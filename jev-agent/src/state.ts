@@ -525,6 +525,24 @@ export type DescentOption = {
   wallSolid: boolean
   headSolid: boolean
   floorSolid: boolean
+  /** solid block under the landing cell (`feet.y - 2`); false means the drop has no floor */
+  supportSolid?: boolean
+  /** lava/water is inside the 3x3x3 neighbourhood of one of this step's cells */
+  hazardNearby?: boolean
+  /**
+   * Every cell this step must remove for the landing cell to be ENTERABLE as a
+   * 1x2 profile, with the per-cell harvest truth the tool gate needs.
+   *
+   * A staircase step down is not "dig the floor": the body must end up standing
+   * in the landing cell, which occupies `feet.y - 1` (the floor cell, dug) AND
+   * `feet.y` (the front cell, `wall`). Leaving `wall` solid makes the offered
+   * step physically un-enterable even though every individual dig was legal -
+   * the measured live failure (`PATH_CALLBACK ... outcome=noPath` then `stuck`
+   * on every cardinal step, each dig followed by a silent heading switch).
+   * `head` is deliberately NOT part of a `down` step: the body never stands at
+   * the current feet level inside the front column.
+   */
+  digs?: DescentDigRequirement[]
   /** true when every dig in this step is safe (no lava/water/void, solid landing) */
   safe: boolean
   reason: string
@@ -541,6 +559,59 @@ export type DescentOption = {
   digHarvestTier?: number | null
   /** primary cell is diggable right now */
   diggable?: boolean
+}
+
+/** One cell of a descent step's 1x2 profile, with its live harvest truth. */
+export interface DescentDigRequirement {
+  cell: Vec3Json
+  name: string | null
+  harvestTool: HarvestTool | null
+  harvestTier: number | null
+  diggable: boolean
+}
+
+/**
+ * The primary cell of a step: the block the action's identity/tool gate is
+ * derived from. Shared by the candidate id, the tool gate and the executor so
+ * "which block is this step about" cannot drift between them.
+ */
+export function descentPrimaryCell(step: DescentOption): Vec3Json {
+  if (step.mode === 'down') return step.floorSolid ? step.floor : step.wall
+  return step.wallSolid ? step.wall : step.head
+}
+
+/**
+ * The ordered dig plan of a step: every passage cell first, the primary/landing
+ * cell LAST. Digging in this order means the drop is opened only after the
+ * passage into it exists, so a dig can never strand the body in a hole it cannot
+ * leave (the measured live bowl).
+ *
+ * `digs` is absent on hand-built/legacy fixtures, so the historical single
+ * primary dig is the fallback - never an empty list, because a DESCEND with
+ * nothing to dig is not a dig action.
+ */
+export function descentDigPlan(step: DescentOption): DescentDigRequirement[] {
+  const primary = descentPrimaryCell(step)
+  const fallback: DescentDigRequirement = {
+    cell: primary,
+    name: step.digName ?? null,
+    harvestTool: step.digHarvestTool ?? null,
+    harvestTier: step.digHarvestTier ?? null,
+    diggable: step.diggable === true,
+  }
+  const list = step.digs !== undefined && step.digs.length > 0 ? step.digs : [fallback]
+  const key = (cell: Vec3Json): string => `${cell.x}_${cell.y}_${cell.z}`
+  const primaryKey = key(primary)
+  const seen = new Set<string>([primaryKey])
+  const passages: DescentDigRequirement[] = []
+  for (const item of list) {
+    const cellKey = key(item.cell)
+    if (seen.has(cellKey)) continue
+    seen.add(cellKey)
+    passages.push(item)
+  }
+  const primaryItem = list.find((item) => key(item.cell) === primaryKey) ?? fallback
+  return [...passages, primaryItem]
 }
 
 export type GoalState = {
@@ -744,6 +815,19 @@ export interface SensorOptions {
   maxTerrain: number
   hazardRadius: number
   entityRadius: number
+  /**
+   * Radius (blocks) that HOSTILE entities stay visible in even when they are
+   * beyond `entityRadius`. `entityRadius` bounds the general entity budget (food
+   * animals, item entities, other players); it must not also bound the safety
+   * layer, because the Nether's ranged attacker outranges it: a ghast opens fire
+   * from up to 64 m, so a body with a 24 m entity radius is shelled by an
+   * invisible mob. Measured live (`run-muc3qbug-18vg3`, the 18 s Nether death
+   * window) the ghast that took the body from 9.5 HP to 7.5 HP never appeared in
+   * a single sensor line: `mob_appeared` only ever listed a skeleton at 94 m and
+   * magma cubes at 95-100 m. Widening HOSTILE perception is truth, not policy:
+   * it grounds no action by itself.
+   */
+  hostileRadius: number
   maxStoneBlocks: number
   maxPlacementSpots: number
   /**
@@ -780,6 +864,7 @@ export const defaultSensorOptions: SensorOptions = {
   maxTerrain: 8,
   hazardRadius: 6,
   entityRadius: 24,
+  hostileRadius: 48,
   maxStoneBlocks: 16,
   maxPlacementSpots: 6,
   escapeRadius: 6,
@@ -1171,12 +1256,17 @@ function buildEntities(
   const out: EntityState[] = []
   const selfId = bot.entity.id
   const attackerId = lastDamage?.sourceId ?? null
+  const hostileRadius = Math.max(options.entityRadius, options.hostileRadius ?? options.entityRadius)
   for (const entity of Object.values(bot.entities)) {
     if (entity.id === selfId) continue
     if (entity.isValid === false) continue
     const distanceToBot = entity.position.distanceTo(bot.entity.position)
-    if (distanceToBot > options.entityRadius) continue
     const name = entity.username ?? entity.name ?? entity.kind ?? 'unknown'
+    // A hostile stays visible out to `hostileRadius` even when it is beyond the
+    // general entity radius (see `hostileRadius`): the safety layer must be able
+    // to name what is shooting the body.
+    const hostile = isHostile(name, entity.kind)
+    if (distanceToBot > (hostile ? hostileRadius : options.entityRadius)) continue
     out.push({
       id: entity.id,
       name,
@@ -1184,7 +1274,7 @@ function buildEntities(
       username: entity.username ?? null,
       position: vecJson(entity.position),
       distance: round2(distanceToBot),
-      hostile: isHostile(name, entity.kind),
+      hostile,
       lineOfSight: canSeeEntity(bot, entity),
       heldItem: heldItemName(entity),
       health: typeof entity.health === 'number' && Number.isFinite(entity.health) ? entity.health : null,
@@ -1192,7 +1282,10 @@ function buildEntities(
     })
   }
   out.sort((a, b) => a.distance - b.distance)
-  return out.slice(0, options.maxEntities)
+  // Hostiles inside the widened envelope are never crowded out by passive
+  // entities: a full animal budget must not hide the mob that is shooting.
+  const hostiles = out.filter((entity) => entity.hostile).length
+  return out.slice(0, Math.max(options.maxEntities, hostiles))
 }
 
 /**
@@ -1975,6 +2068,11 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     const wallOk = ownColumn || clear(wall.x, wall.y, wall.z) || diggableSolid(wall.x, wall.y, wall.z)
     const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
     const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
+    // One hazard probe for the whole step: the refusal chain below reports a
+    // single (highest-priority) reason, so a step refused as `open_floor` could
+    // still sit next to lava. The ordered dig list and the "step into an existing
+    // opening" route both need the hazard fact separately from the refusal.
+    const hazardNearby = hazardsAround(hazardous, wall, head, floor, step, support)
     let reason = 'safe'
     let refusal: DescentRefusalReason | undefined
     const protectedDig = [wall, head, floor]
@@ -1998,7 +2096,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     } else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) {
       reason = 'floor already open (uncontrolled fall)'
       refusal = 'open_floor'
-    } else if (hazardsAround(hazardous, wall, head, floor, step, support)) {
+    } else if (hazardNearby) {
       reason = 'lava/water in the step column'
       refusal = 'hazard'
     }
@@ -2008,6 +2106,29 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       primaryBlock === null
         ? { yield: null, harvestTool: null, harvestTier: null }
         : resolveBlockHarvest(bot, primaryBlock.name)
+    // Everything the body's landing cell occupies, minus the cells that are
+    // already open. `down` lands at feet.y - 1 and needs the front cell at
+    // feet.y (the body's upper half); `level` lands at feet.y and needs the
+    // 2-high corridor (front + head). The own column never digs a cell the body
+    // itself occupies.
+    const digCells: Vec3Json[] = ownColumn
+      ? floorSolid
+        ? [floor]
+        : []
+      : mode === 'down'
+        ? [...(wallSolid ? [wall] : []), ...(floorSolid ? [floor] : [])]
+        : [...(wallSolid ? [wall] : []), ...(headSolid ? [head] : [])]
+    const digs: DescentDigRequirement[] = digCells.map((cell) => {
+      const block = at(cell.x, cell.y, cell.z)
+      const harvest = block === null ? null : resolveBlockHarvest(bot, block.name)
+      return {
+        cell,
+        name: block?.name ?? null,
+        harvestTool: harvest?.harvestTool ?? null,
+        harvestTier: harvest?.harvestTier ?? null,
+        diggable: block?.diggable ?? false,
+      }
+    })
     return {
       dir,
       mode,
@@ -2020,6 +2141,9 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       wallSolid,
       headSolid,
       floorSolid,
+      supportSolid,
+      hazardNearby,
+      digs,
       safe: reason === 'safe',
       reason,
       ...(refusal === undefined ? {} : { refusal }),

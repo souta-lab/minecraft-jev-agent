@@ -2011,6 +2011,41 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     controlReply(socket, request, true, { frozen: false, started: ok })
     return
   }
+  if (cmd === 'reground') {
+    // Operator recovery for semantic queue corruption. This is deliberately
+    // frozen-only: clearing class-A semantic state while a generation can still
+    // propose would let its delayed snapshot immediately resurrect the queue.
+    // World epoch/memory and live server truth are untouched; the next explicit
+    // resume rebuilds the queue from the current grounded frontier.
+    if (!frozen) {
+      controlReply(socket, request, false, { error: 'reground requires frozen=true' })
+      return
+    }
+    const previousGoals = state.ledger?.goals.length ?? 0
+    const previousBasis = state.ledger?.basis ?? null
+    archiveLedger('control-reground')
+    state.ledger = null
+    saveState('control-reground')
+    // Fence delayed proposals from the quiesced generation. A generation born
+    // after resume is seeded from this new revision and remains admissible.
+    ledgerRevision = state.revision
+    log('LEDGER_REGROUND', {
+      reason: 'control',
+      previousGoals,
+      previousBasis,
+      revision: state.revision,
+      worldKey: currentWorldKey(),
+    })
+    writeAcceptance()
+    controlReply(socket, request, true, {
+      frozen: true,
+      ledgerCleared: true,
+      previousGoals,
+      revision: state.revision,
+      runId,
+    })
+    return
+  }
   if (cmd === 'simdeath' || cmd === 'simdeath --hard') {
     if (bot === null || bot.entity === undefined) {
       controlReply(socket, request, false, { error: 'no live bot' })
