@@ -239,6 +239,8 @@ export function describeActionPostcondition(kind: string): string {
       return 'target block removed AND (for a collect goal the drop acquired: itemsGained > 0; a pure dig is complete on removal)'
     case 'RETRIEVE':
       return 'remembered resource reached (remaining distance to the target decreased) or item count increased'
+    case 'PICKUP':
+      return 'the dropped item entity reached the inventory (itemsGained > 0); standing next to an uncollected drop is NOT acquisition'
     case 'DESCEND':
       return 'target block removed and the descend step is reachable'
     case 'STEP':

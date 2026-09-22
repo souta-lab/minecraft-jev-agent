@@ -231,6 +231,13 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
+    // #oscillation-boundary: the durable local-motion record must ride the
+    // generation seed, or a reload would restart the very count it exists to
+    // keep (the #80 omission class this clone exists to prevent).
+    localOscillation:
+      normal.localOscillation === undefined || normal.localOscillation === null
+        ? null
+        : { ...normal.localOscillation, cells: [...normal.localOscillation.cells] },
     hazards: normal.hazards.map((h) => ({ ...h })),
   }
 }

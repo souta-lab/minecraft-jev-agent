@@ -151,6 +151,7 @@ export type CandidateKind =
   | 'DESCEND'
   | 'STEP'
   | 'RETRIEVE'
+  | 'PICKUP'
   | 'ATTACK'
   | 'EAT'
   | 'EQUIP'
@@ -892,6 +893,12 @@ const STATIONARY_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'IGNITE',
   'ENTER_PORTAL',
   'RETRIEVE',
+  // Walking onto a dropped item is goal-directed locomotion, exactly like
+  // RETRIEVE (which is why RETRIEVE is here): it moves the body toward the
+  // goal's own target, so it is not a direction AWAY from an attacker the body
+  // cannot see. It shares RETRIEVE's classification deliberately - the two are
+  // the same mechanical family.
+  'PICKUP',
 ])
 
 function isStationaryKind(kind: CandidateKind): boolean {
@@ -2040,22 +2047,43 @@ export function formatMobDropSourceGap(gap: MobDropSourceGap): string {
 }
 
 /**
- * The typed no-producer gap for the active mob-drop collect focus, or null when
- * a producer route is on offer / the focus has no declared mob producer. Pure.
+ * The typed no-producer gap for the active mob-drop need, or null when a producer
+ * route is on offer / the goal has no declared mob producer. Pure.
+ *
+ * The need is the goal's own: for `collect X` it is exactly `X` (unchanged,
+ * whether or not the body already holds enough), and for any other goal kind it is
+ * the first item of the goal's BILL OF MATERIALS whose only grounded producer is a
+ * mob. That second half is what makes a `craft ender_eye` goal report the same
+ * typed fact a `collect blaze_rod` goal does: `item=blaze_rod
+ * producers=["blaze"] sensed=0 next=explore`, instead of silently offering only
+ * fortress fabric for an item no block drops.
  */
 export function mobDropSourceGap(
   state: WorldState,
   offered: readonly Candidate[],
+  recipes: RecipeIndex | null = null,
 ): MobDropSourceGap | null {
   const current = state.goalQueue?.current ?? null
   const goalKind = current?.kind ?? 'collect'
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
-  if (focusItem === null || goalKind !== 'collect') return null
-  const producerNames = MOB_DROP_PRODUCERS[focusItem]
+  if (focusItem === null) return null
+  const need =
+    goalKind === 'collect'
+      ? MOB_DROP_PRODUCERS[focusItem] === undefined
+        ? undefined
+        : focusItem
+      : mobDropNeedsForGoal(
+          focusItem,
+          Math.max(1, Math.floor(current?.requiredCount ?? 1)),
+          recipes,
+          state.inventory.counts,
+        )[0]
+  if (need === undefined) return null
+  const producerNames = MOB_DROP_PRODUCERS[need]
   if (producerNames === undefined) return null
-  // A hunt candidate for this focus IS the grounded producer route (the executor
+  // A hunt candidate for this need IS the grounded producer route (the executor
   // verifies the kill plus the drop), so the gap is closed.
-  if (offered.some((candidate) => candidate.meta.goalDrop === focusItem)) return null
+  if (offered.some((candidate) => candidate.meta.goalDrop === need)) return null
   const sensed = state.entities.filter((entity) => producerNames.has(entity.name)).length
   // `meta.explore` is the grounded-exploration marker `exploreMoveCandidate`
   // sets, so the gap's `next` agrees with the no-source gap and with the
@@ -2064,7 +2092,7 @@ export function mobDropSourceGap(
   const offeredRoutes = explores ? ['explore'] : []
   const producers = [...producerNames].sort()
   return {
-    item: focusItem,
+    item: need,
     producers,
     sensed,
     offered: offeredRoutes,
@@ -2327,6 +2355,9 @@ const LOCOMOTION_CANDIDATE_KINDS: ReadonlySet<CandidateKind> = new Set<Candidate
   'STEP',
   'DESCEND',
   'ENTER_PORTAL',
+  // Walking onto a dropped item moves the body to another cell, so it is a way
+  // out of the current cell exactly like RETRIEVE.
+  'PICKUP',
 ])
 
 /**
@@ -2887,7 +2918,7 @@ export function generateGroundedCandidates(
     // The combat-kit fact is the other half of the same producer path: which
     // prerequisite (a sword) this body's kit is missing for the required kill.
     combatKitGap: combatKitGap(state, grounded.candidates),
-    mobDropGap: mobDropSourceGap(state, grounded.candidates),
+    mobDropGap: mobDropSourceGap(state, grounded.candidates, options.recipes ?? null),
   }
 }
 
@@ -3421,16 +3452,31 @@ function generateRawCandidates(
       entity.distance > COMBAT_CANDIDATE_RANGE &&
       isResponseWorthyThreat(state, entity, state.timestampMs),
   )
-  // Goal-directed mob drops: when the ACTIVE collect goal targets an item whose
-  // only producer is a mob (`ender_pearl` <- enderman, `blaze_rod` <- blaze),
-  // expose every sensed producer as a grounded ATTACK candidate. This is
-  // producer truth (CAN), never a preference: Jev still owns WHICH
-  // producer/action to pursue, and the `goalDrop` meta is what makes the
-  // executor verify a real kill plus the wanted drop (see `runAttack`).
-  const producerNames = focusItem === null || goalKind !== 'collect' ? undefined : MOB_DROP_PRODUCERS[focusItem]
-  const goalDropTargets =
-    producerNames === undefined ? [] : state.entities.filter((entity) => producerNames.has(entity.name))
-  const goalDropByEntity = new Set(goalDropTargets.map((entity) => entity.id))
+  // Goal-directed mob drops: when the ACTIVE goal still needs an item whose only
+  // producer is a mob (`blaze_rod` <- blaze, `ender_pearl` <- enderman), expose
+  // every sensed producer as a grounded ATTACK candidate. This is producer truth
+  // (CAN), never a preference: Jev still owns WHICH producer/action to pursue,
+  // and the `goalDrop` meta is what makes the executor verify a real kill plus
+  // the wanted drop (see `runAttack`).
+  //
+  // The need is the goal's OWN bill of materials, not the focus item's name:
+  // the earlier `goalKind !== 'collect'` gate meant the terminal `craft 12 x
+  // ender_eye` goal withheld every hunt, so its ingredient descent to
+  // `blaze_rod`/`ender_pearl` (a mob drop with no block source) could offer only
+  // MINE/RETRIEVE on fortress fabric - a chain that crosses two producer kinds
+  // (recipe -> mob drop) had no route at its mob end. `mobDropNeedsForGoal` is
+  // the same recipe truth for every goal kind, so `collect blaze_rod` keeps
+  // exactly its old offer.
+  const requiredCount = Math.max(1, Math.floor(state.goalQueue?.current?.requiredCount ?? 1))
+  const mobDropNeeds = mobDropNeedsForGoal(focusItem, requiredCount, options.recipes ?? null, state.inventory.counts)
+  const goalDropByEntity = new Map<number, string>()
+  const goalDropTargets: EntityState[] = []
+  for (const entity of state.entities) {
+    const drop = producerDropFor(entity.name)
+    if (drop === null || !mobDropNeeds.includes(drop)) continue
+    goalDropByEntity.set(entity.id, drop)
+    goalDropTargets.push(entity)
+  }
   // Food acquisition: when the resident is hungry (at or below `eatBelowFood`)
   // and holds no food, offer the grounded ATTACK affordance for every sensed
   // passive food animal so Jev can choose to hunt. Code only reports CAN (a real
@@ -3483,7 +3529,7 @@ function generateRawCandidates(
   const body = bodySurvivalFacts(state.self)
   for (const entity of attackTargets) {
     const isFoodTarget = huntTargets.includes(entity)
-    const goalDrop = goalDropByEntity.has(entity.id) ? focusItem : null
+    const goalDrop = goalDropByEntity.get(entity.id) ?? null
     const weaponNote = weapon.name === null ? 'with bare fists' : `with ${weapon.label}`
     candidates.push({
       id: `ATTACK:e${entity.id}`,
@@ -3720,6 +3766,14 @@ function generateRawCandidates(
   // semantic action, not an alternative mechanical route for the active goal;
   // it was observed live as raw_iron -> unrelated future log retrieval.
   candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0, digRefusals))
+
+  // A dropped item the goal can use is on the GROUND: the body must walk onto it
+  // (the server picks it up; Mineflayer only observes). This is the route a drop
+  // that outlived the bounded executor pickup window otherwise never had. CAN
+  // enumeration appended alongside every other family - never an override, never
+  // a rank. It is offered for any sensed drop that advances the active focus or
+  // its recipe chain, so it is general for every craft/drop chain, not M3's.
+  candidates.push(...pickupCandidates(state, options, focusItem))
 
   // Clearance MINEs are route-opening safety affordances, not semantic goal
   // actions. Once the active goal has another grounded route (for example a
@@ -4116,6 +4170,108 @@ function mineDropAdvancesFocus(
   if (isResourceClass(focusItem)) return true
   if (recipes === null) return true
   return recipeChainContains(recipes, focusItem, dropItem)
+}
+
+/** One material the active goal needs, with the amount the goal implies. */
+export interface GoalMaterialNeed {
+  item: string
+  /** how many the goal's own recipe chain requires (units, rounded up per craft) */
+  required: number
+  /** how many the body holds right now */
+  held: number
+}
+
+/**
+ * The goal's BILL OF MATERIALS: the focus item plus every ingredient its recipe
+ * chain implies, each with the amount the goal requires.
+ *
+ * This is plain recipe arithmetic, not a policy: the goal is `craft N x X`, and
+ * the chain multiplies out (`craft 12 x ender_eye` -> 12 x ender_pearl + 12 x
+ * blaze_powder -> 6 x blaze_rod, because one rod yields two powder). Amounts are
+ * aggregated by MAX over paths, which is the conservative (never-short) reading
+ * of a recipe DAG, and the descent is depth- and cycle-bounded so a malformed
+ * table can only produce a truncated BOM.
+ *
+ * The variant per item is chosen with `selectCraftIngredients`, the SAME
+ * deterministic selection the craft planner and the ingredient route use, so the
+ * BOM cannot disagree with the step that will actually be executed.
+ */
+export function goalMaterialNeeds(
+  focusItem: string | null,
+  requiredCount: number,
+  recipes: RecipeIndex | null,
+  inventory: Readonly<Record<string, number>>,
+): GoalMaterialNeed[] {
+  if (focusItem === null) return []
+  const required = new Map<string, number>()
+  const bump = (item: string, amount: number): void => {
+    const next = Math.max(required.get(item) ?? 0, amount)
+    required.set(item, next)
+  }
+  bump(focusItem, Math.max(1, Math.floor(requiredCount)))
+  if (recipes !== null) {
+    const stack = new Set<string>()
+    const descend = (item: string, want: number, depth: number): void => {
+      if (depth >= MAX_DEPENDENCY_DEPTH || stack.has(item)) return
+      if (required.size > MAX_FOCUS_CHAIN_ITEMS) return
+      // A DECOMPOSITION recipe (`diamond` <= `diamond_block` <= 9 `diamond`) is a
+      // recipe whose ingredient's own chain leads back to the item: it does not
+      // make the item craftable, and expanding it would demand 2 diamond_blocks
+      // for 3 diamonds. Skip such variants, exactly as the goal layer's
+      // `hasCraftingProducer` does, so the BOM describes the goal's real
+      // ingredient chain.
+      const variants = recipes
+        .recipesFor(item)
+        .filter(
+          (variant) =>
+            !variant.ingredients.some(
+              (ingredient) => ingredient.item === item || recipeChainContains(recipes, ingredient.item, item),
+            ),
+        )
+      if (variants.length === 0) return
+      const selection = selectCraftIngredients(variants, inventory)
+      if (selection === null) return
+      const perCraft = Math.max(1, selection.variant.resultCount)
+      const crafts = Math.ceil(want / perCraft)
+      stack.add(item)
+      for (const ingredient of selection.variant.ingredients) {
+        const amount = crafts * ingredient.count
+        bump(ingredient.item, amount)
+        descend(ingredient.item, amount, depth + 1)
+      }
+      stack.delete(item)
+    }
+    descend(focusItem, required.get(focusItem) as number, 0)
+  }
+  return [...required.entries()]
+    .map(([item, amount]) => ({ item, required: amount, held: inventory[item] ?? 0 }))
+    .sort((a, b) => (a.item === b.item ? 0 : a.item < b.item ? -1 : 1))
+}
+
+/**
+ * The items the ACTIVE goal still needs whose only grounded producer is a MOB.
+ *
+ * The general form the mission needs: "item X is produced by recipe R from
+ * ingredients I, or dropped by mob M". `MOB_DROP_PRODUCERS` (state.ts) owns the
+ * "dropped by M" half; `goalMaterialNeeds` owns the recipe half. Crossing them
+ * answers the question the candidate layer previously answered only for a
+ * `collect` goal: a `craft ender_eye` goal needs `blaze_powder`, whose raw
+ * producer is `blaze_rod`, whose ONLY producer is a blaze - so the hunt is a
+ * grounded route for the CRAFT goal too, not just for `collect blaze_rod`.
+ *
+ * "Still needs" is the BOM's own shortfall (`held < required`), so an ingredient
+ * the body already holds in the required amount is not chased again. Sorted, and
+ * pure: the same state yields the same list.
+ */
+export function mobDropNeedsForGoal(
+  focusItem: string | null,
+  requiredCount: number,
+  recipes: RecipeIndex | null,
+  inventory: Readonly<Record<string, number>>,
+): string[] {
+  return goalMaterialNeeds(focusItem, requiredCount, recipes, inventory)
+    .filter((need) => MOB_DROP_PRODUCERS[need.item] !== undefined && need.held < need.required)
+    .map((need) => need.item)
 }
 
 /**
@@ -6075,6 +6231,12 @@ interface CraftIngredientRoute {
   missing: string
   /** `collect <spec>`, or `none` when no raw producer could be resolved */
   producer: string
+  /**
+   * The mob that drops `rawItem`, when its only grounded source is a mob drop
+   * (`MOB_DROP_PRODUCERS`), else null. This is what turns "collect blaze_rod" -
+   * an item with no block source at all - into a route a reader can act on.
+   */
+  producerMob: string | null
   candidates: Candidate[]
   /** true when the recipe descent stopped at the dependency depth cap */
   depthBoundHit: boolean
@@ -6142,14 +6304,36 @@ function craftIngredientRoute(
   if (missing === undefined) return null
   const missingLabel = missing.cls === null ? missing.item : missing.cls
   const raw = rawProducerForNeed(missing, { recipes, counts: state.inventory.counts, depth: 0, stack: new Set<string>() })
-  if (raw === null) return { item: focusItem, missing: missingLabel, producer: 'none', candidates: [], depthBoundHit: false }
+  if (raw === null) {
+    return {
+      item: focusItem,
+      missing: missingLabel,
+      producer: 'none',
+      producerMob: null,
+      candidates: [],
+      depthBoundHit: false,
+    }
+  }
   return {
     item: focusItem,
     missing: missingLabel,
     producer: `collect ${raw.spec}`,
+    producerMob: producerMobForItem(raw.spec),
     candidates: collectRouteCandidates(state, options, raw.spec),
     depthBoundHit: raw.depthBoundHit,
   }
+}
+
+/**
+ * The mob that drops `item`, or null when its source is not a declared mob drop.
+ * A stable, sorted spelling of every declared producer (`blaze`), so the same
+ * world data always yields the same producer fact.
+ */
+export function producerMobForItem(item: string | null): string | null {
+  if (item === null) return null
+  const producers = MOB_DROP_PRODUCERS[item]
+  if (producers === undefined) return null
+  return [...producers].sort().join('|')
 }
 
 /** The one-line `CRAFT_INGREDIENT_PREREQ` record for a craft goal's missing ingredient. */
@@ -6160,6 +6344,15 @@ export interface CraftIngredientPrereqLine {
   missing: string
   /** `craft <item>` for a satisfiable step, else `collect <spec>` (or `none`) */
   producer: string
+  /**
+   * The mob that drops the raw producer, when its only grounded source is a mob
+   * drop, else null. This is the PRODUCER FACT the line needs to be actionable:
+   * `missing=blaze_powder producer=collect blaze_rod` names an item with no block
+   * source at all, and the reader could not tell whether the run was missing a
+   * dig site or a kill. Omitted (not `null`) from the line when absent, so every
+   * non-mob ingredient's marker stays byte-identical.
+   */
+  producerMob?: string | null
   /** true when the recipe descent stopped at the shared dependency depth cap */
   depthBoundHit: boolean
 }
@@ -6191,12 +6384,21 @@ export function craftIngredientPrereq(state: WorldState, options: CandidateOptio
   }
   const route = craftIngredientRoute(state, options, item)
   if (route === null) return null
-  return { item, missing: route.missing, producer: route.producer, depthBoundHit: route.depthBoundHit }
+  return {
+    item,
+    missing: route.missing,
+    producer: route.producer,
+    ...(route.producerMob === null ? {} : { producerMob: route.producerMob }),
+    depthBoundHit: route.depthBoundHit,
+  }
 }
 
 export function formatCraftIngredientPrereq(entry: CraftIngredientPrereqLine): string {
   const bound = entry.depthBoundHit ? ' depth=bound' : ''
-  return `CRAFT_INGREDIENT_PREREQ item=${entry.item} missing=${entry.missing} producer=${entry.producer}${bound}`
+  // The producer fact is appended ONLY for a mob-drop raw producer: every other
+  // ingredient's line is unchanged byte for byte.
+  const mob = entry.producerMob == null ? '' : ` mob=${entry.producerMob}`
+  return `CRAFT_INGREDIENT_PREREQ item=${entry.item} missing=${entry.missing} producer=${entry.producer}${bound}${mob}`
 }
 
 /** One craft-plan step plus any placement refusal met while resolving it. */
@@ -10268,6 +10470,85 @@ function retrievalCandidates(
   return []
 }
 
+/** Cap on sensed drops offered as PICKUPs per tick (nearest first). */
+export const MAX_PICKUP_CANDIDATES = 4
+
+/**
+ * The grounded PICKUP affordance for a DROPPED ITEM ENTITY.
+ *
+ * A killed mob's drop (or a dropped block yield, or any other item on the
+ * ground) is an ENTITY at a world position, and the ONLY way it reaches the
+ * inventory is the body walking into it: Mineflayer sends nothing, the server
+ * picks the item up when the body is inside the pickup volume (mineflayer 4.39.0
+ * `lib/plugins/entities.js` only OBSERVES the inbound `collect` packet). The
+ * executor already knows how to do that walk (`collectDrop`), but until now it
+ * could only ever be reached from INSIDE another action - a MINE verify, or a
+ * hunt that had just proved a kill. An item that outlived that bounded window
+ * (the kill landed at the edge of the lease, the drop fell outside the 4-block
+ * search radius, the nudge stalled) had NO decision-layer route back: the
+ * candidate layer could not even name such an entity (`droppedItem` did not
+ * exist on the sensor's entity state), so a `blaze_rod`/`ender_pearl` on the
+ * ground was invisible forever and the run reported "0 held" with no action left
+ * to take.
+ *
+ * This is CAN enumeration, never a rank and never M3-specific:
+ *   * it is driven by `mineDropAdvancesFocus`, the SAME focus/recipe-chain rule
+ *     the MINE and RETRIEVE arms already withhold on, so a drop is offered only
+ *     when picking it up can advance the ACTIVE goal (`ender_eye` -> blaze_powder
+ *     -> blaze_rod is one such chain);
+ *   * one candidate per sensed drop, keyed on the ENTITY id (a falling item's
+ *     position changes every tick, so a position key would defeat the bounded
+ *     failure memory while an id is stable for the drop's whole lifetime);
+ *   * the reachability gate owns whether the body can actually walk there;
+ *   * it is appended ALONGSIDE every other family, so Jev still chooses.
+ */
+function pickupCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+): Candidate[] {
+  const recipes = options.recipes ?? null
+  const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const drops = state.entities
+    .filter((entity) => {
+      const item = entity.droppedItem
+      if (typeof item !== 'string' || item.length === 0) return false
+      if (!mineDropAdvancesFocus(focusItem, item, recipes)) return false
+      if (failureCount(state.signals.failedCandidates, `PICKUP:e${entity.id}`) >= failureLimit) return false
+      return true
+    })
+    .sort((a, b) => (a.distance === b.distance ? a.id - b.id : a.distance - b.distance))
+    .slice(0, MAX_PICKUP_CANDIDATES)
+  return drops.map((entity) => {
+    const item = entity.droppedItem as string
+    const inReach = distance(entity.position, state.self.eyePosition) <= options.reach
+    return {
+      // The entity ID is the identity of THIS drop for its whole lifetime.
+      id: `PICKUP:e${entity.id}`,
+      kind: 'PICKUP' as const,
+      label: `walk onto the dropped ${item} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z}) and pick it up`,
+      targetName: item,
+      target: entity.position,
+      targetEntityId: entity.id,
+      itemName: item,
+      requiresTool: false,
+      toolName: null,
+      inReach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        pickupItem: item,
+        pickupEntityId: entity.id,
+        distance: entity.distance,
+        // The drop is a WORLD entity, not a remembered coordinate: the executor
+        // must re-locate the item entity by name near this position rather than
+        // trusting a stale cell (an item keeps falling for a few ticks).
+        pickupRoute: 'dropped_item_entity',
+      },
+    }
+  })
+}
+
 export function surfaceSpot(
   state: WorldState,
   item: string,
@@ -10740,6 +11021,11 @@ const LOCOMOTION_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind
   // is withheld with the same typed reason every other locomotion candidate uses, so the ordinary
   // MOVE/vertical candidates drive the body instead.
   'ENTER_PORTAL',
+  // PICKUP walks the body onto a sensed dropped item entity. It is locomotion to
+  // a concrete world position like RETRIEVE, so it inherits the same reachability
+  // contract: an item the body cannot route to is withheld with the same typed
+  // reason (never offered as a route that cannot be walked).
+  'PICKUP',
 ])
 
 /**
@@ -10812,7 +11098,8 @@ function exploreRouteBlockedFact(
   if (item === null) return null
   if (candidates.some(hasAdvancingGoalRoute)) return null
   const movementWithheld = withheld.some(
-    (entry) => entry.candidate.kind === 'MOVE' || entry.candidate.kind === 'RETRIEVE',
+    (entry) =>
+      entry.candidate.kind === 'MOVE' || entry.candidate.kind === 'RETRIEVE' || entry.candidate.kind === 'PICKUP',
   )
   const frontierExists = !strandedOnColumn(state)
   const reason: ExploreRouteBlockedReason = movementWithheld
@@ -11042,6 +11329,12 @@ const MECHANICAL_LOCOMOTION_KINDS: ReadonlySet<CandidateKind> = new Set<Candidat
   'MOVE',
   'RETRIEVE',
   'RETREAT',
+  // A pickup is a walk to a cell, so it is subject to the dimension-transfer
+  // refusal like every other mechanical locomotion realization: routing onto a
+  // lit portal plane to reach an item would CROSS a dimension, and no goal item
+  // is worth an unauthorized transfer. Leaving PICKUP out of this set would have
+  // exempted it from the one safety check the locomotion family shares.
+  'PICKUP',
 ])
 
 function dimensionTransferRefusal(

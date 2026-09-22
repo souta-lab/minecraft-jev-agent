@@ -501,6 +501,15 @@ export function semanticTargetRef(candidate: Candidate): SemanticTargetRef {
         label: action === 'withdraw' && item !== null ? `take ${item} from ${ref}` : `open ${ref}`,
       }
     }
+    case 'PICKUP': {
+      // A dropped item is identified by its exact entity id, like an ATTACK
+      // target: the cell is not stable (the stack drifts while it falls) and the
+      // item NAME is not unique (two stacks of the same item can be on the
+      // ground at once). The name travels in the key as the readable half.
+      const entityId = candidate.targetEntityId ?? -1
+      const item = candidate.itemName ?? candidate.targetName ?? 'item'
+      return { kind: 'entity', key: `e${entityId}:pickup=${item}`, label: `pick up ${item}#${entityId}` }
+    }
     case 'MOVE':
     case 'RETREAT':
     case 'RETRIEVE': {

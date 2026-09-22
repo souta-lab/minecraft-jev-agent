@@ -259,9 +259,21 @@ import type { System2ApplyState, System2RequestContext } from './system2Authorit
 import {
   evaluateBetaTerminationBoundary,
   evaluateCandidateStarvationBoundary,
+  evaluateLocalMotionBoundary,
   shouldWakeSystem2AfterLocalFailure,
 } from './system2Escalation.ts'
 import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
+import {
+  formatLocalOscillationCleared,
+  isNotableLocalOscillation,
+  localOscillationCell,
+  localOscillationPersistKey,
+  observeLocalOscillation,
+  resolveLocalOscillationRecentCells,
+  resolveLocalOscillationReturnLimit,
+  restoreLocalOscillationRecord,
+} from './localOscillation.ts'
+import type { LocalOscillationRecordJson } from './localOscillation.ts'
 import {
   formatStrategicNonProgressExhausted,
   resolveStrategicStallHorizon,
@@ -470,6 +482,15 @@ export interface JevAgentOptions {
   moveFailureEntries?: readonly MoveFailEntry[]
   /** called after movement failure memory changes so the HOST can persist a DTO snapshot */
   onMoveFailureMemoryChange?: (entries: readonly MoveFailEntry[]) => void
+  /**
+   * #oscillation-boundary: the durable local-motion oscillation record restored
+   * from the resident's class-A world memory. It is keyed on the BODY's cell
+   * envelope, never on the queue head, so a generation change cannot launder a
+   * loop in the same small set of cells.
+   */
+  localOscillationRecord?: LocalOscillationRecordJson | null
+  /** called when the durable local-motion record changes, so the HOST can persist it */
+  onLocalOscillationChange?: (record: LocalOscillationRecordJson | null) => void
   /**
    * #44: minimum spacing between replans for the same summon reason. A second
    * replan inside the window (with unchanged inputs) reuses the current plan.
@@ -696,6 +717,14 @@ const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLD
 const MOVE_FAILMEM_MAX_ENTRIES = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_MAX_ENTRIES', 256)
 /** Issue #8: do not re-log the same oscillating pair more often than this. */
 const OSCILLATION_REPEAT_LOG_MS = 5_000
+/**
+ * #oscillation-boundary: the size of the body's cell envelope and the bounded
+ * return count that proves the local recovery is exhausted. Reasoning lives on
+ * the constants in `localOscillation.ts`; they are read once here like the
+ * `MOVE_FAILMEM_*` pair above.
+ */
+const LOCAL_OSCILLATION_RECENT_CELLS = resolveLocalOscillationRecentCells()
+const LOCAL_OSCILLATION_RETURN_LIMIT = resolveLocalOscillationReturnLimit()
 
 function resolveEnvPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name]
@@ -1486,6 +1515,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // geometry, the vertical planner's own refusal, and the carried block a pillar
   // would consume), so unreachable and merely-missed are distinct run evidence.
   'HUNT_CONTACT_UNREACHABLE',
+  // The DROP half of the same vocabulary. A killed mob leaves an item ENTITY on
+  // the ground, and the only thing that proves the kill produced anything is the
+  // inventory delta after walking onto it. Without these two markers a run that
+  // killed a blaze and then failed to collect the rod is indistinguishable, in
+  // the run log, from one that never killed anything: `blaze_rod 0` with no
+  // explanation. Positive (`PICKUP_ACQUIRED`) and typed-negative
+  // (`PICKUP_NOT_ACQUIRED`) are separate, mirrored facts.
+  'PICKUP_ACQUIRED',
+  'PICKUP_NOT_ACQUIRED',
   // Starvation is a run-scoped survival fact, not a private diagnostic. The
   // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
   // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and
@@ -2155,6 +2193,18 @@ export class JevController {
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
   private moveFailMemory: MoveFailMemory
   /**
+   * #oscillation-boundary: the DURABLE local-motion record. It is seeded from
+   * class-A world memory at construction and written back through
+   * `onLocalOscillationChange`, so unlike every other stall counter in this class
+   * it is not erased by a generation change. Deliberately keyed on the body's
+   * cell envelope only: no queue identity, no position churn, no wall clock.
+   */
+  private localOscillation: LocalOscillationRecordJson | null
+  /** inventory digest at the previous settled decision (the "no inventory delta" fact) */
+  private localOscillationInventory = ''
+  /** serialized form of the last record handed to the HOST, so unchanged records are not re-proposed */
+  private localOscillationPersisted = ''
+  /**
    * Zero-observable-change route memory: (kind, target cell, stand cell, route
    * signature) -> attempts. The postcondition layer owns the verdict; this owns
    * only what happens NEXT - a repeat of the same action with unchanged
@@ -2399,6 +2449,8 @@ export class JevController {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
     this.moveFailMemory = this.createMoveFailMemory()
+    this.localOscillation = restoreLocalOscillationRecord(this.options.localOscillationRecord ?? null)
+    this.localOscillationPersisted = localOscillationPersistKey(this.localOscillation)
     this.replanThrottle = new ReplanThrottle(
       this.options.replanThrottleMs,
       this.options.replanPositionDelta,
@@ -2541,6 +2593,9 @@ export class JevController {
     if (this.running) throw new Error('setOptions() cannot be called while the agent is running')
     this.options = normalizeOptions({ ...this.options, ...partial })
     this.moveFailMemory = this.createMoveFailMemory()
+    this.localOscillation = restoreLocalOscillationRecord(this.options.localOscillationRecord ?? null)
+    this.localOscillationInventory = ''
+    this.localOscillationPersisted = localOscillationPersistKey(this.localOscillation)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.harvestedGoalCount = 0
     this.semanticStateGeneration = 0
@@ -5922,6 +5977,13 @@ export class JevController {
     // #plan-reconciliation: the same settled semantic progress clears the durable
     // no-productive-head bound (`noteSemanticProgress` above resets it on the row),
     // so only a head that genuinely never advances is escalated.
+    // #oscillation-boundary: the BODY's own durable motion record. It is separate
+    // from the queue-head bound above on purpose: that one is about the QUEUE's
+    // head and is cleared by any tick that offers a productive candidate, while
+    // this one is about the BODY's cell envelope and is cleared only by a real
+    // change in the situation. It therefore also observes the ticks that the head
+    // bound deliberately resets on.
+    this.observeLocalMotion(result, candidate, taxonomy)
 
     writeOutcome(this.jevWriter, {
       callId: decision.callId,
@@ -8169,7 +8231,17 @@ export class JevController {
     else if (code === 'verify_failed') {
       this.logger.info('agent', `LOCAL_VERIFY_FAILURE system2=false detail=${detail}`, { code, detail }, this.tickCounter)
     }
-    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure && code !== 'verify_failed') {
+    // `verify_failed` used to be excluded here on the theory that the unverified
+    // ACTION budget bounds it instead. Measured live: that budget is keyed per plan
+    // (falling back to the action id) and both rotate as the body re-decides - the log
+    // shows `ACTION_UNVERIFIED planId=null ... attempts=1` every time and
+    // `ABANDON_REASON=action_unverified` ZERO times in the whole run, while one ATTACK
+    // ended `MECHANICALLY_BLOCKED failure=verify_failed` three times in a row (30 such
+    // attacks: the single most common ATTACK outcome). The operator saw the result
+    // directly - "ずっと攻撃モードになってて次の行動を再開しない", stuck in attack mode and
+    // never resuming. A repeated verification failure is exactly what this streak bound
+    // exists for, so it is no longer excluded.
+    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure) {
       this.escalate('same_failure_3x', `${code ?? 'unknown'} failed ${this.failureStreak}x: ${detail}`)
     }
   }
@@ -8335,6 +8407,133 @@ export class JevController {
     }
     if (!this.goal.complete && stalledMs > this.options.wedgeStallMs) {
       this.abortWedge(`goal progress stayed 0 for ${stalledMs}ms`)
+    }
+  }
+
+  /**
+   * #oscillation-boundary: feed one settled decision into the DURABLE local-motion
+   * record and hand the typed fact upward when its bounded return window is
+   * exhausted.
+   *
+   * The three facts that END an episode are the ones the operator named - the
+   * world changed (`goal`/`search` progress), the inventory changed, or the body
+   * actually closed distance to a target. Everything else is evidence:
+   *   - a MOVEMENT decision engages its DESTINATION cell, so a MOVE that fails
+   *     `stuck` still re-engages the same coordinate (the measured loop);
+   *   - verified body motion that only revisits the same cells does NOT reset it,
+   *     because "body motionだけで semantic stall timer が reset される" is the
+   *     defect, not the fix;
+   *   - a plan/goal change is recorded, never used to re-arm.
+   *
+   * The trip is state-conditioned: no clock participates in the decision, and a
+   * plain walk produces no record worth persisting (`isNotableLocalOscillation`),
+   * so ordinary locomotion is untouched.
+   */
+  private observeLocalMotion(
+    result: ExecutionResult,
+    candidate: Candidate,
+    taxonomy: ActionOutcomeTaxonomy,
+  ): void {
+    const dimension = this.currentDimension()
+    const position = this.bot.entity.position
+    const bodyCell = localOscillationCell(dimension, position)
+    const startedCell = this.actionStart === null ? null : localOscillationCell(dimension, this.actionStart)
+    const attemptCell =
+      isTrackedMoveKind(result.kind) && candidate.target !== null
+        ? localOscillationCell(dimension, candidate.target)
+        : null
+    const inventory = ((): string => {
+      try {
+        return JSON.stringify(this.inventorySnapshot())
+      } catch {
+        // Inventory unreadable at a death/quit boundary: no delta evidence, and
+        // the record is deliberately NOT cleared (unknown is not progress).
+        return this.localOscillationInventory
+      }
+    })()
+    const inventoryChanged = this.localOscillationInventory !== '' && this.localOscillationInventory !== inventory
+    this.localOscillationInventory = inventory
+
+    const previous = this.localOscillation
+    const decision = observeLocalOscillation(
+      previous,
+      {
+        bodyCell,
+        attemptCell,
+        dimension,
+        goal: this.currentGoalKey(),
+        cellChanged: startedCell !== null && startedCell !== bodyCell,
+        semanticProgress: taxonomy.progressKinds.some((kind) => kind === 'goal' || kind === 'search'),
+        inventoryChanged,
+        // Only a RETRIEVE reports `distanceClosed`, and only for a run that moved
+        // the body closer to its target: real locomotion toward something.
+        distanceClosed: result.kind === 'RETRIEVE' && result.distanceClosed === true,
+        now: Date.now(),
+      },
+      { recentCells: LOCAL_OSCILLATION_RECENT_CELLS, returnLimit: LOCAL_OSCILLATION_RETURN_LIMIT },
+    )
+
+    this.localOscillation = decision.record
+    if (decision.cleared !== null && previous !== null && isNotableLocalOscillation(previous)) {
+      this.logger.info(
+        'agent',
+        formatLocalOscillationCleared(previous, decision.cleared),
+        { reason: decision.cleared, cells: previous.cells, goal: this.currentGoalKey() },
+        this.tickCounter,
+      )
+      this.persistLocalOscillation()
+    } else if (isNotableLocalOscillation(decision.record)) {
+      // Persist the FIRST evidence of a return and every change after it, so a
+      // generation change cannot restart the count. Ordinary walking (returns 0)
+      // writes nothing at all.
+      this.persistLocalOscillation()
+    }
+    if (!decision.exhausted || decision.line === null) return
+
+    const boundary = evaluateLocalMotionBoundary({
+      activeOption: this.queue.current !== null,
+      oscillationExhausted: true,
+    })
+    this.logger.warn(
+      'agent',
+      decision.line,
+      {
+        cells: decision.record?.cells ?? [],
+        returns: decision.record?.returns ?? 0,
+        required: decision.required,
+        trips: decision.record?.trips ?? 0,
+        goal: this.currentGoalKey(),
+        boundary: boundary.reason,
+      },
+      this.tickCounter,
+    )
+    if (!boundary.wake) return
+    this.escalate(
+      'all_candidates_invalid',
+      `LOCAL_OSCILLATION_BOUNDARY: ${decision.record?.returns ?? 0} re-engagements of the same ` +
+        `${decision.record?.cells.length ?? 0}-cell set with zero semantic progress; ` +
+        `cells=${JSON.stringify(decision.record?.cells ?? [])}`,
+    )
+  }
+
+  /** Write the durable half through the HOST callback; never throws into the tick. */
+  private persistLocalOscillation(): void {
+    const signature = localOscillationPersistKey(this.localOscillation)
+    if (signature === this.localOscillationPersisted) return
+    this.localOscillationPersisted = signature
+    const callback = this.options.onLocalOscillationChange
+    if (callback === undefined) return
+    try {
+      callback(
+        this.localOscillation === null ? null : { ...this.localOscillation, cells: [...this.localOscillation.cells] },
+      )
+    } catch (error) {
+      this.logger.warn(
+        'agent',
+        'LOCAL_OSCILLATION_PERSIST_FAILED',
+        { message: error instanceof Error ? error.message : String(error) },
+        this.tickCounter,
+      )
     }
   }
 
