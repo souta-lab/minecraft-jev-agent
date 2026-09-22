@@ -492,6 +492,21 @@ export function validatePredicate(predicate: unknown): string | null {
       return typeof p.y === 'number' && Number.isFinite(p.y) ? null : 'levelAtMost needs a finite y'
     case 'levelAtLeast':
       return typeof p.y === 'number' && Number.isFinite(p.y) ? null : 'levelAtLeast needs a finite y'
+    case 'positionNear': {
+      const position = p.position as Record<string, unknown> | null
+      const validPosition =
+        position !== null &&
+        typeof position === 'object' &&
+        typeof position.x === 'number' &&
+        Number.isFinite(position.x) &&
+        typeof position.y === 'number' &&
+        Number.isFinite(position.y) &&
+        typeof position.z === 'number' &&
+        Number.isFinite(position.z)
+      return validPosition && typeof p.distance === 'number' && Number.isFinite(p.distance) && p.distance >= 0
+        ? null
+        : 'positionNear needs a finite position and non-negative distance'
+    }
     case 'healthAtLeast':
       return typeof p.health === 'number' && Number.isFinite(p.health) ? null : 'healthAtLeast needs a finite health'
     case 'custom':

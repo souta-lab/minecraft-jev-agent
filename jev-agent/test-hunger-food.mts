@@ -27,8 +27,9 @@ import {
   generateCandidates,
   generateGroundedCandidates,
 } from './src/candidates.ts'
-import { emptyGoalQueueState } from './src/goalQueue.ts'
+import { GoalQueue, emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { isProtectedGoal } from './src/protectedGoals.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
 import { buildPlanOptions, computeFrontier, RUNGS, rungIndexById } from '../buddy-driver/planner.ts'
@@ -301,6 +302,48 @@ addCase('(d2) the food rung is OPTIONAL, SELF-CONTAINED, and only offered while 
       fed === undefined &&
       unknownHunger === undefined,
     detail: `optional=${food?.optional === true} selfContained=${food?.selfContained === true} hungry=[${items.join(',')}] fed=${fed?.id ?? 'none'} noHungerFact=${unknownHunger?.id ?? 'none'}`,
+  }
+})
+ 
+addCase('(d2b) optional food goals are replaceable by a semantic recovery plan', () => {
+  const option = buildPlanOptions({}, emptyWorldMemory(), { foodLevel: 0, eatBelowFood: THRESHOLD }).find((entry) => entry.id === 'food')
+  const foodGoals = (option?.goals ?? []).filter((goal) => goal.targetItem === 'food')
+  return {
+    pass: option !== undefined && foodGoals.length > 0 && foodGoals.every((goal) => goal.core !== true),
+    detail: `foodGoals=${foodGoals.length} core=[${foodGoals.map((goal) => String(goal.core === true)).join(',')}]`,
+  }
+})
+ 
+addCase('(d2c) persisted core food rows remain replaceable but prerequisites stay protected', () => {
+  const food = { kind: 'collect', targetItem: 'food', core: true, protected: false }
+  const prerequisite = { kind: 'collect', targetItem: 'obsidian', core: true, protected: false }
+  return {
+    pass: !isProtectedGoal(food) && isProtectedGoal(prerequisite),
+    detail: `foodProtected=${isProtectedGoal(food)} prerequisiteProtected=${isProtectedGoal(prerequisite)}`,
+  }
+})
+ 
+addCase('(d2d) a patch replaces a persisted active food row with a new semantic goal', () => {
+  const queue = new GoalQueue()
+  queue.restore({
+    counter: 1,
+    revision: 1,
+    goals: [
+      {
+        ...foodGoal(),
+        core: true,
+        protected: false,
+      },
+    ],
+  })
+  queue.applyPlan(
+    [{ kind: 'collect', description: 'collect 10 x obsidian', targetItem: 'obsidian', requiredCount: 10 }],
+    'llm',
+    'patch',
+  )
+  return {
+    pass: queue.current?.targetItem === 'obsidian',
+    detail: `current=${queue.current?.targetItem ?? 'none'} depth=${queue.state.depth}`,
   }
 })
 

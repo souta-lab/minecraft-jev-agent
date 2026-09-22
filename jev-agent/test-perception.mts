@@ -18,6 +18,7 @@
 //
 // Run: bun test-perception.mts
 import { readFileSync } from 'node:fs'
+import { isHostileEntityName } from './src/state.ts'
 import { createRequire } from 'node:module'
 import {
   candidateStarvationLine,
@@ -589,6 +590,35 @@ addCase('(6) the CRAFT_INGREDIENT_PREREQ marker is mirrored and emitted from the
 
 let failures = 0
 process.stdout.write('station perception truth (remembered vs sensed)\n')
+addCase('(4) a mob that damaged the body is a threat whatever its type (zombie_villager live case)', () => {
+  // Live: a summoned `zombie_villager` damaged the body (`CRITICAL_DAMAGE ... source=zombie_villager`,
+  // `DEATH_CAUSE killer=zombie_villager`) while no threat was ever sensed, so no ATTACK/RETREAT was
+  // offered and the body never fought back. `zombie_villager` matches neither `zombie` nor the
+  // `_zombie`/`_skeleton` suffix rule, so it was invisible to the safety layer.
+  const vanilla = [
+    'zombie_villager',
+    'zombie',
+    'skeleton',
+    'blaze',
+    'wither',
+    'ender_dragon',
+    'silverfish',
+    'evoker',
+  ].every((name) => isHostileEntityName(name, 'hostile'))
+  // No over-reach: a genuinely passive mob is still not a threat a priori (the
+  // observed-aggression rule in `buildEntities` covers the provoked case instead).
+  const passive = ['pig', 'cow', 'villager', 'sheep', 'chicken'].every(
+    (name) => isHostileEntityName(name, 'passive') === false,
+  )
+  // The general rule lives where the damage source is already in hand.
+  const text = readFileSync(new URL('./src/state.ts', import.meta.url), 'utf8')
+  const observed = text.includes('attackerId !== null && entity.id === attackerId')
+  return {
+    pass: vanilla && passive && observed,
+    detail: `vanillaHostiles=${vanilla} passiveStayPassive=${passive} observedAggressionRule=${observed}`,
+  }
+})
+
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()

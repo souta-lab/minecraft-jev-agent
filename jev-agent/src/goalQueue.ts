@@ -26,6 +26,7 @@ import {
   formatProtectedGoalReinserted,
   formatProtectedGoalRetired,
   isProtectedGoal,
+  isReplaceableOptionalFoodGoal,
   splitProtectedGoals,
 } from './protectedGoals.ts'
 import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
@@ -719,8 +720,11 @@ export class GoalQueue {
       }
       const droppedQueued = protectedForMerge.filter((goal) => dropped.some((found) => found.id === goal.id))
       if (effectiveOp === 'patch') {
-        // keep completed history and the currently active goal; replace the pending tail
-        this.goals = this.goals.filter((goal) => goal.status === 'done' || goal.status === 'active' || retiredIds.has(goal.id))
+        // Keep completed history and the active goal, except for an optional
+        // food recovery row that a new semantic route is explicitly replacing.
+        this.goals = this.goals.filter(
+          (goal) => goal.status === 'done' || (goal.status === 'active' && !isReplaceableOptionalFoodGoal(goal)) || retiredIds.has(goal.id),
+        )
       } else {
         this.goals = this.goals.filter(
           (goal) => goal.status === 'done' || goal.id === abandonedCurrentId || retiredIds.has(goal.id),

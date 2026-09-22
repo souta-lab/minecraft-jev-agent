@@ -76,6 +76,40 @@ const offlineResident = async () => null
   ok('exact evidence commands are printed')
 }
 
+// 1b. A runtime-root override must target the selected worktree, not a magic
+// shared checkout path.
+{
+  const runtimeRoot = '/tmp/m3-live-runtime'
+  let observedSocket = null
+  const { commands } = await deriveStatus({
+    run: makeRunner(),
+    runtimeRoot,
+    readResident: async (socket) => {
+      observedSocket = socket
+      return null
+    },
+  })
+  const expectedSocket = join(runtimeRoot, 'buddy-driver', 'data', 'resident', 'control.sock')
+  assert.equal(observedSocket, expectedSocket)
+  assert.ok(commands.includes(`socket ${expectedSocket} <- {"cmd":"report"} (2000ms timeout)`))
+  ok('runtime-root override reads the selected resident socket')
+}
+
+// 1c. The CLI accepts the same explicit runtime-root override.
+{
+  const runtimeRoot = '/tmp/m3-live-cli-runtime'
+  let observedSocket = null
+  await main(['--runtime-root', runtimeRoot], {
+    run: makeRunner(),
+    readResident: async (socket) => {
+      observedSocket = socket
+      return null
+    },
+  })
+  assert.equal(observedSocket, join(runtimeRoot, 'buddy-driver', 'data', 'resident', 'control.sock'))
+  ok('CLI runtime-root override reaches the injected resident reader')
+}
+
 // 2. Failing gh -> UNKNOWN, no crash, no fabricated zero.
 {
   const { markdown } = await deriveStatus({ run: makeRunner({ ghOk: false }), readResident: offlineResident })
