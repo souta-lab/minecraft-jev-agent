@@ -1352,7 +1352,7 @@ export function worldOutcomeRungFloor(world: ResidentWorldMemory): number {
 
 /**
  * How far the supplied durable record may raise the resume scan, capped by live
- * world truth.
+ * world truth - in BOTH directions.
  *
  * The record is the run's own commit (archived ledger: its frontier basis and its
  * `done` rows). The ladder is a prerequisite chain, so a rung it records as
@@ -1365,6 +1365,18 @@ export function worldOutcomeRungFloor(world: ResidentWorldMemory): number {
  * must be re-planned rather than skipped, so the floor stops just below the first
  * revoked one. Inventory achievements are historical facts and are not revocable.
  *
+ * The cap applies to the record's CHAIN claim only. Its other half - a rung live
+ * world truth proves on its own (`worldOutcomeRungFloor`, probed with an EMPTY
+ * inventory) - is direct evidence for that rung and does not depend on the rungs
+ * below it, so the floor may never sit below it. Measured live
+ * (`run-muc30dps-181tp`, 2026-09-22T02:55:31Z): a standing lit portal at 25,66,9
+ * with every remembered station purged as stale stopped the chain at wood
+ * (index 1 `crafting_table` is a `worldOutcome` rung with no held and no remembered
+ * table), so the run re-entered the stone/cobblestone/furnace stage although the
+ * composed record already carried `world:nether_portal@13`. `worldRungIndex` is
+ * bounded by the record's own index, so this can only preserve rungs the record
+ * already claims - never invent progress beyond it.
+ *
  * No record, or a record that proves nothing, returns -1: live-inventory
  * behaviour exactly as before.
  */
@@ -1372,21 +1384,31 @@ export function achievedRungFloor(
   counts: Counts,
   world: ResidentWorldMemory,
   durable?: DurableLadderProgress | null,
-): { rungIndex: number; sources: DurableLadderSource[] } {
+): { rungIndex: number; sources: DurableLadderSource[]; chainRungIndex: number; worldRungIndex: number } {
   const through = durable === null || durable === undefined ? -1 : durable.rungIndex
-  if (through < 0) return { rungIndex: -1, sources: [] }
-  let floor = -1
+  if (through < 0) return { rungIndex: -1, sources: [], chainRungIndex: -1, worldRungIndex: -1 }
+  let chainRungIndex = -1
   for (let i = 0; i <= through && i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || !isMandatoryRung(rung)) continue
-    // A revoked world outcome invalidates the durable claim from here up: the
-    // structure must be re-planned, and everything the record asserted above it
+    // A revoked world outcome invalidates the record's CHAIN claim from here up:
+    // the structure must be re-planned, and everything the record asserted above it
     // depended on it.
     if (rung.worldOutcome === true && !rung.satisfied(counts, world)) break
-    floor = i
+    chainRungIndex = i
   }
-  if (floor < 0) return { rungIndex: -1, sources: [] }
-  return { rungIndex: floor, sources: [...(durable?.sources ?? [])] }
+  // The world half, re-derived from the live world the ladder is planning against
+  // (the rung predicate stays its single owner). A rung world truth proves here is
+  // NOT subject to the chain cap above.
+  const worldRungIndex = Math.min(through, worldOutcomeRungFloor(world))
+  const sources = durable?.sources === undefined ? [] : [...durable.sources]
+  let rungIndex = chainRungIndex
+  if (worldRungIndex > rungIndex) {
+    rungIndex = worldRungIndex
+    if (!sources.includes('world-outcome')) sources.push('world-outcome')
+  }
+  if (rungIndex < 0) return { rungIndex: -1, sources: [], chainRungIndex, worldRungIndex }
+  return { rungIndex, sources, chainRungIndex, worldRungIndex }
 }
 
 /** How a durable-record rung index maps back to a rung id (null when `complete`). */
@@ -1431,6 +1453,21 @@ export function deriveResumeRung(
     }
   }
   const achieved = achievedRungFloor(counts, world, durable)
+  // Typed evidence for the floor's provenance: the record's chain stopped lower (a
+  // `worldOutcome` rung it claimed is no longer in the world) and a rung live world
+  // truth proves on its own kept the floor. Measured live this is the marker that
+  // separates the fix from the `achievedRungIndex=0` collapse of run-muc30dps-181tp,
+  // where the chain stopped at wood while `world:nether_portal@13` stood.
+  if (achieved.worldRungIndex > achieved.chainRungIndex && achieved.worldRungIndex === achieved.rungIndex) {
+    log?.('LADDER_DURABLE_WORLD_FLOOR', {
+      rungId: rungIdForResumeIndex(achieved.rungIndex),
+      rungIndex: achieved.rungIndex,
+      chainRungId: rungIdForResumeIndex(achieved.chainRungIndex),
+      chainRungIndex: achieved.chainRungIndex,
+      worldRungIndex: achieved.worldRungIndex,
+      sources: achieved.sources,
+    })
+  }
   const basis: ResumeBasis = achieved.sources.length > 0 ? 'durable' : 'inventory'
   const resumeExtras = {
     resumeBasis: basis,
