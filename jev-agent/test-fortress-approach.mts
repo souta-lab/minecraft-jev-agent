@@ -58,6 +58,20 @@
 //        lane adds no second combat rule), the offer is a survival set, and the
 //        scaffold never substitutes for a grounded attack/keep-distance response.
 //
+//        NAMED RESIDUAL (NOT fixed here, and deliberately not): when the chosen
+//        action was WORK, the tick can still end actionless while the in-flight dig
+//        keeps running - controller-legacy.ts:3408 looks the chosen id up in the
+//        RESTRICTED offer, threat.ts#survivalControlFallback answers
+//        `not_a_survival_action` for a null reground kind BEFORE it looks at
+//        contact, and controller-legacy.ts:3539 returns. That boundary is PINNED by
+//        another lane's invariant (test-combat-closure.mts case A3: "a non-survival
+//        choice is untouched by this rule", `otherFallback.reason ===
+//        'not_a_survival_action'` with threatInContact true), landed by
+//        task/skill-commitment-phase1. Reversing it from this lane would be a second
+//        combat rule; the owning lane must make that call. What this lane guarantees
+//        is the half below: the work set is removed, the offer stays a survival set,
+//        and the gap is typed.
+//
 // NO fortress / Nether / M3 branch, coordinate or goal test exists in the
 // mechanism: every case below only ever names the goal's own target cell, the
 // sensor's own probe, and the block the body holds.
