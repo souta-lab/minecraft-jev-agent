@@ -44,7 +44,7 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillStart, formatSkillStep, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillStart, formatSkillStep, normalizePortalDimension, parsePortalCells, PORTAL_OPEN_FACE_MAX_DISTANCE, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
 import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
@@ -401,8 +401,6 @@ const PORTAL_WALK_IN_STEP_MS = 45
  * tried before the ordinary typed failure.
  */
 const PORTAL_FACE_LEG_BUDGET_MS = 1200
-/** A step-aside is a short move, not a travel leg: bounded to the gate's own block. */
-const PORTAL_FACE_LEG_MAX_DISTANCE = 4
 /**
  * Non-solid cells a body may walk INTO. The same shape covers every portal-like
  * traversal target, so the direct walk is not nether-specific.
@@ -6269,7 +6267,7 @@ export class Executor {
         y: Math.floor(this.bot.entity.position.y),
         z: Math.floor(this.bot.entity.position.z),
       },
-      PORTAL_FACE_LEG_MAX_DISTANCE,
+      PORTAL_OPEN_FACE_MAX_DISTANCE,
     ).filter((spot) => !this.portalInsideInterior(spot)) // a face the body already stands on is not a step aside
     if (faces.length === 0) {
       this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'no_open_face'), {
