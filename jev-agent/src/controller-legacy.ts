@@ -29,6 +29,8 @@ import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentR
 import { bodySurvivalFacts, formatThreatClear, formatThreatNearby, formatThreatNoEscape, MELEE_THREAT_REACH, ThreatTracker, weaponFacts } from './threat.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
+import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
+import type { FoodSourceGap } from './foodSources.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -1089,6 +1091,21 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
   'RESOURCE_SOURCE_NONE',
+  // Starvation is a run-scoped survival fact, not a private diagnostic. The
+  // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
+  // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and
+  // FOOD_LOW to the generation console only, because neither token rode the
+  // mirrored event path - the run log showed a body doing heavy work with no
+  // visible reason. Keep the whole hunger vocabulary mirrored so the state, the
+  // refusal, the grounded route and the bounded dead end are all run evidence.
+  'BODY_STARVING',
+  'CRITICAL_DAMAGE',
+  'CRITICAL_DAMAGE_EXHAUSTED',
+  'FOOD_LOW',
+  'EAT_REFUSED',
+  'FOOD_ROUTE',
+  'FOOD_ACQUIRED',
+  FOOD_SOURCE_NONE,
   'LOG_ROUTE',
   'WEDGE_SUPPRESSED',
   PROTECTION_ABANDON_CONFLICT,
@@ -1655,6 +1672,8 @@ export class JevController {
   private columnDescentRefusalThisTick: ColumnDescentRefusal | null = null
   /** Dedupe key for the last mirrored `RESOURCE_SOURCE_NONE` line. */
   private lastSourceGapKey: string | null = null
+  /** Dedupe key for the last mirrored `FOOD_SOURCE_NONE` line. */
+  private lastFoodSourceGapKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -2409,6 +2428,7 @@ export class JevController {
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
+      this.logFoodSourceGap(grounded.foodGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.noteColumnDig(grounded.candidates)
       this.noteFoodHabitat(grounded.foodHabitatRefusal)
@@ -2558,6 +2578,14 @@ export class JevController {
         if (grounded.sourceGap !== null) {
           const sourceToken = `resource:${grounded.sourceGap.item}:${grounded.sourceGap.reason}`
           if (!missing.includes(sourceToken)) missing.push(sourceToken)
+        }
+        // A body at the hunger floor with no grounded food route names that
+        // survival fact in the same evidence: the starvation line can then never
+        // say only `no_productive_action` while the body is starving, and the
+        // existing bounded escalation boundary sees the missing affordance.
+        if (grounded.foodGap !== null) {
+          const foodToken = `food_source:${grounded.foodGap.reason}`
+          if (!missing.includes(foodToken)) missing.push(foodToken)
         }
         // A starved `place <item>` goal must NAME its typed gap. The live defect
         // reported `missing=[]` for 21 repeats while the agent paced around the
@@ -7629,6 +7657,25 @@ export class JevController {
     this.lastSourceGapKey = key
     if (gap === null) return
     this.logger.warn('agent', formatResourceSourceGap(gap), { ...gap }, this.tickCounter)
+  }
+
+  /**
+   * The typed "a hungry body has NO grounded route to food" fact
+   * (`FOOD_SOURCE_NONE item=food reason=no_source_sensed|source_withheld ...`).
+   *
+   * Bounded and descriptive: it names which affordances are missing (no edible
+   * item held, no food animal sensed, no edible/ingredient block sensed, no
+   * cookable recipe) and what the world still affords (`next=explore|escalate`).
+   * Deduped per distinct line, so a stable dead end is one auditable fact, and
+   * an escalating one (`starving=true`) is visible as the body reaches the
+   * code-owned starvation floor. It never selects an action.
+   */
+  private logFoodSourceGap(gap: FoodSourceGap | null): void {
+    const key = gap === null ? null : formatFoodSourceGap(gap)
+    if (key === this.lastFoodSourceGapKey) return
+    this.lastFoodSourceGapKey = key
+    if (gap === null) return
+    this.logger.warn('agent', formatFoodSourceGap(gap), { ...gap, goal: this.currentGoalKey() }, this.tickCounter)
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */

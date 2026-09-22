@@ -941,6 +941,11 @@ export function boundedStateSnapshot(
       lastFailureCode: state.signals.lastFailureCode,
       lastPathStatus: state.signals.lastPathStatus,
       escalationRecommended: state.signals.escalationRecommended,
+      // The critical-damage/starvation evidence is a survival fact, not a
+      // diagnostic: even the size-degraded snapshot must not hide a body pinned
+      // at the starvation floor, or the option layer loses the one fact saying
+      // only a food route can end the damage.
+      criticalDamage: state.signals.criticalDamage ?? null,
     },
     bounds: snapshotBounds(state),
     note: 'snapshot_over_budget',

@@ -23,10 +23,12 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentOption, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
+import { isEdibleFoodItem } from './foodSources.ts'
+import type { FoodSourceGap } from './foodSources.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
@@ -391,9 +393,13 @@ export function damageEndingCandidates(candidates: readonly Candidate[]): Candid
   return candidates.filter(
     (candidate) =>
       CRITICAL_DAMAGE_KINDS.has(candidate.kind) ||
-      // A food-animal ATTACK is the grounded route to food, not a combat
-      // preference: it is the one ATTACK that can end starvation.
-      (candidate.kind === 'ATTACK' && candidate.meta.foodAnimal === true),
+      // A food route is the grounded route to food, not a combat/crafting
+      // preference: the hunt ATTACK, the forage/acquire MINE and the cook CRAFT
+      // are the ones that can end starvation. Any other ATTACK/CRAFT/MINE keeps
+      // the body working while the hunger bar kills it. `foodAnimal` stays
+      // accepted on its own: it is the older typed hunt fact and a stale or
+      // foreign candidate may carry only that one.
+      typeof candidate.meta.foodRoute === 'string' || candidate.meta.foodAnimal === true,
   )
 }
 
@@ -646,6 +652,15 @@ export interface GroundedCandidatesResult {
    * both fire, and each names its own half of the reason.
    */
   sourceGap: ResourceSourceGap | null
+  /**
+   * Typed `FOOD_SOURCE_NONE ...` when a hungry body has NO grounded route to
+   * food at all: nothing edible held, no sensed food animal, no sensed edible
+   * block, no sensed recipe-ingredient block, no cookable recipe. Null whenever
+   * any route (or the EAT mechanic) is on offer, and null for a fed body. This
+   * is the bounded escalation the starvation path needs: it NAMES the missing
+   * affordance instead of leaving a silent food-less WAIT.
+   */
+  foodGap: FoodSourceGap | null
 }
 
 /**
@@ -1363,7 +1378,7 @@ export const defaultCandidateOptions: CandidateOptions = {
   reach: 4.5,
   maxMineCandidates: 12,
   maxAttackCandidates: 4,
-  eatBelowFood: 18,
+  eatBelowFood: DEFAULT_EAT_BELOW_FOOD,
   foodHuntRange: DEFAULT_FOOD_HUNT_RANGE,
   moveMinDistance: DEFAULT_MOVE_MIN_DISTANCE,
   moveMaxDistance: DEFAULT_MOVE_MAX_DISTANCE,
@@ -1476,7 +1491,7 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(
+  const grounded = applyReachabilityGate(
     raw.candidates,
     state,
     options,
@@ -1489,6 +1504,9 @@ export function generateGroundedCandidates(
     raw.sourceExclusions,
     raw.columnDescentRefusal,
   )
+  // The survival fact is computed from the OFFERED set, never from the raw one,
+  // so "no food route" can never be reported while a route is actually on offer.
+  return { ...grounded, foodGap: foodSourceGap(state, options, grounded.candidates) }
 }
 
 /**
@@ -1524,6 +1542,182 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
     default:
       return true
   }
+}
+
+/** Cap on edible recipe results examined per tick, so a large recipe table stays bounded. */
+const FOOD_RECIPE_SCAN_CAP = 64
+
+/** Cap on cook candidates offered per tick. */
+const FOOD_COOK_CAP = 4
+
+/** Stable cell key for joining the sensor's food-source tags with a block candidate. */
+function blockCellKey(position: Vec3Json): string {
+  return `${position.x},${position.y},${position.z}`
+}
+
+/** True when the body is at/below the single eat gate. */
+function bodyHungry(state: Pick<WorldState, 'self'>, options: CandidateOptions): boolean {
+  return Number.isFinite(state.self.food) && state.self.food <= options.eatBelowFood
+}
+
+/**
+ * The edible recipe results known to the running data version, in the recipe
+ * index's own order. A foreign/fixture `RecipeIndex` may not enumerate results;
+ * that yields no cook route rather than an invented one.
+ */
+function edibleRecipeResults(recipes: RecipeIndex | null): readonly string[] {
+  if (recipes === null) return []
+  return (recipes.resultItems?.() ?? []).filter((item) => isEdibleFoodItem(item)).slice(0, FOOD_RECIPE_SCAN_CAP)
+}
+
+/**
+ * True when a sensed `acquire` cell is a real route to food: the ingredient it
+ * drops is the LAST missing piece of an edible recipe the body can otherwise
+ * finish (held, or one executable craft step away). Without this gate, mining a
+ * brown_mushroom while holding no red_mushroom and no plan would be reported as
+ * a food route when it is only clutter - the CAN fact must be grounded in the
+ * recipe the body can actually complete.
+ */
+function foodIngredientCompletesRecipe(state: WorldState, options: CandidateOptions, item: string): boolean {
+  const recipes = options.recipes ?? null
+  if (recipes === null) return false
+  const counts = state.inventory.counts
+  for (const result of edibleRecipeResults(recipes)) {
+    const tableAvailable = sensedCraftingTableAvailable(state, options, result)
+    for (const variant of recipes.recipesFor(result)) {
+      if (!variant.ingredients.some((ingredient) => ingredient.item === item)) continue
+      const complete = variant.ingredients.every((ingredient) => {
+        if (ingredient.item === item) return true
+        if ((counts[ingredient.item] ?? 0) >= ingredient.count) return true
+        return planNextCraftStep(recipes, ingredient.item, counts, tableAvailable, ingredient.count).op !== null
+      })
+      if (complete) return true
+    }
+  }
+  return false
+}
+
+/**
+ * The sensed blocks that ground a food route for THIS tick, keyed by cell.
+ *
+ * `forage` cells (an edible drop) are offered to any hungry body with no edible
+ * item held. `acquire` cells (a recipe ingredient) only when the ingredient
+ * completes an edible recipe the body can finish. Code owns this CAN fact and
+ * nothing else: no route is preferred, ranked or auto-selected here.
+ */
+function foodRouteCells(
+  state: WorldState,
+  options: CandidateOptions,
+): ReadonlyMap<string, { route: 'forage' | 'acquire'; item: string }> {
+  const out = new Map<string, { route: 'forage' | 'acquire'; item: string }>()
+  if (pickFood(state) !== null || !bodyHungry(state, options)) return out
+  for (const block of state.blocks) {
+    const route = block.foodRoute
+    const item = block.foodItem
+    if (route === undefined || typeof item !== 'string' || item.length === 0) continue
+    if (route === 'acquire' && !foodIngredientCompletesRecipe(state, options, item)) continue
+    out.set(blockCellKey(block.position), { route, item })
+  }
+  return out
+}
+
+/**
+ * The grounded FORAGE/ACQUIRE candidates: the MINE/MOVE/ACCESS routes to the
+ * sensed food-source cells, generated as their own bounded call.
+ *
+ * Separate from the focus pool on purpose. The measured live starvation ran
+ * under a `craft acacia_planks` goal inside an oak/birch forest: folding the
+ * food cells into the focus pool would have let the 12-slot mechanical cap
+ * consume every slot with focus logs before a single edible block was offered.
+ * The same reasoning that keeps the food hunt out of the combat budget applies
+ * here - the survival affordance is an ADDITIONAL grounded set for Jev, never a
+ * replacement or a re-ranking of the focus's own routes.
+ */
+function foodForageCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const cells = foodRouteCells(state, options)
+  if (cells.size === 0) return []
+  const keys = new Set(cells.keys())
+  return mineCandidates(state, options, null, null, (block) => keys.has(blockCellKey(block.position)))
+}
+
+/**
+ * The bounded, typed "a hungry body has no grounded route to food" fact.
+ *
+ * Descriptive only: it lists which affordances ARE grounded (`offered`), which
+ * ones are missing, and what the world still affords as a next step. It never
+ * picks an action and never ranks one. Null for a fed body or as soon as any
+ * route is on offer, so a healthy resident never emits the marker.
+ */
+export function foodSourceGap(
+  state: WorldState,
+  options: CandidateOptions,
+  candidates: readonly Candidate[],
+): FoodSourceGap | null {
+  const hungry = bodyHungry(state, options)
+  if (!hungry) return null
+  const held = pickFood(state)
+  const offered = [
+    ...(held === null ? [] : ['eat']),
+    ...candidates
+      .filter((candidate) => typeof candidate.meta.foodRoute === 'string')
+      .map((candidate) => String(candidate.meta.foodRoute)),
+  ]
+  const uniqueOffered = [...new Set(offered)].sort()
+  if (uniqueOffered.length > 0) return null
+  const huntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
+  const sensedAnimal = state.entities.some(
+    (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= huntRange,
+  )
+  const sensedEdibleBlock = state.blocks.some((block) => block.foodRoute === 'forage')
+  // The ACQUIRE tier counts only when the sensed ingredient really would
+  // complete an edible recipe: a mushroom with no plan is not a route, so the
+  // marker must not report `source_withheld` for it.
+  const sensedIngredientBlock = state.blocks.some(
+    (block) =>
+      block.foodRoute === 'acquire' &&
+      typeof block.foodItem === 'string' &&
+      foodIngredientCompletesRecipe(state, options, block.foodItem),
+  )
+  const sourceExists = sensedAnimal || sensedEdibleBlock || sensedIngredientBlock
+  return {
+    offered: uniqueOffered,
+    heldEdible: false,
+    sensedAnimal,
+    sensedEdibleBlock,
+    sensedIngredientBlock,
+    cookableRecipe: false,
+    hungry,
+    starving: bodyStarving(state.self),
+    reason: sourceExists ? 'source_withheld' : 'no_source_sensed',
+    next: candidates.some((candidate) => candidate.meta.explore === true) ? 'explore' : 'escalate',
+  }
+}
+
+/**
+ * The grounded COOK candidates: one executable next step per edible recipe the
+ * live inventory can actually complete. The step is the same
+ * `planNextCraftStep`/`craftPlanStepCandidate` pair the craft path uses, so the
+ * candidate can never be a craft the executor would refuse, and the meta carries
+ * `foodRoute=cook` so the survival restriction and the run log can name it.
+ */
+function foodCookCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const recipes = options.recipes ?? null
+  if (recipes === null) return []
+  const counts = state.inventory.counts
+  const out: Candidate[] = []
+  for (const result of edibleRecipeResults(recipes)) {
+    const tableAvailable = sensedCraftingTableAvailable(state, options, result)
+    const plan = planNextCraftStep(recipes, result, counts, tableAvailable, 1)
+    if (plan.op === null) continue
+    const step = craftPlanStepCandidate(state, options, plan.op, `food:${result}`)
+    if (step.candidate === null) continue
+    out.push({
+      ...step.candidate,
+      meta: { ...step.candidate.meta, foodRoute: 'cook', foodTarget: result },
+    })
+    if (out.length >= FOOD_COOK_CAP) break
+  }
+  return out
 }
 
 /**
@@ -1786,6 +1980,19 @@ function generateRawCandidates(
       meta: { tick: state.tick, food: state.self.food },
     })
   }
+  // The grounded FORAGE/ACQUIRE routes: the sensed blocks the running data
+  // version can turn into food. Measured live (run-muc0l5fp-158ak): the food
+  // focus declared no scanned block names, so a starving body in an oak forest
+  // had no edible block in the world state at all.
+  if (heldFood === null && hungry) candidates.push(...foodForageCandidates(state, options))
+  // The grounded COOK route: a recipe the body can actually finish that produces
+  // an edible item. Measured live: the starving body held a red_mushroom, so the
+  // only way that item could ever become food was mushroom_stew - and no layer
+  // ever asked the recipe planner for an edible result. The step comes from the
+  // same `planNextCraftStep` the craft path uses, so a candidate exists only when
+  // the whole ingredient chain is reachable from the live inventory; Jev owns
+  // whether to cook it.
+  if (heldFood === null && hungry) candidates.push(...foodCookCandidates(state, options))
 
   // Armor-equip affordance: offered alongside the other local self-care actions
   // (EAT/ATTACK/RETREAT), independent of the active goal. The generator reports
@@ -2331,6 +2538,9 @@ function mineCandidates(
   // that hosts blazes, never a source that yields `blaze_rod`.
   const want = focusItem === null ? null : retrievalWant(focusItem)
   const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+  // Tagging only: the food cells are offered by their own bounded call
+  // (`foodForageCandidates`), never by crowding the focus pool's mechanical cap.
+  const foodCells = foodRouteCells(state, options)
   const matching = mineable.filter(
     (block) =>
       focusItem === null ||
@@ -2366,6 +2576,7 @@ function mineCandidates(
     if (!hasTool(state, harvestTool, tier)) continue
 
     const requiresTool = harvestTool !== null
+    const foodCell = foodCells.get(blockCellKey(block.position))
     const baseMeta = {
       tick: state.tick,
       x: block.position.x,
@@ -2374,6 +2585,10 @@ function mineCandidates(
       diggable: block.diggable,
       yieldItem: block.yield ?? block.name,
       ...(block.kind === 'log' ? { [LOG_ROUTE_META]: 'mine_sensed' } : {}),
+      // Typed CAN fact: this cell is a grounded route to food and which item it
+      // yields. The survival restriction and the FOOD_ROUTE marker read this
+      // instead of re-deriving it from the block name.
+      ...(foodCell === undefined ? {} : { foodRoute: foodCell.route, foodTarget: foodCell.item }),
     }
 
     const horizontal = Math.hypot(block.position.x + 0.5 - self.x, block.position.z + 0.5 - self.z)
@@ -5877,7 +6092,7 @@ export function surfaceSpot(
 
 /** True when an item name is edible (the shared `food` resource class). */
 export function isFoodItem(name: string): boolean {
-  return matchesResourceClass(name, 'food')
+  return isEdibleFoodItem(name)
 }
 
 /**
@@ -6462,6 +6677,9 @@ export function applyReachabilityGate(
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),
+    // Filled by `generateGroundedCandidates` from the OFFERED set, once the gate
+    // has finished; the raw gate has no survival fact of its own.
+    foodGap: null,
   }
 }
 
