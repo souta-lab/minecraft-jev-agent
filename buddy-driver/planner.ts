@@ -26,7 +26,7 @@ import { FatalModelError, describeFailure, failLoud, withModelRetries } from '..
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
-import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
+import { bodyStarving, countSensedPortalFrameBlocks, formatBodyStarvingFact } from '../jev-agent/src/state.ts'
 import { defaultCandidateOptions } from '../jev-agent/src/candidates.ts'
 import {
   PlannerBrain as LegacyPlannerBrain,
@@ -187,6 +187,25 @@ function waitLimitStallKey(request: System2PlanRequest): string {
   return `${identity}|objective:${request.objective.targetItem}:${request.objective.requiredCount}`
 }
 
+/**
+ * The code-owned starvation fact, as the ONE typed line the Jev side also
+ * emits (`formatBodyStarving`). Null for a fed body, so nothing changes when the
+ * body is healthy. The measured live failure (run-muc0l5fp-158ak) was a body
+ * pinned at the server's 1 HP starvation floor: the deterministic candidate
+ * layer restricted its own offer, but the OPTION layer (this planner/System2
+ * request) only carried the raw numbers `health: 1, food: 0`, so nothing in the
+ * plan surface said "this body is taking starvation damage and needs a route
+ * that ends it". This is a typed fact, not a ranking: it never reorders or
+ * removes an Option.
+ */
+export function starvationFact(bot: Pick<Bot, 'food' | 'health'>): string | null {
+  const food = bot.food
+  const health = bot.health
+  if (typeof food !== 'number' || typeof health !== 'number') return null
+  if (!bodyStarving({ food, health })) return null
+  return formatBodyStarvingFact({ food, health })
+}
+
 function compactPlan(option: PlanOption): Record<string, unknown> {
   return {
     id: option.id,
@@ -213,6 +232,7 @@ function compactSystem2State(
 ): Record<string, unknown> {
   const inventory: Record<string, number> = {}
   for (const [name, count] of Object.entries(counts)) if (count > 0) inventory[name] = count
+  const starvation = starvationFact(bot)
   return {
     reason: request.reason,
     detail: request.detail,
@@ -238,6 +258,10 @@ function compactSystem2State(
     recentEvents: request.recentEvents.slice(-24),
     recentOutcomes: request.recentOutcomes.slice(-16),
     groundedPlans: options.map(compactPlan),
+    // Typed survival fact, present only while the body is actually starving at
+    // the critical-health floor. The model already sees the raw `health`/`food`
+    // numbers; this names the STATE so a plan can prefer a route that ends it.
+    ...(starvation === null ? {} : { survival: starvation }),
   }
 }
 
@@ -363,6 +387,17 @@ export class PlannerBrain implements System2Brain {
     const gap = parseCapabilityGap(request.recentEvents)
     if (y !== null && (gap !== null || upperAccessRecoveryApplies(this.world, y))) {
       options.push(buildUpperAccessRecoveryOption(this.world, y))
+    }
+    // Typed survival fact on the ONE Option whose route can end starvation. This
+    // names the state (and the reason that Option is the survivable one) for the
+    // model; it never adds, removes, reorders or pre-selects an Option, so the
+    // semantic WHAT stays with System2.
+    const starvation = starvationFact(this.bot)
+    if (starvation !== null) {
+      const food = options.find((option) => option.id === 'food')
+      if (food !== undefined && !food.title.includes(starvation)) {
+        food.title = `${food.title} [${starvation}]`
+      }
     }
     return uniqueOptions(options)
   }

@@ -51,6 +51,23 @@ const FOOD_ITEMS = new Set([
   'carrot',
   'melon_slice',
   'sweet_berries',
+  // Edible vanilla items the survival table was missing. These are the outputs
+  // and forage drops of the grounded food routes (`foodSources.ts`): without
+  // them a recipe could be planned to completion and the eat mechanic would
+  // still refuse the result, which is a dead-end route rather than a food truth.
+  // The boundary is deliberate: items that are edible but carry a harmful
+  // effect (rotten_flesh, spider_eye, poisonous_potato, pufferfish, ...) are NOT
+  // survival food, and a table that cannot distinguish them would offer a
+  // starving body a route that kills it.
+  'beetroot',
+  'beetroot_soup',
+  'cookie',
+  'dried_kelp',
+  'glow_berries',
+  'honey_bottle',
+  'kelp',
+  'mushroom_stew',
+  'pumpkin_pie',
 ])
 
 const PICKAXE_SUFFIX = '_pickaxe'

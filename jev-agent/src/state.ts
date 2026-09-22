@@ -17,6 +17,8 @@ import type { StrategicStallEvidence } from './strategicStall.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import type { CriticalDamageEvidence } from './criticalDamage.ts'
 import { resourceMatches } from './resourceClass.ts'
+import { foodSourceSpecs } from './foodSources.ts'
+import type { FoodSourceRegistry } from './foodSources.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
 import {
@@ -278,6 +280,15 @@ export function bodyIsOutOfAir(self: Pick<SelfState, 'air' | 'feetInWater' | 'ey
  */
 export const STARVING_FOOD_LEVEL = 0
 
+/**
+ * The single eat gate default: below this food level the body wants food, so
+ * the sensor scans for grounded food sources and the candidate layer offers
+ * EAT/hunt/forage/cook routes. `defaultCandidateOptions.eatBelowFood` and the
+ * controller's `logFoodState` threshold both read this number, so perception,
+ * offer and marker can never disagree about what "hungry" means.
+ */
+export const DEFAULT_EAT_BELOW_FOOD = 18
+
 export function bodyStarving(
   self: Pick<SelfState, 'food' | 'health'>,
   criticalHealth: number = CRITICAL_DAMAGE_HEALTH,
@@ -294,7 +305,17 @@ export function bodyStarving(
 export const BODY_STARVING = 'BODY_STARVING'
 
 export function formatBodyStarving(self: Pick<SelfState, 'food' | 'health'>, at: Vec3Json): string {
-  return `${BODY_STARVING} health=${self.health}/${CRITICAL_DAMAGE_HEALTH} food=${self.food} at=${at.x},${at.y},${at.z} -> only routes that can end the starvation stay offered`
+  return `${formatBodyStarvingFact(self)} at=${at.x},${at.y},${at.z}`
+}
+
+/**
+ * The position-free starvation fact. Same wording as {@link formatBodyStarving}
+ * without the cell, so a consumer that keys on the string (the option title the
+ * planner hands to System2, whose identity feeds the model-call cache) does not
+ * see a new value every time the body moves one block.
+ */
+export function formatBodyStarvingFact(self: Pick<SelfState, 'food' | 'health'>): string {
+  return `${BODY_STARVING} health=${self.health}/${CRITICAL_DAMAGE_HEALTH} food=${self.food} -> only routes that can end the starvation stay offered`
 }
 
 /** Stable `x_y_z` key for a placement spot, shared by the sensor fact, guard and generator. */
@@ -413,6 +434,16 @@ export type BlockState = {
    * dig through a wall, so it becomes a tunnel target instead.
    */
   visible?: boolean
+  /**
+   * Perception truth (`foodSources.ts`): this sensed block is a grounded route
+   * to food, and how. `forage` yields an edible item directly; `acquire` yields
+   * an item that is an ingredient of a recipe producing one. Set only for a
+   * hungry body, so the extra scan is bounded by an actual need. The candidate
+   * layer reads it only while the body still holds no edible item.
+   */
+  foodRoute?: 'forage' | 'acquire'
+  /** the item this food-source block yields (edible, or an ingredient) */
+  foodItem?: string
 }
 
 /** One pre-computed staircase/tunnel step in a cardinal direction. */
@@ -650,6 +681,13 @@ export interface SensorOptions {
   entityRadius: number
   maxStoneBlocks: number
   maxPlacementSpots: number
+  /**
+   * The eat gate the candidate layer uses. The sensor scans for grounded food
+   * sources (edible blocks and recipe-ingredient blocks) only while the live
+   * hunger bar is at or below this level, so the extra scan is bounded by an
+   * actual need. Defaults to `DEFAULT_EAT_BELOW_FOOD`.
+   */
+  eatBelowFood?: number
   /**
    * Exact world-mutation revision (see `DecisionScheduler.worldRevision`), or
    * absent/null when the caller cannot prove one. Only when it is a finite
@@ -1458,6 +1496,68 @@ function buildScannedResourceBlocks(
   return out.slice(0, 48)
 }
 
+/** Bound on food-source cells the sensor keeps (and probes adjacency for). */
+const FOOD_SOURCE_SCAN_CAP = 24
+
+/**
+ * Food-source scan for a hungry body.
+ *
+ * The measured live failure (run-muc0l5fp-158ak / run-mubobiq6-12onv lineage):
+ * `food=0` for a whole run with an oak/birch forest in reach, because the food
+ * focus declared no scanned block names at all, so no edible block was ever in
+ * the world state and no forage/acquire route could be generated. This scan is
+ * the perception half of the fix: while the live hunger bar is at/below the eat
+ * gate, every block the running data version can turn into food
+ * (`foodSources.foodSourceSpecs`) is name-scanned and tagged with what it
+ * yields. The candidate layer decides whether the route is offered; this
+ * function only reports what is there.
+ */
+function buildFoodSourceBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
+  const eatBelow = typeof options.eatBelowFood === 'number' ? options.eatBelowFood : DEFAULT_EAT_BELOW_FOOD
+  if (!(Number.isFinite(self.food) && self.food <= eatBelow)) return []
+  const specs = foodSourceSpecs((bot as { registry?: FoodSourceRegistry }).registry ?? null)
+  if (specs.size === 0) return []
+  const radius = Math.max(options.scanRadius, 64)
+  const positions = stableFindBlocks(bot, `food:${radius}:48`, {
+    matching: (block) => specs.has(block.name),
+    maxDistance: radius,
+    count: 48,
+  })
+  // Resolve the cheap facts only for the NEAREST cells: `findAdjacentStandable`
+  // costs 36 block reads per target, so probing all 48 candidates to keep 24 is
+  // the same waste the log scan was optimized out of.
+  const nearest = [...positions]
+    .sort((a, b) => distance(vecJson(a), self.position) - distance(vecJson(b), self.position))
+    .slice(0, FOOD_SOURCE_SCAN_CAP)
+  const out: BlockState[] = []
+  for (const position of nearest) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const spec = specs.get(block.name)
+    if (spec === undefined) continue
+    const pos = vecJson(position)
+    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const harvest = resolveBlockHarvest(bot, block.name)
+    out.push({
+      kind: 'ore',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach: distance(pos, self.eyePosition) <= options.reach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: harvest.yield,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+      foodRoute: spec.route,
+      foodItem: spec.item,
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance)
+  return out.slice(0, FOOD_SOURCE_SCAN_CAP)
+}
+
 /**
  * Blocks that can occupy a remembered resource cell without disproving the
  * memory: air/fluids are indistinguishable from a not-yet-sent chunk section
@@ -1628,12 +1728,16 @@ function buildBlocks(
         ? buildBuriedStoneBlocks(bot, stoneScanOptions, self, null, true)
         : []
   const ores = buildScannedResourceBlocks(bot, options, self, focusItem)
+  // A hungry body's food sources are sensed independently of the active focus:
+  // the measured live starvation ran under a `craft acacia_planks` goal, so a
+  // focus-only scan would have kept every edible block invisible.
+  const foodSources = buildFoodSourceBlocks(bot, options, self)
   const hazards = buildHazardBlocks(bot, options, self)
   // Keep the bounded capability envelope ahead of the broad route-planning
   // stone scan. This is not a semantic ranking: `mineCandidates` applies a
   // typed placeable-producer filter, but its mechanical candidate cap must not
   // be consumed by unrelated stone cells before the near producer is seen.
-  const blocks = [...logs, ...nearbyPlaceableProducers, ...stones, ...buried, ...ores, ...hazards]
+  const blocks = [...logs, ...nearbyPlaceableProducers, ...stones, ...buried, ...ores, ...foodSources, ...hazards]
   const seen = new Set<string>()
   return blocks.filter((block) => {
     const key = `${block.kind}:${block.position.x},${block.position.y},${block.position.z}`
