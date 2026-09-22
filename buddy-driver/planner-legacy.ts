@@ -3345,6 +3345,20 @@ export class PlannerBrain implements System2Brain {
       recentFailures: request.recentOutcomes
         .slice(-6)
         .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`),
+      durable: this.durableWorldFacts(),
+    }
+  }
+
+  /**
+   * Durable world truth the model must see to avoid re-planning completed work. A
+   * lit+verified portal (or a remembered station) is a WORLD fact, not a kit fact: the
+   * ladder predicate already treats it as achieved, and the plan must not rebuild it.
+   */
+  private durableWorldFacts(): { verifiedPortal: { x: number; y: number; z: number } | null; knownPortalSites: number } {
+    const site = verifiedPortalSiteInWorld(this.world)
+    return {
+      verifiedPortal: site === null ? null : { x: site.x, y: site.y, z: site.z },
+      knownPortalSites: Array.isArray(this.world.knownPortalSites) ? this.world.knownPortalSites.length : 0,
     }
   }
 
@@ -3369,6 +3383,7 @@ export class PlannerBrain implements System2Brain {
       inventory: relevant,
       stations: { craftingTables: this.world.craftingTables.length, furnaces: this.world.furnaces.length },
       discoveredOres: this.world.discoveredOres,
+      durable: this.durableWorldFacts(),
       queue: {
         depth: request.goalQueueState.depth,
         done: request.goalQueueState.done,
