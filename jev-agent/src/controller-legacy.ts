@@ -226,6 +226,7 @@ import {
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { formatDigRouteProgress, formatDigRouteRefused } from './digRoute.ts'
+import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
@@ -1358,6 +1359,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DIG_ROUTE',
   'DIG_ROUTE_REFUSED',
   'DIG_ROUTE_PROGRESS',
+  // The BRIDGE/scaffold family (`bridgeRoute.ts`): the leg that places a floor
+  // across a same-level gap and advances onto it, its per-step mechanic, its typed
+  // end, and the typed reason a needed bridge was refused. A bridge that reaches
+  // `buddy.log` only as a `MOVE` would be indistinguishable from an ordinary walk,
+  // and the #436 section 5 effect (`mayPlaceBlocks` + the consumed block) would not
+  // be auditable run-scoped.
+  'BRIDGE_START',
+  'BRIDGE_STEP',
+  'BRIDGE_END',
+  'BRIDGE_REFUSED',
   // #436 reflex/continuation vocabulary: a bounded mechanical continuation that is
   // the UNIQUE binding prerequisite of the active leg (`REFLEX
   // reason=unique_binding_prerequisite`) and the mechanical step when it runs.
@@ -2142,6 +2153,8 @@ export class JevController {
   private lastEnvHazardGapLine: string | null = null
   /** Signature of the last `REFLEX` line, so a repeated reflex decision logs once. */
   private lastReflexLine: string | null = null
+  /** last logged BRIDGE_REFUSED signature, so one refused bridge is one line. */
+  private lastBridgeRefusalKey: string | null = null
   /** Signature of the last `SKILL_POLICY_BOUNDARY` line (hazard boundaries). */
   private lastEnvBoundaryLine: string | null = null
   /** True when a fresh damage observation landed this tick (fed to `envHazard`). */
@@ -2912,6 +2925,7 @@ export class JevController {
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logDigRouteRefusals(grounded.digRefusals)
       this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
+      this.logBridgeRefusals(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logSkillPolicyBoundaries(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
@@ -3525,6 +3539,7 @@ export class JevController {
         )
       }
       if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
+      if (isBridgeMove(guarded.candidate)) this.logBridgeAuthority(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -5784,6 +5799,53 @@ export class JevController {
       },
       this.tickCounter,
     )
+  }
+
+  /**
+   * The typed `BRIDGE_REFUSED reason=<no_block|no_verified_landing|hazard|
+   * protected|budget> ...` facts: the leg needed a same-level gap crossed, the
+   * sensor's bounded forward probe saw it, and the bridge was refused for a NAMED
+   * reason (`bridgeRoute.ts`). Logged for WITHHELD candidates too, so the refusal is
+   * visible on the tick it exists instead of looking like "no gap was ever seen".
+   * Deduped like the other typed dead-end facts.
+   */
+  private logBridgeRefusals(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta[BRIDGE_REFUSED_META]
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastBridgeRefusalKey) return
+    this.lastBridgeRefusalKey = key
+    if (key === null) return
+    for (const line of lines) this.logger.warn('agent', line, { line }, this.tickCounter)
+  }
+
+  /**
+   * The selected BRIDGE leg's #436 section 17 layer: `SKILL_STEP skill=<id>
+   * step=bridge authority=<MECHANICAL_CONTINUATION|MANDATORY_PREREQUISITE>
+   * evidence=... worldDelta=place_blocks=1 budget=<span>`. Logged when the action is
+   * taken, so the marker means "the body is now running this bridge", and the layer
+   * half says whether code finished a UNIQUE prerequisite (U1..U6) or merely
+   * realized the route Jev selected. The `REFLEX reason=unique_binding_prerequisite`
+   * proof, when there is one, rides `logLegReflexes` from the same candidate meta.
+   */
+  private logBridgeAuthority(candidate: Candidate): void {
+    const detail = typeof candidate.meta[BRIDGE_AUTHORITY_META] === 'string' ? candidate.meta[BRIDGE_AUTHORITY_META] : null
+    const skill = typeof candidate.meta.legContinuationSkill === 'string' ? candidate.meta.legContinuationSkill : 'BRIDGE(approach)'
+    const line =
+      detail === null
+        ? formatSkillStep(skill, 'bridge', `target=${candidate.target === null ? 'unknown' : `${candidate.target.x},${candidate.target.y},${candidate.target.z}`}`)
+        : formatSkillStep(skill, 'bridge', detail)
+    this.logger.info('agent', line, {
+      actionId: candidate.id,
+      target: candidate.target,
+      dir: candidate.meta.bridgeDir ?? null,
+      block: candidate.meta.bridgeBlock ?? null,
+      span: candidate.meta.bridgeSpan ?? null,
+      mayPlaceBlocks: candidate.meta.mayPlaceBlocks === true,
+    })
   }
 
   /**
