@@ -381,17 +381,23 @@ buddy-driver/resident-types.ts
 buddy-driver/package.json
 <!-- merged: retained integration guidance -->
 ### 4.0 ブランチ運用（競合防止・必須）
+・★作業ディレクトリは **disk-backed な `/home/s0u7a/mc-ai-worktrees/`** に置く。`/tmp` は tmpfs（RAM 上）で、
+  レーンごとに ~650 MB の worktree を作ると 7.8 GB を使い切り、**機械全体が遅くなり fixture が ENOSPC で落ちる**
+  （実測: 2026-09-22 に 2 回 100% 到達。1 回目は fixture 死亡、2 回目は logger が `new Executor` 内で例外）。
+  `git worktree add /home/s0u7a/mc-ai-worktrees/<task> -b task/<name> origin/main` を使う。
+  `/tmp/opencode/*` に既にある worktree は、その lane が終わった時点で `git worktree remove` する。
 ```
 ・サブエージェント／並行タスクは **必ず専用ブランチを切って作業する**（例: `task/issue-12-precondition-chain`）
 ・★共有ツリーで `git checkout` しない。**`git worktree add` で別ディレクトリを切る**:
     cd /home/s0u7a/mc-ai
     git fetch origin
-    git worktree add /tmp/opencode/wt-<task> -b task/<name> origin/main
-    # 作業後: git -C /tmp/opencode/wt-<task> add -A && git -C ... commit -m "..." && git -C ... push -u origin task/<name>
-    # 終了時: git worktree remove /tmp/opencode/wt-<task>
+    # ★/tmp ではなく disk-backed path を使う（/tmp は tmpfs で機械全体を止める）
+    git worktree add /home/s0u7a/mc-ai-worktrees/<task> -b task/<name> origin/main
+    # 作業後: git -C /home/s0u7a/mc-ai-worktrees/<task> add -A && git -C ... commit -m "..." && git -C ... push -u origin task/<name>
+    # 終了時: git worktree remove /home/s0u7a/mc-ai-worktrees/<task>
   理由: 常駐ホストは**作業ツリーからバンドルを生成**してホットリロードするため、
         共有ツリーを checkout で切り替えると稼働中のエージェントが別ブランチのコードで動き出し、他のタスクの編集も壊れる
-  （実例: #21 は /tmp/opencode/wt21 を使用。これが正しい）
+  （★歴史的注記: 以前は /tmp/opencode/wt21 を使っていたが、/tmp が tmpfs であるため現在は禁止。disk-backed path を使う）
 ・★共有ツリーの HEAD は常に `main` でなければならない。同期の `reset` は現在のブランチを動かすため、
   非 `main` HEAD ではレーンのブランチを静かに書き換える。共有ツリーの同期は `bun tools/sync-shared-tree.mjs`
   を使い、`SYNC_HEAD_WRONG head=<branch>` で停止した場合は checkout や reset で回避しない。
@@ -434,12 +440,12 @@ buddy-driver/package.json
 ```bash
 cd /home/s0u7a/mc-ai
 git fetch origin
-git worktree add /tmp/opencode/wt-<task> -b task/<name> origin/main
+git worktree add /home/s0u7a/mc-ai-worktrees/<task> -b task/<name> origin/main
 
 # lane finish
-git -C /tmp/opencode/wt-<task> add -A
-git -C /tmp/opencode/wt-<task> commit -m "..."
-git -C /tmp/opencode/wt-<task> push -u origin task/<name>
+git -C /home/s0u7a/mc-ai-worktrees/<task> add -A
+git -C /home/s0u7a/mc-ai-worktrees/<task> commit -m "..."
+git -C /home/s0u7a/mc-ai-worktrees/<task> push -u origin task/<name>
 
 # integration
 git fetch
@@ -447,7 +453,7 @@ git merge --no-ff origin/task/<name>
 git push
 
 # cleanup
-git worktree remove /tmp/opencode/wt-<task>
+git worktree remove /home/s0u7a/mc-ai-worktrees/<task>
 ```
 
 運用invariants:
