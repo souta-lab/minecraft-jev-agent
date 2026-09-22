@@ -106,6 +106,18 @@ const INVENTORY_RE = /\b(?:items|inventory)=(\{[^{}]*\})/
  * reports the dimension it observed, while the M2 stages ignore this field.
  */
 const DIMENSION_RE = /\bdimension=(minecraft:[a-z_]+|[a-z_]+)\b/
+/**
+ * The ONLY markers that report the BODY's own dimension (buddy-driver/dimension-observer.ts):
+ * `DIMENSION_OBSERVED` at generation start and `DIMENSION_TRANSITION` on a live change, whose
+ * `dimension=` is the canonical current field. Every other marker that happens to carry a
+ * `dimension=` field names something else - the portal's own dimension (PORTAL_LIT,
+ * PORTAL_VERIFIED, PORTAL_SITE_RECHECK), a route TARGET (PORTAL_ENTRY_UNVERIFIED
+ * `dimension=minecraft:the_nether expected=6`), a death location, a spawn or a structure site -
+ * and must never prove the body reached that dimension. Measured false PASS: a run whose only
+ * `the_nether` occurrence was a PORTAL_ENTRY_UNVERIFIED target line was gated
+ * `nether_reached: PASS` while every body observation said `minecraft:overworld`.
+ */
+const BODY_DIMENSION_MARKER_RE = /\b(?:DIMENSION_OBSERVED|DIMENSION_TRANSITION|SPAWN|DEATH)\b/
 
 /** Read-only current-run binding used only to bound live policy evidence. */
 export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, timeoutMs = 1500) {
@@ -530,7 +542,7 @@ export function scanRunLines(runId, lines) {
     if (portal !== null) portalEvents.push(portal)
     const inventory = parseInventoryMarker(line)
     if (inventory !== null) inventorySamples.push(inventory)
-    const dimension = DIMENSION_RE.exec(line)
+    const dimension = BODY_DIMENSION_MARKER_RE.test(line) ? DIMENSION_RE.exec(line) : null
     if (dimension !== null) dimensionObservations.push(dimension[1])
   }
   if (!bootSeen) {

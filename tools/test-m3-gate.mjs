@@ -65,7 +65,15 @@ const FALLBACK_POLICY = {
 
 const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=abc123 worldEpoch=1`
 const inv = (counts, pos = '10,64,20') => `[2026-09-20T10:00:01.000Z] INVENTORY items=${JSON.stringify(counts)} pos=${pos}`
-const heartbeat = (dimension) => `[2026-09-20T10:00:01.500Z] HEARTBEAT pos=10,64,20 health=20 dimension=${dimension}`
+// The real HEARTBEAT carries NO dimension field (0 occurrences in a live 75 MB log). The body's own
+// dimension is reported by DIMENSION_OBSERVED / DIMENSION_TRANSITION (buddy-driver/dimension-observer.ts)
+// and by SPAWN / DEATH. These helpers build those real shapes; the old fixture fed the dimension through
+// HEARTBEAT, i.e. it tested evidence production never emits and hid a real false PASS.
+const heartbeat = () => `[2026-09-20T10:00:01.500Z] HEARTBEAT pos=10,64,20 health=20 rung=enter_nether`
+const dimensionObserved = (dimension, runId = RUN) =>
+  `[2026-09-20T10:00:01.500Z] DIMENSION_OBSERVED dimension=${dimension} runId=${runId} reason=generation-start source=live-world`
+const dimensionTransition = (to, runId = RUN) =>
+  `[2026-09-20T10:00:01.700Z] DIMENSION_TRANSITION from=minecraft:overworld to=${to} dimension=${to} runId=${runId} reason=live-change source=live-world`
 
 const PORTAL_CHAIN = [
   '[2026-09-20T10:00:02.000Z] PORTAL_BLOCK_PLACED pos=10,64,20',
@@ -76,7 +84,7 @@ const PORTAL_CHAIN = [
 
 const EYES_READY = inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 })
 const MATERIALS_ONLY = inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 4 })
-const FULL_RUN = [boot(RUN), heartbeat('minecraft:the_nether'), EYES_READY]
+const FULL_RUN = [boot(RUN), dimensionTransition('minecraft:the_nether'), EYES_READY]
 
 /** Build injected run-scoped evidence through the real M2 scanner (shared schema). */
 function evidenceFrom(lines, runId = RUN) {
@@ -226,7 +234,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   // Run A has only 4 pearls; run B proves the full 12 eyes.
   // M3 also requires live proof of Nether arrival, so each run in this fixture records the dimension
   // it observed; the cross-run negative below is about run binding, not about the Nether.
-  const mixed = [boot(RUN), inv({ ender_pearl: 4 }), boot(OTHER_RUN), heartbeat('minecraft:the_nether'), EYES_READY]
+  const mixed = [boot(RUN), inv({ ender_pearl: 4 }), boot(OTHER_RUN), dimensionObserved('minecraft:the_nether', OTHER_RUN), EYES_READY]
   const asA = await judge({ lines: mixed, expectedRunId: RUN })
   assert.equal(asA.code, 2, asA.text)
   assert.match(asA.text, /ender_eye_ready: UNKNOWN/, asA.text)
@@ -479,6 +487,47 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     rmSync(dir, { recursive: true, force: true })
   }
   ok('the gate reads the run-scoped resident predicate file and reports it; a missing file keeps UNKNOWN')
+}
+
+// ---------------------------------------------------------------------------
+// 2b. RED: only the BODY's own dimension evidence may prove nether_reached
+// ---------------------------------------------------------------------------
+{
+  // Measured live false PASS (2026-09-22, run-muc620xb-1d312): the run never left the overworld, but its own
+  // window contained `PORTAL_ENTRY_UNVERIFIED ... enter=26,67,9 dimension=minecraft:the_nether expected=6` - a
+  // route TARGET naming the dimension it wanted to reach - and the old loose `dimension=` scan counted it as an
+  // observation, so the gate reported `nether_reached: PASS at=unavailable source=log:dimension`. A gate that can
+  // manufacture Nether arrival from a plan description would let M3 be declared without ever leaving the overworld.
+  const routeTargetOnly = [
+    boot(RUN),
+    inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 }),
+    '[2026-09-20T10:00:02.000Z] PORTAL_ENTRY_UNVERIFIED reason=site_not_observed site=25,66,9 enter=26,67,9 dimension=minecraft:the_nether expected=6',
+  ]
+  const asTarget = await judge({ lines: routeTargetOnly })
+  assert.match(asTarget.text, /nether_reached: UNKNOWN/, asTarget.text)
+  assert.notEqual(asTarget.code, 0)
+  assert.doesNotMatch(asTarget.text, /status=PASS/)
+
+  // A portal that LIVES in the Nether is still not the body's own observation (PORTAL_LIT/PORTAL_VERIFIED and the
+  // structure/site markers all carry the dimension of the thing they describe).
+  const portalInNetherOnly = [
+    boot(RUN),
+    inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 }),
+    '[2026-09-20T10:00:03.000Z] PORTAL_LIT pos=2,65,0 dimension=minecraft:the_nether',
+  ]
+  const asPortal = await judge({ lines: portalInNetherOnly })
+  assert.match(asPortal.text, /nether_reached: UNKNOWN/, asPortal.text)
+
+  // Positive control: SPAWN and DEATH report where the BODY is / died, so they do prove arrival.
+  const spawnedInNether = [
+    boot(RUN),
+    inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 }),
+    '[2026-09-20T10:00:04.000Z] SPAWN pos=2.5,65.0,0.5 health=20 username=AI_Buddy dimension=minecraft:the_nether worldEpoch=1',
+  ]
+  const asSpawn = await judge({ lines: spawnedInNether })
+  assert.match(asSpawn.text, /nether_reached: PASS/, asSpawn.text)
+  assert.equal(asSpawn.code, 0, asSpawn.text)
+  ok("nether_reached accepts only the body's own dimension markers (never a portal, a site or a route target)")
 }
 
 console.log(`m3-gate-test ${checks}/${checks} PASS`)
