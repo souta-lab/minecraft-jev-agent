@@ -78,6 +78,7 @@ import {
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
+import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
@@ -12091,7 +12092,25 @@ export function deriveReachabilityAbilities(
         ascendMissing.push({ kind: 'tool', tool: requiredTool, tier: ascent.blocker?.requiredTier ?? 0 })
       }
     }
-    if (ascendMissing.length === 0) ascendMissing.push({ kind: 'ascend_plan' })
+    if (ascendMissing.length === 0) {
+      // Nothing else named a fact, and a bare `ascend_plan` would hide WHICH
+      // concrete HOW was rejected (the live trial: `place=1 hazard=0 tools=[]`
+      // with 834 identical bare-token withholdings while the body stood frozen).
+      // Name the plan the column carried and the precondition that stopped it -
+      // the same rule `descend_plan` already follows - so the refusal is
+      // actionable instead of retryable.
+      const feetCell = {
+        x: Math.floor(state.self.position.x),
+        y: Math.floor(state.self.position.y),
+        z: Math.floor(state.self.position.z),
+      }
+      // The ONLY fact this branch can be holding is the column's support: every
+      // other precondition (placeable block, headroom + tool, safe-column refusal)
+      // pushes its own capability above, and a plan is grounded unless one of them
+      // refused. `plan !== null && !footingSolid` is therefore the live shape.
+      const reason: AscendPlanRefusalReason = plan !== null && !column.footingSolid ? 'no_footing' : 'plan_unavailable'
+      ascendMissing.push({ kind: 'ascend_plan', plan: plan?.kind ?? null, reason, cell: feetCell })
+    }
   }
 
   const descendMissing: Capability[] = []
