@@ -18,6 +18,19 @@
 // per-tick spatial `predicateForGoal` level predicate. When the world truth is
 // already true, the row is permanent.
 //
+// EVIDENCE NOTE (run-muchajde-1qhat). `goalKeyOf` is
+// `${kind}:${targetItem}:${requiredCount}`, so the `WAIT_STREAK
+// goal=place:nether_portal:1` line cannot distinguish the light/verify row
+// (`portal_lit`) from the dimension-transfer row (`portal_entered`). In that run
+// the head was the TRANSFER row (`CAUSAL ... planId=g1:place:nether_portal`
+// with `semanticOptionInstanceId=enter_portal:goal#dminecraft_the_nether~pportal_entered`,
+// `rung=enter_nether`), whose own predicate - the body's live dimension - was
+// genuinely FALSE in the overworld; it is deliberately NOT retired here (doing so
+// would strand the body in the overworld with the M3 work queued). The
+// world-outcome rows this module retires are the class measured in the same log
+// family as `LEDGER_RESTORED ... current=collect obsidian reopened=5`
+// (`g10 place:obsidian`, `g11 place:nether_portal`) with the gate standing.
+//
 // One question, one answer, tri-state:
 //
 //   satisfied    the row's own postcondition provably holds -> DONE (Code owns DONE)
@@ -281,7 +294,10 @@ export function evaluateGoalSuccess(
  *      read overworld chunks, so without this half the stale row would survive
  *      exactly in the measured case.
  *
- * No record and nothing readable is UNKNOWN - never "the portal is gone".
+ * No record and nothing readable is UNKNOWN - never "the portal is gone". A
+ * record whose own cells a live read CONTRADICTS is never upgraded to the
+ * durable half: the live world outranks the record (its revocation belongs to
+ * the world-memory sync, not to this module).
  */
 function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldProbe): GoalSuccessEvidence {
   const expectedDimension = typeof goal.dimension === 'string' && goal.dimension.length > 0 ? goal.dimension : OVERWORLD
@@ -301,7 +317,8 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
     }
   }
   const readable = liveReadAllowed(expectedDimension, probe.dimension)
-  let readableSites = 0
+  const contradicted = new Set<RecordedPortalSite>()
+  let contradictedLive = false
   if (readable) {
     for (const site of sites) {
       const validation = validatePortalFrame({
@@ -312,9 +329,7 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
       const reads = validation.interior.map((cell) => probe.blockAt(cell))
       // One unreadable cell makes this site unobservable, not disproved.
       if (reads.some((name) => name === null)) continue
-      readableSites += 1
-      const lit = isPortalIgnitionPostconditionMet(validation.interior, (cell) => probe.blockAt(cell), NETHER_PORTAL)
-      if (lit) {
+      if (isPortalIgnitionPostconditionMet(validation.interior, (cell) => probe.blockAt(cell), NETHER_PORTAL)) {
         return {
           status: 'satisfied',
           predicate: 'portal_lit',
@@ -324,10 +339,16 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
             ` origin=${cellKey(site.origin)} dimension=${probe.dimension ?? 'unknown'}`,
         }
       }
+      // Readable and NOT the ignition postcondition: this record is contradicted
+      // by the live world, so it may not carry the durable half either.
+      contradicted.add(site)
+      contradictedLive = true
     }
   }
-  // The run's own verified record is a positive proof of this row's outcome.
-  const recorded = sites.find((site) => (site.frame?.length ?? 0) > 0) ?? sites[0]
+  // The run's own verified record is a positive proof of this row's outcome -
+  // but only for a record the live world did not just contradict.
+  const usable = sites.filter((site) => !contradicted.has(site))
+  const recorded = usable.find((site) => site.frame.length > 0) ?? usable[0]
   if (recorded !== undefined) {
     return {
       status: 'satisfied',
@@ -338,11 +359,22 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
         ` dimension=${recorded.dimension ?? expectedDimension}`,
     }
   }
+  if (contradictedLive) {
+    const site = sites.find((candidate) => contradicted.has(candidate))
+    return {
+      status: 'unsatisfied',
+      predicate: 'portal_lit',
+      source: 'live-block-read',
+      detail:
+        `recorded portal site origin=${site === undefined ? 'unknown' : cellKey(site.origin)}` +
+        ` interior is not ${NETHER_PORTAL} dimension=${probe.dimension ?? 'unknown'}`,
+    }
+  }
   return {
     status: 'unknown',
     predicate: 'portal_lit',
     source: 'world-unobservable',
-    detail: `recorded portal sites=${sites.length} readable=${readableSites} liveDimension=${probe.dimension ?? 'unknown'}`,
+    detail: `recorded portal sites=${sites.length} readable=0 liveDimension=${probe.dimension ?? 'unknown'}`,
   }
 }
 

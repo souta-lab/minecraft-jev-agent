@@ -225,6 +225,30 @@ const retiredMarkers = (markers: readonly string[]): string[] =>
 // (i) THE MEASURED CASE
 // ---------------------------------------------------------------------------
 
+// (i-0) BEFORE/AFTER: the pre-fix behaviour is exactly "no probe installed" - the
+// same ledger against the same world truth keeps the M2 rows at the head. This is
+// the permanent goal the rest of this fixture removes, and it also proves the
+// change is additive (an uninstalled probe changes nothing).
+{
+  const stale = [frameRow(), lightRow(), blazeRow()]
+  const world = probe({ dimension: OVERWORLD, blocks: portalBlocks(), resources: [portalResource()] })
+  const bare = restoreHarness(stale, null)
+  const withProbe = restoreHarness(stale, world)
+  check(
+    '(i-0) BEFORE: with no probe the same world truth retires nothing (the permanent goal)',
+    bare.queue.current?.id === 'g5:place:obsidian' &&
+      statusOf(bare.queue, 'g5:place:obsidian') === 'active' &&
+      statusOf(bare.queue, 'g6:place:nether_portal') === 'pending' &&
+      bare.markers.length === 0,
+    `head=${bare.queue.current?.id ?? 'none'} frame=${statusOf(bare.queue, 'g5:place:obsidian')} light=${statusOf(bare.queue, 'g6:place:nether_portal')}`,
+  )
+  check(
+    '(i-0) AFTER: the identical ledger with the probe retires both rows and the queue advances',
+    withProbe.queue.current?.id === 'g8:collect:blaze_rod' && retiredMarkers(withProbe.markers).length === 2,
+    `head=${withProbe.queue.current?.id ?? 'none'} markers=${retiredMarkers(withProbe.markers).length}`,
+  )
+}
+
 // (i-a) the body stands in the overworld: the recorded frame's own interior
 // cells read back as nether_portal - the strongest, live half.
 {
@@ -484,6 +508,27 @@ const retiredMarkers = (markers: readonly string[]): string[] =>
     '(iii-c) an incomplete verified record does not claim the whole frame',
     statusOf(queue, 'g5:place:obsidian') === 'active' && queue.current?.id === 'g5:place:obsidian' && retiredMarkers(markers).length === 0,
     `frame=${statusOf(queue, 'g5:place:obsidian')} head=${queue.current?.id ?? 'none'}`,
+  )
+}
+
+// (iii-c2) a record the LIVE world contradicts is never upgraded to the durable
+// half: the gate's interior reads back as air, so "the portal exists" is
+// disproved here and the row keeps its normal path (the world-memory sync owns
+// the record's revocation, not this module).
+{
+  const blocks = new Map<string, string>()
+  for (const cell of LAYOUT.frame) blocks.set(key(cell), OBSIDIAN)
+  for (const cell of LAYOUT.interior) blocks.set(key(cell), 'air')
+  const world = probe({ dimension: OVERWORLD, blocks, resources: [portalResource()] })
+  const evidence = evaluateGoalSuccess(lightRow(), world)
+  const { queue, markers } = restoreHarness([lightRow(), blazeRow()], world)
+  check(
+    '(iii-c2) a live-contradicted record does not satisfy the light row',
+    evidence?.status === 'unsatisfied' &&
+      evidence.source === 'live-block-read' &&
+      statusOf(queue, 'g6:place:nether_portal') === 'active' &&
+      retiredMarkers(markers).length === 0,
+    `evidence=${JSON.stringify(evidence)} light=${statusOf(queue, 'g6:place:nether_portal')} markers=${markers.length}`,
   )
 }
 
