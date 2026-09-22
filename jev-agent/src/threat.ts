@@ -561,6 +561,91 @@ export const SURVIVAL_REGROUND = 'SURVIVAL_REGROUND'
 export const SURVIVAL_NO_GROUNDED_ACTION = 'SURVIVAL_NO_GROUNDED_ACTION'
 export const GUARD_REJECTIONS = 'GUARD_REJECTIONS'
 
+// ---------------------------------------------------------------------------
+// MOB_IDENTITY_CHURN: a mob whose ENTITY ID changes while its CAUSAL IDENTITY
+// (kind + place) does not, and the body is fighting it.
+// ---------------------------------------------------------------------------
+//
+// Measured (m3-live `buddy-driver/buddy.log`, the Nether magma-cube fights). The
+// log carries 41 `THREAT_NEARBY threat=magma_cube` lines and the id is a NEW
+// entity every engagement while `threat=magma_cube` never changes:
+//
+//   threatId 6313 -> 6759 -> 7466 -> … -> 41425 -> 42895 -> 45891 -> 48411 -> 49561 -> 52841
+//
+// and the "the chosen ATTACK's entity id vanished" shape is live in the same log:
+//
+//   07:57:38.109 SURVIVAL_NO_GROUNDED_ACTION chosenId=ATTACK:e15787 kind=ATTACK
+//                reason=no_grounded_equivalent freshOffer=1 threat=skeleton
+//                distance=2.38 contact=true health=2.51
+//   11:04:04.464 SURVIVAL_NO_GROUNDED_ACTION chosenId=ATTACK:e49561 kind=ATTACK
+//                reason=no_grounded_equivalent outcome=TARGET_LOST freshOffer=1
+//                threat=magma_cube distance=2.32 contact=true
+//
+// (Honest scope of the second line: it landed 0.45 s AFTER that host's `DEATH`
+// + respawn, so it is evidence of the SHAPE - a typed TARGET_LOST for an entity
+// id that no longer exists - not of the kill mechanism. The magma cube's id
+// churn itself is the measured part: 11:03:51 `threatId=49561 in contact` and
+// 11:13:25 `threatId=52841` are two different entities of one unchanging
+// `threat=magma_cube` in the same pocket.)
+//
+// A magma cube (like a slime) is REPLACED when its size state changes: the
+// parent entity is removed by the server and the smaller cubes are NEW entities
+// with fresh ids (the id is allocated at spawn and never reused). What survives
+// the replacement is everything the candidate layer already carries:
+//   - `targetName` ('magma_cube') - mineflayer sets it from the entity TYPE
+//     (`mineflayer/lib/plugins/entities.js` `setEntityData`), so it is stable;
+//   - `meta.targetKind` ('Hostile mobs' - the minecraft-data category), stable;
+//   - `target` (the sensed position) - the children spawn inside/at the parent;
+//   - the threat tracker's own record (`ThreatStateEvidence`) - it re-derives the
+//     nearest active threat from EVERY snapshot, so it names the new id on the
+//     next tick and never remembers the old one.
+// What does NOT survive is the entity id - and the id is the only thing
+// `regroundVanishedSurvivalChoice` compared, so the honest `TARGET_LOST` was
+// produced for a threat that was still standing on the body.
+//
+// This is the bounded, code-owned repair. It is NOT a new target choice: the
+// rule only fires for a survival ATTACK on a HOSTILE (`meta.targetHostile`) -
+// never for a producer/food hunt, whose candidate is a claim about ONE instance
+// (candidates.ts: "the committed ENTITY ID is the target for the whole Skill …
+// never adopts another instance of the mob") - and only when ALL of these hold:
+//
+//   1. the previous entity is PROVEN gone: its id is absent from the client's
+//      tracked set (`bot.entities`), which only the server's `entity_destroy`
+//      produces. `null`/UNKNOWN refuses. "No longer in the 24 m sensor" is NOT
+//      this fact and never adopts.
+//   2. the replacement has the SAME mob name (and the same entity kind when both
+//      sides carry one) - a different kind can never be adopted, whatever its
+//      position.
+//   3. the replacement is within `IDENTITY_CHURN_RADIUS` of the position the
+//      vanished candidate recorded for the threat.
+//   4. the churn happened inside `IDENTITY_CHURN_WINDOW_MS`. Both timestamps are
+//      snapshot times the code owns (`WorldState.timestampMs`); unknown refuses.
+//   5. the replacement is NEW: its id was not in the decision-time snapshot. A
+//      same-kind bystander that was already standing next to the threat at
+//      decision time is therefore never adopted (two same-name entities inside
+//      `IDENTITY_CHURN_RADIUS` would both have been sensed).
+//   6. the replacement is a candidate of the FRESH restricted offer, i.e. the
+//      reply is a real grounded ATTACK that survived the same threat envelopes
+//      and the reachability gate. Nothing is invented for an unsensed mob.
+//
+// Residual risk, stated rather than hidden: if the server destroys the committed
+// id AND a NEW same-kind entity appears within `IDENTITY_CHURN_RADIUS` inside the
+// window, the two are treated as one causal threat. That is exactly the split
+// signature; the alternative (a typed TARGET_LOST while a same-kind hostile is in
+// melee contact) is the measured stand-still. The rule cannot fire for a
+// different kind, for a pre-existing entity, for a live old id, or outside the
+// bounded window, and it never widens the effect envelope: the adopted candidate
+// is the one the fresh offer already grounded.
+//
+// Pinned by `test-threat-response-grounding.mts` (i)-(vii).
+
+/** Bounded radius (blocks) in which a same-kind entity is the same causal threat. */
+export const IDENTITY_CHURN_RADIUS = 3
+/** Bounded window (ms) inside which an id churn may be adopted. */
+export const IDENTITY_CHURN_WINDOW_MS = 3000
+/** `MOB_IDENTITY_CHURN from=… to=… mob=… kind=… moved=…m elapsedMs=… rule=…`. */
+export const MOB_IDENTITY_CHURN = 'MOB_IDENTITY_CHURN'
+
 /**
  * The survival kinds whose candidate id is anchored to volatile sensed truth
  * (an escape cell recomputed around a moving body, a sensed entity that can
@@ -575,12 +660,64 @@ export interface SurvivalChoiceLike {
   id: string
   kind: string
   targetEntityId?: number | null | undefined
+  /** the sensed mob type name the candidate answers (`Candidate.targetName`) */
+  targetName?: string | null | undefined
+  /** the sensed position the candidate recorded (`Candidate.target`) */
+  target?: Vec3Json | null | undefined
   meta?: Readonly<Record<string, unknown>> | undefined
+}
+
+/**
+ * The code-owned facts that make an identity churn safe to adopt. Every field is
+ * either a fact the sensor already carried (`name`/`kind`/position), a fact the
+ * controller proves from the client's tracked set (`goneEvidence`, `newEntity`),
+ * or a bounded time the snapshots own (`elapsedMs`).
+ */
+export interface MobIdentityChurnFacts {
+  /** the destroyed entity id the vanished choice answered */
+  fromEntityId: number
+  /** the fresh candidate's entity id for the same causal threat */
+  toEntityId: number
+  /** the mob type both entities are (never inferred: both candidates carry it) */
+  name: string
+  /** the entity kind/category both entities are, or null when not exposed */
+  kind: string | null
+  /** distance between the last recorded threat position and the fresh position */
+  distance: number
+  /** ms between the decision-time snapshot and this revalidation */
+  elapsedMs: number
+  rule: 'same_kind_near_last_position'
+  /** how the previous entity is proven gone (never "out of sensor range") */
+  goneEvidence: 'not_in_client_tracked_set'
+  /** how the replacement is proven to have appeared during the churn window */
+  newEntity: 'absent_from_decision_snapshot'
+}
+
+/**
+ * What the caller can prove about the entity the vanished choice answered. All
+ * fields are required for an adoption: an UNKNOWN (`null`/absent) refuses rather
+ * than guesses.
+ */
+export interface MobIdentityContext {
+  /**
+   * Is the previous entity id still in the client's TRACKED set right now
+   * (`bot.entities`)? `false` is the server's own `entity_destroy` for that id.
+   * `null`/absent is UNKNOWN and never adopts.
+   */
+  previousEntityTracked?: boolean | null | undefined
+  /** entity ids the DECISION-time snapshot carried; the replacement must be new */
+  knownEntityIds?: ReadonlySet<number> | null | undefined
+  /** wall-clock ms of the decision-time snapshot (`WorldState.timestampMs`) */
+  chosenAtMs?: number | null | undefined
+  /** wall-clock ms of this revalidation (`WorldState.timestampMs`) */
+  nowMs?: number | null | undefined
 }
 
 export type SurvivalRegroundReason =
   | 'not_a_survival_action'
   | 'same_target_attack'
+  /** the same causal threat under a NEW entity id (bounded churn adoption) */
+  | 'same_kind_near_last_position_attack'
   | 'same_threat_keep_distance'
   | 'any_threat_keep_distance'
   | 'no_grounded_equivalent'
@@ -598,6 +735,14 @@ export type SurvivalRegroundReason =
 export type SurvivalVanishedOutcome =
   /** the same survival action was restored from the fresh offer */
   | 'REGROUNDED'
+  /**
+   * the same survival action was restored for the SAME CAUSAL THREAT under a new
+   * entity id (`MOB_IDENTITY_CHURN`). Distinct from `REGROUNDED` on purpose: the
+   * committed entity id is gone, so a post-mortem must be able to tell "the same
+   * identity came back" apart from "the same mob kind at the same place came
+   * back", and the churn facts are carried in `identityChurn`.
+   */
+  | 'REGROUNDED_IDENTITY_CHURN'
   /** the exact entity the chosen ATTACK answered is no longer offered */
   | 'TARGET_LOST'
   /** no grounded response of the chosen kind exists at all any more */
@@ -615,6 +760,11 @@ export interface SurvivalRegroundResult {
   entityId: number | null
   /** the typed terminal outcome of this re-ground (never "nothing happened") */
   outcome: SurvivalVanishedOutcome
+  /**
+   * the identity-churn facts when (and only when) the re-ground adopted the same
+   * causal threat under a new entity id; null on every other path
+   */
+  identityChurn: MobIdentityChurnFacts | null
 }
 
 function numericMeta(meta: Readonly<Record<string, unknown>> | undefined, key: string): number | null {
@@ -633,6 +783,113 @@ function attackEntityId(chosen: SurvivalChoiceLike): number | null {
   return parsed === null ? null : Number(parsed[1])
 }
 
+/** The mob type name a candidate answers, from the sensed facts it carries. */
+function attackTargetName(choice: SurvivalChoiceLike): string | null {
+  if (typeof choice.targetName === 'string' && choice.targetName.length > 0) return choice.targetName
+  const producer = choice.meta?.['producerMob']
+  return typeof producer === 'string' && producer.length > 0 ? producer : null
+}
+
+/** The minecraft-data entity category a candidate answers, or null (UNKNOWN). */
+function attackTargetKind(choice: SurvivalChoiceLike): string | null {
+  const kind = choice.meta?.['targetKind']
+  return typeof kind === 'string' && kind.length > 0 ? kind : null
+}
+
+/**
+ * Is this candidate an ATTACK whose causal identity is a HOSTILE THREAT (rather
+ * than one instance of a producer/food hunt)? Only these may be re-grounded onto
+ * a churned entity id: for a `goalDrop`/food candidate the individual instance IS
+ * the claim (see `candidates.ts`), so adopting another one would be the measured
+ * `HUNT_RETARGET` failure - a semantic retarget - and stays forbidden.
+ */
+function isHostileThreatAttack(choice: SurvivalChoiceLike): boolean {
+  if (choice.kind !== 'ATTACK') return false
+  if (choice.meta?.['targetHostile'] !== true) return false
+  if (choice.meta?.['goalDrop'] !== undefined) return false
+  if (choice.meta?.['foodAnimal'] === true) return false
+  if (choice.meta?.['foodRoute'] !== undefined) return false
+  return true
+}
+
+function position(choice: SurvivalChoiceLike): Vec3Json | null {
+  const target = choice.target
+  if (target === null || target === undefined) return null
+  if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || !Number.isFinite(target.z)) return null
+  return target
+}
+
+/**
+ * The bounded identity-churn adoption: which fresh candidate, if any, is the
+ * SAME causal threat as the vanished ATTACK under a new entity id.
+ *
+ * Pure and total. Every condition is a fact the caller proved (see the section
+ * comment above `IDENTITY_CHURN_RADIUS`); anything unknown refuses, so this can
+ * never adopt an unrelated entity, a different kind, or a threat whose old entity
+ * is still alive.
+ */
+export function identityChurnCandidate(
+  chosen: SurvivalChoiceLike | null,
+  fresh: readonly SurvivalChoiceLike[],
+  context: MobIdentityContext | null | undefined,
+): { candidate: SurvivalChoiceLike; facts: MobIdentityChurnFacts } | null {
+  if (chosen === null || context === null || context === undefined) return null
+  if (!isHostileThreatAttack(chosen)) return null
+  const fromEntityId = attackEntityId(chosen)
+  if (fromEntityId === null) return null
+  // 1. the previous entity is proven GONE (the server destroyed that exact id).
+  if (context.previousEntityTracked !== false) return null
+  // 4. the churn happened inside the bounded window (snapshot times, code-owned).
+  const nowMs = context.nowMs
+  const chosenAtMs = context.chosenAtMs
+  if (typeof nowMs !== 'number' || !Number.isFinite(nowMs)) return null
+  if (typeof chosenAtMs !== 'number' || !Number.isFinite(chosenAtMs)) return null
+  const elapsedMs = nowMs - chosenAtMs
+  if (elapsedMs < 0 || elapsedMs > IDENTITY_CHURN_WINDOW_MS) return null
+  const fromPosition = position(chosen)
+  const name = attackTargetName(chosen)
+  if (fromPosition === null || name === null) return null
+  const kind = attackTargetKind(chosen)
+  // 5. the replacement appeared during the window: it was NOT in the snapshot the
+  // vanished candidate was chosen from. An UNKNOWN snapshot refuses.
+  const known = context.knownEntityIds
+  if (known === null || known === undefined) return null
+
+  for (const candidate of fresh) {
+    if (candidate === chosen) continue
+    if (!isHostileThreatAttack(candidate)) continue
+    const toEntityId = attackEntityId(candidate)
+    if (toEntityId === null || toEntityId === fromEntityId) continue
+    // 2. never a different kind: the mob name (and the entity kind when exposed)
+    // must be exactly the same.
+    if (attackTargetName(candidate) !== name) continue
+    const candidateKind = attackTargetKind(candidate)
+    if (kind !== null && candidateKind !== null && candidateKind !== kind) continue
+    // 3. the same place: within the bounded radius of the last recorded position.
+    const toPosition = position(candidate)
+    if (toPosition === null) continue
+    const moved = distance(fromPosition, toPosition)
+    if (!(moved <= IDENTITY_CHURN_RADIUS)) continue
+    // 5. not an entity that was already standing there at decision time.
+    if (known.has(toEntityId)) continue
+    return {
+      candidate,
+      facts: {
+        fromEntityId,
+        toEntityId,
+        name,
+        kind: candidateKind ?? kind,
+        distance: moved,
+        elapsedMs,
+        rule: 'same_kind_near_last_position',
+        goneEvidence: 'not_in_client_tracked_set',
+        newEntity: 'absent_from_decision_snapshot',
+      },
+    }
+  }
+  return null
+}
+
 /**
  * Re-ground a vanished chosen survival action from the fresh offer.
  *
@@ -648,12 +905,27 @@ function attackEntityId(chosen: SurvivalChoiceLike): number | null {
 export function regroundVanishedSurvivalChoice(
   chosen: SurvivalChoiceLike | null,
   fresh: readonly SurvivalChoiceLike[],
+  context?: MobIdentityContext | null,
 ): SurvivalRegroundResult {
   if (chosen === null) {
-    return { candidateId: null, kind: null, reason: 'not_a_survival_action', entityId: null, outcome: 'NOT_A_SURVIVAL_ACTION' }
+    return {
+      candidateId: null,
+      kind: null,
+      reason: 'not_a_survival_action',
+      entityId: null,
+      outcome: 'NOT_A_SURVIVAL_ACTION',
+      identityChurn: null,
+    }
   }
   if (!SURVIVAL_REGROUNDABLE_KINDS.has(chosen.kind)) {
-    return { candidateId: null, kind: null, reason: 'not_a_survival_action', entityId: null, outcome: 'NOT_A_SURVIVAL_ACTION' }
+    return {
+      candidateId: null,
+      kind: null,
+      reason: 'not_a_survival_action',
+      entityId: null,
+      outcome: 'NOT_A_SURVIVAL_ACTION',
+      identityChurn: null,
+    }
   }
 
   if (chosen.kind === 'ATTACK') {
@@ -662,13 +934,50 @@ export function regroundVanishedSurvivalChoice(
       (candidate) => candidate.kind === 'ATTACK' && entityId !== null && attackEntityId(candidate) === entityId,
     )
     if (same !== undefined) {
-      return { candidateId: same.id, kind: 'ATTACK', reason: 'same_target_attack', entityId, outcome: 'REGROUNDED' }
+      return {
+        candidateId: same.id,
+        kind: 'ATTACK',
+        reason: 'same_target_attack',
+        entityId,
+        outcome: 'REGROUNDED',
+        identityChurn: null,
+      }
     }
-    // The exact entity the response answered is gone (killed / left the sensor).
-    // Retargeting another mob would be a new WHICH decision, so nothing is
-    // re-grounded - and the typed outcome says so instead of leaving the tick
-    // silent: TARGET_LOST, never a kill and never a substitute target.
-    return { candidateId: null, kind: 'ATTACK', reason: 'no_grounded_equivalent', entityId, outcome: 'TARGET_LOST' }
+    // The exact entity id is gone. For a HOSTILE threat that is the NORMAL case
+    // when the mob's identity churns by design (a magma cube/slime is REPLACED
+    // when its size state changes: same name, same kind, same place, new id), so
+    // before declaring the premise destroyed, try the bounded adoption rule above
+    // - same hostile kind, at (within `IDENTITY_CHURN_RADIUS` of) the position the
+    // candidate recorded, inside `IDENTITY_CHURN_WINDOW_MS`, with the old entity
+    // PROVEN gone from the client's tracked set and the replacement proven NEW.
+    // Jev chose to fight THAT threat; this keeps fighting it. Nothing else is
+    // adopted: a different kind, a live old entity, a pre-existing bystander, a
+    // producer/food hunt instance and an unsensed mob all still end TARGET_LOST.
+    const churn = identityChurnCandidate(chosen, fresh, context)
+    if (churn !== null) {
+      return {
+        candidateId: churn.candidate.id,
+        kind: 'ATTACK',
+        reason: 'same_kind_near_last_position_attack',
+        entityId,
+        outcome: 'REGROUNDED_IDENTITY_CHURN',
+        identityChurn: churn.facts,
+      }
+    }
+    // The exact entity the response answered is gone (killed / despawned / left
+    // the client's tracked set with no same-kind replacement), and no bounded
+    // churn adoption is provable. Retargeting another mob would be a new WHICH
+    // decision, so nothing is re-grounded - and the typed outcome says so instead
+    // of leaving the tick silent: TARGET_LOST, never a kill and never a
+    // substitute target.
+    return {
+      candidateId: null,
+      kind: 'ATTACK',
+      reason: 'no_grounded_equivalent',
+      entityId,
+      outcome: 'TARGET_LOST',
+      identityChurn: null,
+    }
   }
 
   const retreats = fresh.filter((candidate) => candidate.kind === 'RETREAT')
@@ -684,6 +993,7 @@ export function regroundVanishedSurvivalChoice(
         reason: 'same_threat_keep_distance',
         entityId: threatEntityId,
         outcome: 'REGROUNDED',
+        identityChurn: null,
       }
     }
   }
@@ -695,12 +1005,20 @@ export function regroundVanishedSurvivalChoice(
       reason: 'any_threat_keep_distance',
       entityId: threatEntityId ?? numericMeta(first.meta, 'threatEntityId'),
       outcome: 'REGROUNDED',
+      identityChurn: null,
     }
   }
   // No grounded keep-distance action exists at all: the CAPABILITY the chosen
   // response required is gone, which is a typed return to policy - not a silent
   // empty tick while a hostile is on the body.
-  return { candidateId: null, kind: 'RETREAT', reason: 'no_grounded_equivalent', entityId: threatEntityId, outcome: 'CAPABILITY_LOST' }
+  return {
+    candidateId: null,
+    kind: 'RETREAT',
+    reason: 'no_grounded_equivalent',
+    entityId: threatEntityId,
+    outcome: 'CAPABILITY_LOST',
+    identityChurn: null,
+  }
 }
 
 /**
@@ -769,6 +1087,38 @@ export function formatSurvivalReground(
     `${SURVIVAL_REGROUND} from=${from} to=${result.candidateId ?? 'none'} kind=${result.kind ?? 'none'} ` +
     `reason=${result.reason} outcome=${result.outcome} offer=${freshOfferSize} threat=${threat} threatId=${evidence?.threatId ?? 'none'} ` +
     `distance=${distance} contact=${evidence?.inContact ?? false} health=${round2(body.health)} food=${body.food}`
+  )
+}
+
+/**
+ * `MOB_IDENTITY_CHURN from=e49561 to=e49572 mob=magma_cube kind=Hostile mobs
+ * moved=0.4m elapsedMs=210 rule=same_kind_near_last_position
+ * gone=not_in_client_tracked_set new=absent_from_decision_snapshot` - the bounded
+ * identity rule that kept the body fighting the same causal threat.
+ *
+ * The fields are the whole proof: WHICH id vanished, WHICH id replaced it, the
+ * mob type/kind both entities share, how far the replacement is from the position
+ * the vanished candidate recorded, how long after the decision-time snapshot the
+ * churn was observed, the rule name, and the two fail-closed facts (`gone`, `new`)
+ * that keep the rule from adopting a live, a different-kind, or a pre-existing
+ * entity. Mirrored, so a post-mortem of a churn fight reads it in `buddy.log`.
+ */
+export function formatMobIdentityChurn(
+  from: string,
+  facts: MobIdentityChurnFacts,
+  evidence: ThreatStateEvidence | null,
+  body: BodySurvivalFacts,
+): string {
+  const distance = evidence?.threatDistance === null || evidence?.threatDistance === undefined
+    ? 'unknown'
+    : `${round2(evidence.threatDistance)}m`
+  return (
+    `${MOB_IDENTITY_CHURN} from=${from} to=ATTACK:e${facts.toEntityId} mob=${facts.name} kind=${facts.kind ?? 'unknown'} ` +
+    `fromEntityId=${facts.fromEntityId} toEntityId=${facts.toEntityId} moved=${round2(facts.distance)}m ` +
+    `elapsedMs=${Math.round(facts.elapsedMs)} rule=${facts.rule} gone=${facts.goneEvidence} new=${facts.newEntity} ` +
+    `threat=${evidence?.threatName ?? 'none'} threatId=${evidence?.threatId ?? 'none'} distance=${distance} ` +
+    `contact=${evidence?.inContact ?? false} health=${round2(body.health)} food=${body.food} ` +
+    `-> the same causal threat under a new entity id; never a different kind, never a live old entity, never an entity already known at decision time`
   )
 }
 
