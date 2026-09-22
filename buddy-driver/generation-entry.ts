@@ -2681,6 +2681,16 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       world.moveFailures = entries.map((entry) => ({ ...entry }))
       ctx.proposeWorldMemory({ moveFailures: world.moveFailures })
     },
+    // #oscillation-boundary: the durable local-motion record is seeded from the
+    // host's class-A world memory and written straight back, exactly like the
+    // coordinate failure memory above. The record only ever holds the BODY's
+    // cell envelope, so the durable row's own starvation counter and this one
+    // cannot become two owners of one question.
+    localOscillationRecord: world.localOscillation ?? null,
+    onLocalOscillationChange: (record) => {
+      world.localOscillation = record === null ? null : { ...record, cells: [...record.cells] }
+      ctx.proposeWorldMemory({ localOscillation: world.localOscillation })
+    },
     knownResources: groundedWaypoints,
     // #prereq-dominated: the deterministic ladder owns the capability closure
     // (rung `satisfied` + recipe/smelt consumers). A queued prerequisite whose

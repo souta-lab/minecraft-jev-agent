@@ -17,6 +17,7 @@
 import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
+import type { LocalOscillationRecordJson } from '../jev-agent/src/localOscillation.ts'
 import type { MilestonePredicateObservation } from './milestone-predicates.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
@@ -657,6 +658,9 @@ export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | '
  *   knownTraversals    generation-entry `recordTraversalOutcome` from the
  *                      controller/executor locomotion outcome stream (#354)
  *   moveFailures       controller `onMoveFailureMemoryChange`
+ *   localOscillation   controller `onLocalOscillationChange` (host-side class-A
+ *                      record; only written once a return is observed, so
+ *                      ordinary locomotion proposes no delta at all)
  *   hazards            HOST `registerDeathHazard` on a production death (#26)
  *   mined              NO runtime producer: merge/persist machinery exists, but no
  *                      caller emits a `mined` delta (depletion model never wired)
@@ -712,6 +716,16 @@ export interface ResidentWorldMemory {
   traversalFailures: TraversalFailure[]
   /** coordinate-level movement failure memory; survives generation recovery (#12) */
   moveFailures: MoveFailEntry[]
+  /**
+   * #oscillation-boundary: the durable record of the BODY re-engaging the same
+   * small set of cells with zero semantic progress. Optional so legacy/partial
+   * JSON keeps parsing (it defaults to `null`), and deliberately world-keyed like
+   * `moveFailures`: a bound loop in this world/dimension is a fact about this
+   * world, and a world reset must not carry it over. It exists so a generation
+   * change cannot reset the count the way every controller-scoped stall counter
+   * does; the verdict itself stays in `jev-agent/src/localOscillation.ts`.
+   */
+  localOscillation?: LocalOscillationRecordJson | null
   /** death coordinates; a coordinate that kills twice is excluded (hard hazard) */
   hazards: DeathHazard[]
   /**
@@ -741,6 +755,7 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     knownTraversals: [],
     traversalFailures: [],
     moveFailures: [],
+    localOscillation: null,
     hazards: [],
   }
 }
@@ -759,6 +774,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.knownTraversals = Array.isArray(memory.knownTraversals) ? memory.knownTraversals : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
+  memory.localOscillation = memory.localOscillation ?? null
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
   return memory
 }
@@ -809,6 +825,8 @@ export interface WorldMemoryDelta {
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   moveFailures?: MoveFailEntry[]
+  /** #oscillation-boundary: the durable local-motion record; `null` clears it (progress / left pocket) */
+  localOscillation?: LocalOscillationRecordJson | null
   hazards?: DeathHazard[]
 }
 
