@@ -393,6 +393,13 @@ export function mergeKnownResourcesInto(
         item: stored.name,
         kind: stored.kind,
         at: knownResourceAt(stored),
+        // The STAMP is evidence, not decoration. A reader of this line must be
+        // able to see which world bucket the cell went into: the measured
+        // `jungle_log` rows were stamped `minecraft:the_nether` while their DATA
+        // came from the Overworld, and with no `dimension` field here the log
+        // alone could not show that, which is why the durable state file had to be
+        // read to answer the question at all.
+        ...(typeof stored.dimension === 'string' && stored.dimension.length > 0 ? { dimension: stored.dimension } : {}),
         ...(options.worldEpoch === undefined ? {} : { worldEpoch: options.worldEpoch }),
       })
     }

@@ -160,7 +160,7 @@ import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import type { AgentSignals, DimensionProvenance, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -520,6 +520,15 @@ export interface JevAgentOptions {
    * counts the same action failing the same way inside the executor.
    */
   actionFailureEscalateCycles: number
+  /**
+   * Read provenance for the bot's per-column world cache (see
+   * `DimensionProvenance` in `state.ts`). The resident supplies it so every world
+   * read the sensor performs is attributable to the dimension it came from; a cell
+   * whose column is not attributable is refused (typed) instead of becoming an
+   * offer. Absent in standalone runs and fixtures, which therefore keep the
+   * un-gated sensor path exactly.
+   */
+  dimensionProvenance?: DimensionProvenance | null
   /**
    * Issue #327 follow-up: consecutive chosen WAIT decisions while real
    * actionable candidates exist, after which the local recovery is declared
@@ -12042,7 +12051,16 @@ function pickResummon(
 }
 
 function sensorOptions(options: JevAgentOptions, worldRevision: number | null = null): SensorOptions {
-  return { ...defaultSensorOptions, scanRadius: options.scanRadius, reach: options.reach, worldRevision }
+  return {
+    ...defaultSensorOptions,
+    scanRadius: options.scanRadius,
+    reach: options.reach,
+    worldRevision,
+    // Only the decision-time build carries provenance: `sensorOptions(...)` is
+    // also used for standalone portal-frame projections outside `buildWorldState`,
+    // where the read gate is not armed and the reads are unchanged.
+    dimensionProvenance: options.dimensionProvenance ?? null,
+  }
 }
 
 function candidateOptions(

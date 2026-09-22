@@ -23,6 +23,9 @@ import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
 import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
+import { createDimensionProvenanceView, writeRefusal } from './dimension-provenance.ts'
+import type { DimensionProvenance } from '../jev-agent/src/state.ts'
+import type { DimensionProvenanceView } from './dimension-provenance.ts'
 import { HUMAN_INTENT_MAX_COUNT, parseHumanIntentCommand, parseQuantityReply } from './human-intent.ts'
 import { M2SnapshotRecorder } from './m2-snapshot.ts'
 import { evaluateMilestonePredicates } from './milestone-predicate-eval.ts'
@@ -373,6 +376,7 @@ export function evictStaleKnownResources(
   known: KnownResourceJson[],
   worldKey: { dimension: string; worldEpoch: number },
   log?: (event: string, detail?: Record<string, unknown>) => void,
+  provenance?: DimensionProvenance | null,
 ): KnownResourceJson[] {
   const entity = bot.entity
   if (entity === undefined) return []
@@ -408,10 +412,28 @@ export function evictStaleKnownResources(
     const distance = Math.hypot(resource.x - position.x, resource.y - position.y, resource.z - position.z)
     if (distance > KNOWN_RESOURCE_STALENESS_RADIUS) continue
     let live: string | null = null
-    try {
-      live = bot.blockAt(new Vec3(resource.x, resource.y, resource.z))?.name ?? null
-    } catch {
-      live = null
+    // Provenance gate: this probe RE-CONFIRMS a remembered cell, so a foreign
+    // column would keep a bogus row alive for hours by reporting the other
+    // dimension's block as `present` (measured: the seven `jungle_log` rows had
+    // their `lastSeenAt` refreshed repeatedly while the body was in the Nether).
+    // A cell we cannot attribute stays `null`, and `resourceStillPresent` answers
+    // `unknown` - the entry is left alone, never confirmed and never evicted.
+    const attribution = provenance == null ? null : provenance.cellAttribution(resource.x, resource.z)
+    if (attribution !== null && attribution.kind !== 'attributable') {
+      provenance?.refuseRead({
+        cell: { x: resource.x, y: resource.y, z: resource.z },
+        chunk: attribution.chunk,
+        provenance: attribution.dimension,
+        liveDimension: attribution.liveDimension,
+        reason: attribution.reason ?? 'unknown_column',
+        source: 'known-resource-staleness',
+      })
+    } else {
+      try {
+        live = bot.blockAt(new Vec3(resource.x, resource.y, resource.z))?.name ?? null
+      } catch {
+        live = null
+      }
     }
     const verdict = resourceStillPresent(resource.name, live)
     if (verdict === 'stale') {
@@ -1088,7 +1110,13 @@ export function syncKnownStructureSites(input: {
  * (structure memory) must not prune on a failure: a transient `findBlocks` error would
  * otherwise erase a verified Nether-fortress site.
  */
-function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] | null {
+function scanBlockPositions(
+  bot: Bot,
+  blockNames: readonly string[],
+  maxDistance: number,
+  cap: number,
+  provenance: DimensionProvenanceView,
+): Vec3Json[] | null {
   const ids: number[] = []
   for (const name of blockNames) {
     const block = bot.registry.blocksByName[name]
@@ -1097,7 +1125,28 @@ function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance
   if (ids.length === 0) return []
   try {
     const positions = bot.findBlocks({ matching: ids, maxDistance, count: cap })
-    return positions.map((pos) => ({ x: pos.x, y: pos.y, z: pos.z }))
+    // Read provenance: `findBlocks` walks every column in the bot's store with no
+    // world filter, so a column left over from another dimension would otherwise be
+    // reported here as live truth. A position whose column is not attributable to
+    // the live dimension is refused (typed) instead of returned - this is the exact
+    // path that minted the seven `jungle_log` rows stamped `minecraft:the_nether`.
+    const kept: Vec3Json[] = []
+    for (const position of positions) {
+      const verdict = provenance.cellAttribution(position.x, position.z)
+      if (verdict.kind === 'attributable') {
+        kept.push({ x: position.x, y: position.y, z: position.z })
+        continue
+      }
+      provenance.refuseRead({
+        cell: { x: position.x, y: position.y, z: position.z },
+        chunk: verdict.chunk,
+        provenance: verdict.dimension,
+        liveDimension: verdict.liveDimension,
+        reason: verdict.reason ?? 'unknown_column',
+        source: 'scan-block-positions',
+      })
+    }
+    return kept
   } catch {
     return null
   }
@@ -1824,6 +1873,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // evidence-blind), then once per CHANGE from `refreshLiveFacts`. Observation
   // only - it never chooses a destination.
   const dimensionObserver = createDimensionObserver(ctx.log, ctx.runId, world.dimension)
+  // Read provenance for the bot's per-column world cache. This is the capability
+  // the measured `jungle_log` defect was missing: the columns are the BOT's (one
+  // store, created once, handed to every generation), so the tags are bot-scoped
+  // and survive generation swaps, while this view carries THIS generation's log so
+  // a disposed generation is never called back. `syncLiveDimension` runs once per
+  // sensor build from `buildWorldState`, so a build never gates on a stale
+  // dimension; on a change it drops every tag and unloads the columns.
+  const dimensionProvenance = createDimensionProvenanceView(ctx.bot, ctx.log, ctx.runId, 'generation-start')
   /**
    * #80: maintain the durable verified-portal-site record from live truth, and
    * project the live-only verdict from BOTH observation routes.
@@ -1955,7 +2012,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // No coalesce here: the `scanned === null` guard below is the whole point of #377. With
     // `?? []` the guard was unreachable and one transient scan failure silently erased a
     // verified fortress site (the live set looked empty near a remembered site).
-    const scanned = scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)
+    const scanned = scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64, dimensionProvenance)
     if (scanned === null) {
       // #377: a failed scan is NOT evidence of absence. `syncKnownStructureSites`
       // treats an empty live set near a remembered site as negative proof, so
@@ -2058,22 +2115,23 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
   }
 
-  const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64) ?? []
-  const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32) ?? []
+  const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64, dimensionProvenance) ?? []
+  const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32, dimensionProvenance) ?? []
   const ores = scanBlockPositions(
     bot,
     ['iron_ore', 'deepslate_iron_ore', 'diamond_ore', 'deepslate_diamond_ore', 'coal_ore', 'deepslate_coal_ore', 'copper_ore', 'gold_ore'],
     64,
     64,
+    dimensionProvenance,
   ) ?? []
-  const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64) ?? []
+  const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64, dimensionProvenance) ?? []
   // Obsidian is a non-ore direct drop required by the M2 portal plan
   // (`collect:obsidian`). Keep it in durable known-resource memory so the
   // candidate layer's known-coordinate retrieval survives after the block
   // leaves the live sensor range. It is deliberately NOT added to the `ores`
   // scan: `discoveredOres` stays `_ore`-only and obsidian carries no
   // prospecting semantics.
-  const obsidian = scanBlockPositions(bot, ['obsidian'], 64, 32) ?? []
+  const obsidian = scanBlockPositions(bot, ['obsidian'], 64, 32, dimensionProvenance) ?? []
   const stationRuntimeLog = (event: string, detail?: Record<string, unknown>): void => ctx.log(event, detail)
   const tableValidation = validateRememberedStations(bot, 'crafting_table', world.craftingTables, tables, now, stationRuntimeLog)
   const furnaceValidation = validateRememberedStations(bot, 'furnace', world.furnaces, furnaces, now, stationRuntimeLog)
@@ -2204,7 +2262,35 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const discoveredOres: string[] = []
   const foundResources: KnownResourceJson[] = []
   const seenAt = Date.now()
+  /**
+   * The DURABLE-WRITE gate, the second half of the same capability. Even with the
+   * scan gated, the writer is the last layer that can put a cell into durable
+   * memory, so it re-checks provenance itself: a cell whose column is not
+   * attributable to the live dimension is refused with the SAME typed line the
+   * sensor uses (never a silent drop), naming the cell, the read's provenance, the
+   * live dimension and the action. This is the exact stamp that produced
+   * `{"name":"jungle_log","dimension":"minecraft:the_nether"}`: the stamp was
+   * correct and the DATA was not, which is why only a provenance check - not a
+   * dimension check - can refuse it.
+   */
+  function attributableCell(at: Vec3Json, item: string): boolean {
+    const refusal = writeRefusal(dimensionProvenance, at, 'known-resource-write')
+    if (refusal === null) return true
+    dimensionProvenance.refuseRead(refusal)
+    ctx.log('KNOWN_RESOURCE_PROVENANCE_REFUSED', {
+      item,
+      cell: `${Math.round(at.x)},${Math.round(at.y)},${Math.round(at.z)}`,
+      chunk: `${refusal.chunk.x},${refusal.chunk.z}`,
+      provenance: refusal.provenance.length === 0 ? 'unknown' : refusal.provenance,
+      dimension: refusal.liveDimension.length === 0 ? 'unknown' : refusal.liveDimension,
+      reason: refusal.reason,
+      action: 'refused',
+      worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+    })
+    return false
+  }
   for (const ore of ores) {
+    if (!attributableCell(ore, 'ore')) continue
     const name = bot.blockAt(new Vec3(ore.x, ore.y, ore.z))?.name ?? 'unknown_ore'
     if (!world.discoveredOres.includes(name)) world.discoveredOres.push(name)
     if (!discoveredOres.includes(name)) discoveredOres.push(name)
@@ -2220,6 +2306,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
   }
   for (const log of logs) {
+    if (!attributableCell(log, 'log')) continue
     const name = bot.blockAt(new Vec3(log.x, log.y, log.z))?.name ?? 'unknown_log'
     foundResources.push({
       name,
@@ -2233,6 +2320,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
   }
   for (const block of obsidian) {
+    if (!attributableCell(block, 'obsidian')) continue
     const name = bot.blockAt(new Vec3(block.x, block.y, block.z))?.name ?? 'obsidian'
     foundResources.push({
       name,
@@ -2255,7 +2343,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // placed in the overworld is a real block but not a fortress landmark, so it is
   // never recorded as a blaze_rod route there.
   if (isNetherDimension(ctx.worldKey.dimension)) {
-    for (const position of scanBlockPositions(bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64) ?? []) {
+    for (const position of scanBlockPositions(bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64, dimensionProvenance) ?? []) {
+      if (!attributableCell(position, 'nether_structure')) continue
       const name = liveBlockNameAt(bot, position)
       if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
       foundResources.push({
@@ -2273,7 +2362,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       })
     }
   }
-  const staleRemovals = evictStaleKnownResources(bot, world.knownResources, ctx.worldKey, (event, detail) => ctx.log(event, detail))
+  const staleRemovals = evictStaleKnownResources(
+    bot,
+    world.knownResources,
+    ctx.worldKey,
+    (event, detail) => ctx.log(event, detail),
+    dimensionProvenance,
+  )
   const newKnownResources = mergeKnownResources(
     world.knownResources,
     foundResources,
@@ -2577,6 +2672,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const options: Partial<JevAgentOptions> = {
     goalItem: rootGoal.goalItem,
     goalCount: rootGoal.goalCount,
+    // Every decision-time world read carries provenance: a cell whose column was
+    // not loaded under the live dimension is refused (typed) instead of read.
+    dimensionProvenance,
     heartbeatMs: 3000,
     // A resident never stops on a timer and never aborts a wedge: the host would
     // have to restart the generation, so make the controller self-heal instead.
