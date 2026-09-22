@@ -34,6 +34,8 @@ jobs:
         run: bun run issue-graph-test
       - name: Current-status fixtures
         run: bun run current-status-test
+      - name: CI verdict classification fixtures (issue #299)
+        run: bun run ci-classify-test
       - name: Lane-guard fixtures
         run: bun run lane-guard-test
       - name: Milestone contract fixtures

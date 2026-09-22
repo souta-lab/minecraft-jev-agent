@@ -21,6 +21,8 @@
     "test": "bun test --timeout=120000 --max-concurrency=1 ./bun-tests",
     "mcp-test": "bun test/mcp-test.js",
     "bun-residue-check": "bun tools/bun-residue-check.mjs",
+    "ci-classify": "bun tools/ci-classify.mjs",
+    "ci-classify-test": "bun tools/test-ci-classify.mjs",
     "movement-patch:check": "bun run --cwd jev-agent movement-patch:check",
     "contract-docs-check": "bun run --cwd buddy-driver contract-docs-check",
     "contract-docs-test": "bun run --cwd buddy-driver contract-docs-test",

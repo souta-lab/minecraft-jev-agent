@@ -5,12 +5,20 @@
 //   --runtime-root  inspect a resident rooted in another worktree.
 // Every section is labeled EVIDENCE or UNKNOWN. Values are never invented: if a
 // command fails, the section is UNKNOWN and the failure is shown verbatim.
-// The command runner and the resident reader are injectable for offline tests.
+// The command runner, the resident reader and the CI reader are injectable for
+// offline tests.
+//
+// The CI section exists because of issue #299: `repo-invariants` jobs can
+// conclude `failure` without ever starting a runner (GitHub Actions billing).
+// Such a run produced NO code verdict, so it must be reported as INFRA_UNKNOWN —
+// never omitted (silent) and never rendered as a code FAIL. tools/ci-classify.mjs
+// owns that classification; this file only renders it.
 import { execFile } from 'node:child_process'
 import { existsSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { FAIL, INFRA_UNKNOWN, PASS, readCiStatus } from './ci-classify.mjs'
 
 export const CODE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const DEFAULT_RUNTIME_ROOT = CODE_ROOT
@@ -235,6 +243,44 @@ export async function deriveStatus(options = {}) {
         JSON.stringify(report, null, 2),
         '```',
       ])
+    }
+  }
+
+  // CI gate. A never-started job is INFRA_UNKNOWN, not FAIL and not silence.
+  const ciReader = options.readCi === false ? null : (options.readCi ?? ((ciOptions) => readCiStatus(trackedRun, ciOptions)))
+  if (ciReader) {
+    let status = null
+    try {
+      status = await ciReader({ repo: options.repo, workflow: options.workflow })
+    } catch (error) {
+      status = { ok: false, error: `CI reader threw: ${error.message}`, verdict: INFRA_UNKNOWN }
+    }
+    if (status === null || status === undefined || status.ok !== true) {
+      section('CI gate (repo-invariants)', 'UNKNOWN', [
+        `- verdict: ${INFRA_UNKNOWN}`,
+        `- reason: ${status?.error ?? 'CI reader returned nothing'}`,
+        '- no GitHub Actions result was read, so this snapshot makes NO CI claim',
+      ])
+    } else {
+      const body = [
+        `- verdict: ${status.verdict}`,
+        `- run: ${status.runId ?? 'UNKNOWN'}`,
+        `- head: ${status.headSha ?? 'UNKNOWN'}`,
+        `- jobs: ${status.executedJobs}/${status.totalJobs} executed at least one step`,
+        `- reason: ${status.reason}`,
+      ]
+      for (const job of status.jobs ?? []) {
+        body.push(`- job ${job.name}: ${job.verdict} (${job.executedSteps}/${job.steps} executed steps, raw conclusion=${job.conclusion})`)
+      }
+      if (status.verdict === INFRA_UNKNOWN) {
+        body.push('- NOTE: no job executed a step. This run is NOT a code verdict (issue #299).')
+        body.push('- NOTE: do not cite GitHub Actions as a passing or failing gate for this head until the workflow actually runs.')
+      } else if (status.verdict === FAIL) {
+        body.push('- NOTE: at least one job executed and failed. This IS a code verdict.')
+      } else if (status.verdict === PASS) {
+        body.push('- NOTE: every job executed and succeeded.')
+      }
+      section('CI gate (repo-invariants)', 'EVIDENCE', body)
     }
   }
 
