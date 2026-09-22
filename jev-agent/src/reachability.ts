@@ -23,6 +23,7 @@
 // Pure: no bot, no clock, no model. Same facts in -> same verdict out.
 import type { HarvestTool, Vec3Json } from './state.ts'
 import { PICKAXE_RANKS, distance } from './state.ts'
+import { ENV_LAVA_PROXIMITY } from './envHazard.ts'
 
 export type ReachabilityReason =
   | 'reachable'
@@ -37,8 +38,8 @@ export type ReachabilityReason =
 /** Vertical gap (blocks) a `canDig=false` body change can walk without a plan. */
 export const ASCEND_GAP_LIMIT = 4
 export const DESCEND_GAP_LIMIT = 4
-/** A hazard this close to the destination blocks it (mirrors policy LAVA_PROXIMITY). */
-export const HAZARD_PROXIMITY = 1.5
+/** A hazard this close to the destination blocks it (one number: `envHazard.ts`). */
+export const HAZARD_PROXIMITY = ENV_LAVA_PROXIMITY
 
 /**
  * Horizontal range (blocks) within which a vertical gap is a LOCAL affordance
