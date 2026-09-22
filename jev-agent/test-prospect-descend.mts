@@ -33,6 +33,7 @@ import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type {
   AgentSignals,
   BlockState,
+  DescentDigRequirement,
   DescentOption,
   GoalState,
   InventoryState,
@@ -149,19 +150,30 @@ function ore(position: Vec3Json, overrides: Partial<BlockState> = {}): BlockStat
   }
 }
 
+/** One cell of a step's 1x2 profile, as the live `buildDescent` reports it. */
+function dig(cell: Vec3Json, name = 'stone'): DescentDigRequirement {
+  return { cell, name, harvestTool: 'pickaxe', harvestTier: 1, diggable: true }
+}
+
 function downStep(dir: DescentOption['dir'], dx: number, dz: number, feet: Vec3Json = FEET): DescentOption {
+  const wall = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+  const floor = { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz }
   return {
     dir,
     mode: 'down',
     dx,
     dz,
-    step: { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz },
-    wall: { x: feet.x + dx, y: feet.y, z: feet.z + dz },
+    step: { ...floor },
+    wall,
     head: { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz },
-    floor: { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz },
+    floor,
     wallSolid: false,
     headSolid: false,
     floorSolid: true,
+    supportSolid: true,
+    hazardNearby: false,
+    // the live builder's 1x2 profile: front cell (the body's upper half) first
+    digs: [dig(wall), dig(floor)],
     safe: true,
     reason: 'safe',
     digName: 'stone',
@@ -179,18 +191,24 @@ function levelStep(
   overrides: Partial<DescentOption> = {},
   feet: Vec3Json = FEET,
 ): DescentOption {
+  const wall = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+  const head = { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz }
   return {
     dir,
     mode: 'level',
     dx,
     dz,
-    step: { x: feet.x + dx, y: feet.y, z: feet.z + dz },
-    wall: { x: feet.x + dx, y: feet.y, z: feet.z + dz },
-    head: { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz },
+    step: { ...wall },
+    wall,
+    head,
     floor: { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz },
     wallSolid: true,
     headSolid: true,
     floorSolid: true,
+    supportSolid: true,
+    hazardNearby: false,
+    // the live builder's 1x2 corridor: solid passages first, primary last
+    digs: [dig(wall), dig(head)],
     safe: true,
     reason: 'safe',
     digName: 'stone',
@@ -273,13 +291,14 @@ addCase('a descend row passing a buried producer offers the exposure probe besid
     meta.prospectDeltaY === 0 &&
     meta.prospectDigKind === 'wall' &&
     meta.prospectExposure === 'branch_toward' &&
-    // the opened cell is under a solid head, so this probe is a dig-only action:
-    // no step phase, because a 1-tall pocket is not entrant yet
-    meta.prospectStepIn === false &&
-    meta.stepX === undefined &&
-    meta.stepY === undefined &&
-    meta.stepZ === undefined &&
     meta.grounded === true &&
+    // the step's own 1x2 dig profile is preserved: this probe digs the corridor
+    // (head passage first, the wall the exposure claim names last) and steps in
+    meta.digCount === 2 &&
+    meta.digCells === '29,60,33;29,59,33' &&
+    meta.stepX === 29 &&
+    meta.stepY === 59 &&
+    meta.stepZ === 33 &&
     descends.length === 1 &&
     // enumerated AFTER the step: it can never replace the descent by position
     grounded.candidates.indexOf(probe) > grounded.candidates.indexOf(descends[0]!) &&
@@ -293,24 +312,25 @@ addCase('a descend row passing a buried producer offers the exposure probe besid
 })
 
 addCase('a probe whose opened cell IS entrant keeps the step and advances the body', () => {
-  // head already open: dig the wall at the body's level and step into the cell,
-  // exactly the DESCEND:level contract the live log verifies 53x
+  // head already open: the 1x2 corridor is just the wall, and the step phase
+  // advances the body into the cell it removed
   const state = world({
     focusItem: 'raw_iron',
     blocks: [ore({ x: 30, y: 59, z: 33 }, { inReach: true })],
     descent: [
       downStep('E', 1, 0),
-      levelStep('E', 1, 0, { headSolid: false }),
-      levelStep('W', -1, 0, { headSolid: false }),
-      levelStep('N', 0, -1, { headSolid: false }),
-      levelStep('S', 0, 1, { headSolid: false }),
+      levelStep('E', 1, 0, { headSolid: false, digs: [dig({ x: 29, y: 59, z: 33 })] }),
+      levelStep('W', -1, 0, { headSolid: false, digs: [dig({ x: 27, y: 59, z: 33 })] }),
+      levelStep('N', 0, -1, { headSolid: false, digs: [dig({ x: 28, y: 59, z: 32 })] }),
+      levelStep('S', 0, 1, { headSolid: false, digs: [dig({ x: 28, y: 59, z: 34 })] }),
     ],
   })
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
   const probe = prospects(grounded.candidates)[0]
   const pass =
-    probe?.meta.prospectStepIn === true &&
-    probe.meta.prospectExposure === 'exposed_by_this_dig' &&
+    probe?.meta.prospectExposure === 'exposed_by_this_dig' &&
+    probe.meta.digCount === 1 &&
+    probe.meta.digCells === '29,59,33' &&
     probe.meta.stepX === 29 &&
     probe.meta.stepY === 59 &&
     probe.meta.stepZ === 33
@@ -321,7 +341,10 @@ addCase('an open wall with a solid head probes the head and then steps in', () =
   const state = world({
     focusItem: 'raw_iron',
     blocks: [ore({ x: 31, y: 59, z: 33 })],
-    descent: [downStep('E', 1, 0), levelStep('E', 1, 0, { wallSolid: false })],
+    descent: [
+      downStep('E', 1, 0),
+      levelStep('E', 1, 0, { wallSolid: false, digs: [dig({ x: 29, y: 60, z: 33 })] }),
+    ],
   })
   const result = prospectCandidates(state, defaultCandidateOptions, 'raw_iron', -54)
   const probe = result.candidates[0]
@@ -329,8 +352,8 @@ addCase('an open wall with a solid head probes the head and then steps in', () =
     probe?.id === 'PROSPECT:level:E:b29_60_33' &&
     probe?.target?.y === 60 &&
     probe.meta.prospectDigKind === 'head' &&
-    probe.meta.prospectStepIn === true &&
     probe.meta.prospectExposure === 'branch_toward' &&
+    probe.meta.digCells === '29,60,33' &&
     probe.meta.stepY === 59
   return { pass, detail: `id=${probe?.id ?? 'none'} meta=${JSON.stringify(probe?.meta ?? {})}` }
 })
