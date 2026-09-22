@@ -5297,6 +5297,17 @@ function descendStepRouteSignature(step: DescentOption): string {
  * step the builder then refuses - that disagreement is exactly how a route arm
  * ends up offering nothing while a legal detour step exists.
  */
+/**
+ * True only for a cell we KNOW is open air. An EMPTY name is an unloaded or unknown
+ * cell, and unknown is never satisfied (the repo's standing rule) - treating it as
+ * air would let a step into a cell nobody has read. Measured while fixing the
+ * `air needs a tool tier 0` refusal: a filter that accepted `''` as air also
+ * un-gated ordinary terrain, which a level-scan fixture caught immediately.
+ */
+function isOpenAirName(name: string | null | undefined): boolean {
+  return name === 'air' || name === 'cave_air' || name === 'void_air'
+}
+
 function strictStepDigProfile(
   state: WorldState,
   step: DescentOption,
@@ -5312,13 +5323,23 @@ function strictStepDigProfile(
   // and a dirt floor is not diggable without a pickaxe, and offering it anyway
   // produced a dig that could not finish (measured live: every cardinal step dug
   // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
+  //
+  // A cell that is ALREADY EMPTY is excluded first: there is nothing to remove, so
+  // it can never be the profile's requirement. Leaving it in made the strongest
+  // requirement "not diggable" (air is `diggable:false`), and the arm then refused
+  // with the nonsense detail `air needs a tool tier 0` - measured live 203 times in
+  // one run, every time on a profile whose front was already open, which is exactly
+  // the state where the step should simply be taken. A tool is required for rock,
+  // never for air.
   const requirement = strongestDigRequirement(
-    digPlan.map((item) => ({
-      name: item.name ?? '',
-      harvestTool: item.harvestTool ?? null,
-      harvestTier: item.harvestTier ?? null,
-      diggable: item.diggable,
-    })),
+    digPlan
+      .filter((item) => !isOpenAirName(item.name))
+      .map((item) => ({
+        name: item.name ?? '',
+        harvestTool: item.harvestTool ?? null,
+        harvestTier: item.harvestTier ?? null,
+        diggable: item.diggable,
+      })),
   )
   const choice = selectDigTool(
     {
