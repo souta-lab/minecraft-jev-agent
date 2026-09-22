@@ -1552,9 +1552,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // had anything to say about it.
   PLAN_IDENTITY_CHANGED,
   PLAN_ROW_RETIRED,
+  'PLAN_IDENTITY_ADOPTED',
+  'PLAN_IDENTITY_UNAVAILABLE',
   ROW_NOT_EXECUTABLE_HERE,
   ROW_DEFERRED_NOT_EXECUTABLE_HERE,
   'NO_PRODUCTIVE_HEAD_BOUND',
+  'NO_PRODUCTIVE_HEAD_WINDOW',
 ])
 
 /**
@@ -4095,7 +4098,7 @@ export class JevController {
         this.tickCounter,
       )
     }
-    if (result.retired.length > 0 || (result.changed && result.superseded > 0)) {
+    if (result.superseded > 0) {
       this.logger.warn(
         'agent',
         formatPlanIdentityChanged(result),

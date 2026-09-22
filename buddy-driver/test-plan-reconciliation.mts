@@ -708,9 +708,12 @@ addCase('(vii) every new marker is MIRRORED, so it reaches buddy.log', () => {
   const markers = [
     PLAN_IDENTITY_CHANGED,
     PLAN_ROW_RETIRED,
+    'PLAN_IDENTITY_ADOPTED',
+    'PLAN_IDENTITY_UNAVAILABLE',
     ROW_NOT_EXECUTABLE_HERE,
     ROW_DEFERRED_NOT_EXECUTABLE_HERE,
     'NO_PRODUCTIVE_HEAD_BOUND',
+    'NO_PRODUCTIVE_HEAD_WINDOW',
   ]
   const missing = markers.filter((token) => !MIRRORED_MARKERS.has(token))
   const tokens = markers.map((token) => mirroredEventToken(`${token} detail=1`))
