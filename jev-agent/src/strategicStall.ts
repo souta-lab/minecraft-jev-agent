@@ -38,12 +38,12 @@ import type { ProgressKind } from './actionPostcondition.ts'
 export const STRATEGIC_STALL_HORIZON_DEFAULT = 24
 
 /**
- * How many DISTINCT state fingerprints may appear inside the window and still
- * count as "the same pocket". 3 covers the measured A<->B<->C (`MOVE:p3_67_17`,
- * `MOVE:p3_67_18`, `MOVE:p2_67_18`) and A<->B shapes while a real route grows
- * its distinct-state count monotonically.
+ * How many DISTINCT block-cell fingerprints may appear inside the window and
+ * still count as "the same pocket". Four covers the measured 2x2 respawn
+ * pocket (`(1|2,67,17|18)`) after strategic fingerprints discard sub-block
+ * jitter, while a real route grows its state footprint beyond the bound.
  */
-export const STRATEGIC_STALL_MAX_DISTINCT_STATES_DEFAULT = 3
+export const STRATEGIC_STALL_MAX_DISTINCT_STATES_DEFAULT = 4
 
 /**
  * Minimum body-progress decisions required in the window. A WAIT-only or
@@ -74,6 +74,19 @@ export function resolveStrategicStallMinBodyProgress(
   const raw = Number(env.BUDDY_STRATEGIC_STALL_MIN_BODY ?? STRATEGIC_STALL_MIN_BODY_PROGRESS_DEFAULT)
   return Number.isInteger(raw) && raw >= 0 ? raw : STRATEGIC_STALL_MIN_BODY_PROGRESS_DEFAULT
 }
+/**
+ * Stable block-cell identity for strategic recurrence evidence.
+ *
+ * `positionKey` intentionally preserves sub-block motion for the oscillation
+ * detector, but that precision is noise for semantic non-progress: Mineflayer
+ * commonly settles at several fractional coordinates inside the same block
+ * pocket. Floor each axis so jitter cannot turn one recurrent cell into several
+ * distinct states and prevent the bounded exhaustion window from firing.
+ */
+export function strategicStateKey(position: { x: number; y: number; z: number }): string {
+  return `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`
+}
+
 
 /**
  * One settled decision, reduced to the facts this evidence needs. `stateKey` is

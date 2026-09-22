@@ -294,11 +294,24 @@ addCase('a hungry foodless resident is offered a nearby food animal as a grounde
   fed.inventory = { slots: [], counts: { beef: 2 }, totalItems: 2 }
   fed.entities = hungry.entities
   const fedCandidates = generateCandidates(fed, defaultCandidateOptions)
-  const fedHunt = fedCandidates.some((candidate) => candidate.kind === 'ATTACK' && candidate.targetName === 'cow')
+  const fedHunt = fedCandidates.find((candidate) => candidate.kind === 'ATTACK' && candidate.targetName === 'cow')
   const eatOffered = fedCandidates.some((candidate) => candidate.kind === 'EAT')
+  // issue #436/#11 (operator directive): an attackable entity in range is offered
+  // whether or not the resident "needs" it - which entities are worth attacking is
+  // Jev's WHICH. What the hunger/food gate still owns is the FACT: only a hungry,
+  // foodless resident gets the food-hunt contract (`foodAnimal`/`foodRoute`, whose
+  // drop postcondition is a meal). A fed resident sees the same entity as a plain
+  // grounded ATTACK with no food-hunt meta, so nothing is ranked or hidden.
   return {
-    pass: hunt !== undefined && hunt.meta?.foodAnimal === true && !fedHunt && eatOffered,
-    detail: `hunt=${hunt?.id ?? 'none'} foodAnimal=${hunt?.meta?.foodAnimal ?? 'none'} fedHunt=${fedHunt} eat=${eatOffered}`,
+    pass:
+      hunt !== undefined &&
+      hunt.meta?.foodAnimal === true &&
+      fedHunt !== undefined &&
+      fedHunt.meta?.foodAnimal !== true &&
+      eatOffered,
+    detail:
+      `hunt=${hunt?.id ?? 'none'} foodAnimal=${hunt?.meta?.foodAnimal ?? 'none'} ` +
+      `fedHunt=${fedHunt?.id ?? 'none'} fedFoodAnimal=${fedHunt?.meta?.foodAnimal ?? 'none'} eat=${eatOffered}`,
   }
 })
 

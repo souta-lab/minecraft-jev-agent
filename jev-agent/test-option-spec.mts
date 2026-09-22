@@ -101,6 +101,18 @@ addCase('OptionSpec validation accepts a well-formed compiled spec', () => {
   const errors = validateOptionSpec(spec)
   return { pass: errors.length === 0 && spec.id === 'collect:raw_iron' && spec.abortThreshold === 0.5, detail: `errors=[${errors.join('; ')}] id=${spec.id}` }
 })
+ 
+addCase('goto recovery compiles and validates its positionNear postcondition', () => {
+  const spec = compilePlannedGoal({
+    kind: 'goto',
+    description: 'return to the latest death site',
+    targetPosition: { x: 12, y: 68, z: -2 },
+    targetPredicate: 'death_site_recovery',
+    dimension: 'minecraft:overworld',
+  })
+  const errors = validateOptionSpec(spec)
+  return { pass: errors.length === 0, detail: `errors=[${errors.join('; ')}] success=${spec.success.map(describePredicate).join('|')}` }
+})
 
 addCase('OptionSpec validation reports every structural problem', () => {
   const malformed = {

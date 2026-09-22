@@ -538,7 +538,7 @@ const cell = (p: Vec3Json): string => `${Math.floor(p.x)},${Math.floor(p.y)},${M
   fill(grid, 0, 16, 64, 68, -1, 1, 'air')
   fill(grid, 6, 6, 64, 64, -1, 1, 'stone') // a one-block wall across the run
   fill(grid, 6, 6, 65, 68, -1, 1, 'air')
-  const start: Vec3Json = { x: 0, y: 64, z: 0 }
+  const start: Vec3Json = { x: 4, y: 64, z: 0 }
   const target: Vec3Json = { x: 12, y: 64, z: 0 }
   const run = await runWalk(start, grid, moveCandidate(target), {
     actuation: 'pathfinder',

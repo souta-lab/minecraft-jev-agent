@@ -1560,7 +1560,14 @@ function buildEntities(
     // A hostile stays visible out to `hostileRadius` even when it is beyond the
     // general entity radius (see `hostileRadius`): the safety layer must be able
     // to name what is shooting the body.
-    const hostile = isHostile(name, entity.kind)
+    // A mob that has just DAMAGED the body is a threat whatever its type. The
+    // a-priori list cannot enumerate everything that attacks: a zombie_villager is
+    // hostile but matches neither `zombie` nor the suffix rule, and a provoked
+    // piglin, a bear or any summoned/plugin mob is hostile only in context. The
+    // general truth is observed aggression, and `lastDamage.sourceId` is already
+    // in hand here. The list stays as the a-priori fallback (and for the cases
+    // where the body must be able to name what is shooting it before it is hit).
+    const hostile = isHostile(name, entity.kind) || (attackerId !== null && entity.id === attackerId)
     if (distanceToBot > (hostile ? hostileRadius : options.entityRadius)) continue
     out.push({
       id: entity.id,
@@ -1627,6 +1634,24 @@ const HOSTILE_NAMES = new Set([
   'warden',
   'hoglin',
   'zoglin',
+  // Hostile in vanilla but absent from the list above, so they were invisible to
+  // the safety layer: `zombie_villager` neither matches `zombie` nor the
+  // `_zombie`/`_skeleton` suffix rule, and the rest are simply other hostile
+  // families. Live evidence: a summoned `zombie_villager` damaged the body
+  // (`CRITICAL_DAMAGE ... source=zombie_villager`, `DEATH_CAUSE killer=zombie_villager`)
+  // while no threat was ever sensed, so no ATTACK/RETREAT was ever offered and
+  // the body never fought back.
+  'zombie_villager',
+  'evoker',
+  'illusioner',
+  'vex',
+  'silverfish',
+  'endermite',
+  'shulker',
+  'guardian',
+  'elder_guardian',
+  'wither',
+  'ender_dragon',
 ])
 
 function isHostile(name: string, kind: string | undefined): boolean {
