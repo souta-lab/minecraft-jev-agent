@@ -145,7 +145,23 @@ export type Capability =
       /** minimum rank when `tool === 'pickaxe'` */
       tier: number | null
     }
-  | { kind: 'ascend_plan' }
+  | {
+      kind: 'ascend_plan'
+      /**
+       * The vertical plan the column DID carry, when one was grounded but not
+       * mechanically available (`pillar` / `staircase-up` / `reuse`), or null
+       * when the planner grounded nothing at all.
+       */
+      plan?: string | null
+      /**
+       * Which column precondition or sensor classification stopped it, named so
+       * the refusal is actionable. Mirrors `descend_plan`: the bare token is kept
+       * only when no fact can be named, so existing fingerprints do not drift.
+       */
+      reason?: AscendPlanRefusalReason | null
+      /** the body's own feet column the classification examined */
+      cell?: Vec3Json | null
+    }
   | {
       kind: 'descend_plan'
       /**
@@ -186,6 +202,26 @@ export type DescendPlanRefusalReason =
  * (`no_tool`). A bare `safe_column` token is forbidden.
  */
 export type SafeColumnRefusalReason = 'no_clearance' | 'no_tool'
+
+/**
+ * Why an upward gap has no AVAILABLE ascent, as a typed fact.
+ *
+ * Only ONE fact was left unnamed, and the live trial was exactly it: the operator's
+ * floated gate left the body on a ledge with `place=1 hazard=0 tools=[]` and 834
+ * identical `reason=needs_ascend missing=[ascend_plan]` lines - a token that can
+ * only be retried, never acted on. Every other precondition in that branch is
+ * already named by its own capability (`placeable_block`, `headroom` + `tool`,
+ * `safe_column:no_clearance|no_tool`), so the bare token is reachable only when a
+ * plan WAS grounded and its own column has no proven support:
+ *
+ *   `no_footing`       the live fact: a grounded pillar whose `footingSolid` is
+ *                      false, so `explicitPlanAvailable` is false while the
+ *                      column's placeable block, headroom and safe column are all
+ *                      fine - which is what made it invisible;
+ *   `plan_unavailable` defensive: any future column precondition that refuses a
+ *                      grounded plan without naming itself. Never silently bare.
+ */
+export type AscendPlanRefusalReason = 'no_footing' | 'plan_unavailable'
 
 /** A block that must be broken before the target is reachable, with its tool facts. */
 export interface ReachabilityBarrier {
@@ -434,8 +470,20 @@ export function capabilityKey(capability: Capability): string {
       }
       return `safe_column:no_clearance${at}`
     }
-    case 'ascend_plan':
-      return 'ascend_plan'
+    case 'ascend_plan': {
+      // A bare `ascend_plan` means "no grounded, available ascent" and nothing
+      // more; the typed suffix is added only when the column classified a
+      // concrete fact, exactly like `descend_plan`. A legacy caller that pushes
+      // the bare token therefore keeps the historical key byte-identical.
+      const plan = capability.plan ?? null
+      const reason = capability.reason ?? null
+      if (plan === null && reason === null) return 'ascend_plan'
+      const at =
+        capability.cell === undefined || capability.cell === null
+          ? ''
+          : `@${capability.cell.x},${capability.cell.y},${capability.cell.z}`
+      return `ascend_plan:${plan ?? 'none'}:${reason ?? 'unknown'}${at}`
+    }
     case 'descend_plan': {
       // A bare `descend_plan` means "no grounded descent plan" and nothing more;
       // the typed suffix is added only when the sensor pool named the binding

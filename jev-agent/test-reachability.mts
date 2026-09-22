@@ -2051,5 +2051,86 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   }
 }
 
+// (18) THE OPERATOR'S FROZEN BODY: a withheld ascent must name WHICH concrete HOW
+// was rejected, never the bare `ascend_plan` token.
+//
+// Live (the floated gate; the body frozen for 2+ minutes at (22.7,66,4.5), 834
+// identical lines):
+//   REACHABILITY candidate=ASCEND:habitat:p29_68_8 kind=MOVE reachable=false
+//     reason=needs_ascend missing=["ascend_plan"]
+//     fingerprint=rv1|29,68,8|needs_ascend|missing=[ascend_plan]|gap=ascend_far|place=1|tools=[]|hazard=0|approach=1
+//
+// `place=1` (a pillar block IS held), `hazard=0`, no tool fact, clear headroom and
+// a safe column: the ONLY unnamed precondition left was the live FOOTING, so the
+// bare token was the whole evidence and the body could only retry it.
+{
+  const state = worldState({
+    position: { x: 22.7, y: 66, z: 4.5 },
+    inventory: inventory({ cobblestone: 177, dirt: 128, soul_soil: 222, oak_log: 81 }),
+    // the body's own column is not in the sensed stand set (the live ledge), but
+    // the sensor DOES see a walkable step one level up beside it - so the ascent
+    // column is `clear`, not `refuse`, and the only unnamed fact left is support
+    standable: [{ x: 23, y: 67, z: 4 }],
+  })
+  const target: Vec3Json = { x: 29, y: 71, z: 8 }
+  const column = {
+    placeable: { name: 'cobblestone', count: 177 },
+    columnSafe: true,
+    footingSolid: false,
+    headroomClear: true,
+    headroomCell: null,
+  }
+  const abilities = deriveReachabilityAbilities(state, target, column)
+  const keys = abilities.ascend.missing.map((capability) => capabilityKey(capability))
+  check(
+    '(18a) a grounded pillar with no proven footing names the fact instead of the bare ascend_plan token',
+    abilities.ascend.available === false &&
+      keys.includes('ascend_plan:pillar:no_footing@22,66,4') &&
+      !keys.includes('ascend_plan'),
+    `available=${abilities.ascend.available} missing=[${keys.join(',')}]`,
+  )
+  check(
+    '(18b) the typed key never drifts for a legacy bare token, so existing fingerprints are unchanged',
+    capabilityKey({ kind: 'ascend_plan' }) === 'ascend_plan' &&
+      capabilityKey({ kind: 'ascend_plan', plan: null, reason: null, cell: null }) === 'ascend_plan' &&
+      capabilityKey({ kind: 'ascend_plan', plan: 'staircase-up', reason: 'plan_unavailable', cell: { x: 22, y: 66, z: 4 } }) ===
+        'ascend_plan:staircase-up:plan_unavailable@22,66,4',
+    `bare=${capabilityKey({ kind: 'ascend_plan' })}`,
+  )
+}
+
+{
+  // A column that CAN support the climb is still available: the fix names the
+  // absent fact, it does not widen or narrow what is offered.
+  const state = worldState({
+    position: { x: 22.7, y: 66, z: 4.5 },
+    inventory: inventory({ cobblestone: 177 }),
+    standable: [{ x: 23, y: 67, z: 4 }],
+  })
+  const supported = deriveReachabilityAbilities(state, { x: 29, y: 71, z: 8 }, {
+    placeable: { name: 'cobblestone', count: 177 },
+    columnSafe: true,
+    footingSolid: true,
+    headroomClear: true,
+    headroomCell: null,
+  })
+  const blocked = deriveReachabilityAbilities(state, { x: 29, y: 71, z: 8 }, {
+    placeable: { name: 'cobblestone', count: 177 },
+    columnSafe: true,
+    footingSolid: true,
+    headroomClear: false,
+    headroomCell: { x: 22, y: 68, z: 4 },
+  })
+  const blockedKeys = blocked.ascend.missing.map((capability) => capabilityKey(capability))
+  check(
+    '(18c) availability is unchanged, and the fact this branch already named stays named',
+    supported.ascend.available === true &&
+      supported.ascend.missing.length === 0 &&
+      blockedKeys.includes('headroom@22,68,4') &&
+      !blockedKeys.includes('ascend_plan'),
+    `supported=${supported.ascend.available} blocked=[${blockedKeys.join(',')}]`,
+  )
+}
+
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)
 if (failures > 0) process.exit(1)
