@@ -4089,7 +4089,18 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
       ...(state.signals.heldFurnacePlacedAt === blockId('b', furnace) ? { furnaceSource: 'held' } : {}),
     },
   }
-  if (direct.inReach) return [direct]
+  // The direct step must never REPLACE the rest of the ladder (see the contract above): the two
+  // code-owned reachability facts can disagree, and when they do the tick degenerates to
+  // `[SMELT, WAIT]`. Measured live (run-mubobiq6-12onv, source 7a55dba): a furnace the selector
+  // believed was in reach was refused by the guard every tick (`SMELT:charcoal code=NO_PATH
+  // canDig=false`, `key=overworld:33,66,12 attempts=414 reason=unreachable`) while the body held 57
+  // cobblestone, so `CANDIDATE_STARVATION presented=2 productive=0 goal=smelt:charcoal:1` starved
+  // with the craft/place-furnace route never offered. Keep the cheap `[direct]` offer while the
+  // direct step has NO recorded failure (the common, working case), and open the full ladder as soon
+  // as it has failed at least once - the same retry-memory pattern `sensedCraftingTableAvailable`
+  // already uses for the table path.
+  const directFailures = state.signals.failedCandidates[direct.id] ?? 0
+  if (direct.inReach && directFailures === 0) return [direct]
   const travel = furnaceAcquisitionCandidates(state, options).filter((candidate) => candidate.id !== direct.id)
   return [direct, ...travel]
 }
