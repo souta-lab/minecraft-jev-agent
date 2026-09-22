@@ -62,11 +62,13 @@ import {
   OBSIDIAN,
   PORTAL_ENTERED_PREDICATE,
   PORTAL_LIT_PREDICATE,
+  PORTAL_OPEN_FACE_MAX_DISTANCE,
   groundPortalFrame,
   planPortalIgnition,
+  portalOpenFaceCells,
   serializePortalCells,
 } from './netherPortalPlan.ts'
-import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
+import type { PortalBlockPosition, PortalEntryCandidate, PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
 import { armorEquipOffers, armorEquipRefusals, assessCombatKit, CRAFTABLE_SWORDS, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
 import type { ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
@@ -1421,6 +1423,61 @@ export interface PortalEntryRefusal {
  * supplies the live plan (lit interior + safe approach); this never chooses WHEN
  * to enter.
  */
+/**
+ * The step-aside leg onto an OPEN face of the portal, offered ALONGSIDE the
+ * entry (never instead of it).
+ *
+ * Measured live (run-mucaq28q-1ftq1, main 4c5645b): the body stood WEST of the
+ * left frame column at 24.7,67,9.7 while the entry cell (26,67,9) sat 1.8 blocks
+ * east BEHIND the obsidian column at (25,67,9). The straight walk is a 2-high
+ * frame face, so the entry could never get in and the offer collapsed to
+ * WAIT/ESCALATE - the operator's "it would get through if it stepped one block
+ * aside". The generic travel approach leg cannot ground this move either: every
+ * open-face cell is FARTHER from the target than the occluded stand cell, so the
+ * "reduce the distance" rule rejects exactly the leg that is needed.
+ *
+ * The face is derived from STRUCTURE truth - a standable cell beside an interior
+ * cell at its level, outside the frame ring - never from the plan's wording.
+ * This is a mechanically necessary prerequisite of the entry, offered as an
+ * ordinary MOVE the guard/reachability gate still own; Jev keeps the choice.
+ */
+function portalOpenFaceLegs(state: WorldState, options: CandidateOptions, entry: PortalEntryCandidate): Candidate[] {
+  const standable = new Set(state.terrain.standable.map((spot) => cellKey(spot)))
+  const interior: PortalBlockPosition[] = entry.portalCells
+  const bodyCell = cellKey(state.self.position)
+  return portalOpenFaceCells(
+    interior,
+    entry.enterCell.y,
+    (spot) => standable.has(cellKey(spot)),
+    state.self.position,
+    PORTAL_OPEN_FACE_MAX_DISTANCE,
+  )
+    .filter((spot) => cellKey(spot) !== bodyCell)
+    .map((spot) => ({
+      id: `MOVE:${blockId('p', spot)}`,
+      kind: 'MOVE' as const,
+      label:
+        `step onto the portal's open face at (${spot.x},${spot.y},${spot.z}) so the walk into ` +
+        `(${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) is not blocked by the frame`,
+      targetName: NETHER_PORTAL,
+      target: spot,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(spot, state.self.position) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        x: spot.x,
+        y: spot.y,
+        z: spot.z,
+        approachLeg: 'portal_open_face',
+        approachTarget: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
+      },
+    }))
+}
+
 export function entryCandidates(
   state: WorldState,
   options: CandidateOptions,
@@ -1523,7 +1580,9 @@ export function entryCandidates(
       },
       digRefusals,
     )
-    if (legs.length > 0) return { candidates: legs, refusal: null }
+    const faceLegs = portalOpenFaceLegs(state, options, entry)
+    const withFaces = [...legs, ...faceLegs.filter((leg) => !legs.some((other) => other.id === leg.id))]
+    if (withFaces.length > 0) return { candidates: withFaces, refusal: null }
     // No grounded route, no grounded approach leg and no grounded dig route
     // changes anything from here: every route this goal can ground is spent. Say
     // it typed and let the ordinary bounded escalation reach System2 - never
@@ -1541,7 +1600,10 @@ export function entryCandidates(
       },
     }
   }
-  return { candidates: [candidate], refusal: null }
+  // Every open face stays policy-visible (#436): several ways in are a CHOICE,
+  // so code offers them all as ordinary MOVE legs and never picks one.
+  const faceLegs = portalOpenFaceLegs(state, options, entry)
+  return { candidates: [candidate, ...faceLegs], refusal: null }
 }
 
 /**
