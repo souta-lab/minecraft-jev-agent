@@ -58,9 +58,11 @@ import { createInterface } from 'node:readline'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  M2_RUN_CHAIN,
   RUN_ID_RE,
   asCounts,
   parseInventoryMarker,
+  parsePortalChainLine,
   parsePortalMarker,
   readM2Snapshot,
   readPolicySocketBinding,
@@ -79,7 +81,11 @@ export const RECORD = 'milestone-run-artifact'
 // latestReload/latestSourceReload + effectiveSourceSha + provenance + the read-only
 // control-socket cross-check). `run.boot.sourceSha` and every schema-3 field are
 // unchanged.
-export const SCHEMA_VERSION = 4
+// 5 = additive: `verdicts.M2.chain` (the delegated gate's ORDERED
+// build->light->verify trace, one fact per link with the evidence source that
+// proved it + the marker indices + the frame's own blocks/shape). It is present
+// only when the gate emitted `m2_chain:` lines; every schema-4 field is unchanged.
+export const SCHEMA_VERSION = 5
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
 /** Repo-level operator decision file; run-scoped by each entry's own runId. */
 export const OPERATOR_DECISION_RECORD = 'operator-decision'
@@ -1485,6 +1491,60 @@ export function parseConditions(lines) {
   return out
 }
 
+/**
+ * Carry the delegated M2 gate's ORDERED build->light->verify trace into the
+ * run-scoped artifact.
+ *
+ * The gate's stage conditions say WHAT passed; they cannot say WHICH evidence
+ * source proved each link, and a frame proven by the snapshot plus a light proven
+ * by the log would look identical to one complete chain. The gate emits one
+ * `m2_chain:` line per evidence source (tools/m2-gate.mjs formatPortalChainLine);
+ * this turns them into per-link facts with their own `source`.
+ *
+ * The `best` link is the strongest source-level trace: a complete ordered chain
+ * first, else the source that proved the build, else the one that lit. A source
+ * named `none` is the gate stating no chain was found - it is recorded but can
+ * never become `best`, so this field can never manufacture a link.
+ *
+ * Returns null when the gate emitted no `m2_chain:` line at all (an older gate),
+ * so the field is absent rather than falsely empty.
+ */
+export function composePortalChain(lines) {
+  const links = (Array.isArray(lines) ? lines : []).map((line) => parsePortalChainLine(line)).filter((link) => link !== null)
+  if (links.length === 0) return null
+  const proven = links.filter((link) => link.source !== 'none')
+  const best =
+    proven.find((link) => link.ordered === true) ??
+    proven.find((link) => link.built === 'PASS') ??
+    proven.find((link) => link.lit === 'PASS') ??
+    null
+  const linkFact = (name) => {
+    if (best === null) return null
+    const fact = { status: best[name], source: best.source }
+    if (name === 'built') {
+      fact.index = best.indices.frame
+      fact.blocks = best.blocks
+      fact.shape = best.shape
+    } else if (name === 'lit') {
+      fact.index = best.indices.lit
+      fact.dimension = best.dimension
+      fact.overworld = best.overworld
+    } else {
+      fact.index = best.indices.verified
+    }
+    return fact
+  }
+  return {
+    ordered: best?.ordered === true,
+    built: linkFact('built'),
+    lit: linkFact('lit'),
+    verified: linkFact('verified'),
+    placedIndex: best === null ? null : best.indices.placed,
+    sources: proven.map((link) => link.source),
+    links,
+  }
+}
+
 async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvidence, policySocket, sourceSha = null }) {
   const lines = []
   let code = 2
@@ -1529,20 +1589,22 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
     if (status === 'UNKNOWN') missing.push({ field: `verdict:${id}`, reason: `the gate reported UNKNOWN reason=${parsed.reason}` })
   }
   const factsLine = lines.find((line) => line.startsWith(`${id.toLowerCase()}_facts:`)) ?? null
-  return {
-    verdict: {
-      id,
-      gate,
-      runId,
-      status,
-      reason: parsed?.reason ?? error ?? `gate_emitted_no_status code=${code}`,
-      statusLine: parsed === null ? null : `${id}_RUN_RESULT`,
-      conditions: parseConditions(lines),
-      factsLine,
-      lines,
-    },
-    missing,
+  const verdict = {
+    id,
+    gate,
+    runId,
+    status,
+    reason: parsed?.reason ?? error ?? `gate_emitted_no_status code=${code}`,
+    statusLine: parsed === null ? null : `${id}_RUN_RESULT`,
+    conditions: parseConditions(lines),
+    factsLine,
+    lines,
   }
+  // Additive: the ordered per-link chain trace, only when the gate emitted one.
+  // Absent for gates that do not produce it (M3), never a fabricated empty chain.
+  const chain = composePortalChain(lines)
+  if (chain !== null) verdict.chain = chain
+  return { verdict, missing }
 }
 
 // ---------------------------------------------------------------------------

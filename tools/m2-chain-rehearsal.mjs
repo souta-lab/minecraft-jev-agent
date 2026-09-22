@@ -28,6 +28,10 @@
 //    it, reading the names from the executor/plan definitions (not guessing),
 //    and asserts the projected order equals the gate's required order. A
 //    missing, reordered, or renamed stage FAILs with a precise diff.
+//    The claim "the executor emits this marker here" is PROBED, not asserted:
+//    every emitter call site is searched in the source at run time and the line
+//    it actually found is reported (a moved/renamed/removed emitter is a GAP, not
+//    a stale file:line in a comment).
 // 3. Materializes a synthetic single-run fixture (BOOT boundary + inventory
 //    samples + the derived marker lines in the log; GENERATION_READY /
 //    SYSTEM2_AUTHORITY_DECISION in runner.out; a source=jev decision in
@@ -37,13 +41,28 @@
 // 4. Asserts the negatives: a run that only INHERITS a portal (no build chain)
 //    is UNKNOWN reason=inherited_portal, and a PORTAL_LIT without a dimension
 //    can never PASS.
+// 5. FRESH-RUN CAPABILITY (no hand-fed inventory): from an inventory that has NOT
+//    finished the M2 prerequisites, asserts the chain's own gates - obsidian
+//    mining is refused without a diamond pickaxe, the plan emits the diamond ->
+//    diamond_pickaxe -> obsidian prerequisite order before build/light/verify, a
+//    valid frame has exactly 10 placeable cells, and ignition is refused without
+//    flint_and_steel. Its gate verdict must be UNKNOWN: the capability is proven,
+//    the outcome is not, until a run really gathers the materials.
 //
 // The gate is never modified and no marker is invented: every synthetic line is
 // rendered by the same formatter the executor calls, and a mismatch between the
 // plan's real markers and the gate's requirements is the deliverable.
 //
+// WHAT THIS DOES NOT PROVE
+// ------------------------
+// Live obtainability. The positive case starts from the post-prerequisite
+// inventory, and the fresh case starts from a fresh one: neither walks a world,
+// finds an obsidian block, mines it, or places a frame. Those remain LIVE
+// questions, and the fresh case names exactly which materials a fresh run must
+// still gather.
+//
 // Exit: 0 = READY, 1 = GAP.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -62,6 +81,8 @@ import {
   netherPortalRungGoals,
   orderedPlacementCells,
   planNetherPortal,
+  planObsidianMining,
+  planPortalIgnition,
   portalFrameLayout,
   portalStepToPlannedGoal,
   portalStepsToPlannedGoals,
@@ -72,6 +93,7 @@ import { placedFrameCellLine, frameReadyLine } from '../jev-agent/src/executor.t
 import {
   INHERITED_PORTAL_REASON,
   evaluatePortalChain,
+  parsePortalChainLine,
   parsePortalMarker,
 } from './m2-gate.mjs'
 
@@ -107,32 +129,139 @@ export const GATE_REQUIRED_MARKER_ORDER = Object.freeze([
 ])
 
 /**
- * The mapping plan step -> executor emission. Each entry names the exact code
- * path the marker comes from. The marker line strings are produced by the SAME
- * functions the executor uses, so a rename/removal breaks this harness.
+ * The mapping plan step -> the gate stage it feeds. The marker line strings are
+ * produced by the SAME functions the executor uses, so a rename/removal breaks
+ * this harness.
  */
-export const PLAN_STEP_MARKER_SOURCES = Object.freeze({
-  build_portal_frame: Object.freeze({
-    gateStage: 'portal_built',
-    emission: [
-      'executor.ts:3824 runPlaceCells -> executor.ts:4103 emitFrameCell -> executor.ts:825 placedFrameCellLine -> netherPortalPlan.ts:501 formatPortalBlockPlaced (one PORTAL_BLOCK_PLACED per verified obsidian cell)',
-      'executor.ts:3885 formatPortalFrameReady(validation) -> netherPortalPlan.ts:497 (only when validatePortalFrame reports shape=ok)',
-    ],
-  }),
-  light_portal: Object.freeze({
-    gateStage: 'portal_lit',
-    emission: [
-      'executor.ts:4202 formatPortalLit(target, dimension) -> netherPortalPlan.ts:701 (after the ignite post-condition holds at every interior cell)',
-    ],
-  }),
-  verify_portal: Object.freeze({
-    gateStage: 'portal_lit',
-    emission: [
-      'executor.ts:4203 verifyPortal({lit:true, portalBlockPresent:true}).line -> netherPortalPlan.ts:718',
-      'light_portal and verify_portal compile to the SAME `place nether_portal` goal carrying PORTAL_LIT_PREDICATE (netherPortalPlan.ts:1018-1085), so the GoalQueue dedups them into ONE runIgnite action that emits both markers.',
-    ],
-  }),
+export const PLAN_STEP_GATE_STAGES = Object.freeze({
+  build_portal_frame: 'portal_built',
+  light_portal: 'portal_lit',
+  verify_portal: 'portal_lit',
 })
+
+/**
+ * The PRODUCTION emitters each derived marker must come from, as exact source
+ * text. These are probed at run time (see `probeMarkerEmitters`): the file is
+ * searched, the line actually found is reported, and a missing probe is a GAP.
+ *
+ * A hand-written `file:line` cannot stay true - the previous revision of this
+ * harness claimed `executor.ts:825` for `placedFrameCellLine`, which is at
+ * `executor.ts:1396` today. Searching for the CALL EXPRESSION (arguments
+ * included) is the strongest claim that survives a move, and still breaks on a
+ * rename or a changed call.
+ *
+ * The two `symbol` probes confirm the enclosing executor actions exist
+ * (`runPlaceCells` builds the frame, `runIgnite` lights and verifies it); the
+ * `call` probes confirm the marker formatters are invoked from the live path.
+ */
+export const MARKER_EMITTER_PROBES = Object.freeze({
+  [PORTAL_BLOCK_PLACED]: Object.freeze([
+    {
+      id: 'block-placed-formatter',
+      file: 'jev-agent/src/netherPortalPlan.ts',
+      expect: 'call',
+      text: 'export function formatPortalBlockPlaced(pos: PortalBlockPosition): string {',
+    },
+    {
+      id: 'block-placed-executor-call',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'call',
+      text: 'return formatPortalBlockPlaced(at)',
+    },
+    {
+      id: 'emit-frame-cell-action',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'symbol',
+      text: 'private emitFrameCell(',
+    },
+    {
+      id: 'run-place-cells-action',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'symbol',
+      text: 'private async runPlaceCells(',
+    },
+  ]),
+  [PORTAL_FRAME_READY]: Object.freeze([
+    {
+      id: 'frame-ready-formatter',
+      file: 'jev-agent/src/netherPortalPlan.ts',
+      expect: 'call',
+      text: 'export function formatPortalFrameReady(validation: PortalFrameValidation): string {',
+    },
+    {
+      id: 'frame-ready-executor-call',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'call',
+      text: 'const ready = formatPortalFrameReady(validation)',
+    },
+  ]),
+  [PORTAL_LIT]: Object.freeze([
+    {
+      id: 'portal-lit-formatter',
+      file: 'jev-agent/src/netherPortalPlan.ts',
+      expect: 'call',
+      text: 'export function formatPortalLit(position: PortalBlockPosition, dimension: string = OVERWORLD): string {',
+    },
+    {
+      id: 'portal-lit-executor-call',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'call',
+      text: "this.logger.info('agent', formatPortalLit(target, dimension),",
+    },
+    {
+      id: 'run-ignite-action',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'symbol',
+      text: 'private async runIgnite(',
+    },
+  ]),
+  [PORTAL_VERIFIED]: Object.freeze([
+    {
+      id: 'verify-portal-formatter',
+      file: 'jev-agent/src/netherPortalPlan.ts',
+      expect: 'call',
+      text: 'export function verifyPortal(input: VerifyPortalInput): VerifyPortalResult {',
+    },
+    {
+      id: 'verified-executor-call',
+      file: 'jev-agent/src/executor.ts',
+      expect: 'call',
+      text: "this.logger.info('agent', verifyPortal({ lit: true, portalBlockPresent: true, dimension }).line,",
+    },
+  ]),
+})
+
+/**
+ * Search each claimed emitter in its file and report the line it was actually
+ * found on. Deterministic, read-only, no cache: provenance is derived evidence,
+ * never a remembered constant.
+ */
+export function probeMarkerEmitters({ root = REPO_ROOT } = {}) {
+  const probes = []
+  const cache = new Map()
+  for (const [marker, list] of Object.entries(MARKER_EMITTER_PROBES)) {
+    for (const probe of list) {
+      const absolute = join(root, probe.file)
+      if (!cache.has(absolute)) {
+        cache.set(absolute, existsSync(absolute) ? readFileSync(absolute, 'utf8').split('\n') : null)
+      }
+      const lines = cache.get(absolute)
+      const line = lines === null ? -1 : lines.findIndex((entry) => entry.includes(probe.text))
+      probes.push({
+        marker,
+        id: probe.id,
+        file: probe.file,
+        expect: probe.expect,
+        text: probe.text,
+        line: line === -1 ? -1 : line + 1,
+        ok: line !== -1,
+        // A probe that matches twice is not precise enough to be provenance.
+        matches: lines === null ? 0 : lines.filter((entry) => entry.includes(probe.text)).length,
+      })
+    }
+  }
+  return probes
+}
 
 /**
  * Precise order diff. `missing` lists required markers absent from the emitted
@@ -279,6 +408,91 @@ export function rehearsePlanChain({
 }
 
 // ---------------------------------------------------------------------------
+// fresh-run capability (no hand-fed post-prerequisite inventory)
+// ---------------------------------------------------------------------------
+
+/** A fresh body: a stone pickaxe and no M2 material. */
+export const M2_FRESH_INVENTORY = Object.freeze({ stone_pickaxe: 1, cobblestone: 16 })
+/** PICKAXE_TIER0 stone = 2. */
+export const M2_FRESH_TOOL_RANK = 2
+
+/**
+ * Prove the chain's OWN gates from a fresh inventory, so "a fresh run must first
+ * gather 3 diamonds -> diamond_pickaxe -> 10 obsidian (+ flint_and_steel)" is a
+ * measured statement rather than an assumption.
+ *
+ * Every assertion here is negative-first: what the chain REFUSES without the
+ * material is as important as what it does with it.
+ */
+export function rehearseFreshRunChain({ inventory = M2_FRESH_INVENTORY, toolRank = M2_FRESH_TOOL_RANK } = {}) {
+  const rankWithoutDiamond = planObsidianMining(toolRank, 10)
+  const rankWithDiamond = planObsidianMining(M2_READY_TOOL_RANK, 10)
+
+  const plan = planNetherPortal({ inventory, toolRank })
+  const prerequisiteKinds = plan.prerequisites.map((step) => step.kind)
+  const obsidianStep = plan.prerequisites.find((step) => step.kind === 'collect' && step.item === OBSIDIAN) ?? null
+  const pickaxeStep = plan.prerequisites.find((step) => step.kind === 'craft' && step.item === DIAMOND_PICKAXE) ?? null
+  const diamondStep = plan.prerequisites.find((step) => step.kind === 'collect' && step.item === DIAMOND) ?? null
+  // Several prerequisites share a `kind` (collect raw_iron / flint / diamond /
+  // obsidian), so the order is the step's own index - never indexOf(kind).
+  const prerequisiteIndex = (step) => (step === null ? -1 : plan.prerequisites.indexOf(step))
+  const diamondAt = prerequisiteIndex(diamondStep)
+  const pickaxeAt = prerequisiteIndex(pickaxeStep)
+  const obsidianAt = prerequisiteIndex(obsidianStep)
+  const prerequisitesOrdered = diamondAt !== -1 && pickaxeAt > diamondAt && obsidianAt > pickaxeAt
+
+  // The frame leg: a valid 4x5 frame is exactly 10 placeable obsidian cells and
+  // its own validated marker, independent of where the obsidian came from.
+  const layout = portalFrameLayout(M2_READY_FRAME_ORIGIN, 'x')
+  const cells = orderedPlacementCells(layout.frame)
+  const validation = validatePortalFrame({ blocks: layout.frame, widthAxis: 'x' })
+  const placedLines = cells.map((cell) => placedFrameCellLine(OBSIDIAN, OBSIDIAN, cell))
+  const frameLine = frameReadyLine(cells, 'x')
+
+  // The ignition leg: refused without flint_and_steel, offered with it.
+  const withoutSteel = planPortalIgnition({ frame: validation, hasFlintAndSteel: false })
+  const withSteel = planPortalIgnition({ frame: validation, hasFlintAndSteel: true })
+
+  return {
+    inventory,
+    toolRank,
+    mining: {
+      refused: rankWithoutDiamond.attempted === false,
+      refusedLine: rankWithoutDiamond.line,
+      allowedWithDiamond: rankWithDiamond.attempted === true,
+      allowedLine: rankWithDiamond.line,
+    },
+    plan: {
+      ready: plan.ready === true,
+      prerequisiteKinds,
+      prerequisitesOrdered,
+      diamondIndex: diamondAt,
+      pickaxeIndex: pickaxeAt,
+      obsidianIndex: obsidianAt,
+      diamondCount: diamondStep === null ? null : diamondStep.count ?? null,
+      obsidianCount: obsidianStep === null ? null : obsidianStep.count ?? null,
+      obsidianRequiredPickaxeRank: obsidianStep === null ? null : obsidianStep.requiredPickaxeRank ?? null,
+      pickaxePostcondition: pickaxeStep === null ? null : pickaxeStep.postcondition?.kind ?? null,
+      portalStepCount: plan.steps.length,
+    },
+    frame: {
+      cells: cells.length,
+      shape: validation.shape,
+      blocks: validation.blocks,
+      allCellsPlaceable: placedLines.every((line) => typeof line === 'string' && line.startsWith(PORTAL_BLOCK_PLACED)),
+      frameLine,
+      interiorCells: validation.interior.length,
+    },
+    ignition: {
+      refusedWithoutSteel: withoutSteel.ok === false,
+      refusalLine: withoutSteel.ok === false ? withoutSteel.line : null,
+      offeredWithSteel: withSteel.ok === true,
+      litLine: withSteel.ok === true ? withSteel.candidate.line : null,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // synthetic single-run fixture (log + runner.out + decisions + snapshot dir)
 // ---------------------------------------------------------------------------
 
@@ -292,20 +506,22 @@ const BOOT_LINE = `[${stamp(0)}] BOOT pid=4242 runId=${RUN_ID} bundle=none sourc
 
 /**
  * Materialize an offline fixture. `markerLines` are the plan-derived lines;
- * `portalTruthLine` is the optional inherited-portal observation (no chain).
+ * `portalTruthLine` is the optional inherited-portal observation (no chain);
+ * `inventory` is emitted as the run's two inventory samples (default: the
+ * post-prerequisite inventory; a fresh-run case passes one that is NOT ready).
  * Every case gets its own directory so evidence can never bleed across cases.
  */
-export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine = null }) {
+export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine = null, inventory = M2_READY_INVENTORY }) {
   const dir = mkdtempSync(join(tmpdir(), `m2-chain-${caseName}-`))
   const snapshotDir = join(dir, 'snapshots')
   mkdirSync(snapshotDir)
   const diamondSample = {
-    [DIAMOND]: M2_READY_INVENTORY[DIAMOND],
-    [DIAMOND_PICKAXE]: M2_READY_INVENTORY[DIAMOND_PICKAXE],
+    [DIAMOND]: inventory[DIAMOND] ?? 0,
+    [DIAMOND_PICKAXE]: inventory[DIAMOND_PICKAXE] ?? 0,
   }
   const materialsSample = {
-    [FLINT_AND_STEEL]: M2_READY_INVENTORY[FLINT_AND_STEEL],
-    [OBSIDIAN]: M2_READY_INVENTORY[OBSIDIAN],
+    [FLINT_AND_STEEL]: inventory[FLINT_AND_STEEL] ?? 0,
+    [OBSIDIAN]: inventory[OBSIDIAN] ?? 0,
   }
   const logLines = [
     BOOT_LINE,
@@ -346,7 +562,7 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
   return {
     dir,
     runId: RUN_ID,
-    inventory: M2_READY_INVENTORY,
+    inventory,
     logPath: join(dir, 'buddy.log'),
     snapshotDir,
     decisionsPath: join(dir, 'decisions.jsonl'),
@@ -384,6 +600,12 @@ export function runRealGate({
   const resultLine = stdout.split('\n').find((line) => line.startsWith('M2_RUN_RESULT ')) ?? null
   const status = resultLine === null ? null : /\bstatus=(\S+)/.exec(resultLine)?.[1] ?? null
   const reason = resultLine === null ? null : /\breason=(\S+)/.exec(resultLine)?.[1] ?? null
+  // The gate's ordered chain trace, parsed back through the gate's own parser.
+  const chainLinks = stdout
+    .split('\n')
+    .filter((line) => line.startsWith('m2_chain:'))
+    .map((line) => parsePortalChainLine(line))
+    .filter((link) => link !== null)
   return {
     cmd,
     exitCode: proc.exitCode,
@@ -392,8 +614,26 @@ export function runRealGate({
     resultLine,
     status,
     reason,
+    chainLinks,
     statusLine: stdout.split('\n').find((line) => line.startsWith('portal_lit: ')) ?? null,
   }
+}
+
+/**
+ * One-line rendering of the gate's parsed chain trace, for the rehearsal report.
+ * Deterministic and source-ordered, so two runs of the rehearsal are comparable.
+ */
+export function formatChainTrace(links) {
+  const list = Array.isArray(links) ? links : []
+  if (list.length === 0) return 'trace=missing'
+  return list
+    .map(
+      (link) =>
+        `source=${link.source} built=${link.built} lit=${link.lit} verified=${link.verified} ` +
+        `ordered=${link.ordered} overworld=${link.overworld === null ? 'unknown' : link.overworld} ` +
+        `indices=${link.indices.placed},${link.indices.frame},${link.indices.lit},${link.indices.verified}`,
+    )
+    .join(' | ')
 }
 
 // ---------------------------------------------------------------------------
@@ -444,16 +684,59 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
         `requiredCount=${goal.requiredCount ?? 'null'} predicate=${goal.targetPredicate ?? 'none'} dimension=${goal.dimension ?? 'none'}`,
     )
   }
-  for (const [step, mapping] of Object.entries(PLAN_STEP_MARKER_SOURCES)) {
+  for (const [step, gateStage] of Object.entries(PLAN_STEP_GATE_STAGES)) {
     const names = rehearsal.emittedSteps
       .filter((entry) => entry.kind === step)
       .flatMap((entry) => entry.markers.map((marker) => marker.name))
-    write(`M2_CHAIN_REHEARSAL_MAPPING step=${step} gateStage=${mapping.gateStage} markers=${[...new Set(names)].join(',') || 'none'}`)
-    for (const source of mapping.emission) write(`M2_CHAIN_REHEARSAL_MAPPING_SOURCE ${source}`)
+    write(`M2_CHAIN_REHEARSAL_MAPPING step=${step} gateStage=${gateStage} markers=${[...new Set(names)].join(',') || 'none'}`)
   }
+
+  // --- the emitter claims are PROBED, never remembered -----------------------
+  const probes = probeMarkerEmitters()
+  details.probes = probes
+  for (const probe of probes) {
+    write(
+      `M2_CHAIN_REHEARSAL_EMITTER marker=${probe.marker} probe=${probe.id} file=${probe.file}:${probe.line} ` +
+        `expect=${probe.expect} ok=${probe.ok} matches=${probe.matches}`,
+    )
+    if (!probe.ok) missing.push(`emitter_probe_missing:${probe.marker}:${probe.id}:${probe.file}`)
+    else if (probe.matches !== 1) missing.push(`emitter_probe_ambiguous:${probe.marker}:${probe.id}:${probe.file}:matches=${probe.matches}`)
+  }
+
   write(`M2_CHAIN_REHEARSAL_ORDER emitted=${rehearsal.emittedStages.join('>')} required=${GATE_REQUIRED_MARKER_ORDER.join('>')}`)
   write(`M2_CHAIN_REHEARSAL_FRAME blocks=${rehearsal.frame.blocks} shape=${rehearsal.frame.shape} line="${rehearsal.frame.frameLine}"`)
   write(`M2_CHAIN_REHEARSAL_LIT line="${rehearsal.frame.litLine}"`)
+
+  // --- fresh-run capability: what the chain needs and what it refuses --------
+  const fresh = rehearseFreshRunChain()
+  details.fresh = fresh
+  if (!fresh.mining.refused) missing.push('fresh_mining_not_refused_without_diamond_pickaxe')
+  if (!fresh.mining.allowedWithDiamond) missing.push('fresh_mining_not_allowed_with_diamond_pickaxe')
+  if (!fresh.plan.prerequisitesOrdered) {
+    missing.push(
+      `fresh_prerequisites_unordered:diamond=${fresh.plan.diamondIndex} pickaxe=${fresh.plan.pickaxeIndex} obsidian=${fresh.plan.obsidianIndex}`,
+    )
+  }
+  if (fresh.plan.obsidianRequiredPickaxeRank !== M2_READY_TOOL_RANK) {
+    missing.push(`fresh_obsidian_rank=${fresh.plan.obsidianRequiredPickaxeRank} expected=${M2_READY_TOOL_RANK}`)
+  }
+  if (fresh.frame.cells !== 10 || fresh.frame.shape !== 'ok' || !fresh.frame.allCellsPlaceable) {
+    missing.push(`fresh_frame:cells=${fresh.frame.cells} shape=${fresh.frame.shape} placeable=${fresh.frame.allCellsPlaceable}`)
+  }
+  if (!fresh.ignition.refusedWithoutSteel || !fresh.ignition.offeredWithSteel) {
+    missing.push(`fresh_ignition:refused=${fresh.ignition.refusedWithoutSteel} offered=${fresh.ignition.offeredWithSteel}`)
+  }
+  write(
+    `M2_CHAIN_REHEARSAL_FRESH inventory=${JSON.stringify(fresh.inventory)} toolRank=${fresh.toolRank} ` +
+      `prerequisites=${fresh.plan.prerequisiteKinds.join('>')} ordered=${fresh.plan.prerequisitesOrdered} ` +
+      `obsidianRank=${fresh.plan.obsidianRequiredPickaxeRank}`,
+  )
+  write(`M2_CHAIN_REHEARSAL_FRESH_MINING refused="${fresh.mining.refusedLine}" allowed="${fresh.mining.allowedLine}"`)
+  write(
+    `M2_CHAIN_REHEARSAL_FRESH_FRAME cells=${fresh.frame.cells} shape=${fresh.frame.shape} ` +
+      `interior=${fresh.frame.interiorCells} placeable=${fresh.frame.allCellsPlaceable} line="${fresh.frame.frameLine}"`,
+  )
+  write(`M2_CHAIN_REHEARSAL_FRESH_IGNITION refused="${fresh.ignition.refusalLine}" lit="${fresh.ignition.litLine}"`)
 
   // --- case a: the plan-derived chain must satisfy the real gate -------------
   const positiveFixture = materializeSyntheticRun({ caseName: 'chain', markerLines: rehearsal.emittedLines })
@@ -468,6 +751,25 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
   write(`M2_CHAIN_REHEARSAL_GATE_RESULT case=chain ${positive.resultLine ?? 'M2_RUN_RESULT missing'}`)
   if (positive.status !== 'PASS' || positive.exitCode !== 0) {
     missing.push(`gate_not_pass:status=${positive.status} reason=${positive.reason} exit=${positive.exitCode}`)
+  }
+  {
+    // The gate's own ordered trace must name all three links PROVEN, from the
+    // source that carried them, in order. A PASS whose trace cannot say that is a
+    // GAP: the artifact would carry a verdict with no chain evidence.
+    const link = positive.chainLinks.find((entry) => entry.source !== 'none') ?? null
+    write(`M2_CHAIN_REHEARSAL_CHAIN case=chain ${formatChainTrace(positive.chainLinks)}`)
+    if (link === null) {
+      missing.push('chain_trace_missing:chain')
+    } else {
+      if (link.built !== 'PASS' || link.lit !== 'PASS' || link.verified !== 'PASS') {
+        missing.push(`chain_trace_links:built=${link.built} lit=${link.lit} verified=${link.verified}`)
+      }
+      if (link.ordered !== true) missing.push('chain_trace_not_ordered')
+      if (link.overworld !== true) missing.push(`chain_trace_overworld=${link.overworld}`)
+      if (!(link.indices.placed < link.indices.frame && link.indices.frame < link.indices.lit && link.indices.lit < link.indices.verified)) {
+        missing.push(`chain_trace_indices:${JSON.stringify(link.indices)}`)
+      }
+    }
   }
 
   // --- case b: inherited portal (no build chain) is a named UNKNOWN ----------
@@ -484,6 +786,14 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
   write(`M2_CHAIN_REHEARSAL_GATE_RESULT case=inherited ${inherited.resultLine ?? 'M2_RUN_RESULT missing'}`)
   if (inherited.status !== 'UNKNOWN' || inherited.reason !== INHERITED_PORTAL_REASON || inherited.exitCode !== 2) {
     missing.push(`inherited_negative:status=${inherited.status} reason=${inherited.reason} exit=${inherited.exitCode}`)
+  }
+  {
+    const link = inherited.chainLinks.find((entry) => entry.source !== 'none') ?? null
+    write(`M2_CHAIN_REHEARSAL_CHAIN case=inherited ${formatChainTrace(inherited.chainLinks)}`)
+    if (link === null) missing.push('chain_trace_missing:inherited')
+    else if (link.built === 'PASS' || link.lit === 'PASS' || link.verified === 'PASS' || link.ordered) {
+      missing.push(`inherited_chain_trace_claimed_links:${formatChainTrace(inherited.chainLinks)}`)
+    }
   }
 
   // --- case c: PORTAL_LIT without a dimension must not PASS ------------------
@@ -506,6 +816,37 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
     missing.push(`lit_no_dimension_negative:status=${noDimension.status} exit=${noDimension.exitCode}`)
   }
 
+  // --- case d: a FRESH run's own evidence never PASSes ----------------------
+  // The fresh inventory cannot satisfy diamond_ready / portal_materials_ready, and
+  // there is no chain: the gate must say UNKNOWN. This is the outcome half of the
+  // fresh-run capability case above.
+  const freshFixture = materializeSyntheticRun({
+    caseName: 'fresh',
+    markerLines: [],
+    inventory: M2_FRESH_INVENTORY,
+  })
+  let freshGate
+  try {
+    freshGate = runRealGate({ fixture: freshFixture })
+  } finally {
+    if (cleanup) rmSync(freshFixture.dir, { recursive: true, force: true })
+  }
+  details.freshGate = freshGate
+  write(`M2_CHAIN_REHEARSAL_GATE case=fresh status=${freshGate.status} reason=${freshGate.reason} exit=${freshGate.exitCode}`)
+  write(`M2_CHAIN_REHEARSAL_GATE_RESULT case=fresh ${freshGate.resultLine ?? 'M2_RUN_RESULT missing'}`)
+  write(`M2_CHAIN_REHEARSAL_CHAIN case=fresh ${formatChainTrace(freshGate.chainLinks)}`)
+  if (freshGate.status === 'PASS' || freshGate.exitCode === 0) {
+    missing.push(`fresh_negative:status=${freshGate.status} exit=${freshGate.exitCode}`)
+  }
+  if (freshGate.status !== 'UNKNOWN') missing.push(`fresh_not_unknown:status=${freshGate.status}`)
+  {
+    const link = freshGate.chainLinks.find((entry) => entry.source !== 'none') ?? null
+    if (link === null) missing.push('chain_trace_missing:fresh')
+    else if (link.built === 'PASS' || link.lit === 'PASS' || link.verified === 'PASS') {
+      missing.push(`fresh_chain_trace_claimed_links:${formatChainTrace(freshGate.chainLinks)}`)
+    }
+  }
+
   const result = missing.length === 0 ? 'READY' : 'GAP'
   details.result = result
   details.missing = missing
@@ -513,7 +854,8 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
     `M2_CHAIN_REHEARSAL result=${result} stages=${rehearsal.stepKinds.join('>')} ` +
       `markers=${rehearsal.emittedStages.join('>')} missing=${missing.length === 0 ? 'none' : missing.join(',')} ` +
       `gate=${positive.status ?? 'none'} inherited=${inherited.status ?? 'none'}/${inherited.reason ?? 'none'} ` +
-      `lit_no_dimension=${noDimension.status ?? 'none'}`,
+      `lit_no_dimension=${noDimension.status ?? 'none'} fresh=${freshGate.status ?? 'none'} ` +
+      `emitter_probes=${probes.filter((probe) => probe.ok).length}/${probes.length}`,
   )
   return details
 }

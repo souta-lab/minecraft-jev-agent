@@ -15,14 +15,22 @@
 //     chain never PASSes;
 //   * a missing / out-of-order / renamed stage produces a precise diff.
 import assert from 'node:assert/strict'
-import { rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { parsePortalMarker } from './m2-gate.mjs'
 import {
   GATE_REQUIRED_MARKER_ORDER,
+  M2_FRESH_INVENTORY,
+  M2_FRESH_TOOL_RANK,
   M2_READY_INVENTORY,
   M2_READY_TOOL_RANK,
+  MARKER_EMITTER_PROBES,
+  PLAN_STEP_GATE_STAGES,
   diffMarkerOrder,
   materializeSyntheticRun,
+  probeMarkerEmitters,
+  rehearseFreshRunChain,
   rehearsePlanChain,
   runRehearsal,
   runRealGate,
@@ -187,6 +195,116 @@ async function gateOnLines(caseName, lines) {
   assert.notEqual(chainlessResult.status, 'PASS')
   assert.match(chainlessResult.stdout, /reason=inherited_portal/)
   ok('a reordered chain and a chainless PORTAL_VERIFIED=true never PASS the real gate')
+}
+
+// ---------------------------------------------------------------------------
+// 8. the emitter provenance is PROBED in the source, not remembered
+// ---------------------------------------------------------------------------
+// The previous revision carried hardcoded `executor.ts:825`-style references that
+// had drifted (placedFrameCellLine is at executor.ts:1396). These assertions pin
+// the derived form: every claim is a live search, the reported line really holds
+// the claimed text, and a wrong root makes the probe fail instead of passing.
+{
+  assert.equal(report.probes.length, Object.values(MARKER_EMITTER_PROBES).flat().length)
+  for (const probe of report.probes) {
+    assert.equal(probe.ok, true, `emitter probe not found: ${probe.marker} ${probe.id} ${probe.file}`)
+    assert.equal(probe.matches, 1, `emitter probe must match exactly once: ${probe.id} in ${probe.file}`)
+    assert.ok(probe.line > 0, `emitter probe has no line: ${probe.id}`)
+    const lines = readFileSync(join('/home/s0u7a/mc-ai-worktrees/m2-chain', probe.file), 'utf8').split('\n')
+    assert.ok(
+      lines[probe.line - 1].includes(probe.text),
+      `probe ${probe.id} claims ${probe.file}:${probe.line} but that line does not contain the emitter call`,
+    )
+  }
+  // A root without the sources cannot produce a passing probe.
+  const emptyRoot = mkdtempSync(join(tmpdir(), 'm2-rehearsal-empty-'))
+  try {
+    const blind = probeMarkerEmitters({ root: emptyRoot })
+    assert.equal(blind.length, report.probes.length)
+    assert.ok(blind.every((probe) => probe.ok === false && probe.line === -1))
+  } finally {
+    rmSync(emptyRoot, { recursive: true, force: true })
+  }
+  // Every gate stage the plan feeds is one of the gate's own stage names.
+  assert.deepEqual(Object.values(PLAN_STEP_GATE_STAGES), ['portal_built', 'portal_lit', 'portal_lit'])
+  ok('every marker emitter claim is a live source probe, verified line by line')
+}
+
+// ---------------------------------------------------------------------------
+// 9. fresh-run capability: what the chain needs, and what it refuses
+// ---------------------------------------------------------------------------
+{
+  assert.deepEqual(M2_FRESH_INVENTORY, { stone_pickaxe: 1, cobblestone: 16 })
+  assert.equal(M2_FRESH_TOOL_RANK, 2)
+  const fresh = report.fresh
+  assert.deepEqual(fresh, rehearseFreshRunChain())
+  // The obsidian mine is REFUSED without the diamond pickaxe, never attempted.
+  assert.equal(fresh.mining.refused, true)
+  assert.equal(fresh.mining.refusedLine, 'PRECONDITION_MISSING tool=diamond_pickaxe')
+  assert.equal(fresh.mining.allowedWithDiamond, true)
+  assert.match(fresh.mining.allowedLine, /^MINE_OBSIDIAN target=obsidian count=10 tool=diamond_pickaxe$/)
+  // The material chain is emitted in dependency order: diamond -> diamond_pickaxe
+  // -> obsidian, with the obsidian step carrying the rank-4 tool requirement.
+  assert.equal(fresh.plan.ready, false, 'a fresh inventory is not M2-ready')
+  assert.equal(fresh.plan.prerequisitesOrdered, true)
+  assert.ok(fresh.plan.diamondIndex < fresh.plan.pickaxeIndex)
+  assert.ok(fresh.plan.pickaxeIndex < fresh.plan.obsidianIndex)
+  assert.equal(fresh.plan.diamondCount, 3)
+  assert.equal(fresh.plan.obsidianCount, 10)
+  assert.equal(fresh.plan.obsidianRequiredPickaxeRank, 4)
+  assert.equal(fresh.plan.pickaxePostcondition, 'toolRankAtLeast')
+  // The frame leg is placeable as-is (10 edge cells, corners optional).
+  assert.equal(fresh.frame.cells, 10)
+  assert.equal(fresh.frame.shape, 'ok')
+  assert.equal(fresh.frame.allCellsPlaceable, true)
+  assert.equal(fresh.frame.frameLine, 'PORTAL_FRAME_READY blocks=10 shape=ok')
+  // The ignition leg is refused without flint_and_steel.
+  assert.equal(fresh.ignition.refusedWithoutSteel, true)
+  assert.equal(fresh.ignition.refusalLine, 'PRECONDITION_MISSING tool=flint_and_steel')
+  assert.equal(fresh.ignition.offeredWithSteel, true)
+  assert.match(fresh.ignition.litLine, /^PORTAL_LIT pos=\d+,\d+,\d+ dimension=minecraft:overworld$/)
+  ok('a fresh run must gather diamond x3 -> diamond_pickaxe -> obsidian x10 + flint_and_steel to build/light the frame')
+}
+
+// ---------------------------------------------------------------------------
+// 10. the real gate's ordered chain trace is parsed back and pinned
+// ---------------------------------------------------------------------------
+{
+  const positiveLink = report.positive.chainLinks.find((entry) => entry.source !== 'none')
+  assert.ok(positiveLink !== null, 'the PASS fixture must carry a chain trace')
+  assert.equal(positiveLink.built, 'PASS')
+  assert.equal(positiveLink.lit, 'PASS')
+  assert.equal(positiveLink.verified, 'PASS')
+  assert.equal(positiveLink.ordered, true)
+  assert.equal(positiveLink.overworld, true)
+  assert.equal(positiveLink.blocks, 10)
+  assert.equal(positiveLink.shape, 'ok')
+  assert.equal(positiveLink.dimension, 'minecraft:overworld')
+  const { placed, frame, lit, verified } = positiveLink.indices
+  assert.ok(placed >= 0 && placed < frame && frame < lit && lit < verified)
+
+  const inheritedLink = report.inherited.chainLinks.find((entry) => entry.source !== 'none')
+  assert.ok(inheritedLink !== null)
+  assert.equal(inheritedLink.ordered, false)
+  for (const name of ['built', 'lit', 'verified']) assert.equal(inheritedLink[name], 'UNKNOWN')
+
+  const freshLink = report.freshGate.chainLinks.find((entry) => entry.source !== 'none')
+  assert.ok(freshLink !== null)
+  assert.equal(freshLink.ordered, false)
+  for (const name of ['built', 'lit', 'verified']) assert.equal(freshLink[name], 'UNKNOWN')
+  ok('the gate chain trace is PASS for the chain, and link-less for inherited and fresh runs')
+}
+
+// ---------------------------------------------------------------------------
+// 11. a FRESH run's own evidence is UNKNOWN, never PASS
+// ---------------------------------------------------------------------------
+{
+  assert.equal(report.freshGate.exitCode, 2)
+  assert.equal(report.freshGate.status, 'UNKNOWN')
+  assert.match(report.freshGate.resultLine, /diamond=UNKNOWN materials=UNKNOWN frame=UNKNOWN lit=UNKNOWN/)
+  assert.match(report.freshGate.reason, /^m2_stages_incomplete:/)
+  assert.doesNotMatch(report.freshGate.stdout, /status=PASS/)
+  ok('a fresh inventory with no chain -> UNKNOWN (the capability is proven, the outcome is not)')
 }
 
 console.log(`m2-chain-rehearsal-test ${checks}/${checks} PASS`)
