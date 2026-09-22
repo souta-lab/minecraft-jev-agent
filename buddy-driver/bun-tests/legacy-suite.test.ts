@@ -25,5 +25,7 @@ const fixtures = readdirSync(PACKAGE_ROOT)
   .sort()
 
 for (const file of fixtures) {
-  test(`Bun fixture: ${file}`, async () => runFixture(file))
+  // The child owns the same 120 s budget. Give the parent wrapper that budget too;
+  // otherwise Bun's 5 s default kills healthy long-running fixtures first.
+  test(`Bun fixture: ${file}`, async () => runFixture(file), 120_000)
 }

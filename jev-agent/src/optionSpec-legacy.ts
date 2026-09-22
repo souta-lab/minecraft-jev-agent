@@ -1409,6 +1409,13 @@ export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
   if (typeof spec.target.targetY === 'number' && Number.isFinite(spec.target.targetY)) goal.targetY = spec.target.targetY
   if (typeof spec.target.dimension === 'string' && spec.target.dimension.length > 0) goal.dimension = spec.target.dimension
   if (typeof spec.target.predicate === 'string' && spec.target.predicate.length > 0) goal.targetPredicate = spec.target.predicate
+  // #system2-compile: the code-grounded navigation target must survive the round
+  // trip. `compilePlannedGoal` already carries `goal.targetPosition` into
+  // `target.position`, but this rebuild dropped it, so a host-grounded goal such
+  // as death-site recovery reached the queue with no coordinate and was retired as
+  // `goto goal ... has no code-grounded target position`. Never model-authored:
+  // only a position the compiler itself put in the spec can come back out.
+  if (spec.target.position !== undefined) goal.targetPosition = { ...spec.target.position }
   if (spec.protected === true) goal.protected = true
   if (spec.core === true) goal.core = true
   goal.optionInstanceId = stableOptionInstanceId(spec)

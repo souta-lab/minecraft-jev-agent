@@ -60,6 +60,14 @@ import { goalQueueSnapshotFromState } from './state-snapshot.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { deriveResumeRung, rungIndexById } from './planner.ts'
+import {
+  NOT_EXECUTABLE_HERE_KEEP_KINDS,
+  restrictCandidatesNotExecutableHere,
+  safetyEnvelopeActive,
+} from '../jev-agent/src/candidates.ts'
+import type { Candidate, CandidateKind, NotExecutableHereBinding } from '../jev-agent/src/candidates.ts'
+import type { AgentSignals, InventoryState, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
+import type { GoalQueueState } from '../jev-agent/src/goalQueue.ts'
 import { OVERWORLD } from '../jev-agent/src/netherPortalPlan.ts'
 
 interface Case {
@@ -720,6 +728,9 @@ addCase('(vii) every new marker is MIRRORED, so it reaches buddy.log', () => {
     'NO_PRODUCTIVE_HEAD_BOUND',
     'NO_PRODUCTIVE_HEAD_WINDOW',
     'ROW_NOT_EXECUTABLE_HERE_REPEATS',
+    'ROW_NOT_EXECUTABLE_HERE_BINDING',
+    'ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED',
+    'ROW_NOT_EXECUTABLE_HERE_INTERRUPT',
   ]
   const missing = markers.filter((token) => !MIRRORED_MARKERS.has(token))
   const tokens = markers.map((token) => mirroredEventToken(`${token} detail=1`))
@@ -1069,6 +1080,249 @@ addCase('(ix) the controller arms the warrant only for a head-about summon and a
     "plan.op === 'patch' || plan.op === 'replace'",
     'const humanOwnsWhat = this.queue.state.goals.some(',
     'PLAN_HEAD_REPLACEMENT_APPLIED',
+  ]
+  const missing = required.filter((needle) => !source.includes(needle))
+  const pass = missing.length === 0
+  return { pass, detail: `missing=[${missing.join(' | ')}]` }
+})
+
+// ---------------------------------------------------------------------------
+// (x) the proof binds the OFFER: an unexecutable head must not drive the body
+// ---------------------------------------------------------------------------
+// Measured live (`run-muctsqt6-27ocr`, main 3002d84): the head was
+// `g14:descend:raw_iron` declaring minecraft:overworld (success `levelAtMost y32`)
+// while the body stood in the NETHER at y37, hp 10 - and the body kept DESCENDING
+// toward y32, i.e. toward lava, while the escalation that replaces the row was in
+// flight. The queue had already proven the row cannot run here; the OFFER had not.
+function liveBinding(): NotExecutableHereBinding {
+  return {
+    goalId: 'g14:descend:raw_iron',
+    goalKey: 'descend:raw_iron:1',
+    declaredDimension: 'overworld',
+    liveDimension: 'the_nether',
+    reason: 'no_executable_alternative',
+  }
+}
+
+function offerCandidate(id: string, kind: CandidateKind, target: Vec3Json | null = null): Candidate {
+  return {
+    id,
+    kind,
+    label: `${kind} ${id}`,
+    targetName: null,
+    target,
+    itemName: kind === 'DESCEND' ? 'raw_iron' : null,
+    cost: 1,
+    risk: 0,
+    meta: {},
+  } as unknown as Candidate
+}
+
+/** The measured offer: the row's own descent plus the control/self-care options. */
+function measuredOffer(): Candidate[] {
+  return [
+    offerCandidate('DESCEND:level:N:b16_37_-9', 'DESCEND', { x: 16, y: 36, z: -9 }),
+    offerCandidate('MOVE:p16_37_-9', 'MOVE', { x: 16, y: 37, z: -9 }),
+    offerCandidate('STEP:down:E:b16_36_-9', 'STEP', { x: 16, y: 36, z: -9 }),
+    offerCandidate('RETREAT:p16_38_-9', 'RETREAT', { x: 16, y: 38, z: -9 }),
+    offerCandidate('WAIT', 'WAIT'),
+    offerCandidate('ESCALATE', 'ESCALATE'),
+  ]
+}
+
+function offerWorld(overrides: Partial<SelfState> = {}, signals: Partial<AgentSignals> = {}): WorldState {
+  const feet: Vec3Json = { x: 16, y: 37, z: -9 }
+  const counts: Record<string, number> = { cobblestone: 4 }
+  const slots = Object.entries(counts).map(([name, count], slot) => ({ name, count, slot }))
+  const inventory: InventoryState = { slots, counts, totalItems: 4 }
+  const self: SelfState = {
+    username: 'AI_REC',
+    position: feet,
+    eyePosition: { x: feet.x, y: feet.y + 1.62, z: feet.z },
+    yaw: 0,
+    pitch: 0,
+    onGround: true,
+    health: 10,
+    food: 18,
+    gameMode: 'survival',
+    dimension: NETHER,
+    isDay: true,
+    heldItem: null,
+    ...overrides,
+  }
+  const baseSignals: AgentSignals = {
+    consecutiveFailures: 0,
+    lastFailureCode: null,
+    lastPathStatus: 'idle',
+    stalledMs: 0,
+    lastPolicyConfidence: null,
+    maxConcurrentActions: 0,
+    escalationRecommended: false,
+    failedCandidates: {},
+    knownResources: [],
+    ...signals,
+  }
+  const goalQueue: GoalQueueState = {
+    depth: 1,
+    current: staleDescendRow(),
+    empty: false,
+    hasImpossible: false,
+    done: 3,
+    goals: [staleDescendRow()],
+  }
+  return {
+    schemaVersion: 1,
+    tick: 7,
+    timestampMs: 1_790_000_000_000,
+    self,
+    inventory,
+    entities: [],
+    blocks: [],
+    terrain: { standable: [feet] },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    portalFrameSites: [],
+    descent: [],
+    stepCuts: [],
+    headroomCuts: [],
+    goal: {
+      id: 'g',
+      description: 'explore',
+      targetItem: 'raw_iron',
+      requiredCount: 1,
+      startCount: 0,
+      haveCount: 0,
+      progress: 0,
+      complete: false,
+      startedAtMs: 0,
+    },
+    goalQueue,
+    recentEvents: [],
+    signals: baseSignals,
+  }
+}
+
+addCase('(x) the measured shape: the unexecutable head no longer offers its own descent', () => {
+  const state = offerWorld()
+  const offer = measuredOffer()
+  const restriction = restrictCandidatesNotExecutableHere(state, offer, liveBinding(), offer)
+  const keptKinds = restriction.candidates.map((candidate) => candidate.kind)
+  const withheldIds = restriction.withheld.map((candidate) => candidate.id)
+  const pass =
+    restriction.bound === true &&
+    restriction.reason === 'bound' &&
+    withheldIds.includes('DESCEND:level:N:b16_37_-9') &&
+    withheldIds.includes('MOVE:p16_37_-9') &&
+    withheldIds.includes('STEP:down:E:b16_36_-9') &&
+    // no candidate that descends or walks toward the unreachable y32 predicate
+    restriction.candidates.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE' || candidate.kind === 'RETREAT') &&
+    // the body can still hold and hand off, and self-care survives
+    keptKinds.includes('WAIT') &&
+    keptKinds.includes('ESCALATE') &&
+    keptKinds.includes('RETREAT') &&
+    keptKinds.every((kind) => NOT_EXECUTABLE_HERE_KEEP_KINDS.has(kind))
+  return { pass, detail: `bound=${restriction.bound} kept=[${keptKinds.join(',')}] withheld=[${withheldIds.join(',')}]` }
+})
+
+addCase('(x) the same-dimension head executes exactly as now (no binding)', () => {
+  const state = offerWorld()
+  const offer = measuredOffer()
+  const unbound = restrictCandidatesNotExecutableHere(state, offer, null, offer)
+  const sameDimensionHead = restrictCandidatesNotExecutableHere(
+    state,
+    offer,
+    { ...liveBinding(), declaredDimension: 'the_nether', reason: 'never' },
+    offer,
+  )
+  // A binding whose row DOES declare the live dimension is not a proof; the
+  // controller only creates one from the queue's escalate result, and the control
+  // here pins that the pure filter is driven by the fact, not by the row's kind.
+  const pass =
+    unbound.bound === false &&
+    unbound.reason === 'no_binding' &&
+    unbound.candidates.length === offer.length &&
+    sameDimensionHead.bound === true &&
+    unbound.withheld.length === 0
+  return { pass, detail: `unbound=${unbound.reason} candidates=${unbound.candidates.length}/${offer.length}` }
+})
+
+addCase('(x) a safety envelope always outranks the binding (escape routes are never withdrawn)', () => {
+  const offer = measuredOffer()
+  // lava at the body's own cell
+  const hazardState = offerWorld({
+    envHazard: {
+      active: true,
+      inFire: false,
+      inLava: true,
+      onFire: false,
+      drowning: false,
+      headInWater: false,
+      airAbove: true,
+      adjacentLava: true,
+      inWaterWhileBurning: false,
+      kinds: ['in_lava'],
+      cell: { x: 16, y: 37, z: -9 },
+      block: 'lava',
+      leavesCell: true,
+      immediateDamage: true,
+      escapeRequired: true,
+      detail: 'lava at the body cell',
+    },
+  } as unknown as Partial<SelfState>)
+  const hazard = restrictCandidatesNotExecutableHere(hazardState, offer, liveBinding(), offer)
+  // out of air: the submersion envelope owns the escape
+  const drowningState = offerWorld({ air: 2, feetInWater: true, eyesInWater: true })
+  const drowning = restrictCandidatesNotExecutableHere(drowningState, offer, liveBinding(), offer)
+  // critical damage still landing
+  const damageState = offerWorld(
+    {},
+    { criticalDamage: { active: true, since: 1, health: 4, damageTaken: 3, sources: [] } } as unknown as Partial<AgentSignals>,
+  )
+  const damage = restrictCandidatesNotExecutableHere(damageState, offer, liveBinding(), offer)
+  const pass =
+    safetyEnvelopeActive(hazardState, offer) === true &&
+    hazard.bound === false &&
+    hazard.reason === 'safety_envelope_active' &&
+    hazard.candidates.length === offer.length &&
+    drowning.bound === false &&
+    drowning.reason === 'safety_envelope_active' &&
+    damage.bound === false &&
+    damage.reason === 'safety_envelope_active' &&
+    // a healthy, dry body is NOT in an envelope, so the binding applies
+    safetyEnvelopeActive(offerWorld(), offer) === false
+  return {
+    pass,
+    detail: `hazard=${hazard.reason}/${hazard.candidates.length} drowning=${drowning.reason} damage=${damage.reason} healthyEnvelope=${safetyEnvelopeActive(offerWorld(), offer)}`,
+  }
+})
+
+addCase('(x) the binding never empties the offer and never touches a row that can run here', () => {
+  const state = offerWorld()
+  const noControl = [offerCandidate('DESCEND:level:N:b16_37_-9', 'DESCEND', { x: 16, y: 36, z: -9 })]
+  const empty = restrictCandidatesNotExecutableHere(state, noControl, liveBinding(), noControl)
+  const controlOnly = [offerCandidate('WAIT', 'WAIT'), offerCandidate('ESCALATE', 'ESCALATE')]
+  const notNarrowing = restrictCandidatesNotExecutableHere(state, controlOnly, liveBinding(), controlOnly)
+  const pass =
+    empty.bound === false &&
+    empty.reason === 'no_kept_candidates' &&
+    empty.candidates.length === noControl.length &&
+    notNarrowing.bound === false &&
+    notNarrowing.reason === 'not_narrowing' &&
+    notNarrowing.candidates.length === 2
+  return { pass, detail: `empty=${empty.reason} controlOnly=${notNarrowing.reason}` }
+})
+
+addCase('(x) the controller binds the offer, remembers the fact, and interrupts an in-flight work action', async () => {
+  const source = await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()
+  const required = [
+    'restrictCandidatesNotExecutableHere(',
+    'this.notExecutableHereBinding =',
+    "result.action === 'escalate' && result.goalId !== null",
+    'const rawOfferBeforeSafety = candidates',
+    'isNotExecutableHereKeepKind(running.kind)',
+    'this.executor.cancelCurrent(`row not executable here:',
+    'formatNotExecutableHereInterrupt(binding, running.id, running.kind)',
   ]
   const missing = required.filter((needle) => !source.includes(needle))
   const pass = missing.length === 0

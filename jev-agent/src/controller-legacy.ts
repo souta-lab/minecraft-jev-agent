@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer } from './candidates.ts'
-import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer, isNotExecutableHereKeepKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
@@ -161,7 +161,7 @@ import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import type { AgentSignals, DimensionProvenance, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -255,7 +255,13 @@ import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './brid
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
-import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
+import {
+  evaluateSystem2Apply,
+  formatCompiledGoalRows,
+  formatSystem2Discard,
+  formatSystem2PlanApplied,
+  system2BodyOwned,
+} from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
 import {
   evaluateBetaTerminationBoundary,
@@ -515,6 +521,15 @@ export interface JevAgentOptions {
    * counts the same action failing the same way inside the executor.
    */
   actionFailureEscalateCycles: number
+  /**
+   * Read provenance for the bot's per-column world cache (see
+   * `DimensionProvenance` in `state.ts`). The resident supplies it so every world
+   * read the sensor performs is attributable to the dimension it came from; a cell
+   * whose column is not attributable is refused (typed) instead of becoming an
+   * offer. Absent in standalone runs and fixtures, which therefore keep the
+   * un-gated sensor path exactly.
+   */
+  dimensionProvenance?: DimensionProvenance | null
   /**
    * Issue #327 follow-up: consecutive chosen WAIT decisions while real
    * actionable candidates exist, after which the local recovery is declared
@@ -1130,11 +1145,20 @@ export function registerPlacedStation(
   stations: KnownResource[],
   item: string,
   at: Vec3Json,
+  /**
+   * The world the placement was VERIFIED in. A placed station is a world fact
+   * like any remembered cell: without it the row is un-attributable and the
+   * fail-closed dimension gate (#14, `resourceDimensionMatches`) refuses it as a
+   * target in EVERY world. Optional only so a fixture can build the
+   * un-attributed shape deliberately.
+   */
+  dimension?: string,
 ): { added: boolean; station: KnownResource } {
   const station: KnownResource = {
     name: item,
     kind: 'station',
     position: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) },
+    ...(dimension === undefined ? {} : { dimension }),
   }
   const cellKey = (entry: { name: string; position: Vec3Json }): string =>
     `${entry.name}@${Math.round(entry.position.x)},${Math.round(entry.position.y)},${Math.round(entry.position.z)}`
@@ -1290,6 +1314,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // that no fluid could reach the pocket - and "the body mined the wall because the
   // pocket is provably dry" cannot be told apart from an ordinary tunnel step.
   'DIG_ROUTE_ENTRY',
+  // #system2-compile: the queue-side half of the System2 hand-off must be visible
+  // in BOTH evidence planes. `LLM plan applied` (and therefore the compiled rows it
+  // names) exists only in the run log, so without this marker the one line that
+  // says WHY a model answer became no row - its typed reason - is dropped from the
+  // host log, and "the answer carried no goals" cannot be told apart from "the
+  // answer was never applied".
+  'SYSTEM2_PLAN_NO_GOALS',
+  // The applied half of the same record: what the answer BECAME.
+  'SYSTEM2_PLAN_APPLIED',
   // The BOUNDED LEVEL SCAN (`levelScan.ts`): the descent a body takes when NOTHING at its
   // own level can ground a route and the rock below can. Without these in the mirrored
   // list the live sink DROPS the two lines that say which level the body descended to, which
@@ -1610,6 +1643,9 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'NO_PRODUCTIVE_HEAD_BOUND',
   'NO_PRODUCTIVE_HEAD_WINDOW',
   'ROW_NOT_EXECUTABLE_HERE_REPEATS',
+  'ROW_NOT_EXECUTABLE_HERE_BINDING',
+  'ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED',
+  'ROW_NOT_EXECUTABLE_HERE_INTERRUPT',
   'PLAN_HEAD_REPLACEMENT_APPLIED',
 ])
 
@@ -2102,6 +2138,14 @@ export class JevController {
    * this; every other request leaves the conservative rule untouched.
    */
   private headAnswerWarrant: HeadAnswerWarrant | null = null
+  /**
+   * #plan-reconciliation: the queue's proven "this head cannot execute in the live
+   * dimension" fact, remembered from `reconcileHeadDimension` so the OFFER can be
+   * bound to it in the same tick. Null whenever the head can run here.
+   */
+  private notExecutableHereBinding: NotExecutableHereBinding | null = null
+  /** one interrupt per offending in-flight action, so the cancel cannot loop. */
+  private notExecutableInterruptedActionId: string | null = null
   /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
@@ -3193,6 +3237,10 @@ export class JevController {
       // names the capability gap when code grounds no attack and no
       // keep-distance route, which is mirrored as `THREAT_NO_ESCAPE` - the work
       // set is never silently handed back while a hostile is on the body.
+      // #plan-reconciliation: the offer BEFORE the safety envelope, so the
+      // not-executable-here binding can tell whether a safety envelope is active
+      // (its escape routes must never be withdrawn by the binding below).
+      const rawOfferBeforeSafety = candidates
       const threatOffer = applyGroundedThreatRestriction(state, candidates, grounded.withheld)
       candidates = threatOffer.candidates
       this.logThreatOccluded(threatOffer)
@@ -3229,6 +3277,84 @@ export class JevController {
       // Drowning is excluded: `restrictCandidatesDuringSubmersion` above owns
       // that question.
       candidates = restrictCandidatesDuringEnvHazard(state, candidates)
+      // #plan-reconciliation: the queue PROVED this head cannot run in the live
+      // dimension (`ROW_NOT_EXECUTABLE_HERE`), and the escalation that replaces it
+      // is in flight. Measured live (`run-muctsqt6-27ocr`): the offer still carried
+      // the row's own descent, so the body kept DESCENDING toward an overworld
+      // `levelAtMost y32` predicate while standing in the Nether at hp 10 - the
+      // safe verdict and the physical actions disagreed toward the lava. The proof
+      // is now binding on the offer: only control/self-care kinds stay, unless a
+      // safety envelope is active (which always outranks this binding).
+      const notExecutableOffer = restrictCandidatesNotExecutableHere(
+        state,
+        candidates,
+        this.notExecutableHereBinding,
+        rawOfferBeforeSafety,
+      )
+      if (notExecutableOffer.bound) {
+        this.logger.warn(
+          'agent',
+          formatNotExecutableHereBinding(
+            this.notExecutableHereBinding as NotExecutableHereBinding,
+            notExecutableOffer,
+            this.queue.current?.id ?? 'none',
+          ),
+          {
+            goalId: this.notExecutableHereBinding?.goalId ?? null,
+            goalKey: this.notExecutableHereBinding?.goalKey ?? null,
+            declaredDimension: this.notExecutableHereBinding?.declaredDimension ?? null,
+            liveDimension: this.notExecutableHereBinding?.liveDimension ?? null,
+            queueReason: this.notExecutableHereBinding?.reason ?? null,
+            withheld: notExecutableOffer.withheld.map((candidate) => candidate.id),
+            kept: notExecutableOffer.candidates.map((candidate) => candidate.kind),
+          },
+          this.tickCounter,
+        )
+      } else if (this.notExecutableHereBinding !== null && notExecutableOffer.reason === 'safety_envelope_active') {
+        this.logger.info(
+          'agent',
+          `ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED goalId=${this.notExecutableHereBinding.goalId} reason=safety_envelope_active`,
+          {
+            goalId: this.notExecutableHereBinding.goalId,
+            goalKey: this.notExecutableHereBinding.goalKey,
+            reason: notExecutableOffer.reason,
+          },
+          this.tickCounter,
+        )
+      }
+      candidates = notExecutableOffer.candidates
+      // The body must also STOP working the row that cannot run here. An action
+      // already in flight would otherwise keep descending while the offer is
+      // correct; cancel it once, with typed evidence, unless it is a control or
+      // self-care action.
+      if (notExecutableOffer.bound) {
+        const running = this.executor.current
+        if (
+          running !== null &&
+          running.status === 'running' &&
+          !isNotExecutableHereKeepKind(running.kind) &&
+          running.id !== this.notExecutableInterruptedActionId &&
+          this.notExecutableHereBinding !== null
+        ) {
+          const binding = this.notExecutableHereBinding
+          if (this.executor.cancelCurrent(`row not executable here: ${binding.goalKey} declared=${binding.declaredDimension ?? 'none'} live=${binding.liveDimension ?? 'unknown'}`)) {
+            this.notExecutableInterruptedActionId = running.id
+            this.logger.warn(
+              'agent',
+              formatNotExecutableHereInterrupt(binding, running.id, running.kind),
+              {
+                actionId: running.id,
+                actionKind: running.kind,
+                goalId: binding.goalId,
+                goalKey: binding.goalKey,
+                declaredDimension: binding.declaredDimension,
+                liveDimension: binding.liveDimension,
+              },
+              this.tickCounter,
+            )
+          }
+        }
+      }
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -4216,9 +4342,25 @@ export class JevController {
    * `CANDIDATE_STARVATION`/ascent loop.
    */
   private reconcileHeadDimension(): void {
-    if (this.queue.isEmpty) return
+    if (this.queue.isEmpty) {
+      this.notExecutableHereBinding = null
+      return
+    }
     const live = this.bot.game?.dimension ?? null
     const result = this.queue.reconcileNotExecutableHead({ liveDimension: live })
+    // Only an ESCALATE leaves the not-executable row holding the plan (a `defer`
+    // has already moved it behind a row that can run here), so only that state binds
+    // the offer.
+    this.notExecutableHereBinding =
+      result.action === 'escalate' && result.goalId !== null
+        ? {
+            goalId: result.goalId,
+            goalKey: result.goalKey,
+            declaredDimension: result.declaredDimension,
+            liveDimension: result.liveDimension,
+            reason: result.reason,
+          }
+        : null
     if (result.action === 'hold') return
     if (result.action === 'defer') {
       this.resetNotExecutableDedupe()
@@ -5802,6 +5944,8 @@ export class JevController {
     const moveArrived =
       (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
     const surfaceSearchArrived = result.kind === 'RETRIEVE' && this.surfaceSearchArrived(candidate)
+    const exploreSearchArrived = result.kind === 'MOVE' && candidate.meta.explore === true && moveArrived
+    const searchArrived = surfaceSearchArrived || exploreSearchArrived
     const retrieveArrived = result.kind === 'RETRIEVE' && !surfaceSearchArrived && this.retrievalArrived(candidate)
     const retrieveDistanceClosed = result.kind === 'RETRIEVE' && !surfaceSearchArrived && result.distanceClosed
     const truth = truthfulActionOutcome({
@@ -5815,7 +5959,7 @@ export class JevController {
       damageObserved: result.damageObserved,
       arrived: moveArrived || retrieveArrived,
       distanceClosed: retrieveDistanceClosed,
-      searchArrived: surfaceSearchArrived,
+      searchArrived,
       requiresPickup: candidate.meta.requiresPickup === true,
     })
     const semanticProgress =
@@ -5830,9 +5974,9 @@ export class JevController {
       progressed: result.progressed,
       entityDefeated: result.entityDefeated,
       damageObserved: result.damageObserved,
-      arrived: moveArrived || retrieveArrived || surfaceSearchArrived,
+      arrived: moveArrived || retrieveArrived || searchArrived,
       distanceClosed: retrieveDistanceClosed,
-      searchArrived: surfaceSearchArrived,
+      searchArrived,
       semanticProgress,
       failureCode: result.failure,
     })
@@ -6007,7 +6151,12 @@ export class JevController {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.noteVerified(candidate.itemName)
         if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
-          const registered = registerPlacedStation(this.placedStations, candidate.itemName, candidate.target)
+          const registered = registerPlacedStation(
+            this.placedStations,
+            candidate.itemName,
+            candidate.target,
+            this.currentDimension(),
+          )
           if (registered.added) {
             this.logger.info(
               'agent',
@@ -6906,6 +7055,11 @@ export class JevController {
     }
     const current = this.queue.current
     if (current === null) return
+    if (current.kind === 'explore') {
+      // Search Options are intentionally open-ended: code owns grounded frontier
+      // enumeration and search progress, while beta/System2 own semantic termination.
+      return
+    }
     if (current.kind === 'goto') {
       const target = current.targetPosition ?? null
       if (target === null) {
@@ -8024,9 +8178,82 @@ export class JevController {
         }
         this.llmNotes.push(plan.note)
         if (this.llmNotes.length > 12) this.llmNotes.shift()
+        // #system2-compile: the hand-off is typed and mirrored. The applied line
+        // names the INTENT (which words the model wrote), the COMPILED rows (the
+        // executable meaning: kind, target, dimension) and the apply outcome; an
+        // answer that produced no row is a typed rejection naming why, never a
+        // silent no-op. Code reports the model's WHAT here; it never picks one.
+        const provenance = plan.provenance ?? null
+        const compiledRows = added.map((goal) => ({
+          id: goal.id,
+          kind: goal.kind,
+          targetItem: goal.targetItem ?? null,
+          targetY: goal.targetY ?? null,
+          dimension: goal.dimension ?? null,
+          description: goal.description,
+        }))
+        const compiledSummary = formatCompiledGoalRows(compiledRows)
+        const intentSource = provenance?.intentSource ?? 'unrecorded'
+        // `abort`/`complete`/`continue` are lifecycle ops whose meaning IS the op,
+        // so an empty goal list is their correct shape; only a goal-carrying op can
+        // "carry no goals".
+        const planOp = plan.op ?? 'replace'
+        const goalsExpected = planOp === 'patch' || planOp === 'replace'
+        // The MIRRORED half of the hand-off: one marker line naming the model's own
+        // words, the executable meaning of every accepted row, and the outcome. It
+        // is emitted in BOTH evidence planes (MIRRORED_MARKERS), or the host log
+        // cannot tell "the answer produced no row" from "the answer never applied".
+        this.logger.warn(
+          'system2',
+          formatSystem2PlanApplied({
+            requestId: requestContext.requestId,
+            op: planOp,
+            applied: added.length,
+            depth: this.queue.state.depth,
+            intentSource,
+            uncompiled: provenance?.uncompiled?.length ?? 0,
+            intent: provenance?.intent ?? plan.note,
+            rows: compiledRows,
+          }),
+          {
+            requestId: requestContext.requestId,
+            reason,
+            op: planOp,
+            applied: added.length,
+            compiled: compiledRows,
+            uncompiled: provenance?.uncompiled ?? [],
+            intentSource,
+            intent: provenance?.intent ?? null,
+            noGoalsReason: plan.goals.length === 0 && goalsExpected ? (provenance?.noGoalsReason ?? 'answer_carried_no_goals') : null,
+            note: plan.note,
+          },
+          this.tickCounter,
+        )
+        if (plan.goals.length === 0 && goalsExpected) {
+          const noGoalsReason = provenance?.noGoalsReason ?? 'answer_carried_no_goals'
+          const intentText = (provenance?.intent ?? plan.note).slice(0, 200)
+          this.logger.warn(
+            'system2',
+            `SYSTEM2_PLAN_NO_GOALS op=${planOp} reason=${noGoalsReason} intentSource=${intentSource} requestId=${requestContext.requestId} intent="${intentText}"`,
+            {
+              requestId: requestContext.requestId,
+              reason,
+              op: planOp,
+              noGoalsReason,
+              intentSource,
+              intent: intentText,
+              uncompiled: provenance?.uncompiled ?? [],
+              note: plan.note,
+            },
+            this.tickCounter,
+          )
+          this.recentEvents.push(
+            `System2 answered with no compilable goal (${noGoalsReason}); ${this.currentGoalKey()} held`,
+          )
+        }
         this.logger.info(
           'system2',
-          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} :: ${plan.note}`,
+          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} intentSource=${intentSource} uncompiled=${provenance?.uncompiled?.length ?? 0} compiled=[${compiledSummary}] :: ${plan.note}`,
           {
             provider: this.system2Provider,
             model: this.system2Model,
@@ -8034,6 +8261,10 @@ export class JevController {
             requestContext,
             queueDepth: this.queue.state.depth,
             goals: added.map((goal) => goal.description),
+            compiled: compiledRows,
+            uncompiled: provenance?.uncompiled ?? [],
+            intentSource,
+            intent: provenance?.intent ?? null,
             note: plan.note,
           },
           this.tickCounter,
@@ -12088,7 +12319,16 @@ function pickResummon(
 }
 
 function sensorOptions(options: JevAgentOptions, worldRevision: number | null = null): SensorOptions {
-  return { ...defaultSensorOptions, scanRadius: options.scanRadius, reach: options.reach, worldRevision }
+  return {
+    ...defaultSensorOptions,
+    scanRadius: options.scanRadius,
+    reach: options.reach,
+    worldRevision,
+    // Only the decision-time build carries provenance: `sensorOptions(...)` is
+    // also used for standalone portal-frame projections outside `buildWorldState`,
+    // where the read gate is not armed and the reads are unchanged.
+    dimensionProvenance: options.dimensionProvenance ?? null,
+  }
 }
 
 function candidateOptions(

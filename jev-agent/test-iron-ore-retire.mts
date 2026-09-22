@@ -148,7 +148,7 @@ function downStep(dir: DescentOption['dir'], dx: number, dz: number, feet: Vec3J
 
 const FEET: Vec3Json = { x: 28, y: 59, z: 33 }
 /** Live remembered ore the bot could not route to (b25_49_37). */
-const UNREACHABLE_ORE: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 25, y: 49, z: 37 } }
+const UNREACHABLE_ORE: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 25, y: 49, z: 37 } }
 const UNREACHABLE_ORE_KEY = 'iron_ore@25,49,37'
 
 function oreWorld(known: KnownResource[]): WorldState {

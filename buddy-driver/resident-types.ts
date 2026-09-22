@@ -368,10 +368,26 @@ export function mergeKnownResourcesInto(
       ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
     }),
     // Re-observation is free proof the cell is still valuable: refresh recency
-    // instead of inserting a duplicate or spending an eviction on it.
+    // instead of inserting a duplicate or spending an eviction on it. It is ALSO
+    // proof of WHERE the cell stands, so a row that never recorded a dimension is
+    // stamped with the observing world now (#14, run-mucqgrdo-21plr): fail-closed
+    // attribution must be recoverable by the next observation, otherwise a legacy
+    // row would stay unusable forever. A row that already records a dimension is
+    // left alone - re-attribution is the eviction path's decision, not the merge's.
     refresh: (existing, resource) => {
       if (typeof resource.lastSeenAt === 'number' && Number.isFinite(resource.lastSeenAt)) {
         existing.lastSeenAt = resource.lastSeenAt
+      }
+      const existingDimension = typeof existing.dimension === 'string' ? existing.dimension.trim() : ''
+      const observedDimension = typeof resource.dimension === 'string' ? resource.dimension.trim() : ''
+      if (existingDimension.length === 0 && observedDimension.length > 0) {
+        existing.dimension = observedDimension
+        log?.('KNOWN_RESOURCE_ATTRIBUTED', {
+          item: existing.name,
+          at: knownResourceAt(existing),
+          recordedDimension: null,
+          observedDimension,
+        })
       }
     },
     log,
@@ -393,6 +409,9 @@ export function mergeKnownResourcesInto(
         item: stored.name,
         kind: stored.kind,
         at: knownResourceAt(stored),
+        // The recorded dimension, named explicitly (`null` = the row records
+        // none, so it is un-attributable and refused in every world).
+        dimension: stored.dimension ?? null,
         ...(options.worldEpoch === undefined ? {} : { worldEpoch: options.worldEpoch }),
       })
     }

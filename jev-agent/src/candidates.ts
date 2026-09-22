@@ -560,6 +560,147 @@ function occludedThreatBypass(
  * guard MUST call this adapter; otherwise the same state can expose goal work to
  * Jev and then erase it during revalidation.
  */
+// ---------------------------------------------------------------------------
+// #plan-reconciliation: the code-owned not-executable-here fact bound to the OFFER
+// ---------------------------------------------------------------------------
+//
+// Measured live (`run-muctsqt6-27ocr`, main 3002d84): the durable head was
+// `g14:descend:raw_iron` declaring `minecraft:overworld` with the success
+// predicate `levelAtMost y32`, while the body was in the NETHER at y37 and hp 10.
+// The queue layer had already PROVEN the row cannot run there
+// (`ROW_NOT_EXECUTABLE_HERE declared=overworld live=the_nether`), and the
+// escalation that replaces it was in flight - yet the offer still carried the
+// row's own descent, so the body kept DESCENDING toward y32 in the Nether, which
+// is where the lava is. The safe verdict and the physical actions disagreed, and
+// the disagreement pointed at the hazard.
+//
+// This binding keeps the OFFER honest while the proof holds: only control and
+// self-care kinds stay on offer, so the next decision cannot drive the body toward
+// a predicate it cannot reach here. It never reorders or retires a queue row, and
+// a code-owned safety envelope always outranks it (an escape route must never be
+// removed by this rule).
+
+/** The queue's proven "this head cannot execute in the live dimension" fact. */
+export interface NotExecutableHereBinding {
+  goalId: string
+  goalKey: string
+  declaredDimension: string | null
+  liveDimension: string | null
+  /** the queue's own reason (`no_executable_alternative`, `defer_budget_exhausted`) */
+  reason: string
+}
+
+/**
+ * Kinds that cannot advance a row's own predicate: control hand-off and self-care.
+ * Everything else (MINE/MOVE/CRAFT/PLACE/SMELT/CONTAINER/IGNITE/ENTER_PORTAL/
+ * DESCEND/STEP/RETRIEVE) is work toward the row and is withheld while the proof
+ * holds.
+ */
+export const NOT_EXECUTABLE_HERE_KEEP_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'WAIT',
+  'ESCALATE',
+  'RETREAT',
+  'EAT',
+  'ATTACK',
+  'EQUIP',
+])
+
+export function isNotExecutableHereKeepKind(kind: CandidateKind): boolean {
+  return NOT_EXECUTABLE_HERE_KEEP_KINDS.has(kind)
+}
+
+export type NotExecutableHereOfferReason =
+  | 'no_binding'
+  | 'safety_envelope_active'
+  | 'no_kept_candidates'
+  | 'bound'
+  | 'not_narrowing'
+
+export interface NotExecutableHereOfferRestriction {
+  candidates: Candidate[]
+  withheld: Candidate[]
+  bound: boolean
+  reason: NotExecutableHereOfferReason
+}
+
+/**
+ * Is a code-owned safety envelope narrowing the raw offer right now?
+ *
+ * Reuses the SAME restriction functions that shape the live offer, applied to the
+ * pre-safety-envelope list, so a new safety envelope automatically vetoes this
+ * binding instead of having to be added here. A body in lava/fire, out of air, in
+ * critical damage, at critical health with a hostile on it, or under a named
+ * attacker is in a safety envelope and keeps its full escape offer.
+ */
+export function safetyEnvelopeActive(state: WorldState, rawCandidates: readonly Candidate[]): boolean {
+  if (rawCandidates.length === 0) return false
+  const probes: Candidate[][] = [
+    restrictCandidatesAtCriticalHealth(state, rawCandidates),
+    restrictCandidatesDuringCriticalDamage(state, rawCandidates),
+    restrictCandidatesDuringSubmersion(state, rawCandidates),
+    restrictCandidatesDuringEnvHazard(state, rawCandidates),
+    restrictCandidatesDuringUnseenAttacker(state, rawCandidates),
+    applyGroundedThreatRestriction(state, rawCandidates, []).candidates,
+  ]
+  return probes.some((probe) => probe.length < rawCandidates.length)
+}
+
+/**
+ * Bind the queue's not-executable-here proof to the physical offer. Pure.
+ * `rawCandidates` is the offer BEFORE the safety-envelope restrictions, so the
+ * safety veto sees what the body would otherwise be allowed to do.
+ */
+export function restrictCandidatesNotExecutableHere(
+  state: WorldState,
+  candidates: readonly Candidate[],
+  binding: NotExecutableHereBinding | null,
+  rawCandidates: readonly Candidate[] = candidates,
+): NotExecutableHereOfferRestriction {
+  if (binding === null) {
+    return { candidates: [...candidates], withheld: [], bound: false, reason: 'no_binding' }
+  }
+  if (safetyEnvelopeActive(state, rawCandidates)) {
+    return { candidates: [...candidates], withheld: [], bound: false, reason: 'safety_envelope_active' }
+  }
+  const kept = candidates.filter((candidate) => isNotExecutableHereKeepKind(candidate.kind))
+  if (kept.length === 0) {
+    // Never hand an empty offer to the decision layer: with no control/self-care
+    // candidate the pre-existing starvation/escalation machinery owns the tick.
+    return { candidates: [...candidates], withheld: [], bound: false, reason: 'no_kept_candidates' }
+  }
+  const withheld = candidates.filter((candidate) => !isNotExecutableHereKeepKind(candidate.kind))
+  if (withheld.length === 0) {
+    return { candidates: kept, withheld: [], bound: false, reason: 'not_narrowing' }
+  }
+  return { candidates: kept, withheld, bound: true, reason: 'bound' }
+}
+
+export function formatNotExecutableHereBinding(
+  binding: NotExecutableHereBinding,
+  restriction: NotExecutableHereOfferRestriction,
+  goalQueueHead: string,
+): string {
+  return (
+    `ROW_NOT_EXECUTABLE_HERE_BINDING goalId=${binding.goalId} goal=${binding.goalKey}` +
+    ` declared=${binding.declaredDimension ?? 'none'} live=${binding.liveDimension ?? 'unknown'}` +
+    ` queueReason=${binding.reason} withheld=${restriction.withheld.length}` +
+    ` kept=[${restriction.candidates.map((candidate) => candidate.kind).join(',')}]` +
+    ` action=${restriction.reason} head=${goalQueueHead}`
+  )
+}
+
+export function formatNotExecutableHereInterrupt(
+  binding: NotExecutableHereBinding,
+  actionId: string,
+  actionKind: CandidateKind,
+): string {
+  return (
+    `ROW_NOT_EXECUTABLE_HERE_INTERRUPT actionId=${actionId} actionKind=${actionKind}` +
+    ` goalId=${binding.goalId} goal=${binding.goalKey}` +
+    ` declared=${binding.declaredDimension ?? 'none'} live=${binding.liveDimension ?? 'unknown'}`
+  )
+}
+
 export function applyGroundedThreatRestriction(
   state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
   candidates: readonly Candidate[],
@@ -1543,29 +1684,54 @@ export function formatPlaceRefusal(refusal: PlaceRefusal): string {
 
 /**
  * A cell that WOULD have been offered as a source for the active collect goal
- * but is a member of a live structure the resident depends on. This is the
- * explicit fact that replaces silently dismantling the asset: the cell stays
- * unavailable while the structure validates, and the plan must source the item
- * elsewhere (other sensed/remembered cells, or exploration).
+ * but is refused by a grounded world-truth gate. The marker is the explicit fact
+ * that replaces a silent refusal: the cell stays unavailable and the plan must
+ * source the item elsewhere (other sensed/remembered cells, or exploration).
  *
  * Generic by construction: the reason is a membership predicate, and the
  * diagnostic `structure` field is never matched on.
+ *
+ * Why a cell that matches the active want is NOT offered as a source:
+ *
+ *   live_structure         the cell is a member of a live structure (dismantling
+ *                          the asset is worse than sourcing elsewhere)
+ *   dimension_mismatch     the cell is remembered in ANOTHER dimension
+ *   dimension_unattributed the cell records no dimension at all, so it cannot be
+ *                          attributed to the live world (fail closed, #14)
+ *
+ * The two dimension reasons are the honest report side of
+ * `resourceDimensionVerdict`: the row is never deleted for them.
  */
-export type ResourceSourceExclusionReason = 'live_structure'
+export type ResourceSourceExclusionReason = 'live_structure' | 'dimension_mismatch' | 'dimension_unattributed'
 
 export interface ResourceSourceExclusion {
   /** the item the active collect goal wants */
   item: string
   cell: Vec3Json
   reason: ResourceSourceExclusionReason
-  /** diagnostic structure kind only (never matched on) */
-  structure: string
+  /** diagnostic structure kind only (never matched on); set iff reason is `live_structure` */
+  structure?: string
+  /**
+   * The dimension the row ITSELF records, or `null` when it records none. Never
+   * invented from the durable bucket: the durable key has been measured to hold
+   * wrong-world cells (see `resourceDimensionVerdict`).
+   */
+  recordedDimension?: string | null
+  /** the live dimension the cell was refused in */
+  liveDimension?: string
 }
 
 export const RESOURCE_SOURCE_EXCLUDED = 'RESOURCE_SOURCE_EXCLUDED'
 
+/**
+ * The `live_structure` spelling is unchanged (byte-identical); a dimension
+ * refusal additionally names the recorded dimension (or its absence) and the
+ * live dimension, so one line carries the whole fact.
+ */
 export function formatResourceSourceExclusion(exclusion: ResourceSourceExclusion): string {
-  return `${RESOURCE_SOURCE_EXCLUDED} item=${exclusion.item} cell=${exclusion.cell.x},${exclusion.cell.y},${exclusion.cell.z} reason=${exclusion.reason}`
+  const base = `${RESOURCE_SOURCE_EXCLUDED} item=${exclusion.item} cell=${exclusion.cell.x},${exclusion.cell.y},${exclusion.cell.z} reason=${exclusion.reason}`
+  if (exclusion.reason === 'live_structure') return base
+  return `${base} recorded_dimension=${exclusion.recordedDimension ?? 'none'} live_dimension=${exclusion.liveDimension ?? 'unknown'}`
 }
 
 /**
@@ -1588,6 +1754,8 @@ export type ResourceSourceGapReason =
   | 'remembered_falsified'
   /** the only matching cells are members of a live structure */
   | 'live_structure'
+  /** every matching remembered cell records another / no dimension (#14) */
+  | 'dimension_refused'
   /** matching cells exist, but every offered route was withheld (tool/reach/path) */
   | 'source_withheld'
 
@@ -1602,6 +1770,8 @@ export interface ResourceSourceGap {
   falsified: number
   /** matching cells withheld as live-structure members */
   excluded: number
+  /** matching remembered cells refused because they name another / no dimension */
+  dimensionRefused: number
   /** the grounded next step the mechanical layer can offer right now */
   next: 'explore' | 'escalate'
 }
@@ -1609,7 +1779,7 @@ export interface ResourceSourceGap {
 export const RESOURCE_SOURCE_NONE = 'RESOURCE_SOURCE_NONE'
 
 export function formatResourceSourceGap(gap: ResourceSourceGap): string {
-  return `${RESOURCE_SOURCE_NONE} item=${gap.item} reason=${gap.reason} sensed=${gap.sensed} remembered=${gap.remembered} falsified=${gap.falsified} excluded=${gap.excluded} next=${gap.next}`
+  return `${RESOURCE_SOURCE_NONE} item=${gap.item} reason=${gap.reason} sensed=${gap.sensed} remembered=${gap.remembered} falsified=${gap.falsified} excluded=${gap.excluded} dimension_refused=${gap.dimensionRefused} next=${gap.next}`
 }
 
 /** Remembered matching cells the loaded world proved are no longer the resource. */
@@ -1636,8 +1806,6 @@ function liveStructureIndexOf(state: WorldState): ReadonlyMap<string, string> {
  * with the offered set.
  */
 export function resourceSourceExclusions(state: WorldState): ResourceSourceExclusion[] {
-  const index = liveStructureIndexOf(state)
-  if (index.size === 0) return []
   const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   if (focusItem === null) return []
   const out: ResourceSourceExclusion[] = []
@@ -1653,27 +1821,87 @@ export function resourceSourceExclusions(state: WorldState): ResourceSourceExclu
       structure,
     })
   }
-  // (1) Sensed cells the MINE/MOVE/DESCEND families would otherwise offer, using
-  // the SAME source matching as `mineCandidates` (drop match plus the declared
-  // scanned block name, so `flint -> gravel` is covered too).
-  const want = retrievalWant(focusItem)
-  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
-  for (const block of state.blocks) {
-    if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
-    if (!resourceMatches(block.yield, focusItem) && !(sourceNames?.includes(block.name) ?? false)) continue
-    const structure = index.get(liveStructureCellKey(block.position))
-    if (structure !== undefined) record(block.position, structure)
-  }
-  // (2) Remembered cells the RETRIEVE:known family would otherwise offer, using
-  // the same want matching and dimension re-anchoring as `knownResourceFor`.
-  if (want !== null) {
-    for (const resource of state.signals.knownResources ?? []) {
-      if (!resourceDimensionMatches(resource, state.self.dimension)) continue
-      const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
-      if (!matches) continue
-      const structure = index.get(liveStructureCellKey(resource.position))
-      if (structure !== undefined) record(resource.position, structure)
+  const index = liveStructureIndexOf(state)
+  if (index.size > 0) {
+    // (1) Sensed cells the MINE/MOVE/DESCEND families would otherwise offer, using
+    // the SAME source matching as `mineCandidates` (drop match plus the declared
+    // scanned block name, so `flint -> gravel` is covered too).
+    const want = retrievalWant(focusItem)
+    const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+    for (const block of state.blocks) {
+      if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
+      if (!resourceMatches(block.yield, focusItem) && !(sourceNames?.includes(block.name) ?? false)) continue
+      const structure = index.get(liveStructureCellKey(block.position))
+      if (structure !== undefined) record(block.position, structure)
     }
+    // (2) Remembered cells the RETRIEVE:known family would otherwise offer, using
+    // the same want matching and dimension re-anchoring as `knownResourceFor`.
+    if (want !== null) {
+      for (const resource of state.signals.knownResources ?? []) {
+        if (!resourceDimensionMatches(resource, state.self.dimension)) continue
+        const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
+        if (!matches) continue
+        const structure = index.get(liveStructureCellKey(resource.position))
+        if (structure !== undefined) record(resource.position, structure)
+      }
+    }
+  }
+  // (3) Remembered cells refused by the dimension gate. Independent of live
+  // structures: an un-attributable cell is withheld whether or not any structure
+  // stands nearby (see `resourceDimensionVerdict`).
+  for (const refusal of resourceDimensionRefusals(state, focusItem)) {
+    const key = liveStructureCellKey(refusal.cell)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(refusal)
+  }
+  return out
+}
+
+/**
+ * The typed `RESOURCE_SOURCE_EXCLUDED ... reason=dimension_mismatch|dimension_unattributed`
+ * facts for the active collect focus: every remembered cell that matches the want
+ * `knownResourceFor` would offer and is refused because it cannot be attributed to
+ * the live dimension.
+ *
+ * Enumeration only; the refusal itself is applied by `resourceDimensionMatches`
+ * at the source selectors, so this marker cannot disagree with the offered set.
+ * Each fact names the cell, the dimension the row records (or its absence) and the
+ * live dimension - the three values needed to tell "another world" apart from
+ * "nowhere recorded". Pure.
+ */
+export function resourceDimensionRefusals(
+  state: WorldState,
+  focusItem?: string | null,
+): ResourceSourceExclusion[] {
+  const item = focusItem ?? state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  if (item === null) return []
+  const want = retrievalWant(item)
+  if (want === null) return []
+  const live = state.self.dimension
+  const out: ResourceSourceExclusion[] = []
+  const seen = new Set<string>()
+  for (const resource of state.signals.knownResources ?? []) {
+    const verdict = resourceDimensionVerdict(resource, live)
+    if (verdict === 'same') continue
+    // The SAME want matching `knownResourceFor` uses: a logged cell matches by
+    // suffix, every other declared source name by membership (or by being the
+    // wanted item itself, which is how a remembered drop is routed).
+    const matches =
+      want.kind === 'log'
+        ? resource.name.endsWith('_log')
+        : want.blockNames.includes(resource.name) || resource.name === item
+    if (!matches) continue
+    const key = liveStructureCellKey(resource.position)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      item,
+      cell: { x: resource.position.x, y: resource.position.y, z: resource.position.z },
+      reason: verdict === 'unattributed' ? 'dimension_unattributed' : 'dimension_mismatch',
+      recordedDimension: resource.dimension ?? null,
+      liveDimension: live,
+    })
   }
   return out
 }
@@ -1727,7 +1955,14 @@ export function resourceSourceGapFor(
   const rememberedOpen = rememberedResources.filter(
     (resource) => !isLiveStructureMember(liveStructures, resource.position),
   ).length
-  const excluded = exclusions.filter((exclusion) => exclusion.item === want.item).length
+  const excluded = exclusions.filter(
+    (exclusion) => exclusion.item === want.item && exclusion.reason === 'live_structure',
+  ).length
+  // Kept separate from `excluded`: a dimension refusal is not a protected
+  // structure, and reporting it as one would name the wrong blocker.
+  const dimensionRefused = exclusions.filter(
+    (exclusion) => exclusion.item === want.item && exclusion.reason !== 'live_structure',
+  ).length
   const falsified = (state.knownResourceEvidence ?? []).filter((evidence) => evidence.status === 'falsified').length
   const reason: ResourceSourceGapReason =
     sensedOpen > 0 || rememberedOpen > 0
@@ -1736,7 +1971,9 @@ export function resourceSourceGapFor(
         ? 'remembered_falsified'
         : excluded > 0
           ? 'live_structure'
-          : 'no_source_sensed'
+          : dimensionRefused > 0
+            ? 'dimension_refused'
+            : 'no_source_sensed'
   const next: ResourceSourceGap['next'] = candidates.some((candidate) => candidate.meta.explore === true)
     ? 'explore'
     : 'escalate'
@@ -1747,6 +1984,7 @@ export function resourceSourceGapFor(
     remembered: rememberedResources.length,
     falsified,
     excluded,
+    dimensionRefused,
     next,
   }
 }
@@ -3199,7 +3437,7 @@ function generateRawCandidates(
   let prospect: ProspectResult = { candidates: [], refusal: null }
   const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
   const current = state.goalQueue?.current ?? null
-  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  const focusItem = current === null ? (state.goal.targetItem ?? null) : current.targetItem
   const goalKind = current?.kind ?? 'collect'
   const strategy = current?.strategy ?? null
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
@@ -3232,6 +3470,9 @@ function generateRawCandidates(
       }
       break
     }
+    case 'explore':
+      candidates.push(...exploreFallbackCandidates(state, options, null, goalKind))
+      break
     case 'craft': {
       const craft = craftCandidates(state, options, focusItem)
       candidates.push(...craft.candidates)
@@ -8592,16 +8833,56 @@ export function staleKnownResources(
 
 /**
  * Issue #14 dimension re-anchoring: a remembered coordinate is only meaningful
- * in the dimension it was scanned in. Entries written before the field existed
- * carry no dimension and remain valid (backwards compatible); an entry whose
+ * in the dimension it was scanned in.
+ *
+ * The three-way verdict, not a boolean, because "another world" and "no world
+ * recorded" are different facts and only the first is evidence:
+ *
+ *   same          the row names the live dimension: the cell is a target here
+ *   other         the row names a different dimension: the cell is a place in
+ *                 another world (a Nether fortress cell is not in the overworld)
+ *   unattributed  the row names NO dimension: we do not know where the cell is
+ *
+ * `unattributed` FAILS CLOSED (measured, run-mucqgrdo-21plr). Treating a missing
+ * dimension as "matches everything" is the repo's forbidden shape - unknown read
+ * as satisfied - one level down from the goal layer: it is exactly how an
+ * overworld tree cell (a `jungle_log` at y=85, impossible in the Nether) becomes
+ * a Nether locomotion target that the body then burns ticks pillar-climbing
+ * toward (`RETRIEVE:known:log:b8_85_6 ... reason=needs_ascend`). Not knowing
+ * where a cell is must never be a licence to walk to it.
+ *
+ * The row is never deleted for this (durable memory is not dropped on ignorance):
+ * it is kept, reported typed by the caller
+ * (`RESOURCE_SOURCE_EXCLUDED ... reason=dimension_unattributed recorded_dimension=none
+ * live_dimension=...`), and becomes usable again through the ordinary write paths,
+ * which stamp the world a cell was actually observed in - including the merge's
+ * re-observation refresh, which heals a row that never carried one.
+ */
+export type ResourceDimensionVerdict = 'same' | 'other' | 'unattributed'
+
+/** Prefix-insensitive dimension equality, the same form the durable key uses. */
+function normalizeDimensionId(value: string): string {
+  return value.replace(/^minecraft:/, '').toLowerCase()
+}
+
+/**
+ * Classify a remembered cell against the live dimension. Pure; no candidate and
+ * no durable row is changed here.
+ */
+export function resourceDimensionVerdict(resource: KnownResource, dimension: string): ResourceDimensionVerdict {
+  const recorded = typeof resource.dimension === 'string' ? resource.dimension.trim() : ''
+  if (recorded.length === 0) return 'unattributed'
+  return normalizeDimensionId(recorded) === normalizeDimensionId(dimension) ? 'same' : 'other'
+}
+
+/**
+ * True only when the cell is attributable to the live dimension. An entry whose
  * recorded dimension differs from the bot's current one is NEVER offered as a
- * retrieval target. This is a world-truth filter, not a preference: the cell is
- * a different place in a different dimension.
+ * retrieval target, and neither is an entry that records none. This is a
+ * world-truth filter, not a preference.
  */
 export function resourceDimensionMatches(resource: KnownResource, dimension: string): boolean {
-  if (resource.dimension === undefined || resource.dimension.length === 0) return true
-  const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
-  return normalize(resource.dimension) === normalize(dimension)
+  return resourceDimensionVerdict(resource, dimension) === 'same'
 }
 
 /**

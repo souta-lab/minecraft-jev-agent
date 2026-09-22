@@ -931,7 +931,7 @@ addCase('the live pocket marker sequence pins refusal, relocation and the execut
 
 addCase('a below-level remembered ore emits a staircase retrieval candidate', () => {
   const feet = { x: 28, y: 57, z: 35 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 49, z: 0 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 40, y: 49, z: 0 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -950,7 +950,7 @@ addCase('a below-level remembered ore emits a staircase retrieval candidate', ()
 
 addCase('a remembered tunnel turns the retrieval candidate into a reuse plan', () => {
   const feet = { x: 28, y: 57, z: 35 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 25, y: 49, z: 36 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 25, y: 49, z: 36 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -968,7 +968,7 @@ addCase('a remembered tunnel turns the retrieval candidate into a reuse plan', (
 
 addCase('an above-level remembered ore with cobblestone held emits a pillar retrieval candidate', () => {
   const feet = { x: 39, y: 31, z: 33 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 53, y: 36, z: 33 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 53, y: 36, z: 33 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -987,7 +987,7 @@ addCase('an above-level remembered ore with cobblestone held emits a pillar retr
 
 addCase('an above-level remembered ore with a safe step-cut emits a staircase-up candidate', () => {
   const feet = { x: 39, y: 31, z: 33 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 43, y: 40, z: 33 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 43, y: 40, z: 33 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -1010,7 +1010,7 @@ addCase('an above-level remembered ore without a placeable keeps an explicit ver
   // dy=3 stays inside the walkable band, so the affordance gate presents it and
   // the vertical plan stays explicitly 'none' (a dy>4 climb without a plan is
   // withheld as needs_ascend by the gate; see test-reachability.mts).
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 53, y: 34, z: 33 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 53, y: 34, z: 33 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -1029,7 +1029,7 @@ addCase('an above-level remembered ore without a placeable keeps an explicit ver
 
 addCase('the guard accepts a staircase retrieval grounded in the descent options', () => {
   const feet = { x: 28, y: 57, z: 35 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 49, z: 0 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 40, y: 49, z: 0 } }
   const step = downStep('E', 1, 0, feet)
   const state = worldState({
     position: feet,
@@ -1065,7 +1065,7 @@ addCase('the guard accepts a staircase retrieval grounded in the descent options
 
 addCase('the guard rejects a staircase retrieval with no matching descent step', () => {
   const feet = { x: 28, y: 57, z: 35 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 49, z: 0 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 40, y: 49, z: 0 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -1329,7 +1329,7 @@ addCase('the LOCAL_CLEAR marker carries the cell, block, tool and tier', () => {
 
 addCase('a reuse retrieval candidate carries the no-tunnel fallback vertical plan', () => {
   const feet = { x: 28, y: 57, z: 35 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 25, y: 49, z: 36 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 25, y: 49, z: 36 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),

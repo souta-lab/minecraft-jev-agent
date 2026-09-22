@@ -355,18 +355,29 @@ const DURABLE: KnownResourceJson[] = [
 ]
 
 addCase('(a) block_mined removes the durable cell; mob_gone/drop_absent only withhold it', () => {
-  const blockMined = knownResourceFalsifiedRemovals(DURABLE, { reason: 'block_mined', cell: ORE_CELL })
-  const mobGone = knownResourceFalsifiedRemovals(DURABLE, { reason: 'mob_gone', cell: FORTRESS_CELLS[0] })
-  const dropAbsent = knownResourceFalsifiedRemovals(DURABLE, { reason: 'drop_absent', cell: FORTRESS_CELLS[0] })
-  const noCell = knownResourceFalsifiedRemovals(DURABLE, { reason: 'block_mined' })
+  // #14: `block_mined` is a proof about the world that was probed, so only a row
+  // attributable to THAT world is removed. The iron_ore row names the overworld,
+  // which is the live dimension here.
+  const blockMined = knownResourceFalsifiedRemovals(DURABLE, { reason: 'block_mined', cell: ORE_CELL }, 'minecraft:overworld')
+  const mobGone = knownResourceFalsifiedRemovals(DURABLE, { reason: 'mob_gone', cell: FORTRESS_CELLS[0] }, 'minecraft:the_nether')
+  const dropAbsent = knownResourceFalsifiedRemovals(DURABLE, { reason: 'drop_absent', cell: FORTRESS_CELLS[0] }, 'minecraft:the_nether')
+  const noCell = knownResourceFalsifiedRemovals(DURABLE, { reason: 'block_mined' }, 'minecraft:overworld')
+  // A `block_mined` proof read in the NETHER cannot delete the overworld row: the
+  // coordinate is a different place in a different world.
+  const wrongWorld = knownResourceFalsifiedRemovals(DURABLE, { reason: 'block_mined', cell: ORE_CELL }, 'minecraft:the_nether')
+  // An un-attributed row is never deleted on any world's proof.
+  const unattributed: KnownResourceJson[] = [{ name: 'iron_ore', kind: 'ore', x: ORE_CELL.x, y: ORE_CELL.y, z: ORE_CELL.z }]
+  const noDimension = knownResourceFalsifiedRemovals(unattributed, { reason: 'block_mined', cell: ORE_CELL }, 'minecraft:overworld')
   return {
     pass:
       blockMined.length === 1 &&
       blockMined[0]?.name === 'iron_ore' &&
       mobGone.length === 0 &&
       dropAbsent.length === 0 &&
-      noCell.length === 0,
-    detail: `blockMined=${blockMined.map((entry) => `${entry.name}@${entry.x},${entry.y},${entry.z}`).join(',') || 'none'} mobGone=${mobGone.length} dropAbsent=${dropAbsent.length} noCell=${noCell.length}`,
+      noCell.length === 0 &&
+      wrongWorld.length === 0 &&
+      noDimension.length === 0,
+    detail: `blockMined=${blockMined.map((entry) => `${entry.name}@${entry.x},${entry.y},${entry.z}`).join(',') || 'none'} mobGone=${mobGone.length} dropAbsent=${dropAbsent.length} noCell=${noCell.length} wrongWorld=${wrongWorld.length} noDimension=${noDimension.length}`,
   }
 })
 

@@ -122,6 +122,31 @@ export function fencedBlocks(text: string): string[] {
 }
 
 /**
+ * #system2-compile: the answer's prose with every balanced top-level JSON object
+ * (and any fence markers) removed.
+ *
+ * Why this exists: when an answer's STRUCTURED block fails validation, the
+ * prose-grounding fallback must not be fed the rejected block's own text. Doing
+ * so let the surviving goals of a REJECTED plan through one by one - the measured
+ * shape `{"goals":[{"kind":"collect","item":"log","count":1},{"kind":"collect",
+ * "item":"diamond","count":0}]}` was rejected at `goals.1.count`, yet `log` was
+ * still grounded out of the JSON text and applied. A rejected plan may not be
+ * partially applied, so only the prose half of the answer is groundable.
+ */
+export function proseWithoutJsonObjects(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return ''
+  let prose = text
+  for (const object of balancedJsonObjects(text)) {
+    if (object.length === 0) continue
+    prose = prose.replace(object, ' ')
+  }
+  return prose
+    .replace(/```(?:json)?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
  * Extract one candidate plan/enrichment object from a model's text response.
  * Envelope selection only: it never edits the object. Truth/authority validation
  * happens later and separately (see `stripUnknownPlanKeys` + the capability
