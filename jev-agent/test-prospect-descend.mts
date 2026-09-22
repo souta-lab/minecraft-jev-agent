@@ -610,7 +610,12 @@ addCase('a non-descending local row with the same producer is unchanged', () => 
   }
 })
 
-addCase('a travel row whose grounded target is below the body is a prospecting context', () => {
+addCase('a travel row whose grounded target is below is a prospecting context', () => {
+  // Family-contract assertion: the context predicate accepts a navigation row
+  // whose code-grounded target sits below the body. Wiring note: `goto` rows are
+  // answered by the generator's `goto` branch (a MOVE to the target), so this
+  // context only produces offers on the acquisition rows that reach the mine arm
+  // (`descend`, `collect`, `craft`, `smelt`, ...) - see the next case.
   const state = world({
     focusItem: 'raw_iron',
     blocks: [ore({ x: 31, y: 59, z: 33 })],
@@ -619,6 +624,20 @@ addCase('a travel row whose grounded target is below the body is a prospecting c
   const result = prospectCandidates(state, defaultCandidateOptions, 'raw_iron', null)
   const pass = result.candidates.length === 1 && result.candidates[0]?.id === 'PROSPECT:level:E:b29_59_33'
   return { pass, detail: `probes=[${result.candidates.map((c) => c.id).join(',')}]` }
+})
+
+addCase('a descend row with no targetY still offers the probe through the wired generator', () => {
+  const state = world({
+    focusItem: 'raw_iron',
+    blocks: [ore({ x: 31, y: 59, z: 33 })],
+    current: { kind: 'descend', targetY: null, description: 'descend for iron' },
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    prospects(grounded.candidates).length === 1 &&
+    descendSteps(grounded.candidates).length >= 1 &&
+    grounded.prospectRefusal === null
+  return { pass, detail: `ids=[${grounded.candidates.map((c) => c.id).join(',')}]` }
 })
 
 addCase('a producer below the body keeps the context when the row only counts items', () => {
