@@ -137,10 +137,24 @@ export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, t
         const runId = typeof data?.runId === 'string' ? data.runId : null
         if (runId === null) return finish(null)
         const status = data?.status
+        // generationHash/generationId/frozen are ADDITIVE: they let a reader
+        // cross-check the live generation against file evidence (the host's
+        // `report` reply already carries them, so no extra query is issued and
+        // nothing here mutates the resident). `run.boot.sourceSha` remains the
+        // run's origin; the binding never replaces it.
+        const rawGenerationId = data?.generationId
+        const generationId = Array.isArray(rawGenerationId)
+          ? (typeof rawGenerationId[0] === 'string' ? rawGenerationId[0] : null)
+          : typeof rawGenerationId === 'string'
+            ? rawGenerationId
+            : null
         finish({
           runId,
           policyKind: typeof status?.policyKind === 'string' ? status.policyKind : typeof data?.policyKind === 'string' ? data.policyKind : null,
           policyModel: typeof status?.policyModel === 'string' ? status.policyModel : typeof data?.policyModel === 'string' ? data.policyModel : null,
+          generationHash: typeof data?.generationHash === 'string' ? data.generationHash : null,
+          generationId,
+          frozen: typeof data?.frozen === 'boolean' ? data.frozen : null,
         })
       } catch {
         finish(null)

@@ -11,11 +11,20 @@
 //      staircase step, fall back to the bot's own column ("dig down"), and never
 //      let a stale failure count suppress the only body change available;
 //   2. the Y-progress assertion: the feet Y must keep decreasing, or the caller
-//      logs `DESCEND_STALLED` and switches strategy instead of WAITing.
+//      logs `DESCEND_STALLED` and switches strategy instead of WAITing;
+//   3. the HEADING PLAN of a running descent: one heading is held for as long as
+//      the world offers a safe step under it, and a change is a typed event with
+//      the concrete obstruction that forced it. Measured live
+//      (run-muc3qbug-18vg3, main ab19403) the last 60 descend steps were
+//      `W 23 | E 17 | N 12 | S 8`: every tick re-picked a heading because the
+//      only memory of a chosen heading was a successful-completion record and
+//      the pool silently widened whenever that heading had no safe step. The
+//      result was a winding one-block-per-level bowl instead of a staircase.
 //
-// Pure: no bot, no clock. `pickBestDescendStep` is a function of its inputs so
-// the candidate rule is unit-testable without a live world.
-import type { DescentOption, Vec3Json } from './state.ts'
+// Pure: no bot, no clock. `pickBestDescendStep` and `resolveDescentHeading` are
+// functions of their inputs so the candidate rules are unit-testable without a
+// live world.
+import type { DescentDir, DescentOption, DescentRefusalReason, Vec3Json } from './state.ts'
 import { distance } from './state.ts'
 
 /** Ticks a descend goal may make no vertical progress before it is called stalled. */
@@ -149,4 +158,114 @@ export function pickBestDescendStep(
     }
   }
   return best
+}
+
+/**
+ * Why a held heading could not be continued. The sensor's typed refusal when the
+ * world itself obstructs the step, or `no_step` when the heading has no option in
+ * the current pool at all. This is the ONLY licence to change the plan heading.
+ */
+export type DescentHeadingChangeReason = DescentRefusalReason | 'no_step' | 'oscillation' | 'cap'
+
+/** A typed heading change: the obstruction that forced it, with its world cell. */
+export interface DescentHeadingChange {
+  from: DescentDir
+  to: DescentDir
+  reason: DescentHeadingChangeReason
+  /** the refused cell of the abandoned heading, null when geometrically absent */
+  cell: Vec3Json | null
+  /** the block that obstructed it, null when unknown */
+  block: string | null
+}
+
+export type DescentHeadingStatus = 'new' | 'held' | 'changed'
+
+export interface DescentHeadingPlan {
+  /** the heading this step belongs to (held when the plan could continue) */
+  dir: DescentDir
+  status: DescentHeadingStatus
+  /** the plan heading before this step, null when the plan just started */
+  from: DescentDir | null
+  /** non-null exactly when `status === 'changed'` */
+  change: DescentHeadingChange | null
+}
+
+/** The concrete obstruction of a heading, read from the sensor's refused option. */
+export interface DescentHeadingObstruction {
+  reason: DescentHeadingChangeReason
+  cell: Vec3Json | null
+  block: string | null
+}
+
+/**
+ * Resolve the heading of the next descent step.
+ *
+ * The rule is deliberately not a score: while the world offers ANY safe step
+ * under the previous heading, that heading is held (`held`, no change event).
+ * Only when the previous heading has no safe/eligible step does the plan move to
+ * another heading, and that move carries the typed obstruction that caused it -
+ * so a heading change can always be attributed to a world fact instead of a
+ * silent re-pick. `null` previous means the plan is starting and the caller's
+ * existing selection rule (score, then deterministic scan order) owns the first
+ * heading.
+ */
+export function resolveDescentHeading(input: {
+  previous: DescentDir | null
+  /** headings with at least one safe, eligible step this tick, in pool order */
+  available: readonly DescentDir[]
+  /** why the previous heading is unavailable (only read when it is) */
+  obstruction: DescentHeadingObstruction | null
+}): DescentHeadingPlan | null {
+  const first = input.available[0]
+  if (first === undefined) return null
+  if (input.previous === null) return { dir: first, status: 'new', from: null, change: null }
+  if (input.available.includes(input.previous)) {
+    return { dir: input.previous, status: 'held', from: input.previous, change: null }
+  }
+  const obstruction = input.obstruction ?? { reason: 'no_step', cell: null, block: null }
+  return {
+    dir: first,
+    status: 'changed',
+    from: input.previous,
+    change: {
+      from: input.previous,
+      to: first,
+      reason: obstruction.reason,
+      cell: obstruction.cell,
+      block: obstruction.block,
+    },
+  }
+}
+
+/** The exact `DESCEND_HEADING` line: the plan heading of the step about to run. */
+export function formatDescentHeading(plan: DescentHeadingPlan): string {
+  const held = plan.status === 'held' || plan.status === 'new'
+  const change =
+    plan.change === null
+      ? ''
+      : ` from=${plan.change.from} reason=${plan.change.reason}` +
+        `${plan.change.cell === null ? '' : ` cell=${plan.change.cell.x},${plan.change.cell.y},${plan.change.cell.z}`}` +
+        `${plan.change.block === null ? '' : ` block=${plan.change.block}`}`
+  return `DESCEND_HEADING dir=${plan.dir} held=${held}${change}`
+}
+
+/**
+ * The obstruction of one heading, from the sensor's full option list (safe AND
+ * refused). A refused step carries `refusal` + the human-readable `reason`; the
+ * dig cell is the step's primary cell. Pure.
+ */
+export function descentHeadingObstruction(
+  steps: readonly DescentOption[],
+  dir: DescentDir,
+): DescentHeadingObstruction {
+  const candidates = steps.filter((step) => step.dir === dir)
+  if (candidates.length === 0) return { reason: 'no_step', cell: null, block: null }
+  const refused = candidates.find((step) => !step.safe)
+  if (refused === undefined) return { reason: 'no_step', cell: null, block: null }
+  const cell = refused.mode === 'down' ? refused.floor : (refused.wallSolid ? refused.wall : refused.head)
+  return {
+    reason: refused.refusal ?? 'no_step',
+    cell,
+    block: refused.digName ?? null,
+  }
 }

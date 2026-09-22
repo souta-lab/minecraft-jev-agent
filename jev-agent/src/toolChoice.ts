@@ -144,3 +144,27 @@ export function selectDigTool(block: DigBlockInfo, has: HasTool): ToolChoice {
 export function toolLabel(tool: HarvestTool | null): string {
   return tool ?? 'hand'
 }
+
+/** How demanding a single cell's harvest requirement is, for the profile fold. */
+function requirementRank(cell: DigBlockInfo): number {
+  if (cell.harvestTool === 'pickaxe') return 300 + (cell.harvestTier ?? 0)
+  if (cell.harvestTool === 'axe') return 200
+  if (cell.harvestTool === 'shovel') return 100
+  return 0
+}
+
+/**
+ * Fold a multi-cell dig profile into the single requirement that gates the
+ * action. A staircase step down is a 1x2 landing cell, so it can only be dug
+ * when EVERY cell of the profile can be: an unbreakable cell refuses the whole
+ * profile, and otherwise the strongest requirement wins (a pickaxe also breaks
+ * the dirt cell of the same step, never the other way round). Pure.
+ */
+export function strongestDigRequirement(cells: readonly DigBlockInfo[]): DigBlockInfo {
+  let best: DigBlockInfo | null = null
+  for (const cell of cells) {
+    if (!cell.diggable) return cell
+    if (best === null || requirementRank(cell) > requirementRank(best)) best = cell
+  }
+  return best ?? { name: '', harvestTool: null, harvestTier: null, diggable: false }
+}

@@ -116,6 +116,37 @@ const cases: Case[] = [
     }).accept,
   },
   {
+    name: 'done-only Nether snapshot cannot erase the fresh Overworld respawn queue',
+    expected: false,
+    observed: evaluateLedgerRestoreBasis(
+      {
+        ...snapshot('collect', 'blaze_rod', 'done'),
+        basis: {
+          worldKey: '127.0.0.1:25565|minecraft:the_nether|1',
+          frontierRungId: 'blaze_rods',
+          frontierRungIndex: 15,
+        },
+      },
+      {
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        frontierRungId: 'enter_nether',
+        frontierRungIndex: 14,
+      },
+    ).accept,
+  },
+  {
+    name: 'done-only snapshot with the same scoped basis remains restorable',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        frontierRungId: 'enter_nether',
+        frontierRungIndex: 14,
+      }
+      return evaluateLedgerRestoreBasis({ ...snapshot('collect', 'log', 'done'), basis }, basis).accept
+    })(),
+  },
+  {
     name: 'same world and frontier preserve an unfinished semantic ledger',
     expected: true,
     observed: (() => {

@@ -467,7 +467,10 @@ let generationModule: GenerationModule | null = null
 let currentBundle: string | null = null
 let reconnecting = false
 let shuttingDown = false
-let frozen = false
+// Maintenance-safe boot: the control socket is started before Minecraft connect,
+// but spawn can race an operator's first freeze request. Opting in here makes the
+// host frozen from process birth; `startGeneration` below enforces the same flag.
+let frozen = (process.env.BUDDY_START_FROZEN ?? '').trim() === '1'
 let generationRestartTimer: NodeJS.Timeout | null = null
 let reloadTimer: NodeJS.Timeout | null = null
 let reloadArbiter: ReloadArbiter | null = null
@@ -934,6 +937,13 @@ function watchGenerationStop(gen: ResidentGeneration): void {
 }
 
 async function startGeneration(trigger: string): Promise<boolean> {
+  // `freeze` is a lifecycle invariant, not merely a restart-timer hint. Direct
+  // spawn/respawn/control paths all funnel through this function, so enforcing it
+  // here prevents a reconnect from silently reviving actuation while frozen.
+  if (frozen) {
+    log('GENERATION_START_SUPPRESSED', { trigger, reason: 'frozen' })
+    return false
+  }
   if (bot === null || bot.entity === undefined) {
     log('ERROR', { where: 'startGeneration', message: 'no spawned bot', trigger })
     return false
@@ -2011,6 +2021,41 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     controlReply(socket, request, true, { frozen: false, started: ok })
     return
   }
+  if (cmd === 'reground') {
+    // Operator recovery for semantic queue corruption. This is deliberately
+    // frozen-only: clearing class-A semantic state while a generation can still
+    // propose would let its delayed snapshot immediately resurrect the queue.
+    // World epoch/memory and live server truth are untouched; the next explicit
+    // resume rebuilds the queue from the current grounded frontier.
+    if (!frozen) {
+      controlReply(socket, request, false, { error: 'reground requires frozen=true' })
+      return
+    }
+    const previousGoals = state.ledger?.goals.length ?? 0
+    const previousBasis = state.ledger?.basis ?? null
+    archiveLedger('control-reground')
+    state.ledger = null
+    saveState('control-reground')
+    // Fence delayed proposals from the quiesced generation. A generation born
+    // after resume is seeded from this new revision and remains admissible.
+    ledgerRevision = state.revision
+    log('LEDGER_REGROUND', {
+      reason: 'control',
+      previousGoals,
+      previousBasis,
+      revision: state.revision,
+      worldKey: currentWorldKey(),
+    })
+    writeAcceptance()
+    controlReply(socket, request, true, {
+      frozen: true,
+      ledgerCleared: true,
+      previousGoals,
+      revision: state.revision,
+      runId,
+    })
+    return
+  }
   if (cmd === 'simdeath' || cmd === 'simdeath --hard') {
     if (bot === null || bot.entity === undefined) {
       controlReply(socket, request, false, { error: 'no live bot' })
@@ -2271,6 +2316,7 @@ log('BOOT', {
   revision: state.revision,
   worldEpoch: state.worldEpoch,
   worldKey: currentWorldKey(),
+  frozen,
 })
 if (!acquireHostLock()) {
   log('BOOT_REFUSED', { reason: 'host-lock-held', path: LOCK_PATH })

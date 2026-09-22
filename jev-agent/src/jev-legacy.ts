@@ -900,6 +900,10 @@ export function boundedStateSnapshot(
   state: WorldState,
   limits: JevSnapshotLimits = JEV_SNAPSHOT_LIMITS,
 ): unknown {
+  // `zeroProgressRoutes` is code-owned internal retry memory: its facts already
+  // reach the model as the offered/withheld candidate set, so the raw ledger is
+  // never shipped (it would only grow the prompt).
+  const { zeroProgressRoutes: _zeroProgressRoutes, ...promptSignals } = state.signals
   const bounded = {
     schemaVersion: state.schemaVersion,
     tick: state.tick,
@@ -920,7 +924,7 @@ export function boundedStateSnapshot(
     currentOption: state.currentOption ?? null,
     recentEvents: state.recentEvents.slice(-limits.recentEvents),
     signals: {
-      ...state.signals,
+      ...promptSignals,
       knownResources: (state.signals.knownResources ?? []).slice(0, limits.knownResources),
       failedCandidates: capRecord(state.signals.failedCandidates, limits.failedCandidates),
     },
