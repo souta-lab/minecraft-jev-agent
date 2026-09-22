@@ -583,6 +583,14 @@ addCase('(ii) the drop 4 blocks out: the stock collectblock walk collects it, de
   }
 })
 
+addCase('(ii) both pickup markers are MIRRORED (they reach the run log, not just the console)', () => {
+  const pass = MIRRORED_MARKERS.has('PICKUP_ACQUIRED') && MIRRORED_MARKERS.has('PICKUP_NOT_ACQUIRED')
+  return {
+    pass,
+    detail: `PICKUP_ACQUIRED=${MIRRORED_MARKERS.has('PICKUP_ACQUIRED')} PICKUP_NOT_ACQUIRED=${MIRRORED_MARKERS.has('PICKUP_NOT_ACQUIRED')} (a run that killed a mob and failed to collect the drop is distinguishable from one that never killed)`,
+  }
+})
+
 addCase('(ii) a drop that never lands is pickup_failed + PICKUP_NOT_ACQUIRED, never a banked item', async () => {
   const fixture = makeDropFixture('never')
   const result = await makeExecutor(fixture).claim(pickupCandidate()).completion
