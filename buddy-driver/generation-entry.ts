@@ -63,9 +63,13 @@ import {
   inventoryCounts,
   isMandatoryRung,
   resolvePlannerMode,
+  rungConsumesItem,
+  rungProducesGoal,
   worldOutcomeRungFloor,
 } from './planner.ts'
 import type { Counts, DurableLadderProgress, DurableLadderSource, Rung } from './planner.ts'
+import { formatPlanIdentity } from '../jev-agent/src/goalQueue.ts'
+import type { PlanIdentity, PlanObsoleteProof } from '../jev-agent/src/goalQueue.ts'
 import type {
   DeathRecoveryContext,
   GenerationContext,
@@ -1351,8 +1355,83 @@ export function reconcileLedgerGoals(
   return { snapshot: { ...snapshot, goals }, reopened, dominated, achieved }
 }
 
-export function selectLedgerSnapshot(
-  hostSnapshot: GoalQueueSnapshot | null,
+/**
+ * #plan-reconciliation: the LIVE plan/objective identity, projected from the same
+ * durable-aware ladder frontier that seeds the controller. This is the one value
+ * a durable row's authoring identity is compared against.
+ */
+export function planIdentityFor(
+  frontier: { rungId: string; rungIndex: number },
+  rootGoal: { goalItem: string; goalCount: number },
+): PlanIdentity {
+  return {
+    rungId: frontier.rungId,
+    rungIndex: frontier.rungIndex,
+    objectiveItem: rootGoal.goalItem,
+    objectiveCount: rootGoal.goalCount,
+  }
+}
+
+/**
+ * #plan-reconciliation: the code-owned proof that an unfinished row authored
+ * under a SUPERSEDED plan is obsolete for the CURRENT objective.
+ *
+ * Measured live (`run-mucpugqn-20evo`): the durable head was
+ * `g1:descend:raw_iron` (`dim=minecraft:overworld`, success `levelAtMost y32`)
+ * while the body was in the Nether and the mission was `blaze_rods`. Its own
+ * predicate was genuinely unsatisfied there, so predicate retirement correctly
+ * left it; what was missing is the plan/objective comparison this proof makes.
+ *
+ * Conservative on purpose - it returns a proof ONLY when every live question
+ * about the row's target item is answered "no":
+ *
+ *   1. the row's authoring frontier is STRICTLY behind the live frontier, so
+ *      every rung it could have advanced is already passed;
+ *   2. no live rung at/after the frontier emits the row's target item;
+ *   3. no UNSATISFIED live rung at/after the frontier consumes it (recipe/smelt
+ *      input), so the item is not still needed as a prerequisite;
+ *   4. the row is not human intent (the operator owns that WHAT, not the plan).
+ *
+ * It never consults the row's own success predicate: "unsatisfied" is not
+ * obsolescence, and a merely-unsatisfied row whose plan is CURRENT is untouched.
+ */
+export function supersededPlanObsoleteProof(
+  goal: Pick<QueuedGoal, 'kind' | 'targetItem' | 'requiredCount' | 'planIdentity' | 'origin'>,
+  current: PlanIdentity,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): PlanObsoleteProof | null {
+  const authored = goal.planIdentity
+  if (authored === undefined) return null
+  if (goal.origin === 'human') return null
+  if (authored.rungIndex >= current.rungIndex) return null
+  const item = goal.targetItem
+  if (typeof item !== 'string' || item.length === 0) return null
+  const rungs = RUNGS
+  const live = rungs
+    .map((rung, index) => ({ rung, index }))
+    .filter((entry) => entry.rung.future !== true && entry.index >= current.rungIndex)
+  const liveOwners = live.filter((entry) =>
+    entry.rung.goals(counts, world).some((planned) => (planned.targetItem ?? null) === item),
+  )
+  if (liveOwners.length > 0) return null
+  const liveConsumers = live.filter((entry) => rungConsumesItem(entry.rung, item, counts, world))
+  const unsatisfiedConsumers = liveConsumers.filter((entry) => !entry.rung.satisfied(counts, world))
+  if (unsatisfiedConsumers.length > 0) return null
+  return {
+    reason: 'authoring_frontier_behind_current',
+    evidence: [
+      `authored=${formatPlanIdentity(authored)}`,
+      `current=${formatPlanIdentity(current)}`,
+      `item=${item}`,
+      `live_rungs=${live.length}`,
+      `live_owners=0`,
+      `live_consumers_satisfied=${liveConsumers.length}`,
+    ],
+  }
+}
+
+export function selectLedgerSnapshot(  hostSnapshot: GoalQueueSnapshot | null,
   derivedSnapshot: GoalQueueSnapshot | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
@@ -1597,6 +1676,10 @@ function restoreLedgerIntoController(
       dominated: chosen.dominated.length,
       achieved: chosen.achieved.length,
       basis: chosen.snapshot.basis ?? null,
+      // #plan-reconciliation: the identity those rows were AUTHORED under. The
+      // basis above is re-stamped with the frontier at every commit, so it cannot
+      // answer "does this queue still belong to the live plan?" - this can.
+      planIdentity: chosen.snapshot.planIdentity ?? null,
     })
     if (chosen.reopened.length > 0) {
       log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
@@ -2550,6 +2633,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // purposes are already fulfilled by better held items retires mid-generation
     // instead of starving behind a station precondition until a reload.
     dominatedGoalReason: (goal, live) => dominatedPrerequisiteReason(goal, { ...live } as Counts, world),
+    // #plan-reconciliation: the live plan/objective identity + the code-owned
+    // supersession proof. The controller compares every unfinished durable row's
+    // authoring identity against this once per tick, retires only rows this proof
+    // calls obsolete, and otherwise asks System2 (the WHAT owner) to re-plan with
+    // the compact state the request already carries.
+    planIdentity: () => {
+      const counts = inventoryCounts(bot)
+      const frontier = deriveResumeRung(counts, world, undefined, durableLadderProgress)
+      const goals = buildLadder(counts, world, undefined, { resumeRungIndex: frontier.rungIndex }).goals
+      const root = compatibilityRootGoal(goals, { goalItem: ctx.goalItem, goalCount: ctx.goalCount })
+      return planIdentityFor(frontier, root)
+    },
+    supersededGoalReason: (goal, identity) =>
+      supersededPlanObsoleteProof(goal, identity, inventoryCounts(bot), world),
   }
 
   const controller = new JevController(bot, options)

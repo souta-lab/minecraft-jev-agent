@@ -216,6 +216,232 @@ export function isSemanticProgressKind(kind: string): boolean {
   return kind === 'goal' || kind === 'search'
 }
 
+// ---------------------------------------------------------------------------
+// #plan-reconciliation: the plan/objective identity a durable row was authored
+// under, and the reconciliation that compares it with the live objective.
+// ---------------------------------------------------------------------------
+//
+// Measured live (m3-live, `run-mucpugqn-20evo`): the durable queue's head was
+// `g1:descend:raw_iron kind=descend dim=minecraft:overworld` with the spatial
+// success predicate `levelAtMost y32`, while the body was in the NETHER at y63
+// and the mission had moved to `blaze_rods` (M3). The row was authored by an
+// M2-era exploration plan; nothing in the queue, the controller or the host
+// compared the plan that authored it with the plan the objective now implies.
+// The row's own predicate was genuinely UNSATISFIED there, so predicate
+// retirement correctly left it alone (goalSuccess.ts), and it could not
+// complete: the body climbed to y102 in the Nether chasing an overworld y32
+// target, forever.
+//
+// A row therefore carries the identity of the plan/objective projection that
+// authored it (`QueuedGoal.planIdentity`), and the queue reconciles that
+// identity against the live one on every lifecycle transition. Retirement is
+// never a preference and never "the predicate is unsatisfied": it requires a
+// code-owned proof supplied by the caller (`isObsolete`), exactly like the
+// #prereq-dominated closure.
+export interface PlanIdentity {
+  /** frontier rung that owned the outstanding work when the plan was authored */
+  rungId: string
+  rungIndex: number
+  /** item-bearing objective the plan existed to advance */
+  objectiveItem: string | null
+  objectiveCount: number
+}
+
+/**
+ * Stable comparison id for a plan identity.
+ *
+ * The PLAN identity is its frontier projection (`rungId@rungIndex`): that is the
+ * ladder's own code-owned statement of which rung's work is outstanding, so two
+ * identities with the same frontier are the same plan even if the objective
+ * projection around them is spelled differently (e.g. a legacy snapshot restored
+ * from `basis`, whose rows carried no objective). The objective fields are
+ * evidence in `formatPlanIdentity`, not part of the comparison - including them
+ * would make every generation start look like a supersession.
+ */
+export function planIdentityId(identity: PlanIdentity): string {
+  return `${identity.rungId}@${identity.rungIndex}`
+}
+
+/** Compact one-line identity evidence for the durable log. */
+export function formatPlanIdentity(identity: PlanIdentity | null): string {
+  if (identity === null) return 'none'
+  return `${identity.rungId}@${identity.rungIndex} objective=${identity.objectiveItem ?? 'none'}x${identity.objectiveCount}`
+}
+
+export const PLAN_IDENTITY_CHANGED = 'PLAN_IDENTITY_CHANGED'
+export const PLAN_ROW_RETIRED = 'PLAN_ROW_RETIRED'
+export const ROW_NOT_EXECUTABLE_HERE = 'ROW_NOT_EXECUTABLE_HERE'
+export const ROW_DEFERRED_NOT_EXECUTABLE_HERE = 'ROW_DEFERRED_NOT_EXECUTABLE_HERE'
+
+/** A code-owned proof that a row authored under a superseded plan is obsolete. */
+export interface PlanObsoleteProof {
+  /** machine reason (e.g. `authoring_frontier_behind_current`) */
+  reason: string
+  /** typed evidence tokens naming the facts the proof used */
+  evidence: readonly string[]
+}
+
+export interface PlanRowRetirement {
+  id: string
+  description: string
+  goalKey: string
+  /** identity the row was authored under (null for an unstamped legacy row) */
+  authoredUnder: string | null
+  reason: string
+  evidence: readonly string[]
+}
+
+export interface PlanIdentityReconciliation {
+  previous: PlanIdentity | null
+  current: PlanIdentity
+  /** current vs previous identity id */
+  changed: boolean
+  /** unfinished rows authored under a superseded identity, with or without a proof */
+  superseded: number
+  /** rows retired by the code-owned proof */
+  retired: PlanRowRetirement[]
+  /** superseded rows kept because no proof said they are obsolete */
+  kept: PlanRowRetirement[]
+  /** unstamped legacy rows that adopted the current identity */
+  adoptedLegacy: number
+  /** the head row is authored under a superseded identity */
+  headSuperseded: boolean
+}
+
+export interface PlanReconciliationOptions {
+  current: PlanIdentity
+  /** Code-owned obsolescence proof; returning null keeps the row. */
+  isObsolete?: (goal: QueuedGoal) => PlanObsoleteProof | null
+  /** Audit sink for retired rows; defaults to the lifecycle sink. */
+  onSuperseded?: (line: string, detail: Record<string, unknown>) => void
+  now?: number
+}
+
+export interface NotExecutableHeadOptions {
+  /** live bot dimension (e.g. `minecraft:the_nether`), null when unknown */
+  liveDimension: string | null
+  /** how many times one row may be deferred before it escalates instead */
+  limit?: number
+  now?: number
+}
+
+export type NotExecutableHeadAction = 'hold' | 'defer' | 'escalate'
+
+export type NotExecutableHeadReason =
+  | 'no_current'
+  | 'executable_here'
+  | 'unknown_dimension'
+  | 'deferred'
+  | 'no_executable_alternative'
+  | 'defer_budget_exhausted'
+
+export interface NotExecutableHeadResult {
+  action: NotExecutableHeadAction
+  reason: NotExecutableHeadReason
+  goalId: string | null
+  goalKey: string
+  declaredDimension: string | null
+  liveDimension: string | null
+  /** the row that took the head when the action was `defer` */
+  nextGoalId: string | null
+  /** defers this row has already spent */
+  defers: number
+  limit: number
+}
+
+/** Default bound on the typed dimension deferral. */
+export const NOT_EXECUTABLE_DEFER_LIMIT_DEFAULT = 3
+
+export function resolveNotExecutableDeferLimit(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_NOT_EXECUTABLE_DEFER_LIMIT ?? NOT_EXECUTABLE_DEFER_LIMIT_DEFAULT)
+  return Number.isInteger(raw) && raw >= 0 ? raw : NOT_EXECUTABLE_DEFER_LIMIT_DEFAULT
+}
+
+/** `minecraft:the_nether` and `the_nether` are the same dimension. */
+export function normalizeGoalDimension(dimension: string | null | undefined): string | null {
+  if (typeof dimension !== 'string') return null
+  const trimmed = dimension.trim().replace(/^minecraft:/, '')
+  return trimmed.length === 0 ? null : trimmed
+}
+
+export function formatPlanRowRetired(
+  goal: QueuedGoal,
+  current: PlanIdentity,
+  proof: PlanObsoleteProof,
+): string {
+  return (
+    `${PLAN_ROW_RETIRED} id=${goal.id} goal=${goalKeyOf(goal)} reason=${proof.reason}` +
+    ` evidence=${proof.evidence.join(',')} current=${formatPlanIdentity(current)}`
+  )
+}
+
+export function formatPlanIdentityChanged(result: PlanIdentityReconciliation): string {  return (
+    `${PLAN_IDENTITY_CHANGED} from=${formatPlanIdentity(result.previous)} to=${formatPlanIdentity(result.current)}` +
+    ` superseded=${result.superseded} retired=${result.retired.length} kept=${result.kept.length}` +
+    ` head_superseded=${result.headSuperseded}`
+  )
+}
+
+export function formatRowNotExecutableHere(result: NotExecutableHeadResult): string {
+  return (
+    `${ROW_NOT_EXECUTABLE_HERE} id=${result.goalId ?? 'none'} goal=${result.goalKey}` +
+    ` declared=${result.declaredDimension ?? 'none'} live=${result.liveDimension ?? 'unknown'}` +
+    ` action=${result.action} reason=${result.reason} defers=${result.defers}/${result.limit}` +
+    ` next=${result.nextGoalId ?? 'none'}`
+  )
+}
+
+export function formatRowDeferredNotExecutableHere(result: NotExecutableHeadResult): string {
+  return (
+    `${ROW_DEFERRED_NOT_EXECUTABLE_HERE} id=${result.goalId ?? 'none'} goal=${result.goalKey}` +
+    ` declared=${result.declaredDimension ?? 'none'} live=${result.liveDimension ?? 'unknown'}` +
+    ` defers=${result.defers}/${result.limit} next=${result.nextGoalId ?? 'none'}`
+  )
+}
+
+/**
+ * #plan-reconciliation: the typed System2 re-plan request a superseded durable
+ * queue produces. This is the PREFERRED repair (WHAT belongs to System2): the
+ * request names the obsolete plan identity, the live objective identity, what was
+ * retired and what was kept. The caller supplies the compact state
+ * (`System2PlanRequest`: objective, queue head, recent outcomes/events, grounded
+ * alternatives, world facts, blocker detail) through its normal summon path.
+ *
+ * Null when nothing is superseded, so a healthy queue never generates a request.
+ */
+export function planReplanRequest(result: PlanIdentityReconciliation): { reason: 'no_progress'; detail: string } | null {
+  if (result.superseded === 0) return null
+  return {
+    reason: 'no_progress',
+    detail:
+      `${PLAN_IDENTITY_CHANGED} from=${formatPlanIdentity(result.previous)} to=${formatPlanIdentity(result.current)}` +
+      ` superseded=${result.superseded} retired=${result.retired.length} kept=${result.kept.length}` +
+      ` retired_ids=${result.retired.map((entry) => entry.id).join(',') || 'none'}` +
+      ` kept_ids=${result.kept.map((entry) => entry.id).join(',') || 'none'}` +
+      ` head_superseded=${result.headSuperseded}`,
+  }
+}
+
+/**
+ * #plan-reconciliation: the typed System2 request a head that cannot execute in
+ * the live dimension produces when there is no row that can (or its bounded
+ * deferral budget is spent). It never chooses the replacement WHAT.
+ */
+export function notExecutableReplanRequest(
+  result: NotExecutableHeadResult,
+): { reason: 'action_impossible'; detail: string } | null {
+  if (result.action !== 'escalate') return null
+  return {
+    reason: 'action_impossible',
+    detail:
+      `row not executable here: goal=${result.goalKey} id=${result.goalId ?? 'none'}` +
+      ` declared=${result.declaredDimension ?? 'none'} live=${result.liveDimension ?? 'unknown'}` +
+      ` reason=${result.reason} defers=${result.defers}/${result.limit}`,
+  }
+}
+
 export type NonProgressAction = 'hold' | 'yield' | 'escalate'
 
 export type NonProgressReason =
@@ -391,6 +617,18 @@ export interface QueuedGoal {
    * generation reload cannot silently reset a bound the measured stall relied on.
    */
   nonProgressDecisions?: number
+  /**
+   * #plan-reconciliation: the plan/objective identity that AUTHORED this row.
+   * Absent only on rows written before this field existed (they adopt the
+   * restored plan identity, so they are never misread as superseded).
+   */
+  planIdentity?: PlanIdentity
+  /**
+   * #plan-reconciliation: how many times this row has been deferred because it
+   * declares a dimension other than the live one. Persisted with the durable row
+   * so a reload cannot reset the bound.
+   */
+  deferCount?: number
 }
 
 /** A goal as proposed by the LLM. The queue assigns ids and bookkeeping. */
@@ -533,6 +771,14 @@ export interface GoalQueueSnapshot {
    * not safe to restore across a fresh generation.
    */
   basis?: LedgerBasis
+  /**
+   * #plan-reconciliation: the plan/objective identity the queue was last
+   * authored under. Persisted so a restore can tell a row that belongs to a
+   * superseded plan from one the current objective still wants; a legacy
+   * snapshot without it falls back to `basis` (its committed frontier), which is
+   * the identity those rows were in fact authored under.
+   */
+  planIdentity?: PlanIdentity
 }
 
 /** Minimal live context used to validate a durable semantic queue on restore. */
@@ -554,6 +800,12 @@ export class GoalQueue {
   private goals: QueuedGoal[] = []
   private counter = 0
   private queueRevision = 0
+  /**
+   * #plan-reconciliation: the plan/objective identity new rows are stamped with.
+   * Null until the resident installs one (standalone tests / deterministic
+   * baselines keep the previous behaviour byte for byte).
+   */
+  private planIdentity: PlanIdentity | null = null
   /** Most recent plan's audit sink, reused by later lifecycle transitions. */
   private lifecycleSink: ((line: string) => void) | undefined
   /**
@@ -892,6 +1144,9 @@ export class GoalQueue {
       ...(plan.targetPosition === undefined
         ? {}
         : { targetPosition: plan.targetPosition === null ? null : { ...plan.targetPosition } }),
+      // #plan-reconciliation: the identity that authored this row, so a later
+      // objective can tell whether the row still belongs to the live plan.
+      ...(this.planIdentity === null ? {} : { planIdentity: { ...this.planIdentity } }),
       startCount: 0,
       haveCount: 0,
       status: 'pending',
@@ -1156,7 +1411,12 @@ export class GoalQueue {
   }
 
   snapshot(): GoalQueueSnapshot {
-    return { counter: this.counter, goals: this.goals.map((goal) => ({ ...goal })), revision: this.queueRevision }
+    return {
+      counter: this.counter,
+      goals: this.goals.map((goal) => ({ ...goal })),
+      revision: this.queueRevision,
+      ...(this.planIdentity === null ? {} : { planIdentity: { ...this.planIdentity } }),
+    }
   }
 
   restore(snapshot: GoalQueueSnapshot): void {
@@ -1169,8 +1429,191 @@ export class GoalQueue {
       copy.optionInstanceId = copy.optionInstanceId ?? stableOptionInstanceId(spec)
       return copy
     })
+    // #plan-reconciliation: adopt the identity the restored queue was authored
+    // under. A legacy snapshot has no identity field, but its committed `basis`
+    // is exactly the frontier those rows were authored against, so it is the
+    // honest fallback - never "current", which would erase the supersession the
+    // reconciliation exists to detect.
+    this.planIdentity =
+      snapshot.planIdentity !== undefined
+        ? { ...snapshot.planIdentity }
+        : snapshot.basis === undefined
+          ? null
+          : {
+              rungId: snapshot.basis.frontierRungId,
+              rungIndex: snapshot.basis.frontierRungIndex,
+              objectiveItem: null,
+              objectiveCount: 0,
+            }
+    if (this.planIdentity !== null) {
+      for (const goal of this.goals) {
+        if (goal.planIdentity === undefined) goal.planIdentity = { ...this.planIdentity }
+      }
+    }
     this.queueRevision = Math.max(this.queueRevision + 1, snapshot.revision ?? 0)
     this.activate()
+  }
+
+  /** The plan/objective identity the queue is currently authored under. */
+  get authoredPlanIdentity(): PlanIdentity | null {
+    return this.planIdentity === null ? null : { ...this.planIdentity }
+  }
+
+  /**
+   * Adopt a plan identity without reconciling (rows keep their own stamp).
+   * Returns the identity that was current before the call.
+   */
+  setPlanIdentity(identity: PlanIdentity): PlanIdentity | null {
+    const previous = this.planIdentity
+    this.planIdentity = { ...identity }
+    return previous
+  }
+
+  /**
+   * #plan-reconciliation: compare every unfinished row's authoring identity with
+   * the live one and retire ONLY the rows a code-owned proof calls obsolete.
+   *
+   * A superseded row without a proof is kept and reported (`kept`), never
+   * retired: "the plan that authored me is gone" alone is not obsolescence -
+   * the current objective may still require the same work. Rows with no stamp
+   * (legacy) adopt the current identity and are never treated as superseded.
+   */
+  reconcilePlanIdentity(options: PlanReconciliationOptions): PlanIdentityReconciliation {
+    const previous = this.planIdentity
+    const current: PlanIdentity = { ...options.current }
+    this.planIdentity = current
+    const currentId = planIdentityId(current)
+    const changed = previous === null || planIdentityId(previous) !== currentId
+    const sink = options.onSuperseded ?? this.lifecycleSink
+    const now = options.now ?? Date.now()
+    const retired: PlanRowRetirement[] = []
+    const kept: PlanRowRetirement[] = []
+    let adoptedLegacy = 0
+    let headSuperseded = false
+    const head = this.nextRef()
+    for (const goal of this.goals) {
+      if (goal.status !== 'pending' && goal.status !== 'active') continue
+      if (goal.planIdentity === undefined) {
+        goal.planIdentity = { ...current }
+        adoptedLegacy += 1
+        continue
+      }
+      const authoredId = planIdentityId(goal.planIdentity)
+      if (authoredId === currentId) continue
+      const authoredUnder = authoredId
+      if (goal === head) headSuperseded = true
+      const proof = options.isObsolete?.(goal) ?? null
+      if (proof === null) {
+        kept.push({
+          id: goal.id,
+          description: goal.description,
+          goalKey: goalKeyOf(goal),
+          authoredUnder,
+          reason: 'no_code_owned_proof',
+          evidence: [],
+        })
+        continue
+      }
+      goal.status = 'impossible'
+      goal.detail = `retired superseded plan: ${proof.reason}${proof.evidence.length === 0 ? '' : ` (${proof.evidence.join(',')})`}`
+      goal.updatedAt = now
+      const entry: PlanRowRetirement = {
+        id: goal.id,
+        description: goal.description,
+        goalKey: goalKeyOf(goal),
+        authoredUnder,
+        reason: proof.reason,
+        evidence: [...proof.evidence],
+      }
+      retired.push(entry)
+      sink?.(formatPlanRowRetired(goal, current, proof), {
+        id: goal.id,
+        goalKey: entry.goalKey,
+        authoredUnder,
+        reason: proof.reason,
+        evidence: entry.evidence,
+        current: formatPlanIdentity(current),
+      })
+    }
+    if (retired.length > 0) {
+      this.queueRevision += 1
+      this.activate()
+    }
+    return {
+      previous,
+      current,
+      changed,
+      superseded: retired.length + kept.length,
+      retired,
+      kept,
+      adoptedLegacy,
+      headSuperseded,
+    }
+  }
+
+  /**
+   * #plan-reconciliation: the measured cross-dimension starvation.
+   *
+   * A head row that declares a dimension the body is not in cannot be executed
+   * HERE and NOW. That is a feasibility fact, not obsolescence: the row is kept
+   * (never marked impossible) and the queue's own plan order is preserved except
+   * for a BOUNDED demotion behind the next row that IS executable in the live
+   * dimension. With no such row the fact is returned as `escalate` so the
+   * controller asks System2 (the WHAT owner) instead of looping.
+   */
+  reconcileNotExecutableHead(options: NotExecutableHeadOptions): NotExecutableHeadResult {
+    const limit = Math.max(0, Math.floor(options.limit ?? resolveNotExecutableDeferLimit()))
+    const current = this.nextRef()
+    if (current === undefined) {
+      return {
+        action: 'hold',
+        reason: 'no_current',
+        goalId: null,
+        goalKey: 'none',
+        declaredDimension: null,
+        liveDimension: options.liveDimension,
+        nextGoalId: null,
+        defers: 0,
+        limit,
+      }
+    }
+    const declared = normalizeGoalDimension(current.dimension)
+    const live = normalizeGoalDimension(options.liveDimension)
+    const base = {
+      goalId: current.id,
+      goalKey: goalKeyOf(current),
+      declaredDimension: declared,
+      liveDimension: live,
+      defers: current.deferCount ?? 0,
+      limit,
+    }
+    if (declared === null) return { ...base, action: 'hold', reason: 'unknown_dimension', nextGoalId: null }
+    if (live === null) return { ...base, action: 'hold', reason: 'unknown_dimension', nextGoalId: null }
+    if (declared === live) return { ...base, action: 'hold', reason: 'executable_here', nextGoalId: null }
+    if (base.defers >= limit) {
+      return { ...base, action: 'escalate', reason: 'defer_budget_exhausted', nextGoalId: null }
+    }
+    const alternative = this.goals.find(
+      (goal) =>
+        goal.id !== current.id &&
+        (goal.status === 'pending' || goal.status === 'active') &&
+        (normalizeGoalDimension(goal.dimension) === null || normalizeGoalDimension(goal.dimension) === live),
+    )
+    if (alternative === undefined) {
+      return { ...base, action: 'escalate', reason: 'no_executable_alternative', nextGoalId: null }
+    }
+    current.deferCount = base.defers + 1
+    current.status = 'pending'
+    current.updatedAt = options.now ?? Date.now()
+    const nextGoalId = this.demoteToBack(current)
+    this.queueRevision += 1
+    return {
+      ...base,
+      action: 'defer',
+      reason: 'deferred',
+      defers: base.defers + 1,
+      nextGoalId: nextGoalId ?? alternative.id,
+    }
   }
 
   private activate(): void {
