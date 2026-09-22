@@ -111,7 +111,13 @@ import {
   weaponFacts,
 } from './threat.ts'
 import type { KeepDistanceSpot, ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
-import { HUNT_APPROACH_BUDGET } from './combatClosure.ts'
+import {
+  classifyContactApproach,
+  contactGapY,
+  formatContactUnreachable,
+  HUNT_APPROACH_BUDGET,
+} from './combatClosure.ts'
+import type { ContactApproach } from './combatClosure.ts'
 import {
   envHazardProximityDenied,
   MAX_ENV_HAZARD_ESCAPES,
@@ -1202,6 +1208,20 @@ export interface GroundedCandidatesResult {
    */
   columnDescentRefusal: ColumnDescentRefusal | null
   /**
+   * Typed `HUNT_CONTACT_UNREACHABLE` refusals: a sensed fight target that is
+   * ABOVE the body's walk envelope (`gapY > VERTICAL_GAP`) for which the ONE
+   * vertical planner grounds no route to its level. Each entry names the target,
+   * the contact geometry and the planner's own refusal (`no_placeable` /
+   * `unsafe_column`). Empty when every fight target is reachable by a walk or by
+   * a grounded ascent.
+   *
+   * Non-empty means the ATTACK for that target was withheld BY CAN and no lease
+   * is started for it - the difference between a target the body cannot reach at
+   * all and the measured 0-swing `out_of_range` lease that only LOOKED like an
+   * attempt (21 blaze hunts, `swings=0 hits=0`).
+   */
+  contactRefusals: ContactRefusal[]
+  /**
    * Typed `DIG_ROUTE_REFUSED reason=...` facts for the travel/enter/retrieve
    * targets this tick could not walk to AND could not dig toward: the target is
    * named with the bearing, the refused cell/block and the sensor's own cause
@@ -1652,6 +1672,30 @@ export interface SurfaceAscentRefusal {
 /** The exact `SURFACE_ASCENT_REFUSED` observability line for the candidate layer. */
 export function formatSurfaceAscentRefused(refusal: SurfaceAscentRefusal): string {
   return `SURFACE_ASCENT_REFUSED reason=${refusal.reason} goal=${refusal.goalId} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+}
+
+/**
+ * A sensed FIGHT target the body's melee envelope provably cannot be brought
+ * onto from where it stands: the target is above the walk envelope and the ONE
+ * vertical planner grounds no route to its level.
+ *
+ * The refused ascent is the same `SurfaceAscentRefusal` every other ascent arm
+ * reports (`no_placeable` when no pillar block is held, `unsafe_column` when the
+ * body's own column is a hazard), joined to the ENTITY identity and the contact
+ * geometry so the fact is about `e<id>` rather than about a goal kind.
+ */
+export interface ContactRefusal extends SurfaceAscentRefusal {
+  /** the sensed entity the contact was refused for */
+  entityId: number
+  targetName: string | null
+  /** target feet Y minus body feet Y (positive: the target is ABOVE) */
+  gapY: number
+  /** the 3-D distance the walk would have to close */
+  distance: number
+  /** the contact verdict `classifyContactApproach` reached */
+  approach: ContactApproach
+  /** the carried block a pillar would consume, or null when none is held */
+  placeable: string | null
 }
 
 /**
@@ -2350,6 +2394,7 @@ export function generateGroundedCandidates(
     raw.columnDescentRefusal,
     raw.prospectRefusal,
     digRefusals,
+    raw.contactRefusals,
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
@@ -3023,6 +3068,16 @@ function generateRawCandidates(
     }
   }
 
+  // The REPOSITION half of a fight whose target sits above the walk envelope: the
+  // own-column vertical route to the target's level, offered as an ordinary
+  // MOVE-family candidate ALONGSIDE the ATTACK. CAN enumeration only - code says
+  // whether a grounded route to that level exists and never ranks it against the
+  // fight; Jev chooses. When no route exists the arm returns a typed refusal (see
+  // `contactRefusals`), which is what lets the gate withhold the ATTACK BY CAN
+  // instead of leasing a target the body provably cannot bring melee onto.
+  const contactApproach = contactApproachCandidates(state, options, attackTargets)
+  candidates.push(...contactApproach.candidates)
+
   const foodName = heldFood
   if (foodName !== null && hungry) {
     candidates.push({
@@ -3262,6 +3317,7 @@ function generateRawCandidates(
     surfaceAscentRefusal: surfaceAscent.refusal,
     foodHabitatRefusal: foodHabitat.refusal,
     columnDescentRefusal: columnDescent.refusal,
+    contactRefusals: contactApproach.refusals,
     digRefusals: dedupeDigRouteRefusals(digRefusals),
     prospectRefusal: prospect.refusal,
     sourceExclusions: resourceSourceExclusions(state),
@@ -5578,6 +5634,12 @@ interface RawCandidatesResult {
   foodHabitatRefusal: SurfaceAscentRefusal | null
   /** typed refusal when a stranded body has no safe descent off its own column */
   columnDescentRefusal: ColumnDescentRefusal | null
+  /**
+   * Typed `HUNT_CONTACT_UNREACHABLE` refusals: a sensed fight target the body's
+   * melee envelope provably cannot be brought onto from here (see
+   * `GroundedCandidatesResult.contactRefusals`).
+   */
+  contactRefusals: ContactRefusal[]
   /**
    * Typed `DIG_ROUTE_REFUSED reason=...` facts collected while grounding this
    * tick's offers (see `GroundedCandidatesResult.digRefusals`).
@@ -7956,6 +8018,156 @@ function wallEntryCandidates(
 }
 
 /**
+ * THE CONTACT GEOMETRY of one sensed FIGHT target, from facts the candidate layer
+ * already owns: the 3-D distance the executor closes on, the vertical component
+ * of that gap, and whether the ONE vertical planner (`planVerticalApproachDetailed`,
+ * own column - the same call `ascentRouteTo` makes) grounds a route to the
+ * target's level.
+ *
+ * Pure over the world state: no pathfinder, no clock, no mob name. A producer
+ * that hovers four blocks above the walkway and a skeleton on a ledge four blocks
+ * up are the SAME case here, because the mechanical fact is the gap, not the mob.
+ */
+function contactGeometryFor(
+  state: WorldState,
+  entity: { position: Vec3Json; distance: number },
+): {
+  approach: ContactApproach
+  gapY: number
+  distance: number
+  placeable: string | null
+  ascentRefusal: UpwardRefusalReason | null
+  /** the level the planner was asked for, so the caller cannot disagree with it */
+  targetY: number
+} {
+  const bodyLevel = Math.floor(state.self.position.y)
+  const targetY = Math.floor(entity.position.y)
+  const gapY = contactGapY(bodyLevel, targetY)
+  const placeable = selectPlaceableBlock(state.inventory.counts)
+  const decision = planVerticalApproachDetailed(
+    verticalInputFor(state, {
+      x: Math.floor(state.self.position.x),
+      y: targetY,
+      z: Math.floor(state.self.position.z),
+    }),
+  )
+  const ascentRefusal = decision.plan === null ? (decision.ascentRefusal?.reason ?? null) : null
+  return {
+    approach: classifyContactApproach({
+      distance: entity.distance,
+      meleeReach: MELEE_THREAT_REACH,
+      gapY,
+      // A walk cannot change the body's LEVEL, so the largest vertical component a
+      // walk-only close can still express is the melee envelope itself: the 3-D
+      // distance is at least |gapY|, so `gapY > meleeReach` is unreachable from
+      // EVERY horizontal position. Integer levels make this identical for the
+      // executor's 3.1 and the gate's 3.2.
+      walkGap: MELEE_THREAT_REACH,
+      ascentRefused: ascentRefusal !== null,
+    }),
+    gapY,
+    distance: entity.distance,
+    placeable: placeable === null ? null : placeable.name,
+    ascentRefusal,
+    targetY,
+  }
+}
+
+export interface ContactApproachResult {
+  candidates: Candidate[]
+  refusals: ContactRefusal[]
+}
+
+/**
+ * The REPOSITION remedy for a fight whose target sits above the walk envelope.
+ *
+ * MEASURED (21 blaze hunts, every one `HUNT_END ... reason=out_of_range swings=0
+ * hits=0`, `blaze_rod 0` in every inventory sample): the hunt gate bounded the
+ * approach with `HUNT_APPROACH_BUDGET` - a WALKING budget - against the raw 3-D
+ * distance. A producer hovering above the fortress walkway over a lava basin is
+ * therefore "inside the budget" while no walk can ever close its vertical
+ * component, so the lease ran to its deadline without a swing.
+ *
+ * The remedy is NOT new machinery and NOT an attack: it is the SAME own-column
+ * vertical route every other ascent uses (`ascentRouteTo` -> reuse a remembered
+ * tunnel / cut an up-staircase / pillar with a held block), offered as an
+ * ordinary MOVE-family candidate alongside everything else. Code enumerates CAN
+ * (is there a grounded route to that level?); Jev owns WHICH.
+ *
+ * ONE OFFER PER TARGET LEVEL, not one per entity: every grounded route to the
+ * same level begins with the same mechanical step, so N copies would put N
+ * identical actions in front of Jev and bias the choice - the same reasoning
+ * `levelScanCandidates` records. The motivating entity is named in the meta.
+ *
+ * When the planner grounds NOTHING the arm offers no candidate and returns a
+ * typed `ContactRefusal` instead of silence: the caller withholds the ATTACK by
+ * CAN so the target is never leased as a 0-swing attempt that looks like one.
+ */
+function contactApproachCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  targets: readonly { id: number; name: string; position: Vec3Json; distance: number }[],
+): ContactApproachResult {
+  const candidates: Candidate[] = []
+  const refusals: ContactRefusal[] = []
+  const offeredLevels = new Set<number>()
+  const refusedLevels = new Set<number>()
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  for (const entity of targets) {
+    const geometry = contactGeometryFor(state, entity)
+    if (geometry.approach !== 'ascent_required' && geometry.approach !== 'no_grounded_remedy') continue
+    const base: ContactRefusal = {
+      reason: geometry.ascentRefusal ?? 'no_placeable',
+      goalId: `contact:e${entity.id}`,
+      fromY: feet.y,
+      toY: geometry.targetY,
+      cell: feet,
+      entityId: entity.id,
+      targetName: entity.name,
+      gapY: geometry.gapY,
+      distance: geometry.distance,
+      approach: geometry.approach,
+      placeable: geometry.placeable,
+    }
+    if (geometry.approach === 'no_grounded_remedy') {
+      if (refusedLevels.has(geometry.targetY)) continue
+      refusedLevels.add(geometry.targetY)
+      refusals.push(base)
+      continue
+    }
+    if (offeredLevels.has(geometry.targetY)) continue
+    const ascent = ascentRouteTo(state, options, {
+      targetY: geometry.targetY,
+      goalId: base.goalId,
+      idPrefix: 'ASCEND:contact:',
+      label: `ascend to ${entity.name}'s level for melee contact`,
+      extraMeta: {
+        contactAscent: true,
+        contactEntityId: entity.id,
+        contactTargetName: entity.name,
+        contactGapY: geometry.gapY,
+        contactApproach: geometry.approach,
+      },
+    })
+    if (ascent.candidates.length === 0) {
+      // The planner agreed there is no route after all: the refusal is the fact,
+      // never a silent empty arm.
+      if (refusedLevels.has(geometry.targetY)) continue
+      refusedLevels.add(geometry.targetY)
+      refusals.push({ ...base, reason: ascent.refusal?.reason ?? base.reason })
+      continue
+    }
+    offeredLevels.add(geometry.targetY)
+    candidates.push(...ascent.candidates)
+  }
+  return { candidates, refusals }
+}
+
+/**
  * The VERTICAL remedy for a locomotion target that sits ABOVE the body and has no
  * walkable route.
  *
@@ -9703,6 +9915,15 @@ export function applyReachabilityGate(
   columnDescentRefusal: ColumnDescentRefusal | null = null,
   prospectRefusal: ProspectRefusal | null = null,
   digRefusals: DigRouteRefusalSink = [],
+  /**
+   * Typed `HUNT_CONTACT_UNREACHABLE` refusals the generator already derived (see
+   * `GroundedCandidatesResult.contactRefusals`). Appended at the END of the
+   * parameter list so every existing positional caller keeps its meaning; the
+   * gate does not re-derive them - it re-derives the GEOMETRY per candidate,
+   * which is what decides the withhold, and carries the generator's typed
+   * refusal out as evidence.
+   */
+  contactRefusals: ContactRefusal[] = [],
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -9854,6 +10075,7 @@ export function applyReachabilityGate(
     surfaceAscentRefusal,
     foodHabitatRefusal,
     columnDescentRefusal,
+    contactRefusals,
     prospectRefusal,
     digRefusals: dedupeDigRouteRefusals(digRefusals),
     sourceExclusions: exclusions,
@@ -10042,6 +10264,11 @@ function evaluateOrdinaryAttackCandidate(
     )
   }
 
+  // The ORDINARY (non-hunt) ATTACK keeps the probe rule unchanged: its probe is a
+  // 3-D `GoalNear`, which already answers the vertical case correctly, and the
+  // pinned survival fixtures own that vocabulary. The HUNT path is the one that
+  // needed the contact decomposition (its 24 m budget is a WALKING distance
+  // compared against a 3-D distance), and `evaluateHuntAttackCandidate` applies it.
   const probe = context.options.reachability?.attackPathProbe?.(target) ?? 'unknown'
   if (probe === 'unknown') return null
   const result: ReachabilityResult =
@@ -10066,7 +10293,7 @@ function evaluateOrdinaryAttackCandidate(
  *       must ALWAYS produce an ATTACK, whatever any path probe says; WHICH
  *       response to take stays Jev's.
  *   inside the hunt approach budget   -> executable. `HUNT_APPROACH_BUDGET` is the
- *       distance one bounded lease can actually walk, so the kill is groundable by
+ *       distance one bounded lease can actually WALK, so the kill is groundable by
  *       construction (the case that already works).
  *   beyond the budget                 -> offered UNLESS the route probe POSITIVELY
  *       reports `no_path`. There the body cannot route to the producer at all, so
@@ -10076,6 +10303,19 @@ function evaluateOrdinaryAttackCandidate(
  *       again as soon as the producer is inside the budget (or a route appears).
  *       `unknown` is NOT a verdict - exactly like every locomotion candidate, an
  *       unavailable probe never deletes the only productive action.
+ *
+ * MEASURED CORRECTION (21 blaze hunts, EVERY one `HUNT_END ... reason=out_of_range
+ * swings=0 hits=0`, `blaze_rod 0` in every inventory sample): the budget above is a
+ * WALKING distance and it was compared against the raw 3-D distance. A producer
+ * that hovers above the walkway is "inside the budget" while no walk can close its
+ * vertical component, and the ATTACK lease's own envelope (`GoalFollow` +
+ * `bot.attack`, weapon-only equip list) cannot gain height - so the lease ran to
+ * its deadline without a swing and ended `out_of_range`, which reads as a failed
+ * attempt rather than an unreachable target. The contact geometry is therefore
+ * decomposed FIRST (`contactGeometryFor`, the SAME vertical planner every ascent
+ * uses): a target above the walk envelope is withheld with `needs_ascend` +
+ * `ascend_plan` and its own-column vertical route is enumerated as a MOVE-family
+ * candidate instead. Nothing about WHICH action to take is decided here.
  */
 function evaluateHuntAttackCandidate(
   candidate: Candidate,
@@ -10084,6 +10324,23 @@ function evaluateHuntAttackCandidate(
   targetFact: ReachabilityTarget,
   world: ReachabilityWorld,
 ): CandidateReachability {
+  const contact = contactGeometryFor(context.state, {
+    position: candidate.target as Vec3Json,
+    distance: distanceToTarget,
+  })
+  if (contact.approach === 'ascent_required' || contact.approach === 'no_grounded_remedy') {
+    return reachabilityRecord(
+      candidate,
+      targetFact,
+      world,
+      {
+        reachable: false,
+        reason: 'needs_ascend',
+        missingCapabilities: [{ kind: 'ascend_plan' }],
+      },
+      context,
+    )
+  }
   if (distanceToTarget <= MELEE_THREAT_REACH || distanceToTarget <= HUNT_APPROACH_BUDGET) {
     return reachabilityRecord(
       candidate,

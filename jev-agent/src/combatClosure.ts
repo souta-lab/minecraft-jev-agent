@@ -49,6 +49,20 @@ export type CombatOutcome =
   | 'TARGET_LOST'
   /** the committed id is present but no longer a valid attack target */
   | 'TARGET_INVALIDATED'
+  /**
+   * The committed id is tracked and alive, but NO grounded remedy can bring the
+   * body's melee envelope onto it from here: the contact gap has a vertical
+   * component the walk cannot express (the target is above the body's level) and
+   * the ONE vertical planner every ascent uses (`verticalPlan.ts`) grounds no
+   * route to that level.
+   *
+   * This is a §9 vocabulary gap, not a policy: none of the other outcomes says
+   * it. Measured live, every blaze hunt ended `HUNT_END ... reason=out_of_range
+   * swings=0 hits=0` (21 occurrences) because a hovering producer is exactly
+   * this case and the typed fact had no name - so a 0-swing lease looked like a
+   * failed attempt instead of a target the body cannot reach at all.
+   */
+  | 'TARGET_UNREACHABLE'
   /** a hard-safety interrupt or lease revocation preempted the commitment */
   | 'COMBAT_INTERRUPTED'
   /** the bounded lease expired with the target still tracked and alive */
@@ -89,6 +103,8 @@ export function combatFailureCode(outcome: CombatOutcome): string | null {
       return 'target_gone'
     case 'TARGET_INVALIDATED':
       return 'target_invalidated'
+    case 'TARGET_UNREACHABLE':
+      return 'target_unreachable'
     case 'COMBAT_INTERRUPTED':
       return 'combat_interrupted'
     case 'COMBAT_TIMEOUT':
@@ -107,6 +123,13 @@ export interface CombatOutcomeFacts {
   invalidated: boolean
   /** a hard-safety interrupt or a revoked lease ended the commitment */
   interrupted: boolean
+  /**
+   * the commitment ended because no grounded remedy reaches melee contact
+   * (`TARGET_UNREACHABLE`): the target is tracked, alive and simply out of the
+   * body's reach from every level the body can legally stand on. Optional so a
+   * caller that cannot observe the geometry keeps the historical facts shape.
+   */
+  unreachable?: boolean
   /** swings actually landed on the committed id during the lease */
   hits: number
 }
@@ -123,8 +146,133 @@ export function classifyCombatOutcome(facts: CombatOutcomeFacts): CombatOutcome 
   if (facts.entityDefeated) return 'KILL_VERIFIED'
   if (facts.interrupted) return 'COMBAT_INTERRUPTED'
   if (facts.invalidated) return 'TARGET_INVALIDATED'
+  // An unreachable target is TRACKED and ALIVE: it is neither gone nor invalid,
+  // and calling it a timeout would report a bounded attempt where the body never
+  // had a way to swing. It wins over the tracked/despawned split for that reason.
+  if (facts.unreachable === true) return 'TARGET_UNREACHABLE'
   if (!facts.tracked) return facts.reacquireExhausted ? 'TARGET_LOST' : 'TARGET_DESPAWNED'
   return 'COMBAT_TIMEOUT'
+}
+
+/**
+ * THE CONTACT GEOMETRY of one fight: can the body's melee envelope be brought
+ * onto the target at all, and if not, WHICH mechanical component is missing?
+ *
+ * This is CAN, not a preference. `HUNT_APPROACH_BUDGET` is a WALKING budget
+ * (issue #436 section 9 measured it as "one bounded hunt lease can walk this
+ * far"), but the hunt gate compared it against the raw 3-D distance. A producer
+ * that hovers above the walkway is therefore "inside the budget" while the walk
+ * can never close its vertical component - the measured shape of every blaze
+ * hunt: `HUNT_END reason=out_of_range swings=0 hits=0` (21 times).
+ *
+ * The bound is a theorem, not a heuristic. A walk cannot change the body's LEVEL,
+ * and the 3-D distance to the target is at least the vertical component of the
+ * gap:
+ *
+ *   gapY <= meleeReach   the body can stand at the target's own horizontal
+ *                        position at ITS level and be within the melee envelope,
+ *                        so a walk-only close is expressible.
+ *   gapY >  meleeReach   the distance is > meleeReach at EVERY horizontal
+ *                        position, so no walk can ever produce a swing. The body
+ *                        must GAIN HEIGHT, which only the vertical planner can
+ *                        ground (reuse a tunnel / cut an up-staircase / pillar
+ *                        with a held block) - and that is a MOVE-family remedy,
+ *                        not something a melee ATTACK lease can express.
+ *
+ * The gap is measured between INTEGER levels, so `gapY > meleeReach` is the same
+ * verdict for every melee constant in the tree (3.1 in the executor, 3.2 in the
+ * gate): a 3-block gap is walkable, a 4-block gap is not. No mob is special-cased
+ * and no remedy is invented here.
+ */
+export type ContactApproach =
+  /** the melee envelope already contains the target */
+  | 'contact'
+  /** the walk closes the whole gap: its vertical component fits the melee envelope */
+  | 'walk'
+  /** the gap exceeds the melee envelope and a grounded vertical route EXISTS */
+  | 'ascent_required'
+  /** the gap exceeds the melee envelope and the vertical planner grounds NOTHING */
+  | 'no_grounded_remedy'
+
+export interface ContactGeometryFacts {
+  /** 3-D distance to the target, as the executor measures it */
+  distance: number
+  /** the melee envelope the executor can swing inside */
+  meleeReach: number
+  /** target level minus body level, in whole blocks; positive means ABOVE */
+  gapY: number
+  /** the vertical component a walk-only close can still express (the melee envelope) */
+  walkGap: number
+  /** the vertical planner refused to ground a route to the target's level */
+  ascentRefused: boolean
+}
+
+/** Pure and total: same geometry in, same contact verdict out. */
+export function classifyContactApproach(facts: ContactGeometryFacts): ContactApproach {
+  if (facts.distance <= facts.meleeReach) return 'contact'
+  if (facts.gapY <= facts.walkGap) return 'walk'
+  return facts.ascentRefused ? 'no_grounded_remedy' : 'ascent_required'
+}
+
+/** The vertical component of a contact gap, in whole blocks, from two feet Ys. */
+export function contactGapY(bodyFeetY: number, targetFeetY: number): number {
+  return Math.floor(targetFeetY) - Math.floor(bodyFeetY)
+}
+
+/** `HUNT_CONTACT_UNREACHABLE` - the typed line for a target no remedy reaches. */
+export const HUNT_CONTACT_UNREACHABLE = 'HUNT_CONTACT_UNREACHABLE'
+
+/**
+ * WHICH proof established that the body's melee envelope cannot be brought onto
+ * the target. Deliberately a ONE-member vocabulary, because code may only promote
+ * what it can PROVE:
+ *
+ *   `vertical_gap` the geometry alone proves it: the target is more than the melee
+ *       envelope above the body, a walk cannot change the body's level, and the
+ *       3-D distance is at least the vertical component - so no horizontal
+ *       position can produce a swing, and only a height gain could (which the
+ *       melee ATTACK lease cannot express).
+ *
+ * A bounded approach that produces no closure is NOT promoted to this vocabulary:
+ * that is an observation about the body's progress, not a proof that no route
+ * exists, and the pinned `out_of_range` meaning ("stayed tracked but never entered
+ * melee range inside the lease") already states it honestly.
+ */
+export type ContactUnreachableEvidence = 'vertical_gap'
+
+/**
+ * The observability line for a fight the body's melee envelope provably cannot
+ * reach. It names the geometry (distance, its vertical component), WHICH proof
+ * established the verdict, and the vertical planner's OWN typed refusal, so a
+ * run-scoped reader can tell an unreachable producer from a 0-swing attempt
+ * without inferring anything.
+ */
+export function formatContactUnreachable(input: {
+  actionId: string
+  entityId: number
+  targetName: string | null
+  evidence: ContactUnreachableEvidence
+  approach: ContactApproach
+  distance: number
+  gapY: number
+  /** horizontal component of the gap, when the caller measured it */
+  horizontal?: number | null
+  meleeReach: number
+  walkGap: number
+  /** the vertical planner's own refusal (`no_placeable` / `unsafe_column`) */
+  ascentRefusal: string | null
+  /** the carried block a pillar would consume, or null when none is held */
+  placeable: string | null
+}): string {
+  const horizontal = input.horizontal === undefined || input.horizontal === null ? '' : ` horizontal=${round2(input.horizontal)}`
+  return (
+    `${HUNT_CONTACT_UNREACHABLE} actionId=${input.actionId} entity=e${input.entityId} ` +
+    `target=${input.targetName ?? 'unknown'} evidence=${input.evidence} approach=${input.approach} ` +
+    `distance=${round2(input.distance)}${horizontal} gap_y=${round2(input.gapY)} melee=${input.meleeReach} ` +
+    `walk_gap=${input.walkGap} ` +
+    `ascent_refusal=${input.ascentRefusal ?? 'none'} placeable=${input.placeable ?? 'none'} ` +
+    `-> no grounded remedy brings melee contact onto this target; withheld by CAN, never leased as a 0-swing attempt`
+  )
 }
 
 /**
@@ -171,6 +319,8 @@ function killClaim(outcome: CombatOutcome): string {
       return 'kill=unproven reason=same_identity_reacquire_exhausted'
     case 'TARGET_INVALIDATED':
       return 'kill=unproven reason=target_became_invalid'
+    case 'TARGET_UNREACHABLE':
+      return 'kill=unproven reason=no_grounded_remedy_reaches_melee_contact'
     case 'COMBAT_INTERRUPTED':
       return 'kill=unproven reason=safety_or_lease_preemption'
     case 'COMBAT_TIMEOUT':

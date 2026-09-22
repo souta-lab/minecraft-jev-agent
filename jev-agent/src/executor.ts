@@ -78,6 +78,8 @@ import {
   classifyCombatOutcome,
   combatFailureCode,
   formatCombatOutcome,
+  classifyContactApproach,
+  formatContactUnreachable,
   HUNT_APPROACH_BUDGET,
 } from './combatClosure.ts'
 import type { CombatOutcome } from './combatClosure.ts'
@@ -146,6 +148,7 @@ import {
   headroomAcrossFootprint,
   planReuseLeg,
   resolvePillarStep,
+  selectPlaceableBlock,
   shouldReplanAfterVerticalChunk,
   verticalStepTowardTarget,
 } from './verticalPlan.ts'
@@ -1215,6 +1218,20 @@ export type HuntEndReason =
   | 'target_lost'
   /** the committed id stayed tracked but never entered melee range inside the lease */
   | 'out_of_range'
+  /**
+   * The committed id stayed tracked and alive and the PROVEN geometry puts it out
+   * of melee reach: it is more than `MELEE_ATTACK_RANGE` above the body, and a walk
+   * cannot change the body's level, so no horizontal position a walk can occupy
+   * brings the melee envelope onto it.
+   *
+   * Measured shape this names: 9 of the 17 live blaze hunts started at lease
+   * gapY >= 4 (values 4,4,4,4,9,9,9,9,5) - the fortress ledges at y=60-69 against
+   * the body's y=57-58 - and every one of them ended `out_of_range swings=0 hits=0`
+   * after burning the full `GOAL_HUNT_LEASE_MS`. A target the body provably cannot
+   * reach is now a different run-scoped fact from one it merely failed to arrive
+   * at (`out_of_range`, whose pinned meaning is unchanged).
+   */
+  | 'unreachable'
   /** swings landed, the committed id survived, and the bounded lease ran out */
   | 'lease_expired'
 
@@ -5611,6 +5628,16 @@ export class Executor {
     let reacquireExhausted = false
     /** a safety/lease preemption ended the commitment */
     let interrupted = false
+    /**
+     * The closing phase PROVED no grounded remedy could bring melee contact onto
+     * the committed id: either the geometry alone rules it out (the target sits
+     * more than `MELEE_ATTACK_RANGE` above the body and a walk cannot change the
+     * body's level) or a bounded approach produced zero closure. The lease ends on
+     * that proof with the typed `unreachable` reason instead of polling to its
+     * deadline - the honest difference between a failed approach and a target the
+     * body cannot reach from here.
+     */
+    let unreachable = false
     const onEntityDead = (entity: Entity): void => {
       if (entity.id !== entityId) return
       entityDefeated = true
@@ -5699,6 +5726,58 @@ export class Executor {
           entity.position.z - this.bot.entity.position.z,
         )
         if (distanceToTarget > MELEE_ATTACK_RANGE) {
+          const gapY = Math.floor(entity.position.y) - Math.floor(this.bot.entity.position.y)
+          const horizontal = Math.hypot(
+            entity.position.x - this.bot.entity.position.x,
+            entity.position.z - this.bot.entity.position.z,
+          )
+          const placeable = selectPlaceableBlock(this.inventoryCounts())
+          // THE GEOMETRY PROOF, before any attempt. A walk cannot change the body's
+          // LEVEL, and the 3-D distance is at least the vertical component of the
+          // gap, so a target more than `MELEE_ATTACK_RANGE` above the body is out of
+          // melee reach from EVERY horizontal position: `GoalFollow` provably cannot
+          // close it. The lease therefore ends HERE instead of polling to its
+          // deadline and reporting `out_of_range swings=0` - the measured shape of 9
+          // of the 17 live blaze hunts (lease-start gapY 4,4,4,4,9,9,9,9,5), which
+          // read as failed attempts rather than targets no remedy reaches. Integer
+          // levels make this verdict identical to the candidate gate's
+          // (`contactGeometryFor` uses the same bound).
+          //
+          // This is deliberately the ONLY proof promoted to `unreachable`. A bounded
+          // stall with no closure is NOT: `test-pearl-route.mts` (b4) pins a hunt
+          // whose target never enters melee as the typed `out_of_range`, and a stall
+          // is an observation about the body's progress, not a proof that no route
+          // exists. Code claims only what it can prove.
+          if (gapY > MELEE_ATTACK_RANGE) {
+            stopFollowing()
+            unreachable = true
+            const placeableBlock = placeable === null ? null : placeable.name
+            this.logger.warn(
+              'executor',
+              formatContactUnreachable({
+                actionId: candidate.id,
+                entityId,
+                targetName: candidate.targetName,
+                evidence: 'vertical_gap',
+                approach: classifyContactApproach({
+                  distance: distanceToTarget,
+                  meleeReach: MELEE_ATTACK_RANGE,
+                  gapY,
+                  walkGap: MELEE_ATTACK_RANGE,
+                  ascentRefused: placeable === null,
+                }),
+                distance: distanceToTarget,
+                gapY,
+                horizontal,
+                meleeReach: MELEE_ATTACK_RANGE,
+                walkGap: MELEE_ATTACK_RANGE,
+                ascentRefusal: placeable === null ? 'no_placeable' : null,
+                placeable: placeableBlock,
+              }),
+              { actionId: candidate.id, targetEntityId: entityId, gapY, horizontal },
+            )
+            break
+          }
           // Close on THIS entity only. Stock `GoalFollow(entity)` follows the
           // exact committed id, so a teleporting producer keeps its target.
           if (!following && this.bot.pathfinder !== undefined) {
@@ -5776,6 +5855,7 @@ export class Executor {
       reacquireExhausted,
       invalidated: false,
       interrupted: false,
+      unreachable,
       hits,
     })
 
@@ -5840,11 +5920,13 @@ export class Executor {
           ? 'killed'
           : reacquireExhausted
             ? 'target_lost'
-            : trackedAtEnd
-              ? attacks === 0
-                ? 'out_of_range'
-                : 'lease_expired'
-              : 'untracked'
+            : unreachable
+              ? 'unreachable'
+              : trackedAtEnd
+                ? attacks === 0
+                  ? 'out_of_range'
+                  : 'lease_expired'
+                : 'untracked'
     if (goalDrop !== null && huntEnd !== null) {
       this.logger.info(
         'executor',
