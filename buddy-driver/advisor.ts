@@ -177,16 +177,32 @@ export function groundStrategy(strategy: AdvisorStrategy, state: AdvisorState): 
   return { strategy: replacement, requested: strategy, refused: true, reason }
 }
 
-/** Stable cache key for an advisor state. Exported so tests can seed the cache. */
+/**
+ * Stable cache key for an advisor state. Exported so tests can seed the cache.
+ *
+ * It must cover EVERY input the advisor model is shown (issue #413: "the hash drops
+ * body/wait/failure/queue context and replays compiled goals"). The body's position and
+ * dimension, the rung INDEX, the queue's depth/done counters, the WAIT streak, the recent
+ * failure strings and the durable world facts all change what a correct strategy is; when
+ * they were omitted, a cache hit could replay a plan compiled for a different body state
+ * or a different waiting situation. `JSON.stringify` gives stable key order here because
+ * the payload is built literally and the maps were already normalised by their builders.
+ */
 export function hashAdvisorState(state: AdvisorState): string {
   const payload = {
     rung: state.rung,
+    rungIndex: state.rungIndex,
+    position: state.position,
+    dimension: state.dimension,
     inventory: state.inventory,
     toolRank: state.toolRank,
     stations: state.stations,
     ores: [...state.discoveredOres].sort(),
-    queueCurrent: state.queueCurrent,
+    queue: { current: state.queueCurrent, depth: state.queueDepth, done: state.queueDone },
+    waitStreak: state.waitStreak,
     failed: state.failedCandidates,
+    recentFailures: state.recentFailures,
+    durable: state.durable ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }

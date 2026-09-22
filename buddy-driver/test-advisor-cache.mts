@@ -387,6 +387,33 @@ addCase('mercury grounding reports a missing smelt input without replacing the s
   }
 })
 
+addCase('#413: the advisor key covers every input the model is shown, not only rung/inventory/queue-current', () => {
+  const base = advisorState()
+  const h = (over: Partial<AdvisorState>) => hashAdvisorState(advisorState(over))
+  const key = hashAdvisorState(base)
+  const movedBody = h({ position: { x: 40, y: 12, z: -7 } })
+  const otherDimension = h({ dimension: 'minecraft:the_nether' })
+  const deeperQueue = h({ queueDepth: 4 })
+  const moreDone = h({ queueDone: 9 })
+  const waited = h({ waitStreak: 41 })
+  const failures = h({ recentFailures: ['ENTER:26,67,9:failed:path_stuck'] })
+  const durable = h({ durable: { verifiedPortal: { x: 25, y: 66, z: 9 }, knownPortalSites: 1 } })
+  return {
+    pass:
+      hashAdvisorState(advisorState()) === key &&
+      movedBody !== key &&
+      otherDimension !== key &&
+      deeperQueue !== key &&
+      moreDone !== key &&
+      waited !== key &&
+      failures !== key &&
+      durable !== key,
+    detail:
+      `key=${key} moved=${movedBody !== key} dim=${otherDimension !== key} depth=${deeperQueue !== key} ` +
+      `done=${moreDone !== key} wait=${waited !== key} failures=${failures !== key} durable=${durable !== key}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('Advisor / Mercury cache replay + invalidation tests\n')
 process.stdout.write(`${'-'.repeat(72)}\n`)
