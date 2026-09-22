@@ -3774,9 +3774,19 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
   // clearance candidate ignored failure memory. A cut that has exhausted the
   // same retry budget every other target honours is not executable now; the
   // log route / exploration fallback must take over.
-  const cuts = (state.headroomCuts ?? []).filter(
+  const observedCuts = state.headroomCuts ?? []
+  // New sensor states distinguish the exact cell currently intersecting the
+  // player's AABB from neighbouring clearance observations retained across a
+  // small shuffle. Only the binding current-footprint blocker is an executable
+  // headroom acquisition. Exposing the neighbours as peer MINE choices made Jev
+  // excavate a room per ascent (live y55-y58) even though CAN named one blocker.
+  // Legacy replay fixtures have no metadata, so preserve their historical pool.
+  const hasFootprintMetadata = observedCuts.some((cut) => cut.currentFootprint !== undefined)
+  const cuts = observedCuts.filter(
     (cut) =>
-      cut.safe && failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
+      (!hasFootprintMetadata || cut.currentFootprint === true) &&
+      cut.safe &&
+      failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
   )
   if (cuts.length === 0) return []
   const feet = {

@@ -287,6 +287,22 @@ addCase('(b) craft furnace keeps the clearance stone MINE (chain needs cobblesto
   }
 })
 
+// Live y55-y58 efficiency regression: once the sensor marks the exact player-AABB
+// blocker, neighbouring clearance observations are context only. They must not
+// become alternative Jev MINE choices or the agent excavates a room per ascent.
+addCase('(b2) current-footprint metadata exposes only the binding headroom MINE', () => {
+  const binding = { x: 0, y: 63, z: 0 }
+  const state = build('craft', 'furnace', 'craft 1 x furnace', [], [
+    { pos: binding, name: 'stone', safe: true, reason: 'safe', currentFootprint: true },
+    { pos: { x: 1, y: 63, z: 0 }, name: 'stone', safe: true, reason: 'safe', currentFootprint: false },
+  ])
+  const mines = minesOf(state)
+  return {
+    pass: mines.length === 1 && mines[0]?.id === `MINE:${blockId('b', binding)}`,
+    detail: `mines=${describeMines(mines)}`,
+  }
+})
+
 // (b) raw_iron needs no plain stone while the pickaxe is held, so its clearance
 // MINE is withheld like flint.
 addCase('(b) collect raw_iron withholds the clearance stone MINE', () => {

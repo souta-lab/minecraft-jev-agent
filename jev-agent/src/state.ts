@@ -2303,8 +2303,9 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
     out.set(key, { pos: { x, y, z }, name, safe, reason, currentFootprint: currentFootprint || existing?.currentFootprint === true })
   }
   if (current.blocker !== null) consider(current.blocker.x, current.blocker.y, current.blocker.z, true)
-  // Adjacent columns remain in the acquisition pool so the exact MINE id can
-  // survive a small body shuffle, but they are NOT evidence that current CAN is blocked.
+  // Adjacent columns remain in the observation pool so a small body shuffle does
+  // not erase local geometry. They are context only: candidate generation exposes
+  // the `currentFootprint` blocker, never these neighbours, as headroom acquisition.
   for (let dx = -1; dx <= 1; dx += 1) {
     for (let dz = -1; dz <= 1; dz += 1) {
       for (const dy of [1, 2]) consider(feetX + dx, feetY + dy, feetZ + dz, false)
