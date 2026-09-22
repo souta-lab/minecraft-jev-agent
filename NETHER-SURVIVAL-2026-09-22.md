@@ -7,59 +7,70 @@ the **executor**'s equip action (`jev-agent/src/executor.ts`), the **guard** tha
 `jev-agent/src/threat.ts` mirrored by `jev-agent/src/controller-legacy.ts`.
 
 Primary evidence: the live log
-`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log` (553 301 lines, 2026-09-21T08:06Z →
-2026-09-22T12:10Z) and the generation-local sink
-`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/logs/jev/run.jsonl`.
+`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log` (read twice while this lane ran: 553 301
+lines at 2026-09-22T12:10Z, 1 335 209 lines at 2026-09-22T17:24Z — every number below carries its
+snapshot) and the generation-local sink
+`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/logs/jev/run.jsonl` (124 `EQUIP_WEAPON`, 2 `EQUIP_ARMOR`).
 
 ---
 
 ## 1. Measured death profile
 
-| | count |
-| --- | --- |
-| `DEATH` lines (all) | 104 |
-| real deaths (`simulated=false`) | 98 |
-| `simulated=true` (soft simdeath telemetry) | 6 |
-| deaths in `minecraft:the_nether` | 53 |
-| deaths in `minecraft:overworld` | 51 |
-| window | 28.07 h → **≈3.5 real deaths/hour** |
-| `DEATH_CAUSE` records | 80 |
+**Snapshot boundary (the log is LIVE and grew while this lane ran).** All numbers below come from
+ONE read of `/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log` at
+`2026-09-21T08:06:00.437Z → 2026-09-22T17:24:10.703Z`, **1 335 209 lines**. An earlier pass during
+this lane saw the same file at 553 301 lines / 104 `DEATH` lines / 98 real; the profile grew as the
+resident kept dying, so any number quoted without its snapshot boundary is not reproducible. (The
+fatal-window line numbers used in §1.3 are stable: they are ~463 k, far below either boundary.)
 
-### 1.1 Who killed the body (`DEATH_CAUSE ... killer=`), mob vs player vs environment
+| | at 553 301 lines | at 1 335 209 lines |
+| --- | --- | --- |
+| `DEATH` lines | 104 | **133** |
+| real deaths | 98 | **131** |
+| `simulated=true` | 6 | **2** |
+| `DEATH_CAUSE` records | 80 | **109** |
+| deaths in `minecraft:the_nether` | 53 | **75** |
+| deaths in `minecraft:overworld` | 51 | **56** |
+| window | 28.07 h | **33.30 h** |
+| real deaths / hour | 3.5 | **3.93** |
+| overworld→nether expeditions | — | **79** |
+| expeditions with ≥1 real death | — | **75 / 79 (95 %)** |
+| expeditions with ≥1 **Nether** death | — | **74 / 79 (94 %)** |
+| real deaths per expedition (all dimensions) | — | **1.62** |
+| Nether deaths per expedition | — | **0.94** |
+| max Nether deaths in one expedition | — | 1 |
+
+The per-expedition number is the one that matters for this objective: **94 % of Nether expeditions
+lost the body in the Nether at least once**, i.e. this is not an occasional accident but the normal
+outcome of entering the dimension.
+
+### 1.1 Who killed the body (`DEATH_CAUSE ... killer=`), at the 1 335 209-line snapshot
 
 ```text
-ender_dragon        11   the_nether   SUMMONED (a dragon cannot spawn in the Nether)
-magma_cube           8   the_nether   mob
-fire                 7   the_nether   environment
-lava                 5   the_nether   environment
-skeleton             4   the_nether   mob
-s0u7a                7   overworld    PLAYER (operator)
-Hasilan              7   overworld    PLAYER (operator)
-wither_skeleton      2   the_nether   mob
-warden               2   the_nether   SUMMONED (operator)
-vex                  1   the_nether   mob
-ghast                1   the_nether   mob
-blaze                1   the_nether   mob
-s0u7a                1   the_nether   PLAYER (operator)
-warden               3   overworld    SUMMONED (operator)
-fire                 4   overworld    environment
-zombie_villager      1   overworld    mob
-null                 8   overworld    unattributed
-null                 7   the_nether   unattributed
+Nether:  null 13 | fire 13 | magma_cube 11 | ender_dragon 11 (SUMMONED) | skeleton 6 | lava 6
+         warden 2 (SUMMONED) | wither_skeleton 2 | ghast 2 | s0u7a 2 (PLAYER) | Hasilan 2 (PLAYER)
+         blaze 1 | vex 1
+Overworld: s0u7a 10 (PLAYER) | null 8 | Hasilan 7 (PLAYER) | fire 6 | warden 3 (SUMMONED)
+         endermite 2 | zombie_villager 1
 ```
 
-Separated: **player-inflicted = 15** (`s0u7a` 8 + `Hasilan` 7, all bow/crossbow from creative, 14 of
-them in the overworld), **operator-summoned = 16** (`ender_dragon` 11 + `warden` 5),
-**mob-inflicted = 17** in the Nether (`magma_cube` 8 + `skeleton` 4 + `wither_skeleton` 2 + `vex` +
-`ghast` + `blaze`), **environmental = 16** (`fire` 11 + `lava` 5), **unattributed = 15**
-(`killer=null`).
+Grouped:
 
-So the Nether expedition deaths are **not** mostly the operator: the dominant single Nether killer is
-the `magma_cube` (8), and the "closest approach" death was one of them.
+| class | count | detail |
+| --- | --- | --- |
+| **player-inflicted** | **21** | `s0u7a` 12 (10 overworld + 2 Nether), `Hasilan` 9 (7 + 2) — the operator's bow/crossbow from creative |
+| operator-summoned | 16 | `ender_dragon` 11 (a dragon cannot spawn in the Nether) + `warden` 5 |
+| **mob-inflicted in the Nether** | **23** | `magma_cube` 11, `skeleton` 6, `wither_skeleton` 2, `ghast` 2, `blaze` 1, `vex` 1 |
+| environmental | 25 | `fire` 19, `lava` 6 |
+| unattributed (`killer=null`) | 21 | 13 Nether + 8 overworld |
+| mob, overworld | 3 | `endermite` 2, `zombie_villager` 1 |
+
+So the Nether deaths are **not** mostly the operator: `magma_cube` is the single largest Nether
+killer and the fatal "closest approach" death was one of them.
 
 ### 1.2 What the body was doing, what it held
 
-`weapon=` on the 305 `THREAT_NEARBY` lines (the weapon the body actually met the threat with):
+`weapon=` on the `THREAT_NEARBY` lines (the item the body actually met the threat with):
 
 ```text
 diamond_sword   101
@@ -68,8 +79,8 @@ cobblestone      70
 dirt              1
 ```
 
-150 of 305 threat observations were met with **a non-weapon in hand**. Action kinds at death are
-dominated by `RETREAT`/`MOVE`; the fatal window is a retreat.
+150 of 305 threat observations were met with **a non-weapon in hand** (at the 553 301-line
+snapshot). `SURVIVAL_REGROUND`, `RETREAT` and `MOVE` dominate the actions around the Nether deaths.
 
 ### 1.3 The fatal window (`buddy.log:463026` → `463109`), file:line
 
@@ -133,10 +144,10 @@ which looks like "the equip path never ran". It is an evidence-plane artefact: `
 generation-local sink shows the truth:
 
 ```text
-logs/jev/run.jsonl:  124 × EQUIP_WEAPON   (e.g. `EQUIP_WEAPON item=diamond_sword replaced=stone_pickaxe reason=combat`)
-                       34 × `EQUIP_WEAPON item=diamond_sword replaced=stone_pickaxe reason=combat`
-                       2 × EQUIP_ARMOR    (`EQUIP_ARMOR slot=legs item=diamond_leggings from=inventory replaced=none`)
+logs/jev/run.jsonl:  124 × EQUIP_WEAPON      (incl. 34 × `EQUIP_WEAPON item=diamond_sword replaced=stone_pickaxe reason=combat`)
+                       2 × EQUIP_ARMOR        (`EQUIP_ARMOR slot=legs item=diamond_leggings from=inventory replaced=none`)
                        9 × EQUIP_ARMOR_REFUSED
+                       0 × WEAPON_CHOICE_REQUIRED
 ```
 
 So equip works, armour equip works, and the body *was* armed 124 times — **each time from inside an
