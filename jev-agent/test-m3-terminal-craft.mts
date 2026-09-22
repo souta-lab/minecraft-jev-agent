@@ -21,12 +21,13 @@
 // 14 powder), so it can never under-supply the craft. The fixture pins both the
 // exact minimum (6) and the ladder/gate margin (7) so the off-by-one is visible.
 //
-// KNOWN DEFECT (proven below, reported, not fixed in this lane): the craft
-// candidate path cannot express a multi-count craft. `craftCandidates` plans
-// with `want = 1`, and `crafting.ts#planNextCraftStep` treats ANY held copy of
-// the goal item as already satisfied, so once the bot holds 1..11 ender_eyes the
-// terminal craft goal `craft 12 x ender_eye` receives only WAIT and can never
-// reach 12. See the KNOWN_DEFECT section at the bottom for the observed trace.
+// The multi-count craft stall this file used to document is FIXED, and the pin
+// now sits in the assertions rather than in a defect note: `craftCandidates`
+// plans with `want = craftGoalRequirement(state, focusItem)` (the active goal's
+// `requiredCount`, `candidates.ts:5920`), so the terminal `craft 12 x ender_eye`
+// goal keeps emitting a craft step at 1..11 eyes. The diagnostic section at the
+// bottom prints `DEFECT_FIXED` for every partial count and flips back to
+// `KNOWN_DEFECT` automatically if a later change re-threads `want = 1`.
 //
 // Run: bun jev-agent/test-m3-terminal-craft.mts
 //       (also auto-run by jev-agent/bun-tests/legacy-suite.test.ts)

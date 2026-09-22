@@ -86,7 +86,7 @@ export const M3_POST_POWDER_INVENTORY = Object.freeze({
   [BLAZE_POWDER]: BLAZE_ROD_REQUIRED * POWDER_PER_ROD,
 })
 
-/** The real terminal rung's goal, read from the ladder (planner-legacy.ts:478-480). */
+/** The real terminal rung's goal, read from the ladder (`planner-legacy.ts:685-689`). */
 export const M3_TERMINAL_GOAL = Object.freeze({
   kind: 'craft',
   targetItem: ENDER_EYE,
@@ -96,23 +96,43 @@ export const M3_TERMINAL_GOAL = Object.freeze({
 /**
  * The exact code sites this rehearsal binds. Runtime checks are value-based; these
  * strings exist so a GAP can name BOTH sides with file:line instead of a guess.
+ *
+ * Line numbers re-measured against main `877c3ac` (2026-09-23). They had drifted
+ * by 200+ lines on the ladder side, so a GAP report named the wrong sites - a
+ * methodology/evidence-integrity defect (#63): a citation that no longer resolves
+ * is worse than no citation, because it reads as verified.
  */
 export const M3_CHAIN_SOURCES = Object.freeze({
   ladder_blaze_rods:
-    'buddy-driver/planner-legacy.ts:469-470 id=blaze_rods satisfied blaze_rod>=7 / goals collect 7 x blaze_rod',
+    'buddy-driver/planner-legacy.ts:675-679 id=blaze_rods satisfied blaze_rod>=7 / goals collect 7 x blaze_rod',
   ladder_ender_pearls:
-    'buddy-driver/planner-legacy.ts:474-475 id=ender_pearls satisfied ender_pearl>=12 / goals collect 12 x ender_pearl',
+    'buddy-driver/planner-legacy.ts:680-684 id=ender_pearls satisfied ender_pearl>=12 / goals collect 12 x ender_pearl',
   ladder_ender_eyes:
-    'buddy-driver/planner-legacy.ts:479-480 id=ender_eyes satisfied ender_eye>=12 / goals craft 12 x ender_eye',
+    'buddy-driver/planner-legacy.ts:685-689 id=ender_eyes satisfied ender_eye>=12 / goals craft 12 x ender_eye',
   terminal_goal_want:
-    'jev-agent/src/candidates.ts:1838-1841 craftGoalRequirement(current.requiredCount) -> planNextCraftStep want',
+    'jev-agent/src/candidates.ts:5920-5924 craftGoalRequirement(current.requiredCount) -> planNextCraftStep want',
   planner_want_check:
-    'jev-agent/src/crafting.ts:187-194 planNextCraftStep(... want = 1) + have(item, want)',
-  gate_eye_threshold: 'tools/m3-gate.mjs:54-55 ENDER_EYE=ender_eye ENDER_EYE_REQUIRED=12',
-  gate_pearl_threshold: 'tools/m3-gate.mjs:57-58 ENDER_PEARL_REQUIRED=12',
-  gate_rod_threshold: 'tools/m3-gate.mjs:59-61 BLAZE_ROD_REQUIRED=7',
-  gate_powder_threshold: 'tools/m3-gate.mjs:62-63 BLAZE_POWDER=blaze_powder BLAZE_POWDER_REQUIRED=12',
-  gate_eye_predicate: 'tools/m3-gate.mjs:94-107 evaluateEnderEyes (ender_eye>=12; eye_of_ender is never an item)',
+    'jev-agent/src/crafting.ts:201-208 planNextCraftStep(... want) + have(item, want)',
+  gate_eye_threshold:
+    'tools/milestone-predicates.mjs:43-44 ENDER_EYE=ender_eye ENDER_EYE_REQUIRED=12 (imported by tools/m3-gate.mjs:54-63)',
+  gate_pearl_threshold:
+    'tools/milestone-predicates.mjs:45-46 ENDER_PEARL=ender_pearl ENDER_PEARL_REQUIRED=12',
+  gate_rod_threshold: 'tools/milestone-predicates.mjs:47-48 BLAZE_ROD=blaze_rod BLAZE_ROD_REQUIRED=7',
+  gate_powder_threshold:
+    'tools/milestone-predicates.mjs:49-50 BLAZE_POWDER=blaze_powder BLAZE_POWDER_REQUIRED=12',
+  gate_eye_predicate:
+    'tools/m3-gate.mjs:103-116 evaluateEnderEyes (ender_eye>=12; eye_of_ender is never an item)',
+  /**
+   * The two ACQUISITION steps this rehearsal deliberately does NOT model, named
+   * so its coverage claim is honest: the endgame inventory is SEEDED with
+   * `{ender_pearl: 12, blaze_rod: 7}`, so neither the kill nor the
+   * drop->inventory pickup is exercised here. `jev-agent/test-eye-chain.mts` owns
+   * those (a sensed dropped item entity is offered as a grounded `PICKUP` and
+   * verified by the inventory delta), and `tools/m3-gate.mjs#evaluateEnderEyes`
+   * observes ONLY inventory samples - it cannot see a kill or a pickup at all.
+   */
+  not_modelled_acquisition:
+    'jev-agent/src/candidates.ts:10320-10365 pickupCandidates (dropped-item route NOT rehearsed here; endgame inventory is seeded) + jev-agent/test-eye-chain.mts:1 (owns the kill/drop/pickup shapes)',
 })
 
 /** One shared, read-only recipe index built from the pinned minecraft-data registry. */

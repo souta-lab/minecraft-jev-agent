@@ -2149,6 +2149,9 @@ export class Executor {
       case 'DESCEND':
       case 'STEP':
       case 'MOVE':
+      // Walking onto a dropped item equips nothing: the hand is irrelevant to the
+      // server's pickup, so no carried item is authorized by a PICKUP selection.
+      case 'PICKUP':
       case 'RETRIEVE': {
         // A BRIDGE MOVE declares the ONE block its own placing route consumes
         // (`meta.bridgeBlock`), so that block - and only it - is authorized. The
@@ -2613,6 +2616,8 @@ export class Executor {
           return await this.runStep(candidate, epoch, signal, startedAt)
         case 'RETRIEVE':
           return await this.runRetrieve(candidate, epoch, signal, startedAt)
+        case 'PICKUP':
+          return await this.runPickup(candidate, epoch, signal, startedAt)
         case 'PLACE':
           return await this.runPlace(candidate, epoch, signal, startedAt)
         case 'IGNITE':
@@ -3716,6 +3721,83 @@ export class Executor {
     return await this.runWalkSkill(candidate, epoch, signal, startedAt, (legSignal, strict, remainingMs) =>
       this.runRetrieveLeg(candidate, epoch, legSignal, startedAt, strict, remainingMs),
     )
+  }
+
+  /**
+   * The PICKUP runner: walk onto a SENSED DROPPED ITEM ENTITY and prove the item
+   * reached the inventory.
+   *
+   * A dropped item is an entity, and pickup is the SERVER's: Mineflayer sends
+   * nothing and only observes the inbound `collect` packet (mineflayer 4.39.0
+   * `lib/plugins/entities.js`). The body's whole job is therefore to get inside
+   * the item's pickup volume, which is exactly what the existing bounded
+   * `collectDrop` loop does (stock `collectBlock`, then the direct control nudge,
+   * re-locating the item entity by name each poll because a drop keeps falling
+   * for a few ticks).
+   *
+   * This runner exists so that walk is reachable from a DECISION, not only from
+   * inside another action's tail. Its post-condition is the INVENTORY DELTA -
+   * arrival at the drop's cell proves nothing (the item is not a destination, it
+   * is a thing to acquire), so a walk that ends next to an uncollected drop is a
+   * typed `pickup_failed`, never a success.
+   */
+  private async runPickup(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const itemName = readMetaString(candidate, 'pickupItem') ?? candidate.itemName
+    if (itemName === null) throw new ExecutorError('pickup_failed', 'PICKUP candidate names no item')
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('pickup_failed', `PICKUP candidate for ${itemName} has no position`)
+    const before = this.countItem(itemName)
+    this.setPhase(candidate, epoch, `pickup-${itemName}`)
+    const report = await this.collectDrop(target, itemName, before, false, epoch, signal)
+    const gained = report.itemsGained
+    if (gained <= 0) {
+      // The drop is a WORLD fact, not a route: the honest outcome names the item,
+      // the entity it was last seen at, and whether the entity was still visible
+      // - so "the item was never there" and "the body could not reach it" cannot
+      // be read as the same event.
+      this.logger.warn(
+        'executor',
+        `PICKUP_NOT_ACQUIRED actionId=${candidate.id} item=${itemName} entity=e${candidate.targetEntityId ?? 'unknown'} ` +
+          `dropObserved=${report.dropObserved} goalItemCount=${report.goalItemCount} ms=${report.settledMs} ` +
+          `-> the item did not reach the inventory`,
+        { actionId: candidate.id, item: itemName, target, itemsGained: 0 },
+      )
+      throw new ExecutorError(
+        'pickup_failed',
+        report.dropObserved
+          ? `dropped ${itemName} was located but did not reach the inventory`
+          : `no dropped ${itemName} entity found near (${target.x},${target.y},${target.z})`,
+      )
+    }
+    this.logger.info(
+      'executor',
+      `PICKUP_ACQUIRED actionId=${candidate.id} item=${itemName} entity=e${candidate.targetEntityId ?? 'unknown'} ` +
+        `gained=${gained} ${itemName}_in_inventory=${report.goalItemCount} ms=${report.settledMs}`,
+      { actionId: candidate.id, item: itemName, target, itemsGained: gained },
+    )
+    const result = this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'picked-up',
+      `picked up ${gained}x ${itemName} from the dropped item entity`,
+      null,
+      {
+        verified: true,
+        dropObserved: report.dropObserved,
+        blockRemoved: false,
+        itemsGained: gained,
+        goalItemCount: report.goalItemCount,
+      },
+    )
+    result.yieldItem = itemName
+    return result
   }
 
   /** ONE bounded mechanical leg of a committed RETRIEVE (the pre-loop behaviour). */
