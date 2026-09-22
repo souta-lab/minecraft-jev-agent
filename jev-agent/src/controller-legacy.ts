@@ -37,7 +37,7 @@ import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
-import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
+import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, StationApproachFact, StationApproachProbe, StationApproachRefusal, StationKindName } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
@@ -182,6 +182,8 @@ import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatAscentRefused
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
 import { DigMemory } from './worldMemory.ts'
+import { formatContainerRefusal } from './containerAccess.ts'
+import type { ContainerRefusal } from './containerAccess.ts'
 import type { DigDir } from './worldMemory.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
@@ -1366,6 +1368,18 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   PREREQ_STATION_ALREADY_KNOWN,
   'FURNACE_READY',
   'STATION_REGISTERED',
+  // The container capability's evidence. A container interaction is otherwise
+  // invisible in the run log: without these literals an OPEN that read a chest,
+  // a transfer that took an item, a typed refusal (unreachable / occluded /
+  // open_timeout / empty / contents_changed / no_room), and a verified shulker
+  // placement that became a durable world fact would all be DROPPED by the
+  // mirroring sink, and a reviewer could not tell "the box was opened" from
+  // "the body never went near it".
+  'CONTAINER_OPEN',
+  'CONTAINER_EMPTY',
+  'CONTAINER_TRANSFER',
+  'CONTAINER_REFUSED',
+  'CONTAINER_READY',
   'SMELT_DONE',
   'SMELT_INPUT_PREREQ',
   'CRAFT_INGREDIENT_PREREQ',
@@ -2128,6 +2142,8 @@ export class JevController {
   private gateOptionsTick = -1
   /** last logged REACHABILITY signature per candidate, so markers change with facts. */
   private readonly reachabilityLogSignatures = new Map<string, string>()
+  /** last mirrored container-refusal signature set, so one dead end is one line. */
+  private lastContainerRefusalKey: string | null = null
   /** last logged PLACE_REFUSED signature, so one geometry dead end is one line. */
   private lastPlacementRefusalKey: string | null = null
   /** last logged PORTAL_LIGHT_REFUSED signature, so one ignition dead end is one line. */
@@ -2978,6 +2994,10 @@ export class JevController {
           recentEvents: this.recentEvents,
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
+          // The contents this body OBSERVED by opening a container. A container
+          // with no entry is UNKNOWN - the client has no other contents surface,
+          // so absence of an observation must never be read as empty.
+          containerContents: this.executor.containerContents(),
         },
         sensorOptions(this.options, this.scheduler.worldRevision),
       )
@@ -3041,6 +3061,7 @@ export class JevController {
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
+      this.logContainerRefusals(grounded.containerRefusals)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
       this.noteRouteExhaustion(grounded.entryRefusal)
@@ -3520,6 +3541,10 @@ export class JevController {
           recentEvents: this.recentEvents,
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
+          // The contents this body OBSERVED by opening a container. A container
+          // with no entry is UNKNOWN - the client has no other contents surface,
+          // so absence of an observation must never be read as empty.
+          containerContents: this.executor.containerContents(),
         },
         sensorOptions(this.options, this.scheduler.worldRevision),
       )
@@ -9313,12 +9338,38 @@ export class JevController {
    * `ENTER:26,67,9` was re-offered 669 times. The typed markers above make the
    * next measurement of this shape unambiguous.
    */
+  /**
+   * True when a MOVE candidate is a ROUTE (its own meta declares the mechanical
+   * work it does), as opposed to an ordinary walk. The route keys are the ones the
+   * candidate layer and the executor already use.
+   */
+  private static readonly ROUTE_MOVE_META_KEYS = [
+    'vertical',
+    'digRoute',
+    'digStep',
+    'bridgeBlock',
+    'bridge',
+    'levelScan',
+    'contactAscent',
+    'pillarPlaceName',
+  ] as const
+
+  private isRouteDeclaredMove(candidate: Candidate): boolean {
+    return JevController.ROUTE_MOVE_META_KEYS.some((key) => candidate.meta[key] !== undefined)
+  }
+
   private recordZeroProgressOutcome(
     result: ExecutionResult,
     candidate: Candidate,
     truthful: ReturnType<typeof truthfulActionOutcome>,
   ): void {
     if (!isZeroProgressRouteKind(result.kind)) return
+    // A plain WALK is not tracked here (its memory is `moveFailMemory` and the
+    // distance it closed is its progress). A MOVE that DECLARES a route is: its
+    // postcondition is a mechanical change (a pillar/dig/place/bridge/scan leg),
+    // and one that settles SUCCESS with nothing observable changed is spent -
+    // otherwise it re-offers forever from the same stand cell.
+    if (result.kind === 'MOVE' && !this.isRouteDeclaredMove(candidate)) return
     const stand = this.actionStart
     if (stand === null) return
     const standKey = cellKey(stand)
@@ -10566,6 +10617,34 @@ export class JevController {
   }
 
   /**
+   * Surface every typed container refusal (`CONTAINER_REFUSED reason=...`) once
+   * per distinct fact, so an unreachable/unloaded container, a container that
+   * was opened and observed EMPTY, and a transfer refused by the destination are
+   * all explicit facts instead of the silence that would let "could not open it"
+   * look like "nothing was there".
+   */
+  private logContainerRefusals(refusals: readonly ContainerRefusal[]): void {
+    const key = refusals.length === 0 ? null : refusals.map(formatContainerRefusal).join('|')
+    if (key === this.lastContainerRefusalKey) return
+    this.lastContainerRefusalKey = key
+    for (const refusal of refusals) {
+      this.logger.warn(
+        'agent',
+        formatContainerRefusal(refusal),
+        {
+          reason: refusal.reason,
+          container: refusal.container,
+          block: refusal.block,
+          at: `${refusal.position.x},${refusal.position.y},${refusal.position.z}`,
+          ...(refusal.item === undefined || refusal.item === null ? {} : { item: refusal.item }),
+          ...(refusal.detail === undefined || refusal.detail === null ? {} : { detail: refusal.detail }),
+        },
+        this.tickCounter,
+      )
+    }
+  }
+
+  /**
    * Surface the generator's typed placement refusal (`PLACE_REFUSED
    * reason=no_support|no_clearance|out_of_reach cell=x,y,z item=...`) once per
    * distinct refusal, so a geometry dead end is an explicit fact instead of the
@@ -11168,7 +11247,7 @@ export class JevController {
   }
 
   private noteStationUnreachable(
-    kind: 'furnace' | 'crafting_table',
+    kind: StationKindName,
     station: Vec3Json,
     reason: StationApproachRefusal,
   ): void {
@@ -11178,7 +11257,7 @@ export class JevController {
     this.logger.warn('agent', key, { kind, station, reason }, this.tickCounter)
   }
 
-  private forgetStationUnreachable(kind: 'furnace' | 'crafting_table', station: Vec3Json): void {
+  private forgetStationUnreachable(kind: StationKindName, station: Vec3Json): void {
     for (const reason of ['no_interaction_stand', 'no_path_to_stand'] as const) {
       this.stationApproachLogged.delete(formatStationUnreachable(kind, station, reason))
     }

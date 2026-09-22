@@ -38,6 +38,7 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
+import { isContainerBlockName, normalizeBlockName } from '../jev-agent/src/containerAccess.ts'
 import { NETHER_PORTAL, PORTAL_VERIFIED, portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
 import {
   NETHER_STRUCTURE_BLOCK_NAMES,
@@ -89,6 +90,7 @@ import type {
   TraversalKind,
   TraversalResult,
   Vec3Json,
+  WorldKey,
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { KNOWN_RESOURCE_CAP, mergeKnownResourcesInto, mergeKnownTraversalsInto } from './resident-types.ts'
@@ -287,6 +289,48 @@ export { KNOWN_RESOURCE_CAP }
  * sighting being dropped for the lifetime of the world key. Returns the number
  * of INSERTS (`added`), unchanged.
  */
+/**
+ * The durable world fact a verified container placement records, or null when
+ * the event does not carry a container cell. Exported so the mapping is
+ * unit-testable without a bot: the EXECUTOR logs `CONTAINER_READY source=placed
+ * block=<name> at=x,y,z` with the cell as a `target` object (and the text form
+ * in `at`), and this is the one place that turns it into memory.
+ *
+ * It is deliberately the generic `kind: 'station'` known-resource record, not a
+ * new memory schema: the sensor already merges those into
+ * `WorldState.containers` as `remembered` entries, which is exactly the
+ * "the block is now in the world, do not re-plan a placement" fact.
+ */
+export function containerReadyKnownResource(
+  detail: Record<string, unknown> | undefined,
+  worldKey: WorldKey,
+): KnownResourceJson | null {
+  const at = asVec3Json(detail?.target) ?? asCellString(detail?.at)
+  const block = typeof detail?.block === 'string' ? detail.block : null
+  if (at === null || block === null || !isContainerBlockName(block)) return null
+  return {
+    name: normalizeBlockName(block),
+    kind: 'station',
+    x: Math.round(at.x),
+    y: Math.round(at.y),
+    z: Math.round(at.z),
+    dimension: worldKey.dimension,
+    worldEpoch: worldKey.worldEpoch,
+    lastSeenAt: Date.now(),
+  }
+}
+
+/** Parse the `"x,y,z"` cell spelling the mirrored log lines carry, or null. */
+function asCellString(value: unknown): Vec3Json | null {
+  if (typeof value !== 'string') return null
+  const parts = value.split(',')
+  if (parts.length !== 3) return null
+  const [x, y, z] = parts.map((entry) => Number(entry))
+  if (x === undefined || y === undefined || z === undefined) return null
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  return { x, y, z }
+}
+
 export function mergeKnownResources(
   target: KnownResourceJson[],
   found: KnownResourceJson[],
@@ -2101,6 +2145,24 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     if (event === 'FURNACE_READY') {
       const at = asVec3Json(detail?.target)
       if (at !== null) stationRuntimeUse('furnace', at, detail?.source === 'placed' ? 'placed' : null)
+    }
+    if (event === 'CONTAINER_READY') {
+      // A VERIFIED container placement proved the block stands at this cell. It
+      // is recorded as a durable world fact through the SAME `kind: 'station'`
+      // known-resource envelope every other station uses (so the sensor merges
+      // it into `WorldState.containers` as a `remembered` entry), which is what
+      // makes a re-visit OPEN the box standing there instead of re-planning a
+      // placement of an item that is no longer in the inventory. An unverified
+      // placement never emits the marker, so nothing is remembered here.
+      const known = containerReadyKnownResource(detail, ctx.worldKey)
+      if (known === null) return
+      const added = mergeKnownResources(world.knownResources, [known], (event, detail) => ctx.log(event, detail), ctx.worldKey.worldEpoch)
+      if (added > 0) ctx.proposeWorldMemory({ knownResources: [known] })
+      ctx.log('CONTAINER_REGISTERED', {
+        block: known.name,
+        at: stationKey(known),
+        source: 'placed',
+      })
     }
   }
 

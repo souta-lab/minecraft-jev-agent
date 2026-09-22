@@ -40,6 +40,7 @@ import type {
 } from './resident-types.ts'
 import { emptyWorldMemory, worldKeyString } from './resident-types.ts'
 import { emptyAgentSnapshot, restoreAgentSnapshot } from './state-snapshot.ts'
+import { durableWriteLanded } from './host-durability.ts'
 import {
   commitPendingProposals,
   mergeWorldMemoryDelta,
@@ -337,7 +338,10 @@ addCase('#80 fix: the staged commit path persists knownPortalSites and removeKno
       state: snapshotWith({ [OVER_KEY]: memory }, { worldEpoch: EPOCH }),
       guard: { revision: 5, committedGenerationId: 'gen-1', activeGenerationId: 'gen-1' },
       log: capture().log,
-      save: () => { saves += 1 },
+      save: () => {
+        saves += 1
+        return durableWriteLanded('generation-start', 6)
+      },
       worldKey: OVERWORLD,
     },
     'generation-start',
@@ -403,7 +407,7 @@ addCase('#durable: a stale-key staged delta is rejected wholesale (no cross-worl
       state: snapshotWith({ [NETHER_KEY]: memory }, { worldEpoch: EPOCH, dimension: 'minecraft:the_nether' }),
       guard: { revision: 5, committedGenerationId: 'gen-1', activeGenerationId: 'gen-1' },
       log: cap.log,
-      save: () => undefined,
+      save: () => durableWriteLanded('generation-start', 6),
       worldKey: NETHER,
     },
     'generation-start',

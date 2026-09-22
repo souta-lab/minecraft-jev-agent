@@ -1,9 +1,19 @@
+import { CONTAINER_BLOCK_NAMES } from './containerAccess.ts'
+
 /** World blocks that are durable stations, not disposable route terrain. */
 export const PROTECTED_STATION_BLOCKS: ReadonlySet<string> = new Set([
   'crafting_table',
   'furnace',
   'blast_furnace',
   'smoker',
+  // Containers (chest / trapped_chest / barrel / ender_chest / shulker_box +
+  // the 16 colour variants). A container is a supply source whose contents the
+  // body may need, and a shulker box an operator - or the body itself - placed
+  // is not scrap: the common dig boundary must refuse it exactly like a
+  // crafting table, or a `collect` goal would cannibalize the very box it is
+  // supposed to open. The names come from the ONE shared table in
+  // `containerAccess.ts`, never a second list.
+  ...CONTAINER_BLOCK_NAMES,
 ])
 
 export function isProtectedStationBlock(name: string): boolean {

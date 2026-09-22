@@ -182,6 +182,39 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
    片方でも赤なら移行未完了として扱う。
 
 
+### 4-F. durable commit / quarantine / lock / fatal（P0 durability invariants）
+
+HOST の durable claim は「失敗を表現できる」ことで初めて成立する。code 正典は
+`buddy-driver/host-durability.ts`（marker 名もそこが定義）。数値は §4-A のみが持つ。
+
+```text
+STATE_WRITE_FAILED       durable write が landed しなかった。revision は進めず、in-memory の
+                         commit marker を disk に合わせて roll back し、半端な tmp を削除して報告する。
+                         `PROPOSALS_COMMITTED` の writes は landed した write だけを数える
+                         （writeOk / writeError が実態を示す）。
+STATE_QUARANTINED        unparseable JSON / 対応より新しい schemaVersion / 不正な state file を
+                         `state-quarantine-<reason>-<stamp>-p<pid>.json` へ移動し、理由と foundVersion を記録。
+                         memory は default で継続するが、退避した bytes は変更しない。
+STATE_QUARANTINE_FAILED  退避自体に失敗。**boot を拒否する**（defaults で黙って上書きしない）。
+                         `BOOT_REFUSED reason=state-unreadable-and-not-quarantinable` で exit 1。
+HOST_LOCK_RECLAIMED      pid が死んでいると証明できた lock だけを、atomic take-away → 再検証 →
+                         exclusive create (`wx`) の順で回収する。
+HOST_LOCK_LOST           生きた holder、または pid を解析できない非空 lock file を検出。
+                         後者は stale と証明できないため回収しない（fail closed）。
+FATAL_SHUTDOWN           uncaughtException / unhandledRejection は log だけで終わらせない。
+                         actuation lease を revoke してから non-zero exit する。
+```
+
+- boot の `saveState('boot')` は **host lock 取得後**にのみ実行する。lock を失った resident は
+  自分が読み込んだ snapshot を一切書かない。
+- graceful shutdown は **control server を close（await, bounded）してから** host.lock を release する。
+  socket が受理可能なまま次 resident が boot することはない。
+- 上記 marker は `buddy.log` と同時に、run-scoped な `acceptance-<runId>.json` の `durability`
+  および control socket の `report` / `status` 応答 `durability` に mirror される
+  （counts + その run で観測した marker 名）。acceptance record が示せない durability 主張はしない。
+- これらの経路は HOST プロセスの lifecycle に属するため、**修正の反映には HOST 再起動が必要**
+  （hot reload では変わらない）。fixture は `buddy-driver/test-host-durability.mts`。
+
 ## 5. 状態の持ち越し（リロードで失ってはいけないもの）
 - サブゴール台帳: 既存 `GoalQueue.snapshot()/restore()`（`goalQueue.ts:251-259`）＋`ledgerPath`
 - 失敗記憶: `candidateFailures` / `failureStreak`（世界の真実。リセットすると同じ袋小路に再突入）
@@ -202,7 +235,8 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
   - 実行: `reload` / `freeze` / `resume` / `gc` / `leakcheck` / `simdeath`（既定 soft。`simdeath --hard` または `{hard:true}` で破壊的）
   - 破壊的（使わない）: `worldreset`（worldEpoch が変わる。active generation を quiesce/dispose し、ledger を archive して新しい memory namespace で fresh generation を開始する operator assertion） / `quit`
   - 注意: `goal` / `milestone` は値を返すだけで注入できない。未実装の `mode` / `retry` は**コマンドではない**（mode 切替はフルリロードで行う）
-- `report` / `status` の応答には `contractVersion`（稼働中 HOST の値）と `status.contractVersion`（世代の値）が入る（§4-D）
+- `report` / `status` の応答には `contractVersion`（稼働中 HOST の値）と `status.contractVersion`（世代の値）が入る（§4-D）。
+  同じ応答の `durability` が §4-F の run-scoped marker counts（`markers` は観測した marker 名）を返す。
 - **mode切替はフルリロードで行う**（`createJevPolicy` が構築時に種別固定のため。決定論モードの `llm.called==false` を clean に証明するため）
 
 ## 7. 介入ループ（wedgeは終了ではなく凍結）

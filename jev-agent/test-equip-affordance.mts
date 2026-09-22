@@ -351,6 +351,7 @@ function makeFixture(opts: FixtureOptions = {}): Fixture {
     collect: async () => undefined,
     craft: async () => undefined,
     openContainer: async () => undefined,
+    withdrawFromContainer: async () => undefined,
     writeMovementPacket: () => undefined,
     setPose: () => undefined,
   }

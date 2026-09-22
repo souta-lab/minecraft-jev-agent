@@ -981,6 +981,40 @@ export interface MissionPreflightResult {
   goalCount: number
 }
 
+/**
+ * P0 durability evidence (#378/#379/#381/#384/#388). One recorded durability
+ * outcome: the exact marker that was also written to `buddy.log`, plus its detail.
+ */
+export interface HostDurabilityEventJson {
+  marker: string
+  at: string
+  detail: Record<string, unknown>
+}
+
+/**
+ * Run-scoped mirror of the HOST durability markers. Every field is a count of a
+ * marker that appears in the run log; `markers` exists so the acceptance record
+ * shows the exact marker names observed in THIS run instead of a bare total.
+ *
+ *   writeFailures    STATE_WRITE_FAILED       a durable write did not land
+ *   stateQuarantines STATE_QUARANTINED        unreadable/newer state moved aside
+ *   lockReclaims     HOST_LOCK_RECLAIMED      a provably stale lock was taken over
+ *   lockLosses       HOST_LOCK_LOST           a live holder/foreign pid was found
+ *   fatalShutdowns   FATAL_SHUTDOWN           fatal handler revoked lease + exited
+ */
+export interface HostDurabilityRecord {
+  writeFailures: number
+  stateQuarantines: number
+  lockReclaims: number
+  lockLosses: number
+  fatalShutdowns: number
+  /** distinct durability marker names observed during this run */
+  markers: string[]
+  lastEvent: HostDurabilityEventJson | null
+  /** path of the most recent quarantined state file (null when none) */
+  stateQuarantinePath: string | null
+}
+
 /** Machine-readable acceptance record emitted per run. */
 export interface AcceptanceRecord {
   record: 'acceptance'
@@ -1017,6 +1051,12 @@ export interface AcceptanceRecord {
   listenerCurrent: Record<string, number>
   listenerLeak: boolean
   worldMemoryKeys: string[]
+  /**
+   * P0 durability mirror (#379/#388/#378/#381). The run's write-failure /
+   * quarantine / lock-reclaim / lock-loss / fatal-shutdown markers. Optional so
+   * an older host's acquisition record still parses (#63 evidence taxonomy).
+   */
+  durability?: HostDurabilityRecord
 }
 
 /**
