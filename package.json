@@ -11,7 +11,8 @@
     "mcbot",
     "mcbot/movement-test",
     "mcbot/movement-test/variants/A",
-    "companion"
+    "companion",
+    "system2-harness"
   ],
   "scripts": {
     "postinstall": "bun run --cwd jev-agent postinstall",
