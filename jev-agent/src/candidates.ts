@@ -8010,11 +8010,16 @@ export function deriveReachabilityAbilities(
   // executable NOW: a pillar needs a supported, safe column with jump headroom;
   // an up-staircase needs the held tool for the block it cuts, or the executor
   // would walk into a dig it cannot finish (`RETRIEVE staircase cannot dig`).
-  const ascendPlanAvailable =
-    (plan !== null &&
-      (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
-      (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')) ||
-    ascent.kind === 'clear'
+  const explicitPlanAvailable =
+    plan !== null &&
+    (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
+    (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')
+  // `ascent.kind === clear` is only evidence for the no-explicit-plan path. If
+  // the candidate already carries a concrete pillar/staircase HOW, the executor
+  // will execute THAT plan; an unrelated adjacent step cannot make its blocked
+  // current-column mechanics executable. Live 2026-09-22 y54 proved the old OR
+  // false-positive: fingerprint head=0, ENTER reachable=true, then PILLAR_REFUSED.
+  const ascendPlanAvailable = plan === null ? ascent.kind === 'clear' : explicitPlanAvailable
 
   const ascendMissing: Capability[] = []
   if (dy > ASCEND_GAP_LIMIT && !ascendPlanAvailable) {

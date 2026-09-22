@@ -706,7 +706,10 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   const base = {
     position: { x: 10.6, y: 54, z: 25.4 },
     inventory: inventory({ cobblestone: 290 }),
-    standable: [{ x: 10, y: 54, z: 25 }],
+    // Live restart shape: there IS a clear adjacent step at y55, but the
+    // candidate itself carries an explicit pillar plan in the current column.
+    // That alternate fact must not make the concrete pillar action executable.
+    standable: [{ x: 10, y: 54, z: 25 }, { x: 11, y: 55, z: 25 }],
   }
   const blocker = { x: 10, y: 55, z: 24 }
   const blockedState = worldState({
