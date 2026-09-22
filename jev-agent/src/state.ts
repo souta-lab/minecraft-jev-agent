@@ -14,6 +14,7 @@ import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { System2Outcome } from './system2.ts'
 import type { StrategicStallEvidence } from './strategicStall.ts'
+import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import type { CriticalDamageEvidence } from './criticalDamage.ts'
 import {
@@ -582,6 +583,17 @@ export type AgentSignals = {
    * nearby coordinate cannot evade the memory (#8a).
    */
   failedCandidates: Record<string, number>
+  /**
+   * Zero-observable-change route memory (see `zeroProgressRoute.ts`): the exact
+   * route (kind, target cell, stand cell, route signature) that just proved it
+   * changes nothing. The generator withholds that exact repeat, so the next
+   * attempt for the target must differ in a grounded way (a different vertical
+   * plan, a different stand cell, or a travel/approach leg), and a bounded number
+   * of distinct zero-progress routes at one stand cell exhausts that family
+   * there. Owned by the controller; absent means "nothing has failed yet", so
+   * every pure caller keeps its existing behaviour.
+   */
+  zeroProgressRoutes?: ZeroProgressRoutes
   /** fixed dig direction once chosen; do not flip until the cap/resource (#4) */
   digDir?: DescentDir | null
   /** consecutive digs already executed in `digDir` (cap `DIG_PATH_CAP`) */
