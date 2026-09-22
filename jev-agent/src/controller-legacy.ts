@@ -1051,6 +1051,18 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // pre-movement refusal, or its log cannot tell "walked in" from "never tried".
   'PORTAL_WALK_IN',
   'PORTAL_WALK_IN_REFUSED',
+  // The step-aside onto an open face of the portal: the detour must be visible
+  // in the run log, or "the body refused to step one block aside" cannot be
+  // told apart from "no leg was ever grounded".
+  'PORTAL_APPROACH_LEG',
+  'PORTAL_APPROACH_REFUSED',
+  // Issue #436: the Skill boundary and the reflex proof must both be live-visible,
+  // or a reviewer cannot tell "Jev chose the target" from "code finished it".
+  'SKILL_START',
+  'SKILL_STEP',
+  'SKILL_INTERRUPT',
+  'SKILL_END',
+  'REFLEX',
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'PILLAR_FAIL',

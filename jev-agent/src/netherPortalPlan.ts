@@ -1170,6 +1170,8 @@ export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: s
  *   * `not_level`            the interior is more than one block from the feet;
  *   * `cell_not_traversable` the destination is not a non-solid portal cell
  *                            (never walk into rock);
+ *   * `approach_occluded`    the straight approach is a 2-high frame face the
+ *                            body cannot step over: it needs an open-face leg;
  *   * `no_support`           a step-up target has no floor under it (never step
  *                            up into a hole);
  *   * `hazard_at_body`       the body already stands in lava/fire/water;
@@ -1179,6 +1181,7 @@ export type PortalWalkInRefusal =
   | 'out_of_range'
   | 'not_level'
   | 'cell_not_traversable'
+  | 'approach_occluded'
   | 'no_support'
   | 'hazard_at_body'
   | 'hazard_between'
@@ -1205,6 +1208,158 @@ export function formatPortalWalkInRefused(
   refusal: PortalWalkInRefusal,
 ): string {
   return `${PORTAL_WALK_IN_REFUSED} cell=${formatPos(cell)} from_d=${round2(fromD)} reason=${refusal}`
+}
+
+/**
+ * The bounded step-aside leg onto an OPEN face of the portal: the straight
+ * approach to the interior is blocked by a frame column, so the body must first
+ * stand on a cell beside the interior at its own level and walk in from there.
+ * The line names the intermediate cell so the run log shows the detour, never
+ * only its absence.
+ */
+export const PORTAL_APPROACH_LEG = 'PORTAL_APPROACH_LEG'
+/** No open-face leg could be grounded; the typed reason names why. */
+export const PORTAL_APPROACH_REFUSED = 'PORTAL_APPROACH_REFUSED'
+
+export type PortalApproachRefusal = 'no_open_face' | 'unreachable' | 'multiple_open_faces'
+
+/**
+ * A step-aside onto an open face is a SHORT move, not a travel leg: both layers
+ * (the candidate's offer and the executor's own leg) use this same bound.
+ */
+export const PORTAL_OPEN_FACE_MAX_DISTANCE = 4
+
+export interface PortalApproachLegInput {
+  readonly cell: PortalBlockPosition
+  readonly target: PortalBlockPosition
+  readonly fromD: number
+  readonly toD: number
+}
+
+/** The exact `PORTAL_APPROACH_LEG` line: the stand cell the body reached. */
+export function formatPortalApproachLeg(input: PortalApproachLegInput): string {
+  return (
+    `${PORTAL_APPROACH_LEG} cell=${formatPos(input.cell)} target=${formatPos(input.target)}` +
+    ` from_d=${round2(input.fromD)} to_d=${round2(input.toD)}`
+  )
+}
+
+/** The exact `PORTAL_APPROACH_REFUSED` line. */
+export function formatPortalApproachRefused(
+  target: PortalBlockPosition,
+  fromD: number,
+  refusal: PortalApproachRefusal,
+): string {
+  return `${PORTAL_APPROACH_REFUSED} target=${formatPos(target)} from_d=${round2(fromD)} reason=${refusal}`
+}
+
+// ---------------------------------------------------------------------------
+// Issue #436 "Reflex + Skill closure": every executed Skill states its own
+// boundary, and a mechanically MANDATORY prerequisite that code finishes on the
+// already-selected target's behalf is logged as a REFLEX carrying the geometry
+// that proved it was the ONLY continuation. The governing rule, stated once:
+//
+//   code may execute a uniquely-determined safety/mechanical prerequisite;
+//   if multiple semantically meaningful alternatives remain, return to Jev.
+//
+// A silent extra action is exactly what this vocabulary forbids: the run log
+// must let a reviewer tell "Jev chose the target" (SKILL_START selectedBy=jev)
+// from "code finished that choice" (REFLEX ... reason=unique_binding_prerequisite).
+// ---------------------------------------------------------------------------
+export const SKILL_START = 'SKILL_START'
+export const SKILL_STEP = 'SKILL_STEP'
+export const SKILL_INTERRUPT = 'SKILL_INTERRUPT'
+export const SKILL_END = 'SKILL_END'
+export const REFLEX = 'REFLEX'
+
+/** The entry Skill's stable id (the `skill` / `ownerSkill` field). */
+export const PORTAL_ENTER_SKILL = 'ENTER_PORTAL(portalSite)'
+
+/** Who selected the target this Skill executes (never a per-tick motor choice). */
+export type SkillSelectionSource = 'jev' | 'system2-derived' | 'hard-safety'
+
+export function formatSkillStart(
+  skill: string,
+  selectedBy: SkillSelectionSource,
+  params: string,
+): string {
+  return `${SKILL_START} skill=${skill} selectedBy=${selectedBy} params=${params}`
+}
+
+export function formatSkillStep(skill: string, step: string, detail: string = ''): string {
+  return `${SKILL_STEP} skill=${skill} step=${step}${detail.length === 0 ? '' : ` ${detail}`}`
+}
+
+export function formatSkillInterrupt(skill: string, reason: string): string {
+  return `${SKILL_INTERRUPT} skill=${skill} reason=${reason}`
+}
+
+export function formatSkillEnd(
+  skill: string,
+  execution: string,
+  verification: string,
+  postcondition: string,
+): string {
+  return `${SKILL_END} skill=${skill} execution=${execution} verification=${verification} postcondition=${postcondition}`
+}
+
+export interface ReflexInput {
+  readonly ownerSkill: string
+  /** what code did (a bounded mechanical continuation, never a new destination) */
+  readonly action: string
+  /** the block/geometry fact that proved the continuation was the only one */
+  readonly evidence: string
+}
+
+/** The exact `REFLEX` line: a uniquely-determined prerequisite, with its proof. */
+export function formatReflex(input: ReflexInput): string {
+  return (
+    `${REFLEX} ownerSkill=${input.ownerSkill} reason=unique_binding_prerequisite` +
+    ` action=${input.action} evidence=${input.evidence}`
+  )
+}
+
+/**
+ * The portal's OPEN approach cells, derived from STRUCTURE truth and never from
+ * the plan's wording: a cell horizontally beside an interior cell at the
+ * interior's standing level, outside the frame ring (a frame column is solid and
+ * therefore not standable) and standable for a 1.8-tall body. `isStandable` is
+ * the caller's own truth source (the live bot's block grid, or the sensed
+ * terrain list), so both layers share ONE geometric rule. Nearest to `from`
+ * first and bounded by `maxDistance`.
+ */
+export function portalOpenFaceCells(
+  interiorCells: readonly PortalBlockPosition[],
+  standingLevel: number,
+  isStandable: (cell: PortalBlockPosition) => boolean,
+  from: PortalBlockPosition,
+  maxDistance: number,
+): PortalBlockPosition[] {
+  const found = new Map<string, PortalBlockPosition>()
+  for (const interior of interiorCells) {
+    if (interior.y !== standingLevel) continue
+    for (const dir of [
+      { x: 1, z: 0 },
+      { x: -1, z: 0 },
+      { x: 0, z: 1 },
+      { x: 0, z: -1 },
+    ]) {
+      const spot: PortalBlockPosition = { x: interior.x + dir.x, y: interior.y, z: interior.z + dir.z }
+      const key = formatPos(spot)
+      if (found.has(key)) continue
+      // The interior itself is never an approach cell, and a cell outside the
+      // body's reach of the gate is not a step aside.
+      if (interiorCells.some((cell) => formatPos(cell) === key)) continue
+      if (Math.hypot(spot.x + 0.5 - (from.x + 0.5), spot.z + 0.5 - (from.z + 0.5)) > maxDistance) continue
+      if (!isStandable(spot)) continue
+      found.set(key, spot)
+    }
+  }
+  return [...found.values()].sort(
+    (left, right) =>
+      Math.hypot(left.x + 0.5 - (from.x + 0.5), left.z + 0.5 - (from.z + 0.5)) -
+      Math.hypot(right.x + 0.5 - (from.x + 0.5), right.z + 0.5 - (from.z + 0.5)),
+  )
 }
 
 /** The exact `PORTAL_ENTRY_UNVERIFIED` line: a remembered-site route, no lit claim. */

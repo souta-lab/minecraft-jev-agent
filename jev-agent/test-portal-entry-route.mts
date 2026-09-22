@@ -42,6 +42,14 @@ import {
   OVERWORLD,
   PORTAL_ENTERED_PREDICATE,
   PORTAL_ENTRY_UNVERIFIED,
+  PORTAL_APPROACH_LEG,
+  PORTAL_APPROACH_REFUSED,
+  PORTAL_ENTER_SKILL,
+  REFLEX,
+  SKILL_END,
+  SKILL_INTERRUPT,
+  SKILL_START,
+  SKILL_STEP,
   PORTAL_WALK_IN,
   PORTAL_WALK_IN_REFUSED,
   formatPortalEntryNoKnownSite,
@@ -113,6 +121,8 @@ interface FixtureBot {
   legs: string[]
   /** mutable live inventory: a fixture can take the tool away after the plan was built */
   inventoryItems: Array<{ name: string; type: number; count: number }>
+  /** the walk model reached a standable OPEN face of the portal */
+  movedToFace: boolean
 }
 
 function makeBot(feet: Vec3Json, grid: Map<string, Cell>, hasPickaxe: boolean): FixtureBot {
@@ -186,7 +196,7 @@ function makeBot(feet: Vec3Json, grid: Map<string, Cell>, hasPickaxe: boolean): 
       getPathTo: () => ({ status: 'noPath', path: [] }),
     },
   }
-  return { bot: bot as unknown as Bot, position, grid, digs, pathCalls, legs, inventoryItems }
+  return { bot: bot as unknown as Bot, position, grid, digs, pathCalls, legs, inventoryItems, movedToFace: false }
 }
 
 function canWalkIntoGate(fixture: FixtureBot): boolean {
@@ -277,9 +287,21 @@ function installWalkModel(fixture: FixtureBot, options: { transfer: boolean; blo
   const controls: string[] = []
   const start = fixture.position.clone()
   let moved = 0
+  // the real actuator faces its target with `lookAt` and then pushes forward, so
+  // the model walks the body along the LAST faced direction (one step per push)
+  let heading = { x: 0, z: 0 }
+  const openFaces = new Set(['25,67,10', '26,67,10', '25,67,8', '26,67,8', '27,67,10', '27,67,8'])
+  const bodyCell = (): string =>
+    `${Math.floor(fixture.position.x)},${Math.floor(fixture.position.y)},${Math.floor(fixture.position.z)}`
   const inside = (): boolean =>
     Math.hypot(fixture.position.x - (ENTER_CELL.x + 0.5), fixture.position.z - (ENTER_CELL.z + 0.5)) <= 0.5 &&
     Math.abs(fixture.position.y - ENTER_CELL.y) <= 1.05
+  ;(fixture.bot as unknown as { lookAt: (point: { x: number; z: number }) => Promise<void> }).lookAt = async (point) => {
+    const dx = point.x - fixture.position.x
+    const dz = point.z - fixture.position.z
+    const length = Math.hypot(dx, dz) || 1
+    heading = { x: dx / length, z: dz / length }
+  }
   ;(fixture.bot as unknown as { setControlState: (control: string, state: boolean) => void }).setControlState = (
     control,
     state,
@@ -298,20 +320,16 @@ function installWalkModel(fixture: FixtureBot, options: { transfer: boolean; blo
       return
     }
     if (control !== 'forward') return
-    const dx = ENTER_CELL.x + 0.5 - fixture.position.x
-    const dz = ENTER_CELL.z + 0.5 - fixture.position.z
-    const distance = Math.hypot(dx, dz)
     if (options.blocked === true) {
       // a wall: the push slides the body along it (no approach progress)
       fixture.position.x += 0.15
       moved += 0.15
-      if (inside() && options.transfer) bot.game.dimension = NETHER
       return
     }
-    const step = Math.min(0.22, distance)
-    fixture.position.x += (dx / (distance || 1)) * step
-    fixture.position.z += (dz / (distance || 1)) * step
+    fixture.position.x += heading.x * 0.25
+    fixture.position.z += heading.z * 0.25
     moved = Math.hypot(fixture.position.x - start.x, fixture.position.z - start.z)
+    if (openFaces.has(bodyCell())) fixture.movedToFace = true
     if (inside() && options.transfer) bot.game.dimension = NETHER
   }
   return { controls, travelled: () => moved }
@@ -1016,8 +1034,8 @@ function measuredFixture(): FixtureBot {
   return makeBot({ x: MEASURED_STAND.x - 0.5, y: MEASURED_STAND.y, z: MEASURED_STAND.z - 0.5 }, measuredApproachGrid(), true)
 }
 
-function measuredCandidate(fixture: FixtureBot): Candidate {
-  const state = worldState(MEASURED_STAND, [], { diamond_pickaxe: 1, cobblestone: 32 })
+function measuredCandidate(fixture: FixtureBot, stand: Vec3Json = MEASURED_STAND): Candidate {
+  const state = worldState(stand, [], { diamond_pickaxe: 1, cobblestone: 32 })
   const base = enterCandidate(fixture, state)
   // the path stage is the measured one (stuck); the vertical leg is not this
   // fixture's subject, so it carries no route of its own
@@ -1049,7 +1067,12 @@ function distanceFrom(marker: string, name: string): number {
       result.messages.some((line) => line.startsWith('PORTAL_ENTERED')) &&
       enterCalls.length === 1 &&
       model.controls.includes('forward') &&
-      model.controls.includes('jump'),
+      model.controls.includes('jump') &&
+      result.messages.some((line) => line.startsWith(SKILL_START)) &&
+      result.messages.some(
+        (line) => line.startsWith(REFLEX) && line.includes('action=walk_into_portal_interior'),
+      ) &&
+      result.messages.some((line) => line.startsWith(SKILL_END) && line.includes('execution=entered')),
     `status=${result.status} verified=${result.verified} failure=${result.failure ?? 'none'} enterCalls=${enterCalls.length} marker=[${marker}] travelled=${model.travelled().toFixed(2)} controls=[${model.controls.join(',')}]`,
   )
 }
@@ -1176,6 +1199,177 @@ function distanceFrom(marker: string, name: string): number {
     '(j-mirror) both direct-walk markers are mirrored host events (live-visible)',
     MIRRORED_MARKERS.has(PORTAL_WALK_IN) && MIRRORED_MARKERS.has(PORTAL_WALK_IN_REFUSED),
     `PORTAL_WALK_IN=${MIRRORED_MARKERS.has(PORTAL_WALK_IN)} PORTAL_WALK_IN_REFUSED=${MIRRORED_MARKERS.has(PORTAL_WALK_IN_REFUSED)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (k) THE MEASURED OCCLUDED SHAPE (run-mucaq28q-1ftq1, main 4c5645b): the body
+// stood WEST of the left frame column at 24.7,67,9.7 and the entry cell
+// (26,67,9) was 1.8 blocks EAST behind the obsidian column at (25,67,9) - a
+// 2-high face. The straight walk can never get in, `MOVE:p26_67_9` (the
+// interior cell itself) fails too, and the offer collapsed to WAIT/ESCALATE:
+// the operator's "1ブロック避ければ通れるのに避けない" (it would get through if it
+// stepped one block aside).
+//
+// The measured fix shape: the portal's OPEN faces are z=10 / z=8 (the frame ring
+// is 25 and 28 in x), so the grounded next step is an ordinary MOVE onto
+// (25,67,10)/(26,67,10) - a cell whose neighbour toward the interior is not a
+// frame block - and the walk in finishes from there on the next decision.
+// ---------------------------------------------------------------------------
+function occludedFixture(): FixtureBot {
+  const grid = measuredApproachGrid()
+  // the live body level: the ground at the gate's own y (66) south of the frame
+  for (const x of [24, 25, 26, 27, 28]) for (const z of [10, 11, 12]) grid.set(`${x},66,${z}`, cell('stone'))
+  grid.set('25,67,10', cell('air'))
+  grid.set('26,67,10', cell('air'))
+  grid.set('25,68,10', cell('air'))
+  grid.set('26,68,10', cell('air'))
+  grid.set('25,66,9', cell('obsidian'))
+  grid.set('25,68,9', cell('obsidian'))
+  grid.set('25,69,9', cell('obsidian'))
+  grid.set('24,66,9', cell('stone'))
+  grid.set('24,66,10', cell('stone'))
+  // the pocket: ONE standable open face (26,67,10). (27,67,10) is walled off and
+  // the z=8 side has no floor, so the step-aside is mechanically UNIQUE and code
+  // may finish the selected entry's prerequisite (#436).
+  grid.set('27,67,10', cell('obsidian'))
+  // complete the world model: an unset cell reads as `null` (unknown = blocked)
+  // to the headroom/standability probes, which would veto honest geometry
+  for (const x of [23, 24, 25, 26, 27, 28])
+    for (const z of [8, 9, 10, 11, 12])
+      for (const y of [67, 68, 69, 70]) {
+        const k = `${x},${y},${z}`
+        if (!grid.has(k)) grid.set(k, cell('air'))
+      }
+  return makeBot({ x: 24.2, y: 67, z: 9.2 }, grid, true)
+}
+
+const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
+
+{
+  // (k-1) the offer contains the intermediate open-face leg, not only the entry
+  const fixture = occludedFixture()
+  // the sensor's terrain truth: the body's cell, the interior cell (a portal
+  // block over obsidian reads standable to the generic rule) and the two open
+  // faces on the gate's south side
+  const state = worldState(OCCLUDED_STAND, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
+    OCCLUDED_STAND,
+    ENTER_CELL,
+    { x: 25, y: ENTER_CELL.y, z: 10 },
+    { x: 26, y: ENTER_CELL.y, z: 10 },
+    { x: 27, y: ENTER_CELL.y, z: 10 },
+  ])
+  const options: CandidateOptions = { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) }
+  const offered = entryCandidates(state, options)
+  const entry = offered.candidates.find((candidate) => candidate.kind === 'ENTER_PORTAL')
+  const legs = offered.candidates.filter((candidate) => candidate.meta.approachLeg === 'portal_open_face')
+  check(
+    '(k-1) the occluded shape offers the entry AND EVERY open face as a policy-visible MOVE leg (never one hard-coded)',
+    entry !== undefined &&
+      entry.id === `ENTER:${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}` &&
+      legs.length >= 2 &&
+      legs.every((leg) => leg.kind === 'MOVE' && leg.target?.y === ENTER_CELL.y && leg.target?.z === 10) &&
+      legs.some((leg) => leg.target?.x === 26) &&
+      legs.some((leg) => leg.target?.x === 27) &&
+      legs.every(
+        (leg) => leg.meta.approachTarget === `${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}`,
+      ) &&
+      !legs.some((leg) => leg.target?.x === 25),
+    `offered=[${offered.candidates.map((candidate) => `${candidate.id}:${String(candidate.meta.approachLeg ?? '-')}`).join(',')}]`,
+  )
+}
+
+{
+  // (k-2) the occluded entry action grounds the step-aside itself (bounded chunk),
+  // and the next decision enters from the open face it reached
+  const fixture = occludedFixture()
+  const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
+  const model = installWalkModel(fixture, { transfer: true })
+  const first = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const legLine = first.messages.find((line) => line.startsWith(PORTAL_APPROACH_LEG)) ?? ''
+  check(
+    '(k-2) the UNIQUE open face is executed as a REFLEX prerequisite and reported as durable progress (never entry)',
+    first.status === 'done' &&
+      first.verified === false &&
+      legLine.includes(`target=${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}`) &&
+      fixture.movedToFace &&
+      first.messages.some(
+        (line) => line.startsWith(REFLEX) && line.includes('action=step_onto_open_face'),
+      ) &&
+      first.messages.some(
+        (line) => line.startsWith(SKILL_STEP) && line.includes('step=approach_leg'),
+      ) &&
+      first.messages.some(
+        (line) => line.startsWith(SKILL_END) && line.includes('execution=progress'),
+      ) &&
+      !first.messages.some((line) => line.startsWith('PORTAL_ENTERED')),
+    `status=${first.status} verified=${first.verified} face=${fixture.movedToFace} controls=[${model.controls.join(',')}] marker=[${legLine}]`,
+  )
+  // the next decision re-grounds the entry from the open face and walks in
+  const state = worldState(
+    { x: fixture.position.x, y: fixture.position.y, z: fixture.position.z },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+  )
+  const reoffered = entryCandidates(state, { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) })
+  const secondFixture = fixture
+  const second = await runEntry(
+    secondFixture,
+    candidate,
+    false,
+    true,
+    stubStuckPath(secondFixture),
+  )
+  const walkLine = second.messages.find((line) => line.startsWith(`${PORTAL_WALK_IN} `)) ?? ''
+  check(
+    '(k-2) from the open face the bounded walk enters and the transfer is observed',
+    reoffered.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL') &&
+      second.status === 'done' &&
+      second.verified === true &&
+      walkLine.includes('transferred=true') &&
+      second.messages.some((line) => line.startsWith('PORTAL_ENTERED')),
+    `reoffered=[${reoffered.candidates.map((candidate) => candidate.id).join(',')}] status=${second.status} verified=${second.verified} marker=[${walkLine}]`,
+  )
+}
+
+{
+  // (k-3) every new marker is a mirrored host event (live-visible)
+  const markers = [PORTAL_APPROACH_LEG, PORTAL_APPROACH_REFUSED, SKILL_START, SKILL_STEP, SKILL_INTERRUPT, SKILL_END, REFLEX]
+  check(
+    '(k-3) the step-aside and issue-#436 markers are mirrored host events (live-visible)',
+    markers.every((marker) => MIRRORED_MARKERS.has(marker)),
+    markers.map((marker) => `${marker}=${MIRRORED_MARKERS.has(marker)}`).join(' '),
+  )
+}
+
+{
+  // (k-4) SEVERAL open faces: the skill must NOT pick one - it interrupts typed
+  // and leaves every alternative in the offer for Jev
+  const fixture = occludedFixture()
+  fixture.grid.set('27,67,10', cell('air'))
+  const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
+  const model = installWalkModel(fixture, { transfer: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const interrupt = result.messages.find((line) => line.startsWith(SKILL_INTERRUPT)) ?? ''
+  const refused = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_REFUSED)) ?? ''
+  const state = worldState(OCCLUDED_STAND, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
+    OCCLUDED_STAND,
+    ENTER_CELL,
+    { x: 26, y: ENTER_CELL.y, z: 10 },
+    { x: 27, y: ENTER_CELL.y, z: 10 },
+  ])
+  const offered = entryCandidates(state, { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) })
+  const legs = offered.candidates.filter((entry) => entry.meta.approachLeg === 'portal_open_face')
+  check(
+    '(k-4) several open faces: the skill interrupts typed, moves nothing, and leaves every face offered to Jev',
+    result.status === 'failed' &&
+      result.failure === 'path_stuck' &&
+      interrupt.includes('multiple_open_faces') &&
+      refused.includes('reason=multiple_open_faces') &&
+      !result.messages.some((line) => line.startsWith(PORTAL_APPROACH_LEG)) &&
+      model.controls.length === 0 &&
+      legs.length >= 2,
+    `status=${result.status} failure=${result.failure ?? 'none'} controls=[${model.controls.join(',')}] legs=${legs.length} interrupt=[${interrupt}] refused=[${refused}]`,
   )
 }
 
