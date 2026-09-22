@@ -2816,6 +2816,35 @@ export class Executor {
       } finally {
         bound.cleanup()
       }
+      // A fail-closed envelope refusal is a statement about the COMMITMENT, not a
+      // transient leg failure: the commitment cannot perform a step it needs, so
+      // re-running the identical leg can only repeat the identical refusal. Measured
+      // live before this guard: ONE CRAFT commitment re-attempted the same refused
+      // move 44,617 times inside five seconds (~8,900/s) - a spin loop that burned CPU,
+      // wrote 44k log lines and could never succeed. Stop with the typed capability
+      // boundary and hand the decision back to policy instead.
+      if (legFailure !== null && legFailure.code === 'effect_envelope_violation') {
+        return this.settleWalkSkill(
+          candidate,
+          epoch,
+          skill,
+          commitment,
+          {
+            stop: true,
+            reason: 'capability',
+            outcome: 'MECHANICALLY_BLOCKED',
+            failureCode: legFailure.code,
+            policyBoundary: true,
+          },
+          legs,
+          stalledLegs,
+          remaining,
+          target,
+          thrown,
+          startedAt,
+          startDistance - remaining,
+        )
+      }
       const after = this.distanceToFeet(target)
       remaining = after
       // Durable mechanical progress: distance actually closed toward the committed

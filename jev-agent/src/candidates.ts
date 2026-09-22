@@ -4923,7 +4923,20 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
         routeSig: routeSignature({
           kind: 'STEP',
           id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
-          meta: { dir: cut.dir, stepX: cut.step.x, stepY: cut.step.y, stepZ: cut.step.z },
+          meta: {
+            dir: cut.dir,
+            stepX: cut.step.x,
+            stepY: cut.step.y,
+            stepZ: cut.step.z,
+            // A step cut REMOVES the block in the step's own column, so the commitment's
+            // EffectEnvelope must grant the dig (skillCommitment.ts derives
+            // mayDigGroundedRoute from a declared dig). Measured before this line: the STEP
+            // arm was the last one still refused fail-closed - `dig_cell_not_declared` and
+            // `equip_item_not_declared` on STEP:* candidates, the residual an independent
+            // audit found after the other five arms were fixed at their construction site.
+            digStep: true,
+            digStepReason: `step_cut:${cut.dir}`,
+          },
         }),
         nowMs: state.timestampMs,
       })
