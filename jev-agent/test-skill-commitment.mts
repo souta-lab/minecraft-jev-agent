@@ -111,6 +111,7 @@ function makeFixture(options: { armorWorn?: string } = {}): Fixture {
   let equips = 0
   let swings = 0
   const mob = { id: 31, name: 'zombie', kind: 'hostile', height: 1.95, isValid: true, position: { x: 1, y: 64, z: 0 } }
+  let heldName: string | null = 'cobblestone'
   const bot = emitter as EventEmitter & Record<string, any>
   Object.assign(bot, {
     registry: REGISTRY,
@@ -119,7 +120,6 @@ function makeFixture(options: { armorWorn?: string } = {}): Fixture {
     entity: { id: 1, position: { x: 0, y: 64, z: 0 }, yaw: 0, pitch: 0, onGround: true, width: 0.6, height: 1.8 },
     entities: { 31: mob },
     game: { dimension: 'minecraft:overworld' },
-    heldItem: { name: 'cobblestone', type: 1, count: 64, slot: 36 },
     inventory: {
       slots: armorSlots,
       items: () => [
@@ -138,6 +138,9 @@ function makeFixture(options: { armorWorn?: string } = {}): Fixture {
     equip: async (item: { name: string }, destination: string) => {
       equips += 1
       await new Promise((resolve) => setTimeout(resolve, 5))
+      // issue #436 section 11: the executor VERIFIES the live main hand after a
+      // weapon equip, so the fixture models it like the real bot does.
+      if (destination === 'hand') heldName = item.name
       const index = { head: 5, torso: 6, legs: 7, feet: 8 }[destination as 'head' | 'torso' | 'legs' | 'feet']
       if (index !== undefined) armorSlots[index] = { name: item.name }
     },
@@ -147,6 +150,10 @@ function makeFixture(options: { armorWorn?: string } = {}): Fixture {
     },
     stopDigging: () => undefined,
     setControlState: () => undefined,
+  })
+  Object.defineProperty(bot, 'heldItem', {
+    get: () => (heldName === null ? null : { name: heldName, type: 1, count: 64, slot: 36 }),
+    configurable: true,
   })
   return { bot: bot as unknown as Bot, logger: new CapturingLogger(), equips: () => equips, swings: () => swings, armorSlots }
 }
@@ -475,12 +482,13 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   })
   const pass =
     result.status === 'failed' &&
-    result.failure === 'out_of_reach' &&
-    result.skillOutcome === 'MECHANICALLY_BLOCKED' &&
-    result.skillTerminalReason === 'blocked' &&
-    packet.terminalReason === 'blocked' &&
+    result.failure === 'target_gone' &&
+    result.skillOutcome === 'TARGET_INVALIDATED' &&
+    result.skillTerminalReason === 'target_lost' &&
+    // §2: a vanished entity is TARGET_LOST (not the generic `blocked` fallback)
+    packet.terminalReason === 'target_lost' &&
     policyBoundary(packet) === true &&
-    isPolicyBoundaryOutcome('MECHANICALLY_BLOCKED') === true &&
+    isPolicyBoundaryOutcome('TARGET_INVALIDATED') === true &&
     isPolicyBoundaryOutcome('SUCCESS') === false &&
     skillOutcomeForFailure('target_gone', 'failed') === 'TARGET_INVALIDATED' &&
     skillOutcomeForFailure('submerged', 'failed') === 'SAFETY_INTERRUPT' &&
