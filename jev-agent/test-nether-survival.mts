@@ -548,6 +548,35 @@ addCase('(c3) the assessment itself: sword + one armour piece is sufficient, bar
   }
 })
 
+addCase('(c3b) a sword CARRIED in the inventory is a weapon even when the hand holds a block', () => {
+  // Measured live (run-mucaq28q-1ftq1): the marker said `held=cobblestone swingDamage=1 ... missing=sword
+  // prerequisite=CRAFT:iron_sword` while a diamond_sword sat in the inventory, so System2 was told to craft a
+  // weapon the body already had. The attack path equips the best CARRIED weapon before the first swing.
+  const carrying = assessCombatKit({
+    heldItem: 'cobblestone',
+    carried: { cobblestone: 402, diamond_sword: 1, iron_ingot: 2 },
+    worn: {},
+    health: 20,
+    food: 20,
+  })
+  const trulyBare = assessCombatKit({
+    heldItem: 'cobblestone',
+    carried: { cobblestone: 402, iron_ingot: 2 },
+    worn: {},
+    health: 20,
+    food: 20,
+  })
+  return {
+    pass:
+      carrying.hasWeapon === true &&
+      carrying.missing.includes('sword') === false &&
+      carrying.swingDamage > 1 &&
+      trulyBare.hasWeapon === false &&
+      trulyBare.missing.includes('sword') === true,
+    detail: `carrying=${JSON.stringify(carrying)} trulyBare=${JSON.stringify(trulyBare)}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // (c4/c5) an attacker beyond the response envelope
 // ---------------------------------------------------------------------------

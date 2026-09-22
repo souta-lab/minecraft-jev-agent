@@ -12,6 +12,8 @@ import {
   normalizePlanTail,
   plannerCapabilityHash,
   plannerStateHash,
+  plannerModelView,
+  type PlannerModelView,
   plannerWorldKeyString,
 } from './planner-legacy.ts'
 import type { PlannerWorldKey } from './planner.ts'
@@ -307,7 +309,17 @@ addCase('#33: same-world same-state planner repeat hits the cache', async () => 
     schemaVersion: PLANNER_CACHE_SCHEMA_VERSION,
     capabilityHash,
   }
-  const key = plannerStateHash({}, world, { targetItem: 'iron_pickaxe', haveCount: 0 }, identity)
+  // Seed with the SAME key the production path computes (#412/#414): the view the model is
+  // shown is part of the state hash, so a fixture that omits it would test a different contract.
+  const view = plannerModelView({
+    counts: {},
+    world,
+    request: llmRequest(),
+    position: { x: 0, y: 64, z: 0 },
+    health: 20,
+    food: 20,
+  })
+  const key = plannerStateHash({}, world, { targetItem: 'iron_pickaxe', haveCount: 0 }, identity, 0, null, view)
   seedPlannerCache(cachePath, key, worldKey, 2, capabilityHash)
   const logs: string[] = []
   const brain = new PlannerBrain({ bot: makeBot(), world, log: hostLog(logs), cachePath, worldKey, mode: 'llm' })
@@ -317,6 +329,52 @@ addCase('#33: same-world same-state planner repeat hits the cache', async () => 
   return {
     pass: plan.goals.length === 1 && cacheLine !== undefined && planLine !== undefined,
     detail: `goals=${plan.goals.length} cache=${cacheLine ?? 'none'} plan=${planLine ?? 'none'}`,
+  }
+})
+
+addCase('#412/#414: the state hash keys on the body/queue/failure inputs the model actually sees', () => {
+  // The throttle/cache must not read `no_new_info` while the situation the LLM is shown has changed. Observed live:
+  // PLAN_THROTTLED reason=action_impossible because=no_new_info for minutes while the run's typed route exhaustion,
+  // its pinned position and its repeated failures were all new information.
+  const world = emptyWorldMemory()
+  const identity = {
+    worldKey: plannerWorldKeyString({ serverId: 'srv', dimension: 'minecraft:overworld', worldEpoch: 1 }),
+    worldEpoch: 1,
+    schemaVersion: PLANNER_CACHE_SCHEMA_VERSION,
+    capabilityHash: plannerCapabilityHash(),
+  }
+  const objective = { targetItem: 'iron_pickaxe', haveCount: 0 }
+  const base: PlannerModelView = {
+    position: { x: 10, y: 64, z: 20 },
+    health: 20,
+    food: 20,
+    toolRank: 2,
+    queue: { depth: 2, done: 1, current: 'enter_portal', hasImpossible: false },
+    wakeReason: 'action_impossible',
+    wakeDetail: 'all_routes_spent',
+    recentOutcomes: ['ENTER:26,67,9:failed:path_stuck'],
+    horizon: ['enter_nether', 'blaze_rods'],
+  }
+  const h = (view: PlannerModelView | null) => plannerStateHash({}, world, objective, identity, 0, null, view)
+  const stable = h(base)
+  const moved = h({ ...base, position: { x: 11, y: 64, z: 20 } })
+  const hurt = h({ ...base, health: 3 })
+  const failed = h({ ...base, recentOutcomes: ['ENTER:26,67,9:failed:path_stuck', 'ENTER:26,67,9:failed:path_stuck'] })
+  const queue = h({ ...base, queue: { ...base.queue, hasImpossible: true } })
+  const horizon = h({ ...base, horizon: ['enter_nether'] })
+  const noView = plannerStateHash({}, world, objective, identity)
+  return {
+    pass:
+      stable === h(base) &&
+      moved !== stable &&
+      hurt !== stable &&
+      failed !== stable &&
+      queue !== stable &&
+      horizon !== stable &&
+      noView !== stable,
+    detail:
+      `stable=${stable} moved=${moved !== stable} hurt=${hurt !== stable} failed=${failed !== stable} ` +
+      `queue=${queue !== stable} horizon=${horizon !== stable} noViewDiffers=${noView !== stable}`,
   }
 })
 
