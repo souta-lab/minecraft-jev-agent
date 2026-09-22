@@ -442,8 +442,43 @@ export function notExecutableReplanRequest(
   }
 }
 
-export type NonProgressAction = 'hold' | 'yield' | 'escalate'
+/**
+ * #plan-reconciliation: the reason a head row accumulated starved decisions.
+ * `window` is the first starved decision of a new window (evidence), `wake` is the
+ * bound being reached (escalate to System2, then reset).
+ */
+export type StarvedHeadAction = 'hold' | 'window' | 'wake'
 
+export type StarvedHeadReason =
+  | 'below_window'
+  | 'window_open'
+  | 'no_productive_candidate_bound'
+
+export interface StarvedHeadBoundDecision {
+  action: StarvedHeadAction
+  reason: StarvedHeadReason
+  count: number
+  limit: number
+}
+
+/**
+ * The bound that ends the measured MOVE/WAIT starvation loop.
+ *
+ * Pure: the count lives on the durable row (`QueuedGoal.starvedDecisions`), so the
+ * only inputs are the count and the bound. `count === 1` opens a new window (one
+ * evidence line), `count >= limit` wakes System2 once, and everything between is
+ * silent - the decision never chooses WHAT comes next.
+ */
+export function evaluateStarvedHeadBound(input: { count: number; limit: number }): StarvedHeadBoundDecision {
+  const limit = Math.max(1, Math.floor(input.limit))
+  const count = Math.max(0, Math.floor(input.count))
+  if (count <= 0) return { action: 'hold', reason: 'below_window', count, limit }
+  if (count >= limit) return { action: 'wake', reason: 'no_productive_candidate_bound', count, limit }
+  if (count === 1) return { action: 'window', reason: 'window_open', count, limit }
+  return { action: 'hold', reason: 'below_window', count, limit }
+}
+
+export type NonProgressAction = 'hold' | 'yield' | 'escalate'
 export type NonProgressReason =
   | 'no_current'
   | 'not_optional'
@@ -629,6 +664,17 @@ export interface QueuedGoal {
    * so a reload cannot reset the bound.
    */
   deferCount?: number
+  /**
+   * #plan-reconciliation: controller decisions this row held the head and
+   * presented NO productive candidate (only WAIT/ESCALATE), with no semantic
+   * progress in between. Persisted with the durable row on purpose: the measured
+   * live loop (`run-mucqgrdo-21plr`) alternated MOVE/WAIT on one unachievable row
+   * across several resident reloads, and a controller-scoped counter was reset by
+   * the MOVE ticks AND by every reload - the row stayed permanently stalled while
+   * the evidence that it was stalled kept being erased. If the row survives a
+   * reload, the evidence that it is unproductive survives with it.
+   */
+  starvedDecisions?: number
 }
 
 /** A goal as proposed by the LLM. The queue assigns ids and bookkeeping. */
@@ -1173,8 +1219,42 @@ export class GoalQueue {
   noteSemanticProgress(progressKinds: readonly string[]): number {
     const goal = this.nextRef()
     if (goal === undefined) return 0
-    if (progressKinds.some(isSemanticProgressKind)) goal.nonProgressDecisions = 0
+    if (progressKinds.some(isSemanticProgressKind)) {
+      goal.nonProgressDecisions = 0
+      // Semantic progress also closes the starvation window: a head that is
+      // actually advancing must never accumulate the unproductive bound.
+      goal.starvedDecisions = 0
+    }
     return goal.nonProgressDecisions ?? 0
+  }
+
+  /**
+   * #plan-reconciliation: record one controller decision on which the head
+   * presented NO productive candidate (only WAIT/ESCALATE). The count lives on the
+   * durable row, so interleaved body-only decisions (a MOVE offered on the next
+   * tick) and a generation reload cannot erase it; only semantic progress
+   * (`noteSemanticProgress`), a different head (its own row), an explicit reset, or
+   * firing the bound clears it. The queue revision is deliberately NOT bumped: this
+   * is diagnostic evidence, and bumping it would invalidate an in-flight System2
+   * request (system2Authority compares `queueRevision`).
+   */
+  noteStarvedHead(): number {
+    const goal = this.nextRef()
+    if (goal === undefined) return 0
+    goal.starvedDecisions = (goal.starvedDecisions ?? 0) + 1
+    return goal.starvedDecisions
+  }
+
+  /** Close the starvation window for the current head (after the bound fired). */
+  resetStarvedHead(): void {
+    const goal = this.nextRef()
+    if (goal === undefined) return
+    goal.starvedDecisions = 0
+  }
+
+  /** The head's durable starved-decision count (diagnostics/fixtures). */
+  get starvedHeadCount(): number {
+    return this.nextRef()?.starvedDecisions ?? 0
   }
 
   /**

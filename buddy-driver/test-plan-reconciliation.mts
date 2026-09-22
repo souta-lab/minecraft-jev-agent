@@ -46,6 +46,7 @@ import {
   ROW_NOT_EXECUTABLE_HERE,
   formatPlanIdentity,
   formatPlanIdentityChanged,
+  evaluateStarvedHeadBound,
   notExecutableReplanRequest,
   planIdentityId,
   planReplanRequest,
@@ -54,6 +55,7 @@ import {
 import type { GoalQueueSnapshot, PlanIdentity, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
 import { planIdentityFor, supersededPlanObsoleteProof } from './generation-entry.ts'
+import { goalQueueSnapshotFromState } from './state-snapshot.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { deriveResumeRung, rungIndexById } from './planner.ts'
@@ -714,6 +716,7 @@ addCase('(vii) every new marker is MIRRORED, so it reaches buddy.log', () => {
     ROW_DEFERRED_NOT_EXECUTABLE_HERE,
     'NO_PRODUCTIVE_HEAD_BOUND',
     'NO_PRODUCTIVE_HEAD_WINDOW',
+    'ROW_NOT_EXECUTABLE_HERE_REPEATS',
   ]
   const missing = markers.filter((token) => !MIRRORED_MARKERS.has(token))
   const tokens = markers.map((token) => mirroredEventToken(`${token} detail=1`))
@@ -752,6 +755,114 @@ addCase('(vii) the controller wires both reconciliations and the queue_empty gat
   const missing = gates.filter((needle) => !source.includes(needle))
   const pass = missing.length === 0
   return { pass, detail: `missing=[${missing.join(' | ')}]` }
+})
+
+// ---------------------------------------------------------------------------
+// (viii) the measured starvation bound: SAME head, MOVE/WAIT churn, reload
+// ---------------------------------------------------------------------------
+// Live (`run-mucqgrdo-21plr`): the stale row alternated MOVE/WAIT, so a
+// NON-starved tick sat between every starved one, and `NO_PRODUCTIVE_HEAD_WINDOW`
+// reported `count=1 limit=3` on all seven occurrences while
+// `NO_PRODUCTIVE_HEAD_BOUND` never fired. The count is now a field of the durable
+// ROW (`starvedDecisions`), closed only by semantic progress, by firing, or by the
+// head changing - never by body motion or a reload.
+addCase('(viii) the bound counts starved decisions for the SAME head across a reload', () => {
+  const queue = new GoalQueue()
+  queue.restore({ counter: 1, goals: [staleDescendRow()], revision: 1, planIdentity: staleIdentity() })
+  const first = queue.noteStarvedHead()
+  const firstBound = evaluateStarvedHeadBound({ count: first, limit: 3 })
+  // The interleaved productive tick (the MOVE the live run alternated with WAIT):
+  // nothing is recorded, and the window must stay open.
+  const afterMoveTick = queue.starvedHeadCount
+  // Reload: snapshot -> JSON -> restore, exactly what a resident reload does.
+  const restored = new GoalQueue()
+  restored.restore(JSON.parse(JSON.stringify(queue.snapshot())) as GoalQueueSnapshot)
+  const afterReload = restored.starvedHeadCount
+  const second = restored.noteStarvedHead()
+  const secondBound = evaluateStarvedHeadBound({ count: second, limit: 3 })
+  const third = restored.noteStarvedHead()
+  const thirdBound = evaluateStarvedHeadBound({ count: third, limit: 3 })
+  restored.resetStarvedHead()
+  const afterFire = restored.starvedHeadCount
+  const fourth = restored.noteStarvedHead()
+  const pass =
+    first === 1 &&
+    firstBound.action === 'window' &&
+    afterMoveTick === 1 &&
+    afterReload === 1 &&
+    second === 2 &&
+    secondBound.action === 'hold' &&
+    third === 3 &&
+    thirdBound.action === 'wake' &&
+    thirdBound.reason === 'no_productive_candidate_bound' &&
+    afterFire === 0 &&
+    fourth === 1
+  return {
+    pass,
+    detail: `first=${first}/${firstBound.action} afterMove=${afterMoveTick} afterReload=${afterReload} second=${second}/${secondBound.action} third=${third}/${thirdBound.action} afterFire=${afterFire} next=${fourth}`,
+  }
+})
+
+addCase('(viii) body motion cannot launder the bound, but real progress clears it', () => {
+  const queue = new GoalQueue()
+  queue.restore({ counter: 1, goals: [staleDescendRow()], revision: 1, planIdentity: staleIdentity() })
+  queue.noteStarvedHead()
+  queue.noteStarvedHead()
+  // `body` progress (a successful MOVE/ASCEND) is NOT semantic progress.
+  queue.noteSemanticProgress(['body'])
+  const countAfterBody = queue.starvedHeadCount
+  // `goal`/`search` progress is, and closes the window.
+  queue.noteSemanticProgress(['goal'])
+  const countAfterGoal = queue.starvedHeadCount
+  queue.noteStarvedHead()
+  const reopened = queue.starvedHeadCount
+  const pass = countAfterBody === 2 && countAfterGoal === 0 && reopened === 1
+  return { pass, detail: `afterBody=${countAfterBody} afterGoal=${countAfterGoal} reopened=${reopened}` }
+})
+
+addCase('(viii) the count is row-scoped: a different head starts its own window', () => {
+  const queue = new GoalQueue()
+  queue.restore({
+    counter: 2,
+    goals: [staleDescendRow(), netherRow()],
+    revision: 2,
+    planIdentity: staleIdentity(),
+  })
+  queue.noteStarvedHead()
+  queue.noteStarvedHead()
+  const staleCount = queue.starvedHeadCount
+  // The head moves on (the row completes); the next row has no history of its own.
+  queue.markDone()
+  const nextHead = queue.current?.id ?? 'none'
+  const nextCount = queue.starvedHeadCount
+  const pass = staleCount === 2 && nextHead === 'g2:place:nether_portal' && nextCount === 0
+  return { pass, detail: `stale=${staleCount} nextHead=${nextHead} nextCount=${nextCount}` }
+})
+
+addCase('(viii) the durable field survives the host snapshot path and the JSON round-trip', () => {
+  const queue = new GoalQueue()
+  queue.restore({ counter: 1, goals: [staleDescendRow()], revision: 1, planIdentity: staleIdentity() })
+  queue.noteStarvedHead()
+  const viaHost = goalQueueSnapshotFromState(queue.state)
+  const viaJson = JSON.parse(JSON.stringify(queue.snapshot())) as GoalQueueSnapshot
+  const hostRow = viaHost.goals.find((goal) => goal.id === 'g1:descend:raw_iron')
+  const jsonRow = viaJson.goals.find((goal) => goal.id === 'g1:descend:raw_iron')
+  const pass = hostRow?.starvedDecisions === 1 && jsonRow?.starvedDecisions === 1
+  return { pass, detail: `host=${hostRow?.starvedDecisions ?? 'none'} json=${jsonRow?.starvedDecisions ?? 'none'}` }
+})
+
+addCase('(viii) the controller uses the durable row bound and never resets it on a productive tick', async () => {
+  const source = await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()
+  const required = [
+    'this.queue.noteStarvedHead()',
+    'evaluateStarvedHeadBound({ count, limit: this.options.waitLimit })',
+    'this.queue.resetStarvedHead()',
+  ]
+  const forbidden = ['noProductiveHeadCount', 'noProductiveHeadKey']
+  const missing = required.filter((needle) => !source.includes(needle))
+  const leftover = forbidden.filter((needle) => source.includes(needle))
+  const pass = missing.length === 0 && leftover.length === 0
+  return { pass, detail: `missing=[${missing.join(' | ')}] leftover=[${leftover.join(' | ')}]` }
 })
 
 // ---------------------------------------------------------------------------
