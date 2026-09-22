@@ -1044,6 +1044,11 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCENT_REFUSED',
   'DESCENT_CHUNK',
   'PORTAL_ENTRY_UNVERIFIED',
+  // The bounded direct walk into a non-solid portal cell: the live run needs
+  // both the measured motion (`PORTAL_WALK_IN ... transferred=`) and the typed
+  // pre-movement refusal, or its log cannot tell "walked in" from "never tried".
+  'PORTAL_WALK_IN',
+  'PORTAL_WALK_IN_REFUSED',
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'PILLAR_FAIL',

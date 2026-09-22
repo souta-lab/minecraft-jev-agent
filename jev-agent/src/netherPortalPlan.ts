@@ -58,6 +58,16 @@ export const PORTAL_ENTER_REFUSED = 'PORTAL_ENTER_REFUSED'
  */
 export const PORTAL_ENTRY_UNVERIFIED = 'PORTAL_ENTRY_UNVERIFIED'
 /**
+ * The bounded DIRECT WALK into a non-solid portal interior cell (the actuator
+ * of last resort when the pathfinder cannot execute the destination node). The
+ * line reports what the walk actually did - `from_d`/`to_d` are the feet
+ * distances to the interior cell centre, `transferred` is the OBSERVED
+ * dimension change - so a walk that moved nothing can never look like an entry.
+ */
+export const PORTAL_WALK_IN = 'PORTAL_WALK_IN'
+/** The direct walk was refused before any movement, with the typed world reason. */
+export const PORTAL_WALK_IN_REFUSED = 'PORTAL_WALK_IN_REFUSED'
+/**
  * A multi-cell frame build finished its batch but the complete 10-edge shape is
  * still not present. This is a typed terminal cause: the batch was real work,
  * yet the frame is not verifiable, so the endless `verify_failed` retry that
@@ -193,6 +203,10 @@ export function normalizePortalDimension(dimension: string): string {
 
 function formatPos(pos: PortalBlockPosition): string {
   return `${pos.x},${pos.y},${pos.z}`
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1161,50 @@ export function formatPortalEntryRouteBlocked(input: PortalEntryRouteBlockedInpu
 /** The exact `PORTAL_ENTERED` line. */
 export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: string = NETHER): string {
   return `${PORTAL_ENTERED} pos=${formatPos(enterCell)} dimension=${dimension}`
+}
+
+/**
+ * Why the bounded direct walk did not run. Every reason is a live-world fact
+ * read BEFORE any movement:
+ *   * `out_of_range`         the body is not beside the gate (no walk considered);
+ *   * `not_level`            the interior is more than one block from the feet;
+ *   * `cell_not_traversable` the destination is not a non-solid portal cell
+ *                            (never walk into rock);
+ *   * `no_support`           a step-up target has no floor under it (never step
+ *                            up into a hole);
+ *   * `hazard_at_body`       the body already stands in lava/fire/water;
+ *   * `hazard_between`       a hazard cell lies on the walk to the interior.
+ */
+export type PortalWalkInRefusal =
+  | 'out_of_range'
+  | 'not_level'
+  | 'cell_not_traversable'
+  | 'no_support'
+  | 'hazard_at_body'
+  | 'hazard_between'
+
+export interface PortalWalkInInput {
+  readonly cell: PortalBlockPosition
+  readonly fromD: number
+  readonly toD: number
+  readonly transferred: boolean
+}
+
+/** The exact `PORTAL_WALK_IN` line: the measured motion of the direct walk. */
+export function formatPortalWalkIn(input: PortalWalkInInput): string {
+  return (
+    `${PORTAL_WALK_IN} cell=${formatPos(input.cell)}` +
+    ` from_d=${round2(input.fromD)} to_d=${round2(input.toD)} transferred=${input.transferred}`
+  )
+}
+
+/** The exact `PORTAL_WALK_IN_REFUSED` line: no movement, typed reason. */
+export function formatPortalWalkInRefused(
+  cell: PortalBlockPosition,
+  fromD: number,
+  refusal: PortalWalkInRefusal,
+): string {
+  return `${PORTAL_WALK_IN_REFUSED} cell=${formatPos(cell)} from_d=${round2(fromD)} reason=${refusal}`
 }
 
 /** The exact `PORTAL_ENTRY_UNVERIFIED` line: a remembered-site route, no lit claim. */
