@@ -982,6 +982,66 @@ export type WorldState = {
   signals: AgentSignals
 }
 
+/**
+ * Is the DATA behind one world cell attributable to the dimension the body is
+ * actually in?
+ *
+ * Mineflayer does not expose this. A column carries no world identity:
+ * `prismarine-world` keys its store by `chunkX+','+chunkZ` alone, and Mineflayer's
+ * cross-dimension invalidation is conditional and silent. So the answer has to be
+ * established by observation, and it has three states - never two:
+ *
+ *   `attributable` the column was OBSERVED loading while the live dimension was
+ *                  this one; the read stands;
+ *   `foreign`      the column was observed loading under a DIFFERENT dimension;
+ *   `unknown`      we cannot say (no live dimension, or a column loaded before we
+ *                  started watching). Unknown is NOT satisfied.
+ */
+export interface CellAttribution {
+  kind: 'attributable' | 'foreign' | 'unknown'
+  /** Canonical dimension the column's data was loaded under; `''` when unknown. */
+  dimension: string
+  /** Canonical live dimension; `''` when unknown. */
+  liveDimension: string
+  /** The chunk column that owns the cell. */
+  chunk: Vec3Json
+  reason: 'foreign_column' | 'unknown_column' | 'unknown_live_dimension' | null
+}
+
+/** One refused world read, as handed to the provenance evidence sink. */
+export interface RefusedRead {
+  cell: Vec3Json
+  chunk: Vec3Json
+  /** Canonical dimension of the data we would have read; `''` when unknown. */
+  provenance: string
+  /** Canonical live dimension; `''` when unknown. */
+  liveDimension: string
+  reason: 'foreign_column' | 'unknown_column' | 'unknown_live_dimension'
+  /** The sensor path that refused, for triage. */
+  source: string
+}
+
+/**
+ * The read-provenance capability the sensor requires of a world read. Absent
+ * (`undefined`/`null`) means the caller cannot prove provenance, which keeps
+ * every fixture, replay and non-resident caller on the un-gated path exactly as
+ * before.
+ */
+export interface DimensionProvenance {
+  /** Canonical live dimension, or `''` when unknown. */
+  readonly liveDimension: string
+  /** The verdict for the column that owns this world cell. */
+  cellAttribution(x: number, z: number): CellAttribution
+  /** Record a typed refusal; returns false when the sink is saturated. */
+  refuseRead(input: RefusedRead): boolean
+  /**
+   * Re-read the live dimension and apply a transition if one happened. Optional so
+   * a read-only double (fixtures) can answer provenance without owning a bot; the
+   * sensor calls it once per build so a build never gates on a stale dimension.
+   */
+  syncLiveDimension?(reason: string): void
+}
+
 export interface SensorOptions {
   /** radius (blocks) searched for candidate blocks */
   scanRadius: number
@@ -1039,6 +1099,16 @@ export interface SensorOptions {
    * fixture and any non-resident caller gets.
    */
   worldRevision?: number | null
+  /**
+   * Read provenance for the bot's world cache. When present, EVERY world read this
+   * sensor performs is gated on it: a cell whose column is not attributable to the
+   * live dimension is REFUSED (typed, `DIMENSION_READ_REFUSED`) rather than read,
+   * so a foreign dimension's block truth can never become an offer or durable
+   * memory. Absent means the caller cannot establish provenance (fixtures, replays,
+   * non-resident callers) and the reads are exactly what they were before this gate
+   * existed - which is what keeps those callers byte-identical.
+   */
+  dimensionProvenance?: DimensionProvenance | null
 }
 
 export const defaultSensorOptions: SensorOptions = {
@@ -1449,7 +1519,7 @@ export function sampleMobSpawnContext(
   const surfaceCell = { x: feet.x, y: feet.y - 1, z: feet.z }
   const read = (cell: Vec3Json): { name: string | null; light: number | null; biomeId: number | null } => {
     try {
-      const block = bot.blockAt(cell as never) as unknown as
+      const block = sensorBlockAt(bot, cell as never) as unknown as
         | { name?: unknown; light?: unknown; biome?: unknown }
         | null
         | undefined
@@ -1669,7 +1739,7 @@ export function isUsableGroundSupport(block: SupportBlockLike | null): boolean {
 
 /** True when the block under `feet` is genuinely usable ground (not a canopy). */
 export function hasUsableGroundSupport(bot: Bot, feet: Vec3Json): boolean {
-  return isUsableGroundSupport(bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })))
+  return isUsableGroundSupport(sensorBlockAt(bot, toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })))
 }
 
 const REPLACEABLE_AIR = new Set(['air', 'cave_air', 'void_air'])
@@ -1688,9 +1758,9 @@ function isReplaceableAir(block: { name: string } | null): boolean {
  * solid support is standable.
  */
 export function isStandable(bot: Bot, feet: Vec3Json): boolean {
-  const feetBlock = bot.blockAt(toVec3(bot, feet))
-  const headBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z }))
-  const belowBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z }))
+  const feetBlock = sensorBlockAt(bot, toVec3(bot, feet))
+  const headBlock = sensorBlockAt(bot, toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z }))
+  const belowBlock = sensorBlockAt(bot, toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z }))
   return isPassable(feetBlock) && isPassable(headBlock) && isSolidSupport(belowBlock)
 }
 
@@ -1703,9 +1773,9 @@ export function isStandable(bot: Bot, feet: Vec3Json): boolean {
  */
 export function isUsableStand(bot: Bot, feet: Vec3Json): boolean {
   return isUsableStandFromBlocks(
-    bot.blockAt(toVec3(bot, feet)),
-    bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z })),
-    bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })),
+    sensorBlockAt(bot, toVec3(bot, feet)),
+    sensorBlockAt(bot, toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z })),
+    sensorBlockAt(bot, toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })),
   )
 }
 
@@ -1836,7 +1906,7 @@ function readOnFire(bot: Bot): boolean | null {
  */
 function buildEnvHazardRing(bot: Bot, feet: Vec3Json): EnvHazardCell[] {
   const cells: EnvHazardCell[] = []
-  const at = (x: number, y: number, z: number) => bot.blockAt(toVec3(bot, { x, y, z }))
+  const at = (x: number, y: number, z: number) => sensorBlockAt(bot, toVec3(bot, { x, y, z }))
   for (let dx = -1; dx <= 1; dx += 1) {
     for (let dz = -1; dz <= 1; dz += 1) {
       if (dx === 0 && dz === 0) continue
@@ -1889,7 +1959,7 @@ function buildEnvHazard(
     cells: EnvHazardCell[]
   },
 ): EnvHazardState {
-  const at = (y: number) => bot.blockAt(toVec3(bot, { x: input.feet.x, y, z: input.feet.z }))
+  const at = (y: number) => sensorBlockAt(bot, toVec3(bot, { x: input.feet.x, y, z: input.feet.z }))
   const feetBlock = at(input.feet.y)
   const headBlock = at(input.feet.y + 1)
   const supportBlock = at(input.feet.y - 1)
@@ -1937,7 +2007,7 @@ function readAir(bot: Bot): number {
 
 /** true when the loaded cell holds a fluid (`null` = unloaded, so not a fluid). */
 function fluidAt(bot: Bot, cell: Vec3Json): boolean {
-  const block = bot.blockAt(toVec3(bot, cell))
+  const block = sensorBlockAt(bot, toVec3(bot, cell))
   return block !== null && PROBE_FLUIDS.has(block.name)
 }
 
@@ -2158,13 +2228,79 @@ const SCAN_POSITION_CACHE_CAP = 64
 const scanPositionCache = new Map<string, ScanPositionCacheEntry>()
 let activeScanRevision: number | null = null
 
+/**
+ * The read-provenance gate for the CURRENT `buildWorldState` call, or null when the
+ * caller cannot establish provenance (fixtures, replays, non-resident callers).
+ * Established here rather than threaded through ~40 helper signatures for the same
+ * reason `activeScanRevision` is: it is a per-build fact about the bot's world, not
+ * a per-helper option. Set and cleared by `buildWorldState` around the build.
+ */
+let activeDimensionProvenance: DimensionProvenance | null = null
+
+/**
+ * The ONE gated world read. Returns `null` - the "this cell is not readable from
+ * here" answer every existing caller already handles as unloaded - when the cell's
+ * column is not attributable to the live dimension, and records the typed refusal
+ * (`DIMENSION_READ_REFUSED`, naming the cell, the read's provenance, the live
+ * dimension and the action) through the provenance sink.
+ *
+ * A null return is deliberately the SAME shape as an unloaded chunk: `unloaded` is
+ * already the sensor's no-verdict state, so a refused read cannot be mistaken for
+ * absence. In particular `probKnownResources` keeps such a cell `unknown` and never
+ * `falsified`, so no durable memory is deleted on the strength of a read we refused.
+ */
+function sensorBlockAt(bot: Bot, position: Vec3, source = 'world-state'): ReturnType<Bot['blockAt']> {
+  const provenance = activeDimensionProvenance
+  if (provenance === null) return bot.blockAt(position)
+  const verdict = provenance.cellAttribution(position.x, position.z)
+  if (verdict.kind === 'attributable') return bot.blockAt(position)
+  provenance.refuseRead({
+    cell: vecJson(position),
+    chunk: verdict.chunk,
+    provenance: verdict.dimension,
+    liveDimension: verdict.liveDimension,
+    reason: verdict.reason ?? 'unknown_column',
+    source,
+  })
+  return null
+}
+
+/**
+ * The same gate applied to a `findBlocks` position list. `findBlocks` returns
+ * positions from every column in Mineflayer's store with no world filter, and some
+ * scans (`buildStations`) turn those positions straight into an offer WITHOUT
+ * re-reading the block - so the position list itself has to be gated, not only the
+ * per-cell reads.
+ */
+function sensorPositions(positions: Vec3[], source: string): Vec3[] {
+  const provenance = activeDimensionProvenance
+  if (provenance === null) return positions
+  const kept: Vec3[] = []
+  for (const position of positions) {
+    const verdict = provenance.cellAttribution(position.x, position.z)
+    if (verdict.kind === 'attributable') {
+      kept.push(position)
+      continue
+    }
+    provenance.refuseRead({
+      cell: vecJson(position),
+      chunk: verdict.chunk,
+      provenance: verdict.dimension,
+      liveDimension: verdict.liveDimension,
+      reason: verdict.reason ?? 'unknown_column',
+      source,
+    })
+  }
+  return kept
+}
+
 function stableFindBlocks(
   bot: Bot,
   scanId: string,
   options: Parameters<Bot['findBlocks']>[0],
 ): Vec3[] {
   const revision = activeScanRevision
-  if (revision === null) return bot.findBlocks(options)
+  if (revision === null) return sensorPositions(bot.findBlocks(options), scanId)
   const point = bot.entity.position.floored()
   const key = `${scanId}|${bot.game.dimension}|${point.x},${point.y},${point.z}`
   const hit = scanPositionCache.get(key)
@@ -2174,8 +2310,11 @@ function stableFindBlocks(
     const oldest = scanPositionCache.keys().next().value
     if (oldest !== undefined) scanPositionCache.delete(oldest)
   }
+  // The CACHE holds the raw list (it is keyed by the world revision, which counts
+  // every column load/unload); the GATE is applied on the way out so a cached list
+  // can never smuggle a foreign column past it.
   scanPositionCache.set(key, { revision, positions })
-  return positions
+  return sensorPositions(positions, scanId)
 }
 
 function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
@@ -2191,7 +2330,7 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): Bloc
   // never depended on adjacency, so the kept list is identical.
   const rows: Array<{ block: Exclude<ReturnType<Bot['blockAt']>, null>; pos: Vec3Json; distance: number; harvest: ReturnType<typeof resolveBlockHarvest> }> = []
   for (const position of positions) {
-    const block = bot.blockAt(position)
+    const block = sensorBlockAt(bot, position, 'log-scan')
     if (block === null) continue
     const pos = vecJson(position)
     rows.push({
@@ -2256,7 +2395,7 @@ function buildStoneBlocks(
   ]
   const isExposed = (x: number, y: number, z: number): boolean => {
     for (const [dx, dy, dz] of faces) {
-      const neighbour = bot.blockAt(scratch.set(x + dx, y + dy, z + dz))
+      const neighbour = sensorBlockAt(bot, scratch.set(x + dx, y + dy, z + dz), 'stone-scan')
       if (neighbour !== null && neighbour.boundingBox === 'empty') return true
     }
     return false
@@ -2268,7 +2407,7 @@ function buildStoneBlocks(
       const x = base.x + dx
       const z = base.z + dz
       for (let y = top; y >= bottom; y -= 1) {
-        const block = bot.blockAt(scratch.set(x, y, z))
+        const block = sensorBlockAt(bot, scratch.set(x, y, z), 'stone-scan')
         if (block === null || !STONE_LIKE.has(block.name)) continue
         if (!isExposed(x, y, z)) break
         const harvest = resolveBlockHarvest(bot, block.name)
@@ -2323,7 +2462,7 @@ function buildBuriedStoneBlocks(
   })
   const out: BlockState[] = []
   for (const position of positions) {
-    const block = bot.blockAt(position)
+    const block = sensorBlockAt(bot, position, 'buried-stone-scan')
     if (block === null) continue
     const pos = vecJson(position)
     const harvest = resolveBlockHarvest(bot, block.name)
@@ -2368,7 +2507,7 @@ function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: S
   })
   const out: BlockState[] = []
   for (const position of positions) {
-    const block = bot.blockAt(position)
+    const block = sensorBlockAt(bot, position, 'placeable-producer-scan')
     if (block === null) continue
     const pos = vecJson(position)
     const harvest = resolveBlockHarvest(bot, block.name)
@@ -2418,7 +2557,7 @@ function buildScannedResourceBlocks(
   })
   const out: BlockState[] = []
   for (const position of positions) {
-    const block = bot.blockAt(position)
+    const block = sensorBlockAt(bot, position, 'resource-scan')
     if (block === null) continue
     const pos = vecJson(position)
     const adjacentStandable = findAdjacentStandable(bot, pos)
@@ -2476,7 +2615,7 @@ function buildFoodSourceBlocks(bot: Bot, options: SensorOptions, self: SelfState
     .slice(0, FOOD_SOURCE_SCAN_CAP)
   const out: BlockState[] = []
   for (const position of nearest) {
-    const block = bot.blockAt(position)
+    const block = sensorBlockAt(bot, position, 'food-scan')
     if (block === null) continue
     const spec = specs.get(block.name)
     if (spec === undefined) continue
@@ -2674,7 +2813,7 @@ function readCellBlock(
   cell: Vec3Json,
 ): { name: string | null; loaded: boolean; boundingBox: string | null } {
   try {
-    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z)) as {
+    const block = sensorBlockAt(bot, new Vec3(cell.x, cell.y, cell.z), 'probe-known-resources') as {
       name?: string
       boundingBox?: string
     } | null
@@ -2834,7 +2973,7 @@ function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): B
     count: 32,
   })
   for (const position of positions) {
-    const block = bot.blockAt(position)
+    const block = sensorBlockAt(bot, position, 'hazard-scan')
     if (block === null) continue
     const pos = vecJson(position)
     out.push({
@@ -3019,7 +3158,7 @@ function buildContainers(
   const entries = buildStations(bot, options, self, CONTAINER_STATIONS, remembered)
   return entries.map((entry) => {
     if (entry.source === 'sensed') {
-      const live = bot.blockAt(new Vec3(entry.x, entry.y, entry.z))?.name ?? null
+      const live = sensorBlockAt(bot, new Vec3(entry.x, entry.y, entry.z), 'container-scan')?.name ?? null
       if (live !== null && isContainerBlockName(live)) return { ...entry, name: normalizeBlockName(live) }
     }
     const rememberedName = rememberedContainerName(remembered, entry)
@@ -3075,7 +3214,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     z: Math.floor(self.position.z),
   }
   const scratch = bot.entity.position.clone()
-  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z), 'descent')
   const solid = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
     return block !== null && block.boundingBox === 'block'
@@ -3246,7 +3385,7 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
   const feetY = Math.floor(self.position.y)
   const feetZ = Math.floor(self.position.z)
   const scratch = bot.entity.position.clone()
-  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z))
   const solid = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
     return block !== null && block.boundingBox === 'block'
@@ -3311,7 +3450,7 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
   const feetY = Math.floor(self.position.y)
   const feetZ = Math.floor(self.position.z)
   const scratch = bot.entity.position.clone()
-  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z))
   const halfWidth = bot.entity.width > 0 ? bot.entity.width / 2 : 0.3
   const current = headroomAcrossFootprint({
     center: { x: self.position.x, z: self.position.z },
@@ -3433,9 +3572,9 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
           botBody,
         )
         if (nearBody < 1.0) continue
-        const atFeet = bot.blockAt(scratch.set(candidate.x, candidate.y, candidate.z))
-        const above = bot.blockAt(scratch.set(candidate.x, candidate.y + 1, candidate.z))
-        const below = bot.blockAt(scratch.set(candidate.x, candidate.y - 1, candidate.z))
+        const atFeet = sensorBlockAt(bot, scratch.set(candidate.x, candidate.y, candidate.z), 'placement-spots')
+        const above = sensorBlockAt(bot, scratch.set(candidate.x, candidate.y + 1, candidate.z), 'placement-spots')
+        const below = sensorBlockAt(bot, scratch.set(candidate.x, candidate.y - 1, candidate.z), 'placement-spots')
         // Truly replaceable air only: `leaf_litter` and similar are passable but
         // the server refuses to overwrite them, so placing there silently fails.
         if (!isReplaceableAir(atFeet)) continue
@@ -3637,7 +3776,7 @@ function frameScanWorld(bot: Bot): FrameScanWorld {
     const key = `${x}|${y}|${z}`
     const cached = cache.get(key)
     if (cached !== undefined) return cached
-    const block = bot.blockAt(scratch.set(x, y, z))
+    const block = sensorBlockAt(bot, scratch.set(x, y, z), 'portal-frame-scan')
     cache.set(key, block)
     return block
   }
@@ -3742,7 +3881,7 @@ export function detectLivePortalVerification(bot: Bot): boolean {
   return detectPortalVerification(
     dimension,
     sites,
-    (position) => bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null,
+    (position) => sensorBlockAt(bot, new Vec3(position.x, position.y, position.z), 'portal-verification')?.name ?? null,
   )
 }
 
@@ -3759,7 +3898,7 @@ export function sensedVerifiedPortalSites(bot: Bot): PortalFrameSite[] {
     detectPortalVerification(
       dimension,
       [site],
-      (position) => bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null,
+      (position) => sensorBlockAt(bot, new Vec3(position.x, position.y, position.z), 'portal-verification')?.name ?? null,
     ),
   )
 }
@@ -3910,7 +4049,7 @@ function buildTerrain(
   const transfer: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
   const scratch = bot.entity.position.clone()
-  const at = (p: Vec3Json) => bot.blockAt(scratch.set(p.x, p.y, p.z))
+  const at = (p: Vec3Json) => sensorBlockAt(bot, scratch.set(p.x, p.y, p.z), 'terrain')
   for (let dx = -2; dx <= 2; dx += 1) {
     for (let dz = -2; dz <= 2; dz += 1) {
       for (let dy = -1; dy <= 1; dy += 1) {
@@ -3960,7 +4099,7 @@ export function probeBridgeDirection(
   depth: number = BRIDGE_PROBE_DEPTH,
 ): BridgeProbe {
   const scratch = bot.entity.position.clone()
-  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z), 'bridge-probe')
   // The block slice `wallEntry.ts#floodEvidence` reads, from the same live blocks
   // (`null` = unloaded, which the flood rule never turns into a hazard).
   const readCell = (cell: Vec3Json): WallBlockLike | null => {
@@ -4083,7 +4222,7 @@ export function buildWallProbes(
 ): WallProbe[] {
   const scratch = bot.entity.position.clone()
   const read = (cell: Vec3Json): WallBlockLike | null => {
-    const block = bot.blockAt(scratch.set(cell.x, cell.y, cell.z))
+    const block = sensorBlockAt(bot, scratch.set(cell.x, cell.y, cell.z), 'wall-probes')
     return block === null
       ? null
       : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
@@ -4184,7 +4323,7 @@ export function buildLevelScanProbes(
   }
   const scratch = bot.entity.position.clone()
   const read = (cell: Vec3Json): WallBlockLike | null => {
-    const block = bot.blockAt(scratch.set(cell.x, cell.y, cell.z))
+    const block = sensorBlockAt(bot, scratch.set(cell.x, cell.y, cell.z), 'level-scan')
     return block === null
       ? null
       : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
@@ -4331,7 +4470,7 @@ function buildEscapeCells(
   let coverRays = 0
   const maxCoverRays = Math.max(0, Math.floor(options.maxThreatCoverRays ?? 0))
   const scratch = bot.entity.position.clone()
-  const at = (p: Vec3Json) => bot.blockAt(scratch.set(p.x, p.y, p.z))
+  const at = (p: Vec3Json) => sensorBlockAt(bot, scratch.set(p.x, p.y, p.z), 'escape-cells')
   for (let dx = -radius; dx <= radius; dx += 1) {
     for (let dz = -radius; dz <= radius; dz += 1) {
       for (let dy = -THREAT_ESCAPE_DY; dy <= THREAT_ESCAPE_DY; dy += 1) {
@@ -4507,10 +4646,21 @@ function dedupeCells(cells: readonly Vec3Json[]): Vec3Json[] {
 export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
   const revision = options.worldRevision
   activeScanRevision = typeof revision === 'number' && Number.isFinite(revision) ? revision : null
+  // The read-provenance gate is armed for the whole build. Refresh the live
+  // dimension first: if the body changed dimension since the last build, this drops
+  // every column tag and unloads the columns, so nothing loaded under the previous
+  // dimension can be read by this build.
+  const provenance = options.dimensionProvenance ?? null
+  provenance?.syncLiveDimension?.('sensor-build')
+  // Save/restore rather than clear, so a nested or already-armed gate is never
+  // disarmed by an inner build's exit.
+  const previousProvenance = activeDimensionProvenance
+  activeDimensionProvenance = provenance
   try {
     return buildWorldStateUncached(bot, input, options)
   } finally {
     activeScanRevision = null
+    activeDimensionProvenance = previousProvenance
   }
 }
 
