@@ -43,6 +43,7 @@ import type {
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { milestoneReport } from './milestone-report.ts'
+import { MilestonePredicateRecorder } from './milestone-predicates.ts'
 import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
@@ -489,6 +490,14 @@ let listenerBaselineTimer: NodeJS.Timeout | null = null
 let listenerBaselineGeneration: ResidentGeneration | null = null
 let startPosition: Vec3Json | null = null
 let lastStatus: GenerationStatus | null = null
+/**
+ * HOST-owned, run-scoped milestone predicate recorder. Created lazily on the
+ * first observation that carries `status.milestonePredicates` (older generations
+ * do not), and reused across hot reloads so a proven predicate survives every
+ * generation swap. It writes `milestone-predicates-<runId>.json` next to the
+ * run-scoped M2 snapshot, which tools/milestone-run-artifact.mjs reads.
+ */
+let milestonePredicateRecorder: MilestonePredicateRecorder | null = null
 let deathResetPending = false
 let pendingResetReason: string | null = null
 let lastDeathAt = 0
@@ -1504,6 +1513,24 @@ setInterval(() => {
   const truth = status.truth
   // #34: keep the live-inventory observation fresh while the bot is alive.
   if (truth.health !== null && truth.health > 0) preLossInventory.observe(truth.inventory)
+  // Milestone predicate evidence: the generation evaluates the ladder's own
+  // predicates from live inventory + durable world memory; the HOST owns the
+  // run-scoped, monotonic write. Absent on older generations -> no-op.
+  if (Array.isArray(status.milestonePredicates) && status.milestonePredicates.length > 0) {
+    if (milestonePredicateRecorder === null) {
+      milestonePredicateRecorder = new MilestonePredicateRecorder({
+        runId,
+        sourceSha: bootSourceSha,
+        dir: DATA,
+        log: (event, detail) => log(event, detail),
+      })
+    }
+    try {
+      milestonePredicateRecorder.observe(status.milestonePredicates, { generationId: generation.id })
+    } catch (error) {
+      log('ERROR', { where: 'observe.milestonePredicates', message: error instanceof Error ? error.message : String(error) })
+    }
+  }
   const action = status.currentAction
   if (action !== null && action.id !== lastActionId) {
     lastActionId = action.id

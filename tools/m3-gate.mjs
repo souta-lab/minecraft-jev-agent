@@ -17,6 +17,11 @@
 // runId (no second schema):
 //   * `m2-snapshot-<runId>.json` — inventory samples at every recorded marker
 //     plus initial/latest/terminal inventory, run-scoped by filename AND body;
+//   * `milestone-predicates-<runId>.json` — the resident's own live predicate
+//     observations (tools/milestone-predicates.mjs). Used when present; rejected
+//     on a record / runId / sourceSha mismatch. It may only UPGRADE a condition to
+//     PASS when a predicate is truly observed as satisfied, and the gate also
+//     emits the full `m3_predicate <id>: PASS|FAIL|UNKNOWN at=… source=…` section;
 //   * the resident log, bracketed by its BOOT runId boundary: INVENTORY /
 //     MILESTONE lines carry the live counts, and `dimension=` lines are
 //     reported as an intermediate fact.
@@ -45,24 +50,26 @@ import {
   readRunScopedM2Evidence,
 } from './m2-gate.mjs'
 import { evaluatePolicyEvidence, loadPolicyEvidence } from './m2-policy-evidence.mjs'
+import {
+  BLAZE_POWDER,
+  BLAZE_POWDER_REQUIRED,
+  BLAZE_ROD,
+  BLAZE_ROD_REQUIRED,
+  ENDER_EYE,
+  ENDER_EYE_REQUIRED,
+  ENDER_PEARL,
+  ENDER_PEARL_REQUIRED,
+  deriveMilestonePredicates,
+  readMilestonePredicateEvidence,
+} from './milestone-predicates.mjs'
 
 /** Re-exported so the live-gate wrapper shares the exact same run-id shape rule. */
 export { RUN_ID_RE }
+/** The canonical predicate thresholds live with the predicate evaluator. */
+export { BLAZE_POWDER, BLAZE_POWDER_REQUIRED, BLAZE_ROD, BLAZE_ROD_REQUIRED, ENDER_EYE, ENDER_EYE_REQUIRED, ENDER_PEARL, ENDER_PEARL_REQUIRED }
 
 export const M3_RUN_RESULT = 'M3_RUN_RESULT'
 export const M3_RUN_GATE = 'M3_RUN_GATE'
-
-/** The terminal M3 item and the count the contract requires. */
-export const ENDER_EYE = 'ender_eye'
-export const ENDER_EYE_REQUIRED = 12
-/** The crafting inputs for 12 eyes: 12 ender_pearl + 12 blaze_powder. */
-export const ENDER_PEARL = 'ender_pearl'
-export const ENDER_PEARL_REQUIRED = 12
-export const BLAZE_ROD = 'blaze_rod'
-/** 7 blaze rods smelt/mill into >= 12 blaze_powder (1 rod -> 2 powder). */
-export const BLAZE_ROD_REQUIRED = 7
-export const BLAZE_POWDER = 'blaze_powder'
-export const BLAZE_POWDER_REQUIRED = 12
 
 /** The conditions M3 must prove; inventory facts beyond these are diagnostics. */
 export const M3_REQUIRED_CONDITIONS = Object.freeze(['ender_eye_ready', 'model_authority', 'nether_reached'])
@@ -156,7 +163,7 @@ function verdict({ status, code, reason, runId, conditions, evidence = null, sou
  * model-authority proof are bound to R. A materials-complete run whose eyes are
  * short is FAIL (1). Everything else is UNKNOWN (2) and can never be PASS.
  */
-export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy = null, dimensions = null } = {}) {
+export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy = null, dimensions = null, milestonePredicates = null, sourceSha = null } = {}) {
   if (expectedRunId === null || !RUN_ID_RE.test(String(expectedRunId))) {
     return verdict({
       status: 'UNKNOWN',
@@ -198,18 +205,41 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     : sources.flatMap((source) => (Array.isArray(source.dimensionObservations) ? source.dimensionObservations : []))
   const dimension = observedDimensions.length > 0 ? observedDimensions.at(-1) : null
   const authorityPass = policy?.code === 0
-  const materialsFail = !eyes.ready && eyes.materialInputsComplete
+
+  // FIRST-CLASS milestone predicate evidence. When the caller already read the
+  // run-scoped predicate section (resident observe-loop observations + log +
+  // snapshot) it is used as-is; otherwise it is derived from the SAME run-scoped
+  // sources this gate judges. A predicate may only ever UPGRADE a condition to
+  // PASS when it was truly observed (`satisfied === true`); `false`/UNKNOWN never
+  // manufacture a PASS, and the FAIL path below is driven by the inventory facts.
+  const predicateSection =
+    milestonePredicates ??
+    deriveMilestonePredicates({
+      runId: expectedRunId,
+      runSourceSha: sourceSha ?? null,
+      inventorySamples: samples.map((counts) => ({ counts, source: 'log' })),
+      dimensionObservations: observedDimensions.map((entry) => ({
+        dimension: typeof entry === 'string' ? entry : entry?.dimension,
+        source: typeof entry === 'object' && entry?.source ? entry.source : 'log',
+      })),
+      portalEvents: sources.flatMap((source) => (Array.isArray(source.portalEvents) ? source.portalEvents.map((event) => ({ ...event, source: source.name })) : [])),
+    })
+  const predicateTrue = (id) => predicateSection.predicates.some((predicate) => predicate.id === id && predicate.satisfied === true)
+  const eyesReady = eyes.ready || predicateTrue('ender_eyes')
+  const materialsFail = !eyesReady && eyes.materialInputsComplete
 
   // M3 is "reach the Nether and prove twelve eyes", so Nether arrival is a REQUIRED condition,
   // not a diagnostic: without it a run could claim M3 from the eyes alone while never having
   // left the overworld. UNKNOWN (never FAIL) when the run simply has no Nether observation yet -
   // the absence of a transition is not evidence of a failed one.
-  const netherObserved = observedDimensions.some((entry) => {
-    const value = typeof entry === 'string' ? entry : String(entry?.dimension ?? '')
-    return value === 'minecraft:the_nether' || value === 'the_nether'
-  })
+  const netherObserved =
+    predicateTrue('nether_reached') ||
+    observedDimensions.some((entry) => {
+      const value = typeof entry === 'string' ? entry : String(entry?.dimension ?? '')
+      return value === 'minecraft:the_nether' || value === 'the_nether'
+    })
   const conditions = {
-    ender_eye_ready: eyes.ready ? 'PASS' : materialsFail ? 'FAIL' : 'UNKNOWN',
+    ender_eye_ready: eyesReady ? 'PASS' : materialsFail ? 'FAIL' : 'UNKNOWN',
     model_authority: authorityPass ? 'PASS' : 'UNKNOWN',
     nether_reached: netherObserved ? 'PASS' : 'UNKNOWN',
   }
@@ -219,7 +249,28 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     inventorySamples: Array.isArray(source.inventorySamples) ? source.inventorySamples.length : 0,
     dimensionObservations: Array.isArray(source.dimensionObservations) ? source.dimensionObservations : [],
   }))
-  const facts = { eyes, dimension, dimensions: [...new Set(observedDimensions.map((entry) => (typeof entry === 'string' ? entry : entry?.dimension ?? null)))], netherReached: netherObserved, authority: policy?.facts ?? null }
+  const facts = {
+    eyes,
+    dimension,
+    dimensions: [...new Set(observedDimensions.map((entry) => (typeof entry === 'string' ? entry : entry?.dimension ?? null)))],
+    netherReached: netherObserved,
+    authority: policy?.facts ?? null,
+    milestonePredicates: {
+      runId: predicateSection.runId,
+      sourceSha: predicateSection.sourceSha,
+      observationSources: predicateSection.observationSources,
+      missing: predicateSection.missing,
+      mismatches: predicateSection.mismatches,
+      predicates: predicateSection.predicates.map((predicate) => ({
+        id: predicate.id,
+        satisfied: predicate.satisfied,
+        observedAtMs: predicate.observedAtMs,
+        observedAt: predicate.observedAt,
+        source: predicate.source,
+        evidence: predicate.evidence,
+      })),
+    },
+  }
 
   if (materialsFail) {
     return verdict({
@@ -232,7 +283,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
       facts,
     })
   }
-  if (eyes.ready && !authorityPass) {
+  if (eyesReady && !authorityPass) {
     return verdict({
       status: 'UNKNOWN',
       code: 2,
@@ -247,7 +298,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
   // authorityPass` returned PASS regardless of any other required condition, which is how a run
   // could have claimed M3 while `nether_reached` was still UNKNOWN.
   const unmetRequired = M3_REQUIRED_CONDITIONS.filter((condition) => conditions[condition] !== 'PASS')
-  if (eyes.ready && authorityPass && unmetRequired.length > 0) {
+  if (eyesReady && authorityPass && unmetRequired.length > 0) {
     return verdict({
       status: 'UNKNOWN',
       code: 2,
@@ -258,7 +309,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
       facts,
     })
   }
-  if (eyes.ready && authorityPass) {
+  if (eyesReady && authorityPass) {
     return verdict({
       status: 'PASS',
       code: 0,
@@ -306,6 +357,7 @@ export async function runM3Gate({
   controlSocketPath = M3_GATE_CONTROL_SOCK,
   decisionsPath = M3_GATE_DECISIONS,
   runnerOutPath = M3_GATE_RUNNER_OUT,
+  sourceSha = null,
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   json = false,
@@ -340,7 +392,28 @@ export async function runM3Gate({
         generation: rawPolicy?.generation ?? null,
       })
     : null
-  const result = evaluateM3Gate({ expectedRunId, evidence, policy })
+  // The resident produces a run-scoped predicate observation file in the same
+  // directory as the M2 snapshot. It is used when present (live observations),
+  // and the gate otherwise derives the section from its own run-scoped evidence.
+  const hostObservation = scoped ? readMilestonePredicateEvidence(expectedRunId, { dir: snapshotDir }) : null
+  const milestonePredicates =
+    scoped && hostObservation !== null && hostObservation.present
+      ? deriveMilestonePredicates({
+          runId: expectedRunId,
+          runSourceSha: sourceSha ?? null,
+          inventorySamples: (evidence?.sources ?? []).flatMap((source) =>
+            (Array.isArray(source.inventorySamples) ? source.inventorySamples : []).map((counts) => ({ counts, source: 'log' })),
+          ),
+          dimensionObservations: (evidence?.sources ?? []).flatMap((source) =>
+            (Array.isArray(source.dimensionObservations) ? source.dimensionObservations : []).map((dimension) => ({ dimension, source: 'log' })),
+          ),
+          portalEvents: (evidence?.sources ?? []).flatMap((source) =>
+            (Array.isArray(source.portalEvents) ? source.portalEvents : []).map((event) => ({ ...event, source: source.name })),
+          ),
+          hostObservation,
+        })
+      : null
+  const result = evaluateM3Gate({ expectedRunId, evidence, policy, milestonePredicates, sourceSha })
 
   if (json) {
     write(
@@ -372,6 +445,21 @@ export async function runM3Gate({
         `blaze_powder=${result.facts.eyes.blazePowder} ender_eye=${result.facts.eyes.enderEye} ` +
         `dimension=${result.facts.dimension ?? 'unknown'} dimensions=${result.facts.dimensions.join(',') || 'none'}`,
     )
+    const section = result.facts.milestonePredicates
+    if (section !== undefined && section !== null) {
+      write(
+        `m3_predicates: runId=${section.runId ?? 'none'} sourceSha=${section.sourceSha ?? 'unknown'} ` +
+          `sources=${section.observationSources.join(',') || 'none'} ` +
+          `observed=${section.predicates.filter((predicate) => predicate.satisfied !== null).length}/${section.predicates.length} ` +
+          `missing=${section.missing.join(',') || 'none'}`,
+      )
+      for (const predicate of section.predicates) {
+        write(
+          `m3_predicate ${predicate.id}: ${predicate.satisfied === true ? 'PASS' : predicate.satisfied === false ? 'FAIL' : 'UNKNOWN'} ` +
+            `at=${predicate.observedAt ?? (predicate.satisfied === null ? 'never' : 'unavailable')} source=${predicate.source ?? 'unobserved'}`,
+        )
+      }
+    }
   }
   write(
     `${M3_RUN_RESULT} status=${result.status} reason=${result.reason} runId=${expectedRunId ?? 'none'} ` +

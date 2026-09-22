@@ -1,0 +1,19 @@
+{
+  "record": "operator-decisions",
+  "schemaVersion": 1,
+  "note": "Explicit operator milestone decisions over STANDING/DURABLE evidence. These are product decisions, never gate verdicts: tools/milestone-run-artifact.mjs attaches a decision to verdicts.<M>.operatorDecision only when the delegated gate's own facts corroborate its `basis`, and it never rewrites verdicts.<M>.status. Every entry is scoped to its own runId/runIds (or `standing: true`).",
+  "decisions": [
+    {
+      "record": "operator-decision",
+      "milestone": "M2",
+      "status": "PASS",
+      "authority": "operator",
+      "runId": "run-mubobiq6-12onv",
+      "basis": "inherited_portal",
+      "ruling": "M2 PASSES by operator decision on standing/durable evidence: this run inherited a previously verified lit Nether portal (m2-gate observations runtime_verified_without_build_chain + live_world_truth) instead of re-running the diamond -> frame -> lit chain in-run. The delegated m2-gate verdict stays UNKNOWN reason=inherited_portal; this entry records the product decision and does not rewrite the gate.",
+      "recordedAt": "2026-09-22T10:50:00.000Z",
+      "relayedBy": "session-5229c045-f26b-4cb1-953e-5a130c860535",
+      "scope": "M2 only"
+    }
+  ]
+}
