@@ -156,6 +156,8 @@ export function guardCandidate(
       return guardStep(candidate, state, context)
     case 'RETRIEVE':
       return guardRetrieve(candidate, state, context)
+    case 'PICKUP':
+      return guardPickup(candidate, state, context)
     case 'ATTACK':
       return guardAttack(candidate, state)
     case 'EAT':
@@ -830,6 +832,40 @@ function guardSmelt(candidate: Candidate, state: WorldState, context: GuardConte
   return { ok: true, candidate }
 }
 
+function guardPickup(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
+  const target = candidate.target
+  if (target === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'PICKUP candidate carries no coordinates')
+  }
+  if (target.y < VOID_FLOOR) {
+    return deny(candidate.id, 'NO_SUPPORT', `(${target.x},${target.y},${target.z}) is below the world floor (void)`)
+  }
+  const entityId = candidate.targetEntityId
+  const item = candidate.itemName
+  const sensed = entityId === null ? undefined : state.entities.find((entity) => entity.id === entityId)
+  // The candidate names ONE dropped-item entity. If that entity is no longer
+  // sensed, the item is gone (collected by this body, despawned after five
+  // minutes, or destroyed) and the candidate is stale: fail closed rather than
+  // walking to a cell that now holds anything or nothing. The identity check is
+  // the same truth the offer was grounded on, so a DIFFERENT item that happens to
+  // occupy the cell can never be picked up under this candidate's name.
+  if (sensed === undefined) {
+    return deny(candidate.id, 'TARGET_GONE', `the dropped item entity e${entityId ?? 'unknown'} is no longer sensed`)
+  }
+  if (item !== null && sensed.droppedItem !== item) {
+    return deny(
+      candidate.id,
+      'TARGET_GONE',
+      `e${entityId} carries ${sensed.droppedItem ?? 'unknown'}, not ${item}`,
+    )
+  }
+  const hazard = state.blocks.find((block) => block.kind === 'hazard' && samePosition(block.position, target))
+  if (hazard !== undefined) {
+    return deny(candidate.id, 'LAVA_RISK', `the dropped ${item ?? 'item'} is inside ${hazard.name}`)
+  }
+  return guardPathComputable(candidate, context, target)
+}
+
 function guardRetrieve(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
   const target = candidate.target
   if (target === null) {
@@ -1078,4 +1114,9 @@ export const ACTING_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'RETREAT',
   'STEP',
   'RETRIEVE',
+  // Walking onto a dropped item entity is a real side effect: the server moves the
+  // stack into the inventory when the body enters its pickup volume. It is the
+  // same "act on the world at a position" class as RETRIEVE, so a consumer that
+  // asks "did the selected candidate act?" must see it.
+  'PICKUP',
 ])

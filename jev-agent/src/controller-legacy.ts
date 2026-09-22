@@ -1486,6 +1486,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // geometry, the vertical planner's own refusal, and the carried block a pillar
   // would consume), so unreachable and merely-missed are distinct run evidence.
   'HUNT_CONTACT_UNREACHABLE',
+  // The DROP half of the same vocabulary. A killed mob leaves an item ENTITY on
+  // the ground, and the only thing that proves the kill produced anything is the
+  // inventory delta after walking onto it. Without these two markers a run that
+  // killed a blaze and then failed to collect the rod is indistinguishable, in
+  // the run log, from one that never killed anything: `blaze_rod 0` with no
+  // explanation. Positive (`PICKUP_ACQUIRED`) and typed-negative
+  // (`PICKUP_NOT_ACQUIRED`) are separate, mirrored facts.
+  'PICKUP_ACQUIRED',
+  'PICKUP_NOT_ACQUIRED',
   // Starvation is a run-scoped survival fact, not a private diagnostic. The
   // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
   // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and

@@ -275,8 +275,8 @@ const report = runRehearsal()
     assert.equal(typeof value, 'string')
     assert.match(value, /^(buddy-driver|jev-agent|tools)\/[\w./-]+:\d+/, `${key} must name file:line`)
   }
-  assert.match(M3_CHAIN_SOURCES.gate_eye_threshold, /tools\/m3-gate\.mjs:54/)
-  assert.match(M3_CHAIN_SOURCES.ladder_ender_eyes, /buddy-driver\/planner-legacy\.ts:479/)
+  assert.match(M3_CHAIN_SOURCES.gate_eye_threshold, /tools\/milestone-predicates\.mjs:43/)
+  assert.match(M3_CHAIN_SOURCES.ladder_ender_eyes, /buddy-driver\/planner-legacy\.ts:685/)
   ok('every threshold source names file:line on the ladder, planner and gate side')
 }
 

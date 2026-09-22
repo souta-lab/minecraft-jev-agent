@@ -86,6 +86,11 @@ export const SKILL_KIND_BY_CANDIDATE: Readonly<Record<CandidateKind, SkillKind>>
   DESCEND: 'descend',
   STEP: 'step',
   RETRIEVE: 'retrieve',
+  // Walking onto a dropped item entity IS a bounded retrieval of a concrete
+  // world target, so it commits under the same skill kind. Its post-condition
+  // stays its own (`itemsGained > 0`, see `executor.ts#runPickup`): arrival at a
+  // drop's cell is not acquisition.
+  PICKUP: 'retrieve',
   ATTACK: 'kill',
   EAT: 'eat',
   EQUIP: 'equip_item',
@@ -133,6 +138,20 @@ export interface TargetIdentityContext {
 export function targetIdentityOf(candidate: Candidate, ctx: TargetIdentityContext): CausalTargetIdentity {
   switch (candidate.kind) {
     case 'ATTACK':
+      return {
+        kind: 'entity',
+        entityId: candidate.targetEntityId ?? -1,
+        mobType: candidate.targetName,
+        dimension: ctx.dimension,
+        worldEpoch: ctx.worldEpoch,
+      }
+    case 'PICKUP':
+      // A dropped item is an ENTITY, and its identity is that exact entity id: two
+      // item stacks can sit in one cell, and an item keeps drifting while it
+      // falls, so neither the item NAME nor the cell is a stable identity. The
+      // entity-id branch is reused verbatim; `mobType` carries this entity's
+      // display identity (for a dropped item, the item name), exactly as it
+      // carries the mob name for an ATTACK.
       return {
         kind: 'entity',
         entityId: candidate.targetEntityId ?? -1,
@@ -533,6 +552,13 @@ export function envelopeForCandidate(
         mayUseStations: stations,
       }
     }
+    case 'PICKUP':
+      // Walking onto a dropped item entity needs locomotion and nothing else: no
+      // dig, no place, no attack, no station, no transfer. The body only has to
+      // enter the item's pickup volume - the server does the collecting - so this
+      // envelope is the plain locomotion one and any wider effect is a fail-closed
+      // `effect_not_declared` violation rather than an implicit permission.
+      return { ...base }
     case 'SMELT':
       return { ...base, mayUseStations: [...(input.stations ?? [])] }
     case 'CONTAINER':
