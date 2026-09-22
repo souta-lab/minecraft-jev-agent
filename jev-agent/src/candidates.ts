@@ -4701,6 +4701,19 @@ export function formatFoodHabitatRefused(refusal: SurfaceAscentRefusal): string 
 export function foodHabitatAscent(state: WorldState, options: CandidateOptions): SurfaceAscentResult {
   const heldFood = pickFood(state)
   if (heldFood !== null || state.self.food > options.eatBelowFood) return { candidates: [], refusal: null }
+  // The premise this arm rests on is OVERWORLD spawn truth, and the arm itself
+  // says so ("passive animals need grass with sky access, and in the 1.18+
+  // overworld that surface does not exist below sea level"). No other dimension
+  // has that band: the Nether has no grass-surface passive spawn at all, so
+  // ascending toward sea level there is a route to nowhere. Measured live (fresh
+  // run on 3570c79): a hungry body IN THE NETHER climbed to y102 chasing this
+  // band while no passive animal can exist there - the futile half of the same
+  // class the level scan and contact-ascent work fixed for real targets. The food
+  // gap itself stays typed: `FOOD_SOURCE_NONE` still reports sensedAnimal=false.
+  const habitatDimension = (state.self.dimension ?? '').replace(/^minecraft:/, '')
+  if (habitatDimension.length > 0 && habitatDimension !== 'overworld') {
+    return { candidates: [], refusal: null }
+  }
   const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
   const animalSensed = state.entities.some(
     (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
