@@ -12,17 +12,42 @@
 // `pillarStepUp` verifies all four sub-steps - takeoff, apex, place, landing -
 // and reports the failed one as `PILLAR_FAIL step=...`, so a consumed item can
 // never again read as an unattributed no-progress action.
+//
+// The PLACE-ATTEMPT contract. The measured window is the 791-record live run
+// (`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log`): 410
+// `place/refused` and 277 `apex/apex_missed`, of which `placeY == floor(launchY)`
+// in 405 of the refusals (the step fills the cell the feet occupy), fail-time
+// `rise` 0 - the body back at its launch height - in 222, `endVelocityY` -0.0784
+// (the first post-landing gravity tick) in 54, `traceMaxRise >= the exact
+// clearance` in 258 of the 277 apex records, and `forcedRepositions == 0` in 705
+// of 791. The gate used to authorise the packet from ONE sampled position with a
+// demand of EXACTLY `placeCell.y + 1` - zero margin above the cell top - while
+// mineflayer wrote the packet several position updates later:
+//
+//   `bot.placeBlock` -> `_genericPlace` awaits `bot.lookAt`
+//   (lib/plugins/generic_place.js:37) -> `bot.look` awaits `lookingTask.promise`
+//   (lib/plugins/physics.js:386), resolved by the `move` event emitted inside
+//   `tickPhysics` -> `updatePosition` (physics.js:91-93,116). The continuation
+//   runs only after that frame's whole catch-up loop (physics.js:74-79,
+//   PHYSICS_CATCHUP_TICKS = 4), and every tick of that frame sent a position
+//   packet - the position the server validates the placement against.
+//
+// A 0.42 jump clears a one-block cell by ~0.25 blocks (about three position
+// updates of slack), so a handshake longer than the margin wrote the packet with
+// the body's own AABB back inside the destination cell and the server refused.
+// Reproduced exactly on the dominant live geometry - `placeY == floor(launchY)`
+// in 405/410 refusals: `PILLAR_FAIL step=place reason=refused y=67 rise=0
+// samples=0` with the attempt-time feet exactly 1.0 below the cell top. That is
+// why the log could not tell the mechanisms apart: the record carried the LAUNCH
+// Y and the post-refusal Y, never the attempt-time Y.
+//
+// The contract is therefore the body's OCCUPANCY - the fact the server itself
+// validates - and it must hold over the actuator's whole remaining gap, not at
+// one sample.
 import { jumpWithGroundCorrection, TAKEOFF_RISE } from './pillarJump.ts'
 import type { JumpBotLike, PillarJumpDeps, PillarJumpTrace, Vec3Like } from './pillarJump.ts'
 
 /**
- * The apex window. A verified vertex needs all three: the body must have risen
- * clear of the cell the block will occupy, a velocity at or below
- * `PILLAR_APEX_VY_MAX` (positive -> non-positive crossing), and a velocity not
- * below `PILLAR_APEX_FALL_VY` (the vertex, not the fall). `velocity.y <= 0.01`
- * alone is also true while standing and while plummeting, which is how the old
- * wait placed at the bottom of the arc.
- *
  * `PILLAR_APEX_MIN_RISE` is the rise of an UNOBSTRUCTED jump (a 0.42 jump peaks
  * ~1.25 blocks); it is only a reference. It must not cap the demand: live
  * `run-mu84l153-qry3` proved a ceiling clamps the arc to ~0.46 while the feet
@@ -35,8 +60,118 @@ import type { JumpBotLike, PillarJumpDeps, PillarJumpTrace, Vec3Like } from './p
  * server refuses.
  */
 export const PILLAR_APEX_MIN_RISE = 0.5
+/** A settled body is one whose descent has stopped (`vy` at or below this). */
 export const PILLAR_APEX_VY_MAX = 0.01
+/**
+ * The descent speed past which a sample is EVIDENCE of a hard fall (a ceiling
+ * slam, a server correction), not a place gate. It deliberately no longer bounds
+ * the attempt: the attempt is bounded by the body's occupancy (see
+ * `pillarPlaceCellCleared`), which is the fact the server validates.
+ */
 export const PILLAR_APEX_FALL_VY = -0.25
+
+/**
+ * Minecraft's per-tick player gravity and air drag, exactly as prismarine-physics
+ * applies them: `vel.y -= physics.gravity` then `vel.y *= physics.airdrag`
+ * (prismarine-physics index.js:601-603), with `gravity: 0.08` (index.js:62) and
+ * `airdrag: Math.fround(1 - 0.02)` (index.js:63). The drag is a FLOAT32 constant
+ * and the live jumpTrace velocities only match it as one
+ * (`0.33319999363422365`, not the double `0.33319998714923854`), so it is pinned
+ * as the engine's own expression rather than as `0.98`.
+ */
+export const PILLAR_GRAVITY_PER_TICK = 0.08
+export const PILLAR_DRAG_PER_TICK = Math.fround(1 - 0.02)
+
+/**
+ * The bounded gap this module assumes between the moment the clearance is
+ * sampled and the moment the `block_place` packet is written, when the actuator
+ * goes through mineflayer's look handshake. It is a DECLARED bound, not a
+ * measured one: the handshake ends on the first `move` event after the sent yaw
+ * converges, and `lastSentYaw` advances at most
+ * `PHYSICS_TIMESTEP * physics.yawSpeed = 0.05 * 3.0 = 0.15` rad/tick
+ * (physics.js:190-196), so a large look change costs many ticks. Four covers the
+ * physics catch-up loop; a caller that cannot bound the handshake must declare
+ * this and accept that a one-block column may then be reported `apex_missed`
+ * rather than attempted.
+ */
+export const PILLAR_PLACE_LOOK_HANDSHAKE_TICKS = 4
+
+/**
+ * The gap when the placement is written inside the clearance sample's own tick
+ * (no look handshake): the sample IS the position the server validates against,
+ * so the contract collapses to the exact occupancy predicate.
+ */
+export const PILLAR_PLACE_SAME_TICK = 0
+
+/**
+ * The position delta after `ticks` physics updates starting from `velocityY`
+ * with no collision: the free trajectory. Positive while the body still rises.
+ */
+export function pillarTrajectoryDelta(velocityY: number, ticks: number): number {
+  let position = 0
+  let velocity = velocityY
+  for (let index = 0; index < ticks; index += 1) {
+    position += velocity
+    velocity = (velocity - PILLAR_GRAVITY_PER_TICK) * PILLAR_DRAG_PER_TICK
+  }
+  return position
+}
+
+/**
+ * The LOWEST position delta the body can have over the next `ticks` updates.
+ *
+ * A ceiling can zero the rise at any tick and hand the body straight back to
+ * gravity, so the free trajectory is not a lower bound. Enumerating the
+ * collision tick `j` (rise freely for `j` updates, then fall from rest for
+ * `ticks - j`) reduces to the minimum of two cases: for a rising body the worst
+ * case is the immediate slam (fall from rest across the whole window), and for a
+ * descending body it is the free trajectory (which only steepens). Both are
+ * computed here; `ticks <= 0` is exactly zero, so a same-tick attempt has no
+ * modelled pessimism at all.
+ */
+export function pillarWorstPlaceDelta(velocityY: number, ticks: number): number {
+  if (ticks <= 0) return 0
+  return Math.min(pillarTrajectoryDelta(velocityY, ticks), pillarTrajectoryDelta(0, ticks))
+}
+
+/**
+ * The gap the contract is actually evaluated against. An EXPLICIT
+ * `PILLAR_PLACE_SAME_TICK` (0) is a promise that the packet shares the
+ * clearance sample's tick and is taken at face value; anything else - a
+ * positive declared bound, or an undeclared/NaN/negative value from a caller
+ * that cannot say - is resolved pessimistically to the look-handshake bound.
+ * Degrading an UNKNOWN gap to "zero ticks" is exactly the silent assumption that
+ * produced the measured refusals, so it fails closed instead.
+ */
+export function pillarPlaceHandshakeBudget(handshakeTicks: number): number {
+  if (handshakeTicks === PILLAR_PLACE_SAME_TICK) return PILLAR_PLACE_SAME_TICK
+  if (!Number.isFinite(handshakeTicks) || handshakeTicks < 0) return PILLAR_PLACE_LOOK_HANDSHAKE_TICKS
+  return Math.floor(handshakeTicks)
+}
+
+/**
+ * The placement contract: the packet may be sent only when the body's own
+ * bounding box does not intersect the destination cell - at the sampled moment
+ * AND at the worst moment of the actuator's remaining gap.
+ *
+ * The body's AABB is `[feetY, feetY + 1.8]` and the destination cell is
+ * `[placeCellY, placeCellY + 1]`, so no overlap is exactly
+ * `feetY >= placeCellY + 1`. With an explicitly declared same-tick actuator
+ * (`handshakeTicks = 0`) this is the exact predicate the server applies; with a
+ * declared or undeclared gap it demands the worst-case clearance over that gap,
+ * which turns "the server refused a place we could not keep" into a typed
+ * pre-attempt refusal.
+ */
+export function pillarPlaceCellCleared(input: {
+  feetY: number
+  velocityY: number
+  placeCellY: number
+  handshakeTicks: number
+}): boolean {
+  const gap = pillarPlaceHandshakeBudget(input.handshakeTicks)
+  const lowestFeet = input.feetY + pillarWorstPlaceDelta(input.velocityY, gap)
+  return lowestFeet >= input.placeCellY + 1
+}
 
 /**
  * The rise (from the launch position) the feet must reach so the placed block
@@ -155,6 +290,15 @@ export const PILLAR_LANDING_Y_TOLERANCE = 0.2
 /** Which PILLAR_UP sub-step failed. */
 export type PillarFailStep = 'takeoff' | 'apex' | 'place' | 'landing'
 
+/**
+ * Why a `place` sub-step failed. `refused` means the SERVER refused the packet
+ * (a policy/geometry answer); `body_in_cell` means the attempt-time occupancy
+ * contract rejected it here, before any packet was written. They must stay
+ * distinguishable: `refused` is the server answering a question we asked
+ * correctly, `body_in_cell` is us having asked it too late.
+ */
+export type PillarPlaceFailReason = 'refused' | 'not_landed' | 'wrong_cell' | 'body_in_cell'
+
 export interface PillarFail {
   step: PillarFailStep
   reason: string
@@ -164,6 +308,18 @@ export interface PillarFail {
   detail?: string
   /** takeoff observations for this exact pillar attempt, when available */
   jumpTrace?: PillarJumpTrace
+  /**
+   * The body's OWN feet Y at the moment the placement was attempted, or at the
+   * moment the attempt was refused before any packet. This is the number the
+   * live log was missing: `y`/`rise` are read after the place has settled (the
+   * body may already have fallen back), so they cannot testify about the
+   * attempt.
+   */
+  attemptFeetY?: number
+  /** The clearance the attempt had to produce: `placeCell.y + 1`. */
+  attemptCellTop?: number
+  /** The declared actuator gap the contract was evaluated against, in ticks. */
+  attemptHandshakeTicks?: number
 }
 
 /**
@@ -223,6 +379,11 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
+/** The precision the attempt-time feet Y is named with (1/10000 block). */
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000
+}
+
 export interface PillarStepPlan {
   /** floored feet cell at launch */
   feetCell: Vec3Like
@@ -246,6 +407,14 @@ export interface PillarStepUpDeps extends PillarJumpDeps {
   place: (face: Vec3Like) => Promise<void>
   /** true when a full solid block now occupies the place cell */
   blockPlaced: () => boolean
+  /**
+   * The bounded number of position updates the actuator may take between this
+   * module's clearance sample and the `block_place` packet. `0`
+   * (`PILLAR_PLACE_SAME_TICK`) means the decision and the packet share a tick, so
+   * the sampled occupancy IS what the server validates. Any positive value makes
+   * the contract demand the worst-case clearance over that whole gap.
+   */
+  placeHandshakeTicks: number
   /** ownership check between awaits */
   ensureOwned?: () => void
 }
@@ -277,6 +446,7 @@ export async function pillarStepUp(
     samples: number,
     detail?: string,
     jumpTrace?: PillarJumpTrace,
+    attempt?: { feetY: number; cellTop: number; handshakeTicks: number },
   ): PillarStepOutcome => ({
     ok: false,
     fail: {
@@ -287,6 +457,13 @@ export async function pillarStepUp(
       samples,
       detail,
       jumpTrace,
+      ...(attempt === undefined
+        ? {}
+        : {
+            attemptFeetY: attempt.feetY,
+            attemptCellTop: attempt.cellTop,
+            attemptHandshakeTicks: attempt.handshakeTicks,
+          }),
     },
   })
   // The place must target the cell above the support block AND above the launch
@@ -310,11 +487,15 @@ export async function pillarStepUp(
   // The takeoff verifier can return after the apex when prismarine-physics
   // catches up several ticks in one frame, so the peak it already observed seeds
   // the reported apexRise rather than being discarded. It must NOT satisfy the
-  // place gate: the peak is history, while the server validates the placement
-  // against the feet position at the moment the packet arrives. Requiring the
-  // CURRENT rise to clear `placeCell.y + 1` is what makes the gate and the
-  // server agree. The demand is the exact geometric clearance to the cell top.
+  // placement contract: the peak is history, while the server validates the
+  // placement against the body's occupancy at the moment the packet arrives.
+  // `requiredRise` is kept only as the diagnostic demand: it says whether the
+  // arc EVER cleared the cell, which is what separates an unsatisfiable column
+  // (`apex_missed` / `falling_before_place`) from an actuator that could not be
+  // held to the contract.
   const requiredRise = requiredApexRise(launchY, plan.placeCell.y)
+  const attemptCellTop = plan.placeCell.y + 1
+  const handshakeTicks = deps.placeHandshakeTicks
   const apexDeadline = deps.now() + deps.apexBudgetMs
   let apexSamples = 0
   let apexRise = takeoffObservedRise(jump.trace)
@@ -343,18 +524,35 @@ export async function pillarStepUp(
       deps.ensureOwned?.()
       apexSamples += 1
       const vy = bot.entity.velocity.y
-      const rise = bot.entity.position.y - launchY
+      const feetY = bot.entity.position.y
+      const rise = feetY - launchY
       if (rise > apexRise) apexRise = rise
-      if (rise >= requiredRise && vy <= PILLAR_APEX_VY_MAX && vy >= PILLAR_APEX_FALL_VY) {
+      // The attempt is authorised by the body's OCCUPANCY, never by a velocity
+      // window: `feetY >= placeCell.y + 1` is the fact the server validates, and
+      // it is evaluated across the actuator's whole declared gap so the packet
+      // cannot be written after the body has fallen back into the cell. Accepting
+      // during the ASCENT is what makes the window usable at all - a one-block
+      // arc clears the cell top by only ~0.25 blocks, and excluding the ascent
+      // (the old `vy <= 0.01` vertex rule) left a two-tick window that the
+      // actuator's own await outlived.
+      if (pillarPlaceCellCleared({ feetY, velocityY: vy, placeCellY: plan.placeCell.y, handshakeTicks })) {
         atApex = true
         break
       }
-      if (vy < PILLAR_APEX_FALL_VY) {
-        // Already past the vertex: placing now puts the block wherever the body
-        // happens to be, which is exactly the "no level gained" live failure.
-        // `apexRise` (including the takeoff-observed peak) only names whether the
-        // arc ever cleared the cell; it never authorises a below-clearance place.
-        return fail('apex', apexRise >= requiredRise ? 'apex_missed' : 'falling_before_place', apexSamples, undefined, jump.trace)
+      if (vy < 0) {
+        // The arc is spent: the body is descending, so the worst-case clearance
+        // over the actuator's gap can only shrink from here. `apexRise`
+        // (including the takeoff-observed peak) says whether the ARC ever
+        // cleared the cell - it never authorises a below-clearance attempt.
+        const hardFall = vy < PILLAR_APEX_FALL_VY ? ` hardFallVy=${round2(vy)}` : ''
+        return fail(
+          'apex',
+          apexRise >= requiredRise ? 'apex_missed' : 'falling_before_place',
+          apexSamples,
+          `feetY=${round4(feetY)} cellTop=${attemptCellTop} arcPeakRise=${round4(apexRise)} requiredRise=${round4(requiredRise)} handshakeTicks=${handshakeTicks}${hardFall}`,
+          jump.trace,
+          { feetY, cellTop: attemptCellTop, handshakeTicks },
+        )
       }
       await deps.sleep(deps.pollMs)
     }
@@ -372,11 +570,35 @@ export async function pillarStepUp(
     return fail('apex', apexRise >= requiredRise ? 'apex_timeout' : 'no_rise', apexSamples, undefined, jump.trace)
   }
 
+  // The ATTEMPT contract, checked where the attempt happens. The gate above
+  // authorised a moment; this re-reads the body in the same tick as the packet,
+  // so a placement the server would refuse for occupying the destination cell is
+  // never sent - it is reported as the typed `body_in_cell` with the attempt-time
+  // Y, instead of consuming the arc and surfacing as a server policy refusal.
+  const attemptFeetY = bot.entity.position.y
+  if (attemptFeetY < attemptCellTop) {
+    return fail(
+      'place',
+      'body_in_cell',
+      0,
+      `attemptFeetY=${round4(attemptFeetY)} cellTop=${attemptCellTop} shortfall=${round4(attemptCellTop - attemptFeetY)} handshakeTicks=${handshakeTicks}`,
+      jump.trace,
+      { feetY: attemptFeetY, cellTop: attemptCellTop, handshakeTicks },
+    )
+  }
+
   let placeSamples = 0
   try {
     await deps.place(face)
   } catch (error) {
-    return fail('place', 'refused', placeSamples, error instanceof Error ? error.message : String(error), jump.trace)
+    return fail(
+      'place',
+      'refused',
+      placeSamples,
+      error instanceof Error ? error.message : String(error),
+      jump.trace,
+      { feetY: attemptFeetY, cellTop: attemptCellTop, handshakeTicks },
+    )
   }
   const placeDeadline = deps.now() + deps.placeSettleMs
   let placed = false
@@ -387,10 +609,21 @@ export async function pillarStepUp(
       placed = true
       break
     }
+    // The arc happens here as well: keep reporting the real peak, so `apexRise`
+    // is the step's ceiling and not merely the first authorised sample (a
+    // same-tick attempt is authorised on the ascent, well below the vertex).
+    const settledFeetY = bot.entity.position.y
+    if (settledFeetY - launchY > apexRise) apexRise = settledFeetY - launchY
     if (deps.now() >= placeDeadline) break
     await deps.sleep(deps.pollMs)
   }
-  if (!placed) return fail('place', 'not_landed', placeSamples)
+  if (!placed) {
+    return fail('place', 'not_landed', placeSamples, undefined, jump.trace, {
+      feetY: attemptFeetY,
+      cellTop: attemptCellTop,
+      handshakeTicks,
+    })
+  }
 
   const landingDeadline = deps.now() + deps.landingBudgetMs
   let landingSamples = 0
@@ -398,6 +631,10 @@ export async function pillarStepUp(
     deps.ensureOwned?.()
     landingSamples += 1
     const y = bot.entity.position.y
+    // `apexRise` is this step's real arc ceiling, not the first sample the
+    // contract authorised: a same-tick attempt is authorised on the ascent, so
+    // the vertex is still ahead and must be observed here.
+    if (y - launchY > apexRise) apexRise = y - launchY
     if (
       Math.abs(y - landingY) <= PILLAR_LANDING_Y_TOLERANCE &&
       bot.entity.velocity.y <= PILLAR_APEX_VY_MAX &&
@@ -414,5 +651,12 @@ export async function pillarStepUp(
     }
     await deps.sleep(deps.pollMs)
   }
-  return fail('landing', 'not_on_block', placeSamples + landingSamples, undefined, jump.trace)
+  return fail(
+    'landing',
+    'not_on_block',
+    placeSamples + landingSamples,
+    `attemptFeetY=${round4(attemptFeetY)} cellTop=${attemptCellTop} landedFeetY=${round4(bot.entity.position.y)}`,
+    jump.trace,
+    { feetY: attemptFeetY, cellTop: attemptCellTop, handshakeTicks },
+  )
 }

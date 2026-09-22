@@ -38,6 +38,7 @@
     "pillar-jump-test": "bun test ./test-pillar-jump.mts",
     "pillar-shaft-takeoff-test": "bun test ./test-pillar-shaft-takeoff.mts",
     "pillar-apex-test": "bun test ./test-pillar-apex.mts",
+    "pillar-place-attempt-test": "bun test ./test-pillar-place-attempt.mts",
     "demo": "bun demo.mts",
     "guard-test": "bun test ./test-guard.mts",
     "dig-down-guard-test": "bun test ./test-dig-down-guard.mts",

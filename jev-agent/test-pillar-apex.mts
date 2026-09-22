@@ -173,6 +173,10 @@ function makeDeps(
     apexBudgetMs: 700,
     placeSettleMs: 80,
     landingBudgetMs: 2000,
+    // Pure in-memory clock: the fake `place` writes in the caller's own tick, so
+    // the clearance sample IS the position the model's server rule validates.
+    // The latency-sensitive cases are pinned in test-pillar-place-attempt.mts.
+    placeHandshakeTicks: 0,
     sleep: async (ms: number): Promise<void> => {
       clock += ms
       while (clock - lastTickAt >= 50) {
