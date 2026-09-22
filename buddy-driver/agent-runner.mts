@@ -467,7 +467,10 @@ let generationModule: GenerationModule | null = null
 let currentBundle: string | null = null
 let reconnecting = false
 let shuttingDown = false
-let frozen = false
+// Maintenance-safe boot: the control socket is started before Minecraft connect,
+// but spawn can race an operator's first freeze request. Opting in here makes the
+// host frozen from process birth; `startGeneration` below enforces the same flag.
+let frozen = (process.env.BUDDY_START_FROZEN ?? '').trim() === '1'
 let generationRestartTimer: NodeJS.Timeout | null = null
 let reloadTimer: NodeJS.Timeout | null = null
 let reloadArbiter: ReloadArbiter | null = null
@@ -934,6 +937,13 @@ function watchGenerationStop(gen: ResidentGeneration): void {
 }
 
 async function startGeneration(trigger: string): Promise<boolean> {
+  // `freeze` is a lifecycle invariant, not merely a restart-timer hint. Direct
+  // spawn/respawn/control paths all funnel through this function, so enforcing it
+  // here prevents a reconnect from silently reviving actuation while frozen.
+  if (frozen) {
+    log('GENERATION_START_SUPPRESSED', { trigger, reason: 'frozen' })
+    return false
+  }
   if (bot === null || bot.entity === undefined) {
     log('ERROR', { where: 'startGeneration', message: 'no spawned bot', trigger })
     return false
@@ -2306,6 +2316,7 @@ log('BOOT', {
   revision: state.revision,
   worldEpoch: state.worldEpoch,
   worldKey: currentWorldKey(),
+  frozen,
 })
 if (!acquireHostLock()) {
   log('BOOT_REFUSED', { reason: 'host-lock-held', path: LOCK_PATH })

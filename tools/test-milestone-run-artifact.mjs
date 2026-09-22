@@ -16,6 +16,24 @@
 //                           another BOOT run: it must never be attributed, so the
 //                           gates stay UNKNOWN (no joining across runs)
 //   F. fake gate that emits no machine status line -> UNKNOWN, never PASS
+//   G. CLI surface (--help / --out)
+//   H. server.properties reader whitelist
+//   I. no Nether transition -> predicate UNKNOWN, never PASS
+//   J. operator decisions: annotated, never a gate flip
+//   K/L/M. authority attestation: configured stack, absent marker, foreign runId
+//   N/O. milestone acceptance from the delegated verdicts; the complete-run field list
+//   P. source provenance: the LATEST source-changing RELOAD hash is the effective
+//      source while run.boot.sourceSha stays the run's origin (with trigger/at/
+//      generationId/line index, and the line index points at the real marker)
+//   Q. no reload marker -> explicit `provenance: "boot"` fallback; a window-blind
+//      bundle change is NAMED in missingEvidenceDetail, a clean first-boot window
+//      stays COMPLETE (the fallback is never silent and never a fabricated SHA)
+//   R. RELOAD markers from another runId are never attributed; the foreign run
+//      still resolves its own window
+//   S. skipped=unchanged / ok=false markers are OBSERVED but never a new source
+//   T. deferred=frozen is staged only; a successful RESUME alone commits it
+//   U. the control-socket generation hash is a READ-ONLY cross-check (agreement /
+//      disagreement recorded; a foreign runId or a missing socket changes nothing)
 //
 // Usage: bun tools/test-milestone-run-artifact.mjs
 import assert from 'node:assert/strict'
@@ -44,11 +62,11 @@ const line = (sec, body) => `[${at(sec)}] ${body}`
 const SOURCE_SHA = '7164b92586fec83c340f5ce874dd81416d4247b2'
 const WORLD_KEY = '{"serverId":"127.0.0.1:25565","dimension":"minecraft:overworld","worldEpoch":1}'
 
-const boot = (sec, runId) =>
+const boot = (sec, runId, { generations = 0, reloads = 0, sourceSha = SOURCE_SHA } = {}) =>
   line(
     sec,
-    `BOOT pid=4242 runId=${runId} source=${SOURCE_SHA} runtime=bun runtimeVersion=1.4.2 bundle=none ` +
-      `milestone=null generations=0 reloads=0 contractVersion=3 schemaVersion=3 revision=1 worldEpoch=1 worldKey=${WORLD_KEY}`,
+    `BOOT pid=4242 runId=${runId} source=${sourceSha} runtime=bun runtimeVersion=1.4.2 bundle=none ` +
+      `milestone=null generations=${generations} reloads=${reloads} contractVersion=3 schemaVersion=3 revision=1 worldEpoch=1 worldKey=${WORLD_KEY}`,
   )
 
 const spawnLine = (sec) =>
@@ -72,12 +90,33 @@ const PORTAL_CHAIN = [
  * authority stack), `decisions` are the `SYSTEM2_AUTHORITY_DECISION` lines (the
  * providers that actually answered) and `released` closes the window so the
  * policy loader can bracket it without a control socket.
+ *
+ * Source provenance additions (all default to "the run never reloaded"):
+ *   `build`        emits the host's boot-generation `BUILD hash=<h>` line
+ *   `reloads`      `{sec, body}` RELOAD marker lines, in the order given
+ *   `resumes`      `{sec, ok}` RESUME markers, merged with `reloads` by `sec`
+ *   `bootReloads` / `bootGenerations` / `sourceSha`  the BOOT line's own fields
  */
 function runnerOut(
   runId,
-  { stack = '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}', decisions = ['SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'], released = true, ready = true, offsetSec = 0 } = {},
+  {
+    stack = '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}',
+    decisions = ['SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'],
+    released = true,
+    ready = true,
+    offsetSec = 0,
+    build = null,
+    reloads = [],
+    resumes = [],
+    bootReloads = 0,
+    bootGenerations = 0,
+    sourceSha = SOURCE_SHA,
+  } = {},
 ) {
-  const lines = [boot(offsetSec, runId)]
+  const lines = [boot(offsetSec, runId, { generations: bootGenerations, reloads: bootReloads, sourceSha })]
+  if (build !== null) {
+    lines.push(line(offsetSec + 0.5, `BUILD hash=${build} bytes=6181238 ms=51 outfile=/fixture/data/resident/gen-${build}`))
+  }
   if (ready) {
     lines.push(
       line(
@@ -93,6 +132,11 @@ function runnerOut(
   }
   for (const [index, decision] of decisions.entries()) lines.push(line(offsetSec + 2 + index * 0.1, decision))
   if (released) lines.push(line(offsetSec + 3 + decisions.length * 0.1, `HOST_LOCK released runId=${runId}`))
+  const extras = [
+    ...resumes.map((resume) => ({ sec: resume.sec, body: `RESUME ok=${resume.ok === false ? 'false' : 'true'} reconnect=false` })),
+    ...reloads.map((reload) => ({ sec: reload.sec, body: reload.body })),
+  ].sort((left, right) => left.sec - right.sec)
+  for (const extra of extras) lines.push(line(extra.sec, extra.body))
   return lines.join('\n') + '\n'
 }
 
@@ -783,6 +827,413 @@ ok('an acceptance record never turns an incomplete milestone into PASS; its abse
   assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unknownConditions, [])
 }
 ok('a synthetic complete run answers source SHA, env, inventory, transitions, predicates, authority and fallback absence')
+
+// ---------------------------------------------------------------------------
+// P. source provenance: the LATEST source-changing reload is the effective source
+//    while run.boot.sourceSha stays the run's origin (the live defect: an artifact
+//    that named only the SHA at run START for a run that hot-reloaded afterwards)
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-reload-two'
+  const root = makeRoot('reload-two')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: {
+      build: 'boot11112222',
+      reloads: [
+        { sec: 50, body: 'RELOAD ok=true trigger=source-changed ms=1240 hash=aaaa11112222 id=gen-first generations=2 listeners={"physicsTick":2} listenerLeak=false' },
+        { sec: 60, body: 'RELOAD ok=true trigger=source-changed ms=980 hash=bbbb33334444 id=gen-second generations=3 listeners={"physicsTick":2} listenerLeak=false' },
+      ],
+    },
+  })
+  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  // A reload is not by itself a missing fact: this run is still COMPLETE and PASS.
+  assert.equal(result.code, 0, `reload fixture exit=${result.code} stderr=${result.stderr}`)
+  const artifact = result.json()
+  assert.deepEqual(artifact.missingEvidence, [])
+  const source = artifact.run.source
+  // Origin (untouched) vs effective source (what produced the result).
+  assert.equal(artifact.run.boot.sourceSha, SOURCE_SHA)
+  assert.equal(source.bootSourceSha, SOURCE_SHA)
+  assert.equal(source.bootSourceShaKind, 'git-commit-sha')
+  assert.equal(source.provenance, 'reload')
+  assert.equal(source.effectiveSourceSha, 'bbbb33334444')
+  assert.equal(source.effectiveSourceShaKind, 'generation-bundle-hash')
+  assert.equal(source.reloadCount, 2)
+  assert.equal(source.sourceChangeCount, 2)
+  // The LATEST marker of each kind, with trigger/at/generation id/line index.
+  assert.equal(source.latestReload.hash, 'bbbb33334444')
+  assert.equal(source.latestReload.trigger, 'source-changed')
+  assert.equal(source.latestReload.atMs, T0 + 60000)
+  assert.equal(source.latestReload.ts, at(60))
+  assert.equal(source.latestReload.generationId, 'gen-second')
+  assert.equal(source.latestReload.count, 2)
+  assert.equal(source.latestReload.kind, 'source-change')
+  assert.equal(source.latestReload.applied, true)
+  assert.equal(source.latestReload.durationMs, 980)
+  assert.deepEqual(
+    [source.latestSourceReload.hash, source.latestSourceReload.generationId],
+    ['bbbb33334444', 'gen-second'],
+  )
+  assert.match(source.provenanceBasis, /hash=bbbb33334444/)
+  assert.match(source.provenanceBasis, /trigger=source-changed/)
+  // The recorded line index really points at that marker in the run window.
+  const windowLines = readFileSync(join(root, 'buddy-driver', 'runner.out'), 'utf8').split(/\r?\n/)
+  assert.match(windowLines[source.latestReload.lineIndex], /hash=bbbb33334444/)
+  // Window identity: same BOOT rule as the gates, scanned to EOF, with the boot
+  // generation's own BUILD hash recorded next to it.
+  assert.equal(source.window.status, 'valid')
+  assert.equal(source.window.path, join(root, 'buddy-driver', 'runner.out'))
+  assert.equal(source.window.scannedToEof, true)
+  assert.equal(source.window.closedByRunId, null)
+  assert.equal(source.window.bootBuildHash, 'boot11112222')
+  assert.equal(source.window.scannedToEof, true)
+  assert.deepEqual(source.disagreements, [])
+  assert.deepEqual(source.windowBlind, { detected: false, reasons: [] })
+  // A run that never reloaded would have no observed markers at all.
+  assert.equal(source.observed.length, 2)
+  assert.deepEqual(
+    source.observed.map((marker) => marker.hash),
+    ['aaaa11112222', 'bbbb33334444'],
+  )
+  assert.ok(!artifact.missingEvidence.some((field) => String(field).startsWith('run.source')))
+}
+ok('two in-window reloads: the LATEST source-changing hash is effective, with trigger/at/generationId/line recorded')
+
+// ---------------------------------------------------------------------------
+// Q. no reload marker: BOOT fallback, named (never silently implied)
+// ---------------------------------------------------------------------------
+{
+  // Q1: no RELOAD marker, but the run's own snapshot attests a bundle hash that
+  // differs from the window's boot BUILD hash: the window is blind to a source
+  // change, so `provenance: boot` is not provable and that fact is a named gap.
+  const runId = 'run-fixture-reload-blind'
+  const root = makeRoot('reload-blind')
+  writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }), runner: { build: 'boot11112222' } })
+  writeFileSync(
+    join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+    JSON.stringify({ record: 'm2-snapshot', runId, buildHash: 'later99998888', bootSourceSha: SOURCE_SHA, markers: [] }),
+    'utf8',
+  )
+  const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
+  const source = artifact.run.source
+  assert.equal(source.window.status, 'valid', 'the window itself was readable')
+  assert.equal(source.provenance, 'boot')
+  assert.equal(source.effectiveSourceSha, SOURCE_SHA, 'with no reload the BOOT SHA is repeated')
+  assert.equal(source.effectiveSourceShaKind, 'git-commit-sha')
+  assert.equal(source.latestReload, null)
+  assert.equal(source.reloadCount, 0)
+  assert.equal(source.sourceChangeCount, 0)
+  assert.deepEqual(source.observed, [])
+  assert.equal(source.windowBlind.detected, true)
+  assert.match(source.windowBlind.reasons[0], /snapshot buildHash=later99998888/)
+  assert.match(source.windowBlind.reasons[0], /boot BUILD hash=boot11112222/)
+  // The unprovable fallback is NAMED, not left to be inferred.
+  assert.ok(artifact.missingEvidence.includes('run.source:reload_window'))
+  const gap = artifact.missingEvidenceDetail.find((entry) => entry.field === 'run.source:reload_window')
+  assert.ok(gap, 'the blind window must carry a reason')
+  assert.match(gap.reason, /falls back to the BOOT SHA/)
+  assert.match(gap.reason, /provenance=boot/)
+  assert.match(gap.reason, /later99998888/)
+  // No SHA is invented: the snapshot's hash is never promoted to effectiveSourceSha.
+  assert.notEqual(source.effectiveSourceSha, 'later99998888')
+  assert.equal(source.provenanceBasis.includes('later99998888'), false)
+  assert.match(source.provenanceBasis, /log:BOOT@line 0 source=/)
+  // missingEvidence and missingEvidenceDetail stay one list, in the same order.
+  assert.equal(artifact.missingEvidenceDetail.length, artifact.missingEvidence.length)
+  assert.deepEqual(
+    artifact.missingEvidenceDetail.map((entry) => entry.field),
+    artifact.missingEvidence,
+  )
+
+  // Q2: no reload marker AND nothing contradicts the boot generation: the fallback
+  // is exact and explicit, so a never-reloaded run still produces a COMPLETE
+  // artifact (provenance is recorded, not implied).
+  const cleanId = 'run-fixture-reload-clean'
+  const cleanRoot = makeRoot('reload-clean')
+  writeFixture(cleanRoot, cleanId, { logLines: fullLog(cleanId, { terminalEye: 12 }), runner: { build: 'boot11112222' } })
+  const clean = cli(['--run', cleanId, '--root', cleanRoot, '--json', '--no-control-socket'])
+  assert.equal(clean.code, 0, `clean no-reload fixture exit=${clean.code} stderr=${clean.stderr}`)
+  const cleanArtifact = clean.json()
+  assert.deepEqual(cleanArtifact.missingEvidence, [])
+  assert.equal(cleanArtifact.run.source.provenance, 'boot')
+  assert.equal(cleanArtifact.run.source.effectiveSourceSha, SOURCE_SHA)
+  assert.equal(cleanArtifact.run.source.effectiveSourceShaKind, 'git-commit-sha')
+  assert.equal(cleanArtifact.run.source.windowBlind.detected, false)
+  assert.match(cleanArtifact.run.source.provenanceBasis, /log:BOOT@line 0 source=/)
+  assert.match(cleanArtifact.run.source.provenanceBasis, /no later source/)
+}
+ok('no reload marker: BOOT fallback named in provenance + a proven blind window named in missingEvidenceDetail')
+
+// ---------------------------------------------------------------------------
+// R. RELOAD markers from another runId are never attributed to this run
+// ---------------------------------------------------------------------------
+{
+  const target = 'run-fixture-target-reload'
+  const foreign = 'run-fixture-foreign-reload'
+  const root = makeRoot('foreign-reload')
+  const runnerText =
+    runnerOut(target, {
+      build: 'bootTarget0001',
+      reloads: [{ sec: 50, body: 'RELOAD ok=true trigger=source-changed ms=100 hash=target5555555 id=gen-target generations=2' }],
+    }).trimEnd() +
+    '\n' +
+    runnerOut(foreign, {
+      offsetSec: 100,
+      build: 'bootForeign001',
+      reloads: [{ sec: 150, body: 'RELOAD ok=true trigger=source-changed ms=100 hash=foreign666666 id=gen-foreign generations=9' }],
+    }).trimEnd() +
+    '\n'
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerText, 'utf8')
+  writeFileSync(
+    join(root, 'buddy-driver', 'buddy.log'),
+    `${[boot(0, target), line(1, 'HEARTBEAT pos=0,64,0 running=true')].join('\n')}\n`,
+    'utf8',
+  )
+  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '', 'utf8')
+
+  const targetArtifact = cli(['--run', target, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(targetArtifact.run.source.provenance, 'reload')
+  assert.equal(targetArtifact.run.source.effectiveSourceSha, 'target5555555')
+  assert.equal(targetArtifact.run.source.reloadCount, 1)
+  assert.equal(targetArtifact.run.source.window.bootBuildHash, 'bootTarget0001')
+  assert.equal(targetArtifact.run.source.window.closedByRunId, foreign, 'the foreign BOOT closes this run window')
+  assert.equal(
+    JSON.stringify(targetArtifact.run.source).includes('foreign666666'),
+    false,
+    'a foreign reload hash must never appear in this run provenance',
+  )
+
+  // The foreign run still resolves its OWN window and its own hash.
+  const foreignArtifact = cli(['--run', foreign, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(foreignArtifact.run.source.provenance, 'reload')
+  assert.equal(foreignArtifact.run.source.effectiveSourceSha, 'foreign666666')
+  assert.equal(foreignArtifact.run.source.reloadCount, 1)
+  assert.equal(foreignArtifact.run.source.window.bootBuildHash, 'bootForeign001')
+  assert.equal(foreignArtifact.run.source.window.closedByRunId, null)
+  assert.equal(JSON.stringify(foreignArtifact.run.source).includes('target5555555'), false)
+}
+ok('RELOAD markers from another runId are never attributed; the foreign run resolves its own window')
+
+// ---------------------------------------------------------------------------
+// S. skipped=unchanged / failed reloads are OBSERVED but are not a new source
+// ---------------------------------------------------------------------------
+{
+  // S1: a control reload that rebuilt the same bundle and a failed reload: the
+  // window records both, and the executing source is still the BOOT generation.
+  const runId = 'run-fixture-reload-unchanged-only'
+  const root = makeRoot('reload-unchanged-only')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: {
+      build: 'boot11112222',
+      reloads: [
+        { sec: 50, body: 'RELOAD ok=true trigger=control skipped=unchanged ms=56' },
+        { sec: 60, body: 'RELOAD ok=false trigger=source-changed ms=12 message=CONTRACT_VERSION_mismatch' },
+      ],
+    },
+  })
+  const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
+  const source = artifact.run.source
+  assert.equal(source.provenance, 'boot')
+  assert.equal(source.effectiveSourceSha, SOURCE_SHA)
+  assert.equal(source.reloadCount, 2, 'both markers are recorded')
+  assert.equal(source.sourceChangeCount, 0, 'neither marker changed the source')
+  assert.deepEqual(
+    source.observed.map((marker) => marker.kind),
+    ['unchanged', 'failed'],
+  )
+  assert.equal(source.observed[0].trigger, 'control')
+  assert.equal(source.observed[0].applied, false)
+  assert.equal(source.observed[0].hash, null)
+  assert.match(source.observed[0].note, /not a new source/)
+  assert.equal(source.observed[1].ok, false)
+  assert.equal(source.observed[1].reason, 'CONTRACT_VERSION_mismatch')
+  // The latest observed marker is the failed one; it still carries no hash.
+  assert.equal(source.latestReload.kind, 'failed')
+  assert.equal(source.latestReload.hash, null)
+  assert.equal(source.latestSourceReload, null)
+  // Observed-but-unchanged is not a blind window: the window positively shows
+  // that no source change committed.
+  assert.deepEqual(source.windowBlind, { detected: false, reasons: [] })
+  assert.ok(!artifact.missingEvidence.some((field) => String(field).startsWith('run.source')))
+
+  // S2: an applied reload followed by skipped=unchanged: the applied hash stays
+  // effective while the skipped marker is recorded as the latest observation.
+  const tailId = 'run-fixture-reload-unchanged-tail'
+  const tailRoot = makeRoot('reload-unchanged-tail')
+  writeFixture(tailRoot, tailId, {
+    logLines: fullLog(tailId, { terminalEye: 12 }),
+    runner: {
+      build: 'boot11112222',
+      reloads: [
+        { sec: 50, body: 'RELOAD ok=true trigger=source-changed ms=100 hash=aaaa11112222 id=gen-first generations=2' },
+        { sec: 60, body: 'RELOAD ok=true trigger=control skipped=unchanged ms=59' },
+      ],
+    },
+  })
+  const tailSource = cli(['--run', tailId, '--root', tailRoot, '--json', '--no-control-socket']).json().run.source
+  assert.equal(tailSource.latestReload.kind, 'unchanged')
+  assert.equal(tailSource.latestReload.hash, null)
+  assert.equal(tailSource.latestSourceReload.hash, 'aaaa11112222')
+  assert.equal(tailSource.effectiveSourceSha, 'aaaa11112222')
+  assert.equal(tailSource.provenance, 'reload')
+  assert.equal(tailSource.sourceChangeCount, 1)
+}
+ok('skipped=unchanged and failed reloads are observed, recorded, and never treated as a new source')
+
+// ---------------------------------------------------------------------------
+// T. deferred=frozen is staged, and only a successful RESUME commits it
+// ---------------------------------------------------------------------------
+{
+  const frozen = 'RELOAD ok=true trigger=source-changed deferred=frozen ms=120 hash=frozen7777777 contractVersion=3'
+  const stagedId = 'run-fixture-reload-frozen'
+  const stagedRoot = makeRoot('reload-frozen')
+  writeFixture(stagedRoot, stagedId, {
+    logLines: fullLog(stagedId, { terminalEye: 12 }),
+    runner: { build: 'boot11112222', reloads: [{ sec: 50, body: frozen }] },
+  })
+  const staged = cli(['--run', stagedId, '--root', stagedRoot, '--json', '--no-control-socket']).json().run.source
+  assert.equal(staged.observed[0].kind, 'deferred')
+  assert.equal(staged.observed[0].applied, false, 'a frozen candidate is not swapped in')
+  assert.equal(staged.provenance, 'boot', 'the live generation is still the boot one')
+  assert.equal(staged.effectiveSourceSha, SOURCE_SHA)
+  assert.equal(staged.unmatchedDeferred.hash, 'frozen7777777', 'the staged candidate stays visible')
+
+  // The same window plus a successful RESUME: the remembered module becomes live.
+  const resumedId = 'run-fixture-reload-frozen-resumed'
+  const resumedRoot = makeRoot('reload-frozen-resumed')
+  writeFixture(resumedRoot, resumedId, {
+    logLines: fullLog(resumedId, { terminalEye: 12 }),
+    runner: { build: 'boot11112222', reloads: [{ sec: 50, body: frozen }], resumes: [{ sec: 55, ok: true }] },
+  })
+  const resumed = cli(['--run', resumedId, '--root', resumedRoot, '--json', '--no-control-socket']).json().run.source
+  assert.equal(resumed.provenance, 'reload')
+  assert.equal(resumed.effectiveSourceSha, 'frozen7777777')
+  assert.equal(resumed.latestSourceReload.appliedBy, 'resume')
+  assert.equal(resumed.unmatchedDeferred, null)
+
+  // An UNSUCCESSFUL resume must not commit anything.
+  const failedId = 'run-fixture-reload-frozen-resume-failed'
+  const failedRoot = makeRoot('reload-frozen-resume-failed')
+  writeFixture(failedRoot, failedId, {
+    logLines: fullLog(failedId, { terminalEye: 12 }),
+    runner: { build: 'boot11112222', reloads: [{ sec: 50, body: frozen }], resumes: [{ sec: 55, ok: false }] },
+  })
+  const failed = cli(['--run', failedId, '--root', failedRoot, '--json', '--no-control-socket']).json().run.source
+  assert.equal(failed.provenance, 'boot')
+  assert.equal(failed.effectiveSourceSha, SOURCE_SHA)
+  assert.equal(failed.unmatchedDeferred.hash, 'frozen7777777')
+}
+ok('a deferred=frozen bundle is staged only, and a successful RESUME alone makes it the live source')
+
+// ---------------------------------------------------------------------------
+// U. the control-socket generation hash is a READ-ONLY cross-check, never a source
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-socket-crosscheck'
+  const root = makeRoot('socket-crosscheck')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: {
+      build: 'boot11112222',
+      reloads: [{ sec: 50, body: 'RELOAD ok=true trigger=source-changed ms=100 hash=liveabc12345 id=gen-live generations=2' }],
+    },
+  })
+  // `controlSocketPath` must be a non-empty string for the socket read to be
+  // attempted; the injected reader stands in for the live resident (no socket is
+  // opened and no command other than the read-only `report` is ever sent).
+  const overrides = { controlSocketPath: '/fixture/control.sock' }
+  const readSocket = (binding) => async () => binding
+
+  const agreeing = await buildRunArtifact({
+    runId,
+    root,
+    overrides,
+    readSocket: readSocket({
+      runId,
+      policyKind: 'typesafe',
+      policyModel: 'typesafe-ai/jev',
+      generationHash: 'liveabc12345',
+      generationId: 'gen-live',
+      frozen: false,
+    }),
+  })
+  const agreeSource = agreeing.artifact.run.source
+  assert.equal(agreeSource.crossCheck.queried, true)
+  assert.equal(agreeSource.crossCheck.readOnly, true)
+  assert.equal(agreeSource.crossCheck.command, 'report')
+  assert.equal(agreeSource.crossCheck.forRequestedRun, true)
+  assert.equal(agreeSource.crossCheck.generationHash, 'liveabc12345')
+  assert.equal(agreeSource.crossCheck.generationId, 'gen-live')
+  assert.equal(agreeSource.crossCheck.agrees, true)
+  assert.deepEqual(agreeSource.disagreements, [])
+  assert.equal(agreeSource.effectiveSourceSha, 'liveabc12345')
+
+  // A disagreement is NAMED, and never overwrites the file evidence.
+  const disagreeing = await buildRunArtifact({
+    runId,
+    root,
+    overrides,
+    readSocket: readSocket({
+      runId,
+      policyKind: 'typesafe',
+      policyModel: 'typesafe-ai/jev',
+      generationHash: 'other99999999',
+      generationId: 'gen-other',
+      frozen: false,
+    }),
+  })
+  const disagreeSource = disagreeing.artifact.run.source
+  assert.equal(disagreeSource.crossCheck.agrees, false)
+  assert.equal(disagreeSource.disagreements.length, 1)
+  assert.match(disagreeSource.disagreements[0], /control_socket_generationHash=other99999999/)
+  assert.match(disagreeSource.disagreements[0], /file_latest_source_reload_hash=liveabc12345/)
+  assert.equal(disagreeSource.effectiveSourceSha, 'liveabc12345', 'the file fact stands on its own')
+
+  // A socket reply for ANOTHER runId is not used at all.
+  const foreign = await buildRunArtifact({
+    runId,
+    root,
+    overrides,
+    readSocket: readSocket({ runId: 'run-fixture-someone-else', generationHash: 'foreign00000' }),
+  })
+  const foreignSource = foreign.artifact.run.source
+  assert.equal(foreignSource.crossCheck.forRequestedRun, false)
+  assert.equal(foreignSource.crossCheck.generationHash, null)
+  assert.equal(foreignSource.crossCheck.agrees, null)
+  assert.equal(foreignSource.effectiveSourceSha, 'liveabc12345')
+  assert.equal(JSON.stringify(foreignSource.crossCheck).includes('foreign00000'), false)
+
+  // A newer generation INSTANCE of the same bundle (a restart of the live
+  // generation, not a source change): the hash agrees and the instance difference
+  // is named as exactly that.
+  const restarted = await buildRunArtifact({
+    runId,
+    root,
+    overrides,
+    readSocket: readSocket({
+      runId,
+      policyKind: 'typesafe',
+      policyModel: 'typesafe-ai/jev',
+      generationHash: 'liveabc12345',
+      generationId: 'gen-restarted',
+      frozen: false,
+    }),
+  })
+  const restartedSource = restarted.artifact.run.source
+  assert.equal(restartedSource.crossCheck.agrees, true)
+  assert.equal(restartedSource.crossCheck.generationIdDiffers, true)
+  assert.deepEqual(restartedSource.disagreements, [])
+  assert.match(restartedSource.crossCheck.note, /NEWER INSTANCE of the same bundle hash/)
+
+  // Without any socket the file evidence is unchanged.
+  const noSocket = await buildRunArtifact({ runId, root, overrides: { controlSocketPath: null } })
+  assert.equal(noSocket.artifact.run.source.crossCheck.queried, false)
+  assert.equal(noSocket.artifact.run.source.effectiveSourceSha, 'liveabc12345')
+  assert.equal(noSocket.artifact.run.source.crossCheck.agrees, null)
+}
+ok('the control-socket generation hash is a read-only cross-check: agreement/disagreement named, file facts untouched')
 
 // ---------------------------------------------------------------------------
 // cleanup

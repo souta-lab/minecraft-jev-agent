@@ -20,6 +20,17 @@
 //   4. every fact it could not obtain is named in `missingEvidence`, and a
 //      missing fact is always an UNKNOWN/exit-2 outcome, never a quiet absence.
 //
+// Source provenance
+// -----------------
+// `run.boot.sourceSha` is the SHA the host read when the run OPENED. A run that
+// hot-reloaded while it lived executed other code when the result was produced, so
+// `run.source` records BOTH: the BOOT origin and the latest source-changing RELOAD
+// marker inside the same BOOT-bound window (`provenance: "reload"` ->
+// `effectiveSourceSha` is the host generation BUNDLE hash; no reload marker ->
+// `provenance: "boot"` and the BOOT SHA is repeated, never replaced by a guess).
+// The reload hash is a bundle hash, not a git commit: `effectiveSourceShaKind`
+// says which one a reader is looking at.
+//
 // Run isolation
 // -------------
 // Every log fact is attributed to the requested runId by the SAME BOOT-boundary
@@ -64,7 +75,11 @@ export const RECORD = 'milestone-run-artifact'
 // 3 = additive: `authority.jev`, the parsed `authority.system2.stack` + per-fact
 // attestation, `authority.fallback`, `environment.dimensions.sequence/transitions`,
 // `milestoneAcceptance` and `missingEvidenceDetail`. Every schema-2 field is kept.
-export const SCHEMA_VERSION = 3
+// 4 = additive: `run.source` (run-window SOURCE provenance: bootSourceSha +
+// latestReload/latestSourceReload + effectiveSourceSha + provenance + the read-only
+// control-socket cross-check). `run.boot.sourceSha` and every schema-3 field are
+// unchanged.
+export const SCHEMA_VERSION = 4
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
 /** Repo-level operator decision file; run-scoped by each entry's own runId. */
 export const OPERATOR_DECISION_RECORD = 'operator-decision'
@@ -105,6 +120,9 @@ const TS_RE = /^\[([^\]]+)\]/
 const BOOT_RE = /\bBOOT\b(?!_)/
 const DIMENSION_RE = /\bdimension=([A-Za-z0-9:_]+)/
 const RUN_ID_LINE_RE = /\brunId=(run-[A-Za-z0-9-]+)/
+const RELOAD_RE = /\bRELOAD\b(?!_)/
+const RESUME_RE = /\bRESUME\b(?!_)/
+const BUILD_RE = /\bBUILD\b(?!_)/
 const ENV_MARKER_RE = /\b(?:ENVIRONMENT|SERVER_ENV|SERVER_CONFIG|WORLD_ENV|GAMERULES?)\b/
 const SERVER_LINE_RE = /\b(?:SPAWN|SERVER_VERSION|SERVER_START)\b/
 const KV_RE = /(?:^|\s)([A-Za-z_][A-Za-z0-9_-]*)=("(?:[^"\\]|\\.)*"|\{[^{}]*\}|\[[^[\]]*\]|\S+)/g
@@ -417,6 +435,333 @@ export function attributeRunLines(runId, lines) {
     environmentObservations,
     serverObservations,
     foreignRuns: [...foreignRuns],
+  }
+}
+
+// ---------------------------------------------------------------------------
+// run-window SOURCE provenance (which code actually produced the result)
+// ---------------------------------------------------------------------------
+//
+// `run.boot.sourceSha` is the run's ORIGIN: the SHA the host read when the run
+// opened. It is NOT necessarily the source that produced the RESULT, because the
+// host hot-reloads the generation while the run lives and this artifact is
+// assembled after the fact. The host's own markers answer the "what executed"
+// question positively:
+//
+//   BUILD  hash=<h> bytes=<n> ms=<n> outfile=<path>      the boot generation's bundle hash
+//   RELOAD ok=true trigger=source-changed ms=<dur> hash=<h> id=<generationId> generations=<n> ...
+//   RELOAD ok=true trigger=control skipped=unchanged ms=<dur>
+//   RELOAD ok=true trigger=X deferred=frozen ms=<dur> hash=<h> contractVersion=<n>
+//   RELOAD ok=false trigger=X ms=<dur> reason|message=<text>
+//   RESUME ok=<bool>
+//
+// Rules that keep this honest:
+//   * the window is the SAME `BOOT ... runId=R` boundary the gates use, and it is
+//     deliberately NOT narrowed to the policy window: the latest reload can be
+//     later than the last authority marker;
+//   * a RELOAD line carrying another runId is never attributed (a BOOT for another
+//     run closes the window, exactly as in attributeRunLines);
+//   * `skipped=unchanged` is RECORDED but is not a new source (the host rebuilt the
+//     same bundle, so the executing source did not change);
+//   * `deferred=frozen` stages a bundle without swapping it in; it becomes the live
+//     source only when a later successful `RESUME ok=true` commits it;
+//   * `ok=false` never changes the source;
+//   * no SHA is ever invented: with no source-changing reload the artifact says
+//     `provenance: "boot"` and repeats the BOOT SHA instead of guessing.
+//
+// The reload hash is the host's GENERATION BUNDLE hash (12 hex chars), not a git
+// commit: `effectiveSourceShaKind` says which one a reader is looking at.
+
+/** What each observed RELOAD marker shape means for the executing source. */
+export const RELOAD_MARKER_KINDS = Object.freeze({
+  'source-change': 'the swap committed: this generation bundle hash is the live source from this line onward',
+  unchanged: 'the host rebuilt the SAME bundle (skipped=unchanged): observed, but not a new source',
+  deferred: 'the candidate bundle was validated and remembered (deferred=frozen) but NOT swapped in; it becomes live only when a later RESUME ok=true commits it',
+  failed: 'the reload did not commit (ok=false): the previous generation kept running, so the source is unchanged',
+  unclassified: 'a RELOAD marker without a parseable hash: recorded, never treated as a source',
+})
+
+/** Parse one `RELOAD ...` marker line into its source-relevant fields, or null. */
+export function parseReloadLine(line, lineIndex = null) {
+  if (typeof line !== 'string' || !RELOAD_RE.test(line)) return null
+  const kv = parseKeyValues(line)
+  const ok = booleanOrNull(kv.ok)
+  const skipped = stringOrNull(kv.skipped)
+  const deferred = stringOrNull(kv.deferred)
+  const hash = stringOrNull(kv.hash)
+  let kind
+  if (ok === false) kind = 'failed'
+  else if (skipped === 'unchanged') kind = 'unchanged'
+  else if (deferred === 'frozen') kind = 'deferred'
+  else if (ok === true && hash !== null) kind = 'source-change'
+  else kind = 'unclassified'
+  return {
+    lineIndex,
+    ts: timestampOf(line),
+    // The line's own timestamp: `ms=` on a RELOAD line is the reload DURATION.
+    atMs: timestampMsOf(line),
+    ok,
+    trigger: stringOrNull(kv.trigger),
+    hash,
+    generationId: stringOrNull(kv.id),
+    generations: numberOrNull(kv.generations),
+    durationMs: numberOrNull(kv.ms),
+    skipped,
+    deferred,
+    listenerLeak: booleanOrNull(kv.listenerLeak),
+    reason: stringOrNull(kv.reason ?? kv.message),
+    kind,
+    // `applied` means "this marker changed the live source". A deferred marker is
+    // flipped to applied by a later in-window `RESUME ok=true` (the host commits
+    // exactly the remembered module), never by itself.
+    applied: kind === 'source-change',
+    appliedBy: kind === 'source-change' ? 'reload-commit' : null,
+    note: RELOAD_MARKER_KINDS[kind] ?? null,
+  }
+}
+
+function emptyReloadWindow(runnerOutPath, runId, reason) {
+  return {
+    status: 'unknown',
+    reason,
+    source: runnerOutPath ?? null,
+    runId,
+    bootLineIndex: null,
+    bootTsMs: null,
+    closedByRunId: null,
+    scannedToEof: false,
+    bootBuildHash: null,
+    reloads: [],
+    latestReload: null,
+    latestSourceReload: null,
+    count: 0,
+    sourceChangeCount: 0,
+    unmatchedDeferred: null,
+  }
+}
+
+/**
+ * Scan ONE run's `BOOT ... runId=R` window for its source-change evidence.
+ *
+ * Attribution is the gates' own rule: `BOOT ... runId=R` opens R, a later BOOT for
+ * another run closes it (and stops the scan), lines before any BOOT belong to no
+ * run. Reads only; never mutates the resident.
+ */
+export async function scanRunReloadWindow(runnerOutPath, runId) {
+  if (typeof runnerOutPath !== 'string' || runnerOutPath === '' || !existsSync(runnerOutPath)) {
+    return emptyReloadWindow(runnerOutPath, runId, `runner_out_missing runId=${runId}`)
+  }
+  let activeRunId = null
+  let boundaryFound = false
+  let bootLineIndex = null
+  let bootTsMs = null
+  let closedByRunId = null
+  let bootBuildHash = null
+  let pendingDeferred = null
+  let lineIndex = -1
+  const reloads = []
+  let rl
+  try {
+    rl = createInterface({ input: createReadStream(runnerOutPath, { encoding: 'utf8' }), crlfDelay: Infinity })
+    for await (const line of rl) {
+      lineIndex += 1
+      if (BOOT_RE.test(line)) {
+        const rid = RUN_ID_LINE_RE.exec(line)?.[1] ?? null
+        if (rid !== null) {
+          if (boundaryFound && rid !== runId) {
+            closedByRunId = rid
+            break
+          }
+          activeRunId = rid
+          if (rid === runId) {
+            boundaryFound = true
+            bootLineIndex = lineIndex
+            bootTsMs = timestampMsOf(line)
+          }
+        }
+      }
+      if (!boundaryFound || activeRunId !== runId) continue
+      if (bootBuildHash === null && BUILD_RE.test(line)) {
+        bootBuildHash = stringOrNull(parseKeyValues(line).hash)
+      }
+      if (RESUME_RE.test(line) && booleanOrNull(parseKeyValues(line).ok) === true && pendingDeferred !== null) {
+        // The host resumes exactly the remembered module (`loadGenerationModule(false)`
+        // returns the frozen candidate), so the staged bundle is the live source now.
+        pendingDeferred.applied = true
+        pendingDeferred.appliedBy = 'resume'
+        pendingDeferred.resumedAtMs = timestampMsOf(line)
+        pendingDeferred.resumeLineIndex = lineIndex
+        pendingDeferred = null
+      }
+      const marker = parseReloadLine(line, lineIndex)
+      if (marker === null) continue
+      reloads.push(marker)
+      if (marker.kind === 'deferred' && marker.hash !== null) pendingDeferred = marker
+      else if (marker.kind === 'source-change') pendingDeferred = null
+    }
+  } catch (error) {
+    return emptyReloadWindow(runnerOutPath, runId, `runner_out_unreadable ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    try {
+      rl?.close()
+    } catch {
+      /* best effort */
+    }
+  }
+  if (!boundaryFound) return emptyReloadWindow(runnerOutPath, runId, `run_boundary_missing runId=${runId}`)
+  const applied = reloads.filter((marker) => marker.applied === true && marker.hash !== null)
+  return {
+    status: 'valid',
+    reason: null,
+    source: runnerOutPath,
+    runId,
+    bootLineIndex,
+    bootTsMs,
+    closedByRunId,
+    scannedToEof: closedByRunId === null,
+    bootBuildHash,
+    reloads,
+    latestReload: reloads.at(-1) ?? null,
+    latestSourceReload: applied.at(-1) ?? null,
+    count: reloads.length,
+    sourceChangeCount: applied.length,
+    unmatchedDeferred: pendingDeferred,
+  }
+}
+
+/** The latest reload marker as the artifact records it (id fields + window count). */
+function reloadView(marker, count) {
+  if (marker === null) return null
+  return {
+    hash: marker.hash,
+    trigger: marker.trigger,
+    atMs: marker.atMs,
+    generationId: marker.generationId,
+    lineIndex: marker.lineIndex,
+    count,
+    ts: marker.ts,
+    ok: marker.ok,
+    kind: marker.kind,
+    applied: marker.applied === true,
+    appliedBy: marker.appliedBy ?? null,
+    skipped: marker.skipped,
+    deferred: marker.deferred,
+    generations: marker.generations,
+    durationMs: marker.durationMs,
+    listenerLeak: marker.listenerLeak ?? null,
+    reason: marker.reason ?? null,
+    note: marker.note ?? null,
+  }
+}
+
+/**
+ * Compose the first-class `run.source` provenance section.
+ *
+ * `effectiveSourceSha` is the latest source-changing reload's bundle hash when the
+ * run window has one, else the BOOT SHA (provenance "boot"), else null
+ * (provenance "unknown"): the artifact never invents a SHA. A control-socket
+ * `report` reply, when it belongs to THIS runId, is recorded as a read-only
+ * cross-check; disagreements are named, never used to overwrite the file facts.
+ */
+export function composeRunSource({ runId = null, boot = null, snapshotBuildHash = null, reloadWindow = null, socketBinding = null } = {}) {
+  const window = reloadWindow ?? emptyReloadWindow(null, runId, 'reload_window_not_scanned')
+  const bootSourceSha = boot?.sourceSha ?? null
+  const latestSourceReload = window.latestSourceReload ?? null
+  const reloadHash = stringOrNull(latestSourceReload?.hash)
+  const effectiveSourceSha = reloadHash ?? bootSourceSha ?? null
+  const provenance = reloadHash !== null ? 'reload' : bootSourceSha !== null ? 'boot' : 'unknown'
+  const provenanceBasis =
+    reloadHash !== null
+      ? `log:RELOAD@line ${latestSourceReload.lineIndex} hash=${reloadHash} trigger=${latestSourceReload.trigger ?? 'unknown'} (generation bundle hash; the git SHA behind that bundle is not attested by the marker)`
+      : bootSourceSha !== null
+        ? `log:BOOT@line ${window.bootLineIndex ?? 'unknown'} source=${bootSourceSha}; the run window in ${window.source ?? 'unknown'} (${window.count} RELOAD marker(s), ${window.sourceChangeCount} source-changing) carries no later source`
+        : 'neither a source-changing RELOAD hash nor a BOOT source SHA could be read'
+
+  const socketForRun = isPlainObject(socketBinding) && socketBinding.runId === runId ? socketBinding : null
+  const socketHash = stringOrNull(socketForRun?.generationHash)
+  const socketGenerationId = stringOrNull(socketForRun?.generationId)
+  const fileHash = reloadHash ?? stringOrNull(window.bootBuildHash)
+  // The socket reports the LIVE generation INSTANCE; the file records the instance a
+  // reload created. Same hash + different instance is a restart of the same bundle,
+  // NOT a source change - say so instead of letting a reader guess.
+  const generationIdDiffers =
+    socketHash !== null && socketGenerationId !== null && stringOrNull(latestSourceReload?.generationId) !== null
+      ? socketGenerationId !== latestSourceReload.generationId
+      : null
+  const disagreements = []
+  let agrees = null
+  if (socketHash !== null && fileHash !== null) {
+    agrees = socketHash === fileHash
+    if (!agrees) {
+      disagreements.push(
+        `control_socket_generationHash=${socketHash} vs file_${reloadHash !== null ? 'latest_source_reload' : 'boot_build'}_hash=${fileHash}`,
+      )
+    }
+  }
+  const crossCheck = {
+    queried: socketBinding !== null && socketBinding !== undefined,
+    readOnly: true,
+    command: 'report',
+    socketRunId: isPlainObject(socketBinding) ? (socketBinding.runId ?? null) : null,
+    forRequestedRun: socketForRun !== null,
+    generationHash: socketHash,
+    generationId: socketGenerationId,
+    generationIdDiffers,
+    frozen: socketForRun?.frozen ?? null,
+    fileEffectiveHash: reloadHash,
+    fileBootBuildHash: stringOrNull(window.bootBuildHash),
+    agrees,
+    note:
+      socketForRun === null
+        ? 'no live control-socket report for this runId was available: the file evidence stands alone'
+        : generationIdDiffers === true && agrees === true
+          ? 'the live generation is a NEWER INSTANCE of the same bundle hash (a restart, not a source change); a read-only `report` reply never overrides the file facts, it only cross-checks them'
+          : 'a read-only `report` reply for this runId; it never overrides the file facts, only cross-checks them',
+  }
+
+  // A window with no source-changing reload can still be BLIND: another
+  // run-scoped source can attest that the bundle changed mid-run while the window
+  // shows no RELOAD. That is the one case where "provenance: boot" is not merely a
+  // fallback but an unprovable claim, so it is named as missing evidence.
+  const blindSources = []
+  if (reloadHash === null && window.status === 'valid') {
+    if (socketHash !== null && crossCheck.fileBootBuildHash !== null && socketHash !== crossCheck.fileBootBuildHash) {
+      blindSources.push(`control_socket generationHash=${socketHash} differs from the window's boot BUILD hash=${crossCheck.fileBootBuildHash}`)
+    }
+    if (typeof snapshotBuildHash === 'string' && snapshotBuildHash !== '' && crossCheck.fileBootBuildHash !== null && snapshotBuildHash !== crossCheck.fileBootBuildHash) {
+      blindSources.push(`run-scoped snapshot buildHash=${snapshotBuildHash} differs from the window's boot BUILD hash=${crossCheck.fileBootBuildHash}`)
+    }
+  }
+
+  return {
+    bootSourceSha,
+    bootSourceShaKind: bootSourceSha === null ? null : 'git-commit-sha',
+    latestReload: reloadView(window.latestReload, window.count),
+    latestSourceReload: reloadView(latestSourceReload, window.count),
+    effectiveSourceSha,
+    effectiveSourceShaKind: effectiveSourceSha === null ? null : reloadHash !== null ? 'generation-bundle-hash' : 'git-commit-sha',
+    provenance,
+    provenanceBasis,
+    reloadCount: window.count,
+    sourceChangeCount: window.sourceChangeCount,
+    observed: window.reloads,
+    window: {
+      status: window.status,
+      reason: window.reason ?? null,
+      path: window.source ?? null,
+      runId,
+      rule: 'BOOT ... runId=R opens the window; a later BOOT for another run closes it (same rule as tools/m2-gate.mjs scanRunLines)',
+      bootLineIndex: window.bootLineIndex,
+      bootTsMs: window.bootTsMs,
+      closedByRunId: window.closedByRunId,
+      scannedToEof: window.scannedToEof === true,
+      bootBuildHash: crossCheck.fileBootBuildHash,
+    },
+    unmatchedDeferred: window.unmatchedDeferred ?? null,
+    windowBlind: { detected: blindSources.length > 0, reasons: blindSources },
+    crossCheck,
+    disagreements,
+    note: 'bootSourceSha is the run ORIGIN (BOOT line); effectiveSourceSha is what the run window proves executed at its end (latest source-changing RELOAD hash, else the BOOT SHA). With provenance=reload the value is the host generation BUNDLE hash, not a git commit.',
   }
 }
 
@@ -1373,6 +1718,35 @@ export async function buildRunArtifact({
     missing.add('authority.fallback', `cannot rule out a hidden deterministic fallback: ${authority.fallback.reason}`)
   }
 
+  // ---- run source provenance (which code actually produced the result)
+  //
+  // `run.boot.sourceSha` stays the run's origin. A run that hot-reloaded while it
+  // lived executed OTHER code at the end, so the window's own BUILD/RELOAD markers
+  // are read as first-class provenance. A window with no source-changing reload
+  // keeps `provenance: "boot"` (the BOOT SHA is repeated, never replaced by a
+  // guess) and that fact is named in missingEvidenceDetail as soon as it stops
+  // being provable - either because the window could not be read at all, or
+  // because another run-scoped source attests a bundle change the window missed.
+  const reloadWindow = await scanRunReloadWindow(paths.runnerOutPath, runId)
+  const runSource = composeRunSource({
+    runId,
+    boot,
+    snapshotBuildHash: snapshot.record?.buildHash ?? null,
+    reloadWindow,
+    socketBinding,
+  })
+  if (runSource.window.status !== 'valid') {
+    missing.add(
+      'run.source:reload_window',
+      `${runSource.window.reason}; no BUILD/RELOAD marker for this run could be read from ${paths.runnerOutPath}, so effectiveSourceSha can only repeat the BOOT SHA (provenance=${runSource.provenance}) and the source that produced the result is unattested`,
+    )
+  } else if (runSource.windowBlind.detected) {
+    missing.add(
+      'run.source:reload_window',
+      `the run window records no source-changing RELOAD marker, so effectiveSourceSha falls back to the BOOT SHA (provenance=boot, ${String(runSource.effectiveSourceSha)}), but another run-scoped source attests the bundle changed mid-run (${runSource.windowBlind.reasons.join('; ')}): the window is blind to at least one source change`,
+    )
+  }
+
   // ---- milestone predicate evidence (first-class, run-scoped)
   //
   // The resident's own run-scoped observation file is preferred when it exists
@@ -1498,6 +1872,9 @@ export async function buildRunArtifact({
     run: {
       runId,
       boot,
+      // Provenance: `boot` is the run ORIGIN, `source` is what the run's own
+      // window proves executed (both SHAs, with the basis and any disagreement).
+      source: runSource,
       runtime: boot?.runtime ?? null,
       runtimeVersion: boot?.runtimeVersion ?? null,
       contractVersion: boot?.contractVersion ?? null,
@@ -1616,6 +1993,9 @@ export function usage() {
     '',
     'Artifact sections (per runId):',
     '  run                      boot identity: exact source SHA, runtime, contract/schema, world epoch/key, MC server version',
+    '  run.source               SOURCE provenance: BOOT origin SHA vs the run window\'s latest source-changing RELOAD hash',
+    '                           (effectiveSourceSha + provenance + provenanceBasis, the observed RELOAD markers and the',
+    '                           read-only control-socket generation-hash cross-check; boot fallback is never silent)',
     '  inventory                boot (initial) and latest (final) inventory + the milestone item subset',
     '  environment              difficulty / mob spawning / gamerules and the ordered dimension sequence + transitions',
     '  authority.jev            effective Jev pi provider/model and the line it came from',
