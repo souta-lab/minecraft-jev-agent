@@ -65,7 +65,7 @@ import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
-import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates } from './executor.ts'
+import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
 import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
@@ -7677,6 +7677,24 @@ export class JevController {
     }
   }
 
+  /**
+   * CAN fact for a plain ATTACK lease. The executor follows until it is within
+   * `MELEE_ATTACK_RANGE`; probing GoalBlock is stricter than the real action and
+   * can falsely reject a perfectly hittable target, so use the same near radius.
+   * Timeout is UNKNOWN/non-executable for this short lease, exactly like the
+   * ordinary reachability probe: only a complete path is a current CAN proof.
+   */
+  private canComputeMeleePath(position: Vec3Json): boolean {
+    if (this.bot.pathfinder === undefined) return false
+    try {
+      const goal = new goals.GoalNear(position.x, position.y, position.z, Math.max(1, MELEE_ATTACK_RANGE - 0.2))
+      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
+      return plan.status === 'success'
+    } catch {
+      return false
+    }
+  }
+
   private logCandidates(candidates: readonly Candidate[], state: WorldState): void {
     const option = state.currentOption
     const signature = JSON.stringify({
@@ -8356,6 +8374,7 @@ export class JevController {
   private reachabilityGateOptions(): ReachabilityGateOptions {
     if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
     const pathCache = new Map<string, 'reachable' | 'no_path'>()
+    const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
     this.gateOptions = {
       memory: this.reachabilityProofs,
       pathProbe: (position) => {
@@ -8364,6 +8383,14 @@ export class JevController {
         if (cached !== undefined) return cached
         const result = this.canComputePath(position) ? 'reachable' : 'no_path'
         pathCache.set(key, result)
+        return result
+      },
+      attackPathProbe: (position) => {
+        const key = `${position.x},${position.y},${position.z}`
+        const cached = attackPathCache.get(key)
+        if (cached !== undefined) return cached
+        const result = this.canComputeMeleePath(position) ? 'reachable' : 'no_path'
+        attackPathCache.set(key, result)
         return result
       },
       stationApproach: this.stationApproachProbe(),

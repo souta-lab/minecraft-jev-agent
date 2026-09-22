@@ -546,6 +546,13 @@ export function surfaceSearchKey(dimension: string, position: Vec3Json): string 
 export interface ReachabilityGateOptions {
   /** pathfinder fact for a destination; absent = unknown (no probe) */
   pathProbe?: ((position: Vec3Json) => PathProbeResult) | null
+  /**
+   * Ordinary hostile ATTACK uses GoalFollow/near-melee semantics, not GoalBlock.
+   * The controller supplies the matching near-target path fact separately so an
+   * entity behind sealed terrain is not advertised as an executable fight.
+   * Absent = unknown and preserves pure/offline callers.
+   */
+  attackPathProbe?: ((position: Vec3Json) => PathProbeResult) | null
   /** proven-unreachable (candidateId -> fingerprint) suppression memory */
   memory?: StateFingerprintMemory | null
   /**
@@ -7575,7 +7582,15 @@ function evaluateCandidate(
   context: ReachabilityGateContext,
 ): CandidateReachability | null {
   const position = candidate.target
-  if (position === null || !REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  if (position === null) return null
+  // A plain survival ATTACK is locomotion too: outside contact range the executor
+  // must first GoalFollow the entity into melee. The live portal run repeatedly
+  // advertised a skeleton 7.83m away through sealed terrain as the ONLY
+  // executable action; every 2.2s lease then failed `out_of_reach`. Gate that
+  // mechanical approach here. Goal-directed mob/food hunts keep their dedicated
+  // longer/re-acquisition executor contract and are intentionally unchanged.
+  if (candidate.kind === 'ATTACK') return evaluateOrdinaryAttackCandidate(candidate, context)
+  if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
   if (candidate.kind === 'MINE') return evaluateMineCandidate(candidate, context)
   const accessRefusal = digAccessRefusalOf(candidate)
   if (accessRefusal !== null) {
@@ -7636,6 +7651,44 @@ function evaluateCandidate(
   const effectiveProbe: PathProbeResult = probe === 'no_path' && farTarget ? 'unknown' : probe
   const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, effectiveProbe)
   return reachabilityRecord(candidate, target, world, result, context)
+}
+
+function evaluateOrdinaryAttackCandidate(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+): CandidateReachability | null {
+  const target = candidate.target
+  if (target === null || candidate.meta.targetHostile !== true) return null
+  // Producer/food hunts have a different bounded skill: they may re-acquire and
+  // intentionally travel farther than one local self-defence lease.
+  if (typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal') return null
+
+  const distanceToTarget =
+    typeof candidate.meta.distance === 'number'
+      ? candidate.meta.distance
+      : distance(context.state.self.position, target)
+  const targetFact = reachabilityTargetFor(context.state, candidate)
+  const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+
+  // Contact is already executable: do not let a path probe erase a mob the body
+  // can hit right now. WHICH response to take remains Jev's choice.
+  if (distanceToTarget <= MELEE_THREAT_REACH) {
+    return reachabilityRecord(
+      candidate,
+      targetFact,
+      world,
+      { reachable: true, reason: 'reachable', missingCapabilities: [] },
+      context,
+    )
+  }
+
+  const probe = context.options.reachability?.attackPathProbe?.(target) ?? 'unknown'
+  if (probe === 'unknown') return null
+  const result: ReachabilityResult =
+    probe === 'reachable'
+      ? { reachable: true, reason: 'reachable', missingCapabilities: [] }
+      : { reachable: false, reason: 'no_path', missingCapabilities: [{ kind: 'open_path' }] }
+  return reachabilityRecord(candidate, targetFact, world, result, context)
 }
 
 function hasVerticalPlan(candidate: Candidate): boolean {
