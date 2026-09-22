@@ -8069,7 +8069,17 @@ export class JevController {
     else if (code === 'verify_failed') {
       this.logger.info('agent', `LOCAL_VERIFY_FAILURE system2=false detail=${detail}`, { code, detail }, this.tickCounter)
     }
-    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure && code !== 'verify_failed') {
+    // `verify_failed` used to be excluded here on the theory that the unverified
+    // ACTION budget bounds it instead. Measured live: that budget is keyed per plan
+    // (falling back to the action id) and both rotate as the body re-decides - the log
+    // shows `ACTION_UNVERIFIED planId=null ... attempts=1` every time and
+    // `ABANDON_REASON=action_unverified` ZERO times in the whole run, while one ATTACK
+    // ended `MECHANICALLY_BLOCKED failure=verify_failed` three times in a row (30 such
+    // attacks: the single most common ATTACK outcome). The operator saw the result
+    // directly - "ずっと攻撃モードになってて次の行動を再開しない", stuck in attack mode and
+    // never resuming. A repeated verification failure is exactly what this streak bound
+    // exists for, so it is no longer excluded.
+    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure) {
       this.escalate('same_failure_3x', `${code ?? 'unknown'} failed ${this.failureStreak}x: ${detail}`)
     }
   }
