@@ -26,7 +26,7 @@ import { executeFurnaceSmelt, formatSmeltLog, placedStationReadyLine } from '../
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
 import { formatPrereqRankShadow, knownStationKey, planPrereqOptions, selectPrereqPath } from '../jev-agent/src/prereqOption.ts'
 import type { PrereqPath } from '../jev-agent/src/prereqOption.ts'
-import { MoveFailMemory } from '../jev-agent/src/moveFailMemory.ts'
+import { MoveFailMemory, moveFailureKey } from '../jev-agent/src/moveFailMemory.ts'
 import type { KnownResource } from '../jev-agent/src/state.ts'
 import { stationRegisteredPlacedDetail } from './generation-entry.ts'
 import {
@@ -458,6 +458,41 @@ addCase('(live) #11 v2: smelt charcoal + cobblestone 67 + a known furnace is wal
   return {
     pass,
     detail: `${decision.line} | ${shadow} | chosen=${chosen} acquire=${acquire?.id ?? 'none'} craft=${craft?.reason ?? 'missing'} kept=[${kept.map((candidate) => candidate.id).join(',')}] starvation=${starvation ?? 'none'}`,
+  }
+})
+
+addCase('(live) #421: a blacklisted sensed furnace is retired from direct smelt', () => {
+  const blocked: Vec3Json = { x: 29, y: 61, z: 35 }
+  const viable: Vec3Json = { x: 31, y: 61, z: 35 }
+  const state = worldState({
+    position: blocked,
+    inventory: inventory({ raw_iron: 3, coal: 3 }),
+    furnaces: [
+      { ...blocked, source: 'sensed' },
+      { ...viable, source: 'sensed' },
+    ],
+  })
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    blacklistedMoveTargets: new Set([moveFailureKey('overworld', blocked)]),
+  }
+  const candidates = generateCandidates(state, options)
+  const smelt = candidates.find((candidate) => candidate.kind === 'SMELT')
+  const blockedSmelt = candidates.find(
+    (candidate) =>
+      candidate.kind === 'SMELT' &&
+      candidate.target?.x === blocked.x &&
+      candidate.target?.y === blocked.y &&
+      candidate.target?.z === blocked.z,
+  )
+  const pass =
+    smelt?.target?.x === viable.x &&
+    smelt.target.y === viable.y &&
+    smelt.target.z === viable.z &&
+    blockedSmelt === undefined
+  return {
+    pass,
+    detail: `smelt=${smelt?.id ?? 'none'} blocked=${blockedSmelt?.id ?? 'none'}`,
   }
 })
 
