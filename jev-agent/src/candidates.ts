@@ -2093,6 +2093,7 @@ export function combatKitGap(
   const heldItem = state.self.heldItem?.name ?? null
   const assessment = assessCombatKit({
     heldItem,
+    carried: state.inventory.counts,
     worn: state.self.armor ?? {},
     health: state.self.health,
     food: state.self.food,
@@ -2385,6 +2386,7 @@ function generateRawCandidates(
   if (goalDropTargets.length > 0) {
     const kit = assessCombatKit({
       heldItem: state.self.heldItem?.name ?? null,
+      carried: state.inventory.counts,
       worn: state.self.armor ?? {},
       health: state.self.health,
       food: state.self.food,
