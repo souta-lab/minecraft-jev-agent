@@ -514,8 +514,25 @@ export function envelopeForCandidate(
         mayEquipItems: [...new Set([...(input.equipItems ?? []), ...declaredPlaceBlocks])],
       }
     }
-    case 'CRAFT':
-      return { ...base, mayMove: false, mayJump: false, maySprint: false, mayUseStations: [...(input.stations ?? [])] }
+    case 'CRAFT': {
+      // A craft that must USE A STATION must first REACH it: the executor approaches
+      // the placed crafting table / furnace through the ordinary station path, and
+      // every step of that approach is a `move`. Declaring `mayUseStations` while
+      // denying `mayMove` made the two halves contradict each other - measured live:
+      // 691,311 `move_not_declared` refusals in this log, every one of them on a
+      // CRAFT (`CRAFT:iron_sword effect={"type":"move"}`), i.e. the craft could never
+      // start. A craft with NO station is unchanged: it crafts in hand and moves for
+      // nothing.
+      const stations = [...(input.stations ?? [])]
+      const needsApproach = stations.length > 0
+      return {
+        ...base,
+        mayMove: needsApproach,
+        mayJump: needsApproach,
+        maySprint: needsApproach,
+        mayUseStations: stations,
+      }
+    }
     case 'SMELT':
       return { ...base, mayUseStations: [...(input.stations ?? [])] }
     case 'CONTAINER':
