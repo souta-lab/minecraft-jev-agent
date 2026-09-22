@@ -46,7 +46,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { attributeRunLines, buildRunArtifact, coercePropertyValue, readServerProperties, runCli } from './milestone-run-artifact.mjs'
+import { attributeRunLines, buildRunArtifact, coercePropertyValue, readEnvironmentFile, readServerProperties, runCli } from './milestone-run-artifact.mjs'
 import { scanRunLines } from './m2-gate.mjs'
 import { runM3Gate } from './m3-gate.mjs'
 
@@ -1335,3 +1335,40 @@ ok('a frozen host cannot make its staged candidate look like the executing sourc
 // ---------------------------------------------------------------------------
 for (const root of ROOTS) rmSync(root, { recursive: true, force: true })
 console.log(`\ntest-milestone-run-artifact: ${checks} checks passed`)
+
+// ---------------------------------------------------------------------------
+// Environment CHANGES (not just config) must survive into the artifact: the
+// operator's M3 rules require a change to be recorded with its reason and its
+// effect on the run, and a world edit is not a config value.
+// ---------------------------------------------------------------------------
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'm3-env-'))
+  const withChange = join(dir, 'env-change.json')
+  writeFileSync(
+    withChange,
+    JSON.stringify({
+      values: { difficulty: 'normal', gamerules: { keep_inventory: true } },
+      worldChanges: [
+        {
+          at: '2026-09-23T09:40Z',
+          by: 'operator',
+          what: 'lava poured across the portal-to-fortress route',
+          reason: 'deliberate generality test',
+          effectOnRuns: 'the first causal blocker becomes the crossing',
+        },
+      ],
+    }),
+  )
+  const loaded = readEnvironmentFile(withChange)
+  assert.equal(loaded.worldChanges.length, 1)
+  assert.match(loaded.worldChanges[0].reason, /generality test/)
+  assert.equal(loaded.values.difficulty, 'normal')
+
+  // No change recorded -> no key at all (an absent record is not a claim that nothing changed).
+  const withoutChange = join(dir, 'env-plain.json')
+  writeFileSync(withoutChange, JSON.stringify({ values: { difficulty: 'normal' } }))
+  assert.equal('worldChanges' in readEnvironmentFile(withoutChange), false)
+  rmSync(dir, { recursive: true, force: true })
+}
+ok('an environment CHANGE is carried verbatim into the artifact, and its absence adds no key')
