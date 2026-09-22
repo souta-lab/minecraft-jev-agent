@@ -107,6 +107,7 @@ import {
   weaponFacts,
 } from './threat.ts'
 import type { KeepDistanceSpot, ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
+import { HUNT_APPROACH_BUDGET } from './combatClosure.ts'
 import {
   envHazardProximityDenied,
   MAX_ENV_HAZARD_ESCAPES,
@@ -2802,11 +2803,11 @@ function generateRawCandidates(
         bodyRegenerates: body.regenerating,
         ...(goalDrop === null ? {} : { goalDrop, requiresKill: true }),
         // Typed producer facts: this ATTACK is the mob-drop route to `goalDrop`
-        // and the mob instance is a real sensed producer. The executor verifies
-        // the kill plus the drop and, when this instance teleports out of
-        // tracking range, the bounded hunt may adopt another sensed instance of
-        // the SAME mob - so the producer NAME (not the entity id) is what the
-        // semantic action is bound to. Never a preference; Jev still chose it.
+        // and this instance is a real sensed producer. issue #436 section 9: the
+        // committed ENTITY ID is the target for the whole Skill - the bounded hunt
+        // re-acquires THAT id across occlusion/teleport and never adopts another
+        // instance of the mob, so this candidate is a claim about e<entityId>
+        // specifically. Never a preference; Jev still chose it.
         ...(goalDrop === null
           ? {}
           : { producerMob: entity.name, producerRoute: 'mob_drop' as const }),
@@ -9162,10 +9163,14 @@ function evaluateOrdinaryAttackCandidate(
   context: ReachabilityGateContext,
 ): CandidateReachability | null {
   const target = candidate.target
-  if (target === null || candidate.meta.targetHostile !== true) return null
-  // Producer/food hunts have a different bounded skill: they may re-acquire and
-  // intentionally travel farther than one local self-defence lease.
-  if (typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal') return null
+  if (target === null) return null
+  // Producer/food hunts are a KILL too: the body must be able to close on the
+  // exact entity inside the hunt's own approach budget, or the lease can only end
+  // with 0 swings (measured `ATTACK:e16002`: producer ~37 blocks away, polls=17,
+  // swings=0, reason=no_reacquire). They are not exempt from CAN; they carry a
+  // different budget, which `evaluateHuntAttackCandidate` applies.
+  const isHunt = typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal'
+  if (!isHunt && candidate.meta.targetHostile !== true) return null
 
   const distanceToTarget =
     typeof candidate.meta.distance === 'number'
@@ -9173,6 +9178,7 @@ function evaluateOrdinaryAttackCandidate(
       : distance(context.state.self.position, target)
   const targetFact = reachabilityTargetFor(context.state, candidate)
   const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+  if (isHunt) return evaluateHuntAttackCandidate(candidate, context, distanceToTarget, targetFact, world)
 
   // Contact is already executable: do not let a path probe erase a mob the body
   // can hit right now. WHICH response to take remains Jev's choice.
@@ -9193,6 +9199,69 @@ function evaluateOrdinaryAttackCandidate(
       ? { reachable: true, reason: 'reachable', missingCapabilities: [] }
       : { reachable: false, reason: 'no_path', missingCapabilities: [{ kind: 'open_path' }] }
   return reachabilityRecord(candidate, targetFact, world, result, context)
+}
+
+/**
+ * issue #436 section 9: the KILL reachability contract for a goal-directed hunt.
+ *
+ * A Jev-selected `KILL(E)` / `HUNT_DROP(E,item)` is a bounded Skill, and code owns
+ * CAN. The candidate must not be offered for a producer the body cannot possibly
+ * touch inside the hunt's own budget: that produced the measured 0-swing lease
+ * (`ATTACK:e16002`, body 25.5,54.9,-12.5, last known 60.5,59,-23.5, ~37 blocks,
+ * `polls=17 swings=0 reason=no_reacquire`).
+ *
+ * The three-valued rule is the same one every locomotion candidate uses:
+ *
+ *   contact (<= MELEE_THREAT_REACH)   -> executable. A hostile already on the body
+ *       must ALWAYS produce an ATTACK, whatever any path probe says; WHICH
+ *       response to take stays Jev's.
+ *   inside the hunt approach budget   -> executable. `HUNT_APPROACH_BUDGET` is the
+ *       distance one bounded lease can actually walk, so the kill is groundable by
+ *       construction (the case that already works).
+ *   beyond the budget                 -> offered UNLESS the route probe POSITIVELY
+ *       reports `no_path`. There the body cannot route to the producer at all, so
+ *       the kill is withheld with a typed reason + missing capability instead of
+ *       leasing an attempt that can only end with 0 swings. The ordinary
+ *       MOVE/route candidates keep advancing the body, and the ATTACK is offered
+ *       again as soon as the producer is inside the budget (or a route appears).
+ *       `unknown` is NOT a verdict - exactly like every locomotion candidate, an
+ *       unavailable probe never deletes the only productive action.
+ */
+function evaluateHuntAttackCandidate(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+  distanceToTarget: number,
+  targetFact: ReachabilityTarget,
+  world: ReachabilityWorld,
+): CandidateReachability {
+  if (distanceToTarget <= MELEE_THREAT_REACH || distanceToTarget <= HUNT_APPROACH_BUDGET) {
+    return reachabilityRecord(
+      candidate,
+      targetFact,
+      world,
+      { reachable: true, reason: 'reachable', missingCapabilities: [] },
+      context,
+    )
+  }
+  const probe = context.options.reachability?.attackPathProbe?.(candidate.target as Vec3Json) ?? 'unknown'
+  if (probe !== 'no_path') {
+    // `reachable` = a current route proof; `unknown` = no verdict (an unavailable
+    // probe is not evidence the producer is unreachable).
+    return reachabilityRecord(
+      candidate,
+      targetFact,
+      world,
+      { reachable: true, reason: 'reachable', missingCapabilities: [] },
+      context,
+    )
+  }
+  return reachabilityRecord(
+    candidate,
+    targetFact,
+    world,
+    { reachable: false, reason: 'hunt_approach_budget', missingCapabilities: [{ kind: 'open_path' }] },
+    context,
+  )
 }
 
 function hasVerticalPlan(candidate: Candidate): boolean {

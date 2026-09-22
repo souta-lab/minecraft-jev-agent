@@ -53,6 +53,7 @@
     "env-hazard-test": "bun ./test-env-hazard.mts",
     "waypoint-hazard-guard-test": "bun ./test-waypoint-hazard-guard.mts",
     "skill-commitment-test": "bun test ./test-skill-commitment.mts",
+    "combat-closure-test": "bun test ./test-combat-closure.mts",
     "truth-causal-test": "bun test ./test-truth-causal.mts",
     "minecraft-truth-test": "bun test ./test-minecraft-truth.mts",
     "pillar-search-test": "bun test ./test-pillar-search.mts",

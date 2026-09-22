@@ -295,6 +295,8 @@ interface HuntFixture {
   emitter: EventEmitter
   logger: CapturingLogger
   attacks: () => number
+  /** issue #436 section 9: swings aimed at ONE entity id, so a retarget is provable */
+  attacksOn: (entityId: number) => number
   pearls: () => number
   pearlsAdded: () => number
   goalsSet: () => unknown[]
@@ -308,6 +310,7 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
   let pearls = 0
   let pearlsAdded = 0
   let attacks = 0
+  const attacksByEntity = new Map<number, number>()
   const goals: unknown[] = []
   const primary: Record<string, unknown> = {
     id: 31,
@@ -350,6 +353,7 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
     lookAt: async () => undefined,
     attack: (entity: { id: number }) => {
       attacks += 1
+      attacksByEntity.set(entity.id, (attacksByEntity.get(entity.id) ?? 0) + 1)
       if (entity.id === 31 && (mode === 'retarget' || mode === 'lost')) {
         // The enderman TELEPORTS: the instance leaves the tracked entity set with
         // no death event. In 'retarget' a second enderman is already sensed.
@@ -375,6 +379,7 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
     emitter,
     logger: new CapturingLogger(),
     attacks: () => attacks,
+    attacksOn: (entityId: number) => attacksByEntity.get(entityId) ?? 0,
     pearls: () => pearls,
     pearlsAdded: () => pearlsAdded,
     goalsSet: () => goals,
@@ -475,26 +480,32 @@ addCase('(a2) the hunt candidate is offered for a distant producer too, without 
 // (b) the hunt re-acquires a teleporting target, or ends typed
 // ---------------------------------------------------------------------------
 
-addCase('(b1) a hunt whose target teleports away adopts the sensed enderman and finishes the kill', async () => {
+// (b1) issue #436 section 9: the committed ENTITY ID is the target. A teleport
+// (the id leaves the tracked set) may be recovered only by re-acquiring THAT id;
+// a second enderman standing at 2m is a different causal entity and is NOT
+// adopted, because "zombie A disappears; attack skeleton B instead -> Jev pi".
+addCase('(b1) a teleporting hunt target is re-acquired by IDENTITY, never replaced by a sensed same-mob enderman', async () => {
   const fixture = makeHuntFixture('retarget')
   const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
   return {
     pass:
-      result.status === 'done' &&
-      result.verified === true &&
-      result.entityDefeated === true &&
-      result.itemsGained === 1 &&
-      result.huntEnd === 'killed' &&
-      result.huntReacquired === 1 &&
-      fixture.attacks() === 2 &&
-      fixture.pearlsAdded() === 1 &&
-      fixture.logger.has('HUNT_RETARGET reason=untracked') &&
-      fixture.logger.has('HUNT_END reason=killed') &&
-      !fixture.logger.has('HUNT_TARGET_LOST') &&
-      // the listeners are released; the adopted entity's death was observed
+      result.status === 'failed' &&
+      result.verified === false &&
+      result.entityDefeated === false &&
+      result.itemsGained === 0 &&
+      result.huntEnd === 'target_lost' &&
+      result.combatOutcome === 'TARGET_LOST' &&
+      result.huntReacquired === 0 &&
+      // the sensed enderman e32 was never swung at
+      fixture.attacksOn(32) === 0 &&
+      fixture.pearlsAdded() === 0 &&
+      fixture.logger.has('HUNT_RETARGET') === false &&
+      fixture.logger.has('HUNT_END reason=target_lost') &&
+      fixture.logger.has('COMBAT_OUTCOME outcome=TARGET_LOST') &&
+      // the listeners are released and the pathfinder goal cleared on the way out
       fixture.emitter.listenerCount('entityDead') === 0 &&
-      fixture.emitter.listenerCount('entityHurt') === 0,
-    detail: `status=${result.status} defeated=${result.entityDefeated} gained=${result.itemsGained} huntEnd=${result.huntEnd} reacquired=${result.huntReacquired} swings=${fixture.attacks()} log=${JSON.stringify(fixture.logger.matching('HUNT_'))}`,
+      fixture.goalsSet().at(-1) === null,
+    detail: `status=${result.status} huntEnd=${result.huntEnd} outcome=${result.combatOutcome} attacksOn32=${fixture.attacksOn(32)} log=${JSON.stringify(fixture.logger.matching('HUNT_'))}`,
   }
 })
 
@@ -509,15 +520,17 @@ addCase('(b2) a hunt whose target teleports away with no replacement ends TYPED,
       result.verified === false &&
       result.failure === 'verify_failed' &&
       result.phase === 'target-not-defeated' &&
-      result.huntEnd === 'no_reacquire' &&
+      result.huntEnd === 'target_lost' &&
+      result.combatOutcome === 'TARGET_LOST' &&
       result.entityDefeated === false &&
       result.itemsGained === 0 &&
       lost.length === 1 &&
       result.huntLastKnown !== undefined &&
       result.huntLastKnown.x === 1 &&
       result.huntLastKnown.y === 64 &&
-      fixture.logger.has('HUNT_END reason=no_reacquire') &&
+      fixture.logger.has('HUNT_END reason=target_lost') &&
       fixture.logger.has('HUNT_RETARGET') === false &&
+      fixture.logger.has('COMBAT_OUTCOME outcome=TARGET_LOST') &&
       // the bounded re-approach really happened: a goal toward the last observed
       // cell was issued, and the hunt released the pathfinder when it ended
       nearGoals.length >= 1 &&
@@ -527,27 +540,26 @@ addCase('(b2) a hunt whose target teleports away with no replacement ends TYPED,
   }
 })
 
-addCase('(b3) a tracked producer outside the envelope is replaced by a closer SAME-mob producer', async () => {
-  const fixture = makeHuntFixture('out-of-range')
-  // the closer enderman is already sensed
-  ;(fixture.bot.entities as Record<number, unknown>)[32] = {
-    id: 32,
-    name: 'enderman',
-    kind: 'hostile',
-    height: 2.9,
-    isValid: true,
-    position: new P(2, 64, 0),
-  }
+// (b3) issue #436 section 9: "Do not automatically attack the nearest entity F,
+// even if F has the same mob type". A second enderman at 2m must NOT be adopted
+// when the committed id leaves the tracked set - that would be a new WHICH.
+addCase('(b3) a vanished producer is NOT replaced by a closer SAME-mob producer (§9 no retarget)', async () => {
+  const fixture = makeHuntFixture('retarget')
   const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
   return {
     pass:
-      result.status === 'done' &&
-      result.entityDefeated === true &&
-      result.huntEnd === 'killed' &&
-      result.huntReacquired === 1 &&
-      fixture.logger.has('HUNT_RETARGET reason=out_of_range') &&
-      fixture.pearlsAdded() === 1,
-    detail: `status=${result.status} huntEnd=${result.huntEnd} reacquired=${result.huntReacquired} log=${JSON.stringify(fixture.logger.matching('HUNT_'))}`,
+      result.status === 'failed' &&
+      result.verified === false &&
+      result.entityDefeated === false &&
+      result.huntEnd === 'target_lost' &&
+      result.combatOutcome === 'TARGET_LOST' &&
+      result.huntReacquired === 0 &&
+      fixture.attacksOn(32) === 0 &&
+      fixture.pearlsAdded() === 0 &&
+      fixture.logger.has('HUNT_RETARGET') === false &&
+      fixture.logger.has('COMBAT_OUTCOME outcome=TARGET_LOST') &&
+      fixture.logger.lines.some((line) => line.includes('kill=unproven reason=same_identity_reacquire_exhausted')),
+    detail: `status=${result.status} huntEnd=${result.huntEnd} outcome=${result.combatOutcome} reacquired=${result.huntReacquired} attacksOn32=${fixture.attacksOn(32)} combat=${JSON.stringify(fixture.logger.matching('COMBAT_OUTCOME'))}`,
   }
 })
 
@@ -585,35 +597,36 @@ addCase('(b5) the bounded re-acquisition never adopts a different mob', async ()
   return {
     pass:
       result.status === 'failed' &&
-      result.huntEnd === 'no_reacquire' &&
+      result.huntEnd === 'target_lost' &&
+      result.combatOutcome === 'TARGET_LOST' &&
       fixture.pearlsAdded() === 0 &&
       !fixture.logger.has('HUNT_RETARGET'),
     detail: `status=${result.status} huntEnd=${result.huntEnd} log=${JSON.stringify(fixture.logger.matching('HUNT_'))}`,
   }
 })
 
-// (b6) an ordinary (non-hunt) ATTACK keeps its historical behavior: no
-// re-acquisition of a different instance of the same mob, and a target that
-// vanishes before the first swing is still the typed out_of_reach error.
-addCase('(b6) an ordinary ATTACK target that vanishes keeps the historical out_of_reach', async () => {
+// (b6) an ordinary (non-hunt) ATTACK target that vanishes before the first swing
+// is the typed `target_gone` (§9/§14: the entity identity is gone), never
+// `out_of_reach` - the body was not out of reach, the target stopped existing.
+addCase('(b6) an ordinary ATTACK target that vanishes is the typed target_gone', async () => {
   const fixture = makeHuntFixture('lost')
   const plain: Candidate = { ...huntCandidate(31), meta: { tick: 1, entityId: 31, distance: 1 } }
   const promise = makeExecutor(fixture).claim(plain).completion
-  // the executor re-acquisition query must never run for a plain ATTACK; the
-  // entity was never attacked (the target is gone at the first poll), so this is
-  // the out_of_reach shape the historical battery pins.
-  ;(fixture.bot.entities as Record<number, unknown>)[31] = undefined
+  // the target is gone at the first poll; the same-identity re-acquire runs (a
+  // plain ATTACK has the same §9 identity contract) and ends typed.
   delete (fixture.bot.entities as Record<number, unknown>)[31]
   const result = await promise
   return {
     pass:
       result.status === 'failed' &&
-      result.failure === 'out_of_reach' &&
+      result.failure === 'target_gone' &&
       result.huntEnd === undefined &&
       result.huntReacquired === undefined &&
-      !fixture.logger.has('HUNT_') &&
+      // the honest combat outcome is on the evidence line even though the
+      // historical throw shape carries the failure code on the result
+      fixture.logger.has('COMBAT_OUTCOME outcome=TARGET_LOST') &&
       fixture.attacks() === 0,
-    detail: `status=${result.status} failure=${result.failure} huntEnd=${String(result.huntEnd)} swings=${fixture.attacks()}`,
+    detail: `status=${result.status} failure=${result.failure} combat=${JSON.stringify(fixture.logger.matching('COMBAT_OUTCOME'))} swings=${fixture.attacks()}`,
   }
 })
 

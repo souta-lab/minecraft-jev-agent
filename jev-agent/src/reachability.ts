@@ -34,6 +34,13 @@ export type ReachabilityReason =
   | 'no_standable_approach'
   | 'out_of_reach'
   | 'hazard_blocked'
+  /**
+   * issue #436 section 9: a goal-directed producer/food hunt whose target is
+   * beyond the distance one bounded hunt lease can close AND has no positive route
+   * proof. The kill is not groundable yet; the ordinary route candidates advance
+   * the body and the ATTACK is offered once the target is inside the budget.
+   */
+  | 'hunt_approach_budget'
 
 /** Vertical gap (blocks) a `canDig=false` body change can walk without a plan. */
 export const ASCEND_GAP_LIMIT = 4
