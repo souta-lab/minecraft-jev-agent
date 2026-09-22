@@ -64,6 +64,7 @@ import {
 } from './src/threat.ts'
 import type { SurvivalChoiceLike } from './src/threat.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
+import { guardDecision } from './src/policy.ts'
 import type { AgentSignals, EntityState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
@@ -472,6 +473,37 @@ addCase('(ii3) hold_alternatives are exposed as the policy boundary, and code em
   )
   const pass = arms.length === 2 && arms.every((candidate) => candidate.meta.weaponArm === true)
   return { pass, detail: `arms=[${arms.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(ii4) the GUARD admits the arm candidate on the hand slot and still denies a foreign slot', () => {
+  // The candidate cannot bypass the guard: `guardEquip` is the same gate every
+  // other equip passes, and it must accept `hand` while refusing an unknown slot.
+  const state = noteThreat(measuredBody())
+  const arm = offerFor(state).find((candidate) => candidate.id === 'EQUIP:hand:diamond_sword')
+  if (arm === undefined) return { pass: false, detail: 'the arm candidate was not offered' }
+  const context = {
+    phase: 'decision' as const,
+    candidateIds: new Set([arm.id]),
+    inFlight: null,
+    reach: 4,
+    maxCandidateAgeTicks: 40,
+  }
+  const admitted = guardDecision(arm.id, [arm], state, context)
+  const foreign = {
+    ...arm,
+    id: 'EQUIP:back:diamond_sword',
+    meta: { ...arm.meta, slot: 'back' },
+  }
+  const denied = guardDecision(foreign.id, [foreign], state, { ...context, candidateIds: new Set([foreign.id]) })
+  const pass =
+    admitted.ok === true &&
+    denied.ok === false &&
+    denied.code === 'TARGET_GONE' &&
+    denied.reason.includes('no valid equip slot')
+  return {
+    pass,
+    detail: `admitted=${admitted.ok} foreign=${denied.ok ? 'accepted' : `${denied.code}: ${denied.reason}`}`,
+  }
 })
 
 // ---------------------------------------------------------------------------
