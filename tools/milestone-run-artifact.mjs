@@ -506,6 +506,11 @@ export function parseReloadLine(line, lineIndex = null) {
     ok,
     trigger: stringOrNull(kv.trigger),
     hash,
+    // The host names the git commit the bundle was built from (`sourceSha=` on BUILD/RELOAD).
+    // The bundle hash alone cannot attest WHICH COMMIT a hot-reloaded run is executing, which is
+    // exactly the `exact source SHA` the acceptance asks for; older markers omit it and this is
+    // then null rather than a guess.
+    sourceSha: stringOrNull(kv.sourceSha),
     generationId: stringOrNull(kv.id),
     generations: numberOrNull(kv.generations),
     durationMs: numberOrNull(kv.ms),
@@ -637,6 +642,7 @@ function reloadView(marker, count) {
   if (marker === null) return null
   return {
     hash: marker.hash,
+    sourceSha: marker.sourceSha ?? null,
     trigger: marker.trigger,
     atMs: marker.atMs,
     generationId: marker.generationId,
@@ -671,6 +677,7 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
   const bootSourceSha = boot?.sourceSha ?? null
   const latestSourceReload = window.latestSourceReload ?? null
   const reloadHash = stringOrNull(latestSourceReload?.hash)
+  const reloadSourceSha = stringOrNull(latestSourceReload?.sourceSha)
   const effectiveSourceSha = reloadHash ?? bootSourceSha ?? null
   const provenance = reloadHash !== null ? 'reload' : bootSourceSha !== null ? 'boot' : 'unknown'
   const provenanceBasis =
