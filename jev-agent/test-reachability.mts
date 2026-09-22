@@ -1784,5 +1784,198 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   )
 }
 
+// (17) THE LIVE M3 SHAPE: a body FAR above a target that requires descending ---
+//
+// Live run-muc3qbug-18vg3 (main 35dfd29, m3-live): the body stood at
+// (119.7,75,-14.5) with the lit Nether gate at (27,67,9) - ~96 blocks away and
+// 8 blocks BELOW - while `option=front_enter_nether`. `state.descent` is built
+// from the body's OWN four cardinal cells, so a surface cell with no safe
+// dig-down step made the gate `reachable=false reason=needs_descend
+// missing=["descend_plan"]`, and because the fingerprint does not move with the
+// body the same proof then held forever (`suppressed=true`). Every offered
+// MOVE/MINE stayed local, so the body mined leaves under the enter-nether
+// option instead of walking to its own gate.
+//
+// The general rule this fixture pins: a vertical gap is a LOCAL affordance only
+// while the body is at the destination column or cannot travel at all. A body
+// with a walkable frontier gets the far-below target as a travel leg; a descent
+// that is genuinely impossible stays a TYPED refusal naming the missing
+// precondition and the cell.
+{
+  const FEET: Vec3Json = { x: 119.7, y: 75, z: -14.5 }
+  const GATE: Vec3Json = { x: 27, y: 67, z: 9 }
+  const FRONTIER: Vec3Json[] = [
+    FEET,
+    { x: 118, y: 75, z: -14 },
+    { x: 110, y: 74, z: -12 },
+    { x: 100, y: 73, z: -10 },
+  ]
+  const gateMove = (target: Vec3Json): Candidate => ({
+    id: `MOVE:${blockId('p', target)}`,
+    kind: 'MOVE',
+    label: `walk to the lit gate at (${target.x},${target.y},${target.z})`,
+    targetName: null,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { tick: 7, x: target.x, y: target.y, z: target.z },
+  })
+  // Every cardinal step is refused by the ABSENT LANDING SUPPORT: the canopy
+  // shape the live sensor reported (the body stands on a leaf/ledge cell whose
+  // neighbours have no solid support one block down).
+  const noSupportDown = (dir: DescentOption['dir'], dx: number, dz: number): DescentOption => ({
+    dir,
+    mode: 'down',
+    dx,
+    dz,
+    step: { x: Math.floor(FEET.x) + dx, y: 74, z: Math.floor(FEET.z) + dz },
+    wall: { x: Math.floor(FEET.x) + dx, y: 75, z: Math.floor(FEET.z) + dz },
+    head: { x: Math.floor(FEET.x) + dx, y: 76, z: Math.floor(FEET.z) + dz },
+    floor: { x: Math.floor(FEET.x) + dx, y: 74, z: Math.floor(FEET.z) + dz },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: false,
+    reason: 'no solid support at (118,73,-14)',
+    refusal: 'no_support',
+    digName: 'oak_leaves',
+    digHarvestTool: null,
+    digHarvestTier: null,
+    diggable: true,
+  })
+  const pool = [noSupportDown('E', 1, 0), noSupportDown('W', -1, 0), noSupportDown('N', 0, -1)]
+
+  // (17a) the live shape: far below + a walkable frontier -> OFFERED, never
+  // withheld, and no suppression proof is recorded for the unchanged shape.
+  {
+    const memory = new StateFingerprintMemory({ maxEntries: 16 })
+    const state = worldState({ position: FEET, standable: FRONTIER, descent: pool })
+    const first = applyReachabilityGate([gateMove(GATE)], state, optionsWith(memory))
+    const second = applyReachabilityGate([gateMove(GATE)], state, optionsWith(memory))
+    const id = gateMove(GATE).id
+    const presented = first.candidates.some((candidate) => candidate.id === id)
+    check(
+      '(17a) the live shape: a target 8 blocks below and ~96 blocks away is PRESENTED as a travel leg',
+      presented &&
+        first.withheld.length === 0 &&
+        second.candidates.some((candidate) => candidate.id === id) &&
+        second.withheld.length === 0,
+      `presented=${presented} withheld=[${first.withheld.map((entry) => `${entry.candidate.id}:${entry.result.reason}`).join(',')}] second=${second.withheld.length}`,
+    )
+    check(
+      '(17a) the unchanged far-descent shape records NO suppression proof',
+      !memory.check(id, 'any').known && memory.size() === 0,
+      `known=${memory.check(id, 'any').known} size=${memory.size()}`,
+    )
+  }
+
+  // (17b) the SAME target from a body confined to its own column: the local
+  // descent pool IS the binding affordance, so the refusal stands - and it now
+  // names the mechanical precondition and the cell instead of a bare token.
+  {
+    const state = worldState({ position: FEET, standable: [FEET], descent: pool })
+    const grounded = applyReachabilityGate([gateMove(GATE)], state, optionsWith(null))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id === gateMove(GATE).id)
+    const keys = withheld?.result.missingCapabilities.map(capabilityKey) ?? []
+    check(
+      '(17b) a stranded body above a far target keeps needs_descend with a TYPED missing precondition',
+      withheld !== undefined &&
+        withheld.result.reason === 'needs_descend' &&
+        keys.length === 1 &&
+        keys[0] === `descend_plan:no_support@${Math.floor(FEET.x) + 1},74,${Math.floor(FEET.z)}:oak_leaves`,
+      `reason=${withheld?.result.reason ?? 'none'} missing=[${keys.join(',')}]`,
+    )
+    check(
+      '(17b) the refusal is bounded and named, and the withheld record still carries the body change to make',
+      withheld?.suppressed === false &&
+        grounded.withheld.length === 1 &&
+        withheld?.result.missingCapabilities[0]?.kind === 'descend_plan',
+      `suppressed=${withheld?.suppressed ?? 'none'} withheld=${grounded.withheld.length}`,
+    )
+  }
+
+  // (17c) a genuinely impossible target below: the hazard fact refuses it
+  // truthfully, at any range.
+  {
+    const state = worldState({
+      position: FEET,
+      standable: FRONTIER,
+      descent: pool,
+      blocks: [
+        {
+          kind: 'hazard',
+          name: 'lava',
+          position: { x: 27, y: 68, z: 9 },
+          distance: 96,
+          diggable: false,
+          inReach: false,
+          hasAdjacentStandable: false,
+          adjacentStandable: null,
+          yield: null,
+          harvestTool: null,
+          harvestTier: null,
+        },
+      ],
+    })
+    const grounded = applyReachabilityGate([gateMove(GATE)], state, optionsWith(null))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id === gateMove(GATE).id)
+    check(
+      '(17c) a target below with lava at it is hazard_blocked, not offered and not silently dropped',
+      withheld !== undefined &&
+        withheld.result.reason === 'hazard_blocked' &&
+        !grounded.candidates.some((candidate) => candidate.id === gateMove(GATE).id),
+      `reason=${withheld?.result.reason ?? 'none'} offered=${grounded.candidates.map((candidate) => candidate.id).join(',')}`,
+    )
+  }
+
+  // (17d) bedrock under the body: the typed refusal names `unbreakable` and the
+  // block, so the dead end is actionable (no tool can fix bedrock).
+  {
+    const bedrock = { ...noSupportDown('E', 1, 0), safe: false, reason: 'bedrock floor is not breakable', refusal: 'unbreakable' as const, digName: 'bedrock', diggable: false }
+    const state = worldState({ position: FEET, standable: [FEET], descent: [bedrock] })
+    const grounded = applyReachabilityGate([gateMove(GATE)], state, optionsWith(null))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id === gateMove(GATE).id)
+    const keys = withheld?.result.missingCapabilities.map(capabilityKey) ?? []
+    check(
+      '(17d) a bedrock descent refusal names unbreakable + the block + the cell',
+      keys[0] === `descend_plan:unbreakable@${Math.floor(FEET.x) + 1},74,${Math.floor(FEET.z)}:bedrock`,
+      `missing=[${keys.join(',')}]`,
+    )
+  }
+
+  // (17e) the substitute pool: when a below target IS withheld, the acquisition
+  // pass must offer a candidate that ADVANCES toward that target (travel to the
+  // descent cell), not only local work.
+  {
+    const NEAR_GATE: Vec3Json = { x: 0, y: 30, z: 10 }
+    const BODY: Vec3Json = { x: 0, y: 60, z: 0 }
+    const FRONTIER_NEAR: Vec3Json[] = [BODY, { x: 0, y: 60, z: 3 }, { x: 0, y: 60, z: 6 }]
+    const state = worldState({ position: BODY, standable: FRONTIER_NEAR, descent: [] })
+    const grounded = applyReachabilityGate([gateMove(NEAR_GATE)], state, optionsWith(null))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id === gateMove(NEAR_GATE).id)
+    const approach = grounded.candidates.find(
+      (candidate) => candidate.meta.verticalRecovery === 'descend_approach',
+    )
+    const advances =
+      approach?.target !== null &&
+      approach?.target !== undefined &&
+      Math.hypot(approach.target.x - NEAR_GATE.x, approach.target.y - NEAR_GATE.y, approach.target.z - NEAR_GATE.z) <=
+        Math.hypot(BODY.x - NEAR_GATE.x, BODY.y - NEAR_GATE.y, BODY.z - NEAR_GATE.z) - 1
+    check(
+      '(17e) a withheld descent target yields a travel leg that advances toward it',
+      withheld?.result.reason === 'needs_descend' &&
+        approach !== undefined &&
+        approach.kind === 'MOVE' &&
+        approach.meta.missingCapability === 'descend_plan' &&
+        advances === true,
+      `withheld=${withheld?.result.reason ?? 'none'} approach=${approach === undefined ? 'none' : `${approach.id}->${approach.target?.x},${approach.target?.y},${approach.target?.z}`}`,
+    )
+  }
+}
+
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)
 if (failures > 0) process.exit(1)
