@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer } from './candidates.ts'
-import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer, isNotExecutableHereKeepKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
@@ -1562,6 +1562,9 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'NO_PRODUCTIVE_HEAD_BOUND',
   'NO_PRODUCTIVE_HEAD_WINDOW',
   'ROW_NOT_EXECUTABLE_HERE_REPEATS',
+  'ROW_NOT_EXECUTABLE_HERE_BINDING',
+  'ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED',
+  'ROW_NOT_EXECUTABLE_HERE_INTERRUPT',
   'PLAN_HEAD_REPLACEMENT_APPLIED',
 ])
 
@@ -2054,6 +2057,14 @@ export class JevController {
    * this; every other request leaves the conservative rule untouched.
    */
   private headAnswerWarrant: HeadAnswerWarrant | null = null
+  /**
+   * #plan-reconciliation: the queue's proven "this head cannot execute in the live
+   * dimension" fact, remembered from `reconcileHeadDimension` so the OFFER can be
+   * bound to it in the same tick. Null whenever the head can run here.
+   */
+  private notExecutableHereBinding: NotExecutableHereBinding | null = null
+  /** one interrupt per offending in-flight action, so the cancel cannot loop. */
+  private notExecutableInterruptedActionId: string | null = null
   /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
@@ -3128,6 +3139,10 @@ export class JevController {
       // names the capability gap when code grounds no attack and no
       // keep-distance route, which is mirrored as `THREAT_NO_ESCAPE` - the work
       // set is never silently handed back while a hostile is on the body.
+      // #plan-reconciliation: the offer BEFORE the safety envelope, so the
+      // not-executable-here binding can tell whether a safety envelope is active
+      // (its escape routes must never be withdrawn by the binding below).
+      const rawOfferBeforeSafety = candidates
       const threatOffer = applyGroundedThreatRestriction(state, candidates, grounded.withheld)
       candidates = threatOffer.candidates
       this.logThreatOccluded(threatOffer)
@@ -3164,6 +3179,84 @@ export class JevController {
       // Drowning is excluded: `restrictCandidatesDuringSubmersion` above owns
       // that question.
       candidates = restrictCandidatesDuringEnvHazard(state, candidates)
+      // #plan-reconciliation: the queue PROVED this head cannot run in the live
+      // dimension (`ROW_NOT_EXECUTABLE_HERE`), and the escalation that replaces it
+      // is in flight. Measured live (`run-muctsqt6-27ocr`): the offer still carried
+      // the row's own descent, so the body kept DESCENDING toward an overworld
+      // `levelAtMost y32` predicate while standing in the Nether at hp 10 - the
+      // safe verdict and the physical actions disagreed toward the lava. The proof
+      // is now binding on the offer: only control/self-care kinds stay, unless a
+      // safety envelope is active (which always outranks this binding).
+      const notExecutableOffer = restrictCandidatesNotExecutableHere(
+        state,
+        candidates,
+        this.notExecutableHereBinding,
+        rawOfferBeforeSafety,
+      )
+      if (notExecutableOffer.bound) {
+        this.logger.warn(
+          'agent',
+          formatNotExecutableHereBinding(
+            this.notExecutableHereBinding as NotExecutableHereBinding,
+            notExecutableOffer,
+            this.queue.current?.id ?? 'none',
+          ),
+          {
+            goalId: this.notExecutableHereBinding?.goalId ?? null,
+            goalKey: this.notExecutableHereBinding?.goalKey ?? null,
+            declaredDimension: this.notExecutableHereBinding?.declaredDimension ?? null,
+            liveDimension: this.notExecutableHereBinding?.liveDimension ?? null,
+            queueReason: this.notExecutableHereBinding?.reason ?? null,
+            withheld: notExecutableOffer.withheld.map((candidate) => candidate.id),
+            kept: notExecutableOffer.candidates.map((candidate) => candidate.kind),
+          },
+          this.tickCounter,
+        )
+      } else if (this.notExecutableHereBinding !== null && notExecutableOffer.reason === 'safety_envelope_active') {
+        this.logger.info(
+          'agent',
+          `ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED goalId=${this.notExecutableHereBinding.goalId} reason=safety_envelope_active`,
+          {
+            goalId: this.notExecutableHereBinding.goalId,
+            goalKey: this.notExecutableHereBinding.goalKey,
+            reason: notExecutableOffer.reason,
+          },
+          this.tickCounter,
+        )
+      }
+      candidates = notExecutableOffer.candidates
+      // The body must also STOP working the row that cannot run here. An action
+      // already in flight would otherwise keep descending while the offer is
+      // correct; cancel it once, with typed evidence, unless it is a control or
+      // self-care action.
+      if (notExecutableOffer.bound) {
+        const running = this.executor.current
+        if (
+          running !== null &&
+          running.status === 'running' &&
+          !isNotExecutableHereKeepKind(running.kind) &&
+          running.id !== this.notExecutableInterruptedActionId &&
+          this.notExecutableHereBinding !== null
+        ) {
+          const binding = this.notExecutableHereBinding
+          if (this.executor.cancelCurrent(`row not executable here: ${binding.goalKey} declared=${binding.declaredDimension ?? 'none'} live=${binding.liveDimension ?? 'unknown'}`)) {
+            this.notExecutableInterruptedActionId = running.id
+            this.logger.warn(
+              'agent',
+              formatNotExecutableHereInterrupt(binding, running.id, running.kind),
+              {
+                actionId: running.id,
+                actionKind: running.kind,
+                goalId: binding.goalId,
+                goalKey: binding.goalKey,
+                declaredDimension: binding.declaredDimension,
+                liveDimension: binding.liveDimension,
+              },
+              this.tickCounter,
+            )
+          }
+        }
+      }
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -4151,9 +4244,25 @@ export class JevController {
    * `CANDIDATE_STARVATION`/ascent loop.
    */
   private reconcileHeadDimension(): void {
-    if (this.queue.isEmpty) return
+    if (this.queue.isEmpty) {
+      this.notExecutableHereBinding = null
+      return
+    }
     const live = this.bot.game?.dimension ?? null
     const result = this.queue.reconcileNotExecutableHead({ liveDimension: live })
+    // Only an ESCALATE leaves the not-executable row holding the plan (a `defer`
+    // has already moved it behind a row that can run here), so only that state binds
+    // the offer.
+    this.notExecutableHereBinding =
+      result.action === 'escalate' && result.goalId !== null
+        ? {
+            goalId: result.goalId,
+            goalKey: result.goalKey,
+            declaredDimension: result.declaredDimension,
+            liveDimension: result.liveDimension,
+            reason: result.reason,
+          }
+        : null
     if (result.action === 'hold') return
     if (result.action === 'defer') {
       this.resetNotExecutableDedupe()
