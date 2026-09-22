@@ -2753,6 +2753,25 @@ async function runMeasuredEntryRoute(
     live !== null && live.meta[BRIDGE_META] === true && live.meta.bridgeSpan === 2,
     `presented=${live !== null} bridge=${String(live?.meta[BRIDGE_META])} span=${String(live?.meta.bridgeSpan)}`,
   )
+  // ...and the GUARD accepts it: the crossing is the entry's own route, so the
+  // horizontal path probe is skipped for exactly the reason a MOVE bridge skips it
+  // (`policy.ts#carriesOwnRoute`), while every hazard/void/in-flight check still runs.
+  const verdict =
+    live === null
+      ? null
+      : guardCandidate(live, state, {
+          phase: 'decision',
+          candidateIds: new Set([live.id]),
+          inFlight: null,
+          reach: 4.5,
+          maxCandidateAgeTicks: 200,
+          canComputePath: () => true,
+        })
+  check(
+    '(s-2) the guard accepts the crossing-only entry (its own route), so the selected leg really leases',
+    verdict !== null && verdict.ok === true,
+    `ok=${String(verdict?.ok)} reason=${verdict === null || verdict.ok ? 'none' : verdict.reason}`,
+  )
 
   // (s-3) EXECUTION OF THE WHOLE MEASURED TRIAL, one bounded chunk per decision,
   // each decision re-sensed at the body's current cell (the live loop's own shape):
