@@ -1455,6 +1455,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   BETA_ABANDON_DEFERRED_MARKER,
   BETA_ABANDON_RELEASED_MARKER,
   'BETA_DEFERRED',
+  // Issue #436 section 17: three evidence lines were EMITTED but never mirrored, so the live
+  // sink dropped them and a reviewer saw only the downstream outcome (`failure=effect_envelope_violation`
+  // without WHICH effect or WHY). The envelope refusal is the fail-closed boundary itself, and the
+  // invalidation/selection lines are the rest of the commitment lifecycle; all three belong in the
+  // live record.
+  'SKILL_ENVELOPE_VIOLATION',
+  'SKILL_INVALIDATED',
+  'SKILL_SELECTED',
 ])
 
 /**
