@@ -1,41 +1,35 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-21",
+  "updatedAt": "2026-09-23T16:50:00Z",
   "dimensions": {
-    "policy": ["missing", "defined"],
-    "implementation": ["none", "partial", "landed"],
-    "verification": ["none", "offline", "integration", "live"],
-    "observation": ["not-run", "pass", "fail", "unknown"],
-    "compliance": ["pass", "fail", "unknown"]
+    "policy": [
+      "missing",
+      "defined"
+    ],
+    "implementation": [
+      "none",
+      "partial",
+      "landed"
+    ],
+    "verification": [
+      "none",
+      "offline",
+      "integration",
+      "live"
+    ],
+    "observation": [
+      "not-run",
+      "pass",
+      "fail",
+      "unknown"
+    ],
+    "compliance": [
+      "pass",
+      "fail",
+      "unknown"
+    ]
   },
   "issues": {
-    "80": {
-      "acceptanceClass": "portal-build-live",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "live",
-      "observation": "unknown",
-      "compliance": "unknown",
-      "note": "Typed build/light/verify portal mechanics are landed. Recent exact-RC runs advanced into frame placement and exposed executor geometry/approach defects; current main includes the latest packet-waypoint normalization after RC 0485a04 failed before placement. No PASS is carried across source changes: 3c83c69 still needs a fresh run-scoped portal gate."
-    },
-    "226": {
-      "acceptanceClass": "architecture-authority-implementation",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "offline",
-      "observation": "unknown",
-      "compliance": "unknown",
-      "note": "Static re-audit on current main no longer reproduces the old bypass list. Planner defaults to model authority; deterministic is explicit-only; invalid mode throws; capability-gap recovery is an offered grounded option; queue-empty no longer bypasses System2; model failures fail loud; the real-Jev anti-flap path holds only a Jev-selected candidate. Remaining acceptance is fresh live fail-loud/no-hidden-fallback evidence."
-    },
-    "221": {
-      "acceptanceClass": "architecture-authority-live",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "live",
-      "observation": "unknown",
-      "compliance": "unknown",
-      "note": "The historical fallback-only run remains a valid failure for its old RC, not for current main. The authority overhaul and fail-loud wiring have landed, and recent live work reports Mercury/System2 choices at later M2/portal stages. A current run-scoped proof still must show effective non-fallback Jev policy plus real invocation counters and no hidden semantic substitution before this issue can close."
-    },
     "11": {
       "acceptanceClass": "architecture-authority",
       "policy": "defined",
@@ -43,124 +37,88 @@
       "verification": "live",
       "observation": "unknown",
       "compliance": "unknown",
-      "note": "Current main has the #11 authority facade: System2 owns WHAT, Jev pi owns WHICH, Jev beta owns Option termination, and code retains truth/safety/mechanics/verification. The facade now disables most legacy prereq/retry/wedge semantic selectors on the real-Jev path, and anti-flap no longer chooses by cost. Continue live-path audit; do not treat historical fallback-only failures as current compliance failures."
-    },
-    "128": {
-      "acceptanceClass": "runtime-config-authority",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "A typed/versioned effective authority config is still absent. Build it after the current live authority proof so requested/resolved modes and artifact namespaces cannot drift silently."
-    },
-    "107": {
-      "acceptanceClass": "architecture-authority-map",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Rebuild the authority map from the corrected runtime after current live authority evidence rather than documenting historical deterministic takeover."
-    },
-    "121": {
-      "acceptanceClass": "architecture-observability",
-      "policy": "defined",
-      "implementation": "partial",
-      "verification": "offline",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Truth/progress classification remains useful and verified-success boundaries are stronger. Any remaining taxonomy work must stay descriptive and must not choose semantic actions."
-    },
-    "56": {
-      "acceptanceClass": "architecture-dataflow",
-      "policy": "defined",
-      "implementation": "partial",
-      "verification": "offline",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "CurrentOptionContext reaches the Jev payload. Any remaining Option-to-Skill authority work should restart from current main after live authority proof; stale PR #173 remains superseded."
-    },
-    "3": {
-      "acceptanceClass": "resident-restart-live",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Ledger/bootstrap fixes have landed; only fresh current-authority restart evidence should trigger more implementation."
-    },
-    "13": {
-      "acceptanceClass": "resident-soak",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Lifecycle/resource cleanup fixtures exist; changed-hash soak evidence remains pending."
-    },
-    "136": {
-      "acceptanceClass": "architecture-surface-contract",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "offline",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Code-owned vertical recovery truth fix is landed/offline-verified; live revalidation waits for a current run that exercises the boundary."
-    },
-    "130": {
-      "acceptanceClass": "research",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Research only. Do not start factorized/multi-head policy work before the simple real-Jev authority path is proven live."
-    },
-    "295": {
-      "acceptanceClass": "audit-correctness",
-      "policy": "defined",
-      "implementation": "partial",
-      "verification": "offline",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "Structural/wiring regression tests still inspect only the monolithic controller.ts while the runtime is now the controller.ts facade plus controller-legacy.ts, so several audits are known-red. PR #298 (undrafted 2026-09-21) realigns them and asserts the current defaults (Option compiler ON, beta authority ON). Re-verify after #298 lands; it must still detect a deliberately removed legacy call site and a deliberately removed facade strangler."
-    },
-    "296": {
-      "acceptanceClass": "governance-derived-state",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "CURRENT-STATUS.md is still a hand-carried snapshot reporting a stale base SHA and a stale open-PR list. GitHub branch topology changed on 2026-09-21 (75 merged-PR head branches pruned; delete_branch_on_merge enabled), so derived state must be regenerated atomically with source SHA, generatedAt, live open-PR/issue lists, and frozen historical snapshots explicitly labeled historical."
-    },
-    "297": {
-      "acceptanceClass": "architecture-authority",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "Audit of current main still finds (1) groundMercuryPlan rewriting the model-selected WHAT after selection and (2) MercuryCallRecord outcome 'fallback' written immediately before a fatal model failure. Both need a truthful representation: code-owned initiation predicates that preserve the selected Option identity, and a terminal fatal/model_failure outcome with corrected comments."
-    },
-    "299": {
-      "acceptanceClass": "ci-infrastructure",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "repo-invariants jobs conclude failure with steps=0 because GitHub Actions never dispatches a runner (account payment/spending-limit annotation), not because of repository code; the root cause and evidence were recorded as an issue comment on 2026-09-21. Required: an INFRA_UNKNOWN classification so acceptance tooling never treats a never-started job as a code FAIL, and no reliance on Actions as an acceptance gate until billing is restored."
+      "note": "Architecture constitution (Grounded Option OS). Absorbs the naming (#419), Jev-contract (#423), governance-gate (#424), authority-map (#107), taxonomy (#121), config (#128), status (#296), docs (#422), repo-hygiene (#420), workspace/repo boundary (#372/#373), research baselines (#130/#304/#306/#363) rows. Live evidence exists for parts (nether_reached PASS, model authority VERIFIED); the umbrella is open because the migrations it names are not finished."
     },
     "308": {
       "acceptanceClass": "architecture-convergence",
       "policy": "defined",
       "implementation": "partial",
       "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Grounded Option Runtime as the canonical production state. Kept as the convergence umbrella; its first slice was the #309 PR series."
+    },
+    "365": {
+      "acceptanceClass": "generalization-gate",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Benchmark-independent objectives: the home for the calibration/evaluation residual that #423 could not close. Nothing implemented yet."
+    },
+    "366": {
+      "acceptanceClass": "audit-correctness",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Repo-wide audit umbrella + the HOST lifecycle/snapshot/world-identity/CI-tooling checklist. IMPORTANT: the 8 P0 rows (#378 lock race, #379 revision-before-durable, #380 saveState-before-lock, #381 log-only fatal handlers, #383 missing attack/stopDigging capabilities, #384 no server.close, #388 rejected snapshot overwritten, #393 late generation events) were CONSOLIDATED, not fixed - do not read the closures as fixes. Reopened on 2026-09-23 because it had been auto-absorbed into its own children."
+    },
+    "401": {
+      "acceptanceClass": "state-authority-p0",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "P0: superseded generations can still write class-A world memory (applyWorldMemoryDelta checks only the world key). Kept STANDALONE deliberately - a wrong or absent fence here silently corrupts durable memory."
+    },
+    "415": {
+      "acceptanceClass": "human-intent-authority-p0",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "P0: any server player can inject protected WHAT or clear goals (generation-entry authorizes by lease+bot name only, goalQueue clearHumanInterrupts wipes every human row). Kept STANDALONE - no other owner."
+    },
+    "416": {
+      "acceptanceClass": "behavior-quality-gate",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Executable behaviour gate (no recurrent wandering / redundant stations / purposeless dig-move). Absorbs #418 (typed causal purpose). Four families are currently pinned only by separate fixtures."
+    },
+    "421": {
+      "acceptanceClass": "m3-execution-focus",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "live",
       "observation": "unknown",
       "compliance": "unknown",
-      "note": "Target production state: one Grounded Option Runtime with one canonical semantic state and one authority owner per decision class. PR #309 (System2 causal authority) is the first integrated slice; retiring the remaining duplicated semantic representations (RUNGS/PlanOption/System2Plan/PlannedGoal) is not yet scheduled."
+      "note": "M3 critical path + WIP cap. Current run-scoped state: nether_reached PASS, model authority VERIFIED, ender_eye 0/12 -> the ONLY remaining stage is ender_eye_ready. Absorbs the M3-critical rows (#80 M2 verdict, #13 reload soak, #39 casts, #41 capability graph, #56 Option->Skill, #327 escalation, #353 vertical choice, #360 stall bound, #408-#411, #417) plus the #226/#377 residuals."
+    },
+    "436": {
+      "acceptanceClass": "skill-closure",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Deterministic Skill closure after Jev selection. Landed: Phase 1 (97a651d: SkillCommitment/CausalTargetIdentity/EffectEnvelope + fail-closed assertEffect + SKILL_* evidence), the combat half (bdac3d6/418c640: exact-identity KILL, honest outcomes, ATTACK offered as entity truth), never-actionless survival (74f3cd8) and dig legality. Open for Phase 2/3 (HOLD_ITEM/GUI/PICKUP, WALK_TO - the walk half landed separately) and Phase 6 reflex classification. Absorbs the harness migrations #438 (Jev) and #439 (System2) as named phases, plus #297's System2 failure-algebra residual."
+    },
+    "440": {
+      "acceptanceClass": "movement-os",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "live",
+      "observation": "pass",
+      "compliance": "unknown",
+      "note": "Generalize MOVE into scaffold-capable locomotion. LIVE-VERIFIED: the bridge crossed a real gap with BRIDGE_END placed=3 verified=true reason=reached, and its refusals are typed (no_verified_landing / budget). The walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival vs 12 decisions and never verified before). Open for the remaining movement frontier."
     }
   }
 }
