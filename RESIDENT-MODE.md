@@ -195,7 +195,10 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
 - 主: Unixドメインソケット `data/resident/control.sock`（0600＝権限が認証、双方向push、`{id,cmd,args}`→`{id,ok,data}`）
 - 従: `control/inbox.jsonl` 追記（結果は `control/outbox.jsonl`、`id` で重複排除）
 - コマンド（`agent-runner.mts` のハンドラに実装されている実集合）:
-  - 照会のみ: `report` / `status`（同義、全 state を返す） / `goal` / `milestone` / `acceptance`
+  - 照会のみ: `report` / `status`（同義、全 state を返す） / `goal` / `milestone`
+  - 照会のみ（ただし副作用あり）: `acceptance` は `writeAcceptance()` を呼び、run-scoped な
+    `data/resident/acceptance-<runId>.json` を更新してから path を返す（run 状態・lease・generation は変えない）。
+    この record は boot では書かれず、reload commit / `freeze` / `resume` / `reground` / この query / 正常 shutdown で書かれる
   - 実行: `reload` / `freeze` / `resume` / `gc` / `leakcheck` / `simdeath`（既定 soft。`simdeath --hard` または `{hard:true}` で破壊的）
   - 破壊的（使わない）: `worldreset`（worldEpoch が変わる。active generation を quiesce/dispose し、ledger を archive して新しい memory namespace で fresh generation を開始する operator assertion） / `quit`
   - 注意: `goal` / `milestone` は値を返すだけで注入できない。未実装の `mode` / `retry` は**コマンドではない**（mode 切替はフルリロードで行う）

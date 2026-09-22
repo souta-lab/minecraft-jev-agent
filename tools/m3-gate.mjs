@@ -361,6 +361,10 @@ export async function runM3Gate({
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   json = false,
+  // ADDITIVE (schema-neutral): see tools/m2-gate.mjs `onResult`. The structured
+  // verdict is handed to an assembler without changing the printed lines or the
+  // returned exit code.
+  onResult = null,
 } = {}) {
   const stamp = now().toISOString()
   const resolveEvidence = readEvidence ?? ((runId) => readRunScopedM2Evidence(runId, { logPath, snapshotDir }))
@@ -414,6 +418,7 @@ export async function runM3Gate({
         })
       : null
   const result = evaluateM3Gate({ expectedRunId, evidence, policy, milestonePredicates, sourceSha })
+  if (typeof onResult === 'function') onResult(result)
 
   if (json) {
     write(

@@ -485,8 +485,9 @@ above a threshold requests a System2 replan. See `RESIDENT-MODE.md` section 14.
 - One-shot health dashboard: `bun tools/buddy-status.mjs` (`--json` for machine-readable). It prints host count,
   control-socket state, churn counters, listener leak, world memory, acceptance/freeze artifact paths, and marker counts.
 - Control socket `buddy-driver/data/resident/control.sock` (0600, JSON lines):
-  query-only `report | status | goal | milestone | acceptance`; actions `freeze | resume | reload | gc | leakcheck |
-  simdeath | quit`. Goal/milestone CANNOT be injected externally: the only way to unstick the agent is a code fix.
+  query-only `report | status | goal | milestone`; `acceptance` is a query that also REFRESHES the run-scoped
+  `data/resident/acceptance-<runId>.json` via `acceptanceProvenance`/`writeAcceptance()` (no run state, lease or
+  generation change); actions `freeze | resume | reload | gc | leakcheck | simdeath | quit`. Goal/milestone CANNOT be injected externally: the only way to unstick the agent is a code fix.
   `worldreset` is destructive and is not used while unattended.
 - Server: Leaf 1.21.11 at 127.0.0.1:25565, offline, peaceful. Java here is 21.0.13-ea, so the server must be started with
   `-DPaper.IgnoreJavaVersion=true`. `ops.json` now contains `s0u7a` at level 4 (RCON is enabled in properties but Leaf

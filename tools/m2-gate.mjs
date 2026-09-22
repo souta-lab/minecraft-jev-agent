@@ -711,6 +711,12 @@ export async function runM2Gate({
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   json = false,
+  // ADDITIVE (schema-neutral): an assembler such as tools/milestone-run-artifact.mjs
+  // needs the STRUCTURED verdict (conditions + facts) the gate already computed, not
+  // a regex over its human lines. Returning it here never changes the verdict, the
+  // printed lines, or the exit code - `runM2Gate` still returns the numeric code so
+  // the CLI contract (`process.exitCode = await runM2Gate(...)`) is unchanged.
+  onResult = null,
 } = {}) {
   const stamp = now().toISOString()
   const resolveEvidence = readEvidence ?? ((runId) => readRunScopedM2Evidence(runId, { logPath, snapshotDir }))
@@ -747,6 +753,7 @@ export async function runM2Gate({
       })
     : null
   const result = evaluateM2Gate({ expectedRunId, evidence, policy })
+  if (typeof onResult === 'function') onResult(result)
 
   if (json) {
     write(
