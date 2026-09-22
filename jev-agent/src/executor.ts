@@ -21,7 +21,7 @@ import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, formatBodySubmerged, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, formatBodySubmerged, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, resolveBlockHarvest, toVec3 } from './state.ts'
 import type { BodySubmersion } from './state.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
@@ -2668,11 +2668,19 @@ export class Executor {
         }
         const columnSafe = !this.pillarColumnUnsafe()
         const headroom = columnSafe ? await this.clearPillarHeadroom(candidate, feet, epoch, signal) : null
+        // The block this step places rests on the live footing, so the footing is
+        // read before the pure gate: a leaf canopy is solid enough for the server
+        // to accept the placement, but it is not ground. The operator photographed
+        // exactly that (run-mubobiq6-12onv: a cobblestone block on a treetop while
+        // the body climbed a canopy it had no reason to be in), so the pillar
+        // refuses with the typed `canopy_footing` instead of building there.
+        const footing = this.currentBlockAt({ x: feet.x, y: pose.footingY, z: feet.z })
         const step = evaluatePillarStep({
           placeableCount: placeStack.count,
           columnSafe,
           remaining: maxSteps - climbed,
-          footingSolid: true,
+          footingSolid: footing !== null && footing.boundingBox === 'block',
+          footingUsable: footing !== null && isUsableGroundSupport(footing),
           headroomClear: headroom !== null && headroom.cleared,
         })
         if (!step.ok) {
@@ -2734,8 +2742,21 @@ export class Executor {
           await this.bot.equip(held, 'hand')
           this.ensureOwned(epoch, signal)
         }
-        const footing = this.currentBlockAt({ x: feet.x, y: pose.footingY, z: feet.z })
-        if (footing === null || footing.boundingBox !== 'block') break
+        // Re-read immediately before the placement: the gate above answered from
+        // the footing read a few steps (and one headroom dig/equip) earlier, and a
+        // canopy footing must never reach `placeBlock` even if the world changed
+        // between the two reads.
+        const liveFooting = this.currentBlockAt({ x: feet.x, y: pose.footingY, z: feet.z })
+        if (liveFooting === null || liveFooting.boundingBox !== 'block') break
+        if (!isUsableGroundSupport(liveFooting)) {
+          this.lastVerticalFailureReason = 'canopy_footing'
+          this.logger.warn(
+            'executor',
+            formatPillarRefused({ reason: 'canopy_footing', cell: feet, obstacle: null }),
+            { actionId: candidate.id, ...feet, footing: liveFooting.name },
+          )
+          break
+        }
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
         const placeCell = { x: feet.x, y: pose.placeY, z: feet.z }
@@ -2788,10 +2809,10 @@ export class Executor {
             sleep: (ms) => delay(ms, signal),
             now: Date.now,
             ensureOwned: () => this.ensureOwned(epoch, signal),
-            place: (face) => this.bot.placeBlock(footing, toVec3(this.bot, face)),
+            place: (face) => this.bot.placeBlock(liveFooting, toVec3(this.bot, face)),
             blockPlaced: () => this.currentBlockAt(placeCell)?.boundingBox === 'block',
           },
-          { feetCell: feet, placeCell, support: footing.position },
+          { feetCell: feet, placeCell, support: liveFooting.position },
         )
         jumping = false
         this.ensureOwned(epoch, signal)
@@ -2860,7 +2881,7 @@ export class Executor {
             supportY: pose.footingY,
             placeY: pose.placeY,
             landingY: pose.landingY,
-            supportName: footing.name,
+            supportName: liveFooting.name,
             launchFeetBlock: launchFeetBlock?.name ?? null,
             launchHeadBlock: launchHeadBlock?.name ?? null,
             launchAboveHeadBlock: this.currentBlockAt({ x: feet.x, y: feet.y + 2, z: feet.z })?.name ?? null,
