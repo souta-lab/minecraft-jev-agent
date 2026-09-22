@@ -94,6 +94,8 @@ jobs:
         run: bun run retrieve-failure-memory-test
       - name: Grounded reachability
         run: bun run reachability-test
+      - name: Level-scan prerequisite and envelope fixtures
+        run: bun run level-scan-test
       - name: Recovery policy regressions
         run: bun run candidate-policy-test && bun run move-failmem-test && bun run pit-escape-test && bun run pillar-search-test && bun run hop-policy-test && bun run pillar-jump-test && bun run pillar-apex-test
 
