@@ -41,6 +41,31 @@ export type ReachabilityReason =
    * the body and the ATTACK is offered once the target is inside the budget.
    */
   | 'hunt_approach_budget'
+  /**
+   * SAFE/CAN: a mechanical locomotion leg whose realization would stand the body
+   * in a dimension-transfer cell (a lit portal block) - either as its
+   * destination or along the route it would walk.
+   *
+   * Measured live (`run-mucgir1z-1p7oh`): a skeleton engaged the body at ~9 m
+   * inside the Nether portal room, every grounded keep-distance destination was
+   * a cell of the portal itself, and "move away from the threat" was realized as
+   * a dimension change - `the_nether -> overworld -> the_nether` 186 times, 30-90 s
+   * apart, each re-entry walking straight back to the same skeleton.
+   *
+   * Crossing a dimension is not locomotion: it abandons the whole objective, and
+   * in this geometry it guarantees a re-entry loop. It is a semantic disengage
+   * that belongs to Jev/System2 as an explicit choice, which is exactly what the
+   * `ENTER_PORTAL` candidate is. Code owns only the fact, so it refuses to
+   * realize one through a MOVE/RETRIEVE/RETREAT leg.
+   */
+  | 'crosses_dimension'
+
+/**
+ * The route-side verdict for the dimension-transfer invariant: does the body's
+ * own route to a destination stand it in a transfer cell? `'unknown'` means no
+ * route planner (or no verdict) and never refuses anything by itself.
+ */
+export type DimensionTransferRoute = 'crosses' | 'clear' | 'unknown'
 
 /** Vertical gap (blocks) a `canDig=false` body change can walk without a plan. */
 export const ASCEND_GAP_LIMIT = 4

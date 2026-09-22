@@ -962,6 +962,30 @@ export interface KeepDistanceInput {
   standable: readonly Vec3Json[]
   /** threat-escape cells: the wider scan, already filtered to genuine separation */
   escapeCells?: readonly Vec3Json[]
+  /**
+   * SAFE/CAN: cells the sensor proved are NOT in the threat's line of sight - a
+   * sight line from the threat's own eye position hits solid geometry before the
+   * cell (real block truth, never a guess; a cell the sensor could not ray is
+   * simply absent, so unknown never counts as cover).
+   *
+   * This is the fact that makes a RANGED attacker answerable at all. Measured
+   * live (`run-mucgir1z-1p7oh`): a skeleton engaged the body from ~9 m inside a
+   * Nether portal room. Distance alone cannot answer it - the body cannot outrun
+   * an arrow and the room gives it no separation - while stepping out of the
+   * attacker's sight line genuinely stops the attack. Without this fact the only
+   * "reposition" the code could ground in that room was a cell of the portal.
+   */
+  occludedCells?: readonly Vec3Json[]
+  /**
+   * SAFE: cells where standing realizes a DIMENSION TRANSFER (a lit portal block,
+   * `netherPortalPlan.isDimensionTransferBlock`). A keep-distance destination
+   * must never be one: "move away from the threat" realized as a dimension
+   * change abandons the whole objective and, in a portal room, walks straight
+   * back into the same fight (measured `run-mucgir1z-1p7oh`: 186 transitions,
+   * 30-90 s apart). Crossing is a semantic disengage owned by Jev/System2 - the
+   * explicit `ENTER_PORTAL` candidate - never a mechanical keep-distance leg.
+   */
+  transferCells?: readonly Vec3Json[]
   /** separation gain required when a destination does not reach standoff */
   minGain?: number
   /** absolute separation that counts as "outside reach" for this threat */
@@ -979,16 +1003,23 @@ export interface KeepDistanceSpot {
   outsideReach: boolean
   /** the destination came from the wider threat-escape scan */
   escape: boolean
+  /** the threat's sight line to this destination is blocked (code-owned cover) */
+  occluded: boolean
 }
 
 /**
  * Ground the destinations that actually keep distance from a threat.
  *
- * A destination qualifies when EITHER it reaches the threat's standoff range
- * while not moving closer, OR it gains a real amount of separation
- * (`MIN_KEEP_DISTANCE_GAIN`). The pre-existing rule (`separation > current +
- * 0.25`) admitted 1.4 m shuffles inside melee reach and labelled them
- * "retreat to safety", which is the measured `moved=0m` death.
+ * A destination qualifies when ANY of these holds:
+ *   * it gains a real amount of separation (`MIN_KEEP_DISTANCE_GAIN`);
+ *   * it reaches the threat's standoff range while not moving closer;
+ *   * it is not in the threat's line of sight while not moving closer
+ *     (`occludedCells`, the fact that answers a ranged attacker).
+ *
+ * The pre-existing rule (`separation > current + 0.25`) admitted 1.4 m shuffles
+ * inside melee reach and labelled them "retreat to safety", which is the measured
+ * `moved=0m` death. A dimension-transfer cell never qualifies at all: crossing a
+ * dimension is not a keep-distance realization (see `transferCells`).
  *
  * Deterministic and bounded: the caller still owns WHICH destination is taken
  * (Jev), and the returned list is capped so the offer cannot be crowded.
@@ -1001,18 +1032,24 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
   const max = Math.max(0, input.max ?? 3)
   if (max === 0) return []
   const current = distance(input.self, threat)
+  const transfer = new Set((input.transferCells ?? []).map(cellKey))
+  const occluded = new Set((input.occludedCells ?? []).map(cellKey))
   const seen = new Set<string>()
   const scored: KeepDistanceSpot[] = []
   const consider = (spot: Vec3Json, escape: boolean): void => {
-    const key = `${spot.x},${spot.y},${spot.z}`
+    const key = cellKey(spot)
     if (seen.has(key)) return
     seen.add(key)
+    // A transfer cell is not a destination this solver may offer, whatever its
+    // separation: the realization would leave the dimension, not keep distance.
+    if (transfer.has(key)) return
     const separation = distance(spot, threat)
     const gain = separation - current
     const outsideReach = separation >= standoff
-    const qualifies = gain >= minGain || (outsideReach && gain > 0)
+    const inCover = occluded.has(key)
+    const qualifies = gain >= minGain || (outsideReach && gain > 0) || (inCover && gain > 0)
     if (!qualifies) return
-    scored.push({ spot, separation, gain, outsideReach, escape })
+    scored.push({ spot, separation, gain, outsideReach, escape, occluded: inCover })
   }
   for (const spot of input.escapeCells ?? []) consider(spot, true)
   for (const spot of input.standable) consider(spot, false)
@@ -1020,6 +1057,10 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
   // destinations are handed to Jev), not a preference among action kinds.
   scored.sort((a, b) => b.separation - a.separation)
   return scored.slice(0, max)
+}
+
+function cellKey(spot: Vec3Json): string {
+  return `${spot.x},${spot.y},${spot.z}`
 }
 
 function distance(a: Vec3Json, b: Vec3Json): number {
