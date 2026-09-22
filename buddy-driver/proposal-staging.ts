@@ -417,6 +417,13 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
   if (delta.moveFailures !== undefined) {
     memory.moveFailures = delta.moveFailures.map((entry) => ({ ...entry }))
   }
+  // #oscillation-boundary: the record is REPLACED, never merged: it is one
+  // episode's evidence, and `null` is the meaningful "the situation changed"
+  // clear. A deep copy keeps the durable store free of the generation's objects.
+  if (delta.localOscillation !== undefined) {
+    memory.localOscillation =
+      delta.localOscillation === null ? null : { ...delta.localOscillation, cells: [...delta.localOscillation.cells] }
+  }
   if (delta.hazards !== undefined) {
     const { production, simulation } = partitionHazardsBySource(delta.hazards)
     for (const hazard of production) mergeHazard(memory.hazards, hazard)

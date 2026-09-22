@@ -48,6 +48,35 @@ export function evaluateCandidateStarvationBoundary(
   return { wake: false, reason: 'local_recovery' }
 }
 
+/**
+ * The LOCAL MOTION boundary: the body kept re-engaging the same small set of
+ * cells with zero semantic progress until its bounded, durable return window was
+ * exhausted.
+ *
+ * This is deliberately a separate question from `CandidateStarvationBoundaryInput`:
+ * that one is about the local CAN envelope being empty (no executable candidate),
+ * while this one is about the BODY's motion recurring inside a bounded cell set
+ * even when candidates ARE offered. It is also deliberately not the queue-head
+ * bound: no queue identity participates, so a new row cannot restart it.
+ *
+ * Like the starvation bound, the wake is legal only because the LOCAL recovery
+ * window is code-proven exhausted (`localRecoveryExhausted` there, the bounded
+ * return count here). It is not a verdict that the Option is semantically
+ * exhausted, invalid or abandoned - beta and System2 own those - and it never
+ * selects WHAT comes next.
+ */
+export interface LocalMotionBoundaryInput {
+  activeOption: boolean
+  /** Code-owned proof that the durable local-motion record exhausted its bounded return window. */
+  oscillationExhausted: boolean
+}
+
+export function evaluateLocalMotionBoundary(input: LocalMotionBoundaryInput): System2WakeBoundaryDecision {
+  if (!input.activeOption) return { wake: false, reason: 'no_active_option' }
+  if (input.oscillationExhausted) return { wake: true, reason: 'semantic_boundary' }
+  return { wake: false, reason: 'local_recovery' }
+}
+
 /** Compact typed evidence used at the Jev beta -> System2 boundary. */
 export interface BetaOutcomeEvidence {
   actionId?: string | null
