@@ -127,9 +127,9 @@ export function readLogTail(logPath, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
   }
 }
 
-/** Find a run-scoped startup event without loading the full append-only log. */
-function readRunEvent(logPath, eventName, runId) {
-  if (runId === null || runId === undefined || !existsSync(logPath)) return null
+/** Find the latest matching event without loading the full append-only log. */
+function readLogEvent(logPath, eventName, runId = null) {
+  if (!existsSync(logPath)) return null
   const fd = openSync(logPath, 'r')
   try {
     let cursor = fstatSync(fd).size
@@ -144,15 +144,20 @@ function readRunEvent(logPath, eventName, runId) {
       carry = lines.shift() ?? ''
       for (let index = lines.length - 1; index >= 0; index -= 1) {
         const entry = parseBuddyLogLine(lines[index] ?? '')
-        if (entry?.event === eventName && entry.detail.runId === runId) return entry
+        if (entry?.event === eventName && (runId === null || entry.detail.runId === runId)) return entry
       }
       cursor = start
     }
     const first = parseBuddyLogLine(carry)
-    return first?.event === eventName && first.detail.runId === runId ? first : null
+    return first?.event === eventName && (runId === null || first.detail.runId === runId) ? first : null
   } finally {
     closeSync(fd)
   }
+}
+
+function readRunEvent(logPath, eventName, runId) {
+  if (runId === null || runId === undefined) return null
+  return readLogEvent(logPath, eventName, runId)
 }
 
 export function latestEvent(events, names) {
@@ -232,18 +237,26 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
-export function buildObserverSnapshot({ report, events, mission, runBoot = null, now = Date.now() }) {
+export function buildObserverSnapshot({ report, events, mission, runBoot = null, runBuild = null, now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
-  const latestBoot = latestEvent(events, ['BOOT'])
-  const runId = data?.runId ?? latestBoot?.detail?.runId ?? latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+  const bootFromTail = latestEvent(events, ['BOOT'])
+  const candidateBoot = bootFromTail ?? runBoot
+  const runId = data?.runId ?? candidateBoot?.detail?.runId ?? latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+  const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
   const runEvents = runId === null
     ? events
-    : events.filter((entry) => entry.detail?.runId === undefined || entry.detail.runId === runId)
+    : events.filter((entry) => {
+      if (entry.detail?.runId !== undefined) return entry.detail.runId === runId
+      if (!Number.isFinite(runStartedAt)) return true
+      const eventAt = Date.parse(entry.ts)
+      return Number.isFinite(eventAt) ? eventAt >= runStartedAt : true
+    })
   const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
   const boot = latestEvent(relevantEvents, ['BOOT'])
     ?? (runBoot?.detail?.runId === runId ? runBoot : null)
   const build = latestEvent(relevantEvents, ['BUILD'])
+    ?? (runBuild?.detail?.runId === runId ? runBuild : null)
   const jev = latestEvent(relevantEvents, ['JEV_HEADS', 'TOOL_CHOICE'])
   const system2Input = latestEvent(relevantEvents, ['SYSTEM2_AUTHORITY_INPUT'])
   const system2Decision = latestEvent(relevantEvents, ['SYSTEM2_AUTHORITY_DECISION', 'SYSTEM2_STALE_DISCARD'])
@@ -269,9 +282,14 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
       connected: data?.connected ?? false,
       frozen: data?.frozen ?? null,
       runId,
-      generationId: data?.generationId ?? null,
-      generationHash: data?.generationHash ?? null,
-      worldKey: data?.worldKey ?? status?.worldKey ?? null,
+      generationId: data?.generationId
+        ?? latestEvent(
+          relevantEvents.filter((entry) => entry.detail?.generationId !== undefined && entry.detail.generationId !== null),
+          TRACE_EVENTS,
+        )?.detail?.generationId
+        ?? null,
+      generationHash: data?.generationHash ?? build?.detail?.hash ?? null,
+      worldKey: data?.worldKey ?? status?.worldKey ?? boot?.detail?.worldKey ?? null,
       sourceCommit: build?.detail?.sourceSha ?? boot?.detail?.source ?? null,
     },
     mission,
@@ -394,12 +412,14 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
   const actionEvent = latestProjectedEvent(snapshot, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
   const actionOutcomeEvent = latestProjectedEvent(snapshot, ['ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED', 'PLAN_REJECTED'])
+  const heartbeat = latestProjectedEvent(snapshot, ['HEARTBEAT'])
   const observedAtMs = parseTimestamp(snapshot.observedAt)
   const freshnessMs = observedAtMs === null ? null : Math.max(0, now - observedAtMs)
   const unknown = []
   if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
   if (latest === null) unknown.push('no_choice_event_observed')
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
+  if (snapshot.truth === null) unknown.push('authoritative_world_truth_unavailable')
   const selection = latest?.selected?.strategy
     ?? latest?.selected?.chosen
     ?? latest?.selected?.id
@@ -446,6 +466,22 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       latestOutcomeEvent: actionOutcomeEvent,
     },
     world: snapshot.truth,
+    worldObservation: heartbeat === null ? null : {
+      observedAt: heartbeat.ts,
+      ageMs: parseTimestamp(heartbeat.ts) === null ? null : Math.max(0, now - parseTimestamp(heartbeat.ts)),
+      sourceEvent: heartbeat.event,
+      live: snapshot.resident.available && snapshot.resident.connected,
+      worldKey: snapshot.resident.worldKey,
+      dimension: snapshot.truth?.dimension ?? snapshot.resident.worldKey?.dimension ?? null,
+      position: heartbeat.detail?.pos ?? null,
+      health: heartbeat.detail?.health ?? null,
+      food: heartbeat.detail?.food ?? null,
+      inventory: heartbeat.detail?.inv ?? null,
+      currentAction: heartbeat.detail?.action ?? null,
+      frontier: heartbeat.detail?.rung ?? null,
+      queueDepth: heartbeat.detail?.depth ?? null,
+      queueDone: heartbeat.detail?.done ?? null,
+    },
     recentEvents: (snapshot.events ?? []).slice(0, 12),
     unknown,
     interpretation: 'Only emitted audit fields are summarized. Null and unknown entries mean the observer found no matching evidence.',
@@ -460,20 +496,36 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   let snapshotInFlight = null
   let cachedRunId = null
   let cachedRunBoot = null
+  let cachedRunBuild = null
+  let latestBootInLog = null
+  let bootScanCompleted = false
   const snapshot = async () => {
     if (snapshotInFlight !== null) return await snapshotInFlight
     snapshotInFlight = Promise.all([
       callControlSocket(socketPath, 'report'),
       Promise.resolve(readLogTail(logPath)),
     ]).then(([report, events]) => {
+      const bootFromTail = latestEvent(events, ['BOOT'])
+      if (bootFromTail !== null) {
+        latestBootInLog = bootFromTail
+        bootScanCompleted = true
+      } else if (!bootScanCompleted) {
+        latestBootInLog = readLogEvent(logPath, 'BOOT')
+        bootScanCompleted = true
+      }
       const currentRunId = report?.ok === true
         ? report.data?.runId ?? null
-        : latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+        : latestBootInLog?.detail?.runId ?? latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
       if (currentRunId !== null && currentRunId !== cachedRunId) {
         cachedRunId = currentRunId
-        cachedRunBoot = readRunEvent(logPath, 'BOOT', currentRunId)
+        cachedRunBoot = bootFromTail?.detail?.runId === currentRunId
+          ? bootFromTail
+          : latestBootInLog?.detail?.runId === currentRunId
+            ? latestBootInLog
+            : readRunEvent(logPath, 'BOOT', currentRunId)
+        cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
-      return buildObserverSnapshot({ report, events, mission, runBoot: cachedRunBoot })
+      return buildObserverSnapshot({ report, events, mission, runBoot: cachedRunBoot, runBuild: cachedRunBuild })
     })
       .finally(() => { snapshotInFlight = null })
     return await snapshotInFlight
