@@ -90,8 +90,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 1
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v1'
+export const JEV_PROJECTION_VERSION = 2
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v2'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -117,6 +117,7 @@ export const JEV_PROJECTION_LIMITS = {
 export type SkillTerminalReason =
   | 'done'
   | 'blocked'
+  | 'drop_not_acquired'
   | 'target_lost'
   | 'safety_interrupted'
   | 'capability_lost'
@@ -133,7 +134,7 @@ export interface VerificationSummary {
 }
 
 export interface ProgressSummary {
-  kind: 'verified' | 'mechanical' | 'none' | 'regressed'
+  kind: 'verified' | 'search' | 'mechanical' | 'none' | 'regressed'
   /** the executor's own bounded progress metric, unchanged in meaning */
   delta: number
   note: string | null
@@ -201,6 +202,9 @@ export function terminalReasonFor(input: {
   failure: string | null
   verified: boolean
 }): SkillTerminalReason {
+  // The exact target died, but its declared inventory postcondition did not.
+  // Keep this distinct even if a malformed caller also claims done/verified.
+  if (input.failure === 'drop_not_acquired') return 'drop_not_acquired'
   if (input.status === 'cancelled') return 'lease_revoked'
   if (input.status === 'guard-rejected') {
     // A deterministic guard refusal is a typed mechanical blocker of THIS Skill.
@@ -273,6 +277,7 @@ export function policyBoundary(packet: Pick<SkillOutcomePacket, 'terminalReason'
  */
 const MANDATORY_POLICY_BOUNDARIES: ReadonlySet<SkillTerminalReason> = new Set<SkillTerminalReason>([
   'target_lost',
+  'drop_not_acquired',
   'capability_lost',
   'safety_interrupted',
   'world_changed',
@@ -307,6 +312,8 @@ export interface SkillOutcomePacketInput {
   verificationDetail?: string | null
   progressDelta?: number
   progressed?: boolean
+  /** a verified partial result changed the search frontier but did not complete the Skill */
+  searchProgress?: boolean
   meaningfulWorldDelta?: readonly SemanticDelta[]
   newFacts?: readonly GroundedFact[]
   nextDecisionRequired?: boolean
@@ -326,11 +333,13 @@ export function buildSkillOutcomePacket(input: SkillOutcomePacketInput): SkillOu
   const progressKind: ProgressSummary['kind'] =
     input.verified && progressDelta > 0
       ? 'verified'
-      : input.progressed === true
-        ? 'mechanical'
-        : progressDelta < 0
-          ? 'regressed'
-          : 'none'
+      : input.searchProgress === true
+        ? 'search'
+        : input.progressed === true
+          ? 'mechanical'
+          : progressDelta < 0
+            ? 'regressed'
+            : 'none'
   const packet: SkillOutcomePacket = {
     decisionEpoch: input.decisionEpoch,
     commitmentId: input.commitmentId,
@@ -347,7 +356,12 @@ export function buildSkillOutcomePacket(input: SkillOutcomePacketInput): SkillOu
     semanticProgress: {
       kind: progressKind,
       delta: progressDelta,
-      note: input.progressed === true && !input.verified ? 'mechanical_body_change_only' : null,
+      note:
+        input.searchProgress === true
+          ? 'verified_target_death_drop_not_acquired'
+          : input.progressed === true && !input.verified
+            ? 'mechanical_body_change_only'
+            : null,
     },
     meaningfulWorldDelta: [...(input.meaningfulWorldDelta ?? [])].slice(0, JEV_PROJECTION_LIMITS.meaningfulDelta),
     newFacts: [...(input.newFacts ?? [])].slice(0, JEV_PROJECTION_LIMITS.facts),
@@ -363,6 +377,9 @@ export function buildSkillOutcomePacket(input: SkillOutcomePacketInput): SkillOu
 }
 
 function describeTerminal(reason: SkillTerminalReason, failure: string | null): string {
+  if (failure === 'drop_not_acquired') {
+    return 'the selected entity died, but the declared item did not enter the inventory'
+  }
   if (failure !== null) return failure
   switch (reason) {
     case 'target_lost':
@@ -373,6 +390,8 @@ function describeTerminal(reason: SkillTerminalReason, failure: string | null): 
       return 'the capability the commitment required is no longer available'
     case 'budget_exhausted':
       return 'the commitment budget was exhausted'
+    case 'drop_not_acquired':
+      return 'the selected entity died, but its declared item was not acquired'
     case 'world_changed':
       return 'the world/dimension/epoch changed under the commitment'
     case 'lease_revoked':

@@ -553,13 +553,19 @@ addCase('(iii-b) a pearl drop the body never reaches is DROP_NOT_ACQUIRED, never
   const warned = fixture.logger.matching('HUNT_DROP_NOT_ACQUIRED')
   return {
     pass:
+      completion.status === 'failed' &&
+      completion.failure === 'drop_not_acquired' &&
+      completion.verified === false &&
       completion.entityDefeated === true &&
+      completion.dropAcquired === false &&
+      completion.skillTerminalReason === 'drop_not_acquired' &&
       fixture.held() === 0 &&
       warned.length >= 1 &&
       outcomes.some((line) => line.includes('outcome=DROP_NOT_ACQUIRED') && line.includes('dropAcquired=false')) &&
       completion.combatOutcome === 'DROP_NOT_ACQUIRED',
     detail:
-      `defeated=${String(completion.entityDefeated)} held=${fixture.held()} combatOutcome=${completion.combatOutcome ?? 'none'} ` +
+      `status=${completion.status} failure=${completion.failure} defeated=${String(completion.entityDefeated)} ` +
+      `skillTerminal=${completion.skillTerminalReason ?? 'none'} held=${fixture.held()} combatOutcome=${completion.combatOutcome ?? 'none'} ` +
       `warned=${warned.length} dropOnGround=${String(fixture.dropOnGround())}`,
   }
 })

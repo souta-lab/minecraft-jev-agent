@@ -71,13 +71,13 @@ describe('#437 landed boundary - the harness contract matches jev-agent source',
     expect(source).toContain("projectionModelView(projection: JevSemanticProjection): Omit<JevSemanticProjection, 'counts'>")
   })
 
-  test('the terminal-reason and progress-kind value spaces are unchanged', () => {
+  test('the terminal-reason and progress-kind value spaces match the landed projection', () => {
     expect([...unionMembers('SkillTerminalReason')].sort()).toEqual([...LANDED_437_TERMINAL_REASONS].sort())
     expect([...unionMembers('EpochInvalidationReason')].sort()).toEqual([...LANDED_437_EPOCH_INVALIDATION_REASONS].sort())
     const progress = interfaceFields('ProgressSummary')
     expect(progress).toContain('kind')
-    expect(source).toContain("kind: 'verified' | 'mechanical' | 'none' | 'regressed'")
-    expect([...LANDED_437_PROGRESS_KINDS].length).toBe(4)
+    expect(source).toContain("kind: 'verified' | 'search' | 'mechanical' | 'none' | 'regressed'")
+    expect([...LANDED_437_PROGRESS_KINDS].length).toBe(5)
   })
 
   test('the SkillOutcomePacket still carries the causal fields the link record needs', () => {
@@ -152,9 +152,32 @@ describe('#437 landed boundary - the mapping onto the harness link record', () =
     const progressOf = (kind: (typeof LANDED_437_PROGRESS_KINDS)[number]) =>
       skillOutcomeLinkFromPacket({ decisionId: 'dec_1', packet: { ...base, semanticProgress: { kind } } }).semanticProgress
     expect(progressOf('verified')).toBe('achieved')
+    expect(progressOf('search')).toBe('partial')
     expect(progressOf('mechanical')).toBe('partial')
     expect(progressOf('none')).toBe('none')
     expect(progressOf('regressed')).toBe('none')
+  })
+
+  test('a killed HUNT_DROP target with no acquired item remains a typed partial boundary', () => {
+    const link = skillOutcomeLinkFromPacket({
+      decisionId: 'dec_1',
+      packet: {
+        decisionEpoch: 481,
+        commitmentId: 'commit:drop-miss',
+        selectedCandidateId: 'ATTACK:e183',
+        terminalReason: 'drop_not_acquired',
+        verification: { verified: false, postcondition: 'entity death AND ender_pearl acquired' },
+        semanticProgress: { kind: 'search', delta: 0 },
+        failure: {
+          code: 'drop_not_acquired',
+          reason: 'the selected entity died, but the declared item did not enter the inventory',
+        },
+      },
+    })
+    expect(link.terminalReason).toBe('drop_not_acquired')
+    expect(link.verification).toBe('not_verified')
+    expect(link.semanticProgress).toBe('partial')
+    expect(link.failure).toBe('drop_not_acquired: the selected entity died, but the declared item did not enter the inventory')
   })
 
   test('a typed failure keeps its code, and a link passes the artifact consistency check', async () => {

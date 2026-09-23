@@ -6077,6 +6077,21 @@ export class JevController {
         detail: 'the selected target is no longer present (TARGET_LOST, not killed)',
       })
     }
+    if (input.failure === 'drop_not_acquired' && input.entityDefeated) {
+      facts.push({
+        kind: 'target',
+        key: target.key,
+        detail: 'the selected entity was verified dead, but its declared HUNT_DROP item was not acquired',
+      })
+      const goalDrop = input.candidate?.meta.goalDrop
+      if (typeof goalDrop === 'string') {
+        facts.push({
+          kind: 'resource',
+          key: `inventory:${goalDrop}`,
+          detail: `this hunt lease gained no ${goalDrop} in the body inventory`,
+        })
+      }
+    }
     const packet = buildSkillOutcomePacket({
       decisionEpoch: binding?.epoch ?? this.decisionEpochs.active?.epoch ?? 0,
       commitmentId:
@@ -6095,6 +6110,7 @@ export class JevController {
       verificationDetail: input.verification,
       progressDelta: input.verified ? Math.max(0, input.itemsGained + (input.blockRemoved ? 1 : 0)) : 0,
       progressed: input.progressed,
+      searchProgress: input.failure === 'drop_not_acquired' && input.entityDefeated,
       meaningfulWorldDelta: deltas,
       newFacts: facts,
       optionComplete: this.goal.complete === true,
@@ -6446,7 +6462,7 @@ export class JevController {
       entityDefeated: result.entityDefeated === true,
       targetName: result.targetName ?? candidate.targetName,
       candidate,
-      verification: taxonomy.verification,
+      verification: result.unverifiedPostcondition ?? taxonomy.verification,
     })
 
     const pending = this.pendingDecisions.get(result.epoch)

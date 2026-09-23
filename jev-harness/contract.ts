@@ -432,6 +432,7 @@ export interface SkillOutcomeProjection {
   readonly terminalReason:
     | 'done'
     | 'blocked'
+    | 'drop_not_acquired'
     | 'target_lost'
     | 'safety_interrupted'
     | 'capability_lost'

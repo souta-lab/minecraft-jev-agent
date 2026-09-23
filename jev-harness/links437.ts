@@ -14,17 +14,18 @@ import type { SkillOutcomeLink } from './artifacts.ts'
 import type { StaleReason } from './identity.ts'
 
 /** The landed #437 schema string and version (`JEV_PROJECTION_SCHEMA`/`JEV_PROJECTION_VERSION`). */
-export const LANDED_437_PROJECTION_ID = 'jev-semantic-projection/v1'
-export const LANDED_437_PROJECTION_VERSION = 1
+export const LANDED_437_PROJECTION_ID = 'jev-semantic-projection/v2'
+export const LANDED_437_PROJECTION_VERSION = 2
 
 /**
  * The landed #437 `SkillTerminalReason` value space. The harness's
- * `SkillOutcomeProjection.terminalReason` uses the same eight values; the drift
+ * `SkillOutcomeProjection.terminalReason` uses the same nine values; the drift
  * test asserts this table against the landed union.
  */
 export const LANDED_437_TERMINAL_REASONS: readonly SkillOutcomeProjection['terminalReason'][] = [
   'done',
   'blocked',
+  'drop_not_acquired',
   'target_lost',
   'safety_interrupted',
   'capability_lost',
@@ -34,7 +35,7 @@ export const LANDED_437_TERMINAL_REASONS: readonly SkillOutcomeProjection['termi
 ]
 
 /** The landed `ProgressSummary['kind']` value space. */
-export const LANDED_437_PROGRESS_KINDS = ['verified', 'mechanical', 'none', 'regressed'] as const
+export const LANDED_437_PROGRESS_KINDS = ['verified', 'search', 'mechanical', 'none', 'regressed'] as const
 
 /** The landed `EpochInvalidationReason` value space. */
 export const LANDED_437_EPOCH_INVALIDATION_REASONS = [
@@ -75,6 +76,7 @@ function progressState(packet: Jev437OutcomeLike): SkillOutcomeLink['semanticPro
     case 'verified':
       return 'achieved'
     case 'mechanical':
+    case 'search':
       return 'partial'
     case 'none':
     case 'regressed':
