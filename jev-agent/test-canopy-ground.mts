@@ -334,6 +334,35 @@ check(
   `terrain=${atop.terrain.standable.map((cell) => `${cell.x},${cell.y},${cell.z}`).join(' ')} (ground patch 77,79,12 kept, leaf top 75,79,12 dropped)`,
 )
 
+const leafLandingGrid = new Map<string, string>([
+  [key(0, 71, 0), 'dirt'],
+  [key(1, 71, 0), 'oak_leaves'],
+])
+const leafLanding = perceive(leafLandingGrid, { position: { x: 0.5, y: 72, z: 0.5 }, food: 20 })
+const eastLevelLanding = leafLanding.descent?.find((step) => step.dir === 'E' && step.mode === 'level')
+const leafLandingCell = { x: 1, y: 72, z: 0 }
+const leafLandingCandidate = offer(leafLanding).candidates.find(
+  (candidate) =>
+    candidate.kind === 'MOVE' &&
+    candidate.meta.verticalRecovery === 'safe_level_step' &&
+    candidate.target?.x === leafLandingCell.x &&
+    candidate.target?.y === leafLandingCell.y &&
+    candidate.target?.z === leafLandingCell.z,
+)
+
+check(
+  '(a1b) descent sensor marks a collidable leaf landing unusable and candidate generation withholds it',
+  eastLevelLanding?.safe === true &&
+    eastLevelLanding.landingUsable === false &&
+    !leafLanding.terrain.standable.some(
+      (cell) => cell.x === leafLandingCell.x && cell.y === leafLandingCell.y && cell.z === leafLandingCell.z,
+    ) &&
+    leafLandingCandidate === undefined,
+  `safe=${eastLevelLanding?.safe} landingUsable=${eastLevelLanding?.landingUsable} terrainHasLanding=${leafLanding.terrain.standable.some(
+    (cell) => cell.x === leafLandingCell.x && cell.y === leafLandingCell.y && cell.z === leafLandingCell.z,
+  )} candidate=${leafLandingCandidate?.id ?? 'none'}`,
+)
+
 check(
   '(a2) placement sites exclude leaf-supported cells and keep ground ones',
   atop.placementSpots.length > 0 &&

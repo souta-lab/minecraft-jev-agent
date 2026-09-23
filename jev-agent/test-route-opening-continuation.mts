@@ -208,6 +208,7 @@ function openLevelStep(dir: DescentOption['dir'], dx: number, dz: number, step: 
     wallSolid: false,
     headSolid: false,
     floorSolid: true,
+    landingUsable: true,
     safe: true,
     reason: 'safe',
     digName: 'air',

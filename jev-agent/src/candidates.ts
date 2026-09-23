@@ -13972,7 +13972,7 @@ function capabilityAcquisitionCandidates(
         // the next observation can then derive the next down plan.  Do not
         // invent a drop or an arbitrary exploration target here.
         const levelSteps = (state.descent ?? [])
-          .filter((step) => step.mode === 'level' && step.safe && step.floorSolid && (step.dx !== 0 || step.dz !== 0))
+          .filter((step) => hasUsableLevelLanding(step) && step.floorSolid && (step.dx !== 0 || step.dz !== 0))
           .map((step) => {
             const target = step.step
             const candidate = exploreMoveCandidate(
@@ -14331,6 +14331,11 @@ function moveAdvancesTowardTarget(
  * the stock path returned `noPath` and the next state starved). Facts only: no
  * item/coordinate/portal special-casing, no ordering, and Jev still chooses.
  */
+/** `safe` proves the step mechanics; MOVE also needs a passable body and usable support. */
+function hasUsableLevelLanding(step: DescentOption): boolean {
+  return step.mode === 'level' && step.safe && step.landingUsable === true
+}
+
 function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candidate[] {
   const feet = {
     x: Math.floor(state.self.position.x),
@@ -14339,7 +14344,7 @@ function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candi
   }
   const out: Candidate[] = []
   for (const step of state.descent ?? []) {
-    if (step.mode !== 'level' || !step.safe) continue
+    if (!hasUsableLevelLanding(step)) continue
     // A solid wall or head is still a DESCEND owned by `descendCandidates`.
     if (step.wallSolid || step.headSolid) continue
     if (step.dx === 0 && step.dz === 0) continue

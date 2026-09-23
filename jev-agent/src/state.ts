@@ -612,6 +612,13 @@ export type DescentOption = {
   floorSolid: boolean
   /** solid block under the landing cell (`feet.y - 2`); false means the drop has no floor */
   supportSolid?: boolean
+  /**
+   * Canonical destination truth for the landing feet cell: both body cells are
+   * passable and the support is usable ground. `safe` covers clearance and
+   * support; it can still be true for a collidable leaf-supported landing.
+   * Optional on legacy/hand-built states; movement recovery requires `true`.
+   */
+  landingUsable?: boolean
   /** lava/water is inside the 3x3x3 neighbourhood of one of this step's cells */
   hazardNearby?: boolean
   /**
@@ -3350,10 +3357,6 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
   }
   const scratch = bot.entity.position.clone()
   const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z), 'descent')
-  const solid = (x: number, y: number, z: number): boolean => {
-    const block = at(x, y, z)
-    return block !== null && block.boundingBox === 'block'
-  }
   const diggableSolid = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
     return block !== null && isBreakableSolidBlock(block)
@@ -3382,10 +3385,19 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     const step = { x: feet.x + dx, y: stepY, z: feet.z + dz }
     const floor = { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz }
     const support = { x: feet.x + dx, y: stepY - 1, z: feet.z + dz }
-    const wallSolid = solid(wall.x, wall.y, wall.z)
-    const headSolid = solid(head.x, head.y, head.z)
-    const floorSolid = solid(floor.x, floor.y, floor.z)
-    const supportSolid = solid(support.x, support.y, support.z)
+    const wallBlock = at(wall.x, wall.y, wall.z)
+    const headBlock = at(head.x, head.y, head.z)
+    const floorBlock = at(floor.x, floor.y, floor.z)
+    const supportBlock = at(support.x, support.y, support.z)
+    const wallSolid = wallBlock !== null && wallBlock.boundingBox === 'block'
+    const headSolid = headBlock !== null && headBlock.boundingBox === 'block'
+    const floorSolid = floorBlock !== null && floorBlock.boundingBox === 'block'
+    const supportSolid = supportBlock !== null && supportBlock.boundingBox === 'block'
+    const landingUsable = isUsableStandFromBlocks(
+      mode === 'level' ? wallBlock : floorBlock,
+      mode === 'level' ? headBlock : wallBlock,
+      supportBlock,
+    )
     // The bot's own column needs no front/head clearance: it digs the floor.
     const wallOk = ownColumn || clear(wall.x, wall.y, wall.z) || diggableSolid(wall.x, wall.y, wall.z)
     const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
@@ -3471,6 +3483,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       headSolid,
       floorSolid,
       supportSolid,
+      landingUsable,
       hazardNearby,
       ...(transfersDimension ? { transfersDimension: true } : {}),
       digs,
