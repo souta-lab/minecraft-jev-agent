@@ -967,19 +967,16 @@ export interface GenerationStatus {
    * derivation. Optional for contract compatibility with older generations.
    */
   milestonePredicates?: MilestonePredicateObservation[]
-  /** number of goals this generation's planner will seed on start() (may be 0) */
+  /** deterministic seed size, or the live System2 queue depth in model mode */
   plannedGoals: number
-  /** index of the first unsatisfied ladder rung (progress frontier) */
+  /** observer-only index of the first unsatisfied legacy ladder rung */
   rungIndex: number
-  /** id of that rung */
+  /** observer-only id of that legacy ladder rung */
   rungId: string
   /**
-   * Legacy root goal projected from the LIVE frontier's own goals
-   * (`compatibilityRootGoal` of the rung's emitted goals). The control socket's
-   * `milestone` reply serves this instead of the host's static M2 default, so a
-   * satisfied rung (`iron_ingot` with a diamond pickaxe + flint_and_steel held)
-   * can never advertise outstanding work. Absent on a generation that cannot
-   * project one; the host then falls back to its static default.
+   * Deterministic mode's compatibility goal projected from the live frontier;
+   * model mode reports its configured objective. The rung fields remain
+   * observer evidence and do not define production System2 intent.
    */
   goalItem?: string
   goalCount?: number

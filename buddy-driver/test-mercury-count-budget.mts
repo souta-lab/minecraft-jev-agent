@@ -48,11 +48,10 @@ function hostLog(sink: string[]): (event: string, detail?: Record<string, unknow
 
 function mercurySummary(): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'no_candidate',
     wakeReason: 'action_impossible',
     wakeDetail: 'test',
-    rung: 'iron_gear',
-    rungIndex: 6,
     position: { x: 10, y: 62, z: 10 },
     dimension: 'minecraft:overworld',
     health: 20,

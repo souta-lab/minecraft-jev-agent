@@ -21,11 +21,10 @@ const bot = {
 } as unknown as Bot
 
 const summarize = (request: System2PlanRequest, trigger: 'wait_limit' | 'no_candidate' | 'no_progress' | 'action_impossible' | 'post_death') => ({
+  humanMission: 'Defeat the Ender Dragon' as const,
   trigger,
   wakeReason: request.reason,
   wakeDetail: request.detail,
-  rung: 'iron_gear',
-  rungIndex: 10,
   position: { x: 0, y: 61, z: 0 },
   dimension: 'minecraft:overworld',
   health: 20,
@@ -83,7 +82,7 @@ const planner = new PlannerBrain({
 assert.equal(planner.model, 'qwen3.5-9b-local')
 assert.deepEqual(planner.authorityStack, {
   provider: 'local-mercury',
-  model: 'deterministic|mercury:qwen3.5-9b-local',
+  model: 'mercury:qwen3.5-9b-local',
 })
 
 const queueEmpty: System2PlanRequest = {
@@ -101,7 +100,7 @@ const queueEmpty: System2PlanRequest = {
 // fork's original "ordinary queue_empty stays on the deterministic floor"
 // expectation is superseded by that newer landed decision.
 const drained = await planner.plan(queueEmpty)
-assert.equal(planner.provider, 'mercury')
+assert.equal(planner.provider, 'local-mercury')
 assert.equal(planner.authorityModel, 'qwen3.5-9b-local')
 assert.equal(mercuryCalls, 1, 'a drained queue is a semantic moment: local Mercury is consulted')
 assert.equal(externalPlannerKeyLookups, 0, 'local-mercury must not touch the TypeSafe planner key')
@@ -115,7 +114,7 @@ const stalled: System2PlanRequest = {
   goalQueueState: { depth: 1, current: null, empty: false, hasImpossible: false, done: 1, goals: [] },
 }
 const repaired = await planner.plan(stalled)
-assert.equal(planner.provider, 'mercury')
+assert.equal(planner.provider, 'local-mercury')
 assert.equal(planner.authorityModel, 'qwen3.5-9b-local')
 assert.equal(mercuryCalls, 2, 'no_progress must call local Mercury exactly once (one per summon)')
 assert.equal(externalPlannerKeyLookups, 0, 'local-mercury must never require the TypeSafe gateway key')
@@ -156,7 +155,7 @@ const postDeathPlanner = new PlannerBrain({
 
 const postDeathLogStart = logs.length
 await postDeathPlanner.plan({ ...queueEmpty, tick: 3, detail: 'first plan after respawn' })
-assert.equal(postDeathPlanner.provider, 'mercury')
+assert.equal(postDeathPlanner.provider, 'local-mercury')
 assert.equal(postDeathCalls, 1, 'post-death queue_empty must call local Mercury exactly once')
 assert.equal(
   logs.slice(postDeathLogStart).some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.trigger === 'post_death'),
@@ -166,7 +165,7 @@ assert.equal(
 
 const afterPostDeathLogStart = logs.length
 await postDeathPlanner.plan({ ...queueEmpty, tick: 4, detail: 'ordinary queue after post-death repair' })
-assert.equal(postDeathPlanner.provider, 'mercury')
+assert.equal(postDeathPlanner.provider, 'local-mercury')
 assert.equal(postDeathCalls, 2, 'post-death is consumed once; the later drained queue is a fresh no_candidate consult')
 assert.equal(
   logs.slice(afterPostDeathLogStart).some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.trigger === 'no_candidate'),

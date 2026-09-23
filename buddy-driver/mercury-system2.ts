@@ -6,11 +6,9 @@
 // talks to is muse-spark. Earlier revisions used `inception/mercury-2.5` (and
 // `inception/mercury-2`), which are retained in the price table for old call records.
 //
-// This is the EXCEPTION-DRIVEN high-level planner. It is only consulted when the
-// resident is stuck (no productive candidate / 3 consecutive WAITs / no progress /
-// an impossible goal / post-death recovery). The deterministic capability ladder
-// (planner.ts) stays the normal-path planner; Mercury only repairs the goal queue
-// when the ladder cannot make progress.
+// This adapter supplies production System2's high-level WHAT. The controller
+// summons it when the queue is empty or a semantic option needs repair; no
+// deterministic progression ladder selects the production goal.
 //
 // HARD RULES (mirrors AGENTS.md):
 //   * The LLM returns the WHAT in NATURAL LANGUAGE. Structured plan facts
@@ -1062,11 +1060,10 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     worldKey: identity.worldKey,
     worldEpoch: identity.worldEpoch,
     schemaVersion: identity.schemaVersion,
+    humanMission: state.humanMission,
     trigger: state.trigger,
     wakeReason: state.wakeReason,
     wakeDetail: state.wakeDetail,
-    rung: state.rung,
-    rungIndex: state.rungIndex,
     position: state.position,
     dimension: state.dimension,
     health: state.health,
@@ -1204,12 +1201,14 @@ export function resolveMercuryEnablement(
 // compressed state summary
 // ---------------------------------------------------------------------------
 
+export const SYSTEM2_HUMAN_MISSION = 'Defeat the Ender Dragon' as const
+
 export interface MercuryStateSummary {
+  /** Human-provided long-horizon objective; benchmark gates are not planner inputs. */
+  humanMission: typeof SYSTEM2_HUMAN_MISSION
   trigger: MercuryTriggerReason
   wakeReason: string
   wakeDetail: string
-  rung: string
-  rungIndex: number
   position: { x: number; y: number; z: number } | null
   dimension: string | null
   health: number | null
@@ -1345,8 +1344,8 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 // ---------------------------------------------------------------------------
 
 /** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
-export const MERCURY_CACHE_SCHEMA_VERSION = 7
-const MERCURY_CACHE_FILE_VERSION = 7
+export const MERCURY_CACHE_SCHEMA_VERSION = 8
+const MERCURY_CACHE_FILE_VERSION = 8
 
 export interface MercuryWorldKey {
   serverId: string
@@ -1822,8 +1821,10 @@ function defaultMercuryTransport(model: string): MercuryTransport {
   }
 }
 
-export const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
+export const SYSTEM_PROMPT = `You are System 2, the long-horizon intent planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
+
+Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world facts and grounded executable alternatives that can advance it. The mission does not prescribe a fixed subgoal order; the current objective and queue describe local work, not mandatory stages.
 
 Answer in NATURAL LANGUAGE: one or two short sentences saying WHAT should happen
 next and why, naming the real Minecraft item, resource or portal step involved.
@@ -1850,7 +1851,7 @@ operations (e.g. craft furnace vs place furnace):
 - { kind: 'light_portal', dimension }   light the validated frame with flint_and_steel; optional dimension defaults to minecraft:overworld. The ignition post-condition verifies the nether_portal block. 'light' is an accepted synonym.
 - { kind: 'verify_portal', dimension }  re-verify the lit nether_portal block in the dimension. 'verify' is an accepted synonym.
 - { kind: 'enter_portal', dimension }   enter an already-live verified portal and transfer dimensions; optional dimension defaults to minecraft:the_nether. The entry cells and route are code-owned.
-When the portal materials are ready, { kind: 'build_portal_frame' }, { kind: 'light' } and { kind: 'verify' } are distinct WHAT goals you may emit in the order you choose: Code grounds the frame geometry and owns the ignition verification. Never emit coordinates, a frame cell list, or { kind: 'place', item: 'nether_portal' }. If state.portal.verified=true and the current rung is enter_nether, do not rebuild or relight the gate merely to make progress; enter_portal is the grounded WHAT for using the already-live gate.
+{ kind: 'build_portal_frame' }, { kind: 'light' }, { kind: 'verify' } and { kind: 'enter_portal' } are distinct WHAT choices. Choose among them using the current dimension, live portal facts and mission. Code grounds the frame geometry and owns ignition, portal and dimension verification. Never emit coordinates, a frame cell list, or { kind: 'place', item: 'nether_portal' }.
 Every collect/craft/smelt goal MUST include an explicit integer count in [1,64]; when the quantity is not otherwise constrained, emit count: 1. Local normalization fills a missing count with 1, but an explicit count is required to express your intent, and a count outside [1,64] is rejected.
 Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions; goto references a resource name, never an x/z position.
 Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.
@@ -3099,7 +3100,7 @@ export class MercurySystem2 implements System2Brain {
   ): never {
     this.fallbacks += 1
     this.log('MERCURY_FAILURE_STATE', {
-      rung: state.rung,
+      humanMission: state.humanMission,
       inventory: Object.keys(state.inventory).length,
       wait: state.consecutiveWait,
       queueDepth: state.queue.depth,

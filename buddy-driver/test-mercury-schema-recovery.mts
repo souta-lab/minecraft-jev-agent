@@ -71,11 +71,10 @@ function planRequest(): System2PlanRequest {
 
 function mercurySummary(): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'action_impossible',
     wakeReason: 'action_impossible',
     wakeDetail: 'test',
-    rung: 'crafting_table',
-    rungIndex: 1,
     position: { x: 26, y: 63, z: 20 },
     dimension: 'minecraft:overworld',
     health: 20,

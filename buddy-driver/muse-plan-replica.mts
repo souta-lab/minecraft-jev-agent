@@ -65,8 +65,7 @@ function planRequest(reason: System2PlanRequest['reason'], detail: string, tick:
  */
 function scenario(index: number, nonce: string): { state: MercuryStateSummary; request: System2PlanRequest } {
   const common = {
-    rung: 'obsidian',
-    rungIndex: 12,
+    humanMission: 'Defeat the Ender Dragon' as const,
     health: 20,
     toolRank: 3,
     consecutiveWait: 3,

@@ -20,11 +20,11 @@
 //   verify_portal -> IGNITE selected skill (same, re-verifies the postcondition)
 //   enter_portal  -> ENTER_PORTAL selected skill (place nether_portal + portal_entered)
 //
-// The M2 Nether gate is exposed as MODEL-VISIBLE WHAT, never as model-supplied
-// geometry. Mercury picks `build_portal_frame` / `light_portal` / `verify_portal`
-// and Code grounds the site (`choosePortalSite`), the cell set
-// (`portalFrameLayout`) and the verification (`validatePortalFrame`). The frame
-// is never leaked as a `place nether_portal` item (#263 pins that refusal).
+// Portal actions are grounded WHAT alternatives, never model-supplied geometry.
+// System2 chooses among them from current facts; Code grounds the site
+// (`choosePortalSite`), cell set (`portalFrameLayout`) and verification
+// (`validatePortalFrame`). The frame is never leaked as a `place nether_portal`
+// item (#263 pins that refusal).
 //
 // A pair is only added once the deterministic executor can actually ground it.
 

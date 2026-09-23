@@ -112,11 +112,10 @@ function waitLimitRequest(authorityEpoch = 0): System2PlanRequest {
 
 function mercurySummary(trigger: MercuryStateSummary['trigger'] = 'wait_limit'): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger,
     wakeReason: 'no_progress',
     wakeDetail: 'WAIT chosen 8x with no verified progress',
-    rung: 'nether_portal',
-    rungIndex: 13,
     position: { x: 10, y: 62, z: 10 },
     dimension: 'minecraft:overworld',
     health: 20,
@@ -325,9 +324,9 @@ addCase('planner: repeat wait_limit does not reach Mercury; progress does', asyn
       first?.context === 'mercury:wait_limit' &&
       afterFirst === 1 &&
       afterSecond === 1 &&
-      // suppressed request fell through to the normal System2 authority (no key),
-      // NOT to Mercury and NOT to the deterministic ladder.
-      second?.context === 'planner-key' &&
+      // The held request keeps the active semantic option without consulting a
+      // second planner or falling through to the deterministic ladder.
+      second === null &&
       progressed?.context === 'mercury:wait_limit' &&
       afterProgress === 2 &&
       suppressed &&

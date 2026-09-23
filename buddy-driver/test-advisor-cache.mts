@@ -79,11 +79,10 @@ function planRequest(): System2PlanRequest {
 
 function mercuryState(overrides: Partial<MercuryStateSummary> = {}): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'no_candidate',
     wakeReason: 'action_impossible',
     wakeDetail: 'test',
-    rung: 'raw_iron',
-    rungIndex: 7,
     position: { x: 10, y: 62, z: 10 },
     dimension: 'minecraft:overworld',
     health: 20,
@@ -105,7 +104,7 @@ addCase('Mercury cache identity separates every model-visible recovery input', (
   const base = mercuryState()
   const variants = [
     mercuryState({ wakeDetail: 'no_path at portal approach' }),
-    mercuryState({ rungIndex: 14 }),
+    mercuryState({ trigger: 'action_impossible' }),
     mercuryState({ position: { x: 28, y: 62, z: 9 } }),
     mercuryState({ health: 8 }),
     mercuryState({ queue: { ...base.queue, done: 4 } }),

@@ -204,7 +204,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
 
 {
   const sink = collector()
-  const summary = buildMercurySummary(liveBot(), liveWorld(), liveRequest(liveBlockerFacts()), 'no_progress', null, null, sink.log)
+  const summary = buildMercurySummary(liveBot(), liveWorld(), liveRequest(liveBlockerFacts()), 'no_progress', null, sink.log)
   const blockers = summary.blockers
   assert.ok(blockers !== undefined, 'a summon with a withheld candidate must carry typed blockers')
   check('(i) the goal-level blocker is carried as a typed fact', blockers.blockedBy === 'no_productive_action', String(blockers.blockedBy))
@@ -306,11 +306,11 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
   const sink = collector()
   const world = emptyWorldMemory()
   const request = liveRequest()
-  const summary = buildMercurySummary(liveBot(), world, request, 'no_candidate', null, null, sink.log)
+  const summary = buildMercurySummary(liveBot(), world, request, 'no_candidate', null, sink.log)
   check('(ii) no blockers field is invented when nothing was withheld', !('blockers' in summary), JSON.stringify(Object.keys(summary)))
   check('(ii) no alternatives field is invented either', !('alternatives' in summary), JSON.stringify(Object.keys(summary)))
   check(
-    '(ii) the payload key set is exactly the pre-existing contract',
+    '(ii) the production summary keeps the human mission and omits rung prescription',
     JSON.stringify(Object.keys(summary).sort()) ===
       JSON.stringify([
         'allowedGoals',
@@ -318,6 +318,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
         'deathHistory',
         'dimension',
         'health',
+        'humanMission',
         'inventory',
         'knownOres',
         'objective',
@@ -326,8 +327,6 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
         'postDeath',
         'queue',
         'recentFailures',
-        'rung',
-        'rungIndex',
         'stations',
         'toolRank',
         'trigger',
@@ -589,7 +588,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
   facts.withheld = [
     { candidate: forgedMarker, kind: 'MOVE', reason: forgedField, missing: [forgedMarker], suppressed: false },
   ]
-  const summary = buildMercurySummary(liveBot(), world, liveRequest(facts), 'no_progress', null, null, sink.log)
+  const summary = buildMercurySummary(liveBot(), world, liveRequest(facts), 'no_progress', null, sink.log)
 
   const reparsed = JSON.parse(JSON.stringify(summary)) as Record<string, unknown>
   check(
@@ -682,7 +681,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     ],
   }
   const sink = collector()
-  const summary = buildMercurySummary(liveBot(), liveWorld(), liveRequest(facts), 'no_progress', null, null, sink.log)
+  const summary = buildMercurySummary(liveBot(), liveWorld(), liveRequest(facts), 'no_progress', null, sink.log)
   const acquisition = summary.blockers?.withheld[1]?.acquisition?.[0]
   check(
     '(i-b) an unobtainable missing fact carries its typed refusal, not silence',
@@ -758,7 +757,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     })
   }
   const sink = collector()
-  const summary = buildMercurySummary(liveBot(), world, liveRequest(liveBlockerFacts()), 'no_progress', null, null, sink.log)
+  const summary = buildMercurySummary(liveBot(), world, liveRequest(liveBlockerFacts()), 'no_progress', null, sink.log)
   check(
     '(vi) the death history is a bounded recent window',
     summary.deathHistory.length === MERCURY_DEATH_HISTORY_LIMIT,
@@ -803,7 +802,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     '(vi) a small history is carried complete (no invented truncation)',
     (() => {
       boundedWorld.hazards.push({ x: 1, y: 2, z: 3, reason: 'damage', count: 2, firstSeenAt: 1, lastSeenAt: 5 })
-      const one = buildMercurySummary(liveBot(), boundedWorld, liveRequest(), 'no_candidate', null, null)
+      const one = buildMercurySummary(liveBot(), boundedWorld, liveRequest(), 'no_candidate', null)
       // no truncation happened, so no total field is added at all: an ordinary
       // summon keeps exactly the field set it always had
       return (

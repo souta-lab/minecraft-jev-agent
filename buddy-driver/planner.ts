@@ -134,6 +134,10 @@ export class PlannerBrain implements System2Brain {
       advisor: undefined,
       mercury: undefined,
       postDeathRecovery: false,
+      // The wrapped legacy planner exists only for an explicitly selected
+      // deterministic baseline. Do not even seed it with observer frontier data
+      // in model mode.
+      durableLadderProgress: this.mode === 'deterministic' ? options.durableLadderProgress : null,
     })
   }
 

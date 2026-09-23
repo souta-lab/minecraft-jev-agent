@@ -136,11 +136,10 @@ function unrelatedBlockers(): NonNullable<MercuryStateSummary['blockers']> {
 
 function mercuryState(overrides: Partial<MercuryStateSummary> = {}): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'action_impossible',
     wakeReason: 'action_impossible',
     wakeDetail: 'row not executable here',
-    rung: 'nether_portal',
-    rungIndex: 14,
     position: { x: 26, y: 79, z: -4 },
     dimension: 'minecraft:overworld',
     health: 20,

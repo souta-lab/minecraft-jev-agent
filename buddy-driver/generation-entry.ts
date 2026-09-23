@@ -8,9 +8,8 @@
 // The generation wraps the battle-tested `JevController` (System One remains the
 // sole action authority). The long-horizon brain is `PlannerBrain` (planner.ts):
 // it answers the controller's replan summons with a BOUNDED goal list, choosing
-// between the deterministic capability ladder and a batched Jev evaluation. The
-// controller consumes the goal queue exactly as before, so the ledger and the
-// reload path are untouched.
+// from the human mission and current grounded world facts. The controller consumes
+// the goal queue exactly as before, so the ledger and reload path are untouched.
 import type { Bot } from 'mineflayer'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -38,6 +37,7 @@ import {
   MercurySystem2,
   mercuryCallsPath,
   resolveMercuryEnablement,
+  SYSTEM2_HUMAN_MISSION,
 } from './mercury-system2.ts'
 import { MERCURY_DEATH_HISTORY_LIMIT } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
@@ -145,11 +145,10 @@ export { debugFrontier }
 
 /**
  * Compatibility projection for the controller's legacy scalar `goalItem/goalCount`.
- * The GoalQueue/System2 frontier is authoritative; this scalar exists only because
- * the current controller still requires a non-null root GoalState before the queue
- * is populated. Seed it from the first grounded ladder goal instead of the host's
- * historical `iron_ingot x3` default so an empty queue cannot leak a stale mission
- * into candidate grounding or a System2 state fingerprint.
+ * The dynamic System2 queue owns semantic WHAT; the scalar is only a mechanical
+ * inventory counter before a queue item exists. Deterministic baseline mode can
+ * still project its legacy ladder into that counter, but production/model mode
+ * keeps the configured objective instead of deriving a benchmark rung from it.
  */
 export function compatibilityRootGoal(
   goals: readonly PlannedGoal[],
@@ -1445,6 +1444,38 @@ export function planIdentityFor(
   }
 }
 
+/** Stable semantic identity for System2-owned plans; it carries no ladder frontier. */
+export const SYSTEM2_MISSION_PLAN_IDENTITY: Readonly<PlanIdentity> = Object.freeze({
+  rungId: 'mission:defeat_ender_dragon',
+  rungIndex: -1,
+  objectiveItem: null,
+  objectiveCount: 0,
+})
+
+export function isSystem2MissionPlanIdentity(identity: PlanIdentity | undefined): boolean {
+  return (
+    identity?.rungId === SYSTEM2_MISSION_PLAN_IDENTITY.rungId &&
+    identity.rungIndex === SYSTEM2_MISSION_PLAN_IDENTITY.rungIndex &&
+    identity.objectiveItem === SYSTEM2_MISSION_PLAN_IDENTITY.objectiveItem &&
+    identity.objectiveCount === SYSTEM2_MISSION_PLAN_IDENTITY.objectiveCount
+  )
+}
+
+/**
+ * Rung-based dominated-prerequisite proofs are legacy planner closure, not
+ * Minecraft truth. They may retire an explicit deterministic plan only; model
+ * authored WHAT must be reconsidered by System2 against current grounded facts.
+ */
+export function dominatedGoalReasonForPlannerMode(
+  plannerMode: ReturnType<typeof resolvePlannerMode>,
+  goal: Pick<QueuedGoal, 'kind' | 'targetItem' | 'requiredCount'>,
+  counts: Readonly<Record<string, number>>,
+  world: ResidentWorldMemory,
+): ReturnType<typeof dominatedPrerequisiteReason> {
+  if (plannerMode !== 'deterministic') return null
+  return dominatedPrerequisiteReason(goal, { ...counts } as Counts, world)
+}
+
 /**
  * #plan-reconciliation: the code-owned proof that an unfinished row authored
  * under a SUPERSEDED plan is obsolete for the CURRENT objective.
@@ -1525,6 +1556,28 @@ export function selectLedgerSnapshot(  hostSnapshot: GoalQueueSnapshot | null,
   return null
 }
 
+/** Select a consistent model-authored queue without ladder reconciliation. */
+export function selectSystem2LedgerSnapshot(
+  hostSnapshot: GoalQueueSnapshot | null,
+  derivedSnapshot: GoalQueueSnapshot | null,
+  counts: Record<string, number>,
+  world: ResidentWorldMemory,
+): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot } | null {
+  if (hostSnapshot !== null) {
+    return ledgerIsConsistent(hostSnapshot, counts, world) && isSystem2MissionPlanIdentity(hostSnapshot.planIdentity)
+      ? { source: 'host-snapshot', snapshot: hostSnapshot }
+      : null
+  }
+  if (
+    derivedSnapshot !== null &&
+    ledgerIsConsistent(derivedSnapshot, counts, world) &&
+    isSystem2MissionPlanIdentity(derivedSnapshot.planIdentity)
+  ) {
+    return { source: 'derived-file', snapshot: derivedSnapshot }
+  }
+  return null
+}
+
 /**
  * A durable queue is semantic state, not an all-time action history. It may be
  * restored only when its live world and mandatory frontier still match the
@@ -1552,6 +1605,23 @@ export function evaluateLedgerRestoreBasis(
   if (basis.worldKey !== live.worldKey) reasons.push('world_key_changed')
   if (basis.frontierRungIndex !== live.frontierRungIndex) reasons.push('frontier_index_changed')
   if (basis.frontierRungId !== live.frontierRungId) reasons.push('frontier_id_changed')
+  return { accept: reasons.length === 0, reasons }
+}
+
+/**
+ * Model-authority queue restore is scoped to the world and semantic mission.
+ * The ladder frontier remains evidence, but moving it cannot authorize or reject
+ * a System2 plan because it does not define the plan's WHAT.
+ */
+export function evaluateSystem2LedgerRestoreBasis(
+  snapshot: GoalQueueSnapshot,
+  live: LedgerBasis,
+): { accept: boolean; reasons: string[] } {
+  const basis = snapshot.basis
+  if (basis === undefined) return { accept: false, reasons: ['missing_world_basis'] }
+  const reasons: string[] = []
+  if (basis.worldKey !== live.worldKey) reasons.push('world_key_changed')
+  if (!isSystem2MissionPlanIdentity(snapshot.planIdentity)) reasons.push('mission_identity_mismatch')
   return { accept: reasons.length === 0, reasons }
 }
 
@@ -1700,6 +1770,7 @@ export function durableProgressForGeneration(
  */
 function restoreLedgerIntoController(
   controller: JevController,
+  plannerMode: ReturnType<typeof resolvePlannerMode>,
   hostSnapshot: GoalQueueSnapshot | null,
   ledgerPath: string | null,
   counts: Record<string, number>,
@@ -1716,14 +1787,26 @@ function restoreLedgerIntoController(
       log('ERROR', { where: 'restoreLedgerIntoController.read', message: error instanceof Error ? error.message : String(error) })
     }
   }
-  const chosen = selectLedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world)
+  const chosen =
+    plannerMode === 'deterministic'
+      ? selectLedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world)
+      : selectSystem2LedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world)
   if (chosen === null) {
     if (hostSnapshot !== null || derivedSnapshot !== null) {
-      log('LEDGER_STALE', { reason: 'live inventory regressed below recorded goals', source: hostSnapshot !== null ? 'host-snapshot' : 'derived-file' })
+      log('LEDGER_STALE', {
+        reason:
+          plannerMode === 'deterministic'
+            ? 'live inventory regressed below recorded goals'
+            : 'snapshot was not authored for the current System2 mission',
+        source: hostSnapshot !== null ? 'host-snapshot' : 'derived-file',
+      })
     }
     return
   }
-  const basisDecision = evaluateLedgerRestoreBasis(chosen.snapshot, liveBasis)
+  const basisDecision =
+    plannerMode === 'deterministic'
+      ? evaluateLedgerRestoreBasis(chosen.snapshot, liveBasis)
+      : evaluateSystem2LedgerRestoreBasis(chosen.snapshot, liveBasis)
   if (!basisDecision.accept) {
     log('LEDGER_RESTORE_DISCARDED', {
       source: chosen.source,
@@ -1738,6 +1821,11 @@ function restoreLedgerIntoController(
     const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
     holder.queue.restore(chosen.snapshot)
     const goals = snapshotGoals(chosen.snapshot)
+    const deterministicReconciliation =
+      plannerMode === 'deterministic' ? (chosen as NonNullable<ReturnType<typeof selectLedgerSnapshot>>) : null
+    const reopened = deterministicReconciliation?.reopened ?? []
+    const dominated = deterministicReconciliation?.dominated ?? []
+    const achieved = deterministicReconciliation?.achieved ?? []
     const done = goals.filter((goal) => goal.status === 'done').length
     const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
     log('LEDGER_RESTORED', {
@@ -1745,24 +1833,24 @@ function restoreLedgerIntoController(
       done,
       total: goals.length,
       current: current?.description ?? null,
-      reopened: chosen.reopened.length,
-      dominated: chosen.dominated.length,
-      achieved: chosen.achieved.length,
+      reopened: reopened.length,
+      dominated: dominated.length,
+      achieved: achieved.length,
       basis: chosen.snapshot.basis ?? null,
       // #plan-reconciliation: the identity those rows were AUTHORED under. The
       // basis above is re-stamped with the frontier at every commit, so it cannot
       // answer "does this queue still belong to the live plan?" - this can.
       planIdentity: chosen.snapshot.planIdentity ?? null,
     })
-    if (chosen.reopened.length > 0) {
-      log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
+    if (reopened.length > 0) {
+      log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: reopened })
     }
     // The mirror of the reopen above: an unfinished row whose world OUTCOME
     // already exists is finished work the ledger never observed as `done`, so it
     // is retired (typed, recorded in the durable ledger) instead of restored at
     // the queue head. Measured live: this is what kept `place obsidian` /
     // `place nether_portal` rows alive for a gate that was standing and lit.
-    for (const entry of chosen.achieved) {
+    for (const entry of achieved) {
       log('LEDGER_GOAL_RETIRED', {
         reason: 'outcome_already_satisfied',
         goal: entry.id,
@@ -1770,7 +1858,7 @@ function restoreLedgerIntoController(
         rungs: entry.rungIds,
       })
     }
-    for (const entry of chosen.dominated) {
+    for (const entry of dominated) {
       log('PREREQ_DOMINATED', {
         goal: entry.id,
         description: entry.description,
@@ -1806,15 +1894,10 @@ export function buildMercurySummary(
   request: System2PlanRequest,
   trigger: MercuryTriggerReason,
   deathRecovery: DeathRecoveryContext | null = null,
-  durable?: DurableLadderProgress | null,
   log?: (event: string, detail?: Record<string, unknown>) => void,
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
-  // The Mercury frontier is the SAME rung source of truth as the ladder: a
-  // non-lossy resume must not tell the semantic layer a lower rung than the
-  // generation actually resumed.
-  const frontier = deriveResumeRung(counts, world, undefined, durable)
   const inventory: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) inventory[name] = n
   let wait = 0
@@ -1860,11 +1943,10 @@ export function buildMercurySummary(
     }
   }
   return {
+    humanMission: SYSTEM2_HUMAN_MISSION,
     trigger,
     wakeReason: request.reason,
     wakeDetail: request.detail.slice(0, 200),
-    rung: frontier.rungId,
-    rungIndex: frontier.rungIndex,
     position:
       entity === undefined
         ? null
@@ -2656,7 +2738,6 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
             request,
             trigger,
             ctx.deathRecovery ?? null,
-            durableLadderProgress,
             (event, detail) => ctx.log(event, detail),
           ),
         log: (event, detail) => ctx.log(event, detail),
@@ -2806,8 +2887,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     ctx.log('TRAVERSAL_HINT', { waypoint: traversalCellKey(hint.waypoint), source: 'memory' })
   }
 
-  const rootGoal = compatibilityRootGoal(ladder.goals, { goalItem: ctx.goalItem, goalCount: ctx.goalCount })
-  if (rootGoal.goalItem !== ctx.goalItem || rootGoal.goalCount !== ctx.goalCount) {
+  const configuredObjective = { goalItem: ctx.goalItem, goalCount: ctx.goalCount }
+  const rootGoal = plannerMode === 'deterministic' ? compatibilityRootGoal(ladder.goals, configuredObjective) : configuredObjective
+  if (plannerMode === 'deterministic' && (rootGoal.goalItem !== ctx.goalItem || rootGoal.goalCount !== ctx.goalCount)) {
     ctx.log('ROOT_GOAL_PROJECTED', {
       source: 'ladder-frontier',
       goalItem: rootGoal.goalItem,
@@ -2900,13 +2982,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // (rung `satisfied` + recipe/smelt consumers). A queued prerequisite whose
     // purposes are already fulfilled by better held items retires mid-generation
     // instead of starving behind a station precondition until a reload.
-    dominatedGoalReason: (goal, live) => dominatedPrerequisiteReason(goal, { ...live } as Counts, world),
+    dominatedGoalReason: (goal, live) => dominatedGoalReasonForPlannerMode(plannerMode, goal, live, world),
     // #plan-reconciliation: the live plan/objective identity + the code-owned
     // supersession proof. The controller compares every unfinished durable row's
     // authoring identity against this once per tick, retires only rows this proof
     // calls obsolete, and otherwise asks System2 (the WHAT owner) to re-plan with
     // the compact state the request already carries.
     planIdentity: () => {
+      if (plannerMode !== 'deterministic') return { ...SYSTEM2_MISSION_PLAN_IDENTITY }
       const counts = inventoryCounts(bot)
       const frontier = deriveResumeRung(counts, world, undefined, durableLadderProgress)
       const goals = buildLadder(counts, world, undefined, { resumeRungIndex: frontier.rungIndex }).goals
@@ -2914,7 +2997,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       return planIdentityFor(frontier, root)
     },
     supersededGoalReason: (goal, identity) =>
-      supersededPlanObsoleteProof(goal, identity, inventoryCounts(bot), world),
+      plannerMode === 'deterministic'
+        ? supersededPlanObsoleteProof(goal, identity, inventoryCounts(bot), world)
+        : null,
   }
 
   const controller = new JevController(bot, options)
@@ -2929,7 +3014,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // a stale floor. `liveWorldKey` is the same key the durable-progress read above
   // already uses, so there is one spelling of it.
   const liveLedgerBasis: LedgerBasis = ledgerBasisForLiveFrontier(liveWorldKey, ladder)
-  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
+  restoreLedgerIntoController(controller, plannerMode, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
   const brain = new PlannerBrain({
     bot,
     world,
@@ -2963,7 +3048,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     id,
     rungIndex: ladder.rungIndex,
     rungId: ladder.rungId,
-    goals: ladder.goals.map((goal) => goal.description),
+    productionPlanAuthority: plannerMode === 'deterministic' ? 'deterministic' : 'system2',
+    ...(plannerMode === 'deterministic' ? { goals: ladder.goals.map((goal) => goal.description) } : {}),
     policy: controller.policyKind,
     policyProvider: controller.policyProvider,
     model: controller.policyModel,
@@ -3195,15 +3281,17 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function status(): GenerationStatus {
     refreshLiveFacts('status')
     const truth = readTruth()
-    // The HOST's observe loop reads this rung (MILESTONE high-water + the ledger
-    // basis it commits at heartbeat), so it must be the SAME durable-aware frontier
-    // the generation resumed at, not an inventory-only projection.
+    // The HOST's observe loop reads this rung for milestone evidence and the
+    // ledger basis it commits at heartbeat. Model-mode queue identity and its
+    // configured compatibility objective do not derive from this frontier.
     const frontier = deriveResumeRung(truth.inventory, world, undefined, durableLadderProgress)
-    // The control socket's `milestone` reply is served by the HOST, so carry the
-    // same frontier projection the controller is seeded with: the frontier's own
-    // item-bearing goal, never the host's historical `iron_ingot x3` default.
-    const frontierGoals = buildLadder(truth.inventory, world, undefined, { resumeRungIndex: frontier.rungIndex }).goals
-    const rootGoal = compatibilityRootGoal(frontierGoals, { goalItem: ctx.goalItem, goalCount: ctx.goalCount })
+    const rootGoal =
+      plannerMode === 'deterministic'
+        ? compatibilityRootGoal(
+            buildLadder(truth.inventory, world, undefined, { resumeRungIndex: frontier.rungIndex }).goals,
+            { goalItem: ctx.goalItem, goalCount: ctx.goalCount },
+          )
+        : { goalItem: ctx.goalItem, goalCount: ctx.goalCount }
     const current = controller.agent.current
     return {
       running: controller.isRunning,
@@ -3223,7 +3311,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       // run-scoped. Computed from THIS generation's live inventory + durable world
       // memory with the ladder's own predicates; the HOST owns the durable write.
       milestonePredicates: evaluateMilestonePredicates(truth.inventory, world, Date.now()),
-      plannedGoals: ladder.goals.length,
+      plannedGoals: plannerMode === 'deterministic' ? ladder.goals.length : controller.goalQueueState.depth,
       rungIndex: frontier.rungIndex,
       rungId: frontier.rungId,
       goalItem: rootGoal.goalItem,
@@ -3286,8 +3374,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   function missionPreflight(): MissionPreflightResult {
+    if (plannerMode !== 'deterministic') return { ok: SYSTEM2_HUMAN_MISSION.length > 0, reason: null, goalCount: 0 }
     const goalCount = ladder.goals.length
-    return { ok: goalCount >= 1, reason: goalCount >= 1 ? null : 'planner produced an empty plan', goalCount }
+    return { ok: goalCount >= 1, reason: goalCount >= 1 ? null : 'deterministic planner produced an empty plan', goalCount }
   }
 
   return {

@@ -23,11 +23,10 @@ const bot = {
 
 const dir = mkdtempSync(join(tmpdir(), 'mercury-authority-wiring-'))
 const summary = {
+  humanMission: 'Defeat the Ender Dragon' as const,
   trigger: 'wait_limit' as const,
   wakeReason: 'no_progress',
   wakeDetail: 'candidate starvation',
-  rung: 'iron_gear',
-  rungIndex: 10,
   position: { x: 0, y: 61, z: 0 },
   dimension: 'minecraft:overworld',
   health: 20,
@@ -90,14 +89,13 @@ const planner = new PlannerBrain({
   resolveKey: () => null,
 })
 
-// Before a request no provider has actually owned a semantic choice yet. The
-// configured stack is still hybrid, but reporting it as the last authority
-// would falsely claim Mercury owned a queue_empty/Typesafe decision.
+// Before a request no provider has actually owned a semantic choice yet, even
+// though the production semantic authority is configured.
 assert.equal(planner.provider, 'none')
 assert.equal(planner.authorityModel, 'none')
 assert.deepEqual(planner.authorityStack, {
-  provider: 'hybrid',
-  model: `typesafe-ai:${planner.model}|muse-spark:${MUSE_SPARK_MODEL}`,
+  provider: 'muse-spark',
+  model: MUSE_SPARK_MODEL,
 })
 
 const plan = await planner.plan(request)

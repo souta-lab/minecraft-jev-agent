@@ -48,11 +48,10 @@ function planRequest(): System2PlanRequest {
 
 function mercuryState(overrides: Partial<MercuryStateSummary> = {}): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'no_candidate',
     wakeReason: 'action_impossible',
     wakeDetail: 'test',
-    rung: 'furnace',
-    rungIndex: 4,
     position: { x: 10, y: 62, z: 10 },
     dimension: 'minecraft:overworld',
     health: 20,

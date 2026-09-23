@@ -67,11 +67,10 @@ function planRequest(): System2PlanRequest {
 
 function mercurySummary(): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'no_candidate',
     wakeReason: 'queue_empty',
     wakeDetail: 'empty goal queue in the Nether',
-    rung: 'nether_portal',
-    rungIndex: 12,
     position: { x: 12, y: 64, z: -8 },
     dimension: 'minecraft:the_nether',
     health: 20,

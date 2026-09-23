@@ -169,11 +169,10 @@ function seedPlannerCache(
 
 function mercurySummary(): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'no_candidate',
     wakeReason: 'action_impossible',
     wakeDetail: 'test',
-    rung: 'raw_iron',
-    rungIndex: 7,
     position: { x: 10, y: 62, z: 10 },
     dimension: 'minecraft:overworld',
     health: 20,

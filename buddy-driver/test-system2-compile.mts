@@ -56,18 +56,17 @@ function hostLog(sink: string[]): (event: string, detail?: Record<string, unknow
 
 /**
  * The measured live state, reduced to the fields the compile reads: the body is
- * in the Nether at the blaze_rods rung, the head row is not executable here, and
- * the mission objective is still raw_iron. This is the state the answers below
+ * in the Nether, the head row is not executable here, and the local objective is
+ * raw_iron. This is the state the answers below
  * were actually recorded against.
  */
 function measuredState(): MercuryStateSummary {
   return {
+    humanMission: 'Defeat the Ender Dragon',
     trigger: 'action_impossible',
     wakeReason: 'action_impossible',
     wakeDetail:
       'row not executable here: goal=descend:raw_iron:1 id=g15:descend:raw_iron declared=overworld live=the_nether reason=no_executable_alternative defers=0/3',
-    rung: 'blaze_rods',
-    rungIndex: 15,
     position: { x: 16, y: 37, z: -9 },
     dimension: 'the_nether',
     health: 10,
