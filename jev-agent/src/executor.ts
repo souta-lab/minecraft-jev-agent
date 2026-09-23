@@ -88,8 +88,14 @@ import {
   formatCombatOutcome,
   classifyContactApproach,
   formatContactUnreachable,
+  formatMeleeVerticalReach,
   HUNT_APPROACH_BUDGET,
   MELEE_ATTACK_REACH,
+  MELEE_REACH_UP,
+  meleeHorizontalBudget,
+  meleeContactDistance,
+  meleeVerticalReachGap,
+  meleeWalkGap,
 } from './combatClosure.ts'
 import type { CombatOutcome } from './combatClosure.ts'
 import type { ArmorSlot } from './gearPlan.ts'
@@ -6316,6 +6322,8 @@ export class Executor {
      * body cannot reach from here.
      */
     let unreachable = false
+    /** one `MELEE_VERTICAL_REACH` line per lease, naming the first swing it grounds */
+    let verticalReachLogged = false
     const onEntityDead = (entity: Entity): void => {
       if (entity.id !== entityId) return
       entityDefeated = true
@@ -6403,35 +6411,47 @@ export class Executor {
           entity.position.y - this.bot.entity.position.y,
           entity.position.z - this.bot.entity.position.z,
         )
-        if (distanceToTarget > MELEE_ATTACK_RANGE) {
+        const gapY = Math.floor(entity.position.y) - Math.floor(this.bot.entity.position.y)
+        const horizontalToTarget = Math.hypot(
+          entity.position.x - this.bot.entity.position.x,
+          entity.position.z - this.bot.entity.position.z,
+        )
+        // THE ENVELOPE, measured from the body's own upper half: a target above the
+        // body's feet is nearer to the swing than feet-to-feet says, by however much
+        // of the gap the body's own height already spans
+        // (`combatClosure.meleeContactDistance`). This is the SAME expression the
+        // stance gate admits a stance with, so the gate and this loop cannot
+        // disagree about whether a swing can land. For a target at or below the
+        // body's level this IS `distanceToTarget`, bit for bit - the measure only
+        // changes for a target above the body.
+        const reachDistance = meleeContactDistance({
+          distance: distanceToTarget,
+          horizontal: horizontalToTarget,
+          gapY,
+        })
+        if (reachDistance > MELEE_ATTACK_RANGE) {
           // The closing path itself stays allocation-free: the geometry facts the
           // unreachable proof needs are read only when the proof is about to fire.
-          const gapY = Math.floor(entity.position.y) - Math.floor(this.bot.entity.position.y)
           // THE GEOMETRY PROOF, before any attempt. A walk cannot change the body's
-          // LEVEL, and the 3-D distance is at least the vertical component of the
-          // gap, so a target more than `MELEE_ATTACK_RANGE` above the body is out of
-          // melee reach from EVERY horizontal position: `GoalFollow` provably cannot
-          // close it. The lease therefore ends HERE instead of polling to its
-          // deadline and reporting `out_of_range swings=0` - the measured shape of 9
-          // of the 17 live blaze hunts (lease-start gapY 4,4,4,4,9,9,9,9,5), which
-          // read as failed attempts rather than targets no remedy reaches. Integer
-          // levels make this verdict identical to the candidate gate's
-          // (`contactGeometryFor` uses the same bound).
+          // LEVEL, and the distance to the target is at least `gapY - MELEE_REACH_UP`
+          // (the body's own height spans the first `MELEE_REACH_UP` of the gap), so a
+          // target beyond `meleeWalkGap` is out of melee reach from EVERY horizontal
+          // position: `GoalFollow` provably cannot close it. The lease therefore ends
+          // HERE instead of polling to its deadline and reporting
+          // `out_of_range swings=0` - the measured shape of 9 of the 17 live blaze
+          // hunts (lease-start gapY 4,4,4,4,9,9,9,9,5), which read as failed attempts
+          // rather than targets no remedy reaches.
           //
           // This is deliberately the ONLY proof promoted to `unreachable`. A bounded
           // stall with no closure is NOT: `test-pearl-route.mts` (b4) pins a hunt
           // whose target never enters melee as the typed `out_of_range`, and a stall
           // is an observation about the body's progress, not a proof that no route
           // exists. Code claims only what it can prove.
-          if (gapY > MELEE_ATTACK_RANGE) {
+          if (meleeVerticalReachGap(gapY) > MELEE_ATTACK_RANGE) {
             stopFollowing()
             unreachable = true
             const placeable = selectPlaceableBlock(this.inventoryCounts())
             const placeableBlock = placeable === null ? null : placeable.name
-            const horizontal = Math.hypot(
-              entity.position.x - this.bot.entity.position.x,
-              entity.position.z - this.bot.entity.position.z,
-            )
             this.logger.warn(
               'executor',
               formatContactUnreachable({
@@ -6443,26 +6463,37 @@ export class Executor {
                   distance: distanceToTarget,
                   meleeReach: MELEE_ATTACK_RANGE,
                   gapY,
-                  walkGap: MELEE_ATTACK_RANGE,
+                  walkGap: meleeWalkGap(MELEE_ATTACK_RANGE),
                   ascentRefused: placeable === null,
                 }),
                 distance: distanceToTarget,
                 gapY,
-                horizontal,
+                horizontal: horizontalToTarget,
                 meleeReach: MELEE_ATTACK_RANGE,
-                walkGap: MELEE_ATTACK_RANGE,
+                walkGap: meleeWalkGap(MELEE_ATTACK_RANGE),
                 ascentRefusal: placeable === null ? 'no_placeable' : null,
                 placeable: placeableBlock,
               }),
-              { actionId: candidate.id, targetEntityId: entityId, gapY, horizontal },
+              { actionId: candidate.id, targetEntityId: entityId, gapY, horizontal: horizontalToTarget },
             )
             break
           }
           // Close on THIS entity only. Stock `GoalFollow(entity)` follows the
           // exact committed id, so a teleporting producer keeps its target.
+          // The goal is a 3-D BALL (`GoalFollow.isEnd` sums dx,dy,dz), so its radius
+          // must be the ball whose restriction to the body's own level is exactly the
+          // horizontal melee budget for this vertical gap. The bare melee reach is
+          // smaller than the gap for any hovering target, and such a goal has NO
+          // satisfiable node at all: the body walks at it forever and the lease burns
+          // to `swings=0`. `goals.GoalFollow` keeps following the entity, so the
+          // horizontal half still tracks a moving target.
+          const followRange = Math.max(
+            0.5,
+            Math.hypot(meleeHorizontalBudget(gapY), Math.abs(gapY)) - 0.2,
+          )
           if (!following && this.bot.pathfinder !== undefined) {
             this.setPhase(candidate, epoch, 'closing-to-melee-range')
-            this.bot.pathfinder.setGoal(new goals.GoalFollow(entity, MELEE_ATTACK_RANGE - 0.2), true)
+            this.bot.pathfinder.setGoal(new goals.GoalFollow(entity, followRange), true)
             following = true
             followBestDistance = distanceToTarget
             followClosingAt = Date.now()
@@ -6475,7 +6506,7 @@ export class Executor {
               followClosingAt = Date.now()
             } else if (Date.now() - followClosingAt > HUNT_FOLLOW_STALL_MS) {
               this.bot.pathfinder?.setGoal(null)
-              this.bot.pathfinder?.setGoal(new goals.GoalFollow(entity, MELEE_ATTACK_RANGE - 0.2), true)
+              this.bot.pathfinder?.setGoal(new goals.GoalFollow(entity, followRange), true)
               followClosingAt = Date.now()
             }
           }
@@ -6485,6 +6516,38 @@ export class Executor {
 
         stopFollowing()
         this.setPhase(candidate, epoch, goalDrop === null ? 'attacking' : `hunting-for-${goalDrop}`)
+        // THE VERTICAL REACH, named where it decides something. This swing is only
+        // legal because the body's own height spans part of an UPWARD gap: the
+        // feet-to-feet distance the lease tracks is still outside
+        // `MELEE_ATTACK_RANGE`, so without this line the swing reads as an ordinary
+        // close-range one and the correction cannot be audited from the run record.
+        // Emitted ONCE per lease, on the first swing it grounds.
+        if (!verticalReachLogged && gapY > 0 && distanceToTarget > MELEE_ATTACK_RANGE) {
+          verticalReachLogged = true
+          this.logger.info(
+            'executor',
+            formatMeleeVerticalReach({
+              outcome: 'grounded',
+              actionId: candidate.id,
+              entityId,
+              targetName: candidate.targetName,
+              distance: distanceToTarget,
+              reachDistance,
+              horizontal: horizontalToTarget,
+              gapY,
+              meleeReach: MELEE_ATTACK_RANGE,
+              reachUp: MELEE_REACH_UP,
+            }),
+            {
+              actionId: candidate.id,
+              targetEntityId: entityId,
+              gapY,
+              horizontal: horizontalToTarget,
+              reachDistance,
+              outcome: 'grounded',
+            },
+          )
+        }
         this.assertEffect({ type: 'look' })
         await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
         this.ensureOwned(epoch, signal)
