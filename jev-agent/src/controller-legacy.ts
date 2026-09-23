@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -1579,6 +1579,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SKILL_POLICY_BOUNDARY',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
+  // The acquisition half of the withhold: WHEN a withheld candidate's missing
+  // mechanical fact was answered by a grounded acquisition route, and - when none
+  // exists - the typed reason with the item and count the body would need. The
+  // measured freeze (main 38cbb22) was readable only as `CANDIDATE_WITHHELD
+  // ... missing=[headroom@27,62,15]` plus `CANDIDATE_STARVATION
+  // blockedBy=no_productive_action`: no line said whether the tool that clears the
+  // cell was craftable from what the body carried, or that nothing obtainable
+  // existed. These two markers are that fact, on both evidence planes.
+  'CANDIDATE_ACQUISITION',
+  'CANDIDATE_ACQUISITION_REFUSED',
   'CANDIDATE_STARVATION',
   'RESOURCE_SOURCE_NONE',
   // The M3 producer side of the same observability rule. A pearl need with no
@@ -11231,6 +11241,21 @@ export class JevController {
       const block = entry.candidate.target
       if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
         this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
+      }
+      // THE ACQUISITION ROUTE for this withheld fact: which grounded candidate(s)
+      // would remove the missing precondition, or - when nothing obtainable exists
+      // - the typed reason naming the item and count. Emitted with the withhold so
+      // the two facts can never be read apart.
+      for (const acquisition of entry.acquisition ?? []) {
+        const acquisitionDetail = { ...detail, acquisition }
+        this.logger.warn(
+          'agent',
+          acquisition.routes.length > 0
+            ? formatCandidateAcquisition(entry.candidate.id, acquisition)
+            : formatCandidateAcquisitionRefused(entry.candidate.id, acquisition),
+          acquisitionDetail,
+          this.tickCounter,
+        )
       }
       // THE STANCE REFUSAL, mirrored with the full geometry: the entity, the melee
       // constant, the nearest stance the search examined and the fact that refused
