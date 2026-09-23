@@ -368,6 +368,21 @@ const ASSISTED_VARIANTS = [
     expect: 'descriptor.sourceSha',
   },
   {
+    id: 'legacy pack_format only (a bare pack_format no longer declares support)',
+    mutate: (doc) => {
+      delete doc.cleanRun.gameruleMechanism.datapackFormat
+      doc.cleanRun.gameruleMechanism.datapackPackFormat = 88
+    },
+    expect: 'descriptor.datapackFormat',
+  },
+  {
+    id: 'gamerule scope not declared per dimension',
+    mutate: (doc) => {
+      delete doc.cleanRun.gameruleScope
+    },
+    expect: 'descriptor.gameruleScope',
+  },
+  {
     id: 'a world change is recorded',
     mutate: (doc) => {
       doc.worldChanges = [{ who: 'operator', what: 'gave supplies', why: 'fixture' }]
@@ -563,11 +578,12 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
     'level-name=world\nlevel-seed=2024\ndifficulty=normal\nspawn-monsters=true\nspawn-animals=true\ngamemode=survival\nforce-gamemode=false\nhardcore=false\npvp=true\nenable-command-block=false\ngenerate-structures=true\nlevel-type=minecraft\\:normal\nallow-nether=true\nallow-flight=true\nspawn-protection=0\nwhite-list=false\nserver-port=25565\nmotd=fixture\n',
     'utf8',
   )
+
   writeFileSync(join(container, 'ops.json'), '[]', 'utf8')
   const descriptorPath = join(root, 'descriptor.json')
   const descriptorDoc = JSON.parse(readFileSync(TEMPLATE, 'utf8'))
   descriptorDoc.cleanRun.worldContainer = container
-  descriptorDoc.cleanRun.gameruleMechanism.datapackPackFormat = 88
+  descriptorDoc.cleanRun.gameruleMechanism.datapackFormat = { min: [94, 1], max: [94, 1] }
   writeFileSync(descriptorPath, `${JSON.stringify(descriptorDoc, null, 2)}\n`, 'utf8')
   const args = ['--environment', descriptorPath, '--server-root', container, '--level-name', 'm3clean-prep', '--seed', '998877665544', '--source-sha', FIXTURE_SHA]
 
@@ -582,6 +598,12 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.equal(existsSync(join(container, 'm3-clean-run')), false)
   assert.equal(existsSync(join(container, 'm3clean-prep')), false)
   assert.match(planRun.guards.find((guard) => guard.id === 'no_destructive_operation').detail, /no delete/)
+  // spawn-monsters is a DEAD key in this build: the real gate is the gamerule, and
+  // the property check must say so loudly instead of implying enforcement
+  const deadKey = planRun.propertyChecks.find((entry) => entry.property === 'spawn-monsters')
+  assert.ok(deadKey !== undefined, 'spawn-monsters must be reported')
+  assert.equal(deadKey.verdict, 'NOT_READ_BY_BUILD')
+  assert.match(deadKey.detail, /spawn_mobs \/ spawn_monsters GAMERULE/)
   ok('G1. --dry-run writes NOTHING into the server root and reports every planned action with a content hash')
 
   // G2. apply stages the world, the datapack, the resolved descriptor and the manifest
@@ -590,7 +612,14 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.ok(existsSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'data', 'm3clean', 'function', 'set_gamerules.mcfunction')))
   const mcfunction = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'data', 'm3clean', 'function', 'set_gamerules.mcfunction'), 'utf8')
   assert.match(mcfunction, /^gamerule keep_inventory false$/m)
-  assert.match(readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'pack.mcmeta'), 'utf8'), /"pack_format": 88/)
+  assert.match(readFileSync(join(container, 'm3-clean-run', 'operator-commands.txt'), 'utf8'), /execute in minecraft:the_nether run gamerule/)
+  const packMeta = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'pack.mcmeta'), 'utf8')
+  assert.match(packMeta, /"min_format": \[\s*94,\s*1\s*\]/)
+  assert.match(packMeta, /"max_format": \[\s*94,\s*1\s*\]/)
+  assert.equal(/pack_format/.test(packMeta), false, 'since 1.21.9 a bare pack_format does not declare support: it must not be written')
+  // gamerules are per-dimension: every rule is also asserted in the Nether and the End
+  assert.match(mcfunction, /^execute in minecraft:the_nether run gamerule keep_inventory false$/m)
+  assert.match(mcfunction, /^execute in minecraft:the_end run gamerule keep_inventory false$/m)
   const resolvedPath = join(container, 'm3-clean-run', 'environment-resolved.json')
   const resolved = JSON.parse(readFileSync(resolvedPath, 'utf8'))
   assert.equal(resolved.values.sourceSha, FIXTURE_SHA)

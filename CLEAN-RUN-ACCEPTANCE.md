@@ -50,8 +50,9 @@ environment record can never be two different documents.
 | `cleanRun.gamerulePolicy.requiredRules` | the 58 rules this world carries | every one is declared and judged |
 | `cleanRun.gamerulePolicy.notRegisteredInWorld` | `max_minecart_speed` | registered by the build but absent from the world (its feature flag `minecart_improvements` is in the world's disabled datapack list), so the in-world command does not exist; declared, excluded from the datapack/console set |
 | `cleanRun.gamerulePolicy.assistIfChanged` | one justification per rule (59) | "list the assists explicitly and justify each": a reviewer reads the reason here, and the gate fails if any declared rule has none |
-| `cleanRun.gameruleMechanism` | console primary, datapack secondary | Mineflayer cannot read gamerules. The console listing after first boot is the authoritative evidence; the staged datapack asserts the rules at every world load as belt-and-braces |
-| `values.difficulty` / `mobSpawning` / `spawnAnimals` | `normal` / `true` / `true` | M3 needs hostile mobs: ender pearls and blaze rods. `peaceful` is refused |
+| `cleanRun.gameruleScope` | `perDimension: true` + overworld/nether/end | gamerules are stored **per dimension** in this build (each `level.dat` owns its own `Data.game_rules`; the live world runs `keep_inventory=true` in all three while `advance_time=false` only in the overworld). The M3 route dies in the Nether, so a single-dimension rule set could leave `keep_inventory=true` exactly where it matters |
+| `cleanRun.gameruleMechanism` | console primary, datapack secondary, `datapackFormat` = `min/max [94,1]` | Mineflayer cannot read gamerules and camelCase ids are rejected by this build. The console listings (per dimension) after first boot are the authoritative evidence; the staged datapack asserts every rule in all three dimensions at every world load. Since 1.21.9 a bare `pack_format` no longer declares data-pack support, so the pack declares `min_format`/`max_format` |
+| `values.difficulty` / `mobSpawning` / `spawnAnimals` | `normal` / `true` / `true` | M3 needs hostile mobs: ender pearls and blaze rods. `peaceful` is refused. **`spawn-monsters` is a DEAD key in this build** (0 occurrences in `DedicatedServerProperties`): it is declared for the artifact's environment record and written for diff readability only. Hostile spawning is actually gated by the `spawn_mobs` / `spawn_monsters` **gamerules**, which the descriptor declares and the gate judges |
 | `values.levelName` | `m3clean-b1` | a NEW name: lowercase, not `world*`, not a protected name, and not the previous world |
 | `values.levelSeed` | `-4187923615481` | a NEW seed: not `2024`, not `0`, not empty |
 | `values.serverVersion` / `serverImplementation` / `serverId` | `1.21.11` / `leaf-1.21.11-178.jar` / `127.0.0.1:25565` | the world identity: `serverId` is half of the resident's `worldKey` |
@@ -120,14 +121,26 @@ cp <container>/server.properties <container>/server.properties.clean-run-bak-<st
 cp <container>/m3-clean-run/server.properties.clean <container>/server.properties
 
 # 3.3 restart the server  [OPERATOR ACTION — H4; this harness never does it]
-cd <container> && setsid --fork ./start.sh </dev/null >>server.log 2>&1 &
+#     start.sh does NOT forward "$@", so pass the flags by invoking java directly:
+#     --config pins the properties file, --universe the world container, --level-name
+#     the world. There is NO --seed flag in this build: the seed can only come from
+#     the properties file, and it is consumed only when level.dat does not exist yet.
+cd <container> && setsid --fork /usr/lib/jvm/java-21-openjdk-amd64/bin/java \
+  -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui \
+  --config <container>/m3-clean-run/server.properties.clean \
+  --universe <container> --level-name <levelName> \
+  </dev/null >>server.log 2>&1 &
+#     do NOT pass --bonusChest (there is no properties key for it)
 
 # 3.4 after the FIRST boot, verify on the server console and paste the output into
 #     <container>/m3-clean-run/gamerule-verification.txt :
-#       list          -> the body's name must be allowed in
-#       seed          -> must equal values.levelSeed
-#       gamerule      -> keep_inventory=false and every declared default
-#     (the 1.21.11 ids are snake_case; if this build wants a namespace, `minecraft:keep_inventory`)
+#       list                                    -> the body's name must be allowed in
+#       seed                                    -> must equal values.levelSeed
+#       gamerule                                -> overworld rules
+#       execute in minecraft:the_nether run gamerule
+#       execute in minecraft:the_end run gamerule
+#     keep_inventory must be FALSE IN ALL THREE DIMENSIONS (the M3 route dies in the
+#     Nether). The ids are the snake_case 1.21.11 ids; camelCase is REJECTED by this build.
 
 # 3.5 start the resident on the FROZEN SHA, with EMPTY durable state: use a FRESH
 #     worktree of the frozen commit, so no ledger/known-resource memory from the
@@ -228,12 +241,19 @@ so a clean premise can never be paired with a run judged against another file.
   clean world from a different root would put the wrong seed in the acceptance
   record; the clean gate FAILs that loudly (`run.seedAttested`) rather than
   accepting it.
-- **`datapackPackFormat` is `null`** in the checked-in descriptor, so the gamerule
-  datapack is skipped loudly and the console listing is the primary mechanism.
-  Fill it in once the pack format for this build is verified. The datapack is
-  written under `<world>/datapacks/m3-clean-gamerules/`; a wrong `pack_format` is
-  reported by the server as an incompatible pack, which is visible and harmless
-  (the console listing remains the authoritative evidence either way).
+- **The datapack's own execution is unverified without a boot.** Its format
+  (`min_format`/`max_format` = `[94,1]`, the build's data format) and its load tag
+  (`data/minecraft/tags/function/load.json`) are verified statically in this build's
+  jar, and the load tag is auto-enabled even with `initial-enabled-packs=vanilla`,
+  but no world has been booted, so the ordering of the load function against spawn
+  preparation is untested. The console listings per dimension remain the
+  authoritative gamerule evidence.
+- **`spawn-monsters` proves nothing in this build** (dead key). Hostile spawning is
+  gated by the `spawn_mobs` / `spawn_monsters` gamerules, and whether those actually
+  yield endermen and blazes at the M3 site is only observable in the run.
+- **Gamerule values are per dimension.** The gate can check a run-scoped marker and
+  the operator's three console listings; it cannot enumerate a dimension's rule
+  table by itself.
 - **The live world's durable resident state** (ledger / known resources) is
   namespaced by `worldKey`, which contains no seed: a new world on the same
   `serverId` and epoch could still match old memory. The recipe avoids this by

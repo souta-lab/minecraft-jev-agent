@@ -37,11 +37,11 @@
 //
 // Exit: 0 = planned / applied / idempotent no-op, 1 = REFUSED (not clean), 2 = usage.
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { PROTECTED_LEVEL_NAMES, loadCleanEnvironment, validateCleanEnvironment, worldDirNames } from './clean-run-environment.mjs'
+import { PROTECTED_LEVEL_NAMES, loadCleanEnvironment, validateCleanEnvironment, worldDataExists, worldDirNames } from './clean-run-environment.mjs'
 
 export const RECORD = 'clean-run-prepare'
 export const SCHEMA_VERSION = 1
@@ -203,25 +203,43 @@ function gitHead(root) {
 
 /**
  * The gamerule datapack: pack.mcmeta + minecraft:load tag + the function.
+ *
+ * Two measured facts about THIS build shape the file:
+ *   * since 1.21.9 a data pack must declare `min_format`/`max_format`; a bare
+ *     `pack_format` no longer declares support (the server's own
+ *     `world/datapacks/bukkit/pack.mcmeta` uses `{"min_format":[94,1],"max_format":[94,1]}`),
+ *     so a pack with only `pack_format` is rejected or ignored - a silent way to
+ *     end up with a "clean" world whose rules were never set.
+ *   * gamerules are PER DIMENSION (each level.dat owns its own set; the live
+ *     world proves it: keep_inventory=true in all three dimensions while
+ *     advance_time=false only in the overworld). A load function runs in the
+ *     overworld context, so every rule is also asserted in the Nether and the End
+ *     - otherwise a Nether death could still keep its inventory.
+ *
  * Rules the build registers but the world does not carry (`notRegisteredInWorld`)
- * are excluded: a command for them would fail in-world. The console command form
- * is the bare 1.21.11 rule id; `minecraft:<id>` is documented as the fallback.
+ * are excluded: the command would fail in-world. The console form is the bare
+ * 1.21.11 snake_case rule id (camelCase is rejected by this build).
  */
-export function gameruleDatapackFiles(levelName, gamerules, packFormat, exclude = []) {
+export function gameruleDatapackFiles(levelName, gamerules, format, exclude = []) {
   const excluded = new Set(exclude)
+  const dimensions = format?.dimensions ?? ['minecraft:the_nether', 'minecraft:the_end']
   const sorted = Object.entries(gamerules)
     .filter(([rule]) => !excluded.has(rule))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-  const commands = [
-    `# m3 clean-run gamerules for ${levelName}: every rule is asserted at its declared vanilla default.`,
+  const lines = [
+    `# m3 clean-run gamerules for ${levelName}: every rule is asserted at its declared vanilla default,`,
+    '# in the overworld AND in every other dimension (gamerules are per-dimension in this build).',
     '# Written by tools/clean-run-prepare.mjs; the console `gamerule` listing is the human verification.',
     ...(excluded.size === 0 ? [] : [`# excluded (registered by the build but absent from this world): ${[...excluded].join(', ')}`]),
-    ...sorted.map(([rule, value]) => `gamerule ${rule} ${String(value)}`),
   ]
+  for (const [rule, value] of sorted) {
+    lines.push(`gamerule ${rule} ${String(value)}`)
+    for (const dimension of dimensions) lines.push(`execute in ${dimension} run gamerule ${rule} ${String(value)}`)
+  }
   const files = [
     {
       path: join(DATAPACK_DIR, 'pack.mcmeta'),
-      content: `${JSON.stringify({ pack: { pack_format: packFormat, description: `M3 clean-run gamerules (${levelName})` } }, null, 2)}\n`,
+      content: `${JSON.stringify({ pack: { description: `M3 clean-run gamerules (${levelName})`, min_format: format.min, max_format: format.max } }, null, 2)}\n`,
     },
     {
       path: join(DATAPACK_DIR, 'data', 'minecraft', 'tags', 'function', 'load.json'),
@@ -229,11 +247,18 @@ export function gameruleDatapackFiles(levelName, gamerules, packFormat, exclude 
     },
     {
       path: join(DATAPACK_DIR, 'data', DATAPACK_NAMESPACE, 'function', 'set_gamerules.mcfunction'),
-      content: `${commands.join('\n')}\n`,
+      content: `${lines.join('\n')}\n`,
     },
   ]
   return files
 }
+
+/** Data-pack formats a prepared world must not be written with. */
+export const DEAD_PROPERTIES = Object.freeze({
+  'spawn-monsters': 'this build does not read spawn-monsters at all (0 matches in DedicatedServerProperties.class): the real gate is the spawn_mobs / spawn_monsters GAMERULE. It is kept in the file only so a diff stays readable.',
+  'spawn-animals': 'this build does not read spawn-animals: the real gate is the spawn_mobs class of gamerules.',
+  'spawn-npcs': 'this build does not read spawn-npcs.',
+})
 
 /**
  * Build the whole plan. Pure: no writes, no server, no socket. `apply` only
@@ -346,11 +371,11 @@ export function planPrepare({
         : `--server-root ${resolve(container)} is inside the target world directory ${nestedInTargetWorld.join(', ')}`,
   })
   if (nestedInTargetWorld.length > 0) refusals.push({ reason: `server_root_inside_target_world: ${nestedInTargetWorld.join(', ')}` })
-  const containerHasLevelDat = existsSync(join(resolve(container), 'level.dat'))
+  const containerHasLevelDat = worldDataExists(resolve(container))
   guards.push({
     id: 'server_root_is_not_a_world',
     verdict: containerHasLevelDat ? 'FAIL' : 'PASS',
-    detail: containerHasLevelDat ? `--server-root ${resolve(container)} contains a level.dat, i.e. it IS a generated world` : `--server-root ${resolve(container)} contains no level.dat`,
+    detail: containerHasLevelDat ? `--server-root ${resolve(container)} contains level.dat/level.dat_old, i.e. it IS a generated world` : `--server-root ${resolve(container)} contains no world data`,
   })
   if (containerHasLevelDat) refusals.push({ reason: `server_root_is_a_world: ${resolve(container)} contains level.dat` })
   guards.push({ id: 'no_destructive_operation', verdict: 'PASS', detail: 'this tool performs no delete, no move and no chmod; every action below is mkdir or write' })
@@ -361,7 +386,7 @@ export function planPrepare({
   }
 
   // ---- the world must be new, and NOT already generated --------------------
-  const scanned = worldDirNames(levelName2).map((dir) => ({ dir, path: join(resolve(container), dir), exists: existsSync(join(resolve(container), dir)), generated: existsSync(join(resolve(container), dir, 'level.dat')) }))
+  const scanned = worldDirNames(levelName2).map((dir) => ({ dir, path: join(resolve(container), dir), exists: existsSync(join(resolve(container), dir)), generated: worldDataExists(join(resolve(container), dir)) }))
   const generated = scanned.filter((entry) => entry.generated)
   if (generated.length > 0) {
     refusals.push({ reason: `world_already_generated: ${generated.map((entry) => `${entry.dir} (level.dat present)`).join(', ')} — a played world can never be a clean-run target; choose a NEW --level-name/--seed` })
@@ -407,11 +432,23 @@ export function planPrepare({
         'spawn-monsters': String(resolvedDoc.values.mobSpawning === true),
         motd: `M3 CLEAN RUN ${levelName2} seed=${levelSeed}`,
       }
+      for (const [property, whyDead] of Object.entries(DEAD_PROPERTIES)) {
+        if (parsed.values[property] === undefined) continue
+        propertyChecks.push({ property, wanted: 'not used by this build', verdict: 'NOT_READ_BY_BUILD', detail: `${property}=${parsed.values[property]} is in the file but ${whyDead}` })
+      }
       for (const [key, property] of Object.entries(SERVER_PROPERTY_MAP)) {
         const value = resolvedDoc.values.server?.[key]
         if (value === undefined) continue
         if (parsed.values[property] === undefined) {
-          propertyChecks.push({ property, wanted: value, verdict: 'KEY_ABSENT', detail: `${property} is not a key in this build's server.properties; it cannot be enforced by file (see operator-commands.txt)` })
+          propertyChecks.push({
+            property,
+            wanted: value,
+            verdict: 'KEY_ABSENT',
+            detail:
+              property === 'bonus-chest'
+                ? `this build has no bonus-chest property; it is enforced by NEVER passing the --bonusChest launch flag (see operator-commands.txt)`
+                : `${property} is not a key in this build's server.properties; it cannot be enforced by file (see operator-commands.txt)`,
+          })
           continue
         }
         overrides[property] = String(value)
@@ -457,13 +494,16 @@ export function planPrepare({
   // ---- actions -------------------------------------------------------------
   const actions = []
   actions.push({ kind: 'mkdir', path: worldDir, exists: existsSync(worldDir), note: 'the new world directory (the server generates level.dat/region on first boot)' })
-  const packFormat = resolvedDoc.cleanRun?.gameruleMechanism?.datapackPackFormat ?? null
+  const mechanism = resolvedDoc.cleanRun?.gameruleMechanism ?? {}
+  const legacyPackFormat = mechanism.datapackPackFormat ?? null
+  const packFormat = mechanism.datapackFormat ?? (typeof legacyPackFormat === 'number' ? { min: legacyPackFormat, max: legacyPackFormat, legacy: true } : null)
   if (packFormat === null) {
-    warnings.push('datapackPackFormat is null in the descriptor: the gamerule datapack is SKIPPED. The console `gamerule` listing after first boot is then the authoritative gamerule evidence.')
+    warnings.push('no datapackFormat in the descriptor: the gamerule datapack is SKIPPED. The console `gamerule` listing after first boot is then the authoritative gamerule evidence.')
   } else {
+    if (packFormat.legacy === true) warnings.push('datapackFormat is missing and only the legacy datapackPackFormat number is set: since 1.21.9 a data pack must declare min_format/max_format, so this pack may be ignored by the server. Set cleanRun.gameruleMechanism.datapackFormat.')
     const notRegistered = Object.keys(resolvedDoc.cleanRun?.gamerulePolicy?.notRegisteredInWorld ?? {})
     for (const file of gameruleDatapackFiles(levelName2, resolvedDoc.values.gamerules ?? {}, packFormat, notRegistered)) {
-      files.push({ path: join(worldDir, file.path), content: file.content, note: 'gamerule datapack (asserted on every world load)' })
+      files.push({ path: join(worldDir, file.path), content: file.content, note: 'gamerule datapack (asserted on every world load, per dimension)' })
     }
   }
   const resolvedForFile = { ...resolvedDoc, resolvedBy: { tool: 'tools/clean-run-prepare.mjs', from: loaded.path, fromSha256: loaded.sha256, overrides: overridesApplied, at: 'see manifest.json' } }
@@ -564,8 +604,11 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `# 4. after the first boot, VERIFY the world + gamerules on the server console and paste the output into:`,
     `#    ${runDir}/gamerule-verification.txt`,
     `#    (console commands) list  /  seed  /  gamerule`,
-    `#    the gamerule ids are the 1.21.11 snake_case ids from ${runDir}/environment-resolved.json;`,
-    `#    if this build wants a namespaced id, prefix with minecraft: (e.g. \`gamerule minecraft:keep_inventory false\`)`,
+    `#    gamerules are PER DIMENSION in this build: also run`,
+    `#      execute in minecraft:the_nether run gamerule`,
+    `#      execute in minecraft:the_end run gamerule`,
+    `#    the gamerule ids are the snake_case ids from ${runDir}/environment-resolved.json (camelCase is`,
+    `#    REJECTED by this build); keep_inventory must be false in ALL THREE dimensions because the M3 route dies in the Nether`,
     `#    reviewer check: keepInventory=false and every rule in ${runDir}/environment-resolved.json`,
     `# 5. start the resident on the FROZEN sha (from the frozen checkout, not this one):`,
     `cd ${tree}/buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &`,

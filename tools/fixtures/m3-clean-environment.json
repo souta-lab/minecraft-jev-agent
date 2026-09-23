@@ -16,7 +16,7 @@
     "previousWorld": {
       "levelName": "world",
       "levelSeed": "2024",
-      "why": "measured 2026-09-23: difficulty=normal, level-name=world, level-seed=2024, spawn-monsters=true, keepInventory ON (proved by behaviour: LADDER_INVENTORY_SETTLE reason=death itemCount=27 with the diamond_sword surviving), plus operator grants (a shulker of supplies), summons (ender_dragon x11, warden x5) and terrain flooding. level.dat confirms keep_inventory=true in all three dimensions and advance_time=false in the overworld. This world can never be the M3 proof."
+      "why": "measured 2026-09-23: difficulty=normal, level-name=world, level-seed=2024, keepInventory ON (proved by behaviour: LADDER_INVENTORY_SETTLE reason=death itemCount=27 with the diamond_sword surviving). level.dat confirms keep_inventory=true in ALL THREE dimensions and advance_time=false in the overworld. The server .console_history records the assists verbatim: gamerule keep_inventory true (and twice via `execute in minecraft:the_nether/the_end run gamerule keep_inventory true`), spawn_mobs false/true toggles, advance_time false, doDaylightCycle false, doInsomnia false, forced night and clear weather, 7x tp, 27x give (incl. cobblestone 402 and diamond gear), 4x fill ... air replace (portal/obsidian). No `seed` command was ever run, so the seed is only in server.properties. This world can never be the M3 proof."
     },
     "sourceSha": {
       "state": "UNSET",
@@ -212,12 +212,33 @@
         "water_source_conversion": true
       }
     },
+    "gameruleScope": {
+      "perDimension": true,
+      "dimensions": [
+        "minecraft:overworld",
+        "minecraft:the_nether",
+        "minecraft:the_end"
+      ],
+      "why": "measured: gamerules are stored PER DIMENSION (each level.dat owns its own Data.game_rules; the live world runs keep_inventory=true in all three while advance_time=false only in the overworld). A load function runs in the overworld context, so the gamerule datapack asserts every rule in all three dimensions - otherwise keep_inventory could stay true in the Nether, i.e. exactly where the M3 route dies."
+    },
     "gameruleMechanism": {
       "primary": "console",
-      "primaryDetail": "After the FIRST boot of the clean world the operator runs `gamerule` (no arguments) on the server console and pastes the full listing into the run evidence directory; the reviewer checks keep_inventory=false and every declared default. Mineflayer cannot read gamerules, so the console listing plus this descriptor is the only honest gamerule evidence.",
+      "primaryDetail": "After the FIRST boot of the clean world the operator runs `gamerule`, and `execute in minecraft:the_nether run gamerule` plus `execute in minecraft:the_end run gamerule`, on the server console and pastes the three listings into the run evidence directory; the reviewer checks keep_inventory=false and every declared default in ALL THREE dimensions. Mineflayer cannot read gamerules, and camelCase ids are rejected by this build (ids are snake_case).",
       "secondary": "datapack",
-      "secondaryDetail": "clean-run-prepare also writes <world>/datapacks/m3-clean-gamerules (data/minecraft/tags/function/load.json -> m3clean:set_gamerules) so the gamerules are asserted at every world load as well. This is belt-and-braces: if the pack format for this build is unknown (datapackPackFormat null) the datapack is SKIPPED loudly and the console path is authoritative.",
-      "datapackPackFormat": null
+      "secondaryDetail": "clean-run-prepare writes <world>/datapacks/m3-clean-gamerules with data/minecraft/tags/function/load.json -> m3clean:set_gamerules, so every rule is asserted at every world load in all three dimensions. The load tag is auto-enabled even with initial-enabled-packs=vanilla (measured).",
+      "datapackFormat": {
+        "min": [
+          94,
+          1
+        ],
+        "max": [
+          94,
+          1
+        ],
+        "dataMajor": 94,
+        "dataMinor": 1,
+        "source": "measured from this build: version.json data_major=94/data_minor=1; the server writes world/datapacks/bukkit/pack.mcmeta with {\"min_format\":[94,1],\"max_format\":[94,1]} and the bundled paper datapack uses {\"min_format\":94,\"max_format\":94}. Since 1.21.9 a bare pack_format does not declare support."
+      }
     }
   },
   "values": {

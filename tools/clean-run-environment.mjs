@@ -188,6 +188,15 @@ export function worldDirNames(levelName) {
  * create the world. An absent container is reported as unreadable, which can
  * never be mistaken for "the world exists".
  */
+/**
+ * Does this world directory already hold world data? Mirrors the server's own
+ * `hasWorldData()`: `level.dat` OR `level.dat_old` (a crash-recovered world has
+ * only the latter, and regenerating level data in place is NOT a fresh world).
+ */
+export function worldDataExists(worldDir) {
+  return existsSync(join(worldDir, 'level.dat')) || existsSync(join(worldDir, 'level.dat_old'))
+}
+
 export function scanWorldContainer(containerPath, levelName) {
   const out = { containerReadable: false, generated: [], staged: [], scanned: [] }
   if (typeof containerPath !== 'string' || containerPath === '' || !existsSync(containerPath)) return out
@@ -197,7 +206,7 @@ export function scanWorldContainer(containerPath, levelName) {
     const path = join(containerPath, dir)
     if (!existsSync(path)) continue
     out.scanned.push(dir)
-    if (existsSync(join(path, 'level.dat'))) out.generated.push(dir)
+    if (worldDataExists(path)) out.generated.push(dir)
     else out.staged.push(dir)
   }
   return out
@@ -301,7 +310,7 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
       verdict: scanned.generated.length > 0 ? 'FAIL' : 'PASS',
       reason:
         scanned.generated.length > 0
-          ? `world already GENERATED under ${String(containerPath)}: ${scanned.generated.join(', ')} (a level.dat exists, so the world has been booted and can never be a clean-run target)`
+          ? `world already GENERATED under ${String(containerPath)}: ${scanned.generated.join(', ')} (level.dat/level.dat_old exists, so the world has been booted and can never be a clean-run target)`
           : scanned.containerReadable
             ? `${worldDirNames(levelName ?? '').join(', ')} contain no level.dat under ${containerPath}${scanned.staged.length > 0 ? ` (staged by clean-run-prepare, not yet generated: ${scanned.staged.join(', ')})` : ''}`
             : `world container ${String(containerPath)} is absent, so no world can exist there yet (clean-run-prepare refuses to write into a missing root without --create-server-root)`,
@@ -339,7 +348,51 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
     condition({
       id: 'descriptor.mobSpawning',
       verdict: values.mobSpawning === true ? 'PASS' : 'FAIL',
-      reason: values.mobSpawning === true ? 'spawn-monsters=true (natural hostile spawning is ON)' : `spawn-monsters must be true, got ${String(values.mobSpawning)}`,
+      reason:
+        values.mobSpawning === true
+          ? 'hostile spawning is declared ON. NOTE: this build does NOT read the server.properties key `spawn-monsters` (0 occurrences in DedicatedServerProperties); the enforceable gate is the spawn_mobs / spawn_monsters GAMERULE, which descriptor.gamerulesClean checks'
+          : `values.mobSpawning must be true, got ${String(values.mobSpawning)} (and it is only a declaration: this build gates hostile spawning on the spawn_mobs / spawn_monsters gamerule)`,
+    }),
+  )
+
+  // 5b. gamerules are PER DIMENSION in this build (each level.dat owns its own
+  // set; the live world proves it: keep_inventory=true everywhere while
+  // advance_time=false only in the overworld). A clean run must assert the rules
+  // in every dimension, because the M3 route dies in the Nether.
+  const scope = isPlainObject(cleanRun.gameruleScope) ? cleanRun.gameruleScope : null
+  const scopeDimensions = Array.isArray(scope?.dimensions) ? scope.dimensions : []
+  const requiredDimensions = ['minecraft:overworld', 'minecraft:the_nether', 'minecraft:the_end']
+  const missingDimensions = requiredDimensions.filter((dimension) => !scopeDimensions.includes(dimension))
+  conditions.push(
+    condition({
+      id: 'descriptor.gameruleScope',
+      verdict: scope?.perDimension === true && missingDimensions.length === 0 ? 'PASS' : 'FAIL',
+      reason:
+        scope?.perDimension === true && missingDimensions.length === 0
+          ? `gamerules are declared PER DIMENSION for ${scopeDimensions.join(', ')}; the staged datapack asserts every rule in all three (keep_inventory=false must hold in the Nether, where the M3 route dies)`
+          : `cleanRun.gameruleScope must declare perDimension=true and all of ${requiredDimensions.join(', ')} (got perDimension=${String(scope?.perDimension)}, dimensions=${JSON.stringify(scopeDimensions)}); a single-dimension gamerule set can leave keep_inventory=true in the Nether and fake the run`,
+      detail: { perDimension: scope?.perDimension ?? null, dimensions: scopeDimensions, missing: missingDimensions },
+    }),
+  )
+
+  // 5c. the gamerule mechanism: since 1.21.9 a data pack must declare
+  // min_format/max_format - a bare pack_format no longer declares support, so a
+  // pack written that way can be rejected or ignored and the rules never set.
+  const mechanism = isPlainObject(cleanRun.gameruleMechanism) ? cleanRun.gameruleMechanism : {}
+  const datapackFormat = isPlainObject(mechanism.datapackFormat) ? mechanism.datapackFormat : null
+  const legacyFormat = typeof mechanism.datapackPackFormat === 'number' ? mechanism.datapackPackFormat : null
+  const formatShaped = datapackFormat !== null && datapackFormat.min !== undefined && datapackFormat.max !== undefined
+  conditions.push(
+    condition({
+      id: 'descriptor.datapackFormat',
+      verdict: formatShaped ? 'PASS' : datapackFormat === null && legacyFormat !== null ? 'FAIL' : 'UNKNOWN',
+      required: datapackFormat !== null || legacyFormat !== null,
+      reason: formatShaped
+        ? `the gamerule datapack declares min_format=${JSON.stringify(datapackFormat.min)} max_format=${JSON.stringify(datapackFormat.max)} (1.21.9+ requires this pair; this build's data format is 94.1)`
+        : datapackFormat === null && legacyFormat !== null
+          ? `only the legacy datapackPackFormat=${legacyFormat} is set: since 1.21.9 a bare pack_format does not declare data-pack support, so the gamerule pack may be rejected or ignored and the rules never applied`
+          : 'no datapackFormat is declared: the gamerule datapack is skipped and the console `gamerule` listing is the only mechanism',
+      detail: { datapackFormat, legacyFormat },
     }),
   )
 

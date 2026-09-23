@@ -35,14 +35,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
-  CHECK_RECORD,
   SCHEMA_VERSION,
   checkRunEvidence,
   extractRunWindow,
   loadCleanEnvironment,
   observedDeviations,
   observedWorlds,
-  sha256Text,
   validateCleanEnvironment,
 } from './clean-run-environment.mjs'
 
@@ -336,11 +334,11 @@ export async function runCleanRunGate({
   // ---- output --------------------------------------------------------------
   if (out !== null && out !== '') {
     const outDir = resolve(out)
+    verdict.outputs = { json: join(outDir, 'clean-run.json'), markdown: join(outDir, 'clean-run.md') }
     try {
       mkdirSync(outDir, { recursive: true })
-      writeFileSync(join(outDir, 'clean-run.json'), `${JSON.stringify(verdict, null, 2)}\n`, 'utf8')
-      writeFileSync(join(outDir, 'clean-run.md'), cleanRunMarkdown(verdict), 'utf8')
-      verdict.outputs = { json: join(outDir, 'clean-run.json'), markdown: join(outDir, 'clean-run.md') }
+      writeFileSync(verdict.outputs.json, `${JSON.stringify(verdict, null, 2)}\n`, 'utf8')
+      writeFileSync(verdict.outputs.markdown, cleanRunMarkdown(verdict), 'utf8')
     } catch (thrown) {
       write(`CLEAN_RUN_WRITE_FAILED dir=${outDir} reason=${thrown instanceof Error ? thrown.message : String(thrown)}\n`)
     }
