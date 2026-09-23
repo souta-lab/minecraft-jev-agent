@@ -137,11 +137,24 @@ world. The operator requirement is that the final M3 PASS is proved on a NEW see
 / NEW world with NO assists (`keepInventory` and friends), so an M3 PASS from the
 current world (`level-seed=2024`, `keep_inventory=true` in all three dimensions,
 `advance_time=false`, granted supplies, summoned mobs, flooded terrain) is not an
-M3 acceptance. Read `CLEAN-RUN-ACCEPTANCE.md` and add the two steps:
+M3 acceptance. Read `CLEAN-RUN-ACCEPTANCE.md` for the exact ordered procedure.
+Preparation must run from the fresh frozen checkout with `--root "$PWD"`; the
+prep tool checks that checkout's HEAD equals the resolved source SHA and prints
+the resident command for that same tree. It stages `server.properties.clean`,
+never copies it over the shared `server.properties`. After stopping the old
+resident and server, start Leaf with `--config <staged-properties> --universe
+<container> --level-name <descriptor-level>`, verify the new seed/rules, then
+start the resident from that frozen checkout with
+`BUDDY_SERVER_PROPERTIES_PATH=<staged-properties>` so HOST seed attestation
+reads the same config.
 
 ```bash
+cd <frozen-checkout>
 bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
-  --source-sha <frozen-40-hex> --apply        # stage the clean world (no server control)
+  --root "$PWD" --dry-run                     # stage plan; no server control
+# Review the plan and operator-commands.txt, then apply the same plan:
+bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
+  --root "$PWD" --apply
 # ... run the attempt on the frozen SHA ...
 bun tools/clean-run-gate.mjs \
   --environment <container>/m3-clean-run/environment-resolved.json \

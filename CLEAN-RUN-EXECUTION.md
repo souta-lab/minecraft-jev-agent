@@ -10,8 +10,9 @@ Status of this lane: the staged tree below was produced as a **rehearsal into a
 scratch container** (`--server-root /home/s0u7a/mc-server/m3-clean-run-rehearsal`),
 so the live world/properties were never touched. Step 2 of the real attempt
 re-stages into the real container `/home/s0u7a/mc-server`. **Do not boot the
-rehearsal tree**: the world directory would be created under the scratch root
-while `serverSeed()` still reads `/home/s0u7a/mc-server/server.properties`.
+rehearsal tree**: the descriptor names `/home/s0u7a/mc-server` as the world
+container. A rehearsal must not create its level under a scratch root or attest
+the live world's seed.
 
 **Do not name a rehearsal container `<container>/m3-clean-run`.** That path is not
 free: the real attempt's run directory is *exactly* `<container>/m3-clean-run`, so a
@@ -58,11 +59,11 @@ git rev-parse HEAD          # must print $FROZEN
 ```bash
 cd /home/s0u7a/mc-ai-worktrees/m3-clean-run
 
-# 2a. READ the plan before doing it: expect `actions=11`, 6 guards PASS, status=PLANNED.
+# 2a. READ the plan before doing it: expect `actions=11`, 7 guards PASS, status=PLANNED.
 #     --root "$PWD" is REQUIRED for a correct printed recipe: it freezes git HEAD of
-#     THIS tree and makes every printed command name THIS tree. With --source-sha
-#     alone the printed commands fall back to /home/s0u7a/mc-ai (the shared tree,
-#     whose HEAD is NOT the frozen sha) and the attempt fails liveSignals.
+#     THIS tree and makes every printed command name THIS tree. If --source-sha is
+#     used without --root, the tool checks its own checkout and refuses when that
+#     tree's HEAD does not match the frozen SHA.
 bun tools/clean-run-prepare.mjs \
   --environment tools/fixtures/m3-clean-environment.json \
   --root "$PWD" --server-root /home/s0u7a/mc-server --dry-run
@@ -93,31 +94,18 @@ correct, not a bug: the template cannot authorise a run.
 
 ## 3. Stop the resident host and the server  [OPERATOR — H4]
 
-```bash
-# resident: the read-only control socket also accepts `quit` (that command is H4)
-printf '{"id":"quit","cmd":"quit"}\n' | socat - UNIX-CONNECT:/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock
-# server: graceful stop, then WAIT for the process to exit (the server rewrites
-# server.properties on the way down, which would silently undo the swap in step 4)
-kill "$(pgrep -f leaf-1.21.11-178.jar)"
-until ! pgrep -f leaf-1.21.11-178.jar >/dev/null; do sleep 1; done
-```
+Stop the existing resident through **its own** control socket and wait for its
+process to exit. Then stop Leaf gracefully from its console and wait for that
+process to exit. Both stops are operator actions (H4). Do not use a broad `kill`
+or copy/replace the shared `/home/s0u7a/mc-server/server.properties`.
 
-## 4. Swap `server.properties` (backup first, while the server is STOPPED)
+The staged clean file stays at
+`/home/s0u7a/mc-server/m3-clean-run/server.properties.clean`. The server receives
+it through `--config`; `agent-runner.mts` receives the same path through
+`BUDDY_SERVER_PROPERTIES_PATH` when it writes the HOST acceptance record. This
+keeps seed attestation aligned without changing shared server configuration.
 
-```bash
-STAMP=$(date +%Y%m%d-%H%M)
-cp /home/s0u7a/mc-server/server.properties "/home/s0u7a/mc-server/server.properties.clean-run-bak-$STAMP"
-cp /home/s0u7a/mc-server/m3-clean-run/server.properties.clean /home/s0u7a/mc-server/server.properties
-cat /home/s0u7a/mc-server/m3-clean-run/server-properties.diff.txt   # the exact keys that changed
-```
-
-The swap is **required, not cosmetic**: `agent-runner.mts serverSeed()` reads
-`/home/s0u7a/mc-server/server.properties` (hard-coded) and that value is what the
-HOST acceptance record attests. A `--config-only` launch would record the old seed
-(2024) and the clean gate would FAIL `run.seedAttested`.
-Never print or paste the file itself (it carries `rcon.password`).
-
-## 5. Start the server on the clean config / level name
+## 4. Start the server on the clean config / level name  [OPERATOR — H4]
 
 ```bash
 cd /home/s0u7a/mc-server
@@ -133,7 +121,7 @@ setsid --fork /usr/lib/jvm/java-21-openjdk-amd64/bin/java \
 exist yet, which is exactly the prepared state. **Never pass `--bonusChest`** (there
 is no properties key for it).
 
-## 6. Console-verify the seed and every gamerule, per dimension
+## 5. Console-verify the seed and every gamerule, per dimension
 
 On the server console, and paste the raw output into
 `/home/s0u7a/mc-server/m3-clean-run/gamerule-verification.txt`:
@@ -152,22 +140,23 @@ Nether, and gamerules are per dimension in this build. Ids are the snake_case
 defaults this descriptor declares, so a non-default value here means the world is
 not fresh or something changed it.
 
-## 7. Start the resident from the frozen worktree (empty durable state)
+## 6. Start the resident from the frozen worktree (empty durable state)
 
 ```bash
 cd /home/s0u7a/mc-ai-worktrees/m3-clean-run/buddy-driver
 ls data/resident            # must be empty/absent: a fresh worktree has no memory
-setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
+BUDDY_SERVER_PROPERTIES_PATH=/home/s0u7a/mc-server/m3-clean-run/server.properties.clean \
+  setsid --fork nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 grep -m1 BOOT runner.out    # source= must equal $FROZEN ; note the runId
 ```
 
-## 8. Run the M3 attempt
+## 7. Run the M3 attempt
 
 Drive the body to ender_eye × 12 with nether reached under model authority.
 Record the runId from the `BOOT` line; leave the resident running afterwards, so the
-control socket still answers in step 9.
+control socket still answers in step 8.
 
-## 9. Refresh the HOST acceptance record (read-only query)
+## 8. Refresh the HOST acceptance record (read-only query)
 
 ```bash
 printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
@@ -175,10 +164,11 @@ printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
 ```
 
 This is the only attestation of `levelName` + `seed` (there is no `writeAcceptance()`
-on the BOOT path), and it reads the live properties **at query time** — so run it
-**before** restoring the backup in step 12, or the record will attest seed 2024.
+on the BOOT path). The runner reads the staged properties through
+`BUDDY_SERVER_PROPERTIES_PATH`, so the record remains tied to the clean server
+config without swapping the shared properties.
 
-## 10. The canonical bundle, then the clean gate
+## 9. The canonical bundle, then the clean gate
 
 ```bash
 cd /home/s0u7a/mc-ai-worktrees/m3-clean-run
@@ -192,7 +182,7 @@ bun tools/clean-run-gate.mjs \
   --out "$PWD/runs/m3-live/acceptance-bundle-$RUN"
 ```
 
-## 11. Reviewer fail-closed checks (each is a FAIL, not a warning)
+## 10. Reviewer fail-closed checks (each is a FAIL, not a warning)
 
 ```text
  1 CLEAN_RUN_M3 status=ACCEPTED  and  CLEAN_RUN_RESULT status=CLEAN acceptance=ACCEPTED   (exit 0)
@@ -214,7 +204,7 @@ bun tools/clean-run-gate.mjs \
 Staging-time checks (run before step 3, all offline):
 
 ```bash
-bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json --root "$PWD" --dry-run   # actions=11, guards PASS, status=PLANNED
+bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json --root "$PWD" --dry-run   # actions=11, 7 guards PASS, status=PLANNED
 bun tools/test-clean-run-harness.mjs                                                                             # 13/13
 bun -e 'const m=require("/home/s0u7a/mc-server/m3-clean-run/manifest.json");console.log(m.target,m.guards.every(g=>g.verdict==="PASS"))'
 cat /home/s0u7a/mc-server/m3clean-b1/datapacks/m3-clean-gamerules/pack.mcmeta      # min_format/max_format [94,1]
@@ -222,19 +212,15 @@ grep -c 'gamerule' /home/s0u7a/mc-server/m3clean-b1/datapacks/m3-clean-gamerules
 ls /home/s0u7a/mc-server/m3clean-b1/level.dat 2>/dev/null || echo "no level.dat: still fresh"
 ```
 
-## 12. Restore the live configuration when the attempt is over
+## 11. Finish the clean run without restoring shared configuration
 
-```bash
-kill "$(pgrep -f leaf-1.21.11-178.jar)"; until ! pgrep -f leaf-1.21.11-178.jar >/dev/null; do sleep 1; done
-cp "/home/s0u7a/mc-server/server.properties.clean-run-bak-$STAMP" /home/s0u7a/mc-server/server.properties
-# restart the live server + resident for further experiments (operator action)
-```
+The shared `/home/s0u7a/mc-server/server.properties` was never changed, so there
+is nothing to restore. When the operator ends the attempt, stop the resident
+through its control socket and stop the clean Leaf server gracefully; wait for
+both processes to exit. Keep the staged descriptor, properties, verification,
+and run evidence with the clean-run artifact.
 
-Expect the swapped-in `server.properties` and the staged
-`m3-clean-run/server.properties.clean` to have been rewritten by the server on
-shutdown; that is why the backup exists and why a second attempt re-runs step 2.
-
-## 13. Unverified until a server is actually booted (no boot happened in this lane)
+## 12. Unverified until a server is actually booted (no boot happened in this lane)
 
 ```text
 - that the world is genuinely generated from level-seed: only the console `seed` output plus the
@@ -247,7 +233,7 @@ shutdown; that is why the backup exists and why a second attempt re-runs step 2.
 - Leaf's effective defaults for a freshly generated world: the 59-rule table was measured from
   GameRules.<clinit> + the live worlds, not from a new world's level.dat
 - that spawn_mobs / spawn_monsters=true actually yields endermen and blazes at the M3 site
-- that the server rewrites server.properties on shutdown (assumed; hence swap-while-stopped)
+- that the staged config remains the effective server config throughout shutdown; the shared file is not changed by this recipe
 - that keep_inventory=false actually drops the inventory on a Nether death (LADDER_INVENTORY_SETTLE)
 - that bot.game.levelName reports "m3clean-b1" (levelName is client-attested, not read from properties)
 - where the world is SERVED FROM: the gate attests levelName + seed, not the --universe path. Stage
@@ -255,7 +241,7 @@ shutdown; that is why the backup exists and why a second attempt re-runs step 2.
 - the resident's BOOT source / worldKey on the new world, and that no old durable memory matches
 ```
 
-## 14. Why a fixture can never fake this
+## 13. Why a fixture can never fake this
 
 `tools/clean-run-gate.mjs` reads the canonical bundle's own verdict and requires
 `evidenceClass=live` **and** `liveAcceptance=true` (tree HEAD + `host.lock` + the HOST
