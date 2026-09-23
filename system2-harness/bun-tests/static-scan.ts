@@ -23,7 +23,6 @@ export const HARNESS_DIR = join(REPO_ROOT, 'system2-harness')
  */
 export const ALLOWED_LEGACY_PROVIDER_CALLS: Readonly<Record<string, string>> = Object.freeze({
   'buddy-driver/mercury-system2.ts': '#439 Phase D/E: the live System2 WHAT authority being replaced by the harness',
-  'buddy-driver/planner.ts': '#439 Phase C/D: second PlannerBrain that chooses WHAT',
   'buddy-driver/planner-legacy.ts': '#439 Phase C/D: legacy planner that chooses WHAT',
   'buddy-driver/advisor.ts': '#439 Phase D: shadow/advisory only, never authority',
   'buddy-driver/muse-plan-replica.mts': '#419 naming/provider migration: offline evidence replica, no authority',
