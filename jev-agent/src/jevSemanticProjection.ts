@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 2
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v2'
+export const JEV_PROJECTION_VERSION = 3
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v3'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -749,6 +749,65 @@ export interface SemanticSafetyFacts {
   criticalDamageKey: string | null
   /** last observed damage event, so a hit is never hidden by banding */
   lastDamageKey: string | null
+  /** fixed-slot worn gear and banded observed condition; null means not observed */
+  wornArmor: SemanticWornArmor | null
+}
+
+export type ArmorSlotName = 'head' | 'torso' | 'legs' | 'feet'
+export type ArmorDurabilityBand = 'fresh' | 'worn' | 'low' | 'critical' | 'unknown'
+
+export interface SemanticWornArmorPiece {
+  /** destination slot in the player's armor window */
+  slot: ArmorSlotName
+  item: string
+  /** derived only when both current and maximum durability were observed */
+  durabilityBand: ArmorDurabilityBand
+}
+
+export type SemanticWornArmor = Record<ArmorSlotName, SemanticWornArmorPiece | null>
+
+type ObservedWornArmor = Partial<
+  Record<
+    ArmorSlotName,
+    | {
+        name: string
+        durabilityUsed?: number | null
+        maxDurability?: number | null
+      }
+    | null
+    | undefined
+  >
+>
+
+/**
+ * Compress the four authoritative worn slots into stable decision facts. Exact
+ * durability remains in the raw authority state; this projection changes only
+ * when a piece crosses a broad condition band, so ordinary armor wear does not
+ * trigger a Jev call on every damage point.
+ */
+export function semanticWornArmor(armor: ObservedWornArmor | null | undefined): SemanticWornArmor | null {
+  if (armor === null || armor === undefined) return null
+  const slots: readonly ArmorSlotName[] = ['head', 'torso', 'legs', 'feet']
+  const result = {} as SemanticWornArmor
+  for (const slot of slots) {
+    const piece = armor[slot]
+    if (piece === null || piece === undefined || typeof piece.name !== 'string' || piece.name.length === 0) {
+      result[slot] = null
+      continue
+    }
+    const max = piece.maxDurability
+    const used = piece.durabilityUsed
+    let durabilityBand: ArmorDurabilityBand = 'unknown'
+    if (
+      typeof max === 'number' && Number.isFinite(max) && max > 0 &&
+      typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= max
+    ) {
+      const remaining = (max - used) / max
+      durabilityBand = remaining >= 0.75 ? 'fresh' : remaining >= 0.5 ? 'worn' : remaining >= 0.25 ? 'low' : 'critical'
+    }
+    result[slot] = { slot, item: piece.name, durabilityBand }
+  }
+  return result
 }
 
 /**
@@ -1181,6 +1240,7 @@ export function diffSemanticProjections(
   push('safety.foodBand', previous.safety.foodBand, current.safety.foodBand)
   push('safety.airBand', previous.safety.airBand, current.safety.airBand)
   push('safety.submerged', previous.safety.submerged, current.safety.submerged)
+  push('safety.wornArmor', previous.safety.wornArmor, current.safety.wornArmor)
   push('safety.threatKey', previous.safety.threatKey, current.safety.threatKey)
   push('safety.criticalDamageKey', previous.safety.criticalDamageKey, current.safety.criticalDamageKey)
   push('safety.lastDamageKey', previous.safety.lastDamageKey, current.safety.lastDamageKey)

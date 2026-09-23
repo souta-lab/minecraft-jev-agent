@@ -207,13 +207,25 @@ export type HeldItemState = {
   slot: number
 }
 
+/** Exact durability reported by the connected item's data when it has one. */
+export type ObservedDurability = {
+  /** damage already applied; null when the item/version does not report it */
+  durabilityUsed: number | null
+  /** maximum durability; null for non-damageable or unreported items */
+  maxDurability: number | null
+}
+
+// Optional in hand-built state fixtures; `buildArmor` emits both fields on
+// every observed worn piece, with null reserved for unavailable values.
+export type ArmorPieceState = HeldItemState & Partial<ObservedDurability>
+
 /**
  * Worn armor per destination. Built from the mineflayer player-window armor
  * slots (5-8), which `bot.inventory.items()` deliberately excludes: a WORN
  * piece is not a carried item, so `inventory.counts` never double-counts it.
  * `null` means nothing is worn in that slot.
  */
-export type ArmorState = Record<ArmorSlot, HeldItemState | null>
+export type ArmorState = Record<ArmorSlot, ArmorPieceState | null>
 
 /** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
 export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
@@ -2083,14 +2095,50 @@ function fluidAt(bot: Bot, cell: Vec3Json): boolean {
  * (`SelfState.armor`) instead of opening a second window into the inventory.
  */
 export function buildArmor(bot: Bot): ArmorState {
-  const slots = (bot.inventory as { slots?: ReadonlyArray<{ name?: string; count?: number; slot?: number } | null> })
-    .slots
+  const slots = (
+    bot.inventory as {
+      slots?: ReadonlyArray<
+        | {
+            name?: string
+            count?: number
+            slot?: number
+            maxDurability?: number | null
+            durabilityUsed?: number | null
+          }
+        | null
+      >
+    }
+  ).slots
   const armor = { ...EMPTY_ARMOR }
   for (const slot of ARMOR_SLOTS) {
     const index = ARMOR_SLOT_INDEX[slot]
     const item = slots?.[index]
     if (item === undefined || item === null || typeof item.name !== 'string') continue
-    armor[slot] = { name: item.name, count: item.count ?? 1, slot: item.slot ?? index }
+    const maxDurability =
+      typeof item.maxDurability === 'number' && Number.isFinite(item.maxDurability) && item.maxDurability > 0
+        ? item.maxDurability
+        : null
+    let durabilityUsed: number | null = null
+    if (maxDurability !== null) {
+      // Prismarine-item exposes this as a getter over protocol-version-specific
+      // NBT/components. Treat unsupported or malformed data as unknown instead
+      // of letting an observation failure break the entire world snapshot.
+      try {
+        const used = item.durabilityUsed
+        if (typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= maxDurability) {
+          durabilityUsed = used
+        }
+      } catch {
+        durabilityUsed = null
+      }
+    }
+    armor[slot] = {
+      name: item.name,
+      count: item.count ?? 1,
+      slot: item.slot ?? index,
+      durabilityUsed,
+      maxDurability,
+    }
   }
   return armor
 }

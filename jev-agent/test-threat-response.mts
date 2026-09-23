@@ -258,6 +258,56 @@ addCase('the sensor projects sight, weapon and attacker attribution onto a sense
   }
 })
 
+addCase('worn armor and exact observed durability reach the raw Jev state from armor-window slots', () => {
+  const bot = fakeThreatBot()
+  const slots: Array<Record<string, unknown> | null> = new Array(46).fill(null)
+  slots[5] = { name: 'iron_helmet', count: 1, slot: 5, maxDurability: 165, durabilityUsed: 12 }
+  slots[6] = { name: 'iron_chestplate', count: 1, slot: 6, maxDurability: 240, durabilityUsed: 197 }
+  const boots: Record<string, unknown> = { name: 'golden_boots', count: 1, slot: 8, maxDurability: 91 }
+  Object.defineProperty(boots, 'durabilityUsed', {
+    get() {
+      throw new Error('durability component unavailable')
+    },
+  })
+  slots[8] = boots
+  ;(bot as unknown as { inventory: { slots: Array<Record<string, unknown> | null> } }).inventory.slots = slots
+  const state = buildWorldState(
+    bot,
+    {
+      tick: 4,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      signals: signals({ lastDamage: ATTACKED_DAMAGE }),
+    },
+    defaultSensorOptions,
+  )
+  const payload = authorityState(authorityRequest(state, generateCandidates(state, defaultCandidateOptions)))
+  type RawArmorPiece = { name: string; slot: number; durabilityUsed: number | null; maxDurability: number | null }
+  const armor = payload.self && typeof payload.self === 'object'
+    ? (payload.self as { armor?: Record<string, RawArmorPiece | null> }).armor
+    : undefined
+  const pass =
+    state.self.armor?.head?.name === 'iron_helmet' &&
+    state.self.armor.head.slot === 5 &&
+    state.self.armor.head.durabilityUsed === 12 &&
+    state.self.armor.head.maxDurability === 165 &&
+    state.self.armor.torso?.name === 'iron_chestplate' &&
+    state.self.armor.torso.durabilityUsed === 197 &&
+    state.self.armor.legs === null &&
+    state.self.armor.feet?.name === 'golden_boots' &&
+    state.self.armor.feet.durabilityUsed === null &&
+    armor?.torso?.slot === 6 &&
+    armor.torso.name === 'iron_chestplate' &&
+    armor.torso.durabilityUsed === 197 &&
+    armor.torso.maxDurability === 240 &&
+    state.inventory.counts.iron_chestplate === undefined
+  return {
+    pass,
+    detail: `sensorArmor=${JSON.stringify(state.self.armor)} modelArmor=${JSON.stringify(armor)} carriedChestplate=${state.inventory.counts.iron_chestplate ?? 0}`,
+  }
+})
+
 addCase('the sensor scans escape cells for a recently engaged ranged hostile beyond the danger radius', () => {
   const Vec3 = require('vec3')
   const position = new Vec3(0.5, 10, 0.5)

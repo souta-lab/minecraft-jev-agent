@@ -34,8 +34,12 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'candidate data supplied by deterministic code; answer with the id verbatim and never invent an id. Candidate cost, ' +
   'distance, failure history, reachability, and prerequisite-path metadata are evidence. They are not universal ranking ' +
   'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives. When an ' +
-  'ATTACK candidate is present, ATTACK versus MOVE, RETREAT, or WAIT is your pi decision: weigh the target identity and ' +
-  'distance, health, food, equipment, immediate danger, current Option, and available alternatives. Do not attack merely ' +
+  'ATTACK candidate is present, ATTACK versus MOVE, RETREAT, or WAIT is your pi decision: weigh the target identity, ' +
+  'distance, your held weapon, the target\'s held ranged weapon, health, food, worn armor and its observed condition, ' +
+  'immediate danger, other threats, and what each grounded escape route gains (separation, cover, and reach). Use ' +
+  'observed line of sight as a ' +
+  'projectile-risk fact, not as a guarantee that no projectile is in flight. Consider the current Option and recent ' +
+  'outcomes. Do not attack merely ' +
   'because a mob exists, and do not ignore ATTACK merely because movement is cheaper. Deterministic code may ground and ' +
   'safety-check the candidate, but it must not choose attack for you or replace your valid attack choice with a different ' +
   'semantic action. The current Option allowedSkills is an envelope: SAFETY, CONTROL, and PREREQUISITE are always ' +
@@ -246,6 +250,10 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
     position: state.self.position,
     health: state.self.health,
     food: state.self.food,
+    // Worn armor is read from the player's armor window slots, not carried
+    // inventory. Preserve exact observed slot/name/durability evidence on the
+    // raw model path; the semantic projection carries stable condition bands.
+    armor: state.self.armor ?? null,
     // P1 durability: a falling health number is not enough to answer "am I
     // being attacked, and by what?". The recorded damage event makes the
     // threat explicit so Jev can choose fight/flee instead of WAIT.
