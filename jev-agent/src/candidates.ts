@@ -6333,14 +6333,19 @@ function descendCandidates(
   // had no safe step (`if (pool.length === 0) pool = steps.filter(...)`). Neither
   // the cap nor a sensor refusal may be a silent licence to re-pick.
   //
-  // `DIG_PATH_CAP` still bounds a LEVEL search tunnel (no altitude change, so it
-  // can run away); a DOWN staircase is bounded by Y (descend target / known stone
-  // level / DESCEND_STALLED) and holding its heading is what makes it a staircase
-  // instead of a one-block bowl per level.
+  // `DIG_PATH_CAP` bounds a LEVEL search tunnel (no altitude change, so it can run
+  // away); a DOWN staircase is bounded by Y (descend target / known stone level /
+  // DESCEND_STALLED) and holding its heading is what makes it a staircase instead
+  // of a one-block bowl per level. At the cap, fail closed for level steps. The
+  // old fallback to `eligible` silently re-enabled the same tunnel exactly when
+  // every level step had been filtered, so the bot could keep digging forever at
+  // one height. Other grounded candidates (including a safe DOWN step) remain
+  // available to change position or altitude.
   const downOnly = oscillate ? base.filter((step) => step.mode === 'down') : base
   const eligible = downOnly.length > 0 ? downOnly : base
   const usable = eligible.filter((step) => step.mode === 'down' || fixedCount < DIG_PATH_CAP)
-  const poolSteps = usable.length > 0 ? usable : eligible
+  const poolSteps = usable
+  if (poolSteps.length === 0) return []
   const availableDirs = dedupeDirs(poolSteps)
   const headingPlan = resolveDescentHeading({
     previous: fixedDir,
