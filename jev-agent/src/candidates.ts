@@ -1519,13 +1519,31 @@ export interface ReachabilityGateOptions {
 /**
  * Why a withheld capability had NO grounded acquisition route, as a typed fact.
  *
- *   `no_producer`  - the sensor proved no world source for the missing thing
- *                    (no producer block/mob in the observation envelope, or the
- *                    named cell is an unobserved/unknown fact);
+ *   `no_producer`  - the sensor proved no world source for the missing thing (no
+ *                    producer block/mob in the observation envelope);
  *   `no_material`  - a recipe route exists (the thing is craftable in principle)
- *                    but its ingredient is neither held nor producible.
+ *                    but its ingredient is neither held nor producible;
+ *   `no_station`   - a recipe route exists and EVERY ingredient is held, but the
+ *                    craft needs a placed station the body cannot obtain or
+ *                    place; the named item is the STATION, not the product. The
+ *                    measured shape (`run-mudlqw62-19miy`, live): a body holding
+ *                    planks + sticks + a carried crafting_table in a flooded
+ *                    pocket with no placement geometry was told
+ *                    `no_material item=wooden_pickaxe count=1` - naming the tool
+ *                    as its own missing material while it held everything the
+ *                    recipe needs;
+ *   `cell_unread`  - the missing fact is a CELL the sensor could not read at all
+ *                    (an unloaded / provenance-refused column). No harvest
+ *                    requirement and no clearance route can exist for a cell
+ *                    whose block was never observed, so the refusal names the
+ *                    CELL instead of inventing an item. The measured live freeze:
+ *                    `CANDIDATE_ACQUISITION_REFUSED ... missing=headroom@-8,52,-6
+ *                    reason=no_producer item=null count=null` while
+ *                    `DIMENSION_READ_REFUSED cell=-8,52,-6 provenance=unknown
+ *                    reason=unknown_column source=world-state` proves the read
+ *                    itself was refused.
  */
-export type AcquisitionRefusalReason = 'no_producer' | 'no_material'
+export type AcquisitionRefusalReason = 'no_producer' | 'no_material' | 'no_station' | 'cell_unread'
 
 /**
  * The acquisition evidence for ONE capability a candidate was withheld for: the
@@ -1552,6 +1570,12 @@ export interface CandidateAcquisition {
   count: number | null
   /** how many of `item` the body actually holds (item facts only) */
   held: number | null
+  /**
+   * The CELL the missing fact belongs to, for a fact that is a cell rather than
+   * an item (`cell_unread`). Null for every item/material fact, so the marker
+   * stays byte-identical wherever it named an item before.
+   */
+  cell?: Vec3Json | null
   /** the held tool state per family the missing fact named, e.g. `pickaxe:-1` */
   tools: string
 }
@@ -1591,14 +1615,20 @@ export function formatCandidateAcquisition(candidateId: string, entry: Candidate
  * `CANDIDATE_ACQUISITION_REFUSED`: no grounded route exists for a withheld fact.
  * The item+count are named whenever the missing thing is a material, so the line
  * is actionable (`item=oak_log count=3`) instead of a token that can only be
- * retried.
+ * retried. A fact that is a CELL rather than an item (`cell_unread`) names the
+ * cell (`cell=-8,52,-6`) and adds no item fields - the two shapes never mix, so a
+ * reader can tell "get this material" from "this cell was never read".
  */
 export function formatCandidateAcquisitionRefused(candidateId: string, entry: CandidateAcquisition): string {
   const named =
     entry.item === null
       ? ''
       : ` item=${entry.item} count=${entry.count ?? 1} held=${entry.held ?? 0}`
-  return `CANDIDATE_ACQUISITION_REFUSED candidate=${candidateId} missing=${entry.missing} reason=${entry.reason ?? 'no_producer'}${named} tools=${entry.tools}`
+  const cell =
+    entry.cell === undefined || entry.cell === null
+      ? ''
+      : ` cell=${entry.cell.x},${entry.cell.y},${entry.cell.z}`
+  return `CANDIDATE_ACQUISITION_REFUSED candidate=${candidateId} missing=${entry.missing} reason=${entry.reason ?? 'no_producer'}${named}${cell} tools=${entry.tools}`
 }
 
 export interface GroundedCandidatesResult {
@@ -12084,7 +12114,7 @@ export function applyReachabilityGate(
   const acquisitionRoutes = new Map<string, string[]>()
   const acquisitionRefusals = new Map<
     string,
-    { reason: AcquisitionRefusalReason; item: string | null; count: number | null }
+    { reason: AcquisitionRefusalReason; item: string | null; count: number | null; cell?: Vec3Json | null }
   >()
   // The acquisition closure is over CAPABILITIES, not only over station
   // retirement. A withheld fact is often answered by a route that is itself
@@ -12136,6 +12166,7 @@ export function applyReachabilityGate(
         item,
         count: refusal?.count ?? null,
         held: item === null ? null : (state.inventory.counts[item] ?? 0),
+        cell: refusal?.cell ?? null,
         tools: toolStateForCapabilities(state, [capability]),
       }
     })
@@ -13329,7 +13360,10 @@ interface AcquisitionPassResult {
    */
   routes: Map<string, string[]>
   /** `capabilityKey` -> the typed reason no grounded route exists for it */
-  refusals: Map<string, { reason: AcquisitionRefusalReason; item: string | null; count: number | null }>
+  refusals: Map<
+    string,
+    { reason: AcquisitionRefusalReason; item: string | null; count: number | null; cell?: Vec3Json | null }
+  >
 }
 
 /**
@@ -13337,20 +13371,48 @@ interface AcquisitionPassResult {
  * concrete item and count when the missing thing is a MATERIAL. The item comes
  * from the SAME recipe view the craft route uses (`craftIngredientRoute`), so the
  * refusal names what the body would have to obtain rather than a token.
+ *
+ * Every arm below is a fact the acquisition pass MEASURED this tick: the generic
+ * `no_producer` is reserved for the case where the sensor really did prove no
+ * world source, and a cell the sensor never read is named as such instead of
+ * being reported as a world verdict (`cell_unread`).
  */
 function acquisitionRefusalFor(
   state: WorldState,
   options: CandidateOptions,
   capability: Capability,
-): { reason: AcquisitionRefusalReason; item: string | null; count: number | null } {
+): { reason: AcquisitionRefusalReason; item: string | null; count: number | null; cell?: Vec3Json | null } {
   if (capability.kind === 'tool') {
     const item = toolItemsForCapability(state, options, capability)[0]
     if (item === undefined) return { reason: 'no_producer', item: null, count: null }
     const route = craftIngredientRoute(state, options, item)
-    if (route === null) return { reason: 'no_material', item, count: 1 }
+    if (route === null) {
+      // Every ingredient of the recipe IS held, so the plan cannot be short of
+      // material: what it can be short of is the STATION a 3x3 step needs. Naming
+      // the tool as its own missing material (the old shape) is a false fact; the
+      // station is the obtainable thing (place the carried one / walk to a known
+      // one / craft it from what the body carries).
+      const recipes = options.recipes ?? null
+      if (
+        recipes !== null &&
+        planRequiresTable(recipes, item, state.inventory.counts, craftGoalRequirement(state, item))
+      ) {
+        return { reason: 'no_station', item: 'crafting_table', count: 1 }
+      }
+      return { reason: 'no_material', item, count: 1 }
+    }
     // `producer: 'none'` is the route's own statement that no raw source exists;
     // either way the ingredient the body lacks is named with its count.
     return { reason: 'no_material', item: route.missing, count: route.missingCount }
+  }
+  if (capability.kind === 'headroom' && capability.cell !== null) {
+    // A clearance cell the sensor never read is not a missing producer and not a
+    // missing material: it is a missing READ. Naming the cell keeps the record
+    // honest (`cell_unread cell=-8,52,-6`) instead of the bare `no_producer`
+    // token, which reads as a world verdict the pass never measured.
+    if (cellHarvestBarrier(state, capability.cell) === null && observedCutName(state, capability.cell) === 'unknown') {
+      return { reason: 'cell_unread', item: null, count: null, cell: capability.cell }
+    }
   }
   return { reason: 'no_producer', item: null, count: null }
 }
