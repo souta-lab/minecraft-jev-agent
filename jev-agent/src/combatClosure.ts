@@ -65,6 +65,98 @@ export const HUNT_APPROACH_BUDGET = 24
  */
 export const MELEE_ATTACK_REACH = 3.1
 
+/**
+ * THE BODY'S OWN VERTICAL REACH: how much of a contact gap the body already spans
+ * without moving, because the swing and the aim point both originate from the
+ * body's UPPER half, not from its feet.
+ *
+ * `MELEE_ATTACK_REACH` above is the LENGTH of the reach. This is its ORIGIN, and
+ * the two must be read together or the envelope is geometrically wrong:
+ *
+ *   a target level with the body   feet-to-feet IS the distance that matters
+ *   a target ABOVE the body        feet-to-feet charges the body for the height
+ *                                  it ALREADY has (`runAttack` looks at, and
+ *                                  swings from, an eye-level origin: `bot.lookAt`
+ *                                  targets `position + height / 2`), so the gap it
+ *                                  must actually close is `gapY - MELEE_REACH_UP`
+ *
+ * The value is the player's own eye height. It is a property of the BODY, not of
+ * any mob, which is what makes the correction general: it applies to every target
+ * whose hitbox sits above the body's hitbox - a flying or hovering hostile (blaze,
+ * ghast, phantom, vex), a mob on a ledge or a wall above, anything in a tree.
+ *
+ * Measured live before this existed (the blaze chain, `buddy.log`): every blaze
+ * hunt ended `HUNT_END ... target=blaze swings=0 hits=0` (19/19), and the geometry
+ * proof that ended one of them named `gap_y=4` with `horizontal=1.70`
+ * (`HUNT_CONTACT_UNREACHABLE actionId=ATTACK:e85793`). Feet-to-feet that is
+ * 4.35 m > 3.1 -> "no stance can land a swing"; measured from the body's own upper
+ * half it is 2.93 m <= 3.1 -> an ordinary swing. The target was not unhittable;
+ * the MEASUREMENT was one body-height short.
+ */
+export const MELEE_REACH_UP = 1.62
+
+/**
+ * The vertical component of a contact gap AFTER crediting the body's own height.
+ *
+ * Monotone by construction: the result is never LARGER than `|gapY|`, so this can
+ * only ever move a target INTO the envelope, never out of it. Every offer the
+ * feet-to-feet measure grounded stays grounded, exactly, at `gapY <= 0` (level and
+ * downward encounters: the `gapY > 0` branch is not taken and `Math.abs` is
+ * precisely the term the old 3-D `hypot` used).
+ */
+export function meleeVerticalReachGap(gapY: number): number {
+  if (gapY > 0) return Math.max(0, gapY - MELEE_REACH_UP)
+  return Math.abs(gapY)
+}
+
+/**
+ * THE MELEE DISTANCE: the number the executor's swing test and the stance gate
+ * both compare against `MELEE_ATTACK_REACH`.
+ *
+ * `horizontal` is the horizontal feet-to-feet separation (the same quantity
+ * whether measured from the body or from a stance cell); `gapY` is the whole-block
+ * vertical separation (`contactGapY`). For a level encounter this is the old
+ * feet-to-feet 3-D distance to the last bit; for an elevated target it is the gap
+ * the body's upper half must actually close.
+ */
+export function meleeReachDistance(horizontal: number, gapY: number): number {
+  return Math.hypot(horizontal, meleeVerticalReachGap(gapY))
+}
+
+/**
+ * The largest vertical gap a WALK-only close can express: the melee envelope PLUS
+ * the body's own height. A walk cannot change the body's level, and the distance
+ * to a target is at least `gapY - MELEE_REACH_UP`, so a gap beyond this is
+ * unreachable from EVERY horizontal position - which is what makes
+ * `HUNT_CONTACT_UNREACHABLE evidence=vertical_gap` a proof and not a heuristic.
+ *
+ * This is the corrected form of the theorem this module used to state with
+ * `walkGap = meleeReach`: with the tree's constants the corrected threshold is
+ * 4.72, so whole-block gaps split `4 = walkable` / `5 = not` - the honest split,
+ * and the opposite verdict the old form reached for the measured 4-block blaze.
+ */
+export function meleeWalkGap(meleeReach: number = MELEE_ATTACK_REACH): number {
+  return meleeReach + MELEE_REACH_UP
+}
+
+/**
+ * The HORIZONTAL budget of the melee envelope for a target this far above the
+ * body: how close the body's own level must get to the target's horizontal
+ * position for a swing to land.
+ *
+ * The pathfinder's approach goal is a 3-D ball (`GoalFollow.isEnd` compares
+ * `dx*dx + dy*dy + dz*dz` against `range*range`), so a goal expressed as the bare
+ * melee reach can NEVER be satisfied for a target above it: radius 2.9 around a
+ * target 4 blocks up has no standable node at all, and the closing leg burns its
+ * whole lease without arriving. This is the horizontal half such a ball must be
+ * widened to, and it is the same envelope the swing test uses - one geometry, two
+ * readers.
+ */
+export function meleeHorizontalBudget(gapY: number, meleeReach: number = MELEE_ATTACK_REACH): number {
+  const vertical = meleeVerticalReachGap(gapY)
+  return Math.sqrt(Math.max(0, meleeReach * meleeReach - vertical * vertical))
+}
+
 /** The §9 outcome of one bounded combat commitment against ONE entity id. */
 export type CombatOutcome =
   /** the server `entityDead` event fired for the committed entity id */
@@ -347,6 +439,23 @@ export function stanceMeleeDistance(stance: Vec3Json, entityPosition: Vec3Json):
 }
 
 /**
+ * The SAME measurement with the body's own height credited (`meleeReachDistance`):
+ * the horizontal half of `stanceMeleeDistance` against the corrected vertical gap.
+ *
+ * At or below the stance's level this DELEGATES to `stanceMeleeDistance` verbatim,
+ * so a level or downward target is not merely equal but bit-for-bit identical to
+ * the pre-correction measurement - every existing offer keeps its exact number.
+ * Above it, the gap loses the part the body's own height already spans.
+ */
+export function stanceReachDistance(stance: Vec3Json, entityPosition: Vec3Json): number {
+  if (contactGapY(stance.y, entityPosition.y) <= 0) return stanceMeleeDistance(stance, entityPosition)
+  return meleeReachDistance(
+    Math.hypot(entityPosition.x - (stance.x + 0.5), entityPosition.z - (stance.z + 0.5)),
+    contactGapY(stance.y, entityPosition.y),
+  )
+}
+
+/**
  * The executor's own contact measurement, VERBATIM (`runAttack`): both endpoints
  * are feet positions. Used for the stance the body is already standing on, where
  * the body's real float position is known - a cell centre is only the estimate
@@ -359,6 +468,37 @@ export function bodyMeleeDistance(bodyFeet: Vec3Json, entityPosition: Vec3Json):
     entityPosition.y - bodyFeet.y,
     entityPosition.z - bodyFeet.z,
   )
+}
+
+/**
+ * The body-position form of `stanceReachDistance`: the same correction applied to
+ * the body's real float feet, for the stance the body is already standing on.
+ * Delegates to `bodyMeleeDistance` verbatim at or below the body's level.
+ */
+export function bodyReachDistance(bodyFeet: Vec3Json, entityPosition: Vec3Json): number {
+  if (contactGapY(bodyFeet.y, entityPosition.y) <= 0) return bodyMeleeDistance(bodyFeet, entityPosition)
+  return meleeReachDistance(
+    Math.hypot(entityPosition.x - bodyFeet.x, entityPosition.z - bodyFeet.z),
+    contactGapY(bodyFeet.y, entityPosition.y),
+  )
+}
+
+/**
+ * THE EXECUTOR'S ENVELOPE TEST, as one call: the corrected distance for a target
+ * ABOVE the body, and the executor's own historical 3-D feet-to-feet distance for
+ * one at or below it.
+ *
+ * `distance` is that 3-D value (the loop already measures it for logging and for
+ * the closing-stall tracker), `horizontal` its horizontal component. Passing both
+ * keeps the level/downward case bit-for-bit identical rather than merely equal.
+ */
+export function meleeContactDistance(facts: {
+  distance: number
+  horizontal: number
+  gapY: number
+}): number {
+  if (facts.gapY <= 0) return facts.distance
+  return meleeReachDistance(facts.horizontal, facts.gapY)
 }
 
 /**
@@ -393,9 +533,11 @@ export function selectAttackStand(input: AttackStandInput): AttackStandFact {
         const onBody = cell.x === bodyFeet.x && cell.y === bodyFeet.y && cell.z === bodyFeet.z
         // The body's own stance is measured from where the body IS (the executor's
         // own expression); a stance it would walk to is measured from the cell.
+        // BOTH credit the body's own height against a target above it, which is the
+        // same measure `runAttack` compares against the same constant.
         const distance = onBody
-          ? bodyMeleeDistance(input.feet, input.entity.position)
-          : stanceMeleeDistance(cell, input.entity.position)
+          ? bodyReachDistance(input.feet, input.entity.position)
+          : stanceReachDistance(cell, input.entity.position)
         if (distance > input.reach) continue
         stances.push({
           cell,
@@ -405,7 +547,23 @@ export function selectAttackStand(input: AttackStandInput): AttackStandFact {
       }
     }
   }
-  stances.sort((a, b) => a.fromBody - b.fromBody || a.distance - b.distance || a.cell.y - b.cell.y)
+  // Nearest to the BODY first, then nearest to the entity, then the stance that
+  // needs the least VERTICAL move from where the body already is, then lowest.
+  //
+  // The vertical term is not decoration: crediting the body's own height makes a
+  // cell one block BELOW the body measure the same as the body's own cell when the
+  // target is one block ABOVE it, and without this the lowest cell won the tie and
+  // the search preferred stepping DOWN over swinging from where the body stands.
+  // Preferring the body's own level restores that: the same hittability for less
+  // movement is the mechanically cheaper stance, and it is what the pre-existing
+  // ordering picked before the reach correction existed.
+  stances.sort(
+    (a, b) =>
+      a.fromBody - b.fromBody ||
+      a.distance - b.distance ||
+      Math.abs(a.cell.y - bodyFeet.y) - Math.abs(b.cell.y - bodyFeet.y) ||
+      a.cell.y - b.cell.y,
+  )
 
   let nearest: AttackStandRejection | null = null
   for (const stance of stances) {
@@ -551,6 +709,59 @@ export function formatContactUnreachable(input: {
     `walk_gap=${input.walkGap} ` +
     `ascent_refusal=${input.ascentRefusal ?? 'none'} placeable=${input.placeable ?? 'none'} ` +
     `-> no grounded remedy brings melee contact onto this target; withheld by CAN, never leased as a 0-swing attempt`
+  )
+}
+
+/** `MELEE_VERTICAL_REACH` - the typed line for a swing the body's OWN height grounds. */
+export const MELEE_VERTICAL_REACH = 'MELEE_VERTICAL_REACH'
+
+/**
+ * WHICH way the corrected envelope decided one target's hittability.
+ *
+ * Deliberately the two facts a reviewer needs and nothing else:
+ *   `grounded`  the corrected distance is inside the envelope and the feet-to-feet
+ *               distance was NOT - i.e. the body's own height is the only reason
+ *               this swing is legal. Without this line such a swing is
+ *               indistinguishable in the record from an ordinary same-level one.
+ *   `refused`   even after crediting the body's height the target is outside the
+ *               envelope - the honest "still too far", which is what keeps the
+ *               correction from being read as "everything is reachable now".
+ */
+export type MeleeVerticalReachOutcome = 'grounded' | 'refused'
+
+/**
+ * The observability line for the VERTICAL half of the melee envelope: it names the
+ * entity, the distance as the executor measures it (feet-to-feet, 3-D), the
+ * corrected distance the envelope is actually compared against, the vertical gap,
+ * the body's own reach-up, and the melee constant - so a run-scoped reader can
+ * tell "the body's own height is why this landed" from "the target was close" and
+ * from "the target is still out of reach", without re-deriving any geometry.
+ *
+ * No mob is named by this vocabulary. A hovering blaze, a ghast, a phantom and a
+ * skeleton on a ledge produce the same line with a different `target=`.
+ */
+export function formatMeleeVerticalReach(input: {
+  outcome: MeleeVerticalReachOutcome
+  actionId: string
+  entityId: number
+  targetName: string | null
+  /** the executor's own measurement: 3-D feet-to-feet */
+  distance: number
+  /** the same gap with the body's own height credited (`meleeReachDistance`) */
+  reachDistance: number
+  horizontal: number
+  gapY: number
+  meleeReach: number
+  /** how much of the vertical gap the body's own height already spans */
+  reachUp: number
+}): string {
+  return (
+    `${MELEE_VERTICAL_REACH} outcome=${input.outcome} actionId=${input.actionId} entity=e${input.entityId} ` +
+    `target=${input.targetName ?? 'unknown'} distance=${round2(input.distance)} horizontal=${round2(input.horizontal)} ` +
+    `gap_y=${round2(input.gapY)} reach_up=${input.reachUp} reach_distance=${round2(input.reachDistance)} melee=${input.meleeReach} ` +
+    (input.outcome === 'grounded'
+      ? `-> the target sits above the body's feet; the body's own height spans the first ${input.reachUp} of the gap, so this swing is inside the melee envelope`
+      : `-> still outside the melee envelope after crediting the body's own height; the gap is real, not a measurement artifact`)
   )
 }
 
