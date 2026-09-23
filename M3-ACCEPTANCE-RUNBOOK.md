@@ -129,3 +129,28 @@ acceptance record present, the run's BOOT SHA equal to the tree HEAD).
 - The HOST acceptance record cannot be produced offline.
 - `--evidence-class` is an operator declaration; the bundle records it next to the
   objective live signals instead of trusting it.
+
+## 7. Clean-run requirement (new seed / new world / no assists)
+
+The bundle decides the milestone; it cannot see whether the WORLD was a clean
+world. The operator requirement is that the final M3 PASS is proved on a NEW seed
+/ NEW world with NO assists (`keepInventory` and friends), so an M3 PASS from the
+current world (`level-seed=2024`, `keep_inventory=true` in all three dimensions,
+`advance_time=false`, granted supplies, summoned mobs, flooded terrain) is not an
+M3 acceptance. Read `CLEAN-RUN-ACCEPTANCE.md` and add the two steps:
+
+```bash
+bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
+  --source-sha <frozen-40-hex> --apply        # stage the clean world (no server control)
+# ... run the attempt on the frozen SHA ...
+bun tools/clean-run-gate.mjs \
+  --environment <container>/m3-clean-run/environment-resolved.json \
+  --bundle-dir <root>/runs/m3-live/acceptance-bundle-<runId> --run <runId> \
+  --out <root>/runs/m3-live/acceptance-bundle-<runId>   # writes clean-run.json/.md next to the bundle
+```
+
+`CLEAN_RUN_M3 status=ACCEPTED` = descriptor CLEAN + run evidence consistent + this
+bundle's own `PASS` + `liveAcceptance: true` + `--evidence-class live`. The gate
+never re-judges a milestone and never modifies `bundle.json`; it turns an assisted
+world into `NOT_ACCEPTED` even when `tools/m3-gate.mjs` legitimately PASSes it
+(`bun run clean-run-harness-test` proves exactly that).
