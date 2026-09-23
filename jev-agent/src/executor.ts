@@ -21,7 +21,7 @@ import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, buildArmor, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
 import {
   BRIDGE_BLOCK_META,
   BRIDGE_DIR_META,
@@ -49,11 +49,20 @@ import {
 } from './routePlaceDeclaration.ts'
 import type { BodySubmersion } from './state.ts'
 import {
+  armorFallMitigation,
   classifyStepLanding,
+  fallSurvivability,
   formatMoveLegStopped,
+  maxSurvivableDrop,
   STEP_SUPPORT_UNKNOWN,
 } from './stepLanding.ts'
-import type { StepLandingBlock, StepLandingReads } from './stepLanding.ts'
+import type {
+  FallBodyFacts,
+  FallSurvivabilityVerdict,
+  MoveLegStopReason,
+  StepLandingBlock,
+  StepLandingReads,
+} from './stepLanding.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
@@ -296,13 +305,16 @@ export type FailureCode =
   | 'submerged'
   /**
    * The per-step landing guard stopped the locomotion leg BEFORE the step: the
-   * step's landing cell is a hazard (`hazard_between`) or has no real support
-   * within the movement policy's own drop bound (`unsafe_landing`). Both are
-   * typed refusals of the LEG, never a re-planned route: the body keeps standing
-   * where it is and the decision returns to the policy (`stepLanding.ts`).
+   * step's landing cell is a hazard (`hazard_between`), has no real support
+   * within the movement policy's own drop bound (`unsafe_landing`), or is a drop
+   * that would take the body to/below the critical-health floor from its own
+   * health, armour and held items (`fall_lethal`). All three are typed refusals
+   * of the LEG, never a re-planned route: the body keeps standing where it is and
+   * the decision returns to the policy (`stepLanding.ts`).
    */
   | 'hazard_between'
   | 'unsafe_landing'
+  | 'fall_lethal'
   /** issue #436 section 5/27: the step was outside the commitment's effect envelope */
   | 'effect_envelope_violation'
   /** issue #436 section 14/23: the world this commitment was grounded in changed */
@@ -791,6 +803,21 @@ const MOVE_STEP_PROBE_DISTANCE = 1
  */
 const MOVE_STEP_LANDING_WINDOW_DEFAULT = 8
 const MOVE_STEP_LANDING_WINDOW_MAX = 16
+/**
+ * The movement policy's PINNED planning bound (`ensureMovements`): the deepest
+ * drop the `canDig=false` planner may route through when the body's own state is
+ * unknown or healthy enough. `applySurvivableDropBound` only ever TIGHTENS it,
+ * never loosens it, so this is the ceiling for every locomotion leg.
+ */
+const MAX_PLANNED_DROP_DOWN = 8
+/**
+ * The deepest column the FALL verdict may read to prove a drop fatal. A drop of
+ * 64 blocks kills any possible body (the toughest measured bound is ~44), so a
+ * window this deep can always prove fatality when the bottom is below the read
+ * bound, and the cap keeps a hostile health value from turning one step into a
+ * world scan.
+ */
+const FALL_PROOF_WINDOW_MAX = 64
 
 export type ClimbManeuver = 'pre-contact-jump' | 'vertical-hop' | 'continue'
 
@@ -2061,7 +2088,7 @@ export class Executor {
     movements.allowParkour = false
     movements.allowFreeMotion = false
     movements.dontMineUnderFallingBlock = true
-    movements.maxDropDown = 8
+    movements.maxDropDown = MAX_PLANNED_DROP_DOWN
     movements.infiniteLiquidDropdownDistance = false
     this.bot.pathfinder.setMovements(movements)
     this.movementsReady = true
@@ -5529,7 +5556,10 @@ export class Executor {
   /**
    * The bounded landing window: the movement policy's OWN `maxDropDown`, so this
    * guard refuses exactly the steps the `canDig=false` planner would never have
-   * planned and leaves every legal drop untouched.
+   * planned and leaves every legal drop untouched. `applySurvivableDropBound`
+   * keeps that bound at the pinned 8 unless the body's own state proves it cannot
+   * survive a drop that deep, so this window can only ever TIGHTEN - and the fall
+   * verdict reads its own, deeper proof window (`fallProofWindow`) either way.
    */
   private moveStepLandingWindow(): number {
     const movements = (
@@ -5542,27 +5572,47 @@ export class Executor {
     return MOVE_STEP_LANDING_WINDOW_DEFAULT
   }
 
-  /** Read the landing cell, its head cell and the bounded column under it. */
-  private readStepLanding(landing: Vec3Json): StepLandingReads {
+  /**
+   * Read the landing cell, its head cell and a bounded column under it. The
+   * window is a parameter because two questions read the SAME column at different
+   * depths: the geometry verdict at the movement policy's own bound (unchanged)
+   * and the fall verdict deep enough to PROVE whether the drop is fatal.
+   */
+  private readStepLanding(landing: Vec3Json, window: number = this.moveStepLandingWindow()): StepLandingReads {
     const at = (y: number): StepLandingBlock | null => {
       const block = this.currentBlockAt({ x: landing.x, y, z: landing.z })
       return block === null ? null : { name: block.name, boundingBox: block.boundingBox }
     }
     const below: Array<StepLandingBlock | null> = []
-    for (let depth = 1; depth <= this.moveStepLandingWindow(); depth += 1) below.push(at(landing.y - depth))
+    for (let depth = 1; depth <= window; depth += 1) below.push(at(landing.y - depth))
     return { landing: at(landing.y), head: at(landing.y + 1), below }
   }
 
   /**
-   * THE PER-STEP LANDING GUARD (measured defect run-mucdemk5-1kg6b).
+   * THE PER-STEP LANDING GUARD (measured defects run-mucdemk5-1kg6b and the
+   * y79 bridge fall on main 67388ac).
    *
    * Asked once per step, BEFORE the body is actuated: does the step's landing
-   * column hold real ground within the movement policy's own drop bound, and is
-   * the landing cell itself free of a hazard? Reads only already-sensed cells
-   * (`bot.blockAt`), runs no A*, and never re-plans: a refusal logs the typed
-   * `MOVE_LEG_STOPPED` line, throws the same typed `ExecutorError`, and leaves
-   * the body standing exactly where it is, so the decision returns to the policy
-   * layer that owns WHICH destination/action comes next (#436).
+   * column hold real ground within the movement policy's own drop bound, is the
+   * landing cell itself free of a hazard, and - the fact added for the second
+   * measured death (the body walked off its own y79 bridge and fell 28 blocks to
+   * its death, and on the tightened no-assist acceptance that same fall costs the
+   * whole kit) - is the landing's DROP one this body survives from its health,
+   * armour and held items? Reads only already-sensed cells (`bot.blockAt`), runs
+   * no A*, and never re-plans: a refusal logs the typed `MOVE_LEG_STOPPED` line,
+   * throws the same typed `ExecutorError`, and leaves the body standing exactly
+   * where it is, so the decision returns to the policy layer that owns WHICH
+   * destination/action comes next (#436).
+   *
+   * The two windows, and why neither loosens the other:
+   *   * GEOMETRY reads the movement policy's own bound (`maxDropDown`, 8): the
+   *     existing `hazard_between` / `unsafe_landing` / step-up letters are
+   *     byte-identical, so the planner's own `canDig=false` bound stays
+   *     authoritative for what counts as "there is no floor here";
+   *   * FALL reads deep enough to PROVE fatality (`safeDrop + 1`, bounded): it can
+   *     only ever turn a step the geometry already allows into a typed refusal, or
+   *     replace a `unsafe_landing` letter with the exact `fall_lethal` fact. It
+   *     never turns a refusal into a step.
    */
   private guardStepLanding(target: Vec3Json, landing: Vec3Json): void {
     const feet = this.bot.entity.position
@@ -5574,34 +5624,178 @@ export class Executor {
     // A probe that resolves to the body's own column is not a step (a near-zero
     // or backward heading): the body's own support is not this guard's question.
     if (from.x === landing.x && from.z === landing.z && from.y === landing.y) return
-    const verdict = classifyStepLanding(this.readStepLanding(landing))
-    if (verdict.reason === null) return
+    const facts = this.fallBodyFacts()
+    const plannerWindow = this.moveStepLandingWindow()
+    const proofWindow = this.fallProofWindow(plannerWindow, facts)
+    const reads = this.readStepLanding(landing, proofWindow)
+    const geometry = classifyStepLanding({
+      landing: reads.landing,
+      head: reads.head,
+      below: reads.below.slice(0, plannerWindow),
+    })
+    // The same column read deeper: its `drop` is exact when a real surface stops
+    // the fall inside the proof window, and a proven LOWER BOUND otherwise.
+    const deep = proofWindow > plannerWindow ? classifyStepLanding(reads) : geometry
+    // A hazard letter is final: a hazard is a hazard at whatever depth, and it is
+    // the most precise fact available. Otherwise - a legal geometry, or the
+    // planner-bound `unsafe_landing` - the fall verdict speaks: the drop it prices
+    // is the drop the geometry already measured, now named and compared against
+    // THIS body's health. It can only ever turn a step into a typed refusal, or
+    // replace an `unsafe_landing` letter with the exact fatal-drop fact; it never
+    // turns a refusal into a step (the planner's own bound stays authoritative).
+    if (geometry.reason === null || geometry.reason === 'unsafe_landing') {
+      const fall = fallSurvivability(deep, facts)
+      if (fall.fatal) {
+        this.refuseStepLanding(target, from, landing, geometry, {
+          fall,
+          edgeBlock: reads.landing?.name ?? null,
+          support: deep.support,
+        })
+        return
+      }
+    }
+    if (geometry.reason === null) return
+    this.refuseStepLanding(target, from, landing, geometry, null)
+  }
+
+  /**
+   * Emit the typed, mirrored refusal for one step and throw the same typed
+   * `ExecutorError`. `fall` is present exactly on a `fall_lethal` refusal, so the
+   * line names the edge cell, the predicted drop, the body's health, the damage it
+   * would take, the deepest drop it could have survived, and the fact that made it
+   * fatal; every other reason's line is unchanged.
+   */
+  private refuseStepLanding(
+    target: Vec3Json,
+    from: Vec3Json,
+    landing: Vec3Json,
+    geometry: { reason: MoveLegStopReason | null; block: string | null; support: string },
+    fall: { fall: FallSurvivabilityVerdict; edgeBlock: string | null; support: string } | null,
+  ): void {
+    const reason: MoveLegStopReason = fall === null ? (geometry.reason ?? 'unsafe_landing') : 'fall_lethal'
+    const block = fall === null ? geometry.block : fall.edgeBlock
+    const support = fall === null ? geometry.support : fall.support
     const detail = {
       actionId: this.action?.id ?? 'unknown',
       target,
-      reason: verdict.reason,
+      reason,
       from,
       to: landing,
-      block: verdict.block ?? STEP_SUPPORT_UNKNOWN,
-      support: verdict.support,
+      block: block ?? STEP_SUPPORT_UNKNOWN,
+      support,
+      ...(fall === null
+        ? {}
+        : {
+            drop: fall.fall.drop,
+            dropAtLeast: fall.fall.dropAtLeast,
+            damage: fall.fall.damage,
+            health: fall.fall.health,
+            safeDrop: fall.fall.safeDrop,
+            armorPoints: fall.fall.armorPoints,
+            mitigation: fall.fall.mitigation,
+            fatalFact: fall.fall.fatalFact,
+          }),
     }
     this.logger.warn(
       'executor',
       formatMoveLegStopped({
-        reason: verdict.reason,
+        reason,
         from,
         to: landing,
-        block: verdict.block,
-        support: verdict.support,
+        block,
+        support,
+        ...(fall === null ? {} : { fall: fall.fall }),
       }),
       detail,
     )
     throw new ExecutorError(
-      verdict.reason,
-      `${verdict.reason} before the step to (${landing.x},${landing.y},${landing.z}): block=${
-        verdict.block ?? STEP_SUPPORT_UNKNOWN
-      } support=${verdict.support}`,
+      reason,
+      fall === null
+        ? `${reason} before the step to (${landing.x},${landing.y},${landing.z}): block=${
+            block ?? STEP_SUPPORT_UNKNOWN
+          } support=${support}`
+        : `the step to (${landing.x},${landing.y},${landing.z}) would drop the body ${
+            fall.fall.dropAtLeast ? 'at least ' : ''
+          }${fall.fall.drop ?? STEP_SUPPORT_UNKNOWN} blocks onto ${support} for ` +
+            `${fall.fall.damage ?? 0} HP at health ${fall.fall.health ?? STEP_SUPPORT_UNKNOWN}` +
+            ` (the body survives at most ${fall.fall.safeDrop ?? STEP_SUPPORT_UNKNOWN}` +
+            `${fall.fall.armorPoints > 0 ? ` with ${fall.fall.armorPoints} armor points` : ''}): ${
+              fall.fall.fatalFact
+            }`,
     )
+  }
+
+  /**
+   * How deep the fall read must look to be able to PROVE a fatal drop: the first
+   * drop whose damage is fatal is `safeDrop + 1`, so reading that many cells is
+   * enough. Never shallower than the geometry window (so the two reads share one
+   * pass) and capped so a hostile health cannot turn one step into a world scan.
+   */
+  private fallProofWindow(plannerWindow: number, facts: FallBodyFacts): number {
+    const { points, toughness } = armorFallMitigation(facts.armor)
+    const safe = maxSurvivableDrop(facts.health ?? null, points, toughness)
+    if (safe === null) return plannerWindow
+    return Math.min(Math.max(plannerWindow, safe + 1), FALL_PROOF_WINDOW_MAX)
+  }
+
+  /**
+   * The body facts the fall-survivability verdict is priced from: the live
+   * health, the worn armour (the SAME read the sensor publishes as
+   * `SelfState.armor`, `state.ts buildArmor`) and the held item. Absent/unknown
+   * fields are left absent so the verdict is UNKNOWN-is-not-false rather than a
+   * fabricated refusal.
+   */
+  private fallBodyFacts(): FallBodyFacts {
+    const health = (this.bot as unknown as { health?: number }).health
+    const held = (this.bot as unknown as { heldItem?: { name?: string } | null }).heldItem
+    return {
+      health: typeof health === 'number' && Number.isFinite(health) ? health : null,
+      armor: buildArmor(this.bot),
+      heldItem: typeof held?.name === 'string' ? held.name : null,
+    }
+  }
+
+  /**
+   * The deepest drop THIS body may plan/take right now, from the same facts the
+   * per-step guard uses. `null` = the body's health was never observed, so the
+   * pinned policy bound stands (UNKNOWN is not false).
+   */
+  private survivableDropBound(): number | null {
+    const facts = this.fallBodyFacts()
+    const { points, toughness } = armorFallMitigation(facts.armor)
+    return maxSurvivableDrop(facts.health ?? null, points, toughness)
+  }
+
+  /**
+   * Pin the movement policy's own drop bound to what the body can SURVIVE (never
+   * looser than the pinned `maxDropDown`). This is the pre-COMMIT half of the
+   * fall guard: the stock pathfinder is the live default actuator
+   * (`options.actuation === 'pathfinder'`, `stockPathTo` -> `setGoal`) and drives
+   * the body with real physics without passing through the per-step guard, so a
+   * low-health body would otherwise be planned into a drop it cannot survive.
+   * With the bound tightened, the planner has no such route at all (typed
+   * `no_path`) and the handled control-walk reads the SAME bound through
+   * `moveStepLandingWindow()`. A healthy body keeps the pinned 8 unchanged.
+   */
+  private applySurvivableDropBound(): void {
+    const movements = (
+      this.bot.pathfinder as unknown as { movements?: { maxDropDown?: number } } | undefined
+    )?.movements
+    if (movements === undefined || movements === null) return
+    const survivable = this.survivableDropBound()
+    const pinned = Math.min(MAX_PLANNED_DROP_DOWN, MOVE_STEP_LANDING_WINDOW_MAX)
+    // Floor at 1: the planner's own bound must stay readable to
+    // `moveStepLandingWindow()`, which treats a sub-1 value as "unreadable" and
+    // falls back to the looser default. A body that cannot survive ANY damage
+    // still takes the free 1-block step down, which is exactly the vanilla rule.
+    const next = survivable === null ? pinned : Math.max(1, Math.min(pinned, survivable))
+    if (movements.maxDropDown === next) return
+    this.logger.info(
+      'executor',
+      `movements.maxDropDown ${movements.maxDropDown} -> ${next} (the deepest drop this body survives)`,
+      { survivable, pinnedDropDown: pinned },
+    )
+    movements.maxDropDown = next
   }
 
   /**
@@ -10425,6 +10619,10 @@ export class Executor {
         ? new goals.GoalGetToBlock(target.x, target.y, target.z)
         : new goals.GoalBlock(target.x, target.y, target.z)
     const outcome = this.waitForGoal(epoch, signal, timeoutMs)
+    // PRE-COMMIT fall bound: this is the live default actuator, so the planner's
+    // own drop bound is tightened to what the body survives BEFORE the route is
+    // planned. Unknown health leaves the pinned bound untouched.
+    this.applySurvivableDropBound()
     this.bot.pathfinder.setGoal(goal)
     const result = await outcome
     this.pathStatus = toPathStatus(result)
@@ -10450,6 +10648,7 @@ export class Executor {
           ? new goals.GoalBlock(position.x, position.y, position.z)
           : new goals.GoalNear(position.x, position.y, position.z, range)
         const outcome = this.waitForGoal(epoch, signal, budgetMs)
+        this.applySurvivableDropBound()
         this.bot.pathfinder.setGoal(goal)
         const result = await outcome
         this.pathStatus = toPathStatus(result)
@@ -10574,6 +10773,7 @@ export class Executor {
       try {
         const goal = new goals.GoalNear(destination.x, destination.y, destination.z, 1)
         const outcome = this.waitForGoal(epoch, signal, PLACED_STOCK_BUDGET_MS)
+        this.applySurvivableDropBound()
         this.bot.pathfinder.setGoal(goal)
         result = await outcome
       } catch (error) {
