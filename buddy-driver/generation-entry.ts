@@ -38,6 +38,13 @@ import {
   resolveMercuryEnablement,
 } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
+import {
+  formatSystem2PayloadAbsentLine,
+  formatSystem2PayloadLine,
+  formatSystem2PayloadRefusedLine,
+  projectSystem2PayloadFacts,
+} from '../jev-agent/src/system2Payload.ts'
+import type { System2RouteMemoryInput } from '../jev-agent/src/system2Payload.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
@@ -1782,6 +1789,7 @@ export function buildMercurySummary(
   trigger: MercuryTriggerReason,
   deathRecovery: DeathRecoveryContext | null = null,
   durable?: DurableLadderProgress | null,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
@@ -1800,6 +1808,39 @@ export function buildMercurySummary(
   const recentFailures = request.recentOutcomes
     .slice(-6)
     .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`)
+  // BLOCKERS + GROUNDED ALTERNATIVES, as typed facts. Purely additive: the
+  // projection is `null` whenever the summoning tick established no refusal, so
+  // an ordinary payload is byte-for-byte what it was (no invented field).
+  const traversals = world.knownTraversals ?? []
+  const routeMemory: System2RouteMemoryInput | null =
+    world.knownResources.length === 0 && traversals.length === 0
+      ? null
+      : {
+          knownResources: world.knownResources.length,
+          traversalsOk: traversals.filter((entry) => entry.result === 'ok').length,
+          traversalsBlocked: traversals.filter((entry) => entry.result === 'blocked').length,
+        }
+  const payloadFacts = projectSystem2PayloadFacts(request.blockers, routeMemory)
+  if (payloadFacts !== null && log !== undefined) {
+    log(formatSystem2PayloadLine(payloadFacts.shape), {
+      plane: 'payload',
+      withheld: payloadFacts.blockers.withheld,
+      withheldTotal: payloadFacts.blockers.withheldTotal,
+      missing: payloadFacts.blockers.missing,
+      blockedBy: payloadFacts.blockers.blockedBy ?? null,
+      tools: payloadFacts.blockers.tools,
+      presented: payloadFacts.alternatives.presented,
+      presentedTotal: payloadFacts.alternatives.presentedTotal,
+      routes: payloadFacts.alternatives.routes ?? null,
+      chars: payloadFacts.shape.chars,
+    })
+    for (const entry of payloadFacts.shape.refused) {
+      log(formatSystem2PayloadRefusedLine(entry), { ...entry, plane: 'payload' })
+    }
+    for (const field of payloadFacts.shape.absent) {
+      log(formatSystem2PayloadAbsentLine(field), { field, plane: 'payload' })
+    }
+  }
   return {
     trigger,
     wakeReason: request.reason,
@@ -1851,6 +1892,9 @@ export function buildMercurySummary(
           }
         : null,
     allowedGoals: MERCURY_ALLOWED_GOALS,
+    ...(payloadFacts === null
+      ? {}
+      : { blockers: payloadFacts.blockers, alternatives: payloadFacts.alternatives }),
   }
 }
 
@@ -2564,7 +2608,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const mercury = mercuryEnablement.enabled
     ? new MercurySystem2({
         summarize: (request, trigger) =>
-          buildMercurySummary(bot, world, request, trigger, ctx.deathRecovery ?? null, durableLadderProgress),
+          buildMercurySummary(
+            bot,
+            world,
+            request,
+            trigger,
+            ctx.deathRecovery ?? null,
+            durableLadderProgress,
+            (event, detail) => ctx.log(event, detail),
+          ),
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,

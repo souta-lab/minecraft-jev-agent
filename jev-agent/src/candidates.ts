@@ -128,6 +128,7 @@ import {
   formatContactUnreachable,
   HUNT_APPROACH_BUDGET,
   MELEE_ATTACK_REACH,
+  meleeWalkGap,
 } from './combatClosure.ts'
 import type { AttackStandEvidence, AttackStandFact, ContactApproach } from './combatClosure.ts'
 import {
@@ -1515,6 +1516,46 @@ export interface ReachabilityGateOptions {
   digApproach?: DigApproachProbe | null
 }
 
+/**
+ * Why a withheld capability had NO grounded acquisition route, as a typed fact.
+ *
+ *   `no_producer`  - the sensor proved no world source for the missing thing
+ *                    (no producer block/mob in the observation envelope, or the
+ *                    named cell is an unobserved/unknown fact);
+ *   `no_material`  - a recipe route exists (the thing is craftable in principle)
+ *                    but its ingredient is neither held nor producible.
+ */
+export type AcquisitionRefusalReason = 'no_producer' | 'no_material'
+
+/**
+ * The acquisition evidence for ONE capability a candidate was withheld for: the
+ * grounded routes enumerated for it this tick, or - when there are none - the
+ * typed reason. `missing` is the same `capabilityKey` the withhold line carries,
+ * so the offer and the evidence can never disagree.
+ *
+ * This is EVIDENCE, not authority: attaching it changes no offer. The withheld
+ * candidate stays withheld; what the acquisition pass adds is a DIFFERENT
+ * grounded candidate for the missing fact, and this record is how a reader can
+ * tell the two apart (`CANDIDATE_ACQUISITION`) or see that nothing obtainable
+ * exists (`CANDIDATE_ACQUISITION_REFUSED`, naming the item and count).
+ */
+export interface CandidateAcquisition {
+  /** the withheld capability this fact is about (`capabilityKey`) */
+  missing: string
+  /** candidate ids of the grounded routes enumerated for it (empty when none) */
+  routes: string[]
+  /** typed reason NO route exists; null whenever `routes` is non-empty */
+  reason: AcquisitionRefusalReason | null
+  /** the concrete item that could not be obtained (item facts only) */
+  item: string | null
+  /** how many of `item` the route would need (item facts only) */
+  count: number | null
+  /** how many of `item` the body actually holds (item facts only) */
+  held: number | null
+  /** the held tool state per family the missing fact named, e.g. `pickaxe:-1` */
+  tools: string
+}
+
 export interface CandidateReachability {
   candidate: Candidate
   result: ReachabilityResult
@@ -1533,6 +1574,31 @@ export interface CandidateReachability {
   targetSignature: string
   withheld: boolean
   suppressed: boolean
+  /**
+   * The acquisition evidence for this withheld candidate's own missing facts.
+   * Present only when the reachability gate ran (the acquisition pass owns it),
+   * so pure callers and existing fixtures are unchanged.
+   */
+  acquisition?: CandidateAcquisition[]
+}
+
+/** `CANDIDATE_ACQUISITION`: the grounded route offered for a withheld fact. */
+export function formatCandidateAcquisition(candidateId: string, entry: CandidateAcquisition): string {
+  return `CANDIDATE_ACQUISITION candidate=${candidateId} missing=${entry.missing} route=${entry.routes.join('|')} tools=${entry.tools}`
+}
+
+/**
+ * `CANDIDATE_ACQUISITION_REFUSED`: no grounded route exists for a withheld fact.
+ * The item+count are named whenever the missing thing is a material, so the line
+ * is actionable (`item=oak_log count=3`) instead of a token that can only be
+ * retried.
+ */
+export function formatCandidateAcquisitionRefused(candidateId: string, entry: CandidateAcquisition): string {
+  const named =
+    entry.item === null
+      ? ''
+      : ` item=${entry.item} count=${entry.count ?? 1} held=${entry.held ?? 0}`
+  return `CANDIDATE_ACQUISITION_REFUSED candidate=${candidateId} missing=${entry.missing} reason=${entry.reason ?? 'no_producer'}${named} tools=${entry.tools}`
 }
 
 export interface GroundedCandidatesResult {
@@ -4650,6 +4716,19 @@ function mineCandidates(
   focusItem: string | null,
   descendTargetY: number | null = null,
   blockFilter: ((block: BlockState) => boolean) | null = null,
+  /**
+   * CAN-enumeration ONLY, for the capability-acquisition pass: keep a SENSED
+   * producer whose harvest tool the body does not hold yet, instead of dropping
+   * it inside the generator. Dropping it made the tool need invisible - the
+   * acquisition pass then had no route and reported `no_producer` for a producer
+   * the sensor had actually proved, and no `{kind:'tool'}` fact existed anywhere
+   * to route to. The candidate this produces is NOT executable: the reachability
+   * gate refuses it with `missing_tool` on its own barrier (and the guard denies
+   * EMPTY_HAND), which is exactly how the tool need becomes a fact the
+   * acquisition closure can answer. False for every ordinary caller, so the
+   * offer is unchanged where the tool is already held.
+   */
+  keepUnharvestable = false,
 ): Candidate[] {
   // A MINE that feeds an inventory-counted goal (collect/craft/smelt) must end
   // with its drop in the inventory; a navigation goal (descend/surface/explore)
@@ -4736,7 +4815,7 @@ function mineCandidates(
     if (digsBotSupport(state.self.position, block.position) !== null) continue
     const harvestTool = block.harvestTool ?? null
     const tier = block.harvestTier ?? null
-    if (!fabricCell && !hasTool(state, harvestTool, tier)) continue
+    if (!fabricCell && !hasTool(state, harvestTool, tier) && !keepUnharvestable) continue
 
     // A structure-approach cell is never harvested here, so the MOVE must not
     // inherit the fabric's harvest-tool requirement: a fortress is a place to
@@ -5543,29 +5622,38 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  return cuts.slice(0, 2).map((cut) => ({
-    id: `MINE:${blockId('b', cut.pos)}`,
-    kind: 'MINE' as const,
-    label: `mine the ${cut.name} ceiling block at (${cut.pos.x},${cut.pos.y},${cut.pos.z}) to open jump headroom and escape the pocket`,
-    targetName: cut.name,
-    target: cut.pos,
-    targetEntityId: null,
-    itemName: null,
-    requiresTool: false,
-    toolName: null,
-    inReach: distance(cut.pos, state.self.eyePosition) <= options.reach,
-    hasStandableAdjacent: true,
-    meta: {
-      tick: state.tick,
-      x: cut.pos.x,
-      y: cut.pos.y,
-      z: cut.pos.z,
-      clearance: true,
-      requiresPickup: false,
-      yieldItem: cut.name,
-      distance: Math.hypot(cut.pos.x + 0.5 - feet.x, cut.pos.z + 0.5 - feet.z),
-    },
-  }))
+  return cuts.slice(0, 2).map((cut) => {
+    // The clearance dig is a MINE like any other and must declare the harvest
+    // requirement the sensor proved for this cell. Hard-coding `requiresTool:
+    // false` advertised an executable lease for a block the bare hand cannot
+    // harvest (live 38cbb22: stone jump cell, no pickaxe of any tier, dig_timeout
+    // until move-failure memory retired the cut) and hid the tool need from the
+    // gate, so no acquisition route for the missing tool could ever be derived.
+    const barrier = cellHarvestBarrier(state, cut.pos)
+    return {
+      id: `MINE:${blockId('b', cut.pos)}`,
+      kind: 'MINE' as const,
+      label: `mine the ${cut.name} ceiling block at (${cut.pos.x},${cut.pos.y},${cut.pos.z}) to open jump headroom and escape the pocket`,
+      targetName: cut.name,
+      target: cut.pos,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: barrier !== null,
+      toolName: barrier?.requiredTool ?? null,
+      inReach: distance(cut.pos, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        x: cut.pos.x,
+        y: cut.pos.y,
+        z: cut.pos.z,
+        clearance: true,
+        requiresPickup: false,
+        yieldItem: cut.name,
+        distance: Math.hypot(cut.pos.x + 0.5 - feet.x, cut.pos.z + 0.5 - feet.z),
+      },
+    }
+  })
 }
 
 /**
@@ -6565,6 +6653,12 @@ interface CraftIngredientRoute {
    */
   producerMob: string | null
   candidates: Candidate[]
+  /**
+   * How many of `missing` the selected variant needs. Carried so the typed
+   * refusal can name the item AND its count (`item=oak_log count=3`) instead of
+   * an unactionable token; `selectCraftIngredients` already computes it.
+   */
+  missingCount: number
   /** true when the recipe descent stopped at the dependency depth cap */
   depthBoundHit: boolean
 }
@@ -6638,6 +6732,7 @@ function craftIngredientRoute(
       producer: 'none',
       producerMob: null,
       candidates: [],
+      missingCount: missing.count,
       depthBoundHit: false,
     }
   }
@@ -6647,6 +6742,7 @@ function craftIngredientRoute(
     producer: `collect ${raw.spec}`,
     producerMob: producerMobForItem(raw.spec),
     candidates: collectRouteCandidates(state, options, raw.spec),
+    missingCount: missing.count,
     depthBoundHit: raw.depthBoundHit,
   }
 }
@@ -9441,12 +9537,15 @@ function contactGeometryFor(
       distance: entity.distance,
       meleeReach: MELEE_THREAT_REACH,
       gapY,
-      // A walk cannot change the body's LEVEL, so the largest vertical component a
-      // walk-only close can still express is the melee envelope itself: the 3-D
-      // distance is at least |gapY|, so `gapY > meleeReach` is unreachable from
-      // EVERY horizontal position. Integer levels make this identical for the
-      // executor's 3.1 and the gate's 3.2.
-      walkGap: MELEE_THREAT_REACH,
+      // A walk cannot change the body's LEVEL, but the body's own height already
+      // spans the first `MELEE_REACH_UP` of an upward gap, so the largest vertical
+      // component a walk-only close can still express is the melee envelope PLUS
+      // that height (`meleeWalkGap`). The old `walkGap = meleeReach` form declared
+      // the measured 4-block blaze gap (`HUNT_CONTACT_UNREACHABLE
+      // actionId=ATTACK:e85793 gap_y=4 horizontal=1.70`) ascent-required when the
+      // body's own upper half is 2.93 m from the target - inside the envelope.
+      // Whole-block verdicts with the tree's constants: 4 = walk, 5 = ascent.
+      walkGap: meleeWalkGap(MELEE_THREAT_REACH),
       ascentRefused: ascentRefusal !== null,
     }),
     gapY,
@@ -11615,16 +11714,68 @@ export function applyReachabilityGate(
   // station cells, so the loop terminates.
   let retired = retiredStationsFromWithheld(withheld)
   let acquisitionOptions = optionsWithRetiredStations(options, retired)
+  // The acquisition evidence, per missing-capability key: the grounded routes
+  // enumerated for it, or the typed reason none exists. Filled by the passes and
+  // attached to the withheld entry it belongs to, so `CANDIDATE_ACQUISITION` /
+  // `CANDIDATE_ACQUISITION_REFUSED` name the SAME facts the offer was built from.
+  const acquisitionRoutes = new Map<string, string[]>()
+  const acquisitionRefusals = new Map<
+    string,
+    { reason: AcquisitionRefusalReason; item: string | null; count: number | null }
+  >()
+  // The acquisition closure is over CAPABILITIES, not only over station
+  // retirement. A withheld fact is often answered by a route that is itself
+  // withheld for a second, deeper fact - clearing the jump cell needs a tool, the
+  // tool needs a material, the material needs a station. Each pass can introduce
+  // such a fact, so the loop continues while the capability set grows (bounded by
+  // the same MAX_ACQUISITION_RETIRE_PASSES), and the closed set is monotone, so
+  // it terminates.
+  let expandedCapabilities = new Set(
+    withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)),
+  )
   for (let pass = 0; pass < MAX_ACQUISITION_RETIRE_PASSES; pass += 1) {
     const seen = new Set([
       ...presented.map((candidate) => candidate.id),
       ...withheld.map((entry) => entry.candidate.id),
     ])
-    run(capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen, digRefusals))
+    const acquired = capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen, digRefusals)
+    run(acquired.candidates)
+    for (const [key, ids] of acquired.routes) {
+      acquisitionRoutes.set(key, [...(acquisitionRoutes.get(key) ?? []), ...ids])
+      acquisitionRefusals.delete(key)
+    }
+    for (const [key, refusal] of acquired.refusals) {
+      if (!acquisitionRoutes.has(key)) acquisitionRefusals.set(key, refusal)
+    }
     const next = retiredStationsFromWithheld(withheld)
-    if (next.size === retired.size) break
+    const capabilities = new Set(
+      withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)),
+    )
+    const grewCapability = [...capabilities].some((key) => !expandedCapabilities.has(key))
+    expandedCapabilities = capabilities
+    if (!grewCapability && next.size === retired.size) break
     retired = next
     acquisitionOptions = optionsWithRetiredStations(options, retired)
+  }
+  // Attach the evidence to the withheld candidate whose fact it answers. This is
+  // observability only: the candidate stays withheld exactly as before.
+  for (const entry of withheld) {
+    if (entry.result.missingCapabilities.length === 0) continue
+    entry.acquisition = entry.result.missingCapabilities.map((capability) => {
+      const key = capabilityKey(capability)
+      const routes = acquisitionRoutes.get(key) ?? []
+      const refusal = routes.length > 0 ? null : acquisitionRefusals.get(key) ?? null
+      const item = refusal?.item ?? null
+      return {
+        missing: key,
+        routes,
+        reason: refusal?.reason ?? null,
+        item,
+        count: refusal?.count ?? null,
+        held: item === null ? null : (state.inventory.counts[item] ?? 0),
+        tools: toolStateForCapabilities(state, [capability]),
+      }
+    })
   }
 
   // A log-class collect goal must never be left with a stationary non-yield
@@ -12312,19 +12463,65 @@ function barrierForCandidate(state: WorldState, candidate: Candidate): Reachabil
       : candidate.kind === 'MINE'
         ? candidate.target
         : null
-  const block =
-    cell === null
-      ? undefined
-      : state.blocks.find(
-          (entry) => entry.position.x === cell.x && entry.position.y === cell.y && entry.position.z === cell.z,
-        )
-  if (block === undefined || block.harvestTool == null) return null
-  return {
-    position: block.position,
-    name: block.name,
-    requiredTool: block.harvestTool,
-    requiredTier: block.harvestTier ?? null,
+  return cell === null ? null : cellHarvestBarrier(state, cell)
+}
+
+/** The block NAME a cut pool observed at `cell` (headroom first, then step cuts). */
+function observedCutName(state: WorldState, cell: Vec3Json): string | null {
+  const at = (pos: Vec3Json): boolean => pos.x === cell.x && pos.y === cell.y && pos.z === cell.z
+  const head = (state.headroomCuts ?? []).find((cut) => at(cut.pos))
+  if (head !== undefined) return head.name
+  const step = (state.stepCuts ?? []).find((cut) => at(cut.cut))
+  if (step !== undefined) return step.name
+  return null
+}
+
+/**
+ * THE HARVEST TRUTH OF A CELL, from every piece of sensor truth the state holds.
+ *
+ * `state.blocks` is the scanner's RESOURCE index: it carries the sensor's
+ * resolved harvest profile (tool family + minimum tier), but ordinary terrain is
+ * not in it. A ceiling or a step face is sensed as a CUT (`headroomCuts` /
+ * `stepCuts`), and those carry only the block NAME. Reading the requirement from
+ * `state.blocks` alone therefore made a terrain tool need invisible - the
+ * measured live freeze on main 38cbb22:
+ *
+ *   - the ascend column refused the jump at the body's own head cell and the
+ *     withheld fact was `headroom@27,62,15` with `tools=[]`, i.e. no tool fact at
+ *     all, while that cell is a block a bare hand cannot harvest and the body held
+ *     no pickaxe of any tier;
+ *   - the clearance MINE was generated with `requiresTool=false`, so the gate had
+ *     no barrier to refuse it with, the lease dug the block bare-handed into
+ *     `dig_timeout` until move-failure memory retired the cut, and only then did
+ *     the acquisition pass have nothing left to offer;
+ *   - no `{kind:'tool'}` capability was ever derived for the cell, so nothing in
+ *     the run could turn "the climb needs the cell above cleared" into "get a
+ *     tool", and the offer stayed `[WAIT, ESCALATE]`.
+ *
+ * The requirement is resolved deterministically from facts the state already
+ * carries: the scanner's own entry first (its profile is the sensor's), else the
+ * cut pools by NAME through the shared mechanics owner (#54 `resolveHarvest`). An
+ * unknown/unobserved name resolves to null: a fact the sensor did not prove never
+ * becomes a tool requirement, and the caller keeps its previous behaviour instead
+ * of inventing a refusal.
+ */
+function cellHarvestBarrier(state: WorldState, cell: Vec3Json): ReachabilityBarrier | null {
+  const block = state.blocks.find(
+    (entry) => entry.position.x === cell.x && entry.position.y === cell.y && entry.position.z === cell.z,
+  )
+  if (block !== undefined && block.harvestTool != null) {
+    return {
+      position: block.position,
+      name: block.name,
+      requiredTool: block.harvestTool,
+      requiredTier: block.harvestTier ?? null,
+    }
   }
+  const name = block?.name ?? observedCutName(state, cell)
+  if (name === undefined || name === null || name === '' || name === 'unknown') return null
+  const profile = resolveHarvest(loadGameData(), name)
+  if (profile.harvestTool === null) return null
+  return { position: cell, name, requiredTool: profile.harvestTool, requiredTier: profile.harvestTier }
 }
 
 function columnFacts(state: WorldState): ColumnFacts {
@@ -12455,20 +12652,24 @@ export function deriveReachabilityAbilities(
     if (column.placeable === null) ascendMissing.push({ kind: 'placeable_block' })
     if (!column.headroomClear) {
       // The blocked jump cell is the binding immediate fact; the acquisition
-      // pass offers its clearance, so the column is not additionally refused.
+      // pass offers its clearance. That clearance is only executable with the
+      // cell's own harvest requirement, so when the requirement is not held the
+      // SAME fact is named as a missing tool - the acquisition pass then has a
+      // capability it can route to (craft/collect), instead of an undiggable
+      // lease that can only time out.
       ascendMissing.push({ kind: 'headroom', cell: column.headroomCell })
       const cell = column.headroomCell
-      const blocker =
-        cell === null
-          ? undefined
-          : state.blocks.find(
-              (block) =>
-                block.position.x === cell.x && block.position.y === cell.y && block.position.z === cell.z,
-            )
-      if (blocker?.harvestTool != null) {
-        const tier = blocker.harvestTier ?? 0
-        if (bestToolTier(counts, blocker.harvestTool) < tier) {
-          ascendMissing.push({ kind: 'tool', tool: blocker.harvestTool, tier })
+      // The clearance cell is TERRAIN: the scanner's resource index usually has
+      // no entry for it, so its harvest requirement comes from the same
+      // cell-level truth the gate uses. Without this the fact carried no tool at
+      // all (`missing=[headroom@27,62,15] tools=[]`) and the acquisition pass had
+      // no `{kind:'tool'}` to answer with - the measured freeze.
+      const blocker = cell === null ? null : cellHarvestBarrier(state, cell)
+      const blockerTool = blocker?.requiredTool ?? null
+      if (blockerTool !== null) {
+        const tier = blocker?.requiredTier ?? 0
+        if (bestToolTier(counts, blockerTool) < tier) {
+          ascendMissing.push({ kind: 'tool', tool: blockerTool, tier })
         }
       }
     } else if (ascent.kind === 'refuse') {
@@ -12542,9 +12743,28 @@ export function deriveReachabilityAbilities(
 }
 
 /**
+ * The held tool state for the tool families a set of missing capabilities names,
+ * as `family:bestHeldTier` (`pickaxe:-1` = none of any tier, the live shape).
+ * Part of the acquisition evidence: a reader must be able to see the tool state
+ * the acquisition decision was made against, not just the decision.
+ */
+function toolStateForCapabilities(state: WorldState, capabilities: readonly Capability[]): string {
+  const families = [
+    ...new Set(
+      capabilities
+        .filter((capability): capability is Extract<Capability, { kind: 'tool' }> => capability.kind === 'tool')
+        .map((capability) => capability.tool),
+    ),
+  ].sort()
+  if (families.length === 0) return 'none'
+  return families.map((tool) => `${tool}:${bestToolTier(state.inventory.counts, tool)}`).join('|')
+}
+
+/**
  * Bounded closure passes over the capability-acquisition output (see
- * `applyReachabilityGate`). Each pass can only add distinct station cells to the
- * retirement set, so a small fixed bound terminates and cannot loop.
+ * `applyReachabilityGate`). The bound holds for BOTH closure conditions - the
+ * station-retirement set and the capability set can only grow, and each pass adds
+ * at least one distinct member, so a small fixed bound terminates and cannot loop.
  */
 export const MAX_ACQUISITION_RETIRE_PASSES = 3
 
@@ -12710,6 +12930,42 @@ function retiredStationsFromWithheld(withheld: readonly CandidateReachability[])
   return retired
 }
 
+/** The result of one acquisition pass: the candidates plus the per-fact evidence. */
+interface AcquisitionPassResult {
+  candidates: Candidate[]
+  /**
+   * `capabilityKey` -> the candidate ids this pass enumerated for it. A key with
+   * an entry has a grounded route; a key with no entry (and no emission) is the
+   * typed refusal case.
+   */
+  routes: Map<string, string[]>
+  /** `capabilityKey` -> the typed reason no grounded route exists for it */
+  refusals: Map<string, { reason: AcquisitionRefusalReason; item: string | null; count: number | null }>
+}
+
+/**
+ * The typed reason no grounded route exists for one missing capability, with the
+ * concrete item and count when the missing thing is a MATERIAL. The item comes
+ * from the SAME recipe view the craft route uses (`craftIngredientRoute`), so the
+ * refusal names what the body would have to obtain rather than a token.
+ */
+function acquisitionRefusalFor(
+  state: WorldState,
+  options: CandidateOptions,
+  capability: Capability,
+): { reason: AcquisitionRefusalReason; item: string | null; count: number | null } {
+  if (capability.kind === 'tool') {
+    const item = toolItemsForCapability(state, options, capability)[0]
+    if (item === undefined) return { reason: 'no_producer', item: null, count: null }
+    const route = craftIngredientRoute(state, options, item)
+    if (route === null) return { reason: 'no_material', item, count: 1 }
+    // `producer: 'none'` is the route's own statement that no raw source exists;
+    // either way the ingredient the body lacks is named with its count.
+    return { reason: 'no_material', item: route.missing, count: route.missingCount }
+  }
+  return { reason: 'no_producer', item: null, count: null }
+}
+
 /** Grounded candidates that would acquire a withheld target's missing capability. */
 function capabilityAcquisitionCandidates(
   state: WorldState,
@@ -12717,8 +12973,10 @@ function capabilityAcquisitionCandidates(
   withheld: readonly CandidateReachability[],
   existingIds: ReadonlySet<string>,
   digRefusals: DigRouteRefusalSink = [],
-): Candidate[] {
+): AcquisitionPassResult {
   const out: Candidate[] = []
+  const routes = new Map<string, string[]>()
+  const refusals = new Map<string, { reason: AcquisitionRefusalReason; item: string | null; count: number | null }>()
   const seen = new Set<string>(existingIds)
   // A candidate already withheld this cycle must never be re-emitted: the
   // acquisition pass would re-evaluate the same id and double-record its
@@ -12740,12 +12998,19 @@ function capabilityAcquisitionCandidates(
         // tool, pickup and reachability facts as an ordinary route, while the
         // typed envelope below preserves why it is admitted under the active
         // Option.
+        //
+        // `keepUnharvestable` is what makes the MATERIAL route honest: a sensed
+        // producer whose tool the body still lacks IS the route to the material,
+        // and it must be enumerated so the gate can say `missing_tool` and the
+        // closure can offer the tool. Dropping it here made the acquisition pass
+        // report `no_producer` for a producer the sensor had proved.
         source = mineCandidates(
           state,
           options,
           null,
           null,
           (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
+          true,
         )
       } else if (capability.kind === 'tool') {
         // Enumerate every tier-satisfying tool the inventory can actually make
@@ -12811,9 +13076,12 @@ function capabilityAcquisitionCandidates(
         const approach = descentApproachCandidates(state, options, entry.candidate.target)
         source = [...levelSteps, ...approach]
       }
+      const key = capabilityKey(capability)
+      const emitted: string[] = []
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue
         seen.add(candidate.id)
+        emitted.push(candidate.id)
         const inheritedPrereqPath =
           typeof entry.candidate.meta.prereqPath === 'string' ? entry.candidate.meta.prereqPath : null
         const inheritedPrerequisiteRole =
@@ -12829,7 +13097,7 @@ function capabilityAcquisitionCandidates(
           meta: {
             ...candidate.meta,
             capabilityAcquisition: true,
-            missingCapability: capabilityKey(capability),
+            missingCapability: key,
             ...(placeablePrerequisite
               ? { optionSkill: 'PREREQUISITE', prerequisiteRole: 'placeable_block' }
               : {}),
@@ -12842,9 +13110,16 @@ function capabilityAcquisitionCandidates(
           },
         })
       }
+      if (emitted.length > 0) {
+        routes.set(key, [...(routes.get(key) ?? []), ...emitted])
+      } else if (!refusals.has(key)) {
+        // Nothing grounded could be enumerated for this fact. Say WHY, in typed
+        // form and with the item+count when one exists - never silence.
+        refusals.set(key, acquisitionRefusalFor(state, options, capability))
+      }
     }
   }
-  return out
+  return { candidates: out, routes, refusals }
 }
 
 /**
@@ -13199,13 +13474,19 @@ function existingDescentRouteCandidates(state: WorldState, options: CandidateOpt
 }
 
 /**
- * The canonical pickaxes that satisfy a missing-tool `capability` AND whose
- * recipe inputs the live inventory can obtain (weakest first). A tool the body
- * cannot make is not an answer to "acquire the missing capability", so the
- * acquisition pass enumerates every craftable-now tier instead of only the
- * weakest canonical name. When NONE is craftable it returns the weakest
- * satisfying name so the existing ingredient route (collect the missing
- * material) still runs rather than collapsing to WAIT.
+ * The tool ITEMS that satisfy a missing-tool `capability` AND whose recipe
+ * inputs the live inventory can obtain (weakest first). A tool the body cannot
+ * make is not an answer to "acquire the missing capability", so the acquisition
+ * pass enumerates every craftable-now item instead of only the weakest canonical
+ * name. When NONE is craftable it returns the weakest satisfying name so the
+ * existing ingredient route (collect the missing material) still runs rather
+ * than collapsing to WAIT.
+ *
+ * The family is read from the capability, never assumed: pickaxes carry the
+ * canonical material ladder (`PICKAXE_TIER_ORDER`, the one family the game gates
+ * a harvest on in practice), and every other family is enumerated from the item
+ * registry by its own suffix. Nothing here is pickaxe-specific except the tier
+ * ordering the game itself defines for that family.
  *
  * CAN/producibility only (recipe truth), never a preference ranking: an offered
  * `craft:<tool>` is a grounded step the model still chooses between.
@@ -13215,17 +13496,30 @@ function toolItemsForCapability(
   options: CandidateOptions,
   capability: Capability,
 ): string[] {
-  if (capability.kind !== 'tool' || capability.tool !== 'pickaxe') return []
-  const satisfying = PICKAXE_TIER_ORDER.filter((name) => (PICKAXE_RANKS[name] ?? -1) >= capability.tier)
+  if (capability.kind !== 'tool') return []
+  const suffix = `_${capability.tool}`
+  const satisfying =
+    capability.tool === 'pickaxe'
+      ? PICKAXE_TIER_ORDER.filter((name) => (PICKAXE_RANKS[name] ?? -1) >= capability.tier)
+      : Object.keys(loadGameData().itemsByName ?? {})
+          .filter((name) => name.endsWith(suffix))
+          .sort()
   if (satisfying.length === 0) return []
   const recipes = options.recipes ?? null
   if (recipes === null) return [satisfying[0]!]
+  const hasRecipe = (name: string): boolean => recipes.recipesFor(name).length > 0
   // `tableAvailable: true` answers only "are the recipe's inputs obtainable": a
   // table needed for a 3x3 tier is itself a grounded step the craft path owns.
   const craftable = satisfying.filter(
-    (name) => planNextCraftStep(recipes, name, state.inventory.counts, true).op !== null,
+    (name) => hasRecipe(name) && planNextCraftStep(recipes, name, state.inventory.counts, true).op !== null,
   )
-  return craftable.length > 0 ? craftable : [satisfying[0]!]
+  if (craftable.length > 0) return craftable
+  // Nothing is craftable now. Name the weakest item of the family the recipe
+  // index can actually make, so the ingredient route (collect the missing
+  // material) runs; a family with NO recipe at all is not routable and stays a
+  // typed refusal rather than a bogus craft step.
+  const weakest = satisfying.find(hasRecipe)
+  return weakest === undefined ? [] : [weakest]
 }
 
 function escalateRefusal(state: WorldState, withheld: readonly CandidateReachability[]): Candidate {

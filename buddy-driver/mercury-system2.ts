@@ -59,6 +59,7 @@ import { z } from 'zod'
 import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { compilePlannedGoal, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2PayloadShape } from '../jev-agent/src/system2Payload.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
@@ -886,8 +887,45 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     deathHistory: state.deathHistory,
     postDeath: state.postDeath ?? null,
     allowedGoals,
+    // The typed blocker + grounded-alternative facts are part of the KEY, not
+    // decoration: two summons whose blockers differ must not replay one
+    // another's answer (#33 - a cache hit must replay an attributable decision,
+    // and a decision made for "the route is refused with `headroom@x,y,z`
+    // missing" is not attributable to "the plan is wrong"). `withheldTotal`/
+    // `presentedTotal` are included so a clamped list cannot collide with a
+    // complete one at the same kept length.
+    blockers: state.blockers ?? null,
+    alternatives: state.alternatives ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+}
+
+/**
+ * The MODEL-CALL plane mirror of the summon payload's shape.
+ *
+ * Derived from the very object serialised into the prompt, so a call record
+ * attests to what the model was given instead of to what the builder intended.
+ * Defensive by construction: an old/replayed/fixture state carries no typed
+ * blocker fields, and then every count is zero and `attached` is false.
+ */
+export function mercuryPayloadShape(state: unknown): System2PayloadShape {
+  const record = (state ?? {}) as { blockers?: unknown; alternatives?: unknown }
+  const blockers = (record.blockers ?? null) as MercuryStateSummary['blockers'] | null
+  const alternatives = (record.alternatives ?? null) as MercuryStateSummary['alternatives'] | null
+  return {
+    attached: blockers !== null || alternatives !== null,
+    withheld: blockers?.withheld.length ?? 0,
+    withheldTotal: blockers?.withheldTotal ?? 0,
+    presented: alternatives?.presented.length ?? 0,
+    presentedTotal: alternatives?.presentedTotal ?? 0,
+    unmetTools: blockers?.tools.unmet.length ?? 0,
+    missing: blockers?.missing.length ?? 0,
+    blockedBy: blockers?.blockedBy !== undefined,
+    routes: alternatives?.routes !== undefined,
+    chars: JSON.stringify({ blockers, alternatives }).length,
+    refused: [],
+    absent: blockers === null ? ['blockers'] : [],
+  }
 }
 
 /** A compact, human-readable strategy label for the ADVISOR log. */
@@ -993,6 +1031,37 @@ export interface MercuryStateSummary {
     goto_resources?: string[]
     explore_modes?: string[]
   }
+  /**
+   * Typed BLOCKERS: which grounded actions the body cannot take, the typed
+   * reason for each refusal, the capability keys that are missing, and the tool
+   * truth behind a named tool requirement. Bounded by `SYSTEM2_PAYLOAD_LIMITS`;
+   * `withheldTotal`/`presentedTotal` report the pre-clamp counts so a truncated
+   * list is never mistaken for a complete one.
+   *
+   * Present only when the summoning tick established a refusal. An ordinary
+   * summon carries no `blockers` field at all, so its payload is unchanged.
+   */
+  blockers?: {
+    blockedBy?: string
+    missing: string[]
+    repeats?: { count: number; bound: number }
+    withheld: Array<{ candidate: string; kind: string; reason: string; missing: string[]; suppressed: boolean }>
+    withheldTotal: number
+    tools: {
+      held: Array<{ tool: string; tier: number }>
+      unmet: Array<{ tool: string; requiredTier: number; heldTier: number; candidate: string }>
+    }
+  }
+  /**
+   * Typed GROUNDED ALTERNATIVES: the candidates the body DID present this tick,
+   * plus the durable world-memory route counts. This is the other half of the
+   * blocker fact - "X is refused" is only actionable next to "Y was offered".
+   */
+  alternatives?: {
+    presented: Array<{ candidate: string; kind: string }>
+    presentedTotal: number
+    routes?: { knownResources: number; traversalsOk: number; traversalsBlocked: number }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,8 +1103,8 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 // ---------------------------------------------------------------------------
 
 /** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
-export const MERCURY_CACHE_SCHEMA_VERSION = 6
-const MERCURY_CACHE_FILE_VERSION = 6
+export const MERCURY_CACHE_SCHEMA_VERSION = 7
+const MERCURY_CACHE_FILE_VERSION = 7
 
 export interface MercuryWorldKey {
   serverId: string
@@ -1181,6 +1250,13 @@ export interface MercuryCallRecord {
   rawText?: string
   /** how the goals were obtained: structured enrichment, grounded prose, or none. */
   intentSource?: 'enrichment' | 'intent' | 'ungrounded' | 'cached'
+  /**
+   * The MODEL-CALL plane mirror of the summon payload's shape: what the compact
+   * state actually carried, derived from the very object that was serialised
+   * into the prompt. Written by `writeCall`, so every call record - success,
+   * rejection, budget exhaustion - attests to the state the model was given.
+   */
+  payloadShape?: System2PayloadShape
 }
 
 // ---------------------------------------------------------------------------
@@ -2765,7 +2841,7 @@ export class MercurySystem2 implements System2Brain {
   private writeCall(record: MercuryCallRecord): void {
     try {
       mkdirSync(dirname(this.callsPath), { recursive: true })
-      appendFileSync(this.callsPath, `${JSON.stringify(record)}\n`)
+      appendFileSync(this.callsPath, `${JSON.stringify({ ...record, payloadShape: mercuryPayloadShape(record.state) })}\n`)
     } catch (error) {
       this.log('ERROR', { where: 'mercury.writeCall', message: describeError(error) })
     }
