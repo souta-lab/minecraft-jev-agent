@@ -272,6 +272,18 @@ when the hand already holds the best carried weapon.
   armour at all** (`armor=0/4`), so "keep armour on" is only satisfied when armour exists. The
   armour gap is now stated honestly (`missing=[armor] prerequisite=none`) instead of pointing at a
   sword craft; an armour craft route is not implemented and is not in this lane.
+  **CLOSED 2026-09-22 by lane `task/armour-route`** (this bullet is kept as the measured state at
+  38cbb22, which the armour lane started from). The route now exists as a capability class:
+  `candidates.ts#armorCraftCandidates` offers `CRAFT:<any armour piece the data version can produce>`
+  through the same `planNextCraftStep`/`craftPlanStepCandidate` machinery every other craft uses,
+  `armorCraftTargets` (gearPlan.ts) supplies slot/tier truth for every material (leather, golden,
+  iron, diamond, turtle scutes - no iron-specific branch), the ordinary EQUIP affordance wears the
+  piece on the following tick, and `COMBAT_KIT_GAP`'s armour half now names that craft as its
+  `prerequisite`. When nothing is affordable the tick emits
+  `ARMOR_CRAFT_REFUSED slot=torso item=iron_chestplate material=iron_ingot need=8 have=2 shortfall=6`
+  instead of silence, and when it IS affordable it emits `ARMOR_CRAFT ...`. Fixtures:
+  `jev-agent/test-armour-route.mts`, including a byte-identical control for this lane's weapon-arm
+  candidate (same sha256 as 38cbb22).
 * **Arming is gated to "a fight is on the table"** (a threat envelope is active or an ATTACK is
   enumerated). A body mining with a pickaxe and carrying a sword is deliberately not offered the
   swap, to avoid churning the tool; whether a permanently-armed policy is better is a live question.
