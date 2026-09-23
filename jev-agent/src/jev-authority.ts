@@ -358,9 +358,248 @@ export function isTransientProviderFailure(error: unknown, depth = 0): boolean {
   return Array.isArray(row.errors) && row.errors.some((entry) => isTransientProviderFailure(entry, depth + 1))
 }
 
-function describe(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`
-  try { return JSON.stringify(error) } catch { return '<unserialisable>' }
+/** Bounded, secret-safe diagnostics copied from known AI SDK error fields only. */
+export interface ProviderErrorDiagnostics {
+  httpStatus?: number
+  providerErrorCode?: string
+  providerErrorType?: string
+  errorName?: string
+  requestId?: string
+  requestIdHeader?: string
+}
+
+const PROVIDER_ERROR_CODE_KEYS = ['providerCode', 'provider_code', 'errorCode', 'error_code', 'code'] as const
+const PROVIDER_ERROR_TYPE_KEYS = ['providerErrorType', 'provider_error_type', 'errorType', 'error_type', 'type'] as const
+const HTTP_STATUS_KEYS = ['statusCode', 'status_code', 'httpStatus', 'status'] as const
+const REQUEST_ID_HEADERS = [
+  'x-vercel-id',
+  'x-vercel-request-id',
+  'x-request-id',
+  'request-id',
+  'x-typesafe-request-id',
+] as const
+const ERROR_CHILD_KEYS = ['cause', 'lastError', 'response', 'error', 'data', 'body', 'responseBody', 'errors'] as const
+const MAX_ERROR_NODES = 32
+const MAX_ERROR_DEPTH = 5
+const MAX_PROVIDER_CODE_LENGTH = 80
+const MAX_REQUEST_ID_LENGTH = 160
+const MAX_ERROR_MESSAGE_LENGTH = 512
+
+type UnknownRecord = Record<string, unknown>
+
+function errorRecord(value: unknown): UnknownRecord | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as UnknownRecord
+    : null
+}
+
+function readErrorField(record: UnknownRecord, key: string): unknown {
+  try {
+    return record[key]
+  } catch {
+    return undefined
+  }
+}
+
+function firstSafeCode(record: UnknownRecord, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const code = safeCode(readErrorField(record, key))
+    if (code !== null) return code
+  }
+  return undefined
+}
+
+function firstHttpStatus(record: UnknownRecord): number | undefined {
+  for (const key of HTTP_STATUS_KEYS) {
+    const status = readErrorField(record, key)
+    if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) return status
+  }
+  return undefined
+}
+
+function safeCode(value: unknown): string | null {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 0 && value <= 9999 ? String(value) : null
+  }
+  if (typeof value !== 'string') return null
+  const code = value.trim()
+  if (
+    code.length === 0 ||
+    code.length > MAX_PROVIDER_CODE_LENGTH ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(code) ||
+    /(?:bearer|secret|password|authorization)/i.test(code) ||
+    /^(?:sk|pk|rk|sess|gh[pousr])[-_]/i.test(code) ||
+    /^[A-Fa-f0-9]{32,}$/.test(code) ||
+    /^[A-Za-z0-9_-]{48,}$/.test(code)
+  ) return null
+  return code
+}
+
+function safeRequestId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const requestId = value.trim()
+  if (
+    requestId.length === 0 ||
+    requestId.length > MAX_REQUEST_ID_LENGTH ||
+    !/^[A-Za-z0-9._:-]+$/.test(requestId) ||
+    /(?:bearer|token|secret|password|authorization|api.?key)/i.test(requestId) ||
+    /^(?:sk|pk|rk|sess|gh[pousr])[-_]/i.test(requestId) ||
+    /^[A-Fa-f0-9]{32,}$/.test(requestId)
+  ) return null
+  return requestId
+}
+
+function requestIdFromHeaders(value: unknown): Array<{ header: string; value: string }> {
+  const candidates: Array<{ header: string; value: string }> = []
+  if (typeof value !== 'object' || value === null) return candidates
+
+  let get: unknown
+  try {
+    get = (value as { get?: unknown }).get
+  } catch {
+    return candidates
+  }
+  if (typeof get === 'function') {
+    for (const header of REQUEST_ID_HEADERS) {
+      try {
+        const id = safeRequestId(get.call(value, header))
+        if (id !== null) candidates.push({ header, value: id })
+      } catch {
+        // A malformed provider error object should never affect policy handling.
+      }
+    }
+    return candidates
+  }
+
+  let keys: string[]
+  try {
+    keys = Object.keys(value).slice(0, 64)
+  } catch {
+    return candidates
+  }
+  for (const header of REQUEST_ID_HEADERS) {
+    const actual = keys.find((key) => key.toLowerCase() === header)
+    if (actual === undefined) continue
+    const id = safeRequestId(readErrorField(value as UnknownRecord, actual))
+    if (id !== null) candidates.push({ header, value: id })
+  }
+  return candidates
+}
+
+function parseErrorBody(value: unknown): unknown {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 8192) return null
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Extract only bounded, allowlisted metadata from AI SDK and TypeSafe SDK errors.
+ * Never serializes response bodies or headers wholesale: callers may attach an
+ * authorization value, prompt, URL, or other secret to those objects.
+ */
+export function extractProviderErrorDiagnostics(error: unknown): ProviderErrorDiagnostics | null {
+  const queue: Array<{ value: unknown; depth: number }> = [{ value: error, depth: 0 }]
+  const seen = new Set<object>()
+  const requestIds: Array<{ header: string; value: string }> = []
+  let httpStatus: number | undefined
+  let providerErrorCode: string | undefined
+  let providerErrorType: string | undefined
+  let errorName: string | undefined
+  let visited = 0
+
+  while (queue.length > 0 && visited < MAX_ERROR_NODES) {
+    const next = queue.shift()
+    if (next === undefined || next.depth > MAX_ERROR_DEPTH) continue
+    const row = errorRecord(next.value)
+    if (row === null || seen.has(row)) continue
+    seen.add(row)
+    visited += 1
+
+    if (httpStatus === undefined) {
+      httpStatus = firstHttpStatus(row)
+    }
+    if (providerErrorCode === undefined) {
+      providerErrorCode = firstSafeCode(row, PROVIDER_ERROR_CODE_KEYS)
+    }
+    if (providerErrorType === undefined) {
+      providerErrorType = firstSafeCode(row, PROVIDER_ERROR_TYPE_KEYS)
+    }
+    if (errorName === undefined) {
+      const name = safeCode(readErrorField(row, 'name'))
+      if (name !== null) errorName = name
+    }
+
+    for (const headerKey of ['responseHeaders', 'headers'] as const) {
+      requestIds.push(...requestIdFromHeaders(readErrorField(row, headerKey)))
+    }
+    const directId = safeRequestId(readErrorField(row, 'requestId'))
+    if (directId !== null) requestIds.push({ header: 'requestId', value: directId })
+
+    if (next.depth === MAX_ERROR_DEPTH) continue
+    for (const key of ERROR_CHILD_KEYS) {
+      const child = readErrorField(row, key)
+      const parsedBody = key === 'responseBody' ? parseErrorBody(child) : null
+      if (parsedBody !== null) queue.push({ value: parsedBody, depth: next.depth + 1 })
+      else if (typeof child === 'object' && child !== null) {
+        if (Array.isArray(child)) {
+          for (const entry of child.slice(0, 8)) queue.push({ value: entry, depth: next.depth + 1 })
+        } else {
+          queue.push({ value: child, depth: next.depth + 1 })
+        }
+      }
+    }
+  }
+
+  // Vercel's edge request id is most useful for tracing; otherwise retain the
+  // most specific allowlisted request-id header encountered in the error chain.
+  const selectedRequestId = REQUEST_ID_HEADERS
+    .map((header) => requestIds.find((candidate) => candidate.header === header))
+    .find((candidate) => candidate !== undefined)
+    ?? requestIds.find((candidate) => candidate.header === 'requestId')
+  const diagnostics: ProviderErrorDiagnostics = {}
+  if (httpStatus !== undefined) diagnostics.httpStatus = httpStatus
+  if (providerErrorCode !== undefined) diagnostics.providerErrorCode = providerErrorCode
+  if (providerErrorType !== undefined) diagnostics.providerErrorType = providerErrorType
+  if (errorName !== undefined) diagnostics.errorName = errorName
+  if (selectedRequestId !== undefined) {
+    diagnostics.requestId = selectedRequestId.value
+    diagnostics.requestIdHeader = selectedRequestId.header
+  }
+  return Object.keys(diagnostics).length > 0 ? diagnostics : null
+}
+
+function redactErrorText(text: string): string {
+  return text
+    .replace(
+      /\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*(?:bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      '$1=[REDACTED]',
+    )
+    .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:sk|pk|rk|sess|gh[pousr])[-_][A-Za-z0-9_-]{8,}\b/gi, '[REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+    .slice(0, MAX_ERROR_MESSAGE_LENGTH)
+}
+
+/** Error message kept in evidence; never serializes arbitrary SDK error fields. */
+export function describeProviderError(error: unknown): string {
+  let text: string
+  if (error instanceof Error) {
+    const name = safeCode(error.name)
+    text = `${name ?? 'ProviderError'}: ${error.message}`
+  } else if (typeof error === 'string') {
+    text = error
+  } else {
+    const row = errorRecord(error)
+    if (row === null) return '<provider failure>'
+    const name = safeCode(readErrorField(row, 'name'))
+    const message = readErrorField(row, 'message')
+    if (typeof message === 'string') text = `${name ?? 'ProviderError'}: ${message}`
+    else text = name ?? '<provider failure object>'
+  }
+  return redactErrorText(text)
 }
 
 function sleep(ms: number): Promise<void> {
@@ -452,7 +691,9 @@ export class AuthorityJevPolicy implements JevPolicy {
         }
         return result
       } catch (error) {
-        const message = describe(error)
+        const message = describeProviderError(error)
+        const providerDiagnostics = extractProviderErrorDiagnostics(error)
+        const providerDiagnosticsField = providerDiagnostics === null ? {} : { providerDiagnostics }
         if (isRateLimit(error) && rateAttempt < this.options.rateLimitRetries) {
           rateAttempt += 1
           generalAttempt -= 1
@@ -461,6 +702,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: rateAttempt,
             delayMs, totalWaitMs: rateWaitMs, error: message,
+            ...providerDiagnosticsField,
           })
           await sleep(delayMs)
           continue
@@ -473,6 +715,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             questions, response: null, error: message,
             authority: { pi: 'model', beta: 'model', failure: 'transient-provider-unavailable' },
             retryable: true,
+            ...providerDiagnosticsField,
           })
           throw new FatalModelError('jev-authority', generalAttempt, message, true)
         }
@@ -480,6 +723,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: generalAttempt,
             delayMs: 0, totalWaitMs: rateWaitMs, error: message,
+            ...providerDiagnosticsField,
           })
           continue
         }
@@ -489,6 +733,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs, state: modelState,
           questions, response: null, error: message,
           authority: { pi: 'model', beta: 'model', failure: 'fatal-no-fallback' },
+          ...providerDiagnosticsField,
         })
         throw new FatalModelError('jev-authority', generalAttempt, message)
       }
