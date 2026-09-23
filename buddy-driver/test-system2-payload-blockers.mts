@@ -431,13 +431,25 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
   const enforced = enforceSystem2PayloadBudget(oversized, oversizedShape)
   check(
     '(iii) the hard char ceiling is enforced against an oversized fact set',
-    payloadFactsChars(oversized) > SYSTEM2_PAYLOAD_LIMITS.factsChars && enforced !== null && payloadFactsChars(enforced) <= SYSTEM2_PAYLOAD_LIMITS.factsChars,
+    payloadFactsChars(oversized) > SYSTEM2_PAYLOAD_LIMITS.factsChars &&
+      enforced !== null &&
+      payloadFactsChars(enforced) <= SYSTEM2_PAYLOAD_LIMITS.factsChars,
     `before=${payloadFactsChars(oversized)} after=${enforced === null ? 'null' : payloadFactsChars(enforced)} limit=${SYSTEM2_PAYLOAD_LIMITS.factsChars}`,
   )
   check(
-    '(iii) the ceiling drops the alternatives before the withheld facts',
-    enforced !== null && enforced.alternatives.presented.length === 0 && enforced.withheld.length > 0,
-    JSON.stringify({ withheld: enforced?.withheld.length, presented: enforced?.alternatives.presented.length }),
+    '(iii) the ceiling drops the alternatives first',
+    enforced !== null && enforced.alternatives.presented.length === 0,
+    JSON.stringify({ presented: enforced?.alternatives.presented.length }),
+  )
+  check(
+    '(iii) degradation is STAGED and every drop is reported',
+    oversizedShape.refused.length > 0 && oversizedShape.refused.every((entry) => entry.dropped > 0),
+    JSON.stringify(oversizedShape.refused),
+  )
+  check(
+    '(iii) the goal-level blocker survives the ceiling (the cheapest, most load-bearing fact)',
+    enforced !== null && enforced.blockedBy === 'no_productive_action',
+    JSON.stringify({ blockedBy: enforced?.blockedBy, withheld: enforced?.withheld.length }),
   )
   check(
     '(iii) the ceiling clamps the unclamped held-tool list in the builder',
@@ -445,19 +457,19 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     `held=${built.facts.tools.held.length}`,
   )
 
-  // The extreme: a fact set that cannot fit even after every staged drop.
+  // The extreme reachable refusal: nothing goal-level exists to degrade TO, so
+  // there is no fact left that could be carried.
   const impossible = {
-    blockedBy: 'no_productive_action',
     missing: [],
     withheld: [
-      { candidate: 'c'.repeat(4000), kind: 'MOVE', reason: 'no_path', missing: ['open_path'], suppressed: false },
+      { candidate: 'c'.repeat(4000), kind: 'MOVE', reason: 'no_path', missing: [], suppressed: false },
     ],
     tools: { held: [], unmet: [] },
     alternatives: { presented: [] },
   }
   const impossibleShape = { ...emptySystem2PayloadShape(), attached: true, chars: payloadFactsChars(impossible) }
   const refusedOutright = enforceSystem2PayloadBudget(impossible, impossibleShape)
-  check('(iii) a state that cannot fit is refused outright, not dumped', refusedOutright === null, JSON.stringify(refusedOutright))
+  check('(iii) a state with no carryable fact is refused outright, not dumped', refusedOutright === null, JSON.stringify(refusedOutright))
   check(
     '(iii) the refusal is recorded as an absent field',
     impossibleShape.absent.includes('blockers') && impossibleShape.attached === false,
@@ -467,6 +479,69 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     '(iii) a refused payload has no char weight',
     impossibleShape.chars === 0,
     `chars=${impossibleShape.chars}`,
+  )
+
+  // End to end through the payload projection: a pathological REQUEST (an
+  // untrusted object the builder must not trust to be pre-clamped) still lands
+  // inside the budget and still states what it dropped.
+  const projected = projectSystem2PayloadFacts(
+    {
+      blockedBy: 'no_productive_action',
+      missing: Array.from({ length: 20 }, () => 'm'.repeat(300)),
+      withheld: Array.from({ length: 20 }, (_, index) => ({
+        candidate: `C${index}`.padEnd(300, 'x'),
+        kind: 'MOVE',
+        reason: 'needs_ascend',
+        missing: Array.from({ length: 20 }, () => 'k'.repeat(300)),
+        suppressed: false,
+        acquisition: Array.from({ length: 20 }, () => ({
+          missing: 'k'.repeat(300),
+          routes: Array.from({ length: 20 }, () => 'r'.repeat(300)),
+          reason: null,
+          item: 'stone_pickaxe',
+          count: 1,
+          held: 0,
+          tools: 'pickaxe:-1',
+        })),
+      })),
+      tools: { held: [{ tool: 'pickaxe', tier: -1 }], unmet: [] },
+      alternatives: { presented: Array.from({ length: 20 }, () => ({ candidate: 'p'.repeat(300), kind: 'MOVE' })) },
+    },
+    { knownResources: 3, traversalsOk: 2, traversalsBlocked: 1 },
+  )
+  check(
+    '(iii) an untrusted oversized request still lands inside the budget',
+    projected !== null && projected.shape.chars <= SYSTEM2_PAYLOAD_LIMITS.factsChars,
+    `chars=${projected?.shape.chars}`,
+  )
+  check(
+    '(iii) the projected payload reports the staged drops it made',
+    projected !== null &&
+      projected.shape.refused.length > 0 &&
+      projected.shape.refused.every((entry) => entry.dropped > 0 && entry.limit >= 0),
+    JSON.stringify(projected?.shape.refused.slice(0, 3)),
+  )
+  check(
+    '(iii) the projected shape counts agree with the payload it actually carries',
+    projected !== null &&
+      projected.shape.withheld === projected.blockers.withheld.length &&
+      projected.shape.presented === projected.alternatives.presented.length &&
+      projected.shape.unmetTools === projected.blockers.tools.unmet.length &&
+      projected.shape.missing === projected.blockers.missing.length,
+    JSON.stringify({
+      shape: [projected?.shape.withheld, projected?.shape.presented, projected?.shape.unmetTools, projected?.shape.missing],
+      payload: [
+        projected?.blockers.withheld.length,
+        projected?.alternatives.presented.length,
+        projected?.blockers.tools.unmet.length,
+        projected?.blockers.missing.length,
+      ],
+    }),
+  )
+  check(
+    '(iii) the marker line stays short for the worst payload',
+    projected !== null && formatSystem2PayloadLine(projected.shape).length < 200,
+    String(projected === null ? '<refused>' : formatSystem2PayloadLine(projected.shape).length),
   )
   check(
     '(iii) the absent marker is well formed',
