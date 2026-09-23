@@ -272,6 +272,11 @@ function levelDescent(dir: 'E' | 'W', step: Vec3Json): DescentOption {
     wallSolid: false,
     headSolid: false,
     floorSolid: true,
+    // `safe` describes the step/dig mechanics. A MOVE continuation is only
+    // grounded when the sensor has also verified the complete landing
+    // (two passable body cells plus usable support). Keep that separate fact
+    // explicit in this synthetic world state, as the live sensor does.
+    landingUsable: true,
     safe: true,
     reason: 'safe',
     digName: null,
@@ -485,6 +490,35 @@ function main(): void {
       '(d) route recovery removes a MOVE that increases target distance',
       !divergent,
       `moves=[${acquisitions.map((candidate) => candidate.id).join(',')}] divergent=${divergent}`,
+    )
+  }
+
+  // (d0) `safe` alone is not enough to offer a level-step MOVE. Legacy or
+  // synthetic states can omit the sensor's canonical landing verdict; with
+  // that truth unknown the recovery must stay withheld. This is the causal
+  // distinction behind the prior empty `moves=[]` assertion: its hand-built
+  // DescentOption said `safe: true` but omitted `landingUsable`.
+  {
+    const unverifiedStep = levelDescent('E', { x: 3, y: 60, z: 0 })
+    delete unverifiedStep.landingUsable
+    const routeState = worldState({
+      goal: goal('furnace'),
+      goalQueue: queueWith(queuedGoal('furnace', 'place')),
+      descent: [unverifiedStep],
+      standable: [BOT],
+    })
+    const grounded = applyReachabilityGate(
+      [waitCandidate(routeState.tick), unreachableMove(routeState.tick)],
+      routeState,
+      optionsWith(),
+    )
+    const moves = grounded.candidates.filter(
+      (candidate) => candidate.kind === 'MOVE' && candidate.meta.capabilityAcquisition === true,
+    )
+    check(
+      '(d0) an unverified landing is not promoted from safe-step mechanics into a MOVE',
+      moves.length === 0,
+      `safe=${String(unverifiedStep.safe)} landingUsable=${String(unverifiedStep.landingUsable)} moves=[${moves.map((candidate) => candidate.id).join(',')}]`,
     )
   }
 
