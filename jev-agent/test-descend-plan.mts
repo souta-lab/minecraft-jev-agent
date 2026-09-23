@@ -228,7 +228,7 @@ addCase('an exhausted descent exposes grounded down and level alternatives to po
 addCase('a successful policy-selected recovery starts its own bounded Skill continuation', () => {
   type RecoveryRuntime = {
     digMemory: DigMemory
-    options: { worldEpoch: number }
+    options: { serverId: string; worldEpoch: number }
     bot: { game: { dimension: string }; entity: { position: Vec3Json } }
     logger: {
       info: (channel: string, message: string, fields: Record<string, unknown>, tick: number) => void
@@ -272,14 +272,14 @@ addCase('a successful policy-selected recovery starts its own bounded Skill cont
   if (selected === undefined) return { pass: false, detail: 'policy alternative level:N was not offered' }
 
   const memory = new DigMemory()
-  memory.bindScope({ dimension: 'minecraft:overworld', worldEpoch: 1 })
+  memory.bindScope({ serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 })
   memory.observeStoneY(30)
   memory.record({ x: 1, y: 54, z: 0, dir: 'E', mode: 'down', target: 'raw_iron', atMs: 1 })
   for (let index = 0; index < 4; index += 1) memory.markDescend(false)
   const lines: string[] = []
   const runtime = Object.create(JevController.prototype) as RecoveryRuntime
   runtime.digMemory = memory
-  runtime.options = { worldEpoch: 1 }
+  runtime.options = { serverId: 'local', worldEpoch: 1 }
   runtime.bot = {
     game: { dimension: 'minecraft:overworld' },
     entity: { position: feet },
@@ -439,7 +439,7 @@ addCase('the path cap still permits a grounded downward step', () => {
 addCase('a verified move after the capped tunnel opens a fresh bounded path', () => {
   type ResetRuntime = {
     digMemory: DigMemory
-    options: { worldEpoch: number }
+    options: { serverId: string; worldEpoch: number }
     bot: { game: { dimension: string } }
     logger: { info: (channel: string, message: string, fields: Record<string, unknown>, tick: number) => void }
     tickCounter: number
@@ -450,14 +450,14 @@ addCase('a verified move after the capped tunnel opens a fresh bounded path', ()
   }
   const runtime = Object.create(JevController.prototype) as ResetRuntime
   const memory = new DigMemory()
-  memory.bindScope({ dimension: 'minecraft:overworld', worldEpoch: 1 })
+  memory.bindScope({ serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 })
   const lines: string[] = []
   for (let index = 0; index < DIG_PATH_CAP; index += 1) {
     memory.record({ x: index, y: 55, z: 0, dir: 'E', mode: 'level', target: 'raw_iron', atMs: index })
   }
   for (let index = 0; index < 4; index += 1) memory.markDescend(false)
   runtime.digMemory = memory
-  runtime.options = { worldEpoch: 1 }
+  runtime.options = { serverId: 'local', worldEpoch: 1 }
   runtime.bot = { game: { dimension: 'minecraft:overworld' } }
   runtime.logger = { info: (_channel, message) => lines.push(message) }
   runtime.tickCounter = 1

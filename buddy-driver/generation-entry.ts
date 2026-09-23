@@ -2948,6 +2948,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // Real Jev policy by default (key from the gateway key file or
     // AI_GATEWAY_API_KEY); deterministic fallback only when explicitly requested.
     forceFallbackPolicy: (process.env.BUDDY_POLICY ?? '').trim().toLowerCase() === 'fallback',
+    serverId: ctx.worldKey.serverId,
     worldEpoch: ctx.worldKey.worldEpoch,
     terminateOnModelFailure: terminateResident,
     actuation: 'pathfinder',

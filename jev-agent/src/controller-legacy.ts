@@ -586,6 +586,8 @@ export interface JevAgentOptions {
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
   */
   prereqRankPolicy: PrereqRankPolicy
+  /** server identifier from the resident world key captured for this generation */
+  serverId: string
   /** resident world epoch captured when this controller generation was created */
   worldEpoch: number
 }
@@ -637,6 +639,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   repeatedOutcomeLimit: resolveRepeatedOutcomeLimit(),
   betaAbandonDeferCycles: resolveBetaAbandonDeferCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
+  serverId: 'local',
   worldEpoch: 0,
 }
 
@@ -13167,9 +13170,9 @@ export class JevController {
 
   /**
    * DigMemory contains absolute block coordinates, so every access is fenced to
-   * the controller's host world epoch and Mineflayer's live dimension. A portal
-   * transfer or world replacement clears that coordinate history; ordinary
-   * ticks in the same world preserve it.
+   * the controller's full host world identity and Mineflayer's live dimension.
+   * A server switch, portal transfer, or world replacement clears that coordinate
+   * history; ordinary ticks in the same world preserve it.
    */
   private get digMemory(): DigMemory {
     this.bindDigMemoryScope(this.currentDimension())
@@ -13182,12 +13185,16 @@ export class JevController {
   }
 
   private bindDigMemoryScope(dimension: string): void {
-    const change = this.digMemoryState.bindScope({ dimension, worldEpoch: this.options.worldEpoch })
+    const change = this.digMemoryState.bindScope({
+      serverId: this.options.serverId,
+      dimension,
+      worldEpoch: this.options.worldEpoch,
+    })
     if (change.changed) this.digOscillationReported = false
     if (!change.changed || change.previous === null) return
     this.logger.warn(
       'agent',
-      `DIG_MEMORY_SCOPE_RESET previous=${change.previous.dimension}@${change.previous.worldEpoch} current=${change.current.dimension}@${change.current.worldEpoch}`,
+      `DIG_MEMORY_SCOPE_RESET previous=${change.previous.serverId}|${change.previous.dimension}@${change.previous.worldEpoch} current=${change.current.serverId}|${change.current.dimension}@${change.current.worldEpoch}`,
       {
         previous: change.previous,
         current: change.current,

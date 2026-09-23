@@ -37,8 +37,9 @@ export interface DigMemorySnapshot {
   descendLimitReached: boolean
 }
 
-/** The coordinate system DigMemory describes. Both fields are host/world facts. */
+/** The coordinate system DigMemory describes. These are host/world identity facts. */
 export interface DigMemoryScope {
+  serverId: string
   dimension: string
   worldEpoch: number
 }
@@ -101,13 +102,18 @@ export class DigMemory {
 
   /**
    * Fence coordinate and descent history to the world in which it was learned.
-   * Dimension transfers and host world-epoch changes invalidate old positions;
-   * repeated reads from the same world leave useful tunnel/search memory intact.
+   * Server changes, dimension transfers, and host world-epoch changes invalidate
+   * old positions; repeated reads from the same complete world key leave useful
+   * tunnel/search memory intact.
    */
   bindScope(scope: DigMemoryScope): DigMemoryScopeChange {
     const current = { ...scope }
     const previous = this.scope === null ? null : { ...this.scope }
-    if (previous?.dimension === current.dimension && previous.worldEpoch === current.worldEpoch) {
+    if (
+      previous?.serverId === current.serverId &&
+      previous.dimension === current.dimension &&
+      previous.worldEpoch === current.worldEpoch
+    ) {
       return { changed: false, previous, current }
     }
     this.clearMemory()
