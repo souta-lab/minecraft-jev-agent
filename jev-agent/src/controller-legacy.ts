@@ -1743,6 +1743,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'EAT_REFUSED',
   'FOOD_ROUTE',
   'FOOD_ACQUIRED',
+  'FOOD_EATEN',
   FOOD_SOURCE_NONE,
   'LOG_ROUTE',
   'WEDGE_SUPPRESSED',
@@ -2306,6 +2307,9 @@ export class JevController {
   private lastLogRouteSignature = ''
   /** Dedupe key for FOOD_LOW/EAT_REFUSED/FOOD_ROUTE so a stable food state is one auditable line. */
   private lastFoodMarkerSignature = ''
+  /** Live hunger bar at the previous decision tick, for FOOD_EATEN; null until the first tick. */
+  private lastFoodLevel: number | null = null
+
   /** Food-item counts at the previous decision tick, for FOOD_ACQUIRED; null until the first tick. */
   private lastFoodCounts: Map<string, number> | null = null
   private lastProgress = 0
@@ -11453,6 +11457,7 @@ export class JevController {
    *   EAT_REFUSED reason=full|no_food            why no EAT candidate was offered
    *   FOOD_ROUTE kind=animal target=<entity>     a grounded hunt route is on offer
    *   FOOD_ACQUIRED item=<name> count=<n>        a food item count rose this tick
+   *   FOOD_EATEN item=<name> food=<a>-><b> health=<n>  the hunger bar rose this tick
    *
    * Deduped by (food, threshold, held food, offered routes) so a stable food
    * state is one auditable line, matching the LOG_ROUTE convention.
@@ -11484,13 +11489,23 @@ export class JevController {
       if (held !== null && food > threshold) {
         this.logger.info(
           'food',
+          // The reason lives in the MESSAGE, but the mirror (`mirroredEventToken`
+          // + the host renderer) keeps only the first token and the detail object,
+          // so `reason=full` never reached the run log: the observed line was
+          // `EAT_REFUSED food=15 threshold=18`, indistinguishable from the
+          // no_food case. The discriminator is carried in the detail too.
           'EAT_REFUSED reason=full',
-          { food, threshold, heldFood: held },
+          { food, threshold, heldFood: held, reason: 'full' },
           this.tickCounter,
         )
       }
       if (held === null && food <= threshold) {
-        this.logger.info('food', 'EAT_REFUSED reason=no_food', { food, threshold }, this.tickCounter)
+        this.logger.info(
+          'food',
+          'EAT_REFUSED reason=no_food',
+          { food, threshold, reason: 'no_food' },
+          this.tickCounter,
+        )
       }
       for (const candidate of routes) {
         this.logger.info(
@@ -11500,6 +11515,10 @@ export class JevController {
             candidate: candidate.id,
             kind: candidate.meta.foodRoute,
             target: candidate.meta.foodTarget,
+            // The SENSED source this route serves: the block for forage/acquire
+            // (`oak_leaves`), the item for a cook/hunt. Without it the mirrored
+            // line names the consumable but not what the body perceived.
+            source: candidate.targetName ?? null,
             distance: candidate.meta.distance ?? null,
           },
           this.tickCounter,
@@ -11524,6 +11543,33 @@ export class JevController {
         )
       }
     }
+    // FOOD_EATEN is a BODY-state delta, not a route fact: the tick where the live
+    // hunger bar ROSE. It names the consumable that left the inventory, the food
+    // change and the health at that moment, so "the body ate and its food rose"
+    // is run evidence instead of an inference stitched from two other counters.
+    // Read BEFORE `lastFoodCounts` is advanced, so the delta is the eaten item.
+    const level = state.self.food
+    if (Number.isFinite(level) && this.lastFoodLevel !== null && level > this.lastFoodLevel) {
+      const eaten =
+        [...(this.lastFoodCounts ?? new Map<string, number>()).entries()].find(
+          ([name, count]) => (state.inventory.counts[name] ?? 0) < count,
+        )?.[0] ??
+        held ??
+        null
+      this.logger.info(
+        'food',
+        `FOOD_EATEN item=${eaten ?? 'unknown'} food=${this.lastFoodLevel}->${level} health=${state.self.health}`,
+        {
+          item: eaten,
+          from: this.lastFoodLevel,
+          to: level,
+          health: state.self.health,
+          threshold,
+        },
+        this.tickCounter,
+      )
+    }
+    if (Number.isFinite(level)) this.lastFoodLevel = level
     this.lastFoodCounts = current
   }
 

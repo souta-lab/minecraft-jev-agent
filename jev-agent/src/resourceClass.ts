@@ -3,7 +3,7 @@
 // The planner must not be assumed to know world-specific item ids. It asks for a
 // class ("log", "stone", ...) and the resolver maps it to the concrete items that
 // exist in the world / inventory.
-import { isFuelItem, loadGameData, recipesFor } from './gameData.ts'
+import { isFoodItem, isFuelItem, loadGameData, recipesFor } from './gameData.ts'
 
 export type ResourceClass = 'log' | 'planks' | 'stone' | 'fuel' | 'food' | 'pickaxe'
 
@@ -25,50 +25,15 @@ const STONE_ITEMS = new Set([
   'basalt',
 ])
 
-const FOOD_ITEMS = new Set([
-  'bread',
-  'cooked_beef',
-  'cooked_porkchop',
-  'cooked_chicken',
-  'cooked_mutton',
-  'cooked_cod',
-  'cooked_salmon',
-  'cooked_rabbit',
-  // Raw passive-animal drops are edible without a furnace; a hunting-only
-  // survival route would be useless if the raw drop could not be eaten. This is
-  // the single food truth table (candidates.ts `pickFood`/`isFoodItem` delegate
-  // here) so hunger and the ladder agree on what counts as food.
-  'beef',
-  'porkchop',
-  'chicken',
-  'mutton',
-  'rabbit',
-  'cod',
-  'salmon',
-  'apple',
-  'baked_potato',
-  'golden_apple',
-  'carrot',
-  'melon_slice',
-  'sweet_berries',
-  // Edible vanilla items the survival table was missing. These are the outputs
-  // and forage drops of the grounded food routes (`foodSources.ts`): without
-  // them a recipe could be planned to completion and the eat mechanic would
-  // still refuse the result, which is a dead-end route rather than a food truth.
-  // The boundary is deliberate: items that are edible but carry a harmful
-  // effect (rotten_flesh, spider_eye, poisonous_potato, pufferfish, ...) are NOT
-  // survival food, and a table that cannot distinguish them would offer a
-  // starving body a route that kills it.
-  'beetroot',
-  'beetroot_soup',
-  'cookie',
-  'dried_kelp',
-  'glow_berries',
-  'honey_bottle',
-  'kelp',
-  'mushroom_stew',
-  'pumpkin_pie',
-])
+// The `food` class is GAME DATA, not a list: it asks the running data version's
+// own edible table (`gameData.isFoodItem` -> `foodsByName` from foods.json), the
+// same way harvest/recipe truth is read. Re-listing food names here meant a
+// starving body holding a genuinely edible `golden_carrot` or `rabbit_stew`
+// reported `EAT_REFUSED reason=no_food` and `missing=["no_edible_held"]`.
+//
+// The only surviving list is the POLICY exception table in `gameData.ts`
+// (`NON_SURVIVAL_EDIBLES` / `VANILLA_EDIBLE_DATA_GAPS`): the data cannot say
+// "this one poisons the eater", and it wrongly calls the fish buckets edible.
 
 const PICKAXE_SUFFIX = '_pickaxe'
 
@@ -122,7 +87,11 @@ export function matchesResourceClass(itemName: string | null | undefined, cls: R
     case 'stone':
       return STONE_ITEMS.has(itemName)
     case 'food':
-      return FOOD_ITEMS.has(itemName)
+      // The pinned data version's `foodsByName`, minus the explicit policy
+      // exceptions (`gameData.isFoodItem`). No registry is threaded here: the
+      // pinned version IS the version this repo runs, and `null` means "read
+      // the pinned table", not "no table".
+      return isFoodItem(null, itemName)
     case 'fuel':
       return isFuelItem(itemName)
     case 'pickaxe':

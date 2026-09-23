@@ -30,8 +30,7 @@
 // enumerates routes and Jev/System2 choose.
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
-import { resolveHarvest } from './gameData.ts'
-import { matchesResourceClass } from './resourceClass.ts'
+import { isFoodItem, resolveHarvest } from './gameData.ts'
 
 /** The minimal registry slice the food-source truth reads. */
 export interface FoodSourceRegistry {
@@ -55,13 +54,18 @@ export interface FoodSourceSpec {
 }
 
 /**
- * True when an item is edible, using the single `food` resource class. The
- * candidate layer's `pickFood`/`isFoodItem`, the planner's `food` rung and this
- * module all read this one table, so a route can never end in an item the eat
- * mechanic would refuse.
+ * True when an item is edible, read from the running data version's own edible
+ * table (`foodsByName`, foods.json) through the single `gameData.isFoodItem`
+ * predicate, minus the explicit policy exceptions there. The candidate layer's
+ * `pickFood`/`isFoodItem`, the planner's `food` rung and this module all read
+ * that one truth, so a route can never end in an item the eat mechanic would
+ * refuse and a genuinely edible item can never be reported as "no food".
+ *
+ * `registry` is optional and only overrides the table when the live registry
+ * carries one (a different data version than the pinned `MC_DATA_VERSION`).
  */
-export function isEdibleFoodItem(itemName: string | null | undefined): boolean {
-  return typeof itemName === 'string' && matchesResourceClass(itemName, 'food')
+export function isEdibleFoodItem(itemName: string | null | undefined, registry?: FoodSourceRegistry | null): boolean {
+  return isFoodItem((registry ?? null) as never, itemName)
 }
 
 /**
@@ -109,10 +113,10 @@ function registryValue(registry: FoodSourceRegistry, name: string): unknown {
 export function foodIngredientItems(registry: FoodSourceRegistry, index: RecipeIndex): ReadonlySet<string> {
   const out = new Set<string>()
   for (const name of Object.keys(registry.itemsByName ?? {})) {
-    if (!isEdibleFoodItem(name)) continue
+    if (!isEdibleFoodItem(name, registry)) continue
     for (const variant of index.recipesFor(name)) {
       for (const ingredient of variant.ingredients) {
-        if (!isEdibleFoodItem(ingredient.item)) out.add(ingredient.item)
+        if (!isEdibleFoodItem(ingredient.item, registry)) out.add(ingredient.item)
       }
     }
   }
@@ -134,14 +138,14 @@ function computeFoodSourceSpecs(registry: FoodSourceRegistry): ReadonlyMap<strin
     const harvest = resolveHarvest(registry as never, blockName)
     const yieldName = harvest.yield
     if (typeof yieldName !== 'string' || yieldName.length === 0) continue
-    if (isEdibleFoodItem(yieldName)) out.set(blockName, { item: yieldName, route: 'forage' })
+    if (isEdibleFoodItem(yieldName, registry)) out.set(blockName, { item: yieldName, route: 'forage' })
     else if (ingredients.has(yieldName)) out.set(blockName, { item: yieldName, route: 'acquire' })
   }
   // Curated vanilla truth wins over the block table, and is validated against
   // the running data version before it is ever offered.
   for (const [blockName, item] of Object.entries(VANILLA_FOOD_BLOCK_DROPS)) {
     if (registryValue(registry, blockName) === undefined) continue
-    if (!isEdibleFoodItem(item)) continue
+    if (!isEdibleFoodItem(item, registry)) continue
     out.set(blockName, { item, route: 'forage' })
   }
   return out
@@ -188,14 +192,39 @@ export interface FoodSourceGap {
   sensedIngredientBlock: boolean
   /** held ingredients form a satisfiable recipe step to an edible item */
   cookableRecipe: boolean
+  /** a non-edible item is held that a furnace turns into an edible one */
+  smeltableIngredient: boolean
+  /** a furnace the body can reach is sensed for the held smelt-cook ingredient (the station half) */
+  sensedFurnace: boolean
   /** the body is at/below the eat gate but not yet at the starvation floor */
   hungry: boolean
   /** the body is at the code-owned starvation floor (food 0, critical health) */
   starving: boolean
   reason: 'no_source_sensed' | 'source_withheld'
+  /**
+   * The DECISIVE missing link on the food path, typed. One value, named in the
+   * order the route chain runs (hold -> sensed source -> route to it -> station):
+   * `no_route_to_sensed_source` says the world DOES show food and the offer
+   * still grounded nothing, which is a different defect from
+   * `no_edible_block_sensed` and must not be reported as the same thing.
+   */
+  missingLink: FoodSourceMissingLink
   /** what the world still affords as a next step: a grounded explore route, else escalate */
   next: 'explore' | 'escalate'
 }
+
+/**
+ * The first link of the food chain that is missing for this body, typed.
+ * Deliberately coarse: the per-affordance detail stays in the `missing` list, so
+ * this field answers only "which link is decisive" (a source is sensed and still
+ * no route -> the ROUTE link; ingredients and no station -> the STATION link).
+ */
+export type FoodSourceMissingLink =
+  | 'no_edible_held'
+  | 'no_route_to_sensed_source'
+  | 'no_reachable_furnace'
+  | 'no_cookable_recipe'
+  | 'no_edible_source_sensed'
 
 export const FOOD_SOURCE_NONE = 'FOOD_SOURCE_NONE'
 
@@ -208,5 +237,5 @@ export function formatFoodSourceGap(gap: FoodSourceGap): string {
   if (!gap.cookableRecipe) missing.push('no_cookable_recipe')
   const offered = gap.offered.length > 0 ? ` offered=${JSON.stringify(gap.offered)}` : ''
   const starving = gap.starving ? ' starving=true' : ''
-  return `${FOOD_SOURCE_NONE} item=food reason=${gap.reason}${starving} missing=${JSON.stringify(missing)}${offered} next=${gap.next}`
+  return `${FOOD_SOURCE_NONE} item=food reason=${gap.reason}${starving} missing=${JSON.stringify(missing)} link=${gap.missingLink} next=${gap.next}`
 }

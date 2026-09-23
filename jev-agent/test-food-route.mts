@@ -31,6 +31,12 @@
 //
 // Run: bun test-food-route.mts
 import { createRequire } from 'node:module'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { ActuationPort } from './src/actuationPort.ts'
+import { EventLogger, JsonlWriter } from './src/jev.ts'
+import { Executor, defaultExecutorOptions } from './src/index.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import {
   defaultCandidateOptions,
@@ -43,7 +49,7 @@ import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
-import { mirroredEventToken } from './src/controller-legacy.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
 import { starvationFact } from '../buddy-driver/planner.ts'
 
 const require = createRequire(import.meta.url)
@@ -52,7 +58,7 @@ const registry = require('minecraft-data')('1.21.11')
 
 interface Case {
   name: string
-  run: () => { pass: boolean; detail: string }
+  run: () => { pass: boolean; detail: string } | Promise<{ pass: boolean; detail: string }>
 }
 
 const cases: Case[] = []
@@ -543,6 +549,7 @@ addCase('(f1) the hunger/starvation markers ride the mirrored event path', () =>
     'FOOD_LOW food=0 threshold=18',
     'EAT_REFUSED reason=no_food',
     'FOOD_ROUTE kind=forage target=sweet_berries',
+    'FOOD_EATEN item=apple food=15->19 health=5.33',
     'FOOD_SOURCE_NONE item=food reason=no_source_sensed',
     'CRITICAL_DAMAGE goal=x health=1/6 damage=1/3 food=0 source=environment',
     'CRITICAL_DAMAGE_EXHAUSTED goal=x health=1/6 damage=3/3 food=0 source=environment',
@@ -553,13 +560,21 @@ addCase('(f1) the hunger/starvation markers ride the mirrored event path', () =>
     'FOOD_LOW',
     'EAT_REFUSED',
     'FOOD_ROUTE',
+    'FOOD_EATEN',
     'FOOD_SOURCE_NONE',
     'CRITICAL_DAMAGE',
     'CRITICAL_DAMAGE_EXHAUSTED',
   ]
+  // The mirror keeps only the first token plus the DETAIL object, so a marker's
+  // discriminator must live in the detail (the EAT_REFUSED `reason=` case).
+  const evidenceMarkers = ['FOOD_LOW', 'EAT_REFUSED', 'FOOD_ROUTE', 'FOOD_ACQUIRED', 'FOOD_EATEN', 'FOOD_SOURCE_NONE']
   return {
-    pass: mapped.every((token, index) => token === expected[index]),
-    detail: `tokens=[${mapped.map((token) => String(token)).join(',')}]`,
+    pass:
+      mapped.every((token, index) => token === expected[index]) &&
+      evidenceMarkers.every((marker) => MIRRORED_MARKERS.has(marker)),
+    detail: `tokens=[${mapped.map((token) => String(token)).join(',')}] evidenceMarkers=${
+      evidenceMarkers.filter((marker) => !MIRRORED_MARKERS.has(marker)).join(',') || 'all-registered'
+    }`,
   }
 })
 
@@ -592,13 +607,355 @@ addCase('(g2) the plan-layer fact is position-free, so it cannot churn the model
   }
 })
 
+
+// ---------------------------------------------------------------------------
+// THE LIVE SHAPE (main `ba8b7be`, run measured live at food=15 health=5.33):
+//
+//   FOOD_SOURCE_NONE ... heldEdible=false sensedEdibleBlock=true offered=[] hungry=true
+//   EAT_REFUSED food=15 threshold=18
+//
+// The body stood under an oak canopy, sensed the leaves (so `sensedEdibleBlock`
+// was TRUE) and STILL grounded no route. The canopy cell is neither
+// pickup-adjacent (`vertical` 3+ > PICKUP_MINE_VERTICAL 1.5) nor walk-up
+// reachable (`findAdjacentStandable` samples only dy=0 and dy=-1, so a leaf with
+// leaves around it has none), so the ONLY offered step toward it is the indirect
+// `columnDigBaseFor`/`columnDigMine` branch - which carried NO `foodRoute` tag.
+// `foodSourceGap.offered` and the FOOD_ROUTE marker both read that tag, so the
+// route was on offer while the food accounting reported no food route at all.
+// ---------------------------------------------------------------------------
+
+/** A dense oak canopy `layers` above the body's feet; interior cells have no walk-up stand. */
+function canopyBlocks(layers: number, radius = 3): Array<{ at: Vec3Json; name: string; diggable?: boolean }> {
+  const out: Array<{ at: Vec3Json; name: string; diggable?: boolean }> = []
+  for (let dy = 0; dy < layers; dy += 1) {
+    const r = dy === layers - 1 ? radius - 1 : radius
+    for (let dx = -r; dx <= r; dx += 1) {
+      for (let dz = -r; dz <= r; dz += 1) {
+        out.push({ at: { x: ORIGIN.x + dx, y: ORIGIN.y + 3 + dy, z: ORIGIN.z + dz }, name: 'oak_leaves' })
+      }
+    }
+  }
+  return out
+}
+
+const LIVE_INVENTORY = { oak_log: 82, stone_pickaxe: 1, red_mushroom: 1, leaf_litter: 92, birch_log: 26 }
+
+addCase('(i) THE LIVE SHAPE: hungry under a canopy grounds a forage route (was offered=[])', () => {
+  const state = perceive({ counts: LIVE_INVENTORY, food: 15, health: 5.33, blocks: canopyBlocks(4) })
+  const result = grounded(state)
+  const forage = result.candidates.filter((candidate) => candidate.meta.foodRoute === 'forage')
+  return {
+    pass:
+      forage.length > 0 &&
+      result.foodGap === null &&
+      forage.every((candidate) => candidate.meta.foodTarget === 'apple' && candidate.targetName === 'oak_leaves'),
+    detail: `routes=[${foodRoutes(result.candidates).join(',')}] gap=${
+      result.foodGap === null ? 'none' : formatFoodSourceGap(result.foodGap)
+    }`,
+  }
+})
+
+addCase('(i2) the canopy route is the INDIRECT branch, and it names the sensed cell it serves', () => {
+  const state = perceive({ counts: LIVE_INVENTORY, food: 15, health: 5.33, blocks: canopyBlocks(4) })
+  const result = grounded(state)
+  const sensed = new Set(
+    state.blocks
+      .filter((block) => block.foodRoute === 'forage')
+      .map((block) => `${block.position.x},${block.position.y},${block.position.z}`),
+  )
+  const tagged = result.candidates.filter((candidate) => candidate.meta.foodRoute === 'forage')
+  const indirect = tagged.filter((candidate) => candidate.meta.columnDig === true || candidate.meta.digAccess === true)
+  const servesSensedCell = tagged.every((candidate) => {
+    const target = candidate.target
+    return target !== null && sensed.has(`${target.x},${target.y},${target.z}`)
+  })
+  return {
+    pass: indirect.length > 0 && servesSensedCell && tagged.every((candidate) => candidate.kind === 'MINE'),
+    detail: `tagged=${tagged.length} indirect=${indirect.length} sample=${tagged[0]?.id ?? 'none'} servesSensedCell=${servesSensedCell}`,
+  }
+})
+
+// --- (ii) an edible item held: plain EAT, and nothing else is added -----------
+
+addCase('(ii) an edible item held: plain EAT only, no forage/cook tier is added to the offer', () => {
+  const blocks = [...canopyBlocks(4), { at: { x: 3, y: 64, z: 0 }, name: 'furnace', diggable: true }]
+  const state = perceive({ counts: { ...LIVE_INVENTORY, apple: 2, potato: 2, coal: 1 }, food: 15, health: 5.33, blocks })
+  const result = grounded(state)
+  const eat = result.candidates.find((candidate) => candidate.kind === 'EAT')
+  const extra = result.candidates.filter((candidate) => typeof candidate.meta.foodRoute === 'string')
+  return {
+    pass:
+      pickFood(state) === 'apple' &&
+      eat?.id === 'EAT:apple' &&
+      extra.length === 0 &&
+      result.foodGap === null,
+    detail: `held=${String(pickFood(state))} eat=${eat?.id ?? 'none'} extraFoodRoutes=[${foodRoutes(extra).join(',')}]`,
+  }
+})
+
+// --- (iii) a cookable ingredient + a reachable furnace: the furnace-cook route --
+
+addCase('(iii) a held furnace-only ingredient + a reachable furnace: cook route, then EAT', () => {
+  const blocks = [{ at: { x: 3, y: 64, z: 0 }, name: 'furnace', diggable: true }]
+  const state = perceive({ counts: { potato: 2, coal: 1 }, food: 15, health: 5.33, blocks })
+  const result = grounded(state)
+  const cook = result.candidates.find((candidate) => candidate.meta.foodRoute === 'cook')
+  // The next tick: the furnace produced the edible output, so the EAT is grounded.
+  const after = grounded(perceive({ counts: { baked_potato: 1, coal: 1 }, food: 15, health: 5.33, blocks }))
+  const eat = after.candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass:
+      cook?.kind === 'SMELT' &&
+      cook.id === 'SMELT:baked_potato' &&
+      cook.meta.inputItem === 'potato' &&
+      cook.meta.foodTarget === 'baked_potato' &&
+      eat?.id === 'EAT:baked_potato' &&
+      result.foodGap === null,
+    detail: `cook=${cook?.id ?? 'none'} input=${String(cook?.meta.inputItem)} eat=${eat?.id ?? 'none'} gap=${
+      result.foodGap === null ? 'none' : formatFoodSourceGap(result.foodGap)
+    }`,
+  }
+})
+
+addCase('(iii-b) the same ingredient with NO reachable furnace: the refusal names the station link', () => {
+  const state = perceive({ counts: { potato: 2, coal: 1 }, food: 15, health: 5.33, blocks: FLOOR })
+  const result = grounded(state)
+  const gap = result.foodGap
+  return {
+    pass:
+      gap !== null &&
+      gap.smeltableIngredient &&
+      !gap.sensedFurnace &&
+      gap.missingLink === 'no_reachable_furnace' &&
+      formatFoodSourceGap(gap).includes('link=no_reachable_furnace'),
+    detail: gap === null ? 'gap=null (silent)' : formatFoodSourceGap(gap),
+  }
+})
+
+// --- (iv) nothing edible anywhere: a typed refusal naming the missing link -----
+
+addCase('(iv) nothing edible sensed anywhere: the typed refusal names the decisive link', () => {
+  const state = perceive({
+    counts: { oak_log: 4, raw_iron: 2 },
+    food: 15,
+    health: 5.33,
+    blocks: [{ at: { x: 2, y: 64, z: 0 }, name: 'oak_log' }],
+  })
+  const result = grounded(state)
+  const gap = result.foodGap
+  return {
+    pass:
+      gap !== null &&
+      gap.offered.length === 0 &&
+      gap.reason === 'no_source_sensed' &&
+      gap.missingLink === 'no_edible_source_sensed' &&
+      formatFoodSourceGap(gap).includes('link=no_edible_source_sensed'),
+    detail: gap === null ? 'gap=null (silent)' : formatFoodSourceGap(gap),
+  }
+})
+
+addCase('(iv-b) a sensed food block no route can ground: the refusal names the ROUTE link', () => {
+  const state = perceive({
+    counts: {},
+    food: 15,
+    health: 5.33,
+    blocks: [{ at: { x: 2, y: 64, z: 0 }, name: 'oak_leaves', diggable: false }],
+  })
+  const result = grounded(state)
+  const gap = result.foodGap
+  return {
+    pass:
+      gap !== null &&
+      gap.sensedEdibleBlock &&
+      gap.missingLink === 'no_route_to_sensed_source' &&
+      gap.reason === 'source_withheld',
+    detail: gap === null ? 'gap=null (silent)' : formatFoodSourceGap(gap),
+  }
+})
+
+// --- (v) a fed body: the food tiers add nothing -------------------------------
+
+addCase('(v) a fed body: no food tag, no gap, and the offer is the hungry offer minus the food tiers', () => {
+  const blocks = [
+    ...canopyBlocks(4),
+    { at: { x: 3, y: 64, z: 0 }, name: 'furnace', diggable: true },
+    { at: { x: 2, y: 64, z: 2 }, name: 'oak_log' },
+    { at: { x: 2, y: 65, z: 2 }, name: 'oak_log' },
+  ]
+  const counts = { ...LIVE_INVENTORY, potato: 2, coal: 1 }
+  // focus oak_log so BOTH bodies carry the same ordinary working offer; only the
+  // hungry one may gain the food tiers.
+  const fed = grounded(perceive({ counts, food: 20, health: 20, blocks }, 'oak_log'))
+  const hungry = grounded(perceive({ counts, food: 15, health: 5.33, blocks }, 'oak_log'))
+  const lines = (result: { candidates: readonly { kind: string; id: string; meta: Record<string, unknown> }[] }) =>
+    result.candidates.map((candidate) => `${candidate.kind}|${candidate.id}|${JSON.stringify(candidate.meta)}`).sort()
+  const fedLines = lines(fed)
+  const hungryLines = lines(hungry)
+  const hungryWithoutFood = hungryLines.filter((line) => !line.includes('"foodRoute"'))
+  return {
+    pass:
+      fed.foodGap === null &&
+      // the filter must actually have had work to do: the hungry offer DOES gain food tiers
+      hungryLines.length > hungryWithoutFood.length &&
+      !fedLines.some((line) => line.includes('"foodRoute"')) &&
+      fedLines.length === hungryWithoutFood.length &&
+      fedLines.every((line, index) => line === hungryWithoutFood[index]),
+    detail: `fed=${fedLines.length} hungry=${hungryLines.length} hungryMinusFoodTiers=${hungryWithoutFood.length} fedFoodTagged=${fedLines.filter(
+      (line) => line.includes('"foodRoute"'),
+    ).length}`,
+  }
+})
+
+// --- (w) the food truth is the running data version's own edible table --------
+
+addCase('(w) edible truth is game data (foods.json), not a hand-written list', () => {
+  const edibleByData = ['golden_carrot', 'rabbit_stew', 'chorus_fruit', 'tropical_fish', 'apple', 'cooked_beef']
+  const notSurvivalFood = ['potato', 'rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'cod_bucket']
+  const notFoodAtAll = ['red_mushroom', 'brown_mushroom', 'oak_leaves', 'oak_log', 'wheat', 'bone']
+  return {
+    pass:
+      edibleByData.every((name) => isEdibleFoodItem(name)) &&
+      notSurvivalFood.every((name) => !isEdibleFoodItem(name)) &&
+      notFoodAtAll.every((name) => !isEdibleFoodItem(name)) &&
+      // the one vanilla-edible item this data version's foods.json omits
+      isEdibleFoodItem('kelp'),
+    detail: `dataEdible=${edibleByData.map((n) => `${n}:${isEdibleFoodItem(n)}`).join(' ')} policyExcluded=${notSurvivalFood
+      .map((n) => `${n}:${isEdibleFoodItem(n)}`)
+      .join(' ')}`,
+  }
+})
+
+addCase('(w2) an edible item outside the old curated list is now EATable (never a false no_food)', () => {
+  const state = perceive({ counts: { golden_carrot: 1 }, food: 15, health: 5.33, blocks: FLOOR })
+  const result = grounded(state)
+  const eat = result.candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: pickFood(state) === 'golden_carrot' && eat?.id === 'EAT:golden_carrot' && result.foodGap === null,
+    detail: `held=${String(pickFood(state))} eat=${eat?.id ?? 'none'} gap=${
+      result.foodGap === null ? 'none' : formatFoodSourceGap(result.foodGap)
+    }`,
+  }
+})
+
+// --- (x) the route, executed, ends in eating: food really rises ---------------
+
+interface EatFixture {
+  bot: Parameters<typeof buildWorldState>[0]
+  port: ActuationPort
+  foodNow: () => number
+}
+
+/** A minimal body that really equips + consumes: `consume()` is what the executor calls. */
+function eatFixture(itemName: string, food: number): EatFixture {
+  const feet = new Vec3(ORIGIN.x, ORIGIN.y, ORIGIN.z)
+  const slots = [{ name: itemName, count: 1, slot: 36, type: 1 }]
+  let foodLevel = food
+  const state = { heldItem: null as { name: string; count: number; slot: number } | null }
+  const bot: Record<string, unknown> = {
+    registry,
+    entity: {
+      id: 1,
+      position: feet,
+      yaw: 0,
+      pitch: 0,
+      onGround: true,
+      width: 0.6,
+      height: 1.8,
+      offset: (x: number, y: number, z: number) => feet.offset(x, y, z),
+      clone: () => feet.clone(),
+      distanceTo: (other: { x: number; y: number; z: number }) => feet.distanceTo(new Vec3(other.x, other.y, other.z)),
+    },
+    _client: { write: () => true },
+    physicsEnabled: true,
+    health: 5.33,
+    get food() {
+      return foodLevel
+    },
+    time: { isDay: true },
+    game: { gameMode: 'survival', dimension: 'overworld' },
+    entities: {},
+    inventory: { slots, items: () => slots.filter((slot) => slot.count > 0), count: () => 0 },
+    get heldItem() {
+      return state.heldItem
+    },
+    blockAt: () => null,
+    on: () => bot,
+    removeListener: () => bot,
+    setControlState: () => undefined,
+    lookAt: async () => undefined,
+    equip: async (item: { name: string }) => {
+      state.heldItem = { name: item.name, count: 1, slot: 36 }
+    },
+    consume: async () => {
+      foodLevel = Math.min(20, foodLevel + 4)
+      slots[0]!.count = 0
+    },
+    canDigBlock: () => true,
+    dig: async () => undefined,
+    stopDigging: () => undefined,
+    attack: () => undefined,
+    pathfinder: {
+      movements: null as unknown,
+      setMovements: () => undefined,
+      setGoal: () => undefined,
+      stop: () => undefined,
+      getPathTo: () => ({ status: 'noPath', path: [] }),
+    },
+  }
+  const port = {
+    generationId: 'gen-food-test',
+    assertLease: () => undefined,
+    pathTo: () => undefined,
+    stopPath: () => undefined,
+    setControls: () => undefined,
+    clearControls: () => undefined,
+    lookAt: async () => undefined,
+    dig: async () => undefined,
+    placeBlock: async () => undefined,
+    activateItem: async () => undefined,
+    activateBlock: async () => undefined,
+    equip: async (item: { name: string }) => {
+      state.heldItem = { name: item.name, count: 1, slot: 36 }
+    },
+    collect: async () => undefined,
+    craft: async () => undefined,
+    openContainer: async () => undefined,
+    withdrawFromContainer: async () => undefined,
+    writeMovementPacket: () => undefined,
+    setPose: () => undefined,
+  } as unknown as ActuationPort
+  return { bot: bot as unknown as Parameters<typeof buildWorldState>[0], port, foodNow: () => foodLevel }
+}
+
+addCase('(x) the canopy route leads to a real EAT: the executor consumes and food rises', async () => {
+  const hungry = { counts: { ...LIVE_INVENTORY }, food: 15, health: 5.33, blocks: canopyBlocks(4) }
+  const forage = grounded(perceive(hungry)).candidates.find((candidate) => candidate.meta.foodRoute === 'forage')
+  // The harvest landed the drop in the inventory: the plain EAT is now grounded.
+  const harvested = grounded(perceive({ ...hungry, counts: { ...LIVE_INVENTORY, apple: 1 } }))
+  const eat = harvested.candidates.find((candidate) => candidate.kind === 'EAT')
+  if (forage === undefined || eat === undefined) {
+    return { pass: false, detail: `forage=${forage?.id ?? 'none'} eat=${eat?.id ?? 'none'}` }
+  }
+  const fixture = eatFixture('apple', 15)
+  const executor = new Executor(fixture.bot, new EventLogger(new JsonlWriter(join(mkdtempSync(join(tmpdir(), 'food-')), 'run.jsonl')), false), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+    actuationPort: fixture.port,
+  })
+  const completion = await executor.claim(eat).completion
+  return {
+    pass: completion.status === 'done' && fixture.foodNow() > 15,
+    detail: `forage=${forage.id} eat=${eat.id} status=${completion.status} food=15->${fixture.foodNow()}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 
 let failures = 0
 process.stdout.write('food route: grounded food acquisition for a starving body\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
-  const observed = testCase.run()
+  const observed = await testCase.run()
   if (!observed.pass) failures += 1
   process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
   process.stdout.write(`      ${observed.detail}\n`)
