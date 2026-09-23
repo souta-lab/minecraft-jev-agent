@@ -28,6 +28,7 @@ import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
+import { truthfulActionOutcome } from './src/actionPostcondition.ts'
 import type { AgentLevel } from './src/jev-legacy.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { defaultCandidateOptions, generateGroundedCandidates, isAttackableEntity, producerDropFor } from './src/candidates.ts'
@@ -393,6 +394,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
     result.dropAcquired === true &&
     result.itemsGained === 1 &&
     result.yieldItem === 'blaze_rod' &&
+    result.skillOutcome === 'SUCCESS' &&
     combat.some((line) => line.includes('outcome=KILL_VERIFIED') && line.includes('dropAcquired=true'))
   report(
     pass,
@@ -407,18 +409,36 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   const fixture = makeFight({ carried: { iron_sword: 1 }, hitsToKill: 1 })
   const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
   const combat = fixture.logger.matching('COMBAT_OUTCOME')
+  const truth = truthfulActionOutcome({
+    kind: result.kind,
+    status: result.status,
+    verified: result.verified,
+    itemsGained: result.itemsGained,
+    blockRemoved: result.blockRemoved,
+    progressed: result.progressed,
+    entityDefeated: result.entityDefeated,
+    damageObserved: result.damageObserved,
+  })
   const pass =
-    result.status === 'done' &&
+    result.status === 'failed' &&
+    result.failure === 'drop_not_acquired' &&
+    result.verified === false &&
     result.entityDefeated === true &&
     result.dropAcquired === false &&
     result.itemsGained === 0 &&
     result.combatOutcome === 'DROP_NOT_ACQUIRED' &&
+    result.skillOutcome === 'DROP_NOT_ACQUIRED' &&
+    result.skillTerminalReason === 'drop_not_acquired' &&
     fixture.logger.has('HUNT_DROP_NOT_ACQUIRED') &&
+    fixture.logger.has('HUNT_DROP_POSTCONDITION_UNMET') &&
+    truth.resetsFailureMemory === false &&
+    truth.replanProgress === true &&
     combat.some((line) => line.includes('outcome=DROP_NOT_ACQUIRED') && line.includes('drop=not_acquired'))
   report(
     pass,
     '4b. kill verified without the drop is DROP_NOT_ACQUIRED, never a banked item',
-    `status=${result.status} outcome=${result.combatOutcome} dropAcquired=${result.dropAcquired} gained=${result.itemsGained}`,
+    `status=${result.status} failure=${result.failure} skill=${result.skillOutcome}/${result.skillTerminalReason} ` +
+      `combat=${result.combatOutcome} dropAcquired=${result.dropAcquired} gained=${result.itemsGained} truth=${JSON.stringify(truth)}`,
   )
 }
 

@@ -780,6 +780,7 @@ export type SkillOutcome =
   | 'WORLD_CHANGED'
   | 'LEASE_REVOKED'
   | 'BUDGET_EXHAUSTED'
+  | 'DROP_NOT_ACQUIRED'
   | 'CANCELLED'
 
 /**
@@ -795,6 +796,7 @@ export const POLICY_BOUNDARY_OUTCOMES: ReadonlySet<SkillOutcome> = new Set<Skill
   'WORLD_CHANGED',
   'LEASE_REVOKED',
   'BUDGET_EXHAUSTED',
+  'DROP_NOT_ACQUIRED',
 ])
 
 export function isPolicyBoundaryOutcome(outcome: SkillOutcome): boolean {
@@ -828,6 +830,8 @@ export function skillOutcomeForFailure(failureCode: string | null, status: strin
     case 'dig_timeout':
     case 'smelt_timeout':
       return 'BUDGET_EXHAUSTED'
+    case 'drop_not_acquired':
+      return 'DROP_NOT_ACQUIRED'
     case null:
       return status === 'done' ? 'SUCCESS' : 'MECHANICALLY_BLOCKED'
     default:
@@ -1033,6 +1037,8 @@ export function skillTerminalReasonFor(outcome: SkillOutcome): SkillTerminalReas
       return 'lease_revoked'
     case 'BUDGET_EXHAUSTED':
       return 'budget_exhausted'
+    case 'DROP_NOT_ACQUIRED':
+      return 'drop_not_acquired'
     case 'MECHANICALLY_BLOCKED':
       return 'blocked'
     case 'CANCELLED':

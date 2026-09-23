@@ -341,6 +341,41 @@ addCase('(5) TARGET_LOST is never rewritten into TARGET_KILLED', () => {
   return { pass, detail: `lost=${lost.terminalReason}/${lost.failure?.code} killed=${killed.terminalReason} verified=${lost.verification.verified}` }
 })
 
+addCase('(5b) a verified kill without its declared drop is a typed search boundary, never HUNT_DROP success', () => {
+  const partial = outcomePacket({
+    status: 'failed',
+    failure: 'drop_not_acquired',
+    verified: false,
+    entityDefeated: true,
+    searchProgress: true,
+    newFacts: [
+      { kind: 'target', key: 'e183', detail: 'the selected entity died, but its HUNT_DROP item was not acquired' },
+      { kind: 'resource', key: 'inventory:ender_pearl', detail: 'this hunt lease gained no ender_pearl in the body inventory' },
+    ],
+  })
+  const line = formatSkillOutcomePacket(partial)
+  const pass =
+    JEV_PROJECTION_VERSION === 2 &&
+    terminalReasonFor({ status: 'done', failure: 'drop_not_acquired', verified: true }) === 'drop_not_acquired' &&
+    partial.terminalReason === 'drop_not_acquired' &&
+    partial.verification.verified === false &&
+    partial.semanticProgress.kind === 'search' &&
+    partial.semanticProgress.delta === 0 &&
+    partial.newFacts.some((fact) => fact.kind === 'resource' && fact.key === 'inventory:ender_pearl') &&
+    policyBoundary(partial) &&
+    mandatoryPolicyBoundary(partial.terminalReason) &&
+    partial.nextDecisionRequired &&
+    SRC_CONTROLLER.includes("searchProgress: input.failure === 'drop_not_acquired' && input.entityDefeated") &&
+    SRC_CONTROLLER.includes('this hunt lease gained no ${goalDrop} in the body inventory') &&
+    line.includes('terminalReason=drop_not_acquired') &&
+    line.includes('progress=search:0') &&
+    line.includes('verified=false')
+  return {
+    pass,
+    detail: `version=${JEV_PROJECTION_VERSION} terminal=${partial.terminalReason} progress=${partial.semanticProgress.kind}:${partial.semanticProgress.delta} facts=${partial.newFacts.length} line=${line}`,
+  }
+})
+
 addCase('(6) identical retries are compressed while the typed final failure stays visible', () => {
   const retries = Array.from({ length: 5 }, () => 'failure path_timeout: pathfinder gave up at 26,67,10')
   const kinds = meaningfulEventKinds(retries)
@@ -422,8 +457,8 @@ addCase('(7) a new genuinely distinct recovery alternative changes the candidate
 
 addCase('(8) a late result from epoch N cannot authorize after epoch N+1 started', () => {
   const epochs = new JevDecisionEpochs()
-  const first = epochs.begin({ projectionHash: 'jp1:aaa', candidateIdentities: ['a'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 0 })
-  const second = epochs.begin({ projectionHash: 'jp1:bbb', candidateIdentities: ['b'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 1 })
+  const first = epochs.begin({ projectionHash: 'jp2:aaa', candidateIdentities: ['a'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 0 })
+  const second = epochs.begin({ projectionHash: 'jp2:bbb', candidateIdentities: ['b'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 1 })
   const late = epochs.accept(first.epoch)
   const authorize = epochs.authorize({ epoch: first.epoch, commitmentId: 'a12:MOVE:p26_67_10', selectedIdentity: 'a' })
   const current = epochs.accept(second.epoch)
@@ -443,7 +478,7 @@ addCase('(8) a late result from epoch N cannot authorize after epoch N+1 started
 
 addCase('(9) world/generation/lease changes invalidate the active epoch', () => {
   const epochs = new JevDecisionEpochs()
-  const epoch = epochs.begin({ projectionHash: 'jp1:aaa', candidateIdentities: ['a'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 0 })
+  const epoch = epochs.begin({ projectionHash: 'jp2:aaa', candidateIdentities: ['a'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 0 })
   const matchesBefore = epochs.matchesWorld({ dimension: OVERWORLD, worldEpoch: 7 })
   const matchesAfter = epochs.matchesWorld({ dimension: 'minecraft:the_nether', worldEpoch: 7 })
   const invalidated = epochs.invalidate('world_changed')
@@ -451,7 +486,7 @@ addCase('(9) world/generation/lease changes invalidate the active epoch', () => 
   const closes = formatEpochEnd({ ...epoch, closed: true, closeReason: 'world_changed' })
   // lease revocation is its own typed reason
   const leaseEpochs = new JevDecisionEpochs()
-  const leaseEpoch = leaseEpochs.begin({ projectionHash: 'jp1:ccc', candidateIdentities: ['a'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 0 })
+  const leaseEpoch = leaseEpochs.begin({ projectionHash: 'jp2:ccc', candidateIdentities: ['a'], dimension: OVERWORLD, worldEpoch: 7, nowMs: 0 })
   leaseEpochs.invalidate('lease_revoked')
   const leaseClosed = leaseEpochs.snapshot().find((entry) => entry.epoch === leaseEpoch.epoch)
   const pass =

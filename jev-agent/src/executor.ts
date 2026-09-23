@@ -340,6 +340,8 @@ export type FailureCode =
   | 'combat_interrupted'
   /** issue #436 section 9: the bounded combat lease expired with the target alive */
   | 'combat_timeout'
+  /** issue #436: a HUNT_DROP target died, but the declared item was not acquired */
+  | 'drop_not_acquired'
   /**
    * A container interaction failed on a measured fact: the cell no longer holds
    * a container, the container is occluded, the server never opened a window
@@ -2198,8 +2200,7 @@ export class Executor {
     )
 
     void this.runAction(candidate, epoch, controller.signal, startedAt)
-      .then((result) => {
-        const finalResult = this.applyPostcondition(candidate, result)
+      .then((finalResult) => {
         action.status = finalResult.status
         action.detail = finalResult.detail
         this.lastResultValue = finalResult
@@ -2743,10 +2744,9 @@ export class Executor {
   // -------------------------------------------------------------------------
 
   /**
-   * issue #436 section 17: the evidence wrapper for every action. It adds the
-   * commitmentId + typed lifecycle outcome to the settled result and closes the
-   * commitment evidence with SKILL_END. It never changes execution: the body is
-   * byte-for-byte the existing runner dispatch.
+   * issue #436 section 17: the evidence wrapper for every action. It first
+   * applies deterministic postcondition truth, then adds the commitmentId and
+   * typed lifecycle outcome and closes the commitment evidence with SKILL_END.
    */
   private async runAction(
     candidate: Candidate,
@@ -2755,7 +2755,7 @@ export class Executor {
     startedAt: number,
   ): Promise<ExecutionResult> {
     const commitment = this.activeCommitment
-    const result = await this.runActionBody(candidate, epoch, signal, startedAt)
+    const result = this.applyPostcondition(candidate, await this.runActionBody(candidate, epoch, signal, startedAt))
     if (commitment !== null) {
       // issue #436 section 6 + #437 section 2: the settled action carries the
       // identity of the commitment it closes and the §6 lifecycle outcome. The
@@ -12100,6 +12100,30 @@ export class Executor {
    * and charge the plan's unverified budget.
    */
   private applyPostcondition(candidate: Candidate, result: ExecutionResult): ExecutionResult {
+    const goalDrop =
+      candidate.kind === 'ATTACK' && typeof candidate.meta.goalDrop === 'string' ? candidate.meta.goalDrop : null
+    if (
+      goalDrop !== null &&
+      result.entityDefeated === true &&
+      result.combatOutcome === 'DROP_NOT_ACQUIRED' &&
+      result.dropAcquired !== true
+    ) {
+      const postcondition = `the selected entity died AND ${goalDrop} entered the inventory`
+      this.logger.warn(
+        'executor',
+        `HUNT_DROP_POSTCONDITION_UNMET actionId=${result.actionId} item=${goalDrop} entityDefeated=true ` +
+          `dropAcquired=false itemsGained=${result.itemsGained} -> selected HUNT_DROP did not complete`,
+        { actionId: result.actionId, goalDrop, entityDefeated: true, itemsGained: result.itemsGained },
+      )
+      return {
+        ...result,
+        status: 'failed',
+        phase: 'drop_not_acquired',
+        failure: 'drop_not_acquired',
+        verified: false,
+        unverifiedPostcondition: postcondition,
+      }
+    }
     const unverified = isUnverifiedOutcome({
       kind: result.kind,
       status: result.status,

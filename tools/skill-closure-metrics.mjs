@@ -45,7 +45,7 @@ const window = lines.slice(start, end).slice(-limit)
  * #437 §9/§12: a bounded projection should repeat its hash when the semantic
  * situation repeats.
  *
- * The hash is VERSIONED (`jp1:<16 hex>`, see `projectionHash`), so the capture
+ * The hash is VERSIONED (`jp<version>:<16 hex>`, see `projectionHash`), so the capture
  * must accept the `jp<version>:` prefix. Matching bare hex here silently reported
  * `observations: 0` on every real run - the metric looked implemented and was
  * always empty. `tools/test-skill-closure-metrics.mjs` pins this.
