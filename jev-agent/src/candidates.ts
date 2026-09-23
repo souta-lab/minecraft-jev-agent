@@ -5047,7 +5047,6 @@ function mineCandidates(
       const scaffold = descentScaffoldForLevel(state, options, {
         targetY: descendTargetY,
         goalId: state.goalQueue?.current?.id ?? null,
-        idPrefix: 'DESCEND:place:',
         label: 'descend by placing its own landing',
       })
       if (scaffold.candidate !== null) candidates.push(scaffold.candidate)
@@ -9946,7 +9945,7 @@ function descentRemedyCandidates(
 function descentScaffoldForLevel(
   state: WorldState,
   options: CandidateOptions,
-  spec: { targetY: number; goalId: string | null; idPrefix: string; label: string },
+  spec: { targetY: number; goalId: string | null; label: string },
 ): { candidate: Candidate | null; refusal: DescentScaffoldRefusal | null } {
   const feet = {
     x: Math.floor(state.self.position.x),
