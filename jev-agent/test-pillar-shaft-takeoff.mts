@@ -126,6 +126,9 @@ function depsFor(bot: ReturnType<typeof makeScriptedBot>) {
     apexBudgetMs: 600,
     placeSettleMs: 100,
     landingBudgetMs: 600,
+    // Pure in-memory clock: the placement is written in the caller's own tick, so
+    // the clearance sample IS the position this fixture's world model validates.
+    placeHandshakeTicks: 0,
     sleep: async (ms: number): Promise<void> => {
       clock += ms
       bot.tick()

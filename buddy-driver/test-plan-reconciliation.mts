@@ -61,13 +61,15 @@ import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { deriveResumeRung, rungIndexById } from './planner.ts'
 import {
-  NOT_EXECUTABLE_HERE_KEEP_KINDS,
+  NOT_EXECUTABLE_HERE_WITHHELD_KINDS,
   restrictCandidatesNotExecutableHere,
   safetyEnvelopeActive,
 } from '../jev-agent/src/candidates.ts'
 import type { Candidate, CandidateKind, NotExecutableHereBinding } from '../jev-agent/src/candidates.ts'
 import type { AgentSignals, InventoryState, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 import type { GoalQueueState } from '../jev-agent/src/goalQueue.ts'
+import { PORTAL_ENTERED_PREDICATE, netherPortalEntryGoal } from '../jev-agent/src/netherPortalPlan.ts'
+import { isDimensionTransferGoal } from '../jev-agent/src/goalQueue.ts'
 import { OVERWORLD } from '../jev-agent/src/netherPortalPlan.ts'
 
 interface Case {
@@ -1215,13 +1217,13 @@ addCase('(x) the measured shape: the unexecutable head no longer offers its own 
     withheldIds.includes('DESCEND:level:N:b16_37_-9') &&
     withheldIds.includes('MOVE:p16_37_-9') &&
     withheldIds.includes('STEP:down:E:b16_36_-9') &&
-    // no candidate that descends or walks toward the unreachable y32 predicate
-    restriction.candidates.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE' || candidate.kind === 'RETREAT') &&
-    // the body can still hold and hand off, and self-care survives
+    // ONLY body motion is withheld: no candidate that walks or descends toward the
+    // unreachable y32 predicate survives
+    restriction.withheld.every((candidate) => NOT_EXECUTABLE_HERE_WITHHELD_KINDS.has(candidate.kind)) &&
+    // the body can still hold, hand off and self-care
     keptKinds.includes('WAIT') &&
     keptKinds.includes('ESCALATE') &&
-    keptKinds.includes('RETREAT') &&
-    keptKinds.every((kind) => NOT_EXECUTABLE_HERE_KEEP_KINDS.has(kind))
+    keptKinds.includes('RETREAT')
   return { pass, detail: `bound=${restriction.bound} kept=[${keptKinds.join(',')}] withheld=[${withheldIds.join(',')}]` }
 })
 
@@ -1320,13 +1322,142 @@ addCase('(x) the controller binds the offer, remembers the fact, and interrupts 
     'this.notExecutableHereBinding =',
     "result.action === 'escalate' && result.goalId !== null",
     'const rawOfferBeforeSafety = candidates',
-    'isNotExecutableHereKeepKind(running.kind)',
+    'isNotExecutableHereWithheldKind(running.kind)',
     'this.executor.cancelCurrent(`row not executable here:',
     'formatNotExecutableHereInterrupt(binding, running.id, running.kind)',
   ]
   const missing = required.filter((needle) => !source.includes(needle))
   const pass = missing.length === 0
   return { pass, detail: `missing=[${missing.join(' | ')}]` }
+})
+
+// ---------------------------------------------------------------------------
+// (xi) a dimension-TRANSFER row is not "not executable here", and the binding is
+//      narrowed to body motion (the measured one-hour deadlock)
+// ---------------------------------------------------------------------------
+// Live (main 06c5976, the floated-portal trial): `g99:place:nether_portal
+// targetPredicate=portal_entered dimension=the_nether` was classified
+// not-executable-here while the body stood in the OVERWORLD, and the binding
+// withheld every work kind - including the entry's own climb legs and a needed
+// pickaxe craft - for 1370 firings / one hour with the body frozen at
+// (26.3,64.0,6.3). A transfer row's declared dimension is its DESTINATION.
+addCase('(xi) the measured transfer row is NOT classified: its dimension is the destination', () => {
+  const planned = netherPortalEntryGoal(NETHER)
+  const transfer = row({
+    id: 'g99:place:nether_portal',
+    kind: planned.kind,
+    description: planned.description,
+    targetItem: planned.targetItem ?? null,
+    requiredCount: planned.requiredCount ?? 1,
+    targetPredicate: planned.targetPredicate ?? null,
+    dimension: planned.dimension ?? NETHER,
+    status: 'active',
+    planIdentity: staleIdentity(),
+  })
+  const queue = new GoalQueue()
+  queue.restore({ counter: 99, goals: [transfer], revision: 99, planIdentity: staleIdentity() })
+  // body on the OTHER side (overworld) - exactly the measured state
+  const result = queue.reconcileNotExecutableHead({ liveDimension: OVERWORLD })
+  const pass =
+    planned.targetPredicate === PORTAL_ENTERED_PREDICATE &&
+    result.action === 'hold' &&
+    result.reason === 'dimension_transfer_goal' &&
+    result.declaredDimension === 'the_nether' &&
+    result.liveDimension === 'overworld' &&
+    queue.current?.id === 'g99:place:nether_portal' &&
+    queue.current?.status === 'active' &&
+    queue.current?.deferCount === undefined
+  return { pass, detail: `action=${result.action}/${result.reason} head=${queue.current?.id ?? 'none'}/${queue.current?.status ?? 'none'} defers=${queue.current?.deferCount ?? 0}` }
+})
+
+addCase('(xi) with the transfer row exempt there is no binding, so the climb offer survives', () => {
+  const planned = netherPortalEntryGoal(NETHER)
+  const transfer = row({
+    id: 'g99:place:nether_portal',
+    kind: planned.kind,
+    description: planned.description,
+    targetItem: planned.targetItem ?? null,
+    requiredCount: planned.requiredCount ?? 1,
+    targetPredicate: planned.targetPredicate ?? null,
+    dimension: planned.dimension ?? NETHER,
+    status: 'active',
+    planIdentity: staleIdentity(),
+  })
+  const queue = new GoalQueue()
+  queue.restore({ counter: 99, goals: [transfer], revision: 99, planIdentity: staleIdentity() })
+  const result = queue.reconcileNotExecutableHead({ liveDimension: OVERWORLD })
+  // The controller binds ONLY on an escalate result, so a hold leaves binding null.
+  const binding = result.action === 'escalate' && result.goalId !== null ? liveBinding() : null
+  const offer = [
+    offerCandidate('MOVE:p26_64_6', 'MOVE', { x: 26, y: 64, z: 6 }),
+    offerCandidate('STEP:up:N:b26_65_6', 'STEP', { x: 26, y: 65, z: 6 }),
+    offerCandidate('DESCEND:level:N:b26_63_6', 'DESCEND', { x: 26, y: 63, z: 6 }),
+    offerCandidate('ENTER:26,67,9', 'ENTER_PORTAL', { x: 26, y: 67, z: 9 }),
+    offerCandidate('CRAFT:wooden_pickaxe', 'CRAFT'),
+    offerCandidate('WAIT', 'WAIT'),
+  ]
+  const restriction = restrictCandidatesNotExecutableHere(offerWorld(), offer, binding, offer)
+  const pass =
+    binding === null &&
+    restriction.bound === false &&
+    restriction.reason === 'no_binding' &&
+    restriction.candidates.length === offer.length &&
+    restriction.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL') &&
+    restriction.candidates.some((candidate) => candidate.kind === 'MOVE') &&
+    restriction.candidates.some((candidate) => candidate.kind === 'DESCEND')
+  return { pass, detail: `queue=${result.reason} binding=${binding === null ? 'none' : 'set'} offer=${restriction.candidates.length}/${offer.length} kinds=[${restriction.candidates.map((c) => c.kind).join(',')}]` }
+})
+
+addCase('(xi) the narrowed binding still stops the descent but never stops the work (no deadlock)', () => {
+  const workOffer = [
+    offerCandidate('DESCEND:level:N:b16_37_-9', 'DESCEND', { x: 16, y: 36, z: -9 }),
+    offerCandidate('MOVE:p16_37_-9', 'MOVE', { x: 16, y: 37, z: -9 }),
+    offerCandidate('STEP:down:E:b16_36_-9', 'STEP', { x: 16, y: 36, z: -9 }),
+    offerCandidate('CRAFT:pickaxe', 'CRAFT'),
+    offerCandidate('SMELT:iron_ingot', 'SMELT'),
+    offerCandidate('RETRIEVE:known:iron_ore', 'RETRIEVE'),
+    offerCandidate('MINE:stone', 'MINE'),
+    offerCandidate('EAT:bread', 'EAT'),
+    offerCandidate('WAIT', 'WAIT'),
+  ]
+  const restriction = restrictCandidatesNotExecutableHere(offerWorld(), workOffer, liveBinding(), workOffer)
+  const kinds = restriction.candidates.map((candidate) => candidate.kind)
+  const withheld = restriction.withheld.map((candidate) => candidate.kind)
+  const pass =
+    restriction.bound === true &&
+    withheld.join(',') === 'DESCEND,MOVE,STEP' &&
+    kinds.includes('CRAFT') &&
+    kinds.includes('SMELT') &&
+    kinds.includes('RETRIEVE') &&
+    kinds.includes('MINE') &&
+    kinds.includes('EAT') &&
+    kinds.includes('WAIT')
+  return { pass, detail: `withheld=[${withheld.join(',')}] kept=[${kinds.join(',')}]` }
+})
+
+addCase('(xi) goto keeps its own dimension guard and is never read as a transfer row', () => {
+  const goto = {
+    kind: 'goto' as const,
+    targetPredicate: PORTAL_ENTERED_PREDICATE,
+    optionTemplateId: 'enter_portal',
+    semanticOptionTemplateId: 'enter_portal',
+  }
+  const descend = { kind: 'collect' as const, targetPredicate: 'levelAtMost', optionTemplateId: 'explore:cave' }
+  const pass = isDimensionTransferGoal(goto) === false && isDimensionTransferGoal(descend) === false
+  return { pass, detail: `goto=${isDimensionTransferGoal(goto)} descend=${isDimensionTransferGoal(descend)}` }
+})
+
+addCase('(xi) the controller only binds on escalate and cancels only body motion', async () => {
+  const source = await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()
+  const required = [
+    "result.action === 'escalate' && result.goalId !== null",
+    'isNotExecutableHereWithheldKind(running.kind)',
+  ]
+  const forbidden = ['isNotExecutableHereKeepKind']
+  const missing = required.filter((needle) => !source.includes(needle))
+  const leftover = forbidden.filter((needle) => source.includes(needle))
+  const pass = missing.length === 0 && leftover.length === 0
+  return { pass, detail: `missing=[${missing.join(' | ')}] leftover=[${leftover.join(' | ')}]` }
 })
 
 // ---------------------------------------------------------------------------

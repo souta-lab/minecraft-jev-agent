@@ -19,6 +19,7 @@
 // The queue is deliberately plain data so it can be: handed to Jev inside the
 // world state, written to the decision log, and unit-tested with no bot at all.
 import type { OptionSpec } from './optionSpec.ts'
+import { PORTAL_ENTERED_PREDICATE } from './netherPortalPlan.ts'
 import {
   abandonDetail,
   formatProtectedGoalAbandoned,
@@ -362,12 +363,46 @@ export interface NotExecutableHeadOptions {
   now?: number
 }
 
+/**
+ * #plan-reconciliation: the postconditions whose SUCCESS is a dimension change.
+ *
+ * A row carrying one of these declares its `dimension` as the DESTINATION, not as
+ * a place it can only run: the whole point of the row is that the body is on the
+ * other side. Measured live (main 06c5976, the floated-portal trial):
+ * `g99:place:nether_portal targetPredicate=portal_entered dimension=the_nether` was
+ * classified not-executable-here while the body stood in the overworld, the offer
+ * binding then withheld the entry's own climb/dig legs for 1370 firings (one hour)
+ * and the body froze at (26.3,64.0,6.3) - unable even to reach the gate it was
+ * supposed to enter.
+ */
+export const DIMENSION_TRANSFER_PREDICATES: ReadonlySet<string> = new Set<string>([PORTAL_ENTERED_PREDICATE])
+
+/** Compiled Option identities that realize a dimension transfer. */
+export const DIMENSION_TRANSFER_TEMPLATES: ReadonlySet<string> = new Set<string>(['enter:nether_portal', 'enter_portal'])
+
+/**
+ * Is this row's own SUCCESS a dimension change? If so its `dimension` is the
+ * target dimension and the not-executable-here arm must not apply to it. The
+ * `goto` arm keeps its own dimension guard (a goto target really is a place).
+ */
+export function isDimensionTransferGoal(
+  goal: Pick<QueuedGoal, 'kind' | 'targetPredicate' | 'optionTemplateId' | 'semanticOptionTemplateId'>,
+): boolean {
+  if (goal.kind === 'goto') return false
+  const predicate = goal.targetPredicate ?? null
+  if (predicate !== null && DIMENSION_TRANSFER_PREDICATES.has(predicate)) return true
+  const template = goal.optionTemplateId ?? goal.semanticOptionTemplateId ?? null
+  return template !== null && DIMENSION_TRANSFER_TEMPLATES.has(template)
+}
+
 export type NotExecutableHeadAction = 'hold' | 'defer' | 'escalate'
 
 export type NotExecutableHeadReason =
   | 'no_current'
   | 'executable_here'
   | 'unknown_dimension'
+  /** a dimension-TRANSFER row: its declared dimension is the destination */
+  | 'dimension_transfer_goal'
   | 'deferred'
   | 'no_executable_alternative'
   | 'defer_budget_exhausted'
@@ -1767,6 +1802,12 @@ export class GoalQueue {
     if (declared === null) return { ...base, action: 'hold', reason: 'unknown_dimension', nextGoalId: null }
     if (live === null) return { ...base, action: 'hold', reason: 'unknown_dimension', nextGoalId: null }
     if (declared === live) return { ...base, action: 'hold', reason: 'executable_here', nextGoalId: null }
+    // A TRANSFER row (success = dimension change) declares where it is going, not
+    // where it may run. Classifying it here made the entry row permanently
+    // not-executable-here and the offer binding then withheld its own climb legs.
+    if (isDimensionTransferGoal(current)) {
+      return { ...base, action: 'hold', reason: 'dimension_transfer_goal', nextGoalId: null }
+    }
     if (base.defers >= limit) {
       return { ...base, action: 'escalate', reason: 'defer_budget_exhausted', nextGoalId: null }
     }

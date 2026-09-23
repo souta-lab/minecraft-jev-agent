@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  M2_LEGACY_MARKERS,
   M2SnapshotRecorder,
   m2SnapshotFileName,
   orderedM2Chain,
@@ -80,10 +81,10 @@ addCase('the ordered chain PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE is VALID
     const names = snapshot?.markers.map((marker) => marker.name) ?? []
     return {
       pass:
-        snapshot?.chain.status === 'VALID' &&
+        snapshot?.legacyChain.status === 'VALID' &&
         names.join(',') === 'PREREQ_OPTION,FURNACE_READY,SMELT_DONE' &&
         typeof snapshot.markers[0]?.at === 'string',
-      detail: `chain=${snapshot?.chain.status} markers=${names.join(',')} at=${snapshot?.markers[0]?.at}`,
+      detail: `legacyChain=${snapshot?.legacyChain.status} markers=${names.join(',')} at=${snapshot?.markers[0]?.at}`,
     }
   }),
 )
@@ -96,8 +97,8 @@ addCase('out-of-order markers are never promoted to VALID', () =>
     recorder.recordMarker('PREREQ_OPTION')
     const snapshot = readM2SnapshotFile(RUN_A, dir)
     return {
-      pass: snapshot?.chain.status === 'INCOMPLETE',
-      detail: `chain=${snapshot?.chain.status} sequence=${JSON.stringify(snapshot?.sequence)}`,
+      pass: snapshot?.legacyChain.status === 'INCOMPLETE',
+      detail: `legacyChain=${snapshot?.legacyChain.status} sequence=${JSON.stringify(snapshot?.sequence)}`,
     }
   }),
 )
@@ -149,11 +150,11 @@ addCase('the chain survives a generation hot reload within the same run', () =>
     const snapshot = readM2SnapshotFile(RUN_A, dir)
     return {
       pass:
-        snapshot?.chain.status === 'VALID' &&
+        snapshot?.legacyChain.status === 'VALID' &&
         snapshot?.markers.length === 3 &&
         snapshot?.generationId === 'gen-two' &&
         snapshot?.runId === RUN_A,
-      detail: `chain=${snapshot?.chain.status} markers=${snapshot?.markers.length} gen=${snapshot?.generationId}`,
+      detail: `legacyChain=${snapshot?.legacyChain.status} markers=${snapshot?.markers.length} gen=${snapshot?.generationId}`,
     }
   }),
 )
@@ -200,10 +201,11 @@ addCase('malformed snapshot bodies are rejected', () => {
 })
 
 addCase('orderedM2Chain matches m2-watch first-after semantics', () => {
-  const valid = orderedM2Chain(['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE']).status
-  const extra = orderedM2Chain(['PREREQ_OPTION', 'PREREQ_OPTION', 'FURNACE_READY', 'FURNACE_READY', 'SMELT_DONE']).status
-  const selfHeal = orderedM2Chain(['FURNACE_READY', 'PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE']).status
-  const premature = orderedM2Chain(['SMELT_DONE', 'PREREQ_OPTION', 'FURNACE_READY']).status
+  const L = M2_LEGACY_MARKERS
+  const valid = orderedM2Chain(['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'], L).status
+  const extra = orderedM2Chain(['PREREQ_OPTION', 'PREREQ_OPTION', 'FURNACE_READY', 'FURNACE_READY', 'SMELT_DONE'], L).status
+  const selfHeal = orderedM2Chain(['FURNACE_READY', 'PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'], L).status
+  const premature = orderedM2Chain(['SMELT_DONE', 'PREREQ_OPTION', 'FURNACE_READY'], L).status
   return {
     pass: valid === 'VALID' && extra === 'VALID' && selfHeal === 'VALID' && premature === 'INCOMPLETE',
     detail: `valid=${valid} extra=${extra} selfHeal=${selfHeal} premature=${premature}`,
@@ -246,10 +248,10 @@ addCase('the valid chain keeps the first FURNACE_READY sample when a repeat cons
     const smelt = snapshot?.markers.find((marker) => marker.name === 'SMELT_DONE')
     return {
       pass:
-        snapshot?.chain.status === 'VALID' &&
+        snapshot?.legacyChain.status === 'VALID' &&
         furnace?.inventory.charcoal === 1 &&
         smelt?.inventory.iron_ingot === 3,
-      detail: `chain=${snapshot?.chain.status} furnaceCharcoal=${furnace?.inventory.charcoal} smeltIngot=${smelt?.inventory.iron_ingot}`,
+      detail: `legacyChain=${snapshot?.legacyChain.status} furnaceCharcoal=${furnace?.inventory.charcoal} smeltIngot=${smelt?.inventory.iron_ingot}`,
     }
   }),
 )
@@ -314,11 +316,11 @@ addCase('a verified iron-pickaxe craft records run-scoped terminal inventory aft
     const snapshot = readM2SnapshotFile(RUN_A, dir)
     return {
       pass:
-        snapshot?.chain.status === 'VALID' &&
+        snapshot?.legacyChain.status === 'VALID' &&
         snapshot?.terminal?.actionId === 'CRAFT:iron_pickaxe' &&
         snapshot?.terminal?.inventory.iron_pickaxe === 1 &&
         (snapshot?.terminal?.atMs ?? 0) > (snapshot?.markers.find((marker) => marker.name === 'SMELT_DONE')?.atMs ?? 0),
-      detail: `chain=${snapshot?.chain.status} terminal=${snapshot?.terminal?.actionId} pickaxe=${snapshot?.terminal?.inventory.iron_pickaxe}`,
+      detail: `legacyChain=${snapshot?.legacyChain.status} terminal=${snapshot?.terminal?.actionId} pickaxe=${snapshot?.terminal?.inventory.iron_pickaxe}`,
     }
   }),
 )
@@ -351,3 +353,27 @@ for (const testCase of cases) {
 process.stdout.write('-'.repeat(72) + '\n')
 process.stdout.write(`${cases.length - failures}/${cases.length} m2-snapshot cases passed\n`)
 if (failures > 0) process.exit(1)
+
+addCase('the chain the snapshot reports is the PORTAL chain the M2 premise and the gate use', () =>
+  withTempDir((dir) => {
+    const recorder = recorders(dir, 'run-portal-chain', () => ({}))
+    recorder.recordMarker('PORTAL_BLOCK_PLACED')
+    recorder.recordMarker('PORTAL_BLOCK_PLACED')
+    recorder.recordMarker('PORTAL_FRAME_READY')
+    recorder.recordMarker('PORTAL_LIT')
+    const beforeVerify = readM2SnapshotFile('run-portal-chain', dir)
+    recorder.recordMarker('PORTAL_VERIFIED')
+    const afterVerify = readM2SnapshotFile('run-portal-chain', dir)
+    return {
+      pass:
+        beforeVerify?.chain.status === 'INCOMPLETE' &&
+        beforeVerify?.chain.required.join(',') === 'PORTAL_BLOCK_PLACED,PORTAL_FRAME_READY,PORTAL_LIT,PORTAL_VERIFIED' &&
+        afterVerify?.chain.status === 'VALID' &&
+        afterVerify?.chain.observed.join(',') === 'PORTAL_BLOCK_PLACED,PORTAL_FRAME_READY,PORTAL_LIT,PORTAL_VERIFIED' &&
+        // the legacy iron chain is still evaluated from the same sequence, so a historical
+        // reader loses nothing when `chain` became the portal chain.
+        afterVerify?.legacyChain.status === 'INCOMPLETE',
+      detail: `chain=${afterVerify?.chain.status} required=${afterVerify?.chain.required.join(',')} legacy=${afterVerify?.legacyChain.status}`,
+    }
+  }),
+)
