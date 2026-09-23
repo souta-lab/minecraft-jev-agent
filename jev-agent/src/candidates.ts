@@ -4994,6 +4994,32 @@ function mineDropAdvancesFocus(
   return recipeChainContains(recipes, focusItem, dropItem)
 }
 
+/**
+ * Whether a dropped entity is a route for the active focus.
+ *
+ * The mined-block rule above deliberately keeps the historical broad envelope
+ * for resource-class focuses: mining any sensed resource may be useful to the
+ * next horizon. A dropped item is different: it is already a concrete,
+ * one-step acquisition, so unrelated drops must not masquerade as progress for
+ * the current Option or suppress its route-opening candidates. For classes,
+ * accept a member of the class (plus logs as the mechanical source of planks);
+ * for item focuses, accept the focus or a proven recipe ingredient. When recipe
+ * truth is unavailable, keep the candidate rather than claiming it cannot help.
+ */
+function pickupDropAdvancesFocus(
+  focusItem: string | null,
+  dropItem: string | null,
+  recipes: RecipeIndex | null,
+): boolean {
+  if (focusItem === null || dropItem === null || dropItem.length === 0) return true
+  if (resourceMatches(dropItem, focusItem)) return true
+  if (isResourceClass(focusItem)) {
+    return focusItem === 'planks' && matchesResourceClass(dropItem, 'log')
+  }
+  if (recipes === null) return true
+  return recipeChainContains(recipes, focusItem, dropItem)
+}
+
 /** One material the active goal needs, with the amount the goal implies. */
 export interface GoalMaterialNeed {
   item: string
@@ -11804,10 +11830,10 @@ export const MAX_PICKUP_CANDIDATES = 4
  * to take.
  *
  * This is CAN enumeration, never a rank and never M3-specific:
- *   * it is driven by `mineDropAdvancesFocus`, the SAME focus/recipe-chain rule
- *     the MINE and RETRIEVE arms already withhold on, so a drop is offered only
- *     when picking it up can advance the ACTIVE goal (`ender_eye` -> blaze_powder
- *     -> blaze_rod is one such chain);
+ *   * it is driven by `pickupDropAdvancesFocus`: a concrete class member or a
+ *     proven recipe ingredient is on offer, while unrelated loot cannot masquerade
+ *     as progress for the ACTIVE goal (`ender_eye` -> blaze_powder -> blaze_rod
+ *     is one such chain);
  *   * one candidate per sensed drop, keyed on the ENTITY id (a falling item's
  *     position changes every tick, so a position key would defeat the bounded
  *     failure memory while an id is stable for the drop's whole lifetime);
@@ -11825,7 +11851,7 @@ function pickupCandidates(
     .filter((entity) => {
       const item = entity.droppedItem
       if (typeof item !== 'string' || item.length === 0) return false
-      if (!mineDropAdvancesFocus(focusItem, item, recipes)) return false
+      if (!pickupDropAdvancesFocus(focusItem, item, recipes)) return false
       if (failureCount(state.signals.failedCandidates, `PICKUP:e${entity.id}`) >= failureLimit) return false
       return true
     })
