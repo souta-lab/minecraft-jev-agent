@@ -14,6 +14,8 @@ import {
 import type { DescendScoreInput } from './src/descendPlan.ts'
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
+import { JevController } from './src/controller.ts'
+import { DIG_PATH_CAP, DigMemory } from './src/worldMemory.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, DescentOption, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -276,6 +278,119 @@ addCase('a latched item-goal descent budget preserves safe lateral search', () =
   return {
     pass: descend !== undefined && descend.meta.mode === 'level' && descend.meta.dir === 'E',
     detail: descend === undefined ? 'no lateral DESCEND' : `${descend.id} mode=${String(descend.meta.mode)}`,
+  }
+})
+
+addCase('a capped lateral tunnel stops offering same-height DESCEND steps', () => {
+  const feet = { x: 0, y: 55, z: 0 }
+  const lateral = {
+    ...downStep('E', 1, 0, feet),
+    mode: 'level' as const,
+    step: { x: 1, y: 55, z: 0 },
+  }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(
+      queuedGoal({ kind: 'collect', targetY: undefined, description: 'collect raw iron' }),
+    ),
+    signals: signals({
+      descendLimitReached: true,
+      digDir: 'E',
+      digDirCount: DIG_PATH_CAP,
+    }),
+    descent: [lateral],
+  })
+  const descend = generateCandidates(state, defaultCandidateOptions).filter(
+    (candidate: Candidate) => candidate.kind === 'DESCEND',
+  )
+  return {
+    pass: descend.length === 0,
+    detail: descend.map((candidate) => candidate.id).join(',') || 'no DESCEND at path cap',
+  }
+})
+
+addCase('the path cap still permits a grounded downward step', () => {
+  const feet = { x: 0, y: 55, z: 0 }
+  const lateral = {
+    ...downStep('E', 1, 0, feet),
+    mode: 'level' as const,
+    step: { x: 1, y: 55, z: 0 },
+  }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(
+      queuedGoal({ kind: 'collect', targetY: undefined, description: 'collect raw iron' }),
+    ),
+    signals: signals({ digDir: 'E', digDirCount: DIG_PATH_CAP, knownStoneY: 40 }),
+    descent: [lateral, downStep('D', 0, 0, feet)],
+  })
+  const descend = generateCandidates(state, defaultCandidateOptions).filter(
+    (candidate: Candidate) => candidate.kind === 'DESCEND',
+  )
+  return {
+    pass: descend.length === 1 && descend[0]?.meta.mode === 'down',
+    detail: descend.map((candidate) => `${candidate.id} mode=${String(candidate.meta.mode)}`).join(',') || 'no DESCEND',
+  }
+})
+
+addCase('a verified move after the capped tunnel opens a fresh bounded path', () => {
+  type ResetRuntime = {
+    digMemory: DigMemory
+    logger: { info: (channel: string, message: string, fields: Record<string, unknown>, tick: number) => void }
+    tickCounter: number
+    resetDescendBudgetAfterWorldChange: (
+      actionId: string,
+      reason: 'verified_mine' | 'verified_move',
+    ) => void
+  }
+  const runtime = Object.create(JevController.prototype) as ResetRuntime
+  const memory = new DigMemory()
+  const lines: string[] = []
+  for (let index = 0; index < DIG_PATH_CAP; index += 1) {
+    memory.record({ x: index, y: 55, z: 0, dir: 'E', mode: 'level', target: 'raw_iron', atMs: index })
+  }
+  for (let index = 0; index < 4; index += 1) memory.markDescend(false)
+  runtime.digMemory = memory
+  runtime.logger = { info: (_channel, message) => lines.push(message) }
+  runtime.tickCounter = 1
+
+  runtime.resetDescendBudgetAfterWorldChange('MINE:b8_55_0', 'verified_mine')
+  const afterMine = memory.snapshot()
+  for (let index = 0; index < 4; index += 1) memory.markDescend(false)
+  runtime.resetDescendBudgetAfterWorldChange('MOVE:p9_55_0', 'verified_move')
+  const snapshot = memory.snapshot()
+  const nextFeet = { x: 9, y: 55, z: 0 }
+  const nextLateral = {
+    ...downStep('E', 1, 0, nextFeet),
+    mode: 'level' as const,
+    step: { x: 10, y: 55, z: 0 },
+  }
+  const nextColumn = worldState({
+    position: nextFeet,
+    goalQueue: queueWith(
+      queuedGoal({ kind: 'collect', targetY: undefined, description: 'collect raw iron' }),
+    ),
+    signals: signals({
+      descendLimitReached: snapshot.descendLimitReached,
+      digDir: snapshot.digDir,
+      digDirCount: snapshot.digDirCount,
+    }),
+    descent: [nextLateral],
+  })
+  const nextStep = generateCandidates(nextColumn, defaultCandidateOptions).find(
+    (candidate: Candidate) => candidate.kind === 'DESCEND' && candidate.meta.mode === 'level',
+  )
+  return {
+    pass:
+      afterMine.digDirCount === DIG_PATH_CAP &&
+      afterMine.descendNoProgress === 0 &&
+      snapshot.digDir === null &&
+      snapshot.digDirCount === 0 &&
+      snapshot.descendNoProgress === 0 &&
+      lines.some((line) => line.startsWith('DIG_PATH_RESET reason=cap_after_verified_move')) &&
+      lines.some((line) => line.startsWith('DESCEND_BUDGET_RESET actionId=MOVE:p9_55_0')) &&
+      nextStep !== undefined,
+    detail: `mineCount=${afterMine.digDirCount} nextStep=${nextStep?.id ?? 'none'} dir=${snapshot.digDir} count=${snapshot.digDirCount} noProgress=${snapshot.descendNoProgress} logs=${lines.join(' | ')}`,
   }
 })
 

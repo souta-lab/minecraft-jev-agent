@@ -42,6 +42,8 @@ jobs:
         run: bun run milestone-status:check && bun run milestone-status-test
       - name: M2 evidence tooling fixtures
         run: bun run m2-watch-test && bun run m2-acceptance-test && bun run m2-live-gate-test && bun run m2-gate-test
+      - name: M2 clean-run and reproducibility harness fixtures
+        run: bun run clean-run-harness-test && bun run m2-reproducibility-test
       - name: Live issue-routing invariant
         run: bun run frontier:check
       - name: Live issue-evidence invariant

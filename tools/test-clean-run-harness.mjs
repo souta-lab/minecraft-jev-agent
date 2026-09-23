@@ -42,7 +42,7 @@
 //
 // Usage: bun tools/test-clean-run-harness.mjs
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -634,6 +634,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   const attempts = JSON.parse(readFileSync(join(container, 'm3-clean-run', 'attempts.json'), 'utf8'))
   assert.equal(attempts.attempts.length, 1)
   assert.match(readFileSync(join(container, 'm3-clean-run', 'server.properties.clean'), 'utf8'), /^level-name=m3clean-prep$/m)
+  assert.equal(statSync(join(container, 'm3-clean-run', 'server.properties.clean')).mode & 0o777, 0o600, 'staged server properties may contain RCON material and stay owner-readable only')
   assert.match(readFileSync(join(container, 'm3-clean-run', 'server-properties.diff.txt'), 'utf8'), /level-seed: 2024 -> 998877665544/)
   assert.match(readFileSync(join(container, 'm3-clean-run', 'operator-commands.txt'), 'utf8'), /m3-acceptance-bundle\.mjs/)
   // the resolved descriptor is CLEAN and consumable by the canonical bundle

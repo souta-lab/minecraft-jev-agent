@@ -60,6 +60,7 @@
     "m2-chain-execution-test": "bun tools/test-m2-chain-execution.mjs",
     "m2-policy-evidence-test": "bun tools/test-m2-policy-evidence.mjs",
     "m2-snapshot-evidence-test": "bun tools/test-m2-snapshot-evidence.mjs",
+    "m2-reproducibility-test": "bun tools/test-m2-reproducibility.mjs",
     "m3-gate-test": "bun tools/test-m3-gate.mjs",
     "clean-run-harness-test": "bun tools/test-clean-run-harness.mjs",
     "clean-run-gate": "bun tools/clean-run-gate.mjs",
