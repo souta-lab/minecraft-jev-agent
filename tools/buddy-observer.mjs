@@ -1310,13 +1310,29 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   const runnerOutPath = join(runtimeDir, 'runner.out')
   const mission = readMission(join(REPO, 'MILESTONE-CONTRACT.json'))
 
+  // Summary requests also expose the on-demand live probe. Multiple readers
+  // asking for the same radius at once must share its report -> state -> report
+  // bracket; otherwise a burst of read-only HTTP clients queues redundant
+  // sensor scans on the resident control socket and can make each response
+  // miss its caller's deadline.
+  const worldProbeInFlight = new Map()
   const worldProbe = async ({ radius = 6, verticalRadius = 3 } = {}) => {
     const horizontal = Number.isFinite(radius) ? Math.max(1, Math.min(8, Math.floor(radius))) : 6
     const vertical = Number.isFinite(verticalRadius) ? Math.max(1, Math.min(4, Math.floor(verticalRadius))) : 3
-    const report = await callControlSocket(socketPath, 'report')
-    const state = await callControlSocket(socketPath, 'state', DEFAULT_CONTROL_TIMEOUT_MS, { radius: horizontal, verticalRadius: vertical })
-    const reportAfter = await callControlSocket(socketPath, 'report')
-    return buildWorldProbe({ report, reportAfter, state, radius: horizontal, verticalRadius: vertical })
+    const key = `${horizontal}:${vertical}`
+    const existing = worldProbeInFlight.get(key)
+    if (existing !== undefined) return await existing
+
+    const pending = (async () => {
+      const report = await callControlSocket(socketPath, 'report')
+      const state = await callControlSocket(socketPath, 'state', DEFAULT_CONTROL_TIMEOUT_MS, { radius: horizontal, verticalRadius: vertical })
+      const reportAfter = await callControlSocket(socketPath, 'report')
+      return buildWorldProbe({ report, reportAfter, state, radius: horizontal, verticalRadius: vertical })
+    })().finally(() => {
+      if (worldProbeInFlight.get(key) === pending) worldProbeInFlight.delete(key)
+    })
+    worldProbeInFlight.set(key, pending)
+    return await pending
   }
 
   let snapshotInFlight = null
