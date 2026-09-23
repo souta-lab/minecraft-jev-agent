@@ -10620,6 +10620,31 @@ function groundBridgeLeg(
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
+  // A bridge is a SAME-LEVEL structure: its probes live at the body's feet Y and
+  // its self-landing place cell is `feet.y - 1`, so it can neither climb to a
+  // target above nor descend to one below. The entry crossing has carried this
+  // gate since it landed (`Math.abs(entry.enterCell.y - feet.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE`);
+  // the general MOVE leg did not, which is how a body perched at y79 with its
+  // target at y67 built an elevated highway across the area instead of descending.
+  // The vertical planner owns the difference; this leg declines it, typed.
+  // The gate is ASYMMETRIC because the mechanics are: a bridge places a floor and
+  // advances onto it, and with a pillar leg it can also rise to a target above -
+  // that is the legitimate "tower" remedy the entry fixture pins (a target at
+  // +6 still offers place:bridge + place:pillar). It cannot DESCEND, because
+  // placing below the feet and stepping down is a different act (the descent
+  // scaffold owns it). So only a target BELOW this bridge's own plane is refused.
+  if (feet.y - spec.target.y > PORTAL_WALK_IN_LEVEL_TOLERANCE) {
+    return {
+      plan: null,
+      refusal: {
+        reason: 'level',
+        cell: feet,
+        target: spec.target,
+        block: null,
+        detail: `target y=${spec.target.y} is ${Math.abs(spec.target.y - feet.y)} block(s) from the body's feet y=${feet.y}; a bridge advances only in its own plane`,
+      },
+    }
+  }
   const liveStructures = liveStructureIndexOf(state)
   const decision = planBridgeRoute({
     selfFeet: feet,

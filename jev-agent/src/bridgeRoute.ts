@@ -246,6 +246,19 @@ export type BridgeRefusalReason =
   | 'portal_plane'
   /** SELF-LANDING only: a pocket cell is unobserved or cannot be opened (unknown is never stood in) */
   | 'unbreakable'
+  /**
+   * The target is not in this bridge's own PLANE.
+   *
+   * A bridge advances at the body's level (its probe cells are all at the body's
+   * feet Y and its self-landing place cell is `feet.y - 1`), so it can neither
+   * climb to a target above nor descend to one below. Without this gate a body
+   * standing far above its target will build a highway at its own altitude
+   * towards it - measured live on 2026-09-23: the body climbed to y79 with the
+   * floated gate interior at y67 and laid an elevated cobblestone network across
+   * the area, which the operator photographed ("どこに橋を立てているの？？？？").
+   * The vertical planner owns that difference; the bridge must decline it.
+   */
+  | 'level'
 
 export interface BridgeRefusal {
   reason: BridgeRefusalReason
