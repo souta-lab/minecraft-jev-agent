@@ -918,6 +918,45 @@ export interface InteractionStandProbe {
 
 export { interactionFaceDistance }
 
+/**
+ * Does a body standing at `stand` SEE the block at `block`? ONE ray from that
+ * stand's own eye height to the block's centre, and the first solid hit the
+ * world reports must be the block's own cell.
+ *
+ * This is the FEET-INDEPENDENT form of mineflayer's `canSeeBlock` (which can
+ * only answer from where the body is RIGHT NOW), and it is what makes an
+ * interaction stand a real stand for a block that is interacted with by LOOKING
+ * at it. Measured live (m3-live buddy.log 2026-09-22T16:03:47.146Z): the body sat
+ * in the Nether portal cell (7,59,8) and the operator's `purple_shulker_box`
+ * stood one block beyond the frame's obsidian column at (9,58..62,8); the eye ray
+ * hit the obsidian, `canSeeBlock` was false, and the open was refused
+ * `CONTAINER_REFUSED reason=occluded ... detail=line_of_sight_blocked` - while the
+ * SAME container is fully visible from (11,59,8), (10,59,7) and (10,59,9), which
+ * are passable with support (world truth: world_nether/DIM-1/region/r.0.0.mca).
+ *
+ * Fail-open on ABSENCE of a fact: a cast that reports no hit at all (no world
+ * raycast in a structural double, a degenerate segment) answers `true`, exactly
+ * like the controller's `botSeesEntityFrom`, so a missing world never invents an
+ * occluder. `cast` returns the first solid cell on the segment, or null.
+ */
+export function blockSightFromStand(
+  stand: Vec3Json,
+  block: Vec3Json,
+  eyeHeight: number,
+  cast: (from: Vec3Json, to: Vec3Json) => Vec3Json | null,
+): boolean {
+  const from = { x: stand.x + 0.5, y: stand.y + eyeHeight, z: stand.z + 0.5 }
+  const to = { x: block.x + 0.5, y: block.y + 0.5, z: block.z + 0.5 }
+  let hit: Vec3Json | null
+  try {
+    hit = cast(from, to)
+  } catch {
+    return true
+  }
+  if (hit === null) return true
+  return hit.x === block.x && hit.y === block.y && hit.z === block.z
+}
+
 function standDistanceFromFeet(stand: Vec3Json, feet: Vec3Json): number {
   return Math.hypot(stand.x + 0.5 - feet.x, stand.z + 0.5 - feet.z)
 }
@@ -7171,7 +7210,31 @@ export class Executor {
     this.setPhase(candidate, epoch, 'pathing-to-container')
     // The EXISTING station approach (never a forked approach): a real
     // interaction stand or a typed path_stuck, no blind interaction.
-    const stand = await this.approachPlacedBlock(target, 'container', epoch, signal)
+    //
+    // `requireSight` is the one container-specific demand, and it is mechanical:
+    // a container is opened by LOOKING at it, so the stand the body walks to must
+    // be a cell the container is visible from. Without it the approach accepts
+    // "the body is already within reach" from a cell whose sight line is blocked
+    // and the open dies as a typed `occluded` refusal instead of walking two
+    // blocks to a stand that can see it (the live shape below).
+    let stand: Vec3Json
+    try {
+      stand = await this.approachPlacedBlock(target, 'container', epoch, signal, {
+        requireSight: true,
+        sightFailure: 'container_occluded',
+      })
+    } catch (error) {
+      if (error instanceof ExecutorError && error.code === 'container_occluded') {
+        this.logContainerRefusal({
+          reason: 'occluded',
+          container: ref,
+          block: readMetaString(candidate, 'containerBlock') ?? 'container',
+          position: { x: target.x, y: target.y, z: target.z },
+          detail: 'no_stand_with_line_of_sight',
+        })
+      }
+      throw error
+    }
     this.ensureOwned(epoch, signal)
     const block = this.currentBlockAt(target)
     if (block === null || !isContainerBlockName(block.name)) {
@@ -10442,8 +10505,23 @@ export class Executor {
     label: string,
     epoch: number,
     signal: AbortSignal,
+    options: {
+      /**
+       * Only stands that can SEE the block count (see `blockSightFrom`). A
+       * container is opened by looking at it, so this is the mechanical truth
+       * the container path needs; every other caller keeps the plain geometry.
+       */
+      requireSight?: boolean
+      /**
+       * The failure code when `requireSight` removed every stand that the plain
+       * geometry had: "stands exist, none can see the block" is a different
+       * measured fact from "no stand exists", and the caller names it.
+       */
+      sightFailure?: FailureCode
+    } = {},
   ): Promise<Vec3Json> {
-    const stands = this.interactionStands(block)
+    const requireSight = options.requireSight === true
+    const stands = this.interactionStands(block, requireSight)
     const alreadyAt = this.standAt(block, stands)
     if (alreadyAt !== null) return alreadyAt
     // An interaction stand is not limited to the four orthogonal neighbours the
@@ -10457,7 +10535,7 @@ export class Executor {
     // moving, and the control nudge pivoted on the same exact-cell predicate, so
     // the approach could only repeat `reason=stuck` (81 attempts) and never open
     // the furnace. When the live face is genuinely in reach, no path is needed.
-    const liveStand = this.standAtCurrentFeet(block)
+    const liveStand = this.standAtCurrentFeet(block, requireSight)
     if (liveStand !== null) {
       const eye = this.bot.entity.position.offset(0, 1.62, 0)
       this.logger.info(
@@ -10469,6 +10547,15 @@ export class Executor {
     }
     if (stands.length === 0) {
       this.notifyPathFailed(block, 'stuck')
+      // Every STANDING cell the geometry allows exists, but not one of them can
+      // see the block: the target is occluded from the whole interaction
+      // envelope, which is a sight fact, not a path fact.
+      if (requireSight && this.interactionStands(block).length > 0) {
+        throw new ExecutorError(
+          options.sightFailure ?? 'path_stuck',
+          `no interaction stand for ${label} at (${block.x},${block.y},${block.z}) has line of sight to it within ${this.options.reach}m`,
+        )
+      }
       throw new ExecutorError(
         'path_stuck',
         `no interaction stand for ${label} at (${block.x},${block.y},${block.z}): no passable, supported standing face within ${this.options.reach}m`,
@@ -10566,10 +10653,17 @@ export class Executor {
     )
   }
 
-  /** The valid interaction stands for `block`, nearest-first from the bot's feet. */
-  private interactionStands(block: Vec3Json): Vec3Json[] {
+  /**
+   * The valid interaction stands for `block`, nearest-first from the bot's feet.
+   *
+   * `requireSight` keeps only the stands that can actually SEE the block (see
+   * `blockSightFrom`). A container is opened by looking at it, so a passable,
+   * supported cell whose eye->container ray hits another block first is not an
+   * interaction stand for that container and must never be walked to.
+   */
+  private interactionStands(block: Vec3Json, requireSight = false): Vec3Json[] {
     const feet = this.bot.entity.position
-    return interactionStandCandidates(
+    const stands = interactionStandCandidates(
       block,
       { x: feet.x, y: feet.y, z: feet.z },
       {
@@ -10578,6 +10672,56 @@ export class Executor {
       },
       this.options.reach,
     )
+    if (!requireSight) return stands
+    return stands.filter((stand) => this.blockSightFrom(stand, block))
+  }
+
+  /**
+   * Does a body standing at `stand` SEE the block at `block`? ONE ray from that
+   * stand's own eye height to the block's centre, through the same
+   * `bot.world.raycast` mineflayer's `canSeeBlock` uses, and the first solid hit
+   * must be the block's own cell.
+   *
+   * This is the feet-independent form of `canSeeBlock` (which can only answer
+   * from where the body is RIGHT NOW), and it is what makes an interaction stand
+   * a real stand for a block that is interacted with by LOOKING at it. Measured
+   * live (m3-live buddy.log 2026-09-22T16:03:47.146Z): the body sat in the
+   * Nether portal cell (7,59,8) and the operator's `purple_shulker_box` stood one
+   * block beyond the frame's obsidian column at (9,58..62,8); the eye ray hit the
+   * obsidian, `canSeeBlock` was false, and the open was refused
+   * `CONTAINER_REFUSED reason=occluded ... detail=line_of_sight_blocked` - while
+   * the SAME container is fully visible from (11,59,8), (10,59,7) and (10,59,9),
+   * which are all passable with support (world truth read from
+   * world_nether/DIM-1/region/r.0.0.mca).
+   *
+   * Absence of a raycast (a structural double) answers `true`: "not occluded" is
+   * the fail-open direction, exactly like the controller's `botSeesEntityFrom`,
+   * so a missing world never invents an occluder.
+   */
+  private blockSightFrom(stand: Vec3Json, block: Vec3Json): boolean {
+    const world = this.bot.world as unknown as
+      | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
+      | undefined
+    if (world === undefined || typeof world.raycast !== 'function') return true
+    const raycast = world.raycast.bind(world)
+    const base = this.bot.entity.position
+    const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
+    const cast = (from: Vec3Json, to: Vec3Json): Vec3Json | null => {
+      const dx = to.x - from.x
+      const dy = to.y - from.y
+      const dz = to.z - from.z
+      const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (!Number.isFinite(range) || range <= 0) return null
+      try {
+        const origin = base.clone().set(from.x, from.y, from.z)
+        const direction = base.clone().set(dx / range, dy / range, dz / range)
+        const hit = raycast(origin, direction, range, null) as { position?: Vec3Json } | null | undefined
+        return hit?.position ?? null
+      } catch {
+        return null
+      }
+    }
+    return blockSightFromStand(stand, block, eyeHeight, cast)
   }
 
   /** The valid stand the bot's feet currently occupy, or null when it is not on one. */
@@ -10601,8 +10745,13 @@ export class Executor {
    * This is the same geometry the stand search uses, evaluated from where the
    * body actually is instead of from the four enumerated neighbours, so a
    * diagonal-but-interactable station needs no path at all.
+   *
+   * `requireSight` additionally demands that this live cell can SEE the block:
+   * "the body is already standing close enough" is not enough to open a
+   * container through a wall, and accepting such a cell is exactly how the live
+   * refusal below was produced instead of a short walk to a seeing stand.
    */
-  private standAtCurrentFeet(block: Vec3Json): Vec3Json | null {
+  private standAtCurrentFeet(block: Vec3Json, requireSight = false): Vec3Json | null {
     const position = this.bot.entity.position
     const cell = {
       x: Math.floor(position.x + 1e-3),
@@ -10615,6 +10764,7 @@ export class Executor {
     if (!this.solidSupportAt(cell.x, cell.y - 1, cell.z)) return null
     const eye = position.offset(0, 1.62, 0)
     if (faceDistanceFromEye({ x: eye.x, y: eye.y, z: eye.z }, block) > this.options.reach) return null
+    if (requireSight && !this.blockSightFrom(cell, block)) return null
     return cell
   }
 

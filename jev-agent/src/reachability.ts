@@ -556,8 +556,17 @@ export interface ReachabilityFingerprintInput {
  * every missing tool family and whether a placeable block exists. Wall clock and
  * bot position are deliberately excluded: an unchanged state keeps suppressing,
  * a genuinely changed state (new tool/block/headroom) re-opens the target.
+ *
+ * `includeVerticalGap: false` drops the ONE body-relative term and yields the
+ * target's own grounding facts. Needed by callers asking a question that must
+ * not be reset by the body's own transient motion inside a failing attempt - see
+ * `reachabilityTargetSignature`. The field list stays in this ONE function, so
+ * the two forms cannot drift.
  */
-export function reachabilityFingerprint(input: ReachabilityFingerprintInput): string {
+export function reachabilityFingerprint(
+  input: ReachabilityFingerprintInput,
+  options: { includeVerticalGap?: boolean } = {},
+): string {
   const position = input.target.position
   const gap = position === null ? 0 : Math.round(position.y - input.world.self.y)
   const gapBucket =
@@ -568,17 +577,40 @@ export function reachabilityFingerprint(input: ReachabilityFingerprintInput): st
     .map((capability) => `${capability.tool}:${bestToolTier(input.inventory, capability.tool)}`)
     .sort()
     .join(',')
-  return [
+  const fields = [
     'rv1',
     targetLabel(position),
     input.result.reason,
     `missing=[${missing}]`,
-    `gap=${gapBucket}`,
     `place=${input.placeableBlock ? 1 : 0}`,
     `tools=[${tools}]`,
     `hazard=${input.world.hazardAtTarget ? 1 : 0}`,
     `approach=${input.world.approach === null ? 0 : 1}`,
     `head=${input.world.headroomClear ? 1 : 0}`,
     `foot=${input.world.footingSolid ? 1 : 0}`,
-  ].join('|')
+  ]
+  if (options.includeVerticalGap === false) return fields.join('|')
+  // The gap sits after `missing=[...]` in the pins callers already depend on.
+  fields.splice(4, 0, `gap=${gapBucket}`)
+  return fields.join('|')
+}
+
+/**
+ * The TARGET's own grounding facts: `reachabilityFingerprint` without the single
+ * body-relative term (the vertical gap).
+ *
+ * Why the gap must be excluded for this question. Measured live (`m3-live`,
+ * `ASCEND:habitat:p3_68_22`, 2026-09-21T19:55:26 -> 20:20:04): the candidate's
+ * fingerprint during the runaway alternated `gap=1` x122 / `gap=0` x115 because
+ * the failing action's own step rose one block and fell back. Any counter keyed
+ * on the full fingerprint therefore restarts every attempt, which is precisely
+ * how 184 identical `apex_missed` outcomes at one cell produced no escalation.
+ * The gap is a relationship between the BODY and the target, not a fact about
+ * whether the target is grounded; every term kept here is a fact about the
+ * target (cell, verdict, missing capabilities, placeable block, every missing
+ * tool tier, hazard, approach, headroom, footing), so a genuinely new capability
+ * still re-opens it.
+ */
+export function reachabilityTargetSignature(input: ReachabilityFingerprintInput): string {
+  return reachabilityFingerprint(input, { includeVerticalGap: false })
 }

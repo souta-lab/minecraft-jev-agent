@@ -82,6 +82,31 @@ export interface System2Outcome {
  *
  * Facts only. Nothing here selects, ranks or recommends a replacement WHAT.
  */
+/**
+ * The GROUNDED ACQUISITION evidence for one capability a candidate was withheld
+ * for (`CandidateAcquisition`, projected to plain data): the grounded routes
+ * enumerated for the missing fact, or the typed reason none exists plus the item
+ * and count the body would need.
+ *
+ * This is the grounded alternative that pairs with a refusal - "the ascent needs
+ * this cell cleared" is only actionable next to "this is the grounded route that
+ * clears it" or "nothing obtainable can". Evidence only: attaching it changes no
+ * offer and selects no WHAT.
+ */
+export interface System2AcquisitionFact {
+  /** the withheld capability this fact is about (same key as in `missing`) */
+  missing: string
+  /** candidate ids of the grounded routes enumerated for it (empty when none) */
+  routes: string[]
+  /** typed reason NO route exists; null whenever `routes` is non-empty */
+  reason: string | null
+  item: string | null
+  count: number | null
+  held: number | null
+  /** held tool state per family the missing fact named, e.g. `pickaxe:-1` */
+  tools: string
+}
+
 export interface System2WithheldCandidate {
   candidate: string
   kind: string
@@ -89,6 +114,12 @@ export interface System2WithheldCandidate {
   missing: string[]
   /** true when the local layer suppressed the refusal as already-reported this stall */
   suppressed: boolean
+  /**
+   * The grounded acquisition evidence per missing capability. Absent when the
+   * acquisition pass did not run for this entry, so an older/partial producer
+   * carries no invented route.
+   */
+  acquisition?: System2AcquisitionFact[]
 }
 
 /**

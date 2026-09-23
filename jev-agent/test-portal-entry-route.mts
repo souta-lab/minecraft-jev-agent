@@ -205,6 +205,16 @@ function makeBot(
     }
   }
   const listeners = new Map<string, Set<() => void>>()
+  /** The one placement rule both mineflayer entry points share. */
+  const placeAt = (reference: { position: Vec3 }, face: { x: number; y: number; z: number }): void => {
+    const target = {
+      x: Math.floor(reference.position.x) + face.x,
+      y: Math.floor(reference.position.y) + face.y,
+      z: Math.floor(reference.position.z) + face.z,
+    }
+    const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
+    grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+  }
   const bot = {
     registry,
     game: { dimension: OVERWORLD as string },
@@ -257,14 +267,14 @@ function makeBot(
     // clicked face points at, and it is the HELD item that goes in (mineflayer's
     // generic_place sends the held stack).
     placeBlock: async (reference: { position: Vec3 }, face: { x: number; y: number; z: number }) => {
-      const target = {
-        x: Math.floor(reference.position.x) + face.x,
-        y: Math.floor(reference.position.y) + face.y,
-        z: Math.floor(reference.position.z) + face.z,
-      }
-      const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
-      grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+      placeAt(reference, face)
     },
+    // mineflayer's OWN internal placement entry. A LIVE bot has it, and the executor
+    // reads its presence to declare the SAME-TICK actuator
+    // (`executor.ts#pillarPlaceHandshakeTicks`); without it a pillar placement is
+    // judged against the pessimistic look-handshake budget, so a genuinely cleared
+    // apex is reported `apex_timeout`. The fixture models the live method and places
+    // exactly as `placeBlock` does.
     // THE LIVE PLACEMENT ENTRY POINT. `Executor.placePillarBlock` prefers this
     // mineflayer API with `{ forceLook: 'ignore', swingArm: 'right' }`, and
     // `Executor.pillarPlaceHandshakeTicks()` reads the SAME fact to declare the
@@ -362,6 +372,8 @@ function makeBot(
       clearInterval(physicsTimer)
     },
   }
+  // A clientbound position correction is delivered as `forcedMove` by a live bot.
+  // A LIVE body emits `physicsTick` (~20/s) and `forcedMove` (on clientbound position
 }
 
 function canWalkIntoGate(fixture: FixtureBot): boolean {

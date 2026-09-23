@@ -78,7 +78,7 @@ import {
 } from './bridgeRoute.ts'
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
-import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
+import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint, reachabilityTargetSignature } from './reachability.ts'
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
@@ -1560,6 +1560,18 @@ export interface CandidateReachability {
   candidate: Candidate
   result: ReachabilityResult
   fingerprint: string
+  /**
+   * The TARGET's own grounding facts (`reachabilityTargetSignature`): the same
+   * digest without the body-relative vertical gap.
+   *
+   * The full fingerprint above is consumed only for candidates the gate
+   * WITHHELD (the unreachability proof memory). For a candidate that passed,
+   * this is the fact that says "no fact about this target's grounding changed",
+   * which the cross-action repeat bound needs: the live `ASCEND:habitat:p3_68_22`
+   * runaway alternated the full fingerprint's `gap` term 122x/115x as the body
+   * rose one block and fell back, so a counter keyed on it could never advance.
+   */
+  targetSignature: string
   withheld: boolean
   suppressed: boolean
   /**
@@ -5669,17 +5681,26 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
   }> = []
   const standKey = cellKey(state.self.position)
   for (const cut of cuts) {
-    // The cut cell is TERRAIN: the scanner's resource index usually has no entry
-    // for it, so its harvest requirement comes from the cell-level truth (the
-    // same `cellHarvestBarrier` the gate and the ascent accounting use). Reading
-    // it from `state.blocks` made a rock step resolve to "no tool required", the
-    // STEP was offered with `requiresTool:false`, and the body discovered the
-    // missing pickaxe only inside the executor:
-    //   `SKILL_END actionId=STEP:S:b23_80_8 outcome=CAPABILITY_LOST
-    //    failure=dig_no_tool policyBoundary=true` (run-mudkuea9-124kk).
+    const known = state.blocks.find(
+      (block) =>
+        block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
+    )
+    // The cell's harvest truth comes from EVERY sensor pool, not only the resource
+    // index: a terrain cell is sensed as a CUT carrying only its name, so `known`
+    // is undefined for exactly the cells a step cut is made of. Reading only
+    // `known` declared the cut hand-diggable (requiresTool=false) and the body
+    // discovered otherwise at execution time - the live
+    // `STEP:S:b23_80_8 ... outcome=CAPABILITY_LOST failure=dig_no_tool` pair.
+    // (landed on main as f9f139f; this branch keeps that resolution verbatim)
     const barrier = cellHarvestBarrier(state, cut.cut)
-    const tool = barrier?.requiredTool ?? null
-    const tier = barrier?.requiredTier ?? null
+    const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
+    const tier = barrier?.requiredTier ?? known?.harvestTier ?? null
+    // The cut is NOT dropped here when the tool is missing: it is the FACT that
+    // the step needs a tool the body lacks, and dropping it left that fact
+    // invisible - no `missing_tool` withhold, no acquisition route. The
+    // executable cuts keep their pre-existing top-2 slots (the offer is
+    // unchanged) and the unharvestable ones are emitted after them, where the
+    // dig-tool gate withholds them and the acquisition pass answers them.
     // The same 1-block step cut that just proved it changes nothing from this
     // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
     // dir/step route), so a different cut or a body that moved stays offerable.
@@ -5722,12 +5743,8 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
   if (scored.length === 0) return []
   scored.sort((a, b) => a.score - b.score)
 
-  // A cut the body cannot execute is NOT dropped: it is a FACT ("this step needs
-  // a pickaxe I do not hold"), and dropping it left the fact invisible - no
-  // `missing_tool` withhold, no acquisition route, and the arm was still offered
-  // with `requiresTool:false`. The executable cuts keep their pre-existing top-2
-  // slots (the offer is unchanged), and the unharvestable ones are emitted after
-  // them so the gate withholds them and the acquisition pass can offer the tool.
+  // Executable cuts keep the pre-existing top-2 slots; the unharvestable ones
+  // follow as fact-carrying candidates (see the loop note above).
   const executable = scored.filter((entry) => hasTool(state, entry.tool, entry.tier))
   const blocked = scored.filter((entry) => !hasTool(state, entry.tool, entry.tier))
 
@@ -12517,6 +12534,13 @@ function reachabilityRecord(
       world,
       placeableBlock: context.column.placeable !== null,
     }),
+    targetSignature: reachabilityTargetSignature({
+      target,
+      result,
+      inventory: context.state.inventory.counts,
+      world,
+      placeableBlock: context.column.placeable !== null,
+    }),
     withheld: false,
     suppressed: false,
   }
@@ -13438,7 +13462,19 @@ function moveAdvancesTowardTarget(
   blockedTarget: Vec3Json,
 ): boolean {
   if (candidate.target === null) return false
-  const currentDistance = distance(current, blockedTarget)
+  // LIKE FOR LIKE: every candidate target is a CELL, so the current point must be
+  // the body's own CELL too. Comparing a cell against the body's FRACTIONAL
+  // position (the historical form) mis-measures a genuine one-cell advance whenever
+  // the body does not stand at its cell's centre - measured (2026-09-23, a plain
+  // MOVE across a void): a grounded SELF-LANDING scaffold toward a target one cell
+  // over was dropped, because `distance(bodyFraction, target)` was smaller than
+  // `distance(landingCell, target)` even though the step really is one cell closer
+  // - which `bridgeRoute.ts#planBridgeSpan`'s own strict reduction already proved in
+  // the same cell units (`to <= from - BRIDGE_MIN_ADVANCE`, both cells). The intent
+  // is unchanged (a target that is NOT closer than the body's own cell is still
+  // refused, so no lateral wandering), only the measurement is now consistent.
+  const from = { x: Math.floor(current.x), y: Math.floor(current.y), z: Math.floor(current.z) }
+  const currentDistance = distance(from, blockedTarget)
   const nextDistance = distance(candidate.target, blockedTarget)
   return nextDistance + 0.1 < currentDistance
 }

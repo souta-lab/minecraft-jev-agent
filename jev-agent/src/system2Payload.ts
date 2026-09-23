@@ -41,6 +41,7 @@
 // so a token can never contain a line break even in a plane that does print it.
 
 import type {
+  System2AcquisitionFact,
   System2BlockerFacts,
   System2GroundedAlternative,
   System2ToolGap,
@@ -67,6 +68,8 @@ export const SYSTEM2_PAYLOAD_LIMITS = {
   unmetTools: 4,
   /** held tool-family ranks carried */
   heldTools: 3,
+  /** grounded acquisition routes carried per missing capability */
+  acquisitionRoutes: 3,
   /** chars allowed for any single carried token */
   tokenChars: 48,
   /**
@@ -116,6 +119,10 @@ export interface System2PayloadShape {
   blockedBy: boolean
   /** true when durable world-memory route counts were attached */
   routes: boolean
+  /** grounded acquisition routes carried (across all withheld candidates) */
+  acquisitionRoutes: number
+  /** missing capabilities with a TYPED refusal instead of a route */
+  acquisitionRefused: number
   /** JSON chars the blocker + alternative facts add to the payload */
   chars: number
   /** what the size budget refused, by field */
@@ -136,6 +143,8 @@ export function emptySystem2PayloadShape(): System2PayloadShape {
     missing: 0,
     blockedBy: false,
     routes: false,
+    acquisitionRoutes: 0,
+    acquisitionRefused: 0,
     chars: 0,
     refused: [],
     absent: [],
@@ -153,26 +162,94 @@ function clampList<T>(
   return items.slice(0, limit)
 }
 
+/**
+ * Bound one capability's grounded acquisition evidence. The routes are the
+ * actionable half, so they are clamped with a refusal; the typed reason and the
+ * item/count/held facts are single scalars and are carried verbatim.
+ */
+function clampAcquisition(
+  entry: System2WithheldCandidate,
+  keptMissing: readonly string[],
+  refused: System2PayloadShape['refused'],
+): System2AcquisitionFact[] | undefined {
+  if (entry.acquisition === undefined) return undefined
+  // Answer only the capabilities this payload actually carries. The acquisition
+  // lane's own invariant is that `missing` is the SAME capabilityKey the withhold
+  // line carries, so an acquisition fact whose key was truncated away must be
+  // dropped rather than left as evidence for a refusal the model cannot see.
+  const keptKeys = new Set(keptMissing)
+  const answered = entry.acquisition.filter((fact) => {
+    const key = encodePayloadToken(fact.missing)
+    const keep = keptKeys.has(key)
+    if (!keep) {
+      refused.push({
+        field: `withheld.acquire[${key}]`,
+        kept: 0,
+        dropped: 1,
+        limit: keptMissing.length,
+      })
+    }
+    return keep
+  })
+  // A hard count cap as well as the key filter: two capabilities can CLAMP to the
+  // same token, so key matching alone cannot bound the array. The payload must
+  // stay bounded even when the world makes the keys collide.
+  const boundedFacts = answered.slice(0, SYSTEM2_PAYLOAD_LIMITS.missingPerCandidate)
+  if (answered.length > boundedFacts.length) {
+    refused.push({
+      field: 'withheld.acquire',
+      kept: boundedFacts.length,
+      dropped: answered.length - boundedFacts.length,
+      limit: SYSTEM2_PAYLOAD_LIMITS.missingPerCandidate,
+    })
+  }
+  return boundedFacts.map((fact) => {
+    const routes = fact.routes.map((route) => encodePayloadToken(route))
+    const kept = routes.slice(0, SYSTEM2_PAYLOAD_LIMITS.acquisitionRoutes)
+    if (routes.length > kept.length) {
+      refused.push({
+        field: `withheld.acquire[${encodePayloadToken(fact.missing)}].routes`,
+        kept: kept.length,
+        dropped: routes.length - kept.length,
+        limit: SYSTEM2_PAYLOAD_LIMITS.acquisitionRoutes,
+      })
+    }
+    return {
+      missing: encodePayloadToken(fact.missing),
+      routes: kept,
+      reason: fact.reason === null ? null : encodePayloadToken(fact.reason, 24),
+      item: fact.item === null ? null : encodePayloadToken(fact.item, 32),
+      count: fact.count,
+      held: fact.held,
+      tools: encodePayloadToken(fact.tools, 48),
+    }
+  })
+}
+
 function clampWithheld(
   withheld: readonly System2WithheldCandidate[],
   refused: System2PayloadShape['refused'],
 ): System2WithheldCandidate[] {
   const limit = SYSTEM2_PAYLOAD_LIMITS.missingPerCandidate
   return withheld.map((entry) => {
-    const missing = entry.missing.map((token) => encodePayloadToken(token))
-    if (missing.length <= limit) {
+    const missingAll = entry.missing.map((token) => encodePayloadToken(token))
+    const missing = missingAll.slice(0, limit)
+    const acquisition = clampAcquisition(entry, missing, refused)
+    const carry = acquisition === undefined ? {} : { acquisition }
+    if (missingAll.length <= limit) {
       return {
         candidate: encodePayloadToken(entry.candidate),
         kind: encodePayloadToken(entry.kind, 24),
         reason: encodePayloadToken(entry.reason, 32),
         missing,
         suppressed: entry.suppressed === true,
+        ...carry,
       }
     }
     refused.push({
       field: `withheld.missing[${encodePayloadToken(entry.candidate)}]`,
       kept: limit,
-      dropped: missing.length - limit,
+      dropped: missingAll.length - limit,
       limit,
     })
     return {
@@ -181,6 +258,7 @@ function clampWithheld(
       reason: encodePayloadToken(entry.reason, 32),
       missing: missing.slice(0, limit),
       suppressed: entry.suppressed === true,
+      ...carry,
     }
   })
 }
@@ -287,6 +365,11 @@ export function buildSystem2BlockerFacts(input: {
       missing: missing.length,
       blockedBy: hasBlocker,
       routes: false,
+      acquisitionRoutes: withheld.reduce((total, entry) => total + (entry.acquisition ?? []).reduce((n, fact) => n + fact.routes.length, 0), 0),
+      acquisitionRefused: withheld.reduce(
+        (total, entry) => total + (entry.acquisition ?? []).filter((fact) => fact.routes.length === 0).length,
+        0,
+      ),
       chars: payloadFactsChars(facts),
       refused,
       absent,
@@ -296,13 +379,27 @@ export function buildSystem2BlockerFacts(input: {
 
 /** JSON chars a bounded fact set adds to the payload. */
 export function payloadFactsChars(facts: System2BlockerFacts): number {
-  return JSON.stringify({ blockers: facts, alternatives: facts.alternatives }).length
+  // Measured against the PAYLOAD fields, not the fact object: the payload emits
+  // `blockers` (which does not nest `alternatives`) beside a sibling
+  // `alternatives`, so serialising the whole fact object would double-count the
+  // alternatives and make the ceiling stricter than the budget it states.
+  const { alternatives, ...blockers } = facts
+  return JSON.stringify({ blockers, alternatives }).length
 }
 
 /**
- * Enforce the hard size ceiling on an assembled fact set. Deterministic order:
- * drop the grounded alternatives, then drop surplus withheld entries, then drop
- * the facts entirely. Every step is recorded in the shape's `refused` list.
+ * Enforce the hard size ceiling on an assembled fact set.
+ *
+ * Degradation is STAGED and ordered by what the model can least afford to lose,
+ * so a pathological state loses detail instead of losing the blocker entirely:
+ *   1. the grounded alternatives (the enrichment half);
+ *   2. surplus withheld entries, keeping the first;
+ *   3. the kept entry's acquisition detail (its routes and item facts);
+ *   4. the withheld list itself, keeping the goal-level blocker and its missing
+ *      union - the cheapest and most load-bearing fact;
+ *   5. everything, reported as an absent `blockers` field.
+ * Every step is recorded in the shape's `refused` list, so a truncated payload is
+ * never mistaken for a complete one.
  */
 export function enforceSystem2PayloadBudget(
   facts: System2BlockerFacts,
@@ -323,16 +420,55 @@ export function enforceSystem2PayloadBudget(
     return withoutAlternatives
   }
   const kept = facts.withheld.slice(0, 1)
-  const dropped = facts.withheld.length - kept.length
-  if (dropped > 0) {
-    shape.refused.push({ field: 'withheld', kept: kept.length, dropped, limit: 1 })
+  const droppedEntries = facts.withheld.length - kept.length
+  if (droppedEntries > 0) {
+    shape.refused.push({ field: 'withheld', kept: kept.length, dropped: droppedEntries, limit: 1 })
     shape.withheld = kept.length
   }
-  const minimal: System2BlockerFacts = { ...withoutAlternatives, withheld: kept }
-  const chars = payloadFactsChars(minimal)
-  if (chars <= limit) {
-    shape.chars = chars
-    return minimal
+  const one: System2BlockerFacts = { ...withoutAlternatives, withheld: kept }
+  if (payloadFactsChars(one) <= limit) {
+    shape.chars = payloadFactsChars(one)
+    return one
+  }
+  // Step 3: keep the refused candidate and its typed reason, drop its
+  // acquisition detail. The blocker still reaches the model; only the route
+  // enumeration is lost, and that loss is stated.
+  const stripped = kept.map((entry) => {
+    if (entry.acquisition === undefined) return entry
+    shape.refused.push({ field: 'withheld.acquisition', kept: 0, dropped: entry.acquisition.length, limit: 0 })
+    const { acquisition: _dropped, ...rest } = entry
+    return rest
+  })
+  const noDetail: System2BlockerFacts = { ...withoutAlternatives, withheld: stripped }
+  if (payloadFactsChars(noDetail) <= limit) {
+    shape.chars = payloadFactsChars(noDetail)
+    return noDetail
+  }
+  // Step 4: the withheld list itself goes, but the goal-level blocker - the
+  // cheapest fact, and the one the operator's rule names first - stays.
+  if (facts.withheld.length > 0) {
+    shape.refused.push({ field: 'withheld', kept: 0, dropped: facts.withheld.length, limit: 0 })
+    shape.withheld = 0
+  }
+  const goalLevel: System2BlockerFacts = {
+    ...withoutAlternatives,
+    missing: facts.missing.slice(0, 1),
+    withheld: [],
+    tools: { held: withoutAlternatives.tools.held.slice(0, 1), unmet: [] },
+  }
+  if (goalLevel.blockedBy === undefined && goalLevel.missing.length === 0) {
+    shape.refused.push({ field: 'blockers', kept: 0, dropped: 1, limit: 0 })
+    shape.attached = false
+    shape.chars = 0
+    shape.absent.push('blockers')
+    return null
+  }
+  const goalLevelChars = payloadFactsChars(goalLevel)
+  if (goalLevelChars <= limit) {
+    shape.chars = goalLevelChars
+    shape.missing = goalLevel.missing.length
+    shape.unmetTools = 0
+    return goalLevel
   }
   shape.refused.push({ field: 'blockers', kept: 0, dropped: 1, limit: 0 })
   shape.attached = false
@@ -398,17 +534,39 @@ export function projectSystem2PayloadFacts(
   const withRoutes: System2BlockerFacts = routes === null
     ? built.facts
     : { ...built.facts, alternatives: { ...built.facts.alternatives, routes } }
-  const bounded = enforceSystem2PayloadBudget(withRoutes, {
-    ...built.shape,
-    chars: payloadFactsChars(withRoutes),
-  })
+  // ONE shape object, mutated in place by the ceiling: the enforcement refusals
+  // have to land on the shape the caller reports, or a payload trimmed by the
+  // budget would carry no record that it was trimmed.
+  const shape: System2PayloadShape = { ...built.shape, chars: payloadFactsChars(withRoutes) }
+  const bounded = enforceSystem2PayloadBudget(withRoutes, shape)
   if (bounded === null) return null
-  if (routes !== null) {
-    built.shape.routes = true
-    built.shape.chars = payloadFactsChars(bounded)
+  shape.chars = payloadFactsChars(bounded)
+  // The route counts are reported from the BOUNDED facts, not from the input:
+  // when the ceiling drops the alternatives the routes are gone with them, and a
+  // shape that still claimed `routes=1` would attest to a field the model never
+  // received.
+  if (bounded.alternatives.routes !== undefined) {
+    shape.routes = true
   } else {
-    built.shape.absent.push('alternatives.routes')
+    shape.routes = false
+    if (routes === null) shape.absent.push('alternatives.routes')
   }
+  // A staged drop that removed withheld detail also changes these counts; the
+  // totals stay the pre-clamp measure so a truncated list is never read as a
+  // complete one.
+  shape.withheld = bounded.withheld.length
+  shape.presented = bounded.alternatives.presented.length
+  shape.unmetTools = bounded.tools.unmet.length
+  shape.missing = bounded.missing.length
+  shape.blockedBy = bounded.blockedBy !== undefined
+  shape.acquisitionRoutes = bounded.withheld.reduce(
+    (total, entry) => total + (entry.acquisition ?? []).reduce((n, fact) => n + fact.routes.length, 0),
+    0,
+  )
+  shape.acquisitionRefused = bounded.withheld.reduce(
+    (total, entry) => total + (entry.acquisition ?? []).filter((fact) => fact.routes.length === 0).length,
+    0,
+  )
   return {
     blockers: {
       ...(bounded.blockedBy === undefined ? {} : { blockedBy: bounded.blockedBy }),
@@ -423,7 +581,7 @@ export function projectSystem2PayloadFacts(
       presentedTotal: built.shape.presentedTotal,
       ...(bounded.alternatives.routes === undefined ? {} : { routes: bounded.alternatives.routes }),
     },
-    shape: built.shape,
+    shape,
   }
 }
 
@@ -450,6 +608,8 @@ export function formatSystem2PayloadLine(shape: System2PayloadShape): string {
     ` unmetTools=${shape.unmetTools}` +
     ` missing=${shape.missing}` +
     ` blockedBy=${shape.blockedBy ? 1 : 0}` +
+    ` acquire=${shape.acquisitionRoutes}` +
+    ` acquireRefused=${shape.acquisitionRefused}` +
     ` routes=${shape.routes ? 1 : 0}` +
     ` refused=${shape.refused.length}` +
     ` absent=${shape.absent.length}` +

@@ -160,7 +160,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, MAX_AIR, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -181,6 +181,11 @@ import {
   StateFingerprintMemory,
 } from './moveFailMemory.ts'
 import type { MoveFailEntry, MoveFailureReason } from './moveFailMemory.ts'
+// The durable cross-action bound on one action's own typed outcome repeating
+// identically at the same target. The module owns the ONE bound; the controller
+// only observes and prunes.
+import { ACTION_REPEAT_EXHAUSTED_MARKER, ACTION_REPEAT_MARKER, ACTION_TARGET_RETIRED_MARKER, actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken, resolveRepeatedOutcomeLimit } from './repeatedOutcomeEscalation.ts'
+import type { RepeatedOutcomeEntryJson } from './repeatedOutcomeEscalation.ts'
 import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatAscentRefused, formatKnownResourceUnreachable, formatRetrieveStalled, pillarColumnUnsafeFromBlocks, planRetrievalEscalation, planVerticalApproachDetailed, resolveRetrievalStallTicks, selectPlaceableBlock } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
@@ -509,6 +514,23 @@ export interface JevAgentOptions {
   /** called when the durable local-motion record changes, so the HOST can persist it */
   onLocalOscillationChange?: (record: LocalOscillationRecordJson | null) => void
   /**
+   * The durable (action shape, cell, typed outcome) repeat ledger restored from
+   * the resident's class-A world memory. It is the DURABLE half of the
+   * cross-action escalation: the in-generation `ActionFailureEscalation` counter
+   * is erased by `progress=body` and by every hot reload, which is how the
+   * measured `ASCEND:habitat:p3_68_22` runaway re-issued 161 attempts at one
+   * cell with the same `apex_missed` outcome and never retired the target.
+   */
+  repeatedOutcomeEntries?: readonly RepeatedOutcomeEntryJson[]
+  /** called when the durable repeat ledger changes, so the HOST can persist it */
+  onRepeatedOutcomeChange?: (entries: readonly RepeatedOutcomeEntryJson[]) => void
+  /**
+   * The bound for the durable repeat ledger. Defaults to the module's one
+   * constant (`REPEATED_OUTCOME_LIMIT_DEFAULT`) via
+   * `resolveRepeatedOutcomeLimit`; it is never a second literal.
+   */
+  repeatedOutcomeLimit: number
+  /**
    * #44: minimum spacing between replans for the same summon reason. A second
    * replan inside the window (with unchanged inputs) reuses the current plan.
    */
@@ -610,6 +632,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   replanNoInfoEscalateCycles: resolveReplanNoInfoEscalateCycles(),
   actionFailureEscalateCycles: resolveActionFailureEscalateCycles(),
   waitStreakEscalateCycles: resolveWaitStreakEscalateCycles(),
+  repeatedOutcomeLimit: resolveRepeatedOutcomeLimit(),
   betaAbandonDeferCycles: resolveBetaAbandonDeferCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
   worldEpoch: 0,
@@ -1443,6 +1466,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'MOVE_FAILMEM',
   'MOVE_FAILMEM_RESET',
   'MOVE_TARGET_SKIPPED',
+  // The cross-action bound on one action's own bounded outcome repeating
+  // identically at one target. These three ARE the escalation, so they belong in
+  // the live record: the sibling `ACTION_FAILURE_REPEAT`/`ACTION_FAILURE_EXHAUSTED`
+  // pair was emitted with `logger.warn('agent', ...)` but never mirrored, and the
+  // measured run shows `ACTION_FAILURE_REPEAT=0` / `ACTION_FAILURE_EXHAUSTED=0`
+  // in 1.34M lines while one cell was re-issued 161 times. An unmirrored
+  // escalation is an escalation no reader and no gate can see.
+  ACTION_REPEAT_MARKER,
+  ACTION_REPEAT_EXHAUSTED_MARKER,
+  ACTION_TARGET_RETIRED_MARKER,
   'OSCILLATION_DETECTED',
   'RETURN_TO_KNOWN_RESOURCE',
   'RETRIEVE_STALLED',
@@ -2403,6 +2436,8 @@ export class JevController {
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
+  /** retirement evidence dedup: one `ACTION_TARGET_RETIRED` line per retirement, not per tick */
+  private readonly loggedRetiredRepeats = new Set<string>()
   private readonly stationApproachLogged = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
   private moveFailMemory: MoveFailMemory
@@ -2418,6 +2453,29 @@ export class JevController {
   private localOscillationInventory = ''
   /** serialized form of the last record handed to the HOST, so unchanged records are not re-proposed */
   private localOscillationPersisted = ''
+  /**
+   * The DURABLE cross-action escalation ledger: one entry per
+   * `(action shape, target cell)`, advanced only while the typed outcome AND the
+   * target's affordance fact signature are byte-identical. Seeded from class-A
+   * world memory at construction and written back through
+   * `onRepeatedOutcomeChange`, so a hot reload cannot launder a repeat the way it
+   * laundered the controller-scoped `ActionFailureEscalation` counter.
+   */
+  private repeatedOutcomes: RepeatedOutcomeEscalation
+  /** serialized form of the last ledger handed to the HOST, so unchanged ledgers are not re-proposed */
+  private repeatedOutcomesPersisted = ''
+  /**
+   * The affordance fact signature of every candidate the gate evaluated THIS
+   * tick, keyed by candidate id (`reachability.ts#reachabilityTargetSignature` -
+   * the target's own grounding facts, WITHOUT the body-relative vertical gap).
+   *
+   * The affordance plane computes this for every grounded candidate on every
+   * tick, and for a candidate that PASSES the gate it was discarded: only the
+   * withheld side's fingerprint ever had a consumer. It is exactly the fact the
+   * cross-action bound needs - "the target's grounding facts did not change" -
+   * and it deliberately excludes wall clock and fine body position.
+   */
+  private groundingFingerprints = new Map<string, string>()
   /**
    * Zero-observable-change route memory: (kind, target cell, stand cell, route
    * signature) -> attempts. The postcondition layer owns the verdict; this owns
@@ -2671,6 +2729,7 @@ export class JevController {
     this.moveFailMemory = this.createMoveFailMemory()
     this.localOscillation = restoreLocalOscillationRecord(this.options.localOscillationRecord ?? null)
     this.localOscillationPersisted = localOscillationPersistKey(this.localOscillation)
+    this.repeatedOutcomes = this.createRepeatedOutcomes()
     this.replanThrottle = new ReplanThrottle(
       this.options.replanThrottleMs,
       this.options.replanPositionDelta,
@@ -2816,6 +2875,8 @@ export class JevController {
     this.localOscillation = restoreLocalOscillationRecord(this.options.localOscillationRecord ?? null)
     this.localOscillationInventory = ''
     this.localOscillationPersisted = localOscillationPersistKey(this.localOscillation)
+    this.repeatedOutcomes = this.createRepeatedOutcomes()
+    this.repeatedOutcomesPersisted = JSON.stringify(this.repeatedOutcomes.snapshot())
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.harvestedGoalCount = 0
     this.semanticStateGeneration = 0
@@ -2865,6 +2926,42 @@ export class JevController {
       maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
       initialEntries: this.options.moveFailureEntries,
     })
+  }
+
+  /**
+   * The durable cross-action repeat ledger. `limit` comes from the module's ONE
+   * bound (`REPEATED_OUTCOME_LIMIT_DEFAULT`, overridable by
+   * `BUDDY_REPEATED_OUTCOME_LIMIT`); it is never re-derived here.
+   */
+  private createRepeatedOutcomes(): RepeatedOutcomeEscalation {
+    return new RepeatedOutcomeEscalation({
+      limit: this.options.repeatedOutcomeLimit,
+      initialEntries: this.options.repeatedOutcomeEntries,
+    })
+  }
+
+  /**
+   * Persist the ledger through the HOST-owned class-A store, deduped on the
+   * serialized form so an unchanged ledger proposes no delta at all. Mirrors
+   * `notifyMoveFailureMemory`.
+   */
+  private notifyRepeatedOutcomes(): void {
+    const callback = this.options.onRepeatedOutcomeChange
+    if (callback === undefined) return
+    const snapshot = this.repeatedOutcomes.snapshot()
+    const serialized = JSON.stringify(snapshot)
+    if (serialized === this.repeatedOutcomesPersisted) return
+    this.repeatedOutcomesPersisted = serialized
+    try {
+      callback(snapshot)
+    } catch (error) {
+      this.logger.warn(
+        'agent',
+        'REPEATED_OUTCOME_PERSIST_FAILED',
+        { message: error instanceof Error ? error.message : String(error) },
+        this.tickCounter,
+      )
+    }
   }
 
   private buildScheduler(): DecisionScheduler {
@@ -3362,6 +3459,14 @@ export class JevController {
         this.placementRetries.retiredItemSet(),
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
+      // The affordance plane evaluated every candidate's grounding facts this
+      // tick. Its fingerprint is the "did anything that could re-open this
+      // target change?" fact; for the candidates that PASSED the gate it had no
+      // consumer at all (only the withheld side is fed to the reachability proof
+      // memory), so the cross-action bound is where it finally lands.
+      this.groundingFingerprints = new Map(
+        grounded.reachability.map((entry) => [entry.candidate.id, entry.targetSignature]),
+      )
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       // The typed projection of the SAME refusal facts, for the System2 payload.
       // Rebuilt every tick from this tick's `grounded` result, so a summon can
@@ -3372,6 +3477,22 @@ export class JevController {
         reason: entry.result.reason,
         missing: entry.result.missingCapabilities.map(capabilityKey),
         suppressed: entry.suppressed,
+        // The GROUNDED ALTERNATIVE for each missing fact: the acquisition routes
+        // the same gate enumerated, or its typed refusal. Present only when the
+        // acquisition pass ran, so no route is ever invented here.
+        ...(entry.acquisition === undefined
+          ? {}
+          : {
+              acquisition: entry.acquisition.map((fact) => ({
+                missing: fact.missing,
+                routes: [...fact.routes],
+                reason: fact.reason,
+                item: fact.item,
+                count: fact.count,
+                held: fact.held,
+                tools: fact.tools,
+              })),
+            }),
       }))
       this.presentedCandidateFacts = grounded.candidates.map((candidate) => ({
         candidate: candidate.id,
@@ -3418,6 +3539,10 @@ export class JevController {
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
+      // The cross-action bound's consequence runs beside the coordinate failure
+      // memory's: a target this action provably cannot progress at is pruned the
+      // same mechanical way, which forces the offer onto a different target.
+      candidates = this.filterRepeatedOutcomeCandidates(candidates, state)
       // The gate's self-contained craft ladder runs before these controller
       // filters, so a move-failure-memory prune can strip the last productive
       // candidate. Backfill the deterministic craft step for the current craft
@@ -4199,6 +4324,11 @@ export class JevController {
         reach: this.options.reach,
         maxCandidateAgeTicks: this.options.maxCandidateAgeTicks,
         canComputePath: (position) => this.canComputePath(position),
+        // The SAME per-tick station-approach fact the candidate layer gates on
+        // (`reachabilityGateOptions()` is memoised per tick), so a station the
+        // grounding proved reachable through its interaction stand can never be
+        // refused here by a probe of the station's own cell.
+        stationApproach: this.reachabilityGateOptions().stationApproach ?? null,
       })
 
       const record = makeDecisionRecord({
@@ -6223,6 +6353,14 @@ export class JevController {
       control: taxonomy.control,
     })
     if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
+    // The cross-action bound: one settled action, one typed outcome, one target.
+    // Deliberately NOT gated on `progressKinds` containing `body` - the measured
+    // runaway was laundered by exactly that (an interleaved PILLAR_UP_STEP reports
+    // `progress=body` while the same action keeps concluding `apex_missed` at the
+    // same cell), and per `buddy-driver/AGENTS.md` section 5 body motion is never
+    // completion. Only a changed TYPED OUTCOME or a changed grounding fact
+    // signature restarts the streak.
+    this.noteRepeatedOutcome(result, candidate, truth.verified, taxonomy.progressKinds)
     this.noteAscendOutcome(result, candidate)
     // #360: feed the settled decision to the state-recurrence evidence. This runs
     // once per settled action (not per tick), and `body` progress deliberately
@@ -8137,10 +8275,11 @@ export class JevController {
       freshness: { measured: this.withheldFactsFingerprint, current: this.lastStateFingerprint },
     })
     if (built === null) {
+      const empty = { ...emptySystem2PayloadShape(), absent: ['blockers'] }
       this.logger.info(
         'system2',
-        formatSystem2PayloadLine(emptySystem2PayloadShape()),
-        { attached: false, absent: ['blockers'] },
+        formatSystem2PayloadLine(empty),
+        { attached: false, absent: empty.absent },
         this.tickCounter,
       )
       return null
@@ -12151,32 +12290,27 @@ export class JevController {
   }
 
   /**
-   * Can a body standing on this stance see the entity? ONE ray, the same call the
-   * cover logic makes (`bot.world.raycast`), from the eyes at the stance to the
-   * entity's aim point - the point `runAttack` looks at before it swings. Absence
-   * of a raycast (a structural double) answers `true`: "not occluded" is the
-   * fail-open direction here, so a missing world never refutes a visible mob.
+   * Can a body standing on this stance see the entity? Delegated to the sensor's
+   * own `entityVisibleFromEye` so the stance verdict and `EntityState.lineOfSight`
+   * answer with ONE implementation of one ray, to ONE point (the entity's aim
+   * point, `position + height / 2`). Two copies of this geometry is how the
+   * sensor could report `los=false` while the stance search found the mob plainly
+   * visible.
+   *
+   * Absence of a raycast (a structural double, a fixture) answers `true`: "not
+   * occluded" is the fail-open direction here, so a missing world never refutes a
+   * visible mob - which is exactly the previous behaviour of this method.
    */
   private botSeesEntityFrom(x: number, y: number, z: number, entityPosition: Vec3Json, height: number): boolean {
-    const world = this.bot.world as unknown as
-      | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
-      | undefined
-    if (world === undefined || typeof world.raycast !== 'function') return true
-    try {
-      const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
-      const eye = this.bot.entity.position.clone().set(x + 0.5, y + eyeHeight, z + 0.5)
-      const aim = this.bot.entity.position.clone().set(entityPosition.x, entityPosition.y + height / 2, entityPosition.z)
-      const dx = aim.x - eye.x
-      const dy = aim.y - eye.y
-      const dz = aim.z - eye.z
-      const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      if (!Number.isFinite(range) || range <= 0) return true
-      const direction = this.bot.entity.position.clone().set(dx / range, dy / range, dz / range)
-      const hit = world.raycast(eye, direction, range, null)
-      return hit === null || hit === undefined
-    } catch {
-      return true
-    }
+    if (this.bot.world === undefined || typeof this.bot.world.raycast !== 'function') return true
+    const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
+    return (
+      entityVisibleFromEye(
+        this.bot,
+        { x: x + 0.5, y: y + eyeHeight, z: z + 0.5 },
+        { position: entityPosition, height },
+      ) !== false
+    )
   }
 
   /**
@@ -12376,6 +12510,160 @@ export class JevController {
     }
     this.noteCandidateFailure(candidate.id)
     this.recordMoveFailure(candidate, 'unreachable')
+  }
+
+  /**
+   * The cross-action bound. One settled action, one typed outcome, one target.
+   *
+   * The measured class this closes (`m3-live`, read-only): `ASCEND:habitat:p3_68_22`
+   * produced 184 typed failures (`PILLAR_FAIL step=apex reason=apex_missed` 160,
+   * `step=place reason=refused` 23, one timeout) across 161 attempts in 24m38s at
+   * ONE cell, interleaved with `PILLAR_UP_STEP` successes, with no
+   * `PILLAR_RETIRE`/`PILLAR_RELOCATE` and zero escalations of any kind.
+   *
+   * It is deliberately NOT gated on `progressKinds` containing `body`: the
+   * interleaved step reports `progress=body` while the same action keeps
+   * concluding the same typed outcome at the same cell, and per
+   * `buddy-driver/AGENTS.md` section 5 body motion is never completion. The
+   * streak is advanced only while the typed outcome AND the target's affordance
+   * fact signature are byte-identical, so a genuinely new fact still restarts it.
+   */
+  private noteRepeatedOutcome(
+    result: ExecutionResult,
+    candidate: Candidate,
+    verified: boolean,
+    progressKinds: readonly string[],
+  ): void {
+    if (!isRepeatTrackedKind(candidate.kind)) return
+    const dimension = this.currentDimension()
+    const actionShape = actionShapeOf(result.actionId)
+    const cell = repeatedOutcomeCell(dimension, candidate.target, this.bot.entity.position)
+    const outcome = repeatedOutcomeToken({ failure: result.failure, status: result.status, verified })
+    // The affordance fingerprint is the gate's own "did any fact that could
+    // re-open this target change?" digest; when the gate did not evaluate this
+    // candidate this tick, a stable world-identity token stands in - never the
+    // body position, which is what laundered the measured loop.
+    const affordanceFingerprint =
+      this.groundingFingerprints.get(candidate.id) ??
+      this.groundingFingerprints.get(result.actionId) ??
+      'no-affordance-evaluation'
+    const factSignature = repeatedOutcomeFactSignature({
+      affordanceFingerprint,
+      planIdentity: this.queue.current?.id ?? null,
+      worldKey: `${dimension}|epoch=${this.options.worldEpoch}`,
+    })
+    const decision = this.repeatedOutcomes.note({
+      actionId: result.actionId,
+      actionShape,
+      cell,
+      outcome,
+      failureCode: result.failure,
+      // `body` is mechanical motion, not semantic progress (`strategicStall.ts`
+      // keeps its window open across it, and the taxonomy's semantic kinds are
+      // `goal`/`search`). The measured runaway alternated a `progress=body`
+      // success with an `apex_missed` failure at ONE cell for 24m38s with
+      // `progressDelta=0` on both halves; reading the success half as new
+      // information is what kept every existing counter at 1.
+      semanticProgress: repeatedOutcomeSemanticProgress({
+        progressKinds,
+        itemsGained: result.itemsGained,
+        blockRemoved: result.blockRemoved === true,
+      }),
+      factSignature,
+      now: Date.now(),
+    })
+    if (decision.count > 1) {
+      this.logger.warn(
+        'agent',
+        formatActionRepeat(decision),
+        {
+          actionId: result.actionId,
+          kind: candidate.kind,
+          cell,
+          outcome,
+          count: decision.count,
+          limit: decision.limit,
+          restarted: decision.restarted,
+          escalated: decision.escalate,
+        },
+        this.tickCounter,
+      )
+    }
+    if (decision.escalate) {
+      this.logger.warn(
+        'agent',
+        // `decision.line` is the escalation form when `escalate` is true; it names
+        // the action, the shape, the cell, the repeated outcome, the count, the
+        // bound and the consequence. Mirrored, so it reaches the live record.
+        decision.line,
+        {
+          actionId: result.actionId,
+          kind: candidate.kind,
+          cell,
+          outcome,
+          count: decision.count,
+          limit: decision.limit,
+          bound: decision.limit,
+          consequence: 'retire_target',
+          boundary: 'mechanical_invalidity',
+        },
+        this.tickCounter,
+      )
+    }
+    if (decision.escalate || decision.restarted !== null) this.notifyRepeatedOutcomes()
+  }
+
+  /**
+   * The consequence of the cross-action bound: an `(action shape, cell)` proven
+   * unable to progress there leaves the offered set, which forces the offer onto
+   * a different target - the bounded relocation. Same mechanical-invalidity shape
+   * as `filterMoveCandidates`, and it never ranks or substitutes a semantic
+   * alternative: what remains is still offered to Jev unchanged.
+   */
+  private filterRepeatedOutcomeCandidates(
+    candidates: readonly Candidate[],
+    state: WorldState,
+    log = true,
+  ): Candidate[] {
+    const { kept, withheld } = filterRetiredRepeats(
+      candidates,
+      this.repeatedOutcomes,
+      state.self.dimension,
+      this.bot.entity.position,
+    )
+    if (!log) return kept
+    for (const entry of withheld) {
+      // Deduped per retirement so a retired target is ONE typed line, not a
+      // per-tick flood. A re-retirement after a fact change carries a new count,
+      // so it logs again.
+      const dedupKey = `${entry.key}|${entry.outcome}|${entry.count}`
+      if (this.loggedRetiredRepeats.has(dedupKey)) continue
+      this.loggedRetiredRepeats.add(dedupKey)
+      this.logger.warn(
+        'agent',
+        formatActionTargetRetired({
+          actionId: entry.candidate.id,
+          actionShape: entry.actionShape,
+          cell: entry.cell,
+          outcome: entry.outcome,
+          count: entry.count,
+          limit: entry.limit,
+        }),
+        {
+          actionId: entry.candidate.id,
+          kind: entry.candidate.kind,
+          key: entry.key,
+          actionShape: entry.actionShape,
+          cell: entry.cell,
+          outcome: entry.outcome,
+          count: entry.count,
+          limit: entry.limit,
+          consequence: 'withheld_from_offer',
+        },
+        this.tickCounter,
+      )
+    }
+    return kept
   }
 
   /** #8: drop movement targets still inside their blacklist cooldown. */
