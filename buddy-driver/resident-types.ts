@@ -1114,9 +1114,11 @@ export interface AcceptanceRecord {
 }
 
 /**
- * One generation of the reloadable intelligence. `quiesce()` must cancel every
- * in-flight action, stop the scheduler and persist the goal-queue ledger, while
- * leaving the Mineflayer connection untouched.
+ * One generation of the reloadable intelligence. `quiesce()` stops the scheduler
+ * and persists the goal-queue ledger while leaving the Mineflayer connection
+ * untouched. Ordinarily it cancels in-flight work; after model authority is
+ * withdrawn, it lets only an already-committed bounded safety escape reach its
+ * terminal boundary before HOST revokes the lease.
  */
 export interface ResidentGeneration {
   readonly id: string
@@ -1127,7 +1129,7 @@ export interface ResidentGeneration {
   attach(): void
   /** begin scheduling. MUST assert the actuation lease for this id first. */
   start(): void
-  /** stop timers/actions and persist; resolves after the in-flight action settles (bounded). */
+  /** stop timers/actions and persist; resolves after bounded in-flight settlement. */
   quiesce(): Promise<void>
   /** best-effort synchronous teardown. */
   dispose(): void

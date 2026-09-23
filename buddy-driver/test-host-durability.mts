@@ -835,7 +835,7 @@ addCase('#384(a) the control server is closed (awaited) BEFORE the lock is relea
       log: cap.log,
       alreadyShuttingDown: () => false,
       markShuttingDown: () => order.push('mark'),
-      quiesce: () => order.push('quiesce'),
+      quiesce: () => { order.push('quiesce') },
       writeAcceptance: () => {
         order.push('acceptance')
         return 'acceptance.json'
@@ -896,7 +896,7 @@ addCase('#384(b) fault-injected: an open control client cannot delay the close p
       log: cap.log,
       alreadyShuttingDown: () => false,
       markShuttingDown: () => order.push('mark'),
-      quiesce: () => order.push('quiesce'),
+      quiesce: () => { order.push('quiesce') },
       writeAcceptance: () => 'acceptance.json',
       persistState: () => durableWriteLanded('shutdown', 1),
       disposeGeneration: () => undefined,
@@ -930,7 +930,7 @@ addCase('#384(c) ordinary case: a re-entrant shutdown call is a no-op (one exit,
       down = true
       order.push('mark')
     },
-    quiesce: () => order.push('quiesce'),
+    quiesce: () => { order.push('quiesce') },
     writeAcceptance: () => 'acceptance.json',
     persistState: () => durableWriteLanded('shutdown', 1),
     disposeGeneration: () => undefined,
@@ -986,6 +986,34 @@ addCase('#384(d) fault-injected: a throwing shutdown step never skips close/rele
   const errors = cap.events.filter((e) => e.event === 'ERROR').length
   const pass = outcome.ran && outcome.serverClosed && outcome.lockReleased && order.join('>') === 'mark>closeServer>releaseLock>exit:0' && errors >= 5
   return { pass, detail: `order=[${order.join('>')}] errors=${errors}` }
+})
+
+addCase('#384(e) shutdown awaits bounded generation quiescence before writing or disposing', async () => {
+  const cap = capture()
+  const order: string[] = []
+  let releaseQuiesce: () => void = () => {}
+  const quiesceGate = new Promise<void>((resolve) => { releaseQuiesce = resolve })
+  const shutdown = runShutdownSequence({
+    log: cap.log,
+    alreadyShuttingDown: () => false,
+    markShuttingDown: () => order.push('mark'),
+    quiesce: async () => { order.push('quiesce:start'); await quiesceGate; order.push('quiesce:terminal') },
+    writeAcceptance: () => { order.push('acceptance'); return 'acceptance.json' },
+    persistState: () => { order.push('persist'); return durableWriteLanded('shutdown', 1) },
+    disposeGeneration: () => order.push('dispose'),
+    disconnect: () => order.push('disconnect'),
+    closeServer: async () => { order.push('closeServer'); return true },
+    releaseLock: () => order.push('releaseLock'),
+    exit: (code) => order.push(`exit:${code}`),
+    exitDelayMs: 0,
+  })
+  await Promise.resolve()
+  const held = order.join('>') === 'mark>quiesce:start'
+  releaseQuiesce()
+  const outcome = await shutdown
+  const expected = 'mark>quiesce:start>quiesce:terminal>acceptance>persist>dispose>disconnect>closeServer>releaseLock>exit:0'
+  const pass = held && outcome.ran && order.join('>') === expected
+  return { pass, detail: `held=${held} order=${order.join('>')}` }
 })
 
 // ===========================================================================

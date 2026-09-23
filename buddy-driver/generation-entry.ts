@@ -3238,14 +3238,16 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   async function quiesce(): Promise<void> {
     try {
-      controller.stop()
+      await controller.quiesce()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'quiesce.stop', message })
     }
     proposeLedger()
-    // Bounded settle: the executor cancels the in-flight action on stop.
-    await Promise.race([runPromise ?? Promise.resolve(), delay(3000, ctx.resources)])
+    // `controller.quiesce()` awaits an already-committed bounded escape during
+    // model recovery. Its declared Skill budget plus drain grace is the terminal
+    // bound; HOST must not revoke the lease on an unrelated 3 s timer.
+    await (runPromise ?? Promise.resolve())
   }
 
   function proposeLedger(): void {

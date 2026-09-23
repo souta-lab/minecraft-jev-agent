@@ -33,8 +33,8 @@ export async function resetWorldEpoch(ports: WorldEpochResetPorts): Promise<{ ep
   const previous = ports.getActive()
   if (previous !== null) {
     ports.detachActive(previous)
-    ports.revokeLease('worldreset')
     await previous.quiesce()
+    ports.revokeLease('worldreset')
     ports.disposeActive(previous)
   }
   const epoch = ports.incrementEpoch()

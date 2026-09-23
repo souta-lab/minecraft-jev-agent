@@ -121,7 +121,7 @@ import type {
   SkillTerminalReason,
 } from './jevSemanticProjection.ts'
 import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
-import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
+import type { ActuationMode, CurrentAction, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
@@ -2221,6 +2221,7 @@ export function betaAbandonProgressObserved(
 }
 
 export class JevController {
+  private static readonly MODEL_RECOVERY_DRAIN_GRACE_MS = 1_000
   private readonly bot: Bot
   private options: JevAgentOptions
 
@@ -2782,6 +2783,8 @@ export class JevController {
   private running = false
   /** HOST has withdrawn semantic authority; only a pre-committed safety Skill may settle. */
   private modelRecoveryStopping = false
+  /** Hard upper bound for settling a committed safety Skill during model recovery. */
+  private modelRecoveryDrainTimer: NodeJS.Timeout | null = null
   private ticking = false
   private startedAt = 0
   private completion: Promise<RunSummary> | null = null
@@ -3170,6 +3173,12 @@ export class JevController {
     this.finish('stopped-by-caller', this.runSuccess())
   }
 
+  /** HOST quiesce fence: await the ordinary stop or the current recovery drain. */
+  async quiesce(): Promise<void> {
+    this.stop()
+    await this.wait()
+  }
+
   /**
    * HOST model recovery withdraws all future decision authority immediately. If a
    * bounded, already-committed escape Skill is running, keep its lease only until
@@ -3184,23 +3193,9 @@ export class JevController {
     this.pendingTrigger = null
     this.deferredTrigger = null
 
-    const current = this.executor.current
+    const current = this.modelRecoveryDrainAction()
     const commitment = current?.commitment ?? null
-    const bounded =
-      commitment !== null &&
-      commitment.candidateId === current?.id &&
-      commitment.budget.ms !== null &&
-      Number.isFinite(commitment.budget.ms) &&
-      commitment.budget.ms > 0
-    const escapeSkill =
-      bounded &&
-      ((current?.kind === 'RETREAT' && commitment.skillKind === 'retreat') ||
-        (current?.kind === 'MOVE' &&
-          commitment.skillKind === 'walk_to' &&
-          commitment.allowedEffects.mayMove &&
-          (current.id.startsWith('MOVE:env:') || current.id.startsWith('ASCEND:breath:'))))
-
-    if (current === null || current.status !== 'running' || !escapeSkill) {
+    if (current === null || commitment === null) {
       this.logger.warn(
         'agent',
         `MODEL_RECOVERY_DRAIN phase=cancel actionId=${current?.id ?? 'none'} kind=${current?.kind ?? 'none'} reason=no_bounded_escape_skill`,
@@ -3224,6 +3219,45 @@ export class JevController {
       },
       this.tickCounter,
     )
+    const budgetMs = commitment.budget.ms as number
+    const drainDeadlineMs = Math.max(
+      0,
+      current.startedAt + budgetMs + JevController.MODEL_RECOVERY_DRAIN_GRACE_MS - Date.now(),
+    )
+    this.modelRecoveryDrainTimer = setTimeout(() => {
+      this.modelRecoveryDrainTimer = null
+      const stillRunning = this.executor.current
+      if (stillRunning?.epoch !== current.epoch || stillRunning.status !== 'running') {
+        this.finish('stopped-by-caller', false)
+        return
+      }
+      this.logger.error(
+        'agent',
+        `MODEL_RECOVERY_DRAIN phase=deadline actionId=${current.id} kind=${current.kind} budgetMs=${budgetMs} graceMs=${JevController.MODEL_RECOVERY_DRAIN_GRACE_MS} -> cancel over-budget Skill`,
+        {
+          actionId: current.id,
+          kind: current.kind,
+          commitmentId: commitment.commitmentId,
+          budgetMs,
+          graceMs: JevController.MODEL_RECOVERY_DRAIN_GRACE_MS,
+          elapsedMs: Date.now() - current.startedAt,
+        },
+        this.tickCounter,
+      )
+      try {
+        this.executor.cancelCurrent('model recovery drain exceeded the committed Skill budget')
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.logger.error('agent', `MODEL_RECOVERY_DRAIN phase=cancel_error actionId=${current.id} error=${message}`, {
+          actionId: current.id,
+          kind: current.kind,
+          commitmentId: commitment.commitmentId,
+          error: message,
+        }, this.tickCounter)
+      } finally {
+        this.finish('stopped-by-caller', false)
+      }
+    }, drainDeadlineMs)
     void current.completion.then(
       (result) => {
         this.logger.warn(
@@ -3256,6 +3290,29 @@ export class JevController {
   wait(): Promise<RunSummary> {
     if (this.completion !== null) return this.completion
     return Promise.resolve(this.summary('stopped-by-caller', this.runSuccess()))
+  }
+
+  private modelRecoveryDrainAction(): CurrentAction | null {
+    const current = this.executor.current
+    const commitment = current?.commitment ?? null
+    if (
+      current === null ||
+      current.status !== 'running' ||
+      commitment === null ||
+      commitment.candidateId !== current.id ||
+      commitment.budget.ms === null ||
+      !Number.isFinite(commitment.budget.ms) ||
+      commitment.budget.ms <= 0
+    ) {
+      return null
+    }
+    const escapeSkill =
+      (current.kind === 'RETREAT' && commitment.skillKind === 'retreat') ||
+      (current.kind === 'MOVE' &&
+        commitment.skillKind === 'walk_to' &&
+        commitment.allowedEffects.mayMove &&
+        (current.id.startsWith('MOVE:env:') || current.id.startsWith('ASCEND:breath:')))
+    return escapeSkill ? current : null
   }
 
   // -------------------------------------------------------------------------
@@ -13320,6 +13377,24 @@ export class JevController {
 
   private finish(stopped: RunSummary['stopped'], success: boolean): void {
     if (!this.running) return
+    if (this.modelRecoveryStopping && stopped !== 'disconnected') {
+      const draining = this.modelRecoveryDrainAction()
+      if (draining !== null) {
+        this.logger.warn(
+          'agent',
+          `MODEL_RECOVERY_DRAIN phase=finish_deferred actionId=${draining.id} kind=${draining.kind} requestedReason=${stopped}`,
+          {
+            actionId: draining.id,
+            kind: draining.kind,
+            commitmentId: draining.commitment?.commitmentId ?? null,
+            requestedReason: stopped,
+            epoch: draining.epoch,
+          },
+          this.tickCounter,
+        )
+        return
+      }
+    }
     this.running = false
     this.saveLedger()
     this.scheduler.stop()
@@ -13327,6 +13402,10 @@ export class JevController {
     if (this.watchdog !== null) {
       clearTimeout(this.watchdog)
       this.watchdog = null
+    }
+    if (this.modelRecoveryDrainTimer !== null) {
+      clearTimeout(this.modelRecoveryDrainTimer)
+      this.modelRecoveryDrainTimer = null
     }
     this.bot.removeListener('end', this.onBotEnd)
     this.bot.removeListener('kicked', this.onBotKicked)

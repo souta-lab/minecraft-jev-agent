@@ -19,7 +19,7 @@ addCase('#25 old world keys are rejected while the new epoch remains valid', asy
   return { pass, detail: `oldAccepted=${acceptsWorldMemoryProposal(oldKey, newKey)} newAccepted=${acceptsWorldMemoryProposal(newKey, { ...newKey })}` }
 })
 
-addCase('#25 reset quiesces and revokes before epoch commit, then starts fresh', async () => {
+addCase('#25 reset quiesces before revoking and epoch commit, then starts fresh', async () => {
   const events: string[] = []
   const generation: WorldEpochGeneration = {
     id: 'gen-old',
@@ -39,9 +39,36 @@ addCase('#25 reset quiesces and revokes before epoch commit, then starts fresh',
     persist: () => events.push('persist'),
     startGeneration: async () => { started = true; events.push(`start:${epoch}`); return true },
   })
-  const expected = ['detach', 'revoke:worldreset', 'quiesce', 'dispose', 'epoch:5', 'memory:new-epoch', 'persist', 'start:5']
+  const expected = ['detach', 'quiesce', 'revoke:worldreset', 'dispose', 'epoch:5', 'memory:new-epoch', 'persist', 'start:5']
   const pass = result.epoch === 5 && result.started && started && events.join('|') === expected.join('|')
   return { pass, detail: `events=${events.join('|')} result=${JSON.stringify(result)}` }
+})
+
+addCase('#25 recovery reset retains lease until an in-flight safety quiesce reaches its boundary', async () => {
+  const events: string[] = []
+  let finishQuiesce: () => void = () => {}
+  const quiesced = new Promise<void>((resolve) => { finishQuiesce = resolve })
+  let finished = false
+  const reset = resetWorldEpoch({
+    getActive: () => ({
+      id: 'gen-recovery',
+      quiesce: async () => { events.push('quiesce:start'); await quiesced; finished = true; events.push('quiesce:terminal') },
+      dispose: () => { events.push('dispose') },
+    }),
+    detachActive: () => events.push('detach'),
+    revokeLease: (reason) => events.push(`revoke:${reason}`),
+    disposeActive: () => events.push('dispose'),
+    incrementEpoch: () => { events.push('epoch'); return 2 },
+    initializeMemory: () => events.push('memory'),
+    persist: () => events.push('persist'),
+    startGeneration: async () => { events.push('start'); return true },
+  })
+  await Promise.resolve()
+  const held = !finished && !events.includes('revoke:worldreset') && !events.includes('dispose')
+  finishQuiesce()
+  await reset
+  const pass = held && finished && events.indexOf('quiesce:terminal') < events.indexOf('revoke:worldreset')
+  return { pass, detail: `held=${held} events=${events.join('|')}` }
 })
 
 addCase('#25 cache namespace changes with world epoch and preserves full key identity', async () => {

@@ -716,8 +716,8 @@ export interface ShutdownSequenceOptions {
   log: SnapshotLog
   alreadyShuttingDown: () => boolean
   markShuttingDown: () => void
-  /** stop timers/arbiter and emit the SHUTDOWN marker. */
-  quiesce: () => void
+  /** Stop timers/arbiter, await active generation quiescence, and emit SHUTDOWN. */
+  quiesce: () => void | Promise<void>
   /** write the acceptance record; may throw (guarded by the sequence). */
   writeAcceptance: () => string | null
   persistState: () => DurableWriteOutcome
@@ -747,6 +747,14 @@ const guard = (log: SnapshotLog, where: string, step: () => void): void => {
   }
 }
 
+const guardAsync = async (log: SnapshotLog, where: string, step: () => void | Promise<void>): Promise<void> => {
+  try {
+    await step()
+  } catch (error) {
+    log('ERROR', { where, message: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 /**
  * The one graceful-shutdown order. Invariants:
  *   - re-entrant calls are no-ops (the first caller owns the sequence);
@@ -761,7 +769,7 @@ export async function runShutdownSequence(options: ShutdownSequenceOptions): Pro
     return { ran: false, acceptancePath: null, serverClosed: false, lockReleased: false }
   }
   options.markShuttingDown()
-  guard(options.log, 'shutdown.quiesce', () => options.quiesce())
+  await guardAsync(options.log, 'shutdown.quiesce', options.quiesce)
 
   let acceptancePath: string | null = null
   guard(options.log, 'shutdown.writeAcceptance', () => {

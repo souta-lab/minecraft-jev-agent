@@ -1034,12 +1034,12 @@ async function startGeneration(trigger: string): Promise<boolean> {
     // actuation lease. Dispose the old one first.
     const old = generation
     generation = null
-    if (leaseManager.isActive(old.id)) revokeLease('replaced-by-new-generation')
     try {
       await old.quiesce()
     } catch {
       // best effort
     }
+    if (leaseManager.isActive(old.id)) revokeLease('replaced-by-new-generation')
     log('LISTENERS', { phase: 'after_quiesce', generationId: old.id, listeners: listenerCounts() })
     disposeGeneration(old)
   }
@@ -2518,14 +2518,16 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     const snapshot = mode === 'soft' ? snapshotRehearsalState() : null
     const old = generation
     generation = null
-    revokeLease('simdeath')
     if (old !== null) {
       try {
         await old.quiesce()
       } catch {
         // best effort
       }
+      if (leaseManager.isActive(old.id)) revokeLease('simdeath')
       old.dispose()
+    } else {
+      revokeLease('simdeath')
     }
     if (mode === 'hard') {
       for (const item of liveBot.inventory.items()) {
@@ -2719,7 +2721,7 @@ async function shutdown(reason: string): Promise<void> {
     markShuttingDown: () => {
       shuttingDown = true
     },
-    quiesce: () => {
+    quiesce: async () => {
       clearListenerBaselineTimer()
       if (generationConnectionRetryTimer !== null) {
         clearTimeout(generationConnectionRetryTimer)
@@ -2727,6 +2729,14 @@ async function shutdown(reason: string): Promise<void> {
       }
       reloadArbiter?.stop()
       log('SHUTDOWN', { reason })
+      const active = generation
+      if (active !== null) {
+        try {
+          await active.quiesce()
+        } finally {
+          if (leaseManager.isActive(active.id)) revokeLease('shutdown')
+        }
+      }
     },
     writeAcceptance: () => {
       let acceptance: string | null = null
@@ -2741,8 +2751,9 @@ async function shutdown(reason: string): Promise<void> {
     persistState: () => saveState('shutdown'),
     disposeGeneration: () => {
       if (generation !== null) {
-        disposeGeneration(generation)
+        const active = generation
         generation = null
+        disposeGeneration(active)
       }
     },
     disconnect: () => {

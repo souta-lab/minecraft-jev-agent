@@ -138,4 +138,46 @@ describe('model authority recovery host policy', () => {
     expect(body.slice(gate, moduleLoad)).toContain("reason: 'model-recovery-backoff'")
     expect(body.slice(gate, defer)).toContain('recoveryGate.delayMs')
   })
+
+  test('host quiesce drains the controller before revoking an incumbent lease', () => {
+    const generationSource = readFileSync(new URL('./generation-entry.ts', import.meta.url), 'utf8')
+    const quiesceStart = generationSource.indexOf('async function quiesce(): Promise<void>')
+    const quiesceEnd = generationSource.indexOf('\n  function proposeLedger()', quiesceStart)
+    const quiesceBody = generationSource.slice(quiesceStart, quiesceEnd)
+    expect(quiesceStart).toBeGreaterThanOrEqual(0)
+    expect(quiesceEnd).toBeGreaterThan(quiesceStart)
+    expect(quiesceBody).toContain('await controller.quiesce()')
+    expect(quiesceBody).not.toContain('Promise.race')
+
+    const runner = readFileSync(new URL('./agent-runner.mts', import.meta.url), 'utf8')
+    const startGeneration = runner.indexOf('async function startGeneration(trigger: string)')
+    const startGenerationEnd = runner.indexOf('\nfunction scheduleGenerationRestart(', startGeneration)
+    const startBody = runner.slice(startGeneration, startGenerationEnd)
+    const replacementStart = startBody.indexOf('if (generation !== null)')
+    const replacementEnd = startBody.indexOf('const mod = await loadGenerationModule(false)', replacementStart)
+    const replacementBody = startBody.slice(replacementStart, replacementEnd)
+    expect(replacementBody.indexOf('await old.quiesce()')).toBeGreaterThanOrEqual(0)
+    expect(replacementBody.indexOf('await old.quiesce()')).toBeLessThan(
+      replacementBody.indexOf("revokeLease('replaced-by-new-generation')"),
+    )
+
+    const simdeathStart = runner.indexOf("if (cmd === 'simdeath'")
+    const simdeathEnd = runner.indexOf("if (mode === 'hard')", simdeathStart)
+    const simdeathBody = runner.slice(simdeathStart, simdeathEnd)
+    expect(simdeathBody.indexOf('await old.quiesce()')).toBeGreaterThanOrEqual(0)
+    expect(simdeathBody.indexOf('await old.quiesce()')).toBeLessThan(simdeathBody.indexOf("revokeLease('simdeath')"))
+
+    const shutdownStart = runner.indexOf('async function shutdown(reason: string)')
+    const shutdownQuiesce = runner.indexOf('quiesce: async () =>', shutdownStart)
+    const shutdownDispose = runner.indexOf('disposeGeneration: () =>', shutdownQuiesce)
+    const shutdownBody = runner.slice(shutdownQuiesce, shutdownDispose)
+    expect(shutdownStart).toBeGreaterThanOrEqual(0)
+    expect(shutdownDispose).toBeGreaterThan(shutdownQuiesce)
+    expect(shutdownBody.indexOf('await active.quiesce()')).toBeGreaterThanOrEqual(0)
+    expect(shutdownBody.indexOf('await active.quiesce()')).toBeLessThan(shutdownBody.indexOf("revokeLease('shutdown')"))
+
+    const worldEpoch = readFileSync(new URL('./world-epoch.ts', import.meta.url), 'utf8')
+    expect(worldEpoch.indexOf('await previous.quiesce()')).toBeGreaterThanOrEqual(0)
+    expect(worldEpoch.indexOf('await previous.quiesce()')).toBeLessThan(worldEpoch.indexOf("ports.revokeLease('worldreset')"))
+  })
 })
