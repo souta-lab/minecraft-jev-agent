@@ -1187,6 +1187,45 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission, intervalMs, snapshot, worldProbe }
 }
 
+function bindProbeToSummary(summary, probe) {
+  const probeBinding = probe?.binding ?? null
+  const summaryWorld = normalizeWorldKey(summary?.run?.worldKey)
+  const probeWorld = normalizeWorldKey(probeBinding?.probeWorld)
+  const sameRun = typeof summary?.run?.id === 'string' && typeof probeBinding?.probeRunId === 'string'
+    ? summary.run.id === probeBinding.probeRunId
+    : null
+  const sameWorld = summaryWorld !== null && probeWorld !== null
+    ? summaryWorld.serverId === probeWorld.serverId
+      && summaryWorld.dimension === probeWorld.dimension
+      && summaryWorld.worldEpoch === probeWorld.worldEpoch
+    : null
+  const sameGeneration = typeof summary?.run?.generationId === 'string' && typeof probeBinding?.probeGenerationId === 'string'
+    ? summary.run.generationId === probeBinding.probeGenerationId
+    : null
+  const status = sameRun === true && sameWorld === true && sameGeneration === true
+    ? 'aligned'
+    : [sameRun, sameWorld, sameGeneration].includes(false) ? 'mismatch' : 'unknown'
+  return {
+    ...probe,
+    summaryBinding: {
+      status,
+      sameRun,
+      sameWorld,
+      sameGeneration,
+      summary: {
+        runId: summary?.run?.id ?? null,
+        generationId: summary?.run?.generationId ?? null,
+        worldKey: summaryWorld,
+      },
+      probe: {
+        runId: probeBinding?.probeRunId ?? null,
+        generationId: probeBinding?.probeGenerationId ?? null,
+        worldKey: probeWorld,
+      },
+    },
+  }
+}
+
 function htmlPage() {
   return String.raw`<!doctype html>
 <html lang="ja">
@@ -1320,8 +1359,15 @@ export function startObserverServer(options = {}) {
         return Response.json(await observer.snapshot(), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/ai-summary') {
-        const snapshot = await observer.snapshot()
-        return Response.json(buildAiSummary(snapshot), { headers: { 'cache-control': 'no-store' } })
+        const [snapshot, probe] = await Promise.all([
+          observer.snapshot(),
+          observer.worldProbe({ radius: 6, verticalRadius: 3 }),
+        ])
+        const summary = buildAiSummary(snapshot)
+        return Response.json({
+          ...summary,
+          currentWorldProbe: bindProbeToSummary(summary, probe),
+        }, { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/world-probe') {
         const radiusValue = Number(url.searchParams.get('radius') ?? 6)

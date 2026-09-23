@@ -1,9 +1,19 @@
 # AI Buddy read-only observer
 
 The observer serves a human dashboard at `http://127.0.0.1:4173/` and a compact
-machine view at `http://127.0.0.1:4173/api/ai-summary`. It reads the resident
-`report`, the run-scoped `buddy.log` tail, and a bounded tail of
-`logs/jev/jev-calls.jsonl`; it does not issue Minecraft actions.
+machine view at `http://127.0.0.1:4173/api/ai-summary`. The AI summary joins
+the resident `report`, run-scoped `buddy.log` tail, a bounded tail of
+`logs/jev/jev-calls.jsonl`, and one read-only current world probe; it does not
+issue Minecraft actions.
+
+`/api/ai-summary` returns `currentWorldProbe` alongside the model decision
+snapshot. The probe samples player truth, nearby blocks and entities within
+radius 6 / vertical radius 3. Its `summaryBinding.status` is `aligned` only
+when run, world epoch/dimension and generation all match the summary. If a
+death, reconnect or generation transition occurs between reads, the binding
+shows `mismatch`; keep the decision-time snapshot and current probe separate.
+The probe is on-demand per summary request and does not add work to the
+observer's regular update loop.
 
 For a fresh local scan around the resident, request
 `http://127.0.0.1:4173/api/world-probe?radius=6&verticalRadius=3`. This
