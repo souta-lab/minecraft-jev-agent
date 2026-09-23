@@ -353,7 +353,16 @@ addCase('(a5) an exhausted trajectory exposes policy alternatives and hard-inval
     step: { x: FEET_CELL.x, y: FEET_CELL.y, z: FEET_CELL.z - 1 },
   }
   const failed = stoneStep(feet, 'W', -1, 0)
-  const protectedStep = stoneStep(feet, 'S', 0, 1, { digName: 'crafting_table' })
+  const protectedStepBase = stoneStep(feet, 'S', 0, 1)
+  const protectedStep: DescentOption = {
+    ...protectedStepBase,
+    digName: 'crafting_table',
+    // `descentDigPlan` consumes the explicit profile when present; make the
+    // floor cell itself protected so this route is mechanically invalid.
+    digs: protectedStepBase.digs?.map((dig) =>
+      dig.cell === protectedStepBase.floor ? { ...dig, name: 'crafting_table' } : dig,
+    ),
+  }
   const unsafe = stoneStep(feet, 'D', 0, 0, { safe: false, refusal: 'hazard', reason: 'lava in step' })
   const failedId = `DESCEND:down:W:b${failed.floor.x}_${failed.floor.y}_${failed.floor.z}`
   const state = worldState({
