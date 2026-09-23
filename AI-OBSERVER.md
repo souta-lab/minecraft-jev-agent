@@ -26,6 +26,22 @@ ID, or by an explicitly inferred stable report bracket if both reports and the
 sample keep the same run/world while the state response omits that ID. A
 mismatched direct ID, or an unstable bracket when the state has no ID, leaves
 generation alignment unknown/partial.
+The `worldCache` object reports the player's chunk, a bounded list/count of
+Mineflayer's loaded columns, which columns overlap the requested probe and
+whether each is loaded, plus the dimension-provenance classification and load /
+unload timestamps. `worldCacheBinding` checks that snapshot's run, world,
+generation and capture time against the enclosing state response. Unloaded,
+unattributed and foreign-dimension columns remain unknown; the diagnostic does
+not treat them as air or infer a route. `worldCacheReadability` distinguishes an
+unbound provenance view from unloaded columns and foreign / unknown provenance.
+`worldCacheCapturedAt` gives the exact cache-sample timestamp. `entityCache` and
+`entityCacheBinding` show the corresponding Mineflayer local entity-cache scope;
+an empty nearby list does not establish that the server has no nearby entities.
+`area.supportEvidence` is labeled as current player footing only if its support
+cell lies inside the scanned bounds and matches the same capture's player
+position and timestamp. Otherwise `supportScopeStatus` keeps it unverified or
+marks it outside the requested sample; do not join stale support from another
+generation or timestamp to the current player.
 Local blocks and entities do not prove a village, fortress, or stronghold, so
 structure detection stays unknown until a structure or POI sensor is added.
 

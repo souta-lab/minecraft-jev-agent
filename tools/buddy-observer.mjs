@@ -455,6 +455,97 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
     : sameGeneration === true ? 'stable-report-bracket' : 'unknown'
   const area = stateData.area ?? null
   const blocks = area?.blocks ?? null
+  const entityCache = area?.entityCache ?? null
+  const support = blocks?.support ?? null
+  const supportEvidence = blocks?.supportEvidence ?? null
+  const supportPoint = support?.position ?? null
+  const supportBounds = supportEvidence?.sampleBounds ?? null
+  const supportPlayerPosition = supportEvidence?.playerPosition ?? null
+  const statePlayerPosition = stateData.truth?.position ?? null
+  const supportInsideBounds = supportPoint !== null && supportBounds?.min !== undefined && supportBounds?.max !== undefined
+    && supportPoint.x >= supportBounds.min.x && supportPoint.x <= supportBounds.max.x
+    && supportPoint.y >= supportBounds.min.y && supportPoint.y <= supportBounds.max.y
+    && supportPoint.z >= supportBounds.min.z && supportPoint.z <= supportBounds.max.z
+  const supportMatchesSampledFooting = supportPlayerPosition !== null && supportPoint !== null
+    && supportPoint.x === Math.floor(supportPlayerPosition.x)
+    && supportPoint.y === Math.floor(supportPlayerPosition.y) - 1
+    && supportPoint.z === Math.floor(supportPlayerPosition.z)
+  const supportPlayerPositionMatchesState = supportPlayerPosition !== null && statePlayerPosition !== null
+    && supportPlayerPosition.x === statePlayerPosition.x
+    && supportPlayerPosition.y === statePlayerPosition.y
+    && supportPlayerPosition.z === statePlayerPosition.z
+  const supportCaptureMatchesState = supportEvidence?.capturedAt !== null
+    && supportEvidence?.capturedAt === stateData.capturedAt
+  const supportScopeStatus = supportEvidence === null ? 'unverified'
+    : supportInsideBounds && supportMatchesSampledFooting && supportCaptureMatchesState
+      && supportPlayerPositionMatchesState && supportEvidence.coordinateIsCurrentPlayerFooting === true
+      ? 'verified-current-player-footing'
+      : !supportInsideBounds ? 'outside-requested-sample'
+        : !supportCaptureMatchesState ? 'capture-time-mismatch'
+          : !supportPlayerPositionMatchesState ? 'player-position-mismatch'
+            : 'not-current-player-footing'
+  const worldCache = stateData.worldCache ?? null
+  const worldCacheReadability = worldCache?.readability !== null && typeof worldCache?.readability === 'object'
+    ? worldCache.readability
+    : null
+  const worldCacheBindingData = worldCache?.binding !== null && typeof worldCache?.binding === 'object'
+    ? worldCache.binding
+    : null
+  const cacheWorld = normalizeWorldKey(worldCacheBindingData?.worldKey)
+  const cacheWorldMatchesState = cacheWorld !== null && probeWorld !== null
+    && cacheWorld.serverId === probeWorld.serverId
+    && cacheWorld.dimension === probeWorld.dimension
+    && cacheWorld.worldEpoch === probeWorld.worldEpoch
+  const cacheRunStatus = typeof stateData.runId === 'string' && stateData.runId.length > 0
+    ? worldCacheBindingData?.runId === stateData.runId ? 'aligned' : 'mismatch'
+    : 'unknown'
+  const cacheWorldStatus = cacheWorldMatchesState ? 'aligned'
+    : cacheWorld === null || probeWorld === null ? 'unknown' : 'mismatch'
+  const cacheGenerationStatus = worldCacheBindingData !== null
+    && worldCacheBindingData.generationId === probeGeneration
+    ? probeGeneration !== null ? 'aligned' : sameGeneration === true ? 'inferred' : 'unknown'
+    : worldCacheBindingData === null || probeGeneration === null ? 'unknown' : 'mismatch'
+  const cacheTimestampStatus = typeof stateData.capturedAt === 'string' && stateData.capturedAt.length > 0
+    ? worldCache?.capturedAt === stateData.capturedAt ? 'aligned' : 'mismatch'
+    : 'unknown'
+  const cacheBindingStatuses = [cacheRunStatus, cacheWorldStatus, cacheGenerationStatus, cacheTimestampStatus]
+  const worldCacheBinding = {
+    status: cacheBindingStatuses.includes('mismatch') ? 'mismatch'
+      : cacheBindingStatuses.includes('unknown') ? 'unknown'
+        : cacheBindingStatuses.includes('inferred') ? 'inferred' : 'aligned',
+    runId: cacheRunStatus,
+    worldKey: cacheWorldStatus,
+    generationId: cacheGenerationStatus,
+    capturedAt: cacheTimestampStatus,
+  }
+  const entityCacheWorld = normalizeWorldKey(entityCache?.worldKey)
+  const entityCacheWorldMatchesState = entityCacheWorld !== null && probeWorld !== null
+    && entityCacheWorld.serverId === probeWorld.serverId
+    && entityCacheWorld.dimension === probeWorld.dimension
+    && entityCacheWorld.worldEpoch === probeWorld.worldEpoch
+  const entityCacheBindingStatuses = [
+    typeof stateData.runId === 'string' && stateData.runId.length > 0
+      ? entityCache?.runId === stateData.runId ? 'aligned' : 'mismatch'
+      : 'unknown',
+    entityCacheWorldMatchesState ? 'aligned'
+      : entityCacheWorld === null || probeWorld === null ? 'unknown' : 'mismatch',
+    entityCache !== null && entityCache?.generationId === probeGeneration
+      ? probeGeneration !== null ? 'aligned' : sameGeneration === true ? 'inferred' : 'unknown'
+      : entityCache === null || entityCache?.generationId === null || probeGeneration === null ? 'unknown' : 'mismatch',
+    typeof stateData.capturedAt === 'string' && stateData.capturedAt.length > 0
+      ? entityCache?.capturedAt === stateData.capturedAt ? 'aligned' : 'mismatch'
+      : 'unknown',
+  ]
+  const entityCacheBinding = {
+    status: entityCache === null ? 'unavailable'
+      : entityCacheBindingStatuses.includes('mismatch') ? 'mismatch'
+        : entityCacheBindingStatuses.includes('unknown') ? 'unknown'
+          : entityCacheBindingStatuses.includes('inferred') ? 'inferred' : 'aligned',
+    runId: entityCacheBindingStatuses[0],
+    worldKey: entityCacheBindingStatuses[1],
+    generationId: entityCacheBindingStatuses[2],
+    capturedAt: entityCacheBindingStatuses[3],
+  }
   const entities = Array.isArray(area?.entities) ? area.entities : []
   const scannedBlocks = (2 * radius + 1) ** 2 * (2 * verticalRadius + 1)
   const unknownBlocks = typeof blocks?.unknown === 'number' ? blocks.unknown : null
@@ -465,6 +556,19 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
   else if (sameGeneration === null) unknown.push('report_state_generation_alignment_unknown')
   if (unknownBlocks === null) unknown.push('scanned_block_coverage_unknown')
   else if (unknownBlocks > 0) unknown.push('some_scanned_blocks_unloaded_or_unknown')
+  if (worldCache === null || typeof worldCache !== 'object') unknown.push('world_cache_diagnostic_unavailable')
+  else if (worldCacheBinding.status === 'mismatch') unknown.push('world_cache_identity_or_timestamp_mismatch')
+  else if (worldCacheBinding.status === 'unknown') unknown.push('world_cache_identity_or_timestamp_unknown')
+  if (worldCacheReadability?.status === 'unbound') {
+    unknown.push(`world_reads_unbound:${worldCacheReadability.unboundReason ?? 'unknown'}`)
+  } else if (typeof worldCacheReadability?.refusedColumnCount === 'number' && worldCacheReadability.refusedColumnCount > 0) {
+    unknown.push('some_requested_world_columns_refused_or_unavailable')
+  }
+  if (entityCacheBinding.status === 'unavailable') unknown.push('entity_cache_diagnostic_unavailable')
+  else if (entityCacheBinding.status === 'mismatch') unknown.push('entity_cache_identity_or_timestamp_mismatch')
+  else if (entityCacheBinding.status === 'unknown') unknown.push('entity_cache_identity_or_timestamp_unknown')
+  if (supportScopeStatus === 'unverified') unknown.push('support_current_footing_scope_unverified')
+  else if (supportScopeStatus !== 'verified-current-player-footing') unknown.push(`support_${supportScopeStatus.replaceAll('-', '_')}`)
 
   const projectedEntities = entities.slice(0, 64).map((entity) => ({
     id: entity.id ?? null,
@@ -490,6 +594,9 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
   if (milestonePredicates.status !== 'observed') unknown.push('milestone_predicates_not_joined_to_probe')
   const identityAligned = sameWorld && sameRun
   const dataComplete = unknownBlocks === 0 && unclassifiedEntities === 0 && sameGeneration === true
+    && (worldCacheBinding.status === 'aligned' || worldCacheBinding.status === 'inferred')
+    && (entityCacheBinding.status === 'aligned' || entityCacheBinding.status === 'inferred')
+    && supportScopeStatus === 'verified-current-player-footing'
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-world-probe',
@@ -511,6 +618,9 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
       probeGenerationId: probeGeneration,
       generationJoin,
       generationJoinConfidence: generationJoin === 'direct' ? 'direct' : generationJoin === 'stable-report-bracket' ? 'inferred' : 'unknown',
+      worldCache: worldCacheBinding,
+      entityCache: entityCacheBinding,
+      support: supportScopeStatus,
     },
     world: {
       ...pickFields(stateData.world, ['dimension', 'version', 'serverBrand', 'levelType', 'timeOfDay', 'day', 'raining', 'thunderState']),
@@ -520,6 +630,13 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
       ...pickFields(stateData.truth, ['position', 'health', 'food', 'dimension', 'onGround', 'inventory']),
       stateSource: 'resident-live-state-probe',
     },
+    worldCache,
+    worldCacheCapturedAt: worldCache?.capturedAt ?? null,
+    worldCacheBinding,
+    worldCacheReadability,
+    entityCache,
+    entityCacheCapturedAt: entityCache?.capturedAt ?? null,
+    entityCacheBinding,
     area: {
       radius,
       verticalRadius,
@@ -530,10 +647,12 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
       blockCounts,
       hazards: Array.isArray(blocks?.hazards) ? blocks.hazards.slice(0, 32) : null,
       portals: Array.isArray(blocks?.portals) ? blocks.portals.slice(0, 32) : null,
-      support: blocks?.support ?? null,
+      support,
+      supportEvidence,
+      supportScopeStatus,
       entities: projectedEntities,
       hostiles,
-      hostileStatus: Array.isArray(area?.entities) ? 'observed' : 'not_recorded',
+      hostileStatus: Array.isArray(area?.entities) ? 'observed-in-local-client-entity-cache' : 'not_recorded',
       unclassifiedEntityCount: unclassifiedEntities,
     },
     structures: {

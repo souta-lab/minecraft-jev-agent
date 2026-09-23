@@ -3312,6 +3312,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       }
     },
     status,
+    worldProbeProvenance: (columns) => dimensionProvenance.diagnostic(columns),
     structuralSmoke,
     missionPreflight,
     stopReason: () => stopped,

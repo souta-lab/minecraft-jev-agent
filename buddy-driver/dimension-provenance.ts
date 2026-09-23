@@ -23,25 +23,26 @@
 //
 //   * every column the bot loads is tagged with the dimension that was live when
 //     the load was OBSERVED (`chunkColumnLoad`, forwarded by mineflayer at
-//     `lib/plugins/blocks.js:591`);
-//   * a dimension change DROPS every tag and ACTIVELY unloads every column we know
-//     about, so the sensor never depends on mineflayer's conditional clear having
-//     run;
+//     `lib/plugins/blocks.js:591`); the first attach adopts the already-loaded
+//     columns from that bot's current connection in place;
+//   * a dimension change drops old-dimension tags and unloads only those columns,
+//     preserving destination columns whose loads have already been witnessed;
 //   * a column with no tag is UNKNOWN, and unknown is NOT satisfied: the sensor
 //     refuses the read (typed) instead of minting durable memory from it.
 //
 // It is world truth only (CAN/TRUE): it never ranks or selects an action.
 //
 // LISTENER LIFETIME. The column store belongs to the bot, and the host owns the
-// bot for the whole connection (`buddy-driver/agent-runner.mts:1384` creates it
-// once; `generation-entry.ts` hands the SAME object to every generation). The
-// listeners are therefore installed once per bot object and are deliberately NOT
-// generation-tracked resources: a tag must survive a generation swap, because the
-// columns do. They die with the bot. The per-generation VIEW is what carries the
-// generation's `log`, so no disposed generation is ever called back.
+// bot for the whole connection (`buddy-driver/agent-runner.mts` creates it once;
+// `generation-entry.ts` hands the SAME object to every generation). Symbol.for
+// keeps the store/listener-install marker stable across hash-stamped module reloads.
+// The listeners are deliberately NOT generation-tracked resources: a tag must
+// survive a generation swap, because the columns do. They die with the bot. The
+// per-generation VIEW carries the generation's `log`, so no disposed generation is
+// ever called back.
 
 import type { Bot } from 'mineflayer'
-import type { DimensionProvenance, RefusedRead } from '../jev-agent/src/state.ts'
+import type { CellAttribution, DimensionProvenance, RefusedRead } from '../jev-agent/src/state.ts'
 import { canonicalDimensionId, normalizeDimensionId } from './dimension-observer.ts'
 
 export type DimensionLog = (event: string, detail?: Record<string, unknown>) => void
@@ -84,19 +85,36 @@ interface ProvenanceStore {
   refusals: number
   unloads: number
   loadsTagged: number
-  /** Columns discarded at first attach because their provenance could not be proven. */
-  attachDropped: number
+  loadEvents: number
+  unloadEvents: number
+  lastColumnLoadAt: string | null
+  lastColumnUnloadAt: string | null
+  lastLocalColumnUnloadAt: string | null
+  /** Already-loaded current-world columns attributed when the first listener attached. */
+  attachAdopted: number
 }
 
 const REFUSAL_CAP_PER_KEY = 8
 const PENDING_TRANSITION_CAP = 16
 
-const stores = new WeakMap<object, ProvenanceStore>()
+// Generation bundles are hash-stamped and re-imported on hot reload. A module
+// local WeakMap/WeakSet is therefore not bot-scoped in practice: every changed
+// bundle would attach another pair of listeners and treat the same loaded world
+// as unobserved. Symbol.for keeps these two bot-owned facts stable across bundles
+// in the resident's single JS isolate, while remaining invisible to JSON output.
+const STORE_KEY = Symbol.for('mc-ai.buddy.dimension-provenance.store.v1')
+const ATTACHED_KEY = Symbol.for('mc-ai.buddy.dimension-provenance.attached.v1')
+
+type BotWithProvenance = Record<symbol, unknown>
+
+function botProvenanceFields (bot: Bot): BotWithProvenance {
+  return bot as unknown as BotWithProvenance
+}
 
 function storeFor (bot: Bot): ProvenanceStore {
-  const key = bot as unknown as object
-  const existing = stores.get(key)
-  if (existing !== undefined) return existing
+  const fields = botProvenanceFields(bot)
+  const existing = fields[STORE_KEY]
+  if (existing !== undefined && existing !== null && typeof existing === 'object') return existing as ProvenanceStore
   const created: ProvenanceStore = {
     liveDimension: '',
     columnDimension: new Map<string, string>(),
@@ -104,14 +122,16 @@ function storeFor (bot: Bot): ProvenanceStore {
     refusals: 0,
     unloads: 0,
     loadsTagged: 0,
-    attachDropped: 0,
+    loadEvents: 0,
+    unloadEvents: 0,
+    lastColumnLoadAt: null,
+    lastColumnUnloadAt: null,
+    lastLocalColumnUnloadAt: null,
+    attachAdopted: 0,
   }
-  stores.set(key, created)
+  fields[STORE_KEY] = created
   return created
 }
-
-/** The bot's `chunkColumnLoad` tag; module-level so nothing of a generation is retained. */
-const TAGGED = new WeakSet<object>()
 
 /**
  * Unload every column this store knows about. We do this ourselves rather than
@@ -119,11 +139,11 @@ const TAGGED = new WeakSet<object>()
  * column that was still readable after a transfer, and a store we can empty is a
  * store we can reason about.
  */
-function unloadKnownColumns (bot: Bot, store: ProvenanceStore): number {
+function unloadKnownColumns (bot: Bot, store: ProvenanceStore, onlyKeys: readonly string[] = [...store.columnDimension.keys()]): number {
   const world = bot.world as unknown as { unloadColumn?: (chunkX: number, chunkZ: number) => void } | undefined
   if (world === undefined || world === null || typeof world.unloadColumn !== 'function') return 0
   let unloaded = 0
-  for (const key of store.columnDimension.keys()) {
+  for (const key of onlyKeys) {
     const parts = key.split(',')
     const chunkX = Number(parts[0])
     const chunkZ = Number(parts[1])
@@ -137,6 +157,7 @@ function unloadKnownColumns (bot: Bot, store: ProvenanceStore): number {
     }
   }
   store.unloads += unloaded
+  if (unloaded > 0) store.lastLocalColumnUnloadAt = new Date().toISOString()
   return unloaded
 }
 
@@ -144,22 +165,21 @@ function unloadKnownColumns (bot: Bot, store: ProvenanceStore): number {
  * Install the column-provenance listeners on a bot once. Idempotent per bot
  * object, so every generation may call it and only the first one installs.
  *
- * The first install also DISCARDS every column that is already loaded. Those were
- * loaded before we could witness anything, so their provenance is genuinely
- * unknown - and unknown is not satisfied. The remedy for unknown is to obtain a
- * known provenance, not to assume one: the columns are dropped and the server
- * re-sends them under the dimension we are watching. The cost is bounded by one
- * chunk-delivery cycle, it happens once per bot object (a reconnect, where the
- * world is new anyway), and it means no unprovable column is ever readable.
+ * On first attach, already-loaded columns are tagged with the bot's current
+ * dimension. They belong to this Mineflayer connection and WorldSync does not
+ * request replacement columns when it locally unloads them. Later dimensions
+ * remain guarded by observed load events and transition invalidation.
  */
 export function attachDimensionProvenance (bot: Bot): void {
-  const key = bot as unknown as object
-  if (TAGGED.has(key)) return
-  TAGGED.add(key)
+  const fields = botProvenanceFields(bot)
+  if (fields[ATTACHED_KEY] === true) return
+  fields[ATTACHED_KEY] = true
   const store = storeFor(bot)
   const onLoad = (corner: ColumnCorner): void => {
     const chunk = cornerChunk(corner)
     if (chunk === null) return
+    store.loadEvents += 1
+    store.lastColumnLoadAt = new Date().toISOString()
     // The dimension live at the moment the load was OBSERVED. `map_chunk` arrives
     // long after the `respawn` handler relabelled `bot.game.dimension`, so this is
     // the new dimension for a transfer; a same-tick load would be tagged with the
@@ -172,18 +192,25 @@ export function attachDimensionProvenance (bot: Bot): void {
   const onUnload = (corner: ColumnCorner): void => {
     const chunk = cornerChunk(corner)
     if (chunk === null) return
+    store.unloadEvents += 1
+    store.lastColumnUnloadAt = new Date().toISOString()
     store.columnDimension.delete(chunkKey(chunk.chunkX, chunk.chunkZ))
   }
   bot.on('chunkColumnLoad', onLoad)
   bot.on('chunkColumnUnload', onUnload)
-  store.attachDropped = dropEveryLoadedColumn(bot, store, canonicalDimensionId(bot.game?.dimension))
+  // First attach happens as the resident generation starts for this Mineflayer
+  // connection. Existing columns were loaded by this bot in its current world.
+  // Attribute them in place: WorldSync.unloadColumn() only erases the LOCAL cache;
+  // it sends no request that tells the server to resend those columns. Dropping
+  // here (and especially doing it again from every re-imported generation bundle)
+  // can leave the body with no readable support/terrain until the player crosses
+  // out of and back into each chunk. A true dimension transition still drops
+  // witnessed old-dimension columns in syncStore() below.
+  store.attachAdopted = tagExistingColumns(bot, store, canonicalDimensionId(bot.game?.dimension))
 }
 
-/**
- * Drop every column the world currently holds. Used once at attach, where
- * "already loaded" and "unprovable" are the same set.
- */
-function dropEveryLoadedColumn (bot: Bot, store: ProvenanceStore, liveDimension: string): number {
+/** Tag already loaded columns without mutating Mineflayer's local cache. */
+function tagExistingColumns (bot: Bot, store: ProvenanceStore, liveDimension: string): number {
   const world = bot.world as unknown as { getColumns?: () => Array<{ chunkX?: unknown; chunkZ?: unknown }> } | undefined
   const keys: string[] = []
   if (world !== undefined && world !== null && typeof world.getColumns === 'function') {
@@ -200,37 +227,15 @@ function dropEveryLoadedColumn (bot: Bot, store: ProvenanceStore, liveDimension:
       keys.push(chunkKey(chunkX, chunkZ))
     }
   }
-  if (keys.length === 0) return 0
-  // THE TAG MUST BE READABLE IF THE UNLOAD CANNOT HAPPEN.
-  //
-  // The original form tagged every loaded column with the EMPTY dimension - a tag no read
-  // can accept - and then cleared the map, so the column was left neither unloaded nor
-  // attributed. That is only sound when the world really drops the column and the server
-  // re-sends it (a `chunkColumnLoad` then re-tags it). Measured live on a FRESH WORLD: the
-  // installed client has no `unloadColumn`, so nothing was ever unloaded, nothing was ever
-  // re-sent, and every read of the body's own neighbourhood failed closed -
-  // `DIMENSION_READ_REFUSED cell=5,66,-8 provenance=unknown reason=unknown_column
-  // source=level-scan`, 10,102 of them in one run. The consequence was not a cautious body
-  // but a BLIND one: `isStandable` needs three cell reads, all refused, so no cell in the
-  // melee envelope was a legal stance, an adjacent attacker's ATTACK was withheld
-  // `no_attack_stand refusal=no_standable_cell`, the escape machinery reported
-  // `SURVIVAL_ESCAPE_NONE`, and the body sat at full health next to a threat it could
-  // neither hit nor leave.
-  //
-  // At ATTACH there is no transition to fail closed against - the columns were loaded by
-  // this bot in this world - so when the unload cannot happen they stay attributed to the
-  // LIVE dimension. A column that survives a TRANSITION is a different event and keeps the
-  // original treatment in `syncStore`: dropped, unloaded where possible, and unreadable.
+  if (liveDimension.length === 0) return 0
   for (const key of keys) store.columnDimension.set(key, liveDimension)
-  const dropped = unloadKnownColumns(bot, store)
-  if (dropped > 0) store.columnDimension.clear()
-  return dropped
+  return keys.length
 }
 
 /**
- * Move the store to a newly observed live dimension. On a change every tag is
- * dropped and every known column is unloaded, so nothing loaded under the previous
- * dimension can be read afterwards.
+ * Move the store to a newly observed live dimension. Drop old/foreign tags and
+ * unload only those old columns; columns already witnessed loading in `next`
+ * survive the synchronization.
  */
 function syncStore (
   bot: Bot,
@@ -243,34 +248,22 @@ function syncStore (
     return { changed: false, from: store.liveDimension, to: next, columnsDropped: 0, columnsUnloaded: 0 }
   }
   // NAMING THE LIVE DIMENSION FOR THE FIRST TIME IS NOT A TRANSITION. The store starts
-  // with an empty live dimension, and until it is named the columns attached under it were
-  // tagged with the dimension the bot was ALREADY in (`attachDimensionProvenance` tags the
-  // loaded columns with `canonicalDimensionId(bot.game.dimension)` when it cannot unload
-  // them). Treating that first naming as a change ran the reset path over tags that were
-  // already correct - dropping and (where possible) unloading columns that had not gone
-  // anywhere, which on a client without `unloadColumn` left every one of them unattributed
-  // and every read refused. That is the blindness this branch is here to prevent, so the
-  // naming is recorded and nothing else changes.
+  // empty; columns present at first attach were loaded by this bot in its current world
+  // and already carry that dimension tag. Record the live dimension without invalidating
+  // those current-world reads.
   if (store.liveDimension.length === 0) {
     store.liveDimension = next
     return { changed: false, from: '', to: next, columnsDropped: 0, columnsUnloaded: 0 }
   }
   const from = store.liveDimension
   store.liveDimension = next
-  const columnsDropped = store.columnDimension.size
-  // UNLOAD FIRST, THEN CLEAR. The unload walks `store.columnDimension` to know which
-  // columns to drop, so clearing the tag map first left it an empty list: every reset
-  // reported `columnsUnloaded=0` while `columnsDropped` counted the tags it had just
-  // discarded (measured live: 108 resets, columnsUnloaded 0 on all of them, dropped up
-  // to 190). The consequence is the freeze this fix is for - a column whose tag was
-  // discarded but which the world still holds is read as `provenance=unknown`, the
-  // sensor refuses it (`DIMENSION_READ_REFUSED ... reason=unknown_column source=world-state`),
-  // and the cell it could not read then yields no tool fact, no acquisition route and no
-  // candidate at all: the body froze in a hole holding 81 logs it could not turn into a
-  // pickaxe because the CELL ABOVE IT WAS NEVER READ. The module's own documented remedy
-  // ("drop the column so the server re-sends it") only works in this order.
-  const columnsUnloaded = unloadKnownColumns(bot, store)
-  store.columnDimension.clear()
+  const destination = normalizeDimensionId(next)
+  const staleKeys = [...store.columnDimension.entries()]
+    .filter(([, taggedDimension]) => normalizeDimensionId(taggedDimension) !== destination)
+    .map(([key]) => key)
+  const columnsDropped = staleKeys.length
+  const columnsUnloaded = unloadKnownColumns(bot, store, staleKeys)
+  for (const key of staleKeys) store.columnDimension.delete(key)
   const record = { from, to: next, reason, columnsDropped, columnsUnloaded }
   // A transition with no live generation is kept as plain data for the next view
   // to mirror, so the evidence is never silently lost across a generation swap.
@@ -314,9 +307,28 @@ export interface DimensionProvenanceStats {
   liveDimension: string
   taggedColumns: number
   loadsTagged: number
-  attachDropped: number
+  attachAdopted: number
   refusals: number
   unloads: number
+  loadEvents: number
+  unloadEvents: number
+  lastColumnLoadAt: string | null
+  lastColumnUnloadAt: string | null
+  lastLocalColumnUnloadAt: string | null
+}
+
+export interface DimensionProvenanceColumnDiagnostic {
+  chunkX: number
+  chunkZ: number
+  kind: CellAttribution['kind']
+  dimension: string | null
+  liveDimension: string | null
+  reason: CellAttribution['reason']
+}
+
+export interface DimensionProvenanceDiagnostic extends DimensionProvenanceStats {
+  columns: DimensionProvenanceColumnDiagnostic[]
+  columnsTruncated: boolean
 }
 
 export interface DimensionProvenanceView extends DimensionProvenance {
@@ -324,6 +336,8 @@ export interface DimensionProvenanceView extends DimensionProvenance {
   syncLiveDimension (reason: string): void
   /** Observation counters, for the generation's own evidence line. */
   stats (): DimensionProvenanceStats
+  /** Read-only requested-column attribution snapshot; does not sync or mutate the store. */
+  diagnostic (columns: readonly { chunkX: number; chunkZ: number }[]): DimensionProvenanceDiagnostic
 }
 
 /**
@@ -410,9 +424,40 @@ export function createDimensionProvenanceView (
         liveDimension: store.liveDimension,
         taggedColumns: store.columnDimension.size,
         loadsTagged: store.loadsTagged,
-        attachDropped: store.attachDropped,
+        attachAdopted: store.attachAdopted,
         refusals: store.refusals,
         unloads: store.unloads,
+        loadEvents: store.loadEvents,
+        unloadEvents: store.unloadEvents,
+        lastColumnLoadAt: store.lastColumnLoadAt,
+        lastColumnUnloadAt: store.lastColumnUnloadAt,
+        lastLocalColumnUnloadAt: store.lastLocalColumnUnloadAt,
+      }
+    },
+    diagnostic (columns) {
+      const bounded = columns.slice(0, 128)
+      const unique = new Map<string, { chunkX: number; chunkZ: number }>()
+      for (const column of bounded) {
+        if (!Number.isFinite(column.chunkX) || !Number.isFinite(column.chunkZ)) continue
+        const chunkX = Math.floor(column.chunkX)
+        const chunkZ = Math.floor(column.chunkZ)
+        unique.set(chunkKey(chunkX, chunkZ), { chunkX, chunkZ })
+      }
+      const columnDiagnostics = [...unique.values()].map(({ chunkX, chunkZ }) => {
+        const verdict = this.cellAttribution(chunkX * 16, chunkZ * 16)
+        return {
+          chunkX,
+          chunkZ,
+          kind: verdict.kind,
+          dimension: verdict.dimension.length === 0 ? null : verdict.dimension,
+          liveDimension: verdict.liveDimension.length === 0 ? null : verdict.liveDimension,
+          reason: verdict.reason,
+        }
+      })
+      return {
+        ...this.stats(),
+        columns: columnDiagnostics,
+        columnsTruncated: columns.length > 128,
       }
     },
   }
