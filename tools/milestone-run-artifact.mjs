@@ -1810,6 +1810,13 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
     id,
     gate,
     runId,
+    // Preserve the structured evaluator identity beside the requested run scope.
+    // Aggregators can then bind a PASS to the same run and BOOT source instead of
+    // trusting the wrapper's requested runId alone.
+    gateRunId: typeof gateResult?.runId === 'string' ? gateResult.runId : null,
+    gateStatus: ['PASS', 'FAIL', 'UNKNOWN'].includes(gateResult?.status) ? gateResult.status : null,
+    sourceSha: typeof gateResult?.sourceSha === 'string' ? gateResult.sourceSha : null,
+    sourceShaReason: typeof gateResult?.sourceShaReason === 'string' ? gateResult.sourceShaReason : null,
     status,
     reason: parsed?.reason ?? error ?? `gate_emitted_no_status code=${code}`,
     statusLine: parsed === null ? null : `${id}_RUN_RESULT`,
