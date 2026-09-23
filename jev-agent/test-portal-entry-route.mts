@@ -164,6 +164,16 @@ function makeBot(
     }
   }
   const listeners = new Map<string, Set<() => void>>()
+  /** The one placement rule both mineflayer entry points share. */
+  const placeAt = (reference: { position: Vec3 }, face: { x: number; y: number; z: number }): void => {
+    const target = {
+      x: Math.floor(reference.position.x) + face.x,
+      y: Math.floor(reference.position.y) + face.y,
+      z: Math.floor(reference.position.z) + face.z,
+    }
+    const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
+    grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+  }
   const bot = {
     registry,
     game: { dimension: OVERWORLD as string },
@@ -216,13 +226,16 @@ function makeBot(
     // clicked face points at, and it is the HELD item that goes in (mineflayer's
     // generic_place sends the held stack).
     placeBlock: async (reference: { position: Vec3 }, face: { x: number; y: number; z: number }) => {
-      const target = {
-        x: Math.floor(reference.position.x) + face.x,
-        y: Math.floor(reference.position.y) + face.y,
-        z: Math.floor(reference.position.z) + face.z,
-      }
-      const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
-      grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+      placeAt(reference, face)
+    },
+    // mineflayer's OWN internal placement entry. A LIVE bot has it, and the executor
+    // reads its presence to declare the SAME-TICK actuator
+    // (`executor.ts#pillarPlaceHandshakeTicks`); without it a pillar placement is
+    // judged against the pessimistic look-handshake budget, so a genuinely cleared
+    // apex is reported `apex_timeout`. The fixture models the live method and places
+    // exactly as `placeBlock` does.
+    _placeBlockWithOptions: async (reference: { position: Vec3 }, face: { x: number; y: number; z: number }) => {
+      placeAt(reference, face)
     },
     pathfinder: {
       movements: null as unknown,
@@ -234,6 +247,17 @@ function makeBot(
       getPathTo: () => ({ status: 'noPath', path: [] }),
     },
   }
+  // A LIVE body emits `physicsTick` (~20/s) and `forcedMove` (on clientbound position
+  // packets). The executor's climb and apex loops are driven by those events, and main
+  // 57e9716 added the typed `physics_stalled` failure for a zero-tick apex window, so
+  // the fixture models the stream instead of leaving the registered listeners silent -
+  // otherwise a pillar climb that the fixture's own control model really performs is
+  // reported as a physics failure. The interval is process-scoped; the file ends with
+  // `process.exit`, so it never holds the runner open.
+  const physicsPump = setInterval(() => {
+    for (const listener of [...(listeners.get('physicsTick') ?? [])]) listener()
+  }, 5)
+  void physicsPump
   return { bot: bot as unknown as Bot, position, grid, digs, pathCalls, legs, inventoryItems, movedToFace: false }
 }
 
