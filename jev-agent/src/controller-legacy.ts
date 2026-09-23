@@ -189,7 +189,7 @@ import type { RepeatedOutcomeEntryJson } from './repeatedOutcomeEscalation.ts'
 import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatAscentRefused, formatKnownResourceUnreachable, formatRetrieveStalled, pillarColumnUnsafeFromBlocks, planRetrievalEscalation, planVerticalApproachDetailed, resolveRetrievalStallTicks, selectPlaceableBlock } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
-import { DigMemory } from './worldMemory.ts'
+import { DIG_PATH_CAP, DigMemory } from './worldMemory.ts'
 import { formatContainerRefusal } from './containerAccess.ts'
 import type { ContainerRefusal } from './containerAccess.ts'
 import type { DigDir } from './worldMemory.ts'
@@ -12869,6 +12869,15 @@ export class JevController {
 
   private resetDescendBudgetAfterWorldChange(actionId: string, reason: 'verified_mine' | 'verified_move'): void {
     const dig = this.digMemory.snapshot()
+    if (reason === 'verified_move' && dig.digDirCount >= DIG_PATH_CAP) {
+      this.digMemory.resetPath()
+      this.logger.info(
+        'agent',
+        `DIG_PATH_RESET reason=cap_after_verified_move count=${dig.digDirCount}`,
+        { actionId, previousCount: dig.digDirCount },
+        this.tickCounter,
+      )
+    }
     if (!dig.descendLimitReached) return
     this.digMemory.resetDescendBudget()
     this.logger.info(

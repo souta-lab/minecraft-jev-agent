@@ -138,9 +138,9 @@ export class DigMemory {
   }
 
   /**
-   * A successful lateral move starts a new search column. Clear only the
-   * no-progress budget; the caller already resets the path when the cap fires,
-   * and the known stone level remains useful evidence for the next column.
+   * Clear the no-progress budget after verified world progress. When a verified
+   * move leaves a capped tunnel, the controller also resets the path so the new
+   * column gets its own bounded search; the known stone level remains useful.
    */
   resetDescendBudget(): void {
     this.descendNoProgress = 0
