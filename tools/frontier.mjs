@@ -5,7 +5,10 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const ROUTING_PATH = resolve('ISSUE-ROUTING.json')
-export const GH_ARGS = ['issue', 'list', '--state', 'open', '--limit', '1000', '--json', 'number,title,url']
+// The whole issue set, not only the open one: a routing file can be wrong in both
+// directions (routing a closed issue as work, or keeping a still-open issue in the
+// historical list), and `--state open` cannot tell "closed" from "does not exist".
+export const GH_ARGS = ['issue', 'list', '--state', 'all', '--limit', '1000', '--json', 'number,title,url,state']
 
 export function defaultIssueReader() {
   return JSON.parse(execFileSync('gh', GH_ARGS, { encoding: 'utf8' }))
@@ -19,8 +22,15 @@ function uniqueNumbers(values) {
   return [...new Set((Array.isArray(values) ? values : []).map(Number).filter(Number.isInteger))]
 }
 
+// Older fixtures (and hand-written routing reviews) omit `state`; treat that as open
+// so a missing field never silently turns a routed issue into a "closed" claim.
+export function issueIsOpen(issue) {
+  return (issue?.state ?? 'OPEN') === 'OPEN'
+}
+
 export function classify(issues, routing) {
-  const open = new Map((Array.isArray(issues) ? issues : []).map((issue) => [Number(issue.number), issue]))
+  const all = new Map((Array.isArray(issues) ? issues : []).map((issue) => [Number(issue.number), issue]))
+  const open = new Map([...all].filter(([, issue]) => issueIsOpen(issue)))
   const categories = {
     NOW: uniqueNumbers(routing.now),
     NEXT: uniqueNumbers(routing.next),
@@ -29,10 +39,20 @@ export function classify(issues, routing) {
     FUTURE: uniqueNumbers(routing.future),
     REFERENCE_ONLY: uniqueNumbers(routing.referenceOnly),
   }
+  // Historical rows are closed issues the routing file used to present as work. They
+  // are recorded so the closure is not silently dropped, but they are never picked.
+  const historical = uniqueNumbers(routing.historical)
   const errors = []
   const warnings = []
   const seen = new Map()
   const wipLimit = Number(routing?.policy?.wipLimit ?? 3)
+
+  // A string policy silently nulls every policy field (wipLimit falls back to the
+  // default, the selection/completion rules are never read), which is how a routing
+  // file can look governed while it is not.
+  if (routing?.policy !== undefined && (typeof routing.policy !== 'object' || routing.policy === null || Array.isArray(routing.policy))) {
+    errors.push('policy must be an object (wipLimit/newIssueRule/selectionRule/completionRule...); a non-object silently disables every policy field')
+  }
 
   if (categories.NOW.length > wipLimit) {
     errors.push(`NOW has ${categories.NOW.length} items; WIP limit is ${wipLimit}`)
@@ -43,7 +63,36 @@ export function classify(issues, routing) {
       const previous = seen.get(number)
       if (previous) errors.push(`#${number} appears in both ${previous} and ${category}`)
       else seen.set(number, category)
-      if (!open.has(number)) warnings.push(`#${number} is routed as ${category} but is not currently open`)
+      if (!all.has(number)) {
+        errors.push(`#${number} is routed as ${category} but does not exist in the GitHub issue set`)
+      } else if (!open.has(number)) {
+        errors.push(`#${number} is routed as ${category} but is CLOSED — a closed row belongs in "historical", not in a routing category`)
+      }
+    }
+  }
+
+  for (const number of historical) {
+    const previous = seen.get(number)
+    if (previous) errors.push(`#${number} appears in both ${previous} and HISTORICAL`)
+    else seen.set(number, 'HISTORICAL')
+    if (!all.has(number)) {
+      errors.push(`#${number} is listed as historical but does not exist in the GitHub issue set`)
+    } else if (open.has(number)) {
+      errors.push(`#${number} is listed as historical but is still OPEN — historical rows must be closed`)
+    }
+    if (!routing?.notes?.[String(number)]) {
+      errors.push(`#${number} is historical but has no note recording how it was closed`)
+    }
+  }
+
+  // Clusters are a derived grouping of routed work, not routing itself, so a stale
+  // membership is a warning rather than a failed gate.
+  const clusters = routing?.clusters && typeof routing.clusters === 'object' ? routing.clusters : {}
+  for (const [name, members] of Object.entries(clusters)) {
+    for (const number of uniqueNumbers(members)) {
+      if (seen.get(number) === undefined || seen.get(number) === 'HISTORICAL') {
+        warnings.push(`cluster ${name} references #${number}, which is not an open routed issue`)
+      }
     }
   }
 
@@ -58,12 +107,19 @@ export function classify(issues, routing) {
     errors.push(`unclassified P0/P1 issues: ${priorityUnclassified.map((issue) => `#${issue.number}`).join(', ')}`)
   }
 
-  return { open, categories, unclassified, errors, warnings, wipLimit }
+  return { all, open, categories, historical, clusters, unclassified, errors, warnings, wipLimit }
 }
 
 function issueLine(number, open, routing) {
   const issue = open.get(number)
   const title = issue?.title ?? 'CLOSED / missing from open set'
+  const note = routing?.notes?.[String(number)]
+  return `- #${number} ${title}${note ? ` — ${note}` : ''}`
+}
+
+function historyLine(number, all, routing) {
+  const issue = all.get(number)
+  const title = issue?.title ?? 'CLOSED / no longer in the GitHub issue set'
   const note = routing?.notes?.[String(number)]
   return `- #${number} ${title}${note ? ` — ${note}` : ''}`
 }
@@ -93,6 +149,11 @@ export function render(issues, routing) {
   lines.push('## BACKLOG')
   lines.push(`- ${result.unclassified.length} other open issues are deliberately hidden from the execution frontier.`)
   lines.push('- Do not enumerate or evaluate them during normal ORIENT. Search them only when a NOW issue references them or when promoting NEXT work.')
+  lines.push('')
+  lines.push('## HISTORICAL — closed rows (not work)')
+  lines.push(`- ${result.historical.length} closed rows are recorded in ISSUE-ROUTING.json.historical with how they were closed, so a closure is never silently dropped.`)
+  lines.push('- A fold is not a fix: where a row was folded, its acceptance is an open checklist row on the umbrella named in the note. Do not pick a historical row.')
+  for (const number of result.historical) lines.push(historyLine(number, result.all, routing))
   lines.push('')
   lines.push('## Issue creation rule')
   lines.push(`- ${routing?.policy?.newIssueRule ?? 'Search for overlap before creating a new issue.'}`)
@@ -127,6 +188,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
       research: report.categories.RESEARCH,
       future: report.categories.FUTURE,
       referenceOnly: report.categories.REFERENCE_ONLY,
+      historical: report.historical,
       backlogCount: report.unclassified.length,
       errors: report.errors,
       warnings: report.warnings,

@@ -244,6 +244,15 @@ export async function deriveStatus(options = {}) {
         '```',
       ])
     }
+  } else {
+    // --no-resident: a lane that may not issue control-socket commands regenerates
+    // everything else and says so, instead of leaving a superseded run id standing
+    // as if it were the current runtime state.
+    section('Resident snapshot', 'UNKNOWN', [
+      '- not collected: --no-resident was set, so this run issued no control-socket command.',
+      '- the previous snapshot is superseded and is NOT current runtime state; it remains in git history only.',
+      '- run `bun run current-status:write` from the runtime tree to restore an EVIDENCE snapshot.',
+    ])
   }
 
   // CI gate. A never-started job is INFRA_UNKNOWN, not FAIL and not silence.
@@ -298,10 +307,14 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   const cwd = options.cwd ?? process.cwd()
   const runtimeRoot = options.runtimeRoot ?? optionValue(argv, '--runtime-root')
   const residentSocket = options.residentSocket ?? optionValue(argv, '--resident-socket')
+  // --no-resident is a hard guarantee: no control-socket command is issued, even if a
+  // reader was injected. The section is then reported as not-collected, not as a fact.
+  const noResident = argv.includes('--no-resident')
   const statusOptions = {
     ...options,
     ...(runtimeRoot === null ? {} : { runtimeRoot }),
     ...(residentSocket === null ? {} : { residentSocket }),
+    ...(noResident ? { readResident: false } : {}),
   }
   const { markdown } = await deriveStatus(statusOptions)
   let written = null
