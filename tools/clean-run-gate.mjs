@@ -25,6 +25,8 @@
 //   CLEAN_RUN_M3 status=ACCEPTED
 //     = descriptor CLEAN
 //     + every run-evidence condition not FAIL
+//     + bundle.git.dirty === false + this run's complete source window binds to
+//       the same frozen commit, including any applied hot reloads
 //     + the bundle's own acceptanceVerdict.status === PASS
 //     + bundle.liveAcceptance === true (which itself requires host.lock + a HOST
 //       acceptance record + BOOT SHA == tree HEAD + `--evidence-class live`)
@@ -58,6 +60,9 @@ export const RESULT_LINE = 'CLEAN_RUN_RESULT'
 export const ACCEPTANCE_RULES = Object.freeze([
   'descriptor.status === CLEAN',
   'no run-evidence condition FAIL',
+  'bundle.git.dirty === false',
+  'descriptor frozen sourceSha === clean bundle.git.head === this run BOOT sourceSha',
+  'the run-scoped source window is complete and every applied reload names the same sourceSha',
   'bundle.acceptanceVerdict.status === PASS',
   'bundle.liveAcceptance === true',
   'bundle.evidenceClass === live',
@@ -65,6 +70,7 @@ export const ACCEPTANCE_RULES = Object.freeze([
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..')
+const COMMIT_SHA_RE = /^[a-f0-9]{40}$/i
 
 export function parseArgs(argv) {
   const out = {
@@ -134,6 +140,178 @@ function readJson(path) {
 
 function condition({ id, verdict, reason = null, required = true, detail = null }) {
   return { id, verdict, required: required === true, reason, detail }
+}
+
+/**
+ * Independently bind acceptance to a clean checkout and the exact source that
+ * produced this run. `bundle.liveAcceptance` is useful, but an older or
+ * incomplete bundle must not be able to omit these provenance facts and still
+ * pass this additive clean-run gate.
+ */
+function productionSourceConditions({ bundle, artifact, descriptor, runId }) {
+  const git = bundle?.git ?? null
+  const dirtyCondition = condition({
+    id: 'run.cleanFrozenCheckout',
+    verdict: git?.dirty === false ? 'PASS' : git?.dirty === true ? 'FAIL' : 'UNKNOWN',
+    reason:
+      git?.dirty === false
+        ? 'the acceptance bundle records a clean checkout (git.dirty=false)'
+        : git?.dirty === true
+          ? 'the acceptance bundle records a dirty checkout; live acceptance requires a frozen clean worktree'
+          : 'the acceptance bundle does not record a boolean git.dirty=false, so checkout cleanliness is unproven',
+    detail: { dirty: git?.dirty ?? null, head: git?.head ?? null, bundlePresent: bundle !== null },
+  })
+
+  const pinnedSha = descriptor?.values?.sourceSha ?? null
+  const bundleHead = git?.head ?? null
+  const bootSha = artifact?.run?.boot?.sourceSha ?? null
+  const sourceBootSha = artifact?.run?.source?.bootSourceSha ?? null
+  const exactFacts = { descriptor: pinnedSha, bundleHead, boot: bootSha, sourceBoot: sourceBootSha }
+  const knownShas = Object.entries(exactFacts).filter(([, sha]) => typeof sha === 'string' && COMMIT_SHA_RE.test(sha))
+  const distinctKnownShas = [...new Set(knownShas.map(([, sha]) => sha.toLowerCase()))]
+  const invalidOrMissing = Object.entries(exactFacts).filter(([, sha]) => typeof sha !== 'string' || !COMMIT_SHA_RE.test(sha))
+  let exactVerdict = 'PASS'
+  let exactReason = 'descriptor pin, clean bundle HEAD, and this run BOOT/source origin all name the same exact commit'
+  if (distinctKnownShas.length > 1) {
+    exactVerdict = 'FAIL'
+    exactReason = `source SHA mismatch: ${knownShas.map(([name, sha]) => `${name}=${sha}`).join(', ')}`
+  } else if (invalidOrMissing.length > 0) {
+    exactVerdict = 'UNKNOWN'
+    exactReason = `exact source binding is incomplete or malformed: ${invalidOrMissing.map(([name]) => name).join(', ')}`
+  } else if (bundle === null || artifact === null || runId === null) {
+    exactVerdict = 'UNKNOWN'
+    exactReason = 'a bundle, run artifact, and exact runId are required to bind source identity'
+  }
+  const exactShaCondition = condition({
+    id: 'run.exactFrozenSourceSha',
+    verdict: exactVerdict,
+    reason: exactReason,
+    detail: { ...exactFacts, runId },
+  })
+
+  const source = artifact?.run?.source ?? null
+  const window = source?.window ?? null
+  const observed = source?.observed
+  const sourceWindowIssues = []
+  const sourceWindowUnknown = []
+  if (bundle === null) sourceWindowUnknown.push('bundle git provenance is absent')
+  if (artifact === null) sourceWindowUnknown.push('run artifact is absent')
+  if (typeof runId !== 'string' || runId === '') sourceWindowUnknown.push('exact runId is absent')
+  if (typeof bundle?.runId !== 'string') sourceWindowUnknown.push('bundle runId is missing')
+  else if (bundle.runId !== runId) sourceWindowIssues.push(`bundle runId=${bundle.runId} differs from requested runId=${String(runId)}`)
+  const artifactRunIds = [artifact?.runId, artifact?.run?.runId]
+  if (artifactRunIds.some((value) => typeof value === 'string' && value !== runId)) {
+    sourceWindowIssues.push(`artifact run identity differs from requested runId=${String(runId)}`)
+  }
+  if (artifactRunIds.some((value) => typeof value !== 'string')) sourceWindowUnknown.push('artifact run identity is missing')
+  if (window?.status !== 'valid') sourceWindowUnknown.push(`source window status is ${String(window?.status ?? 'missing')}`)
+  if (window?.runId !== runId) {
+    if (typeof window?.runId === 'string' && typeof runId === 'string') sourceWindowIssues.push(`source window belongs to runId=${window.runId}, not ${runId}`)
+    else sourceWindowUnknown.push('source window runId is missing')
+  }
+  if (source?.windowBlind?.detected === true) sourceWindowIssues.push('the source window is explicitly marked blind to a source change')
+  else if (source?.windowBlind?.detected !== false) sourceWindowUnknown.push('source-window blindness status is missing')
+  if (!Array.isArray(source?.windowBlind?.reasons)) sourceWindowUnknown.push('source-window blindness reasons are missing')
+  else if (source.windowBlind.detected === false && source.windowBlind.reasons.length > 0) sourceWindowIssues.push('source-window blindness reasons contradict detected=false')
+  if (!Array.isArray(observed)) sourceWindowUnknown.push('observed reload markers are missing')
+
+  const reloadCount = source?.reloadCount
+  const sourceChangeCount = source?.sourceChangeCount
+  if (!Number.isInteger(reloadCount) || !Number.isInteger(sourceChangeCount)) {
+    sourceWindowUnknown.push('reload counts are missing or malformed')
+  } else if (Array.isArray(observed) && reloadCount !== observed.length) {
+    sourceWindowIssues.push(`reloadCount=${reloadCount} does not match observed marker count=${observed.length}`)
+  }
+
+  const applied = []
+  if (Array.isArray(observed)) {
+    for (const [index, marker] of observed.entries()) {
+      if (marker === null || typeof marker !== 'object') {
+        sourceWindowUnknown.push(`reload marker ${index} is malformed`)
+        continue
+      }
+      if (marker.applied !== true && marker.applied !== false) {
+        sourceWindowUnknown.push(`reload marker ${index} has no boolean applied status`)
+        continue
+      }
+      if (!['source-change', 'unchanged', 'deferred', 'failed', 'unclassified'].includes(marker.kind)) {
+        sourceWindowUnknown.push(`reload marker ${index} has unknown kind=${String(marker.kind)}`)
+      }
+      if (marker.kind === 'unclassified') sourceWindowUnknown.push(`reload marker ${index} cannot be classified as source-preserving`)
+      if (marker.kind === 'source-change' && marker.applied !== true) sourceWindowIssues.push(`source-change marker ${index} is not marked applied`)
+      if (marker.applied === true) {
+        applied.push({ index, marker })
+        if (marker.kind !== 'source-change' && !(marker.kind === 'deferred' && marker.appliedBy === 'resume')) {
+          sourceWindowIssues.push(`applied reload marker ${index} has inconsistent kind/appliedBy evidence`)
+        }
+        if (typeof marker.sourceSha !== 'string' || !COMMIT_SHA_RE.test(marker.sourceSha)) {
+          sourceWindowUnknown.push(`applied reload marker ${index} has no exact sourceSha`)
+        } else if (typeof bootSha === 'string' && COMMIT_SHA_RE.test(bootSha) && marker.sourceSha.toLowerCase() !== bootSha.toLowerCase()) {
+          sourceWindowIssues.push(`applied reload marker ${index} sourceSha=${marker.sourceSha} differs from BOOT sourceSha=${bootSha}`)
+        }
+        if (typeof marker.hash !== 'string' || marker.hash === '') sourceWindowUnknown.push(`applied reload marker ${index} has no generation hash`)
+      }
+    }
+  }
+  if (Number.isInteger(sourceChangeCount) && Array.isArray(observed) && sourceChangeCount !== applied.length) {
+    sourceWindowIssues.push(`sourceChangeCount=${sourceChangeCount} does not match applied reload count=${applied.length}`)
+  }
+
+  const latestSourceReload = source?.latestSourceReload ?? null
+  if (applied.length === 0) {
+    if (source?.provenance !== 'boot' || source?.effectiveSourceShaKind !== 'git-commit-sha') {
+      sourceWindowUnknown.push('with no applied reload, boot provenance and git-commit-sha effective source are required')
+    }
+    if (typeof bootSha === 'string' && source?.effectiveSourceSha !== bootSha) {
+      sourceWindowIssues.push('effective source SHA does not equal the BOOT source SHA')
+    }
+    if (latestSourceReload !== null) sourceWindowIssues.push('latestSourceReload is present despite no applied reload')
+  } else {
+    const lastApplied = applied.at(-1).marker
+    if (source?.provenance !== 'reload' || source?.effectiveSourceShaKind !== 'generation-bundle-hash') {
+      sourceWindowIssues.push('applied reloads require reload provenance and generation-bundle-hash effective source kind')
+    }
+    if (latestSourceReload === null || latestSourceReload?.applied !== true) {
+      sourceWindowUnknown.push('latest applied reload record is missing')
+    } else {
+      if (latestSourceReload.sourceSha !== lastApplied.sourceSha || latestSourceReload.hash !== lastApplied.hash) {
+        sourceWindowIssues.push('latestSourceReload disagrees with the last applied observed marker')
+      }
+      if (source?.effectiveSourceSha !== latestSourceReload.hash) sourceWindowIssues.push('effective generation hash disagrees with latestSourceReload')
+    }
+  }
+  if (source?.crossCheck?.agrees === false) sourceWindowIssues.push('read-only control report disagrees with the run source window')
+  if (Array.isArray(source?.disagreements) && source.disagreements.length > 0) sourceWindowIssues.push(...source.disagreements.map((entry) => `source disagreement: ${String(entry)}`))
+
+  const sourceWindowVerdict = sourceWindowIssues.length > 0 ? 'FAIL' : sourceWindowUnknown.length > 0 ? 'UNKNOWN' : 'PASS'
+  const sourceWindowCondition = condition({
+    id: 'run.sourceWindowExact',
+    verdict: sourceWindowVerdict,
+    reason:
+      sourceWindowVerdict === 'PASS'
+        ? 'the complete source window is bound to this run and every applied reload preserves the BOOT source commit'
+        : sourceWindowVerdict === 'FAIL'
+          ? sourceWindowIssues.join('; ')
+          : sourceWindowUnknown.join('; '),
+    detail: {
+      runId,
+      artifactRunId: artifact?.runId ?? null,
+      windowRunId: window?.runId ?? null,
+      windowStatus: window?.status ?? null,
+      windowBlind: source?.windowBlind ?? null,
+      reloadCount: reloadCount ?? null,
+      observedCount: Array.isArray(observed) ? observed.length : null,
+      sourceChangeCount: sourceChangeCount ?? null,
+      appliedReloadCount: applied.length,
+      provenance: source?.provenance ?? null,
+      effectiveSourceSha: source?.effectiveSourceSha ?? null,
+      effectiveSourceShaKind: source?.effectiveSourceShaKind ?? null,
+      issues: sourceWindowIssues,
+      unknown: sourceWindowUnknown,
+    },
+  })
+
+  return [dirtyCondition, exactShaCondition, sourceWindowCondition]
 }
 
 /** Read the run's own log for the death/keep-inventory behaviour check. */
@@ -237,6 +415,7 @@ export async function runCleanRunGate({
           descriptorPath,
           descriptorSha256: loaded.sha256,
         })
+  runConditions.push(...productionSourceConditions({ bundle, artifact, descriptor, runId }))
   if (log.reason !== null && artifact !== null) {
     runConditions.push(condition({ id: 'run.logReadable', verdict: 'UNKNOWN', required: false, reason: `death/keep-inventory behaviour not checked: ${log.reason}`, detail: { path: log.path } }))
   }
@@ -281,7 +460,7 @@ export async function runCleanRunGate({
     acceptanceReason = `the bundle is a PASS but NOT a live acceptance (evidenceClass=${String(evidenceClass)}, liveAcceptance=false): ${(bundle.residual ?? []).filter((entry) => /live signal|evidence class/.test(String(entry))).join(' | ') || 'objective live signals not satisfied'}`
   } else {
     acceptanceStatus = 'ACCEPTED'
-    acceptanceReason = 'descriptor CLEAN + run evidence consistent + canonical M3 gate PASS + liveAcceptance=true'
+    acceptanceReason = 'descriptor CLEAN + clean frozen checkout + exact run source provenance + run evidence consistent + canonical M3 gate PASS + liveAcceptance=true'
   }
   const exitCode = cleanStatus === 'NOT_CLEAN' || acceptanceStatus === 'NOT_ACCEPTED' ? 1 : cleanStatus === 'UNKNOWN' || acceptanceStatus === 'UNKNOWN' ? 2 : 0
 
@@ -309,6 +488,7 @@ export async function runCleanRunGate({
       liveAcceptance,
       evidenceClass,
       gitHead: bundle?.git?.head ?? null,
+      gitDirty: bundle?.git?.dirty ?? null,
     },
     status: cleanStatus,
     acceptanceStatus,
@@ -354,6 +534,7 @@ export function cleanRunMarkdown(verdict) {
   lines.push(`- descriptor: ${String(verdict.descriptor.path)} (sha256 ${String(verdict.descriptor.sha256)})`)
   lines.push(`- target world: levelName=${String(verdict.descriptor.levelName)} levelSeed=${String(verdict.descriptor.levelSeed)} sourceSha=${String(verdict.descriptor.sourceSha)}`)
   lines.push(`- canonical bundle: verdict=${String(verdict.run.bundleVerdict)} liveAcceptance=${String(verdict.run.liveAcceptance)} evidenceClass=${String(verdict.run.evidenceClass)}`)
+  lines.push(`- source checkout: gitHead=${String(verdict.run.gitHead)} dirty=${String(verdict.run.gitDirty)} BOOT=${String(verdict.run.bootSourceSha)}`)
   lines.push(`- CLEAN STATUS: **${verdict.status}**`)
   lines.push(`- M3 ACCEPTANCE: **${verdict.acceptanceStatus}** — ${verdict.acceptanceReason}`)
   lines.push('')
