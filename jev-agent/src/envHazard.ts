@@ -256,7 +256,11 @@ export function buildEnvHazardState(facts: EnvHazardFacts): EnvHazardState {
   const inFire = own?.kind === 'fire'
   const inLava = own?.kind === 'lava'
   const onFire = typeof facts.onFire === 'boolean' ? facts.onFire : null
-  const drowning = facts.outOfAir === true
+  // A low breath reading is still a safety fact after surfacing, but by itself
+  // it does not prove the body is currently drowning or needs a surface route.
+  // Keep the recent air reading in the scheduler/projection; only name this
+  // environmental hazard while authoritative submersion evidence is present.
+  const drowning = facts.outOfAir === true && facts.inWater === true
   const headInWater = facts.headInWater === true
   const airAbove = facts.airAbove === true
   const inWaterWhileBurning = onFire === true && facts.inWater === true
