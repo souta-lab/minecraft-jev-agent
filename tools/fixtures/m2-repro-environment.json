@@ -1,6 +1,6 @@
 {
   "record": "clean-run-environment",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "note": "The environment contract for one reproducible M2 measurement: a fresh world, a unique seed, no assists, and the peaceful difficulty already allowed for M2. This fixture is independent of the M3 acceptance descriptor.",
   "cleanRun": {
     "milestone": "M2",
@@ -337,5 +337,6 @@
     "prebuiltStructures": [],
     "operatorWorldEdits": []
   },
+  "configurationChanges": [],
   "worldChanges": []
 }
