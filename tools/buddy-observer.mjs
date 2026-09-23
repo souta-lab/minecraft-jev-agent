@@ -21,6 +21,7 @@ const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4173
 const DEFAULT_INTERVAL_MS = 2500
 const DEFAULT_LOG_TAIL_BYTES = 128 * 1024
+const MAX_RUN_BOUNDARY_SCAN_BYTES = 1024 * 1024
 const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const MAX_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const DEFAULT_CONTROL_TIMEOUT_MS = 5000
@@ -214,16 +215,18 @@ export function readRunnerOutEvents(logPath, options = {}, maxBytes = DEFAULT_LO
   return parseRunnerOutEvents(readTextTail(logPath, maxBytes), options)
 }
 
-/** Find the latest matching event without loading the full append-only log. */
+/** Find a recent event without scanning an unbounded append-only log. */
 function readLogEvent(logPath, eventName, runId = null) {
   if (!existsSync(logPath)) return null
   const fd = openSync(logPath, 'r')
   try {
-    let cursor = fstatSync(fd).size
+    const size = fstatSync(fd).size
+    const scanStart = Math.max(0, size - MAX_RUN_BOUNDARY_SCAN_BYTES)
+    let cursor = size
     let carry = ''
     const chunkSize = 64 * 1024
-    while (cursor > 0) {
-      const length = Math.min(cursor, chunkSize)
+    while (cursor > scanStart) {
+      const length = Math.min(cursor - scanStart, chunkSize)
       const start = cursor - length
       const buffer = Buffer.alloc(length)
       readSync(fd, buffer, 0, length, start)
@@ -235,6 +238,10 @@ function readLogEvent(logPath, eventName, runId = null) {
       }
       cursor = start
     }
+    // At a bounded scan boundary `carry` may be only the end of a line. Do not
+    // attribute a partial record to this run; only parse it when the file start
+    // was reached.
+    if (scanStart > 0) return null
     const first = parseBuddyLogLine(carry)
     return first?.event === eventName && (runId === null || first.detail.runId === runId) ? first : null
   } finally {
@@ -244,6 +251,8 @@ function readLogEvent(logPath, eventName, runId = null) {
 
 function readRunEvent(logPath, eventName, runId) {
   if (runId === null || runId === undefined) return null
+  // Historical run metadata beyond MAX_RUN_BOUNDARY_SCAN_BYTES stays unknown;
+  // never recover it by scanning an unbounded log on a live request.
   return readLogEvent(logPath, eventName, runId)
 }
 
@@ -516,22 +525,28 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
   const bootFromTail = latestEvent(events, ['BOOT'])
-  const candidateBoot = bootFromTail ?? runBoot
-  const runId = data?.runId ?? candidateBoot?.detail?.runId ?? latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+  const runId = typeof data?.runId === 'string' && data.runId.length > 0 ? data.runId : null
+  const candidateBoot = runId === null
+    ? null
+    : bootFromTail?.detail?.runId === runId
+      ? bootFromTail
+      : runBoot?.detail?.runId === runId
+        ? runBoot
+        : null
   const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
   const runEvents = runId === null
-    ? events
+    ? []
     : events.filter((entry) => {
       if (entry.detail?.runId !== undefined) return entry.detail.runId === runId
-      if (!Number.isFinite(runStartedAt)) return true
+      if (!Number.isFinite(runStartedAt)) return false
       const eventAt = Date.parse(entry.ts)
       return Number.isFinite(eventAt) ? eventAt >= runStartedAt : true
     })
   const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
   const boot = latestEvent(relevantEvents, ['BOOT'])
-    ?? (runBoot?.detail?.runId === runId ? runBoot : null)
+    ?? (runId !== null && runBoot?.detail?.runId === runId ? runBoot : null)
   const build = latestEvent(relevantEvents, ['BUILD'])
-    ?? (runBuild?.detail?.runId === runId ? runBuild : null)
+    ?? (runId !== null && runBuild?.detail?.runId === runId ? runBuild : null)
   const jev = latestEvent(relevantEvents, ['JEV_HEADS', 'TOOL_CHOICE'])
   const system2Input = latestEvent(relevantEvents, ['SYSTEM2_AUTHORITY_INPUT'])
   const system2Decision = latestEvent(relevantEvents, ['SYSTEM2_AUTHORITY_DECISION', 'SYSTEM2_STALE_DISCARD'])
@@ -1182,6 +1197,8 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     && heartbeatAgeMs !== null && heartbeatAgeMs <= 15_000
   const unknown = []
   if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
+  if (snapshot.resident.runId === null) unknown.push('live_run_identity_unavailable')
+  if (snapshot.resident.sourceCommit === null) unknown.push('run_source_sha_unavailable')
   if (modelUnavailable) unknown.push('model_authority_unavailable')
   if (latest === null) unknown.push('no_choice_event_observed')
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
@@ -1339,8 +1356,6 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   let cachedRunId = null
   let cachedRunBoot = null
   let cachedRunBuild = null
-  let latestBootInLog = null
-  let bootScanCompleted = false
   const snapshot = async () => {
     if (snapshotInFlight !== null) return await snapshotInFlight
     snapshotInFlight = Promise.all([
@@ -1349,23 +1364,13 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       Promise.resolve(readJsonlTail(jevCallsPath)),
     ]).then(([report, events, jevCalls]) => {
       const bootFromTail = latestEvent(events, ['BOOT'])
-      if (bootFromTail !== null) {
-        latestBootInLog = bootFromTail
-        bootScanCompleted = true
-      } else if (!bootScanCompleted) {
-        latestBootInLog = readLogEvent(logPath, 'BOOT')
-        bootScanCompleted = true
-      }
-      const currentRunId = report?.ok === true
-        ? report.data?.runId ?? null
-        : latestBootInLog?.detail?.runId ?? latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+      const reportedRunId = report?.ok === true ? report.data?.runId : null
+      const currentRunId = typeof reportedRunId === 'string' && reportedRunId.length > 0 ? reportedRunId : null
       if (currentRunId !== null && currentRunId !== cachedRunId) {
         cachedRunId = currentRunId
         cachedRunBoot = bootFromTail?.detail?.runId === currentRunId
           ? bootFromTail
-          : latestBootInLog?.detail?.runId === currentRunId
-            ? latestBootInLog
-            : readRunEvent(logPath, 'BOOT', currentRunId)
+          : readRunEvent(logPath, 'BOOT', currentRunId)
         cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
       const runnerEvents = readRunnerOutEvents(runnerOutPath, { runId: currentRunId, bootTs: cachedRunBoot?.ts ?? null })
