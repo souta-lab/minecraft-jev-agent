@@ -31,11 +31,34 @@
 //       never call the open.
 //   (G) world preservation: a placed container is refused at the dig boundary.
 //   (H) the ordinary furnace smelt contract is unchanged.
+//   (K/L/M) the LIVE SHAPES of 2026-09-22 (m3-live buddy.log), replayed from the
+//       save: (K1) the out-of-reach container Jev chose and the guard refused
+//       with `NO_PATH ... (GoalBlock probe)` against the container's own cell -
+//       reproduced BEFORE, allowed AFTER through its interaction stand; (K2) a
+//       container 26 m away, outside the 16 m near-field scan, offered from
+//       durable memory and guard-allowed; (L1) a container no stand can SEE is
+//       refused `occluded` / `no_stand_with_line_of_sight` and never opened;
+//       (L2) the live 16:03 geometry - the portal-cell stand is blocked by the
+//       frame's obsidian column while the stands beside the box see it;
+//       (M1) the control: a container-free world is byte-identical to the
+//       pristine base's candidate list.
+//
+// STILL BLOCKED LIVE, and NOT by this layer (measured 2026-09-22T19:19-21:27Z):
+// the read-provenance gate refuses the container's own block reads
+// (`DIMENSION_READ_REFUSED cell=10,59,8 chunk=0,0 provenance=unknown
+// dimension=minecraft:the_nether reason=unknown_column`, 33 events, sources
+// `stations:barrel,…,purple_shulker_box,…:16:8` and `container-scan`), so the
+// sensed cell keeps its position but loses its NAME and the open is refused
+// `CONTAINER_REFUSED reason=unreachable container=container@10,59,8
+// block=container detail=block_unknown` - the typed refusal (A4) locks exactly
+// this behaviour, so a refused read can never look like an absent block.
 //
 // Run: bun test-container-interaction.mts
 import type { Bot } from 'mineflayer'
 import { createRequire } from 'node:module'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
+import { blockSightFromStand } from './src/executor.ts'
+import { guardDecision } from './src/policy.ts'
 import { defaultCandidateOptions, generateCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import { placedContainerReadyLine } from './src/executor.ts'
 import { effectEnvelopeHash, effectViolation, envelopeForCandidate } from './src/skillCommitment.ts'
@@ -154,6 +177,11 @@ function makeContainerBot(config: {
   inventorySlots?: Array<Slot | null>
   /** present -> answers the line-of-sight read; absent -> no occlusion fact */
   canSeeBlock?: (block: FakeBlock) => boolean
+  /**
+   * present -> answers `bot.world.raycast` (the sight-aware interaction-stand
+   * filter). Returns the first SOLID cell on the segment, or null for no hit.
+   */
+  sightCast?: (from: Vec3Json, to: Vec3Json) => Vec3Json | null
   /** 'never' keeps the open promise pending forever (the 20 s wedge shape) */
   openMode?: 'normal' | 'never' | 'late'
   lateOpenMs?: number
@@ -240,6 +268,26 @@ function makeContainerBot(config: {
     },
     blockAt,
     ...(config.canSeeBlock === undefined ? {} : { canSeeBlock: (block: FakeBlock) => config.canSeeBlock?.(block) ?? true }),
+    ...(config.sightCast === undefined
+      ? {}
+      : {
+          world: {
+            raycast: (
+              origin: { x: number; y: number; z: number },
+              direction: { x: number; y: number; z: number },
+              range: number,
+            ): { position: Vec3Json } | null => {
+              const from = { x: origin.x, y: origin.y, z: origin.z }
+              const to = {
+                x: origin.x + direction.x * range,
+                y: origin.y + direction.y * range,
+                z: origin.z + direction.z * range,
+              }
+              const hit = config.sightCast?.(from, to) ?? null
+              return hit === null ? null : { position: hit }
+            },
+          },
+        }),
     heldItem: null as Slot | null,
     on: () => undefined,
     removeListener: () => undefined,
@@ -1196,6 +1244,230 @@ addCase('(J1) every container marker is registered and mirrored, and the emitted
   return {
     pass,
     detail: `emitted=${emitted.length} tokens=[${[...new Set(tokens)].join(',')}] missing=[${missingFromRegistry.join(',')}] unmirrored=${unmirrored.length}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (K/L/M) the MEASURED LIVE SHAPES: m3-live buddy.log, 2026-09-22
+// ---------------------------------------------------------------------------
+
+/** A voxel walker: the first SOLID cell on the segment, or null. `solid` decides. */
+function solidVoxelCast(
+  blocks: Map<string, string>,
+  solid: (name: string) => boolean,
+): (from: Vec3Json, to: Vec3Json) => Vec3Json | null {
+  return (from, to) => {
+    const dx = to.x - from.x
+    const dy = to.y - from.y
+    const dz = to.z - from.z
+    const length = Math.hypot(dx, dy, dz)
+    if (!Number.isFinite(length) || length <= 0) return null
+    const steps = Math.max(1, Math.ceil(length / 0.02))
+    let last: string | null = null
+    for (let step = 1; step <= steps; step += 1) {
+      const t = step / steps
+      const x = Math.floor(from.x + dx * t)
+      const y = Math.floor(from.y + dy * t)
+      const z = Math.floor(from.z + dz * t)
+      const key = `${x},${y},${z}`
+      if (key === last) continue
+      last = key
+      if (solid(blocks.get(key) ?? 'air')) return { x, y, z }
+    }
+    return null
+  }
+}
+
+/**
+ * The live Nether slice around the operator's shulker box, read from the save
+ * (`/home/s0u7a/mc-server/world_nether/DIM-1/region/r.0.0.mca`, chunk 0,0 via
+ * `tools/world-truth-plane.mjs` + a plane dump): a purple_shulker_box at
+ * (10,59,8) on soul_sand, the portal's obsidian frame columns x=6 and x=9 at
+ * y=58..62 plus the frame's y=58/y=62 rows through x=7..8, the lit portal plane
+ * x=7..8 y=59..61 z=8, a soul_sand floor at y=56..58, everything else around the
+ * box open air.
+ */
+function liveNetherSlice(): Map<string, string> {
+  const blocks = new Map<string, string>()
+  for (let x = 5; x <= 14; x += 1) for (let z = 5; z <= 14; z += 1) blocks.set(`${x},56,${z}`, 'soul_sand')
+  for (let x = 6; x <= 9; x += 1) for (let y = 58; y <= 62; y += 1) blocks.set(`${x},${y},8`, 'obsidian')
+  for (let x = 7; x <= 8; x += 1) for (let y = 59; y <= 61; y += 1) blocks.set(`${x},${y},8`, 'nether_portal')
+  blocks.set('10,57,8', 'soul_sand')
+  blocks.set('10,58,8', 'soul_sand')
+  blocks.set('11,58,8', 'soul_sand')
+  blocks.set('10,58,9', 'soul_sand')
+  blocks.set('10,59,8', 'purple_shulker_box')
+  return blocks
+}
+
+/** Vanilla raycast semantics: the portal plane is not solid, the rest is. */
+const LIVE_SOLID = (name: string): boolean => name !== 'air' && name !== 'nether_portal'
+
+addCase('(K1) the LIVE 14:17 shape: an out-of-reach container is guard-allowed through its STAND, never refused against its own cell', () => {
+  // m3-live buddy.log 2026-09-22T14:17:10.218Z:
+  //   JEV_HEADS action=CONTAINER:open:purple_shulker_box@10,59,8
+  //   ACTION_REJECTED ... code=NO_PATH reason=no canDig=false path to (10,59,8) (GoalBlock probe)
+  // The body stood at (22.3,59,-0.3), 14.8 m away, and never moved: the guard
+  // probed `GoalBlock(<container cell>)`, a cell the shulker box occupies.
+  const cell: Vec3Json = { x: 10, y: 59, z: 8 }
+  const state = worldState({ containers: [{ ...cell, source: 'sensed', name: 'purple_shulker_box' }] })
+  state.self.position = { x: 22.3, y: 59, z: -0.3 }
+  state.self.eyePosition = { x: 22.3, y: 60.62, z: -0.3 }
+  const candidate = openCandidates(state)[0]
+  if (candidate === undefined) return { pass: false, detail: 'no OPEN candidate offered at all' }
+  const context = {
+    phase: 'decision' as const,
+    candidateIds: new Set([candidate.id]),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 40,
+    // The live controller probe: `new goals.GoalBlock(10,59,8)` is unsatisfiable.
+    canComputePath: () => false,
+  }
+  const before = guardDecision(candidate.id, [candidate], state, { ...context })
+  const stand: Vec3Json = { x: 11, y: 59, z: 8 }
+  const after = guardDecision(candidate.id, [candidate], state, {
+    ...context,
+    stationApproach: () => ({ approach: stand, path: 'reachable' }),
+  })
+  const lidless = guardDecision(candidate.id, [candidate], state, {
+    ...context,
+    stationApproach: () => ({ approach: null, path: null }),
+  })
+  const walled = guardDecision(candidate.id, [candidate], state, {
+    ...context,
+    stationApproach: () => ({ approach: stand, path: 'no_path' }),
+  })
+  const pass =
+    candidate.id === 'CONTAINER:open:purple_shulker_box@10,59,8' &&
+    before.ok === false &&
+    before.code === 'NO_PATH' &&
+    before.reason === 'no canDig=false path to (10,59,8) (GoalBlock probe)' &&
+    after.ok === true &&
+    lidless.ok === false &&
+    lidless.code === 'NO_PATH' &&
+    lidless.reason === 'no interaction stand for purple_shulker_box@10,59,8 at (10,59,8) within reach' &&
+    walled.ok === false &&
+    walled.code === 'NO_PATH' &&
+    walled.reason ===
+      'no canDig=false path to the interaction stand (11,59,8) for purple_shulker_box@10,59,8 at (10,59,8)'
+  return {
+    pass,
+    detail: `id=${candidate.id} before=${before.ok ? 'ok' : `${before.code}:${before.reason}`} after=${after.ok ? 'ok' : 'refused'} noStand=${lidless.ok ? 'ok' : lidless.reason} noPath=${walled.ok ? 'ok' : walled.reason}`,
+  }
+})
+
+addCase('(K2) a container 26 m away (outside the 16 m near-field scan) is offered from DURABLE memory and guard-allowed', () => {
+  // The scan radius is `Math.max(16, reach + 8)` (state.ts buildStations), but a
+  // host-validated durable station is merged in as `remembered` (radius 48), so
+  // the near-field radius is NOT the binding limit for a known container.
+  const cell: Vec3Json = { x: 10, y: 59, z: 8 }
+  const state = worldState({ containers: [{ ...cell, source: 'remembered', name: 'purple_shulker_box' }] })
+  state.self.position = { x: 36, y: 59, z: 8 }
+  state.self.eyePosition = { x: 36, y: 60.62, z: 8 }
+  const candidate = openCandidates(state)[0]
+  const offeredDistance = candidate === undefined ? -1 : Math.abs((candidate.target?.x ?? Number.NaN) - 36)
+  const guarded = candidate === undefined
+    ? null
+    : guardDecision(candidate.id, [candidate], state, {
+        phase: 'decision',
+        candidateIds: new Set([candidate.id]),
+        inFlight: null,
+        reach: 4.5,
+        maxCandidateAgeTicks: 40,
+        canComputePath: () => false,
+        stationApproach: () => ({ approach: { x: 11, y: 59, z: 8 }, path: 'reachable' }),
+      })
+  const pass =
+    candidate !== undefined &&
+    candidate.meta.containerSource === 'remembered' &&
+    candidate.target?.x === 10 &&
+    Math.abs((candidate.target?.x ?? 0) - 36) === 26 &&
+    offeredDistance === 26 &&
+    candidate.inReach === false &&
+    guarded?.ok === true
+  return {
+    pass,
+    detail: `candidate=${candidate?.id ?? 'none'} source=${String(candidate?.meta.containerSource)} inReach=${String(candidate?.inReach)} offeredAt=${offeredDistance}m guarded=${guarded?.ok === true ? 'ok' : 'refused'}`,
+  }
+})
+
+addCase('(L1) a container every stand is sight-blocked from is refused typed (occluded / no_stand_with_line_of_sight) and never opened', async () => {
+  // A LIDDED container: a solid block in the cell above it intercepts the eye
+  // ray of every same-level interaction stand, so no stand can SEE the container.
+  const blocks = terrain({ '1,64,0': 'chest', '1,65,0': 'stone' })
+  const fixture = makeContainerBot({
+    feet: { x: 6.5, y: 64, z: 0.5 },
+    blocks,
+    containerSlots: [{ name: 'iron_ingot', type: itemId('iron_ingot'), count: 3 }],
+    canSeeBlock: () => false,
+    sightCast: solidVoxelCast(blocks, (name) => name !== 'air'),
+  })
+  const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
+  const { executor, logger } = containerExecutor(fixture)
+  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const refusal = logger.warnings.find((line) => line.startsWith('CONTAINER_REFUSED '))
+  const pass =
+    result.status === 'failed' &&
+    result.failure === 'container_occluded' &&
+    fixture.openCalls.length === 0 &&
+    refusal === 'CONTAINER_REFUSED reason=occluded container=chest@1,64,0 at=1,64,0 detail=no_stand_with_line_of_sight'
+  return {
+    pass,
+    detail: `status=${result.status}/${result.failure} openCalls=${fixture.openCalls.length} refusal="${refusal ?? 'none'}"`,
+  }
+})
+
+addCase('(L2) the LIVE 16:03 geometry: the portal-cell stand is sight-blocked by the frame column, the clear stands see the box', () => {
+  // m3-live buddy.log 2026-09-22T16:03:47.146Z: the body stood in the Nether
+  // portal cell (7,59,8) 2.4 m from the box, `canSeeBlock` was false and the open
+  // was refused occluded. The geometry says why: the frame's obsidian column
+  // x=9 at y=60 is the FIRST SOLID HIT on the eye->box ray, while the same box is
+  // in plain sight from the stands beside it.
+  const blocks = liveNetherSlice()
+  const cast = solidVoxelCast(blocks, LIVE_SOLID)
+  const box: Vec3Json = { x: 10, y: 59, z: 8 }
+  const portalStand: Vec3Json = { x: 7, y: 59, z: 8 }
+  const clearStands: Vec3Json[] = [
+    { x: 11, y: 59, z: 8 },
+    { x: 10, y: 59, z: 9 },
+  ]
+  const blockedHit = cast({ x: 7.5, y: 60.62, z: 8.5 }, { x: 10.5, y: 59.5, z: 8.5 })
+  const portalSees = blockSightFromStand(portalStand, box, 1.62, cast)
+  const clearSees = clearStands.map((stand) => blockSightFromStand(stand, box, 1.62, cast))
+  const pass =
+    portalSees === false &&
+    blockedHit?.x === 9 &&
+    blockedHit?.y === 60 &&
+    blockedHit?.z === 8 &&
+    clearSees.every((sees) => sees === true)
+  return {
+    pass,
+    detail: `portalStandSees=${portalSees} firstHit=${JSON.stringify(blockedHit)} clearStands=[${clearStands.map((stand, index) => `${stand.x},${stand.y},${stand.z}:${clearSees[index]}`).join(' ')}]`,
+  }
+})
+
+addCase('(M1) the CONTROL: a world with NO container present yields no container candidate, no container evidence, and the pristine candidate ids', () => {
+  const control = worldState({ containers: [] })
+  const candidates = containerCandidates(control)
+  const ids = generateCandidates(control, defaultCandidateOptions).map((candidate) => candidate.id)
+  const containerIds = ids.filter((id) => id.startsWith('CONTAINER'))
+  const blocked = blockSightFromStand({ x: 2, y: 64, z: 0 }, CONTAINER_CELL, 1.62, () => null)
+  // Captured on the PRISTINE base of this lane (38cbb22, `git status` empty):
+  // the same no-container world produced exactly this candidate list, so the
+  // container work moved nothing in a container-free tick.
+  const pristine = 'WAIT'
+  const pass =
+    candidates.length === 0 &&
+    containerIds.length === 0 &&
+    control.containers?.length === 0 &&
+    // A world with nothing to see still answers "not occluded": the new sight
+    // predicate can never invent an occluder.
+    blocked === true &&
+    ids.join(' ') === pristine
+  return {
+    pass,
+    detail: `containers=${control.containers?.length ?? -1} containerCandidates=${candidates.length} allCandidates=[${ids.join(' ')}] pristine=[${pristine}] containerIds=${containerIds.length} noHitSees=${blocked}`,
   }
 })
 
