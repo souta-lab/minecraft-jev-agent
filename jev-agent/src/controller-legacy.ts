@@ -233,6 +233,8 @@ import {
 import type { PrereqDecision, PrereqPath, PrereqProgress, PrereqRankPolicy, RetrieveUnverifiedState } from './prereqOption.ts'
 import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
+import { formatLocomotionObservation, isEfficientLocomotionProgress, LOCOMOTION_WINDOW_SIZE, NO_LOCOMOTION_OBSERVATION, observeLocomotion } from './locomotion.ts'
+import type { LocomotionObservation } from './locomotion.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
 import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, isZeroProgressOutcome, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
@@ -2201,7 +2203,7 @@ function closesDescentRecoveryBoundary(reason: unknown): reason is string {
 export function betaAbandonProgressObserved(
   reason: string,
   outcome: System2Outcome | null,
-  locomotionEfficiency = 100,
+  locomotionObservation: LocomotionObservation = NO_LOCOMOTION_OBSERVATION,
 ): boolean {
   const kinds = outcome?.progressKinds ?? []
   const progress = outcome?.progress ?? null
@@ -2217,8 +2219,9 @@ export function betaAbandonProgressObserved(
   // legitimate progress, so the deferral is kept only when the body is actually going
   // somewhere: the windowed locomotion efficiency must be above the same floor the
   // move-failure memory uses. A state-recurring micro-move loop sits at ~0-6% and no
-  // longer holds the Option open.
-  return locomotionEfficiency >= MOVE_PROGRESS_EFFICIENCY_FLOOR
+  // longer holds the Option open. An idle or not-yet-sampled window is not
+  // locomotion evidence and therefore cannot keep the deferral alive either.
+  return isEfficientLocomotionProgress(locomotionObservation, MOVE_PROGRESS_EFFICIENCY_FLOOR)
 }
 
 export class JevController {
@@ -2440,8 +2443,8 @@ export class JevController {
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
   /** Surface waypoints reached without finding the requested resource. */
-  /** windowed locomotion efficiency (%) over the last 40 samples; 100 when idle */
-  private lastLocomotionEfficiency = 100
+  /** Explicit body-motion observation; idle and unobserved are never "100% efficient". */
+  private lastLocomotionObservation: LocomotionObservation = NO_LOCOMOTION_OBSERVATION
   /**
    * #405: bounded LRU of cells the body has recently occupied, exposed to the
    * candidate layer as `signals.exploredCells` so the exploration fallback keeps
@@ -5098,7 +5101,7 @@ export class JevController {
       return boundary
     }
     const action = decisionIdFrom(decision) ?? 'WAIT'
-    const progressed = betaAbandonProgressObserved(boundary.reason, outcome, this.lastLocomotionEfficiency)
+    const progressed = betaAbandonProgressObserved(boundary.reason, outcome, this.lastLocomotionObservation)
     const bounded = this.betaAbandonDeferral.note({
       plan: this.betaAbandonPlanId,
       action,
@@ -7089,7 +7092,7 @@ export class JevController {
 
   private sampleMovement(position: Vec3Json): void {
     this.positionWindow.push({ x: position.x, y: position.y, z: position.z })
-    while (this.positionWindow.length > 40) this.positionWindow.shift()
+    while (this.positionWindow.length > LOCOMOTION_WINDOW_SIZE) this.positionWindow.shift()
     const cellKey = exploredCellKey(position)
     this.exploredCells.delete(cellKey)
     this.exploredCells.add(cellKey)
@@ -7100,24 +7103,16 @@ export class JevController {
     }
     this.signals.exploredCells = this.exploredCells
     this.detectOscillation(position)
-    if (this.positionWindow.length < 40) return
+    if (this.positionWindow.length < LOCOMOTION_WINDOW_SIZE) return
     const first = this.positionWindow[0]
     const last = this.positionWindow[this.positionWindow.length - 1]
     if (first === undefined || last === undefined) return
-    let traveled = 0
-    for (let index = 1; index < this.positionWindow.length; index += 1) {
-      const a = this.positionWindow[index - 1]
-      const b = this.positionWindow[index]
-      if (a === undefined || b === undefined) continue
-      traveled += Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z)
-    }
-    const net = Math.hypot(last.x - first.x, last.y - first.y, last.z - first.z)
-    const efficiency = traveled > 0.01 ? Math.round((net / traveled) * 100) : 100
-    this.lastLocomotionEfficiency = efficiency
+    const observation = observeLocomotion(this.positionWindow)
+    this.lastLocomotionObservation = observation
     this.logger.info(
       'agent',
-      `MOVE_EFFICIENCY samples=40 traveled=${Math.round(traveled * 100) / 100} net=${Math.round(net * 100) / 100} efficiency=${efficiency}%`,
-      { traveled, net, efficiency, windowStart: first, windowEnd: last },
+      `MOVE_EFFICIENCY samples=${LOCOMOTION_WINDOW_SIZE} ${formatLocomotionObservation(observation)}`,
+      { ...observation, windowStart: first, windowEnd: last },
       this.tickCounter,
     )
     this.detectMoveOscillation()
@@ -13165,17 +13160,17 @@ export class JevController {
     this.resetDescendBudgetAfterWorldChange(candidate.id, 'verified_move')
     const dimension = this.currentDimension()
     const key = moveFailureKey(dimension, candidate.target)
-    // A verified micro-MOVE inside a low-efficiency window is mechanical success, not
+    // A verified MOVE inside an idle, unobserved or low-efficiency window is mechanical success, not
     // progress. Resetting the failure memory there is exactly what let the live
     // 48-minute A<->B loop undo every oscillation blacklist (issue #360: 401
     // OSCILLATION_DETECTED vs 49 blacklists, 1533 blocks travelled in a one-block
     // box). Keeping the memory means the loop's own cells stay suppressed and the body
     // must change neighbourhood instead of re-winning the same step.
-    if (this.lastLocomotionEfficiency < MOVE_PROGRESS_EFFICIENCY_FLOOR) {
+    if (!isEfficientLocomotionProgress(this.lastLocomotionObservation, MOVE_PROGRESS_EFFICIENCY_FLOOR)) {
       this.logger.info(
         'agent',
-        `MOVE_FAILMEM_RESET_SKIPPED efficiency=${this.lastLocomotionEfficiency}% reason=strategic_non_progress`,
-        { actionId: candidate.id, key },
+        `MOVE_FAILMEM_RESET_SKIPPED ${formatLocomotionObservation(this.lastLocomotionObservation)} reason=strategic_non_progress`,
+        { actionId: candidate.id, key, locomotion: this.lastLocomotionObservation },
         this.tickCounter,
       )
       return
@@ -13273,6 +13268,7 @@ export class JevController {
     const pair = `${fromKey}|${toKey}`
     const now = Date.now()
     this.positionWindow.length = 0
+    this.lastLocomotionObservation = NO_LOCOMOTION_OBSERVATION
     if (pair === this.lastOscillationPair && now - this.lastOscillationAt < OSCILLATION_REPEAT_LOG_MS) return
     this.lastOscillationPair = pair
     this.lastOscillationAt = now

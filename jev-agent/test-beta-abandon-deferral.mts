@@ -139,6 +139,10 @@ function makeHarness(planId: string | null, limit: number): Harness {
     options: { betaAuthority: true },
     betaAbandonDeferral: new BetaAbandonDeferral(limit),
     betaAbandonPlanId: planId,
+    // This fixture's productive body outcomes represent observed efficient
+    // locomotion. Idle/unobserved body evidence is covered in
+    // test-locomotion-progress.mts and does not hold the beta deferral open.
+    lastLocomotionObservation: { kind: 'moving', samples: 40, traveled: 10, net: 10, efficiency: 100 } as const,
   }
   return {
     lines,
