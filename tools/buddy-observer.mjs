@@ -22,6 +22,7 @@ const DEFAULT_PORT = 4173
 const DEFAULT_INTERVAL_MS = 2500
 const DEFAULT_LOG_TAIL_BYTES = 128 * 1024
 const MAX_RUN_BOUNDARY_SCAN_BYTES = 1024 * 1024
+const MAX_RUN_ARTIFACT_BYTES = 64 * 1024
 const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const MAX_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const DEFAULT_CONTROL_TIMEOUT_MS = 5000
@@ -216,7 +217,7 @@ export function readRunnerOutEvents(logPath, options = {}, maxBytes = DEFAULT_LO
 }
 
 /** Find a recent event without scanning an unbounded append-only log. */
-function readLogEvent(logPath, eventName, runId = null) {
+function readLogEvent(logPath, eventName, runId = null, detailMatches = null) {
   if (!existsSync(logPath)) return null
   const fd = openSync(logPath, 'r')
   try {
@@ -234,7 +235,9 @@ function readLogEvent(logPath, eventName, runId = null) {
       carry = lines.shift() ?? ''
       for (let index = lines.length - 1; index >= 0; index -= 1) {
         const entry = parseBuddyLogLine(lines[index] ?? '')
-        if (entry?.event === eventName && (runId === null || entry.detail.runId === runId)) return entry
+        if (entry?.event === eventName
+          && (runId === null || entry.detail.runId === runId)
+          && (detailMatches === null || detailMatches(entry.detail))) return entry
       }
       cursor = start
     }
@@ -243,7 +246,9 @@ function readLogEvent(logPath, eventName, runId = null) {
     // was reached.
     if (scanStart > 0) return null
     const first = parseBuddyLogLine(carry)
-    return first?.event === eventName && (runId === null || first.detail.runId === runId) ? first : null
+    return first?.event === eventName
+      && (runId === null || first.detail.runId === runId)
+      && (detailMatches === null || detailMatches(first.detail)) ? first : null
   } finally {
     closeSync(fd)
   }
@@ -254,6 +259,79 @@ function readRunEvent(logPath, eventName, runId) {
   // Historical run metadata beyond MAX_RUN_BOUNDARY_SCAN_BYTES stays unknown;
   // never recover it by scanning an unbounded log on a live request.
   return readLogEvent(logPath, eventName, runId)
+}
+
+function readRunArtifact(runtimeDir, prefix, recordName, runId) {
+  if (typeof runId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)) return null
+  const path = join(runtimeDir, 'data', 'resident', `${prefix}${runId}.json`)
+  if (!existsSync(path)) return null
+  let fd = null
+  try {
+    fd = openSync(path, 'r')
+    const size = fstatSync(fd).size
+    if (size < 2 || size > MAX_RUN_ARTIFACT_BYTES) return null
+    const buffer = Buffer.alloc(size)
+    readSync(fd, buffer, 0, size, 0)
+    const parsed = JSON.parse(buffer.toString('utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    if (parsed.record !== recordName || parsed.runId !== runId) return null
+    return parsed
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) closeSync(fd)
+  }
+}
+
+/** Join only files whose embedded run identity matches the live report. */
+function readRunMetadata(runtimeDir, runId) {
+  // Writers use `<record>-<runId>.json`; runId already contains the `run-` prefix.
+  const acceptance = readRunArtifact(runtimeDir, 'acceptance-', 'acceptance', runId)
+  const predicates = readRunArtifact(runtimeDir, 'milestone-predicates-', 'milestone-predicates', runId)
+  const acceptanceSha = acceptance?.gitCommit ?? null
+  const predicateSha = predicates?.sourceSha ?? null
+  const hasAcceptanceSha = typeof acceptanceSha === 'string' && acceptanceSha.length > 0
+  const hasPredicateSha = typeof predicateSha === 'string' && predicateSha.length > 0
+  const validSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+  const sourceShaConflict = hasAcceptanceSha && hasPredicateSha
+    && (!validSha(acceptanceSha) || !validSha(predicateSha) || acceptanceSha !== predicateSha)
+  const sourceSha = acceptance !== null && predicates !== null
+    && hasAcceptanceSha && hasPredicateSha
+    && validSha(acceptanceSha) && acceptanceSha === predicateSha
+    ? acceptanceSha
+    : null
+  return {
+    acceptance,
+    predicates,
+    sourceSha,
+    sourceShaConflict,
+    runArtifactsMatched: acceptance !== null && predicates !== null,
+  }
+}
+
+function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent) {
+  return typeof runId === 'string'
+    && metadata?.runArtifactsMatched === true
+    && metadata.sourceSha !== null
+    && metadata.sourceShaConflict !== true
+    && metadata.acceptance?.runId === runId
+    && metadata.predicates?.runId === runId
+    && typeof generationId === 'string'
+    && metadata.acceptance?.generationId === generationId
+    && metadata.predicates?.generationId === generationId
+    && readyEvent?.event === 'GENERATION_READY'
+    && readyEvent.detail?.id === generationId
+}
+
+function eventBelongsToRunGeneration(entry, { runId, generationId, generationStartedAt, generationBound }) {
+  const eventRunId = entry.detail?.runId
+  if (eventRunId !== undefined && eventRunId !== null && eventRunId !== runId) return false
+  if (generationBound !== true || typeof generationId !== 'string') return false
+  const eventGenerationId = entry.detail?.generationId
+    ?? (entry.event === 'GENERATION_READY' ? entry.detail?.id : null)
+  if (eventGenerationId !== null && eventGenerationId !== undefined) return eventGenerationId === generationId
+  const eventAt = parseTimestamp(entry.ts)
+  return Number.isFinite(generationStartedAt) && eventAt !== null && eventAt >= generationStartedAt
 }
 
 /** Read only a bounded JSONL tail; Jev call logs are append-only and can be large. */
@@ -521,11 +599,12 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
-export function buildObserverSnapshot({ report, events, mission, runBoot = null, runBuild = null, jevCalls = [], now = Date.now() }) {
+export function buildObserverSnapshot({ report, events, mission, runBoot = null, runBuild = null, runMetadata = null, runGenerationReady = null, jevCalls = [], now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
   const bootFromTail = latestEvent(events, ['BOOT'])
   const runId = typeof data?.runId === 'string' && data.runId.length > 0 ? data.runId : null
+  const generationId = typeof data?.generationId === 'string' && data.generationId.length > 0 ? data.generationId : null
   const candidateBoot = runId === null
     ? null
     : bootFromTail?.detail?.runId === runId
@@ -534,14 +613,14 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
         ? runBoot
         : null
   const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
-  const runEvents = runId === null
-    ? []
-    : events.filter((entry) => {
-      if (entry.detail?.runId !== undefined) return entry.detail.runId === runId
-      if (!Number.isFinite(runStartedAt)) return false
-      const eventAt = Date.parse(entry.ts)
-      return Number.isFinite(eventAt) ? eventAt >= runStartedAt : true
-    })
+  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, runGenerationReady)
+  const generationStartedAt = generationBound ? parseTimestamp(runGenerationReady.ts) ?? NaN : NaN
+  const runEvents = runId === null ? [] : events.filter((entry) => eventBelongsToRunGeneration(entry, {
+    runId,
+    generationId,
+    generationStartedAt,
+    generationBound,
+  }))
   const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
   const boot = latestEvent(relevantEvents, ['BOOT'])
     ?? (runId !== null && runBoot?.detail?.runId === runId ? runBoot : null)
@@ -566,18 +645,29 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
   const queue = queueProjection(status)
   const current = queue.current
   const worldKey = data?.worldKey ?? status?.worldKey ?? boot?.detail?.worldKey ?? null
-  const generationId = data?.generationId
-    ?? latestEvent(
-      relevantEvents.filter((entry) => entry.detail?.generationId !== undefined && entry.detail.generationId !== null),
-      TRACE_EVENTS,
-    )?.detail?.generationId
-    ?? null
+  const eventSourceSha = boot?.detail?.source ?? null
+  const artifactSourceSha = runMetadata?.sourceSha ?? null
+  const sourceCandidates = [eventSourceSha, artifactSourceSha]
+    .filter((value) => value !== null && value !== undefined && value !== '')
+  const sourceCandidatesValid = sourceCandidates.every((value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value))
+  const distinctSourceCandidates = [...new Set(sourceCandidates)]
+  const sourceCommitConflict = runMetadata?.sourceShaConflict === true
+    || !sourceCandidatesValid
+    || distinctSourceCandidates.length > 1
+  const sourceCommit = sourceCommitConflict || distinctSourceCandidates.length !== 1
+    ? null
+    : distinctSourceCandidates[0]
+  const sourceCommitBinding = sourceCommit === null
+    ? sourceCommitConflict ? 'conflict' : 'unknown'
+    : eventSourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+acceptance+predicate-artifacts'
+      : artifactSourceSha !== null ? 'run-acceptance+predicate-artifacts'
+        : 'run-BOOT-event'
   const decisionEvidence = projectJevDecisionEvidence({
     jevCalls,
     choiceEvent: jev,
     events: relevantEvents,
     runId,
-    runStartedAt,
+    runStartedAt: Number.isFinite(generationStartedAt) ? generationStartedAt : runStartedAt,
     worldKey,
     generationId,
   })
@@ -594,7 +684,16 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
       generationId,
       generationHash: data?.generationHash ?? build?.detail?.hash ?? null,
       worldKey,
-      sourceCommit: build?.detail?.sourceSha ?? boot?.detail?.source ?? null,
+      sourceCommit,
+      sourceCommitBinding,
+      sourceCommitConflict,
+      generationBoundary: generationBound ? {
+        event: 'GENERATION_READY',
+        generationId,
+        observedAt: runGenerationReady.ts,
+        method: 'live-report+run-artifacts+generation-id',
+        confidence: 'direct',
+      } : null,
     },
     mission,
     goal: {
@@ -1011,6 +1110,9 @@ export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, 
   if (choiceEvent === null || !['JEV_HEADS', 'TOOL_CHOICE'].includes(choiceEvent?.event)) return null
   const choiceAt = parseTimestamp(choiceEvent.ts)
   const startedAt = Number.isFinite(runStartedAt) ? runStartedAt : null
+  const choiceGenerationId = choiceEvent.detail?.generationId ?? null
+  if (generationId !== null && choiceGenerationId !== null && choiceGenerationId !== generationId) return null
+  if (choiceAt === null || startedAt === null || choiceAt < startedAt) return null
   const expectedDimension = normalizeDimension(worldKey?.dimension)
   const expectedEpoch = worldKey?.worldEpoch ?? null
   const candidates = jevCalls.filter((call) => {
@@ -1022,7 +1124,8 @@ export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, 
     const callWorld = state.semantic?.world ?? state.world ?? {}
     if (expectedEpoch !== null && callWorld.worldEpoch !== expectedEpoch) return false
     if (expectedDimension !== null && normalizeDimension(callWorld.dimension ?? state.self?.dimension) !== expectedDimension) return false
-    if (generationId !== null && callWorld.generationId !== null && callWorld.generationId !== undefined && callWorld.generationId !== generationId) return false
+    const callGenerationId = call.generationId ?? callWorld.generationId ?? null
+    if (generationId !== null && callGenerationId !== null && callGenerationId !== generationId) return false
     return true
   })
   const selectedAction = choiceEvent.event === 'TOOL_CHOICE'
@@ -1058,7 +1161,11 @@ export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, 
   const callAt = parseTimestamp(call.ts)
   const deltaMs = choiceAt === null || callAt === null ? null : Math.abs(choiceAt - callAt)
   const actionMatches = match !== null
-  const confidence = actionMatches && deltaMs !== null && deltaMs <= 2_000 ? 'strong' : 'partial'
+  const callWorld = call.state?.semantic?.world ?? call.state?.world ?? {}
+  const callGenerationId = call.generationId ?? callWorld.generationId ?? null
+  const confidence = actionMatches && deltaMs !== null && deltaMs <= 2_000
+    ? callGenerationId === generationId && generationId !== null ? 'strong' : 'inferred'
+    : 'partial'
   return redactSecrets({
     available: true,
     observedAt: call.ts,
@@ -1072,12 +1179,15 @@ export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, 
       runId,
       directRunId: false,
       choiceEvent: choiceEvent.event,
-      method: 'boot-window+world-epoch+dimension+selected-action+timestamp',
+      choiceGenerationId,
+      callGenerationId,
+      method: 'GENERATION_READY-window+world-epoch+dimension+selected-action+timestamp',
       confidence,
       choiceAction: selectedAction,
       callAction: answer?.value ?? null,
       sameAction: actionMatches,
       timestampDeltaMs: deltaMs,
+      generationJoin: callGenerationId !== null && callGenerationId === generationId ? 'direct' : 'ready-window-inferred',
       worldEpoch: state.world?.worldEpoch ?? null,
       dimension: state.world?.dimension ?? null,
       generationIdObservedInCall: state.world?.generationId ?? null,
@@ -1198,7 +1308,10 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const unknown = []
   if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
   if (snapshot.resident.runId === null) unknown.push('live_run_identity_unavailable')
-  if (snapshot.resident.sourceCommit === null) unknown.push('run_source_sha_unavailable')
+  if (snapshot.resident.sourceCommit === null) unknown.push(snapshot.resident.sourceCommitConflict === true
+    ? 'run_source_sha_conflict'
+    : 'run_source_sha_unavailable')
+  if (snapshot.resident.generationBoundary === null) unknown.push('current_generation_boundary_unavailable')
   if (modelUnavailable) unknown.push('model_authority_unavailable')
   if (latest === null) unknown.push('no_choice_event_observed')
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
@@ -1234,7 +1347,9 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     run: {
       id: snapshot.resident.runId,
       sourceCommit: snapshot.resident.sourceCommit ?? null,
+      sourceCommitBinding: snapshot.resident.sourceCommitBinding ?? 'unknown',
       generationId: snapshot.resident.generationId,
+      generationBoundary: snapshot.resident.generationBoundary ?? null,
       generationHash: snapshot.resident.generationHash,
       worldKey: snapshot.resident.worldKey,
     },
@@ -1356,6 +1471,9 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   let cachedRunId = null
   let cachedRunBoot = null
   let cachedRunBuild = null
+  let cachedRunMetadata = null
+  let cachedGenerationId = null
+  let cachedGenerationReady = null
   const snapshot = async () => {
     if (snapshotInFlight !== null) return await snapshotInFlight
     snapshotInFlight = Promise.all([
@@ -1366,20 +1484,47 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       const bootFromTail = latestEvent(events, ['BOOT'])
       const reportedRunId = report?.ok === true ? report.data?.runId : null
       const currentRunId = typeof reportedRunId === 'string' && reportedRunId.length > 0 ? reportedRunId : null
-      if (currentRunId !== null && currentRunId !== cachedRunId) {
+      const reportedGenerationId = report?.ok === true ? report.data?.generationId : null
+      const currentGenerationId = typeof reportedGenerationId === 'string' && reportedGenerationId.length > 0 ? reportedGenerationId : null
+      if (currentRunId === null) {
+        cachedRunId = null
+        cachedRunBoot = null
+        cachedRunBuild = null
+      } else if (currentRunId !== cachedRunId) {
         cachedRunId = currentRunId
         cachedRunBoot = bootFromTail?.detail?.runId === currentRunId
           ? bootFromTail
           : readRunEvent(logPath, 'BOOT', currentRunId)
         cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
+      const runMetadata = currentRunId === null ? null : readRunMetadata(runtimeDir, currentRunId)
+      let candidateGenerationReady = latestEvent(events, ['GENERATION_READY'])
+      if (candidateGenerationReady === null) candidateGenerationReady = readLogEvent(logPath, 'GENERATION_READY')
+      const runGenerationReady = runGenerationAnchorMatches(
+        runMetadata,
+        currentRunId,
+        currentGenerationId,
+        candidateGenerationReady,
+      ) ? candidateGenerationReady : null
+      cachedRunMetadata = runMetadata
+      cachedGenerationId = currentGenerationId
+      cachedGenerationReady = runGenerationReady
       const runnerEvents = readRunnerOutEvents(runnerOutPath, { runId: currentRunId, bootTs: cachedRunBoot?.ts ?? null })
       const combinedEvents = [...events, ...runnerEvents].sort((left, right) => {
         const leftTs = Date.parse(left.ts ?? '')
         const rightTs = Date.parse(right.ts ?? '')
         return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0)
       })
-      return buildObserverSnapshot({ report, events: combinedEvents, mission, runBoot: cachedRunBoot, runBuild: cachedRunBuild, jevCalls })
+      return buildObserverSnapshot({
+        report,
+        events: combinedEvents,
+        mission,
+        runBoot: cachedRunBoot,
+        runBuild: cachedRunBuild,
+        runMetadata,
+        runGenerationReady,
+        jevCalls,
+      })
     })
       .finally(() => { snapshotInFlight = null })
     return await snapshotInFlight
@@ -1387,22 +1532,29 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
 
   const recentChoiceOutcomes = async ({ limit = 12, maxBytes = DEFAULT_RECENT_CHOICE_LOG_BYTES } = {}) => {
     const runId = cachedRunId
-    const bootTs = cachedRunBoot?.ts ?? null
-    const bootTime = parseTimestamp(bootTs)
+    const generationId = cachedGenerationId
+    const generationReady = cachedGenerationReady
+    const generationStartedAt = parseTimestamp(generationReady?.ts)
+    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady)
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.floor(limit))) : 12
     const boundedMaxBytes = Number.isFinite(maxBytes)
       ? Math.max(1, Math.min(MAX_RECENT_CHOICE_LOG_BYTES, Math.floor(maxBytes)))
       : DEFAULT_RECENT_CHOICE_LOG_BYTES
-    if (runId === null || bootTime === null) {
+    if (runId === null || generationId === null || generationBound !== true || generationStartedAt === null) {
       return {
         status: 'unknown',
-        binding: { runId, directRunId: false, method: 'current-BOOT-timestamp-window', confidence: 'unknown' },
+        binding: { runId, directRunId: runId !== null, generationId, method: 'runId+generationId+GENERATION_READY', confidence: 'unknown' },
         entries: [],
-        unknown: ['current_run_boot_boundary_unavailable'],
+        unknown: ['current_run_generation_boundary_unavailable'],
       }
     }
     const events = readLogTail(logPath, boundedMaxBytes)
-      .filter((entry) => TRACE_EVENTS.has(entry.event) && (parseTimestamp(entry.ts) ?? 0) >= bootTime)
+      .filter((entry) => TRACE_EVENTS.has(entry.event) && eventBelongsToRunGeneration(entry, {
+        runId,
+        generationId,
+        generationStartedAt,
+        generationBound,
+      }))
     const choices = events.filter((entry) => ['JEV_HEADS', 'TOOL_CHOICE'].includes(entry.event))
     const entries = choices.slice(-boundedLimit).map((entry) => {
       const choice = projectChoice(entry, 'jev')
@@ -1413,6 +1565,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         trigger: choice.trigger,
         reason: choice.reason,
         generationId: entry.detail?.generationId ?? null,
+        generationBinding: entry.detail?.generationId === generationId ? 'direct' : 'ready-window-inferred',
         chainId: entry.detail?.chainId ?? null,
         outcome: outcomeEvidenceForChoice(entry, events),
       }
@@ -1421,10 +1574,11 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       status: entries.length > 0 ? 'observed' : 'not_recorded',
       binding: {
         runId,
-        directRunId: false,
-        method: 'current-BOOT-timestamp-window',
-        confidence: 'inferred',
-        bootObservedAt: bootTs,
+        directRunId: true,
+        generationId,
+        method: 'runId+generationId+GENERATION_READY',
+        confidence: 'direct',
+        generationReadyObservedAt: generationReady.ts,
       },
       bounded: { maxBytes: boundedMaxBytes, limit: boundedLimit },
       entries,
