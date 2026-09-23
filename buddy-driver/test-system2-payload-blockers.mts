@@ -129,6 +129,19 @@ function liveBlockerFacts(): System2BlockerFacts {
         reason: 'needs_ascend',
         missing: ['headroom@27,62,15'],
         suppressed: false,
+        // The grounded alternative for the missing cell: the gate's own
+        // acquisition routes, or its typed refusal.
+        acquisition: [
+          {
+            missing: 'headroom@27,62,15',
+            routes: ['MINE:27,62,15'],
+            reason: null,
+            item: 'stone_pickaxe',
+            count: 1,
+            held: 0,
+            tools: 'pickaxe:-1',
+          },
+        ],
       },
     ],
     tools: {
@@ -225,6 +238,22 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     blockers.tools.unmet.some((gap) => gap.tool === 'pickaxe' && gap.heldTier < gap.requiredTier),
     JSON.stringify(blockers.tools.unmet),
   )
+  check(
+    '(i) the grounded acquisition route for a missing fact is carried',
+    blockers.withheld.some((entry) =>
+      (entry.acquisition ?? []).some((fact) => fact.missing === 'headroom@27,62,15' && fact.routes.includes('MINE:27,62,15')),
+    ),
+    JSON.stringify(blockers.withheld.map((entry) => entry.acquisition)),
+  )
+  check(
+    '(i) the acquisition item/count/held/tools facts are carried',
+    blockers.withheld.some((entry) =>
+      (entry.acquisition ?? []).some(
+        (fact) => fact.item === 'stone_pickaxe' && fact.count === 1 && fact.held === 0 && fact.tools === 'pickaxe:-1',
+      ),
+    ),
+    JSON.stringify(blockers.withheld.map((entry) => entry.acquisition)),
+  )
   const alternatives = summary.alternatives
   assert.ok(alternatives !== undefined, 'grounded alternatives must accompany a blocker')
   check(
@@ -247,7 +276,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
   check('(i) the payload-shape marker is emitted', payloadLine !== undefined, JSON.stringify(sink.lines.map((l) => l.event)))
   check(
     '(i) the payload-shape marker line is counts only',
-    payloadLine !== undefined && /^SYSTEM2_PAYLOAD included=1 withheld=2\/2 presented=3\/3 unmetTools=1 missing=1 blockedBy=1 routes=1 refused=0 absent=0 chars=\d+$/.test(payloadLine.event),
+    payloadLine !== undefined && /^SYSTEM2_PAYLOAD included=1 withheld=2\/2 presented=3\/3 unmetTools=1 missing=1 blockedBy=1 acquire=1 acquireRefused=0 routes=1 refused=0 absent=0 chars=\d+$/.test(payloadLine.event),
     payloadLine?.event ?? '<none>',
   )
   check(
@@ -549,7 +578,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
   check(
     '(iv) an empty shape reports absence rather than fabricating content',
     formatSystem2PayloadLine(emptySystem2PayloadShape()) ===
-      'SYSTEM2_PAYLOAD included=0 withheld=0/0 presented=0/0 unmetTools=0 missing=0 blockedBy=0 routes=0 refused=0 absent=0 chars=0',
+      'SYSTEM2_PAYLOAD included=0 withheld=0/0 presented=0/0 unmetTools=0 missing=0 blockedBy=0 acquire=0 acquireRefused=0 routes=0 refused=0 absent=0 chars=0',
     formatSystem2PayloadLine(emptySystem2PayloadShape()),
   )
   check('(iv) the char weight of the carried facts is reported', payloadFactsChars(facts) > 0)
@@ -563,6 +592,75 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
       `registered=${MIRRORED_MARKERS.has(marker)} token=${mirroredEventToken(`${marker} a=1`)}`,
     )
   }
+}
+
+// ---------------------------------------------------------------------------
+// (i-b) a withheld fact with NO grounded route carries the typed refusal
+// ---------------------------------------------------------------------------
+
+{
+  const facts = liveBlockerFacts()
+  facts.withheld[1] = {
+    ...facts.withheld[1]!,
+    acquisition: [
+      { missing: 'headroom@27,62,15', routes: [], reason: 'no_material', item: 'stone_pickaxe', count: 1, held: 0, tools: 'pickaxe:-1' },
+    ],
+  }
+  const sink = collector()
+  const summary = buildMercurySummary(liveBot(), liveWorld(), liveRequest(facts), 'no_progress', null, null, sink.log)
+  const acquisition = summary.blockers?.withheld[1]?.acquisition?.[0]
+  check(
+    '(i-b) an unobtainable missing fact carries its typed refusal, not silence',
+    acquisition?.reason === 'no_material' && acquisition.routes.length === 0,
+    JSON.stringify(acquisition),
+  )
+  check(
+    '(i-b) the refusal names the item and count the body would need',
+    acquisition?.item === 'stone_pickaxe' && acquisition.count === 1 && acquisition.held === 0,
+    JSON.stringify(acquisition),
+  )
+  const line = sink.lines.find((entry) => entry.event.startsWith('SYSTEM2_PAYLOAD '))
+  check(
+    '(i-b) the marker counts the refused acquisition separately',
+    line !== undefined && / acquire=0 acquireRefused=1 /.test(line.event),
+    line?.event ?? '<none>',
+  )
+  check(
+    '(i-b) the acquisition routes are clamped with a reported refusal',
+    (() => {
+      const many = liveBlockerFacts()
+      many.withheld[1] = {
+        ...many.withheld[1]!,
+        acquisition: [
+          {
+            missing: 'headroom@27,62,15',
+            routes: Array.from({ length: 9 }, (_, index) => `MINE:${index}`),
+            reason: null,
+            item: null,
+            count: null,
+            held: null,
+            tools: 'pickaxe:-1',
+          },
+        ],
+      }
+      const built = buildSystem2BlockerFacts({ blockedBy: 'no_productive_action', withheld: many.withheld })
+      return (
+        built !== null &&
+        built.facts.withheld[1]?.acquisition?.[0]?.routes.length === SYSTEM2_PAYLOAD_LIMITS.acquisitionRoutes &&
+        built.shape.refused.some((entry) => entry.field.includes('acquire'))
+      )
+    })(),
+  )
+  check(
+    '(i-b) a producer with no acquisition pass carries no invented route',
+    (() => {
+      const built = buildSystem2BlockerFacts({
+        blockedBy: 'no_productive_action',
+        withheld: [{ candidate: 'X', kind: 'MOVE', reason: 'no_path', missing: ['open_path'], suppressed: false }],
+      })
+      return built !== null && built.facts.withheld[0]?.acquisition === undefined
+    })(),
+  )
 }
 
 // ---------------------------------------------------------------------------

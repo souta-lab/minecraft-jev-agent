@@ -3372,6 +3372,22 @@ export class JevController {
         reason: entry.result.reason,
         missing: entry.result.missingCapabilities.map(capabilityKey),
         suppressed: entry.suppressed,
+        // The GROUNDED ALTERNATIVE for each missing fact: the acquisition routes
+        // the same gate enumerated, or its typed refusal. Present only when the
+        // acquisition pass ran, so no route is ever invented here.
+        ...(entry.acquisition === undefined
+          ? {}
+          : {
+              acquisition: entry.acquisition.map((fact) => ({
+                missing: fact.missing,
+                routes: [...fact.routes],
+                reason: fact.reason,
+                item: fact.item,
+                count: fact.count,
+                held: fact.held,
+                tools: fact.tools,
+              })),
+            }),
       }))
       this.presentedCandidateFacts = grounded.candidates.map((candidate) => ({
         candidate: candidate.id,
