@@ -26,6 +26,7 @@ import { FatalModelError, describeFailure, failLoud, withModelRetries } from '..
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
+import { classifyMercuryPlanExecutability, formatMercuryPlanNotExecutable } from './mercury-system2.ts'
 import { bodyStarving, countSensedPortalFrameBlocks, formatBodyStarvingFact } from '../jev-agent/src/state.ts'
 import { defaultCandidateOptions } from '../jev-agent/src/candidates.ts'
 import {
@@ -536,6 +537,26 @@ export class PlannerBrain implements System2Brain {
       this.lastMercuryPlanUses < MERCURY_INTENT_MAX_USES &&
       Date.now() - this.lastMercuryPlanAtMs < MERCURY_INTENT_TTL_MS
     ) {
+      // #cached-plan-executability: this memo is the SECOND plan-replay boundary
+      // (the first is Mercury's state-hash cache, which refuses). It carries NO
+      // re-validation at all, so a plan the state's typed withheld facts refuse is
+      // replayed verbatim here. The verdict is MIRRORED so the boundary is
+      // observable rather than silent - but it is deliberately NOT refused:
+      // falling through to the model path can `fatal('planner-budget')` /
+      // `fatal('planner-no-grounded-options')` and terminate the resident, which
+      // is a strictly worse failure than holding a WHAT the next tick will refuse.
+      // Recorded as the honest residual of this fix.
+      const continued = classifyMercuryPlanExecutability(this.lastMercuryPlan.goals, request.blockers)
+      if (continued.verdict === 'not_executable_now') {
+        for (const refusal of continued.refusals) {
+          this.log(formatMercuryPlanNotExecutable(refusal, 'continued'), {
+            ...refusal,
+            ageMs: Date.now() - this.lastMercuryPlanAtMs,
+            uses: this.lastMercuryPlanUses + 1,
+            action: 'continued_unchecked',
+          })
+        }
+      }
       this.lastMercuryPlanUses += 1
       this.log('MERCURY_INTENT_CONTINUED', {
         ageMs: Date.now() - this.lastMercuryPlanAtMs,
