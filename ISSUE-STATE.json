@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-23T16:50:00Z",
+  "updatedAt": "2026-09-23T04:10:52Z",
   "dimensions": {
     "policy": [
       "missing",
@@ -27,6 +27,10 @@
       "pass",
       "fail",
       "unknown"
+    ],
+    "disposition": [
+      "active",
+      "superseded"
     ]
   },
   "issues": {
@@ -37,7 +41,7 @@
       "verification": "live",
       "observation": "unknown",
       "compliance": "unknown",
-      "note": "Architecture constitution (Grounded Option OS). Absorbs the naming (#419), Jev-contract (#423), governance-gate (#424), authority-map (#107), taxonomy (#121), config (#128), status (#296), docs (#422), repo-hygiene (#420), workspace/repo boundary (#372/#373), research baselines (#130/#304/#306/#363) rows. Live evidence exists for parts (nether_reached PASS, model authority VERIFIED); the umbrella is open because the migrations it names are not finished."
+      "note": "Architecture constitution (Grounded Option OS). Absorbs the naming (#419), Jev-contract (#423), governance-gate (#424), authority-map (#107), taxonomy (#121), config (#128), status (#296), docs (#422), repo-hygiene (#420), workspace/repo boundary (#372/#373) and research baseline (#130/#304/#306/#363) rows, plus the round-2 human-intent authority row #415 and the #449 config-admission row. Live evidence exists for parts (nether_reached PASS, model authority VERIFIED); the umbrella is open because those absorbed rows are open checklist rows, and a fold is not a fix."
     },
     "308": {
       "acceptanceClass": "architecture-convergence",
@@ -46,7 +50,7 @@
       "verification": "integration",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Grounded Option Runtime as the canonical production state. Kept as the convergence umbrella; its first slice was the #309 PR series."
+      "note": "Grounded Option Runtime as the canonical production state. Kept as the convergence umbrella; its first slice was the #309 PR series. Open, not finished."
     },
     "365": {
       "acceptanceClass": "generalization-gate",
@@ -64,7 +68,7 @@
       "verification": "none",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Repo-wide audit umbrella + the HOST lifecycle/snapshot/world-identity/CI-tooling checklist. IMPORTANT: the 8 P0 rows (#378 lock race, #379 revision-before-durable, #380 saveState-before-lock, #381 log-only fatal handlers, #383 missing attack/stopDigging capabilities, #384 no server.close, #388 rejected snapshot overwritten, #393 late generation events) were CONSOLIDATED, not fixed - do not read the closures as fixes. Reopened on 2026-09-23 because it had been auto-absorbed into its own children."
+      "note": "Repo-wide audit umbrella + the HOST lifecycle/snapshot/world-identity/CI-tooling checklist. IMPORTANT: the 8 P0 rows (#378 lock race, #379 revision-before-durable, #380 saveState-before-lock, #381 log-only fatal handlers, #383 missing attack/stopDigging capabilities, #384 no server.close, #388 rejected snapshot overwritten, #393 late generation events) were CONSOLIDATED, not fixed - do not read the closures as fixes. Carries the 25 round-2 acceptance-inventory rows (24 slices plus the #394 addendum) and the HOST state-authority row #401, whose acceptance is explicitly unmet at current main. Reopened on 2026-09-23 because it had been auto-absorbed into its own children."
     },
     "401": {
       "acceptanceClass": "state-authority-p0",
@@ -73,7 +77,9 @@
       "verification": "none",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "P0: superseded generations can still write class-A world memory (applyWorldMemoryDelta checks only the world key). Kept STANDALONE deliberately - a wrong or absent fence here silently corrupts durable memory."
+      "disposition": "superseded",
+      "supersededBy": 366,
+      "note": "FOLDED into #366 on 2026-09-23, acceptance UNMET at current main: applyWorldMemoryDelta() still checks only the world key, so a superseded generation keeps same-world durable write capability after lease handoff. Recorded as superseded rather than deleted or labelled compliance=pass, so the tracking closure is never read as a fix."
     },
     "415": {
       "acceptanceClass": "human-intent-authority-p0",
@@ -82,7 +88,9 @@
       "verification": "none",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "P0: any server player can inject protected WHAT or clear goals (generation-entry authorizes by lease+bot name only, goalQueue clearHumanInterrupts wipes every human row). Kept STANDALONE - no other owner."
+      "disposition": "superseded",
+      "supersededBy": 11,
+      "note": "FOLDED into #11 on 2026-09-23, acceptance unmet: any server player can inject protected WHAT or clear another operator's tasks (generation-entry authorizes by lease+bot name only; goalQueue clearHumanInterrupts wipes every human row). Recorded as superseded rather than deleted or labelled compliance=pass, so the tracking closure is never read as a fix."
     },
     "416": {
       "acceptanceClass": "behavior-quality-gate",
@@ -91,7 +99,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Executable behaviour gate (no recurrent wandering / redundant stations / purposeless dig-move). Absorbs #418 (typed causal purpose). Four families are currently pinned only by separate fixtures."
+      "note": "Executable behaviour gate (no recurrent wandering / redundant stations / purposeless dig-move). Absorbs #418 (typed causal purpose). Four families are currently pinned only by separate fixtures and no executable umbrella gate exists yet, so the umbrella is open implementation-plus-live work."
     },
     "421": {
       "acceptanceClass": "m3-execution-focus",
@@ -100,7 +108,7 @@
       "verification": "live",
       "observation": "unknown",
       "compliance": "unknown",
-      "note": "M3 critical path + WIP cap. Current run-scoped state: nether_reached PASS, model authority VERIFIED, ender_eye 0/12 -> the ONLY remaining stage is ender_eye_ready. Absorbs the M3-critical rows (#80 M2 verdict, #13 reload soak, #39 casts, #41 capability graph, #56 Option->Skill, #327 escalation, #353 vertical choice, #360 stall bound, #408-#411, #417) plus the #226/#377 residuals."
+      "note": "M3 critical path + WIP cap. Absorbs the M3-critical rows (#80 M2 verdict, #13 reload soak, #39 casts, #41 capability graph, #56 Option->Skill, #327 escalation, #353 vertical choice, #360 stall bound, #408-#411, #417) plus the #226/#377 residuals and the round-2 live-acceptance child. Audit measurement 2026-09-23T04:01Z (not re-measured here): resident run-mudkuea9-124kk from source 494a92b, body in the overworld at 26.5/79.0/-3.5, portal interior at 26/67/9, entry withheld reason=needs_descend (descend_plan:no_support@25,78,-2:air) - the descent capability (#440) is the live critical path ahead of ender_eye 0/12."
     },
     "436": {
       "acceptanceClass": "skill-closure",
@@ -109,7 +117,25 @@
       "verification": "integration",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Deterministic Skill closure after Jev selection. Landed: Phase 1 (97a651d: SkillCommitment/CausalTargetIdentity/EffectEnvelope + fail-closed assertEffect + SKILL_* evidence), the combat half (bdac3d6/418c640: exact-identity KILL, honest outcomes, ATTACK offered as entity truth), never-actionless survival (74f3cd8) and dig legality. Open for Phase 2/3 (HOLD_ITEM/GUI/PICKUP, WALK_TO - the walk half landed separately) and Phase 6 reflex classification. Absorbs the harness migrations #438 (Jev) and #439 (System2) as named phases, plus #297's System2 failure-algebra residual."
+      "note": "Deterministic Skill closure after Jev selection. Landed: Phase 1 (97a651d: SkillCommitment/CausalTargetIdentity/EffectEnvelope + fail-closed assertEffect + SKILL_* evidence), the combat half (bdac3d6/418c640: exact-identity KILL, honest outcomes, ATTACK offered as entity truth), never-actionless survival (74f3cd8) and dig legality. Open for Phase 2/3 (HOLD_ITEM/GUI/PICKUP, WALK_TO - the walk half landed separately) and Phase 6 reflex classification. Absorbs the harness migrations #438 (Jev) and #439 (System2) as named phases, plus #297's System2 failure-algebra residual and the round-2 #456 HUNT_DROP truth row (a kill with no drop returned done/verified=true) - all open rows."
+    },
+    "437": {
+      "acceptanceClass": "jev-state-hygiene",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Jev state hygiene umbrella, reopened 2026-09-22 from a current-main live audit because section 3 acceptance is still incomplete (sections 1-2 landed as 555c76d/6c73909/1f88a4c with markers observed in a real run). Open rows: semantic event compression, stable candidate identity, decision-epoch isolation. The 2026-09-22 closure is superseded history, not a fix."
+    },
+    "439": {
+      "acceptanceClass": "system2-intent-harness",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Seal System2 behind one typed intent harness (natural-language WHAT in, grounded Option proposals out, zero direct LLM authority). Reopened 2026-09-22 after an exact-source audit: skeleton landed, migration not started. Carries the round-2 folded rows #451 (goto/goto_resource silently rewritten into collect), #454 (verify_portal lowering to a mutation-capable portal_lit) and #455 (Overworld fabrication while compileLiveDimension() is unused) as open rows."
     },
     "440": {
       "acceptanceClass": "movement-os",
@@ -118,7 +144,7 @@
       "verification": "live",
       "observation": "pass",
       "compliance": "unknown",
-      "note": "Generalize MOVE into scaffold-capable locomotion. LIVE-VERIFIED: the bridge crossed a real gap with BRIDGE_END placed=3 verified=true reason=reached, and its refusals are typed (no_verified_landing / budget). The walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival vs 12 decisions and never verified before). Open for the remaining movement frontier."
+      "note": "Generalize MOVE into scaffold-capable locomotion. LIVE-VERIFIED: the bridge crossed a real gap with BRIDGE_END placed=3 verified=true reason=reached, and its refusals are typed (no_verified_landing / budget). The walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival vs 12 decisions and never verified before). Routed as NOW (was NEXT) because the measured live blocker is the descent: portal entry is withheld reason=needs_descend while the landing support is air. Open for the remaining movement frontier."
     }
   }
 }

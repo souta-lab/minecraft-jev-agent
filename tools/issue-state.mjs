@@ -16,6 +16,10 @@ export function loadJson(path) {
 }
 
 const LIVE_CLASSES = /live|soak|closed-loop|resident/i
+// A closed row is either verified-complete or explicitly recorded as superseded by a
+// fold. Without the second disposition a tracking fold can only be written as
+// compliance=pass, which would be false evidence (the defect was not fixed).
+const DISPOSITIONS = new Set(['active', 'superseded'])
 
 export function validateIssueState(issues, manifest, routing) {
   const errors = []
@@ -24,6 +28,7 @@ export function validateIssueState(issues, manifest, routing) {
   const records = manifest?.issues ?? {}
   const dimensions = manifest?.dimensions ?? {}
   const allowed = Object.fromEntries(Object.entries(dimensions).map(([key, values]) => [key, new Set(values)]))
+  const configuredDispositions = allowed.disposition ?? DISPOSITIONS
 
   const required = new Set()
   for (const key of ['now', 'next', 'waitingLive', 'research']) {
@@ -34,7 +39,9 @@ export function validateIssueState(issues, manifest, routing) {
   }
 
   for (const number of required) {
-    if (!records[String(number)]) errors.push(`#${number} is active/significant but missing from ISSUE-STATE.json`)
+    const record = records[String(number)]
+    if (!record) errors.push(`#${number} is active/significant but missing from ISSUE-STATE.json`)
+    else if (record.disposition === 'superseded') errors.push(`#${number} is routed as active work but its ISSUE-STATE.json record is superseded`)
   }
 
   for (const [rawNumber, record] of Object.entries(records)) {
@@ -51,6 +58,10 @@ export function validateIssueState(issues, manifest, routing) {
     for (const key of ['policy', 'implementation', 'verification', 'observation', 'compliance']) {
       if (!allowed[key]?.has(record[key])) errors.push(`#${number} invalid ${key}=${String(record[key])}`)
     }
+    const disposition = record.disposition ?? 'active'
+    if (!configuredDispositions.has(disposition)) {
+      errors.push(`#${number} invalid disposition=${String(record.disposition)}`)
+    }
     if (record.implementation === 'none' && record.compliance === 'pass') {
       errors.push(`#${number} cannot be compliance=pass with implementation=none`)
     }
@@ -62,7 +73,25 @@ export function validateIssueState(issues, manifest, routing) {
         errors.push(`#${number} live/soak/closed-loop compliance=pass requires verification=live and observation=pass`)
       }
     }
-    if (issue.state === 'CLOSED' && record.compliance !== 'pass') {
+    if (issue.state === 'CLOSED' && disposition === 'superseded') {
+      // A fold is not a fix: the row may not claim compliance, and it must name the
+      // open umbrella that now carries its acceptance.
+      if (record.compliance === 'pass') {
+        errors.push(`#${number} is superseded (folded, not fixed) and cannot be compliance=pass`)
+      }
+      const absorber = Number(record.supersededBy)
+      if (!Number.isInteger(absorber)) {
+        errors.push(`#${number} is superseded but does not name supersededBy`)
+      } else if (!byNumber.has(absorber)) {
+        errors.push(`#${number} is superseded by #${absorber}, which does not exist in the GitHub issue set`)
+      } else if (byNumber.get(absorber).state !== 'OPEN') {
+        errors.push(`#${number} is superseded by #${absorber}, which is not open`)
+      }
+    }
+    if (issue.state === 'OPEN' && disposition === 'superseded') {
+      errors.push(`#${number} is marked superseded but is still open`)
+    }
+    if (issue.state === 'CLOSED' && disposition !== 'superseded' && record.compliance !== 'pass') {
       errors.push(`#${number} is closed while machine-readable compliance=${record.compliance}`)
     }
     if (issue.state === 'OPEN' && record.compliance === 'pass') {
@@ -84,6 +113,18 @@ export function renderIssueState(issues, manifest, routing) {
       continue
     }
     lines.push(`| #${number} ${issue?.title ?? ''} | ${record.implementation} | ${record.verification} | ${record.observation} | ${record.compliance} | ${record.acceptanceClass} |`)
+  }
+  const superseded = Object.entries(result.records)
+    .filter(([, record]) => record.disposition === 'superseded')
+    .map(([rawNumber]) => Number(rawNumber))
+    .sort((a, b) => a - b)
+  if (superseded.length > 0) {
+    lines.push('', '## Superseded (closed as folds — acceptance carried by the named umbrella, not fixed)', '', '| Issue | Superseded by | Implementation | Verification | Observation | Compliance |', '| --- | --- | --- | --- | --- | --- |')
+    for (const number of superseded) {
+      const record = result.records[String(number)]
+      const issue = result.byNumber.get(number)
+      lines.push(`| #${number} ${issue?.title ?? ''} | #${record.supersededBy} | ${record.implementation} | ${record.verification} | ${record.observation} | ${record.compliance} |`)
+    }
   }
   if (result.errors.length || result.warnings.length) {
     lines.push('', '## Diagnostics')

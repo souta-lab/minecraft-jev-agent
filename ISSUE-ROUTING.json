@@ -1,14 +1,24 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-23",
-  "policy": "Consolidated on 2026-09-23: the backlog was triaged against the current source (three lanes, file:line evidence) and folded into ten umbrellas by root cause, because the ~71 open issues were genuinely live defects rather than stale backlog. Every absorbed issue's acceptance is preserved as a checklist row on its umbrella (#11, #421, #366, #416, #436, #440) and in the issues' own closing comments. Routing now points only at the umbrellas; closed issues are not routed.",
+  "asOf": "2026-09-23T04:01Z",
+  "policy": {
+    "wipLimit": 3,
+    "unclassified": "backlog",
+    "newIssueRule": "Search existing open/closed issues first. Prefer updating, reopening, or adding acceptance to an existing issue over creating a new issue. Create a new issue only when the acceptance boundary is genuinely distinct.",
+    "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, unclassified BACKLOG, and every \"historical\" row are not normal coding work.",
+    "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
+    "foldRule": "A consolidation fold is NOT a fix. Fold only after copying the slice's acceptance into a checklist row on the umbrella, close the slice as a tracking fold, and record it under \"historical\" with a note naming the umbrella. The umbrella row stays open until its own acceptance is verified live or explicitly dropped.",
+    "basis": "Reconciled 2026-09-23 against GitHub: exactly ten open issues, all umbrellas (#11 #308 #365 #366 #416 #421 #436 #437 #439 #440). Round 2 folded 30 slices into root causes (25 rows onto #366, 1 onto #11 (#449), 3 onto #439 (#451/#454/#455), 1 onto #436 (#456)); earlier rounds folded the authority/audit/M3-critical rows into #11/#421/#366/#436/#308. Routing therefore points only at the umbrellas, and every closed row this file used to present as work is recorded under \"historical\" with how it closed."
+  },
   "now": [
     421,
+    440,
     11
   ],
   "next": [
-    436,
-    440
+    437,
+    439,
+    436
   ],
   "waitingLive": [
     366,
@@ -18,63 +28,80 @@
     365,
     308
   ],
-  "future": [
-    37,
-    35,
-    41,
-    52
-  ],
+  "future": [],
   "referenceOnly": [],
+  "historical": [
+    3,
+    13,
+    35,
+    37,
+    41,
+    52,
+    56,
+    80,
+    107,
+    121,
+    128,
+    130,
+    136,
+    221,
+    226,
+    295,
+    296,
+    297,
+    299,
+    401,
+    415
+  ],
   "clusters": {
-    "PORTAL_CONVERGENCE": [
-      80
+    "M3_EXECUTION": [
+      421,
+      440
     ],
-    "AUTHORITY_RESET": [
-      226,
-      221,
+    "ARCHITECTURE_CONSTITUTION": [
       11,
-      128,
-      107,
-      121,
-      56,
-      130,
-      297,
-      308
+      308,
+      436,
+      437,
+      439
     ],
-    "GOVERNANCE_HYGIENE": [
-      295,
-      296,
-      299
-    ],
-    "RESIDENT_CORRECTNESS": [
-      3,
-      13,
-      136
-    ],
-    "FUTURE_CAPABILITIES": [
-      37,
-      35,
-      41,
-      52
+    "AUDIT_AND_QUALITY_GATES": [
+      366,
+      416,
+      365
     ]
   },
   "notes": {
-    "80": "NOW failure-frontier lane. The typed portal path is implemented and recent exact-RC live runs reached frame placement. Current main 3c83c69 contains the latest packet-waypoint normalization after prior RC 0485a04 failed in portal approach locomotion. Do not add another portal semantic policy patch until this exact source is re-run; next evidence is fresh run-scoped build/light/verify or a newly classified mechanical boundary.",
-    "226": "WAITING_LIVE. The static authority bypasses recorded in the old note are now removed on main: model authority is the planner default, deterministic is explicit-only, invalid mode fails, queue-empty does not bypass System2, capability-gap recovery is offered rather than force-selected, model failures fail loud, and real-Jev anti-flap no longer cost-selects. Remaining acceptance is live fail-loud/no-hidden-fallback evidence; do not reopen implementation without a current counterexample.",
-    "221": "NOW live-acceptance lane. The original fallback-only run remains historically valid evidence, but it predates the authority overhaul. Recent runs/PR evidence shows Mercury/System2 decisions reaching later M2/portal stages; acceptance still needs one run-scoped proof of effective non-fallback Jev policy and real invocation counters with no hidden semantic substitution.",
-    "11": "NOW architecture guardrail. The authority facade now quarantines most legacy prereq/retry/wedge selectors and candidate commitment holds only Jev-selected actions. Continue auditing the live path for any remaining code-owned WHICH/WHAT decision, but do not mass-revert reusable mechanics/truth/verification.",
-    "128": "NEXT recurrence prevention: one typed effective authority config should record requested/resolved policy/planner modes and reject contradictory combinations before action authority starts.",
-    "107": "NEXT after current live authority evidence: document the single surviving authority map from code, not historical fallback behavior.",
-    "121": "Truth/progress taxonomy remains useful because it defines observed mechanics and verification; it must not become a semantic ranking policy. Any implementation restarts from fresh main.",
-    "56": "CurrentOptionContext data flow remains relevant after current live authority proof. Do not revive stale PR #173; rebuild any remaining Option-to-Skill work from fresh main.",
-    "3": "WAITING_LIVE only: durable queue restore has landed follow-up fixes; do not start another planner refactor without a fresh current-authority failure.",
-    "13": "WAITING_LIVE only: lifecycle/resource cleanup fixtures exist; changed-hash soak evidence remains the only reason to reopen implementation.",
-    "136": "WAITING_LIVE only: surface/vertical recovery truth fix is landed/offline-verified; do not reimplement unless a fresh Jev-authoritative run reproduces a current failure.",
-    "130": "Research only. Multi-head Jev experiments are non-blocking until the simple real-Jev authority path is proven first.",
-    "295": "NEXT audit correctness: realign structural/wiring regression tests with the #11 authority facade so they inspect the runtime composition (controller.ts facade + controller-legacy.ts) and assert the current defaults (Option compiler ON, beta authority ON) instead of the superseded opt-in/shadow defaults. PR #298 (undrafted 2026-09-21) is the implementation lane; it must still detect a deliberately removed legacy call site and a deliberately removed facade strangler.",
-    "296": "NEXT governance: regenerate CURRENT-STATUS atomically with source SHA, generatedAt, and the live open-PR/issue list, and label frozen historical resident snapshots as historical. GitHub branch topology changed on 2026-09-21 (75 merged-PR head branches pruned, delete_branch_on_merge enabled), which is exactly the kind of drift this issue must catch automatically.",
-    "297": "NEXT authority audit: remove the post-selection groundMercuryPlan seam that rewrites the model-selected WHAT, and replace the misleading MercuryCallRecord outcome 'fallback' with a truthful terminal state (fatal/model_failure) plus corrected comments. Overlaps AUTHORITY_RESET; evidence recorded in #297.",
-    "299": "NEXT infrastructure: repo-invariants jobs conclude failure with steps=0 because of GitHub Actions billing (account payment/spending limit), not repository code; the root cause and evidence were recorded as an issue comment on 2026-09-21. Add an INFRA_UNKNOWN classification so acceptance tooling never treats a never-started job as a code FAIL, and do not gate acceptance on Actions until billing is restored.",
-    "308": "NEXT architecture target: converge production onto one Grounded Option Runtime with one canonical semantic state and one authority owner per decision class before M3/M4. PR #309 is the first integrated slice (System2 causal authority); sequence it after the current NOW lanes land or are explicitly blocked rather than raising the WIP limit."
+    "421": "NOW M3 critical path + WIP cap. Umbrella, not finished work: it carries the folded M3-critical rows (#13/#41/#56/#80 from round 1 plus the round-2 live-acceptance child), all still open. Audit measurement 2026-09-23T04:01Z (not re-measured by this file): resident run-mudkuea9-124kk from source 494a92b, body in the overworld at 26.5/79.0/-3.5, portal interior at 26/67/9, entry withheld reason=needs_descend (descend_plan:no_support@25,78,-2:air) — the descent capability (#440) is the live critical path ahead of ender_eye acceptance.",
+    "440": "NOW movement/scaffold umbrella, promoted from NEXT because the measured live blocker is the descent: portal entry is withheld reason=needs_descend while the landing support is air. Umbrella, not finished work: the bridge half is live-verified (BRIDGE_END placed=3 verified=true reason=reached) and the walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival); descent/scaffold-down and the rest of the movement frontier are open rows.",
+    "11": "NOW architecture constitution (Grounded Option OS). Umbrella, not finished work: it carries the round-1 and round-2 absorbed rows (#107/#121/#128/#130/#296 authority map/config/taxonomy/status/docs, #415 human-intent authority, #449 config admission) and they are open checklist rows, not fixes.",
+    "437": "NEXT Jev state-hygiene umbrella, reopened 2026-09-22 from a current-main live audit because section 3 acceptance is still incomplete (sections 1-2 landed, markers observed in a real run). Open rows: semantic event compression, stable candidate identity, decision-epoch isolation. The 2026-09-22 closure is superseded history, not a fix.",
+    "439": "NEXT System2 typed-intent-harness umbrella, reopened 2026-09-22 after an exact-source audit ('skeleton landed; migration not started'). Carries the round-2 folded rows #451 (goto/goto_resource silently rewritten into collect), #454 (verify_portal lowering to a mutation-capable portal_lit) and #455 (Overworld fabrication while compileLiveDimension() is unused), all still open.",
+    "436": "NEXT deterministic Skill-closure umbrella. Landed Phase 1 plus the combat half (exact-identity KILL, honest outcomes, never-actionless survival); open Phase 2/3 (HOLD_ITEM/GUI/PICKUP) and Phase 6 reflex classification. Carries the folded rows #297 (round 1, System2 failure algebra) and #456 (round 2, P0 HUNT_DROP truth: a kill with no drop returned done/verified=true).",
+    "366": "WAITING_LIVE repo-wide audit umbrella (HOST lifecycle / snapshot / world identity / CI tooling). Umbrella, not finished work: it carries the 25 round-2 acceptance-inventory rows (24 slices plus the #394 addendum) and the HOST state-authority row #401. The 8 HOST P0 rows were CONSOLIDATED, not fixed — do not read the slice closures as fixes.",
+    "416": "WAITING_LIVE behaviour quality gate (no recurrent wandering, redundant station crafting, purposeless actions, unbounded idle). Carries the absorbed #418 typed causal purpose; four behaviour families are pinned only by separate fixtures and no executable umbrella gate exists yet, so it is open implementation-plus-live work.",
+    "365": "RESEARCH generalization gate: production is still an M2/M3 tech-tree machine rather than a benchmark-independent runtime. The operator named generalization the primary project criterion and M3 the current proving ground. Nothing implemented yet; it is an open umbrella, not a finished roadmap.",
+    "308": "RESEARCH convergence tracker: migrate production onto the #11 v3 Grounded Option OS (one canonical semantic state, one authority owner per decision class). Umbrella, not finished work: PR #309 (System2 causal authority) was its first integrated slice; the migration is incomplete.",
+    "3": "historical: closed 2026-09-22 with evidence — restoreLedgerIntoController now runs unconditionally during generation construction, so the dynamic-planner GoalQueue ledger is restored. Not a fold.",
+    "13": "historical: closed 2026-09-22 as a tracking fold into #421 (listener-leak soak closure row); the required changed-hash soak artifact lives on as an open #421 row.",
+    "35": "historical: closed 2026-09-22 as absorbed by #308 (not planned) — the competing-planner root cause is owned by #308.",
+    "37": "historical: closed 2026-09-22 as [SUPERSEDED] — the M3/M4 milestone route no longer defines production architecture under #11 v3.",
+    "41": "historical: closed 2026-09-22 as a tracking fold into #421 (predicate/capability OptionGraph row).",
+    "52": "historical: closed 2026-09-22 after the verification detail (Option identity / abandon-cooldown counters) was recorded. Not a fold.",
+    "56": "historical: closed 2026-09-22 as a tracking fold into #421 (canonical Option identity row).",
+    "80": "historical: closed 2026-09-22 as a tracking fold into #421 (M2 diamond-to-portal closed-loop acceptance row).",
+    "107": "historical: closed 2026-09-22 as a tracking fold into #11 (authority map row).",
+    "121": "historical: closed 2026-09-23 as a fold into #11 (failure/progress taxonomy row); it had been documented as absorbed but the closure was never executed.",
+    "128": "historical: closed 2026-09-23 as a fold into #11 (versioned runtime profile / config admission row).",
+    "130": "historical: closed 2026-09-22 as a tracking fold into #11 (Jev policy factorisation research row).",
+    "136": "historical: closed 2026-09-22 with the surface-truth fixtures proven and the capability-gap residual box recorded honestly in the closing comment. Not a fold.",
+    "221": "historical: closed 2026-09-22 as [HISTORICAL / RESOLVED]; the fallback-only run it recorded remains valid evidence but predates the model-authority overhaul.",
+    "226": "historical: closed 2026-09-22 as completed — the silent deterministic fallback is removed and the fail-loud path was implemented and observed.",
+    "295": "historical: closed 2026-09-22 with evidence — the structural tests inspect the runtime composition (controller.ts facade + controller-legacy.ts) and are green on main. Not a fold.",
+    "296": "historical: closed 2026-09-22 as a tracking fold into #11 (generated CURRENT-STATUS row; that generator now exists as tools/current-status.mjs).",
+    "297": "historical: closed 2026-09-22 as a tracking fold into #436 (System2 failure algebra / post-selection grounding row).",
+    "299": "historical: closed 2026-09-22 as a tracking fold into #366 (INFRA_UNKNOWN classification for never-started repo-invariants jobs); the CI gate in CURRENT-STATUS reports that condition instead of a code FAIL.",
+    "401": "historical: closed 2026-09-23 as a tracking fold into #366; acceptance explicitly UNMET at current main — a superseded generation can still write class-A world memory after lease handoff. A fold, not a fix.",
+    "415": "historical: closed 2026-09-23 as a tracking fold into #11; acceptance explicitly unmet — any server player can inject protected WHAT or clear another operator's tasks. A fold, not a fix."
   }
 }
