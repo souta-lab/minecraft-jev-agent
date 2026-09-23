@@ -2752,6 +2752,8 @@ export class JevController {
 
   private watchdog: NodeJS.Timeout | null = null
   private running = false
+  /** HOST has withdrawn semantic authority; only a pre-committed safety Skill may settle. */
+  private modelRecoveryStopping = false
   private ticking = false
   private startedAt = 0
   private completion: Promise<RunSummary> | null = null
@@ -3140,6 +3142,89 @@ export class JevController {
     this.finish('stopped-by-caller', this.runSuccess())
   }
 
+  /**
+   * HOST model recovery withdraws all future decision authority immediately. If a
+   * bounded, already-committed escape Skill is running, keep its lease only until
+   * that Skill reaches its own terminal boundary; otherwise stop as usual. This
+   * never replays a Jev answer or chooses a replacement action.
+   */
+  stopForModelRecovery(): void {
+    if (!this.running || this.modelRecoveryStopping) return
+    this.modelRecoveryStopping = true
+    this.scheduler.stop()
+    this.clearDecisionTimer()
+    this.pendingTrigger = null
+    this.deferredTrigger = null
+
+    const current = this.executor.current
+    const commitment = current?.commitment ?? null
+    const bounded =
+      commitment !== null &&
+      commitment.candidateId === current?.id &&
+      commitment.budget.ms !== null &&
+      Number.isFinite(commitment.budget.ms) &&
+      commitment.budget.ms > 0
+    const escapeSkill =
+      bounded &&
+      ((current?.kind === 'RETREAT' && commitment.skillKind === 'retreat') ||
+        (current?.kind === 'MOVE' &&
+          commitment.skillKind === 'walk_to' &&
+          commitment.allowedEffects.mayMove &&
+          (current.id.startsWith('MOVE:env:') || current.id.startsWith('ASCEND:breath:'))))
+
+    if (current === null || current.status !== 'running' || !escapeSkill) {
+      this.logger.warn(
+        'agent',
+        `MODEL_RECOVERY_DRAIN phase=cancel actionId=${current?.id ?? 'none'} kind=${current?.kind ?? 'none'} reason=no_bounded_escape_skill`,
+        { actionId: current?.id ?? null, kind: current?.kind ?? null, commitmentId: current?.commitment?.commitmentId ?? null },
+        this.tickCounter,
+      )
+      this.finish('stopped-by-caller', false)
+      return
+    }
+
+    this.logger.warn(
+      'agent',
+      `MODEL_RECOVERY_DRAIN phase=begin actionId=${current.id} kind=${current.kind} commitmentId=${commitment?.commitmentId} decisionEpoch=${commitment?.decisionEpoch} budgetMs=${commitment?.budget.ms}`,
+      {
+        actionId: current.id,
+        kind: current.kind,
+        commitmentId: commitment?.commitmentId ?? null,
+        decisionEpoch: commitment?.decisionEpoch ?? null,
+        budgetMs: commitment?.budget.ms ?? null,
+        selectedBy: commitment?.selectedBy ?? null,
+      },
+      this.tickCounter,
+    )
+    void current.completion.then(
+      (result) => {
+        this.logger.warn(
+          'agent',
+          `MODEL_RECOVERY_DRAIN phase=terminal actionId=${current.id} kind=${current.kind} outcome=${result.status} failureCode=${result.failure ?? 'none'}`,
+          {
+            actionId: current.id,
+            kind: current.kind,
+            commitmentId: commitment?.commitmentId ?? null,
+            outcome: result.status,
+            failureCode: result.failure ?? null,
+          },
+          this.tickCounter,
+        )
+        this.finish('stopped-by-caller', false)
+      },
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        this.logger.error(
+          'agent',
+          `MODEL_RECOVERY_DRAIN phase=terminal actionId=${current.id} kind=${current.kind} outcome=completion_rejected`,
+          { actionId: current.id, kind: current.kind, commitmentId: commitment?.commitmentId ?? null, error: message },
+          this.tickCounter,
+        )
+        this.finish('stopped-by-caller', false)
+      },
+    )
+  }
+
   wait(): Promise<RunSummary> {
     if (this.completion !== null) return this.completion
     return Promise.resolve(this.summary('stopped-by-caller', this.runSuccess()))
@@ -3232,7 +3317,7 @@ export class JevController {
    * triggers may interrupt. While a tick is already running, triggers coalesce.
    */
   private requestDecision(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
-    if (!this.running) return
+    if (!this.running || this.modelRecoveryStopping) return
     const event: TriggerEvent = { trigger, detail, ts: Date.now() }
     if (this.ticking) {
       if (trigger !== 'heartbeat') this.pendingTrigger = pickHigherPriority(this.pendingTrigger, event)

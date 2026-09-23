@@ -36,13 +36,20 @@ export function modelFailureDisposition(
     : 'terminate-process'
 }
 
+export interface ModelRecoveryController {
+  stop(): void
+  /** Prefer a host-fenced drain of an already committed safety Skill. */
+  stopForModelRecovery?(): void
+}
+
 export function stopGenerationForModelRecovery(
   error: FatalModelError,
   generationId: string,
-  controller: { stop(): void } | null,
+  controller: ModelRecoveryController | null,
 ): ModelRecoveryRequested | null {
   if (modelFailureDisposition(error, controller !== null) !== 'recover-generation' || controller === null) return null
-  controller.stop()
+  if (controller.stopForModelRecovery !== undefined) controller.stopForModelRecovery()
+  else controller.stop()
   return new ModelRecoveryRequested(error.context, generationId)
 }
 
