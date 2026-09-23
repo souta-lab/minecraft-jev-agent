@@ -8119,10 +8119,11 @@ export class JevController {
       freshness: { measured: this.withheldFactsFingerprint, current: this.lastStateFingerprint },
     })
     if (built === null) {
+      const empty = { ...emptySystem2PayloadShape(), absent: ['blockers'] }
       this.logger.info(
         'system2',
-        formatSystem2PayloadLine(emptySystem2PayloadShape()),
-        { attached: false, absent: ['blockers'] },
+        formatSystem2PayloadLine(empty),
+        { attached: false, absent: empty.absent },
         this.tickCounter,
       )
       return null

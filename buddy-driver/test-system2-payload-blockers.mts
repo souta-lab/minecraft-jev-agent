@@ -37,6 +37,7 @@ import {
   SYSTEM2_PAYLOAD_LIMITS,
 } from '../jev-agent/src/system2Payload.ts'
 import { buildMercurySummary } from './generation-entry.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
 import { hashMercuryState, mercuryPayloadShape } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import { emptyWorldMemory } from './resident-types.ts'
@@ -552,6 +553,16 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     formatSystem2PayloadLine(emptySystem2PayloadShape()),
   )
   check('(iv) the char weight of the carried facts is reported', payloadFactsChars(facts) > 0)
+  // "Mirrored" is not a claim about intent: the host sink only receives a line
+  // whose FIRST token is registered in MIRRORED_MARKERS and comes back from
+  // `mirroredEventToken`. Pin all three markers on that path.
+  for (const marker of ['SYSTEM2_PAYLOAD', 'SYSTEM2_PAYLOAD_REFUSED', 'SYSTEM2_PAYLOAD_ABSENT']) {
+    check(
+      `(iv) ${marker} rides the mirrored event path`,
+      MIRRORED_MARKERS.has(marker) && mirroredEventToken(`${marker} a=1`) === marker,
+      `registered=${MIRRORED_MARKERS.has(marker)} token=${mirroredEventToken(`${marker} a=1`)}`,
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------

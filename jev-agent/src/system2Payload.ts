@@ -403,11 +403,17 @@ export function projectSystem2PayloadFacts(
     chars: payloadFactsChars(withRoutes),
   })
   if (bounded === null) return null
-  if (routes !== null) {
+  // The route counts are reported from the BOUNDED facts, not from the input:
+  // when the ceiling drops the alternatives the routes are gone with them, and a
+  // shape that still claimed `routes=1` would attest to a field the model never
+  // received.
+  const carriedRoutes = bounded.alternatives.routes
+  if (carriedRoutes !== undefined) {
     built.shape.routes = true
     built.shape.chars = payloadFactsChars(bounded)
   } else {
-    built.shape.absent.push('alternatives.routes')
+    built.shape.routes = false
+    if (routes === null) built.shape.absent.push('alternatives.routes')
   }
   return {
     blockers: {
