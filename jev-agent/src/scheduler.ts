@@ -141,6 +141,23 @@ export function shouldDeferDamageDuringRetreatLease(
 }
 
 /**
+ * Controller repairs are not fresh world evidence. If one is queued while a
+ * bounded RETREAT is executing, let that lease complete and use its completion
+ * to resense the world. Real damage/health changes are also held during this
+ * already-selected escape, then replayed after completion at their normal
+ * preemptive priority. Other preemptive safety signals keep their usual path.
+ */
+export function shouldDeferTriggerDuringRetreatLease(
+  trigger: DecisionTrigger,
+  actionKind: string,
+): boolean {
+  return (
+    shouldDeferDamageDuringRetreatLease(trigger, actionKind) ||
+    (actionKind === 'RETREAT' && trigger === 'survival_reground')
+  )
+}
+
+/**
  * The scheduler-level survival fact. `layer=scheduler` names the owner of the
  * preemption (the sensor owns the air reading, the guard/executor own refusing
  * the mechanical action); the semantic response stays Jev's.
@@ -187,6 +204,21 @@ export interface TriggerEvent {
   trigger: DecisionTrigger
   detail: Record<string, unknown>
   ts: number
+}
+
+/**
+ * Complete an in-flight action before replaying a deferred trigger unless that
+ * trigger carries a higher-priority fact. In particular, a stale
+ * `survival_reground` request is superseded by the fresh action completion,
+ * while actual damage remains queued for an immediate safety decision.
+ */
+export function selectPostActionTrigger(
+  deferred: TriggerEvent | null,
+  completion: TriggerEvent,
+): TriggerEvent {
+  return deferred !== null && TRIGGER_PRIORITY[deferred.trigger] > TRIGGER_PRIORITY[completion.trigger]
+    ? deferred
+    : completion
 }
 
 export interface SchedulerOptions {

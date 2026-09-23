@@ -158,7 +158,7 @@ import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, MAX_AIR, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
@@ -3353,21 +3353,21 @@ export class JevController {
     }
     const inFlight = this.executor.current
     if (inFlight !== null) {
+      // A RETREAT is already the selected safety response. Controller-only
+      // reground requests and real hit/health events wait for its bounded Skill
+      // to finish; action completion will either supersede stale repair or
+      // replay real damage with its normal preemptive priority.
+      if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind)) {
+        this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
+        this.logger.info(
+          'scheduler',
+          `trigger=${trigger} deferred during RETREAT lease#${inFlight.epoch} ${inFlight.id}`,
+          detail,
+          this.tickCounter,
+        )
+        return
+      }
       if (PREEMPTIVE_TRIGGERS.has(trigger)) {
-        // Damage is expected while a bounded retreat is already carrying out
-        // the selected safety response. Restarting on every hit repeatedly
-        // cancels its path before the body closes distance; coalesce the real
-        // damage trigger and replay it after this mechanical escape completes.
-        if (shouldDeferDamageDuringRetreatLease(trigger, inFlight.kind)) {
-          this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
-          this.logger.info(
-            'scheduler',
-            `trigger=${trigger} deferred during RETREAT lease#${inFlight.epoch} ${inFlight.id}`,
-            detail,
-            this.tickCounter,
-          )
-          return
-        }
         // ATTACK is a Jev-selected combat lease.  Damage/entity events are
         // expected while the selected attack is being aimed and delivered;
         // asking Jev again on every hit cancels the attack before its next
@@ -6917,15 +6917,12 @@ export class JevController {
       }
       return
     }
-    const trigger =
-      deferred !== null && TRIGGER_PRIORITY[deferred.trigger] > TRIGGER_PRIORITY[completionTrigger]
-        ? deferred.trigger
-        : completionTrigger
-    const detail =
-      deferred !== null && TRIGGER_PRIORITY[deferred.trigger] > TRIGGER_PRIORITY[completionTrigger]
-        ? deferred.detail
-        : { actionId: result.actionId, status: result.status, failure: result.failure }
-    this.requestDecision(trigger, detail)
+    const next = selectPostActionTrigger(deferred, {
+      trigger: completionTrigger,
+      detail: { actionId: result.actionId, status: result.status, failure: result.failure },
+      ts: Date.now(),
+    })
+    this.requestDecision(next.trigger, next.detail)
   }
 
   /**

@@ -33,7 +33,8 @@ import {
 import { authorityState } from './src/jev-authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
-import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './src/scheduler.ts'
+import { pickHigherPriority } from './src/controller-legacy.ts'
+import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -568,6 +569,59 @@ addCase('real damage is deferred while a bounded RETREAT lease closes distance, 
   return {
     pass,
     detail: 'damage/hp events coalesce through the bounded retreat; new mobs, low air, and non-retreat actions retain existing preemption',
+  }
+})
+
+addCase('queued reground cannot cancel a successful RETREAT, while real damage replays preemptively into a fresh threat state', () => {
+  const completed: TriggerEvent = {
+    trigger: 'action_completed',
+    detail: { actionId: 'retreat:42', status: 'done', failure: null },
+    ts: NOW + 1,
+  }
+  const queuedReground: TriggerEvent = {
+    trigger: 'survival_reground',
+    detail: { source: 'survival_reground_failed', chosenId: 'move:stale' },
+    ts: NOW,
+  }
+  // The request arrived while the decision tick was occupied, was queued, then
+  // reached requestDecision with RETREAT still leased. The controller must defer
+  // it; after successful escape, action_completed is newer truth and wins.
+  const pendingReground = pickHigherPriority(null, queuedReground)
+  const regroundDeferred = shouldDeferTriggerDuringRetreatLease(pendingReground.trigger, 'RETREAT')
+  const deferredReground = regroundDeferred ? pickHigherPriority(null, pendingReground) : null
+  const regroundDelivered = selectPostActionTrigger(deferredReground, completed)
+  const lowAirStillInterrupts =
+    PREEMPTIVE_TRIGGERS.has('low_air') &&
+    !shouldDeferTriggerDuringRetreatLease('low_air', 'RETREAT')
+
+  // A real hit during that same bounded retreat is also held until completion,
+  // but its higher priority survives and remains eligible to preempt the next
+  // decision. With the engaged skeleton still present, that fresh state offers
+  // a grounded RETREAT again.
+  const queuedDamage: TriggerEvent = {
+    trigger: 'damage_taken',
+    detail: { attackerId: 42, attackerName: 'skeleton' },
+    ts: NOW,
+  }
+  const pendingDamage = pickHigherPriority(null, queuedDamage)
+  const damageDeferred = shouldDeferTriggerDuringRetreatLease(pendingDamage.trigger, 'RETREAT')
+  const deferredDamage = damageDeferred ? pickHigherPriority(null, pendingDamage) : null
+  const damageDelivered = selectPostActionTrigger(deferredDamage, completed)
+  const freshThreat = baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 10 }))
+  const freshRetreat = generateCandidates(freshThreat, defaultCandidateOptions).some((candidate) => candidate.kind === 'RETREAT')
+
+  const pass =
+    regroundDeferred &&
+    !PREEMPTIVE_TRIGGERS.has(queuedReground.trigger) &&
+    regroundDelivered.trigger === 'action_completed' &&
+    lowAirStillInterrupts &&
+    damageDeferred &&
+    damageDelivered.trigger === 'damage_taken' &&
+    PREEMPTIVE_TRIGGERS.has(damageDelivered.trigger) &&
+    freshRetreat
+  return {
+    pass,
+    detail: `reground=${regroundDelivered.trigger} damage=${damageDelivered.trigger} freshThreatRetreat=${freshRetreat}`,
   }
 })
 
