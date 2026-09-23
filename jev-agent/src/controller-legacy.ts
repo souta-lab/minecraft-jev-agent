@@ -32,7 +32,7 @@ import { ARMOR_SLOTS } from './gearPlan.ts'
 import { assessSurvivalRace, bodySurvivalFacts, classifyDamageSource, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalDamageRace, formatSurvivalEscapeNone, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
-import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
+import { contactGapY, formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, meleeHorizontalBudget, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
 import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -1324,6 +1324,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'LOCAL_CLEAR',
   'ASCEND_STEP',
   'ASCENT_PROGRESS',
+  // The HORIZONTAL-ENVELOPE plane: whether a swing was legal because the body's own
+  // height spans the first part of an upward gap. Measured 2026-09-22: 19/19 live
+  // blaze hunts ended `HUNT_END ... target=blaze swings=0 hits=0`, and the closest
+  // geometry ever reached was `gap_y=4 horizontal=1.70` - a target the feet-to-feet
+  // measure called out of range and the body's own upper half is 2.93 m from. A
+  // swing grounded that way must be visible in the live plane, or it reads as an
+  // ordinary close-range attack and the correction cannot be audited.
+  'MELEE_VERTICAL_REACH',
   // The descent half of the vertical vocabulary: a refused local descent names
   // its missing precondition, and a durable descent chunk is run evidence
   // (a `descend_plan` refusal that was never named is what left the M3 body
@@ -10992,16 +11000,29 @@ export class JevController {
   }
 
   /**
-   * CAN fact for a plain ATTACK lease. The executor follows until it is within
-   * `MELEE_ATTACK_RANGE`; probing GoalBlock is stricter than the real action and
-   * can falsely reject a perfectly hittable target, so use the same near radius.
+   * CAN fact for a plain ATTACK lease. The executor follows until the body's own
+   * upper half is inside `MELEE_ATTACK_RANGE` of the target; probing GoalBlock is
+   * stricter than the real action and can falsely reject a perfectly hittable
+   * target, so use the same near radius.
+   *
+   * The goal is a 3-D BALL, so the radius must be the ball whose restriction to the
+   * body's own level is the horizontal melee budget for THIS vertical gap
+   * (`meleeHorizontalBudget`). Probing the bare reach against a target hovering
+   * above the body is unsatisfiable by construction - radius 2.9 around a target 4
+   * blocks up contains no cell the body can stand in - so the probe reported
+   * `no_path` for a fight the body could actually win. For a level target the goal
+   * is the same cell and the same radius as before, unchanged.
+   *
    * Timeout is UNKNOWN/non-executable for this short lease, exactly like the
    * ordinary reachability probe: only a complete path is a current CAN proof.
    */
   private canComputeMeleePath(position: Vec3Json): boolean {
     if (this.bot.pathfinder === undefined) return false
     try {
-      const goal = new goals.GoalNear(position.x, position.y, position.z, Math.max(1, MELEE_ATTACK_RANGE - 0.2))
+      const feet = this.bot.entity.position
+      const gapY = contactGapY(feet.y, position.y)
+      const radius = Math.max(1, Math.hypot(meleeHorizontalBudget(gapY), Math.abs(gapY)) - 0.2)
+      const goal = new goals.GoalNear(position.x, position.y, position.z, radius)
       const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
       return plan.status === 'success'
     } catch {
