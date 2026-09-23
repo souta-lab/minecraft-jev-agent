@@ -1,0 +1,247 @@
+# Clean-run M3 acceptance — the recipe
+
+**What this is.** The operator requirement is: *Nether 到達を live で証明する
+(M3達成は new seed new world、keepinv などの補助ゼロで証明すること。実験は今のワールドで良い。)*
+The M3 gate (`tools/m3-gate.mjs`) answers *"did this run reach the Nether and hold 12
+eyes of ender with model authority?"*. It cannot answer *"was the world a clean
+world?"* — the live world has `level-seed=2024`, `keep_inventory=true`,
+`advance_time=false` in the overworld, operator-granted supplies, summoned mobs
+and flooded terrain, and an M3 PASS there is worthless as M3 evidence.
+
+This document is the **ordered procedure for one clean attempt** and the reviewer
+checklist for its evidence. It is a recipe, **not a claim of success**: the clean
+world has not been booted yet (no server start in this lane), so the gamerule
+mechanism and the fresh-world boot remain unverified until the operator runs it.
+
+Components:
+
+```text
+tools/fixtures/m3-clean-environment.json   the checked-in descriptor (a TEMPLATE until the SHA is frozen)
+tools/clean-run-environment.mjs            descriptor schema + clean validator + run-evidence checks
+tools/clean-run-prepare.mjs                offline preparation of the clean world (--dry-run / --apply)
+tools/clean-run-gate.mjs                   the clean verdict, combined with the canonical bundle
+tools/test-clean-run-harness.mjs           13 offline checks (assisted descriptors are refused)
+runs/m3-clean-measure/                     read-only measurement that grounds the gamerule table
+```
+
+---
+
+## 1. The descriptor: every field, and why it is there
+
+`tools/fixtures/m3-clean-environment.json` is **one file with two jobs**: it is the
+`--environment` record `tools/m3-acceptance-bundle.mjs` feeds to the artifact
+(`readEnvironmentFile` reads `values` and `worldChanges`), and it is the clean-run
+premise `tools/clean-run-gate.mjs` validates. One file, so the premise and the
+environment record can never be two different documents.
+
+| field | value (template) | why it is there |
+| --- | --- | --- |
+| `cleanRun.milestone` | `M3` | a descriptor may only authorise the milestone it was written for |
+| `cleanRun.requirement` | the operator sentence, verbatim | the acceptance criterion itself, not a paraphrase |
+| `cleanRun.worldContainer` | `/home/s0u7a/mc-server` | the world CONTAINER; all three dimensions of the target world live under it. It must stay this path: `serverSeed()` in `buddy-driver/agent-runner.mts` reads the seed from the hard-coded file `<that root>/server.properties` |
+| `cleanRun.botUsername` | `AI_Buddy` | the prep step refuses if that name is in `ops.json`: command authority is the generic assist |
+| `cleanRun.protectedWorldNames` | `world`, `world_nether`, `world_the_end` | the live worlds. Nothing in this harness may write inside them, and the target level name may not collide with them |
+| `cleanRun.previousWorld` | `world` / `2024` + why | states exactly what the target must differ from, and records the measured assistance of the current world |
+| `cleanRun.sourceSha.state` / `.policy` | `UNSET` → `FROZEN` | the run must boot EXACTLY one commit. The checked-in file deliberately carries no SHA: a stale or placeholder pin can never authorise a run, and freezing is an explicit operator act (`--source-sha`, or `--root <frozen checkout>` = git HEAD) |
+| `cleanRun.gamerulePolicy.rule` | "every gamerule at its vanilla default; an omitted mandatory rule is a FAIL, not a default" | the assist rule, stated positively |
+| `cleanRun.gamerulePolicy.version` | `1.21.11` | the rule names/ids are version-specific |
+| `cleanRun.gamerulePolicy.defaultsSource` | measured from this build | the 59-rule default table is not authored by hand: it was read from `GameRules.<clinit>` in the running Leaf jar **and** the pure Mojang vanilla jar (59/59 identical, javap cross-check 0 mismatches) and from the live worlds' own `Data.game_rules` (58 rules). Raw evidence: `runs/m3-clean-measure/gamerule-defaults-observed.json`, `gamerules-observed.json` |
+| `cleanRun.gamerulePolicy.defaults` | 59 rules | the single source of truth the gate compares the declared values against |
+| `cleanRun.gamerulePolicy.requiredRules` | the 58 rules this world carries | every one is declared and judged |
+| `cleanRun.gamerulePolicy.notRegisteredInWorld` | `max_minecart_speed` | registered by the build but absent from the world (its feature flag `minecart_improvements` is in the world's disabled datapack list), so the in-world command does not exist; declared, excluded from the datapack/console set |
+| `cleanRun.gamerulePolicy.assistIfChanged` | one justification per rule (59) | "list the assists explicitly and justify each": a reviewer reads the reason here, and the gate fails if any declared rule has none |
+| `cleanRun.gameruleMechanism` | console primary, datapack secondary | Mineflayer cannot read gamerules. The console listing after first boot is the authoritative evidence; the staged datapack asserts the rules at every world load as belt-and-braces |
+| `values.difficulty` / `mobSpawning` / `spawnAnimals` | `normal` / `true` / `true` | M3 needs hostile mobs: ender pearls and blaze rods. `peaceful` is refused |
+| `values.levelName` | `m3clean-b1` | a NEW name: lowercase, not `world*`, not a protected name, and not the previous world |
+| `values.levelSeed` | `-4187923615481` | a NEW seed: not `2024`, not `0`, not empty |
+| `values.serverVersion` / `serverImplementation` / `serverId` | `1.21.11` / `leaf-1.21.11-178.jar` / `127.0.0.1:25565` | the world identity: `serverId` is half of the resident's `worldKey` |
+| `values.sourceSha` | `null` → the frozen 40-hex commit | the run's BOOT `source=` must equal it |
+| `values.server` | 15 non-gamerule requirements | `levelType=minecraft:normal` (flat/amplified is a tuned world), `gamemode=survival`, `forceGamemode=false`, `hardcore=false`, `bonusChest=false` (granted items), `allowCheats=false`, `generateStructures=true` (no fortresses/strongholds = M3 impossible), `spawnAnimals=true`, `botOperator=false`, `enableCommandBlock=false`, `pvp=true`, `allowNether=true`, `allowFlight=false`, `spawnProtection=0` (non-zero spawn protection forbids a non-op body from breaking blocks near spawn), `whiteList=false` |
+| `values.gamerules` | the 58 in-world rules at defaults | `keep_inventory=false`, `advance_time=true`, `spawn_mobs=true`, `mob_drops=true`, `block_drops=true`, `ender_pearls_vanish_on_death=true`, `immediate_respawn=false`, `fall_damage=true`, `natural_health_regeneration=true`, `lava_source_conversion=false`, `players_nether_portal_default_delay=80`, `random_tick_speed=3`, … (full list + justification in the file) |
+| `assists` | four empty arrays | granted items / summoned mobs / pre-built structures / operator world edits. Non-empty ⇒ NOT_CLEAN. Absent arrays ⇒ FAIL (absence is not a claim of none) |
+| `worldChanges` | `[]` | the artifact carries it verbatim; a clean world has no post-creation change |
+
+The validator (`tools/clean-run-environment.mjs`) is pure and offline. It never
+re-judges a milestone: it decides only whether the descriptor is admissible
+(`CLEAN`), inadmissible (`NOT_CLEAN`), or undecidable (`UNKNOWN`).
+
+## 2. Preparation (offline, no server start)
+
+```bash
+cd <frozen-checkout>            # the tree that WILL produce the run
+bun install --frozen-lockfile
+
+# 2a. see exactly what would happen. Writes nothing.
+bun tools/clean-run-prepare.mjs \
+  --environment tools/fixtures/m3-clean-environment.json \
+  --source-sha "$(git rev-parse HEAD)" --dry-run
+
+# 2b. stage it
+bun tools/clean-run-prepare.mjs \
+  --environment tools/fixtures/m3-clean-environment.json \
+  --source-sha "$(git rev-parse HEAD)" --apply
+```
+
+`--apply` writes, inside the container and nowhere else:
+
+```text
+<container>/<levelName>/                         the new world dir (empty; the server generates level.dat on first boot)
+<container>/<levelName>/datapacks/m3-clean-gamerules/   the gamerule datapack (skipped loudly when datapackPackFormat is null)
+<container>/m3-clean-run/environment-resolved.json      the descriptor the bundle AND the clean gate must both consume
+<container>/m3-clean-run/server.properties.clean        the PROPOSED clean server.properties
+<container>/m3-clean-run/server-properties.diff.txt     every key it changes
+<container>/m3-clean-run/manifest.json                  descriptor sha, world/seed/sha, file hashes, guards, property checks
+<container>/m3-clean-run/attempts.json                  append-only attempt ledger (a reused seed is refused)
+<container>/m3-clean-run/operator-commands.txt          the ordered commands, printed
+<container>/m3-clean-run/ACCEPTANCE-RECIPE.md           a copy of this file, next to the evidence
+```
+
+Guarantees, printed as `CLEAN_RUN_PREPARE_GUARD` lines: no server start/stop, no
+deletion or move of any file, no write inside `world` / `world_nether` /
+`world_the_end`, no `--server-root` that is a world directory or inside the target
+world, no overwrite of an existing `server.properties` (unless
+`--overwrite-properties`, which always keeps a timestamped `.bak` first). It
+refuses: a descriptor that is not CLEAN, a target world that already has a
+`level.dat`, an existing level-name directory it did not stage, a reused seed, an
+unfrozen SHA, a protected level name, and an opped bot. A second `--apply` on an
+unstaged-but-not-generated world is an `IDEMPOTENT_NOOP`.
+
+## 3. The run, in order
+
+```bash
+# 3.1 freeze the SHA (the descriptor's sourceShaState must become FROZEN; the
+#     command below does it) and prepare the clean world
+cd <frozen-checkout>
+bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
+  --source-sha "$(git rev-parse HEAD)" --apply
+
+# 3.2 back up the live properties, then swap in the clean ones (never delete)
+cp <container>/server.properties <container>/server.properties.clean-run-bak-<stamp>
+cp <container>/m3-clean-run/server.properties.clean <container>/server.properties
+
+# 3.3 restart the server  [OPERATOR ACTION — H4; this harness never does it]
+cd <container> && setsid --fork ./start.sh </dev/null >>server.log 2>&1 &
+
+# 3.4 after the FIRST boot, verify on the server console and paste the output into
+#     <container>/m3-clean-run/gamerule-verification.txt :
+#       list          -> the body's name must be allowed in
+#       seed          -> must equal values.levelSeed
+#       gamerule      -> keep_inventory=false and every declared default
+#     (the 1.21.11 ids are snake_case; if this build wants a namespace, `minecraft:keep_inventory`)
+
+# 3.5 start the resident on the FROZEN SHA, with EMPTY durable state: use a FRESH
+#     worktree of the frozen commit, so no ledger/known-resource memory from the
+#     old world can leak into the run
+git -C <repo> worktree add <repo>/../mc-ai-worktrees/m3-clean-run "$(git rev-parse HEAD)"
+cd <repo>/../mc-ai-worktrees/m3-clean-run && bun install --frozen-lockfile
+cd buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
+#     the BOOT line must read source=<the frozen sha>
+
+# 3.6 run the M3 attempt; record the runId from the BOOT line
+
+# 3.7 refresh the HOST acceptance record with the read-only control query
+#     (it is the only attestation of levelName + seed; it is NOT written at boot)
+printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
+  | socat - UNIX-CONNECT:<frozen-tree>/buddy-driver/data/resident/control.sock
+
+# 3.8 the canonical bundle, with the RESOLVED descriptor as the environment record
+bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
+  --root <frozen-tree> \
+  --environment <container>/m3-clean-run/environment-resolved.json \
+  --evidence-class live
+#     outputs land in <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>/
+#     bundle.json / bundle.md / artifact-<RUN_ID>.json / metrics.json / commands/
+
+# 3.9 the clean verdict, written NEXT TO the bundle (additive: bundle.json is never modified)
+bun tools/clean-run-gate.mjs \
+  --environment <container>/m3-clean-run/environment-resolved.json \
+  --bundle-dir <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID> \
+  --run <RUN_ID> \
+  --out <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>
+#     writes clean-run.json + clean-run.md; prints CLEAN_RUN_RESULT / CLEAN_RUN_M3
+```
+
+`CLEAN_RUN_M3 status=ACCEPTED` requires **all** of:
+
+```text
+descriptor CLEAN
++ every required run-evidence condition not FAIL
++ bundle.acceptanceVerdict.status === PASS          (the canonical M3 gate's own verdict, read verbatim)
++ bundle.liveAcceptance === true                    (host.lock + HOST acceptance record + BOOT SHA == tree HEAD)
++ bundle.evidenceClass === live
+```
+
+Exit codes: `0` ACCEPTED, `1` NOT_CLEAN / NOT_ACCEPTED, `2` UNKNOWN. A descriptor
+with no bundle is judged as a PREMISE only (`CLEAN_RUN_M3 status=UNKNOWN`): a clean
+descriptor is not an acceptance.
+
+## 4. Where the run's identity ends up in the evidence
+
+| fact | where a reviewer reads it |
+| --- | --- |
+| `runId` | `bundle.json:runId`, `artifact-<runId>.json:runId`, the filename, every `CLEAN_RUN_*` line |
+| frozen SHA | `BOOT ... source=<sha>` in `buddy.log`; `artifact.run.boot.sourceSha`; the clean gate compares it to `values.sourceSha` (`run.bootSourceSha`) |
+| tree HEAD | `bundle.git.head` + `liveSignals.bootSourceMatchesTreeHead` |
+| `worldKey` | `BOOT ... worldKey={"serverId":…,"dimension":…,"worldEpoch":…}` → `artifact.run.worldKey` (it is the world memory namespace: `serverId|dimension|worldEpoch`; it does NOT contain the seed) |
+| level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()`, which reads the hard-coded `<container>/server.properties` |
+| config (difficulty, spawn-monsters) | run-scoped `ENVIRONMENT`/`GAMERULE` markers in `buddy.log` → `artifact.environment.*` with `source: log, runScoped: true`; the clean gate compares them (`run.difficultyNotContradicted`, `run.mobSpawningNotContradicted`) |
+| gamerules | the descriptor (`artifact.environment.environmentFile.values.gamerules`), plus any run-scoped marker (`artifact.environment.gamerules`), plus the operator's console listing in `gamerule-verification.txt`. Mineflayer cannot read gamerules |
+| no world changes | `artifact.environment.worldChanges` must be `null` (`run.noWorldChanges`) |
+| nothing granted | the run's FIRST inventory sample must be empty (`run.bootInventoryEmpty`, from `artifact.inventory.boot`) |
+| keepInventory behaviour | any `LADDER_INVENTORY_SETTLE reason=death` line in the run window: `itemCount>0` ⇒ FAIL (the live world's own signal); an empty drop ⇒ positive evidence |
+| clean verdict | `clean-run.json` / `clean-run.md` next to `bundle.json`, plus the `CLEAN_RUN_*` lines |
+
+Both the descriptor path and its sha256 are checked: the artifact must have read
+its environment from **this** descriptor (`run.environmentRecordIsThisDescriptor`),
+so a clean premise can never be paired with a run judged against another file.
+
+## 5. Reviewer checklist
+
+1. `clean-run.md` → `CLEAN STATUS: **CLEAN**` and `M3 ACCEPTANCE: **ACCEPTED**`.
+2. `bundle.md` → `VERDICT: **PASS**`, `evidenceClass: live`, `liveAcceptance: true`,
+   and `consistency: gate_vs_artifact_conditions OK`.
+3. `bundle.md` → the three M3 conditions each PASS from `tools/m3-gate.mjs`
+   (`ender_eye_ready`, `nether_reached`, `model_authority`).
+4. `clean-run.md` → the descriptor is the resolved one (`sourceSha` = the frozen
+   commit, `levelName`/`levelSeed` = the new world); `run.levelNameAttested`,
+   `run.seedAttested`, `run.bootSourceSha`, `run.bootInventoryEmpty` all PASS.
+5. `gamerule-verification.txt` → `keep_inventory=false` and every declared default;
+   `seed` equals `values.levelSeed`; the body is not opped.
+6. `bundle.json` → `git.head` == the frozen SHA, `git.dirty` false (or explained),
+   `run.worldKey` is the new world's namespace.
+7. `commands/*.txt` → the exact argv and captured output of the artifact, the M3
+   gate and the metrics step; `clean-run.json` for the machine-readable verdict.
+8. Anything `UNKNOWN` in `clean-run.md`'s residual section is a named gap: it must
+   be resolved or explicitly accepted, never silently ignored.
+
+## 6. Honest residual (what this harness cannot decide)
+
+- **The clean world has not been booted.** The server must generate it from
+  `level-seed` on first start; that the world is genuinely new is proved by the
+  absence of `level.dat` at prepare time (checked) plus the operator's console
+  `seed` output, not by an automated boot.
+- **Gamerule values are operator-declared + console-verified.** No run-scoped
+  machine fact exists for most rules. The gate can catch a *contradiction* in a
+  run-scoped marker, a `LADDER_INVENTORY_SETTLE` that kept items, and a non-empty
+  boot inventory; it cannot read the world's rule table.
+- **`serverSeed()` is hard-coded** to `<container>/server.properties`. Serving the
+  clean world from a different root would put the wrong seed in the acceptance
+  record; the clean gate FAILs that loudly (`run.seedAttested`) rather than
+  accepting it.
+- **`datapackPackFormat` is `null`** in the checked-in descriptor, so the gamerule
+  datapack is skipped loudly and the console listing is the primary mechanism.
+  Fill it in once the pack format for this build is verified. The datapack is
+  written under `<world>/datapacks/m3-clean-gamerules/`; a wrong `pack_format` is
+  reported by the server as an incompatible pack, which is visible and harmless
+  (the console listing remains the authoritative evidence either way).
+- **The live world's durable resident state** (ledger / known resources) is
+  namespaced by `worldKey`, which contains no seed: a new world on the same
+  `serverId` and epoch could still match old memory. The recipe avoids this by
+  running the resident from a FRESH worktree of the frozen SHA.
+- **The clean gate is an addition, not a modification.** `tools/m3-gate.mjs`,
+  `tools/m2-gate.mjs`, `tools/milestone-run-artifact.mjs` and
+  `tools/m3-acceptance-bundle.mjs` are untouched: their verdicts are read, never
+  re-implemented. An M3 PASS without `clean-run.json` is still only an M3 PASS.
+- Fixtures prove the wiring, not the world: `tools/test-clean-run-harness.mjs`
+  runs entirely offline under `runs/clean-run-tests/` and its "simulated live"
+  case exists only to exercise the ACCEPTED branch — it is not evidence.
