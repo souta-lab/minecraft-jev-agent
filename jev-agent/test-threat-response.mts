@@ -274,7 +274,10 @@ addCase('the sensor scans escape cells for a recently engaged ranged hostile bey
         id: 42,
         name: 'pillager',
         kind: 'hostile',
-        position: new Vec3(0.5, 10, 10.5),
+        // Match the live pillager-only decision where the sole candidate was
+        // ATTACK at 9.59m: outside the 8m imminent envelope, but a proven recent
+        // attacker with enough local world to ground a >12m destination.
+        position: new Vec3(0.5, 10, 10.09),
         isValid: true,
         heldItem: { name: 'crossbow', count: 1 },
       },
@@ -321,7 +324,7 @@ addCase('the sensor scans escape cells for a recently engaged ranged hostile bey
   const outsideStandoff = retreats.filter((candidate) => candidate.meta.outsideReach === true)
   const escapeCells = new Set((state.terrain.escapeCells ?? []).map((cell) => `${cell.x},${cell.y},${cell.z}`))
   const pass =
-    state.entities.find((entity) => entity.id === 42)?.distance === 10 &&
+    Math.abs((state.entities.find((entity) => entity.id === 42)?.distance ?? 0) - 9.59) < 0.01 &&
     state.terrain.escapeCells !== undefined &&
     state.terrain.escapeCells.length > 0 &&
     (passiveState.terrain.escapeCells?.length ?? 0) === 0 &&
