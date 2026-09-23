@@ -2246,7 +2246,7 @@ export class JevController {
   private failureStreak = 0
   private candidateFailures = new Map<string, number>()
   private candidateFailureAt = new Map<string, number>()
-  private readonly digMemory = new DigMemory()
+  private digMemoryState = new DigMemory()
   private descendHaveBaseline = 0
   private descendProgress: DescendProgressState | null = null
   private descendStallTicks = 0
@@ -13113,6 +13113,37 @@ export class JevController {
   private currentDimension(): string {
     const game = this.bot.game
     return game === undefined ? 'overworld' : game.dimension
+  }
+
+  /**
+   * DigMemory contains absolute block coordinates, so every access is fenced to
+   * the controller's host world epoch and Mineflayer's live dimension. A portal
+   * transfer or world replacement clears that coordinate history; ordinary
+   * ticks in the same world preserve it.
+   */
+  private get digMemory(): DigMemory {
+    this.bindDigMemoryScope(this.currentDimension())
+    return this.digMemoryState
+  }
+
+  /** Test seams and isolated controller fixtures can replace the memory object. */
+  private set digMemory(value: DigMemory) {
+    this.digMemoryState = value
+  }
+
+  private bindDigMemoryScope(dimension: string): void {
+    const change = this.digMemoryState.bindScope({ dimension, worldEpoch: this.options.worldEpoch })
+    if (!change.changed || change.previous === null) return
+    this.logger.warn(
+      'agent',
+      `DIG_MEMORY_SCOPE_RESET previous=${change.previous.dimension}@${change.previous.worldEpoch} current=${change.current.dimension}@${change.current.worldEpoch}`,
+      {
+        previous: change.previous,
+        current: change.current,
+        cleared: ['direction', 'tunnelCoordinates', 'oscillationWindow', 'knownStoneY', 'descendBudget'],
+      },
+      this.tickCounter,
+    )
   }
 
   /**

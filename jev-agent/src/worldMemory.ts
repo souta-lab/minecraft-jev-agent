@@ -37,6 +37,18 @@ export interface DigMemorySnapshot {
   descendLimitReached: boolean
 }
 
+/** The coordinate system DigMemory describes. Both fields are host/world facts. */
+export interface DigMemoryScope {
+  dimension: string
+  worldEpoch: number
+}
+
+export interface DigMemoryScopeChange {
+  changed: boolean
+  previous: DigMemoryScope | null
+  current: DigMemoryScope
+}
+
 /** Net displacement across the last window of digs. Pure. */
 export function netDisplacementOf(steps: readonly DigStep[]): number {
   if (steps.length < 2) return 0
@@ -85,6 +97,23 @@ export class DigMemory {
   descendNoProgress = 0
   private staircase = false
   private recent: DigStep[] = []
+  private scope: DigMemoryScope | null = null
+
+  /**
+   * Fence coordinate and descent history to the world in which it was learned.
+   * Dimension transfers and host world-epoch changes invalidate old positions;
+   * repeated reads from the same world leave useful tunnel/search memory intact.
+   */
+  bindScope(scope: DigMemoryScope): DigMemoryScopeChange {
+    const current = { ...scope }
+    const previous = this.scope === null ? null : { ...this.scope }
+    if (previous?.dimension === current.dimension && previous.worldEpoch === current.worldEpoch) {
+      return { changed: false, previous, current }
+    }
+    this.clearMemory()
+    this.scope = current
+    return { changed: true, previous, current }
+  }
 
   observeStoneY(y: number): void {
     if (this.knownStoneY === null || y < this.knownStoneY) this.knownStoneY = y
@@ -166,6 +195,11 @@ export class DigMemory {
   }
 
   reset(): void {
+    this.clearMemory()
+    this.scope = null
+  }
+
+  private clearMemory(): void {
     this.dir = null
     this.dirCount = 0
     this.depth = 0

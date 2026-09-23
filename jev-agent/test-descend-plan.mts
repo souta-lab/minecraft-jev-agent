@@ -336,6 +336,8 @@ addCase('the path cap still permits a grounded downward step', () => {
 addCase('a verified move after the capped tunnel opens a fresh bounded path', () => {
   type ResetRuntime = {
     digMemory: DigMemory
+    options: { worldEpoch: number }
+    bot: { game: { dimension: string } }
     logger: { info: (channel: string, message: string, fields: Record<string, unknown>, tick: number) => void }
     tickCounter: number
     resetDescendBudgetAfterWorldChange: (
@@ -345,12 +347,15 @@ addCase('a verified move after the capped tunnel opens a fresh bounded path', ()
   }
   const runtime = Object.create(JevController.prototype) as ResetRuntime
   const memory = new DigMemory()
+  memory.bindScope({ dimension: 'minecraft:overworld', worldEpoch: 1 })
   const lines: string[] = []
   for (let index = 0; index < DIG_PATH_CAP; index += 1) {
     memory.record({ x: index, y: 55, z: 0, dir: 'E', mode: 'level', target: 'raw_iron', atMs: index })
   }
   for (let index = 0; index < 4; index += 1) memory.markDescend(false)
   runtime.digMemory = memory
+  runtime.options = { worldEpoch: 1 }
+  runtime.bot = { game: { dimension: 'minecraft:overworld' } }
   runtime.logger = { info: (_channel, message) => lines.push(message) }
   runtime.tickCounter = 1
 
