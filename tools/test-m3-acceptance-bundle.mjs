@@ -11,19 +11,20 @@
 //     can never be reported as a live acceptance.
 //
 // What is pinned:
-//   A. a PASS-shaped synthetic run -> exit 0, every M3 condition PASS, gate and the
-//      artifact's embedded conditions AGREE, and liveAcceptance stays false;
+//   A. a PASS-shaped synthetic run -> exit 0 only when both M3 and same-run,
+//      exact-source M2 gates PASS; gate/artifact conditions agree and liveAcceptance
+//      stays false;
 //   B. the same run declared `--evidence-class live` -> liveAcceptance is STILL
 //      false, because the objective live signals do not hold (synthetic tree);
 //   C. a MISSING HOST acceptance record -> the evidence class is stated precisely
 //      (writer + triggers + what it attests), the run is still decidable, and
 //      `--require-acceptance` makes it a loud blocking gap (exit 2);
-//   D. an operator decision scoped to ANOTHER runId -> the premise says so exactly
-//      (scope verbatim, thisRunInherits=false, thisRunMust=build) while the M3
-//      conditions are untouched (the M3 gate never consumes M2);
+//   D. an operator decision scoped to ANOTHER runId -> its inherited premise cannot
+//      replace this run's M2 PASS, even when M3 itself PASSes;
 //   E. a decision scoped to THIS run whose basis the gate corroborates -> the
-//      premise says inherit, the delegated gate verdict stays UNKNOWN, and the
-//      bundle verdict is NOT turned into PASS;
+//      premise says inherit, but the delegated M2 UNKNOWN still blocks acceptance;
+//   E2. M2 UNKNOWN, FAIL, wrong runId, wrong source SHA, or evaluator/wrapper
+//      disagreement all block acceptance even when the M3 gate PASSes;
 //   F. an injected gate that contradicts the canonical gate -> the bundle reports
 //      the CONTRADICTION, marks the condition UNKNOWN and exits 2 (never
 //      reconciled towards PASS);
@@ -39,6 +40,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
+import { runM2Gate } from './m2-gate.mjs'
 import { runM3Gate } from './m3-gate.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -148,12 +150,65 @@ function writeDecisions(root, entries) {
   return path
 }
 
-/** A minimal M2 stub so the contradiction fixture isolates the M3 comparison. */
-async function runM2GateStub({ onResult, expectedRunId }) {
-  const verdict = { id: 'M2', status: 'UNKNOWN', code: 2, reason: 'fixture_stub', runId: expectedRunId, conditions: {}, facts: null }
-  if (typeof onResult === 'function') onResult(verdict)
-  return 2
+/** Inject a controlled M2 evaluator result for acceptance-aggregation fixtures. */
+function makeM2GateStub({ status = 'UNKNOWN', gateStatus = status, gateRunId = null, sourceSha = SOURCE_SHA, reason = 'fixture_m2' } = {}) {
+  const code = status === 'PASS' ? 0 : status === 'FAIL' ? 1 : 2
+  const conditions = status === 'PASS'
+    ? { diamond_ready: 'PASS', portal_materials_ready: 'PASS', portal_built: 'PASS', portal_lit: 'PASS' }
+    : { diamond_ready: 'UNKNOWN', portal_materials_ready: 'UNKNOWN', portal_built: 'UNKNOWN', portal_lit: 'UNKNOWN' }
+  return async ({ onResult, expectedRunId, write }) => {
+    const verdict = {
+      id: 'M2',
+      status: gateStatus,
+      code,
+      reason,
+      runId: gateRunId ?? expectedRunId,
+      sourceSha,
+      conditions,
+      facts: null,
+    }
+    if (typeof onResult === 'function') onResult(verdict)
+    write(`M2_RUN_RESULT status=${status} reason=${reason} runId=${expectedRunId}`)
+    return code
+  }
 }
+
+const runM2GateStub = makeM2GateStub()
+
+/** M3 PASS fixture used to isolate the bundle's cross-milestone acceptance rule. */
+async function runM3GatePassStub({ onResult, expectedRunId, sourceSha = SOURCE_SHA, write }) {
+  const observedAt = at(31)
+  const observation = {
+    record: 'current-inventory-observation',
+    schemaVersion: 1,
+    runId: expectedRunId,
+    sourceSha,
+    generationId: 'gen-test-1',
+    observedAtMs: Date.parse(observedAt),
+    observedAt,
+    worldKey: JSON.parse(WORLD_KEY),
+    dimension: 'minecraft:the_nether',
+    counts: { ender_eye: 12 },
+  }
+  const verdict = {
+    id: 'M3',
+    status: 'PASS',
+    code: 0,
+    reason: 'twelve_eyes_of_ender_verified',
+    runId: expectedRunId,
+    sourceSha,
+    conditions: { ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' },
+    facts: {
+      eyes: { ready: true, enderEye: 12, maxObservedEnderEye: 12 },
+      terminalInventory: { status: 'valid', reason: null, observation },
+    },
+  }
+  if (typeof onResult === 'function') onResult(verdict)
+  write(`M3_RUN_RESULT status=PASS reason=twelve_eyes_of_ender_verified runId=${expectedRunId}`)
+  return 0
+}
+
+const PASS_BUNDLE_GATES = Object.freeze({ M2: runM2Gate, M3: runM3GatePassStub })
 
 function stderrCapture() {
   const lines = []
@@ -177,6 +232,8 @@ function condition(bundle, id) {
     outDir,
     evidenceClass: 'fixture',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     write: () => {},
   })
   assert.equal(exitCode, 0, `PASS fixture exit=${exitCode} verdict=${bundle.acceptanceVerdict.reason}`)
@@ -197,16 +254,36 @@ function condition(bundle, id) {
   assert.equal(condition(bundle, 'metrics.skillClosure').verdict, 'PRESENT')
   assert.ok(bundle.metrics.report !== null)
   assert.equal(bundle.metrics.report.runId, RUN)
+  const m2Row = condition(bundle, 'M2.premise')
+  assert.equal(m2Row.verdict, 'PASS')
+  assert.equal(m2Row.blocking, true)
+  assert.equal(m2Row.detail.gateRunId, RUN)
+  assert.equal(m2Row.detail.gateSourceSha, SOURCE_SHA)
+  assert.equal(m2Row.detail.expectedSourceSha, SOURCE_SHA)
+  assert.equal(m2Row.detail.runMatches, true)
+  assert.equal(m2Row.detail.sourceMatches, true)
+  assert.equal(bundle.artifact.document.verdicts.M2.gateStatus, 'PASS')
+  assert.equal(bundle.artifact.document.verdicts.M2.gateRunId, RUN)
+  assert.equal(bundle.artifact.document.verdicts.M2.sourceSha, SOURCE_SHA)
   // A fixture PASS is never a live acceptance.
   assert.equal(bundle.liveAcceptance, false)
   assert.ok(bundle.residual.some((entry) => /evidence class is "fixture"/.test(entry)))
-  ok('A. synthetic PASS: gate==artifact, all conditions PASS, liveAcceptance=false')
+  ok('A. exact-run/source M2 PASS + M3 PASS: accepted fixture, liveAcceptance=false')
 }
 {
   const root = makeRoot('pass-files')
   writeFixture(root, RUN, { logLines: fullLog(RUN, { terminalEye: 12 }) })
   const outDir = join(root, 'bundle')
-  await buildAcceptanceBundle({ runId: RUN, root, outDir, evidenceClass: 'fixture', noControlSocket: true, write: () => {} })
+  await buildAcceptanceBundle({
+    runId: RUN,
+    root,
+    outDir,
+    evidenceClass: 'fixture',
+    noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
+    write: () => {},
+  })
   const bundle = JSON.parse(readFileSync(join(outDir, 'bundle.json'), 'utf8'))
   const markdown = readFileSync(join(outDir, 'bundle.md'), 'utf8')
   assert.equal(bundle.record, 'm3-acceptance-bundle')
@@ -245,6 +322,8 @@ function condition(bundle, id) {
     outDir: join(root, 'bundle'),
     evidenceClass: 'live',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     write: () => {},
   })
   assert.equal(bundle.acceptanceVerdict.status, 'PASS')
@@ -269,6 +348,8 @@ function condition(bundle, id) {
     outDir: join(root, 'bundle'),
     evidenceClass: 'fixture',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     write: errors.write,
   })
   const row = condition(bundle, 'evidence.acceptance')
@@ -289,6 +370,8 @@ function condition(bundle, id) {
     outDir: join(root, 'bundle-strict'),
     evidenceClass: 'fixture',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     requireAcceptance: true,
     write: errors.write,
   })
@@ -307,6 +390,8 @@ function condition(bundle, id) {
     outDir: join(root, 'bundle'),
     evidenceClass: 'fixture',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     write: () => {},
   })
   assert.equal(condition(bundle, 'evidence.acceptance').verdict, 'PRESENT')
@@ -348,6 +433,8 @@ function condition(bundle, id) {
     overrides: { operatorDecisions: decisionsPath },
     evidenceClass: 'fixture',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     write: () => {},
   })
   const premise = bundle.artifact.document.verdicts.M2.operatorDecisionPremise
@@ -364,17 +451,20 @@ function condition(bundle, id) {
   assert.equal(bundle.artifact.document.verdicts.M2.reason, 'inherited_portal')
   assert.equal(bundle.artifact.document.verdicts.M2.operatorDecision, null)
   assert.equal(condition(bundle, 'M2.premise').verdict, 'UNKNOWN')
-  assert.equal(condition(bundle, 'M2.premise').blocking, false)
+  assert.equal(condition(bundle, 'M2.premise').blocking, true)
   assert.equal(condition(bundle, 'M2.premise').detail.recordedRunScope, 'run-some-other-run')
   assert.equal(condition(bundle, 'M2.premise').detail.thisRunMust, 'build')
-  // M3 does not consume M2 at all: the premise cannot change an M3 condition.
+  // M3 itself can pass, but the aggregate acceptance remains blocked on this run's M2.
+  assert.equal(bundle.gate.status, 'PASS')
   assert.equal(condition(bundle, 'M3.nether_reached').verdict, 'PASS')
+  assert.equal(bundle.acceptanceVerdict.status, 'UNKNOWN')
+  assert.equal(bundle.exitCode, 2)
   assert.equal(bundle.artifact.document.operatorDecisions.sha256.length, 64)
   assert.equal(premise.sha256, bundle.artifact.document.operatorDecisions.sha256)
   assert.equal(condition(bundle, 'M2.premise').detail.recordedSha256, premise.sha256)
   assert.match(condition(bundle, 'M2.premise').detail.recordedSource, /operator-decisions\.json$/)
   assert.ok(bundle.artifact.missingEvidence.includes('premise:M2'))
-  ok('D. decision scoped elsewhere: premise says NOT covered (scope verbatim), gate verdict unchanged')
+  ok('D. decision scoped elsewhere cannot replace same-run M2 PASS even when M3 gate PASSes')
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +500,8 @@ function condition(bundle, id) {
     overrides: { operatorDecisions: decisionsPath },
     evidenceClass: 'fixture',
     noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
     write: () => {},
   })
   const premise = bundle.artifact.document.verdicts.M2.operatorDecisionPremise
@@ -419,12 +511,92 @@ function condition(bundle, id) {
   assert.equal(premise.decisions[0].corroboratedByThisRun, true)
   assert.equal(bundle.artifact.document.verdicts.M2.operatorDecision.status, 'PASS')
   assert.equal(bundle.artifact.document.verdicts.M2.status, 'UNKNOWN', 'the annotation never rewrites the gate')
-  assert.equal(condition(bundle, 'M2.premise').verdict, 'PASS')
-  // The milestone is still NOT accepted: 0 eyes.
-  assert.notEqual(bundle.acceptanceVerdict.status, 'PASS')
+  const m2Row = condition(bundle, 'M2.premise')
+  assert.equal(m2Row.verdict, 'UNKNOWN')
+  assert.equal(m2Row.blocking, true)
+  assert.match(m2Row.reason, /inherited M2 premise does not substitute/)
+  assert.equal(bundle.gate.status, 'PASS')
+  assert.equal(bundle.acceptanceVerdict.status, 'UNKNOWN')
   assert.equal(exitCode, 2)
   assert.ok(!bundle.artifact.missingEvidence.includes('premise:M2'))
-  ok('E. decision scoped to this run: premise inherit + PASS, delegated verdict stays UNKNOWN, bundle not PASS')
+  ok('E. same-run inherited decision is diagnostic; delegated M2 UNKNOWN blocks M3 acceptance')
+}
+
+// ---------------------------------------------------------------------------
+// E2. same-run/source binding and delegated verdict must all agree for M2 PASS
+// ---------------------------------------------------------------------------
+{
+  const cases = [
+    {
+      name: 'unknown',
+      m2: { status: 'UNKNOWN', reason: 'm2_not_proven' },
+      expectedStatus: 'UNKNOWN',
+      expectedExit: 2,
+      expectedRunMatches: true,
+      expectedSourceMatches: true,
+      reason: /same-run M2 gate UNKNOWN/,
+    },
+    {
+      name: 'fail',
+      m2: { status: 'FAIL', reason: 'm2_failed' },
+      expectedStatus: 'FAIL',
+      expectedExit: 1,
+      expectedRunMatches: true,
+      expectedSourceMatches: true,
+      reason: /same-run M2 gate FAIL/,
+    },
+    {
+      name: 'wrong-run',
+      m2: { status: 'PASS', gateRunId: 'run-another-source' },
+      expectedStatus: 'UNKNOWN',
+      expectedExit: 2,
+      expectedRunMatches: false,
+      expectedSourceMatches: true,
+      reason: /same-run M2 gate identity unavailable or mismatched/,
+    },
+    {
+      name: 'wrong-source',
+      m2: { status: 'PASS', sourceSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      expectedStatus: 'UNKNOWN',
+      expectedExit: 2,
+      expectedRunMatches: true,
+      expectedSourceMatches: false,
+      reason: /same-run M2 source SHA unavailable or mismatched/,
+    },
+    {
+      name: 'evaluator-wrapper-mismatch',
+      m2: { status: 'PASS', gateStatus: 'FAIL' },
+      expectedStatus: 'UNKNOWN',
+      expectedExit: 2,
+      expectedRunMatches: true,
+      expectedSourceMatches: true,
+      reason: /M2 evaluator\/wrapper verdict mismatch/,
+    },
+  ]
+  for (const entry of cases) {
+    const root = makeRoot(`m2-${entry.name}`)
+    writeFixture(root, RUN, { logLines: fullLog(RUN, { terminalEye: 12 }) })
+    const { bundle, exitCode } = await buildAcceptanceBundle({
+      runId: RUN,
+      root,
+      outDir: join(root, 'bundle'),
+      evidenceClass: 'fixture',
+      noControlSocket: true,
+      gates: { M2: makeM2GateStub(entry.m2), M3: runM3GatePassStub },
+      runGate: runM3GatePassStub,
+      write: () => {},
+    })
+    const m2Row = condition(bundle, 'M2.premise')
+    assert.equal(bundle.gate.status, 'PASS', `${entry.name}: M3 gate fixture should PASS`)
+    assert.equal(m2Row.verdict, entry.expectedStatus, `${entry.name}: M2 row`)
+    assert.equal(m2Row.blocking, true, `${entry.name}: M2 row must block`)
+    assert.equal(m2Row.detail.runMatches, entry.expectedRunMatches, `${entry.name}: run identity binding`)
+    assert.equal(m2Row.detail.sourceMatches, entry.expectedSourceMatches, `${entry.name}: source identity binding`)
+    assert.match(m2Row.reason, entry.reason, `${entry.name}: diagnostic reason`)
+    assert.equal(bundle.acceptanceVerdict.status, entry.expectedStatus, `${entry.name}: aggregate verdict`)
+    assert.equal(exitCode, entry.expectedExit, `${entry.name}: aggregate exit code`)
+  }
+  ok('E2. M2 UNKNOWN/FAIL/wrong run/wrong SHA/verdict mismatch all block M3 PASS')
 }
 
 // ---------------------------------------------------------------------------

@@ -16,8 +16,8 @@
 //      per condition and an explicit CONSISTENCY check between the gate and the
 //      artifact, so a delivered bundle can never contain two different answers for
 //      the same condition;
-//   5. states, separately, the operator-decision PREMISE for this run (what the
-//      recorded decision covers and whether this run inherits it or must build it);
+//   5. requires the same-run M2 gate to PASS on the run's BOOT source SHA before
+//      M3 can be accepted; operator-decision premises remain diagnostic only;
 //   6. states the HOST `acceptance` evidence class precisely when it is absent
 //      (writer, triggers, what it attests) and NEVER fabricates it.
 //
@@ -80,6 +80,10 @@ function sha256(text) {
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function normalizeSourceSha(value) {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : null
 }
 
 // ---------------------------------------------------------------------------
@@ -476,22 +480,55 @@ export async function buildAcceptanceBundle({
       }),
     )
   }
-  // M2 is a PREMISE for M3, not a condition of it: the M3 gate never consumes
-  // portal_verified (tools/m3-gate.mjs M3_REQUIRED_CONDITIONS). It is reported so a
-  // reviewer can see exactly what the recorded decision covers for THIS run.
+  // A full M3 acceptance requires the fresh run to prove its own M2 chain first.
+  // An operator decision that permits inheriting a prior M2 state is useful context,
+  // but it cannot substitute for this run's source-bound build -> light -> verify.
   const premise = artifact?.verdicts?.M2?.operatorDecisionPremise ?? null
+  const m2Gate = artifact?.verdicts?.M2 ?? null
+  const expectedSourceSha = normalizeSourceSha(artifact?.run?.boot?.sourceSha)
+  const m2SourceSha = normalizeSourceSha(m2Gate?.sourceSha)
+  const m2RunMatches = artifact?.runId === runId && m2Gate?.gateRunId === runId
+  const m2SourceMatches = expectedSourceSha !== null && m2SourceSha !== null && m2SourceSha === expectedSourceSha
+  const m2IdentityMatches = m2RunMatches && m2SourceMatches
+  const m2WrapperStatus = ['PASS', 'FAIL', 'UNKNOWN'].includes(m2Gate?.status) ? m2Gate.status : 'UNKNOWN'
+  const m2EvaluatorStatus = ['PASS', 'FAIL', 'UNKNOWN'].includes(m2Gate?.gateStatus) ? m2Gate.gateStatus : null
+  const m2StatusMatches = m2EvaluatorStatus !== null && m2EvaluatorStatus === m2WrapperStatus
+  const m2ReportedStatus = m2StatusMatches ? m2WrapperStatus : 'UNKNOWN'
+  const m2AcceptanceStatus = m2IdentityMatches && m2StatusMatches ? m2ReportedStatus : 'UNKNOWN'
+  let m2AcceptanceReason
+  if (!m2RunMatches) {
+    m2AcceptanceReason = `same-run M2 gate identity unavailable or mismatched: expected runId=${runId}, artifact runId=${String(artifact?.runId ?? 'unknown')}, evaluator runId=${String(m2Gate?.gateRunId ?? 'unknown')}`
+  } else if (!m2SourceMatches) {
+    m2AcceptanceReason = `same-run M2 source SHA unavailable or mismatched: expected BOOT sourceSha=${expectedSourceSha ?? 'invalid'}, M2 sourceSha=${m2SourceSha ?? 'invalid'}`
+  } else if (!m2StatusMatches) {
+    m2AcceptanceReason = `M2 evaluator/wrapper verdict mismatch: evaluator=${String(m2EvaluatorStatus ?? 'missing')} wrapper=${m2WrapperStatus}`
+  } else if (m2ReportedStatus === 'PASS') {
+    m2AcceptanceReason = `same-run M2 gate PASS on BOOT sourceSha=${expectedSourceSha}; build, light, and verify are proven before M3 acceptance`
+  } else {
+    m2AcceptanceReason = `same-run M2 gate ${m2ReportedStatus}: ${String(m2Gate?.reason ?? 'no M2 gate reason')}`
+  }
+  if (m2AcceptanceStatus !== 'PASS' && premise?.thisRunInherits === true) {
+    m2AcceptanceReason += '; an inherited M2 premise does not substitute for this run\'s M2 gate PASS'
+  }
   conditions.push(
     conditionRow({
       id: 'M2.premise',
-      verdict: artifact?.verdicts?.M2?.status === 'PASS' ? 'PASS' : premise?.thisRunInherits === true ? 'PASS' : 'UNKNOWN',
-      source: 'tools/m2-gate.mjs + OPERATOR-DECISIONS.json',
-      reason:
-        premise?.present === true
-          ? premise.consequence
-          : `no operator decision recorded; M2 gate status=${String(artifact?.verdicts?.M2?.status ?? 'UNKNOWN')} reason=${String(artifact?.verdicts?.M2?.reason ?? 'unknown')}`,
+      verdict: m2AcceptanceStatus,
+      source: 'tools/m2-gate.mjs',
+      reason: m2AcceptanceReason,
       detail: {
-        gateStatus: premise?.gateStatus ?? null,
-        gateReason: premise?.gateReason ?? null,
+        gateStatus: m2WrapperStatus,
+        evaluatorStatus: m2EvaluatorStatus,
+        gateReason: m2Gate?.reason ?? null,
+        gateRunId: m2Gate?.gateRunId ?? null,
+        expectedRunId: runId,
+        gateSourceSha: m2SourceSha,
+        gateSourceShaReason: m2Gate?.sourceShaReason ?? null,
+        expectedSourceSha,
+        runMatches: m2RunMatches,
+        sourceMatches: m2SourceMatches,
+        statusMatches: m2StatusMatches,
+        requiredStages: m2Gate?.conditions ?? null,
         thisRunInherits: premise?.thisRunInherits ?? false,
         thisRunMust: premise?.thisRunMust ?? 'build',
         recordedRunScope: premise?.decisions?.[0]?.runScope ?? null,
@@ -499,10 +536,7 @@ export async function buildAcceptanceBundle({
         recordedSource: premise?.source ?? null,
         recordedSha256: premise?.sha256 ?? null,
       },
-      // The M2 premise does NOT block an M3 acceptance: M3 requires nether_reached +
-      // 12 eyes, and its gate is independent of M2. It blocks only a claim that M2
-      // was completed by THIS run.
-      blocking: false,
+      blocking: true,
     }),
   )
   // ---- evidence classes (diagnostic; never a fabricated fact) --------------
@@ -568,11 +602,11 @@ export async function buildAcceptanceBundle({
     acceptanceStatus = 'UNKNOWN'
     acceptanceReason = contradictionNote
   } else if (blocking.some((condition) => condition.verdict !== 'PASS')) {
-    acceptanceStatus = 'UNKNOWN'
-    acceptanceReason = `unmet blocking condition(s): ${blocking
-      .filter((condition) => condition.verdict !== 'PASS')
-      .map((condition) => `${condition.id}=${condition.verdict}`)
-      .join(', ')}`
+    const unmetBlocking = blocking.filter((condition) => condition.verdict !== 'PASS')
+    acceptanceStatus = unmetBlocking.some((condition) => condition.verdict === 'FAIL') ? 'FAIL' : 'UNKNOWN'
+    acceptanceReason = `unmet blocking condition(s): ${unmetBlocking
+      .map((condition) => `${condition.id}=${condition.verdict} (${String(condition.reason ?? 'no reason supplied')})`)
+      .join('; ')}`
   } else if (missingRequired.length > 0) {
     acceptanceStatus = 'UNKNOWN'
     acceptanceReason = `missing required input(s): ${missingRequired.map((input) => input.id).join(', ')}`
