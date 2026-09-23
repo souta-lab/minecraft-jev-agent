@@ -23,7 +23,7 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
@@ -5672,7 +5672,13 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  const scored: Array<{ cut: NonNullable<WorldState['stepCuts']>[number]; score: number }> = []
+  const scored: Array<{
+    cut: NonNullable<WorldState['stepCuts']>[number]
+    score: number
+    /** the cut cell's REAL harvest requirement (see `cellHarvestBarrier`) */
+    tool: HarvestTool | null
+    tier: number | null
+  }> = []
   const standKey = cellKey(state.self.position)
   for (const cut of cuts) {
     const known = state.blocks.find(
@@ -5685,10 +5691,16 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     // `known` declared the cut hand-diggable (requiresTool=false) and the body
     // discovered otherwise at execution time - the live
     // `STEP:S:b23_80_8 ... outcome=CAPABILITY_LOST failure=dig_no_tool` pair.
+    // (landed on main as f9f139f; this branch keeps that resolution verbatim)
     const barrier = cellHarvestBarrier(state, cut.cut)
     const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
     const tier = barrier?.requiredTier ?? known?.harvestTier ?? null
-    if (!hasTool(state, tool, tool === null ? null : tier)) continue
+    // The cut is NOT dropped here when the tool is missing: it is the FACT that
+    // the step needs a tool the body lacks, and dropping it left that fact
+    // invisible - no `missing_tool` withhold, no acquisition route. The
+    // executable cuts keep their pre-existing top-2 slots (the offer is
+    // unchanged) and the unharvestable ones are emitted after them, where the
+    // dig-tool gate withholds them and the acquisition pass answers them.
     // The same 1-block step cut that just proved it changes nothing from this
     // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
     // dir/step route), so a different cut or a body that moved stays offerable.
@@ -5726,18 +5738,17 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       const dot = cut.dx * Math.sign(tdx) + cut.dz * Math.sign(tdz)
       penalty = dot > 0 ? 0 : 10
     }
-    scored.push({ cut, score: penalty + distance(cut.step, state.self.position) })
+    scored.push({ cut, score: penalty + distance(cut.step, state.self.position), tool, tier })
   }
   if (scored.length === 0) return []
   scored.sort((a, b) => a.score - b.score)
 
-  return scored.slice(0, 2).map(({ cut }) => {
-    const known = state.blocks.find(
-      (block) =>
-        block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
-    )
-    const barrier = cellHarvestBarrier(state, cut.cut)
-    const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
+  // Executable cuts keep the pre-existing top-2 slots; the unharvestable ones
+  // follow as fact-carrying candidates (see the loop note above).
+  const executable = scored.filter((entry) => hasTool(state, entry.tool, entry.tier))
+  const blocked = scored.filter((entry) => !hasTool(state, entry.tool, entry.tier))
+
+  return [...executable.slice(0, 2), ...blocked.slice(0, 2)].map(({ cut, tool, tier }) => {
     return {
       id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
       kind: 'STEP' as const,
@@ -5748,7 +5759,7 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       itemName: null,
       requiresTool: tool !== null,
       toolName: tool,
-      toolTier: barrier?.requiredTier ?? known?.harvestTier ?? null,
+      toolTier: tier,
       inReach: distance(cut.cut, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
       meta: {
@@ -11617,6 +11628,90 @@ export interface ColumnFacts {
   headroomCell: Vec3Json | null
 }
 
+/**
+ * The cells a candidate's OWN execution will BREAK, read from the same
+ * declaration the executor reads - never a cell the candidate does not name.
+ *
+ *   - `meta.digCells` is the descent/branch dig plan the executor parses itself
+ *     (`executor.descentDigCellsFromMeta`: `"x,y,z;x,y,z"`, passage cells first,
+ *     primary last), so the offered shape and the checked shape cannot drift;
+ *   - an arm whose TARGET is the block it breaks (`MINE`, `STEP`, and the
+ *     `DESCEND` leg `runDescend` calls the same parser for) has no plan meta, and
+ *     the executor's own fallback for that case is the target - mirrored here.
+ *
+ * A candidate that declares no dig returns [] and is untouched by the gate.
+ */
+export function declaredDigCells(candidate: Candidate): Vec3Json[] {
+  const cells: Vec3Json[] = []
+  const seen = new Set<string>()
+  const push = (cell: Vec3Json): void => {
+    const key = `${cell.x},${cell.y},${cell.z}`
+    if (seen.has(key)) return
+    seen.add(key)
+    cells.push(cell)
+  }
+  const raw = candidate.meta.digCells
+  if (typeof raw === 'string' && raw.length > 0) {
+    for (const part of raw.split(';')) {
+      const [x, y, z] = part.split(',').map((value) => Number(value))
+      if (x === undefined || y === undefined || z === undefined) continue
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue
+      push({ x, y, z })
+    }
+    // The executor returns the PARSED plan when the meta carries one; the target
+    // is only its fallback, so it must not be added beside a real plan.
+    if (cells.length > 0) return cells
+  }
+  if (DIG_TARGET_KINDS.has(candidate.kind) && candidate.target !== null) push(candidate.target)
+  return cells
+}
+
+/** The kinds whose own `target` is the block their execution breaks. */
+const DIG_TARGET_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>(['MINE', 'STEP', 'DESCEND'])
+
+/**
+ * THE DIG-TOOL GATE: the first block a candidate's own execution must break whose
+ * harvest requirement the inventory cannot satisfy, or null.
+ *
+ * THE PROPERTY IT PINS (measured live, run-mudkuea9-124kk gen-mudkuerj-8ehpqk):
+ * a candidate whose execution requires a tool the body lacks must be WITHHELD
+ * with `missing_tool` BEFORE it is leased, and the acquisition route (or the
+ * typed refusal naming item+count) is offered instead - for EVERY dig arm, not
+ * only the headroom clearance.
+ *
+ *   `SKILL_END actionId=STEP:S:b23_80_8 outcome=CAPABILITY_LOST
+ *    failure=dig_no_tool policyBoundary=true`
+ *
+ * was that contract being violated by the step-cut arm: it derived the cell's
+ * harvest truth from the scanner's RESOURCE index (`state.blocks`), which does
+ * not carry terrain, so the cut cell resolved to "no tool required", the STEP
+ * was offered without a reachability verdict (STEP is not a locomotion kind) and
+ * the body only discovered the missing pickaxe inside the executor
+ * (`executor.requireHarvestTool` -> `dig_no_tool`).
+ *
+ * Enforcing it HERE, at the single gate every candidate passes through, is what
+ * makes it hold for every arm rather than for the arm that happened to be
+ * measured: the withholding is `missing_tool` on the cell's REAL harvest truth
+ * (`cellHarvestBarrier`), so the acquisition pass answers it with a
+ * `{kind:'tool'}` route exactly as it does for a MINE.
+ *
+ * Applied only to kinds the reachability contract does not already judge: `MINE`
+ * and the locomotion family keep their existing verdicts byte-for-byte, and a
+ * candidate whose tool IS held falls through to its historical behaviour.
+ */
+function declaredDigToolRefusal(
+  state: WorldState,
+  candidate: Candidate,
+): { barrier: ReachabilityBarrier; capability: Capability } | null {
+  for (const cell of declaredDigCells(candidate)) {
+    const barrier = cellHarvestBarrier(state, cell)
+    if (barrier === null) continue
+    const capability = missingToolCapability(barrier, state.inventory.counts)
+    if (capability !== null) return { barrier, capability }
+  }
+  return null
+}
+
 interface ReachabilityGateContext {
   state: WorldState
   options: CandidateOptions
@@ -11983,7 +12078,28 @@ function evaluateCandidate(
   // mechanical approach here. Goal-directed mob/food hunts keep their dedicated
   // longer/re-acquisition executor contract and are intentionally unchanged.
   if (candidate.kind === 'ATTACK') return evaluateOrdinaryAttackCandidate(candidate, context)
-  if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) {
+    // THE DIG-TOOL GATE for every arm the locomotion contract does not judge
+    // (STEP, and any descent/branch dig leg): a candidate that must break a block
+    // the inventory cannot harvest is withheld `missing_tool` here, BEFORE it can
+    // be leased, so the acquisition pass answers the missing tool with a craft or
+    // collect route (or the typed refusal). A candidate whose tool is held, and a
+    // candidate that breaks nothing, fall through to the historical behaviour.
+    const dig = declaredDigToolRefusal(context.state, candidate)
+    if (dig === null) return null
+    const digTarget: ReachabilityTarget = {
+      ...reachabilityTargetFor(context.state, candidate),
+      barrier: dig.barrier,
+    }
+    const digWorld = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+    return reachabilityRecord(
+      candidate,
+      digTarget,
+      digWorld,
+      { reachable: false, reason: 'missing_tool', missingCapabilities: [dig.capability] },
+      context,
+    )
+  }
   // SAFE: a dimension transfer is not locomotion. Checked before every other
   // mechanical verdict so the typed reason cannot be masked by a path/tool
   // refusal: "this leg would leave the dimension" is the fact that matters, and
