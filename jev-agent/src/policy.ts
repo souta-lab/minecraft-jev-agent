@@ -19,7 +19,7 @@ import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 import { containerObservationAt, observedItemCount } from './containerAccess.ts'
-import type { StationApproachProbe } from './reachability.ts'
+import type { StationApproachProbe, StationKindName } from './reachability.ts'
 
 export type GuardPhase = 'decision' | 'dig'
 
@@ -840,10 +840,11 @@ function guardStationApproach(
   context: GuardContext,
   target: Vec3Json,
   ref: string,
+  kind: StationKindName = 'container',
 ): GuardResult {
   const probe = context.stationApproach ?? null
   if (probe === null) return guardPathComputable(candidate, context, target)
-  const fact = probe(target, 'container')
+  const fact = probe(target, kind)
   if (fact.approach === null) {
     return deny(
       candidate.id,
@@ -896,7 +897,12 @@ function guardSmelt(candidate: Candidate, state: WorldState, context: GuardConte
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the furnace`)
   }
   if (distance(target, state.self.eyePosition) > context.reach) {
-    return guardPathComputable(candidate, context, target)
+    // The SAME fact the candidate layer's `stationApproachReachable` consumes. Probing
+    // `GoalBlock(<furnace cell>)` asked the pathfinder for a path INTO the cell the block
+    // occupies, which can never succeed - the identical asymmetry the container guard was
+    // fixed for. It is masked here only because smelt grounding withholds a furnace whose
+    // cell probe fails, so no live failure has been observed from it.
+    return guardStationApproach(candidate, context, target, 'furnace', 'furnace')
   }
   return { ok: true, candidate }
 }
