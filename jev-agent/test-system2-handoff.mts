@@ -71,6 +71,8 @@ describe('typed Jev to System2 escalation handoff', () => {
     assert.match(branch, /ESCALATE_HANDOFF status=unavailable/)
     assert.match(branch, /\breturn\b/)
     assert.doesNotMatch(branch, /requestDecision\(trigger, detail\)/)
+    assert.match(branch, /pendingTrigger = pickHigherPriority\(this\.pendingTrigger, deferred\)/)
+    assert.match(branch, /requestDecision\(deferred\.trigger, deferred\.detail\)/)
     assert.doesNotMatch(executor, /'escalating', 'handed to System 2'/)
     assert.match(executor, /handoff_request_staged/)
     assert.match(candidates, /request System 2 review/)

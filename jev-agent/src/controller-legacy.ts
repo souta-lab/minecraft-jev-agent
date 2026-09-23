@@ -6879,10 +6879,18 @@ export class JevController {
       // ESCALATE is a control-plane request, not a physical Skill completion.
       // The System2 response schedules the next decision after dispatch. If the
       // request is suppressed, wait for a separate wake instead of immediately
-      // asking Jev to select ESCALATE again from unchanged facts. Preserve a
-      // critical safety event that arrived while the control action settled.
-      if (deferred !== null && CRITICAL_TRIGGERS.has(deferred.trigger)) {
-        this.requestDecision(deferred.trigger, deferred.detail)
+      // asking Jev to select ESCALATE again from unchanged facts. Preserve any
+      // independent trigger that arrived while the control action settled; when
+      // dispatch succeeds it coalesces with the System2 response, and when it is
+      // unavailable it becomes the explicit next wake. Safety triggers therefore
+      // retain their normal priority without manufacturing an action-completed
+      // retry from the ESCALATE request itself.
+      if (deferred !== null) {
+        if (handoff.status === 'submitted') {
+          this.pendingTrigger = pickHigherPriority(this.pendingTrigger, deferred)
+        } else {
+          this.requestDecision(deferred.trigger, deferred.detail)
+        }
       }
       return
     }
