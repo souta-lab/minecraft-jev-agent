@@ -148,11 +148,12 @@ process.stdout.write(`${'-'.repeat(80)}\n`)
     semanticProgress: result.itemsGained > 0,
   })
   const pass =
-    result.status === 'done' && result.verified && result.entityDefeated === true &&
+    result.status === 'failed' && result.failure === 'drop_not_acquired' && !result.verified &&
+    result.entityDefeated === true && result.dropAcquired === false &&
     result.itemsGained === 0 && fixture.pearls() === 0 &&
     fixture.emitter.listenerCount('entityDead') === 0 && taxonomy.progress === 'search' && taxonomy.semantic === 'none'
   report(pass, 'entityDead without the drop is search progress, never collect completion',
-    `status=${result.status} defeated=${result.entityDefeated} gained=${result.itemsGained} progress=${taxonomy.progress}/${taxonomy.semantic} listeners=${fixture.emitter.listenerCount('entityDead')}`)
+    `status=${result.status} failure=${result.failure} verified=${result.verified} defeated=${result.entityDefeated} gained=${result.itemsGained} progress=${taxonomy.progress}/${taxonomy.semantic} listeners=${fixture.emitter.listenerCount('entityDead')}`)
 }
 
 {
