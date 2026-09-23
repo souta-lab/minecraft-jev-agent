@@ -885,6 +885,7 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     wait: Math.min(state.consecutiveWait, 3),
     failures: state.recentFailures,
     deathHistory: state.deathHistory,
+    deathHistoryTotal: state.deathHistoryTotal ?? state.deathHistory.length,
     postDeath: state.postDeath ?? null,
     allowedGoals,
     // The typed blocker + grounded-alternative facts are part of the KEY, not
@@ -935,6 +936,14 @@ export function mercuryPayloadShape(state: unknown): System2PayloadShape {
     absent: blockers === null ? ['blockers'] : [],
   }
 }
+
+/**
+ * Bound on the death-hazard facts carried in one summon payload. The operator's
+ * rule is that the state is not a giant log; a durable hazard memory grows for
+ * the life of the world, so only the most recent facts are carried and the
+ * pre-clamp count is reported beside them.
+ */
+export const MERCURY_DEATH_HISTORY_LIMIT = 8
 
 /** A compact, human-readable strategy label for the ADVISOR log. */
 export function mercuryStrategyLabel(plan: MercuryPlanJson): string {
@@ -1019,7 +1028,21 @@ export interface MercuryStateSummary {
   consecutiveWait: number
   queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
   objective: { targetItem: string; requiredCount: number; haveCount: number; complete: boolean }
+  /**
+   * The most recent durable death-hazard facts, NEWEST FIRST, bounded by
+   * `MERCURY_DEATH_HISTORY_LIMIT`. This is world memory, not a log: it is the
+   * largest field in the live payload when unbounded (measured 1098 chars /
+   * 57 entries of a 3549-char payload), and it grows for the life of the world,
+   * so it is clamped like every other list the model is given.
+   */
   deathHistory: string[]
+  /**
+   * Pre-clamp hazard count, so a truncated history is never read as complete.
+   * Optional for the same reason `portal`/`postDeath` are: fixtures and replayed
+   * records written before the bound exist, and their `deathHistory` is already
+   * complete, so the length IS the total.
+   */
+  deathHistoryTotal?: number
   postDeath?: {
     latestDeathPoint: { x: number; y: number; z: number } | null
     dimension: string

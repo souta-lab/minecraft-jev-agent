@@ -38,7 +38,7 @@ import {
 } from '../jev-agent/src/system2Payload.ts'
 import { buildMercurySummary } from './generation-entry.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
-import { hashMercuryState, mercuryPayloadShape } from './mercury-system2.ts'
+import { MERCURY_DEATH_HISTORY_LIMIT, hashMercuryState, mercuryPayloadShape } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 
@@ -734,6 +734,84 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
         withheld: [{ candidate: 'X', kind: 'MOVE', reason: 'no_path', missing: ['open_path'], suppressed: false }],
       })
       return built !== null && built.facts.withheld[0]?.acquisition === undefined
+    })(),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (vi) world memory is a recent window, not a growing log
+// ---------------------------------------------------------------------------
+
+{
+  // 60 durable hazards with distinct timestamps: the same shape the live run
+  // accumulated (measured 57 entries / 1098 chars = 31% of the whole payload).
+  const world = liveWorld()
+  for (let index = 0; index < 60; index += 1) {
+    world.hazards.push({
+      x: index,
+      y: 60 + index,
+      z: -index,
+      reason: index % 2 === 0 ? 'damage' : 'lava',
+      count: 1,
+      firstSeenAt: index,
+      lastSeenAt: index,
+    })
+  }
+  const sink = collector()
+  const summary = buildMercurySummary(liveBot(), world, liveRequest(liveBlockerFacts()), 'no_progress', null, null, sink.log)
+  check(
+    '(vi) the death history is a bounded recent window',
+    summary.deathHistory.length === MERCURY_DEATH_HISTORY_LIMIT,
+    `kept=${summary.deathHistory.length}`,
+  )
+  check(
+    '(vi) the pre-clamp hazard count is reported beside it',
+    summary.deathHistoryTotal === 60,
+    `total=${summary.deathHistoryTotal}`,
+  )
+  check(
+    '(vi) the window is the NEWEST hazards, not the oldest',
+    summary.deathHistory[0]?.startsWith('lava@59,119,-59') === true,
+    JSON.stringify(summary.deathHistory),
+  )
+  check(
+    '(vi) an unbounded history can no longer dominate the payload',
+    (() => {
+      const bounded = JSON.stringify(summary).length
+      // the same payload with the WHOLE hazard memory, i.e. the pre-fix shape
+      const unbounded = JSON.stringify({
+        ...summary,
+        deathHistory: world.hazards.map(
+          (hazard) => `${hazard.reason}@${Math.round(hazard.x)},${Math.round(hazard.y)},${Math.round(hazard.z)}x${hazard.count}`,
+        ),
+      }).length
+      return unbounded - bounded > 800
+    })(),
+    `bounded=${JSON.stringify(summary).length}`,
+  )
+  check(
+    '(vi) a fixture state without the total still hashes and reads (legacy records)',
+    (() => {
+      const legacy = { ...summary } as Record<string, unknown>
+      delete legacy.deathHistoryTotal
+      return hashMercuryState(legacy as unknown as MercuryStateSummary).length === 16 &&
+        mercuryPayloadShape(summary).attached === true
+    })(),
+  )
+  const boundedWorld = liveWorld()
+  check(
+    '(vi) a small history is carried complete (no invented truncation)',
+    (() => {
+      boundedWorld.hazards.push({ x: 1, y: 2, z: 3, reason: 'damage', count: 2, firstSeenAt: 1, lastSeenAt: 5 })
+      const one = buildMercurySummary(liveBot(), boundedWorld, liveRequest(), 'no_candidate', null, null)
+      // no truncation happened, so no total field is added at all: an ordinary
+      // summon keeps exactly the field set it always had
+      return (
+        one.deathHistory.length === 1 &&
+        one.deathHistoryTotal === undefined &&
+        one.deathHistory[0] === 'damage@1,2,3x2' &&
+        !('deathHistoryTotal' in one)
+      )
     })(),
   )
 }

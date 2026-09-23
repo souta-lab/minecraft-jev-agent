@@ -37,6 +37,7 @@ import {
   mercuryCallsPath,
   resolveMercuryEnablement,
 } from './mercury-system2.ts'
+import { MERCURY_DEATH_HISTORY_LIMIT } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
 import {
   formatSystem2PayloadAbsentLine,
@@ -1782,6 +1783,21 @@ function restoreLedgerIntoController(
   }
 }
 
+/**
+ * The most recent durable death-hazard facts, newest first, as the payload's
+ * `deathHistory`. Pure and bounded: the hazard memory is world-scoped and grows
+ * for the life of the world, so the payload carries a recent window instead of
+ * the whole record.
+ */
+export function deathHistoryFacts(world: ResidentWorldMemory, limit: number): string[] {
+  const rendered = world.hazards.map((hazard) => ({
+    at: hazard.lastSeenAt ?? 0,
+    text: `${hazard.reason}@${Math.round(hazard.x)},${Math.round(hazard.y)},${Math.round(hazard.z)}x${hazard.count}`,
+  }))
+  rendered.sort((a, b) => b.at - a.at)
+  return rendered.slice(0, Math.max(0, limit)).map((entry) => entry.text)
+}
+
 export function buildMercurySummary(
   bot: Bot,
   world: ResidentWorldMemory,
@@ -1867,9 +1883,17 @@ export function buildMercurySummary(
       hasImpossible: request.goalQueueState.hasImpossible,
     },
     objective: request.objective,
-    deathHistory: world.hazards.map(
-      (hazard) => `${hazard.reason}@${Math.round(hazard.x)},${Math.round(hazard.y)},${Math.round(hazard.z)}x${hazard.count}`,
-    ),
+    // Newest-first and BOUNDED: the durable hazard memory is world-scoped and
+    // grows for the life of the world, so carrying it whole made the payload a
+    // log (measured live: 1098 of 3549 chars, 57 entries) and kept perturbing
+    // the Mercury cache key as hazards accumulated. `deathHistoryTotal` reports
+    // the pre-clamp count so a truncated history is never read as complete.
+    deathHistory: deathHistoryFacts(world, MERCURY_DEATH_HISTORY_LIMIT),
+    // Present ONLY when the window actually truncated: an ordinary summon whose
+    // hazard memory fits carries the same field set it always did, and the total
+    // appears exactly where it is needed to stop a short list reading as the
+    // whole record.
+    ...(world.hazards.length > MERCURY_DEATH_HISTORY_LIMIT ? { deathHistoryTotal: world.hazards.length } : {}),
     postDeath:
       trigger === 'post_death' && deathRecovery !== null
         ? {
