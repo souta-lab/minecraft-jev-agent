@@ -116,7 +116,10 @@ cd <frozen-checkout>
 bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
   --source-sha "$(git rev-parse HEAD)" --apply
 
-# 3.2 back up the live properties, then swap in the clean ones (never delete)
+# 3.2 back up the live properties, then swap in the clean ones (never delete).
+#     The swap is REQUIRED, not cosmetic: agent-runner.mts serverSeed() reads this
+#     exact path into the HOST acceptance record, so a --config-only launch would
+#     record the OLD seed (2024) and the clean gate would FAIL run.seedAttested.
 cp <container>/server.properties <container>/server.properties.clean-run-bak-<stamp>
 cp <container>/m3-clean-run/server.properties.clean <container>/server.properties
 
