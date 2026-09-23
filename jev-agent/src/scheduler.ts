@@ -126,6 +126,21 @@ export function shouldInterruptAttackLease(
 }
 
 /**
+ * A bounded RETREAT is already the selected safety response to damage. Restarting
+ * it on each hit cancels the path before it can gain separation, then asks Jev the
+ * same question against a nearly unchanged position. Defer only hit/health events
+ * until this retreat's bounded Skill completes; its terminal/action event will
+ * replay the freshest coalesced trigger and let Jev choose from the new state.
+ * New-hostile and low-air signals remain able to interrupt.
+ */
+export function shouldDeferDamageDuringRetreatLease(
+  trigger: DecisionTrigger,
+  actionKind: string,
+): boolean {
+  return actionKind === 'RETREAT' && (trigger === 'damage_taken' || trigger === 'hp_changed')
+}
+
+/**
  * The scheduler-level survival fact. `layer=scheduler` names the owner of the
  * preemption (the sensor owns the air reading, the guard/executor own refusing
  * the mechanical action); the semantic response stays Jev's.

@@ -20,8 +20,8 @@ import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import type { CriticalDamageEvidence } from './criticalDamage.ts'
 import {
+  activeThreats,
   MIN_KEEP_DISTANCE_GAIN,
-  nearestDangerousThreat,
   THREAT_ESCAPE_DY,
   THREAT_ESCAPE_MAX_CELLS,
   THREAT_MEMORY_MS,
@@ -1089,9 +1089,10 @@ export interface SensorOptions {
   eatBelowFood?: number
   /**
    * Radius (blocks) of the threat escape scan: standable cells used only as
-   * keep-distance destinations while a hostile is inside `THREAT_DANGER_RADIUS`.
-   * Wider than the 5x5x3 `maxTerrain` window because a retreat destination that
-   * is inside that window cannot leave melee reach.
+   * keep-distance destinations for the nearest active hostile, including an
+   * engaged ranged threat outside `THREAT_DANGER_RADIUS`. Wider than the
+   * 5x5x3 `maxTerrain` window because a retreat destination inside that window
+   * cannot leave melee reach or a nearby ranged attacker's standoff envelope.
    */
   escapeRadius: number
   /** Upper bound on escape cells kept, so the offer cannot be crowded. */
@@ -4699,13 +4700,13 @@ export function buildLevelScanProbes(
  * choose a cell ~2 m away - while the zombie that killed the body was inside
  * 0.8 m. `RETREAT:p4_69_-9` was "0.71m away" and executed as `moved=0m`.
  *
- * This scan runs only while a hostile is inside `THREAT_DANGER_RADIUS` (the
- * bounded danger radius), uses the SAME DESTINATION predicate as `buildTerrain`
- * (`isUsableStand`: standable, and its support is load-bearing ground rather
- * than a leaf canopy - a treetop is locomotion truth, not a retreat
- * destination), and keeps only cells that genuinely gain separation from the
- * nearest dangerous hostile. The result is a CAN fact; Jev still chooses
- * whether to take one.
+ * This scan runs for the nearest active hostile: either one inside the bounded
+ * danger radius or a ranged/other hostile the code has evidence is engaged. It
+ * uses the SAME DESTINATION predicate as `buildTerrain` (`isUsableStand`:
+ * standable, and its support is load-bearing ground rather than a leaf canopy -
+ * a treetop is locomotion truth, not a retreat destination), and keeps only
+ * cells that genuinely gain separation from that response-worthy hostile. The
+ * result is a CAN fact; Jev still chooses whether to take one.
  *
  * It also owns the two facts a keep-distance destination cannot be grounded
  * without:
@@ -4725,14 +4726,21 @@ function buildEscapeCells(
   self: SelfState,
   entities: readonly EntityState[],
   lastDamage?: LastDamageEvidence | null,
+  nowMs = Date.now(),
 ): { cells: Vec3Json[]; coverCells: Vec3Json[]; portalWalkInCells: Vec3Json[] } {
-  const sensed = nearestDangerousThreat(entities as readonly ThreatEntityLike[])
+  // Use the same generic response predicate as candidate generation. Restricting
+  // this scan to the melee/danger radius left a ranged attacker at (for example)
+  // 9.5 m with an ATTACK candidate but no RETREAT destination: the body has to
+  // walk into the firing lane before it can choose an escape. Unengaged distant
+  // hostiles remain passive because `activeThreats` requires the danger radius,
+  // actual aggression, or recent damage with sight evidence.
+  const sensed = activeThreats(entities as readonly ThreatEntityLike[], lastDamage ?? null, nowMs)[0] ?? null
   // The UNSEEN attacker: the damage attribution names a position the sensor
   // never witnessed. Same scan, same block truth, same solver - the only change
   // is where "away from" and "out of sight of" are measured from. When the
   // attribution carries no position this stays null and the scan does not run:
   // an origin is never invented to make a destination look grounded.
-  const attributed = sensed === null ? attributedThreatAnchor(entities, lastDamage ?? null, self.position) : null
+  const attributed = sensed === null ? attributedThreatAnchor(entities, lastDamage ?? null, self.position, nowMs) : null
   const threat = sensed ?? attributed
   if (threat === null) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const radius = Math.max(0, Math.floor(options.escapeRadius))
@@ -4856,11 +4864,12 @@ function attributedThreatAnchor(
   entities: readonly EntityState[],
   lastDamage: LastDamageEvidence | null,
   selfPosition: Vec3Json,
+  nowMs = Date.now(),
 ): { name: string; position: Vec3Json } | null {
   const attacker = unsensedAttackerFacts({
     entities: entities as readonly ThreatEntityLike[],
     signals: { lastDamage },
-    timestampMs: Date.now(),
+    timestampMs: nowMs,
   })
   if (attacker === null || attacker.position === null) return null
   if (attacker.ageMs !== null && attacker.ageMs > THREAT_MEMORY_MS) return null
@@ -4946,6 +4955,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
 }
 
 function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOptions): WorldState {
+  const timestampMs = Date.now()
   const { self, envHazardCells } = buildSelfDetail(bot)
   const submersionEscapeTargets = buildSubmersionEscapeTargets(bot, self)
   const inventory = buildInventory(bot)
@@ -4990,7 +5000,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const placementSpots = buildPlacementSpots(bot, options, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
   const terrain = buildTerrain(bot, options, self)
-  const escape = buildEscapeCells(bot, options, self, entities, input.signals.lastDamage ?? null)
+  const escape = buildEscapeCells(bot, options, self, entities, input.signals.lastDamage ?? null, timestampMs)
   // Both transfer-cell sources are unioned: the local terrain window is where an
   // ordinary MOVE destination can come from, the wider escape scan is where a
   // keep-distance destination comes from, and the gate must see both.
@@ -5002,7 +5012,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   return {
     schemaVersion: 1,
     tick: input.tick,
-    timestampMs: Date.now(),
+    timestampMs,
     self,
     inventory,
     entities,

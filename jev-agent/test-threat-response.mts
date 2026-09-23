@@ -33,7 +33,7 @@ import {
 import { authorityState } from './src/jev-authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
-import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './src/scheduler.ts'
+import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -257,6 +257,89 @@ addCase('the sensor projects sight, weapon and attacker attribution onto a sense
   }
 })
 
+addCase('the sensor scans escape cells for a recently engaged ranged hostile beyond the danger radius', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(0.5, 10, 0.5)
+  const bot = {
+    username: 'AI_RANGED_ESCAPE',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 16,
+    food: 20,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: 0, height: 256 },
+    time: { isDay: true },
+    registry: null,
+    entities: {
+      42: {
+        id: 42,
+        name: 'pillager',
+        kind: 'hostile',
+        position: new Vec3(0.5, 10, 10.5),
+        isValid: true,
+        heldItem: { name: 'crossbow', count: 1 },
+      },
+    },
+    inventory: { items: () => [] },
+    // A flat, loaded floor in every direction. The sensor has real block truth
+    // for the entire bounded escape scan, but no raycast proof of cover.
+    blockAt: (cell: { y: number }) =>
+      cell.y < 10 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' },
+    canSeeBlock: () => true,
+    findBlocks: () => [],
+  } as never
+  const state = buildWorldState(
+    bot,
+    {
+      tick: 9,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      signals: signals({
+        lastDamage: {
+          atMs: Date.now() - 500,
+          health: 16,
+          sourceId: 42,
+          sourceName: 'pillager',
+        },
+      }),
+    },
+    { ...defaultSensorOptions, maxTerrain: 32 },
+  )
+  const passiveState = buildWorldState(
+    bot,
+    {
+      tick: 10,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      signals: signals({ lastDamage: null }),
+    },
+    { ...defaultSensorOptions, maxTerrain: 32 },
+  )
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const retreats = generated.filter((candidate) => candidate.kind === 'RETREAT')
+  const outsideStandoff = retreats.filter((candidate) => candidate.meta.outsideReach === true)
+  const escapeCells = new Set((state.terrain.escapeCells ?? []).map((cell) => `${cell.x},${cell.y},${cell.z}`))
+  const pass =
+    state.entities.find((entity) => entity.id === 42)?.distance === 10 &&
+    state.terrain.escapeCells !== undefined &&
+    state.terrain.escapeCells.length > 0 &&
+    (passiveState.terrain.escapeCells?.length ?? 0) === 0 &&
+    generated.some((candidate) => candidate.kind === 'ATTACK' && candidate.targetEntityId === 42) &&
+    outsideStandoff.length > 0 &&
+    outsideStandoff.every(
+      (candidate) =>
+        candidate.meta.threatEntityId === 42 &&
+        candidate.meta.threatStandoff === 12 &&
+        candidate.target !== null &&
+        escapeCells.has(`${candidate.target.x},${candidate.target.y},${candidate.target.z}`),
+    )
+  return {
+    pass,
+    detail: `distance=${state.entities.find((entity) => entity.id === 42)?.distance ?? 'none'} escapeCells=${state.terrain.escapeCells?.length ?? 0} passiveEscapeCells=${passiveState.terrain.escapeCells?.length ?? 0} retreats=[${retreats.map((candidate) => `${candidate.id}:${candidate.meta.outsideReach}`).join(',')}]`,
+  }
+})
+
 addCase('a skeleton that shot the bot is visible to Jev with distance, sight, weapon and attacker attribution', () => {
   const state = baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 12 }))
   const payload = authorityState(authorityRequest(state, generateCandidates(state, defaultCandidateOptions)))
@@ -396,6 +479,21 @@ addCase('damage_taken is a preemptive trigger and interrupts an ATTACK lease at 
     shouldInterruptAttackLease('damage_taken', 15, 6) === false &&
     shouldInterruptAttackLease('survival_reground', 1, 6) === false
   return { pass, detail: 'real damage/hp events preempt; survival_reground is lower-priority, non-preemptive control flow' }
+})
+
+addCase('real damage is deferred while a bounded RETREAT lease closes distance, then replayed after completion', () => {
+  const pass =
+    PREEMPTIVE_TRIGGERS.has('damage_taken') &&
+    PREEMPTIVE_TRIGGERS.has('hp_changed') &&
+    shouldDeferDamageDuringRetreatLease('damage_taken', 'RETREAT') &&
+    shouldDeferDamageDuringRetreatLease('hp_changed', 'RETREAT') &&
+    !shouldDeferDamageDuringRetreatLease('mob_appeared', 'RETREAT') &&
+    !shouldDeferDamageDuringRetreatLease('low_air', 'RETREAT') &&
+    !shouldDeferDamageDuringRetreatLease('damage_taken', 'MOVE')
+  return {
+    pass,
+    detail: 'damage/hp events coalesce through the bounded retreat; new mobs, low air, and non-retreat actions retain existing preemption',
+  }
 })
 
 addCase('the scheduler forwards the Mineflayer attacker with the damage trigger', () => {
