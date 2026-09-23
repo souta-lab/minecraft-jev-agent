@@ -1382,5 +1382,276 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
   )
 }
 
+
+/**
+ * The REAL sensor's four bounded probes for a body on this terrain: the scaffold's
+ * own safety fact (the pocket's face-adjacency flood read) exists only in the
+ * sensor's output (`state.ts#probeBridgeDirection`), so a fixture that grounds a
+ * scaffold must feed it - a hand-built probe keeps the historical
+ * `no_verified_landing` verdict, by design.
+ */
+function realProbes(terrain: Terrain, feet: Vec3Json): BridgeProbe[] {
+  const { bot } = makeBridgeBot(terrain, feet, { cobblestone: 177 })
+  return (['E', 'W', 'N', 'S'] as BridgeDir[]).map((dir) => probeBridgeDirection(bot, feet, dir, BRIDGE_PROBE_DEPTH))
+}
+
+/** The same state as `worldState`, with the sensor's own probes wired in. */
+function scaffoldState(spec: WorldSpec, probes: BridgeProbe[] = realProbes(spec.terrain, spec.feet)): WorldState {
+  const state = worldState({ ...spec, legacyNoProbes: true })
+  ;(state as { bridgeProbes?: BridgeProbe[] }).bridgeProbes = probes
+  return state
+}
+
+/** The options a live decision uses for a withheld locomotion target. */
+function crossingOptions(spec: WorldSpec): CandidateOptions {
+  return { ...optionsFor(spec), reachability: { pathProbe: () => 'no_path' } }
+}
+
+// ===========================================================================
+// (x) THE GENERAL MOVE CASE: a plain MOVE whose target needs a span crossed.
+//
+// LIVE WITNESS (the operator's floated gate, run 38cbb22): the body stood on an
+// island at `(20.7,67.0,2.7)` with `MOVE:p22_66_4` (and `MOVE:p23_65_7`) withheld
+// `no_path missing=[open_path]`, the offer down to `MOVE | WAIT | ESCALATE`, and
+// `CANDIDATE_STARVATION presented=1 productive=0`. Decoded from the save
+// (`r.0.0.mca` chunk (1,0)): the body's landmass and the gate's landmass are
+// separated by AIR at the body's own level, with a furnace head-blocking the one
+// cardinal step. The crossing is the mechanism that answers exactly this, and it
+// is grounded for ANY blocked locomotion target through the capability-acquisition
+// family (`candidates.ts#routeOpeningCandidates` -> `groundBridgeLeg`).
+//
+// Two measured DEFECTS in that path, both fixed and both pinned here:
+//   * rule 7 refused a whole DIRECTION when the probe's verified far bank did not
+//     reduce distance, even though the bounded ONE-CELL scaffold toward the same
+//     target did (`BRIDGE_REFUSED reason=budget ... does not close distance
+//     (1.41m -> 3.16m)` in the live log). The scaffold is now tried first, under
+//     the SAME pocket guards, and says so: `cause=far_bank_no_reduction`.
+//   * the route gate `moveAdvancesTowardTarget` compared the candidate's CELL
+//     against the body's FRACTIONAL position, so a grounded one-cell step was
+//     dropped whenever the body did not stand at its cell's centre.
+// ===========================================================================
+
+/** The measured shape: two landmasses with a void at the body's OWN level. */
+function twoLandmasses(gap: number): { terrain: Terrain; feet: Vec3Json; target: Vec3Json } {
+  const feet: Vec3Json = { x: 0, y: 64, z: 0 }
+  const terrain = new Terrain()
+  terrain.fill(-3, 0, 0, 63, 'stone')
+  terrain.fill(1 + gap, 12, 0, 63, 'stone')
+  return { terrain, feet, target: { x: 1 + gap + 4, y: 64, z: 0 } }
+}
+
+{
+  // (x-a) THE PARENT'S SHAPE: a 3-wide void at the body's own level, the target
+  // 8 m across, cobblestone in hand. The crossing must be OFFERED as an ordinary
+  // MOVE beside the withheld target - Jev chooses, code does not.
+  const world = twoLandmasses(3)
+  const spec: WorldSpec = {
+    feet: world.feet,
+    terrain: world.terrain,
+    counts: { cobblestone: 177 },
+    current: queuedGoto(world.target),
+  }
+  const state = worldState(spec)
+  const grounded = generateGroundedCandidates(state, optionsFor(spec))
+  const bridge = bridgeCandidates(grounded.candidates)[0]
+  const withheldGoto = grounded.withheld.find((entry) => entry.candidate.target !== null && key(entry.candidate.target) === key(world.target))
+  // DIAGNOSTIC (kept as evidence): what the plan rule and the gate each said.
+  const diagPlan = planBridgeRoute({ selfFeet: world.feet, target: world.target, probes: probesFromTerrain(world.terrain, world.feet), placeable: { name: 'cobblestone', count: 177 } })
+  const diag = `plan=${diagPlan.plan === null ? `REFUSED:${diagPlan.refusal.reason}` : `dir=${diagPlan.plan.dir},span=${diagPlan.plan.span},far=${key(diagPlan.plan.far)}`} missing=[${grounded.withheld.map((e) => `${e.candidate.id}:${e.result.missingCapabilities.map((c) => c.kind).join('|')}`).join(' ')}]`
+  check(
+    '(x-a) a plain MOVE across a 3-wide void offers the bounded crossing (3 placements, verified far bank) beside the withheld target',
+    bridge !== undefined &&
+      bridge.kind === 'MOVE' &&
+      bridge.target !== null &&
+      key(bridge.target) === '4,64,0' &&
+      bridge.meta[BRIDGE_DIR_META] === 'E' &&
+      bridge.meta[BRIDGE_SPAN_META] === 3 &&
+      bridge.meta.bridgePlace === '1,63,0' &&
+      bridge.meta[BRIDGE_MAY_PLACE_META] === true &&
+      String(bridge.meta[BRIDGE_LINE_META]) === 'BRIDGE_START cell=1,64,0 block=cobblestone span=3 remaining=174' &&
+      withheldGoto !== undefined,
+    `offer=[${grounded.candidates.map((c) => c.id).join(',')}] withheld=[${grounded.withheld.map((e) => e.candidate.id).join(',')}] ${diag} bridge=${bridge?.id ?? 'none'} target=${bridge?.target === null || bridge?.target === undefined ? 'none' : key(bridge.target)} span=${String(bridge?.meta[BRIDGE_SPAN_META])} line="${String(bridge?.meta[BRIDGE_LINE_META] ?? 'none')}"`,
+  )
+}
+
+{
+  // (x-b) A VOID WIDER THAN THE PROBE DEPTH: no far bank exists inside 4 cells, so
+  // the offer is the SELF-LANDING scaffold - the step that creates the floor of the
+  // cell it occupies - and the next decision re-grounds from the new cell.
+  const world = twoLandmasses(5)
+  const spec: WorldSpec = {
+    feet: world.feet,
+    terrain: world.terrain,
+    counts: { cobblestone: 177 },
+    current: queuedGoto(world.target),
+  }
+  // The scaffold's safety fact is the pocket's own face-adjacency flood read, which
+  // only the REAL sensor fills (`state.ts#probeBridgeDirection`), so this state is
+  // wired with it rather than with the hand-built probe helper.
+  const grounded = generateGroundedCandidates(scaffoldState(spec), crossingOptions(spec))
+  const bridge = bridgeCandidates(grounded.candidates)[0]
+  check(
+    '(x-b) a void wider than the probe depth offers the SELF-LANDING scaffold (span 1, its own floor), never a bare refusal',
+    bridge !== undefined &&
+      bridge.meta[BRIDGE_SPAN_META] === 1 &&
+      bridge.meta.bridgeSelfLanding === true &&
+      bridge.meta.bridgePlace === '1,63,0' &&
+      bridge.meta.bridgeLanding === '1,64,0' &&
+      String(bridge.meta[BRIDGE_LINE_META]).includes('self_landing=true pocket='),
+    `bridge=${bridge?.id ?? 'none'} span=${String(bridge?.meta[BRIDGE_SPAN_META])} self=${String(bridge?.meta.bridgeSelfLanding)} line="${String(bridge?.meta[BRIDGE_LINE_META] ?? 'none')}"`,
+  )
+}
+
+{
+  // (x-c) THE RULE-7 FALLBACK (the live `does not close distance` refusal): the
+  // void is at the body's own level, but the probe's verified far bank lies BEYOND
+  // the target, so the full span is useless while the one-cell step toward the
+  // target is not. The bounded scaffold is grounded and NAMES its cause.
+  const feet: Vec3Json = { x: 0, y: 64, z: 0 }
+  const terrain = new Terrain()
+  terrain.fill(-3, 0, 0, 63, 'stone')
+  terrain.fill(4, 12, 0, 63, 'stone')
+  const target: Vec3Json = { x: 2, y: 65, z: 1 } // one up + diagonal: the far bank (4,64,0) is no closer
+  const spec: WorldSpec = { feet, terrain, counts: { cobblestone: 177 }, current: queuedGoto(target) }
+  const probes = realProbes(terrain, feet)
+  const grounded = generateGroundedCandidates(scaffoldState(spec, probes), crossingOptions(spec))
+  const bridge = bridgeCandidates(grounded.candidates)[0]
+  // The CONTROL: the direction AWAY from the target is still refused `budget`, so
+  // the fallback never turns a useless direction into an offered step.
+  const backwards = planBridgeRoute({ selfFeet: feet, target: { x: -6, y: 64, z: 0 }, probes, placeable: { name: 'cobblestone', count: 177 } })
+  check(
+    '(x-c) when the verified far bank does not reduce distance, the bounded one-cell scaffold is offered with cause=far_bank_no_reduction',
+    bridge !== undefined &&
+      bridge.meta[BRIDGE_SPAN_META] === 1 &&
+      bridge.meta.bridgeSelfLanding === true &&
+      bridge.meta.bridgePlace === '1,63,0' &&
+      String(bridge.meta[BRIDGE_LINE_META]).includes('cause=far_bank_no_reduction') &&
+      backwards.plan === null &&
+      backwards.refusal.reason === 'budget',
+    `bridge=${bridge?.id ?? 'none'} line="${String(bridge?.meta[BRIDGE_LINE_META] ?? 'none')}" backwards=${backwards.plan === null ? backwards.refusal.reason : 'GROUNDED'}`,
+  )
+}
+
+{
+  // (x-d) THE ADVANCE PREDICATE: the body stands PAST its cell's centre (the live
+  // sub-cell shape) with the target one cell over. The grounded scaffold must
+  // survive the route gate - the historical fractional comparison dropped it.
+  const feet: Vec3Json = { x: 0, y: 64, z: 0 }
+  const terrain = new Terrain()
+  terrain.set({ x: 0, y: 63, z: 0 }, 'stone')
+  const target: Vec3Json = { x: 2, y: 64, z: 2 }
+  const spec: WorldSpec = { feet, terrain, counts: { cobblestone: 177 }, current: queuedGoto(target) }
+  const probes = realProbes(terrain, feet)
+  const state = scaffoldState(spec, probes)
+  // the body at its cell's far edge, as the live HEARTBEAT showed (20.7 / 2.7 in cell 20 / 2)
+  ;(state.self as { position: Vec3Json }).position = { x: 0.9, y: 64, z: 0.9 }
+  ;(state.self as { eyePosition: Vec3Json }).eyePosition = { x: 0.9, y: 65.62, z: 0.9 }
+  ;(state.terrain as { standable: Vec3Json[] }).standable = [feet]
+  const grounded = generateGroundedCandidates(state, crossingOptions(spec))
+  const bridge = bridgeCandidates(grounded.candidates)[0]
+  const plan = planBridgeRoute({ selfFeet: feet, target, probes, placeable: { name: 'cobblestone', count: 177 } })
+  const fractional = plan.plan === null ? 0 : distance({ x: 0.9, y: 64, z: 0.9 }, target)
+  const fractionalNext = plan.plan === null ? 0 : distance(plan.plan.far, target)
+  check(
+    '(x-d) a scaffold whose far side is one CELL closer survives the route gate even when the fractional distance would not',
+    bridge !== undefined &&
+      plan.plan !== null &&
+      bridge.meta.bridgeSelfLanding === true &&
+      // the fractional comparison really would have refused it (the regression witness)
+      !(fractionalNext + 0.1 < fractional),
+    `bridge=${bridge?.id ?? 'none'} fractional=${fractional.toFixed(3)}->${fractionalNext.toFixed(3)} (refused=${!(fractionalNext + 0.1 < fractional)})`,
+  )
+}
+
+{
+  // (x-e) CONTROL: a WALKABLE target offers NO crossing and keeps its plain MOVE,
+  // so ordinary walking is byte-identical.
+  const terrain = new Terrain()
+  terrain.fill(-3, 12, 0, 63, 'stone')
+  const feet: Vec3Json = { x: 0, y: 64, z: 0 }
+  const target: Vec3Json = { x: 8, y: 64, z: 0 }
+  const spec: WorldSpec = { feet, terrain, counts: { cobblestone: 177 }, current: queuedGoto(target) }
+  const state = worldState(spec)
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    portalEntry: entryPlanFor(feet),
+    // a real walk exists: the pinned pathfinder can express it
+    reachability: { pathProbe: () => 'reachable' },
+  }
+  const grounded = generateGroundedCandidates(state, options)
+  check(
+    '(x-e) walkable terrain grounds NO crossing and keeps the ordinary MOVE (byte-identical walking)',
+    bridgeCandidates(grounded.candidates).length === 0 &&
+      grounded.withheld.every((entry) => entry.candidate.meta[BRIDGE_META] !== true),
+    `offer=[${grounded.candidates.map((c) => c.id).join(',')}] bridges=${bridgeCandidates(grounded.candidates).length}`,
+  )
+}
+
+{
+  // (x-f) CONTROL: the same void with EMPTY HANDS grounds no crossing (there is
+  // nothing to place), and the refusal is the typed `no_block`.
+  const world = twoLandmasses(3)
+  const spec: WorldSpec = { feet: world.feet, terrain: world.terrain, counts: {}, current: queuedGoto(world.target) }
+  const state = worldState(spec)
+  const grounded = generateGroundedCandidates(state, optionsFor(spec))
+  const decision = planBridgeRoute({
+    selfFeet: world.feet,
+    target: world.target,
+    probes: probesFromTerrain(world.terrain, world.feet),
+    placeable: null,
+  })
+  check(
+    '(x-f) the same void with empty hands grounds no crossing and the refusal is the typed no_block',
+    bridgeCandidates(grounded.candidates).length === 0 &&
+      decision.plan === null &&
+      decision.refusal.reason === 'no_block',
+    `bridges=${bridgeCandidates(grounded.candidates).length} refusal=${decision.plan === null ? decision.refusal.reason : 'GROUNDED'}`,
+  )
+}
+
+
+{
+  // (x-g) EXECUTION of the general MOVE crossing: the offered plan really PLACES its
+  // three floor cells and the body really ADVANCES onto each one (a `BRIDGE_STEP` is
+  // printed only after `sameCell(landed, span.landing)`, so the line IS the advance
+  // proof), ending on the verified far bank. This is the parent's "8 m across" shape
+  // driven through the real Executor, not just offered.
+  const world = twoLandmasses(3)
+  const plan = planBridgeRoute({
+    selfFeet: world.feet,
+    target: world.target,
+    probes: realProbes(world.terrain, world.feet),
+    placeable: { name: 'cobblestone', count: 177 },
+  })
+  const logs: CapturedLog[] = []
+  const { bot, position } = makeBridgeBot(world.terrain, world.feet, { cobblestone: 177 })
+  const executor = new Executor(bot, makeCapturingLogger(logs), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+    pathTimeoutMs: 60,
+    packetStepMs: 0,
+  })
+  if (plan.plan !== null) executor.claim(bridgeCandidateFor(plan.plan))
+  const done = await waitFor(() => logs.some((line) => line.message.startsWith('BRIDGE_END')))
+  executor.cancelCurrent('general move crossing fixture complete')
+  const steps = logs.filter((line) => line.message.startsWith('BRIDGE_STEP')).map((line) => line.message)
+  const end = logs.find((line) => line.message.startsWith('BRIDGE_END'))?.message ?? 'none'
+  const bodyCell = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+  check(
+    '(x-g) the general MOVE crossing EXECUTES: three placements, three verified landings, the body on the far landmass',
+    plan.plan !== null &&
+      done &&
+      steps.length === 3 &&
+      steps[0] === 'BRIDGE_STEP from=0,64,0 to=1,64,0 block=cobblestone' &&
+      steps[2] === 'BRIDGE_STEP from=2,64,0 to=3,64,0 block=cobblestone' &&
+      end === 'BRIDGE_END placed=3 verified=true reason=reached' &&
+      key(bodyCell) === '4,64,0' &&
+      world.terrain.name({ x: 1, y: 63, z: 0 }) === 'cobblestone' &&
+      world.terrain.name({ x: 2, y: 63, z: 0 }) === 'cobblestone' &&
+      world.terrain.name({ x: 3, y: 63, z: 0 }) === 'cobblestone',
+    `plan=${plan.plan === null ? 'none' : `span=${plan.plan.span}`} done=${done} steps=${steps.length} [${steps.join(' | ')}] end="${end}" body=${key(bodyCell)} floors=${world.terrain.name({ x: 1, y: 63, z: 0 })}/${world.terrain.name({ x: 2, y: 63, z: 0 })}/${world.terrain.name({ x: 3, y: 63, z: 0 })}`,
+  )
+}
+
 process.stdout.write(`\n${failures === 0 ? 'ALL BRIDGE FIXTURES PASS' : `${failures} BRIDGE FIXTURE(S) FAILED`}\n`)
 process.exit(failures === 0 ? 0 : 1)
