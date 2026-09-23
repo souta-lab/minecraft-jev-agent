@@ -3,9 +3,9 @@
 Generated from real evidence only. Every section is labeled EVIDENCE or UNKNOWN; no value is invented.
 
 ## Base commit (origin/main) — EVIDENCE
-- sha: `e35d0648285fea812f8e288ceb64c311a8bca244`
-- subject: merge: recover resident from transient Jev outages (#471)
-- date: 2026-09-23T23:23:41+09:00
+- sha: `90e2060c7764eb65f5c91e7b71bc2a95e1ce7b66`
+- subject: merge: fix completed-goal retreat guard (#470)
+- date: 2026-09-23T23:39:09+09:00
 
 ## Open pull requests — EVIDENCE
 - count: 0
@@ -76,15 +76,15 @@ live: unavailable
 
 ## CI gate (repo-invariants) — EVIDENCE
 - verdict: INFRA_UNKNOWN
-- run: 35873865727
-- head: e35d0648285fea812f8e288ceb64c311a8bca244
+- run: 35875756958
+- head: 90e2060c7764eb65f5c91e7b71bc2a95e1ce7b66
 - jobs: 0/5 executed at least one step
 - reason: no job executed a single step (5/5 never started)
-- job jev-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
-- job system2-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
-- job core-deterministic: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
-- job convergence: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
 - job authority-contract: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
+- job core-deterministic: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
+- job jev-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
+- job convergence: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
+- job system2-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
 - NOTE: no job executed a step. This run is NOT a code verdict (issue #299).
 - NOTE: do not cite GitHub Actions as a passing or failing gate for this head until the workflow actually runs.
 
@@ -94,9 +94,9 @@ live: unavailable
 - `gh issue list --state open --limit 1000 --json number,title,labels`
 - `socket /home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock <- {"cmd":"report"} (2000ms timeout)`
 - `gh run list --workflow=repo-invariants.yml --limit 1 --json databaseId,headSha,createdAt,conclusion,headBranch`
-- `gh api repos/souta-lab/minecraft-jev-agent/actions/runs/35873865727/jobs`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107224617418/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107224617695/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107224617713/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107224617740/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107224617831/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/actions/runs/35875756958/jobs`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101224/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101519/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101564/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101663/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101698/annotations`
