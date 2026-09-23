@@ -160,7 +160,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, MAX_AIR, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -12151,32 +12151,27 @@ export class JevController {
   }
 
   /**
-   * Can a body standing on this stance see the entity? ONE ray, the same call the
-   * cover logic makes (`bot.world.raycast`), from the eyes at the stance to the
-   * entity's aim point - the point `runAttack` looks at before it swings. Absence
-   * of a raycast (a structural double) answers `true`: "not occluded" is the
-   * fail-open direction here, so a missing world never refutes a visible mob.
+   * Can a body standing on this stance see the entity? Delegated to the sensor's
+   * own `entityVisibleFromEye` so the stance verdict and `EntityState.lineOfSight`
+   * answer with ONE implementation of one ray, to ONE point (the entity's aim
+   * point, `position + height / 2`). Two copies of this geometry is how the
+   * sensor could report `los=false` while the stance search found the mob plainly
+   * visible.
+   *
+   * Absence of a raycast (a structural double, a fixture) answers `true`: "not
+   * occluded" is the fail-open direction here, so a missing world never refutes a
+   * visible mob - which is exactly the previous behaviour of this method.
    */
   private botSeesEntityFrom(x: number, y: number, z: number, entityPosition: Vec3Json, height: number): boolean {
-    const world = this.bot.world as unknown as
-      | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
-      | undefined
-    if (world === undefined || typeof world.raycast !== 'function') return true
-    try {
-      const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
-      const eye = this.bot.entity.position.clone().set(x + 0.5, y + eyeHeight, z + 0.5)
-      const aim = this.bot.entity.position.clone().set(entityPosition.x, entityPosition.y + height / 2, entityPosition.z)
-      const dx = aim.x - eye.x
-      const dy = aim.y - eye.y
-      const dz = aim.z - eye.z
-      const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      if (!Number.isFinite(range) || range <= 0) return true
-      const direction = this.bot.entity.position.clone().set(dx / range, dy / range, dz / range)
-      const hit = world.raycast(eye, direction, range, null)
-      return hit === null || hit === undefined
-    } catch {
-      return true
-    }
+    if (this.bot.world === undefined || typeof this.bot.world.raycast !== 'function') return true
+    const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
+    return (
+      entityVisibleFromEye(
+        this.bot,
+        { x: x + 0.5, y: y + eyeHeight, z: z + 0.5 },
+        { position: entityPosition, height },
+      ) !== false
+    )
   }
 
   /**
