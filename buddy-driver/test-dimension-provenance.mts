@@ -514,6 +514,28 @@ addCase('absent provenance leaves the un-gated sensor path exactly (fixtures/rep
   return { pass, detail: `logs=${JSON.stringify(state.blocks.filter((b) => b.kind === 'log').map((b) => b.position))}` }
 })
 
+addCase('(iii-b) a column the world cannot unload stays attributed, so the body is not left blind', () => {
+  // THE LIVE SHAPE (a fresh world): the client has no column-unload API, so the
+  // attach-time "drop every loaded column" could not drop anything - and the original
+  // form left those columns tagged with the EMPTY dimension, which no read accepts, and
+  // then cleared them. Every read of the body's own neighbourhood then failed closed
+  // (`DIMENSION_READ_REFUSED ... reason=unknown_column source=level-scan`, 10,102 in one
+  // run), `isStandable` needs three such reads, so no cell was a legal stance, an
+  // adjacent attacker's ATTACK was withheld `no_attack_stand`, the escape machinery said
+  // `SURVIVAL_ESCAPE_NONE`, and the body waited at full health next to a threat it could
+  // neither hit nor leave. At attach there is no transition to fail closed against.
+  const bot = eventBot({ columns: () => ['0,0'] })
+  delete (bot as unknown as { world: { unloadColumn?: unknown } }).world.unloadColumn
+  attachDimensionProvenance(bot)
+  const view: DimensionProvenanceView = createDimensionProvenanceView(bot, () => {}, 'run-test', 'generation-start')
+  view.syncLiveDimension('sensor-build')
+  const cell = view.cellAttribution(CELL_A.x, CELL_A.z)
+  return {
+    pass: cell.kind === 'attributable' && cell.dimension === 'minecraft:overworld',
+    detail: `attribution=${cell.kind}:${cell.kind === 'attributable' ? cell.dimension : cell.reason} tagged=${view.stats().taggedColumns}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('sensor dimension provenance: a block read is attributable to its dimension\n')
 process.stdout.write('-'.repeat(78) + '\n')
