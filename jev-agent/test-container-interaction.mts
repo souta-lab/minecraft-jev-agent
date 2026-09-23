@@ -68,6 +68,7 @@ import { emptyGoalQueueState } from './src/goalQueue.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { Candidate } from './src/candidates.ts'
+import type { LiveStructureMember } from './src/blockSafety.ts'
 import type { EffectEnvelope } from './src/skillCommitment.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, GoalState, InventoryState, StationEntry, Vec3Json, WorldState } from './src/state.ts'
@@ -143,6 +144,8 @@ interface ContainerBotFixture {
   window: () => FakeContainerWindow
   /** every `placeBlock` the executor issued */
   placeCalls: Array<{ name: string; at: Vec3Json }>
+  /** count of actual `bot.dig` mutations issued */
+  digCalls: () => number
   /** the live block grid (a placement mutates it) */
   blocks: Map<string, string>
 }
@@ -191,6 +194,7 @@ function makeContainerBot(config: {
   const openCalls: Array<{ block: string; face: Vec3Json | null }> = []
   const withdrawCalls: Array<{ name: string; count: number }> = []
   const placeCalls: Array<{ name: string; at: Vec3Json }> = []
+  let digCalls = 0
   const containerSlots = config.containerSlots
   const inventorySlots: Array<Slot | null> = config.inventorySlots ?? new Array<Slot | null>(36).fill(null)
   let closeCount = 0
@@ -312,7 +316,11 @@ function makeContainerBot(config: {
       bot.heldItem = null
     },
     canDigBlock: () => true,
-    dig: async () => undefined,
+    digTime: () => 300,
+    dig: async (block: FakeBlock) => {
+      digCalls += 1
+      config.blocks.delete(key(block.position.x, block.position.y, block.position.z))
+    },
     stopDigging: () => undefined,
     craft: async () => undefined,
     recipesFor: () => [],
@@ -353,6 +361,7 @@ function makeContainerBot(config: {
     inventorySlots,
     window: () => current as FakeContainerWindow,
     placeCalls,
+    digCalls: () => digCalls,
     blocks: config.blocks,
   }
 }
@@ -1142,6 +1151,50 @@ addCase('(G) a placed container is refused at the dig boundary, never mined for 
   const result = await executor.claim(mine).completion
   const pass = result.status === 'failed' && result.failure === 'protected_station'
   return { pass, detail: `status=${result.status}/${result.failure} detail=${result.detail}` }
+})
+
+addCase('(G2) a claimed live-structure member is refused before bot.dig, then becomes deconstructible after invalidation', async () => {
+  const fixture = makeContainerBot({
+    feet: STAND_FEET,
+    blocks: terrain({ '1,64,0': 'dirt' }),
+    containerSlots: [],
+  })
+  const { executor, logger } = containerExecutor(fixture)
+  const mine: Candidate = {
+    id: 'MINE:b1_64_0',
+    kind: 'MINE',
+    label: 'mine dirt at (1,64,0)',
+    targetName: 'dirt',
+    target: CONTAINER_CELL,
+    targetEntityId: null,
+    itemName: 'dirt',
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 1, x: 1, y: 64, z: 0, yieldItem: 'dirt', requiresPickup: false },
+  }
+  const members: LiveStructureMember[] = [{ kind: 'synthetic_structure', position: { ...CONTAINER_CELL } }]
+  const firstClaim = executor.claim(mine, { liveStructureMembers: members })
+  // The executor owns a claim-time copy, not this caller's mutable array.
+  members[0]!.position.x = 99
+  const refused = await firstClaim.completion
+  const digsAfterRefusal = fixture.digCalls()
+  const refusalLine = logger.warnings.find((line) => line.startsWith('LIVE_STRUCTURE_MEMBER_DIG_REFUSED '))
+
+  // A new claim uses the next world truth. Once validation drops the member,
+  // ordinary deconstruction remains available and the shared dig boundary acts.
+  const released = await executor.claim(mine, { liveStructureMembers: [] }).completion
+  return {
+    pass:
+      refused.status === 'failed' &&
+      refused.failure === 'live_structure_member' &&
+      digsAfterRefusal === 0 &&
+      fixture.digCalls() === 1 &&
+      released.status === 'done' &&
+      refusalLine === 'LIVE_STRUCTURE_MEMBER_DIG_REFUSED structure=synthetic_structure block=dirt cell=1,64,0',
+    detail: `refused=${refused.status}/${refused.failure} digsAfterRefusal=${digsAfterRefusal} totalDigCalls=${fixture.digCalls()} released=${released.status}/${released.failure}:${released.detail} marker="${refusalLine ?? 'none'}"`,
+  }
 })
 
 // ---------------------------------------------------------------------------

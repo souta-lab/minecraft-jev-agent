@@ -83,7 +83,12 @@ export interface ActionOutcomeTaxonomy {
  * candidate is impossible under an unchanged relevant state.
  */
 export function isDeterministicInvalidityFailure(failureCode: string | null | undefined): boolean {
-  return failureCode === 'target_gone' || failureCode === 'protected_station' || failureCode === 'tunnel_entry_refused'
+  return (
+    failureCode === 'target_gone' ||
+    failureCode === 'protected_station' ||
+    failureCode === 'live_structure_member' ||
+    failureCode === 'tunnel_entry_refused'
+  )
 }
 
 export interface ActionOutcomeTaxonomyInput extends ActionOutcomeInput {

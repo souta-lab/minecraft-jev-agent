@@ -5793,6 +5793,10 @@ export function prospectCandidates(
       refusal(step.refusal ?? 'no_safe_step')
       continue
     }
+    if (protectedStepProfileRefusal(state, strictStepDigProfile(state, step)) !== null) {
+      refusal('protected')
+      continue
+    }
     // CAN: exposing a producer the body cannot harvest is not acquisition.
     if (!hasTool(state, aim.block.harvestTool ?? null, aim.block.harvestTier ?? null)) {
       refusal('no_tool')
@@ -6177,10 +6181,12 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
   // excavate a room per ascent (live y55-y58) even though CAN named one blocker.
   // Legacy replay fixtures have no metadata, so preserve their historical pool.
   const hasFootprintMetadata = observedCuts.some((cut) => cut.currentFootprint !== undefined)
+  const isProtected = protectedResourceTest(state)
   const cuts = observedCuts.filter(
     (cut) =>
       (!hasFootprintMetadata || cut.currentFootprint === true) &&
       cut.safe &&
+      !isProtected(cut.pos, cut.name) &&
       failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
   )
   if (cuts.length === 0) return []
@@ -6230,7 +6236,8 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
  * is simply not executable.
  */
 function stepCutCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe && !isProtectedStationBlock(cut.name))
+  const isProtected = protectedResourceTest(state)
+  const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe && !isProtected(cut.cut, cut.name))
   if (cuts.length === 0) return []
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const target = nearestResource(state, focus)
@@ -6387,7 +6394,7 @@ function descendCandidates(
   const steps = (state.descent ?? []).filter(
     (step) =>
       step.safe &&
-      !isProtectedStationBlock(step.digName ?? '') &&
+      protectedStepProfileRefusal(state, strictStepDigProfile(state, step)) === null &&
       // A spent exact route and a spent family at this stand are hard evidence
       // that this particular down route cannot execute here. Keep the typed
       // remaining options; the family exhaustion itself must not install a
@@ -6696,6 +6703,26 @@ function strictStepDigProfile(
   return { digPlan, primary, requirement, choice }
 }
 
+/** A descent's entire dig profile must preserve stations and live structures. */
+function protectedStepProfileRefusal(
+  state: WorldState,
+  profile: ReturnType<typeof strictStepDigProfile>,
+  fallbackBlock: string | null = null,
+): { block: string | null; detail: string } | null {
+  const isProtected = protectedResourceTest(state)
+  for (const cell of profile.digPlan) {
+    if (!isProtected(cell.cell, cell.name ?? null)) continue
+    const name = cell.name ?? ''
+    return {
+      block: name.length > 0 ? name : fallbackBlock,
+      detail: isProtectedStationBlock(name)
+        ? `${name} at (${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a protected station`
+        : `(${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a member of a live structure`,
+    }
+  }
+  return null
+}
+
 /**
  * One DESCEND candidate from an already-safe step. Shared by the goal-grounded
  * descent family (`descendCandidates`) and the stranded-column descent
@@ -6728,6 +6755,10 @@ function descendCandidateFromStep(
   },
 ): { candidate: Candidate; toolReason: string } | null {
   const profile = strictStepDigProfile(state, best)
+  // This is the shared fail-closed boundary for every DESCEND family. Some
+  // callers report the typed refusal before reaching this builder; the builder
+  // also protects future callers and newly exposed candidate arms.
+  if (protectedStepProfileRefusal(state, profile) !== null) return null
   const digPlan = profile.digPlan
   const primary = profile.primary
   // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
@@ -6881,7 +6912,7 @@ function columnDescentCandidates(
       step.mode === 'down' &&
       step.safe &&
       step.diggable === true &&
-      !isProtectedStationBlock(step.digName ?? ''),
+      protectedStepProfileRefusal(state, strictStepDigProfile(state, step)) === null,
   )
   if (safeDown.length === 0) {
     return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
@@ -9270,16 +9301,31 @@ function verticalPlanLabel(vertical: VerticalPlan | null): string {
  * entry turns out to be unusable.
  */
 function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
+  const digSources = protectedVerticalDigSources(state)
   return {
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,
     target,
     tunnel: state.signals.lastTunnel,
-    descent: state.descent,
-    stepCuts: state.stepCuts,
+    descent: digSources.descent,
+    stepCuts: digSources.stepCuts,
     placeable: selectPlaceableBlock(state.inventory.counts),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     inventory: state.inventory.counts,
+  }
+}
+
+/** Candidate route legs must obey the same live-structure protection as direct digs. */
+function protectedVerticalDigSources(state: WorldState): {
+  descent: WorldState['descent']
+  stepCuts: WorldState['stepCuts']
+} {
+  const isProtected = protectedResourceTest(state)
+  return {
+    descent: (state.descent ?? []).filter(
+      (step) => protectedStepProfileRefusal(state, strictStepDigProfile(state, step)) === null,
+    ),
+    stepCuts: (state.stepCuts ?? []).filter((cut) => !isProtected(cut.cut, cut.name)),
   }
 }
 
@@ -9998,23 +10044,9 @@ function stepGateRefusal(
   // whatever the tool gate says. The measured case is the portal frame's own
   // obsidian: the bearing route into the interior runs THROUGH frame cells, and
   // no route may dismantle the asset the trip is for.
-  const liveStructures = liveStructureIndexOf(state)
-  for (const cell of profile.digPlan) {
-    const name = cell.name ?? ''
-    if (name.length > 0 && isProtectedStationBlock(name)) {
-      return {
-        reason: 'protected',
-        block: name,
-        detail: `${name} at (${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a protected station`,
-      }
-    }
-    if (isLiveStructureMember(liveStructures, cell.cell)) {
-      return {
-        reason: 'protected',
-        block: name.length > 0 ? name : (step.digName ?? null),
-        detail: `(${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a member of a live structure`,
-      }
-    }
+  const protectedRefusal = protectedStepProfileRefusal(state, profile, step.digName ?? null)
+  if (protectedRefusal !== null) {
+    return { reason: 'protected', ...protectedRefusal }
   }
   if (profile.choice.ok) return null
   const requirement = profile.requirement
@@ -13670,13 +13702,14 @@ export function deriveReachabilityAbilities(
 ): ReachabilityAbilities {
   const counts = state.inventory.counts
   const dy = Math.round(target.y - state.self.position.y)
+  const digSources = protectedVerticalDigSources(state)
   const route = planVerticalApproachDetailed({
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,
     target,
     tunnel: state.signals.lastTunnel,
-    descent: state.descent,
-    stepCuts: state.stepCuts,
+    descent: digSources.descent,
+    stepCuts: digSources.stepCuts,
     placeable: column.placeable,
     columnSafe: column.columnSafe,
     inventory: counts,
@@ -13690,7 +13723,7 @@ export function deriveReachabilityAbilities(
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,
     target,
-    stepCuts: state.stepCuts,
+    stepCuts: digSources.stepCuts,
     standable: state.terrain.standable,
     hazards: state.blocks.filter((block) => block.kind === 'hazard').map((block) => block.position),
     inventory: counts,

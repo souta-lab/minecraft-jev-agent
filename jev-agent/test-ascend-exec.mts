@@ -366,6 +366,32 @@ addCase('a Jev-selected ASCEND pillar passes the decision guard and the executor
   }
 })
 
+addCase('vertical planning skips a stair cut that intersects a live structure member', () => {
+  const world = liveWorld({ diamond_pickaxe: 1, cobblestone: 402 })
+  const cut = { x: 4, y: BODY_FEET.y + 1, z: BODY_FEET.z }
+  world.stepCuts = [
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut,
+      step: { x: 4, y: BODY_FEET.y + 1, z: BODY_FEET.z },
+      name: 'obsidian',
+      safe: true,
+      reason: 'safe',
+    },
+  ]
+  const unprotected = ascentOf(generateGroundedCandidates(world, defaultCandidateOptions).candidates)
+  world.liveStructureMembers = [{ kind: 'synthetic_structure', position: { ...cut } }]
+  const protectedAscent = ascentOf(generateGroundedCandidates(world, defaultCandidateOptions).candidates)
+  return {
+    pass:
+      unprotected?.meta.vertical === 'staircase-up' &&
+      protectedAscent?.meta.vertical === 'pillar',
+    detail: `unprotected=${String(unprotected?.meta.vertical ?? 'none')} protected=${String(protectedAscent?.meta.vertical ?? 'none')}`,
+  }
+})
+
 addCase('a plain horizontal MOVE to an unknown standable cell is still guard-rejected', () => {
   const world = liveWorld({ diamond_pickaxe: 1, cobblestone: 402 })
   const plain: Candidate = {

@@ -1360,6 +1360,9 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'QUEUE_DEPTH',
   'PLACE_REFUSED',
   'DIG_PATH',
+  // A final mutation-boundary refusal that names when a claimed vertical or
+  // dynamic route reached a cell still owned by a validated live structure.
+  'LIVE_STRUCTURE_MEMBER_DIG_REFUSED',
   'JUMP_ATTEMPT',
   'JUMP_FAIL',
   'JUMP_ESCAPE',
@@ -4604,7 +4607,10 @@ export class JevController {
       // commitment/evidence layer needs - the decision epoch that authorized it,
       // the decision id, the semantic Option instance, the state fingerprint, the
       // world epoch and WHO selected it. Additive meta only; the id is untouched.
-      const claim = this.executor.claim(this.stampSelectionProvenance(guarded.candidate, decision, record))
+      const claim = this.executor.claim(
+        this.stampSelectionProvenance(guarded.candidate, decision, record),
+        { liveStructureMembers: freshState.liveStructureMembers ?? [] },
+      )
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
       if (claim.kept) {
         this.logger.info(

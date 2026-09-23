@@ -119,7 +119,8 @@ import {
 } from './combatClosure.ts'
 import type { CombatOutcome } from './combatClosure.ts'
 import type { ArmorSlot } from './gearPlan.ts'
-import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
+import { isProtectedStationBlock, liveStructureCellKey, liveStructureMemberIndex, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
+import type { LiveStructureMember } from './blockSafety.ts'
 import {
   containerItemStacks,
   containerRef,
@@ -289,6 +290,7 @@ export type FailureCode =
   | 'tunnel_entry_refused'
   | 'out_of_reach'
   | 'protected_station'
+  | 'live_structure_member'
   | 'dig_error'
   | 'dig_timeout'
   | 'dig_no_tool'
@@ -458,11 +460,18 @@ export interface CurrentAction {
   status: 'running' | 'done' | 'failed' | 'cancelled'
   detail: string
   completion: Promise<ExecutionResult>
+  /** immutable protection snapshot from the WorldState that authorized this claim */
+  liveStructureMembers?: ReadonlyMap<string, string>
   /**
    * issue #436 section 4: the first-class SkillCommitment this action realizes.
    * Persisted for the whole action lifetime and carried into the evidence.
    */
   commitment?: SkillCommitment
+}
+
+export interface ExecutionClaimContext {
+  /** currently validated members from the fresh, merged world observation */
+  liveStructureMembers?: readonly LiveStructureMember[]
 }
 
 export interface ClaimResult {
@@ -2150,7 +2159,7 @@ export class Executor {
    * cancelled first (this is the preemption log line). If the *same* action is
    * running, ownership is retained and the caller just re-attaches to it.
    */
-  claim(candidate: Candidate): ClaimResult {
+  claim(candidate: Candidate, context: ExecutionClaimContext = {}): ClaimResult {
     this.ensureMovements()
     const running = this.action
     if (running !== null && running.status === 'running' && running.id === candidate.id) {
@@ -2175,6 +2184,15 @@ export class Executor {
     // postconditions, effect envelope, budget, interrupt policy, and the
     // provenance (who selected it, at which state fingerprint).
     const commitment = this.buildCommitment(candidate)
+    const liveStructureMembers =
+      context.liveStructureMembers === undefined
+        ? undefined
+        : liveStructureMemberIndex(
+            context.liveStructureMembers.map((member) => ({
+              kind: member.kind,
+              position: { ...member.position },
+            })),
+          )
     const action: CurrentAction = {
       id: candidate.id,
       kind: candidate.kind,
@@ -2185,6 +2203,7 @@ export class Executor {
       detail: '',
       completion,
       commitment,
+      liveStructureMembers,
     }
     this.action = action
     this.activeCommitment = commitment
@@ -11948,6 +11967,18 @@ export class Executor {
         'protected_station',
         `refusing to break protected station ${block.name} at (${block.position.x},${block.position.y},${block.position.z})`,
       )
+    }
+    const memberKey = liveStructureCellKey(block.position)
+    const claimedMembers = this.action?.liveStructureMembers
+    if (claimedMembers?.has(memberKey)) {
+      const structure = claimedMembers.get(memberKey) ?? 'unknown'
+      const detail = `refusing to break member of live structure ${structure} at (${block.position.x},${block.position.y},${block.position.z})`
+      this.logger.warn(
+        'executor',
+        `LIVE_STRUCTURE_MEMBER_DIG_REFUSED structure=${structure} block=${block.name} cell=${memberKey}`,
+        { actionId: this.action?.id ?? null, structure, block: block.name, cell: memberKey },
+      )
+      throw new ExecutorError('live_structure_member', detail)
     }
     if (!this.bot.canDigBlock(block)) {
       throw new ExecutorError('dig_error', `canDigBlock() returned false for ${block.name}`)

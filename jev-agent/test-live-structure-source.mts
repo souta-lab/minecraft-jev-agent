@@ -304,17 +304,38 @@ addCase('(c) a synthetic non-portal live structure refuses its member cell too',
     portalFrame: null,
     portalFrameSites: [],
     liveStructureMembers: [{ kind: 'synthetic_structure', position: OUTSIDE_POS }],
+    // Exercise the other destructive navigation cuts against the same generic
+    // membership fact. With the only resource source protected, headroom MINE
+    // and STEP are the only ways these cells could otherwise leak back in.
+    headroomCuts: [
+      { pos: OUTSIDE_POS, name: 'obsidian', safe: true, reason: 'clearance', currentFootprint: true },
+    ],
+    stepCuts: [
+      {
+        dir: 'W',
+        dx: -1,
+        dz: 0,
+        cut: OUTSIDE_POS,
+        step: { x: 28, y: 66, z: 35 },
+        name: 'obsidian',
+        safe: true,
+        reason: 'safe',
+      },
+    ],
   }
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
-  const offered = grounded.candidates.map((candidate) => candidate.id)
-  const leaked = offered.filter((id) => id.includes(cellToken(OUTSIDE_POS)))
+  const offered = grounded.candidates
+  const leaked = offered
+    .filter((candidate) => candidate.target !== null &&
+      candidate.target.x === OUTSIDE_POS.x && candidate.target.y === OUTSIDE_POS.y && candidate.target.z === OUTSIDE_POS.z)
+    .map((candidate) => candidate.id)
   const marker = grounded.sourceExclusions.map(formatResourceSourceExclusion)
   return {
     pass:
       leaked.length === 0 &&
       marker.length === 1 &&
       marker[0] === `RESOURCE_SOURCE_EXCLUDED item=obsidian cell=${OUTSIDE_POS.x},${OUTSIDE_POS.y},${OUTSIDE_POS.z} reason=live_structure`,
-    detail: `leaked=${leaked.join(',') || 'none'} marker=${marker.join('|') || 'none'}`,
+    detail: `leaked=${leaked.join(',') || 'none'} candidates=${offered.map((candidate) => candidate.id).join(',')} marker=${marker.join('|') || 'none'}`,
   }
 })
 
