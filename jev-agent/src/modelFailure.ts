@@ -1,11 +1,10 @@
-// modelFailure.ts - the single loud exit for a model that will not answer.
+// modelFailure.ts - typed model-call failure and host recovery boundary.
 //
 // Owner directive: a model failure must never degrade into a deterministic
 // decision. Every bounded retry loop that exhausts its attempts funnels through
-// `failLoud()`, which logs a FATAL line and then either terminates the resident
-// process (host-provided `terminate`) or raises a `FatalModelError` so the
-// caller/test observes the failure. Silent `-> deterministic` substitution is
-// not an option here.
+// `failLoud()`, which logs a FATAL line and then delegates to the host. The host
+// may recycle a generation after a retryable provider outage; it must never
+// replace model authority with a deterministic decision.
 //
 // These primitives are shared by both packages: buddy-driver imports them from
 // `../jev-agent/src/modelFailure.ts`, exactly like `resolveJevApiKey`.
@@ -14,11 +13,10 @@
 export type FailureLog = (event: string, detail?: Record<string, unknown>) => void
 
 /**
- * Terminate the resident process. Supplied by the host; returns `never` so the
- * type system knows control does not continue. Tests omit it and observe the
- * thrown `FatalModelError` instead.
+ * Host-owned handling for an exhausted model call. It either stops the resident
+ * or requests a safe generation recovery; the policy never selects a fallback.
  */
-export type FatalTerminator = () => never
+export type FatalTerminator = (error: FatalModelError) => never
 
 /**
  * The one fatal error shape for "the model did not answer". `attempts` is the
@@ -28,13 +26,28 @@ export class FatalModelError extends Error {
   readonly context: string
   readonly attempts: number
   readonly reason: string
+  readonly retryable: boolean
 
-  constructor(context: string, attempts: number, reason: string) {
+  constructor(context: string, attempts: number, reason: string, retryable = false) {
     super(`FATAL model failure in ${context} after ${attempts} attempt(s): ${reason}`)
     this.name = 'FatalModelError'
     this.context = context
     this.attempts = attempts
     this.reason = reason
+    this.retryable = retryable
+  }
+}
+
+/** Control signal: the host stopped this generation and will retry with a fresh projection. */
+export class ModelRecoveryRequested extends Error {
+  readonly context: string
+  readonly generationId: string
+
+  constructor(context: string, generationId: string) {
+    super(`model authority unavailable in ${context}; generation ${generationId} stopped for recovery`)
+    this.name = 'ModelRecoveryRequested'
+    this.context = context
+    this.generationId = generationId
   }
 }
 
@@ -100,7 +113,8 @@ export function failLoud(error: FatalModelError, log: FailureLog, terminate: Fat
     context: error.context,
     attempts: error.attempts,
     error: error.reason,
+    retryable: error.retryable,
   })
-  if (terminate !== undefined) return terminate()
+  if (terminate !== undefined) return terminate(error)
   throw error
 }

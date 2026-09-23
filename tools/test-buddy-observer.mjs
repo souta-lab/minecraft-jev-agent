@@ -100,4 +100,53 @@ assert.equal(aiSummary.runtimeFailure?.detail.context, 'jev-authority')
 assert.equal(aiSummary.status.availabilityReason, 'MODEL_UNAVAILABLE')
 assert.match(aiSummary.headline, /Runtime failure: MODEL_UNAVAILABLE \(jev-authority\)/)
 
+const degradedSummary = buildAiSummary({
+  ...snapshot,
+  resident: {
+    ...snapshot.resident,
+    modelAvailability: {
+      state: 'degraded',
+      consecutiveFailures: 2,
+      retryAt: '2026-09-21T12:00:20.000Z',
+      lastFailure: { ts: '2026-09-21T12:00:10.000Z', context: 'jev-authority', attempts: 4, error: '503 unavailable' },
+      recoveredAt: null,
+    },
+  },
+  events: [
+    ...snapshot.events,
+    { ts: '2026-09-21T12:00:10.000Z', event: 'MODEL_UNAVAILABLE', detail: { context: 'jev-authority' } },
+    { ts: '2026-09-21T12:00:11.000Z', event: 'HEARTBEAT', detail: { pos: { x: 1, y: 62, z: 3 } } },
+  ],
+})
+assert.equal(degradedSummary.status.available, false)
+assert.equal(degradedSummary.status.hostAvailable, true)
+assert.equal(degradedSummary.status.connected, true)
+assert.equal(degradedSummary.status.availabilityReason, 'MODEL_UNAVAILABLE')
+assert.equal(degradedSummary.worldObservation?.live, false)
+assert.ok(degradedSummary.unknown.includes('model_authority_unavailable'))
+assert.match(degradedSummary.headline, /retryAt=2026-09-21T12:00:20.000Z/)
+
+const recoveredSummary = buildAiSummary({
+  ...snapshot,
+  resident: {
+    ...snapshot.resident,
+    modelAvailability: {
+      state: 'available',
+      consecutiveFailures: 0,
+      retryAt: null,
+      lastFailure: { ts: '2026-09-21T12:00:10.000Z', context: 'jev-authority', attempts: 4, error: '503 unavailable' },
+      recoveredAt: '2026-09-21T12:00:30.000Z',
+    },
+  },
+  events: [
+    ...snapshot.events,
+    { ts: '2026-09-21T12:00:10.000Z', event: 'FATAL', detail: { code: 'MODEL_UNAVAILABLE', context: 'jev-authority' } },
+    { ts: '2026-09-21T12:00:30.000Z', event: 'MODEL_RECOVERED', detail: { generationId: 'gen-8' } },
+    { ts: '2026-09-21T12:00:31.000Z', event: 'HEARTBEAT', detail: { pos: { x: 1, y: 62, z: 3 } } },
+  ],
+})
+assert.equal(recoveredSummary.status.available, true)
+assert.equal(recoveredSummary.runtimeFailure, null)
+assert.equal(recoveredSummary.worldObservation?.live, true)
+
 console.log('buddy-observer: PASS')

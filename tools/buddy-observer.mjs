@@ -25,6 +25,10 @@ const DEFAULT_CONTROL_TIMEOUT_MS = 5000
 
 const TRACE_EVENTS = new Set([
   'JEV_HEADS',
+  'MODEL_UNAVAILABLE',
+  'MODEL_AVAILABILITY',
+  'MODEL_RETRY_STARTED',
+  'MODEL_RECOVERED',
   'TOOL_CHOICE',
   'SYSTEM2_AUTHORITY_INPUT',
   'SYSTEM2_AUTHORITY_DECISION',
@@ -155,7 +159,7 @@ export function parseRunnerOutEvents(lines, { runId = null, bootTs = null } = {}
     try {
       const value = JSON.parse(match[2] ?? '')
       if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
-      const allowedKeys = ['trigger', 'code', 'context', 'attempts', 'error', 'reason', 'provider', 'model']
+      const allowedKeys = ['trigger', 'code', 'context', 'attempts', 'error', 'reason', 'provider', 'model', 'retryable', 'generationId']
       detail = Object.fromEntries(allowedKeys
         .filter((key) => Object.hasOwn(value, key))
         .map((key) => [key, redactSecrets(value[key])]))
@@ -350,6 +354,7 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
       available: data !== null,
       connected: data?.connected ?? false,
       frozen: data?.frozen ?? null,
+      modelAvailability: data?.modelAvailability ?? null,
       runId,
       generationId: data?.generationId
         ?? latestEvent(
@@ -483,11 +488,19 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const actionEvent = latestProjectedEvent(snapshot, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
   const actionOutcomeEvent = latestProjectedEvent(snapshot, ['ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED', 'PLAN_REJECTED'])
   const heartbeat = latestProjectedEvent(snapshot, ['HEARTBEAT'])
-  const runtimeFailure = latestProjectedEvent(snapshot, ['FATAL', 'ERROR'])
+  const latestRuntimeFailure = latestProjectedEvent(snapshot, ['FATAL', 'ERROR'])
+  const modelRecovered = latestProjectedEvent(snapshot, ['MODEL_RECOVERED'])
+  const failureResolved = modelRecovered !== null
+    && latestRuntimeFailure !== null
+    && (parseTimestamp(modelRecovered.ts) ?? 0) > (parseTimestamp(latestRuntimeFailure.ts) ?? 0)
+  const runtimeFailure = failureResolved ? null : latestRuntimeFailure
+  const modelAvailability = snapshot.resident.modelAvailability
+  const modelUnavailable = modelAvailability?.state === 'degraded'
   const observedAtMs = parseTimestamp(snapshot.observedAt)
   const freshnessMs = observedAtMs === null ? null : Math.max(0, now - observedAtMs)
   const unknown = []
   if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
+  if (modelUnavailable) unknown.push('model_authority_unavailable')
   if (latest === null) unknown.push('no_choice_event_observed')
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
   if (snapshot.truth === null) unknown.push('authoritative_world_truth_unavailable')
@@ -507,7 +520,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-decision-summary',
-    headline: `${headline}${failureHeadline}`,
+    headline: `${headline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}`,
     observedAt: snapshot.observedAt,
     freshnessMs,
     run: {
@@ -518,10 +531,11 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       worldKey: snapshot.resident.worldKey,
     },
     status: {
-      available: snapshot.resident.available,
+      available: snapshot.resident.available && !modelUnavailable,
+      hostAvailable: snapshot.resident.available,
       connected: snapshot.resident.connected,
       frozen: snapshot.resident.frozen,
-      availabilityReason: snapshot.resident.available ? null : runtimeFailure?.detail?.code ?? null,
+      availabilityReason: modelUnavailable ? 'MODEL_UNAVAILABLE' : snapshot.resident.available ? null : runtimeFailure?.detail?.code ?? null,
     },
     mission: snapshot.mission,
     goal: snapshot.goal,
@@ -541,12 +555,13 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       latestOutcomeEvent: actionOutcomeEvent,
     },
     runtimeFailure,
+    modelAvailability,
     world: snapshot.truth,
     worldObservation: heartbeat === null ? null : {
       observedAt: heartbeat.ts,
       ageMs: parseTimestamp(heartbeat.ts) === null ? null : Math.max(0, now - parseTimestamp(heartbeat.ts)),
       sourceEvent: heartbeat.event,
-      live: snapshot.resident.available && snapshot.resident.connected,
+      live: snapshot.resident.available && snapshot.resident.connected && !modelUnavailable,
       worldKey: snapshot.resident.worldKey,
       dimension: snapshot.truth?.dimension ?? snapshot.resident.worldKey?.dimension ?? null,
       position: heartbeat.detail?.pos ?? null,

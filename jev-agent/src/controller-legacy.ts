@@ -153,7 +153,7 @@ import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, 
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
-import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
+import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
@@ -430,11 +430,11 @@ export interface JevAgentOptions {
   logDir: string
   forceFallbackPolicy: boolean
   /**
-   * Resident host terminator. When set, an exhausted Jev model call logs FATAL
-   * and exits the process instead of degrading to a synthetic WAIT. Tests omit
-   * it and observe the thrown FatalModelError.
+   * Resident host handler for exhausted model calls. Retryable Jev transport
+   * failures may stop this generation for host recovery; all other failures
+   * remain fatal. Tests omit it and observe the thrown FatalModelError.
    */
-  terminateOnModelFailure?: () => never
+  terminateOnModelFailure?: (error: FatalModelError) => never
   /**
    * #22: `false` (default) keeps `abandon_option` shadow-only: it is recorded
    * as a `BETA_SHADOW` vote and can never, by itself, cause a replan/abandon.
@@ -4555,6 +4555,7 @@ export class JevController {
           this.logger.error('agent', `action completion handler failed: ${message}`, {}, this.tickCounter)
         })
     } catch (error) {
+      if (error instanceof ModelRecoveryRequested) return
       const message = error instanceof Error ? error.message : String(error)
       if (error instanceof ActionCancelled) {
         this.logger.info('agent', `tick aborted: ${message}`, {}, this.tickCounter)

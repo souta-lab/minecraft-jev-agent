@@ -44,6 +44,7 @@ import type {
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { milestoneReport } from './milestone-report.ts'
 import { MilestonePredicateRecorder } from './milestone-predicates.ts'
+import { ModelAvailabilityTracker } from './model-recovery.ts'
 import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
@@ -540,6 +541,7 @@ let lastInventoryHash = ''
 let lastActionId: string | null = null
 let lastHeartbeatAt = 0
 const leaseManager = new ActuationLeaseManager()
+const modelAvailability = new ModelAvailabilityTracker()
 const reconnectLedger = new ReconnectLedger()
 /** #384: the control socket server; closed (and awaited) before the lock is released. */
 let controlServer: Server | null = null
@@ -800,7 +802,41 @@ function makeGenerationContext(
     buildHash,
     m2SnapshotDir: DATA,
     bot: b,
-    log,
+    log: (event, detail = {}) => {
+      log(event, detail)
+      if (event === 'MODEL_UNAVAILABLE') {
+        const failure = modelAvailability.recordUnavailable({
+          generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+          context: typeof detail.context === 'string' ? detail.context : 'unknown',
+          attempts: typeof detail.attempts === 'number' ? detail.attempts : 0,
+          error: typeof detail.error === 'string' ? detail.error : 'model authority unavailable',
+        })
+        log('MODEL_AVAILABILITY', {
+          runId,
+          generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+          ...modelAvailability.snapshot(),
+          attempt: failure.attempt,
+          retryDelayMs: failure.delayMs,
+        })
+        try { writeAcceptance() } catch { /* availability log remains durable */ }
+      } else if (event === 'JEV_HEADS') {
+        const previousState = modelAvailability.snapshot().state
+        const recovered = modelAvailability.recordSuccess()
+        if (recovered) {
+          log('MODEL_RECOVERED', {
+            runId,
+            generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+            provider: typeof detail.provider === 'string' ? detail.provider : null,
+            model: typeof detail.model === 'string' ? detail.model : null,
+            recoveredAt: modelAvailability.snapshot().recoveredAt,
+          })
+        }
+        if (recovered || previousState === 'unknown') {
+          log('MODEL_AVAILABILITY', { runId, generationId: detail.generationId ?? null, ...modelAvailability.snapshot() })
+          try { writeAcceptance() } catch { /* success event remains durable */ }
+        }
+      }
+    },
     lease,
     resources: new GenerationResourceRegistry(),
     worldMemory: cloneMemory(keyedMemory()),
@@ -940,7 +976,15 @@ function watchGenerationStop(gen: ResidentGeneration): void {
     state.recoveries += 1
     if (stopped === 'goal-complete') archiveLedger('goal-complete')
     saveState('generation-stop')
-    scheduleGenerationRestart('generation-stopped')
+    if (stopped === 'model-unavailable') {
+      const snapshot = modelAvailability.snapshot()
+      const retryAtMs = snapshot.retryAt === null ? Date.now() + GEN_RESTART_MS : Date.parse(snapshot.retryAt)
+      const delayMs = Math.max(0, retryAtMs - Date.now())
+      log('RECOVERY', { reason: 'model-unavailable', generationId: gen.id, retryDelayMs: delayMs, retryAt: snapshot.retryAt })
+      scheduleGenerationRestart('model-unavailable', delayMs)
+    } else {
+      scheduleGenerationRestart('generation-stopped')
+    }
   }, 2000)
   generationStopWatch.set(gen.id, guard)
 }
@@ -1042,14 +1086,19 @@ async function startGeneration(trigger: string): Promise<boolean> {
   return true
 }
 
-function scheduleGenerationRestart(reason: string): void {
+function scheduleGenerationRestart(reason: string, delayMs = GEN_RESTART_MS): void {
   if (generationRestartTimer !== null || shuttingDown || frozen || deathResetPending) return
   generationRestartTimer = setTimeout(() => {
     generationRestartTimer = null
     if (shuttingDown || frozen) return
     if (generation !== null) return
+    if (reason === 'model-unavailable') {
+      modelAvailability.recordRetryStarted()
+      log('MODEL_RETRY_STARTED', { runId, ...modelAvailability.snapshot() })
+      try { writeAcceptance() } catch { /* retry event remains durable */ }
+    }
     void startGeneration(`recovery:${reason}`)
-  }, GEN_RESTART_MS)
+  }, delayMs)
 }
 
 function inventorySummary(b: Bot): Record<string, number> {
@@ -1730,6 +1779,7 @@ function writeAcceptance(): string {
     ...acceptanceProvenance(bootSourceSha, gitCommit()),
     generationHash,
     generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+    modelAvailability: modelAvailability.snapshot(),
     contractVersion: CONTRACT_VERSION,
     stateSchemaVersion: state.schemaVersion,
     stateRevision: state.revision,
@@ -2008,6 +2058,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       listenerLeak: listenerLeak(),
       acceptancePath: join(DATA, `acceptance-${runId}.json`),
       status,
+      modelAvailability: modelAvailability.snapshot(),
     })
     return
   }
