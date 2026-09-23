@@ -11610,8 +11610,9 @@ export interface ColumnFacts {
  *   - `meta.digCells` is the descent/branch dig plan the executor parses itself
  *     (`executor.descentDigCellsFromMeta`: `"x,y,z;x,y,z"`, passage cells first,
  *     primary last), so the offered shape and the checked shape cannot drift;
- *   - `MINE` and `STEP` have no plan meta because their `target` IS the block
- *     they break, which is exactly the executor's own fallback.
+ *   - an arm whose TARGET is the block it breaks (`MINE`, `STEP`, and the
+ *     `DESCEND` leg `runDescend` calls the same parser for) has no plan meta, and
+ *     the executor's own fallback for that case is the target - mirrored here.
  *
  * A candidate that declares no dig returns [] and is untouched by the gate.
  */
@@ -11624,9 +11625,6 @@ export function declaredDigCells(candidate: Candidate): Vec3Json[] {
     seen.add(key)
     cells.push(cell)
   }
-  if (candidate.kind === 'MINE' || candidate.kind === 'STEP') {
-    if (candidate.target !== null) push(candidate.target)
-  }
   const raw = candidate.meta.digCells
   if (typeof raw === 'string' && raw.length > 0) {
     for (const part of raw.split(';')) {
@@ -11635,9 +11633,16 @@ export function declaredDigCells(candidate: Candidate): Vec3Json[] {
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue
       push({ x, y, z })
     }
+    // The executor returns the PARSED plan when the meta carries one; the target
+    // is only its fallback, so it must not be added beside a real plan.
+    if (cells.length > 0) return cells
   }
+  if (DIG_TARGET_KINDS.has(candidate.kind) && candidate.target !== null) push(candidate.target)
   return cells
 }
+
+/** The kinds whose own `target` is the block their execution breaks. */
+const DIG_TARGET_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>(['MINE', 'STEP', 'DESCEND'])
 
 /**
  * THE DIG-TOOL GATE: the first block a candidate's own execution must break whose
