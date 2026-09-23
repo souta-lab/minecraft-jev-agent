@@ -19,6 +19,7 @@ import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 import { containerObservationAt, observedItemCount } from './containerAccess.ts'
+import type { StationApproachProbe } from './reachability.ts'
 
 export type GuardPhase = 'decision' | 'dig'
 
@@ -79,6 +80,25 @@ export interface GuardContext {
    * which case the cheaper support/hazard checks still apply.
    */
   canComputePath?: ((position: Vec3Json) => boolean) | null
+  /**
+   * The STATION-APPROACH fact (the stand the body interacts from, plus the
+   * `canDig=false` path verdict to that stand), supplied by the controller: the
+   * SAME probe the candidate layer's `stationApproachReachable` consumes, so the
+   * guard and the grounding cannot disagree about a station.
+   *
+   * A station's interaction destination is a STAND, never the station's own
+   * cell: a container block occupies that cell, so `GoalBlock(<container cell>)`
+   * can never succeed and refused every out-of-reach container forever. Measured
+   * live (m3-live buddy.log): the operator's `purple_shulker_box@10,59,8` was
+   * offered by Jev at 14.8 m from the body and rejected
+   * `ACTION_REJECTED ... code=NO_PATH ... path to (10,59,8) (GoalBlock probe)`
+   * five times in 11 s while the body never moved, although three passable,
+   * supported stands with a clear path stand beside that container.
+   *
+   * Optional: a caller that passes no probe keeps the previous cell-probe
+   * behaviour, so no existing verdict moves.
+   */
+  stationApproach?: StationApproachProbe | null
 }
 
 export type GuardResult =
@@ -790,7 +810,53 @@ function guardContainer(candidate: Candidate, state: WorldState, context: GuardC
     }
   }
   if (distance(target, state.self.eyePosition) > context.reach) {
-    return guardPathComputable(candidate, context, target)
+    return guardStationApproach(candidate, context, target, ref)
+  }
+  return { ok: true, candidate }
+}
+
+/**
+ * CAN for an out-of-reach CONTAINER: the body must be able to reach an
+ * INTERACTION STAND beside the container - never the container's own cell.
+ *
+ * `guardPathComputable(candidate, context, target)` probes `GoalBlock(target)`,
+ * i.e. "stand inside the container cell", which no container block allows. The
+ * live record is unambiguous (m3-live buddy.log 2026-09-22T14:17:10.218Z):
+ * `CONTAINER:open:purple_shulker_box@10,59,8` -> `NO_PATH ... (GoalBlock probe)`
+ * five times in 11 s while the body stood 14.8 m away and never moved, and the
+ * world truth at that cell is a shulker box beside the Nether gate with three
+ * clear stands. The candidate layer had ALREADY grounded the same container
+ * through `stationApproachReachable`, so the guard was refusing an approach its
+ * own grounding had proven: this function consumes that same fact instead of
+ * re-deriving a stricter one.
+ *
+ * `no_path` (no reachable stand) stays a separate outcome from the executor's
+ * `occluded` (a stand exists and the line of sight from it is blocked): this
+ * guard answers reachability only, and a stand whose SIGHT is blocked is
+ * resolved by the executor's own sight-aware stand choice, not here.
+ */
+function guardStationApproach(
+  candidate: Candidate,
+  context: GuardContext,
+  target: Vec3Json,
+  ref: string,
+): GuardResult {
+  const probe = context.stationApproach ?? null
+  if (probe === null) return guardPathComputable(candidate, context, target)
+  const fact = probe(target, 'container')
+  if (fact.approach === null) {
+    return deny(
+      candidate.id,
+      'NO_PATH',
+      `no interaction stand for ${ref} at (${target.x},${target.y},${target.z}) within reach`,
+    )
+  }
+  if (fact.path === 'no_path') {
+    return deny(
+      candidate.id,
+      'NO_PATH',
+      `no canDig=false path to the interaction stand (${fact.approach.x},${fact.approach.y},${fact.approach.z}) for ${ref} at (${target.x},${target.y},${target.z})`,
+    )
   }
   return { ok: true, candidate }
 }

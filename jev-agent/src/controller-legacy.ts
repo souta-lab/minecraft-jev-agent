@@ -4072,6 +4072,11 @@ export class JevController {
         reach: this.options.reach,
         maxCandidateAgeTicks: this.options.maxCandidateAgeTicks,
         canComputePath: (position) => this.canComputePath(position),
+        // The SAME per-tick station-approach fact the candidate layer gates on
+        // (`reachabilityGateOptions()` is memoised per tick), so a station the
+        // grounding proved reachable through its interaction stand can never be
+        // refused here by a probe of the station's own cell.
+        stationApproach: this.reachabilityGateOptions().stationApproach ?? null,
       })
 
       const record = makeDecisionRecord({
