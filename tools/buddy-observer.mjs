@@ -51,12 +51,19 @@ const TRACE_EVENTS = new Set([
   'RECONNECT_SUCCESS',
   'BOOT',
   'BUILD',
+  'FATAL',
+  'ERROR',
 ])
 
 const SECRET_KEY = /(api.?key|authorization|cookie|password|secret|token)/i
 
 function redactSecrets(value) {
   if (Array.isArray(value)) return value.map(redactSecrets)
+  if (typeof value === 'string') {
+    return value
+      .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [REDACTED]')
+      .replace(/((?:api.?key|authorization|cookie|password|secret|token)\s*[=:]\s*)[^\s,;]+/gi, '$1[REDACTED]')
+  }
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value)
       .filter(([key]) => !SECRET_KEY.test(key))
@@ -108,7 +115,7 @@ export function parseBuddyLogLine(line) {
   }
 }
 
-export function readLogTail(logPath, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
+export function readTextTail(logPath, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
   if (!existsSync(logPath)) return []
   const fd = openSync(logPath, 'r')
   try {
@@ -118,13 +125,74 @@ export function readLogTail(logPath, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
     readSync(fd, buffer, 0, length, Math.max(0, size - length))
     const text = buffer.toString('utf8')
     const clean = size > length ? text.slice(text.indexOf('\n') + 1) : text
-    return clean
-      .split('\n')
-      .map(parseBuddyLogLine)
-      .filter((entry) => entry !== null)
+    return clean.split('\n').filter((line) => line.trim() !== '')
   } finally {
     closeSync(fd)
   }
+}
+
+export function readLogTail(logPath, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
+  return readTextTail(logPath, maxBytes)
+    .map(parseBuddyLogLine)
+    .filter((entry) => entry !== null)
+}
+
+/** Parse structured fatal lines from runner.out and attribute them to one BOOT window. */
+export function parseRunnerOutEvents(lines, { runId = null, bootTs = null } = {}) {
+  const output = []
+  let currentRunId = null
+  const bootTime = Date.parse(bootTs ?? '')
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    const parsed = parseBuddyLogLine(line)
+    if (parsed?.event === 'BOOT') {
+      currentRunId = parsed.detail.runId ?? null
+      continue
+    }
+    const match = /^\[([^\]]+)]\s+FATAL\s+(\{.*\})$/.exec(line.trim())
+    if (match === null) continue
+    let detail
+    try {
+      const value = JSON.parse(match[2] ?? '')
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+      const allowedKeys = ['trigger', 'code', 'context', 'attempts', 'error', 'reason', 'provider', 'model']
+      detail = Object.fromEntries(allowedKeys
+        .filter((key) => Object.hasOwn(value, key))
+        .map((key) => [key, redactSecrets(value[key])]))
+    } catch {
+      continue
+    }
+    let errorEvent = null
+    for (let lookahead = index + 1; lookahead < Math.min(lines.length, index + 5); lookahead += 1) {
+      const candidate = parseBuddyLogLine(lines[lookahead] ?? '')
+      if (candidate?.event === 'ERROR') {
+        errorEvent = candidate
+        break
+      }
+    }
+    const observedAt = errorEvent?.ts ?? null
+    const observedTime = Date.parse(observedAt ?? '')
+    if (Number.isFinite(bootTime) && Number.isFinite(observedTime) && observedTime < bootTime) continue
+    const belongsToCurrentRun = runId === null
+      || currentRunId === runId
+      || (runId !== null && Number.isFinite(bootTime) && Number.isFinite(observedTime) && observedTime >= bootTime)
+    if (runId !== null && !belongsToCurrentRun) continue
+    output.push({
+      ts: observedAt,
+      event: 'FATAL',
+      detail: {
+        ...detail,
+        emitter: match[1] ?? null,
+        source: 'runner.out',
+        ...(belongsToCurrentRun && runId !== null ? { runId } : currentRunId !== null ? { runId: currentRunId } : {}),
+      },
+    })
+  }
+  return output
+}
+
+export function readRunnerOutEvents(logPath, options = {}, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
+  return parseRunnerOutEvents(readTextTail(logPath, maxBytes), options)
 }
 
 /** Find the latest matching event without loading the full append-only log. */
@@ -271,6 +339,7 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
     'PLAN_REJECTED',
   ]))
   const latestActionEvent = latestEvent(relevantEvents, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
+  const runtimeFailure = latestEvent(relevantEvents, ['FATAL', 'ERROR'])
   const queue = queueProjection(status)
   const current = queue.current
 
@@ -327,6 +396,7 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
       mercury: traceProjection(mercury),
       action: traceProjection(latestActionEvent),
     },
+    runtimeFailure: traceProjection(runtimeFailure),
     events: relevantEvents.slice(-30).reverse().map(traceProjection),
   }
 }
@@ -413,6 +483,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const actionEvent = latestProjectedEvent(snapshot, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
   const actionOutcomeEvent = latestProjectedEvent(snapshot, ['ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED', 'PLAN_REJECTED'])
   const heartbeat = latestProjectedEvent(snapshot, ['HEARTBEAT'])
+  const runtimeFailure = latestProjectedEvent(snapshot, ['FATAL', 'ERROR'])
   const observedAtMs = parseTimestamp(snapshot.observedAt)
   const freshnessMs = observedAtMs === null ? null : Math.max(0, now - observedAtMs)
   const unknown = []
@@ -429,11 +500,14 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const headline = latest === null
     ? 'No choice event has been observed.'
     : `${latest.actor} selected ${selection ?? 'UNKNOWN'}; explicit reason: ${latest.reason ?? 'not emitted'}.`
+  const failureHeadline = runtimeFailure?.detail?.code
+    ? ` Runtime failure: ${runtimeFailure.detail.code}${runtimeFailure.detail.context ? ` (${runtimeFailure.detail.context})` : ''}.`
+    : ''
 
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-decision-summary',
-    headline,
+    headline: `${headline}${failureHeadline}`,
     observedAt: snapshot.observedAt,
     freshnessMs,
     run: {
@@ -447,6 +521,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       available: snapshot.resident.available,
       connected: snapshot.resident.connected,
       frozen: snapshot.resident.frozen,
+      availabilityReason: snapshot.resident.available ? null : runtimeFailure?.detail?.code ?? null,
     },
     mission: snapshot.mission,
     goal: snapshot.goal,
@@ -465,6 +540,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       latestActionEvent: actionEvent,
       latestOutcomeEvent: actionOutcomeEvent,
     },
+    runtimeFailure,
     world: snapshot.truth,
     worldObservation: heartbeat === null ? null : {
       observedAt: heartbeat.ts,
@@ -491,6 +567,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
 export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = DEFAULT_INTERVAL_MS } = {}) {
   const socketPath = join(runtimeDir, 'data', 'resident', 'control.sock')
   const logPath = join(runtimeDir, 'buddy.log')
+  const runnerOutPath = join(runtimeDir, 'runner.out')
   const mission = readMission(join(REPO, 'MILESTONE-CONTRACT.json'))
 
   let snapshotInFlight = null
@@ -525,13 +602,19 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
             : readRunEvent(logPath, 'BOOT', currentRunId)
         cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
-      return buildObserverSnapshot({ report, events, mission, runBoot: cachedRunBoot, runBuild: cachedRunBuild })
+      const runnerEvents = readRunnerOutEvents(runnerOutPath, { runId: currentRunId, bootTs: cachedRunBoot?.ts ?? null })
+      const combinedEvents = [...events, ...runnerEvents].sort((left, right) => {
+        const leftTs = Date.parse(left.ts ?? '')
+        const rightTs = Date.parse(right.ts ?? '')
+        return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0)
+      })
+      return buildObserverSnapshot({ report, events: combinedEvents, mission, runBoot: cachedRunBoot, runBuild: cachedRunBuild })
     })
       .finally(() => { snapshotInFlight = null })
     return await snapshotInFlight
   }
 
-  return { runtimeDir, socketPath, logPath, mission, intervalMs, snapshot }
+  return { runtimeDir, socketPath, logPath, runnerOutPath, mission, intervalMs, snapshot }
 }
 
 function htmlPage() {
