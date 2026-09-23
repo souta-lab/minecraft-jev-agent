@@ -197,7 +197,7 @@ async function runM3GatePassStub({ onResult, expectedRunId, sourceSha = SOURCE_S
     reason: 'twelve_eyes_of_ender_verified',
     runId: expectedRunId,
     sourceSha,
-    conditions: { ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' },
+    conditions: { exact_source: 'PASS', ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' },
     facts: {
       eyes: { ready: true, enderEye: 12, maxObservedEnderEye: 12 },
       terminalInventory: { status: 'valid', reason: null, observation },
@@ -239,10 +239,10 @@ function condition(bundle, id) {
   assert.equal(exitCode, 0, `PASS fixture exit=${exitCode} verdict=${bundle.acceptanceVerdict.reason}`)
   assert.equal(bundle.acceptanceVerdict.status, 'PASS')
   assert.equal(bundle.gate.status, 'PASS')
-  assert.deepEqual(bundle.gate.conditions, { ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' })
+  assert.deepEqual(bundle.gate.conditions, { exact_source: 'PASS', ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' })
   assert.match(bundle.gate.resultLine, /^M3_RUN_RESULT status=PASS reason=twelve_eyes_of_ender_verified/)
   // ONE verdict per condition, all from the canonical gate.
-  for (const id of ['M3.ender_eye_ready', 'M3.model_authority', 'M3.nether_reached']) {
+  for (const id of ['M3.exact_source', 'M3.ender_eye_ready', 'M3.model_authority', 'M3.nether_reached']) {
     const row = condition(bundle, id)
     assert.equal(row.verdict, 'PASS', `${id} verdict=${row.verdict} reason=${row.reason}`)
     assert.equal(row.source, 'tools/m3-gate.mjs')
@@ -348,6 +348,7 @@ function condition(bundle, id) {
   assert.equal(bundle.record, 'm3-acceptance-bundle')
   assert.match(markdown, /VERDICT: \*\*PASS\*\*/)
   assert.match(markdown, /\| M3\.ender_eye_ready \| PASS \| yes \|/)
+  assert.match(markdown, /\| M3\.exact_source \| PASS \| yes \|/)
   assert.ok(readFileSync(join(outDir, `artifact-${RUN}.json`), 'utf8').includes('"record": "milestone-run-artifact"'))
   assert.ok(readFileSync(join(outDir, 'metrics.json'), 'utf8').includes('"runId"'))
   // Every command is recorded with an exact argv and its captured output.
@@ -674,7 +675,7 @@ function condition(bundle, id) {
       code: 0,
       reason: 'twelve_eyes_of_ender_verified',
       runId: expectedRunId,
-      conditions: { ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' },
+      conditions: { exact_source: 'PASS', ender_eye_ready: 'PASS', model_authority: 'PASS', nether_reached: 'PASS' },
       facts: { eyes: { ready: true, enderEye: 12 } },
     }
     if (typeof onResult === 'function') onResult(verdict)

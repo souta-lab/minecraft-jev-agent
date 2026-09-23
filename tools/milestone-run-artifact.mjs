@@ -73,6 +73,7 @@ import {
 import { runM3Gate } from './m3-gate.mjs'
 import { deriveMilestonePredicates, readMilestonePredicateEvidence } from './milestone-predicates.mjs'
 import { loadPolicyEvidence } from './m2-policy-evidence.mjs'
+import { scanRunSourceExactness } from './run-source-exactness.mjs'
 
 export const RECORD = 'milestone-run-artifact'
 // 3 = additive: `authority.jev`, the parsed `authority.system2.stack` + per-fact
@@ -633,6 +634,8 @@ export async function scanRunReloadWindow(runnerOutPath, runId) {
         }
       }
       if (!boundaryFound || activeRunId !== runId) continue
+      const explicitLineRunId = RUN_ID_LINE_RE.exec(line)?.[1] ?? null
+      if (explicitLineRunId !== null && explicitLineRunId !== runId) continue
       if (bootBuildHash === null && BUILD_RE.test(line)) {
         bootBuildHash = stringOrNull(parseKeyValues(line).hash)
       }
@@ -716,14 +719,48 @@ function reloadView(marker, count) {
  * `report` reply, when it belongs to THIS runId, is recorded as a read-only
  * cross-check; disagreements are named, never used to overwrite the file facts.
  */
-export function composeRunSource({ runId = null, boot = null, snapshotBuildHash = null, reloadWindow = null, socketBinding = null } = {}) {
+export function composeRunSource({
+  runId = null,
+  boot = null,
+  snapshotBuildHash = null,
+  reloadWindow = null,
+  socketBinding = null,
+  acceptanceRecord = null,
+  sourceExactness = null,
+} = {}) {
   const window = reloadWindow ?? emptyReloadWindow(null, runId, 'reload_window_not_scanned')
   const bootSourceSha = boot?.sourceSha ?? null
+  const bootSourceShaIsGitCommit = typeof bootSourceSha === 'string' && /^[a-f0-9]{40}$/i.test(bootSourceSha)
   const latestSourceReload = window.latestSourceReload ?? null
   const reloadHash = stringOrNull(latestSourceReload?.hash)
   const reloadSourceSha = stringOrNull(latestSourceReload?.sourceSha)
   const effectiveSourceSha = reloadHash ?? bootSourceSha ?? null
   const provenance = reloadHash !== null ? 'reload' : bootSourceSha !== null ? 'boot' : 'unknown'
+  const acceptanceGitCommit = stringOrNull(acceptanceRecord?.gitCommit)
+  const acceptanceCheckoutHead = stringOrNull(acceptanceRecord?.checkoutHead)
+  const acceptanceGitCommitMismatch =
+    acceptanceGitCommit !== null && bootSourceSha !== null && acceptanceGitCommit.toLowerCase() !== bootSourceSha.toLowerCase()
+  const unclassifiedReload = Array.isArray(window.reloads)
+    ? window.reloads.find((marker) => marker?.kind === 'unclassified') ?? null
+    : null
+  let exactGitSource
+  if (sourceExactness !== null && sourceExactness?.status !== 'exact') {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness?.sourceSha ?? null, reason: sourceExactness?.reason ?? 'source_provenance_unavailable' }
+  } else if (sourceExactness?.sourceSha && bootSourceSha && sourceExactness.sourceSha.toLowerCase() !== bootSourceSha.toLowerCase()) {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness.sourceSha, reason: `source_stream_boot_sha_disagreement artifact=${bootSourceSha} gate=${sourceExactness.sourceSha}` }
+  } else if (reloadHash !== null) {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness?.sourceSha ?? null, reason: 'source_changing_reload_has_no_exact_git_sha' }
+  } else if (unclassifiedReload !== null) {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness?.sourceSha ?? null, reason: `reload_source_effect_unattested line=${unclassifiedReload.lineIndex ?? 'unknown'}` }
+  } else if (window.status !== 'valid') {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness?.sourceSha ?? null, reason: `source_window_unavailable ${window.reason ?? 'unknown'}` }
+  } else if (!bootSourceShaIsGitCommit) {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness?.sourceSha ?? null, reason: bootSourceSha === null ? 'boot_source_sha_missing' : 'boot_source_sha_not_exact_git_sha' }
+  } else if (acceptanceGitCommitMismatch) {
+    exactGitSource = { status: 'unknown', sourceSha: sourceExactness?.sourceSha ?? null, reason: `acceptance_git_commit_mismatch boot=${bootSourceSha} acceptance=${acceptanceGitCommit}` }
+  } else {
+    exactGitSource = { status: 'exact', sourceSha: sourceExactness?.sourceSha ?? bootSourceSha, reason: null }
+  }
   const provenanceBasis =
     reloadHash !== null
       ? `log:RELOAD@line ${latestSourceReload.lineIndex} hash=${reloadHash} trigger=${latestSourceReload.trigger ?? 'unknown'} (generation bundle hash; the git SHA behind that bundle is not attested by the marker)`
@@ -799,11 +836,44 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
 
   return {
     bootSourceSha,
-    bootSourceShaKind: bootSourceSha === null ? null : 'git-commit-sha',
+    bootSourceShaKind: bootSourceSha === null ? null : bootSourceShaIsGitCommit ? 'git-commit-sha' : 'unvalidated-source-identifier',
+    exactGitSource: {
+      ...exactGitSource,
+      evidence: sourceExactness
+        ? {
+            path: sourceExactness.path ?? null,
+            attempts: sourceExactness.attempts ?? [],
+            observations: sourceExactness.observations ?? [],
+            reloadCount: sourceExactness.reloadCount ?? 0,
+            sourceChangeCount: sourceExactness.sourceChangeCount ?? 0,
+            changedMarkers: sourceExactness.changedMarkers ?? [],
+            ambiguousMarkers: sourceExactness.ambiguousMarkers ?? [],
+          }
+        : null,
+    },
+    acceptanceSource: {
+      gitCommit: acceptanceGitCommit,
+      checkoutHead: acceptanceCheckoutHead,
+      gitCommitAgreesWithBoot: acceptanceGitCommit === null ? null : !acceptanceGitCommitMismatch,
+      // checkoutHead is deliberately descriptive: it may move after boot and does
+      // not rewrite the immutable source identity. A live generation reload is
+      // separately rejected above unless that generation carries an exact Git SHA.
+      checkoutHeadDiffersFromBoot:
+        acceptanceCheckoutHead === null || bootSourceSha === null
+          ? null
+          : acceptanceCheckoutHead.toLowerCase() !== bootSourceSha.toLowerCase(),
+    },
     latestReload: reloadView(window.latestReload, window.count),
     latestSourceReload: reloadView(latestSourceReload, window.count),
     effectiveSourceSha,
-    effectiveSourceShaKind: effectiveSourceSha === null ? null : reloadHash !== null ? 'generation-bundle-hash' : 'git-commit-sha',
+    effectiveSourceShaKind:
+      effectiveSourceSha === null
+        ? null
+        : reloadHash !== null
+          ? 'generation-bundle-hash'
+          : bootSourceShaIsGitCommit
+            ? 'git-commit-sha'
+            : 'unvalidated-source-identifier',
     provenance,
     provenanceBasis,
     reloadCount: window.count,
@@ -2126,12 +2196,15 @@ export async function buildRunArtifact({
   // being provable - either because the window could not be read at all, or
   // because another run-scoped source attests a bundle change the window missed.
   const reloadWindow = await scanRunSourceWindow(paths, runId)
+  const exactSourceWindow = await scanRunSourceExactness(runId, [paths.logPath, paths.runnerOutPath])
   const runSource = composeRunSource({
     runId,
     boot,
     snapshotBuildHash: snapshot.record?.buildHash ?? null,
     reloadWindow,
     socketBinding,
+    acceptanceRecord: acceptance.record,
+    sourceExactness: exactSourceWindow,
   })
   if (runSource.window.status !== 'valid') {
     const tried = (runSource.window.attempts ?? [])
@@ -2145,6 +2218,12 @@ export async function buildRunArtifact({
     missing.add(
       'run.source:reload_window',
       `the run window records no source-changing RELOAD marker, so effectiveSourceSha falls back to the BOOT SHA (provenance=boot, ${String(runSource.effectiveSourceSha)}), but another run-scoped source attests the bundle changed mid-run (${runSource.windowBlind.reasons.join('; ')}): the window is blind to at least one source change`,
+    )
+  }
+  if (runSource.exactGitSource.status !== 'exact') {
+    missing.add(
+      'run.source:exact_git_sha',
+      `${runSource.exactGitSource.reason}; the run's final executing source must be attributable to an exact Git commit SHA, and a generation bundle hash is not a commit SHA`,
     )
   }
 

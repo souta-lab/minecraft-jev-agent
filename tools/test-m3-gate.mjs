@@ -43,6 +43,16 @@ const OTHER_RUN = 'run-m3-b'
 const SOURCE_SHA = 'a'.repeat(40)
 const OTHER_SOURCE_SHA = 'b'.repeat(40)
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
+const exactSource = (runId = RUN, sourceSha = SOURCE_SHA) => ({
+  status: 'exact',
+  exact: true,
+  runId,
+  sourceSha,
+  path: 'fixture',
+  reloadCount: 0,
+  sourceChangeCount: 0,
+  reason: null,
+})
 
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0 },
@@ -129,7 +139,14 @@ function evidenceFrom(lines, runId = RUN) {
   }
 }
 
-async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json = false, policyEvidence = VERIFIED_POLICY } = {}) {
+async function judge({
+  lines = FULL_RUN,
+  expectedRunId = RUN,
+  readEvidence,
+  json = false,
+  policyEvidence = VERIFIED_POLICY,
+  acceptanceGitCommit = null,
+} = {}) {
   // M3 acceptance requires a fresh HOST `report` observation of the inventory
   // held now. Derive a run-scoped fixture observation from the latest inventory
   // marker inside the requested BOOT window; historical samples alone cannot
@@ -169,15 +186,31 @@ async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json
         counts: terminalCounts,
       }
   const out = capture()
-  const code = await runM3Gate({
-    expectedRunId,
-    readEvidence: readEvidence ?? (async () => evidenceFrom(lines, expectedRunId)),
-    write: out.write,
-    json,
-    policyEvidence,
-    policySocket: expectedRunId === null ? null : { runId: expectedRunId, currentInventoryObservation },
-  })
-  return { code, text: out.text(), lines: out.lines }
+  const dir = mkdtempSync(join(tmpdir(), 'm3-gate-source-'))
+  const sourcePath = join(dir, 'runner.out')
+  writeFileSync(sourcePath, `${lines.join('\n')}\n`)
+  if (acceptanceGitCommit !== null) {
+    writeFileSync(
+      join(dir, `acceptance-${expectedRunId}.json`),
+      JSON.stringify({ record: 'acceptance', runId: expectedRunId, gitCommit: acceptanceGitCommit }),
+    )
+  }
+  try {
+    const code = await runM3Gate({
+      expectedRunId,
+      readEvidence: readEvidence ?? (async () => evidenceFrom(lines, expectedRunId)),
+      logPath: sourcePath,
+      snapshotDir: dir,
+      runnerOutPath: sourcePath,
+      write: out.write,
+      json,
+      policyEvidence,
+      policySocket: expectedRunId === null ? null : { runId: expectedRunId, currentInventoryObservation },
+    })
+    return { code, text: out.text(), lines: out.lines }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 function runGateCli(args) {
@@ -240,6 +273,41 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     text,
   )
   ok('same-run ender_eye>=12 + authority -> PASS/exit 0 (counts + dimension reported)')
+}
+
+{
+  const changed = await judge({
+    lines: [...FULL_RUN, '[2026-09-20T10:00:06.000Z] RELOAD ok=true trigger=source-changed hash=deadbeefcafe id=gen-2'],
+  })
+  assert.equal(changed.code, 2, changed.text)
+  assert.match(changed.text, /m3_source: status=unknown reason=source_changing_reload_has_no_exact_git_sha/)
+  assert.match(changed.text, /M3_RUN_RESULT status=UNKNOWN reason=run_source_not_exact/)
+  assert.doesNotMatch(changed.text, /status=PASS/)
+  const harmless = await judge({
+    lines: [
+      ...FULL_RUN,
+      '[2026-09-20T10:00:06.000Z] RELOAD ok=true trigger=control skipped=unchanged',
+      '[2026-09-20T10:00:07.000Z] RELOAD ok=false trigger=source-changed reason=compile_failed',
+      `[2026-09-20T10:00:08.000Z] RELOAD runId=${OTHER_RUN} ok=true trigger=source-changed hash=foreignbundle id=foreign`,
+    ],
+  })
+  assert.equal(harmless.code, 0, harmless.text)
+  assert.match(harmless.text, /m3_source: status=exact reason=none reloads=2/)
+
+  const mismatch = await judge({ acceptanceGitCommit: OTHER_SOURCE_SHA })
+  assert.equal(mismatch.code, 2, mismatch.text)
+  assert.match(mismatch.text, /acceptance_git_commit_mismatch/)
+  assert.match(mismatch.text, /exact_source: UNKNOWN/)
+  assert.doesNotMatch(mismatch.text, /status=PASS/)
+
+  const invalidSha = await judge({ lines: FULL_RUN.map((line) => line.replace(SOURCE_SHA, 'deadbeef')) })
+  assert.equal(invalidSha.code, 2, invalidSha.text)
+  assert.match(invalidSha.text, /run_source_not_exact reason=run_boot_source_sha_invalid/)
+  assert.match(invalidSha.text, /exact_source: UNKNOWN/)
+  const restartedWithoutSha = await judge({ lines: [...FULL_RUN, '[2026-09-20T10:00:09.000Z] BOOT pid=2 runId=run-m3-a runtime=bun'] })
+  assert.equal(restartedWithoutSha.code, 2, restartedWithoutSha.text)
+  assert.match(restartedWithoutSha.text, /run_boot_source_sha_invalid/)
+  ok('M3 source contract rejects changed/missing source, preserves unchanged/failed reloads, and checks acceptance provenance')
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +398,25 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     const parsed = JSON.parse(json.stdout)
     assert.equal(parsed.status, 'UNKNOWN')
     assert.equal(parsed.conditions.ender_eye_ready, 'UNKNOWN')
+    assert.equal(parsed.conditions.exact_source, 'PASS')
     assert.equal(parsed.sourceSha, SOURCE_SHA)
+    assert.equal(parsed.sourceExactness.status, 'exact')
     assert.equal(parsed.facts.sourceSha, SOURCE_SHA)
     assert.equal(parsed.facts.milestonePredicates.sourceSha, SOURCE_SHA)
+
+    writeFileSync(
+      runnerOutPath,
+      `${[
+        boot(RUN, OTHER_SOURCE_SHA),
+        '[2026-09-20T10:00:00.100Z] GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false',
+      ].join('\n')}\n`,
+    )
+    const sourceStreamMismatch = runGateCli([...commonArgs, '--json'])
+    const sourceStreamMismatchJson = JSON.parse(sourceStreamMismatch.stdout)
+    assert.equal(sourceStreamMismatch.code, 2)
+    assert.match(sourceStreamMismatchJson.reason, /source_stream_boot_sha_disagreement/)
+    assert.equal(sourceStreamMismatchJson.conditions.exact_source, 'UNKNOWN')
+    writeFileSync(runnerOutPath, `${runnerLog.join('\n')}\n`)
 
     writeFileSync(
       predicatePath,
@@ -396,7 +480,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     assert.equal(unavailable.code, 2, `${unavailable.stderr}\n${unavailable.stdout}`)
     const unavailableJson = JSON.parse(unavailable.stdout)
     assert.equal(unavailableJson.status, 'UNKNOWN')
-    assert.match(unavailableJson.reason, /run_source_sha_unavailable.*run_source_sha_missing/)
+    assert.match(unavailableJson.reason, /run_source_not_exact reason=run_boot_source_sha_invalid/)
     assert.equal(unavailableJson.sourceSha, null)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -506,6 +590,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     expectedRunId: RUN,
     readEvidence: null,
     logPath: sourceLog,
+    runnerOutPath: sourceLog,
     snapshotDir: dir,
     policyEvidence: VERIFIED_POLICY,
     write: out.write,
@@ -532,6 +617,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const currentCode = await runM3Gate({
     expectedRunId: RUN,
     logPath: sourceLog,
+    runnerOutPath: sourceLog,
     snapshotDir: dir,
     policyEvidence: VERIFIED_POLICY,
     policySocket: { runId: RUN, currentInventoryObservation: terminalObservation },
@@ -547,6 +633,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     expectedRunId: OTHER_RUN,
     readEvidence: null,
     logPath: join(dir, 'absent.log'),
+    runnerOutPath: join(dir, 'absent-runner.out'),
     snapshotDir: dir,
     policyEvidence: {
       ...VERIFIED_POLICY,
@@ -599,18 +686,25 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
 
 {
   const out = capture()
-  const code = await runLiveGate({
-    argv: ['--run', RUN],
-    env: {},
-    readEvidence: async (runId) => {
-      assert.equal(runId, RUN)
-      return evidenceFrom(FULL_RUN)
-    },
-    policyEvidence: VERIFIED_POLICY,
-    policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
-    write: out.write,
-  })
-  assert.equal(code, 0, out.text())
+  const dir = mkdtempSync(join(tmpdir(), 'm3-live-source-'))
+  const sourcePath = join(dir, 'runner.out')
+  writeFileSync(sourcePath, `${FULL_RUN.join('\n')}\n`)
+  try {
+    const code = await runLiveGate({
+      argv: ['--run', RUN, '--log', sourcePath, '--runner-out', sourcePath, '--snapshot-dir', dir],
+      env: {},
+      readEvidence: async (runId) => {
+        assert.equal(runId, RUN)
+        return evidenceFrom(FULL_RUN)
+      },
+      policyEvidence: VERIFIED_POLICY,
+      policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
+      write: out.write,
+    })
+    assert.equal(code, 0, out.text())
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
   assert.match(out.text(), new RegExp(`M3_LIVE_GATE current=${CURRENT_M3} runId=${RUN}`), out.text())
   assert.match(out.text(), new RegExp(`M3_LIVE_RESULT status=PASS reason=twelve_eyes_of_ender_verified runId=${RUN}`), out.text())
   ok('live gate delegates the run-scoped M3 verdict')
@@ -624,7 +718,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const evidence = evidenceFrom(shortRun)
   const policy = evaluateM3AuthorityEvidence({ expectedRunId: RUN, ...VERIFIED_POLICY })
   const terminal = currentObservation({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 12 })
-  const base = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, currentInventoryObservation: terminal })
+  const base = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, currentInventoryObservation: terminal, sourceExactness: exactSource() })
   assert.equal(base.status, 'UNKNOWN')
   assert.equal(base.conditions.ender_eye_ready, 'PASS')
   assert.equal(base.conditions.nether_reached, 'UNKNOWN')
@@ -647,7 +741,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
     ],
   }
-  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: section, currentInventoryObservation: terminal })
+  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: section, currentInventoryObservation: terminal, sourceExactness: exactSource() })
   assert.equal(upgraded.status, 'PASS', 'a truly observed predicate is sufficient proof')
   assert.equal(upgraded.conditions.ender_eye_ready, 'PASS')
   assert.equal(upgraded.conditions.nether_reached, 'PASS')
@@ -660,13 +754,13 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       { id: 'nether_reached', satisfied: null, observedAtMs: null, observedAt: null, source: null, evidence: {} },
     ],
   }
-  const notUpgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: falseSection, currentInventoryObservation: terminal })
+  const notUpgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: falseSection, currentInventoryObservation: terminal, sourceExactness: exactSource() })
   assert.notEqual(notUpgraded.status, 'PASS')
   assert.equal(notUpgraded.conditions.ender_eye_ready, 'PASS')
   assert.equal(notUpgraded.conditions.nether_reached, 'UNKNOWN')
 
   const wrongSourceSection = { ...section, sourceSha: OTHER_SOURCE_SHA }
-  const wrongSource = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: wrongSourceSection, currentInventoryObservation: terminal })
+  const wrongSource = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: wrongSourceSection, currentInventoryObservation: terminal, sourceExactness: exactSource() })
   assert.notEqual(wrongSource.status, 'PASS')
   assert.equal(wrongSource.conditions.ender_eye_ready, 'PASS')
   assert.ok(wrongSource.facts.milestonePredicates.mismatches.some((reason) => reason.includes('source_sha_mismatch')))
@@ -679,6 +773,8 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
 {
   const dir = mkdtempSync(join(tmpdir(), 'm3-predicates-'))
   try {
+    const sourceLog = join(dir, 'source.log')
+    writeFileSync(sourceLog, `${boot(RUN)}\n`)
     writeFileSync(
       join(dir, `milestone-predicates-${RUN}.json`),
       JSON.stringify({
@@ -701,6 +797,8 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
       policyEvidence: VERIFIED_POLICY,
       policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
+      logPath: sourceLog,
+      runnerOutPath: sourceLog,
       snapshotDir: dir,
       write: out.write,
     })
@@ -714,6 +812,8 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       expectedRunId: RUN,
       readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
       policyEvidence: VERIFIED_POLICY,
+      logPath: sourceLog,
+      runnerOutPath: sourceLog,
       snapshotDir: join(dir, 'absent'),
       write: foreign.write,
     })

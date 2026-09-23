@@ -45,7 +45,7 @@
 //
 // Exit: 0 = PASS, 1 = FAIL (materials complete, eyes short), 2 = UNKNOWN.
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   M2_GATE_CONTROL_SOCK,
@@ -70,6 +70,7 @@ import {
   deriveMilestonePredicates,
   readMilestonePredicateEvidence,
 } from './milestone-predicates.mjs'
+import { scanRunSourceExactness } from './run-source-exactness.mjs'
 
 /** Re-exported so the live-gate wrapper shares the exact same run-id shape rule. */
 export { RUN_ID_RE }
@@ -81,7 +82,7 @@ export const M3_RUN_GATE = 'M3_RUN_GATE'
 const SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
 
 /** The conditions M3 must prove; inventory facts beyond these are diagnostics. */
-export const M3_REQUIRED_CONDITIONS = Object.freeze(['ender_eye_ready', 'model_authority', 'nether_reached'])
+export const M3_REQUIRED_CONDITIONS = Object.freeze(['exact_source', 'ender_eye_ready', 'model_authority', 'nether_reached'])
 
 /** Default to the shared M2 run-scoped artifacts; allow M3-specific overrides. */
 export const M3_GATE_LOG = process.env.M3_GATE_LOG ?? process.env.M3_LOG ?? M2_GATE_LOG
@@ -224,7 +225,7 @@ export function evaluateM3AuthorityEvidence({ expectedRunId = null, decisions = 
 // ---------------------------------------------------------------------------
 
 function unknownConditions() {
-  return { ender_eye_ready: 'UNKNOWN', model_authority: 'UNKNOWN', nether_reached: 'UNKNOWN' }
+  return { exact_source: 'UNKNOWN', ender_eye_ready: 'UNKNOWN', model_authority: 'UNKNOWN', nether_reached: 'UNKNOWN' }
 }
 
 function normalizeSourceSha(value) {
@@ -233,6 +234,35 @@ function normalizeSourceSha(value) {
 
 function verdict({ status, code, reason, runId, sourceSha = null, conditions, evidence = null, sources = null, facts = null }) {
   return { id: 'M3', status, code, reason, runId, sourceSha, conditions, evidence, sources, facts }
+}
+
+function bindAcceptanceGitCommit(runId, snapshotDir, sourceExactness) {
+  if (sourceExactness?.status !== 'exact') return sourceExactness
+  const path = join(snapshotDir, `acceptance-${runId}.json`)
+  if (!existsSync(path)) return sourceExactness
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8'))
+    if (record?.record !== 'acceptance' || record.runId !== runId) {
+      return { ...sourceExactness, status: 'unknown', exact: false, reason: `acceptance_record_run_mismatch path=${path}` }
+    }
+    const gitCommit = typeof record.gitCommit === 'string' ? record.gitCommit.toLowerCase() : null
+    if (gitCommit !== null && gitCommit !== sourceExactness.sourceSha.toLowerCase()) {
+      return {
+        ...sourceExactness,
+        status: 'unknown',
+        exact: false,
+        reason: `acceptance_git_commit_mismatch boot=${sourceExactness.sourceSha} acceptance=${gitCommit}`,
+      }
+    }
+    return sourceExactness
+  } catch (error) {
+    return {
+      ...sourceExactness,
+      status: 'unknown',
+      exact: false,
+      reason: `acceptance_artifact_unreadable ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
 }
 
 /**
@@ -250,6 +280,7 @@ export function evaluateM3Gate({
   milestonePredicates = null,
   sourceSha = null,
   currentInventoryObservation = null,
+  sourceExactness = null,
 } = {}) {
   if (expectedRunId === null || !RUN_ID_RE.test(String(expectedRunId))) {
     return verdict({
@@ -284,18 +315,36 @@ export function evaluateM3Gate({
     })
   }
 
-  // The run's source identity comes only from its BOOT line in the run-scoped
-  // resident log. A predicate artifact's own sourceSha, or a caller-supplied
-  // value, cannot establish the expected source.
-  const runSourceSha = normalizeSourceSha(evidence.sourceSha)
-  if (runSourceSha === null) {
+  // The run's source identity comes from its same-run BOOT and remains exact only
+  // when every available log stream agrees and no source-changing reload replaced
+  // it. Generation bundle hashes never stand in for Git SHAs.
+  const exactSourceSha = normalizeSourceSha(sourceExactness?.sourceSha)
+  if (sourceExactness?.status !== 'exact' || sourceExactness?.runId !== expectedRunId || exactSourceSha === null) {
     return verdict({
       status: 'UNKNOWN',
       code: 2,
-      reason: `run_source_sha_unavailable reason=${evidence.sourceShaReason ?? 'run_source_sha_missing'}`,
+      reason: `run_source_not_exact reason=${sourceExactness?.reason ?? 'source_provenance_unavailable'}`,
       runId: expectedRunId,
       conditions: unknownConditions(),
+      evidence: sourceExactness?.status ?? 'unavailable',
+      facts: { sourceSha: exactSourceSha, sourceExactness },
+    })
+  }
+  // The scanner independently reads the BOOT window; require it to agree with
+  // the M2 evidence reader before either one can establish the gate's source.
+  const runSourceSha = normalizeSourceSha(evidence.sourceSha)
+  if (runSourceSha === null || runSourceSha !== exactSourceSha) {
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: runSourceSha === null
+        ? `run_source_sha_unavailable reason=${evidence.sourceShaReason ?? 'run_source_sha_missing'}`
+        : `source_stream_boot_sha_disagreement evidence=${runSourceSha} exactness=${exactSourceSha}`,
+      runId: expectedRunId,
+      sourceSha: exactSourceSha,
+      conditions: unknownConditions(),
       evidence: evidence.status,
+      facts: { sourceSha: exactSourceSha, sourceExactness },
     })
   }
   if (sourceSha !== null && normalizeSourceSha(sourceSha) !== runSourceSha) {
@@ -307,6 +356,7 @@ export function evaluateM3Gate({
       sourceSha: runSourceSha,
       conditions: unknownConditions(),
       evidence: evidence.status,
+      facts: { sourceSha: runSourceSha, sourceExactness },
     })
   }
 
@@ -367,6 +417,7 @@ export function evaluateM3Gate({
       return value === 'minecraft:the_nether' || value === 'the_nether'
     })
   const conditions = {
+    exact_source: 'PASS',
     ender_eye_ready: eyesReady ? 'PASS' : materialsFail ? 'FAIL' : 'UNKNOWN',
     model_authority: authorityPass ? 'PASS' : 'UNKNOWN',
     nether_reached: netherObserved ? 'PASS' : 'UNKNOWN',
@@ -379,6 +430,7 @@ export function evaluateM3Gate({
   }))
   const facts = {
     sourceSha: runSourceSha,
+    sourceExactness,
     eyes,
     terminalInventory: {
       status: terminalInventory.status,
@@ -534,8 +586,14 @@ export async function runM3Gate({
         expectedRunId,
         decisions: rawPolicy?.decisions ?? null,
         generation: rawPolicy?.generation ?? null,
-      })
+    })
     : null
+  const scannedSourceExactness = scoped
+    ? await scanRunSourceExactness(expectedRunId, [logPath, runnerOutPath])
+    : { status: 'unknown', exact: false, runId: expectedRunId, sourceSha: null, reason: 'exact_run_scope_required' }
+  const sourceExactness = scoped
+    ? bindAcceptanceGitCommit(expectedRunId, snapshotDir, scannedSourceExactness)
+    : scannedSourceExactness
   // The resident produces a run-scoped predicate observation file in the same
   // directory as the M2 snapshot. It is used when present (live observations),
   // and the gate otherwise derives the section from its own run-scoped evidence.
@@ -544,7 +602,7 @@ export async function runM3Gate({
     scoped && hostObservation !== null && hostObservation.present
       ? deriveMilestonePredicates({
           runId: expectedRunId,
-          runSourceSha: evidence?.sourceSha ?? null,
+          runSourceSha: sourceExactness?.sourceSha ?? null,
           inventorySamples: (evidence?.sources ?? []).flatMap((source) =>
             (Array.isArray(source.inventorySamples) ? source.inventorySamples : []).map((counts) => ({ counts, source: 'log' })),
           ),
@@ -564,6 +622,7 @@ export async function runM3Gate({
     milestonePredicates,
     sourceSha,
     currentInventoryObservation: socketBinding?.runId === expectedRunId ? socketBinding.currentInventoryObservation ?? null : null,
+    sourceExactness,
   })
   if (typeof onResult === 'function') onResult(result)
 
@@ -575,6 +634,7 @@ export async function runM3Gate({
         reason: result.reason,
         runId: result.runId,
         sourceSha: result.sourceSha,
+        sourceExactness: result.facts?.sourceExactness ?? null,
         conditions: result.conditions,
         evidence: evidence === null ? null : { status: evidence.status, sources: (evidence.sources ?? []).map((s) => s.name) },
         policy: policy === null ? null : { status: policy.status, reason: policy.reason },
@@ -587,13 +647,18 @@ export async function runM3Gate({
   write(`${M3_RUN_GATE} — ${stamp}`)
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
   write(`sourceSha: ${result.sourceSha ?? 'unknown'}`)
+  write(
+    `m3_source: status=${result.facts?.sourceExactness?.status ?? 'unknown'} ` +
+      `reason=${result.facts?.sourceExactness?.reason ?? 'none'} ` +
+      `reloads=${result.facts?.sourceExactness?.reloadCount ?? 0}`,
+  )
   if (evidence !== null) {
     const sourceNames = (evidence.sources ?? []).map((source) => source.name).join(',')
     write(`m3_evidence: ${evidence.status} sources=${sourceNames || 'none'}${evidence.reason ? ` reason=${evidence.reason}` : ''}`)
   }
   for (const condition of M3_REQUIRED_CONDITIONS) write(`${condition}: ${result.conditions[condition]}`)
   if (policy !== null) write(`policy: ${policy.status} reason=${policy.reason}`)
-  if (result.facts !== null) {
+  if (result.facts?.eyes !== undefined) {
     write(
       `m3_facts: ender_pearl=${result.facts.eyes.enderPearl} blaze_rod=${result.facts.eyes.blazeRod} ` +
         `blaze_powder=${result.facts.eyes.blazePowder} ender_eye=${result.facts.eyes.enderEye ?? 'unknown'} ` +

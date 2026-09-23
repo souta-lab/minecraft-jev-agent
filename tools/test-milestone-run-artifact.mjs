@@ -153,7 +153,8 @@ const ACCEPTANCE = (runId) =>
     record: 'acceptance',
     runId,
     ts: at(40),
-    gitCommit: 'd8d53c298cdebbde33a14f20e43136263269c666',
+    gitCommit: SOURCE_SHA,
+    checkoutHead: SOURCE_SHA,
     generationHash: 'e6be1812c804',
     contractVersion: 3,
     stateSchemaVersion: 3,
@@ -1089,6 +1090,24 @@ ok('an acceptance record never turns an incomplete milestone into PASS; its abse
 }
 ok('a synthetic complete run answers source SHA, env, inventory, transitions, predicates, authority and fallback absence')
 
+{
+  const runId = 'run-fixture-acceptance-source-mismatch'
+  const root = makeRoot('acceptance-source-mismatch')
+  writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }) })
+  const acceptancePath = join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`)
+  writeFileSync(
+    acceptancePath,
+    JSON.stringify({ record: 'acceptance', runId, gitCommit: 'f'.repeat(40), checkoutHead: SOURCE_SHA }),
+  )
+  const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(artifact.status, 'UNKNOWN')
+  assert.equal(artifact.run.source.exactGitSource.status, 'unknown')
+  assert.match(artifact.run.source.exactGitSource.reason, /acceptance_git_commit_mismatch/)
+  assert.ok(artifact.missingEvidence.includes('run.source:exact_git_sha'))
+  assert.equal(artifact.verdicts.M3.status, 'UNKNOWN')
+  ok('a run-scoped acceptance gitCommit mismatch is surfaced and rejected by M3')
+}
+
 // ---------------------------------------------------------------------------
 // P. source provenance: the LATEST source-changing reload is the effective source
 //    while run.boot.sourceSha stays the run's origin (the live defect: an artifact
@@ -1111,10 +1130,13 @@ ok('a synthetic complete run answers source SHA, env, inventory, transitions, pr
     runId,
     counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
   })
-  // A reload is not by itself a missing fact: this run is still COMPLETE and PASS.
-  assert.equal(result.code, 0, `reload fixture exit=${result.code} stderr=${result.stderr}`)
+  // Bundle hashes identify generations, not source commits. A source-changing
+  // reload has no exact Git SHA, so this run remains UNKNOWN at acceptance.
+  assert.equal(result.code, 2, `reload fixture must remain UNKNOWN: ${result.stderr}`)
   const artifact = result.json()
-  assert.deepEqual(artifact.missingEvidence, [])
+  assert.ok(artifact.missingEvidence.includes('run.source:exact_git_sha'))
+  assert.equal(artifact.status, 'UNKNOWN')
+  assert.equal(artifact.verdicts.M3.status, 'UNKNOWN')
   const source = artifact.run.source
   // Origin (untouched) vs effective source (what produced the result).
   assert.equal(artifact.run.boot.sourceSha, SOURCE_SHA)
@@ -1160,7 +1182,8 @@ ok('a synthetic complete run answers source SHA, env, inventory, transitions, pr
     source.observed.map((marker) => marker.hash),
     ['aaaa11112222', 'bbbb33334444'],
   )
-  assert.ok(!artifact.missingEvidence.some((field) => String(field).startsWith('run.source')))
+  assert.equal(source.exactGitSource.status, 'unknown')
+  assert.equal(source.exactGitSource.reason, 'source_changing_reload_has_no_exact_git_sha')
 }
 ok('two in-window reloads: the LATEST source-changing hash is effective, with trigger/at/generationId/line recorded')
 
