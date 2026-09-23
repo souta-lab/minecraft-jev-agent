@@ -838,6 +838,24 @@ function isBootLine(line) {
   return typeof line === 'string' && /\bBOOT\b(?!_)/.test(line)
 }
 
+const BOOT_SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
+
+function sourceShaFromBootLine(line) {
+  const raw = /\bsource=(\S+)/.exec(line)?.[1] ?? null
+  if (raw === null) return { sourceSha: null, sourceShaReason: 'run_source_sha_missing' }
+  if (!BOOT_SOURCE_SHA_RE.test(raw)) return { sourceSha: null, sourceShaReason: 'run_source_sha_invalid' }
+  return { sourceSha: raw.toLowerCase(), sourceShaReason: null }
+}
+
+function resolveBootSourceSha(records) {
+  if (records.length === 0) return { sourceSha: null, sourceShaReason: 'run_boot_source_unavailable' }
+  const unavailable = records.find((record) => record.sourceSha === null)
+  if (unavailable !== undefined) return { sourceSha: null, sourceShaReason: unavailable.sourceShaReason }
+  const shas = new Set(records.map((record) => record.sourceSha))
+  if (shas.size !== 1) return { sourceSha: null, sourceShaReason: 'run_source_sha_ambiguous' }
+  return { sourceSha: records[0].sourceSha, sourceShaReason: null }
+}
+
 /**
  * Attribute every portal marker and inventory sample to exactly one run. A BOOT
  * line opens a run boundary; a line without `runId=` belongs to the active
@@ -850,13 +868,17 @@ export function scanRunLines(runId, lines) {
   const inventorySamples = []
   const dimensionObservations = []
   const foreignRuns = new Set()
+  const bootSources = []
   let activeRunId = null
   let bootSeen = false
   for (const line of Array.isArray(lines) ? lines : []) {
     const bootRunId = isBootLine(line) ? runIdOfLine(line) : null
     if (bootRunId !== null) {
       activeRunId = bootRunId
-      if (bootRunId === runId) bootSeen = true
+      if (bootRunId === runId) {
+        bootSeen = true
+        bootSources.push(sourceShaFromBootLine(line))
+      }
     }
     // A marker's own runId field is not a lifetime boundary. Only the real
     // BOOT line may open R; otherwise a copied/stale marker can be attributed
@@ -881,14 +903,32 @@ export function scanRunLines(runId, lines) {
       portalEvents: [],
       inventorySamples: [],
       dimensionObservations: [],
+      sourceSha: null,
+      sourceShaReason: 'run_boot_boundary_missing',
     }
   }
-  return { status: 'valid', portalEvents, inventorySamples, dimensionObservations, foreignRuns: [...foreignRuns] }
+  return {
+    status: 'valid',
+    portalEvents,
+    inventorySamples,
+    dimensionObservations,
+    foreignRuns: [...foreignRuns],
+    ...resolveBootSourceSha(bootSources),
+  }
 }
 
 /** Read and scan the resident log for run R's markers. */
 export async function readM2Log(runId, { logPath = M2_GATE_LOG } = {}) {
-  if (!existsSync(logPath)) return { status: 'unavailable', path: logPath, portalEvents: [], inventorySamples: [] }
+  if (!existsSync(logPath)) {
+    return {
+      status: 'unavailable',
+      path: logPath,
+      portalEvents: [],
+      inventorySamples: [],
+      sourceSha: null,
+      sourceShaReason: 'run_log_unavailable',
+    }
+  }
   const lines = []
   const rl = createInterface({ input: createReadStream(logPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) lines.push(line)
@@ -983,6 +1023,7 @@ export async function readRunScopedM2Evidence(
 ) {
   const sources = []
   const mismatches = []
+  const bootSourceRecords = []
   const dirs = Array.isArray(snapshotDirs) && snapshotDirs.length > 0 ? snapshotDirs : [snapshotDir]
   let snapshotTaken = false
   for (const dir of dirs) {
@@ -1009,6 +1050,7 @@ export async function readRunScopedM2Evidence(
     if (typeof candidate !== 'string' || candidate.length === 0 || seenLogs.has(candidate)) continue
     seenLogs.add(candidate)
     const log = await readM2Log(runId, { logPath: candidate })
+    if (log.status === 'valid') bootSourceRecords.push({ sourceSha: log.sourceSha ?? null, sourceShaReason: log.sourceShaReason ?? 'run_source_sha_unavailable' })
     if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0)) {
       sources.push({
         name: 'log',
@@ -1023,6 +1065,7 @@ export async function readRunScopedM2Evidence(
     // it is simply not this run's log. Only a broken boundary is worth recording.
     if (log.status === 'unknown') mismatches.push(log.reason)
   }
+  const runSource = resolveBootSourceSha(bootSourceRecords)
   if (sources.length === 0) {
     return {
       status: mismatches.length > 0 ? 'unknown' : 'unavailable',
@@ -1030,9 +1073,10 @@ export async function readRunScopedM2Evidence(
       sources: [],
       mismatches,
       reason: mismatches[0] ?? 'no_run_scoped_m2_evidence',
+      ...runSource,
     }
   }
-  return { status: 'valid', runId, sources, mismatches }
+  return { status: 'valid', runId, sources, mismatches, ...runSource }
 }
 
 // ---------------------------------------------------------------------------

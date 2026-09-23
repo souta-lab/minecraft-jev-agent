@@ -38,6 +38,7 @@ import { evaluatePortalChain } from './m2-gate.mjs'
 
 export const MILESTONE_PREDICATE_RECORD = 'milestone-predicates'
 export const MILESTONE_PREDICATE_SCHEMA_VERSION = 1
+const SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
 
 /** M3 terminal item + the crafting inputs, re-exported by tools/m3-gate.mjs. */
 export const ENDER_EYE = 'ender_eye'
@@ -394,10 +395,17 @@ export function deriveMilestonePredicates({
 } = {}) {
   const mismatches = []
   let hostPredicates = []
+  const boundRunSourceSha = typeof runSourceSha === 'string' && SOURCE_SHA_RE.test(runSourceSha) ? runSourceSha.toLowerCase() : null
   if (hostObservation !== null && hostObservation.present === true) {
     const hostSha = hostObservation.sourceSha
-    if (runSourceSha !== null && hostSha !== null && hostSha !== runSourceSha) {
-      mismatches.push(`milestone_predicates_source_sha_mismatch expected=${runSourceSha} observed=${hostSha}`)
+    const boundHostSha = typeof hostSha === 'string' && SOURCE_SHA_RE.test(hostSha) ? hostSha.toLowerCase() : null
+    if (boundRunSourceSha === null) {
+      mismatches.push('milestone_predicates_source_sha_unavailable run_source=unknown')
+    } else if (boundHostSha === null) {
+      const reason = hostSha === null ? 'source_sha_missing' : 'source_sha_invalid'
+      mismatches.push(`milestone_predicates_${reason} expected=${boundRunSourceSha}`)
+    } else if (boundHostSha !== boundRunSourceSha) {
+      mismatches.push(`milestone_predicates_source_sha_mismatch expected=${boundRunSourceSha} observed=${boundHostSha}`)
     } else {
       hostPredicates = hostObservation.predicates.map(normalizeHostObservation)
     }
@@ -435,7 +443,7 @@ export function deriveMilestonePredicates({
     record: MILESTONE_PREDICATE_RECORD,
     schemaVersion: MILESTONE_PREDICATE_SCHEMA_VERSION,
     runId,
-    sourceSha: runSourceSha,
+    sourceSha: boundRunSourceSha,
     generatedAt: now().toISOString(),
     observationSources: [...sources].sort(),
     hostObservation:

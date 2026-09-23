@@ -188,7 +188,29 @@ const byId = (section, id) => section.predicates.find((predicate) => predicate.i
   assert.equal(byId(rejected, 'ender_eyes').satisfied, false, 'a mismatched sourceSha must not prove the predicate')
   assert.equal(rejected.mismatches.length, 1)
   assert.match(rejected.mismatches[0], /source_sha_mismatch/)
-  ok('host evidence is merged monotonically, but a sourceSha mismatch is rejected and reported')
+
+  const missingSource = deriveMilestonePredicates({
+    runId: RUN,
+    runSourceSha: SHA,
+    inventorySamples: [{ counts: { ender_eye: 0 }, atMs: T(40), source: 'log' }],
+    dimensionObservations: [],
+    portalEvents: [],
+    hostObservation: { ...host, sourceSha: null },
+  })
+  assert.equal(byId(missingSource, 'ender_eyes').satisfied, false, 'a missing sourceSha must not prove the predicate')
+  assert.match(missingSource.mismatches[0], /source_sha_missing/)
+
+  const runSourceUnknown = deriveMilestonePredicates({
+    runId: RUN,
+    runSourceSha: null,
+    inventorySamples: [],
+    dimensionObservations: [],
+    portalEvents: [],
+    hostObservation: host,
+  })
+  assert.equal(byId(runSourceUnknown, 'ender_eyes').satisfied, null, 'without a BOOT SHA host claims are not usable')
+  assert.match(runSourceUnknown.mismatches[0], /source_sha_unavailable/)
+  ok('host evidence is merged only when its sourceSha matches a known BOOT SHA')
 }
 
 // ---------------------------------------------------------------------------
