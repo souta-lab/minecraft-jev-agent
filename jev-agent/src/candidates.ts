@@ -128,6 +128,7 @@ import {
   formatContactUnreachable,
   HUNT_APPROACH_BUDGET,
   MELEE_ATTACK_REACH,
+  meleeWalkGap,
 } from './combatClosure.ts'
 import type { AttackStandEvidence, AttackStandFact, ContactApproach } from './combatClosure.ts'
 import {
@@ -9429,12 +9430,15 @@ function contactGeometryFor(
       distance: entity.distance,
       meleeReach: MELEE_THREAT_REACH,
       gapY,
-      // A walk cannot change the body's LEVEL, so the largest vertical component a
-      // walk-only close can still express is the melee envelope itself: the 3-D
-      // distance is at least |gapY|, so `gapY > meleeReach` is unreachable from
-      // EVERY horizontal position. Integer levels make this identical for the
-      // executor's 3.1 and the gate's 3.2.
-      walkGap: MELEE_THREAT_REACH,
+      // A walk cannot change the body's LEVEL, but the body's own height already
+      // spans the first `MELEE_REACH_UP` of an upward gap, so the largest vertical
+      // component a walk-only close can still express is the melee envelope PLUS
+      // that height (`meleeWalkGap`). The old `walkGap = meleeReach` form declared
+      // the measured 4-block blaze gap (`HUNT_CONTACT_UNREACHABLE
+      // actionId=ATTACK:e85793 gap_y=4 horizontal=1.70`) ascent-required when the
+      // body's own upper half is 2.93 m from the target - inside the envelope.
+      // Whole-block verdicts with the tree's constants: 4 = walk, 5 = ascent.
+      walkGap: meleeWalkGap(MELEE_THREAT_REACH),
       ascentRefused: ascentRefusal !== null,
     }),
     gapY,
