@@ -41,6 +41,17 @@ import {
   isBridgeMove,
   planBridgeSpan,
 } from './bridgeRoute.ts'
+import {
+  DESCEND_SCAFFOLD_BLOCK_META,
+  DESCEND_SCAFFOLD_LANDING_META,
+  DESCEND_SCAFFOLD_PLACE_META,
+  DESCEND_SCAFFOLD_POCKET_META,
+  formatDescentScaffoldEnd,
+  formatDescentScaffoldRefused,
+  formatDescentScaffoldStart,
+  formatDescentScaffoldStep,
+} from './descentScaffold.ts'
+import type { DescentScaffoldRefusal } from './descentScaffold.ts'
 import type { BridgeDir, BridgeRefusal } from './bridgeRoute.ts'
 import {
   declaredRoutePlaceBlocks,
@@ -727,6 +738,14 @@ export interface ContainerWindowHandle {
   withdraw(itemName: string, count: number): Promise<unknown>
   close(): void
 }
+
+/**
+ * DESCEND_SCAFFOLD: how long the bounded step DOWN onto a freshly placed landing
+ * may take. One block, physics only - the same order as the pillar's own landing
+ * budget, and short enough that a landing the body cannot enter is a typed partial
+ * leg rather than a stall.
+ */
+const DESCEND_SCAFFOLD_STEP_MS = 2_000
 
 /** PILLAR_UP: jump-apex window in which the block is placed under the feet. */
 const PILLAR_APEX_BUDGET_MS = 700
@@ -2227,6 +2246,15 @@ export class Executor {
           ? (candidate.meta[BRIDGE_BLOCK_META] as string)
           : null
         if (bridgeBlock !== null) return carried.filter((name) => name === bridgeBlock)
+        // A DOWNWARD SELF-LANDING DESCEND declares the ONE block its own placing
+        // step consumes (`meta.descentScaffoldBlock`), so that block - and only it -
+        // is authorized. The mirror of the bridge arm above: the selection grounds
+        // the item, and nothing else becomes equippable.
+        const descentBlock =
+          typeof candidate.meta[DESCEND_SCAFFOLD_BLOCK_META] === 'string'
+            ? (candidate.meta[DESCEND_SCAFFOLD_BLOCK_META] as string)
+            : null
+        if (descentBlock !== null) return carried.filter((name) => name === descentBlock)
         // A route-opening locomotion candidate may clear the cells its OWN
         // grounded route names, so the carried instances of the tool families
         // that route can require are the mechanically equivalent way to satisfy
@@ -3837,6 +3865,40 @@ export class Executor {
     let total = 0
     for (const item of this.bot.inventory.items()) if (item.name === itemName) total += item.count
     return total
+  }
+
+  private logDescentScaffoldRefused(candidate: Candidate, refusal: DescentScaffoldRefusal): void {
+    this.logger.warn('agent', formatDescentScaffoldRefused(refusal), {
+      actionId: candidate.id,
+      reason: refusal.reason,
+      cell: refusal.cell,
+      below: refusal.below,
+      block: refusal.block,
+      fromY: refusal.fromY,
+      toY: refusal.toY,
+    })
+  }
+
+  private logDescentScaffoldEnd(
+    candidate: Candidate,
+    fromY: number,
+    toY: number,
+    placed: number,
+    verified: boolean,
+    reason: string,
+    block: string,
+  ): void {
+    this.logger.info('agent', formatDescentScaffoldEnd({ fromY, toY, placed, verified, reason, block }), {
+      actionId: candidate.id,
+      placed,
+      verified,
+      reason,
+      block,
+      fromY,
+      toY,
+      mayPlaceBlocks: true,
+      consumes: block,
+    })
   }
 
   private logBridgeRefused(candidate: Candidate, refusal: BridgeRefusal): void {
@@ -7595,6 +7657,303 @@ export class Executor {
     return result
   }
 
+  /**
+   * ONE bounded DOWNWARD SELF-LANDING DESCEND: place the floor of the cell under
+   * the body's own feet, then drop onto it.
+   *
+   * THE MOTOR RECIPE (the exact mirror of `runBridgeLeg`'s self-landing step, one
+   * level down):
+   *   1. re-read the body's own feet cell and re-check the placement cell's live
+   *      truth: the cell below is still air and the block under it is still solid,
+   *      so the block this leg places has something to rest on. Nothing is placed
+   *      on faith;
+   *   2. equip the ONE declared block and place it into `feet.y - 2` against the
+   *      block the body is standing on, its BOTTOM face (`face=(0,-1,0)`) - the
+   *      downward rotation of the bridge's "place against the footing, side face in
+   *      the direction of travel". The placement goes through the SAME
+   *      `assertEffect` envelope gate every other mechanical step does, so a cell
+   *      outside the declared one fails closed;
+   *   3. verify the block is REALLY there (`waitForPlacedBlock` + postcondition);
+   *   4. only then step DOWN onto it, and require the body to actually occupy the
+   *      landing cell and the distance to the leg target to strictly shrink.
+   *
+   * SAFETY (the "never strand the body" half): a placement is never followed by a
+   * step onto an unverified cell. Any interruption (lease lost, epoch change,
+   * abort, failed advance) leaves the body standing on the previous verified cell
+   * and emits the typed `DESCEND_SCAFFOLD_END ... verified=false reason=...`, never
+   * a floor it does not stand on. The budget is ONE placement by construction.
+   */
+  private async runDescendScaffold(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const place = metaCellOf(candidate, DESCEND_SCAFFOLD_PLACE_META)
+    const landing = metaCellOf(candidate, DESCEND_SCAFFOLD_LANDING_META)
+    const block = readMetaString(candidate, DESCEND_SCAFFOLD_BLOCK_META)
+    if (place === null || landing === null || block === null) {
+      throw new ExecutorError(
+        'target_gone',
+        `${candidate.id} carries no grounded descent-scaffold contract (place=${place === null ? 'none' : 'ok'} landing=${landing === null ? 'none' : 'ok'} block=${block ?? 'none'})`,
+      )
+    }
+    const from = feetCellOf(this.bot)
+    const fromY = from.y
+    // The typed `no_block` refusal at execution time: the item the offer declared
+    // may have left the inventory between the decision and the lease. No block
+    // means no landing, and it says so.
+    if (this.countHeld(block) < 1) {
+      this.logDescentScaffoldRefused(candidate, {
+        reason: 'no_block',
+        cell: place,
+        block,
+        below: null,
+        detail: `${block} is no longer in the inventory (held=0)`,
+        fromY,
+        toY: landing.y,
+      })
+      this.logDescentScaffoldEnd(candidate, fromY, fromY, 0, false, 'no_block', block)
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'failed',
+        'descending',
+        `descent scaffold refused: ${block} is no longer in the inventory`,
+        'target_gone',
+        { verified: false, blockRemoved: false, dropObserved: false, itemsGained: 0, goalItemCount: this.countGoalItem(), progressed: false },
+      )
+    }
+    this.setPhase(candidate, epoch, 'placing')
+    this.logger.info(
+      'agent',
+      formatDescentScaffoldStart({
+        from,
+        landing,
+        place,
+        block,
+        remaining: Math.max(0, this.countHeld(block) - 1),
+        pocketEvidence: readMetaString(candidate, DESCEND_SCAFFOLD_POCKET_META) ?? 'none',
+      }),
+      {
+        actionId: candidate.id,
+        target: candidate.target,
+        cell: place,
+        from,
+        landing,
+        // #436 section 5: the declared effect travels with the marker, so a
+        // reviewer reads "this leg places one block, below the body, and consumes
+        // this item".
+        mayPlaceBlocks: true,
+        consumes: block,
+      },
+    )
+    let placed = 0
+    let reason = 'reached'
+    let verified = false
+    try {
+      // (1) The live re-read, immediately before the side effect. The rule the offer
+      // used is the rule the executor re-checks: the placement cell must still be
+      // replaceable air whose own support is solid, or the block would fall.
+      this.ensureOwned(epoch, signal)
+      const livePlace = this.currentBlockAt(place)
+      if (livePlace !== null && livePlace.boundingBox !== 'empty') {
+        reason = 'not_air'
+        this.logDescentScaffoldRefused(candidate, {
+          reason: 'not_air',
+          cell: place,
+          block: livePlace.name,
+          below: null,
+          detail: `the placement cell (${place.x},${place.y},${place.z}) is no longer replaceable air (${livePlace.name})`,
+          fromY,
+          toY: landing.y,
+        })
+      } else if (this.placementCellOverlapsBody(place)) {
+        reason = 'no_landing'
+        this.logDescentScaffoldRefused(candidate, {
+          reason: 'no_landing',
+          cell: place,
+          block: null,
+          below: null,
+          detail: `the placement cell (${place.x},${place.y},${place.z}) is inside the body`,
+          fromY,
+          toY: landing.y,
+        })
+      } else {
+        const reference = this.descentScaffoldReference(from)
+        if (reference === null) {
+          reason = 'no_ground'
+          this.logDescentScaffoldRefused(candidate, {
+            reason: 'no_ground',
+            cell: place,
+            block: null,
+            below: null,
+            detail: `no solid footing under (${from.x},${from.y},${from.z}) to place ${block} against`,
+            fromY,
+            toY: landing.y,
+          })
+        } else {
+          // SAFE, immediately before the side effect (the same stop a station and a
+          // bridge placement take): a body out of breath does not keep building.
+          this.requireBreath(candidate, place, 'placing a descent scaffold block')
+          await this.equipPlacementItem(candidate, block, epoch, signal)
+          // issue #436 section 5/27: the placement goes through the SAME
+          // effect-envelope gate as every other mechanical step, so a descent cell
+          // outside its declared contract fails closed instead of silently widening
+          // the envelope.
+          this.assertEffect({ type: 'place', position: place, itemName: block })
+          try {
+            await this.bot.placeBlock(reference.block, reference.face)
+          } catch (error) {
+            if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
+            const observed = this.currentBlockAt(place)?.name ?? null
+            const message = error instanceof Error ? error.message : String(error)
+            throw new ExecutorError(
+              'place_refused',
+              `descent scaffold placement of ${block} at (${place.x},${place.y},${place.z}) was rejected; observed block is ${observed ?? 'unknown'} (${message})`,
+            )
+          }
+          this.ensureOwned(epoch, signal)
+          const placedName = await this.waitForPlacedBlock(place, block, epoch, signal)
+          if (!isPlacePostconditionMet(placedName, block)) {
+            reason = 'unverified_place'
+            this.logDescentScaffoldRefused(candidate, {
+              reason: 'no_ground',
+              cell: place,
+              block,
+              below: null,
+              detail: `placeBlock did not create ${block} at (${place.x},${place.y},${place.z}) (found ${placedName ?? 'air'})`,
+              fromY,
+              toY: landing.y,
+            })
+          } else {
+            placed = 1
+            // (4) The step DOWN onto the floor this leg just made. The landing is one
+            // level below the body; the ordinary `canDig=false` walk owns it, exactly
+            // as the bridge's own advance onto its placed floor is an ordinary walk.
+            this.setPhase(candidate, epoch, 'pathing')
+            const advanced = await this.stepDownOnto(landing, epoch, signal)
+            if (!advanced) {
+              // The block IS placed and the body still stands on the previous
+              // verified cell: a typed partial leg, never a floor it walks off.
+              reason = 'advance_failed'
+            } else {
+              this.logger.info(
+                'agent',
+                formatDescentScaffoldStep({ from, to: feetCellOf(this.bot), cell: place, placed: true, block }),
+                { actionId: candidate.id, target: candidate.target, cell: place, placed, block, mayPlaceBlocks: true },
+              )
+              verified = true
+              reason = 'descended'
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.logDescentScaffoldEnd(candidate, fromY, feetCellOf(this.bot).y, placed, false, error instanceof ActionCancelled ? 'interrupted' : 'aborted', block)
+      throw error
+    }
+    const toY = feetCellOf(this.bot).y
+    this.logDescentScaffoldEnd(candidate, fromY, toY, placed, verified, reason, block)
+    if (!verified) {
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'failed',
+        'descending',
+        `descent scaffold ${reason}: placed=${placed} from_y=${fromY} to_y=${toY}`,
+        reason === 'no_block' ? 'target_gone' : reason === 'unverified_place' ? 'verify_failed' : 'path_stuck',
+        { verified: false, blockRemoved: false, dropObserved: false, itemsGained: 0, goalItemCount: this.countGoalItem(), progressed: placed > 0 },
+      )
+    }
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'descended',
+      `descended by placing ${block} at (${place.x},${place.y},${place.z}) and stepping down to (${landing.x},${landing.y},${landing.z})`,
+      null,
+      {
+        verified: true,
+        blockRemoved: false,
+        dropObserved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+        // A real placement that really lowered the body is observable progress even
+        // when the leg's own target was not the whole objective.
+        progressed: true,
+      },
+    )
+  }
+
+  /**
+   * The downward placement's reference face: the block the body is standing on, its
+   * BOTTOM face - the exact mirror of `bridgeReference`'s "the block currently under
+   * the feet, its side face in the direction of travel". Legal vanilla placement,
+   * always in reach (the cell is two blocks below the eyes).
+   */
+  private descentScaffoldReference(feet: Vec3Json): { block: Block; face: ReturnType<Bot['entity']['position']['clone']> } | null {
+    const footing = this.currentBlockAt({ x: feet.x, y: feet.y - 1, z: feet.z })
+    if (footing !== null && isUsableGroundSupport(footing)) {
+      return { block: footing, face: this.bot.entity.position.clone().set(0, -1, 0) }
+    }
+    // Fallback: any solid adjacent face of the placement cell (the same bounded
+    // search the station placement uses).
+    return this.findPlaceReference({ x: feet.x, y: feet.y - 2, z: feet.z })
+  }
+
+  /**
+   * Step DOWN one level onto the floor this leg placed. The ordinary `canDig=false`
+   * walk owns the move; when the pathfinder cannot express "drop into the cell under
+   * me" (the body stands ON the hole's edge cell), a bounded forward nudge off the
+   * edge lets gravity put it in the landing, and the landing is verified either way.
+   *
+   * The nudge is bounded and verified, never a blind step: it is only taken while
+   * the LIVE landing cell is passable with a solid floor (the block just placed), and
+   * it stops the moment the body really occupies that cell.
+   */
+  private async stepDownOnto(landing: Vec3Json, epoch: number, signal: AbortSignal): Promise<boolean> {
+    this.ensureOwned(epoch, signal)
+    if (sameCell(feetCellOf(this.bot), landing)) return true
+    try {
+      await this.pathTo(landing, epoch, signal, 'GoalBlock', { requireLevel: true, budgetMs: DESCEND_SCAFFOLD_STEP_MS })
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      // Falls through to the bounded nudge: the block IS placed and the body is
+      // still on the previous verified cell, so this is recoverable, not fatal.
+    }
+    this.ensureOwned(epoch, signal)
+    if (sameCell(feetCellOf(this.bot), landing)) return true
+    const until = Date.now() + DESCEND_SCAFFOLD_STEP_MS
+    try {
+      while (Date.now() < until) {
+        this.ensureOwned(epoch, signal)
+        if (sameCell(feetCellOf(this.bot), landing)) return true
+        const here = this.bot.entity.position
+        // Aim at the landing cell's centre, horizontally only: the drop is gravity's.
+        const dx = landing.x + 0.5 - here.x
+        const dz = landing.z + 0.5 - here.z
+        const horizontal = Math.hypot(dx, dz)
+        if (horizontal <= 0.2) {
+          // Already over the landing column: wait for the fall to land.
+          await delay(50, signal)
+          continue
+        }
+        this.assertEffect({ type: 'look' })
+        await this.bot.lookAt(this.bot.entity.position.offset(dx, 0, dz), true).catch(() => undefined)
+        this.setControlState('forward', true)
+        await delay(50, signal)
+      }
+    } finally {
+      this.setControlState('forward', false)
+    }
+    this.ensureOwned(epoch, signal)
+    return sameCell(feetCellOf(this.bot), landing)
+  }
+
   private async runDescend(
     candidate: Candidate,
     epoch: number,
@@ -7603,6 +7962,15 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'DESCEND candidate has no dig target')
+    // THE DOWNWARD SELF-LANDING DESCEND: the mirror of the bridge's self-landing
+    // step, one level down. The body holds a block, lays the floor of the cell under
+    // its own feet, verifies it, and drops onto it - so the leg PLACES where every
+    // other DESCEND digs. It is a different mechanic, not a different route: the
+    // candidate is the same DESCEND kind, it declares its own one block and one
+    // cell, and it is executed here rather than through a second entry point.
+    if (readMetaString(candidate, DESCEND_SCAFFOLD_PLACE_META) !== null) {
+      return await this.runDescendScaffold(candidate, epoch, signal, startedAt)
+    }
     // The step is a 1x2 PROFILE, not one block: a staircase step down needs the
     // front cell at the current feet level (the body's upper half standing in the
     // landing cell) as well as the floor, and a level step needs front + head.
@@ -11588,6 +11956,21 @@ function huntEvidence(
     huntLastKnown: { x: lastTarget.x, y: lastTarget.y, z: lastTarget.z },
     huntGoalDrop: goalDrop,
   }
+}
+
+/**
+ * Parse a `"x,y,z"` cell a candidate declared in its own contract meta (the shape
+ * `descentScaffold.ts` and `bridgeRoute.ts` both write). Null when absent or
+ * malformed, so a contract that does not name a real cell fails closed.
+ */
+function metaCellOf(candidate: Candidate, key: string): Vec3Json | null {
+  const raw = readMetaString(candidate, key)
+  if (raw === null) return null
+  const parts = raw.split(',').map((entry) => Number(entry))
+  const [x, y, z] = parts
+  if (x === undefined || y === undefined || z === undefined) return null
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  return { x, y, z }
 }
 
 function readMetaString(candidate: Candidate, key: string): string | null {

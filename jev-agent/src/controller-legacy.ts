@@ -1611,6 +1611,18 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'BRIDGE_STEP',
   'BRIDGE_END',
   'BRIDGE_REFUSED',
+  // The DOWNWARD SELF-LANDING family (`descentScaffold.ts`): the same bridge leg
+  // rotated one level down - the body lays the floor of the cell under its own feet
+  // and drops onto it. Same registration reason as the bridge: a descent that
+  // reached `buddy.log` only as a `DESCEND` would be indistinguishable from a
+  // staircase dig, and the #436 section 5 effect (the one block consumed, and the
+  // one cell placed BELOW the body) would not be auditable run-scoped. Measured
+  // need: 1912 `needs_descend` acquisitions carrying the correct
+  // `descend_plan:no_support@25,78,-2:air` and no route able to answer it.
+  'DESCEND_SCAFFOLD_START',
+  'DESCEND_SCAFFOLD_STEP',
+  'DESCEND_SCAFFOLD_END',
+  'DESCEND_SCAFFOLD_REFUSED',
   // A locomotion route's OWN placement declaration (`routePlaceDeclaration.ts`).
   // The measured defect (live: `PILLAR_UP actionId=MOVE:b35_60_-26 ... failed
   // SKILL_ENVELOPE_VIOLATION violation=equip_item_not_declared:cobblestone`, and

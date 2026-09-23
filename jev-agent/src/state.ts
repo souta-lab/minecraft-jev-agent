@@ -50,6 +50,7 @@ import type { PortalBlockPosition, PortalFrameSite, PortalFrameValidation, Porta
 import { isProtectedStationBlock, liveStructureCellKey } from './blockSafety.ts'
 import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
+import type { DescentScaffoldProbe } from './descentScaffold.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
 import { headroomAcrossFootprint } from './bodyGeometry.ts'
@@ -947,6 +948,16 @@ export type WorldState = {
   knownResourceEvidence?: KnownResourceEvidence[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
+  /**
+   * The DOWNWARD self-landing probe (`descentScaffold.ts`): the live truth of the
+   * cell the body would occupy if it placed a floor under its own feet and dropped
+   * onto it. Present only while the body holds a placeable block AND its own
+   * descent pool refused a downward step for `no_support` - the one shape no dig
+   * can answer, and the measured live blocker (`descend_plan:no_support@25,78,-2:air`
+   * 1912x with the body on a floated gate). Absent in old replay fixtures means
+   * "no probe", so every existing caller and fixture is behaviourally unchanged.
+   */
+  descentScaffold?: DescentScaffoldProbe
   /**
    * The cardinal WALL ENTRY probes: the adjacent 1x2 profile the body could mine
    * open (`wallEntry.ts`), with the pre-existing floor it would stand on and the
@@ -3470,6 +3481,99 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
   return out
 }
 
+/**
+ * The DOWNWARD self-landing probe (`descentScaffold.ts`): the live truth of the one
+ * cell the body would occupy if it placed a floor under its own feet and dropped
+ * onto it, plus the cell below that floor.
+ *
+ * WHY IT EXISTS. The descent vocabulary has two remedies and both are DIGS - cut a
+ * cardinal staircase step, or dig the body's own column - so a landing whose
+ * support is air can only ever be REFUSED. Measured live (main 974e954, the
+ * operator's floated-portal trial, body 23.5,79.0,1.5): 1912 `needs_descend`
+ * acquisitions, all carrying the correct typed
+ * `descend_plan:no_support@25,78,-2:air`, and no route that could answer it.
+ *
+ * The mechanic is the MIRROR of the bridge's own `self_landing` scaffold
+ * (`bridgeRoute.ts#planBridgeSpan`): there the body lays the floor of the cell it
+ * is about to occupy and steps sideways onto it; here it lays the floor of the cell
+ * below it and drops onto it. The geometry is the same, rotated: the placement
+ * reference is the block the body is already standing on, its BOTTOM face
+ * (`bridgeRoute.ts#planBridgeSpan`'s "place against the block under my feet, side
+ * face in the direction of travel"). So this adds a probe, not a second rule.
+ *
+ * BOUNDED, and only where the world needs it: probed only while the body holds a
+ * placeable block AND its own sensor pool refused a downward step for `no_support`
+ * - the one shape no dig can answer. An ordinary tick reads nothing extra.
+ */
+function buildDescentScaffoldProbe(
+  bot: Bot,
+  self: SelfState,
+  descent: readonly DescentOption[],
+): DescentScaffoldProbe | null {
+  // Gate: the body's OWN COLUMN is the one shape this route answers. A descent
+  // self-landing is a straight drop - the body lays the floor of the cell under its
+  // own feet and stands on it - so the probe is anchored on the own-column step
+  // (`dir: 'D'`, the sensor's own last-resort down step). A refused CARDINAL step is
+  // a different geometry (it would land one cell sideways) and the ordinary
+  // walk/dig remedies own it. Any other refusal reason (`open_floor`, `hazard`,
+  // `unbreakable`, `protected`) is already answered or is a hard stop.
+  const ownColumn = descent.find((step) => step.dir === 'D' && step.mode === 'down')
+  if (ownColumn === undefined || ownColumn.safe || ownColumn.refusal !== 'no_support') return null
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z), 'descent-scaffold')
+  const readCell = (cell: Vec3Json): WallBlockLike | null => {
+    const block = at(cell.x, cell.y, cell.z)
+    return block === null
+      ? null
+      : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
+  }
+  const landing = { x: feet.x, y: feet.y - 1, z: feet.z }
+  const place = { x: feet.x, y: feet.y - 2, z: feet.z }
+  const landingHead = { x: feet.x, y: feet.y, z: feet.z }
+  const support = { x: feet.x, y: feet.y - 3, z: feet.z }
+  const below = { x: landing.x, y: landing.y - 1, z: landing.z }
+  const landingBlock = at(landing.x, landing.y, landing.z)
+  const headBlock = at(landingHead.x, landingHead.y, landingHead.z)
+  const placeBlock = at(place.x, place.y, place.z)
+  const supportBlock = at(support.x, support.y, support.z)
+  // The same six-neighbourhood flood reader every wall entry and the bridge
+  // self-landing use: a fluid FACE-ADJACENT to the 1x2 pocket the body would
+  // occupy would pour in, and the body that lays its own floor has no
+  // pre-existing floor verdict to fall back on.
+  const flood = floodEvidence([landing, landingHead], readCell)
+  // Every cell the step touches, for the hazard verdict - unloaded cells are never
+  // hazards (the rule the rest of the sensor uses), so a chunk that has not arrived
+  // can only make the step refuse, never look safe.
+  const hazardBlocks = [landingBlock, headBlock, placeBlock, supportBlock]
+  const hazardBlock: { name: string } | null =
+    hazardBlocks.find((block) => block !== null && isBridgeUnsafeBlockName(block.name)) ?? null
+  return {
+    selfFeet: feet,
+    landing,
+    place,
+    landingOpen: isPassable(landingBlock),
+    landingHeadOpen: isPassable(headBlock),
+    placeable: isReplaceableAir(placeBlock),
+    placeSupported: isSolidSupport(supportBlock),
+    supportName: supportBlock?.name ?? null,
+    landingName: landingBlock?.name ?? null,
+    landingHeadName: headBlock?.name ?? null,
+    placeName: placeBlock?.name ?? null,
+    belowName: at(below.x, below.y, below.z)?.name ?? null,
+    hazard: hazardBlock !== null,
+    hazardBlock: hazardBlock?.name ?? null,
+    flood: flood !== null,
+    floodCell: flood?.cell ?? null,
+    floodBlock: flood?.block ?? null,
+    footing: isUsableGroundSupport(at(feet.x, feet.y - 1, feet.z)),
+  }
+}
+
 function hazardsAround(
   hazardous: (x: number, y: number, z: number) => boolean,
   ...cells: Vec3Json[]
@@ -4883,6 +4987,15 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     ),
     knownResourceEvidence,
     descent,
+    // The DOWNWARD self-landing probe. Sensing is gated on the WORLD shape (the
+    // body's own descent pool refused a downward step for `no_support`), never on
+    // a decision: the typed `no_block` refusal is derived from the inventory fact
+    // alone, so an empty-handed body still reads its own unsupported landing and
+    // can say exactly what it is missing. An ordinary tick reads nothing extra.
+    ...((): { descentScaffold?: DescentScaffoldProbe } => {
+      const probe = buildDescentScaffoldProbe(bot, self, descent)
+      return probe === null ? {} : { descentScaffold: probe }
+    })(),
     // The wall-entry probes exist only where a step is refused by the body's own
     // local geology: on ordinary terrain this adds nothing at all. The bounded LEVEL
     // SCAN rides the same gate (the measured island is exactly this shape): a body
