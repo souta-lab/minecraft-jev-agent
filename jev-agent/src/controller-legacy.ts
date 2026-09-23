@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -32,12 +32,12 @@ import { ARMOR_SLOTS } from './gearPlan.ts'
 import { assessSurvivalRace, bodySurvivalFacts, classifyDamageSource, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalDamageRace, formatSurvivalEscapeNone, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
-import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
+import { contactGapY, formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, meleeHorizontalBudget, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
 import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
-import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
+import { bestToolTier, capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, StationApproachFact, StationApproachProbe, StationApproachRefusal, StationKindName } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -161,7 +161,7 @@ import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, DimensionProvenance, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -254,7 +254,17 @@ import { formatLevelScanStep } from './levelScan.ts'
 import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
-import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
+import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2ToolGap, System2WithheldCandidate } from './system2.ts'
+import {
+  buildSystem2BlockerFacts,
+  emptySystem2PayloadShape,
+  formatSystem2PayloadAbsentLine,
+  formatSystem2PayloadLine,
+  formatSystem2PayloadRefusedLine,
+  SYSTEM2_PAYLOAD,
+  SYSTEM2_PAYLOAD_ABSENT,
+  SYSTEM2_PAYLOAD_REFUSED,
+} from './system2Payload.ts'
 import {
   evaluateSystem2Apply,
   formatCompiledGoalRows,
@@ -1324,6 +1334,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'LOCAL_CLEAR',
   'ASCEND_STEP',
   'ASCENT_PROGRESS',
+  // The HORIZONTAL-ENVELOPE plane: whether a swing was legal because the body's own
+  // height spans the first part of an upward gap. Measured 2026-09-22: 19/19 live
+  // blaze hunts ended `HUNT_END ... target=blaze swings=0 hits=0`, and the closest
+  // geometry ever reached was `gap_y=4 horizontal=1.70` - a target the feet-to-feet
+  // measure called out of range and the body's own upper half is 2.93 m from. A
+  // swing grounded that way must be visible in the live plane, or it reads as an
+  // ordinary close-range attack and the correction cannot be audited.
+  'MELEE_VERTICAL_REACH',
   // The descent half of the vertical vocabulary: a refused local descent names
   // its missing precondition, and a durable descent chunk is run evidence
   // (a `descend_plan` refusal that was never named is what left the M3 body
@@ -1579,6 +1597,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SKILL_POLICY_BOUNDARY',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
+  // The acquisition half of the withhold: WHEN a withheld candidate's missing
+  // mechanical fact was answered by a grounded acquisition route, and - when none
+  // exists - the typed reason with the item and count the body would need. The
+  // measured freeze (main 38cbb22) was readable only as `CANDIDATE_WITHHELD
+  // ... missing=[headroom@27,62,15]` plus `CANDIDATE_STARVATION
+  // blockedBy=no_productive_action`: no line said whether the tool that clears the
+  // cell was craftable from what the body carried, or that nothing obtainable
+  // existed. These two markers are that fact, on both evidence planes.
+  'CANDIDATE_ACQUISITION',
+  'CANDIDATE_ACQUISITION_REFUSED',
   'CANDIDATE_STARVATION',
   'RESOURCE_SOURCE_NONE',
   // The M3 producer side of the same observability rule. A pearl need with no
@@ -1707,6 +1735,17 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // settled, so they belong in the live record like every other lifecycle line.
   'EQUIP_WEAPON',
   'EQUIP_ARMOR',
+  // The System2 summon payload's SHAPE. The model's WHAT decision is only as
+  // good as the state it is given, and the measured live loop (208 queue rows
+  // for one objective, `CANDIDATE_WITHHELD`/`CANDIDATE_STARVATION` typing the
+  // real blocker while the summoned payload carried none of it) was invisible in
+  // the run record: a summon line showed a reason and a queue depth, never what
+  // facts the model actually received. These three markers are counts-only (no
+  // world-derived string is interpolated into the line), so they ride the
+  // mirrored sink and a world name cannot forge a field or a second marker.
+  SYSTEM2_PAYLOAD,
+  SYSTEM2_PAYLOAD_REFUSED,
+  SYSTEM2_PAYLOAD_ABSENT,
 ])
 
 /**
@@ -1784,6 +1823,54 @@ export function candidateStarvationMissing(
       seen.add(token)
       out.push(token)
       if (out.length >= limit) return out
+    }
+  }
+  return out
+}
+
+/**
+ * The typed TOOL truth behind a set of withheld candidates.
+ *
+ * Reachability already names a tool requirement on some capabilities
+ * (`{kind:'tool', tool, tier}` from `missing_tool`, and
+ * `{kind:'safe_column', reason:'no_tool', tool, tier}`). Those are the only
+ * places the code ever states "a tool of family F at rank T is required", so
+ * they are the only places this projection reads: it pairs each such
+ * requirement with the body's own held rank (`bestToolTier`, the same scale
+ * `capabilityKey` prints) and reports the requirement whenever the body does
+ * not hold enough.
+ *
+ * Deliberately does NOT infer a tool need the reachability layer did not state
+ * (e.g. a `headroom@x,y,z` capability names a cell, not a tool): inventing that
+ * pairing here would be a deterministic domain rule masquerading as a measured
+ * fact, and the model would be told a requirement code never established.
+ *
+ * Facts only; it refuses nothing and recommends nothing.
+ */
+export function withheldToolGaps(
+  withheld: readonly CandidateReachability[],
+  inventory: Readonly<Record<string, number>>,
+): System2ToolGap[] {
+  const out: System2ToolGap[] = []
+  const seen = new Set<string>()
+  for (const entry of withheld) {
+    for (const capability of entry.result.missingCapabilities) {
+      let tool: HarvestTool | null = null
+      let requiredTier = 0
+      if (capability.kind === 'tool') {
+        tool = capability.tool
+        requiredTier = capability.tier
+      } else if (capability.kind === 'safe_column' && capability.reason === 'no_tool' && capability.tool !== null) {
+        tool = capability.tool
+        requiredTier = capability.tier ?? 0
+      }
+      if (tool === null) continue
+      const heldTier = bestToolTier(inventory, tool)
+      if (heldTier >= requiredTier) continue
+      const key = `${tool}@${requiredTier}:${entry.candidate.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ tool, requiredTier, heldTier, candidate: entry.candidate.id })
     }
   }
   return out
@@ -2208,6 +2295,30 @@ export class JevController {
   private notExecutableInterruptedActionId: string | null = null
   /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
+  /**
+   * The latest tick's REFUSED grounded candidates as typed facts. Set from the
+   * same `generateGroundedCandidates` result that owns `withheldCandidateIds`,
+   * so the payload can never carry a stale refusal: a tick that withholds
+   * nothing overwrites this with `[]`.
+   *
+   * These are the facts a System2 WHAT decision depends on (which grounded
+   * action is impossible, its typed reason, the capability keys that are
+   * missing, and the tool truth behind a named tool requirement). The controller
+   * only MEASURES them here; selecting a replacement WHAT stays with the model.
+   */
+  private withheldCandidateFacts: System2WithheldCandidate[] = []
+  /** The same tick's OFFERED grounded candidates (what the body can still do). */
+  private presentedCandidateFacts: System2GroundedAlternative[] = []
+  /** Typed tool gaps behind the withheld capabilities; empty when none named a tool. */
+  private withheldToolGaps: System2ToolGap[] = []
+  /**
+   * The observed-state fingerprint the three fields above were measured in.
+   * A summon is reachable from paths that do not re-run the affordance gate, so
+   * the facts are attached only while this still equals the live fingerprint;
+   * otherwise the payload says `SYSTEM2_PAYLOAD_ABSENT field=withheld_stale`
+   * instead of asserting a refusal the body may have already escaped.
+   */
+  private withheldFactsFingerprint = ''
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   /**
@@ -3252,6 +3363,22 @@ export class JevController {
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
+      // The typed projection of the SAME refusal facts, for the System2 payload.
+      // Rebuilt every tick from this tick's `grounded` result, so a summon can
+      // never carry a refusal the body has already escaped.
+      this.withheldCandidateFacts = grounded.withheld.map((entry) => ({
+        candidate: entry.candidate.id,
+        kind: String(entry.candidate.kind),
+        reason: entry.result.reason,
+        missing: entry.result.missingCapabilities.map(capabilityKey),
+        suppressed: entry.suppressed,
+      }))
+      this.presentedCandidateFacts = grounded.candidates.map((candidate) => ({
+        candidate: candidate.id,
+        kind: String(candidate.kind),
+      }))
+      this.withheldToolGaps = withheldToolGaps(grounded.withheld, this.inventorySnapshot())
+      this.withheldFactsFingerprint = this.lastStateFingerprint
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logContainerRefusals(grounded.containerRefusals)
@@ -7982,6 +8109,75 @@ export class JevController {
    * is never periodic, only exception-driven. Returns the resummon record for the
    * decision log, or null when the call was suppressed (in flight / cooldown).
    */
+  /**
+   * The typed blocker + grounded-alternative facts for a summon, or `null` when
+   * this controller holds none (the payload then carries no `blockers` field at
+   * all - never an invented one).
+   *
+   * Every value here was produced by a deterministic layer in THIS tick:
+   * `withheldCandidateFacts`/`presentedCandidateFacts`/`withheldToolGaps` from
+   * the same `generateGroundedCandidates` result the affordance gate used, and
+   * `blockedBy`/`missing`/`repeats` from the candidate-starvation evidence.
+   * `buildSystem2BlockerFacts` only projects, bounds and clamps; it never ranks,
+   * selects or recommends a replacement WHAT.
+   *
+   * `alternatives.routes` is intentionally left unset here: durable world memory
+   * is owned by the resident host, so the payload builder fills it where that
+   * memory is actually in scope.
+   */
+  private system2BlockerFacts(): System2BlockerFacts | null {
+    const starvation = this.starvationContext
+    const heldToolFamilies: HarvestTool[] = ['pickaxe', 'axe', 'shovel']
+    const counts = this.inventorySnapshot()
+    const built = buildSystem2BlockerFacts({
+      ...(starvation === null ? {} : { blockedBy: starvation.blockedBy }),
+      missing: starvation === null ? [] : starvation.missing,
+      ...(this.noProductiveThisTick
+        ? { repeats: { count: this.noProductiveRepeats, bound: this.options.waitLimit } }
+        : {}),
+      withheld: this.withheldCandidateFacts,
+      toolsHeld: heldToolFamilies.map((tool) => ({ tool, tier: bestToolTier(counts, tool) })),
+      toolGaps: this.withheldToolGaps,
+      presented: this.presentedCandidateFacts,
+      freshness: { measured: this.withheldFactsFingerprint, current: this.lastStateFingerprint },
+    })
+    if (built === null) {
+      this.logger.info(
+        'system2',
+        formatSystem2PayloadLine(emptySystem2PayloadShape()),
+        { attached: false, absent: ['blockers'] },
+        this.tickCounter,
+      )
+      return null
+    }
+    this.logger.warn(
+      'system2',
+      formatSystem2PayloadLine(built.shape),
+      {
+        withheld: built.facts.withheld,
+        missing: built.facts.missing,
+        blockedBy: built.facts.blockedBy ?? null,
+        repeats: built.facts.repeats ?? null,
+        tools: built.facts.tools,
+        presented: built.facts.alternatives.presented,
+        chars: built.shape.chars,
+      },
+      this.tickCounter,
+    )
+    for (const entry of built.shape.refused) {
+      this.logger.warn(
+        'system2',
+        formatSystem2PayloadRefusedLine(entry),
+        { ...entry, plane: 'controller' },
+        this.tickCounter,
+      )
+    }
+    for (const field of built.shape.absent) {
+      this.logger.warn('system2', formatSystem2PayloadAbsentLine(field), { field }, this.tickCounter)
+    }
+    return built.facts
+  }
+
   private summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
     if (!this.running) return null
     if (this.queue.current?.origin === 'human') {
@@ -8120,6 +8316,10 @@ export class JevController {
       recentEvents: this.recentEvents.slice(-8),
       recentOutcomes: this.recentOutcomes.slice(-8),
       requestContext,
+      ...(() => {
+        const blockers = this.system2BlockerFacts()
+        return blockers === null ? {} : { blockers }
+      })(),
     }
     const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail: groundedDetail }
     this.tickResummonLog.push(resummon)
@@ -10997,16 +11197,29 @@ export class JevController {
   }
 
   /**
-   * CAN fact for a plain ATTACK lease. The executor follows until it is within
-   * `MELEE_ATTACK_RANGE`; probing GoalBlock is stricter than the real action and
-   * can falsely reject a perfectly hittable target, so use the same near radius.
+   * CAN fact for a plain ATTACK lease. The executor follows until the body's own
+   * upper half is inside `MELEE_ATTACK_RANGE` of the target; probing GoalBlock is
+   * stricter than the real action and can falsely reject a perfectly hittable
+   * target, so use the same near radius.
+   *
+   * The goal is a 3-D BALL, so the radius must be the ball whose restriction to the
+   * body's own level is the horizontal melee budget for THIS vertical gap
+   * (`meleeHorizontalBudget`). Probing the bare reach against a target hovering
+   * above the body is unsatisfiable by construction - radius 2.9 around a target 4
+   * blocks up contains no cell the body can stand in - so the probe reported
+   * `no_path` for a fight the body could actually win. For a level target the goal
+   * is the same cell and the same radius as before, unchanged.
+   *
    * Timeout is UNKNOWN/non-executable for this short lease, exactly like the
    * ordinary reachability probe: only a complete path is a current CAN proof.
    */
   private canComputeMeleePath(position: Vec3Json): boolean {
     if (this.bot.pathfinder === undefined) return false
     try {
-      const goal = new goals.GoalNear(position.x, position.y, position.z, Math.max(1, MELEE_ATTACK_RANGE - 0.2))
+      const feet = this.bot.entity.position
+      const gapY = contactGapY(feet.y, position.y)
+      const radius = Math.max(1, Math.hypot(meleeHorizontalBudget(gapY), Math.abs(gapY)) - 0.2)
+      const goal = new goals.GoalNear(position.x, position.y, position.z, radius)
       const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
       return plan.status === 'success'
     } catch {
@@ -11236,6 +11449,21 @@ export class JevController {
       const block = entry.candidate.target
       if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
         this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
+      }
+      // THE ACQUISITION ROUTE for this withheld fact: which grounded candidate(s)
+      // would remove the missing precondition, or - when nothing obtainable exists
+      // - the typed reason naming the item and count. Emitted with the withhold so
+      // the two facts can never be read apart.
+      for (const acquisition of entry.acquisition ?? []) {
+        const acquisitionDetail = { ...detail, acquisition }
+        this.logger.warn(
+          'agent',
+          acquisition.routes.length > 0
+            ? formatCandidateAcquisition(entry.candidate.id, acquisition)
+            : formatCandidateAcquisitionRefused(entry.candidate.id, acquisition),
+          acquisitionDetail,
+          this.tickCounter,
+        )
       }
       // THE STANCE REFUSAL, mirrored with the full geometry: the entity, the melee
       // constant, the nearest stance the search examined and the fact that refused
