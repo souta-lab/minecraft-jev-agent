@@ -835,6 +835,37 @@ function outcomeEvidenceForChoice(choiceEvent, events) {
     && (causalTime === null || Math.abs((parseTimestamp(entry.ts) ?? 0) - causalTime) <= 5_000))
   const skillEnd = nearestLifecycle('SKILL_END')
   const outcomePacket = nearestLifecycle('SKILL_OUTCOME_PACKET')
+  const skillEndAt = parseTimestamp(skillEnd?.ts)
+  const outcomeAt = parseTimestamp(outcomePacket?.ts)
+  const leaseRevoked = skillEnd?.detail?.outcome === 'LEASE_REVOKED'
+    || outcomePacket?.detail?.terminalReason === 'lease_revoked'
+  const terminalAt = Math.max(skillEndAt ?? 0, outcomeAt ?? 0) || null
+  // A model outage and a lease-revoked skill are separate emitted facts. Link
+  // them only when both refer to the same generation and the outage event falls
+  // between this choice and its observed lease-revoked terminal event. This is
+  // a useful causal lead for operators, but remains explicitly inferred because
+  // MODEL_UNAVAILABLE does not carry the selected action's chainId.
+  const alreadyCompleted = causal?.detail?.verified === true && causal?.detail?.status === 'done'
+  const interruptionEvent = leaseRevoked && !alreadyCompleted && terminalAt !== null
+    && typeof detail.generationId === 'string'
+    ? events.filter((entry) => entry.event === 'MODEL_UNAVAILABLE'
+      && entry.detail?.action === 'stop-generation-for-recovery'
+      && generationMatches(entry)
+      && later(entry)
+      && (parseTimestamp(entry.ts) ?? Number.POSITIVE_INFINITY) <= terminalAt)
+      .sort((left, right) => (parseTimestamp(left.ts) ?? 0) - (parseTimestamp(right.ts) ?? 0))
+      .at(-1) ?? null
+    : null
+  const interruptionAt = parseTimestamp(interruptionEvent?.ts)
+  const interruption = interruptionEvent === null ? null : {
+    event: traceProjection(interruptionEvent),
+    relationship: 'same_generation_provider_stop_preceded_lease_revoked_skill',
+    binding: {
+      method: 'generationId+event-order',
+      confidence: 'inferred',
+      millisecondsBeforeSkillEnd: skillEndAt === null || interruptionAt === null ? null : Math.max(0, skillEndAt - interruptionAt),
+    },
+  }
   const pickupEvidenceCandidates = typeof actionId === 'string' && actionId.startsWith('PICKUP:')
     ? events.filter((entry) => ['PICKUP_ACQUIRED', 'PICKUP_NOT_ACQUIRED'].includes(entry.event) && matchesAction(entry))
     : []
@@ -848,12 +879,115 @@ function outcomeEvidenceForChoice(choiceEvent, events) {
     causal: traceProjection(causal ?? null),
     skillEnd: traceProjection(skillEnd ?? null),
     skillOutcome: traceProjection(outcomePacket ?? null),
+    interruption,
     pickupEvidence: traceProjection(pickupEvidence),
     pickupEvidenceMatchCount: pickupEvidenceCandidates.length,
     pickupEvidenceBinding: pickupEvidence !== null
       ? { method: 'actionId+generationId+post-choice timestamp', confidence: 'inferred' }
       : null,
-    status: causal !== null ? 'causal_observed' : skillEnd != null || outcomePacket != null ? 'skill_observed' : pickupEvidence !== null ? 'pickup_observed' : 'pending_or_not_observed',
+    status: causal !== null ? 'causal_observed' : interruption !== null ? 'provider_interrupted' : skillEnd != null || outcomePacket != null ? 'skill_observed' : pickupEvidence !== null ? 'pickup_observed' : 'pending_or_not_observed',
+  }
+}
+
+/** A compact, evidence-only comparison of Jev's combat choices and context. */
+function projectCombatDecision(jevEvidence) {
+  if (jevEvidence?.available !== true || jevEvidence.state === null || typeof jevEvidence.state !== 'object') {
+    return { status: 'unknown', reason: 'jev_decision_context_unavailable' }
+  }
+  const state = jevEvidence.state
+  const threat = state.threat ?? {}
+  const selectedId = jevEvidence.answer?.action?.value ?? null
+  const rankedAlternatives = (jevEvidence.alternatives ?? []).map((entry) => ({
+    id: entry.id,
+    kind: entry.candidate?.kind ?? null,
+    probability: entry.probability,
+    selected: entry.selected === true,
+    label: entry.candidate?.label ?? null,
+  }))
+  const probabilityById = new Map((jevEvidence.answer?.action?.probabilities ?? [])
+    .filter((entry) => typeof entry.id === 'string')
+    .map((entry) => [entry.id, entry.probability]))
+  const candidateById = new Map()
+  for (const candidate of state.candidates ?? []) {
+    if (candidate?.id !== undefined) candidateById.set(candidate.id, candidate)
+  }
+  for (const entry of jevEvidence.alternatives ?? []) {
+    if (entry.id !== undefined && entry.candidate !== null) candidateById.set(entry.id, entry.candidate)
+  }
+  const alternatives = [...candidateById.values()]
+    .filter((candidate) => candidate?.kind === 'ATTACK' || candidate?.kind === 'RETREAT')
+    .map((candidate) => ({
+      id: candidate.id,
+      kind: candidate.kind,
+      probability: probabilityById.get(candidate.id) ?? null,
+      selected: candidate.id === selectedId,
+      label: candidate.label ?? null,
+      target: candidate.target ?? null,
+      meta: candidate.meta ?? null,
+    }))
+  const selectedAlternative = alternatives.find((entry) => entry.id === selectedId) ?? null
+  const selectedCandidate = selectedAlternative
+    ?? (state.candidates ?? []).find((candidate) => candidate?.id === selectedId)
+    ?? (jevEvidence.selectedCandidate?.id === selectedId ? jevEvidence.selectedCandidate : null)
+  const offeredCandidates = state.candidates ?? []
+  const kindCounts = Object.fromEntries([...new Set(offeredCandidates.map((candidate) => candidate.kind).filter(Boolean))]
+    .map((kind) => [kind, offeredCandidates.filter((candidate) => candidate.kind === kind).length]))
+  const context = {
+    observedAt: jevEvidence.observedAt ?? null,
+    world: pickFields(state.world, ['dimension', 'worldEpoch', 'generationId']),
+    self: pickFields(state.self, ['position', 'dimension', 'health', 'food', 'heldItem', 'equipment']),
+    objective: {
+      goal: state.goal ?? null,
+      progress: state.progress ?? null,
+    },
+    threat: {
+      status: threat.status ?? 'not_recorded',
+      active: threat.active ?? null,
+      inDanger: threat.inDanger ?? null,
+      inContact: threat.inContact ?? null,
+      hostileCount: threat.hostileCount ?? null,
+      primary: threat.primary ?? null,
+      nearbyHostiles: boundedEntries(threat.nearbyHostiles, 6, projectNearbyEntity),
+      nearbyHostilesTruncated: (threat.nearbyHostiles?.length ?? 0) > 6,
+    },
+    safetyEstimate: {
+      danger: pickFields(jevEvidence.answer?.otherHeads?.danger, ['value', 'probability', 'confidence', 'probabilities']),
+      shouldRetreat: pickFields(jevEvidence.answer?.otherHeads?.should_retreat, ['value', 'probability', 'confidence', 'probabilities']),
+    },
+    selection: {
+      actionId: selectedId,
+      kind: selectedCandidate?.kind ?? null,
+      probability: selectedAlternative?.probability ?? probabilityById.get(selectedId) ?? null,
+      confidence: jevEvidence.answer?.action?.confidence ?? null,
+      modelRationale: { status: jevEvidence.rationale?.status ?? 'not_emitted', text: jevEvidence.rationale?.text ?? null },
+    },
+    candidateSet: {
+      offeredCount: state.candidateCount ?? offeredCandidates.length,
+      projectedCount: offeredCandidates.length,
+      kindCounts,
+      truncated: state.candidatesTruncated === true,
+    },
+  }
+  if (alternatives.length === 0) {
+    return {
+      status: state.candidatesTruncated === true
+        ? 'partial'
+        : threat.status === 'observed' ? 'no_combat_action_offered' : 'unknown',
+      ...context,
+      reason: state.candidatesTruncated === true
+        ? 'bounded_candidate_projection_may_omit_combat_actions'
+        : 'no_attack_or_retreat_candidate_in_recorded_choice_set',
+      otherRankedAlternatives: rankedAlternatives.filter((entry) => entry.kind !== 'ATTACK' && entry.kind !== 'RETREAT'),
+      probabilityMeaning: 'model preference among offered candidates; not a probability of combat success',
+    }
+  }
+  return {
+    status: threat.status === 'observed' ? 'observed' : 'partial',
+    ...context,
+    alternatives,
+    otherRankedAlternatives: rankedAlternatives.filter((entry) => entry.kind !== 'ATTACK' && entry.kind !== 'RETREAT'),
+    candidateSetTruncated: state.candidatesTruncated === true,
+    probabilityMeaning: 'model preference among offered candidates; not a probability of combat success',
   }
 }
 
@@ -944,6 +1078,7 @@ export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, 
     alternatives,
     state: {
       ...state,
+      candidateCount: state.candidates.length,
       candidates: boundedEntries(state.candidates, 20, projectCandidate),
       candidatesTruncated: state.candidates.length > 20,
     },
@@ -1031,6 +1166,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const heartbeat = latestProjectedEvent(snapshot, ['HEARTBEAT'])
   const latestRuntimeFailure = latestProjectedEvent(snapshot, ['FATAL', 'ERROR'])
   const jevEvidence = snapshot.decisionTrace?.jevEvidence ?? null
+  const jevCombatDecision = projectCombatDecision(jevEvidence)
   const modelRecovered = latestProjectedEvent(snapshot, ['MODEL_RECOVERED'])
   const failureResolved = modelRecovered !== null
     && latestRuntimeFailure !== null
@@ -1067,11 +1203,15 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const failureHeadline = runtimeFailure?.detail?.code
     ? ` Runtime failure: ${runtimeFailure.detail.code}${runtimeFailure.detail.context ? ` (${runtimeFailure.detail.context})` : ''}.`
     : ''
+  const interruption = jevEvidence?.outcome?.interruption ?? null
+  const interruptionHeadline = interruption === null
+    ? ''
+    : ` The selected skill was lease-revoked after a same-generation MODEL_UNAVAILABLE event; link is inferred.`
 
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-decision-summary',
-    headline: `${headline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}`,
+    headline: `${headline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
     observedAt: snapshot.observedAt,
     freshnessMs,
     run: {
@@ -1095,6 +1235,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       latest,
       jev,
       jevEvidence,
+      jevCombatDecision,
       system2: {
         input: system2Input,
         decision: system2,
@@ -1106,6 +1247,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       latestActionEvent: actionEvent,
       latestOutcomeEvent: actionOutcomeEvent,
       selectedChoiceOutcome: jevEvidence?.outcome ?? null,
+      selectedChoiceInterruption: jevEvidence?.outcome?.interruption ?? null,
       latestDeath: snapshot.decisionTrace?.death ?? null,
     },
     worldProbe: {
@@ -1154,6 +1296,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       queueDepth: heartbeat.detail?.depth ?? null,
       queueDone: heartbeat.detail?.done ?? null,
     },
+    combatDecision: jevCombatDecision,
     recentEvents: (snapshot.events ?? []).slice(0, 12),
     unknown,
     interpretation: 'Only emitted audit fields are summarized. Null and unknown entries mean the observer found no matching evidence.',

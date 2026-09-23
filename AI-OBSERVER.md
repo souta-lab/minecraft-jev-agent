@@ -50,6 +50,20 @@ seconds; it remains an inferred join, not a direct identifier match. `partial`
 or `unknown` must be treated as uncertain evidence. A call from a different
 world epoch is excluded.
 
+`choices.jevCombatDecision` condenses that same decision-time snapshot for the
+fight-or-flee review: dimension/epoch, player health/food/equipment, current
+objective/progress, observed threat count and nearby hostiles, plus the
+ATTACK/RETREAT candidates retained in the bounded decision projection and their
+recorded model preferences. It also shows the other ranked actions,
+candidate-set size/truncation and Jev's emitted danger /
+should-retreat estimates, so a reviewer can tell whether fight, flight, or
+continued work were actually offered. A `null` candidate
+probability means the call log did not record a probability for that candidate;
+it is not interpreted as zero. The listed probabilities compare the model's
+preferences among candidates and are not probabilities of winning a fight.
+The model does not emit private reasoning, so `modelRationale.status` stays
+`not_emitted`.
+
 `execution.selectedChoiceOutcome` joins `CAUSAL` by the choice's exact
 `chainId` when present. For `TOOL_CHOICE`, which has no chain ID, it matches by
 action, generation and nearest timestamp and labels that link `inferred`. The
@@ -61,6 +75,15 @@ chain ID. `execution.selectedChoiceOutcome.pickupEvidence` correlates
 so `pickupEvidenceBinding.confidence` is `inferred`; `pickupEvidenceMatchCount`
 shows when multiple markers matched that scope. Missing records remain null
 with a pending/not-observed status.
+
+`execution.selectedChoiceInterruption` is populated only when a selected Skill
+ended with a lease revoke and a same-generation `MODEL_UNAVAILABLE` event with
+`action="stop-generation-for-recovery"` occurred between the choice and that
+terminal event. This is an event-order correlation, labeled `inferred`; it does
+not claim a direct chain-ID causal link. The same per-choice outcome, including
+this interruption record, is available under each
+`recentChoiceOutcomes.entries[].outcome` so a later decision does not hide the
+previous choice's terminal result.
 
 The top-level `recentChoiceOutcomes` contains up to 12 recent Jev/tool choices
 from the current BOOT time window, read from at most the last 8 MiB of
