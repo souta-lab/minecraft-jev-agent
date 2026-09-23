@@ -298,6 +298,35 @@ async function gateOnLines(caseName, lines) {
 }
 
 // ---------------------------------------------------------------------------
+// 10b. the same chain through the operator's declared-root surface (--root)
+// ---------------------------------------------------------------------------
+{
+  // The rehearsal's explicit-path case proves the chain EXISTS in the run. This
+  // case proves the OPERATOR can reach it: `--root <resident-tree>` with no
+  // explicit evidence paths must find the same chain, the same ordered links and
+  // a VERIFIED authority verdict. Without this, a live run's evidence is provable
+  // only by someone who already knows every private path.
+  const declared = report.declaredRoot
+  assert.ok(declared !== undefined, 'the rehearsal must exercise the declared-root surface')
+  assert.equal(declared.exitCode, 0, declared.stdout)
+  assert.equal(declared.status, 'PASS')
+  assert.match(declared.evidenceRootsLine ?? '', /discover=false/)
+  assert.match(declared.evidenceRootsLine ?? '', /log_from=.*buddy-driver\/buddy\.log/)
+  assert.match(declared.policyLine ?? '', /^policy: VERIFIED/)
+  const link = declared.chainLinks.find((entry) => entry.source !== 'none')
+  assert.ok(link !== null, 'the declared-root fixture must carry a chain trace')
+  assert.equal(link.built, 'PASS')
+  assert.equal(link.lit, 'PASS')
+  assert.equal(link.verified, 'PASS')
+  assert.equal(link.ordered, true)
+  assert.equal(link.overworld, true)
+  const { placed, frame, lit, verified } = link.indices
+  assert.ok(placed >= 0 && placed < frame && frame < lit && lit < verified)
+  assert.deepEqual(declared.stdout.split('\n').filter((line) => line.startsWith('m2_chain:')).length >= 1, true)
+  ok('--root <resident-tree> alone reaches the same ordered chain and VERIFIED policy as the explicit paths')
+}
+
+// ---------------------------------------------------------------------------
 // 11. a FRESH run's own evidence is UNKNOWN, never PASS
 // ---------------------------------------------------------------------------
 {
