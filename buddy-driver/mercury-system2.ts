@@ -860,7 +860,7 @@ export function validateMercuryPlanAgainstState(
 }
 
 // ---------------------------------------------------------------------------
-// #cached-plan-executability: is the installed WHAT EXECUTABLE in this state?
+// #468 install-time executability: is the installed WHAT EXECUTABLE in this state?
 // ---------------------------------------------------------------------------
 //
 // `validateMercuryPlanAgainstState` above answers ADMISSIBILITY - may this goal
@@ -1044,6 +1044,48 @@ export function formatMercuryPlanNotExecutable(refusal: MercuryPlanGoalRefusal, 
     ` goal=${refusal.goal} candidate=${refusal.candidate} candidateKind=${refusal.candidateKind}` +
     ` reason=${refusal.reason} missing=[${refusal.missing.join(',')}] action=refused`
   )
+}
+
+interface MercuryExecutabilityLogContext {
+  intentSource: string
+  trigger: string
+  strategy: string
+  stateHash: string
+  callId?: string
+}
+
+/** The shared install-time boundary for newly generated plans and cache replays. */
+function evaluateAndLogMercuryPlanExecutability(
+  log: MercurySystem2Options['log'],
+  goals: readonly PlannedGoal[],
+  blockers: MercuryExecutabilityBlockerFacts | null | undefined,
+  context: MercuryExecutabilityLogContext,
+): MercuryPlanExecutabilityVerdict {
+  const verdict = classifyMercuryPlanExecutability(goals, blockers)
+  log(formatMercuryPlanExecutability(verdict, {
+    intentSource: context.intentSource,
+    trigger: context.trigger,
+    goals: goals.length,
+    strategy: context.strategy,
+  }), {
+    ...verdict,
+    strategy: context.strategy,
+    stateHash: context.stateHash,
+    ...(context.callId === undefined ? {} : { callId: context.callId }),
+  })
+  if (verdict.verdict === 'not_executable_now') {
+    for (const refusal of verdict.refusals) {
+      log(formatMercuryPlanNotExecutable(refusal, context.intentSource), {
+        ...refusal,
+        strategy: context.strategy,
+        stateHash: context.stateHash,
+        trigger: context.trigger,
+        withheld: blockers?.withheld ?? [],
+        ...(context.callId === undefined ? {} : { callId: context.callId }),
+      })
+    }
+  }
+  return verdict
 }
 
 /** Stable cache key for a Mercury state summary. Exported so tests can seed the cache. */
@@ -2327,7 +2369,7 @@ export class MercurySystem2 implements System2Brain {
       if (restored.ok && restoredGroundingError === null && !replayLimit && !consecutiveLimit) {
         const plan = restored.plan
         const goals = plannedGoalsFromMercury(plan, state)
-        // #cached-plan-executability: admissibility is not executability. The
+        // #468 install-time executability: admissibility is not executability. The
         // cached answer passed `validateMercuryPlanAgainstState` (the gate is
         // verified) but the state may already have typed that the BODY cannot run
         // it here (the measured shape: `needs_descend` +
@@ -2335,9 +2377,9 @@ export class MercurySystem2 implements System2Brain {
         // is legitimate for the state it was GIVEN, so this is not a cache-key
         // bug: it is the missing install-time check. Refusing here is what stops
         // the apply-then-`action_impossible` cycle at its source.
-        const executability = classifyMercuryPlanExecutability(goals, state.blockers)
-        this.log(formatMercuryPlanExecutability(executability, { intentSource: 'cached', trigger, goals: goals.length, strategy: cached.strategy }), {
-          ...executability,
+        const executability = evaluateAndLogMercuryPlanExecutability(this.log, goals, state.blockers, {
+          intentSource: 'cached',
+          trigger,
           strategy: cached.strategy,
           stateHash,
         })
@@ -2346,15 +2388,6 @@ export class MercurySystem2 implements System2Brain {
           // as a replay (nothing was replayed) and the entry is kept: the same
           // state must keep getting the honest answer, and the ordinary
           // escalation path re-asks the WHAT owner once the state changes.
-          for (const refusal of executability.refusals) {
-            this.log(formatMercuryPlanNotExecutable(refusal, 'cached'), {
-              ...refusal,
-              strategy: cached.strategy,
-              stateHash,
-              trigger,
-              withheld: state.blockers?.withheld ?? [],
-            })
-          }
           const ms = Date.now() - started
           return {
             plan: {
@@ -2927,6 +2960,13 @@ export class MercurySystem2 implements System2Brain {
       }
       const strategy = mercuryStrategyLabel(plan)
       const goals = plannedGoalsFromMercury(plan, state)
+      const executability = evaluateAndLogMercuryPlanExecutability(this.log, goals, state.blockers, {
+        intentSource: success.intentSource,
+        trigger,
+        strategy,
+        stateHash,
+        callId,
+      })
       // #system2-compile: a model goal whose lowering fails is typed here rather
       // than disappearing inside `plannedGoalsFromMercury`. Both the host log and
       // the plan provenance carry it, so "the model asked for X but no X row
@@ -2991,33 +3031,49 @@ export class MercurySystem2 implements System2Brain {
         intentSource: success.intentSource,
       })
 
+      const refused = executability.verdict === 'not_executable_now'
+      const installedPlan: System2Plan = refused
+        ? {
+            op: 'patch',
+            goals: [],
+            note: `mercury ${strategy} refused: not executable here`,
+            provenance: {
+              intentSource: success.intentSource,
+              intent: success.intent.slice(0, 400),
+              noGoalsReason: MERCURY_PLAN_NOT_EXECUTABLE_NO_GOALS_REASON,
+              ...(uncompiled.length > 0 ? { uncompiled } : {}),
+              ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
+            },
+          }
+        : {
+            op: plan.op,
+            goals,
+            note: `mercury ${plan.op}: ${plan.reason}`,
+            provenance: {
+              intentSource: success.intentSource,
+              intent: success.intent.slice(0, 400),
+              ...(goals.length === 0
+                ? {
+                    noGoalsReason:
+                      plan.op === 'abort' || plan.op === 'complete' || plan.op === 'continue'
+                        ? 'lifecycle_op'
+                        : uncompiled.length > 0
+                          ? 'goals_not_compilable'
+                          : 'plan_carried_no_goals',
+                  }
+                : {}),
+              ...(uncompiled.length > 0 ? { uncompiled } : {}),
+              // A rejected structured block is evidence even when the prose grounded a
+              // plan: it names WHICH half of the answer the applied rows came from.
+              ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
+            },
+          }
+
       return {
-        plan: {
-          op: plan.op,
-          goals,
-          note: `mercury ${plan.op}: ${plan.reason}`,
-          provenance: {
-            intentSource: success.intentSource,
-            intent: success.intent.slice(0, 400),
-            ...(goals.length === 0
-              ? {
-                  noGoalsReason:
-                    plan.op === 'abort' || plan.op === 'complete' || plan.op === 'continue'
-                      ? 'lifecycle_op'
-                      : uncompiled.length > 0
-                        ? 'goals_not_compilable'
-                        : 'plan_carried_no_goals',
-                }
-              : {}),
-            ...(uncompiled.length > 0 ? { uncompiled } : {}),
-            // A rejected structured block is evidence even when the prose grounded a
-            // plan: it names WHICH half of the answer the applied rows came from.
-            ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
-          },
-        },
+        plan: installedPlan,
         strategy,
-        op: plan.op,
-        goals,
+        op: installedPlan.op ?? 'patch',
+        goals: installedPlan.goals,
         costUsd,
         ms: latencyMs,
         cached: false,

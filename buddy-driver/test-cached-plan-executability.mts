@@ -53,7 +53,6 @@ import {
 import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
-import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 
 const checks: { name: string; pass: boolean; detail: string }[] = []
 function check(name: string, pass: boolean, detail = ''): void {
@@ -196,8 +195,42 @@ interface ReplayRun {
   thrown: unknown
   logs: string[]
   callLog: 'written' | 'absent'
-  cacheAfter: { entries: Record<string, { strategy: string; replays?: number }> }
+  cacheAfter: { entries: Record<string, { strategy: string; replays?: number; goals?: MercuryPlanJson['goals'] }> }
   cachePath: string
+}
+
+async function runFresh(summary: MercuryStateSummary, plan: MercuryPlanJson): Promise<ReplayRun> {
+  const dir = mkdtempSync(join(tmpdir(), 'fresh-plan-exec-'))
+  const cachePath = join(dir, 'mercury-cache.json')
+  const logs: string[] = []
+  const mercury = new MercurySystem2({
+    summarize: () => summary,
+    log: hostLog(logs),
+    callsPath: join(dir, 'mercury-calls.jsonl'),
+    cachePath,
+    maxPerHour: 1,
+    resolveKey: () => ({ key: 'fixture-key', origin: 'fixture' }),
+    transport: async () => ({
+      toolCalls: [{ input: plan }],
+      text: 'Use the verified portal, subject to the live movement refusal.',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }),
+  })
+  let result: MercuryRepairResult | null = null
+  let thrown: unknown = null
+  try {
+    result = await mercury.tryRepair(planRequest(), 'action_impossible')
+  } catch (error) {
+    thrown = error
+  }
+  return {
+    result,
+    thrown,
+    logs,
+    callLog: existsSync(join(dir, 'mercury-calls.jsonl')) ? 'written' : 'absent',
+    cacheAfter: JSON.parse(readFileSync(cachePath, 'utf8')),
+    cachePath,
+  }
 }
 
 /**
@@ -205,10 +238,18 @@ interface ReplayRun {
  * call would fail loudly, so "no model call happened" is provable from the
  * absence of a call record (and from the absence of a throw).
  */
-async function runReplay(summary: MercuryStateSummary, plan: MercuryPlanJson, strategy: string, replays = 0): Promise<ReplayRun> {
+async function runReplay(
+  summary: MercuryStateSummary,
+  plan: MercuryPlanJson,
+  strategy: string,
+  replays = 0,
+  existingCachePath?: string,
+): Promise<ReplayRun> {
   const dir = mkdtempSync(join(tmpdir(), 'cached-plan-exec-'))
-  const cachePath = join(dir, 'mercury-cache.json')
-  writeFileSync(cachePath, cacheFile({ [hashMercuryState(summary)]: cacheEntry(plan, strategy, replays) }))
+  const cachePath = existingCachePath ?? join(dir, 'mercury-cache.json')
+  if (existingCachePath === undefined) {
+    writeFileSync(cachePath, cacheFile({ [hashMercuryState(summary)]: cacheEntry(plan, strategy, replays) }))
+  }
   const logs: string[] = []
   const mercury = new MercurySystem2({
     summarize: () => summary,
@@ -383,60 +424,74 @@ function linesWith(logs: readonly string[], token: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// (iii) a fresh (uncached) answer under the same blocked state is unchanged
+// (iii) a fresh answer uses the same install-time executability boundary
 // ---------------------------------------------------------------------------
 
 {
   const summary = mercuryState({ blockers: liveBlockers() })
-  const dir = mkdtempSync(join(tmpdir(), 'cached-plan-exec-miss-'))
-  const logs: string[] = []
-  const mercury = new MercurySystem2({
-    summarize: () => summary,
-    log: hostLog(logs),
-    callsPath: join(dir, 'mercury-calls.jsonl'),
-    cachePath: join(dir, 'mercury-cache.json'),
-    maxPerHour: 0,
-  })
-  let thrown: unknown = null
-  try {
-    await mercury.tryRepair(planRequest(), 'action_impossible')
-  } catch (error) {
-    thrown = error
-  }
+  const fresh = await runFresh(summary, CACHED_ENTER)
+  const freshVerdict = linesWith(fresh.logs, MERCURY_PLAN_EXECUTABILITY_MARKER)
+  const freshRefusal = linesWith(fresh.logs, MERCURY_PLAN_NOT_EXECUTABLE_MARKER)
   check(
-    '(iii) a cache MISS under the blocked state still goes to the model - no early refusal',
-    thrown instanceof FatalModelError &&
-      linesWith(logs, MERCURY_PLAN_EXECUTABILITY_MARKER).length === 0 &&
-      linesWith(logs, MERCURY_PLAN_NOT_EXECUTABLE_MARKER).length === 0,
-    `thrown=${thrown === null ? 'none' : String(thrown)} logs=${logs.join(' | ')}`,
+    '(iii) a fresh answer refused by the same live blocker is not installed',
+    fresh.thrown === null && fresh.result?.cached === false && fresh.result.goals.length === 0 &&
+      fresh.result.op === 'patch' &&
+      fresh.result.plan.provenance?.noGoalsReason === MERCURY_PLAN_NOT_EXECUTABLE_NO_GOALS_REASON,
+    `thrown=${fresh.thrown === null ? 'none' : String(fresh.thrown)} result=${JSON.stringify(fresh.result?.plan)}`,
   )
-
-  // The classifier is pure: an ordinary fresh answer's compiled rows are not
-  // rewritten by asking the question.
+  check(
+    '(iii) the fresh verdict/refusal names the exact source and grounded blocker',
+    freshVerdict.length === 1 && freshVerdict[0]!.includes('verdict=not_executable_now') &&
+      /intentSource=(enrichment|intent)/.test(freshVerdict[0]!) &&
+      freshRefusal.length === 1 && freshRefusal[0]!.includes('candidateKind=ENTER_PORTAL') &&
+      freshRefusal[0]!.includes('reason=needs_descend') &&
+      freshRefusal[0]!.includes('missing=[descend_plan:no_support@27,78,-4:air]'),
+    `verdict=${freshVerdict.join(' | ')} refusal=${freshRefusal.join(' | ')}`,
+  )
+  check(
+    '(iii) the model was called and its raw answer remains cached for the same tri-state check on replay',
+    fresh.callLog === 'written' &&
+      fresh.cacheAfter.entries[hashMercuryState(summary)]?.replays === 0 &&
+      JSON.stringify(fresh.cacheAfter.entries[hashMercuryState(summary)]?.goals) === JSON.stringify(CACHED_ENTER.goals),
+    `callLog=${fresh.callLog} cached=${JSON.stringify(fresh.cacheAfter.entries[hashMercuryState(summary)])}`,
+  )
+  const replay = await runReplay(summary, CACHED_ENTER, CACHED_ENTER_STRATEGY, 0, fresh.cachePath)
   const frozen = Object.freeze(
     plannedGoalsFromMercury(CACHED_ENTER, summary).map((goal) => Object.freeze({ ...goal })),
   ) as readonly PlannedGoal[]
   const before = JSON.stringify(frozen)
   const verdict = classifyMercuryPlanExecutability(frozen, summary.blockers)
   check(
-    '(iii) classifying a plan never mutates it (a fresh answer cannot be rewritten)',
+    '(iii) classifying a plan never mutates it',
     verdict.verdict === 'not_executable_now' && JSON.stringify(frozen) === before,
     `verdict=${verdict.verdict} before=${before} after=${JSON.stringify(frozen)}`,
   )
-
-  // The new check exists ONLY on the cache-replay branch: one call site, inside
-  // the `if (cached !== undefined)` block (the other identifier match is the
-  // declaration itself).
-  const source = readFileSync(new URL('./mercury-system2.ts', import.meta.url), 'utf8')
-  const callSites = [...source.matchAll(/classifyMercuryPlanExecutability\(/g)]
-    .filter((match) => !(match.index !== undefined && source.slice(Math.max(0, match.index - 9), match.index) === 'function '))
-    .map((match) => match.index ?? -1)
-  const branchStart = source.indexOf('if (cached !== undefined) {')
-  const branchEnd = source.indexOf('if (this.localEndpoint === null) {')
   check(
-    '(iii) the executability check is wired on the cache-replay branch and nowhere on the fresh path',
-    callSites.length === 1 && branchStart > 0 && branchEnd > branchStart && callSites[0]! > branchStart && callSites[0]! < branchEnd,
-    `callSites=${JSON.stringify(callSites)} branch=[${branchStart},${branchEnd})`,
+    '(iii) the fresh answer replayed from cache is refused by the same boundary without another model call',
+    replay.thrown === null && replay.result?.goals.length === 0 && replay.result.cached === true &&
+      replay.callLog === 'absent' &&
+      linesWith(replay.logs, MERCURY_PLAN_EXECUTABILITY_MARKER).length === 1 &&
+      linesWith(replay.logs, MERCURY_PLAN_EXECUTABILITY_MARKER)[0]!.includes('verdict=not_executable_now'),
+    `goals=${JSON.stringify(replay.result?.goals)} calls=${replay.callLog} verdict=${linesWith(replay.logs, MERCURY_PLAN_EXECUTABILITY_MARKER).join(' | ')}`,
+  )
+
+  const unknownSummary = mercuryState({ blockers: unrelatedBlockers() })
+  unknownSummary.allowedGoals.collect.push('stone')
+  const unknownPlan: MercuryPlanJson = {
+    op: 'patch',
+    goals: [{ kind: 'collect', item: 'stone', count: 12 }],
+    reason: 'collect reachable stone',
+  }
+  const unknownFresh = await runFresh(unknownSummary, unknownPlan)
+  const unknownVerdicts = linesWith(unknownFresh.logs, MERCURY_PLAN_EXECUTABILITY_MARKER)
+  check(
+    '(iii) fresh unknown executability remains unknown and does not trigger refusal or fallback',
+    unknownFresh.thrown === null && unknownFresh.result?.cached === false && unknownFresh.result.goals.length > 0 &&
+      unknownVerdicts.length === 1 && unknownVerdicts[0]!.includes('verdict=unknown') &&
+      unknownVerdicts[0]!.includes('no_executor_mapping_for_goal:collect:stone:12') &&
+      linesWith(unknownFresh.logs, MERCURY_PLAN_NOT_EXECUTABLE_MARKER).length === 0 &&
+      !unknownFresh.logs.some((line) => line.startsWith('PLANNER_FALLBACK')),
+    `thrown=${String(unknownFresh.thrown)} goals=${JSON.stringify(unknownFresh.result?.goals)} verdict=${unknownVerdicts.join(' | ')}`,
   )
 }
 
