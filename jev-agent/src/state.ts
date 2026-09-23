@@ -10,6 +10,8 @@
 //   3. replayed in the pure guard unit test with no bot at all.
 import type { Bot } from 'mineflayer'
 import { Vec3 } from 'vec3'
+import { LOW_AIR_LEVEL, MAX_AIR } from './air.ts'
+export { LOW_AIR_LEVEL, MAX_AIR } from './air.ts'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { System2Outcome } from './system2.ts'
@@ -214,28 +216,6 @@ export type ArmorState = Record<ArmorSlot, HeldItemState | null>
 
 /** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
 export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
-
-/**
- * The vanilla player air supply (bubbles). Mineflayer reports the server's
- * `air_supply` entity metadata as `bot.oxygenLevel`
- * (`node_modules/mineflayer/lib/plugins/entities.js`), so the remaining breath
- * is world truth the sensor can READ instead of inferring from damage.
- */
-export const MAX_AIR = 20
-
-/**
- * Air at or below which the body's own survival preempts other work.
- *
- * Measured 2026-09-21T16:59:34.792Z: the body drowned at (67.5,58.3,28.5) after
- * ~35s of `ATTACK:e4698 phase=closing-to-melee-range` chasing a salmon down a
- * water column (y 62 -> 57). No layer read the air supply at all - it was not
- * in `SelfState`, so no guard, executor or scheduler could see the body losing
- * breath. Vanilla drowning damage starts at air 0 and 20 HP is gone ~10s later,
- * so half the supply is the SAFE boundary: below it, surfacing must win over
- * whatever the body is doing. Code owns WHEN the body must resurface; WHICH
- * route surfaces it stays with Jev.
- */
-export const LOW_AIR_LEVEL = 10
 
 /** `dry` = body not in a fluid; `out_of_air` = breath at/below `LOW_AIR_LEVEL`. */
 export type SubmersionState = 'dry' | 'submerged' | 'out_of_air'

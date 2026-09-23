@@ -46,6 +46,7 @@
 // authorization: it names the epoch/commitment an outcome closes.
 import { createHash } from 'node:crypto'
 import type { Candidate, CandidateKind } from './candidates.ts'
+import { LOW_AIR_LEVEL, MAX_AIR } from './air.ts'
 
 // ---------------------------------------------------------------------------
 // §12 observability: the two planes and their markers
@@ -877,11 +878,11 @@ export function foodBand(food: number): string {
   return bandFood(food)
 }
 
-/** `undefined` air means "not observed"; `full` is the vanilla 300-tick ceiling. */
+/** `undefined` air means "not observed"; bands use the sensor's 0..MAX_AIR scale. */
 export function airBand(air: number | null | undefined): string {
   if (air === null || air === undefined || !Number.isFinite(air)) return 'unknown'
-  if (air <= 40) return 'critical'
-  if (air <= 140) return 'low'
+  if (air <= LOW_AIR_LEVEL) return 'critical'
+  if (air < MAX_AIR) return 'low'
   return 'full'
 }
 

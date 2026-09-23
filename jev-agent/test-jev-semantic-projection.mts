@@ -50,6 +50,7 @@ import {
   JEV_PROJECTION_LIMITS,
   JEV_PROJECTION_VERSION,
   JevDecisionEpochs,
+  airBand,
   mandatoryPolicyBoundary,
   meaningfulEventKinds,
   policyBoundary,
@@ -73,6 +74,7 @@ import type {
   SkillOutcomePacket,
 } from './src/jevSemanticProjection.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
+import { LOW_AIR_LEVEL, MAX_AIR } from './src/air.ts'
 
 interface Case {
   name: string
@@ -175,6 +177,33 @@ function outcomePacket(
 }
 
 const SRC_CONTROLLER = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+
+addCase('(0) air bands share the sensor scale and low-air safety boundary', () => {
+  const values = [0, LOW_AIR_LEVEL, LOW_AIR_LEVEL + 1, MAX_AIR]
+  const bands = values.map((value) => airBand(value))
+  const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY].map((value) => airBand(value))
+  const dryFull = buildJevSemanticProjection(projectionInput({
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null },
+  }))
+  const underwaterLow = buildJevSemanticProjection(projectionInput({
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(LOW_AIR_LEVEL), submerged: true, threatKey: null, criticalDamageKey: null, lastDamageKey: null },
+  }))
+  const boundaryHashes = values.map((value) => {
+    const projection = buildJevSemanticProjection(projectionInput({
+      safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(value), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null },
+    }))
+    return projectionHash(projection)
+  })
+  const pass =
+    JSON.stringify(bands) === JSON.stringify(['critical', 'critical', 'low', 'full']) &&
+    unknown.every((band) => band === 'unknown') &&
+    dryFull.safety.airBand === 'full' && dryFull.safety.submerged === false &&
+    underwaterLow.safety.airBand === 'critical' && underwaterLow.safety.submerged === true &&
+    new Set(bands).size === 3 &&
+    boundaryHashes[0] === boundaryHashes[1] &&
+    new Set(boundaryHashes).size === 3
+  return { pass, detail: `scale=0..${MAX_AIR} threshold=${LOW_AIR_LEVEL} bands=${JSON.stringify(bands)} unknown=${JSON.stringify(unknown)} boundaryHashes=${JSON.stringify(boundaryHashes)} dryFull=${dryFull.safety.airBand}/${dryFull.safety.submerged} underwaterLow=${underwaterLow.safety.airBand}/${underwaterLow.safety.submerged}` }
+})
 
 // ---------------------------------------------------------------------------
 // §13 fixtures
