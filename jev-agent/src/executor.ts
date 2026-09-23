@@ -12127,7 +12127,10 @@ export class Executor {
       const proximity = this.distanceToFeet(destination)
       const horizontal = this.horizontalToFeet(destination)
       const feetY = this.bot.entity.position.y
-      const sameLevel = Math.abs(destination.y - feetY) <= 1.0
+      // Entity Y is its own position, not the player's support block. A full
+      // block of vertical separation is a lower/upper-level approach, so it
+      // must not inherit same-level face-veto and side-bearing behavior.
+      const sameLevel = Math.abs(destination.y - feetY) <= 0.5
       // Proximity only ends locomotion once the body is close enough to contact
       // the moving item entity. A wider level-based radius is not a postcondition:
       // the server may still have sent no collect packet at that distance.
