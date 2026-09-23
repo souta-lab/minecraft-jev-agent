@@ -3,21 +3,20 @@
 Generated from real evidence only. Every section is labeled EVIDENCE or UNKNOWN; no value is invented.
 
 ## Base commit (origin/main) — EVIDENCE
-- sha: `90e2060c7764eb65f5c91e7b71bc2a95e1ce7b66`
-- subject: merge: fix completed-goal retreat guard (#470)
-- date: 2026-09-23T23:39:09+09:00
+- sha: `d7cc4a2fa62cf474cd7eb15ac9edf1aee9e47fb8`
+- subject: merge: bind M3 predicate evidence to BOOT SHA (#473)
+- date: 2026-09-24T00:00:19+09:00
 
 ## Open pull requests — EVIDENCE
 - count: 0
 - no open pull requests
 
 ## Open issues — EVIDENCE
-- count: 53
+- count: 52
 - P0: 7
 - P1: 6
 - priority source: labels first, then title prefix (13 counted from title only)
 - labels: no labels
-- #473 M3 gate CLI does not bind milestone predicate evidence to the run BOOT source SHA — no labels
 - #472 Stale synthetic damage_taken can preempt a successful SAFETY RETREAT after danger has cleared — no labels
 - #471 Transient Jev provider outages should degrade/freeze safely instead of terminating the resident — no labels
 - #470 Safety RETREAT can be guard-rejected as ALREADY_DONE after goal completion and lead to death — no labels
@@ -76,15 +75,15 @@ live: unavailable
 
 ## CI gate (repo-invariants) — EVIDENCE
 - verdict: INFRA_UNKNOWN
-- run: 35875756958
-- head: 90e2060c7764eb65f5c91e7b71bc2a95e1ce7b66
+- run: 35878346555
+- head: d7cc4a2fa62cf474cd7eb15ac9edf1aee9e47fb8
 - jobs: 0/5 executed at least one step
 - reason: no job executed a single step (5/5 never started)
 - job authority-contract: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
 - job core-deterministic: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
-- job jev-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
+- job jev-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=UNKNOWN)
 - job convergence: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
-- job system2-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=failure)
+- job system2-harness: INFRA_UNKNOWN (0/0 executed steps, raw conclusion=UNKNOWN)
 - NOTE: no job executed a step. This run is NOT a code verdict (issue #299).
 - NOTE: do not cite GitHub Actions as a passing or failing gate for this head until the workflow actually runs.
 
@@ -94,9 +93,9 @@ live: unavailable
 - `gh issue list --state open --limit 1000 --json number,title,labels`
 - `socket /home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock <- {"cmd":"report"} (2000ms timeout)`
 - `gh run list --workflow=repo-invariants.yml --limit 1 --json databaseId,headSha,createdAt,conclusion,headBranch`
-- `gh api repos/souta-lab/minecraft-jev-agent/actions/runs/35875756958/jobs`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101224/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101519/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101564/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101663/annotations`
-- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107231101698/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/actions/runs/35878346555/jobs`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107240050335/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107240050466/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107240050510/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107240050601/annotations`
+- `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107240050755/annotations`
