@@ -223,7 +223,7 @@ so a clean premise can never be paired with a run judged against another file.
 4. `clean-run.md` → the descriptor is the resolved one (`sourceSha` = the frozen
    commit, `levelName`/`levelSeed` = the new world); `run.levelNameAttested`,
    `run.seedAttested`, `run.bootSourceSha`, `run.bootInventoryEmpty` all PASS.
-5. `clean-run.md` → `run.consoleGamerulesVerified` PASS; inspect the bound `gamerule-verification.txt` for `keep_inventory=false` and every declared default in each dimension. Separately confirm the section 3.4 console checks: `seed` equals `values.levelSeed` and the body is allowed in.
+5. `clean-run.md` → `run.consoleGamerulesVerified` PASS; inspect the bound `gamerule-verification.txt` for `keep_inventory=false` and every declared default in each dimension. Separately confirm the section 3.3 console checks: `seed` equals `values.levelSeed` and the body is allowed in.
 6. `bundle.json` → `git.head` == the frozen SHA, `git.dirty` false (or explained),
    `run.worldKey` is the new world's namespace.
 7. `commands/*.txt` → the exact argv and captured output of the artifact, the M3
