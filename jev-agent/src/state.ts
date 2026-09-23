@@ -2414,7 +2414,17 @@ function stableFindBlocks(
   const point = bot.entity.position.floored()
   const key = `${scanId}|${bot.game.dimension}|${point.x},${point.y},${point.z}`
   const hit = scanPositionCache.get(key)
-  if (hit !== undefined && hit.revision === revision) return hit.positions
+  // The gate is applied on the way OUT, on BOTH paths. The hit path used to return
+  // the cached raw list directly, which contradicted the comment below and let a
+  // cached position list survive a provenance change: the live record shows exactly
+  // that shape - `DIMENSION_READ_REFUSED cell=10,59,8 provenance=unknown
+  // reason=unknown_column` from the per-cell name read while the cached station
+  // position list still offered the cell, so the candidate kept its POSITION but lost
+  // its NAME and grounding degraded to `CONTAINER_REFUSED reason=unreachable ...
+  // detail=block_unknown` (candidates.ts). `sensorPositions` is idempotent for an
+  // already-attributed list, so re-gating a hit costs a map lookup and can only
+  // ever REMOVE a position that is no longer attributable.
+  if (hit !== undefined && hit.revision === revision) return sensorPositions(hit.positions, scanId)
   const positions = bot.findBlocks(options)
   if (scanPositionCache.size >= SCAN_POSITION_CACHE_CAP) {
     const oldest = scanPositionCache.keys().next().value
