@@ -199,7 +199,7 @@ export function usage() {
     'Options:',
     `  --root <tree>             resident tree that produced the run (default ${REPO_ROOT})`,
     '  --out <dir>               bundle directory (default <root>/runs/m3-live/acceptance-bundle-<runId>)',
-    '  --environment <path>      operator environment record (difficulty/gamerules/worldChanges JSON)',
+    '  --environment <path>      operator environment record (difficulty/gamerules/configurationChanges/worldChanges JSON)',
     '  --operator-decisions <p>  operator decision file (default <repo>/OPERATOR-DECISIONS.json)',
     '  --evidence-class <c>      live|fixture|undeclared (default undeclared; only live can yield liveAcceptance)',
     '  --require-acceptance      treat a MISSING HOST acceptance-<runId>.json as a blocking gap (exit 2)',
@@ -353,7 +353,7 @@ export async function buildAcceptanceBundle({
     inputRecord({ id: 'runnerOut', path: paths.runnerOutPath, required: false, reason: 'no runner.out: authority markers must come from buddy.log' }),
     inputRecord({ id: 'snapshotDir', path: paths.snapshotDir, required: false, reason: 'no snapshot/predicate directory' }),
     inputRecord({ id: 'operatorDecisions', path: paths.operatorDecisions, required: false, reason: 'no operator decision file: the milestone premise is then unrecorded' }),
-    inputRecord({ id: 'environment', path: paths.environment, required: false, reason: 'no --environment record: difficulty/gamerules/worldChanges are then derived from the log only' }),
+    inputRecord({ id: 'environment', path: paths.environment, required: false, reason: 'no --environment record: config-change rationale is unavailable and difficulty/gamerules/worldChanges are then derived from the log only' }),
     inputRecord({ id: 'metricsTool', path: join(REPO_ROOT, METRICS_TOOL), required: true, reason: 'the #436/#437 metrics tool is missing from this checkout' }),
   ]
   const missingRequired = inputs.filter((input) => input.required && input.status === 'MISSING')

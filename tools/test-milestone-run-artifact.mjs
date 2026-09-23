@@ -475,7 +475,7 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
 // of the artifact. The gate's `m2_chain:` line is the ordered trace, and the
 // artifact must carry it as `verdicts.M2.chain` with built/lit/verified.
 {
-  assert.equal(passArtifact.schemaVersion, 5)
+  assert.equal(passArtifact.schemaVersion, 6)
   const chain = passArtifact.verdicts.M2.chain
   assert.ok(chain !== null && typeof chain === 'object', `M2 chain missing: ${JSON.stringify(passArtifact.verdicts.M2)}`)
   assert.equal(chain.ordered, true)

@@ -48,7 +48,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
 import { runCleanRunGate, runCli as runGateCli } from './clean-run-gate.mjs'
-import { loadCleanEnvironment, validateCleanEnvironment } from './clean-run-environment.mjs'
+import { checkRunEvidence, loadCleanEnvironment, validateCleanEnvironment } from './clean-run-environment.mjs'
 import { applyPlan, planPrepare, runCli as runPrepareCli } from './clean-run-prepare.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -359,6 +359,92 @@ const runCondition = (verdict, id) => condition(verdict, id)
   console.log('    --- full clean-run verdict lines for the CLEAN fixture (FIXTURE, not live evidence) ---')
   for (const entry of text.trimEnd().split('\n')) console.log(`    ${entry}`)
   ok('B. clean descriptor + fixture run: M3 gate PASS, clean CLEAN, combined NOT_ACCEPTED (fixture≠live), full verdict lines')
+}
+
+// B2. a documented pre-run configuration selection is run-bound and is not a
+// post-creation world edit. `worldChanges` must stay empty for this new world.
+{
+  const root = makeRoot('clean-run-config-rationale')
+  const container = join(SCRATCH, 'container')
+  mkdirSync(container, { recursive: true })
+  const sourceSha = initCleanFixtureGit(root)
+  const rationale = {
+    setting: 'values.difficulty',
+    from: 'normal',
+    to: 'easy',
+    reason: 'Use the lowest non-peaceful difficulty for the unattended clean M3 attempt while retaining hostile mob spawns and drops.',
+    expectedImpact: 'Reduces incoming hostile damage; enderman and blaze spawning/drop mechanics remain enabled, and no world terrain or inventory is pre-edited.',
+  }
+  const descriptor = resolvedDescriptor(root, {
+    levelName: CLEAN_LEVEL,
+    container,
+    sourceSha,
+    mutate: (doc) => {
+      doc.values.difficulty = 'easy'
+      doc.configurationChanges = [rationale]
+    },
+  })
+  const descriptorSha256 = loadCleanEnvironment(descriptor.path).sha256
+  writeFixture(root, RUN, {
+    source: sourceSha,
+    descriptor,
+    logLines: cleanLog(RUN, {
+      source: sourceSha,
+      envMarker: 'ENVIRONMENT difficulty=easy spawnMonsters=true spawnAnimals=true advanceTime=true keepInventory=false spawnMobs=true',
+    }),
+  })
+  const { bundle, exitCode, outDir } = await buildBundle(root, RUN, {
+    environmentPath: descriptor.path,
+    sourceSha,
+    outName: 'bundle-config-rationale',
+  })
+  assert.equal(exitCode, 0, `documented config bundle exit=${exitCode} reason=${bundle.acceptanceVerdict.reason}`)
+  const artifact = bundle.artifact.document
+  assert.equal(artifact.environment.environmentFile.sha256, descriptorSha256)
+  assert.deepEqual(artifact.environment.environmentFile.configurationChanges, [rationale])
+  assert.deepEqual(artifact.environment.configurationChanges, {
+    source: descriptor.path,
+    descriptorSha256,
+    runId: RUN,
+    sourceSha,
+    count: 1,
+    changes: [rationale],
+  })
+  assert.equal(artifact.environment.worldChanges, null, 'a pre-run difficulty selection is not a world edit')
+
+  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
+  assert.equal(verdict.status, 'CLEAN', `documented config clean status=${verdict.status} failed=${verdict.failed.join(',')}`)
+  assert.equal(runCondition(verdict, 'run.configurationChangesBound').verdict, 'PASS')
+  assert.equal(runCondition(verdict, 'run.noWorldChanges').verdict, 'PASS')
+  assert.deepEqual(runCondition(verdict, 'run.noWorldChanges').detail.worldChanges, null)
+
+  const wrongRun = JSON.parse(JSON.stringify(artifact))
+  wrongRun.environment.configurationChanges.runId = 'run-foreign-config'
+  const wrongRunCheck = checkRunEvidence({
+    descriptor: descriptor.document,
+    artifact: wrongRun,
+    runId: RUN,
+    descriptorPath: descriptor.path,
+    descriptorSha256,
+  })
+  assert.equal(wrongRunCheck.find((row) => row.id === 'run.configurationChangesBound').verdict, 'FAIL')
+  const wrongDescriptorHash = JSON.parse(JSON.stringify(artifact))
+  wrongDescriptorHash.environment.environmentFile.sha256 = 'f'.repeat(64)
+  const wrongHashCheck = checkRunEvidence({
+    descriptor: descriptor.document,
+    artifact: wrongDescriptorHash,
+    runId: RUN,
+    descriptorPath: descriptor.path,
+    descriptorSha256,
+  })
+  assert.equal(wrongHashCheck.find((row) => row.id === 'run.environmentRecordIsThisDescriptor').verdict, 'FAIL')
+
+  const incomplete = JSON.parse(JSON.stringify(descriptor.document))
+  incomplete.configurationChanges[0].expectedImpact = ''
+  const incompleteCheck = validateCleanEnvironment(incomplete, { descriptorPath: descriptor.path, worldContainer: container })
+  assert.equal(incompleteCheck.status, 'NOT_CLEAN')
+  assert.equal(condition(incompleteCheck, 'descriptor.configurationChangesDocumented').verdict, 'FAIL')
+  ok('B2. pre-run difficulty rationale/impact stays exact and run-bound; worldChanges remains empty')
 }
 
 // ---------------------------------------------------------------------------

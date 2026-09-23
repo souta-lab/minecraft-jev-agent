@@ -1,7 +1,7 @@
 {
   "record": "clean-run-environment",
-  "schemaVersion": 1,
-  "note": "The environment record for ONE clean M3 acceptance run (new world, new seed, no assists). This file is BOTH the operator environment record for `tools/m3-acceptance-bundle.mjs --environment <this file>` (readEnvironmentFile reads `values`/`worldChanges`) AND the clean-run premise checked by `tools/clean-run-gate.mjs`. It is a TEMPLATE until `cleanRun.sourceSha.state` is FROZEN: `bun tools/clean-run-prepare.mjs --environment <this file> --source-sha <frozen-40-hex> --apply` writes a resolved copy next to the prepared world. A descriptor that is not frozen can never authorise a clean run (see `cleanRun.sourceSha.policy`).",
+  "schemaVersion": 2,
+  "note": "The environment record for ONE clean M3 acceptance run (new world, new seed, no assists). This file is BOTH the operator environment record for `tools/m3-acceptance-bundle.mjs --environment <this file>` (readEnvironmentFile reads `values`, `configurationChanges`, and `worldChanges`) AND the clean-run premise checked by `tools/clean-run-gate.mjs`. Configuration selected before world creation is documented separately from post-creation world edits. It is a TEMPLATE until `cleanRun.sourceSha.state` is FROZEN: `bun tools/clean-run-prepare.mjs --environment <this file> --source-sha <frozen-40-hex> --apply` writes a resolved copy next to the prepared world. A descriptor that is not frozen can never authorise a clean run (see `cleanRun.sourceSha.policy`).",
   "cleanRun": {
     "milestone": "M3",
     "requirement": "Nether 到達を live で証明する(M3達成はnew seed new world、keepinvなどの補助ゼロで証明すること。実験は今のワールドで良い。)",
@@ -337,5 +337,6 @@
     "prebuiltStructures": [],
     "operatorWorldEdits": []
   },
+  "configurationChanges": [],
   "worldChanges": []
 }

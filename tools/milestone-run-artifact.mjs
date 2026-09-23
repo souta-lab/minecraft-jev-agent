@@ -95,8 +95,8 @@ export const RECORD = 'milestone-run-artifact'
 //     `operatorDecisions.{sha256,considered,premises}`, `acceptance.evidenceClass`
 //     (+ top-level `evidenceClasses`) and `gateEvidence` (the exact authority evidence
 //     both delegated gates received).
-// Every schema-4 field is kept.
-export const SCHEMA_VERSION = 5
+// Every schema-5 field is kept.
+export const SCHEMA_VERSION = 6
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
 /** Repo-level operator decision file; run-scoped by each entry's own runId. */
 export const OPERATOR_DECISION_RECORD = 'operator-decision'
@@ -1369,17 +1369,21 @@ export function coercePropertyValue(raw) {
 export function readEnvironmentFile(path) {
   if (typeof path !== 'string' || !existsSync(path)) return null
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const text = readFileSync(path, 'utf8')
+    const parsed = JSON.parse(text)
     const values = parsed?.values ?? parsed
     if (!isPlainObject(values)) return null
-    // `worldChanges` is not a config value: it is the record of an environment CHANGE
-    // (who changed what, why, how it was measured, what it did to the run), which the
-    // operator's M3 rules require in the artifact. Carry it through verbatim.
+    const configurationChanges = Array.isArray(parsed?.configurationChanges) ? parsed.configurationChanges : null
+    // `configurationChanges` records settings selected before world creation;
+    // `worldChanges` records edits after creation. Keep these evidence classes
+    // separate and preserve each descriptor entry verbatim.
     const worldChanges = Array.isArray(parsed?.worldChanges) ? parsed.worldChanges : null
     return {
       path,
       mtime: statSync(path).mtime.toISOString(),
+      sha256: createHash('sha256').update(text).digest('hex'),
       values,
+      ...(configurationChanges === null ? {} : { configurationChanges }),
       ...(worldChanges === null ? {} : { worldChanges }),
     }
   } catch {
@@ -1387,7 +1391,7 @@ export function readEnvironmentFile(path) {
   }
 }
 
-function composeEnvironment({ observations, dimensions, serverProperties, environmentFile = null }) {
+function composeEnvironment({ observations, dimensions, serverProperties, environmentFile = null, runId = null, sourceSha = null }) {
   const logFacts = { difficulty: null, mobSpawning: null, spawnAnimals: null, gamerules: null }
   for (const observation of Array.isArray(observations) ? observations : []) {
     for (const key of Object.keys(logFacts)) {
@@ -1433,7 +1437,29 @@ function composeEnvironment({ observations, dimensions, serverProperties, enviro
     environmentFile:
       environmentFile === null
         ? null
-        : { path: environmentFile.path, mtime: environmentFile.mtime, runScoped: false, values: environmentFile.values },
+        : {
+            path: environmentFile.path,
+            mtime: environmentFile.mtime,
+            sha256: environmentFile.sha256 ?? null,
+            runScoped: false,
+            values: environmentFile.values,
+            ...(Array.isArray(environmentFile.configurationChanges) ? { configurationChanges: environmentFile.configurationChanges } : {}),
+          },
+    // A configuration change describes host/world-generation configuration
+    // selected before this run; it is not a post-creation edit to the world.
+    // Bind the exact descriptor entries to the BOOT identity and keep them in a
+    // separate field from `worldChanges`, which remains reserved for edits.
+    configurationChanges:
+      Array.isArray(environmentFile?.configurationChanges)
+        ? {
+            source: environmentFile.path,
+            descriptorSha256: environmentFile.sha256 ?? null,
+            runId,
+            sourceSha,
+            count: environmentFile.configurationChanges.length,
+            changes: environmentFile.configurationChanges,
+          }
+        : null,
     // The operator's M3 rules require an environment CHANGE (not just its configuration)
     // to be recorded with its reason and its effect on the run. A world edit is not a
     // config value, so it is carried verbatim from the environment record: what changed,
@@ -2119,6 +2145,8 @@ export async function buildRunArtifact({
     dimensions: attribution.dimensionObservations,
     serverProperties,
     environmentFile: readEnvironmentFile(paths.environment),
+    runId,
+    sourceSha: boot?.sourceSha ?? null,
   })
   const environmentSources = `run-scoped ENVIRONMENT log marker, --environment <operator JSON>, --server-properties <file>`
   if (environment.difficulty === null) missing.add('environment.difficulty', `no difficulty fact from any of: ${environmentSources}`)
@@ -2626,7 +2654,7 @@ export function usage() {
     '  --operator-decisions <p>  read explicit operator milestone decisions (default <repo>/OPERATOR-DECISIONS.json)',
     '  --no-operator-decisions   never read an operator decision file',
     '  --server-properties <p>  read difficulty/spawn-monsters from a server.properties (labelled NOT run-scoped)',
-    '  --environment <p>        read operator-recorded environment facts (difficulty/gamerules JSON, labelled NOT run-scoped)',
+    '  --environment <p>        read operator environment facts and configurationChanges/worldChanges records',
     '',
     'Artifact sections (per runId):',
     '  run                      boot identity: exact source SHA, runtime, contract/schema, world epoch/key, MC server version',
@@ -2634,7 +2662,7 @@ export function usage() {
     '                           (effectiveSourceSha + provenance + provenanceBasis, the observed RELOAD markers and the',
     '                           read-only control-socket generation-hash cross-check; boot fallback is never silent)',
     '  inventory                boot (initial) and latest (final) inventory + the milestone item subset',
-    '  environment              difficulty / mob spawning / gamerules and the ordered dimension sequence + transitions',
+    '  environment              difficulty / mob spawning / gamerules, config-change rationale bound to run/source, world changes, and dimensions',
     '  authority.jev            effective Jev pi provider/model and the line it came from',
     '  authority.system2        effective System2 authority (configured stack first, last answerer kept beside it)',
     '  authority.fallback       deterministicFallbackEnabled + in-window decision sources => hidden fallback absence',

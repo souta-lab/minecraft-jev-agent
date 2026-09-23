@@ -25,7 +25,7 @@
 //
 // The descriptor is ALSO a valid `--environment <json>` record for
 // `tools/milestone-run-artifact.mjs` / `tools/m3-acceptance-bundle.mjs`
-// (`readEnvironmentFile` reads `values` / `worldChanges`), so ONE file is the
+// (`readEnvironmentFile` reads `values` / `configurationChanges` / `worldChanges`), so ONE file is the
 // operator's environment record and the clean-run premise at the same time.
 //
 // Verdicts
@@ -42,7 +42,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 export const RECORD = 'clean-run-environment'
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 export const CHECK_RECORD = 'clean-run-environment-check'
 
 /**
@@ -546,6 +546,49 @@ export function validateCleanEnvironment(
     }),
   )
 
+  // Configuration selected before first world generation is documented
+  // separately from later edits to world data. The descriptor must explicitly
+  // carry an array (empty when none occurred); each entry names the exact
+  // setting, from/to values, reason, and expected effect. The run artifact binds
+  // these entries to its descriptor hash and BOOT identity.
+  const rawConfigurationChanges = document.configurationChanges
+  const configurationChanges = Array.isArray(rawConfigurationChanges) ? rawConfigurationChanges : []
+  const invalidConfigurationChanges = []
+  if (!Array.isArray(rawConfigurationChanges)) {
+    invalidConfigurationChanges.push('configurationChanges must be explicitly declared as an array (use [] when no pre-run configuration changed)')
+  }
+  for (const [index, entry] of configurationChanges.entries()) {
+    if (!isPlainObject(entry)) {
+      invalidConfigurationChanges.push(`[${index}] must be an object`)
+      continue
+    }
+    if (typeof entry.setting !== 'string' || entry.setting.trim() === '') invalidConfigurationChanges.push(`[${index}].setting is missing`)
+    if (!Object.prototype.hasOwnProperty.call(entry, 'from') || !Object.prototype.hasOwnProperty.call(entry, 'to')) {
+      invalidConfigurationChanges.push(`[${index}] must state from and to`)
+    } else if (JSON.stringify(entry.from) === JSON.stringify(entry.to)) {
+      invalidConfigurationChanges.push(`[${index}] from and to are identical`)
+    }
+    if (typeof entry.reason !== 'string' || entry.reason.trim() === '') invalidConfigurationChanges.push(`[${index}].reason is missing`)
+    if (typeof entry.expectedImpact !== 'string' || entry.expectedImpact.trim() === '') invalidConfigurationChanges.push(`[${index}].expectedImpact is missing`)
+    if (
+      typeof entry.setting === 'string' && entry.setting.trim() !== '' &&
+      JSON.stringify(readPath(document, entry.setting)) !== JSON.stringify(entry.to)
+    ) {
+      invalidConfigurationChanges.push(`[${index}].to does not match ${entry.setting}`)
+    }
+  }
+  conditions.push(
+    condition({
+      id: 'descriptor.configurationChangesDocumented',
+      verdict: invalidConfigurationChanges.length === 0 ? 'PASS' : 'FAIL',
+      reason:
+        invalidConfigurationChanges.length === 0
+          ? `${configurationChanges.length} pre-run configuration change(s) are documented separately from world edits`
+          : `configuration change record is incomplete or inconsistent: ${invalidConfigurationChanges.join('; ')}`,
+      detail: { configurationChanges, invalid: invalidConfigurationChanges },
+    }),
+  )
+
   // 11. the exact source SHA must be FROZEN (a template can never authorise a run)
   const sourceShaState = isPlainObject(cleanRun.sourceSha) ? cleanRun.sourceSha.state : null
   const sourceSha = values.sourceSha
@@ -888,6 +931,7 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   const gamerules = isPlainObject(values.gamerules) ? values.gamerules : {}
   const defaults = isPlainObject(cleanRun.gamerulePolicy?.defaults) ? cleanRun.gamerulePolicy.defaults : {}
   const document = isPlainObject(artifact) ? artifact : null
+  const env = document !== null && isPlainObject(document.environment) ? document.environment : {}
 
   conditions.push(
     condition({
@@ -919,17 +963,22 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   const recordedPath = typeof envFile?.path === 'string' ? envFile.path : null
   const samePath = recordedPath !== null && descriptorPath !== null && resolve(recordedPath) === resolve(descriptorPath)
   const recordedValuesSha = envFile === null ? null : sha256Text(JSON.stringify(envFile.values ?? null))
+  const recordedDescriptorSha = typeof envFile?.sha256 === 'string' ? envFile.sha256 : null
+  const descriptorShaMatches = recordedDescriptorSha !== null && descriptorSha256 !== null && recordedDescriptorSha === descriptorSha256
+  const descriptorBindingMatches = samePath && descriptorShaMatches
   conditions.push(
     condition({
       id: 'run.environmentRecordIsThisDescriptor',
-      verdict: recordedPath === null ? 'UNKNOWN' : samePath ? 'PASS' : 'FAIL',
+      verdict: recordedPath === null || recordedDescriptorSha === null ? 'UNKNOWN' : descriptorBindingMatches ? 'PASS' : 'FAIL',
       reason:
         recordedPath === null
           ? 'the artifact records no --environment file, so the run has no environment record to bind to this descriptor'
-          : samePath
-            ? `the artifact read its environment from ${recordedPath} (the same file this gate validated)`
-            : `the artifact read its environment from ${recordedPath}, not from ${String(descriptorPath)}: the run was NOT judged against this descriptor`,
-      detail: { recordedPath, descriptorPath, recordedValuesSha256: recordedValuesSha, descriptorSha256 },
+          : recordedDescriptorSha === null
+            ? 'the artifact does not carry the environment descriptor SHA-256, so the exact descriptor bytes cannot be verified'
+            : descriptorBindingMatches
+              ? `the artifact read the same descriptor path and sha256=${descriptorSha256} that this gate validated`
+              : `artifact descriptor path/hash (${String(recordedPath)}, ${recordedDescriptorSha}) does not match the validated descriptor (${String(descriptorPath)}, ${String(descriptorSha256)})`,
+      detail: { recordedPath, descriptorPath, recordedValuesSha256: recordedValuesSha, recordedDescriptorSha256: recordedDescriptorSha, descriptorSha256 },
     }),
   )
 
@@ -946,6 +995,43 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
             ? `BOOT source=${bootSha} equals the descriptor's frozen sourceSha`
             : `BOOT source=${bootSha} != descriptor sourceSha=${String(values.sourceSha)}: the run did not boot the frozen tree`,
       detail: { boot: bootSha, descriptor: values.sourceSha ?? null },
+    }),
+  )
+
+  const configurationChangesDeclared = Array.isArray(descriptor?.configurationChanges)
+  const expectedConfigurationChanges = configurationChangesDeclared ? descriptor.configurationChanges : []
+  const recordedConfigurationChanges = isPlainObject(env.configurationChanges) ? env.configurationChanges : null
+  const recordedChanges = Array.isArray(recordedConfigurationChanges?.changes) ? recordedConfigurationChanges.changes : null
+  const recordedConfigurationChangesBound = recordedConfigurationChanges !== null
+    && recordedConfigurationChanges.runId === runId
+    && recordedConfigurationChanges.sourceSha === bootSha
+    && recordedConfigurationChanges.descriptorSha256 === descriptorSha256
+    && typeof recordedConfigurationChanges.source === 'string'
+    && descriptorPath !== null
+    && resolve(recordedConfigurationChanges.source) === resolve(descriptorPath)
+  const configurationChangesMatch = configurationChangesDeclared
+    ? recordedConfigurationChangesBound && JSON.stringify(recordedChanges) === JSON.stringify(expectedConfigurationChanges)
+    : false
+  conditions.push(
+    condition({
+      id: 'run.configurationChangesBound',
+      verdict: configurationChangesMatch ? 'PASS' : recordedConfigurationChanges === null ? 'UNKNOWN' : 'FAIL',
+      reason:
+        configurationChangesMatch
+          ? expectedConfigurationChanges.length === 0
+            ? 'the descriptor declares no pre-run configuration changes; worldChanges remains a separate record'
+            : `${expectedConfigurationChanges.length} configuration change(s) match the exact descriptor hash and are bound to runId=${String(runId)} sourceSha=${String(bootSha)}`
+          : recordedConfigurationChanges === null
+            ? `the descriptor declares ${expectedConfigurationChanges.length} configuration change(s), but the run artifact did not preserve the explicit configurationChanges list and its rationale/expected impact`
+            : 'the run artifact configuration-change rationale does not match the descriptor path/hash, runId, BOOT source SHA, or exact change entries',
+      detail: {
+        runId: recordedConfigurationChanges?.runId ?? null,
+        sourceSha: recordedConfigurationChanges?.sourceSha ?? null,
+        descriptorSha256: recordedConfigurationChanges?.descriptorSha256 ?? null,
+        expected: expectedConfigurationChanges,
+        observed: recordedChanges,
+      },
+      required: true,
     }),
   )
 
@@ -991,7 +1077,6 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   )
 
   // 3. the artifact's environment facts must not contradict the descriptor
-  const env = isPlainObject(document.environment) ? document.environment : {}
   for (const [id, key, expected] of [
     ['run.difficultyNotContradicted', 'difficulty', values.difficulty],
     ['run.mobSpawningNotContradicted', 'mobSpawning', values.mobSpawning],
