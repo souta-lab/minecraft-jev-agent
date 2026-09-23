@@ -38,7 +38,7 @@ environment record can never be two different documents.
 | --- | --- | --- |
 | `cleanRun.milestone` | `M3` | a descriptor may only authorise the milestone it was written for |
 | `cleanRun.requirement` | the operator sentence, verbatim | the acceptance criterion itself, not a paraphrase |
-| `cleanRun.worldContainer` | `/home/s0u7a/mc-server` | the world CONTAINER; all three dimensions of the target world live under it. It must stay this path: `serverSeed()` in `buddy-driver/agent-runner.mts` reads the seed from the hard-coded file `<that root>/server.properties` |
+| `cleanRun.worldContainer` | `/home/s0u7a/mc-server` | the world CONTAINER; all three dimensions of the target world live under it. It is passed explicitly as the server's `--universe`. The resident's seed attestation reads the same staged config through `BUDDY_SERVER_PROPERTIES_PATH`; the shared `<container>/server.properties` is not changed. |
 | `cleanRun.botUsername` | `AI_Buddy` | the prep step refuses if that name is in `ops.json`: command authority is the generic assist |
 | `cleanRun.protectedWorldNames` | `world`, `world_nether`, `world_the_end` | the live worlds. Nothing in this harness may write inside them, and the target level name may not collide with them |
 | `cleanRun.previousWorld` | `world` / `2024` + why | states exactly what the target must differ from, and records the measured assistance of the current world |
@@ -75,12 +75,12 @@ bun install --frozen-lockfile
 # 2a. see exactly what would happen. Writes nothing.
 bun tools/clean-run-prepare.mjs \
   --environment tools/fixtures/m3-clean-environment.json \
-  --source-sha "$(git rev-parse HEAD)" --dry-run
+  --root "$PWD" --dry-run
 
 # 2b. stage it
 bun tools/clean-run-prepare.mjs \
   --environment tools/fixtures/m3-clean-environment.json \
-  --source-sha "$(git rev-parse HEAD)" --apply
+  --root "$PWD" --apply
 ```
 
 `--apply` writes, inside the container and nowhere else:
@@ -97,12 +97,12 @@ bun tools/clean-run-prepare.mjs \
 <container>/m3-clean-run/ACCEPTANCE-RECIPE.md           a copy of this file, next to the evidence
 ```
 
-Guarantees, printed as `CLEAN_RUN_PREPARE_GUARD` lines: no server start/stop, no
-deletion or move of any file, no write inside `world` / `world_nether` /
-`world_the_end`, no `--server-root` that is a world directory or inside the target
-world, no overwrite of an existing `server.properties` (unless
-`--overwrite-properties`, which always keeps a timestamped `.bak` first). It
-refuses: a descriptor that is not CLEAN, a target world that already has a
+Guarantees, printed as `CLEAN_RUN_PREPARE_GUARD` lines: the resident/operator tree
+HEAD equals the frozen source SHA; no server start/stop, no deletion or move of
+any file, no write inside `world` / `world_nether` / `world_the_end`, no
+`--server-root` that is a world directory or inside the target world, and no
+overwrite of the shared `server.properties` (`--overwrite-properties` is refused
+for both M2 and M3). It refuses: a descriptor that is not CLEAN, a target world that already has a
 `level.dat`, an existing level-name directory it did not stage, a reused seed, an
 unfrozen SHA, a protected level name, and an opped bot. A second `--apply` on an
 unstaged-but-not-generated world is an `IDEMPOTENT_NOOP`.
@@ -110,57 +110,48 @@ unstaged-but-not-generated world is an `IDEMPOTENT_NOOP`.
 ## 3. The run, in order
 
 ```bash
-# 3.1 freeze the SHA (the descriptor's sourceShaState must become FROZEN; the
-#     command below does it) and prepare the clean world
-cd <frozen-checkout>
-bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
-  --source-sha "$(git rev-parse HEAD)" --apply
+# 3.1 OPERATOR / H4: stop the current resident through its own control socket,
+#     then wait for it to exit. Stop the current Leaf server gracefully from its
+#     console and wait for that process to exit before starting the clean world.
+#     Do NOT copy, replace, or restore <container>/server.properties.
+#     Keep this ordering: resident stopped -> server stopped -> clean server started.
 
-# 3.2 back up the live properties, then swap in the clean ones (never delete).
-#     The swap is REQUIRED, not cosmetic: agent-runner.mts serverSeed() reads this
-#     exact path into the HOST acceptance record, so a --config-only launch would
-#     record the OLD seed (2024) and the clean gate would FAIL run.seedAttested.
-cp <container>/server.properties <container>/server.properties.clean-run-bak-<stamp>
-cp <container>/m3-clean-run/server.properties.clean <container>/server.properties
-
-# 3.3 restart the server  [OPERATOR ACTION — H4; this harness never does it]
-#     start.sh does NOT forward "$@", so pass the flags by invoking java directly:
-#     --config pins the properties file, --universe the world container, --level-name
-#     the world. There is NO --seed flag in this build: the seed can only come from
-#     the properties file, and it is consumed only when level.dat does not exist yet.
-cd <container> && setsid --fork /usr/lib/jvm/java-21-openjdk-amd64/bin/java \
+# 3.2 start Leaf directly with the staged properties [OPERATOR ACTION — H4].
+#     start.sh does NOT forward "$@". --config selects the staged seed/config;
+#     --universe and --level-name select this descriptor's new world. There is no
+#     --seed flag in this build; the seed is consumed from the config only before
+#     level.dat exists. The shared server.properties remains untouched.
+cd <container> && setsid --fork java \
   -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui \
   --config <container>/m3-clean-run/server.properties.clean \
   --universe <container> --level-name <levelName> \
   </dev/null >>server.log 2>&1 &
 #     do NOT pass --bonusChest (there is no properties key for it)
 
-# 3.4 after the FIRST boot, verify on the server console and paste the output into
-#     <container>/m3-clean-run/gamerule-verification.txt :
-#       list                                    -> the body's name must be allowed in
-#       seed                                    -> must equal values.levelSeed
-#       gamerule                                -> overworld rules
-#       execute in minecraft:the_nether run gamerule
-#       execute in minecraft:the_end run gamerule
-#     keep_inventory must be FALSE IN ALL THREE DIMENSIONS (the M3 route dies in the
-#     Nether). The ids are the snake_case 1.21.11 ids; camelCase is REJECTED by this build.
+# 3.3 after first boot, verify the world + gamerules on the server console and paste output to:
+#     <container>/m3-clean-run/gamerule-verification.txt
+#     Run: list ; seed ; gamerule ; execute in minecraft:the_nether run gamerule ;
+#     execute in minecraft:the_end run gamerule. `seed` must equal values.levelSeed;
+#     keep_inventory must be false in all three dimensions. The ids are snake_case.
 
-# 3.5 start the resident on the FROZEN SHA, with EMPTY durable state: use a FRESH
-#     worktree of the frozen commit, so no ledger/known-resource memory from the
-#     old world can leak into the run
-git -C <repo> worktree add <repo>/../mc-ai-worktrees/m3-clean-run "$(git rev-parse HEAD)"
-cd <repo>/../mc-ai-worktrees/m3-clean-run && bun install --frozen-lockfile
-cd buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
+# 3.4 start the resident only after the clean server is ready, from the same
+#     FROZEN checkout used by --root. This checkout must be fresh so its durable
+#     state is empty. The environment variable makes HOST acceptance seed
+#     attestation read the staged file the server used, without changing the
+#     shared server.properties.
+cd <frozen-checkout>/buddy-driver && \
+  BUDDY_SERVER_PROPERTIES_PATH=<container>/m3-clean-run/server.properties.clean \
+  setsid --fork nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 #     the BOOT line must read source=<the frozen sha>
 
-# 3.6 run the M3 attempt; record the runId from the BOOT line
+# 3.5 run the M3 attempt; record the runId from the BOOT line
 
-# 3.7 refresh the HOST acceptance record with the read-only control query
+# 3.6 refresh the HOST acceptance record with the read-only control query
 #     (it is the only attestation of levelName + seed; it is NOT written at boot)
 printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
   | socat - UNIX-CONNECT:<frozen-tree>/buddy-driver/data/resident/control.sock
 
-# 3.8 the canonical bundle, with the RESOLVED descriptor as the environment record
+# 3.7 the canonical bundle, with the RESOLVED descriptor as the environment record
 bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
   --root <frozen-tree> \
   --environment <container>/m3-clean-run/environment-resolved.json \
@@ -168,7 +159,7 @@ bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
 #     outputs land in <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>/
 #     bundle.json / bundle.md / artifact-<RUN_ID>.json / metrics.json / commands/
 
-# 3.9 the clean verdict, written NEXT TO the bundle (additive: bundle.json is never modified)
+# 3.8 the clean verdict, written NEXT TO the bundle (additive: bundle.json is never modified)
 bun tools/clean-run-gate.mjs \
   --environment <container>/m3-clean-run/environment-resolved.json \
   --bundle-dir <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID> \
@@ -199,7 +190,7 @@ descriptor is not an acceptance.
 | frozen SHA | `BOOT ... source=<sha>` in `buddy.log`; `artifact.run.boot.sourceSha`; the clean gate compares it to `values.sourceSha` (`run.bootSourceSha`) |
 | tree HEAD | `bundle.git.head` + `liveSignals.bootSourceMatchesTreeHead` |
 | `worldKey` | `BOOT ... worldKey={"serverId":…,"dimension":…,"worldEpoch":…}` → `artifact.run.worldKey` (it is the world memory namespace: `serverId|dimension|worldEpoch`; it does NOT contain the seed) |
-| level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()`, which reads the hard-coded `<container>/server.properties` |
+| level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()`, which reads `BUDDY_SERVER_PROPERTIES_PATH`; the M3 recipe points it at the same staged config passed to Leaf with `--config` |
 | config (difficulty, spawn-monsters) | run-scoped `ENVIRONMENT`/`GAMERULE` markers in `buddy.log` → `artifact.environment.*` with `source: log, runScoped: true`; the clean gate compares them (`run.difficultyNotContradicted`, `run.mobSpawningNotContradicted`) |
 | gamerules | the descriptor (`artifact.environment.environmentFile.values.gamerules`), plus any run-scoped marker (`artifact.environment.gamerules`), plus the operator's console listing in `gamerule-verification.txt`. Mineflayer cannot read gamerules |
 | no world changes | `artifact.environment.worldChanges` must be `null` (`run.noWorldChanges`) |
@@ -240,10 +231,10 @@ so a clean premise can never be paired with a run judged against another file.
   machine fact exists for most rules. The gate can catch a *contradiction* in a
   run-scoped marker, a `LADDER_INVENTORY_SETTLE` that kept items, and a non-empty
   boot inventory; it cannot read the world's rule table.
-- **`serverSeed()` is hard-coded** to `<container>/server.properties`. Serving the
-  clean world from a different root would put the wrong seed in the acceptance
-  record; the clean gate FAILs that loudly (`run.seedAttested`) rather than
-  accepting it.
+- **`serverSeed()` defaults** to `<container>/server.properties`. The M3 recipe
+  explicitly sets `BUDDY_SERVER_PROPERTIES_PATH` to the staged config used by
+  Leaf, so the HOST acceptance seed matches the resolved descriptor without
+  mutating shared server configuration.
 - **The datapack's own execution is unverified without a boot.** Its format
   (`min_format`/`max_format` = `[94,1]`, the build's data format) and its load tag
   (`data/minecraft/tags/function/load.json`) are verified statically in this build's

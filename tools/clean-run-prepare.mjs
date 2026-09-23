@@ -13,8 +13,7 @@
 //      into a RESOLVED descriptor, because the run must boot exactly that commit;
 //   3. stages the new world's directory with a gamerule datapack (when the pack
 //      format is known) and writes the clean server.properties as a PROPOSAL next
-//      to the live one - it never overwrites an existing server.properties unless
-//      --overwrite-properties is passed, and it always keeps a backup first;
+//      to the live one - it never overwrites the shared server.properties;
 //   4. writes the manifest / attempts ledger / resolved descriptor / copy of the
 //      acceptance recipe next to the world, so the operator has one directory to
 //      hand to the reviewer;
@@ -135,14 +134,14 @@ export function usage() {
     'Options:',
     '  --environment <p>        the clean-run descriptor (REQUIRED; must validate CLEAN)',
     '  --source-sha <40-hex>    the exact SHA the run must boot (freezes the descriptor)',
-    '  --root <tree>            alternative to --source-sha: resolve git HEAD of this checkout',
+    '  --root <tree>            frozen resident checkout; its git HEAD must equal the resolved source SHA',
     '  --milestone <M2|M3>      expected descriptor contract (default: M3; M2 requires explicit selection)',
     '  --server-root <dir>      where the clean world is served from (default: descriptor cleanRun.worldContainer)',
     '  --level-name <name>      override the descriptor level name (must still be a new, unprotected name)',
     '  --seed <seed>            override the descriptor seed (must still differ from the live seed)',
     '  --apply                  perform the writes (default is --dry-run)',
     '  --create-server-root     allow --apply to create a missing --server-root directory',
-    '  --overwrite-properties   allow replacing an existing server.properties (a .bak is always written first)',
+    '  --overwrite-properties   legacy flag; refused because shared server.properties is never replaced',
     '  --report <path>          write the plan/result JSON to this path (never inside --server-root in dry-run)',
     '  --json                   print the plan/result JSON to stdout',
     '',
@@ -282,6 +281,7 @@ export function planPrepare({
   serverRoot = null,
   sourceSha = null,
   root = null,
+  enforceOperatorTreeSource = false,
   expectedMilestone = 'M3',
   seed = null,
   levelName = null,
@@ -313,6 +313,21 @@ export function planPrepare({
     resolvedDoc.values.sourceSha = frozenSha
     resolvedDoc.cleanRun.sourceSha.state = 'FROZEN'
     overridesApplied.push(`sourceSha=${frozenSha}${root !== null && sourceSha === null ? ` (git HEAD of ${root})` : ''}`)
+  }
+  if (enforceOperatorTreeSource && expectedMilestone === 'M3') {
+    const operatorTree = root === null ? REPO_ROOT : resolve(root)
+    const operatorTreeSha = gitHead(operatorTree)
+    const operatorTreeMatchesSource = frozenSha !== null && operatorTreeSha === frozenSha
+    guards.push({
+      id: 'operator_tree_matches_frozen_sha',
+      verdict: operatorTreeMatchesSource ? 'PASS' : 'FAIL',
+      detail: operatorTreeMatchesSource
+        ? `operator/resident checkout ${operatorTree} is exactly ${String(frozenSha)}`
+        : `operator/resident checkout ${operatorTree} HEAD=${String(operatorTreeSha)} must equal resolved sourceSha=${String(frozenSha)}; pass --root <frozen-checkout>`,
+    })
+    if (!operatorTreeMatchesSource) {
+      refusals.push({ reason: `operator_tree_source_mismatch: checkout=${operatorTree} HEAD=${String(operatorTreeSha)} sourceSha=${String(frozenSha)}; the resident command must run from the frozen checkout` })
+    }
   }
 
   const container = serverRoot === null ? resolvedDoc.cleanRun?.worldContainer ?? null : resolve(serverRoot)
@@ -406,8 +421,10 @@ export function planPrepare({
   if (!existsSync(resolve(container)) && !createServerRoot) {
     refusals.push({ reason: `server_root_missing: ${resolve(container)} does not exist (pass --create-server-root to create it)` })
   }
-  if (milestone === 'M2' && overwriteProperties) {
-    refusals.push({ reason: 'm2_shared_properties_mutation_forbidden: M2 trials use the staged server.properties.clean through the server --config argument and must never replace the shared server.properties' })
+  if (overwriteProperties) {
+    refusals.push({ reason: milestone === 'M2'
+      ? 'm2_shared_properties_mutation_forbidden: M2 trials use the staged server.properties.clean through the server --config argument and must never replace the shared server.properties'
+      : 'm3_shared_properties_mutation_forbidden: M3 runs use the staged server.properties.clean through the server --config argument and must never replace the shared server.properties' })
   }
 
   // ---- the world must be new, and NOT already generated --------------------
@@ -492,9 +509,6 @@ export function planPrepare({
       if (port !== undefined && wantedPort !== '' && String(port) !== wantedPort) {
         refusals.push({ reason: `server_port_mismatch: server.properties server-port=${port} but the descriptor serverId=${String(resolvedDoc.values.serverId)} (the resident's worldKey.serverId would not match the descriptor)` })
       }
-      if (overwriteProperties && existsSync(propertiesPath)) {
-        warnings.push(`--overwrite-properties will replace ${propertiesPath}; a timestamped .bak copy is written first (nothing is deleted)`)
-      }
     }
   } else {
     warnings.push(`no ${propertiesPath} exists in this container; the clean properties are staged as a PROPOSAL only`)
@@ -566,10 +580,6 @@ export function planPrepare({
     unchanged: false,
     note: 'append-only attempt ledger (levelName/levelSeed/sourceSha/perparedAt) — written last',
   })
-  if (overwriteProperties && proposedProperties !== null && existsSync(propertiesPath)) {
-    actions.push({ kind: 'write', path: propertiesPath, bytes: Buffer.byteLength(proposedProperties, 'utf8'), sha256: sha256Text(proposedProperties), exists: true, unchanged: safeText(propertiesPath) === proposedProperties, note: 'IN-PLACE server.properties replacement (--overwrite-properties); a timestamped .bak is written first' })
-  }
-
   const status = apply ? 'APPLIED' : 'PLANNED'
   return {
     status,
@@ -614,9 +624,8 @@ function safeText(path) {
 }
 
 /** The ordered operator commands. Nothing here is executed by this tool. */
-export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, root, recipePath, milestone = 'M3' }) {
-  const stamp = '<YYYYMMDD-HHMM>'
-  const tree = root ?? '/home/s0u7a/mc-ai'
+export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, root = null, recipePath, milestone = 'M3' }) {
+  const tree = root === null || root === undefined ? REPO_ROOT : resolve(root)
   if (milestone === 'M2') {
     return [
       `# ==== M2 REPRODUCTION: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
@@ -632,12 +641,12 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
   return [
     `# ==== M3 CLEAN RUN: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
     `# 0. this file is the plan; the recipe is ${recipePath}`,
-    `# 1. back up the live properties (nothing is deleted):`,
-    `cp ${container}/server.properties ${container}/server.properties.clean-run-bak-${stamp}`,
-    `# 2. swap in the clean properties:`,
-    `cp ${runDir}/server.properties.clean ${container}/server.properties`,
-    `# 3. restart the server (OPERATOR action; H4 - this tool must not do it):`,
-    `cd ${container} && setsid --fork ./start.sh </dev/null >>server.log 2>&1 &`,
+    `# 1. OPERATOR / H4: stop the current resident through its own control socket; wait for it to exit.`,
+    `# 2. OPERATOR / H4: stop the current Leaf server gracefully from its console; wait for it to exit.`,
+    `#    Do not copy over, edit, or restore the shared ${container}/server.properties.`,
+    `# 3. start the clean world from the staged config with both world paths explicit:`,
+    `cd ${container} && setsid --fork /usr/lib/jvm/java-21-openjdk-amd64/bin/java -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui --config ${runDir}/server.properties.clean --universe ${container} --level-name ${levelName} </dev/null >>server.log 2>&1 &`,
+    `#    --config selects the staged seed/config; --universe and --level-name select the descriptor's world. Never pass --bonusChest.`,
     `# 4. after the first boot, VERIFY the world + gamerules on the server console and paste the output into:`,
     `#    ${runDir}/gamerule-verification.txt`,
     `#    (console commands) list  /  seed  /  gamerule`,
@@ -647,9 +656,10 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `#    the gamerule ids are the snake_case ids from ${runDir}/environment-resolved.json (camelCase is`,
     `#    REJECTED by this build); keep_inventory must be false in ALL THREE dimensions because the M3 route dies in the Nether`,
     `#    reviewer check: keepInventory=false and every rule in ${runDir}/environment-resolved.json`,
-    `# 5. start the resident on the FROZEN sha (from the frozen checkout, not this one):`,
-    `cd ${tree}/buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &`,
+    `# 5. start the resident from this run's FROZEN checkout (run prepare with --root <that checkout>):`,
+    `cd ${tree}/buddy-driver && BUDDY_SERVER_PROPERTIES_PATH=${runDir}/server.properties.clean setsid --fork nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &`,
     `#    the run's BOOT line must report source=${String(sourceSha)}`,
+    `#    BUDDY_SERVER_PROPERTIES_PATH makes HOST seed attestation read the same staged config the server used.`,
     `# 6. run the M3 attempt (drive the agent to the Nether + 12 eyes). Record the runId from BOOT.`,
     `# 7. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
     `printf '{"id":"acceptance-refresh","cmd":"acceptance"}\\n' | socat - UNIX-CONNECT:${tree}/buddy-driver/data/resident/control.sock`,
@@ -796,6 +806,7 @@ export async function runCli({ argv = process.argv.slice(2), write = (line) => p
     serverRoot: args.serverRoot,
     sourceSha: args.sourceSha,
     root: args.root,
+    enforceOperatorTreeSource: true,
     seed: args.seed,
     levelName: args.levelName,
     apply: args.apply,
