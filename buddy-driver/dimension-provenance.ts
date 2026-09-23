@@ -224,8 +224,19 @@ function syncStore (
   const from = store.liveDimension
   store.liveDimension = next
   const columnsDropped = store.columnDimension.size
-  store.columnDimension.clear()
+  // UNLOAD FIRST, THEN CLEAR. The unload walks `store.columnDimension` to know which
+  // columns to drop, so clearing the tag map first left it an empty list: every reset
+  // reported `columnsUnloaded=0` while `columnsDropped` counted the tags it had just
+  // discarded (measured live: 108 resets, columnsUnloaded 0 on all of them, dropped up
+  // to 190). The consequence is the freeze this fix is for - a column whose tag was
+  // discarded but which the world still holds is read as `provenance=unknown`, the
+  // sensor refuses it (`DIMENSION_READ_REFUSED ... reason=unknown_column source=world-state`),
+  // and the cell it could not read then yields no tool fact, no acquisition route and no
+  // candidate at all: the body froze in a hole holding 81 logs it could not turn into a
+  // pickaxe because the CELL ABOVE IT WAS NEVER READ. The module's own documented remedy
+  // ("drop the column so the server re-sends it") only works in this order.
   const columnsUnloaded = unloadKnownColumns(bot, store)
+  store.columnDimension.clear()
   const record = { from, to: next, reason, columnsDropped, columnsUnloaded }
   // A transition with no live generation is kept as plain data for the next view
   // to mirror, so the evidence is never silently lost across a generation swap.

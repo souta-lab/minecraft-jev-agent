@@ -44,6 +44,7 @@ import type { SkillTerminalReason } from './jevSemanticProjection.ts'
 import type { Vec3Json } from './state.ts'
 import { BRIDGE_BLOCK_META, BRIDGE_META, BRIDGE_PLACE_META } from './bridgeRoute.ts'
 import { declaredRoutePlaceBlocks } from './routePlaceDeclaration.ts'
+import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 
 /**
  * The committed Skill kind. This is the executor/candidate-level vocabulary
@@ -511,6 +512,18 @@ export function envelopeForCandidate(
       const bridge = candidate.meta[BRIDGE_META] === true
       const bridgeBlock = typeof candidate.meta[BRIDGE_BLOCK_META] === 'string' ? (candidate.meta[BRIDGE_BLOCK_META] as string) : null
       const firstPlaceCell = bridge ? metaCell(candidate.meta[BRIDGE_PLACE_META]) : null
+      // The DOWNWARD self-landing descent (`descentScaffold.ts`): the mirror of the
+      // bridge's placing route, one level down. It places exactly ONE cell, below
+      // the body's own feet, and the cell is a fact the candidate declared at
+      // offer time (`DESCEND_SCAFFOLD_PLACE_META`) - so the envelope authorizes the
+      // block AND that cell, never "any carried placeable block". Without this arm
+      // the mirror of the bridge's own measured `equip_item_not_declared` defect
+      // would fire on the first descent placement.
+      const descentPlaceCell = metaCell(candidate.meta[DESCEND_SCAFFOLD_PLACE_META])
+      const descentBlock =
+        typeof candidate.meta[DESCEND_SCAFFOLD_BLOCK_META] === 'string'
+          ? (candidate.meta[DESCEND_SCAFFOLD_BLOCK_META] as string)
+          : null
       // The block(s) this route's OWN placement step DECLARED at candidate time:
       // `bridgeBlock` for a bridge, `pillarPlaceName` / `fallbackPillarPlaceName`
       // for a vertical pillar route - the very keys the executor's own legs read
@@ -525,11 +538,13 @@ export function envelopeForCandidate(
       return {
         ...base,
         mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.digStep === true || candidate.meta.vertical !== undefined,
-        mayPlaceGroundedRoute: candidate.meta.vertical !== undefined || bridge,
+        mayPlaceGroundedRoute: candidate.meta.vertical !== undefined || bridge || descentPlaceCell !== null,
         mayPlaceBlocks:
-          bridge && firstPlaceCell !== null && bridgeBlock !== null
-            ? [{ position: firstPlaceCell, itemName: bridgeBlock }]
-            : [],
+          descentPlaceCell !== null && descentBlock !== null
+            ? [{ position: descentPlaceCell, itemName: descentBlock }]
+            : bridge && firstPlaceCell !== null && bridgeBlock !== null
+              ? [{ position: firstPlaceCell, itemName: bridgeBlock }]
+              : [],
         mayEquipItems: [...new Set([...(input.equipItems ?? []), ...declaredPlaceBlocks])],
       }
     }
@@ -544,12 +559,23 @@ export function envelopeForCandidate(
       // nothing.
       const stations = [...(input.stations ?? [])]
       const needsApproach = stations.length > 0
+      // THE INVENTORY GRID IS ALWAYS AVAILABLE, so it is always declared. The executor
+      // asserts `{type:'station', station:'inventory_crafting_grid'}` for a 2x2 craft
+      // (executor.ts:7101), and a station-less craft used to declare an EMPTY station
+      // envelope - so the craft was refused as `station_not_declared:inventory_crafting_grid`
+      // EVERY time. Measured live: 691,626 such violations in this log, all of them on
+      // `CRAFT:birch_planks` (a 2x2 recipe), which is why the body could never turn its 81
+      // logs into planks and therefore never reached a crafting table or a pickaxe - the
+      // cold bootstrap of the whole M2 chain was blocked by a missing declaration, not by a
+      // missing recipe. Naming the grid is not an extra permission: it is the station the
+      // body always carries.
+      const usable = [...new Set([...stations, 'inventory_crafting_grid'])]
       return {
         ...base,
         mayMove: needsApproach,
         mayJump: needsApproach,
         maySprint: needsApproach,
-        mayUseStations: stations,
+        mayUseStations: usable,
       }
     }
     case 'PICKUP':
