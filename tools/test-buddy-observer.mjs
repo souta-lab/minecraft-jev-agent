@@ -73,6 +73,21 @@ const report = {
   },
 }
 
+const observerSourceSha = 'a'.repeat(40)
+const observerRunMetadata = (runId = 'run-1', generationId = 'gen-7') => ({
+  runArtifactsMatched: true,
+  sourceSha: observerSourceSha,
+  sourceShaConflict: false,
+  acceptance: { runId, gitCommit: observerSourceSha, generationId },
+  predicates: { runId, sourceSha: observerSourceSha, generationId },
+})
+const observerBoot = (runId = 'run-1', ts = '2026-09-21T11:59:59.000Z') => parseBuddyLogLine(
+  `[${ts}] BOOT pid=1 runId=${runId} source=${observerSourceSha}`,
+)
+const observerGenerationReady = (generationId = 'gen-7', ts = '2026-09-21T12:00:00.000Z') => parseBuddyLogLine(
+  `[${ts}] GENERATION_READY id=${generationId}`,
+)
+
 const events = [
   parseBuddyLogLine('[2026-09-21T12:00:00.000Z] SYSTEM2_AUTHORITY_INPUT provider=mercury model=qwen3.5-9b-local trigger=post_death reason=no_progress'),
   parseBuddyLogLine('[2026-09-21T12:00:01.000Z] SYSTEM2_AUTHORITY_DECISION provider=mercury model=qwen3.5-9b-local trigger=post_death strategy=rebuild_equipment goals=["collect 3 x raw_iron"]'),
@@ -80,7 +95,16 @@ const events = [
   parseBuddyLogLine('[2026-09-21T12:00:03.000Z] ACTION n=9 id=MINE:b1 kind=MINE phase=running rung=diamond'),
 ].filter((event) => event !== null)
 
-const snapshot = buildObserverSnapshot({ report, events, mission: { id: 'M4', title: 'Ender Dragon' }, now: 1_795_000_000_000 })
+const anchoredEvents = events.map((event) => ({ ...event, detail: { ...event.detail, generationId: 'gen-7' } }))
+const snapshot = buildObserverSnapshot({
+  report,
+  events: anchoredEvents,
+  mission: { id: 'M4', title: 'Ender Dragon' },
+  runBoot: observerBoot(),
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady(),
+  now: 1_795_000_000_000,
+})
 assert.equal(snapshot.resident.connected, true)
 assert.equal(snapshot.goal.frontier, 'diamond')
 assert.equal(snapshot.goal.queue.current?.description, 'collect 3 x raw_iron')
@@ -90,8 +114,55 @@ assert.equal(snapshot.decisionTrace.system2Decision?.detail.strategy, 'rebuild_e
 assert.equal(snapshot.action?.kind, 'MINE')
 assert.equal(snapshot.authority.system2?.last?.model, 'qwen3.5-9b-local')
 
+const laggedGenerationEvents = [
+  parseBuddyLogLine(`[2026-09-23T19:36:20.000Z] BOOT pid=1 runId=run-observer-1 source=${observerSourceSha}`),
+  parseBuddyLogLine('[2026-09-23T19:36:23.559Z] GENERATION_READY id=gen-current'),
+  parseBuddyLogLine('[2026-09-23T19:36:28.302Z] JEV_HEADS action=MOVE:b99_67_79 generationId=gen-current'),
+  parseBuddyLogLine('[2026-09-23T19:36:35.344Z] HEARTBEAT pos=99,67,79 generationId=gen-current'),
+].filter((event) => event !== null)
+const laggedGenerationMetadata = {
+  runArtifactsMatched: true,
+  sourceSha: observerSourceSha,
+  sourceShaConflict: false,
+  acceptance: { runId: 'run-observer-1', gitCommit: observerSourceSha, generationId: 'gen-prior' },
+  predicates: { runId: 'run-observer-1', sourceSha: observerSourceSha, generationId: 'gen-older' },
+}
+const laggedGenerationSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, runId: 'run-observer-1', generationId: 'gen-current' } },
+  events: laggedGenerationEvents,
+  mission: { id: 'M3', title: 'Nether progression' },
+  runBoot: laggedGenerationEvents[0],
+  runMetadata: laggedGenerationMetadata,
+  runGenerationReady: laggedGenerationEvents[1],
+  now: Date.parse('2026-09-23T19:36:47.952Z'),
+})
+const laggedGenerationSummary = buildAiSummary(laggedGenerationSnapshot, { now: Date.parse('2026-09-23T19:36:47.952Z') })
+assert.equal(laggedGenerationSnapshot.resident.sourceCommit, observerSourceSha)
+assert.equal(laggedGenerationSnapshot.resident.generationBoundary?.generationId, 'gen-current')
+assert.equal(laggedGenerationSnapshot.resident.generationBoundary?.artifactGenerations.acceptance.status, 'different_from_live_generation')
+assert.equal(laggedGenerationSnapshot.resident.generationBoundary?.artifactGenerations.predicates.status, 'different_from_live_generation')
+assert.equal(laggedGenerationSnapshot.decisionTrace.jev?.detail.action, 'MOVE:b99_67_79')
+assert.equal(laggedGenerationSummary.worldObservation?.live, true)
+assert.equal(laggedGenerationSummary.unknown.includes('current_generation_boundary_unavailable'), false)
+assert.equal(laggedGenerationSummary.unknown.includes('no_choice_event_observed'), false)
+assert.equal(laggedGenerationSummary.unknown.includes('world_heartbeat_stale_or_missing'), false)
+
+const unboundGenerationSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, runId: 'run-observer-1', generationId: 'gen-current' } },
+  events: laggedGenerationEvents,
+  mission: { id: 'M3', title: 'Nether progression' },
+  runBoot: laggedGenerationEvents[0],
+  runMetadata: {
+    ...laggedGenerationMetadata,
+    predicates: { ...laggedGenerationMetadata.predicates, sourceSha: 'b'.repeat(40) },
+  },
+  runGenerationReady: laggedGenerationEvents[1],
+})
+assert.equal(unboundGenerationSnapshot.resident.generationBoundary, null)
+assert.equal(unboundGenerationSnapshot.decisionTrace.jev, null)
+
 const combatEvents = [
-  parseBuddyLogLine('[2026-09-21T12:00:00.000Z] BOOT pid=1 runId=run-1 source=abc'),
+  observerBoot('run-1', '2026-09-21T12:00:00.000Z'),
   parseBuddyLogLine('[2026-09-21T12:00:10.000Z] JEV_HEADS action=ATTACK:e1 abandon=0.12 decision=continue chainId=combat-1 generationId=gen-7'),
   parseBuddyLogLine('[2026-09-21T12:00:11.000Z] SKILL_END actionId=ATTACK:e1 outcome=SUCCESS failure=null generationId=gen-7'),
   parseBuddyLogLine('[2026-09-21T12:00:11.010Z] SKILL_OUTCOME_PACKET actionId=ATTACK:e1 terminalReason=done progress=body delta=1 nextDecisionRequired=true generationId=gen-7'),
@@ -102,6 +173,7 @@ const combatCall = {
   record: 'jev-call',
   callId: 'call-current-run',
   ts: '2026-09-21T12:00:10.000Z',
+  generationId: 'gen-7',
   policy: 'typesafe-ai',
   model: 'typesafe-ai/jev',
   stage: 'policy-tick-1-start',
@@ -151,6 +223,8 @@ const combatSnapshot = buildObserverSnapshot({
   events: combatEvents,
   mission: { id: 'M4', title: 'Ender Dragon' },
   runBoot: combatEvents[0],
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady('gen-7', '2026-09-21T12:00:01.000Z'),
   jevCalls: [
     { ...combatCall, callId: 'old-run', ts: '2026-09-21T11:59:59.000Z' },
     combatCall,
@@ -178,7 +252,7 @@ assert.deepEqual(combatSummary.choices.jevEvidence.rationale, { status: 'not_emi
 assert.equal(Object.hasOwn(combatSummary.choices.jevEvidence, 'questions'), false)
 
 const toolChoiceEvents = [
-  parseBuddyLogLine('[2026-09-21T12:01:00.000Z] BOOT pid=1 runId=run-1 source=abc'),
+  observerBoot('run-1', '2026-09-21T12:01:00.000Z'),
   parseBuddyLogLine('[2026-09-21T12:01:10.000Z] TOOL_CHOICE actionId=MINE:b1 toolName=mine tier=wood generationId=gen-7'),
   parseBuddyLogLine('[2026-09-21T12:01:10.500Z] SKILL_END actionId=MINE:b1 outcome=SUCCESS failure=null generationId=gen-7'),
   parseBuddyLogLine('[2026-09-21T12:01:10.510Z] SKILL_OUTCOME_PACKET actionId=MINE:b1 terminalReason=done progress=body delta=1 nextDecisionRequired=true generationId=gen-7'),
@@ -196,6 +270,8 @@ const toolChoiceSnapshot = buildObserverSnapshot({
   events: toolChoiceEvents,
   mission: { id: 'M4', title: 'Ender Dragon' },
   runBoot: toolChoiceEvents[0],
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady('gen-7', '2026-09-21T12:01:01.000Z'),
   jevCalls: [toolChoiceCall],
 })
 const toolChoiceSummary = buildAiSummary(toolChoiceSnapshot)
@@ -320,9 +396,12 @@ const completeWorldProbe = buildWorldProbe({
   report: { ok: true, data: { runId: 'run-1', generationId: 'gen-7', worldKey: { serverId: 'local', dimension: 'overworld', worldEpoch: 1 } } },
   state: { ok: true, data: { runId: 'run-1', generationId: 'gen-7', worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 }, area: { blocks: { unknown: 0, counts: {}, hazards: [], portals: [] }, entities: [] } } },
 })
-assert.equal(completeWorldProbe.status, 'known')
+assert.equal(completeWorldProbe.status, 'partial')
 assert.equal(completeWorldProbe.identityAligned, true)
-assert.equal(completeWorldProbe.dataComplete, true)
+assert.equal(completeWorldProbe.dataComplete, false)
+assert.ok(completeWorldProbe.unknown.includes('world_cache_diagnostic_unavailable'))
+assert.ok(completeWorldProbe.unknown.includes('entity_cache_diagnostic_unavailable'))
+assert.ok(completeWorldProbe.unknown.includes('support_current_footing_scope_unverified'))
 
 const mismatchedWorldProbe = buildWorldProbe({
   report: { ok: true, data: { runId: 'run-1', worldKey: { serverId: 'local', dimension: 'overworld', worldEpoch: 1 } } },

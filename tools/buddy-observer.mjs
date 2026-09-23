@@ -309,18 +309,39 @@ function readRunMetadata(runtimeDir, runId) {
   }
 }
 
-function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent) {
+function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, runBoot = null) {
+  const sourceSha = metadata?.sourceSha
+  const validSourceSha = typeof sourceSha === 'string' && /^[0-9a-f]{40}$/i.test(sourceSha)
+  const bootSourceSha = runBoot?.detail?.source ?? runBoot?.detail?.sourceSha ?? null
+  const readySourceSha = readyEvent?.detail?.source ?? readyEvent?.detail?.sourceSha ?? null
   return typeof runId === 'string'
     && metadata?.runArtifactsMatched === true
-    && metadata.sourceSha !== null
+    && validSourceSha
     && metadata.sourceShaConflict !== true
     && metadata.acceptance?.runId === runId
     && metadata.predicates?.runId === runId
+    && metadata.acceptance?.gitCommit === sourceSha
+    && metadata.predicates?.sourceSha === sourceSha
+    && (runBoot === null || (runBoot.event === 'BOOT' && runBoot.detail?.runId === runId))
+    && (bootSourceSha === null || bootSourceSha === sourceSha)
     && typeof generationId === 'string'
-    && metadata.acceptance?.generationId === generationId
-    && metadata.predicates?.generationId === generationId
     && readyEvent?.event === 'GENERATION_READY'
     && readyEvent.detail?.id === generationId
+    && (readyEvent.detail?.runId === undefined || readyEvent.detail.runId === runId)
+    && (readySourceSha === null || readySourceSha === sourceSha)
+    && parseTimestamp(readyEvent.ts) !== null
+}
+
+function generationArtifactStatus(artifact, liveGenerationId) {
+  const artifactGenerationId = typeof artifact?.generationId === 'string' && artifact.generationId.length > 0
+    ? artifact.generationId
+    : null
+  return {
+    generationId: artifactGenerationId,
+    status: artifactGenerationId === null
+      ? 'unrecorded'
+      : artifactGenerationId === liveGenerationId ? 'matches_live_generation' : 'different_from_live_generation',
+  }
 }
 
 function eventBelongsToRunGeneration(entry, { runId, generationId, generationStartedAt, generationBound }) {
@@ -732,7 +753,7 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
         ? runBoot
         : null
   const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
-  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, runGenerationReady)
+  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, runGenerationReady, candidateBoot)
   const generationStartedAt = generationBound ? parseTimestamp(runGenerationReady.ts) ?? NaN : NaN
   const runEvents = runId === null ? [] : events.filter((entry) => eventBelongsToRunGeneration(entry, {
     runId,
@@ -810,7 +831,11 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
         event: 'GENERATION_READY',
         generationId,
         observedAt: runGenerationReady.ts,
-        method: 'live-report+run-artifacts+generation-id',
+        method: 'live-report+exact-run-source-artifacts+GENERATION_READY-id',
+        artifactGenerations: {
+          acceptance: generationArtifactStatus(runMetadata?.acceptance, generationId),
+          predicates: generationArtifactStatus(runMetadata?.predicates, generationId),
+        },
         confidence: 'direct',
       } : null,
     },
@@ -1624,6 +1649,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         currentRunId,
         currentGenerationId,
         candidateGenerationReady,
+        cachedRunBoot,
       ) ? candidateGenerationReady : null
       cachedRunMetadata = runMetadata
       cachedGenerationId = currentGenerationId
@@ -1654,7 +1680,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     const generationId = cachedGenerationId
     const generationReady = cachedGenerationReady
     const generationStartedAt = parseTimestamp(generationReady?.ts)
-    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady)
+    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady, cachedRunBoot)
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.floor(limit))) : 12
     const boundedMaxBytes = Number.isFinite(maxBytes)
       ? Math.max(1, Math.min(MAX_RECENT_CHOICE_LOG_BYTES, Math.floor(maxBytes)))
