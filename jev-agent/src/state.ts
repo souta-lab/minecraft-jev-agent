@@ -22,6 +22,7 @@ import type { CriticalDamageEvidence } from './criticalDamage.ts'
 import {
   activeThreats,
   MIN_KEEP_DISTANCE_GAIN,
+  retreatPreservesThreatSeparation,
   THREAT_ESCAPE_DY,
   THREAT_ESCAPE_MAX_CELLS,
   THREAT_MEMORY_MS,
@@ -4700,9 +4701,11 @@ export function buildLevelScanProbes(
  * choose a cell ~2 m away - while the zombie that killed the body was inside
  * 0.8 m. `RETREAT:p4_69_-9` was "0.71m away" and executed as `moved=0m`.
  *
- * This scan runs for the nearest active hostile: either one inside the bounded
- * danger radius or a ranged/other hostile the code has evidence is engaged. It
- * uses the SAME DESTINATION predicate as `buildTerrain` (`isUsableStand`:
+ * The nearest active hostile supplies the primary direction: either one inside
+ * the bounded danger radius or a ranged/other hostile the code has evidence is
+ * engaged. Every sampled destination also preserves safe separation from the
+ * other active threats, so an escape from a zombie cannot run into a skeleton.
+ * The scan uses the SAME DESTINATION predicate as `buildTerrain` (`isUsableStand`:
  * standable, and its support is load-bearing ground rather than a leaf canopy -
  * a treetop is locomotion truth, not a retreat destination), and keeps only
  * cells that genuinely gain separation from that response-worthy hostile. The
@@ -4734,7 +4737,12 @@ function buildEscapeCells(
   // walk into the firing lane before it can choose an escape. Unengaged distant
   // hostiles remain passive because `activeThreats` requires the danger radius,
   // actual aggression, or recent damage with sight evidence.
-  const sensed = activeThreats(entities as readonly ThreatEntityLike[], lastDamage ?? null, nowMs)[0] ?? null
+  const sensedThreats = activeThreats(entities as readonly ThreatEntityLike[], lastDamage ?? null, nowMs)
+  const sensed = sensedThreats[0] ?? null
+  const additionalThreats = sensedThreats.slice(1).map((entity) => ({
+    position: entity.position,
+    standoff: threatStandoffRange(entity.name),
+  }))
   // The UNSEEN attacker: the damage attribution names a position the sensor
   // never witnessed. Same scan, same block truth, same solver - the only change
   // is where "away from" and "out of sight of" are measured from. When the
@@ -4778,6 +4786,7 @@ function buildEscapeCells(
         // Destination rule, shared with `buildTerrain`: a canopy top is not a
         // place the body may be sent to keep distance from a mob.
         if (!isUsableStandFromBlocks(feetBlock, headBlock, at({ x: feet.x, y: feet.y - 1, z: feet.z }))) continue
+        if (!retreatPreservesThreatSeparation(self.position, feet, additionalThreats)) continue
         usable.push(feet)
         // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
         // standing outside the threat's reach without moving closer.

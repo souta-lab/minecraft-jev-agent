@@ -11948,9 +11948,11 @@ function nearestDanger(state: WorldState, radius: number): BlockState | null {
 }
 
 /**
- * Grounded keep-distance destinations, best separation first. Up to
- * `MAX_RETREAT_CANDIDATES` are returned so Jev can choose a direction instead of
- * receiving one pre-picked spot.
+ * Grounded keep-distance destinations, best separation first. The nearest
+ * active hostile supplies the primary keep-distance direction; every other
+ * active hostile constrains the returned cells so a retreat from one enemy
+ * cannot walk into another. Up to `MAX_RETREAT_CANDIDATES` remain for Jev to
+ * choose a direction instead of receiving one pre-picked spot.
  *
  * A destination qualifies only when it ACTUALLY keeps distance from the threat:
  * it reaches that threat's standoff range without moving closer, or it gains at
@@ -11976,6 +11978,12 @@ function pickRetreats(
   if (danger === null && threats.length === 0 && !hurt && attributed === null) return []
   const hostile = threats.length > 0 ? threats[0] ?? null : null
   const threat = danger?.position ?? hostile?.position ?? attributed?.position ?? state.self.position
+  // The hostile branch below measures RETREAT from this nearest hostile; every
+  // other active hostile constrains the destination geometry.
+  const primaryHostileId = hostile?.id ?? null
+  const additionalThreats = threats
+    .filter((other) => other.id !== primaryHostileId)
+    .map((other) => ({ position: other.position, standoff: threatStandoffRange(other.name) }))
   const usable = (spot: Vec3Json): boolean => !isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)
   const standableUsable = standable.filter(usable)
   if (hostile !== null || attributed !== null) {
@@ -12004,6 +12012,7 @@ function pickRetreats(
       occludedCells: (state.terrain.threatCoverCells ?? []).filter(usable),
       transferCells: state.terrain.portalWalkInCells ?? [],
       standoff: threatStandoffRange(hostile?.name ?? attributed?.name ?? 'unknown'),
+      ...(additionalThreats.length === 0 ? {} : { additionalThreats }),
       ...(unseen ? { minGain: UNSENSED_MIN_KEEP_DISTANCE_GAIN } : {}),
       max: MAX_RETREAT_CANDIDATES,
     })

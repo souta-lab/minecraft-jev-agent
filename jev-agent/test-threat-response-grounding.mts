@@ -362,7 +362,53 @@ addCase('(i3) an away cell that is NOT the portal is offered next to the ATTACK 
   }
 })
 
-addCase('(i4) a cell out of the attacker sight line is a grounded keep-distance destination', () => {
+addCase('(i4) a retreat gains from one hostile without entering another active hostile\'s standoff', () => {
+  const zombie = entity(7, 'zombie', { x: 5, y: 59, z: -3 }, true)
+  const skeleton = entity(30465, 'skeleton', SKELETON, true, {
+    lineOfSight: true,
+    heldItem: 'bow',
+    attackedSelf: true,
+  })
+  // This cell gets away from the nearer zombie but walks toward the engaged
+  // skeleton, crossing inside its 12 m standoff. The other cell is a true
+  // retreat from both. Both targets remain ATTACK choices where their paths are
+  // reachable; code only filters the mechanically unsafe retreat geometry.
+  const unsafe = { x: 5, y: 59, z: 4 }
+  const safe = { x: 10, y: 59, z: -2 }
+  const state = noteThreat(
+    measuredBody({
+      entities: [zombie, skeleton],
+      terrain: {
+        standable: [BODY, unsafe, safe],
+        escapeCells: [unsafe, safe],
+      },
+    }),
+  )
+  const grounded = generateGroundedCandidates(
+    state,
+    withProbe(defaultCandidateOptions, {
+      pathProbe: () => 'reachable',
+      attackPathProbe: () => 'reachable',
+    }),
+  )
+  const offer = applyGroundedThreatRestriction(state, grounded.candidates, grounded.withheld)
+  const attacks = offer.candidates.filter((candidate) => candidate.kind === 'ATTACK')
+  const retreats = offer.candidates.filter((candidate) => candidate.kind === 'RETREAT')
+  const hasSafeRetreat = retreats.some((candidate) => candidate.target?.x === safe.x && candidate.target.z === safe.z)
+  const hasUnsafeRetreat = retreats.some((candidate) => candidate.target?.x === unsafe.x && candidate.target.z === unsafe.z)
+  const pass =
+    attacks.some((candidate) => candidate.targetEntityId === 7) &&
+    attacks.some((candidate) => candidate.targetEntityId === 30465) &&
+    hasSafeRetreat &&
+    !hasUnsafeRetreat &&
+    offer.candidates.every((candidate) => THREAT_SURVIVAL_KINDS.has(candidate.kind))
+  return {
+    pass,
+    detail: `attacks=[${attacks.map((candidate) => candidate.id).join(',')}] retreats=[${retreats.map((candidate) => candidate.id).join(',')}] unsafe=${hasUnsafeRetreat} safe=${hasSafeRetreat}`,
+  }
+})
+
+addCase('(i5) a cell out of the attacker sight line is a grounded keep-distance destination', () => {
   // Distance cannot answer a ranged attacker in a tight room. The code-owned
   // fact that can is cover: the cell is real block truth, not a preference.
   const cover: Vec3Json = { x: 6, y: 59, z: -0.5 }

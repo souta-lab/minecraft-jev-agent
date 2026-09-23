@@ -1809,11 +1809,45 @@ export function formatDeathCause(input: DeathCauseInput): string {
   )
 }
 
+export interface ThreatSeparationConstraint {
+  position: Vec3Json
+  standoff: number
+}
+
+/**
+ * A retreat destination must not turn an already active secondary threat into a
+ * closer/inside-standoff threat. When already inside standoff, require no loss
+ * of separation; when outside, preserve the standoff boundary. Cover only
+ * excuses the primary threat with a direct sensor proof.
+ */
+export function retreatPreservesThreatSeparation(
+  self: Vec3Json,
+  destination: Vec3Json,
+  threats: readonly ThreatSeparationConstraint[],
+): boolean {
+  return threats.every((threat) => {
+    const currentDistance = distance(self, threat.position)
+    const nextDistance = distance(destination, threat.position)
+    const minimum = currentDistance >= threat.standoff ? threat.standoff : currentDistance
+    // Block-center coordinates can leave a sub-ulp difference on an equal
+    // distance step. Tolerate numerical noise, never a meaningful approach.
+    return nextDistance + 1e-9 >= minimum
+  })
+}
+
 export interface KeepDistanceInput {
   /** body position (feet) */
   self: Vec3Json
   /** the threat to move away from, or null when only a hazard applies */
   threat: Vec3Json | null
+  /**
+   * Other active threats that a retreat must not make more dangerous. A cell is
+   * rejected when it would enter their standoff range from outside it, or move
+   * closer while the body is already inside that range. The primary threat may
+   * use a separately proven cover cell; no cover fact is inferred for these
+   * additional threats.
+   */
+  additionalThreats?: readonly ThreatSeparationConstraint[]
   /** standable cells the sensor sampled (the local 5x5x3 window) */
   standable: readonly Vec3Json[]
   /** threat-escape cells: the wider scan, already filtered to genuine separation */
@@ -1899,6 +1933,10 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
     // A transfer cell is not a destination this solver may offer, whatever its
     // separation: the realization would leave the dimension, not keep distance.
     if (transfer.has(key)) return
+    // A RETREAT cannot silently improve separation from its primary threat by
+    // walking into another active hostile's reach. This is a mechanical safety
+    // constraint only; Jev still chooses among the cells that satisfy it.
+    if (!retreatPreservesThreatSeparation(input.self, spot, input.additionalThreats ?? [])) return
     const separation = distance(spot, threat)
     const gain = separation - current
     const outsideReach = separation >= standoff

@@ -343,6 +343,78 @@ addCase('the sensor scans escape cells for a recently engaged ranged hostile bey
   }
 })
 
+addCase('the escape scan does not retreat from a nearer hostile into another engaged hostile', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(0.5, 10, 0.5)
+  const bot = {
+    username: 'AI_MULTI_THREAT_ESCAPE',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 18,
+    food: 20,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: 0, height: 256 },
+    time: { isDay: true },
+    registry: null,
+    entities: {
+      // The nearer zombie is the primary escape direction. Walking away from
+      // it toward negative X would enter the already-engaged skeleton's reach.
+      42: {
+        id: 42,
+        name: 'skeleton',
+        kind: 'hostile',
+        position: new Vec3(-8.5, 10, 0.5),
+        isValid: true,
+        heldItem: { name: 'bow', count: 1 },
+      },
+      43: {
+        id: 43,
+        name: 'zombie',
+        kind: 'hostile',
+        position: new Vec3(3.5, 10, 0.5),
+        isValid: true,
+      },
+    },
+    inventory: { items: () => [] },
+    blockAt: (cell: { y: number }) =>
+      cell.y < 10 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' },
+    canSeeBlock: () => true,
+    findBlocks: () => [],
+  } as never
+  const now = Date.now()
+  const state = buildWorldState(
+    bot,
+    {
+      tick: 11,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      signals: signals({
+        lastDamage: { atMs: now - 500, health: 18, sourceId: 42, sourceName: 'skeleton' },
+      }),
+    },
+    defaultSensorOptions,
+  )
+  const skeleton = state.entities.find((entity) => entity.id === 42)
+  const current = skeleton === undefined ? 0 : Math.hypot(
+    state.self.position.x - skeleton.position.x,
+    state.self.position.y - skeleton.position.y,
+    state.self.position.z - skeleton.position.z,
+  )
+  const getsCloser = (state.terrain.escapeCells ?? []).filter((cell) =>
+    Math.hypot(cell.x - skeleton!.position.x, cell.y - skeleton!.position.y, cell.z - skeleton!.position.z) + 1e-9 < current,
+  )
+  const pass =
+    skeleton !== undefined &&
+    state.entities.some((entity) => entity.id === 43 && entity.distance < skeleton.distance) &&
+    current < 12 &&
+    (state.terrain.escapeCells?.length ?? 0) > 0 &&
+    getsCloser.length === 0
+  return {
+    pass,
+    detail: `primary=zombie secondary=skeleton current=${current.toFixed(2)}m escapeCells=${state.terrain.escapeCells?.length ?? 0} towardSecondary=${getsCloser.length}`,
+  }
+})
+
 addCase('a skeleton that shot the bot is visible to Jev with distance, sight, weapon and attacker attribution', () => {
   const state = baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 12 }))
   const payload = authorityState(authorityRequest(state, generateCandidates(state, defaultCandidateOptions)))
