@@ -19,8 +19,9 @@ const REPO = resolve(HERE, '..')
 const DEFAULT_RUNTIME_DIR = join(REPO, 'buddy-driver')
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4173
-const DEFAULT_INTERVAL_MS = 1000
+const DEFAULT_INTERVAL_MS = 2500
 const DEFAULT_LOG_TAIL_BYTES = 128 * 1024
+const DEFAULT_CONTROL_TIMEOUT_MS = 5000
 
 const TRACE_EVENTS = new Set([
   'JEV_HEADS',
@@ -48,9 +49,21 @@ const TRACE_EVENTS = new Set([
   'RELOAD',
   'DISCONNECT',
   'RECONNECT_SUCCESS',
+  'BOOT',
+  'BUILD',
 ])
 
 const SECRET_KEY = /(api.?key|authorization|cookie|password|secret|token)/i
+
+function redactSecrets(value) {
+  if (Array.isArray(value)) return value.map(redactSecrets)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => !SECRET_KEY.test(key))
+      .map(([key, nested]) => [key, redactSecrets(nested)]))
+  }
+  return value
+}
 
 function coerceValue(raw) {
   if (raw === 'null') return null
@@ -78,7 +91,7 @@ export function parseDetail(raw) {
     if (key === undefined || SECRET_KEY.test(key)) continue
     const start = (match.index ?? 0) + match[0].length
     const end = index + 1 < matches.length ? (matches[index + 1].index ?? raw.length) : raw.length
-    detail[key] = coerceValue(raw.slice(start, end).trim())
+    detail[key] = redactSecrets(coerceValue(raw.slice(start, end).trim()))
   }
   return detail
 }
@@ -114,6 +127,34 @@ export function readLogTail(logPath, maxBytes = DEFAULT_LOG_TAIL_BYTES) {
   }
 }
 
+/** Find a run-scoped startup event without loading the full append-only log. */
+function readRunEvent(logPath, eventName, runId) {
+  if (runId === null || runId === undefined || !existsSync(logPath)) return null
+  const fd = openSync(logPath, 'r')
+  try {
+    let cursor = fstatSync(fd).size
+    let carry = ''
+    const chunkSize = 64 * 1024
+    while (cursor > 0) {
+      const length = Math.min(cursor, chunkSize)
+      const start = cursor - length
+      const buffer = Buffer.alloc(length)
+      readSync(fd, buffer, 0, length, start)
+      const lines = (buffer.toString('utf8') + carry).split('\n')
+      carry = lines.shift() ?? ''
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const entry = parseBuddyLogLine(lines[index] ?? '')
+        if (entry?.event === eventName && entry.detail.runId === runId) return entry
+      }
+      cursor = start
+    }
+    const first = parseBuddyLogLine(carry)
+    return first?.event === eventName && first.detail.runId === runId ? first : null
+  } finally {
+    closeSync(fd)
+  }
+}
+
 export function latestEvent(events, names) {
   const accepted = names instanceof Set ? names : new Set(names)
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -123,7 +164,7 @@ export function latestEvent(events, names) {
   return null
 }
 
-export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = 1500) {
+export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = DEFAULT_CONTROL_TIMEOUT_MS) {
   return await new Promise((resolvePromise) => {
     if (!existsSync(socketPath)) return resolvePromise(null)
     const socket = net.createConnection(socketPath)
@@ -191,10 +232,18 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
-export function buildObserverSnapshot({ report, events, mission, now = Date.now() }) {
+export function buildObserverSnapshot({ report, events, mission, runBoot = null, now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
-  const relevantEvents = events.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
+  const latestBoot = latestEvent(events, ['BOOT'])
+  const runId = data?.runId ?? latestBoot?.detail?.runId ?? latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+  const runEvents = runId === null
+    ? events
+    : events.filter((entry) => entry.detail?.runId === undefined || entry.detail.runId === runId)
+  const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
+  const boot = latestEvent(relevantEvents, ['BOOT'])
+    ?? (runBoot?.detail?.runId === runId ? runBoot : null)
+  const build = latestEvent(relevantEvents, ['BUILD'])
   const jev = latestEvent(relevantEvents, ['JEV_HEADS', 'TOOL_CHOICE'])
   const system2Input = latestEvent(relevantEvents, ['SYSTEM2_AUTHORITY_INPUT'])
   const system2Decision = latestEvent(relevantEvents, ['SYSTEM2_AUTHORITY_DECISION', 'SYSTEM2_STALE_DISCARD'])
@@ -219,10 +268,11 @@ export function buildObserverSnapshot({ report, events, mission, now = Date.now(
       available: data !== null,
       connected: data?.connected ?? false,
       frozen: data?.frozen ?? null,
-      runId: data?.runId ?? null,
+      runId,
       generationId: data?.generationId ?? null,
       generationHash: data?.generationHash ?? null,
       worldKey: data?.worldKey ?? status?.worldKey ?? null,
+      sourceCommit: build?.detail?.sourceSha ?? boot?.detail?.source ?? null,
     },
     mission,
     goal: {
@@ -263,17 +313,170 @@ export function buildObserverSnapshot({ report, events, mission, now = Date.now(
   }
 }
 
+function parseTimestamp(value) {
+  const timestamp = Date.parse(value ?? '')
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function latestProjectedEvent(snapshot, names) {
+  const accepted = new Set(names)
+  const entries = (snapshot.events ?? []).filter((entry) => accepted.has(entry.event))
+  entries.sort((left, right) => (parseTimestamp(right.ts) ?? 0) - (parseTimestamp(left.ts) ?? 0))
+  return entries[0] ?? null
+}
+
+function projectChoice(entry, actor, reasonEvent = null) {
+  if (entry === null) return null
+  const detail = entry.detail ?? {}
+  let selected = null
+  let controller = null
+  if (entry.event === 'JEV_HEADS') {
+    selected = { kind: 'action', id: detail.action ?? null }
+    controller = {
+      abandonProbability: detail.abandon ?? null,
+      decision: detail.decision ?? null,
+      abandonRequested: detail.abandonRequested ?? null,
+      abandonEnforced: detail.abandonEnforced ?? null,
+      betaAuthority: detail.betaAuthority ?? null,
+      betaShadowed: detail.betaShadowed ?? null,
+    }
+  } else if (entry.event === 'TOOL_CHOICE') {
+    selected = {
+      kind: 'tool',
+      actionId: detail.actionId ?? null,
+      toolName: detail.toolName ?? null,
+      tier: detail.tier ?? null,
+    }
+  } else {
+    selected = {
+      operation: detail.op ?? null,
+      strategy: detail.strategy ?? null,
+      chosen: detail.chosen ?? null,
+      goals: Array.isArray(detail.goals) ? detail.goals : null,
+    }
+  }
+  const reasonDetail = reasonEvent?.detail ?? null
+  return {
+    observedAt: entry.ts,
+    actor,
+    event: entry.event,
+    selected,
+    trigger: detail.trigger ?? reasonDetail?.trigger ?? null,
+    reason: detail.reason ?? reasonDetail?.reason ?? null,
+    reasonEvidenceEvent: detail.reason !== undefined || reasonDetail?.reason !== undefined ? reasonEvent?.event ?? entry.event : null,
+    generationId: detail.generationId ?? null,
+    chainId: detail.chainId ?? null,
+  }
+}
+
+/** Compact, machine-oriented view of recorded choices and their observed context. */
+export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
+  const jevEvent = latestProjectedEvent(snapshot, ['JEV_HEADS', 'TOOL_CHOICE'])
+  const system2Event = latestProjectedEvent(snapshot, ['SYSTEM2_AUTHORITY_DECISION'])
+  const system2Input = latestProjectedEvent(snapshot, ['SYSTEM2_AUTHORITY_INPUT'])
+  const inputAt = parseTimestamp(system2Input?.ts)
+  const decisionAt = parseTimestamp(system2Event?.ts)
+  const system2Reason = system2Input !== null
+    && system2Event !== null
+    && inputAt !== null
+    && decisionAt !== null
+    && inputAt <= decisionAt
+    && decisionAt - inputAt <= 5 * 60 * 1000
+    && system2Input.detail?.trigger === system2Event.detail?.trigger
+    && system2Input.detail?.provider === system2Event.detail?.provider
+    && system2Input.detail?.model === system2Event.detail?.model
+    ? system2Input
+    : null
+  const jev = projectChoice(jevEvent, 'jev')
+  const system2 = projectChoice(system2Event, 'system2', system2Reason)
+  const latest = [jev, system2]
+    .filter((choice) => choice !== null)
+    .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
+  const actionEvent = latestProjectedEvent(snapshot, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
+  const actionOutcomeEvent = latestProjectedEvent(snapshot, ['ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED', 'PLAN_REJECTED'])
+  const observedAtMs = parseTimestamp(snapshot.observedAt)
+  const freshnessMs = observedAtMs === null ? null : Math.max(0, now - observedAtMs)
+  const unknown = []
+  if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
+  if (latest === null) unknown.push('no_choice_event_observed')
+  if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
+  const selection = latest?.selected?.strategy
+    ?? latest?.selected?.chosen
+    ?? latest?.selected?.id
+    ?? latest?.selected?.actionId
+    ?? latest?.selected?.toolName
+    ?? null
+  const headline = latest === null
+    ? 'No choice event has been observed.'
+    : `${latest.actor} selected ${selection ?? 'UNKNOWN'}; explicit reason: ${latest.reason ?? 'not emitted'}.`
+
+  return redactSecrets({
+    schemaVersion: 1,
+    kind: 'ai-buddy-decision-summary',
+    headline,
+    observedAt: snapshot.observedAt,
+    freshnessMs,
+    run: {
+      id: snapshot.resident.runId,
+      sourceCommit: snapshot.resident.sourceCommit ?? null,
+      generationId: snapshot.resident.generationId,
+      generationHash: snapshot.resident.generationHash,
+      worldKey: snapshot.resident.worldKey,
+    },
+    status: {
+      available: snapshot.resident.available,
+      connected: snapshot.resident.connected,
+      frozen: snapshot.resident.frozen,
+    },
+    mission: snapshot.mission,
+    goal: snapshot.goal,
+    option: snapshot.option,
+    choices: {
+      latest,
+      jev,
+      system2: {
+        input: system2Input,
+        decision: system2,
+        reasonMatchedBy: system2Reason === null ? null : ['trigger', 'provider', 'model'],
+      },
+    },
+    execution: {
+      activeAction: snapshot.action,
+      latestActionEvent: actionEvent,
+      latestOutcomeEvent: actionOutcomeEvent,
+    },
+    world: snapshot.truth,
+    recentEvents: (snapshot.events ?? []).slice(0, 12),
+    unknown,
+    interpretation: 'Only emitted audit fields are summarized. Null and unknown entries mean the observer found no matching evidence.',
+  })
+}
+
 export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = DEFAULT_INTERVAL_MS } = {}) {
   const socketPath = join(runtimeDir, 'data', 'resident', 'control.sock')
   const logPath = join(runtimeDir, 'buddy.log')
   const mission = readMission(join(REPO, 'MILESTONE-CONTRACT.json'))
 
+  let snapshotInFlight = null
+  let cachedRunId = null
+  let cachedRunBoot = null
   const snapshot = async () => {
-    const [report, events] = await Promise.all([
+    if (snapshotInFlight !== null) return await snapshotInFlight
+    snapshotInFlight = Promise.all([
       callControlSocket(socketPath, 'report'),
       Promise.resolve(readLogTail(logPath)),
-    ])
-    return buildObserverSnapshot({ report, events, mission })
+    ]).then(([report, events]) => {
+      const currentRunId = report?.ok === true
+        ? report.data?.runId ?? null
+        : latestEvent(events, TRACE_EVENTS)?.detail?.runId ?? null
+      if (currentRunId !== null && currentRunId !== cachedRunId) {
+        cachedRunId = currentRunId
+        cachedRunBoot = readRunEvent(logPath, 'BOOT', currentRunId)
+      }
+      return buildObserverSnapshot({ report, events, mission, runBoot: cachedRunBoot })
+    })
+      .finally(() => { snapshotInFlight = null })
+    return await snapshotInFlight
   }
 
   return { runtimeDir, socketPath, logPath, mission, intervalMs, snapshot }
@@ -410,6 +613,10 @@ export function startObserverServer(options = {}) {
       }
       if (url.pathname === '/api/snapshot') {
         return Response.json(await observer.snapshot(), { headers: { 'cache-control': 'no-store' } })
+      }
+      if (url.pathname === '/api/ai-summary') {
+        const snapshot = await observer.snapshot()
+        return Response.json(buildAiSummary(snapshot), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/events') {
         let timer = null
