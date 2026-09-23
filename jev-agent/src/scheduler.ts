@@ -35,6 +35,9 @@ export const DECISION_TRIGGERS = [
   'path_stuck',
   'path_no_path',
   'llm_plan',
+  // Controller-internal request after a survival candidate vanished. This is
+  // not new world evidence and must never carry damage_taken preemption.
+  'survival_reground',
   'human_intent',
 ] as const
 
@@ -158,6 +161,9 @@ function readAir(bot: Bot): number {
   path_completed: 4,
   action_completed: 3,
   llm_plan: 3,
+  // Real safety/progress events that arrive while ticking supersede this
+  // lowest-priority controller repair request.
+  survival_reground: 2,
   start: 2,
   heartbeat: 1,
 }
