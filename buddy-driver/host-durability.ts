@@ -701,6 +701,17 @@ export function createFatalHandlers(options: FatalHandlerOptions): FatalHandlers
 // #384 shutdown: close the control server, THEN release the lock
 // ---------------------------------------------------------------------------
 
+/**
+ * Explicit control-socket quits are clean shutdowns. OS signals are not: keep
+ * their conventional exit status so a process owner can distinguish an
+ * unexpected signal from an intentional quit and reacquire the same authority.
+ */
+export function shutdownExitCodeForReason(reason: string): number {
+  if (reason === 'SIGINT') return 130
+  if (reason === 'SIGTERM') return 143
+  return 0
+}
+
 export interface ShutdownSequenceOptions {
   log: SnapshotLog
   alreadyShuttingDown: () => boolean

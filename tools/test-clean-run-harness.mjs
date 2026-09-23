@@ -44,7 +44,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
 import { runCleanRunGate, runCli as runGateCli } from './clean-run-gate.mjs'
@@ -156,13 +156,53 @@ function makeRoot(name) {
   return root
 }
 
-function writeFixture(root, runId, { logLines, acceptance = true, acceptanceOptions = {}, decisions = DECISIONS } = {}) {
+function initCleanFixtureGit(root) {
+  // This nested checkout stands in for a frozen source tree. Runtime evidence
+  // and the resolved run descriptor are deliberately ignored/untracked so the
+  // source HEAD remains exact and clean while those external run artifacts are
+  // gathered, just as a real checkout's ignored `runs/` data is.
+  writeFileSync(
+    join(root, '.gitignore'),
+    [
+      '/environment-resolved.json',
+      '/gamerule-verification.txt',
+      '/gamerules-observed.json',
+      '/buddy-driver/buddy.log',
+      '/buddy-driver/runner.out',
+      '/buddy-driver/logs/',
+      '/buddy-driver/data/',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  writeFileSync(join(root, 'fixture-marker.txt'), 'FIXTURE source checkout; not run evidence\n', 'utf8')
+  const runGit = (args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`)
+    return result.stdout.trim()
+  }
+  runGit(['init', '-q'])
+  runGit(['config', 'user.email', 'fixture@example.invalid'])
+  runGit(['config', 'user.name', 'fixture'])
+  runGit(['add', '-A'])
+  runGit(['commit', '-q', '-m', 'fixture source'])
+  const head = runGit(['rev-parse', 'HEAD'])
+  assert.ok(/^[0-9a-f]{40}$/.test(head), `fixture git HEAD=${head}`)
+  return head
+}
+
+function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance = true, acceptanceOptions = {}, decisions = DECISIONS, descriptor = null } = {}) {
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId), 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, source), 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisions, 'utf8')
   if (acceptance) {
-    writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), acceptanceRecord(runId, acceptanceOptions), 'utf8')
+    writeFileSync(
+      join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`),
+      acceptanceRecord(runId, { gitCommit: source, ...acceptanceOptions }),
+      'utf8',
+    )
   }
+  if (descriptor !== null) writeGameruleVerification(root, runId, descriptor)
 }
 
 /** A resolved (frozen) descriptor inside the fixture root. */
@@ -179,16 +219,66 @@ function resolvedDescriptor(root, { levelName = CLEAN_LEVEL, levelSeed = CLEAN_S
   return { path, document: template }
 }
 
-async function buildBundle(root, runId, { environmentPath, evidenceClass = 'fixture', outName = 'bundle' } = {}) {
-  return buildAcceptanceBundle({
+function writeGameruleVerification(root, runId, descriptor) {
+  const loaded = loadCleanEnvironment(descriptor.path)
+  assert.equal(loaded.error, null, `fixture descriptor load: ${String(loaded.error)}`)
+  const lines = [
+    'record=m3-clean-gamerule-verification',
+    'schemaVersion=1',
+    `runId=${runId}`,
+    `descriptorSha256=${loaded.sha256}`,
+    `levelName=${descriptor.document.values.levelName}`,
+    `seed=${String(descriptor.document.values.levelSeed)}`,
+    `sourceSha=${descriptor.document.values.sourceSha}`,
+    `capturedAt=${at(36)}`,
+  ]
+  for (const dimension of descriptor.document.cleanRun.gameruleScope.dimensions) {
+    lines.push(`[dimension=${dimension}]`)
+    for (const [rule, value] of Object.entries(descriptor.document.values.gamerules)) lines.push(`${rule}=${String(value)}`)
+  }
+  const path = join(dirname(descriptor.path), 'gamerule-verification.txt')
+  writeFileSync(path, `${lines.join('\n')}\n`, 'utf8')
+  return path
+}
+
+async function buildBundle(
+  root,
+  runId,
+  { environmentPath, evidenceClass = 'fixture', outName = 'bundle', sourceSha = FIXTURE_SHA, currentInventoryCounts = { ender_eye: 12 } } = {},
+) {
+  // Keep generated bundle/gate reports outside the frozen checkout so they do
+  // not make `git status` dirty and invalidate the exact-source check.
+  const outDir = join(SCRATCH, `${basename(root)}-${outName}`)
+  const observedAt = at(35)
+  const reportBinding = {
+    runId,
+    currentInventoryObservation: {
+      record: 'current-inventory-observation',
+      schemaVersion: 1,
+      runId,
+      sourceSha,
+      generationId: 'gen-test-1',
+      observedAtMs: Date.parse(observedAt),
+      observedAt,
+      worldKey: JSON.parse(WORLD_KEY),
+      dimension: 'minecraft:the_nether',
+      counts: currentInventoryCounts,
+    },
+  }
+  const result = await buildAcceptanceBundle({
     runId,
     root,
-    outDir: join(root, outName),
+    outDir,
     evidenceClass,
-    noControlSocket: true,
     overrides: { environment: environmentPath },
+    noControlSocket: false,
+    // This is the explicit read-only control `report` fixture. It supplies the
+    // acceptance-time inventory required by the canonical gate without opening
+    // any real socket or treating log history as the final inventory.
+    readSocket: async () => reportBinding,
     write: () => {},
   })
+  return { ...result, outDir }
 }
 
 const condition = (verdict, id) => verdict.conditions.find((entry) => entry.id === id) ?? null
@@ -218,14 +308,15 @@ const runCondition = (verdict, id) => condition(verdict, id)
   const root = makeRoot('clean-run')
   const container = join(SCRATCH, 'container')
   mkdirSync(container, { recursive: true })
-  const descriptor = resolvedDescriptor(root, { container })
-  writeFixture(root, RUN, { logLines: cleanLog(RUN, { settle: 'LADDER_INVENTORY_SETTLE reason=death readings=9 changed=false empty=true itemCount=0 waitedMs=1000 counts={}' }) })
+  const sourceSha = initCleanFixtureGit(root)
+  const descriptor = resolvedDescriptor(root, { container, sourceSha })
+  writeFixture(root, RUN, { source: sourceSha, descriptor, logLines: cleanLog(RUN, { source: sourceSha, settle: 'LADDER_INVENTORY_SETTLE reason=death readings=9 changed=false empty=true itemCount=0 waitedMs=1000 counts={}' }) })
 
   // the descriptor itself validates CLEAN against the container
   const check = validateCleanEnvironment(descriptor.document, { descriptorPath: descriptor.path, worldContainer: container })
   assert.equal(check.status, 'CLEAN', `descriptor check: ${check.failed.join(',')}`)
 
-  const { bundle, exitCode } = await buildBundle(root, RUN, { environmentPath: descriptor.path })
+  const { bundle, exitCode, outDir } = await buildBundle(root, RUN, { environmentPath: descriptor.path, sourceSha })
   assert.equal(exitCode, 0, `bundle exit=${exitCode} verdict=${bundle.acceptanceVerdict.reason}`)
   assert.equal(bundle.gate.status, 'PASS')
   assert.match(bundle.gate.resultLine, /^M3_RUN_RESULT status=PASS reason=twelve_eyes_of_ender_verified/)
@@ -237,7 +328,6 @@ const runCondition = (verdict, id) => condition(verdict, id)
   assert.equal(envValues.levelSeed, CLEAN_SEED)
   assert.equal(bundle.artifact.document.environment.worldChanges, null)
 
-  const outDir = join(root, 'bundle')
   const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN, out: outDir })
   assert.equal(verdict.status, 'CLEAN', `clean status=${verdict.status} failed=${verdict.failed.join(',')}`)
   for (const id of ['run.environmentRecordIsThisDescriptor', 'run.bootSourceSha', 'run.acceptanceRecord', 'run.levelNameAttested', 'run.seedAttested', 'run.gamerulesNotContradicted', 'run.noWorldChanges', 'run.bootInventoryEmpty', 'run.keepInventoryBehaviour', 'run.difficultyNotContradicted', 'run.mobSpawningNotContradicted']) {
@@ -279,24 +369,20 @@ const runCondition = (verdict, id) => condition(verdict, id)
   const root = makeRoot('sim-live')
   const container = join(SCRATCH, 'sim-live-container')
   mkdirSync(container, { recursive: true })
-  // a real git HEAD so the bundle's bootSourceMatchesTreeHead signal can hold
-  spawnSync('git', ['init', '-q'], { cwd: root })
-  writeFileSync(join(root, 'fixture-marker.txt'), 'FIXTURE - simulated live signals, never evidence\n', 'utf8')
-  spawnSync('git', ['add', '-A'], { cwd: root })
-  spawnSync('git', ['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=fixture', 'commit', '-q', '-m', 'fixture'], { cwd: root })
-  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim()
-  assert.ok(/^[0-9a-f]{40}$/.test(head), `fixture git HEAD=${head}`)
+  // a real exact source HEAD so the bundle's bootSourceMatchesTreeHead signal
+  // can hold; simulated run evidence stays outside the source identity.
+  const head = initCleanFixtureGit(root)
 
   const descriptor = resolvedDescriptor(root, { sourceSha: head, container })
-  writeFixture(root, RUN, { logLines: cleanLog(RUN, { source: head }) })
+  writeFixture(root, RUN, { source: head, descriptor, logLines: cleanLog(RUN, { source: head }) })
   // the third live signal: a HOST acceptance record (the fixture writes it; a real
   // run must refresh it through the read-only `acceptance` control query).
   writeFileSync(join(root, 'buddy-driver', 'data', 'resident', 'host.lock'), `${JSON.stringify({ pid: 4242, runId: RUN })}\n`, 'utf8')
 
-  const { bundle } = await buildBundle(root, RUN, { environmentPath: descriptor.path, evidenceClass: 'live', outName: 'bundle-live' })
+  const { bundle, outDir } = await buildBundle(root, RUN, { environmentPath: descriptor.path, evidenceClass: 'live', outName: 'bundle-live', sourceSha: head })
   assert.equal(bundle.acceptanceVerdict.status, 'PASS')
   assert.equal(bundle.liveAcceptance, true, `live signals: ${JSON.stringify(bundle.liveSignals)}`)
-  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: join(root, 'bundle-live'), runId: RUN })
+  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
   assert.equal(verdict.status, 'CLEAN')
   assert.equal(verdict.acceptanceStatus, 'ACCEPTED', verdict.acceptanceReason)
   assert.equal(verdict.exitCode, 0)
@@ -429,19 +515,20 @@ ok(`D1. ${ASSISTED_VARIANTS.length} assisted descriptors are REFUSED (each names
 {
   const root = makeRoot('assisted-bundle')
   const container = join(SCRATCH, 'container')
-  const descriptor = resolvedDescriptor(root, { container, mutate: (doc) => { doc.values.gamerules.keep_inventory = true } })
-  writeFixture(root, RUN, { logLines: cleanLog(RUN) })
-  const { bundle, exitCode } = await buildBundle(root, RUN, { environmentPath: descriptor.path })
+  const sourceSha = initCleanFixtureGit(root)
+  const descriptor = resolvedDescriptor(root, { container, sourceSha, mutate: (doc) => { doc.values.gamerules.keep_inventory = true } })
+  writeFixture(root, RUN, { source: sourceSha, descriptor, logLines: cleanLog(RUN, { source: sourceSha }) })
+  const { bundle, exitCode, outDir } = await buildBundle(root, RUN, { environmentPath: descriptor.path, sourceSha })
   assert.equal(exitCode, 0, `the M3 gate PASSes an assisted world (exit=${exitCode})`)
   assert.equal(bundle.gate.status, 'PASS')
   assert.equal(bundle.artifact.document.environment.environmentFile.values.gamerules.keep_inventory, true)
-  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: join(root, 'bundle'), runId: RUN })
+  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
   assert.equal(verdict.status, 'NOT_CLEAN')
   assert.equal(verdict.acceptanceStatus, 'NOT_ACCEPTED')
   assert.match(verdict.acceptanceReason, /keepInventory|gamerules/)
   // and the printed M3 line refuses it
   const printed = []
-  await runGateCli({ argv: ['--environment', descriptor.path, '--bundle-dir', join(root, 'bundle'), '--run', RUN], write: (entry) => printed.push(String(entry)), writeError: () => {} })
+  await runGateCli({ argv: ['--environment', descriptor.path, '--bundle-dir', outDir, '--run', RUN], write: (entry) => printed.push(String(entry)), writeError: () => {} })
   assert.match(printed.join(''), /CLEAN_RUN_M3 status=NOT_ACCEPTED/)
   console.log('    --- assisted (keep_inventory=true) refusal lines ---')
   for (const entry of printed.join('').split('\n')) if (/CLEAN_RUN_(GATE|CONDITION descriptor\.gamerules|M3|RESULT)/.test(entry)) console.log(`    ${entry}`)
@@ -497,14 +584,17 @@ const CONTRADICTIONS = [
 for (const variant of CONTRADICTIONS) {
   const root = makeRoot(`contradiction-${variant.id.replace(/[^a-z0-9]+/gi, '-').slice(0, 24)}`)
   const container = join(SCRATCH, 'container')
-  const descriptor = resolvedDescriptor(root, { container })
+  const sourceSha = initCleanFixtureGit(root)
+  const descriptor = resolvedDescriptor(root, { container, sourceSha })
   writeFixture(root, RUN, {
-    logLines: cleanLog(RUN, variant.log ?? {}),
+    source: sourceSha,
+    logLines: cleanLog(RUN, { source: sourceSha, ...(variant.log ?? {}) }),
     acceptance: variant.acceptance !== false,
     acceptanceOptions: variant.acceptanceOptions ?? {},
+    descriptor,
   })
-  const { bundle } = await buildBundle(root, RUN, { environmentPath: descriptor.path })
-  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: join(root, 'bundle'), runId: RUN })
+  const { bundle, outDir } = await buildBundle(root, RUN, { environmentPath: descriptor.path, sourceSha })
+  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
   const expectedStatus = variant.expectStatus ?? 'NOT_CLEAN'
   assert.equal(verdict.status, expectedStatus, `contradiction ${variant.id} status=${verdict.status}`)
   for (const [id, expected] of variant.expect) {
@@ -555,10 +645,11 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
 {
   const root = makeRoot('death-dropped')
   const container = join(SCRATCH, 'container')
-  const descriptor = resolvedDescriptor(root, { container })
-  writeFixture(root, RUN, { logLines: cleanLog(RUN, { settle: 'LADDER_INVENTORY_SETTLE reason=death readings=9 changed=false empty=true itemCount=0 waitedMs=998 counts={}' }) })
-  await buildBundle(root, RUN, { environmentPath: descriptor.path })
-  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: join(root, 'bundle'), runId: RUN })
+  const sourceSha = initCleanFixtureGit(root)
+  const descriptor = resolvedDescriptor(root, { container, sourceSha })
+  writeFixture(root, RUN, { source: sourceSha, descriptor, logLines: cleanLog(RUN, { source: sourceSha, settle: 'LADDER_INVENTORY_SETTLE reason=death readings=9 changed=false empty=true itemCount=0 waitedMs=998 counts={}' }) })
+  const { outDir } = await buildBundle(root, RUN, { environmentPath: descriptor.path, sourceSha })
+  const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
   const row = runCondition(verdict, 'run.keepInventoryBehaviour')
   assert.equal(row.verdict, 'PASS')
   assert.match(row.reason, /empty inventory after death/)
@@ -572,6 +663,8 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
 {
   const root = join(SCRATCH, 'prepare')
   const container = join(root, 'server')
+  const operatorRoot = makeRoot('prepare-source')
+  const prepareSourceSha = initCleanFixtureGit(operatorRoot)
   mkdirSync(container, { recursive: true })
   writeFileSync(
     join(container, 'server.properties'),
@@ -585,10 +678,10 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   descriptorDoc.cleanRun.worldContainer = container
   descriptorDoc.cleanRun.gameruleMechanism.datapackFormat = { min: [94, 1], max: [94, 1] }
   writeFileSync(descriptorPath, `${JSON.stringify(descriptorDoc, null, 2)}\n`, 'utf8')
-  const args = ['--environment', descriptorPath, '--server-root', container, '--level-name', 'm3clean-prep', '--seed', '998877665544', '--source-sha', FIXTURE_SHA]
+  const args = ['--environment', descriptorPath, '--server-root', container, '--root', operatorRoot, '--level-name', 'm3clean-prep', '--seed', '998877665544', '--source-sha', prepareSourceSha]
 
   // G1. dry-run writes NOTHING
-  const planRun = planPrepare({ descriptorPath, serverRoot: container, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: FIXTURE_SHA })
+  const planRun = planPrepare({ descriptorPath, serverRoot: container, root: operatorRoot, enforceOperatorTreeSource: true, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: prepareSourceSha })
   assert.equal(planRun.status, 'PLANNED', `plan status=${planRun.status} refusals=${planRun.refusals.map((entry) => entry.reason).join('|')}`)
   assert.ok(planRun.actions.length >= 6)
   const before = readdirSync(container)
@@ -597,6 +690,14 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.deepEqual(readdirSync(container), before, '--dry-run must not write anything into the server root')
   assert.equal(existsSync(join(container, 'm3-clean-run')), false)
   assert.equal(existsSync(join(container, 'm3clean-prep')), false)
+  assert.equal(cli.plan.guards.find((guard) => guard.id === 'operator_tree_clean_checkout')?.verdict, 'PASS')
+  const dirtySourceFile = join(operatorRoot, 'dirty-source-fixture.txt')
+  writeFileSync(dirtySourceFile, 'uncommitted source\n', 'utf8')
+  const dirtyCli = await runPrepareCli({ argv: [...args, '--dry-run'], write: () => {}, writeError: () => {} })
+  assert.equal(dirtyCli.exitCode, 1)
+  assert.equal(dirtyCli.plan.guards.find((guard) => guard.id === 'operator_tree_clean_checkout')?.verdict, 'FAIL')
+  assert.ok(dirtyCli.plan.refusals.some((entry) => /operator_tree_dirty/.test(entry.reason)))
+  rmSync(dirtySourceFile)
   assert.match(planRun.guards.find((guard) => guard.id === 'no_destructive_operation').detail, /no delete/)
   // spawn-monsters is a DEAD key in this build: the real gate is the gamerule, and
   // the property check must say so loudly instead of implying enforcement
@@ -612,7 +713,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.ok(existsSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'data', 'm3clean', 'function', 'set_gamerules.mcfunction')))
   const mcfunction = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'data', 'm3clean', 'function', 'set_gamerules.mcfunction'), 'utf8')
   assert.match(mcfunction, /^gamerule keep_inventory false$/m)
-  assert.match(readFileSync(join(container, 'm3-clean-run', 'operator-commands.txt'), 'utf8'), /execute in minecraft:the_nether run gamerule/)
+  assert.match(readFileSync(join(planRun.runDir, 'operator-commands.txt'), 'utf8'), /execute in minecraft:the_nether run gamerule/)
   const packMeta = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'pack.mcmeta'), 'utf8')
   assert.match(packMeta, /"min_format": \[\s*94,\s*1\s*\]/)
   assert.match(packMeta, /"max_format": \[\s*94,\s*1\s*\]/)
@@ -620,45 +721,75 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   // gamerules are per-dimension: every rule is also asserted in the Nether and the End
   assert.match(mcfunction, /^execute in minecraft:the_nether run gamerule keep_inventory false$/m)
   assert.match(mcfunction, /^execute in minecraft:the_end run gamerule keep_inventory false$/m)
-  const resolvedPath = join(container, 'm3-clean-run', 'environment-resolved.json')
+  const resolvedPath = join(planRun.runDir, 'environment-resolved.json')
   const resolved = JSON.parse(readFileSync(resolvedPath, 'utf8'))
-  assert.equal(resolved.values.sourceSha, FIXTURE_SHA)
+  assert.equal(resolved.values.sourceSha, prepareSourceSha)
   assert.equal(resolved.cleanRun.sourceSha.state, 'FROZEN')
   assert.equal(resolved.values.levelName, 'm3clean-prep')
   assert.equal(resolved.cleanRun.worldContainer, container)
-  const manifest = JSON.parse(readFileSync(join(container, 'm3-clean-run', 'manifest.json'), 'utf8'))
+  const manifest = JSON.parse(readFileSync(planRun.manifestPath, 'utf8'))
   assert.equal(manifest.target.levelName, 'm3clean-prep')
   assert.equal(manifest.target.levelSeed, '998877665544')
   assert.equal(manifest.descriptor.sha256.length, 64)
   assert.ok(manifest.files.length >= 5)
-  const attempts = JSON.parse(readFileSync(join(container, 'm3-clean-run', 'attempts.json'), 'utf8'))
+  const attempts = JSON.parse(readFileSync(planRun.attemptsPath, 'utf8'))
   assert.equal(attempts.attempts.length, 1)
-  assert.match(readFileSync(join(container, 'm3-clean-run', 'server.properties.clean'), 'utf8'), /^level-name=m3clean-prep$/m)
-  assert.equal(statSync(join(container, 'm3-clean-run', 'server.properties.clean')).mode & 0o777, 0o600, 'staged server properties may contain RCON material and stay owner-readable only')
-  assert.match(readFileSync(join(container, 'm3-clean-run', 'server-properties.diff.txt'), 'utf8'), /level-seed: 2024 -> 998877665544/)
-  assert.match(readFileSync(join(container, 'm3-clean-run', 'operator-commands.txt'), 'utf8'), /m3-acceptance-bundle\.mjs/)
+  assert.match(readFileSync(planRun.propertiesChange.proposed, 'utf8'), /^level-name=m3clean-prep$/m)
+  assert.equal(statSync(planRun.propertiesChange.proposed).mode & 0o777, 0o600, 'staged server properties may contain RCON material and stay owner-readable only')
+  assert.match(readFileSync(join(planRun.runDir, 'server-properties.diff.txt'), 'utf8'), /level-seed: 2024 -> 998877665544/)
+  const operatorCommands = readFileSync(join(planRun.runDir, 'operator-commands.txt'), 'utf8')
+  assert.match(operatorCommands, /m3-acceptance-bundle\.mjs/)
+  assert.match(operatorCommands, /systemd-run/)
+  assert.match(operatorCommands, /Restart=no/)
+  assert.match(operatorCommands, /agent-runner\.mts/)
+  assert.doesNotMatch(operatorCommands, /resident-supervisor\.mjs|Restart=on-failure/)
   // the resolved descriptor is CLEAN and consumable by the canonical bundle
   const cleanCheck = validateCleanEnvironment(resolved, { descriptorPath: resolvedPath, worldContainer: container })
   assert.equal(cleanCheck.status, 'CLEAN', cleanCheck.failed.join(','))
   ok('G2. --apply stages the clean world dir + gamerule datapack + resolved descriptor + manifest + attempt ledger')
 
   // G3. idempotency
-  const replan = planPrepare({ descriptorPath, serverRoot: container, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: FIXTURE_SHA })
+  const replan = planPrepare({ descriptorPath, serverRoot: container, root: operatorRoot, enforceOperatorTreeSource: true, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: prepareSourceSha })
   const reapplied = applyPlan(replan)
   assert.equal(reapplied.status, 'IDEMPOTENT_NOOP')
   assert.deepEqual(reapplied.applied, [])
   assert.ok(reapplied.unchanged.length >= 4)
-  assert.equal(JSON.parse(readFileSync(join(container, 'm3-clean-run', 'attempts.json'), 'utf8')).attempts.length, 1, 'a re-apply is not a new attempt')
+  assert.equal(JSON.parse(readFileSync(planRun.attemptsPath, 'utf8')).attempts.length, 1, 'a re-apply is not a new attempt')
   ok('G3. a second --apply is an IDEMPOTENT_NOOP (no rewrite, no new attempt)')
 
+  // G3a. a different clean target gets a separate evidence directory; the
+  // prior target's operator-filled transcript and manifest remain byte-identical.
+  const firstTranscript = join(planRun.runDir, 'gamerule-verification.txt')
+  const transcriptBefore = `${readFileSync(firstTranscript, 'utf8')}operatorEvidence=preserve-this-target\n`
+  writeFileSync(firstTranscript, transcriptBefore, 'utf8')
+  const secondPlan = planPrepare({
+    descriptorPath,
+    serverRoot: container,
+    levelName: 'm3clean-prep-two',
+    seed: '998877665545',
+    root: operatorRoot,
+    enforceOperatorTreeSource: true,
+    sourceSha: prepareSourceSha,
+  })
+  assert.equal(secondPlan.status, 'PLANNED')
+  assert.notEqual(secondPlan.runDir, planRun.runDir)
+  assert.notEqual(secondPlan.manifestPath, planRun.manifestPath)
+  assert.equal(secondPlan.attemptsPath, planRun.attemptsPath, 'the used-seed ledger spans target-scoped evidence directories')
+  const secondApplied = applyPlan(secondPlan)
+  assert.equal(secondApplied.status, 'APPLIED')
+  assert.equal(readFileSync(firstTranscript, 'utf8'), transcriptBefore, 'a later target must not overwrite earlier run evidence')
+  assert.match(readFileSync(join(secondPlan.runDir, 'gamerule-verification.txt'), 'utf8'), /levelName=m3clean-prep-two/)
+  assert.equal(JSON.parse(readFileSync(planRun.attemptsPath, 'utf8')).attempts.length, 2)
+  ok('G3a. distinct targets keep separate manifest, environment, and gamerule evidence while sharing the seed ledger')
+
   // G4. refusals, each with the EXACT reason it must give
-  const basePlan = { descriptorPath, serverRoot: container, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: FIXTURE_SHA }
+  const basePlan = { descriptorPath, serverRoot: container, root: operatorRoot, enforceOperatorTreeSource: true, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: prepareSourceSha }
   const cases = [
     { id: 'world already generated', touchLevelDat: true, expect: /world already GENERATED|world_already_generated/ },
     { id: 'protected level name', over: { levelName: 'world' }, expect: /descriptor\.levelNameNew/ },
     { id: 'live seed 2024', over: { seed: '2024' }, expect: /descriptor\.levelSeedNew/ },
     { id: 'server-root is inside the target world dir', over: { serverRoot: join(container, 'm3clean-prep') }, expect: /server_root_inside_target_world/ },
-    { id: 'unfrozen template (no --source-sha)', over: { descriptorPath: TEMPLATE, sourceSha: null, root: null }, expect: /descriptor\.sourceSha/ },
+    { id: 'unfrozen template (no --source-sha)', over: { descriptorPath: TEMPLATE, sourceSha: null, root: null, enforceOperatorTreeSource: false }, expect: /descriptor\.sourceSha/ },
     { id: 'a new seed reusing the staged level name', over: { seed: '112233445566' }, expect: /target_level_name_exists/ },
   ]
   for (const entry of cases) {

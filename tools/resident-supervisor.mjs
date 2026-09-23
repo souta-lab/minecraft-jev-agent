@@ -3,8 +3,10 @@
 // resident host (buddy-driver/agent-runner.mts).
 //
 // WHY THIS EXISTS
-// The resident host is fail-loud on purpose (#226). When the planner/System2 model
-// stays unavailable after its bounded retries, the generation logs
+// The resident host is fail-loud on purpose (#226). When an unrecoverable model
+// failure or an unexpected OS signal reaches the host, it exits distinctly so
+// this owner can retry the SAME configured authority with bounded backoff.
+// A model failure logs
 //
 //   FATAL code=MODEL_UNAVAILABLE context=planner-authority attempts=3 error=...
 //   ERROR code=MODEL_UNAVAILABLE action=terminate-resident pid=... exitCode=1
@@ -26,7 +28,9 @@
 //   * It refuses to start when a resident is already running (HOST lock and a
 //     cwd-scoped process check), so two live hosts are never possible.
 //   * It stops after a configurable consecutive-failure budget and exits non-zero
-//     instead of spinning forever.
+//     instead of spinning forever. A process signal received by the child is
+//     marked and returned as 130/143, so it cannot masquerade as an intentional
+//     clean exit. Signals received by this supervisor are forwarded and stop it.
 //
 // The fail-loud authority contract in buddy-driver/AGENTS.md §3 is deliberately
 // untouched: this is an ops process wrapper, not an authority layer.
@@ -41,7 +45,7 @@
 //   <artifact-dir>/supervisor-<iso>-<pid>.summary.json   final counts + failures
 //
 // Exit codes:
-//   0  child exited cleanly (code 0), --help, --status, or --dry-run
+//   0  child exited intentionally (for example `control-quit`), --help, --status, or --dry-run
 //   1  refused to start (another resident is live) or usage error
 //   2  consecutive-failure budget exhausted (max-restarts reached)
 //   3  hard-stop exit that must not be auto-retried (e.g. host lock held)
@@ -111,12 +115,14 @@ const MARKER_PATTERNS = [
   /\bFATAL\b/,
   /code=MODEL_UNAVAILABLE/,
   /action=terminate-resident/,
+  /SHUTDOWN\s+reason=(SIGINT|SIGTERM)\b/,
   /\bBOOT_REFUSED\b/,
   /HOST_LOCK\s+held-by/,
   /\bERROR\b\s+code=/,
 ]
 const HARD_STOP_RE = /\bBOOT_REFUSED\b|HOST_LOCK\s+held-by/
 const MODEL_UNAVAILABLE_RE = /MODEL_UNAVAILABLE/
+const SHUTDOWN_SIGNAL_RE = /SHUTDOWN\s+reason=(SIGINT|SIGTERM)\b/
 // A self-imposed hourly MODEL budget is NOT a transient gateway blip: the
 // call-time budget is persisted, so an immediate retry restarts into the same
 // exhausted budget (observed: 9 consecutive 60s restarts, all dying on
@@ -151,6 +157,20 @@ export function classifyExit({ code, signalCode = null, markers = [] } = {}) {
   const joined = markers.join('\n')
   if (HARD_STOP_RE.test(joined)) {
     return { classification: 'hard-stop', reason: 'host-lock-held' }
+  }
+  // The resident handles SIGINT/SIGTERM to flush evidence before exiting. That
+  // makes child.signalCode null, so preserve its SHUTDOWN marker as an
+  // unexpected signal instead of interpreting the resulting code 0 as `quit`.
+  // Keep provider/budget classification when the same shutdown followed one.
+  const shutdownSignal = joined.match(SHUTDOWN_SIGNAL_RE)?.[1]
+  if (shutdownSignal !== undefined) {
+    if (MODEL_BUDGET_EXHAUSTED_RE.test(joined)) {
+      return { classification: 'budget', reason: 'model-budget-exhausted' }
+    }
+    if (MODEL_UNAVAILABLE_RE.test(joined)) {
+      return { classification: 'transient', reason: 'model-unavailable' }
+    }
+    return { classification: 'transient', reason: `signal-${shutdownSignal}` }
   }
   if (code === 0 && signalCode === null) {
     return { classification: 'clean', reason: 'exit-0' }
@@ -422,7 +442,6 @@ function pump(stream, onLine, sink) {
  */
 export async function supervise(options, deps = {}) {
   const spawn = deps.spawn ?? ((cmd, cfg) => Bun.spawn(cmd, cfg))
-  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
   const now = deps.now ?? (() => Date.now())
   const out = deps.out ?? process.stdout
   const err = deps.err ?? process.stderr
@@ -477,8 +496,13 @@ export async function supervise(options, deps = {}) {
 
   let currentChild = null
   let forwardedSignal = null
+  let interruptBackoff = null
   const onSignal = (sig) => {
     forwardedSignal = sig
+    // A signal can arrive while no child exists, between failed attempts. Wake
+    // that wait immediately so the supervisor can flush its stop evidence and
+    // return the signal exit code without launching another resident.
+    interruptBackoff?.()
     try {
       currentChild?.kill(sig)
     } catch {
@@ -619,7 +643,29 @@ export async function supervise(options, deps = {}) {
         delayMs,
         consecutiveFailures,
       })
-      await sleep(delayMs)
+      const interruptedBySignal = await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          interruptBackoff = null
+          resolve(false)
+        }, delayMs)
+        interruptBackoff = () => {
+          clearTimeout(timer)
+          interruptBackoff = null
+          resolve(true)
+        }
+      })
+      if (interruptedBySignal && forwardedSignal !== null) {
+        reason = `supervisor-signal-${forwardedSignal}`
+        exitCode = forwardedSignal === 'SIGINT' ? 130 : 143
+        emit({
+          type: 'backoff_interrupted',
+          at: new Date().toISOString(),
+          nextAttempt: attempt + 1,
+          signal: forwardedSignal,
+          delayMs,
+        })
+        break
+      }
     }
   } finally {
     process.removeListener('SIGINT', sigint)

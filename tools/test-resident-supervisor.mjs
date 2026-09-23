@@ -7,7 +7,7 @@
 // failure-record writing are exercised deterministically.
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,6 +43,11 @@ if (mode === 'host-lock') {
   process.stdout.write('[' + ts + '] BOOT_REFUSED reason=host-lock-held path=/tmp/host.lock\\n')
   process.exit(1)
 }
+if (mode === 'signal-term') {
+  process.stdout.write('[' + ts + '] SHUTDOWN reason=SIGTERM\\n')
+  process.exit(143)
+}
+if (mode === 'always-crash') process.exit(1)
 if (mode === 'always-fail' || n <= failTimes) {
   process.stdout.write('[' + ts + '] FATAL code=MODEL_UNAVAILABLE context=planner-authority attempts=3 error=GatewayInternalServerError: Service Unavailable\\n')
   process.stdout.write('[' + ts + '] ERROR code=MODEL_UNAVAILABLE action=terminate-resident pid=' + process.pid + ' exitCode=1\\n')
@@ -62,19 +67,45 @@ function makeRoot(name) {
 }
 
 function runSupervisor(args, env = {}) {
+  return startSupervisor(args, env).done
+}
+
+function startSupervisor(args, env = {}) {
   const child = Bun.spawn([process.execPath, TOOL, ...args], {
     cwd: ROOT,
     env: { ...process.env, ...env },
     stdout: 'pipe',
     stderr: 'pipe',
   })
-  return (async () => {
+  const done = (async () => {
     const [stdout, stderr] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ])
     return { status: await child.exited, stdout, stderr }
   })()
+  return { child, done }
+}
+
+async function waitForRecord(dir, type, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!existsSync(dir)) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      continue
+    }
+    const file = readdirSync(dir).find((name) => name.endsWith('.jsonl'))
+    if (file) {
+      const records = readFileSync(join(dir, file), 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+      if (records.some((record) => record.type === type)) return records
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`timed out waiting for supervisor artifact record ${type}`)
 }
 
 function readArtifact(dir) {
@@ -113,6 +144,16 @@ try {
     classification: 'transient',
     reason: 'signal-SIGKILL',
   })
+  assert.deepEqual(classifyExit({ code: 143, markers: ['[t] SHUTDOWN reason=SIGTERM'] }), {
+    classification: 'transient',
+    reason: 'signal-SIGTERM',
+  }, 'the host signal handler exits normally after logging, so the supervisor must classify its marker')
+  const controlQuitMarkers = extractTerminatingMarkers(['[t] SHUTDOWN reason=control-quit'])
+  assert.equal(controlQuitMarkers.length, 0, 'an explicit control quit is not classified as an OS signal')
+  assert.deepEqual(classifyExit({ code: 0, markers: controlQuitMarkers }), {
+    classification: 'clean',
+    reason: 'exit-0',
+  }, 'an explicit control-quit has no OS signal marker and remains clean')
   assert.deepEqual(classifyExit({ code: 1, markers: ['[t] BOOT_REFUSED reason=host-lock-held'] }), {
     classification: 'hard-stop',
     reason: 'host-lock-held',
@@ -183,7 +224,7 @@ try {
   const artB = join(tmp, 'art-b')
   const resB = await runSupervisor(
     ['--root', rootB, '--child-script', fakeChild, '--artifact-dir', artB, '--max-restarts', '2', '--base-delay-ms', '10'],
-    { FAKE_RESIDENT_COUNTER: join(tmp, 'counter-b'), FAKE_RESIDENT_MODE: 'always-fail' },
+    { FAKE_RESIDENT_COUNTER: join(tmp, 'counter-b'), FAKE_RESIDENT_MODE: 'always-crash' },
   )
   assert.equal(resB.status, 2, `budget exhaustion expected exit 2, got ${resB.status}\n${resB.stderr}`)
   const b = readArtifact(artB)
@@ -192,6 +233,41 @@ try {
   assert.equal(b.summary.reason, 'max-restarts-exhausted')
   assert.equal(b.summary.failures.length, 3, 'every failure is retained in the summary')
   assert.match(resB.stderr, /SUPERVISOR_SUMMARY reason=max-restarts-exhausted exitCode=2/)
+  checks++
+
+  // ---- a resident-handled SIGTERM is not an intentional exit-0 ------------
+  const rootSignal = makeRoot('root-signal')
+  const artSignal = join(tmp, 'art-signal')
+  const signalRun = await runSupervisor(
+    ['--root', rootSignal, '--child-script', fakeChild, '--artifact-dir', artSignal, '--max-restarts', '1', '--base-delay-ms', '10'],
+    { FAKE_RESIDENT_COUNTER: join(tmp, 'counter-signal'), FAKE_RESIDENT_MODE: 'signal-term' },
+  )
+  assert.equal(signalRun.status, 2, `a handled signal must be retryable, then bounded: ${signalRun.status}\n${signalRun.stderr}`)
+  const signalArtifact = readArtifact(artSignal)
+  assert.equal(signalArtifact.records.filter((r) => r.type === 'child_start').length, 2)
+  assert.equal(signalArtifact.records.filter((r) => r.type === 'child_exit')[0].classification, 'transient')
+  assert.match(signalArtifact.records.filter((r) => r.type === 'child_exit')[0].markers.join('\n'), /SHUTDOWN reason=SIGTERM/)
+  assert.equal(signalArtifact.summary.reason, 'max-restarts-exhausted')
+  checks++
+
+  // ---- a supervisor signal interrupts backoff before another child starts -
+  const rootBackoffSignal = makeRoot('root-backoff-signal')
+  const artBackoffSignal = join(tmp, 'art-backoff-signal')
+  const backoffSignal = startSupervisor(
+    ['--root', rootBackoffSignal, '--child-script', fakeChild, '--artifact-dir', artBackoffSignal, '--max-restarts', '5', '--base-delay-ms', '2000'],
+    { FAKE_RESIDENT_COUNTER: join(tmp, 'counter-backoff-signal'), FAKE_RESIDENT_MODE: 'always-crash' },
+  )
+  await waitForRecord(artBackoffSignal, 'restart_scheduled')
+  backoffSignal.child.kill('SIGTERM')
+  const backoffSignalResult = await backoffSignal.done
+  assert.equal(backoffSignalResult.status, 143, `SIGTERM during backoff must exit 143: ${backoffSignalResult.status}\n${backoffSignalResult.stderr}`)
+  const backoffSignalArtifact = readArtifact(artBackoffSignal)
+  assert.equal(backoffSignalArtifact.records.filter((r) => r.type === 'child_start').length, 1, 'backoff signal must not start another resident')
+  assert.equal(backoffSignalArtifact.records.filter((r) => r.type === 'backoff_interrupted').length, 1)
+  assert.equal(backoffSignalArtifact.records.find((r) => r.type === 'backoff_interrupted').signal, 'SIGTERM')
+  assert.equal(backoffSignalArtifact.records.at(-1).type, 'supervisor_stop', 'stop evidence is flushed after interrupting backoff')
+  assert.equal(backoffSignalArtifact.summary.reason, 'supervisor-signal-SIGTERM')
+  assert.equal(backoffSignalArtifact.summary.exitCode, 143)
   checks++
 
   // ---- a clean first run is not retried -----------------------------------

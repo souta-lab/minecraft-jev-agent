@@ -163,11 +163,18 @@ function condition({ id, verdict, reason = null, required = true, detail = null 
  * incomplete bundle must not be able to omit these provenance facts and still
  * pass this additive clean-run gate.
  */
-function productionSourceConditions({ bundle, artifact, descriptor, runId }) {
+function productionSourceConditions({ bundle, artifact, descriptor, runId, runEvidenceProvided }) {
+  // These conditions establish identity for an actual run. A descriptor-only
+  // invocation is an explicitly supported offline judgement of the clean-run
+  // premise, so missing bundle/artifact source facts must not make that premise
+  // UNKNOWN. Keep the rows visible for audit, but require them once either run
+  // evidence input was supplied (an unreadable supplied artifact must remain
+  // UNKNOWN rather than silently becoming a descriptor-only judgement).
   const git = bundle?.git ?? null
   const dirtyCondition = condition({
     id: 'run.cleanFrozenCheckout',
     verdict: git?.dirty === false ? 'PASS' : git?.dirty === true ? 'FAIL' : 'UNKNOWN',
+    required: runEvidenceProvided,
     reason:
       git?.dirty === false
         ? 'the acceptance bundle records a clean checkout (git.dirty=false)'
@@ -200,6 +207,7 @@ function productionSourceConditions({ bundle, artifact, descriptor, runId }) {
   const exactShaCondition = condition({
     id: 'run.exactFrozenSourceSha',
     verdict: exactVerdict,
+    required: runEvidenceProvided,
     reason: exactReason,
     detail: { ...exactFacts, runId },
   })
@@ -302,6 +310,7 @@ function productionSourceConditions({ bundle, artifact, descriptor, runId }) {
   const sourceWindowCondition = condition({
     id: 'run.sourceWindowExact',
     verdict: sourceWindowVerdict,
+    required: runEvidenceProvided,
     reason:
       sourceWindowVerdict === 'PASS'
         ? 'the complete source window is bound to this run and every applied reload preserves the BOOT source commit'
@@ -431,7 +440,15 @@ export async function runCleanRunGate({
           descriptorPath,
           descriptorSha256: loaded.sha256,
         })
-  runConditions.push(...productionSourceConditions({ bundle, artifact, descriptor, runId }))
+  runConditions.push(
+    ...productionSourceConditions({
+      bundle,
+      artifact,
+      descriptor,
+      runId,
+      runEvidenceProvided: bundleDir !== null || artifactPath !== null,
+    }),
+  )
   const effectiveGameruleVerificationPath =
     gameruleVerificationPath ?? (descriptorPath === null ? null : join(dirname(descriptorPath), 'gamerule-verification.txt'))
   const gameruleVerification =

@@ -211,6 +211,11 @@ function gitHead(root) {
   return out.status === 0 ? out.stdout.trim() : null
 }
 
+function gitDirty(root) {
+  const out = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: root, encoding: 'utf8' })
+  return out.status === 0 ? out.stdout.trim().length > 0 : null
+}
+
 /**
  * The gamerule datapack: pack.mcmeta + minecraft:load tag + the function.
  *
@@ -317,6 +322,7 @@ export function planPrepare({
   if (enforceOperatorTreeSource && expectedMilestone === 'M3') {
     const operatorTree = root === null ? REPO_ROOT : resolve(root)
     const operatorTreeSha = gitHead(operatorTree)
+    const operatorTreeDirty = gitDirty(operatorTree)
     const operatorTreeMatchesSource = frozenSha !== null && operatorTreeSha === frozenSha
     guards.push({
       id: 'operator_tree_matches_frozen_sha',
@@ -327,6 +333,21 @@ export function planPrepare({
     })
     if (!operatorTreeMatchesSource) {
       refusals.push({ reason: `operator_tree_source_mismatch: checkout=${operatorTree} HEAD=${String(operatorTreeSha)} sourceSha=${String(frozenSha)}; the resident command must run from the frozen checkout` })
+    }
+    guards.push({
+      id: 'operator_tree_clean_checkout',
+      verdict: operatorTreeDirty === false ? 'PASS' : operatorTreeDirty === true ? 'FAIL' : 'UNKNOWN',
+      detail:
+        operatorTreeDirty === false
+          ? `operator/resident checkout ${operatorTree} has no tracked or untracked source changes`
+          : operatorTreeDirty === true
+            ? `operator/resident checkout ${operatorTree} has tracked or untracked changes; stage a clean frozen checkout before preparing a run`
+            : `cannot read git status for operator/resident checkout ${operatorTree}; clean frozen source is unproven`,
+    })
+    if (operatorTreeDirty !== false) {
+      refusals.push({ reason: operatorTreeDirty === true
+        ? `operator_tree_dirty: checkout=${operatorTree} has tracked or untracked changes; prepare from a clean frozen checkout`
+        : `operator_tree_cleanliness_unknown: cannot establish a clean frozen checkout at ${operatorTree}` })
     }
   }
 
@@ -368,14 +389,26 @@ export function planPrepare({
   const levelSeed = String(resolvedDoc.values.levelSeed)
   const runDirName = milestone === 'M2' ? M2_RUN_DIR_NAME : RUN_DIR_NAME
   const datapackDir = milestone === 'M2' ? M2_DATAPACK_DIR : DATAPACK_DIR
-  const runDir = join(resolve(container), runDirName)
+  const runRootDir = join(resolve(container), runDirName)
+  const sourceShaForTarget = String(frozenSha ?? resolvedDoc.values.sourceSha ?? 'unbound')
+  const targetFingerprint = sha256Text(
+    JSON.stringify({ levelName: levelName2, levelSeed, sourceSha: sourceShaForTarget, descriptorSha256: loaded.sha256 }),
+  ).slice(0, 16)
+  const targetSlug = String(levelName2).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 48) || 'world'
+  // Keep every resolved descriptor, console transcript and manifest tied to its
+  // own target. The shared run root is still where the append-only seed ledger
+  // lives, so a later target cannot overwrite earlier provenance or reuse a
+  // seed that already appeared in another attempt.
+  const runDir = milestone === 'M2' ? runRootDir : join(runRootDir, `${targetSlug}-${targetFingerprint}`)
   const worldDir = join(resolve(container), levelName2)
   const propertiesPath = join(resolve(container), 'server.properties')
   const files = []
 
   // ---- guards --------------------------------------------------------------
   const protectedRoots = [...new Set([...PROTECTED_LEVEL_NAMES, ...(Array.isArray(resolvedDoc.cleanRun?.protectedWorldNames) ? resolvedDoc.cleanRun.protectedWorldNames : []), ...(resolvedDoc.cleanRun?.previousWorld?.levelName ? [resolvedDoc.cleanRun.previousWorld.levelName] : [])])]
-  const plannedPaths = [worldDir, runDir, join(worldDir, datapackDir), join(runDir, 'environment-resolved.json'), join(runDir, 'manifest.json'), join(runDir, 'attempts.json'), join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
+  const attemptsPath = join(runRootDir, 'attempts.json')
+  const manifestPath = join(runDir, 'manifest.json')
+  const plannedPaths = [worldDir, runRootDir, runDir, join(worldDir, datapackDir), join(runDir, 'environment-resolved.json'), manifestPath, attemptsPath, join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
   const protectedHits = plannedPaths.filter((path) => protectedRoots.some((name) => path === join(resolve(container), name) || path.startsWith(join(resolve(container), name) + sep)))
   guards.push({
     id: 'protected_world_paths',
@@ -433,7 +466,6 @@ export function planPrepare({
   if (generated.length > 0) {
     refusals.push({ reason: `world_already_generated: ${generated.map((entry) => `${entry.dir} (level.dat present)`).join(', ')} — a played world can never be a clean-run target; choose a NEW --level-name/--seed` })
   }
-  const manifestPath = join(runDir, 'manifest.json')
   const previousManifest = existsSync(manifestPath) ? safeJson(manifestPath) : null
   const sameStagedTarget = previousManifest !== null && previousManifest?.target?.levelName === levelName2 && previousManifest?.target?.levelSeed === levelSeed && previousManifest?.descriptor?.sha256 === loaded.sha256
   if (scanned.some((entry) => entry.exists) && !sameStagedTarget && generated.length === 0) {
@@ -441,7 +473,6 @@ export function planPrepare({
   }
 
   // ---- the seed must not have been used by an earlier attempt --------------
-  const attemptsPath = join(runDir, 'attempts.json')
   const attempts = existsSync(attemptsPath) ? safeJson(attemptsPath) : null
   const previousAttempts = Array.isArray(attempts?.attempts) ? attempts.attempts : []
   const reused = previousAttempts.find((entry) => entry.levelName === levelName2 && String(entry.levelSeed) === levelSeed)
@@ -617,6 +648,9 @@ export function planPrepare({
     container: resolve(container),
     worldDir,
     runDir,
+    runRootDir,
+    manifestPath,
+    attemptsPath,
     levelName: levelName2,
     levelSeed,
     sourceSha: frozenSha ?? resolvedDoc.values.sourceSha,
@@ -663,6 +697,10 @@ function safeText(path) {
   }
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
 /** The ordered operator commands. Nothing here is executed by this tool. */
 export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, descriptorSha256 = null, root = null, recipePath, milestone = 'M3' }) {
   const tree = root === null || root === undefined ? REPO_ROOT : resolve(root)
@@ -678,10 +716,31 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
       `# Identity/evidence directory: ${runDir}`,
     ]
   }
+  const driverDir = join(tree, 'buddy-driver')
+  const environmentFile = join(process.env.HOME ?? '/home/s0u7a', '.config', 'mc-ai', 'resident.env')
+  const managedResidentCommand = [
+    'systemd-run',
+    '--user',
+    '--unit=ai-buddy-resident',
+    '--collect',
+    '--property=Restart=no',
+    '--property=KillMode=mixed',
+    '--property=TimeoutStopSec=30s',
+    `--property=WorkingDirectory=${driverDir}`,
+    `--property=EnvironmentFile=${environmentFile}`,
+    `--setenv=MC_AI_ROOT=${tree}`,
+    '--setenv=BUDDY_PLANNER=llm',
+    `--setenv=BUDDY_SERVER_PROPERTIES_PATH=${join(runDir, 'server.properties.clean')}`,
+    process.execPath,
+    join(driverDir, 'agent-runner.mts'),
+  ].map(shellQuote).join(' \\\n  ')
+
   return [
     `# ==== M3 CLEAN RUN: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
     `# 0. this file is the plan; the recipe is ${recipePath}`,
-    `# 1. OPERATOR / H4: stop the current resident through its own control socket; wait for it to exit.`,
+    `# 1. OPERATOR / H4: stop the current owner and wait. For a managed resident, this deliberate unit stop is not restarted:`,
+    `if systemctl --user is-active --quiet ai-buddy-resident.service; then systemctl --user stop ai-buddy-resident.service; fi`,
+    `#    If a legacy direct resident remains, send its control-socket control-quit command and wait for HOST_LOCK released.`,
     `# 2. OPERATOR / H4: stop the current Leaf server gracefully from its console; wait for it to exit.`,
     `#    Do not copy over, edit, or restore the shared ${container}/server.properties.`,
     `# 3. start the clean world from the staged config with both world paths explicit:`,
@@ -697,18 +756,21 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `#    the gamerule ids are the snake_case ids from ${runDir}/environment-resolved.json (camelCase is`,
     `#    REJECTED by this build); keep_inventory must be false in ALL THREE dimensions because the M3 route dies in the Nether`,
     `#    reviewer check: keepInventory=false and every rule in ${runDir}/environment-resolved.json`,
-    `# 5. start the resident from this run's FROZEN checkout (run prepare with --root <that checkout>):`,
-    `cd ${tree}/buddy-driver && BUDDY_SERVER_PROPERTIES_PATH=${runDir}/server.properties.clean setsid --fork nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &`,
-    `#    the run's BOOT line must report source=${String(sourceSha)}`,
-    `#    BUDDY_SERVER_PROPERTIES_PATH makes HOST seed attestation read the same staged config the server used.`,
-    `# 6. run the M3 attempt (drive the agent to the Nether + 12 eyes). Record the runId from BOOT.`,
-    `# 7. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
+    `# 5. Configure the external provider environment file once, mode 0600, without committing it: ${environmentFile}`,
+    `#    It must carry the currently authorized Jev/System2 provider settings and credentials; no model is selected here.`,
+    `# 6. launch the exact resident process under a user-systemd transient service:`,
+    managedResidentCommand,
+    `#    Do not auto-restart the process: each new host process gets a new runId, which cannot be joined to this M3 proof. Retryable model outages use same-process typed recovery; an unexpected process exit is recorded as an incomplete run.`,
+    `#    The run's BOOT line must report source=${String(sourceSha)}; BUDDY_SERVER_PROPERTIES_PATH attests the staged config.`,
+    `# 7. run the M3 attempt (drive the agent to the Nether + 12 eyes). Record the runId from BOOT.`,
+    `# 8. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
     `printf '{"id":"acceptance-refresh","cmd":"acceptance"}\\n' | socat - UNIX-CONNECT:${tree}/buddy-driver/data/resident/control.sock`,
-    `# 8. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
+    `# 9. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
     `bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> --root ${tree} --environment ${runDir}/environment-resolved.json --evidence-class live`,
-    `# 9. set runId in gamerule-verification.txt to the BOOT runId, then run the clean-run gate, written NEXT TO the bundle:`,
+    `# 10. set runId in gamerule-verification.txt to the BOOT runId, then run the clean-run gate, written NEXT TO the bundle:`,
     `bun tools/clean-run-gate.mjs --environment ${runDir}/environment-resolved.json --bundle-dir ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID> --run <RUN_ID> --gamerule-verification ${runDir}/gamerule-verification.txt --out ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID>`,
     `# ACCEPTED requires: descriptor CLEAN + run evidence consistent + bundle PASS + liveAcceptance=true`,
+    `# Deliberate owner stop when requested: systemctl --user stop ai-buddy-resident.service.`,
   ]
 }
 
@@ -770,8 +832,8 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
     warnings: plan.warnings,
   }
   mkdirSyncAll(plan.runDir)
-  writeFileSync(join(plan.runDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  const attemptsPath = join(plan.runDir, 'attempts.json')
+  writeFileSync(plan.manifestPath ?? join(plan.runDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  const attemptsPath = plan.attemptsPath ?? join(plan.runDir, 'attempts.json')
   const ledger = existsSync(attemptsPath) ? safeJson(attemptsPath) ?? { record: 'clean-run-attempts', schemaVersion: 1, attempts: [] } : { record: 'clean-run-attempts', schemaVersion: 1, attempts: [] }
   if (!Array.isArray(ledger.attempts)) ledger.attempts = []
   if (!ledger.attempts.some((entry) => entry.levelName === plan.levelName && String(entry.levelSeed) === plan.levelSeed)) {

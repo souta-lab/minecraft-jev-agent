@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
 import {
   MODEL_RETRY_BASE_DELAY_MS,
@@ -111,5 +112,30 @@ describe('model authority recovery host policy', () => {
       reason: 'invalid-retry-deadline',
       delayMs: MODEL_RETRY_BASE_DELAY_MS,
     })
+  })
+
+  test('resident checks the retry gate before loading or starting any lifecycle generation', () => {
+    const source = readFileSync(new URL('./agent-runner.mts', import.meta.url), 'utf8')
+    const start = source.indexOf('async function startGeneration(trigger: string)')
+    const end = source.indexOf('\nfunction scheduleGenerationRestart(', start)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    const body = source.slice(start, end)
+    const gate = body.indexOf('modelRecoveryStartGate(modelAvailability.snapshot())')
+    const defer = body.indexOf("scheduleGenerationRestart('model-unavailable', recoveryGate.delayMs)")
+    const dueTransition = body.indexOf("if (recoveryGate.reason === 'retry-due')")
+    const retryStarted = body.indexOf('modelAvailability.recordRetryStarted()', dueTransition)
+    const moduleLoad = body.indexOf('await loadGenerationModule(false)')
+    const create = body.indexOf('mod.createGeneration(ctx)')
+
+    expect(gate).toBeGreaterThanOrEqual(0)
+    expect(defer).toBeGreaterThan(gate)
+    expect(moduleLoad).toBeGreaterThan(defer)
+    expect(create).toBeGreaterThan(moduleLoad)
+    expect(dueTransition).toBeGreaterThan(gate)
+    expect(retryStarted).toBeGreaterThan(dueTransition)
+    expect(retryStarted).toBeLessThan(moduleLoad)
+    expect(body.slice(gate, moduleLoad)).toContain("reason: 'model-recovery-backoff'")
+    expect(body.slice(gate, defer)).toContain('recoveryGate.delayMs')
   })
 })

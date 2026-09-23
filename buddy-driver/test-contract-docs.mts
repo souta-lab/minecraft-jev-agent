@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { generationModuleReadinessError } from './generation-connection-gate.ts'
 
 interface Case {
   name: string
@@ -102,19 +103,19 @@ addCase('c1. all CONTRACT_VERSION definition sites carry the same value', () => 
 // (c2) mismatch is logged with both versions ----------------------------------
 addCase('c2. host reload-refusal logs ERROR + RELOAD_REJECTED + RELOAD ok=false with both versions', () => {
   const runner = read('buddy-driver/agent-runner.mts')
-  const templateSource = 'CONTRACT_VERSION mismatch: generation=\\$\\{[^}]+\\} host=\\$\\{[^}]+\\}'
-  const templateHits = (runner.match(new RegExp(templateSource, 'g')) ?? []).length
-  const sample = new RegExp(templateSource).exec(runner)?.[0] ?? ''
-  const rendered = sample.replace('${mod.CONTRACT_VERSION}', '${generation}').replace('${CONTRACT_VERSION}', '${host}')
-  const bothVersions = rendered.replace('${generation}', '2').replace('${host}', '3') === 'CONTRACT_VERSION mismatch: generation=2 host=3'
+  const readiness = read('buddy-driver/generation-connection-gate.ts')
+  const mismatch = generationModuleReadinessError({ CONTRACT_VERSION: 2, createGeneration: () => ({}) }, 3)
+  const rendered = mismatch ?? ''
+  const templateHits = (readiness.match(/CONTRACT_VERSION mismatch: generation=/g) ?? []).length
+  const bothVersions = rendered === 'CONTRACT_VERSION mismatch: generation=2 host=3'
   const loadSite = runner.includes("where: 'loadGenerationModule'")
   const reloadSite = runner.includes("where: 'performReload'")
   const rejected = runner.includes("log('RELOAD_REJECTED'") && runner.includes("action: 'keep-previous-generation'")
   const reloadFalse = runner.includes("log('RELOAD', { ok: false")
-  const pass = templateHits >= 2 && bothVersions && loadSite && reloadSite && rejected && reloadFalse
+  const pass = templateHits >= 1 && bothVersions && loadSite && reloadSite && rejected && reloadFalse
   return {
     pass,
-    detail: `throwSites=${templateHits} rendered=${rendered} loadSite=${loadSite} reloadSite=${reloadSite} rejected=${rejected} reloadOkFalse=${reloadFalse}`,
+    detail: `sharedReadinessMessage=${templateHits} rendered=${rendered} loadSite=${loadSite} reloadSite=${reloadSite} rejected=${rejected} reloadOkFalse=${reloadFalse}`,
   }
 })
 

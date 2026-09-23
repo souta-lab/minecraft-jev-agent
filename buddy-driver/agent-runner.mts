@@ -44,7 +44,7 @@ import type {
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { milestoneReport } from './milestone-report.ts'
 import { MilestonePredicateRecorder } from './milestone-predicates.ts'
-import { ModelAvailabilityTracker } from './model-recovery.ts'
+import { ModelAvailabilityTracker, modelRecoveryStartGate } from './model-recovery.ts'
 import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
@@ -82,6 +82,7 @@ import {
   loadStateWithQuarantine,
   openResidentBoot,
   runShutdownSequence,
+  shutdownExitCodeForReason,
   type DurableWriteOutcome,
   type HostLockOutcome,
   type HostLockReport,
@@ -998,6 +999,30 @@ async function startGeneration(trigger: string): Promise<boolean> {
   if (frozen) {
     log('GENERATION_START_SUPPRESSED', { trigger, reason: 'frozen' })
     return false
+  }
+  const recoveryGate = modelRecoveryStartGate(modelAvailability.snapshot())
+  if (!recoveryGate.allowed) {
+    const availability = modelAvailability.snapshot()
+    log('GENERATION_START_SUPPRESSED', {
+      runId,
+      trigger,
+      reason: 'model-recovery-backoff',
+      backoffReason: recoveryGate.reason,
+      deferMs: recoveryGate.delayMs,
+      retryAt: availability.retryAt,
+      consecutiveFailures: availability.consecutiveFailures,
+      lastFailure: availability.lastFailure,
+    })
+    scheduleGenerationRestart('model-unavailable', recoveryGate.delayMs)
+    return false
+  }
+  if (recoveryGate.reason === 'retry-due') {
+    // A lifecycle wake can arrive after the deadline without coming through the
+    // scheduled recovery timer. Record that first due retry just as the timer
+    // path does, so acceptance evidence keeps one consistent transition.
+    modelAvailability.recordRetryStarted()
+    log('MODEL_RETRY_STARTED', { runId, trigger, ...modelAvailability.snapshot() })
+    try { writeAcceptance() } catch { /* retry event remains in the resident log */ }
   }
   if (bot === null || bot.entity === undefined) {
     log('ERROR', { where: 'startGeneration', message: 'no spawned bot', trigger })
@@ -2730,7 +2755,7 @@ async function shutdown(reason: string): Promise<void> {
     closeServer: () => closeControlServer(controlServer, { socketPath: SOCK }),
     releaseLock: () => releaseHostLock(),
     exit: (code) => process.exit(code),
-    exitCode: 0,
+    exitCode: shutdownExitCodeForReason(reason),
     exitDelayMs: 800,
   })
 }

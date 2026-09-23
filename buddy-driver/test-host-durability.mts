@@ -36,6 +36,7 @@ import {
   loadStateWithQuarantine,
   openResidentBoot,
   runShutdownSequence,
+  shutdownExitCodeForReason,
 } from './host-durability.ts'
 
 interface Case {
@@ -47,6 +48,17 @@ const cases: Case[] = []
 const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
+
+addCase('#471 OS signal shutdowns are restartable while control-quit stays clean', () => {
+  const pass =
+    shutdownExitCodeForReason('SIGINT') === 130 &&
+    shutdownExitCodeForReason('SIGTERM') === 143 &&
+    shutdownExitCodeForReason('control-quit') === 0
+  return {
+    pass,
+    detail: `SIGINT=${shutdownExitCodeForReason('SIGINT')} SIGTERM=${shutdownExitCodeForReason('SIGTERM')} control-quit=${shutdownExitCodeForReason('control-quit')}`,
+  }
+})
 
 interface Captured {
   events: Array<{ event: string; detail: Record<string, unknown> }>
