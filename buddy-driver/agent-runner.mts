@@ -71,6 +71,7 @@ import { isHostileEntityName } from '../jev-agent/src/state.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, goalQueueSnapshotFromState } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
+import { connectAfterGenerationValidation, generationModuleReadinessError } from './generation-connection-gate.ts'
 import {
   HostDurabilityLedger,
   HostLock,
@@ -534,6 +535,8 @@ let shuttingDown = false
 // host frozen from process birth; `startGeneration` below enforces the same flag.
 let frozen = (process.env.BUDDY_START_FROZEN ?? '').trim() === '1'
 let generationRestartTimer: NodeJS.Timeout | null = null
+let generationConnectionRetryTimer: NodeJS.Timeout | null = null
+let generationConnectionAttempt: Promise<boolean> | null = null
 let reloadTimer: NodeJS.Timeout | null = null
 let reloadArbiter: ReloadArbiter | null = null
 let lastSrcSignature = ''
@@ -724,9 +727,8 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
     try {
       const built = await buildGeneration()
       const mod = (await import(`${pathToFileURL(built.outfile).href}?v=${built.hash}`)) as GenerationModule
-      if (mod.CONTRACT_VERSION !== CONTRACT_VERSION) {
-        throw new Error(`CONTRACT_VERSION mismatch: generation=${mod.CONTRACT_VERSION} host=${CONTRACT_VERSION}`)
-      }
+      const readinessError = generationModuleReadinessError(mod, CONTRACT_VERSION)
+      if (readinessError !== null) throw new Error(readinessError)
       generationModule = mod
       currentBundle = built.outfile
       generationHash = built.hash
@@ -1101,6 +1103,33 @@ function scheduleGenerationRestart(reason: string, delayMs = GEN_RESTART_MS): vo
   }, delayMs)
 }
 
+function scheduleGenerationConnectionRetry(trigger: string, reason: string): void {
+  if (generationConnectionRetryTimer !== null || shuttingDown) return
+  generationConnectionRetryTimer = setTimeout(() => {
+    generationConnectionRetryTimer = null
+    if (shuttingDown) return
+    log('CONNECT_RETRY', { trigger, delayMs: GEN_RESTART_MS, previousRefusal: reason })
+    void connectWhenGenerationReady(`retry:${trigger}`)
+  }, GEN_RESTART_MS)
+}
+
+function connectWhenGenerationReady(trigger: string): Promise<boolean> {
+  if (generationConnectionAttempt !== null) return generationConnectionAttempt
+  const attempt = connectAfterGenerationValidation({
+    load: () => loadGenerationModule(false),
+    validate: (candidate) => generationModuleReadinessError(candidate, CONTRACT_VERSION),
+    connect: () => connect(),
+    refused: (reason) => {
+      log('CONNECT_REFUSED', { trigger, reason, generationHash })
+      scheduleGenerationConnectionRetry(trigger, reason)
+    },
+  })
+  generationConnectionAttempt = attempt.finally(() => {
+    generationConnectionAttempt = null
+  })
+  return generationConnectionAttempt
+}
+
 function inventorySummary(b: Bot): Record<string, number> {
   const out: Record<string, number> = {}
   try {
@@ -1456,6 +1485,14 @@ function restoreRehearsalState(snapshot: RehearsalSnapshot): { ledger: boolean; 
 
 function connect(): void {
   if (shuttingDown) return
+  const readinessError = generationModuleReadinessError(generationModule, CONTRACT_VERSION)
+  if (readinessError !== null) {
+    // This guard is deliberately at the sole createBot boundary as well as at
+    // BOOT/reconnect scheduling, so a future caller cannot bypass validation.
+    log('CONNECT_REFUSED', { trigger: 'connect-guard', reason: readinessError, generationHash })
+    scheduleGenerationConnectionRetry('connect-guard', readinessError)
+    return
+  }
   log('CONNECT', { host: HOST, port: PORT, username: USERNAME, version: VERSION })
   let created: Bot
   try {
@@ -1582,7 +1619,7 @@ function scheduleReconnect(reason: DisconnectReason, uptimeMs: number): void {
   setTimeout(() => {
     if (shuttingDown) return
     reconnecting = false
-    connect()
+    void connectWhenGenerationReady(`reconnect:${reason}`)
   }, episode.backoffMs)
 }
 
@@ -1868,9 +1905,8 @@ async function performReload(trigger: string): Promise<void> {
       return
     }
     const mod = (await import(`${pathToFileURL(built.outfile).href}?v=${built.hash}`)) as GenerationModule
-    if (mod.CONTRACT_VERSION !== CONTRACT_VERSION) {
-      throw new Error(`CONTRACT_VERSION mismatch: generation=${mod.CONTRACT_VERSION} host=${CONTRACT_VERSION}`)
-    }
+    const readinessError = generationModuleReadinessError(mod, CONTRACT_VERSION)
+    if (readinessError !== null) throw new Error(readinessError)
     const previousModule = generationModule
     const nextSeed: GenerationSeed = { revision: state.revision }
     const nextPending = newPendingProposals()
@@ -2370,6 +2406,10 @@ async function shutdown(reason: string): Promise<void> {
     },
     quiesce: () => {
       clearListenerBaselineTimer()
+      if (generationConnectionRetryTimer !== null) {
+        clearTimeout(generationConnectionRetryTimer)
+        generationConnectionRetryTimer = null
+      }
       reloadArbiter?.stop()
       log('SHUTDOWN', { reason })
     },
@@ -2464,6 +2504,4 @@ log('BOOT', {
   frozen,
 })
 startControlServer()
-void loadGenerationModule(false).then(() => {
-  connect()
-})
+void connectWhenGenerationReady('boot')
