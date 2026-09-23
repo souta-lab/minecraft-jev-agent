@@ -259,7 +259,16 @@ const productive = (candidates: readonly Candidate[]): Candidate[] =>
 {
   const feet: Vec3Json = { x: 0, y: 64, z: 0 }
   const cut: HeadroomCut = { pos: { x: 0, y: 66, z: 0 }, name: 'stone', safe: true, reason: 'safe' }
-  const state = heldTableInTunnel([], { headroomCuts: [cut] })
+  // The clearance MINE is the grounded alternative only while it can actually be
+  // executed. The cell is `stone`, whose harvest requirement is a pickaxe, so the
+  // body must hold one: the acquisition-route contract refuses a dig whose tool
+  // the body lacks (`missing_tool` + the typed CRAFT/collect route) instead of
+  // offering an undiggable lease that can only end in `dig_timeout`. This case
+  // pins the REFUSAL-not-silent property, not a hand-diggable stone.
+  const state = heldTableInTunnel([], {
+    headroomCuts: [cut],
+    inventory: inventory({ cobblestone: 3, stick: 2, crafting_table: 1, wooden_pickaxe: 1 }),
+  })
   const grounded = generateGroundedCandidates(state, options)
 
   check(

@@ -84,6 +84,12 @@ export const DEFAULTS = {
   artifactDir: null, // <driverDir>/data/supervisor
   log: null, // explicit supervisor lifecycle log; default none (stderr only)
   maxRestarts: 5,
+  // A model-provider outage is an EXTERNAL condition, not a defect of this run: counting it
+  // against maxRestarts makes a long outage end the run permanently (measured 2026-09-23:
+  // 41 consecutive `reason=model-unavailable` failures exhausted a 40-restart budget in ~20
+  // minutes of flapping and the supervisor stopped for good, killing the M3 run). Keep the
+  // same bounded exponential backoff, give it the long delay, and bound it separately.
+  modelOutageMaxRestarts: 96,
   baseDelayMs: 2000,
   maxDelayMs: 60_000,
   // Budget exhaustion needs the hourly window to refill, not a 60s retry.
@@ -275,6 +281,10 @@ Options:
   --max-delay-ms N      backoff ceiling (default ${DEFAULTS.maxDelayMs})
   --reset-after-ms N    a run alive at least this long resets the failure streak
   --budget-delay-ms <ms>  backoff for a model-budget exit (default 1800000)
+  --model-outage-max-restarts N
+                          restarts allowed for an EXTERNAL provider outage, counted separately
+                          from --max-restarts so it can never end the run permanently
+                          (default ${DEFAULTS.modelOutageMaxRestarts})
                         (default ${DEFAULTS.resetAfterMs})
   --root PATH           shared tree root (default ${MC_AI_ROOT})
   --driver-dir PATH     directory the host runs from (default <root>/buddy-driver)
@@ -317,6 +327,7 @@ export function parseArgs(argv) {
     else if (a === '--max-delay-ms') opts.maxDelayMs = num(a, next())
     else if (a === '--reset-after-ms') opts.resetAfterMs = num(a, next())
     else if (a === '--budget-delay-ms') opts.budgetDelayMs = num(a, next())
+    else if (a === '--model-outage-max-restarts') opts.modelOutageMaxRestarts = num(a, next())
     else if (a === '--root') opts.root = next()
     else if (a === '--driver-dir') opts.driverDir = next()
     else if (a === '--child-script') opts.childScript = next()
@@ -438,6 +449,7 @@ export async function supervise(options, deps = {}) {
   let restarts = 0
   let attempts = 0
   let consecutiveFailures = 0
+  let modelOutageRestarts = 0
   let reason = 'unknown'
   let exitCode = EXIT_OK
 
@@ -557,19 +569,35 @@ export async function supervise(options, deps = {}) {
         break
       }
 
-      if (isHealthyRun(uptimeMs, options.resetAfterMs)) consecutiveFailures = 0
-      consecutiveFailures += 1
+      const modelOutage = verdict.reason === 'model-unavailable'
+      if (isHealthyRun(uptimeMs, options.resetAfterMs)) {
+        consecutiveFailures = 0
+        modelOutageRestarts = 0
+      }
+      if (modelOutage) {
+        // External provider outage: it must not consume the run's own restart budget, but it
+        // is still bounded (above) and every attempt is logged, so it can never loop unseen.
+        modelOutageRestarts += 1
+        if (modelOutageRestarts >= options.modelOutageMaxRestarts) {
+          reason = 'model-outage-exhausted'
+          exitCode = EXIT_BUDGET_EXHAUSTED
+          break
+        }
+      } else {
+        consecutiveFailures += 1
 
-      if (restarts >= options.maxRestarts) {
-        reason = 'max-restarts-exhausted'
-        exitCode = EXIT_BUDGET_EXHAUSTED
-        break
+        if (restarts >= options.maxRestarts) {
+          reason = 'max-restarts-exhausted'
+          exitCode = EXIT_BUDGET_EXHAUSTED
+          break
+        }
       }
 
-      // 'budget' is retryable but only after the hourly window can refill;
-      // everything else keeps the bounded exponential backoff.
+      // 'budget' is retryable but only after the hourly window can refill, and a provider
+      // outage is retried on the same long cadence; everything else keeps the bounded
+      // exponential backoff.
       const delayMs =
-        verdict.classification === 'budget'
+        verdict.classification === 'budget' || modelOutage
           ? Math.max(options.budgetDelayMs, backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs))
           : backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs)
       restarts += 1

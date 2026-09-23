@@ -14,7 +14,7 @@
 // the live world / durable memory, or a chainless PORTAL_VERIFIED=true) is a
 // named UNKNOWN (`inherited_portal`), not a PASS and not an anonymous gap.
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -22,6 +22,7 @@ import {
   M2_REQUIRED_STAGES,
   M2_RUN_CHAIN,
   M2_RUN_RESULT,
+  declaredResidentHomes,
   detectInheritedPortal,
   evaluateM2Gate,
   evaluatePortalChain,
@@ -29,10 +30,13 @@ import {
   parseInventoryMarker,
   parsePortalChainLine,
   readM2Snapshot,
+  readRunScopedM2Evidence,
   requestedRunId,
+  residentPaths,
   runM2Gate,
   scanRunLines,
 } from './m2-gate.mjs'
+import { derivePaths } from './milestone-run-artifact.mjs'
 
 let checks = 0
 function ok(label) {
@@ -527,6 +531,184 @@ function chainLinksOf(text) {
   assert.match(text, /reason=m2_stages_incomplete:portal_built,portal_lit/, text)
   assert.doesNotMatch(text, /m2_inherited_portal/, text)
   ok('PORTAL_TRUTH verified=false is not an inherited-portal claim')
+}
+
+// ---------------------------------------------------------------------------
+// 10. RED: a run's evidence outside the gate's own tree is FOUND (declared
+//     homes + discovery), and runId scoping survives the wider search
+// ---------------------------------------------------------------------------
+{
+  // The gate's resident-tree path contract must be the SAME one the run artifact
+  // and the acceptance bundle already use (`derivePaths`), or a run documented by
+  // the bundle would be invisible to the gate.
+  const home = mkdtempSync(join(tmpdir(), 'm2-home-parity-'))
+  const gatePaths = residentPaths(home)
+  const artifactPaths = derivePaths(home)
+  assert.equal(gatePaths.logPath, artifactPaths.logPath)
+  assert.equal(gatePaths.snapshotDir, artifactPaths.snapshotDir)
+  assert.equal(gatePaths.decisionsPath, artifactPaths.decisionsPath)
+  assert.equal(gatePaths.controlSocketPath, artifactPaths.controlSocketPath)
+  ok('the gate resolves a declared root exactly as derivePaths() does (no second convention)')
+}
+
+{
+  // The declaration is git itself: the primary tree first, then this repository's
+  // other worktrees that actually carry resident evidence, newest first, so the
+  // run's own tree is opened before a stale lane. Homes with no resident artifact
+  // are dropped rather than opened.
+  const roots = declaredResidentHomes({
+    primaryRoot: '/tree/primary',
+    discover: true,
+    listWorktrees: () => ['/tree/primary', '/tree/stale', '/tree/fresh', '/tree/empty'],
+    hasEvidence: (root) => root !== '/tree/empty',
+    freshness: (root) => ({ '/tree/fresh': 300, '/tree/stale': 100, '/tree/primary': 200 })[root] ?? 0,
+  })
+  assert.deepEqual(roots, ['/tree/primary', '/tree/fresh', '/tree/stale'])
+  ok('discovery orders declared homes primary-first then newest evidence, dropping empty homes')
+}
+
+{
+  // A run that BUILT its gate in a worktree outside the gate's own tree: its
+  // snapshot dir is only discoverable through the declared homes. Without the
+  // wider search this is exactly the live shape that gated UNKNOWN
+  // (no_run_scoped_m2_evidence) with the evidence sitting one directory away.
+  const dir = mkdtempSync(join(tmpdir(), 'm2-home-other-'))
+  const home = join(dir, 'resident-tree')
+  const snapshotDir = join(home, 'buddy-driver', 'data', 'resident')
+  mkdirSync(snapshotDir, { recursive: true })
+  writeFileSync(
+    join(snapshotDir, `m2-snapshot-${RUN}.json`),
+    JSON.stringify({
+      record: 'm2-snapshot',
+      runId: RUN,
+      initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 9 },
+      markers: PORTAL_CHAIN.map((line, index) => ({ line, atMs: 1000 + index })),
+      inventory: { obsidian: 1, flint_and_steel: 1 },
+    }),
+  )
+  const out = capture()
+  const code = await runM2Gate({
+    expectedRunId: RUN,
+    root: home,
+    discover: true,
+    homes: [home],
+    policyEvidence: VERIFIED_POLICY,
+    write: out.write,
+  })
+  assert.equal(code, 0, out.text())
+  assert.match(out.text(), /m2_evidence: valid sources=snapshot/, out.text())
+  assert.match(out.text(), new RegExp(`snapshot_from=${snapshotDir}/m2-snapshot-${RUN}\\.json`), out.text())
+  ok('a run whose snapshot dir sits outside the gate tree is found through the declared homes')
+}
+
+{
+  // The same wider search must NOT hand run A's evidence to run B. Home A holds
+  // run A's snapshot and nothing else; asking for run B stays UNKNOWN.
+  const dir = mkdtempSync(join(tmpdir(), 'm2-home-foreign-'))
+  const homeA = join(dir, 'home-a')
+  const snapshotDirA = join(homeA, 'buddy-driver', 'data', 'resident')
+  mkdirSync(snapshotDirA, { recursive: true })
+  writeFileSync(
+    join(snapshotDirA, `m2-snapshot-${RUN}.json`),
+    JSON.stringify({
+      record: 'm2-snapshot',
+      runId: RUN,
+      initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 9 },
+      markers: PORTAL_CHAIN.map((line, index) => ({ line, atMs: 1000 + index })),
+      inventory: {},
+    }),
+  )
+  const outB = capture()
+  const codeB = await runM2Gate({
+    expectedRunId: OTHER_RUN,
+    root: homeA,
+    discover: true,
+    homes: [homeA],
+    policyEvidence: { ...VERIFIED_POLICY, decisions: { ...VERIFIED_POLICY.decisions, runId: OTHER_RUN } },
+    write: outB.write,
+  })
+  assert.equal(codeB, 2, outB.text())
+  assert.doesNotMatch(outB.text(), /status=PASS/, outB.text())
+  assert.match(outB.text(), /snapshot_from=none/, outB.text())
+  ok('--run B is never satisfied by run A snapshot found by discovery')
+
+  // And a file NAMED for run B whose body carries run A's runId is a mismatch:
+  // recorded, refused, never attributed.
+  writeFileSync(join(snapshotDirA, `m2-snapshot-${OTHER_RUN}.json`), JSON.stringify({ record: 'm2-snapshot', runId: RUN, initialInventory: {}, markers: [{ line: PORTAL_CHAIN[3], atMs: 1 }], inventory: {} }))
+  const resolved = await readRunScopedM2Evidence(OTHER_RUN, { snapshotDirs: [snapshotDirA], logCandidates: [join(dir, 'absent.log')] })
+  assert.equal(resolved.status, 'unknown', JSON.stringify(resolved))
+  assert.equal(resolved.sources.length, 0)
+  assert.match(resolved.mismatches.join(' '), /snapshot_run_mismatch/)
+  ok('a snapshot named for run B but carrying run A runId is a recorded mismatch, never evidence')
+}
+
+{
+  // The supervisor shape: the run's own snapshot dir carries the inventory
+  // samples, while the ordered build -> light -> verify chain exists only in the
+  // supervisor's stdout under <home>/runs/. The declared home must supply the
+  // missing half without the operator naming the .out file.
+  const dir = mkdtempSync(join(tmpdir(), 'm2-home-supervisor-'))
+  const home = join(dir, 'resident-tree')
+  const snapshotDir = join(home, 'buddy-driver', 'data', 'resident')
+  const runsDir = join(home, 'runs')
+  mkdirSync(snapshotDir, { recursive: true })
+  mkdirSync(runsDir, { recursive: true })
+  writeFileSync(
+    join(snapshotDir, `m2-snapshot-${RUN}.json`),
+    JSON.stringify({
+      record: 'm2-snapshot',
+      runId: RUN,
+      initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 9 },
+      markers: [],
+      inventory: { flint_and_steel: 1, obsidian: 1 },
+    }),
+  )
+  writeFileSync(join(runsDir, 'supervisor-7.out'), `${[boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN].join('\n')}\n`)
+  const out = capture()
+  const code = await runM2Gate({
+    expectedRunId: RUN,
+    root: home,
+    discover: false,
+    policyEvidence: VERIFIED_POLICY,
+    write: out.write,
+  })
+  assert.equal(code, 0, out.text())
+  assert.match(out.text(), /m2_evidence: valid sources=snapshot,log/, out.text())
+  assert.match(out.text(), new RegExp(`log_from=${runsDir}/supervisor-7\\.out`), out.text())
+  assert.match(out.text(), /m2_chain: source=log built=PASS lit=PASS verified=PASS ordered=true/, out.text())
+  ok('the ordered chain in a supervisor .out is found from the run own snapshot dir')
+}
+
+{
+  // An explicit --log still wins and is never widened: with it named, the same
+  // home answers from that file alone.
+  const dir = mkdtempSync(join(tmpdir(), 'm2-home-explicit-'))
+  const home = join(dir, 'resident-tree')
+  const snapshotDir = join(home, 'buddy-driver', 'data', 'resident')
+  const runsDir = join(home, 'runs')
+  mkdirSync(snapshotDir, { recursive: true })
+  mkdirSync(runsDir, { recursive: true })
+  writeFileSync(
+    join(snapshotDir, `m2-snapshot-${RUN}.json`),
+    JSON.stringify({ record: 'm2-snapshot', runId: RUN, initialInventory: { diamond: 3, diamond_pickaxe: 1 }, markers: [], inventory: {} }),
+  )
+  writeFileSync(join(runsDir, 'supervisor-7.out'), `${[boot(RUN), ...PORTAL_CHAIN].join('\n')}\n`)
+  const explicit = join(dir, 'explicit.log')
+  writeFileSync(explicit, `${[boot(RUN), MATERIALS_READY].join('\n')}\n`)
+  const out = capture()
+  const code = await runM2Gate({
+    expectedRunId: RUN,
+    root: home,
+    discover: false,
+    logPath: explicit,
+    policyEvidence: VERIFIED_POLICY,
+    write: out.write,
+  })
+  assert.equal(code, 2, out.text())
+  assert.match(out.text(), new RegExp(`log_from=${explicit}`), out.text())
+  assert.match(out.text(), /portal_built: UNKNOWN/, out.text())
+  assert.doesNotMatch(out.text(), /source=log built=PASS/, out.text())
+  ok('an explicit --log is used alone: it is a declaration, not a first guess')
 }
 
 console.log(`m2-gate-test ${checks}/${checks} PASS`)

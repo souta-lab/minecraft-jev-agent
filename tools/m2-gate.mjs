@@ -34,8 +34,32 @@
 // The old iron-age markers (PREREQ_OPTION/FURNACE_READY/SMELT_DONE) are NOT
 // required: they are historical M2 evidence, not the current contract.
 //
+// WHERE THE RUN'S EVIDENCE IS FOUND
+// ---------------------------------
+// A run's facts live in the RESIDENT TREE that produced them - the checkout
+// owning `buddy-driver/buddy.log`, `buddy-driver/data/resident/`,
+// `buddy-driver/logs/jev/decisions.jsonl` - plus, for a supervised resident, the
+// supervisor's own stdout under `<resident-tree>/runs/` (recursively, `*.out`). The gate must not
+// require the operator to know that path, so it resolves evidence in this order:
+//
+//   1. `--log` / `--snapshot-dir` / `--decisions` / `--runner-out` (explicit, wins);
+//   2. `--root <resident-tree>` (or M2_GATE_ROOT) - the same declared-root contract
+//      tools/m3-acceptance-bundle.mjs documents;
+//   3. the tree the gate lives in (unchanged legacy default);
+//   4. EVERY OTHER git worktree of this repository, newest resident evidence first.
+//      A lane resident runs from a worktree (root AGENTS.md 4.0), so `git worktree
+//      list` IS the declaration of this repository's resident homes - no private
+//      path, no hand-maintained registry.
+//
+// Discovery can only ever find the REQUESTED run's own evidence: every snapshot is
+// bound by filename AND body `runId` AND its `record` field, and a log is attributed
+// only inside its own `BOOT runId=R` boundary. A candidate that answers for another
+// run is recorded as a mismatch, never used, so `--run B` can never be satisfied by
+// run A's snapshot. Discovery never widens a stage condition and never invents a
+// marker; it only decides WHICH declared file the gate is allowed to read.
+//
 // Exit: 0 = PASS, 1 = FAIL (known portal failure), 2 = UNKNOWN.
-import { createReadStream, existsSync, readFileSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import net from 'node:net'
 import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -109,6 +133,192 @@ export const M2_GATE_RUNNER_OUT =
   process.env.M2_RUNNER_OUT ?? join(REPO_ROOT, 'buddy-driver', 'runner.out')
 export const M2_GATE_CONTROL_SOCK =
   process.env.M2_CONTROL_SOCK ?? join(REPO_ROOT, 'buddy-driver', 'data', 'resident', 'control.sock')
+
+/** Declared resident tree (`--root` / M2_GATE_ROOT); null = the gate's own tree. */
+export const M2_GATE_ROOT = process.env.M2_GATE_ROOT ?? null
+/**
+ * How many declared resident homes discovery may open. This machine has 100+
+ * worktrees but only the trees that actually ran a resident carry a log, so the
+ * bound is a safety valve, not a tuning knob: the home list is ordered
+ * newest-resident-evidence-first and homes with no resident artifact are dropped
+ * before the limit applies.
+ */
+export const M2_GATE_HOME_LIMIT = Number.parseInt(process.env.M2_GATE_HOME_LIMIT ?? '8', 10)
+/** How many supervisor `.out` files per home are considered, newest first. */
+export const M2_GATE_SUPERVISOR_OUT_LIMIT = Number.parseInt(process.env.M2_GATE_SUPERVISOR_OUT_LIMIT ?? '4', 10)
+
+/**
+ * The evidence paths a declared resident tree owns. Mirrors `derivePaths()` in
+ * tools/milestone-run-artifact.mjs (the shared convention used by
+ * tools/m3-acceptance-bundle.mjs `--root`); tools/test-m2-gate.mjs asserts the two
+ * agree so the contract cannot drift apart.
+ */
+export function residentPaths(root) {
+  const base = join(root, 'buddy-driver')
+  return {
+    root,
+    logPath: join(base, 'buddy.log'),
+    snapshotDir: join(base, 'data', 'resident'),
+    decisionsPath: join(base, 'logs', 'jev', 'decisions.jsonl'),
+    runnerOutPath: join(base, 'runner.out'),
+    controlSocketPath: join(base, 'data', 'resident', 'control.sock'),
+  }
+}
+
+function safeMtimeMs(path) {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/** The supervisor's own stdout for a home: `<home>/runs/` recursively, `*.out`, newest first. */
+export function listSupervisorOuts(home, { limit = M2_GATE_SUPERVISOR_OUT_LIMIT } = {}) {
+  const runsDir = join(home, 'runs')
+  const found = []
+  const walk = (dir, depth) => {
+    if (depth > 2) return
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full, depth + 1)
+      else if (entry.isFile() && entry.name.endsWith('.out')) found.push(full)
+    }
+  }
+  walk(runsDir, 0)
+  return found
+    .map((path) => ({ path, mtimeMs: safeMtimeMs(path) }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))
+    .slice(0, Math.max(0, limit))
+    .map((entry) => entry.path)
+}
+
+/** The repo's declared resident homes, from git itself (`git worktree list`). */
+export function listGitWorktreeRoots({ cwd = REPO_ROOT, spawn = defaultGitSpawn } = {}) {
+  const proc = spawn(['git', 'worktree', 'list', '--porcelain'], cwd)
+  if (proc === null || proc.exitCode !== 0) return []
+  const out = typeof proc.stdout === 'string' ? proc.stdout : ''
+  return out
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length).trim())
+    .filter((path) => path.length > 0)
+}
+
+function defaultGitSpawn(cmd, cwd) {
+  try {
+    if (typeof Bun === 'undefined' || typeof Bun.spawnSync !== 'function') return null
+    const proc = Bun.spawnSync({ cmd, cwd, stdout: 'pipe', stderr: 'pipe' })
+    return { exitCode: proc.exitCode, stdout: proc.stdout.toString('utf8') }
+  } catch {
+    return null
+  }
+}
+
+/** How fresh this home's resident evidence is; the newest of its own artifacts. */
+export function homeEvidenceFreshness(home, { mtimeMs = safeMtimeMs } = {}) {
+  const paths = residentPaths(home)
+  return Math.max(
+    mtimeMs(paths.logPath),
+    mtimeMs(paths.runnerOutPath),
+    mtimeMs(paths.decisionsPath),
+    mtimeMs(paths.snapshotDir),
+    mtimeMs(join(home, 'runs')),
+  )
+}
+
+/** A home is worth opening only when it owns at least one resident artifact. */
+export function homeHasResidentEvidence(home, { mtimeMs = safeMtimeMs } = {}) {
+  return homeEvidenceFreshness(home, { mtimeMs }) > 0
+}
+
+/**
+ * The ordered declared homes the gate may read: the primary tree (declared
+ * `--root`, else the gate's own tree) first, then this repository's other git
+ * worktrees, homes with no resident artifact dropped and the rest ordered
+ * newest-evidence-first so the run's own tree is examined before stale lanes.
+ */
+export function declaredResidentHomes({
+  primaryRoot = M2_GATE_ROOT ?? REPO_ROOT,
+  discover = false,
+  homes = null,
+  listWorktrees = listGitWorktreeRoots,
+  hasEvidence = homeHasResidentEvidence,
+  freshness = homeEvidenceFreshness,
+  limit = M2_GATE_HOME_LIMIT,
+} = {}) {
+  const ordered = []
+  const push = (root) => {
+    if (typeof root === 'string' && root.length > 0 && !ordered.includes(root)) ordered.push(root)
+  }
+  push(primaryRoot)
+  if (discover && homes === null) {
+    const others = listWorktrees()
+      .filter((root) => root !== primaryRoot)
+      .filter((root) => hasEvidence(root))
+    others.sort((a, b) => freshness(b) - freshness(a) || a.localeCompare(b))
+    for (const root of others) push(root)
+  }
+  for (const root of Array.isArray(homes) ? homes : []) push(root)
+  const cap = Number.isFinite(limit) && limit > 0 ? limit : 8
+  return ordered.slice(0, Math.max(1, cap))
+}
+
+/**
+ * Every place the gate is allowed to look for run R's evidence, in order. Each
+ * list is independently run-bound downstream, so a longer list can only find
+ * R's own evidence - it can never combine facts across runs.
+ */
+export function evidenceCandidates({
+  primaryRoot = M2_GATE_ROOT ?? REPO_ROOT,
+  discover = false,
+  homes = null,
+  logPath = null,
+  snapshotDir = null,
+  decisionsPath = null,
+  runnerOutPath = null,
+  listWorktrees = listGitWorktreeRoots,
+  supervisorOuts = listSupervisorOuts,
+} = {}) {
+  const roots = declaredResidentHomes({ primaryRoot, discover, homes, listWorktrees })
+  const perHome = roots.map((root) => {
+    const paths = residentPaths(root)
+    return { root, paths, outs: supervisorOuts(root) }
+  })
+  const snapshotDirs = snapshotDir !== null ? [snapshotDir] : perHome.map((home) => home.paths.snapshotDir)
+  const logCandidates = logPath !== null ? [logPath] : []
+  // A supervised resident's stdout is NOT buddy.log: the supervisor captures it
+  // under runs/. It is a declared path of the same tree, so it is a legitimate
+  // log source - offered after the tree's own buddy.log, never instead of it.
+  for (const home of perHome) {
+    logCandidates.push(home.paths.logPath)
+    for (const out of home.outs) logCandidates.push(out)
+  }
+  // The authority window comes from the same streams: runner.out when a detached
+  // resident wrote it, buddy.log (which carries the identical BOOT lines), then the
+  // supervisor's own capture. Deduped, order preserved.
+  const policyCandidates = []
+  const pushPolicy = (path) => {
+    if (typeof path === 'string' && path.length > 0 && !policyCandidates.includes(path)) policyCandidates.push(path)
+  }
+  pushPolicy(runnerOutPath)
+  for (const home of perHome) {
+    pushPolicy(home.paths.runnerOutPath)
+    pushPolicy(home.paths.logPath)
+    for (const out of home.outs) pushPolicy(out)
+  }
+  const decisionsCandidates =
+    decisionsPath !== null ? [decisionsPath] : perHome.map((home) => home.paths.decisionsPath)
+  const controlSocketCandidates =
+    perHome.map((home) => home.paths.controlSocketPath)
+  return { roots, perHome, snapshotDirs, logCandidates, policyCandidates, decisionsCandidates, controlSocketCandidates }
+}
 
 const POS_RE = /pos=(-?\d+),(-?\d+),(-?\d+)/
 
@@ -760,35 +970,58 @@ export function readM2Snapshot(runId, { snapshotDir = M2_GATE_SNAPSHOT_DIR } = {
  * Resolve every run-scoped M2 source for R. Each source is independently
  * attributed to R; a foreign/unknown source is recorded as a mismatch and never
  * used. Returns `valid` only when at least one R-bound source carries evidence.
+ *
+ * `snapshotDirs` / `logCandidates` are the ADDITIVE multi-home forms used by
+ * discovery: the first candidate that carries R's own evidence answers, and every
+ * candidate that refuses (a foreign runId, a malformed record, no BOOT boundary)
+ * is recorded as a mismatch with its path. A single `snapshotDir` / `logPath`
+ * still behaves exactly as before, so an explicit operator path is never widened.
  */
-export async function readRunScopedM2Evidence(runId, { logPath = M2_GATE_LOG, snapshotDir = M2_GATE_SNAPSHOT_DIR } = {}) {
+export async function readRunScopedM2Evidence(
+  runId,
+  { logPath = M2_GATE_LOG, snapshotDir = M2_GATE_SNAPSHOT_DIR, snapshotDirs = null, logCandidates = null } = {},
+) {
   const sources = []
   const mismatches = []
-  const snapshot = readM2Snapshot(runId, { snapshotDir })
-  if (snapshot.status === 'valid' && (snapshot.portalEvents.length > 0 || snapshot.inventorySamples.length > 0)) {
-    sources.push({
-      name: 'snapshot',
-      path: snapshot.path,
-      portalEvents: snapshot.portalEvents,
-      inventorySamples: snapshot.inventorySamples,
-      // Dimension is only recorded on portal markers; the M3 gate reports it as
-      // an intermediate fact without requiring a portal chain.
-      dimensionObservations: snapshot.portalEvents.map((event) => event.dimension).filter((value) => typeof value === 'string'),
-    })
-  } else if (snapshot.status === 'unknown') {
-    mismatches.push(snapshot.reason)
+  const dirs = Array.isArray(snapshotDirs) && snapshotDirs.length > 0 ? snapshotDirs : [snapshotDir]
+  let snapshotTaken = false
+  for (const dir of dirs) {
+    const snapshot = readM2Snapshot(runId, { snapshotDir: dir })
+    if (snapshot.status === 'valid' && (snapshot.portalEvents.length > 0 || snapshot.inventorySamples.length > 0)) {
+      sources.push({
+        name: 'snapshot',
+        path: snapshot.path,
+        portalEvents: snapshot.portalEvents,
+        inventorySamples: snapshot.inventorySamples,
+        // Dimension is only recorded on portal markers; the M3 gate reports it as
+        // an intermediate fact without requiring a portal chain.
+        dimensionObservations: snapshot.portalEvents.map((event) => event.dimension).filter((value) => typeof value === 'string'),
+      })
+      snapshotTaken = true
+      break
+    }
+    if (snapshot.status === 'unknown') mismatches.push(snapshot.reason)
+    else if (snapshot.status === 'valid' && !snapshotTaken) mismatches.push(`snapshot_without_evidence ${snapshot.path}`)
   }
-  const log = await readM2Log(runId, { logPath })
-  if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0)) {
-    sources.push({
-      name: 'log',
-      path: log.path,
-      portalEvents: log.portalEvents,
-      inventorySamples: log.inventorySamples,
-      dimensionObservations: log.dimensionObservations ?? [],
-    })
-  } else if (log.status === 'unknown') {
-    mismatches.push(log.reason)
+  const logPaths = Array.isArray(logCandidates) && logCandidates.length > 0 ? logCandidates : [logPath]
+  const seenLogs = new Set()
+  for (const candidate of logPaths) {
+    if (typeof candidate !== 'string' || candidate.length === 0 || seenLogs.has(candidate)) continue
+    seenLogs.add(candidate)
+    const log = await readM2Log(runId, { logPath: candidate })
+    if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0)) {
+      sources.push({
+        name: 'log',
+        path: log.path,
+        portalEvents: log.portalEvents,
+        inventorySamples: log.inventorySamples,
+        dimensionObservations: log.dimensionObservations ?? [],
+      })
+      break
+    }
+    // A candidate that exists but holds no line attributable to R is not an error -
+    // it is simply not this run's log. Only a broken boundary is worth recording.
+    if (log.status === 'unknown') mismatches.push(log.reason)
   }
   if (sources.length === 0) {
     return {
@@ -816,17 +1049,34 @@ export function requestedRunId(argv = process.argv.slice(2), env = process.env) 
   return runId
 }
 
+/** Preserve order, drop empties and repeats. */
+function uniquePaths(paths) {
+  const out = []
+  for (const path of paths) {
+    if (typeof path === 'string' && path.length > 0 && !out.includes(path)) out.push(path)
+  }
+  return out
+}
+
 export async function runM2Gate({
   expectedRunId = null,
   readEvidence = null,
-  logPath = M2_GATE_LOG,
-  snapshotDir = M2_GATE_SNAPSHOT_DIR,
+  // `null` means "not given by the caller": resolve it from the declared
+  // `--root` / discovery / the gate's own tree. An explicit path is used alone.
+  logPath = null,
+  snapshotDir = null,
+  // Declared resident tree (`--root`, or M2_GATE_ROOT). null = the gate's own tree.
+  root = M2_GATE_ROOT,
+  // Discover this repository's other git worktrees as candidate resident homes.
+  discover = false,
+  homes = null,
+  listWorktrees = listGitWorktreeRoots,
   policyEvidence = null,
   loadPolicy = loadPolicyEvidence,
   policySocket = undefined,
   controlSocketPath = M2_GATE_CONTROL_SOCK,
-  decisionsPath = M2_GATE_DECISIONS,
-  runnerOutPath = M2_GATE_RUNNER_OUT,
+  decisionsPath = null,
+  runnerOutPath = null,
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   json = false,
@@ -838,10 +1088,32 @@ export async function runM2Gate({
   onResult = null,
 } = {}) {
   const stamp = now().toISOString()
-  const resolveEvidence = readEvidence ?? ((runId) => readRunScopedM2Evidence(runId, { logPath, snapshotDir }))
+  const primaryRoot = root ?? REPO_ROOT
+  const plan = evidenceCandidates({
+    primaryRoot,
+    discover,
+    homes,
+    logPath,
+    snapshotDir,
+    decisionsPath,
+    runnerOutPath,
+    listWorktrees,
+  })
+  const resolveEvidence =
+    readEvidence ??
+    ((runId) =>
+      readRunScopedM2Evidence(runId, {
+        logPath: logPath ?? plan.logCandidates[0] ?? M2_GATE_LOG,
+        snapshotDir: snapshotDir ?? plan.snapshotDirs[0] ?? M2_GATE_SNAPSHOT_DIR,
+        logCandidates: plan.logCandidates,
+        snapshotDirs: plan.snapshotDirs,
+      }))
   const scoped = expectedRunId !== null && RUN_ID_RE.test(String(expectedRunId))
   const evidence = scoped ? await resolveEvidence(expectedRunId) : null
   let rawPolicy = policyEvidence
+  let policyVerdict = null
+  let policyUsed = null
+  const policyAttempts = []
   if (scoped && rawPolicy === null) {
     const socketBinding = policySocket === undefined
       ? await readPolicySocketBinding(controlSocketPath)
@@ -852,19 +1124,67 @@ export async function runM2Gate({
     // `[ISO] BOOT ... runId=...` lines. Without this fallback every verdict degraded to
     // UNKNOWN with reason=decisions_evidence_unavailable, i.e. the run-scoped policy
     // evidence was unavailable for a reason that had nothing to do with the run.
-    const runnerOutForScan =
-      runnerOutPath !== null && runnerOutPath !== undefined && existsSync(runnerOutPath)
-        ? runnerOutPath
-        : join(REPO_ROOT, 'buddy-driver', 'buddy.log')
-    rawPolicy = await loadPolicy({
-      runId: expectedRunId,
-      socket: socketBinding?.runId === expectedRunId ? socketBinding : null,
-      decisionsPath,
-      runnerOutPath: runnerOutForScan,
-    })
+    //
+    // A stream that EXISTS is not the same as a stream that carries R: a worktree
+    // resident leaves a `runner.out` belonging to a different run generation while
+    // `buddy.log` holds R's BOOT boundary, and the supervisor captures R's stdout in
+    // `runs/*.out`. So every declared stream is tried in order and the first one that
+    // yields R's own bounded window AND a verified authority verdict answers; the
+    // attempts are reported. Each attempt is run-bound by loadPolicyEvidence itself,
+    // so trying more streams can never attribute another run's decisions to R.
+    const groups = plan.perHome.map((home, index) => ({
+      root: home.root,
+      streams: uniquePaths(
+        index === 0 && runnerOutPath !== null
+          ? [runnerOutPath, home.paths.runnerOutPath, home.paths.logPath, ...home.outs]
+          : [home.paths.runnerOutPath, home.paths.logPath, ...home.outs],
+      ),
+      decisionsPath: decisionsPath ?? home.paths.decisionsPath,
+    }))
+    for (const group of groups) {
+      for (const stream of group.streams) {
+        if (!existsSync(stream)) {
+          policyAttempts.push({ root: group.root, stream, status: 'absent' })
+          continue
+        }
+        const loaded = await loadPolicy({
+          runId: expectedRunId,
+          socket: socketBinding?.runId === expectedRunId ? socketBinding : null,
+          decisionsPath: group.decisionsPath,
+          runnerOutPath: stream,
+        })
+        const evaluated = evaluateCurrentM2AuthorityEvidence({
+          expectedRunId,
+          decisions: loaded?.decisions ?? null,
+          generation: loaded?.generation ?? null,
+          system2: loaded?.system2 ?? null,
+        })
+        policyAttempts.push({
+          root: group.root,
+          stream,
+          decisionsPath: group.decisionsPath,
+          status: loaded?.reason === null || loaded?.reason === undefined ? 'window' : String(loaded.reason),
+          verdict: evaluated.status,
+          verdictReason: evaluated.reason,
+        })
+        if (policyVerdict === null) {
+          rawPolicy = loaded
+          policyVerdict = evaluated
+          policyUsed = { root: group.root, stream, decisionsPath: group.decisionsPath }
+        }
+        if (evaluated.code === 0) {
+          rawPolicy = loaded
+          policyVerdict = evaluated
+          policyUsed = { root: group.root, stream, decisionsPath: group.decisionsPath }
+          break
+        }
+      }
+      if (policyVerdict !== null && policyVerdict.code === 0) break
+    }
   }
   const policy = scoped
-    ? evaluateCurrentM2AuthorityEvidence({
+    ? policyVerdict ??
+      evaluateCurrentM2AuthorityEvidence({
         expectedRunId,
         decisions: rawPolicy?.decisions ?? null,
         generation: rawPolicy?.generation ?? null,
@@ -873,6 +1193,15 @@ export async function runM2Gate({
     : null
   const result = evaluateM2Gate({ expectedRunId, evidence, policy })
   if (typeof onResult === 'function') onResult(result)
+  const evidenceRoots = {
+    homes: plan.roots,
+    discover,
+    declaredRoot: root,
+    snapshotFrom: (evidence?.sources ?? []).find((source) => source.name === 'snapshot')?.path ?? null,
+    logFrom: (evidence?.sources ?? []).find((source) => source.name === 'log')?.path ?? null,
+    policyFrom: policyUsed,
+    policyAttempts,
+  }
 
   if (json) {
     write(
@@ -886,6 +1215,7 @@ export async function runM2Gate({
         policy: policy === null ? null : { status: policy.status, reason: policy.reason },
         inheritedPortal: result.facts?.inheritedPortal ?? null,
         chain: result.facts?.chain ?? null,
+        evidenceRoots,
         facts: result.facts ?? null,
       }),
     )
@@ -914,6 +1244,13 @@ export async function runM2Gate({
     }
     write(`m2_missing: ${result.facts.missing.length > 0 ? result.facts.missing.join(',') : 'none'}`)
   }
+  // WHERE the evidence came from, so a verdict is auditable without re-deriving the
+  // path: the declared homes examined and which file answered each source.
+  write(
+    `m2_evidence_roots: homes=${evidenceRoots.homes.length} discover=${evidenceRoots.discover} ` +
+      `snapshot_from=${evidenceRoots.snapshotFrom ?? 'none'} log_from=${evidenceRoots.logFrom ?? 'none'} ` +
+      `policy_from=${evidenceRoots.policyFrom?.stream ?? 'none'}`,
+  )
   // One typed, ordered built->lit->verified trace per evidence source. Printed on
   // EVERY path (including unscoped/unavailable evidence) so a reader can always
   // tell "no chain was looked for" (`source=none`) apart from "a chain was looked
@@ -934,7 +1271,16 @@ export async function runM2Gate({
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { log: null, snapshotDir: null, decisions: null, runnerOut: null, controlSocket: null, json: false }
+  const out = {
+    log: null,
+    snapshotDir: null,
+    decisions: null,
+    runnerOut: null,
+    controlSocket: null,
+    root: null,
+    discover: true,
+    json: false,
+  }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--run') i += 1
@@ -943,6 +1289,8 @@ function parseArgs(argv) {
     else if (arg === '--decisions') out.decisions = argv[++i] ?? null
     else if (arg === '--runner-out') out.runnerOut = argv[++i] ?? null
     else if (arg === '--control-socket') out.controlSocket = argv[++i] ?? null
+    else if (arg === '--root') out.root = argv[++i] ?? null
+    else if (arg === '--no-discover') out.discover = false
     else if (arg === '--json') out.json = true
     else throw new Error(`unknown argument: ${arg}`)
   }
@@ -957,11 +1305,18 @@ if (isMain) {
     const options = {
       expectedRunId,
       json: args.json,
-      logPath: args.log ?? M2_GATE_LOG,
-      snapshotDir: args.snapshotDir ?? M2_GATE_SNAPSHOT_DIR,
-      decisionsPath: args.decisions ?? M2_GATE_DECISIONS,
-      runnerOutPath: args.runnerOut ?? M2_GATE_RUNNER_OUT,
+      // null = "not given": resolve from --root / discovery / this tree. An explicit
+      // path is used alone, exactly as before.
+      logPath: args.log,
+      snapshotDir: args.snapshotDir,
+      decisionsPath: args.decisions,
+      runnerOutPath: args.runnerOut,
       controlSocketPath: args.controlSocket ?? M2_GATE_CONTROL_SOCK,
+      root: args.root ?? M2_GATE_ROOT,
+      // A run's evidence is found without the operator naming a private path: the
+      // declared root first, then this repository's other git worktrees (see the
+      // header). --no-discover restricts the search to the declared root alone.
+      discover: args.discover,
     }
     process.exitCode = await runM2Gate(options)
   } catch (error) {

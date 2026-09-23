@@ -286,7 +286,17 @@ export interface BridgeSpan {
   selfLanding?: boolean
   /** the per-cell pocket verdict the self-landing step was grounded on (evidence) */
   pocketEvidence?: string
+  /**
+   * Present only when a scaffold was grounded although the probe DID find a far
+   * bank: the reason the bounded one-cell step was chosen over the span. Absent for
+   * the historical "no far bank inside the probe" scaffold, so every pre-existing
+   * `BRIDGE_START ... self_landing=true pocket=...` line stays byte-identical.
+   */
+  scaffoldCause?: BridgeScaffoldCause
 }
+
+/** Why a self-landing scaffold was grounded instead of a verified span. */
+export type BridgeScaffoldCause = 'far_bank_no_reduction'
 
 export type BridgeSpanDecision =
   | { kind: 'span'; span: BridgeSpan }
@@ -487,6 +497,77 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
       }
     }
   }
+  const placeBlockName = typeof input.placeBlockName === 'string' && input.placeBlockName.length > 0
+    ? input.placeBlockName
+    : null
+  /** The scaffold's own pocket evidence, when one was grounded. */
+  let scaffoldEvidence: string | null = null
+  /**
+   * THE SELF-LANDING SCAFFOLD for this direction, as a REUSABLE step: the one-cell
+   * advance that creates its own floor. Returns
+   *   * `null`                     - the caller declared no placement identity, or the
+   *                                  probe carries no pocket read (`first.flood`
+   *                                  undefined, i.e. a hand-built probe): the
+   *                                  historical `no_verified_landing` verdict stands,
+   *                                  fail closed;
+   *   * `{ refusal }`              - the pocket rule refused the step (hazard /
+   *                                  would_flood / portal_plane / protected /
+   *                                  unbreakable), in the shared vocabulary;
+   *   * `{ far, pocketEvidence }`  - the step is legal and its far side is its own
+   *                                  landing.
+   *
+   * It is a closure because TWO situations need the identical step: no far bank
+   * inside the bounded probe (the historical case below), and a far bank that does
+   * NOT strictly reduce the distance to the leg target (rule 7, further down) - the
+   * bounded one-cell advance is then still the honest offer, under the SAME guards.
+   *
+   * The scaffold needs the pocket's OWN sensed facts: the sensor fills the
+   * face-adjacency flood read for the first column on every probe it builds
+   * (`state.ts#probeBridgeDirection`).
+   */
+  const selfLandingScaffold = ():
+    | { far: Vec3Json; pocketEvidence: string }
+    | { refusal: BridgeRefusal }
+    | null => {
+    if (placeBlockName === null || first.flood === undefined) return null
+    const pocket = scaffoldPocketRefusal(
+      {
+        landing: first.cell,
+        pocket: [
+          { cell: first.cell, name: first.cellName, open: first.open, solid: !first.open, breakable: !first.open, observed: first.cellName !== null && first.cellName !== undefined },
+          {
+            cell: { x: first.cell.x, y: first.cell.y + 1, z: first.cell.z },
+            name: first.headName ?? null,
+            open: first.headOpen,
+            solid: !first.headOpen,
+            breakable: !first.headOpen,
+            observed: first.headName !== null && first.headName !== undefined,
+          },
+        ],
+        // The floor of the pocket is the block THIS leg places. It is read from
+        // the placement, not from the world, because the world's cell is air -
+        // that is the whole mechanic.
+        floor: { cell: first.floor, name: placeBlockName, open: false, solid: true, breakable: true, observed: true },
+        flood: first.flood === true,
+        floodCell: first.floodCell ?? null,
+        floodBlock: first.floodBlock ?? null,
+      },
+      isProtected,
+      `the ${input.probe.dir} self-landing scaffold`,
+    )
+    if (pocket !== null) {
+      return {
+        refusal: {
+          reason: bridgeRefusalReasonFor(pocket.reason),
+          cell: pocket.cell ?? first.cell,
+          target: input.target,
+          block: pocket.block,
+          detail: pocket.detail,
+        },
+      }
+    }
+    return { far: first.cell, pocketEvidence: selfLandingPocketEvidence(first, placeBlockName) }
+  }
   if (far === null) {
     // (6b) THE SELF-LANDING SCAFFOLD. No already-standable far side exists inside
     // the bounded probe, so the historical answer was `no_verified_landing` and the
@@ -508,54 +589,11 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
     //     block this leg places as the pocket's floor: a column a fluid could pour
     //     into, an unobserved column, a protected cell and a dimension-transfer
     //     plane are all refused in the shared vocabulary, never in a second one.
-    const placeBlockName = typeof input.placeBlockName === 'string' && input.placeBlockName.length > 0
-      ? input.placeBlockName
-      : null
-    // The scaffold needs the pocket's OWN sensed facts: the sensor fills the
-    // face-adjacency flood read for the first column on every probe it builds
-    // (`state.ts#probeBridgeDirection`). A probe that does not carry it (a hand-built
-    // one) cannot ground a step whose whole safety fact is that read, so it keeps the
-    // historical `no_verified_landing` verdict below - fail closed, and no verdict of
-    // an existing caller changes.
-    if (placeBlockName !== null && first.flood !== undefined) {
-      const pocket = scaffoldPocketRefusal(
-        {
-          landing: first.cell,
-          pocket: [
-            { cell: first.cell, name: first.cellName, open: first.open, solid: !first.open, breakable: !first.open, observed: first.cellName !== null && first.cellName !== undefined },
-            {
-              cell: { x: first.cell.x, y: first.cell.y + 1, z: first.cell.z },
-              name: first.headName ?? null,
-              open: first.headOpen,
-              solid: !first.headOpen,
-              breakable: !first.headOpen,
-              observed: first.headName !== null && first.headName !== undefined,
-            },
-          ],
-          // The floor of the pocket is the block THIS leg places. It is read from
-          // the placement, not from the world, because the world's cell is air -
-          // that is the whole mechanic.
-          floor: { cell: first.floor, name: placeBlockName, open: false, solid: true, breakable: true, observed: true },
-          flood: first.flood === true,
-          floodCell: first.floodCell ?? null,
-          floodBlock: first.floodBlock ?? null,
-        },
-        isProtected,
-        `the ${input.probe.dir} self-landing scaffold`,
-      )
-      if (pocket !== null) {
-        return {
-          kind: 'refuse',
-          refusal: {
-            reason: bridgeRefusalReasonFor(pocket.reason),
-            cell: pocket.cell ?? first.cell,
-            target: input.target,
-            block: pocket.block,
-            detail: pocket.detail,
-          },
-        }
-      }
-      far = first.cell
+    const scaffold = selfLandingScaffold()
+    if (scaffold !== null) {
+      if ('refusal' in scaffold) return { kind: 'refuse', refusal: scaffold.refusal }
+      far = scaffold.far
+      scaffoldEvidence = scaffold.pocketEvidence
     }
   }
   if (far === null) {
@@ -574,17 +612,47 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
   // (7) Bounded and progress-making.
   const landing = first.cell
   const from = input.target === null ? 0 : horizontal(input.selfFeet, input.target)
-  const to = input.target === null ? 0 : horizontal(far, input.target)
+  let to = input.target === null ? 0 : horizontal(far, input.target)
+  /**
+   * WHY a scaffold was grounded even though the probe DID find a far bank: the
+   * verified span to that bank does not strictly reduce the distance to the leg
+   * target, so the direction is not useful as a SPAN - while the bounded one-cell
+   * advance still is. Absent for the historical "no far bank inside the probe"
+   * case, so those `BRIDGE_START` lines stay byte-identical.
+   */
+  let scaffoldCause: BridgeScaffoldCause | undefined
   if (input.target !== null && !(to <= from - BRIDGE_MIN_ADVANCE)) {
-    return {
-      kind: 'refuse',
-      refusal: {
-        reason: 'budget',
-        cell: landing,
-        target: input.target,
-        block: null,
-        detail: `the verified far side (${key(far)}) does not close distance (${from.toFixed(2)}m -> ${to.toFixed(2)}m)`,
-      },
+    // The far bank is no closer to the target than the body already is. Before
+    // refusing the direction, try the SAME bounded scaffold rule 6b uses: the
+    // first landing must close distance on its OWN, under the identical pocket
+    // guards, and it is one cell by construction. Measured live (the operator's
+    // floated gate, body on an island): `BRIDGE_REFUSED reason=budget ... the
+    // verified far side (26,67,6) does not close distance (1.41m -> 3.16m)` was
+    // exactly this shape, and the one-cell step toward the target DID close
+    // distance - so the direction was refused although the honest bounded step
+    // existed. A scaffold refusal here does NOT replace the historical refusal:
+    // the direction was already refused, and this path only ever ADDS a grounded
+    // step, never rewrites a verdict.
+    if (key(far) !== key(landing) && horizontal(landing, input.target) <= from - BRIDGE_MIN_ADVANCE) {
+      const scaffold = selfLandingScaffold()
+      if (scaffold !== null && !('refusal' in scaffold)) {
+        far = scaffold.far
+        to = horizontal(far, input.target)
+        scaffoldEvidence = scaffold.pocketEvidence
+        scaffoldCause = 'far_bank_no_reduction'
+      }
+    }
+    if (!(to <= from - BRIDGE_MIN_ADVANCE)) {
+      return {
+        kind: 'refuse',
+        refusal: {
+          reason: 'budget',
+          cell: landing,
+          target: input.target,
+          block: null,
+          detail: `the verified far side (${key(far)}) does not close distance (${from.toFixed(2)}m -> ${to.toFixed(2)}m)`,
+        },
+      }
     }
   }
   const selfLanding = far !== null && key(far) === key(landing)
@@ -602,7 +670,10 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
       from,
       to,
       ...(selfLanding ? { selfLanding: true } : {}),
-      ...(selfLanding && placedBlock !== null ? { pocketEvidence: selfLandingPocketEvidence(first, placedBlock) } : {}),
+      ...(selfLanding
+        ? { pocketEvidence: scaffoldEvidence ?? (placedBlock === null ? 'none' : selfLandingPocketEvidence(first, placedBlock)) }
+        : {}),
+      ...(scaffoldCause === undefined ? {} : { scaffoldCause }),
     },
   }
 }
@@ -788,6 +859,7 @@ export function planBridgeRoute(input: BridgeRouteInput): BridgeRouteDecision {
     remaining: Math.max(0, input.placeable.count - best.span),
     ...(best.selfLanding === true ? { selfLanding: true } : {}),
     ...(best.selfLanding === true && best.pocketEvidence !== undefined ? { pocketEvidence: best.pocketEvidence } : {}),
+    ...(best.scaffoldCause === undefined ? {} : { scaffoldCause: best.scaffoldCause }),
   })
   return {
     plan: {
@@ -886,10 +958,11 @@ export function formatBridgeStart(input: {
   remaining: number
   selfLanding?: boolean
   pocketEvidence?: string
+  scaffoldCause?: BridgeScaffoldCause
 }): string {
   const scaffold =
     input.selfLanding === true
-      ? ` self_landing=true pocket=${input.pocketEvidence ?? 'none'}`
+      ? ` self_landing=true${input.scaffoldCause === undefined ? '' : ` cause=${input.scaffoldCause}`} pocket=${input.pocketEvidence ?? 'none'}`
       : ''
   return `BRIDGE_START cell=${cellText(input.cell)} block=${input.block} span=${input.span} remaining=${input.remaining}${scaffold}`
 }

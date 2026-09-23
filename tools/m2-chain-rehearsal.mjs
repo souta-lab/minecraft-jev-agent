@@ -559,8 +559,18 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
   writeFileSync(join(dir, 'buddy.log'), `${logLines.join('\n')}\n`)
   writeFileSync(join(dir, 'runner.out'), `${runnerOutLines.join('\n')}\n`)
   writeFileSync(join(dir, 'decisions.jsonl'), `${decisionsLines.join('\n')}\n`)
+  // The same run in the DECLARED resident-tree layout (`--root <dir>`), so the
+  // rehearsal can drive the real gate's OPERATOR surface as well as its
+  // explicit-path surface. No control socket is created: the run stays offline.
+  const homeDir = join(dir, 'buddy-driver')
+  mkdirSync(join(homeDir, 'logs', 'jev'), { recursive: true })
+  mkdirSync(join(homeDir, 'data', 'resident'), { recursive: true })
+  writeFileSync(join(homeDir, 'buddy.log'), `${logLines.join('\n')}\n`)
+  writeFileSync(join(homeDir, 'runner.out'), `${runnerOutLines.join('\n')}\n`)
+  writeFileSync(join(homeDir, 'logs', 'jev', 'decisions.jsonl'), `${decisionsLines.join('\n')}\n`)
   return {
     dir,
+    homeDir: dir,
     runId: RUN_ID,
     inventory,
     logPath: join(dir, 'buddy.log'),
@@ -572,28 +582,37 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
   }
 }
 
-/** Invoke the REAL tools/m2-gate.mjs as a subprocess and parse its verdict. */
+/**
+ * Invoke the REAL tools/m2-gate.mjs as a subprocess and parse its verdict.
+ * `mode: 'declared-root'` uses the operator surface (`--root <tree>`, no explicit
+ * evidence paths), proving a run's evidence is reachable by declaration alone;
+ * `mode: 'explicit'` (default) names every path, as the earlier cases do.
+ */
 export function runRealGate({
   fixture,
   gatePath = M2_CHAIN_GATE_PATH,
   runtime = process.execPath,
+  mode = 'explicit',
 } = {}) {
-  const cmd = [
-    runtime,
-    gatePath,
-    '--run',
-    fixture.runId,
-    '--log',
-    fixture.logPath,
-    '--snapshot-dir',
-    fixture.snapshotDir,
-    '--decisions',
-    fixture.decisionsPath,
-    '--runner-out',
-    fixture.runnerOutPath,
-    '--control-socket',
-    fixture.controlSocketPath,
-  ]
+  const cmd =
+    mode === 'declared-root'
+      ? [runtime, gatePath, '--run', fixture.runId, '--root', fixture.homeDir ?? fixture.dir, '--no-discover']
+      : [
+          runtime,
+          gatePath,
+          '--run',
+          fixture.runId,
+          '--log',
+          fixture.logPath,
+          '--snapshot-dir',
+          fixture.snapshotDir,
+          '--decisions',
+          fixture.decisionsPath,
+          '--runner-out',
+          fixture.runnerOutPath,
+          '--control-socket',
+          fixture.controlSocketPath,
+        ]
   const proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe' })
   const stdout = proc.stdout.toString('utf8')
   const stderr = proc.stderr.toString('utf8')
@@ -616,6 +635,8 @@ export function runRealGate({
     reason,
     chainLinks,
     statusLine: stdout.split('\n').find((line) => line.startsWith('portal_lit: ')) ?? null,
+    evidenceRootsLine: stdout.split('\n').find((line) => line.startsWith('m2_evidence_roots: ')) ?? null,
+    policyLine: stdout.split('\n').find((line) => line.startsWith('policy: ')) ?? null,
   }
 }
 
@@ -769,6 +790,37 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
       if (!(link.indices.placed < link.indices.frame && link.indices.frame < link.indices.lit && link.indices.lit < link.indices.verified)) {
         missing.push(`chain_trace_indices:${JSON.stringify(link.indices)}`)
       }
+    }
+  }
+
+  // --- case a2: the SAME chain through the operator's declared-root surface ---
+  // The rehearsal above names every path. The operator does not: they declare the
+  // tree that produced the run (`--root <tree>`, the contract
+  // tools/m3-acceptance-bundle.mjs documents). If the declared-root surface cannot
+  // reach the chain the explicit surface just proved, a live run's evidence stays
+  // unreachable in practice - so it is asserted, not assumed.
+  const declaredFixture = materializeSyntheticRun({ caseName: 'declared-root', markerLines: rehearsal.emittedLines })
+  let declared
+  try {
+    declared = runRealGate({ fixture: declaredFixture, mode: 'declared-root' })
+  } finally {
+    if (cleanup) rmSync(declaredFixture.dir, { recursive: true, force: true })
+  }
+  details.declaredRoot = declared
+  write(`M2_CHAIN_REHEARSAL_GATE case=declared_root status=${declared.status} reason=${declared.reason} exit=${declared.exitCode}`)
+  write(`M2_CHAIN_REHEARSAL_GATE_RESULT case=declared_root ${declared.resultLine ?? 'M2_RUN_RESULT missing'}`)
+  write(`M2_CHAIN_REHEARSAL_EVIDENCE_ROOTS case=declared_root ${declared.evidenceRootsLine ?? 'm2_evidence_roots missing'}`)
+  write(`M2_CHAIN_REHEARSAL_CHAIN case=declared_root ${formatChainTrace(declared.chainLinks)}`)
+  if (declared.status !== 'PASS' || declared.exitCode !== 0) {
+    missing.push(`declared_root_gate_not_pass:status=${declared.status} reason=${declared.reason} exit=${declared.exitCode}`)
+  }
+  {
+    const link = declared.chainLinks.find((entry) => entry.source !== 'none') ?? null
+    if (link === null || link.built !== 'PASS' || link.lit !== 'PASS' || link.verified !== 'PASS' || link.ordered !== true) {
+      missing.push(`declared_root_chain_trace:${formatChainTrace(declared.chainLinks)}`)
+    }
+    if (declared.policyLine === null || !declared.policyLine.startsWith('policy: VERIFIED')) {
+      missing.push(`declared_root_policy:${declared.policyLine ?? 'missing'}`)
     }
   }
 
