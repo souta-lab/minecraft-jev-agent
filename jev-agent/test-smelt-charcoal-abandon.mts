@@ -488,8 +488,8 @@ async function main(): Promise<void> {
   {
     const stationFailure = guardMoveFailureReason({ kind: 'SMELT' }, 'NO_PATH')
     await check(
-      '(b1) a SMELT guard NO_PATH is a tracked station failure with the typed reason unreachable',
-      stationFailure === 'unreachable',
+      '(b1) a SMELT guard NO_PATH is tracked as a state-scoped path failure, not durable unreachable',
+      stationFailure === 'no_path',
       `reason=${stationFailure ?? 'null'}`,
     )
 
