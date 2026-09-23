@@ -25,6 +25,10 @@ No harness tool performs one.
 ```text
 rehearsal facts (this lane, all verified offline)
   frozen sha        35638640e842595f5d8a100774a2273ccfddf49b   (latest origin/main 67388ac + task/clean-run-harness 1ff9dfb)
+                    the REHEARSAL froze this sha; step 1 re-resolves the lane tip
+                    (docs-only commits move it, e.g. 9ce165d) and step 2 re-stages
+                    whenever it changes - the descriptor must freeze the SAME commit
+                    that the run boots, so never reuse a resolved descriptor across shas
   levelName         m3clean-b1          levelSeed  -4187923615481
   staged tree       /home/s0u7a/mc-server/m3-clean-run-rehearsal/  (REHEARSAL ONLY - do not boot)
   dry-run plan      11 actions, 6 guards PASS, writes nothing
