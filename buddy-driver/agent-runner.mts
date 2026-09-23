@@ -1111,6 +1111,29 @@ function inventorySummary(b: Bot): Record<string, number> {
   return out
 }
 
+/**
+ * A read-only, run-bound inventory snapshot returned with `report`.
+ * Historical milestone observations are useful for proving that a rung was once
+ * reached; acceptance also needs the inventory the player holds at gate time.
+ */
+function currentInventoryObservation(): Record<string, unknown> | null {
+  if (bot === null || bot.entity === undefined) return null
+  const atMs = Date.now()
+  const dimension = normalizeDimension(bot.game?.dimension)
+  return {
+    record: 'current-inventory-observation',
+    schemaVersion: 1,
+    runId,
+    sourceSha: bootSourceSha,
+    generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+    observedAtMs: atMs,
+    observedAt: new Date(atMs).toISOString(),
+    worldKey: { ...currentWorldKey(), dimension },
+    dimension,
+    counts: inventorySummary(bot),
+  }
+}
+
 function blockNameAt(b: Bot, x: number, y: number, z: number): string {
   try {
     return b.blockAt(new Vec3(x, y, z))?.name ?? 'unknown'
@@ -2024,9 +2047,11 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
   if (cmd === 'report' || cmd === 'status') {
     const status = generation === null ? null : generation.status()
     const memory = keyedMemory()
+    const inventoryObservation = currentInventoryObservation()
     syncReconnectStats()
     controlReply(socket, request, true, {
       runId,
+      currentInventoryObservation: inventoryObservation,
       frozen,
       connected: bot !== null && bot.entity !== undefined,
       generations: state.generations,
