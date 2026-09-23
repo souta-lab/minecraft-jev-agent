@@ -1701,7 +1701,10 @@ function depVersion(pkg: string): string {
 
 function serverSeed(): string | null {
   try {
-    const match = /^level-seed=(.*)$/m.exec(readFileSync('/home/s0u7a/mc-server/server.properties', 'utf8'))
+    // M2 reproducibility trials pass their exact staged config only to this
+    // child process. The default path remains the resident's historical source.
+    const propertiesPath = process.env.BUDDY_SERVER_PROPERTIES_PATH ?? '/home/s0u7a/mc-server/server.properties'
+    const match = /^level-seed=(.*)$/m.exec(readFileSync(propertiesPath, 'utf8'))
     return match?.[1]?.trim() ?? null
   } catch {
     return null

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// clean-run-prepare: stage ONE clean Minecraft world for an M3 acceptance run.
+// clean-run-prepare: stage ONE clean Minecraft world for an M2 or M3 run.
 //
 //   bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json --dry-run
 //   bun tools/clean-run-prepare.mjs --environment tools/fixtures/m3-clean-environment.json \
@@ -37,7 +37,7 @@
 //
 // Exit: 0 = planned / applied / idempotent no-op, 1 = REFUSED (not clean), 2 = usage.
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -52,9 +52,13 @@ export const RESULT_LINE = 'CLEAN_RUN_PREPARE_RESULT'
 
 /** The staged directory name (never a world name, never `world*`). */
 export const RUN_DIR_NAME = 'm3-clean-run'
+/** M2 trials use their own staged directory so the M3 acceptance files stay intact. */
+export const M2_RUN_DIR_NAME = 'm2-clean-run'
 /** The datapack namespace + path inside the new world. */
 export const DATAPACK_DIR = 'datapacks/m3-clean-gamerules'
 export const DATAPACK_NAMESPACE = 'm3clean'
+export const M2_DATAPACK_DIR = 'datapacks/m2-repro-gamerules'
+export const M2_DATAPACK_NAMESPACE = 'm2repro'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..')
@@ -82,6 +86,7 @@ export function parseArgs(argv) {
     serverRoot: null,
     sourceSha: null,
     root: null,
+    expectedMilestone: 'M3',
     seed: null,
     levelName: null,
     apply: false,
@@ -98,6 +103,11 @@ export function parseArgs(argv) {
     else if (arg === '--server-root') out.serverRoot = argv[++i] ?? null
     else if (arg === '--source-sha') out.sourceSha = argv[++i] ?? null
     else if (arg === '--root') out.root = argv[++i] ?? null
+    else if (arg === '--milestone') {
+      const value = argv[++i] ?? null
+      if (!['M2', 'M3'].includes(value)) throw new Error(`--milestone must be M2 or M3, got ${String(value)}`)
+      out.expectedMilestone = value
+    }
     else if (arg === '--seed') out.seed = argv[++i] ?? null
     else if (arg === '--level-name') out.levelName = argv[++i] ?? null
     else if (arg === '--apply') out.apply = true
@@ -114,7 +124,7 @@ export function parseArgs(argv) {
 
 export function usage() {
   return [
-    'clean-run-prepare — stage ONE clean world for an M3 acceptance run',
+    'clean-run-prepare — stage ONE clean world for an M2 reproduction or M3 acceptance run',
     '',
     'Usage:',
     '  bun tools/clean-run-prepare.mjs --environment <descriptor.json> [--dry-run]',
@@ -126,6 +136,7 @@ export function usage() {
     '  --environment <p>        the clean-run descriptor (REQUIRED; must validate CLEAN)',
     '  --source-sha <40-hex>    the exact SHA the run must boot (freezes the descriptor)',
     '  --root <tree>            alternative to --source-sha: resolve git HEAD of this checkout',
+    '  --milestone <M2|M3>      expected descriptor contract (default: M3; M2 requires explicit selection)',
     '  --server-root <dir>      where the clean world is served from (default: descriptor cleanRun.worldContainer)',
     '  --level-name <name>      override the descriptor level name (must still be a new, unprotected name)',
     '  --seed <seed>            override the descriptor seed (must still differ from the live seed)',
@@ -220,14 +231,16 @@ function gitHead(root) {
  * are excluded: the command would fail in-world. The console form is the bare
  * 1.21.11 snake_case rule id (camelCase is rejected by this build).
  */
-export function gameruleDatapackFiles(levelName, gamerules, format, exclude = []) {
+export function gameruleDatapackFiles(levelName, gamerules, format, exclude = [], { milestone = 'M3' } = {}) {
+  const datapackDir = milestone === 'M2' ? M2_DATAPACK_DIR : DATAPACK_DIR
+  const datapackNamespace = milestone === 'M2' ? M2_DATAPACK_NAMESPACE : DATAPACK_NAMESPACE
   const excluded = new Set(exclude)
   const dimensions = format?.dimensions ?? ['minecraft:the_nether', 'minecraft:the_end']
   const sorted = Object.entries(gamerules)
     .filter(([rule]) => !excluded.has(rule))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   const lines = [
-    `# m3 clean-run gamerules for ${levelName}: every rule is asserted at its declared vanilla default,`,
+    `# ${milestone.toLowerCase()} clean-run gamerules for ${levelName}: every rule is asserted at its declared vanilla default,`,
     '# in the overworld AND in every other dimension (gamerules are per-dimension in this build).',
     '# Written by tools/clean-run-prepare.mjs; the console `gamerule` listing is the human verification.',
     ...(excluded.size === 0 ? [] : [`# excluded (registered by the build but absent from this world): ${[...excluded].join(', ')}`]),
@@ -238,15 +251,15 @@ export function gameruleDatapackFiles(levelName, gamerules, format, exclude = []
   }
   const files = [
     {
-      path: join(DATAPACK_DIR, 'pack.mcmeta'),
-      content: `${JSON.stringify({ pack: { description: `M3 clean-run gamerules (${levelName})`, min_format: format.min, max_format: format.max } }, null, 2)}\n`,
+      path: join(datapackDir, 'pack.mcmeta'),
+      content: `${JSON.stringify({ pack: { description: `${milestone} clean-run gamerules (${levelName})`, min_format: format.min, max_format: format.max } }, null, 2)}\n`,
     },
     {
-      path: join(DATAPACK_DIR, 'data', 'minecraft', 'tags', 'function', 'load.json'),
-      content: `${JSON.stringify({ values: [`${DATAPACK_NAMESPACE}:set_gamerules`] }, null, 2)}\n`,
+      path: join(datapackDir, 'data', 'minecraft', 'tags', 'function', 'load.json'),
+      content: `${JSON.stringify({ values: [`${datapackNamespace}:set_gamerules`] }, null, 2)}\n`,
     },
     {
-      path: join(DATAPACK_DIR, 'data', DATAPACK_NAMESPACE, 'function', 'set_gamerules.mcfunction'),
+      path: join(datapackDir, 'data', datapackNamespace, 'function', 'set_gamerules.mcfunction'),
       content: `${lines.join('\n')}\n`,
     },
   ]
@@ -269,6 +282,7 @@ export function planPrepare({
   serverRoot = null,
   sourceSha = null,
   root = null,
+  expectedMilestone = 'M3',
   seed = null,
   levelName = null,
   apply = false,
@@ -302,11 +316,17 @@ export function planPrepare({
   }
 
   const container = serverRoot === null ? resolvedDoc.cleanRun?.worldContainer ?? null : resolve(serverRoot)
+  const milestone = expectedMilestone
   if (serverRoot !== null && resolvedDoc.cleanRun.worldContainer !== container) {
     resolvedDoc.cleanRun.worldContainer = container
     overridesApplied.push(`worldContainer=${container}`)
   }
-  const check = validateCleanEnvironment(resolvedDoc, { descriptorPath: loaded.path, descriptorSha256: loaded.sha256, worldContainer: container })
+  const check = validateCleanEnvironment(resolvedDoc, {
+    descriptorPath: loaded.path,
+    descriptorSha256: loaded.sha256,
+    worldContainer: container,
+    expectedMilestone: milestone,
+  })
   if (check.status !== 'CLEAN') {
     for (const entry of check.conditions) {
       if (entry.required && entry.verdict !== 'PASS') refusals.push({ reason: `descriptor_${entry.verdict.toLowerCase()}: ${entry.id}: ${entry.reason}` })
@@ -331,14 +351,16 @@ export function planPrepare({
 
   const levelName2 = resolvedDoc.values.levelName
   const levelSeed = String(resolvedDoc.values.levelSeed)
-  const runDir = join(resolve(container), RUN_DIR_NAME)
+  const runDirName = milestone === 'M2' ? M2_RUN_DIR_NAME : RUN_DIR_NAME
+  const datapackDir = milestone === 'M2' ? M2_DATAPACK_DIR : DATAPACK_DIR
+  const runDir = join(resolve(container), runDirName)
   const worldDir = join(resolve(container), levelName2)
   const propertiesPath = join(resolve(container), 'server.properties')
   const files = []
 
   // ---- guards --------------------------------------------------------------
   const protectedRoots = [...new Set([...PROTECTED_LEVEL_NAMES, ...(Array.isArray(resolvedDoc.cleanRun?.protectedWorldNames) ? resolvedDoc.cleanRun.protectedWorldNames : []), ...(resolvedDoc.cleanRun?.previousWorld?.levelName ? [resolvedDoc.cleanRun.previousWorld.levelName] : [])])]
-  const plannedPaths = [worldDir, runDir, join(worldDir, DATAPACK_DIR), join(runDir, 'environment-resolved.json'), join(runDir, 'manifest.json'), join(runDir, 'attempts.json'), join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
+  const plannedPaths = [worldDir, runDir, join(worldDir, datapackDir), join(runDir, 'environment-resolved.json'), join(runDir, 'manifest.json'), join(runDir, 'attempts.json'), join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
   const protectedHits = plannedPaths.filter((path) => protectedRoots.some((name) => path === join(resolve(container), name) || path.startsWith(join(resolve(container), name) + sep)))
   guards.push({
     id: 'protected_world_paths',
@@ -383,6 +405,9 @@ export function planPrepare({
 
   if (!existsSync(resolve(container)) && !createServerRoot) {
     refusals.push({ reason: `server_root_missing: ${resolve(container)} does not exist (pass --create-server-root to create it)` })
+  }
+  if (milestone === 'M2' && overwriteProperties) {
+    refusals.push({ reason: 'm2_shared_properties_mutation_forbidden: M2 trials use the staged server.properties.clean through the server --config argument and must never replace the shared server.properties' })
   }
 
   // ---- the world must be new, and NOT already generated --------------------
@@ -430,7 +455,7 @@ export function planPrepare({
         'level-seed': levelSeed,
         difficulty: String(resolvedDoc.values.difficulty),
         'spawn-monsters': String(resolvedDoc.values.mobSpawning === true),
-        motd: `M3 CLEAN RUN ${levelName2} seed=${levelSeed}`,
+        motd: `${milestone} CLEAN RUN ${levelName2} seed=${levelSeed}`,
       }
       for (const [property, whyDead] of Object.entries(DEAD_PROPERTIES)) {
         if (parsed.values[property] === undefined) continue
@@ -502,21 +527,21 @@ export function planPrepare({
   } else {
     if (packFormat.legacy === true) warnings.push('datapackFormat is missing and only the legacy datapackPackFormat number is set: since 1.21.9 a data pack must declare min_format/max_format, so this pack may be ignored by the server. Set cleanRun.gameruleMechanism.datapackFormat.')
     const notRegistered = Object.keys(resolvedDoc.cleanRun?.gamerulePolicy?.notRegisteredInWorld ?? {})
-    for (const file of gameruleDatapackFiles(levelName2, resolvedDoc.values.gamerules ?? {}, packFormat, notRegistered)) {
+    for (const file of gameruleDatapackFiles(levelName2, resolvedDoc.values.gamerules ?? {}, packFormat, notRegistered, { milestone })) {
       files.push({ path: join(worldDir, file.path), content: file.content, note: 'gamerule datapack (asserted on every world load, per dimension)' })
     }
   }
   const resolvedForFile = { ...resolvedDoc, resolvedBy: { tool: 'tools/clean-run-prepare.mjs', from: loaded.path, fromSha256: loaded.sha256, overrides: overridesApplied, at: 'see manifest.json' } }
   files.push({ path: join(runDir, 'environment-resolved.json'), content: `${JSON.stringify(resolvedForFile, null, 2)}\n`, note: 'the descriptor the bundle and the clean-run gate must both consume' })
   if (proposedProperties !== null) {
-    files.push({ path: join(runDir, 'server.properties.clean'), content: proposedProperties, note: 'PROPOSED clean server.properties (never overwrites the live one unless --overwrite-properties)' })
+    files.push({ path: join(runDir, 'server.properties.clean'), content: proposedProperties, note: 'staged clean server.properties (owner-only permissions; content is never printed or copied into run evidence)' })
     const diff = (propertiesChange?.changes ?? []).map((entry) => `${entry.key}: ${entry.from === null ? '(absent)' : entry.from} -> ${entry.to}`).join('\n')
     files.push({ path: join(runDir, 'server-properties.diff.txt'), content: `${diff}\n`, note: 'every key this proposal changes' })
   }
-  const operatorCommands = buildOperatorCommands({ container: resolve(container), worldDir, runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md') })
+  const operatorCommands = buildOperatorCommands({ container: resolve(container), runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md'), milestone })
   files.push({ path: join(runDir, 'operator-commands.txt'), content: `${operatorCommands.join('\n')}\n`, note: 'the exact ordered commands for the clean attempt' })
-  const recipeSource = join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md')
-  if (existsSync(recipeSource)) files.push({ path: join(runDir, 'ACCEPTANCE-RECIPE.md'), content: readFileSync(recipeSource, 'utf8'), note: 'copy of the acceptance recipe, next to the run evidence' })
+  const recipeSource = milestone === 'M3' ? join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md') : null
+  if (recipeSource !== null && existsSync(recipeSource)) files.push({ path: join(runDir, 'ACCEPTANCE-RECIPE.md'), content: readFileSync(recipeSource, 'utf8'), note: 'copy of the acceptance recipe, next to the run evidence' })
 
   for (const file of files) {
     const exists = existsSync(file.path)
@@ -589,9 +614,21 @@ function safeText(path) {
 }
 
 /** The ordered operator commands. Nothing here is executed by this tool. */
-export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, root, recipePath }) {
+export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, root, recipePath, milestone = 'M3' }) {
   const stamp = '<YYYYMMDD-HHMM>'
   const tree = root ?? '/home/s0u7a/mc-ai'
+  if (milestone === 'M2') {
+    return [
+      `# ==== M2 REPRODUCTION: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
+      '# This plan never replaces the shared server.properties; the harness gives the server this staged file with --config.',
+      `# Server configuration artifact: ${runDir}/server.properties.clean`,
+      `cd ${container} && java -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui --config ${runDir}/server.properties.clean --universe ${container} --level-name ${levelName}`,
+      `# Verify the generated seed is ${levelSeed}, the fresh world has no prior level.dat, and difficulty remains peaceful.`,
+      `# Keep the run's BOOT source=${String(sourceSha)} and run-scoped M2 evidence with the campaign record.`,
+      `# Driver checkout: ${tree}/buddy-driver`,
+      `# Identity/evidence directory: ${runDir}`,
+    ]
+  }
   return [
     `# ==== M3 CLEAN RUN: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
     `# 0. this file is the plan; the recipe is ${recipePath}`,
@@ -644,7 +681,9 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
     const content = plan.files.find((file) => file.path === action.path)?.content
     if (content === undefined) continue
     mkdirSyncAll(dirname(action.path))
+    const privateProperties = basename(action.path) === 'server.properties.clean'
     if (safeText(action.path) === content) {
+      if (privateProperties) chmodSync(action.path, 0o600)
       unchanged.push(action.path)
       continue
     }
@@ -653,7 +692,12 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
       writeFileSync(bak, readFileSync(action.path, 'utf8'), 'utf8')
       write(`CLEAN_RUN_PREPARE_BACKUP path=${bak}\n`)
     }
-    writeFileSync(action.path, content, 'utf8')
+    if (privateProperties) {
+      writeFileSync(action.path, content, { encoding: 'utf8', mode: 0o600 })
+      chmodSync(action.path, 0o600)
+    } else {
+      writeFileSync(action.path, content, 'utf8')
+    }
     applied.push(action.path)
   }
   // the manifest + ledger are written LAST, after every staged file exists
@@ -757,6 +801,7 @@ export async function runCli({ argv = process.argv.slice(2), write = (line) => p
     apply: args.apply,
     createServerRoot: args.createServerRoot,
     overwriteProperties: args.overwriteProperties,
+    expectedMilestone: args.expectedMilestone,
   })
   if (args.apply && result.status !== 'REFUSED' && result.status !== 'IDEMPOTENT_NOOP') {
     result = apply(result, { write: writeError })
