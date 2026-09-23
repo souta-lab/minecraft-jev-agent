@@ -41,5 +41,9 @@ const toolFixtures = readdirSync(resolve(ROOT, 'tools'))
   .sort()
 
 for (const file of toolFixtures) {
-  test(`Bun tool fixture: ${file}`, async () => runBun(ROOT, [`tools/${file}`]))
+  // Some evidence rehearsals exceed Bun's 5 s default on a loaded checkout even
+  // when they pass in isolation. Give subprocess fixtures the same bounded,
+  // explicit budget as the package suites so suite load is not mistaken for a
+  // hang (the fixture itself still owns its internal deadlines).
+  test(`Bun tool fixture: ${file}`, async () => runBun(ROOT, [`tools/${file}`]), { timeout: 120_000 })
 }
