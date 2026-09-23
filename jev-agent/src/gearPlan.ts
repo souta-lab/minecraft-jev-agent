@@ -176,6 +176,136 @@ export function formatArmorRefusal(refusal: ArmorRefusal): string {
   return `EQUIP_ARMOR_REFUSED slot=${refusal.slot} item=${refusal.itemName} worn=${refusal.worn ?? 'none'} reason=${refusal.reason}`
 }
 
+// ---------------------------------------------------------------------------
+// ARMOUR CRAFT: the route from "no armour" to WORN armour.
+// ---------------------------------------------------------------------------
+//
+// Measured state after the equip affordance landed (`armorEquipOffers` above,
+// `candidates.ts#armorEquipCandidates`): armour can be WORN, but nothing in the
+// agent ever PRODUCES it. The combat-kit gap states that honestly and then names
+// no route:
+//
+//   COMBAT_KIT_GAP focus=blaze_rod target=blaze distance=3m held=diamond_sword
+//   swingDamage=7 armor=0/4 missing=[armor] regenerating=true prerequisite=none
+//
+// (reproduced read-only against the measured Nether arrival kit; the SWORD half
+// of the same marker already has a grounded route in `CRAFTABLE_SWORDS`.)
+//
+// This module owns the armour TRUTH the route needs: which producible item fills
+// which slot, what tier it is, and whether it would be an IMPROVEMENT over what
+// is worn. It deliberately does NOT own which armour items the live data version
+// can produce (that is recipe truth, `RecipeIndex.resultItems`) nor whether the
+// ingredient chain is reachable from the live inventory (that is recipe
+// legality, `planNextCraftStep`). The caller intersects the three, so the route
+// is generic over every material the data version defines - leather from cow
+// drops, gold, iron, diamond, turtle scutes - and over any SINGLE piece. It is
+// never an iron-armour special case: there is no armour item list here at all.
+
+/** One producible armour piece that would improve its slot. */
+export interface ArmorCraftTarget {
+  slot: ArmorSlot
+  itemName: string
+  tier: number
+  /** the piece worn in that slot right now, or null */
+  worn: string | null
+}
+
+/** Slot order for deterministic enumeration (same order as `ARMOR_SLOTS`). */
+const ARMOR_SLOT_ORDER: Readonly<Record<ArmorSlot, number>> = { head: 0, torso: 1, legs: 2, feet: 3 }
+
+/**
+ * Every item in `producible` that is armour the data version can prove a tier
+ * for AND would be an improvement in its slot (the slot is empty, or the piece
+ * is strictly better than what is worn). Carried-but-worse and equal pieces
+ * yield no target, so the route never spends material on a downgrade or a
+ * duplicate. A material absent from `ARMOR_MATERIAL_TIER` is refused (fail
+ * closed: code cannot prove it is protection at all - the live 1.21.11 data
+ * version also produces `copper_*` armour, which is correctly not offered).
+ */
+export function armorCraftTargets(input: {
+  worn: ArmorWorn | undefined
+  /** every item name the live data version can produce, in a caller-stable order */
+  producible: readonly string[]
+}): ArmorCraftTarget[] {
+  const out: ArmorCraftTarget[] = []
+  for (const name of input.producible) {
+    const slot = armorSlotFor(name)
+    if (slot === null) continue
+    const tier = armorTier(name)
+    if (tier === null) continue
+    const worn = input.worn?.[slot] ?? null
+    const wornTier = worn === null ? 0 : armorTier(worn.name) ?? 0
+    if (tier <= wornTier) continue
+    out.push({ slot, itemName: name, tier, worn: worn?.name ?? null })
+  }
+  // Slot order, then name: a stable enumeration across registries and runs, not
+  // a preference. (Which of two affordable pieces to craft is Jev's choice.)
+  return out.sort(
+    (a, b) => ARMOR_SLOT_ORDER[a.slot] - ARMOR_SLOT_ORDER[b.slot] || a.itemName.localeCompare(b.itemName),
+  )
+}
+
+/** The greppable ARMOR_CRAFT marker: a grounded craft step the tick offers. */
+export const ARMOR_CRAFT = 'ARMOR_CRAFT'
+
+/** The greppable ARMOR_CRAFT_REFUSED marker: why an armour craft is not attempted. */
+export const ARMOR_CRAFT_REFUSED = 'ARMOR_CRAFT_REFUSED'
+
+/** One armour craft step that IS on offer this tick, with the material it spends. */
+export interface ArmorCraftOffer {
+  slot: ArmorSlot
+  /** the piece the step produces */
+  itemName: string
+  /** the direct ingredient the recipe consumes (`iron_ingot`), or null when unprovable */
+  material: string | null
+  need: number
+  have: number
+  /** the candidate the offer is carried on (`CRAFT:iron_chestplate`) */
+  candidateId: string
+  worn: string | null
+}
+
+export function formatArmorCraft(offer: ArmorCraftOffer): string {
+  return (
+    `${ARMOR_CRAFT} slot=${offer.slot} item=${offer.itemName} material=${offer.material ?? 'none'} ` +
+    `need=${offer.need} have=${offer.have} candidate=${offer.candidateId} worn=${offer.worn ?? 'none'} ` +
+    `-> the craft is grounded CAN; Jev chooses whether to craft it, then the EQUIP affordance wears the piece`
+  )
+}
+
+/**
+ * Why an armour craft step is NOT on offer:
+ *   - `insufficient_material`: the recipe's own ingredient is short. The refusal
+ *     names WHICH material and the exact count (`material=iron_ingot need=8
+ *     have=2 shortfall=6`), so the fact is actionable.
+ *   - `no_station`: the material is held in full but no crafting_table station is
+ *     reachable (a 3x3 armour recipe), so the plan cannot take a step.
+ */
+export type ArmorCraftRefusalReason = 'insufficient_material' | 'no_station'
+
+export interface ArmorCraftRefusal {
+  slot: ArmorSlot
+  itemName: string
+  material: string | null
+  need: number
+  have: number
+  shortfall: number
+  reason: ArmorCraftRefusalReason
+  worn: string | null
+}
+
+export function formatArmorCraftRefusal(refusal: ArmorCraftRefusal): string {
+  const tail =
+    refusal.reason === 'insufficient_material'
+      ? '-> the craft is not attempted; the shortfall names the material and the count'
+      : '-> the material is held in full but no crafting_table station is reachable; the craft is not attempted'
+  return (
+    `${ARMOR_CRAFT_REFUSED} slot=${refusal.slot} item=${refusal.itemName} ` +
+    `material=${refusal.material ?? 'none'} need=${refusal.need} have=${refusal.have} ` +
+    `shortfall=${refusal.shortfall} reason=${refusal.reason} worn=${refusal.worn ?? 'none'} ${tail}`
+  )
+}
+
 /**
  * Base melee attack damage for the carried weapons the combat condition knows.
  * Static table (minecraft-data exposes no attack-damage attribute): swords and

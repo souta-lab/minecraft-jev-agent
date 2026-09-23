@@ -90,6 +90,8 @@ export const DEFAULTS = {
   // minutes of flapping and the supervisor stopped for good, killing the M3 run). Keep the
   // same bounded exponential backoff, give it the long delay, and bound it separately.
   modelOutageMaxRestarts: 96,
+  /** Outages retried on the normal bounded backoff before the long cadence takes over. */
+  modelOutageFastRetries: 4,
   baseDelayMs: 2000,
   maxDelayMs: 60_000,
   // Budget exhaustion needs the hourly window to refill, not a 60s retry.
@@ -596,8 +598,13 @@ export async function supervise(options, deps = {}) {
       // 'budget' is retryable but only after the hourly window can refill, and a provider
       // outage is retried on the same long cadence; everything else keeps the bounded
       // exponential backoff.
+      // A provider outage is usually a blip: measured 2026-09-23 the gateway answered HTTP 200 to a probe while real
+      // calls failed, and each outage cost a full long delay. So escalate: the first few outages retry on the normal
+      // bounded backoff (seconds), and only a SUSTAINED outage moves to the long cadence. `budget` (an hourly window
+      // that must refill) keeps the long delay from the first retry.
+      const outageEscalated = modelOutage && modelOutageRestarts > options.modelOutageFastRetries
       const delayMs =
-        verdict.classification === 'budget' || modelOutage
+        verdict.classification === 'budget' || outageEscalated
           ? Math.max(options.budgetDelayMs, backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs))
           : backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs)
       restarts += 1

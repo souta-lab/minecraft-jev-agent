@@ -544,12 +544,23 @@ export function envelopeForCandidate(
       // nothing.
       const stations = [...(input.stations ?? [])]
       const needsApproach = stations.length > 0
+      // THE INVENTORY GRID IS ALWAYS AVAILABLE, so it is always declared. The executor
+      // asserts `{type:'station', station:'inventory_crafting_grid'}` for a 2x2 craft
+      // (executor.ts:7101), and a station-less craft used to declare an EMPTY station
+      // envelope - so the craft was refused as `station_not_declared:inventory_crafting_grid`
+      // EVERY time. Measured live: 691,626 such violations in this log, all of them on
+      // `CRAFT:birch_planks` (a 2x2 recipe), which is why the body could never turn its 81
+      // logs into planks and therefore never reached a crafting table or a pickaxe - the
+      // cold bootstrap of the whole M2 chain was blocked by a missing declaration, not by a
+      // missing recipe. Naming the grid is not an extra permission: it is the station the
+      // body always carries.
+      const usable = [...new Set([...stations, 'inventory_crafting_grid'])]
       return {
         ...base,
         mayMove: needsApproach,
         mayJump: needsApproach,
         maySprint: needsApproach,
-        mayUseStations: stations,
+        mayUseStations: usable,
       }
     }
     case 'PICKUP':

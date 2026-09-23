@@ -23,7 +23,7 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
@@ -82,7 +82,7 @@ import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evalu
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
-import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
+import { MAX_DEPENDENCY_DEPTH, collectItemForClass, inventoryClassCount, inventoryCount, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
 import {
   FLINT_AND_STEEL,
@@ -103,8 +103,8 @@ import {
   serializePortalCells,
 } from './netherPortalPlan.ts'
 import type { PortalBlockPosition, PortalEntryCandidate, PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
-import { armorEquipOffers, armorEquipRefusals, assessCombatKit, combatSwingFor, CRAFTABLE_SWORDS, weaponArmOffers, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
-import type { ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
+import { armorCraftTargets, armorEquipOffers, armorEquipRefusals, armorSlotFor, assessCombatKit, combatSwingFor, CRAFTABLE_SWORDS, weaponArmOffers, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
+import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorCraftTarget, ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
   activeThreats,
   bodySurvivalFacts,
@@ -1648,6 +1648,21 @@ export interface GroundedCandidatesResult {
    * held" was surfaced explicitly instead of silently churning.
    */
   armorRefusals: ArmorRefusal[]
+  /**
+   * The grounded armour CRAFT steps this tick actually offers, derived from the
+   * OFFERED candidate set (never the raw one), each naming the piece, the
+   * material it spends and its count (`ARMOR_CRAFT slot=torso item=iron_chestplate
+   * material=iron_ingot need=8 have=8 candidate=CRAFT:iron_chestplate worn=none`).
+   * Empty when nothing improvable is affordable.
+   */
+  armorCraftOffers: ArmorCraftOffer[]
+  /**
+   * Typed `ARMOR_CRAFT_REFUSED` shortfalls: the material and count that stop an
+   * armour craft, carried through the gate unchanged (world truth, not the
+   * offered set). This is what makes `COMBAT_KIT_GAP ... missing=[armor]
+   * prerequisite=none` explainable instead of silent.
+   */
+  armorCraftRefusals: ArmorCraftRefusal[]
   /**
    * Cells withheld from the active collect goal because they are members of a
    * live structure (`RESOURCE_SOURCE_EXCLUDED ... reason=live_structure`). Empty
@@ -3203,6 +3218,7 @@ export function generateGroundedCandidates(
     digRefusals,
     raw.contactRefusals,
     raw.containerRefusals,
+    raw.armorCraftRefusals,
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
@@ -3212,10 +3228,41 @@ export function generateGroundedCandidates(
     ...grounded,
     foodGap: foodSourceGap(state, options, grounded.candidates),
     // The combat-kit fact is the other half of the same producer path: which
-    // prerequisite (a sword) this body's kit is missing for the required kill.
+    // prerequisite (a sword craft, an armour equip or the armour craft that
+    // produces the piece) this body's kit is missing for the required kill.
     combatKitGap: combatKitGap(state, grounded.candidates),
     mobDropGap: mobDropSourceGap(state, grounded.candidates, options.recipes ?? null),
+    // Same "OFFERED set" rule as the gaps above: an armour craft the reachability
+    // gate withheld must never be reported as a grounded CAN.
+    armorCraftOffers: armorCraftOfferEvidence(grounded.candidates),
   }
+}
+
+/**
+ * The typed `ARMOR_CRAFT` evidence for the armour crafts actually on offer this
+ * tick, read off the OFFERED candidates (`meta.armorCraft`). Derived, never
+ * restated: the marker and the candidate cannot disagree about the piece, the
+ * material, the count or the slot.
+ */
+function armorCraftOfferEvidence(offered: readonly Candidate[]): ArmorCraftOffer[] {
+  const out: ArmorCraftOffer[] = []
+  for (const candidate of offered) {
+    if (candidate.meta.armorCraft !== true) continue
+    const slot = candidate.meta.armorSlot
+    if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') continue
+    const material = candidate.meta.armorMaterial
+    const worn = candidate.meta.armorWorn
+    out.push({
+      slot,
+      itemName: candidate.itemName ?? 'unknown',
+      material: typeof material === 'string' && material !== 'none' ? material : null,
+      need: typeof candidate.meta.armorNeed === 'number' ? candidate.meta.armorNeed : 0,
+      have: typeof candidate.meta.armorHave === 'number' ? candidate.meta.armorHave : 0,
+      candidateId: candidate.id,
+      worn: typeof worn === 'string' && worn !== 'none' ? worn : null,
+    })
+  }
+  return out
 }
 
 /**
@@ -3229,9 +3276,18 @@ export function generateGroundedCandidates(
  * item has a declared scanned source, which is perception truth rather than a
  * route. Ordinary reactions (WAIT/ESCALATE/ATTACK/RETREAT/EAT) and clearance
  * MINEs are never routes either.
+ *
+ * A standing SELF-CARE craft is not a focus route either. Measured while landing
+ * the armour craft affordance: a body collecting `blaze_rod` with a sensed blaze
+ * in contact and 4 iron ingots carried offered `CRAFT:iron_boots`, and that alone
+ * flipped this predicate to "the goal has a route", which withdrew the goal's own
+ * producer-search MOVEs (`meta.producerSearch`) - the affordance silently crowded
+ * out the focus's route. The armour craft advances the self-care goal
+ * (`armorCraft` meta), so it is excluded exactly like a clearance MINE.
  */
 function hasAdvancingGoalRoute(candidate: Candidate): boolean {
   if (candidate.meta.clearance === true) return false
+  if (candidate.meta.armorCraft === true) return false
   switch (candidate.kind) {
     case 'WAIT':
     case 'ESCALATE':
@@ -3528,15 +3584,19 @@ export function combatKitGap(
   })
   if (!assessment.insufficient) return null
   // The reported prerequisite must be a route that CLOSES a reported gap. A sword
-  // craft is a prerequisite only while `sword` is missing; an armour gap is only
-  // closed by an armour equip. Otherwise the marker would name a prerequisite that
-  // cannot close the gap it is printed next to.
+  // craft is a prerequisite only while `sword` is missing; an armour gap is closed
+  // by wearing a carried piece, or by the armour CRAFT that produces one when
+  // nothing wearable is carried (the measured live arrival kit: iron in the
+  // inventory, no armour on the body - the craft is the only route that closes
+  // it, and it is what the marker now names). Otherwise the marker would name a
+  // prerequisite that cannot close the gap it is printed next to.
   const prerequisite =
     (assessment.missing.includes('sword')
       ? offered.find((candidate) => candidate.meta.combatKit === 'sword')?.id
       : undefined) ??
     (assessment.missing.includes('armor')
-      ? offered.find((candidate) => candidate.kind === 'EQUIP' && candidate.meta.slot !== 'hand')?.id
+      ? (offered.find((candidate) => candidate.kind === 'EQUIP' && candidate.meta.slot !== 'hand')?.id ??
+        offered.find((candidate) => candidate.meta.armorCraft === true)?.id)
       : undefined) ??
     null
   return {
@@ -3579,6 +3639,147 @@ function armorEquipCandidates(state: WorldState): Candidate[] {
       wornTier: offer.wornTier,
     },
   }))
+}
+
+/**
+ * The armour items the live data version can produce, memoized per `RecipeIndex`
+ * (immutable). 1.21.11 produces 21 of them (`leather`/`golden`/`iron`/`diamond`
+ * per slot plus `turtle_helmet`, and the `copper_*` set, which `armorTier`
+ * refuses). `chainmail_*` and `netherite_*` have no crafting recipe in the
+ * registry, so they are absent here rather than guessed at.
+ */
+const armorItemCache = new WeakMap<RecipeIndex, string[]>()
+function producibleArmorItems(recipes: RecipeIndex): readonly string[] {
+  const cached = armorItemCache.get(recipes)
+  if (cached !== undefined) return cached
+  const items = (recipes.resultItems?.() ?? []).filter((name) => armorSlotFor(name) !== null)
+  armorItemCache.set(recipes, items)
+  return items
+}
+
+/** `have` for one craft need: the exact item, or every item of its class. */
+function craftNeedHave(need: CraftIngredientNeed, counts: Readonly<Record<string, number>>): number {
+  return need.cls === null ? inventoryCount(counts, need.item) : inventoryClassCount(counts, need.cls)
+}
+
+/** The material a craft need names: its class (`planks`) or its concrete item. */
+function craftNeedName(need: CraftIngredientNeed): string {
+  return need.cls ?? need.item
+}
+
+/** One tick's armour-craft affordance: the grounded steps plus the typed shortfalls. */
+interface ArmorCraftScan {
+  candidates: Candidate[]
+  refusals: ArmorCraftRefusal[]
+}
+
+/**
+ * ARMOUR CRAFT: "craft the armour you can afford from what you carry, and wear
+ * it", as a capability CLASS rather than an iron-armour special case.
+ *
+ * For every armour piece the LIVE data version can produce whose slot is empty
+ * or under-armoured (`armorCraftTargets`, armour truth), ask the SAME recipe
+ * machinery every other craft route uses (`planNextCraftStep` over
+ * `RecipeIndex`, recipe legality) whether the whole ingredient chain is
+ * reachable from the live inventory. When it is, the step is emitted through the
+ * SAME `craftPlanStepCandidate` the craft path uses, so a candidate can never be
+ * a craft the executor refuses; the EQUIP affordance then wears the piece on a
+ * following tick, because `armorEquipOffers` reads the inventory.
+ *
+ * Nothing here names a material or a slot preference: leather from cow drops,
+ * gold from nether_gold_ore, iron, diamond and turtle scutes all travel this one
+ * path, and a single affordable piece is offered exactly like a full set. Which
+ * affordable piece to craft is Jev's choice; whether the body is dressed at all
+ * is code's fact.
+ *
+ * When the step is NOT affordable the tick says WHY with the material and the
+ * exact count (`insufficient_material`), or names the station instead
+ * (`no_station`) - never a silent "no armour" while `COMBAT_KIT_GAP` reports
+ * `prerequisite=none`. A refusal is only emitted when the body actually holds
+ * some of the recipe's own ingredient: a body that carries none of that material
+ * has nothing to be short OF, and inventing a material would be a guess.
+ */
+function armorCraftCandidates(state: WorldState, options: CandidateOptions): ArmorCraftScan {
+  const recipes = options.recipes ?? null
+  if (recipes === null) return { candidates: [], refusals: [] }
+  const targets = armorCraftTargets({ worn: state.self.armor, producible: producibleArmorItems(recipes) })
+  if (targets.length === 0) return { candidates: [], refusals: [] }
+  const counts = state.inventory.counts
+  const candidates: Candidate[] = []
+  const refusals: ArmorCraftRefusal[] = []
+  for (const target of targets) {
+    const variants = recipes.recipesFor(target.itemName)
+    if (variants.length === 0) continue
+    const tableAvailable = sensedCraftingTableAvailable(state, options, target.itemName)
+    const plan = planNextCraftStep(recipes, target.itemName, counts, tableAvailable, 1)
+    const selection = selectCraftIngredients(variants, counts)
+    const step = plan.op === null ? null : craftPlanStepCandidate(state, options, plan.op, `armor:${target.itemName}`)
+    if (step !== null && step.candidate !== null) {
+      const primary = selection?.needs[0] ?? null
+      candidates.push({
+        ...step.candidate,
+        meta: {
+          ...step.candidate.meta,
+          // The armour facts the typed `ARMOR_CRAFT` evidence is computed from.
+          armorCraft: true,
+          armorSlot: target.slot,
+          armorTier: target.tier,
+          armorWorn: target.worn ?? 'none',
+          armorMaterial: primary === null ? 'none' : craftNeedName(primary),
+          armorNeed: primary?.count ?? 0,
+          armorHave: primary === null ? 0 : craftNeedHave(primary, counts),
+        },
+      })
+      continue
+    }
+    const refused = armorCraftRefusal(target, selection, counts)
+    if (refused !== null) refusals.push(refused)
+  }
+  return { candidates, refusals }
+}
+
+/**
+ * The typed shortfall for one armour piece the plan could not step toward, or
+ * null when the body holds none of the material that would be short (see
+ * `armorCraftCandidates`).
+ */
+function armorCraftRefusal(
+  target: ArmorCraftTarget,
+  selection: { needs: CraftIngredientNeed[]; missing: CraftIngredientNeed[] } | null,
+  counts: Readonly<Record<string, number>>,
+): ArmorCraftRefusal | null {
+  if (selection === null) return null
+  const missing = selection.missing[0] ?? null
+  if (missing === null) {
+    // Every ingredient is held: what stopped the plan is the station chain (the
+    // measured shape: 8 iron, no reachable crafting_table, plan reason
+    // `no satisfiable recipe for crafting_table`). Reported only when the body
+    // actually holds an ingredient of this recipe, so an irrelevant slot is
+    // never named.
+    if (!selection.needs.some((need) => craftNeedHave(need, counts) > 0)) return null
+    return {
+      slot: target.slot,
+      itemName: target.itemName,
+      material: null,
+      need: 0,
+      have: 0,
+      shortfall: 0,
+      reason: 'no_station',
+      worn: target.worn,
+    }
+  }
+  const have = craftNeedHave(missing, counts)
+  if (have <= 0) return null
+  return {
+    slot: target.slot,
+    itemName: target.itemName,
+    material: craftNeedName(missing),
+    need: missing.count,
+    have,
+    shortfall: Math.max(0, missing.count - have),
+    reason: 'insufficient_material',
+    worn: target.worn,
+  }
 }
 
 /**
@@ -3634,6 +3835,7 @@ function generateRawCandidates(
   let entryRefusal: PortalEntryRefusal | null = null
   let prospect: ProspectResult = { candidates: [], refusal: null }
   const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
+  const armorCraftRefusals: ArmorCraftRefusal[] = []
   const current = state.goalQueue?.current ?? null
   const focusItem = current === null ? (state.goal.targetItem ?? null) : current.targetItem
   const goalKind = current?.kind ?? 'collect'
@@ -4045,6 +4247,21 @@ function generateRawCandidates(
   // CAN; Jev owns whether the body puts on better armor this tick.
   candidates.push(...armorEquipCandidates(state))
 
+  // The ARMOUR CRAFT affordance: the missing PRODUCER half of the same self-care
+  // pair. The equip affordance can only wear armour that exists, and measured live
+  // (NETHER-SURVIVAL-2026-09-22, the fatal window at 33.3 h) no layer ever made
+  // any: the body arrived in the Nether with iron ingots and no armour and
+  // `COMBAT_KIT_GAP ... missing=[armor] prerequisite=none` named the gap without a
+  // route. Crafting is offered with the same standing shape as the equip (any
+  // tick, any material the live data version defines, any single piece) because
+  // the piece has to exist BEFORE the fight, not during it; it is self-limiting
+  // (a piece that would not improve its slot yields no target, so an armoured
+  // body stops being offered crafts) and Jev owns whether to spend the material.
+  // The typed shortfall when the material is short is carried out as evidence.
+  const armorCraft = armorCraftCandidates(state, options)
+  candidates.push(...armorCraft.candidates)
+  armorCraftRefusals.push(...armorCraft.refusals)
+
   // The ARM affordance: a carried weapon that out-damages the item in hand, while
   // a fight is on the table this tick. Same CAN shape as the armor offer, and for
   // the same measured reason: measured live (`buddy.log` 2026-09-22T10:49:5x) the
@@ -4285,6 +4502,7 @@ function generateRawCandidates(
     ignitionRefusal,
     entryRefusal,
     armorRefusals,
+    armorCraftRefusals,
     surfaceAscentRefusal: surfaceAscent.refusal,
     foodHabitatRefusal: foodHabitat.refusal,
     columnDescentRefusal: columnDescent.refusal,
@@ -5672,15 +5890,35 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  const scored: Array<{ cut: NonNullable<WorldState['stepCuts']>[number]; score: number }> = []
+  const scored: Array<{
+    cut: NonNullable<WorldState['stepCuts']>[number]
+    score: number
+    /** the cut cell's REAL harvest requirement (see `cellHarvestBarrier`) */
+    tool: HarvestTool | null
+    tier: number | null
+  }> = []
   const standKey = cellKey(state.self.position)
   for (const cut of cuts) {
     const known = state.blocks.find(
       (block) =>
         block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
     )
-    const tool = known?.harvestTool ?? null
-    if (!hasTool(state, tool, tool === null ? null : known?.harvestTier ?? null)) continue
+    // The cell's harvest truth comes from EVERY sensor pool, not only the resource
+    // index: a terrain cell is sensed as a CUT carrying only its name, so `known`
+    // is undefined for exactly the cells a step cut is made of. Reading only
+    // `known` declared the cut hand-diggable (requiresTool=false) and the body
+    // discovered otherwise at execution time - the live
+    // `STEP:S:b23_80_8 ... outcome=CAPABILITY_LOST failure=dig_no_tool` pair.
+    // (landed on main as f9f139f; this branch keeps that resolution verbatim)
+    const barrier = cellHarvestBarrier(state, cut.cut)
+    const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
+    const tier = barrier?.requiredTier ?? known?.harvestTier ?? null
+    // The cut is NOT dropped here when the tool is missing: it is the FACT that
+    // the step needs a tool the body lacks, and dropping it left that fact
+    // invisible - no `missing_tool` withhold, no acquisition route. The
+    // executable cuts keep their pre-existing top-2 slots (the offer is
+    // unchanged) and the unharvestable ones are emitted after them, where the
+    // dig-tool gate withholds them and the acquisition pass answers them.
     // The same 1-block step cut that just proved it changes nothing from this
     // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
     // dir/step route), so a different cut or a body that moved stays offerable.
@@ -5718,17 +5956,17 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       const dot = cut.dx * Math.sign(tdx) + cut.dz * Math.sign(tdz)
       penalty = dot > 0 ? 0 : 10
     }
-    scored.push({ cut, score: penalty + distance(cut.step, state.self.position) })
+    scored.push({ cut, score: penalty + distance(cut.step, state.self.position), tool, tier })
   }
   if (scored.length === 0) return []
   scored.sort((a, b) => a.score - b.score)
 
-  return scored.slice(0, 2).map(({ cut }) => {
-    const known = state.blocks.find(
-      (block) =>
-        block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
-    )
-    const tool = known?.harvestTool ?? null
+  // Executable cuts keep the pre-existing top-2 slots; the unharvestable ones
+  // follow as fact-carrying candidates (see the loop note above).
+  const executable = scored.filter((entry) => hasTool(state, entry.tool, entry.tier))
+  const blocked = scored.filter((entry) => !hasTool(state, entry.tool, entry.tier))
+
+  return [...executable.slice(0, 2), ...blocked.slice(0, 2)].map(({ cut, tool, tier }) => {
     return {
       id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
       kind: 'STEP' as const,
@@ -5739,7 +5977,7 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       itemName: null,
       requiresTool: tool !== null,
       toolName: tool,
-      toolTier: known?.harvestTier ?? null,
+      toolTier: tier,
       inReach: distance(cut.cut, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
       meta: {
@@ -6844,6 +7082,14 @@ interface RawCandidatesResult {
   entryRefusal: PortalEntryRefusal | null
   /** carried armor pieces that are not better than what is worn (no churn) */
   armorRefusals: ArmorRefusal[]
+  /**
+   * Typed shortfalls for the armour pieces the carried material cannot afford
+   * (`ARMOR_CRAFT_REFUSED ... material=iron_ingot need=8 have=2 shortfall=6`).
+   * Carried through the gate unchanged: it is computed from world truth, not from
+   * the offered set, and it is exactly what explains a `COMBAT_KIT_GAP ...
+   * missing=[armor] prerequisite=none`.
+   */
+  armorCraftRefusals: ArmorCraftRefusal[]
   /** typed ascent refusal for a `surface` goal with no grounded vertical route */
   surfaceAscentRefusal: SurfaceAscentRefusal | null
   /** typed refusal for a hungry hunt with no grounded route up to animal habitat */
@@ -10611,6 +10857,31 @@ function groundBridgeLeg(
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
+  // A bridge is a SAME-LEVEL structure: its probes live at the body's feet Y and
+  // its self-landing place cell is `feet.y - 1`, so it can neither climb to a
+  // target above nor descend to one below. The entry crossing has carried this
+  // gate since it landed (`Math.abs(entry.enterCell.y - feet.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE`);
+  // the general MOVE leg did not, which is how a body perched at y79 with its
+  // target at y67 built an elevated highway across the area instead of descending.
+  // The vertical planner owns the difference; this leg declines it, typed.
+  // The gate is ASYMMETRIC because the mechanics are: a bridge places a floor and
+  // advances onto it, and with a pillar leg it can also rise to a target above -
+  // that is the legitimate "tower" remedy the entry fixture pins (a target at
+  // +6 still offers place:bridge + place:pillar). It cannot DESCEND, because
+  // placing below the feet and stepping down is a different act (the descent
+  // scaffold owns it). So only a target BELOW this bridge's own plane is refused.
+  if (feet.y - spec.target.y > PORTAL_WALK_IN_LEVEL_TOLERANCE) {
+    return {
+      plan: null,
+      refusal: {
+        reason: 'level',
+        cell: feet,
+        target: spec.target,
+        block: null,
+        detail: `target y=${spec.target.y} is ${Math.abs(spec.target.y - feet.y)} block(s) from the body's feet y=${feet.y}; a bridge advances only in its own plane`,
+      },
+    }
+  }
   const liveStructures = liveStructureIndexOf(state)
   const decision = planBridgeRoute({
     selfFeet: feet,
@@ -11583,6 +11854,90 @@ export interface ColumnFacts {
   headroomCell: Vec3Json | null
 }
 
+/**
+ * The cells a candidate's OWN execution will BREAK, read from the same
+ * declaration the executor reads - never a cell the candidate does not name.
+ *
+ *   - `meta.digCells` is the descent/branch dig plan the executor parses itself
+ *     (`executor.descentDigCellsFromMeta`: `"x,y,z;x,y,z"`, passage cells first,
+ *     primary last), so the offered shape and the checked shape cannot drift;
+ *   - an arm whose TARGET is the block it breaks (`MINE`, `STEP`, and the
+ *     `DESCEND` leg `runDescend` calls the same parser for) has no plan meta, and
+ *     the executor's own fallback for that case is the target - mirrored here.
+ *
+ * A candidate that declares no dig returns [] and is untouched by the gate.
+ */
+export function declaredDigCells(candidate: Candidate): Vec3Json[] {
+  const cells: Vec3Json[] = []
+  const seen = new Set<string>()
+  const push = (cell: Vec3Json): void => {
+    const key = `${cell.x},${cell.y},${cell.z}`
+    if (seen.has(key)) return
+    seen.add(key)
+    cells.push(cell)
+  }
+  const raw = candidate.meta.digCells
+  if (typeof raw === 'string' && raw.length > 0) {
+    for (const part of raw.split(';')) {
+      const [x, y, z] = part.split(',').map((value) => Number(value))
+      if (x === undefined || y === undefined || z === undefined) continue
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue
+      push({ x, y, z })
+    }
+    // The executor returns the PARSED plan when the meta carries one; the target
+    // is only its fallback, so it must not be added beside a real plan.
+    if (cells.length > 0) return cells
+  }
+  if (DIG_TARGET_KINDS.has(candidate.kind) && candidate.target !== null) push(candidate.target)
+  return cells
+}
+
+/** The kinds whose own `target` is the block their execution breaks. */
+const DIG_TARGET_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>(['MINE', 'STEP', 'DESCEND'])
+
+/**
+ * THE DIG-TOOL GATE: the first block a candidate's own execution must break whose
+ * harvest requirement the inventory cannot satisfy, or null.
+ *
+ * THE PROPERTY IT PINS (measured live, run-mudkuea9-124kk gen-mudkuerj-8ehpqk):
+ * a candidate whose execution requires a tool the body lacks must be WITHHELD
+ * with `missing_tool` BEFORE it is leased, and the acquisition route (or the
+ * typed refusal naming item+count) is offered instead - for EVERY dig arm, not
+ * only the headroom clearance.
+ *
+ *   `SKILL_END actionId=STEP:S:b23_80_8 outcome=CAPABILITY_LOST
+ *    failure=dig_no_tool policyBoundary=true`
+ *
+ * was that contract being violated by the step-cut arm: it derived the cell's
+ * harvest truth from the scanner's RESOURCE index (`state.blocks`), which does
+ * not carry terrain, so the cut cell resolved to "no tool required", the STEP
+ * was offered without a reachability verdict (STEP is not a locomotion kind) and
+ * the body only discovered the missing pickaxe inside the executor
+ * (`executor.requireHarvestTool` -> `dig_no_tool`).
+ *
+ * Enforcing it HERE, at the single gate every candidate passes through, is what
+ * makes it hold for every arm rather than for the arm that happened to be
+ * measured: the withholding is `missing_tool` on the cell's REAL harvest truth
+ * (`cellHarvestBarrier`), so the acquisition pass answers it with a
+ * `{kind:'tool'}` route exactly as it does for a MINE.
+ *
+ * Applied only to kinds the reachability contract does not already judge: `MINE`
+ * and the locomotion family keep their existing verdicts byte-for-byte, and a
+ * candidate whose tool IS held falls through to its historical behaviour.
+ */
+function declaredDigToolRefusal(
+  state: WorldState,
+  candidate: Candidate,
+): { barrier: ReachabilityBarrier; capability: Capability } | null {
+  for (const cell of declaredDigCells(candidate)) {
+    const barrier = cellHarvestBarrier(state, cell)
+    if (barrier === null) continue
+    const capability = missingToolCapability(barrier, state.inventory.counts)
+    if (capability !== null) return { barrier, capability }
+  }
+  return null
+}
+
 interface ReachabilityGateContext {
   state: WorldState
   options: CandidateOptions
@@ -11664,6 +12019,14 @@ export function applyReachabilityGate(
    */
   contactRefusals: ContactRefusal[] = [],
   containerRefusals: ContainerRefusal[] = [],
+  /**
+   * Typed `ARMOR_CRAFT_REFUSED` shortfalls the generator already derived (see
+   * `GroundedCandidatesResult.armorCraftRefusals`). Appended at the END of the
+   * parameter list so every existing positional caller keeps its meaning; the
+   * gate does not re-derive them (they are world truth about the carried
+   * material, not a property of any candidate).
+   */
+  armorCraftRefusals: ArmorCraftRefusal[] = [],
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -11864,6 +12227,11 @@ export function applyReachabilityGate(
     ignitionRefusal,
     entryRefusal,
     armorRefusals,
+    // Filled by `generateGroundedCandidates` from the OFFERED set, like the
+    // survival gaps below: an offer the reachability gate withheld must not be
+    // reported as grounded CAN.
+    armorCraftOffers: [],
+    armorCraftRefusals,
     surfaceAscentRefusal,
     foodHabitatRefusal,
     columnDescentRefusal,
@@ -11949,7 +12317,28 @@ function evaluateCandidate(
   // mechanical approach here. Goal-directed mob/food hunts keep their dedicated
   // longer/re-acquisition executor contract and are intentionally unchanged.
   if (candidate.kind === 'ATTACK') return evaluateOrdinaryAttackCandidate(candidate, context)
-  if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) {
+    // THE DIG-TOOL GATE for every arm the locomotion contract does not judge
+    // (STEP, and any descent/branch dig leg): a candidate that must break a block
+    // the inventory cannot harvest is withheld `missing_tool` here, BEFORE it can
+    // be leased, so the acquisition pass answers the missing tool with a craft or
+    // collect route (or the typed refusal). A candidate whose tool is held, and a
+    // candidate that breaks nothing, fall through to the historical behaviour.
+    const dig = declaredDigToolRefusal(context.state, candidate)
+    if (dig === null) return null
+    const digTarget: ReachabilityTarget = {
+      ...reachabilityTargetFor(context.state, candidate),
+      barrier: dig.barrier,
+    }
+    const digWorld = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+    return reachabilityRecord(
+      candidate,
+      digTarget,
+      digWorld,
+      { reachable: false, reason: 'missing_tool', missingCapabilities: [dig.capability] },
+      context,
+    )
+  }
   // SAFE: a dimension transfer is not locomotion. Checked before every other
   // mechanical verdict so the typed reason cannot be masked by a path/tool
   // refusal: "this leg would leave the dimension" is the fact that matters, and

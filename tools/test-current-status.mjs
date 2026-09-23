@@ -111,6 +111,29 @@ const offlineResident = async () => null
   ok('CLI runtime-root override reaches the injected resident reader')
 }
 
+// 1d. --no-resident must guarantee that NO control-socket command is issued, and must
+// say the snapshot was not collected instead of leaving a superseded run id standing.
+{
+  let readerCalls = 0
+  const { markdown } = await main(['--no-resident'], {
+    run: makeRunner(),
+    readResident: async () => {
+      readerCalls += 1
+      return { data: { runId: 'run-should-not-be-read' } }
+    },
+  })
+  assert.equal(readerCalls, 0)
+  assert.match(markdown, /## Resident snapshot — UNKNOWN/)
+  assert.match(markdown, /not collected: --no-resident was set, so this run issued no control-socket command/)
+  assert.doesNotMatch(markdown, /run-should-not-be-read/)
+  assert.doesNotMatch(markdown, /live: report received/)
+
+  const derived = await deriveStatus({ run: makeRunner(), readResident: false })
+  assert.match(derived.markdown, /the previous snapshot is superseded and is NOT current runtime state/)
+  assert.ok(!derived.commands.some((command) => command.startsWith('socket ')), 'no socket command may be recorded')
+  ok('--no-resident issues no control-socket command and reports the snapshot as not collected')
+}
+
 // 2. Failing gh -> UNKNOWN, no crash, no fabricated zero.
 {
   const { markdown } = await deriveStatus({ run: makeRunner({ ghOk: false }), readResident: offlineResident })

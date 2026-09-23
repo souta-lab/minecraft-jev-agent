@@ -147,6 +147,7 @@ function liveState(overrides: {
   blocks?: BlockState[]
   standable?: Vec3Json[]
   placementSpots?: WorldState['placementSpots']
+  stepCuts?: WorldState['stepCuts']
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -161,7 +162,7 @@ function liveState(overrides: {
     furnaces: [],
     placementSpots: overrides.placementSpots ?? [],
     descent: [],
-    stepCuts: [],
+    stepCuts: overrides.stepCuts ?? [],
     headroomCuts:
       overrides.headroomCuts ?? [
         { pos: HEAD_CELL, name: 'stone', safe: true, reason: 'safe', currentFootprint: true },
@@ -507,6 +508,147 @@ addCase('(vii) the no-material shape keeps the starvation AND names the item it 
       line !== null &&
       refusals.some((fact) => fact.reason === 'no_material' && fact.item !== null && (fact.count ?? 0) >= 1),
     detail: `starvation=${line ?? 'none'} refusals=[${refusals.map((f) => `${f.missing}:${f.reason}:${f.item}x${f.count}`).join(',')}]`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (viii) THE STEP (step-cut) DIG ARM - the second live reading of the same
+//        property, measured as a COMMITTED dig that failed at execution:
+//          SKILL_END actionId=STEP:S:b23_80_8 outcome=CAPABILITY_LOST
+//          failure=dig_no_tool policyBoundary=true
+//        The cut cell is TERRAIN, so the scanner's resource index has no entry
+//        for it: the arm used to read the truth from `state.blocks`, resolve "no
+//        tool required" and hand the STEP to Jev, which only found out inside the
+//        executor. The property is the same one, for every dig arm: a candidate
+//        whose execution needs a tool the body lacks must be withheld
+//        `missing_tool` BEFORE it is leased, with the acquisition route (or the
+//        typed refusal) offered instead.
+// ---------------------------------------------------------------------------
+const STEP_CUT: NonNullable<WorldState['stepCuts']>[number] = {
+  dir: 'S',
+  dx: 0,
+  dz: 1,
+  cut: { x: 23, y: 80, z: 8 },
+  step: { x: 23, y: 80, z: 8 },
+  name: 'stone',
+  safe: true,
+  reason: 'safe',
+}
+
+/** The measured live step-cut cell is terrain, so the resource index is empty. */
+function stepState(
+  inventoryCounts: Record<string, number>,
+  stepCuts = [STEP_CUT],
+  standable: Vec3Json[] = [FEET, { x: 27, y: 62, z: 15 }],
+): WorldState {
+  return liveState({ inventory: inventoryCounts, headroomCuts: [], stepCuts, standable })
+}
+
+/**
+ * A locomotion leg with no standable approach, which is the live route-opening
+ * shape the step-cut arm answers (`routeOpeningCandidates`): the MOVE is withheld
+ * and the STEP is offered as the route that opens it.
+ */
+function approachlessMove(): Candidate {
+  return {
+    id: 'MOVE:p40_61_15',
+    kind: 'MOVE',
+    label: 'walk to (40,61,15)',
+    targetName: null,
+    target: { x: 40, y: 61, z: 15 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: false,
+    meta: { tick: 7 },
+  }
+}
+
+const stepWithheld = (gate: { withheld: CandidateReachability[] }): CandidateReachability | null =>
+  gate.withheld.find((entry) => entry.candidate.kind === 'STEP') ?? null
+
+const stepOffered = (gate: { candidates: Candidate[] }): Candidate | undefined =>
+  gate.candidates.find((candidate) => candidate.kind === 'STEP')
+
+addCase('(viii) a step cut whose cell needs a tool is withheld missing_tool before lease', () => {
+  const gate = applyReachabilityGate([approachlessMove()], stepState({ oak_log: 81, cobblestone: 177 }), options)
+  const withheld = stepWithheld(gate)
+  const missing = (withheld?.result.missingCapabilities ?? []).map(capabilityKey)
+  return {
+    pass:
+      withheld !== null &&
+      withheld.candidate.id === 'STEP:S:b23_80_8' &&
+      withheld.result.reason === 'missing_tool' &&
+      missing.includes('tool:pickaxe@0') &&
+      // never leased: the STEP is not in the offer at all
+      stepOffered(gate) === undefined,
+    detail: `withheld=${withheld?.candidate.id ?? 'none'}:${withheld?.result.reason ?? '-'} missing=[${missing.join(',')}] offeredStep=${stepOffered(gate)?.id ?? 'none'}`,
+  }
+})
+
+addCase('(viii) the withheld step cut gets its grounded acquisition route in the same tick', () => {
+  const gate = applyReachabilityGate([approachlessMove()], stepState({ oak_log: 81, cobblestone: 177 }), options)
+  const withheld = stepWithheld(gate)
+  const fact = withheld === null ? null : acquisitionFor(withheld, 'tool:pickaxe@0')
+  const routes = (fact?.routes ?? []).map((id) => gate.candidates.find((candidate) => candidate.id === id))
+  return {
+    pass:
+      fact !== null &&
+      fact.reason === null &&
+      fact.routes.length > 0 &&
+      routes.some((candidate) => candidate?.meta.capabilityAcquisition === true && candidate.meta.missingCapability === 'tool:pickaxe@0'),
+    detail: `withheld=${withheld?.candidate.id ?? 'none'} routes=[${(fact?.routes ?? []).join(',')}] tools=${fact?.tools ?? '-'}`,
+  }
+})
+
+addCase('(viii) no obtainable material and no world route yields the typed refusal, not an attempt', () => {
+  // Nothing but the body's own cell: no log to collect, no surface route, nothing
+  // to make planks from. The tool fact must be refused in typed form, naming the
+  // item and count - and the step must not be leased.
+  const gate = applyReachabilityGate([approachlessMove()], stepState({ cobblestone: 177, flint: 4, dirt: 128 }, [STEP_CUT], [FEET]), options)
+  const withheld = stepWithheld(gate)
+  const fact = withheld === null ? null : acquisitionFor(withheld, 'tool:pickaxe@0')
+  const line = withheld !== null && fact !== null ? formatCandidateAcquisitionRefused(withheld.candidate.id, fact) : null
+  return {
+    pass:
+      stepOffered(gate) === undefined &&
+      fact !== null &&
+      fact.routes.length === 0 &&
+      fact.reason === 'no_material' &&
+      typeof fact.item === 'string' &&
+      (fact.count ?? 0) >= 1 &&
+      line !== null &&
+      line.includes(`item=${fact.item}`) &&
+      line.includes(`count=${fact.count}`),
+    detail: line ?? `routes=[${(fact?.routes ?? []).join(',')}]`,
+  }
+})
+
+addCase('(viii) control: with the tool held the same step cut is offered, tool declared', () => {
+  const gate = applyReachabilityGate([approachlessMove()], stepState({ oak_log: 3, wooden_pickaxe: 1 }), options)
+  const offered = stepOffered(gate)
+  return {
+    pass:
+      offered !== undefined &&
+      offered.id === 'STEP:S:b23_80_8' &&
+      offered.requiresTool === true &&
+      offered.toolName === 'pickaxe' &&
+      offered.toolTier === 0 &&
+      stepWithheld(gate) === null,
+    detail: `offered=${offered?.id ?? 'none'} requiresTool=${offered?.requiresTool} tool=${offered?.toolName}@${offered?.toolTier}`,
+  }
+})
+
+addCase('(viii) a hand-diggable step cut is unaffected (no invented requirement)', () => {
+  const dirtCut = { ...STEP_CUT, name: 'dirt' }
+  const gate = applyReachabilityGate([approachlessMove()], stepState({ oak_log: 3 }, [dirtCut]), options)
+  const offered = stepOffered(gate)
+  return {
+    pass:
+      offered !== undefined && offered.requiresTool === false && offered.toolName === null && stepWithheld(gate) === null,
+    detail: `offered=${offered?.id ?? 'none'} requiresTool=${offered?.requiresTool} tool=${offered?.toolName}`,
   }
 })
 
