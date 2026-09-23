@@ -43,7 +43,7 @@ describe('#438 section 4 - versioned head registry', () => {
     }
   })
 
-  test('every head documents owner, primitive, question, projection, result schema, calibration, status and consumers', () => {
+  test('every head documents its result contract; live heads also document consumers', () => {
     for (const head of JEV_HEADS) {
       expect(head.semanticQuestion.length).toBeGreaterThan(10)
       expect(head.stateProjection.length).toBeGreaterThan(0)
@@ -51,7 +51,7 @@ describe('#438 section 4 - versioned head registry', () => {
       expect(head.calibration.transformId.length).toBeGreaterThan(0)
       expect(head.calibration.transformVersion).toBeGreaterThanOrEqual(1)
       expect(['production', 'shadow', 'diagnostic']).toContain(head.status)
-      expect(head.allowedConsumers.length).toBeGreaterThan(0)
+      if (!head.deprecated) expect(head.allowedConsumers.length).toBeGreaterThan(0)
       expect(typeof head.deprecated).toBe('boolean')
     }
   })
@@ -70,6 +70,15 @@ describe('#438 section 4 - versioned head registry', () => {
         expect(source).toContain(ref.symbol)
       }
     }
+  })
+
+  test('retired heads without a current caller remain resolvable but cannot appear active', () => {
+    const retired = lookupHead('system2_horizon_v2')
+    expect(retired?.deprecated).toBe(true)
+    expect(retired?.sourceRefs).toEqual([])
+    expect(retired?.allowedConsumers).toEqual([])
+    expect(retired?.legacyPromptRef).toBeUndefined()
+    expect(activeHeads().some((head) => head.id === 'system2_horizon_v2')).toBe(false)
   })
 
   test('the batched jev-authority call is describable as one batch group with per-head primitives', () => {

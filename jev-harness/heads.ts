@@ -1,15 +1,15 @@
 // jev-harness/heads.ts - the canonical, versioned Jev head registry (#438 section 4).
 //
 // ONE registry of semantic questions. No anonymous ad-hoc Jev call may exist, and
-// every production call must reference a registered head (I2). The registry is
-// modelled on the FIVE production call sites that Phase A inventoried - it
-// deliberately contains no head that nobody asks for.
+// every production call must reference a registered head (I2). Live source refs
+// track the four remaining direct-provider call sites; retired heads with no
+// current caller stay registered for historical artifact decoding.
 //
 //   jev-agent/src/jev-authority.ts:335   batched: action / abandon_option / danger / should_retreat
 //   jev-agent/src/jev-legacy.ts:997      batched legacy: action / abandon_option / danger / should_retreat
 //   buddy-driver/advisor.ts:367          choice: next_strategy over a declared strategy set
 //   buddy-driver/planner-legacy.ts:3432  batched: horizon / plan_fit / strategy_change
-//   buddy-driver/planner.ts:605          choice: horizon over grounded PlanOptions
+//   (the former planner.ts choice was retired when System2 became the WHAT authority)
 //
 // A head is versioned as a whole: bumping the version means a NEW head id, and
 // the old entry stays in the registry with `deprecated: true` so replay of older
@@ -96,9 +96,9 @@ export interface JevHead {
    * (the Phase A batching constraint). The primitive is still per-head.
    */
   readonly batchGroup: string | null
-  /** Modules allowed to consume this head's result (#438 section 4). */
+  /** Current modules allowed to consume this head's result; empty only for a retired archive. */
   readonly allowedConsumers: readonly string[]
-  /** Where the question is asked today - this is the Phase C/D/E migration map. */
+  /** Current ask sites for the Phase C/D/E migration map; empty only when a retired head has no caller. */
   readonly sourceRefs: readonly HeadSourceRef[]
   /**
    * Where the exact prompt wording lives today, when the harness text is not yet
@@ -498,7 +498,7 @@ export const JEV_HEADS: readonly JevHead[] = [
     primitive: 'choice',
     owner: 'system2',
     status: 'production',
-    deprecated: false,
+    deprecated: true,
     semanticQuestion:
       'Which ONE grounded plan option best realises the current objective (or the semantic intent when one is live)?',
     instructions: {
@@ -513,15 +513,11 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: null,
-    allowedConsumers: ['buddy-driver/planner.ts'],
-    sourceRefs: [
-      { file: 'buddy-driver/planner.ts', symbol: 'PlannerBrain', lineHint: 605 },
-      { file: 'buddy-driver/planner.ts', symbol: 'compactSystem2State', lineHint: 226 },
-    ],
-    legacyPromptRef: { file: 'buddy-driver/planner.ts', symbol: 'SYSTEM2_INSTRUCTIONS', lineHint: 589 },
+    allowedConsumers: [],
+    sourceRefs: [],
     notes:
-      'PlannerBrain already fails closed on an invented id; the harness keeps that and adds the epoch fence, artifact ' +
-      'and strict decode.',
+      'Historical Jev choice head retained for old artifact decoding. System2 now owns WHAT via natural-language repair and ' +
+      'code-owned grounding; that path is specified by system2-harness, not this Jev head.',
   },
 ]
 
@@ -587,10 +583,10 @@ export function validateHeadRegistry(heads: readonly JevHead[] = JEV_HEADS): voi
     if (head.instructions.text.trim().length === 0) {
       throw new HeadRegistryError(`head ${head.id}: instructions text is required`)
     }
-    if (head.allowedConsumers.length === 0) {
+    if (head.allowedConsumers.length === 0 && !head.deprecated) {
       throw new HeadRegistryError(`head ${head.id}: allowedConsumers is required (#438 section 4)`)
     }
-    if (head.sourceRefs.length === 0) {
+    if (head.sourceRefs.length === 0 && !head.deprecated) {
       throw new HeadRegistryError(`head ${head.id}: sourceRefs is required (migration map)`)
     }
     if (head.primitive === 'choice' && head.candidateSource === 'none') {

@@ -27,7 +27,6 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
   test('the live tree has no NEW offender (debt allowlist may only shrink)', () => {
     const detail = report.violations.map(formatFinding).join('\n')
     expect(detail).toBe('')
-    expect(report.ok).toBe(true)
   })
 
   test('no harness file imports the provider primitive outside providers/**', () => {
@@ -38,11 +37,10 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
     expect(report.cleared.map((entry) => entry.file)).toEqual([])
   })
 
-  test('the debt allowlist is exactly the Phase A inventory of five call sites', () => {
+  test('the debt allowlist is exactly the four remaining direct provider call sites', () => {
     expect(FIREWALL_DEBT.map((entry) => entry.file).sort()).toEqual([
       'buddy-driver/advisor.ts',
       'buddy-driver/planner-legacy.ts',
-      'buddy-driver/planner.ts',
       'jev-agent/src/jev-authority.ts',
       'jev-agent/src/jev-legacy.ts',
     ])

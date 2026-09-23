@@ -88,7 +88,7 @@ export interface FirewallDebtEntry {
 }
 
 /**
- * Phase A debt (the five production call sites that still import the provider
+ * Phase A debt (the four production call sites that still import the provider
  * directly). This list may only SHRINK: `checkFirewall` fails when an entry here
  * no longer has any finding.
  */
@@ -117,12 +117,6 @@ export const FIREWALL_DEBT: readonly FirewallDebtEntry[] = [
     headIds: ['system2_horizon_v1', 'system2_plan_fit_v1', 'system2_strategy_change_v1'],
     migrationPhase: 'C',
     reason: 'legacy System2 batched call; its `match ?? options[0] ?? FRONT_FALLBACK` fallback must become an explicit code-authority fallback',
-  },
-  {
-    file: 'buddy-driver/planner.ts',
-    headIds: ['system2_horizon_v2'],
-    migrationPhase: 'C',
-    reason: 'PlannerBrain System2 horizon choice; Phase C moves the choice behind the harness',
   },
 ]
 
