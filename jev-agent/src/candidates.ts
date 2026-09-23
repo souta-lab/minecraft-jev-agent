@@ -30,7 +30,7 @@ import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
-import type { FoodSourceGap } from './foodSources.ts'
+import type { FoodSourceGap, FoodSourceMissingLink } from './foodSources.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool, strongestDigRequirement } from './toolChoice.ts'
@@ -93,7 +93,7 @@ import {
   planDescentScaffoldStep,
 } from './descentScaffold.ts'
 import type { DescentScaffoldPlan, DescentScaffoldRefusal } from './descentScaffold.ts'
-import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
+import { FOOD_SMELT_INPUT, fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint, reachabilityTargetSignature } from './reachability.ts'
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
@@ -3468,6 +3468,81 @@ function foodForageCandidates(state: WorldState, options: CandidateOptions): Can
 }
 
 /**
+ * The grounded FURNACE-COOK candidates: one executable SMELT per edible smelt
+ * output whose input the body already carries, when a furnace it can reach is
+ * sensed.
+ *
+ * The CRAFT half above can only produce a food item that is a crafting recipe
+ * (mushroom_stew, bread, cookie, pumpkin_pie). An ingredient the edible truth
+ * does not let the body eat raw - `potato` (60% Poison in vanilla, so it is a
+ * policy-excluded edible) - is food ONLY after a FURNACE step, and no tier could
+ * ever ground it: the same shape the task's "cook an ingredient it carries in a
+ * furnace it can reach" names. A raw meat is already edible, so the EAT tier owns
+ * it; offering a cook route to a body that already holds food would change the
+ * fed body's offer, which the survival contract forbids.
+ *
+ * The step reuses the smelt path's own station and fuel truth
+ * (`directSmeltFurnace`, `smeltFuelFor`, `smeltInventorySufficient`,
+ * `fuelCountFor`), so the candidate can never be a SMELT the executor refuses,
+ * and its meta is the smelt goal's direct-candidate meta plus the food tags.
+ *
+ * Reachability is the CAN fact here: no reachable furnace means no route, and
+ * `foodSourceGap` then names `no_reachable_furnace` instead of staying silent.
+ */
+function foodSmeltCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const counts = state.inventory.counts
+  const out: Candidate[] = []
+  for (const [output, input] of Object.entries(FOOD_SMELT_INPUT)) {
+    if (!isEdibleFoodItem(output)) continue
+    if ((counts[input] ?? 0) <= 0) continue
+    const fuelItem = smeltFuelFor(state, input, 1)
+    if (fuelItem === null) continue
+    const fuelCount = fuelCountFor(1, fuelItem)
+    if (!smeltInventorySufficient(counts, input, 1, fuelItem, fuelCount)) continue
+    const furnace = directSmeltFurnace(state, options)
+    if (furnace === null) continue
+    out.push({
+      id: `SMELT:${output}`,
+      kind: 'SMELT',
+      label: `smelt 1x ${output} from ${input} in the furnace at (${furnace.x},${furnace.y},${furnace.z}) using ${fuelItem} so the body can eat`,
+      targetName: output,
+      target: furnace,
+      targetEntityId: null,
+      itemName: output,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(furnace, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        furnaceX: furnace.x,
+        furnaceY: furnace.y,
+        furnaceZ: furnace.z,
+        inputItem: input,
+        inputCount: 1,
+        fuelItem,
+        fuelCount,
+        outputItem: output,
+        count: 1,
+        ...(state.signals.heldFurnacePlacedAt === blockId('b', furnace) ? { furnaceSource: 'held' } : {}),
+        foodRoute: 'cook',
+        foodTarget: output,
+      },
+    })
+    if (out.length >= FOOD_COOK_CAP) break
+  }
+  return out
+}
+
+/** True when a held item is a furnace input for an edible output (the smelt-cook link). */
+function hasSmeltableFoodIngredient(state: WorldState): boolean {
+  const counts = state.inventory.counts
+  return Object.entries(FOOD_SMELT_INPUT).some(
+    ([output, input]) => isEdibleFoodItem(output) && (counts[input] ?? 0) > 0,
+  )
+}
+
+/**
  * The bounded, typed "a hungry body has no grounded route to food" fact.
  *
  * Descriptive only: it lists which affordances ARE grounded (`offered`), which
@@ -3505,19 +3580,63 @@ export function foodSourceGap(
       typeof block.foodItem === 'string' &&
       foodIngredientCompletesRecipe(state, options, block.foodItem),
   )
-  const sourceExists = sensedAnimal || sensedEdibleBlock || sensedIngredientBlock
+  // Both cook halves are read off the RAW link facts, not restated as `false` and
+  // not read off the offered set: a recipe the live inventory can complete exists
+  // whether or not the reachability gate (or the missing station/fuel
+  // precondition) let its step through, and reporting `cookableRecipe=false`
+  // about a body that holds the ingredients is exactly the kind of untruth this
+  // marker exists to prevent.
+  const smeltableIngredient = hasSmeltableFoodIngredient(state)
+  const cookableRecipe =
+    smeltableIngredient || foodCookCandidates(state, options).length > 0
+  const sensedFurnace = smeltableIngredient && directSmeltFurnace(state, options) !== null
+  const sourceExists = sensedAnimal || sensedEdibleBlock || sensedIngredientBlock || cookableRecipe
   return {
     offered: uniqueOffered,
-    heldEdible: false,
+    heldEdible: held !== null,
     sensedAnimal,
     sensedEdibleBlock,
     sensedIngredientBlock,
-    cookableRecipe: false,
+    cookableRecipe,
+    smeltableIngredient,
+    sensedFurnace,
     hungry,
     starving: bodyStarving(state.self),
     reason: sourceExists ? 'source_withheld' : 'no_source_sensed',
+    missingLink: firstMissingFoodLink({
+      heldEdible: held !== null,
+      sensedEdibleBlock,
+      sensedIngredientBlock,
+      sensedAnimal,
+      smeltableIngredient,
+      sensedFurnace,
+      cookableRecipe,
+    }),
     next: candidates.some((candidate) => candidate.meta.explore === true) ? 'explore' : 'escalate',
   }
+}
+
+/**
+ * The decisive missing link, named in route-chain order. Evidence only: it
+ * reports which grounded fact is absent, never an action to take.
+ */
+function firstMissingFoodLink(facts: {
+  heldEdible: boolean
+  sensedEdibleBlock: boolean
+  sensedIngredientBlock: boolean
+  sensedAnimal: boolean
+  smeltableIngredient: boolean
+  sensedFurnace: boolean
+  cookableRecipe: boolean
+}): FoodSourceMissingLink {
+  if (facts.heldEdible) return 'no_edible_held'
+  // A source IS sensed and no route is on offer: the missing link is the ROUTE
+  // to it (in-reach dig, walk-up stand, column base or dig-access walk). This is
+  // the shape that used to be reported as if the world held no food at all.
+  if (facts.sensedEdibleBlock || facts.sensedIngredientBlock) return 'no_route_to_sensed_source'
+  if (facts.smeltableIngredient && !facts.sensedFurnace) return 'no_reachable_furnace'
+  if (facts.cookableRecipe) return 'no_cookable_recipe'
+  return 'no_edible_source_sensed'
 }
 
 /**
@@ -4298,6 +4417,11 @@ function generateRawCandidates(
   // the whole ingredient chain is reachable from the live inventory; Jev owns
   // whether to cook it.
   if (heldFood === null && hungry) candidates.push(...foodCookCandidates(state, options))
+  // The grounded FURNACE-COOK route: an ingredient the body carries that only a
+  // furnace turns into food (raw_beef -> cooked_beef), offered when a furnace it
+  // can reach is sensed. Same gate as the tiers above, so a body that is fed or
+  // already holds food sees a byte-identical offer.
+  if (heldFood === null && hungry) candidates.push(...foodSmeltCandidates(state, options))
 
   // Armor-equip affordance: offered alongside the other local self-care actions
   // (EAT/ATTACK/RETREAT), independent of the active goal. The generator reports
@@ -4602,7 +4726,13 @@ function digAccessFor(
   return { stand: null, refusal: fact.approach === null ? 'no_interaction_stand' : 'no_path_to_stand' }
 }
 
-function digAccessMove(state: WorldState, block: BlockState, stand: Vec3Json): Candidate {
+function digAccessMove(
+  state: WorldState,
+  block: BlockState,
+  stand: Vec3Json,
+  /** the sensed food route this dig-access walk serves, when it is one (see `columnDigMine`) */
+  foodTag: { route: 'forage' | 'acquire'; item: string } | null = null,
+): Candidate {
   const harvestTool = block.harvestTool ?? null
   return {
     id: digAccessCandidateId(block.position),
@@ -4629,6 +4759,7 @@ function digAccessMove(state: WorldState, block: BlockState, stand: Vec3Json): C
       targetBlockY: block.position.y,
       targetBlockZ: block.position.z,
       targetBlockName: block.name,
+      ...(foodTag === null ? {} : { foodRoute: foodTag.route, foodTarget: foodTag.item }),
     },
   }
 }
@@ -4751,7 +4882,24 @@ function columnLandingFor(state: WorldState, base: BlockState): Vec3Json | null 
  * executor) plus the `columnDig`/`columnTopY` facts that name the column it is
  * the bottom of.
  */
-function columnDigMine(state: WorldState, base: BlockState, topY: number, requiresPickup: boolean): Candidate {
+function columnDigMine(
+  state: WorldState,
+  base: BlockState,
+  topY: number,
+  requiresPickup: boolean,
+  /**
+   * The sensed food route this column belongs to, when it is one. A canopy cell
+   * is not pickup-adjacent and has no walk-up stand (`findAdjacentStandable`
+   * never samples the cell above the target), so the ONLY offered step toward it
+   * is this column-base MINE - and it used to carry no `foodRoute` tag at all.
+   * The candidate was on offer while `foodSourceGap.offered` stayed empty, so a
+   * hungry body with a sensed apple canopy was reported as having NO food route
+   * (measured: `FOOD_SOURCE_NONE ... sensedEdibleBlock=true offered=[]`). Tagging
+   * the branch is the whole consequence: the route kind and the item are the
+   * facts the food accounting, the survival restriction and the run log read.
+   */
+  foodTag: { route: 'forage' | 'acquire'; item: string } | null = null,
+): Candidate {
   const harvestTool = base.harvestTool ?? null
   return {
     id: `MINE:${blockId('b', base.position)}`,
@@ -4777,6 +4925,7 @@ function columnDigMine(state: WorldState, base: BlockState, topY: number, requir
       [COLUMN_DIG_META]: true,
       columnTopY: topY,
       ...(base.kind === 'log' ? { [LOG_ROUTE_META]: 'mine_sensed' } : {}),
+      ...(foodTag === null ? {} : { foodRoute: foodTag.route, foodTarget: foodTag.item }),
     },
   }
 }
@@ -5227,7 +5376,7 @@ function mineCandidates(
         mineActions.length + moveActions.length + accessActions.length < options.maxMineCandidates
       ) {
         columnDigIds.add(columnId)
-        mineActions.push(columnDigMine(state, columnBase, block.position.y, requiresPickup))
+        mineActions.push(columnDigMine(state, columnBase, block.position.y, requiresPickup, foodCell ?? null))
       }
     }
 
@@ -5249,7 +5398,7 @@ function mineCandidates(
         failureCount(state.signals.failedCandidates, digAccessCandidateId(block.position)) <
           (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
       ) {
-        accessActions.push(digAccessMove(state, block, stand))
+        accessActions.push(digAccessMove(state, block, stand, foodCell ?? null))
         continue
       }
     } else if (

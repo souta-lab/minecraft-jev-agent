@@ -453,7 +453,100 @@ export function isFuelItem(itemNameWanted: string): boolean {
   )
 }
 
-/** Food items from minecraft-data `foods` / `foodsByName`. */
-export function isFoodItem(reg: GameDataRegistry, itemNameWanted: string): boolean {
-  return reg.foodsByName?.[itemNameWanted] !== undefined
+// ---------------------------------------------------------------------------
+// edible truth (the data version's own `foods.json`) + the policy layer on it
+//
+// "Can this item be eaten at all" is GAME DATA, read exactly the way harvest
+// truth is (`resolveHarvest(loadGameData(), name)`): minecraft-data builds
+// `foodsByName` on this same registry object (loader.js `foodsByName:
+// indexes.foodsByName` over `data/pc/<version>/foods.json`), so no food item
+// name is re-listed in the decision path. `resolveHarvest` reads the block drop
+// table; this reads the food table.
+//
+// What the data CANNOT answer stays policy, and is deliberately tiny:
+// `foods.json` is a nutrition table (foodPoints/saturation only) with no
+// `isMeat`/`canAlwaysEat`/harm field, and it lists the fish BUCKETS as edible.
+// ---------------------------------------------------------------------------
+
+/**
+ * POLICY (not data): edibles a starving body must not treat as survival food.
+ *
+ *   rotten_flesh / spider_eye / poisonous_potato / pufferfish -> harmful effect
+ *   potato            -> 60% Poison in vanilla; bake it instead (baked_potato)
+ *   suspicious_stew   -> effect is not knowable from the data
+ *   *_bucket          -> foods.json lists the fish buckets, but the bucket is
+ *                        not what gets eaten
+ *
+ * Every name here is ALSO in the data's edible table; excluding one can only
+ * make a route ungrounded, never invent one.
+ */
+export const NON_SURVIVAL_EDIBLES: ReadonlySet<string> = new Set([
+  'rotten_flesh',
+  'spider_eye',
+  'poisonous_potato',
+  'pufferfish',
+  'potato',
+  'suspicious_stew',
+  'cod_bucket',
+  'salmon_bucket',
+  'pufferfish_bucket',
+  'tropical_fish_bucket',
+])
+
+/**
+ * DATA GAPS: vanilla-edible items this data version's `foods.json` does not
+ * list. Corrected here by exception instead of re-listing the whole food set;
+ * `kelp` is edible in vanilla (1 point) while only its smelted form
+ * `dried_kelp` is in the table.
+ */
+export const VANILLA_EDIBLE_DATA_GAPS: ReadonlySet<string> = new Set(['kelp'])
+
+/**
+ * True when the running data version says `itemNameWanted` is edible AND the
+ * policy layer does not exclude it as survival food. `foodsByName` defaults to
+ * the pinned data version so a caller with no registry at hand (the planner
+ * rung, `pickFood`) reads the same truth as one holding `bot.registry`.
+ */
+export function isFoodItem(
+  reg: GameDataRegistry | null | undefined,
+  itemNameWanted: string | null | undefined,
+): boolean {
+  if (typeof itemNameWanted !== 'string' || itemNameWanted.length === 0) return false
+  if (NON_SURVIVAL_EDIBLES.has(itemNameWanted)) return false
+  if (VANILLA_EDIBLE_DATA_GAPS.has(itemNameWanted)) return true
+  const foods = reg?.foodsByName ?? pinnedFoodsByName()
+  return foods !== null && foods[itemNameWanted] !== undefined
+}
+
+/** The pinned data version's edible table, or null when the data is unavailable. */
+function pinnedFoodsByName(): Record<string, unknown> | null {
+  try {
+    return (loadGameData().foodsByName as Record<string, unknown> | undefined) ?? null
+  } catch {
+    // No usable data version is not evidence that an item is edible.
+    return null
+  }
+}
+
+/**
+ * True when the running data version can turn `inputItem` into an edible item
+ * in a furnace. Smelting input -> output (Minecraft wiki, "Smelting"); this is
+ * the FOOD half of the furnace truth, kept separate from `SMELT_INPUT` so the
+ * M2 fuel/ingot routes stay untouched.
+ */
+export const FOOD_SMELT_INPUT: Readonly<Record<string, string>> = {
+  cooked_beef: 'beef',
+  cooked_porkchop: 'porkchop',
+  cooked_chicken: 'chicken',
+  cooked_mutton: 'mutton',
+  cooked_rabbit: 'rabbit',
+  cooked_cod: 'cod',
+  cooked_salmon: 'salmon',
+  baked_potato: 'potato',
+  dried_kelp: 'kelp',
+}
+
+/** The inventory item a food-smelt output consumes, or null when not one. */
+export function foodSmeltInputFor(itemNameWanted: string): string | null {
+  return FOOD_SMELT_INPUT[itemNameWanted] ?? null
 }
