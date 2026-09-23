@@ -227,6 +227,9 @@ export type ArmorPieceState = HeldItemState & Partial<ObservedDurability>
  */
 export type ArmorState = Record<ArmorSlot, ArmorPieceState | null>
 
+/** The observed offhand slot, distinct from the selected main-hand item. */
+export type OffhandState = ArmorPieceState
+
 /** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
 export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
 
@@ -271,6 +274,8 @@ export type SelfState = {
   dimension: string
   isDay: boolean
   heldItem: HeldItemState | null
+  /** Offhand window slot 45; undefined means this client/version did not expose it. */
+  offhand?: OffhandState | null
   /**
    * Remaining breath (vanilla bubbles) and the two fluid cells that decide
    * whether the body is underwater. Optional so pure fixtures that predate the
@@ -1872,6 +1877,7 @@ function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazard
   const air = readAir(bot)
   const feetInWater = fluidAt(bot, feet)
   const eyesInWater = fluidAt(bot, eyes)
+  const offhand = buildOffhand(bot)
   const envHazardCells = buildEnvHazardRing(bot, feet)
   const self: SelfState = {
     username: bot.username,
@@ -1886,6 +1892,7 @@ function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazard
     dimension: bot.game.dimension,
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
+    ...(offhand === undefined ? {} : { offhand }),
     armor: buildArmor(bot),
     air,
     feetInWater,
@@ -2095,52 +2102,76 @@ function fluidAt(bot: Bot, cell: Vec3Json): boolean {
  * (`SelfState.armor`) instead of opening a second window into the inventory.
  */
 export function buildArmor(bot: Bot): ArmorState {
-  const slots = (
-    bot.inventory as {
-      slots?: ReadonlyArray<
-        | {
-            name?: string
-            count?: number
-            slot?: number
-            maxDurability?: number | null
-            durabilityUsed?: number | null
-          }
-        | null
-      >
-    }
-  ).slots
+  const slots = equipmentWindowSlots(bot)
   const armor = { ...EMPTY_ARMOR }
   for (const slot of ARMOR_SLOTS) {
     const index = ARMOR_SLOT_INDEX[slot]
-    const item = slots?.[index]
-    if (item === undefined || item === null || typeof item.name !== 'string') continue
-    const maxDurability =
-      typeof item.maxDurability === 'number' && Number.isFinite(item.maxDurability) && item.maxDurability > 0
-        ? item.maxDurability
-        : null
-    let durabilityUsed: number | null = null
-    if (maxDurability !== null) {
-      // Prismarine-item exposes this as a getter over protocol-version-specific
-      // NBT/components. Treat unsupported or malformed data as unknown instead
-      // of letting an observation failure break the entire world snapshot.
-      try {
-        const used = item.durabilityUsed
-        if (typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= maxDurability) {
-          durabilityUsed = used
-        }
-      } catch {
-        durabilityUsed = null
-      }
-    }
-    armor[slot] = {
-      name: item.name,
-      count: item.count ?? 1,
-      slot: item.slot ?? index,
-      durabilityUsed,
-      maxDurability,
-    }
+    armor[slot] = equipmentPieceFromWindowSlot(slots?.[index], index)
   }
   return armor
+}
+
+/**
+ * Read Mineflayer's actual offhand equipment window slot. `inventory.items()`
+ * intentionally returns only the carried inventory section (9–44), while slot
+ * 45 is offhand. A missing slot array/version capability is UNKNOWN (undefined),
+ * and a present empty slot is the observed value null.
+ */
+export function buildOffhand(bot: Bot): OffhandState | null | undefined {
+  try {
+    if (typeof bot.supportFeature === 'function' && bot.supportFeature('doesntHaveOffHandSlot')) return undefined
+  } catch {
+    return undefined
+  }
+  const slots = equipmentWindowSlots(bot)
+  if (slots === undefined || slots.length <= 45) return undefined
+  const item = slots[45]
+  if (item === undefined) return undefined
+  return equipmentPieceFromWindowSlot(item, 45)
+}
+
+type EquipmentWindowSlot = {
+  name?: string
+  count?: number
+  slot?: number
+  maxDurability?: number | null
+  durabilityUsed?: number | null
+}
+
+function equipmentWindowSlots(bot: Bot): ReadonlyArray<EquipmentWindowSlot | null> | undefined {
+  return (bot.inventory as { slots?: ReadonlyArray<EquipmentWindowSlot | null> }).slots
+}
+
+function equipmentPieceFromWindowSlot(
+  item: EquipmentWindowSlot | null | undefined,
+  fallbackSlot: number,
+): ArmorPieceState | null {
+  if (item === undefined || item === null || typeof item.name !== 'string') return null
+  const maxDurability =
+    typeof item.maxDurability === 'number' && Number.isFinite(item.maxDurability) && item.maxDurability > 0
+      ? item.maxDurability
+      : null
+  let durabilityUsed: number | null = null
+  if (maxDurability !== null) {
+    // Prismarine-item exposes this as a getter over protocol-version-specific
+    // NBT/components. Treat unsupported or malformed data as unknown instead
+    // of letting an observation failure break the entire world snapshot.
+    try {
+      const used = item.durabilityUsed
+      if (typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= maxDurability) {
+        durabilityUsed = used
+      }
+    } catch {
+      durabilityUsed = null
+    }
+  }
+  return {
+    name: item.name,
+    count: item.count ?? 1,
+    slot: item.slot ?? fallbackSlot,
+    durabilityUsed,
+    maxDurability,
+  }
 }
 
 function buildInventory(bot: Bot): InventoryState {

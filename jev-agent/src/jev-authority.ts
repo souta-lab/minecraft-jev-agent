@@ -35,7 +35,8 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'distance, failure history, reachability, and prerequisite-path metadata are evidence. They are not universal ranking ' +
   'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives. When an ' +
   'ATTACK candidate is present, ATTACK versus MOVE, RETREAT, or WAIT is your pi decision: weigh the target identity, ' +
-  'distance, your held weapon, the target\'s held ranged weapon, health, food, worn armor and its observed condition, ' +
+  'distance, your held weapon and observed offhand item/condition, the target\'s held ranged weapon, health, food, ' +
+  'worn armor and its observed condition, ' +
   'immediate danger, other threats, and what each grounded escape route gains (separation, cover, and reach). Use ' +
   'observed line of sight as a ' +
   'projectile-risk fact, not as a guarantee that no projectile is in flight. Consider the current Option and recent ' +
@@ -254,6 +255,10 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
     // inventory. Preserve exact observed slot/name/durability evidence on the
     // raw model path; the semantic projection carries stable condition bands.
     armor: state.self.armor ?? null,
+    offhand: {
+      observed: state.self.offhand !== undefined,
+      item: state.self.offhand ?? null,
+    },
     // P1 durability: a falling health number is not enough to answer "am I
     // being attacked, and by what?". The recorded damage event makes the
     // threat explicit so Jev can choose fight/flee instead of WAIT.

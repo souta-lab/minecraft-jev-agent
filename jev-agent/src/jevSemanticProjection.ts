@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 3
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v3'
+export const JEV_PROJECTION_VERSION = 4
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v4'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -751,6 +751,8 @@ export interface SemanticSafetyFacts {
   lastDamageKey: string | null
   /** fixed-slot worn gear and banded observed condition; null means not observed */
   wornArmor: SemanticWornArmor | null
+  /** selected offhand item/condition; empty and unavailable are distinct */
+  offhand: SemanticOffhandFacts | null
 }
 
 export type ArmorSlotName = 'head' | 'torso' | 'legs' | 'feet'
@@ -765,6 +767,15 @@ export interface SemanticWornArmorPiece {
 }
 
 export type SemanticWornArmor = Record<ArmorSlotName, SemanticWornArmorPiece | null>
+
+export type SemanticOffhandDurabilityBand = ArmorDurabilityBand | 'not_applicable'
+
+export interface SemanticOffhandFacts {
+  /** item in inventory window slot 45, or null when the observed slot is empty */
+  item: string | null
+  /** durability condition for damageable items; otherwise not_applicable */
+  durabilityBand: SemanticOffhandDurabilityBand
+}
 
 type ObservedWornArmor = Partial<
   Record<
@@ -797,17 +808,40 @@ export function semanticWornArmor(armor: ObservedWornArmor | null | undefined): 
     }
     const max = piece.maxDurability
     const used = piece.durabilityUsed
-    let durabilityBand: ArmorDurabilityBand = 'unknown'
-    if (
-      typeof max === 'number' && Number.isFinite(max) && max > 0 &&
-      typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= max
-    ) {
-      const remaining = (max - used) / max
-      durabilityBand = remaining >= 0.75 ? 'fresh' : remaining >= 0.5 ? 'worn' : remaining >= 0.25 ? 'low' : 'critical'
-    }
+    const durabilityBand = durabilityBandFromObservation(max, used)
     result[slot] = { slot, item: piece.name, durabilityBand }
   }
   return result
+}
+
+type ObservedOffhand = {
+  name: string
+  count?: number
+  slot?: number
+  durabilityUsed?: number | null
+  maxDurability?: number | null
+} | null
+
+/** Preserve the difference between an observed empty slot and an unavailable slot. */
+export function semanticOffhand(offhand: ObservedOffhand | undefined): SemanticOffhandFacts | null {
+  if (offhand === undefined) return null
+  if (offhand === null) return { item: null, durabilityBand: 'not_applicable' }
+  if (offhand.maxDurability === null) return { item: offhand.name, durabilityBand: 'not_applicable' }
+  return {
+    item: offhand.name,
+    durabilityBand: durabilityBandFromObservation(offhand.maxDurability, offhand.durabilityUsed),
+  }
+}
+
+function durabilityBandFromObservation(max: number | null | undefined, used: number | null | undefined): ArmorDurabilityBand {
+  if (
+    typeof max !== 'number' || !Number.isFinite(max) || max <= 0 ||
+    typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > max
+  ) {
+    return 'unknown'
+  }
+  const remaining = (max - used) / max
+  return remaining >= 0.75 ? 'fresh' : remaining >= 0.5 ? 'worn' : remaining >= 0.25 ? 'low' : 'critical'
 }
 
 /**
@@ -1241,6 +1275,7 @@ export function diffSemanticProjections(
   push('safety.airBand', previous.safety.airBand, current.safety.airBand)
   push('safety.submerged', previous.safety.submerged, current.safety.submerged)
   push('safety.wornArmor', previous.safety.wornArmor, current.safety.wornArmor)
+  push('safety.offhand', previous.safety.offhand, current.safety.offhand)
   push('safety.threatKey', previous.safety.threatKey, current.safety.threatKey)
   push('safety.criticalDamageKey', previous.safety.criticalDamageKey, current.safety.criticalDamageKey)
   push('safety.lastDamageKey', previous.safety.lastDamageKey, current.safety.lastDamageKey)

@@ -258,7 +258,7 @@ addCase('the sensor projects sight, weapon and attacker attribution onto a sense
   }
 })
 
-addCase('worn armor and exact observed durability reach the raw Jev state from armor-window slots', () => {
+addCase('worn armor and offhand shield are distinguished from carried inventory in raw Jev state', () => {
   const bot = fakeThreatBot()
   const slots: Array<Record<string, unknown> | null> = new Array(46).fill(null)
   slots[5] = { name: 'iron_helmet', count: 1, slot: 5, maxDurability: 165, durabilityUsed: 12 }
@@ -270,7 +270,17 @@ addCase('worn armor and exact observed durability reach the raw Jev state from a
     },
   })
   slots[8] = boots
-  ;(bot as unknown as { inventory: { slots: Array<Record<string, unknown> | null> } }).inventory.slots = slots
+  slots[45] = { name: 'shield', count: 1, slot: 45, maxDurability: 336, durabilityUsed: 80 }
+  const inventory = (bot as unknown as {
+    inventory: {
+      items: () => Array<{ name: string; count: number; slot: number }>
+      slots: Array<Record<string, unknown> | null>
+    }
+  }).inventory
+  inventory.slots = slots
+  // One more shield is merely carried in slot 9. It appears in `items()` and
+  // counts both before/after the offhand slot changes.
+  inventory.items = () => [{ name: 'shield', count: 1, slot: 9 }]
   const state = buildWorldState(
     bot,
     {
@@ -283,10 +293,29 @@ addCase('worn armor and exact observed durability reach the raw Jev state from a
     defaultSensorOptions,
   )
   const payload = authorityState(authorityRequest(state, generateCandidates(state, defaultCandidateOptions)))
+  const carriedOnlySlots = [...slots]
+  carriedOnlySlots[45] = null
+  inventory.slots = carriedOnlySlots
+  const carriedOnly = buildWorldState(
+    bot,
+    {
+      tick: 5,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      signals: signals({ lastDamage: ATTACKED_DAMAGE }),
+    },
+    defaultSensorOptions,
+  )
   type RawArmorPiece = { name: string; slot: number; durabilityUsed: number | null; maxDurability: number | null }
-  const armor = payload.self && typeof payload.self === 'object'
-    ? (payload.self as { armor?: Record<string, RawArmorPiece | null> }).armor
+  const rawSelf = payload.self && typeof payload.self === 'object'
+    ? (payload.self as {
+        armor?: Record<string, RawArmorPiece | null>
+        offhand?: { observed: boolean; item: RawArmorPiece | null }
+      })
     : undefined
+  const armor = rawSelf?.armor
+  const offhand = rawSelf?.offhand
   const pass =
     state.self.armor?.head?.name === 'iron_helmet' &&
     state.self.armor.head.slot === 5 &&
@@ -297,14 +326,25 @@ addCase('worn armor and exact observed durability reach the raw Jev state from a
     state.self.armor.legs === null &&
     state.self.armor.feet?.name === 'golden_boots' &&
     state.self.armor.feet.durabilityUsed === null &&
+    state.self.offhand?.name === 'shield' &&
+    state.self.offhand.slot === 45 &&
+    state.self.offhand.durabilityUsed === 80 &&
     armor?.torso?.slot === 6 &&
     armor.torso.name === 'iron_chestplate' &&
     armor.torso.durabilityUsed === 197 &&
     armor.torso.maxDurability === 240 &&
-    state.inventory.counts.iron_chestplate === undefined
+    offhand?.observed === true &&
+    offhand.item?.name === 'shield' &&
+    offhand.item.slot === 45 &&
+    offhand.item.durabilityUsed === 80 &&
+    state.inventory.counts.iron_chestplate === undefined &&
+    state.inventory.counts.shield === 1 &&
+    carriedOnly.inventory.counts.shield === 1 &&
+    carriedOnly.self.heldItem?.name === state.self.heldItem?.name &&
+    carriedOnly.self.offhand === null
   return {
     pass,
-    detail: `sensorArmor=${JSON.stringify(state.self.armor)} modelArmor=${JSON.stringify(armor)} carriedChestplate=${state.inventory.counts.iron_chestplate ?? 0}`,
+    detail: `sensorArmor=${JSON.stringify(state.self.armor)} sensorOffhand=${JSON.stringify(state.self.offhand)} modelOffhand=${JSON.stringify(offhand)} carriedOnlyOffhand=${JSON.stringify(carriedOnly.self.offhand)} inventoryShield=${state.inventory.counts.shield}`,
   }
 })
 

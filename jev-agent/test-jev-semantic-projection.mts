@@ -59,6 +59,7 @@ import {
   projectionModelView,
   repointReplayedChoice,
   semanticWornArmor,
+  semanticOffhand,
   semanticCandidateKey,
   semanticTargetRef,
   SKILL_OUTCOME_PACKET,
@@ -117,7 +118,7 @@ function projectionInput(overrides: Partial<SemanticProjectionInput> = {}): Sema
     goal: { key: 'collect:flint:1', targetItem: 'flint', have: 0, required: 1, complete: false, progress: 0 },
     option: { instanceId: 'option:enter_portal#1', templateId: 'enter_portal', skillKind: 'ENTER_PORTAL', targetKey: 'portal@26,67,9' },
     world: { dimension: OVERWORLD, worldEpoch: 7, generationId: 'g1', leaseHeld: true, alive: true },
-    safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null },
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
     progress: {
       consecutiveFailures: 0,
       lastFailureCode: null,
@@ -184,14 +185,14 @@ addCase('(0) air bands share the sensor scale and low-air safety boundary', () =
   const bands = values.map((value) => airBand(value))
   const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY].map((value) => airBand(value))
   const dryFull = buildJevSemanticProjection(projectionInput({
-    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null },
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
   }))
   const underwaterLow = buildJevSemanticProjection(projectionInput({
-    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(LOW_AIR_LEVEL), submerged: true, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null },
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(LOW_AIR_LEVEL), submerged: true, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
   }))
   const boundaryHashes = values.map((value) => {
     const projection = buildJevSemanticProjection(projectionInput({
-      safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(value), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null },
+      safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(value), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
     }))
     return projectionHash(projection)
   })
@@ -385,7 +386,7 @@ addCase('(5b) a verified kill without its declared drop is a typed search bounda
   })
   const line = formatSkillOutcomePacket(partial)
   const pass =
-    JEV_PROJECTION_VERSION === 3 &&
+    JEV_PROJECTION_VERSION === 4 &&
     terminalReasonFor({ status: 'done', failure: 'drop_not_acquired', verified: true }) === 'drop_not_acquired' &&
     partial.terminalReason === 'drop_not_acquired' &&
     partial.verification.verified === false &&
@@ -428,17 +429,22 @@ addCase('Jev receives observed worn armor and banded condition without choosing 
     legs: null,
     feet: { name: 'golden_boots', durabilityUsed: null, maxDurability: 91 },
   })
+  const offhandShield = semanticOffhand({ name: 'shield', count: 1, slot: 45, durabilityUsed: 150, maxDurability: 336 })
+  const slightlyWornShield = semanticOffhand({ name: 'shield', count: 1, slot: 45, durabilityUsed: 151, maxDurability: 336 })
+  const wornOutShield = semanticOffhand({ name: 'shield', count: 1, slot: 45, durabilityUsed: 280, maxDurability: 336 })
+  const observedEmptyOffhand = semanticOffhand(null)
+  const unavailableOffhand = semanticOffhand(undefined)
   const empty = buildJevSemanticProjection(projectionInput({ candidates: alternatives }))
   const worn = buildJevSemanticProjection(
     projectionInput({
       candidates: alternatives,
-      safety: { ...projectionInput().safety, wornArmor },
+      safety: { ...projectionInput().safety, wornArmor, offhand: offhandShield },
     }),
   )
   const sameBand = buildJevSemanticProjection(
     projectionInput({
       candidates: alternatives,
-      safety: { ...projectionInput().safety, wornArmor: slightlyWornArmor },
+      safety: { ...projectionInput().safety, wornArmor: slightlyWornArmor, offhand: slightlyWornShield },
     }),
   )
   const changedBand = semanticWornArmor({
@@ -450,12 +456,25 @@ addCase('Jev receives observed worn armor and banded condition without choosing 
   const changed = buildJevSemanticProjection(
     projectionInput({
       candidates: alternatives,
-      safety: { ...projectionInput().safety, wornArmor: changedBand },
+      safety: { ...projectionInput().safety, wornArmor: changedBand, offhand: wornOutShield },
     }),
   )
   const modelView = projectionModelView(worn)
   const sourceWiring = SRC_CONTROLLER.includes('wornArmor: semanticWornArmor(state.self.armor)')
   const armorDelta = diffSemanticProjections(worn, changed).delta.some((entry) => entry.fact === 'safety.wornArmor')
+  const offhandChanged = buildJevSemanticProjection(
+    projectionInput({
+      candidates: alternatives,
+      safety: { ...projectionInput().safety, wornArmor, offhand: wornOutShield },
+    }),
+  )
+  const offhandDelta = diffSemanticProjections(worn, offhandChanged).delta.some((entry) => entry.fact === 'safety.offhand')
+  const emptyHand = buildJevSemanticProjection(
+    projectionInput({
+      candidates: alternatives,
+      safety: { ...projectionInput().safety, offhand: observedEmptyOffhand },
+    }),
+  )
   const pass =
     wornArmor?.head?.slot === 'head' &&
     wornArmor.head.item === 'iron_helmet' &&
@@ -464,17 +483,26 @@ addCase('Jev receives observed worn armor and banded condition without choosing 
     wornArmor.torso.durabilityBand === 'critical' &&
     wornArmor.legs === null &&
     wornArmor.feet?.durabilityBand === 'unknown' &&
+    offhandShield?.item === 'shield' &&
+    offhandShield.durabilityBand === 'worn' &&
+    observedEmptyOffhand?.item === null &&
+    unavailableOffhand === null &&
     modelView.safety.wornArmor?.torso?.item === 'iron_chestplate' &&
     modelView.safety.wornArmor?.torso?.durabilityBand === 'critical' &&
+    modelView.safety.offhand?.item === 'shield' &&
+    modelView.safety.offhand?.durabilityBand === 'worn' &&
     projectionHash(empty) !== projectionHash(worn) &&
+    projectionHash(emptyHand) !== projectionHash(empty) &&
     projectionHash(worn) === projectionHash(sameBand) &&
     projectionHash(worn) !== projectionHash(changed) &&
     armorDelta &&
+    offhandDelta &&
     JSON.stringify(worn.candidates.map((view) => view.identity)) === JSON.stringify(empty.candidates.map((view) => view.identity)) &&
-    sourceWiring
+    sourceWiring &&
+    SRC_CONTROLLER.includes('offhand: semanticOffhand(state.self.offhand)')
   return {
     pass,
-    detail: `armor=${JSON.stringify(modelView.safety.wornArmor)} stableWithinBand=${projectionHash(worn) === projectionHash(sameBand)} armorDelta=${armorDelta} choicesUnchanged=${JSON.stringify(worn.candidates.map((view) => view.kind))}`,
+    detail: `armor=${JSON.stringify(modelView.safety.wornArmor)} offhand=${JSON.stringify(modelView.safety.offhand)} stableWithinBand=${projectionHash(worn) === projectionHash(sameBand)} armorDelta=${armorDelta} offhandDelta=${offhandDelta} choicesUnchanged=${JSON.stringify(worn.candidates.map((view) => view.kind))}`,
   }
 })
 
@@ -659,7 +687,7 @@ addCase('(12) a meaningful Option/progress/failure/safety change changes the key
   const safety = buildJevSemanticProjection(
     projectionInput({
       candidates: [walkToPortalLeg('26,67,10')],
-      safety: { healthBand: 'critical', foodBand: 'starving', airBand: 'critical', submerged: true, threatKey: 'zombie:1:true', criticalDamageKey: 'collect:flint:1:3:zombie', lastDamageKey: 'e33467', wornArmor: null },
+      safety: { healthBand: 'critical', foodBand: 'starving', airBand: 'critical', submerged: true, threatKey: 'zombie:1:true', criticalDamageKey: 'collect:flint:1:3:zombie', lastDamageKey: 'e33467', wornArmor: null, offhand: null },
     }),
   )
   const hashes = [base, option, progress, safety].map((projection) => projectionHash(projection))

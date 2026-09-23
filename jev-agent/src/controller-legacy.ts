@@ -108,6 +108,7 @@ import {
   airBand,
   healthBand,
   semanticWornArmor,
+  semanticOffhand,
   projectionHash as semanticProjectionHash,
 } from './jevSemanticProjection.ts'
 import type {
@@ -6203,6 +6204,7 @@ export class JevController {
         criticalDamageKey: critical === null ? null : `${critical.planKey}:${critical.consecutiveDamage}:${critical.sourceName ?? 'unattributed'}`,
         lastDamageKey: lastDamage === null ? null : `${lastDamage.sourceId ?? 'unknown'}`,
         wornArmor: semanticWornArmor(state.self.armor),
+        offhand: semanticOffhand(state.self.offhand),
       },
       progress,
       sense: {
