@@ -603,10 +603,14 @@ export async function supervise(options, deps = {}) {
       // bounded backoff (seconds), and only a SUSTAINED outage moves to the long cadence. `budget` (an hourly window
       // that must refill) keeps the long delay from the first retry.
       const outageEscalated = modelOutage && modelOutageRestarts > options.modelOutageFastRetries
+      // A model outage does not increment `consecutiveFailures` (it must not consume the run's restart budget), so it
+      // escalates on ITS OWN count - otherwise the backoff would never double and every outage would retry at the base
+      // delay forever. That is exactly what the supervisor fixture caught: `[10,10]` where it asserts `[10,20]`.
+      const escalationCount = modelOutage ? modelOutageRestarts : consecutiveFailures
       const delayMs =
         verdict.classification === 'budget' || outageEscalated
-          ? Math.max(options.budgetDelayMs, backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs))
-          : backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs)
+          ? Math.max(options.budgetDelayMs, backoffDelayMs(escalationCount, options.baseDelayMs, options.maxDelayMs))
+          : backoffDelayMs(escalationCount, options.baseDelayMs, options.maxDelayMs)
       restarts += 1
       emit({
         type: 'restart_scheduled',
