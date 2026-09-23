@@ -70,6 +70,95 @@ export interface System2Outcome {
   control?: 'none' | 'wait' | 'escalate'
 }
 
+/**
+ * A candidate the grounded layer REFUSED, as the code's own typed reachability
+ * fact (`CandidateReachability` projected to plain data).
+ *
+ * This is the fact a WHAT decision depends on: WHICH grounded action the body
+ * cannot take, the typed reason it was refused, and the capability keys that
+ * were missing. Before this existed the refusal stayed in the run log while the
+ * model was told only a queue description plus a truncated free-text detail, so
+ * a summon could not distinguish "the route is blocked" from "the plan is wrong".
+ *
+ * Facts only. Nothing here selects, ranks or recommends a replacement WHAT.
+ */
+export interface System2WithheldCandidate {
+  candidate: string
+  kind: string
+  reason: string
+  missing: string[]
+  /** true when the local layer suppressed the refusal as already-reported this stall */
+  suppressed: boolean
+}
+
+/**
+ * A tool family a WITHHELD capability needs but the body does not hold well
+ * enough. Derived only from capabilities that already name a tool requirement
+ * (`{kind:'tool'}` / `{kind:'safe_column', reason:'no_tool'}`); the payload
+ * never infers a tool need the reachability layer did not state. `heldTier`
+ * uses the same `bestToolTier` scale as the capability key (`-1` = absent).
+ */
+export interface System2ToolGap {
+  tool: string
+  requiredTier: number
+  heldTier: number
+  /** the withheld candidate whose capability needs the tool */
+  candidate: string
+}
+
+/** The body's own tool truth, typed by family instead of a bare rank number. */
+export interface System2ToolTruth {
+  /** best held tier per harvest family the code checked (`-1` = not held) */
+  held: { tool: string; tier: number }[]
+  /** non-empty only when a withheld capability named a tool requirement */
+  unmet: System2ToolGap[]
+}
+
+/** A grounded alternative the body DID present this tick (what it can still do). */
+export interface System2GroundedAlternative {
+  candidate: string
+  kind: string
+}
+
+/** Remembered-route counts from durable world memory. */
+export interface System2RouteFacts {
+  /** known-resource sites the body can still route to */
+  knownResources: number
+  /** remembered traversals that succeeded */
+  traversalsOk: number
+  /** remembered traversals the world refused */
+  traversalsBlocked: number
+}
+
+/**
+ * Typed blocker + grounded-alternative facts attached to a summon request.
+ *
+ * Every field is a fact the deterministic layers already own (`CAN`/`TRUE`
+ * authority in `buddy-driver/AGENTS.md` §2). The payload carries them so the
+ * WHAT decision is made on the state the code measured, instead of on a queue
+ * description plus a truncated free-text detail line. It does NOT tell the
+ * model what to do: `blockedBy`/`missing`/`withheld`/`tools.unmet` describe what
+ * is refused, `alternatives` describes what was offered.
+ */
+export interface System2BlockerFacts {
+  /**
+   * The active goal's own typed blocker (`no_productive_action`, a compiled
+   * precondition, or the goal's own route refusal). Omitted when this summon's
+   * tick did not establish a goal-level blocker - never guessed.
+   */
+  blockedBy?: string
+  /** goal-level missing capability tokens, already bounded by the controller */
+  missing: string[]
+  /** how many consecutive zero-productive cycles proved this stall, and its bound */
+  repeats?: { count: number; bound: number }
+  withheld: System2WithheldCandidate[]
+  tools: System2ToolTruth
+  alternatives: {
+    presented: System2GroundedAlternative[]
+    routes?: System2RouteFacts
+  }
+}
+
 export interface System2PlanRequest {
   reason: LlmSummonReason
   detail: string
@@ -80,6 +169,12 @@ export interface System2PlanRequest {
   recentOutcomes: System2Outcome[]
   /** Identity of the semantic state read by this asynchronous request. */
   requestContext?: System2RequestContext
+  /**
+   * Typed blockers + grounded alternatives measured in the summoning tick.
+   * Absent when the controller holds no typed blocker fact for this summon; the
+   * payload then carries no `blockers` field at all (never an invented one).
+   */
+  blockers?: System2BlockerFacts
 }
 
 /**
