@@ -32,7 +32,7 @@ import {
 } from './src/candidates.ts'
 import { authorityState } from './src/jev-authority.ts'
 import { EventLogger } from './src/jev.ts'
-import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease } from './src/scheduler.ts'
+import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -351,9 +351,12 @@ addCase('damage_taken is a preemptive trigger and interrupts an ATTACK lease at 
   const pass =
     PREEMPTIVE_TRIGGERS.has('damage_taken') &&
     PREEMPTIVE_TRIGGERS.has('hp_changed') &&
+    !PREEMPTIVE_TRIGGERS.has('survival_reground') &&
+    TRIGGER_PRIORITY.damage_taken > TRIGGER_PRIORITY.survival_reground &&
     shouldInterruptAttackLease('damage_taken', 5, 6) === true &&
-    shouldInterruptAttackLease('damage_taken', 15, 6) === false
-  return { pass, detail: 'damage_taken+h p_changed preemptive; critical attack lease interrupt honoured' }
+    shouldInterruptAttackLease('damage_taken', 15, 6) === false &&
+    shouldInterruptAttackLease('survival_reground', 1, 6) === false
+  return { pass, detail: 'real damage/hp events preempt; survival_reground is lower-priority, non-preemptive control flow' }
 })
 
 addCase('the scheduler forwards the Mineflayer attacker with the damage trigger', () => {

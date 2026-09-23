@@ -331,7 +331,7 @@ addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable S
   // while a wither skeleton was in contact at 0.57 m with health 4.36, even though
   // the fresh offer still held a reachable ATTACK on that same mob. Ending the tick
   // idle is what killed the body, so the ungrounded branch must also queue the fresh
-  // offer for the next decision (`damage_taken`) - code still does not choose
+  // offer for the next decision (`survival_reground`) - code still does not choose
   // fight-vs-flight (section 8), it only declines to stand still.
   const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const guard = text.indexOf('const reground = regroundVanishedSurvivalChoice(')
@@ -342,8 +342,9 @@ addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable S
   // DEATH 32) - a bare rejection or a bare requeue is not enough, and only a
   // missing control action may let the tick end without one.
   const ungrounded = text.indexOf('if (reground.candidateId === null) {', reject)
-  const requeue = text.indexOf("this.requestDecision('damage_taken'", ungrounded)
+  const requeue = text.indexOf("this.requestDecision('survival_reground'", ungrounded)
   const tagged = text.indexOf("source: 'survival_reground_failed'", ungrounded)
+  const syntheticDamageTrigger = /requestDecision\('damage_taken',\s*\{\s*source:\s*'survival_reground_failed'/u.test(text)
   const returnsOnlyWhenUngrounded = text.includes('if (reground.candidateId === null && controlId === null) return')
   const hasControlFallback = text.includes('survivalControlFallback({')
   return {
@@ -353,11 +354,12 @@ addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable S
       ungrounded > reject &&
       requeue > ungrounded &&
       tagged > ungrounded &&
+      !syntheticDamageTrigger &&
       returnsOnlyWhenUngrounded &&
       hasControlFallback,
     detail:
       `regroundCallAt=${guard} guardRejectAt=${reject} ungroundedBlockAt=${ungrounded} ` +
-      `requeuesDecisionAt=${requeue} tagged=${tagged > ungrounded} ` +
+      `requeuesDecisionAt=${requeue} tagged=${tagged > ungrounded} syntheticDamageTrigger=${syntheticDamageTrigger} ` +
       `returnsOnlyWhenUngrounded=${returnsOnlyWhenUngrounded} controlFallback=${hasControlFallback}`,
   }
 })

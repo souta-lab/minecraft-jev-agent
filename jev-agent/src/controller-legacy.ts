@@ -4332,7 +4332,7 @@ export class JevController {
           // choosing anything. A null threat means the situation is no longer a
           // survival one and the ordinary flow owns it.
           if (threatEvidence !== null) {
-            this.requestDecision('damage_taken', {
+            this.requestDecision('survival_reground', {
               source: 'survival_reground_failed',
               chosenId: vanishedChoice?.id ?? chosenId,
               reason: reground.reason,
