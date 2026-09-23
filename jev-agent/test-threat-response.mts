@@ -32,6 +32,7 @@ import {
 } from './src/candidates.ts'
 import { authorityState } from './src/jev-authority.ts'
 import { EventLogger } from './src/jev.ts'
+import { guardCandidate } from './src/policy.ts'
 import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
@@ -308,6 +309,44 @@ addCase('a skeleton shooting from 10m (beyond melee, inside bow range) gets a gr
     detail: `retreats=[${retreats.map((candidate) => candidate.id).join(',')}] attacks=[${attacks
       .map((candidate) => candidate.id)
       .join(',')}]`,
+  }
+})
+
+addCase('a completed stale goal does not reject a grounded RETREAT, while WAIT remains ALREADY_DONE', () => {
+  const unfinished = goalState()
+  const completed: GoalState = { ...unfinished, haveCount: 1, progress: 1, complete: true }
+  const state: WorldState = {
+    ...baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 1.33 })),
+    goal: completed,
+  }
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const retreat = candidates.find((candidate) => candidate.kind === 'RETREAT')
+  const wait = candidates.find((candidate) => candidate.kind === 'WAIT')
+  const context = {
+    phase: 'decision' as const,
+    candidateIds: new Set(candidates.map((candidate) => candidate.id)),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 10,
+    canComputePath: () => true,
+  }
+  const retreatResult = retreat === undefined ? null : guardCandidate(retreat, state, context)
+  const waitResult = wait === undefined ? null : guardCandidate(wait, state, context)
+  const retreatBlockedByPath =
+    retreat === undefined
+      ? null
+      : guardCandidate(retreat, state, { ...context, canComputePath: () => false })
+  const pass =
+    state.goal.complete &&
+    state.goalQueue.current?.status === 'active' &&
+    retreatResult?.ok === true &&
+    waitResult?.ok === false &&
+    waitResult.code === 'ALREADY_DONE' &&
+    retreatBlockedByPath?.ok === false &&
+    retreatBlockedByPath.code === 'NO_PATH'
+  return {
+    pass,
+    detail: `staleQueue=${state.goalQueue.current?.status ?? 'none'} retreat=${retreatResult?.ok ? 'accepted' : retreatResult?.code ?? 'missing'} wait=${waitResult?.ok ? 'accepted' : waitResult?.code ?? 'missing'} badPath=${retreatBlockedByPath?.ok ? 'accepted' : retreatBlockedByPath?.code ?? 'missing'}`,
   }
 })
 

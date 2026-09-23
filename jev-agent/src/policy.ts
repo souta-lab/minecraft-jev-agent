@@ -149,7 +149,10 @@ export function guardCandidate(
     return deny(candidate.id, 'STALE_COORDS', `candidate is ${age} ticks old (limit ${context.maxCandidateAgeTicks})`)
   }
 
-  if (state.goal.complete) {
+  // A completed work goal does not make an already-grounded safety escape
+  // meaningless. RETREAT still passes through guardMove below, so its current
+  // standability, hazard, void-floor, and path checks remain authoritative.
+  if (state.goal.complete && candidate.kind !== 'RETREAT') {
     return deny(candidate.id, 'ALREADY_DONE', `goal "${state.goal.description}" is already complete`)
   }
 
