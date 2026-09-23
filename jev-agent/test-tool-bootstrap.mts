@@ -213,7 +213,7 @@ function treeBlock(): BlockState {
     distance: 1.5,
     diggable: true,
     inReach: true,
-    hasStandableAdjacent: true,
+    hasAdjacentStandable: true,
     adjacentStandable: LOG_BLOCK,
     yield: 'oak_log',
     harvestTool: null,
