@@ -920,6 +920,14 @@ export function mercuryPayloadShape(state: unknown): System2PayloadShape {
     presentedTotal: alternatives?.presentedTotal ?? 0,
     unmetTools: blockers?.tools.unmet.length ?? 0,
     missing: blockers?.missing.length ?? 0,
+    acquisitionRoutes: (blockers?.withheld ?? []).reduce(
+      (total, entry) => total + (entry.acquisition ?? []).reduce((n, fact) => n + fact.routes.length, 0),
+      0,
+    ),
+    acquisitionRefused: (blockers?.withheld ?? []).reduce(
+      (total, entry) => total + (entry.acquisition ?? []).filter((fact) => fact.routes.length === 0).length,
+      0,
+    ),
     blockedBy: blockers?.blockedBy !== undefined,
     routes: alternatives?.routes !== undefined,
     chars: JSON.stringify({ blockers, alternatives }).length,
@@ -1045,7 +1053,23 @@ export interface MercuryStateSummary {
     blockedBy?: string
     missing: string[]
     repeats?: { count: number; bound: number }
-    withheld: Array<{ candidate: string; kind: string; reason: string; missing: string[]; suppressed: boolean }>
+    withheld: Array<{
+      candidate: string
+      kind: string
+      reason: string
+      missing: string[]
+      suppressed: boolean
+      /** grounded acquisition routes per missing fact, or its typed refusal */
+      acquisition?: Array<{
+        missing: string
+        routes: string[]
+        reason: string | null
+        item: string | null
+        count: number | null
+        held: number | null
+        tools: string
+      }>
+    }>
     withheldTotal: number
     tools: {
       held: Array<{ tool: string; tier: number }>

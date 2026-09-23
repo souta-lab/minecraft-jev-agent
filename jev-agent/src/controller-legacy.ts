@@ -3489,6 +3489,22 @@ export class JevController {
         reason: entry.result.reason,
         missing: entry.result.missingCapabilities.map(capabilityKey),
         suppressed: entry.suppressed,
+        // The GROUNDED ALTERNATIVE for each missing fact: the acquisition routes
+        // the same gate enumerated, or its typed refusal. Present only when the
+        // acquisition pass ran, so no route is ever invented here.
+        ...(entry.acquisition === undefined
+          ? {}
+          : {
+              acquisition: entry.acquisition.map((fact) => ({
+                missing: fact.missing,
+                routes: [...fact.routes],
+                reason: fact.reason,
+                item: fact.item,
+                count: fact.count,
+                held: fact.held,
+                tools: fact.tools,
+              })),
+            }),
       }))
       this.presentedCandidateFacts = grounded.candidates.map((candidate) => ({
         candidate: candidate.id,
@@ -4320,6 +4336,11 @@ export class JevController {
         reach: this.options.reach,
         maxCandidateAgeTicks: this.options.maxCandidateAgeTicks,
         canComputePath: (position) => this.canComputePath(position),
+        // The SAME per-tick station-approach fact the candidate layer gates on
+        // (`reachabilityGateOptions()` is memoised per tick), so a station the
+        // grounding proved reachable through its interaction stand can never be
+        // refused here by a probe of the station's own cell.
+        stationApproach: this.reachabilityGateOptions().stationApproach ?? null,
       })
 
       const record = makeDecisionRecord({
@@ -8266,10 +8287,11 @@ export class JevController {
       freshness: { measured: this.withheldFactsFingerprint, current: this.lastStateFingerprint },
     })
     if (built === null) {
+      const empty = { ...emptySystem2PayloadShape(), absent: ['blockers'] }
       this.logger.info(
         'system2',
-        formatSystem2PayloadLine(emptySystem2PayloadShape()),
-        { attached: false, absent: ['blockers'] },
+        formatSystem2PayloadLine(empty),
+        { attached: false, absent: empty.absent },
         this.tickCounter,
       )
       return null

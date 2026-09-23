@@ -5720,8 +5720,16 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       (block) =>
         block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
     )
-    const tool = known?.harvestTool ?? null
-    if (!hasTool(state, tool, tool === null ? null : known?.harvestTier ?? null)) continue
+    // The cell's harvest truth comes from EVERY sensor pool, not only the resource
+    // index: a terrain cell is sensed as a CUT carrying only its name, so `known`
+    // is undefined for exactly the cells a step cut is made of. Reading only
+    // `known` declared the cut hand-diggable (requiresTool=false) and the body
+    // discovered otherwise at execution time - the live
+    // `STEP:S:b23_80_8 ... outcome=CAPABILITY_LOST failure=dig_no_tool` pair.
+    const barrier = cellHarvestBarrier(state, cut.cut)
+    const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
+    const tier = barrier?.requiredTier ?? known?.harvestTier ?? null
+    if (!hasTool(state, tool, tool === null ? null : tier)) continue
     // The same 1-block step cut that just proved it changes nothing from this
     // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
     // dir/step route), so a different cut or a body that moved stays offerable.
@@ -5769,7 +5777,8 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       (block) =>
         block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
     )
-    const tool = known?.harvestTool ?? null
+    const barrier = cellHarvestBarrier(state, cut.cut)
+    const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
     return {
       id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
       kind: 'STEP' as const,
@@ -5780,7 +5789,7 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       itemName: null,
       requiresTool: tool !== null,
       toolName: tool,
-      toolTier: known?.harvestTier ?? null,
+      toolTier: barrier?.requiredTier ?? known?.harvestTier ?? null,
       inReach: distance(cut.cut, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
       meta: {
