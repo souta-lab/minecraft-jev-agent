@@ -591,10 +591,14 @@ export interface ExecutorOptions {
   hooks?: ExecutorHooks
 }
 
-/** The control nudge walks ONTO the drop, so it aims inside the pickup volume. */
-const PICKUP_APPROACH_RADIUS = 0.7
-/** Same-level drops are picked up within ~1.3 m, so a wider window is enough. */
-const PICKUP_SAME_LEVEL_RADIUS = 1.15
+/**
+ * Do not treat proximity as pickup: the server's collect packet and inventory
+ * delta are the truth. Keep the body inside the entity contact envelope before
+ * waiting for that packet. The previous 0.7/1.15 m stop radii left a live bot
+ * 0.46 m horizontally from a drop one block below its feet; repeated bounded
+ * PICKUP Skills then waited out their windows without ever intersecting it.
+ */
+const PICKUP_CONTACT_RADIUS = 0.3
 /** After this many stalled nudges, probe a perpendicular bearing around the drop. */
 const PICKUP_BEARING_RETRY_AFTER = 3
 /** Bounded per-item approach so an unreachable drop never wedges the run. */
@@ -12123,11 +12127,14 @@ export class Executor {
       const proximity = this.distanceToFeet(destination)
       const horizontal = this.horizontalToFeet(destination)
       const feetY = this.bot.entity.position.y
-      const sameLevel = Math.abs(destination.y - feetY) <= 1.0
-      // Automatic pickup fires within ~1.3 m horizontally, so a same-level drop
-      // needs a wider approach window than the tight 0.7 m used for a drop that
-      // sits a level below.
-      const approachRadius = sameLevel ? PICKUP_SAME_LEVEL_RADIUS : PICKUP_APPROACH_RADIUS
+      // Entity Y is its own position, not the player's support block. A full
+      // block of vertical separation is a lower/upper-level approach, so it
+      // must not inherit same-level face-veto and side-bearing behavior.
+      const sameLevel = Math.abs(destination.y - feetY) <= 0.5
+      // Proximity only ends locomotion once the body is close enough to contact
+      // the moving item entity. A wider level-based radius is not a postcondition:
+      // the server may still have sent no collect packet at that distance.
+      const approachRadius = PICKUP_CONTACT_RADIUS
       if (horizontal < bestHorizontal - 0.15) {
         bestHorizontal = horizontal
         stalledNudges = 0
