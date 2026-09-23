@@ -75,6 +75,7 @@ import { MIRRORED_MARKERS } from './src/controller.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, DescentOption, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 import { isStandable } from './src/state.ts'
+import { PILLAR_LANDING_Y_TOLERANCE } from './src/pillarApex.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 
@@ -132,7 +133,45 @@ interface FixtureBot {
   inventoryItems: Array<{ name: string; type: number; count: number }>
   /** the walk model reached a standable OPEN face of the portal */
   movedToFace: boolean
+  /** which placement entry point each pillar packet went through, in order */
+  placePaths: string[]
+  /** the live vanilla jump impulse, applied by the engine's own tick */
+  launchJump: () => void
+  /** stop this fixture's engine loop */
+  stop: () => void
 }
+
+// ---------------------------------------------------------------------------
+// THE LIVE ENGINE. A pillar step is an ENGINE act, not a locomotion-model act:
+// its placement is authorised by the body's OCCUPANCY across the actuator's
+// declared gap (`pillarPlaceCellCleared`), which reads the body's real
+// `entity.velocity` over the arc. The fixture must therefore integrate the same
+// arc prismarine-physics does, and emit the same `physicsTick` the apex window
+// counts - otherwise it is not modelling the act it claims to reproduce.
+//
+// The values are the engine's own expressions, pinned exactly as the pillar
+// lane's `test-pillar-place-attempt.mts` pins them (prismarine-physics
+// index.js:62-63 `gravity: 0.08` / `airdrag: Math.fround(1 - 0.02)`, applied at
+// index.js:601-603 as `vel.y -= gravity` then `vel.y *= airdrag`), plus the
+// vanilla jump impulse `Math.fround(0.42)`.
+//
+// WHY THIS EXISTS: the fake bot's `entity.velocity` used to be a frozen
+// `new Vec3(0, 0, 0)`, a "jump" was a discrete `position.y += 1` teleport, and
+// nothing ever emitted `physicsTick`. Under the merged pillar contract that
+// combination is unsatisfiable and unreadable at once: the teleport leaves
+// `velocity.y === 0`, so the occupancy predicate can never clear the cell, and
+// with no tick event the apex window ends on its deadline with
+// `apexTicks === 0` and reports the typed `physics_stalled` - i.e. "the physics
+// loop is idle", which is a LIVE-IMPOSSIBLE reading. The merged live run
+// measured the same act as
+// `PILLAR_UP_STEP ... apexRise=1.2522 samples=24 attemptFeetY=67.001
+// attemptCellTop=67 attemptClearance=0`, a real arc with a real velocity.
+// ---------------------------------------------------------------------------
+/** mineflayer's physics cadence: one integration per 50 ms frame (physics.js). */
+const PHYSICS_FRAME_MS = 50
+const GRAVITY_PER_TICK = 0.08
+const DRAG_PER_TICK = Math.fround(1 - 0.02)
+const JUMP_IMPULSE_VY = Math.fround(0.42)
 
 function makeBot(
   feet: Vec3Json,
@@ -144,6 +183,8 @@ function makeBot(
   const digs: string[] = []
   const pathCalls: Vec3Json[] = []
   const legs: string[] = []
+  /** which placement entry point each pillar packet went through, in order */
+  const placePaths: string[] = []
   const inventoryItems = hasPickaxe ? [{ name: 'diamond_pickaxe', type: registry.itemsByName.diamond_pickaxe.id as number, count: 1 }] : []
   // The blocks the route DECLARED (the crossing's `bridgeBlock`): the body really
   // carries them, so `equipPlacementItem` + `placeBlock` can consume them exactly
@@ -164,6 +205,16 @@ function makeBot(
     }
   }
   const listeners = new Map<string, Set<() => void>>()
+  /** The one placement rule both mineflayer entry points share. */
+  const placeAt = (reference: { position: Vec3 }, face: { x: number; y: number; z: number }): void => {
+    const target = {
+      x: Math.floor(reference.position.x) + face.x,
+      y: Math.floor(reference.position.y) + face.y,
+      z: Math.floor(reference.position.z) + face.z,
+    }
+    const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
+    grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+  }
   const bot = {
     registry,
     game: { dimension: OVERWORLD as string },
@@ -216,13 +267,34 @@ function makeBot(
     // clicked face points at, and it is the HELD item that goes in (mineflayer's
     // generic_place sends the held stack).
     placeBlock: async (reference: { position: Vec3 }, face: { x: number; y: number; z: number }) => {
-      const target = {
-        x: Math.floor(reference.position.x) + face.x,
-        y: Math.floor(reference.position.y) + face.y,
-        z: Math.floor(reference.position.z) + face.z,
-      }
-      const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
-      grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+      placeAt(reference, face)
+    },
+    // mineflayer's OWN internal placement entry. A LIVE bot has it, and the executor
+    // reads its presence to declare the SAME-TICK actuator
+    // (`executor.ts#pillarPlaceHandshakeTicks`); without it a pillar placement is
+    // judged against the pessimistic look-handshake budget, so a genuinely cleared
+    // apex is reported `apex_timeout`. The fixture models the live method and places
+    // exactly as `placeBlock` does.
+    // THE LIVE PLACEMENT ENTRY POINT. `Executor.placePillarBlock` prefers this
+    // mineflayer API with `{ forceLook: 'ignore', swingArm: 'right' }`, and
+    // `Executor.pillarPlaceHandshakeTicks()` reads the SAME fact to declare the
+    // gap: because the entry point skips the asynchronous look handshake, the
+    // packet is written inside the clearance sample's own tick, so the declared
+    // gap is `PILLAR_PLACE_SAME_TICK` and the contract collapses to the exact
+    // occupancy predicate the server applies.
+    //
+    // Omitting it made the fixture declare the pessimistic 4-tick look bound and
+    // take the `bot.placeBlock` fallback - a configuration the live bot is not
+    // in, and (per the contract's own comment, executor.ts:5146-5149) one in
+    // which a one-block pillar step is legitimately refused before any attempt.
+    // The merged live run went through THIS entry point.
+    _placeBlockWithOptions: async (
+      reference: { position: Vec3 },
+      face: { x: number; y: number; z: number },
+      options: { forceLook?: string } = {},
+    ) => {
+      placePaths.push(options.forceLook === 'ignore' ? 'forceLook:ignore' : `forceLook:${options.forceLook ?? 'handshake'}`)
+      await bot.placeBlock(reference, face)
     },
     pathfinder: {
       movements: null as unknown,
@@ -234,7 +306,74 @@ function makeBot(
       getPathTo: () => ({ status: 'noPath', path: [] }),
     },
   }
-  return { bot: bot as unknown as Bot, position, grid, digs, pathCalls, legs, inventoryItems, movedToFace: false }
+
+  // ---- the live physics loop ---------------------------------------------
+  // One prismarine-physics integration per 50 ms frame, emitting the same
+  // `physicsTick` mineflayer's `tickPhysics` emits after each `simulatePlayer`.
+  //
+  // The floor is the top of the highest solid block strictly BELOW the feet cell:
+  // that is the block the body stands ON, and it is what an engine may land on.
+  // Scanning the feet cell itself (as `correctStandingOnGround` does for the
+  // executor's grounding, where a slab or snow layer can live in that cell) would
+  // let this loop teleport a body UP a block whenever it moved into a solid
+  // column - a step-up no engine performs, and one the locomotion model owns.
+  const floorTopAt = (x: number, z: number, fromFeetY: number): number | null => {
+    const column = { x: Math.floor(x), z: Math.floor(z) }
+    for (let y = Math.floor(fromFeetY) - 1; y >= Math.floor(fromFeetY) - 4; y -= 1) {
+      const block = grid.get(`${column.x},${y},${column.z}`)
+      if (block === undefined || block.boundingBox !== 'block') continue
+      return y + 1
+    }
+    return null
+  }
+  const physicsStep = (): void => {
+    const velocity = bot.entity.velocity as unknown as { y: number }
+    const before = position.y
+    position.y += velocity.y
+    const floorTop = floorTopAt(position.x, position.z, before)
+    if (floorTop !== null && position.y < floorTop) {
+      // the engine's landing: the block top under the body is the floor it stands on
+      position.y = floorTop
+      velocity.y = 0
+      bot.entity.onGround = true
+    } else {
+      bot.entity.onGround = false
+    }
+    velocity.y = (velocity.y - GRAVITY_PER_TICK) * DRAG_PER_TICK
+    for (const listener of listeners.get('physicsTick') ?? []) listener()
+  }
+  // prismarine-physics applies the vanilla impulse on the first tick after the
+  // jump control is set (`entity.onGround && control.jump`), never on the client
+  // side of `setControlState`.
+  const launchJump = (): void => {
+    if (!bot.entity.onGround) return
+    ;(bot.entity.velocity as unknown as { y: number }).y = JUMP_IMPULSE_VY
+    bot.entity.onGround = false
+  }
+  const physicsTimer = setInterval(() => {
+    if (bot.physicsEnabled !== true) return
+    physicsStep()
+  }, PHYSICS_FRAME_MS)
+  // Never let the engine loop hold the process open.
+  ;(physicsTimer as unknown as { unref?: () => void }).unref?.()
+
+  return {
+    bot: bot as unknown as Bot,
+    position,
+    grid,
+    digs,
+    pathCalls,
+    legs,
+    inventoryItems,
+    movedToFace: false,
+    placePaths,
+    launchJump,
+    stop: () => {
+      clearInterval(physicsTimer)
+    },
+  }
+  // A clientbound position correction is delivered as `forcedMove` by a live bot.
+  // A LIVE body emits `physicsTick` (~20/s) and `forcedMove` (on clientbound position
 }
 
 function canWalkIntoGate(fixture: FixtureBot): boolean {
@@ -476,12 +615,18 @@ function installWalkModel(
       // onto the frame threshold and a PILLAR step's place-then-land cycle both use,
       // so the fixture models one physics rule instead of one special case per
       // caller. A wall stops it (`blocked`).
+      //
+      // The rise is the ENGINE's, not a teleport: `setControlState('jump')` arms
+      // the vanilla impulse and the 50 ms physics loop integrates the arc (see
+      // `makeBot`). A discrete `position.y += 1` left `velocity.y === 0`, which
+      // is not a state the live engine can be in mid-jump and which the merged
+      // pillar contract reads directly (`pillarPlaceCellCleared`).
       if (options.blocked !== true) {
         const cellName = (x: number, y: number, z: number): string | undefined =>
           fixture.grid.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`)?.boundingBox
         if (cellName(fixture.position.x, fixture.position.y + 1, fixture.position.z) !== 'block' &&
             cellName(fixture.position.x, fixture.position.y + 2, fixture.position.z) !== 'block') {
-          fixture.position.y += 1
+          fixture.launchJump()
         }
       }
       return
@@ -2792,12 +2937,34 @@ async function runMeasuredEntryRoute(
     const cross = route.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CROSS))
     const entered = route.messages.find((line) => line.startsWith('PORTAL_ENTERED')) ?? ''
     const walkIn = route.messages.find((line) => line.startsWith('PORTAL_WALK_IN ')) ?? ''
+    // The crossing's own STRICT REDUCTION - the bound every verified span takes.
+    //
+    // `d=` is a 3D distance to the interior, so its `from` carries the fraction of
+    // a block the body is still descending when the crossing chunk starts. That is
+    // not noise and not a fixture slack: the pillar's landing predicate is a
+    // DECLARED +/-`PILLAR_LANDING_Y_TOLERANCE` window (`pillarApex.ts:639`), so a
+    // climb that has already placed the block it stands on legitimately hands over
+    // a body still up to that tolerance above it (the merged live run measured
+    // `attemptFeetY=67.001`; this fixture measures 67.1768). The reduction is the
+    // assertion; the exact `from` fraction is the arc's phase, so it is bounded by
+    // the geometry and the tolerance rather than pinned to one sample.
+    const crossLine = cross[0] ?? ''
+    const crossSpan = /d=([0-9.]+)->([0-9.]+)/.exec(crossLine)
+    const crossFrom = crossSpan === null ? Number.NaN : Number(crossSpan[1])
+    const crossTo = crossSpan === null ? Number.NaN : Number(crossSpan[2])
+    // the interior is 0.5 cells in x and 2.5 in z from the stance; the leftover
+    // descent the climb may hand over is bounded by its landing tolerance.
+    const fromFloor = Math.hypot(0.5, 0, 2.5)
+    const fromCeiling = Math.hypot(0.5, PILLAR_LANDING_Y_TOLERANCE, 2.5)
     check(
       '(s-3) the measured trial crosses: the climb lifts the body, the crossing ADVANCES it onto the floor it places, the walk-in enters',
       climb.some((line) => line.includes('climb=pillar') && line.includes('outcome=climbed')) &&
-        // the crossing's own STRICT REDUCTION (the bound every verified span takes):
-        // the leg started 2.55m from the interior and ended 0.71m from it.
-        cross.some((line) => line.includes('outcome=advanced') && line.includes('d=2.55->0.71')) &&
+        crossLine.includes('outcome=advanced') &&
+        crossTo === 0.71 &&
+        crossFrom >= fromFloor - 0.01 &&
+        crossFrom <= fromCeiling + 0.02 &&
+        // the span really CLOSED the gap in one bounded chunk, not merely moved
+        crossTo <= crossFrom - 1.8 &&
         steps.length === 2 &&
         steps[0] === 'BRIDGE_STEP from=26,67,6 to=26,67,7 block=cobblestone' &&
         steps[1] === 'BRIDGE_STEP from=26,67,7 to=26,67,8 block=cobblestone' &&
@@ -2809,7 +2976,7 @@ async function runMeasuredEntryRoute(
         route.status === 'done' &&
         route.verified === true &&
         route.failure === null,
-      `actions=${route.actions} status=${route.status} failure=${route.failure ?? 'none'} verified=${route.verified} climb=${climb.length} climbLines=[${climb.slice(0, 4).join(' || ')}] steps=[${steps.join(' | ')}] floors=${String(runFixture.grid.get('26,66,7')?.name)}/${String(runFixture.grid.get('26,66,8')?.name)} cross=[${cross.join(' | ')}] walkIn=[${walkIn}] entered=[${entered}]`,
+      `actions=${route.actions} status=${route.status} failure=${route.failure ?? 'none'} verified=${route.verified} climb=${climb.length} climbLines=[${climb.slice(0, 4).join(' || ')}] steps=[${steps.join(' | ')}] floors=${String(runFixture.grid.get('26,66,7')?.name)}/${String(runFixture.grid.get('26,66,8')?.name)} cross=[${cross.join(' | ')}] walkIn=[${walkIn}] entered=[${entered}] body=${runFixture.position.x.toFixed(3)},${runFixture.position.y.toFixed(3)},${runFixture.position.z.toFixed(3)} placePaths=[${runFixture.placePaths.join(',')}] physics=engine(gravity=${0.08},airdrag=fround(0.98),physicsTick@50ms) placePath=${runFixture.placePaths[0] ?? 'none'}x${runFixture.placePaths.length} handshake=PILLAR_PLACE_SAME_TICK crossFrom=${crossFrom} crossTo=${crossTo} fromBand=[${fromFloor.toFixed(4)},${fromCeiling.toFixed(4)}]`,
     )
 
     // (s-4) The crossing is a BOUNDED chunk, never a claimed entry: the FIRST

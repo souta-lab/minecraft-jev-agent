@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -32,7 +32,7 @@ import { ARMOR_SLOTS } from './gearPlan.ts'
 import { assessSurvivalRace, bodySurvivalFacts, classifyDamageSource, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalDamageRace, formatSurvivalEscapeNone, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
-import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
+import { contactGapY, formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, meleeHorizontalBudget, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
 import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -1334,6 +1334,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'LOCAL_CLEAR',
   'ASCEND_STEP',
   'ASCENT_PROGRESS',
+  // The HORIZONTAL-ENVELOPE plane: whether a swing was legal because the body's own
+  // height spans the first part of an upward gap. Measured 2026-09-22: 19/19 live
+  // blaze hunts ended `HUNT_END ... target=blaze swings=0 hits=0`, and the closest
+  // geometry ever reached was `gap_y=4 horizontal=1.70` - a target the feet-to-feet
+  // measure called out of range and the body's own upper half is 2.93 m from. A
+  // swing grounded that way must be visible in the live plane, or it reads as an
+  // ordinary close-range attack and the correction cannot be audited.
+  'MELEE_VERTICAL_REACH',
   // The descent half of the vertical vocabulary: a refused local descent names
   // its missing precondition, and a durable descent chunk is run evidence
   // (a `descend_plan` refusal that was never named is what left the M3 body
@@ -1589,6 +1597,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SKILL_POLICY_BOUNDARY',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
+  // The acquisition half of the withhold: WHEN a withheld candidate's missing
+  // mechanical fact was answered by a grounded acquisition route, and - when none
+  // exists - the typed reason with the item and count the body would need. The
+  // measured freeze (main 38cbb22) was readable only as `CANDIDATE_WITHHELD
+  // ... missing=[headroom@27,62,15]` plus `CANDIDATE_STARVATION
+  // blockedBy=no_productive_action`: no line said whether the tool that clears the
+  // cell was craftable from what the body carried, or that nothing obtainable
+  // existed. These two markers are that fact, on both evidence planes.
+  'CANDIDATE_ACQUISITION',
+  'CANDIDATE_ACQUISITION_REFUSED',
   'CANDIDATE_STARVATION',
   'RESOURCE_SOURCE_NONE',
   // The M3 producer side of the same observability rule. A pearl need with no
@@ -11175,16 +11193,29 @@ export class JevController {
   }
 
   /**
-   * CAN fact for a plain ATTACK lease. The executor follows until it is within
-   * `MELEE_ATTACK_RANGE`; probing GoalBlock is stricter than the real action and
-   * can falsely reject a perfectly hittable target, so use the same near radius.
+   * CAN fact for a plain ATTACK lease. The executor follows until the body's own
+   * upper half is inside `MELEE_ATTACK_RANGE` of the target; probing GoalBlock is
+   * stricter than the real action and can falsely reject a perfectly hittable
+   * target, so use the same near radius.
+   *
+   * The goal is a 3-D BALL, so the radius must be the ball whose restriction to the
+   * body's own level is the horizontal melee budget for THIS vertical gap
+   * (`meleeHorizontalBudget`). Probing the bare reach against a target hovering
+   * above the body is unsatisfiable by construction - radius 2.9 around a target 4
+   * blocks up contains no cell the body can stand in - so the probe reported
+   * `no_path` for a fight the body could actually win. For a level target the goal
+   * is the same cell and the same radius as before, unchanged.
+   *
    * Timeout is UNKNOWN/non-executable for this short lease, exactly like the
    * ordinary reachability probe: only a complete path is a current CAN proof.
    */
   private canComputeMeleePath(position: Vec3Json): boolean {
     if (this.bot.pathfinder === undefined) return false
     try {
-      const goal = new goals.GoalNear(position.x, position.y, position.z, Math.max(1, MELEE_ATTACK_RANGE - 0.2))
+      const feet = this.bot.entity.position
+      const gapY = contactGapY(feet.y, position.y)
+      const radius = Math.max(1, Math.hypot(meleeHorizontalBudget(gapY), Math.abs(gapY)) - 0.2)
+      const goal = new goals.GoalNear(position.x, position.y, position.z, radius)
       const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
       return plan.status === 'success'
     } catch {
@@ -11414,6 +11445,21 @@ export class JevController {
       const block = entry.candidate.target
       if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
         this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
+      }
+      // THE ACQUISITION ROUTE for this withheld fact: which grounded candidate(s)
+      // would remove the missing precondition, or - when nothing obtainable exists
+      // - the typed reason naming the item and count. Emitted with the withhold so
+      // the two facts can never be read apart.
+      for (const acquisition of entry.acquisition ?? []) {
+        const acquisitionDetail = { ...detail, acquisition }
+        this.logger.warn(
+          'agent',
+          acquisition.routes.length > 0
+            ? formatCandidateAcquisition(entry.candidate.id, acquisition)
+            : formatCandidateAcquisitionRefused(entry.candidate.id, acquisition),
+          acquisitionDetail,
+          this.tickCounter,
+        )
       }
       // THE STANCE REFUSAL, mirrored with the full geometry: the entity, the melee
       // constant, the nearest stance the search examined and the fact that refused
