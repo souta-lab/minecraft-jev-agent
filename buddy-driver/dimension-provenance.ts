@@ -176,15 +176,16 @@ export function attachDimensionProvenance (bot: Bot): void {
   }
   bot.on('chunkColumnLoad', onLoad)
   bot.on('chunkColumnUnload', onUnload)
-  store.attachDropped = dropEveryLoadedColumn(bot, store)
+  store.attachDropped = dropEveryLoadedColumn(bot, store, canonicalDimensionId(bot.game?.dimension))
 }
 
 /**
  * Drop every column the world currently holds. Used once at attach, where
  * "already loaded" and "unprovable" are the same set.
  */
-function dropEveryLoadedColumn (bot: Bot, store: ProvenanceStore): number {
+function dropEveryLoadedColumn (bot: Bot, store: ProvenanceStore, liveDimension: string): number {
   const world = bot.world as unknown as { getColumns?: () => Array<{ chunkX?: unknown; chunkZ?: unknown }> } | undefined
+  const keys: string[] = []
   if (world !== undefined && world !== null && typeof world.getColumns === 'function') {
     let columns: Array<{ chunkX?: unknown; chunkZ?: unknown }> = []
     try {
@@ -196,13 +197,33 @@ function dropEveryLoadedColumn (bot: Bot, store: ProvenanceStore): number {
       const chunkX = Number(column.chunkX)
       const chunkZ = Number(column.chunkZ)
       if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ)) continue
-      // Tagged with the empty dimension so `unloadKnownColumns` visits it; the tag
-      // itself is never readable, because the store is cleared right after.
-      store.columnDimension.set(chunkKey(chunkX, chunkZ), '')
+      keys.push(chunkKey(chunkX, chunkZ))
     }
   }
+  if (keys.length === 0) return 0
+  // THE TAG MUST BE READABLE IF THE UNLOAD CANNOT HAPPEN.
+  //
+  // The original form tagged every loaded column with the EMPTY dimension - a tag no read
+  // can accept - and then cleared the map, so the column was left neither unloaded nor
+  // attributed. That is only sound when the world really drops the column and the server
+  // re-sends it (a `chunkColumnLoad` then re-tags it). Measured live on a FRESH WORLD: the
+  // installed client has no `unloadColumn`, so nothing was ever unloaded, nothing was ever
+  // re-sent, and every read of the body's own neighbourhood failed closed -
+  // `DIMENSION_READ_REFUSED cell=5,66,-8 provenance=unknown reason=unknown_column
+  // source=level-scan`, 10,102 of them in one run. The consequence was not a cautious body
+  // but a BLIND one: `isStandable` needs three cell reads, all refused, so no cell in the
+  // melee envelope was a legal stance, an adjacent attacker's ATTACK was withheld
+  // `no_attack_stand refusal=no_standable_cell`, the escape machinery reported
+  // `SURVIVAL_ESCAPE_NONE`, and the body sat at full health next to a threat it could
+  // neither hit nor leave.
+  //
+  // At ATTACH there is no transition to fail closed against - the columns were loaded by
+  // this bot in this world - so when the unload cannot happen they stay attributed to the
+  // LIVE dimension. A column that survives a TRANSITION is a different event and keeps the
+  // original treatment in `syncStore`: dropped, unloaded where possible, and unreadable.
+  for (const key of keys) store.columnDimension.set(key, liveDimension)
   const dropped = unloadKnownColumns(bot, store)
-  store.columnDimension.clear()
+  if (dropped > 0) store.columnDimension.clear()
   return dropped
 }
 
@@ -220,6 +241,19 @@ function syncStore (
   const next = canonicalDimensionId(dimension)
   if (next === store.liveDimension) {
     return { changed: false, from: store.liveDimension, to: next, columnsDropped: 0, columnsUnloaded: 0 }
+  }
+  // NAMING THE LIVE DIMENSION FOR THE FIRST TIME IS NOT A TRANSITION. The store starts
+  // with an empty live dimension, and until it is named the columns attached under it were
+  // tagged with the dimension the bot was ALREADY in (`attachDimensionProvenance` tags the
+  // loaded columns with `canonicalDimensionId(bot.game.dimension)` when it cannot unload
+  // them). Treating that first naming as a change ran the reset path over tags that were
+  // already correct - dropping and (where possible) unloading columns that had not gone
+  // anywhere, which on a client without `unloadColumn` left every one of them unattributed
+  // and every read refused. That is the blindness this branch is here to prevent, so the
+  // naming is recorded and nothing else changes.
+  if (store.liveDimension.length === 0) {
+    store.liveDimension = next
+    return { changed: false, from: '', to: next, columnsDropped: 0, columnsUnloaded: 0 }
   }
   const from = store.liveDimension
   store.liveDimension = next
