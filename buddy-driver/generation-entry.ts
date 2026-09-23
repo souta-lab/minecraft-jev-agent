@@ -1877,6 +1877,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
+    repeatedOutcomes: (ctx.worldMemory.repeatedOutcomes ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
     portalVerified: detectLivePortalVerification(ctx.bot),
     dimension: canonicalDimensionId(ctx.bot.game?.dimension),
@@ -2788,6 +2789,17 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     onLocalOscillationChange: (record) => {
       world.localOscillation = record === null ? null : { ...record, cells: [...record.cells] }
       ctx.proposeWorldMemory({ localOscillation: world.localOscillation })
+    },
+    // The durable cross-action bound is seeded from the host's class-A world
+    // memory and written straight back, exactly like the coordinate failure
+    // memory and the local-motion record above. It has to be durable: the
+    // measured `ASCEND:habitat:p3_68_22` runaway re-issued 161 attempts at one
+    // cell across a generation swap, and every generation-scoped counter was
+    // erased both by that swap and by the interleaved `progress=body` step.
+    repeatedOutcomeEntries: world.repeatedOutcomes,
+    onRepeatedOutcomeChange: (entries) => {
+      world.repeatedOutcomes = entries.map((entry) => ({ ...entry }))
+      ctx.proposeWorldMemory({ repeatedOutcomes: world.repeatedOutcomes })
     },
     knownResources: groundedWaypoints,
     // #prereq-dominated: the deterministic ladder owns the capability closure

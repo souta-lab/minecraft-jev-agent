@@ -78,7 +78,7 @@ import {
 } from './bridgeRoute.ts'
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
-import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
+import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint, reachabilityTargetSignature } from './reachability.ts'
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
@@ -1519,6 +1519,18 @@ export interface CandidateReachability {
   candidate: Candidate
   result: ReachabilityResult
   fingerprint: string
+  /**
+   * The TARGET's own grounding facts (`reachabilityTargetSignature`): the same
+   * digest without the body-relative vertical gap.
+   *
+   * The full fingerprint above is consumed only for candidates the gate
+   * WITHHELD (the unreachability proof memory). For a candidate that passed,
+   * this is the fact that says "no fact about this target's grounding changed",
+   * which the cross-action repeat bound needs: the live `ASCEND:habitat:p3_68_22`
+   * runaway alternated the full fingerprint's `gap` term 122x/115x as the body
+   * rose one block and fell back, so a counter keyed on it could never advance.
+   */
+  targetSignature: string
   withheld: boolean
   suppressed: boolean
 }
@@ -12245,6 +12257,13 @@ function reachabilityRecord(
     candidate: withAffordance(withEvidence, result),
     result,
     fingerprint: reachabilityFingerprint({
+      target,
+      result,
+      inventory: context.state.inventory.counts,
+      world,
+      placeableBlock: context.column.placeable !== null,
+    }),
+    targetSignature: reachabilityTargetSignature({
       target,
       result,
       inventory: context.state.inventory.counts,

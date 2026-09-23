@@ -238,6 +238,10 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
       normal.localOscillation === undefined || normal.localOscillation === null
         ? null
         : { ...normal.localOscillation, cells: [...normal.localOscillation.cells] },
+    // The durable cross-action repeat ledger must ride the generation seed too,
+    // or a reload would restart the very count this clone exists to keep (the
+    // #80 omission class this clone exists to prevent).
+    repeatedOutcomes: normal.repeatedOutcomes.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
   }
 }

@@ -417,6 +417,13 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
   if (delta.moveFailures !== undefined) {
     memory.moveFailures = delta.moveFailures.map((entry) => ({ ...entry }))
   }
+  // The cross-action repeat ledger is REPLACED, never merged: it is bounded
+  // current state (which action is and is not grounded at which cell), not an
+  // accumulating log, and its eviction order is the generation's own bounded
+  // policy. A deep copy keeps the durable store free of the generation's objects.
+  if (delta.repeatedOutcomes !== undefined) {
+    memory.repeatedOutcomes = delta.repeatedOutcomes.map((entry) => ({ ...entry }))
+  }
   // #oscillation-boundary: the record is REPLACED, never merged: it is one
   // episode's evidence, and `null` is the meaningful "the situation changed"
   // clear. A deep copy keeps the durable store free of the generation's objects.
