@@ -10,8 +10,11 @@ and flooded terrain, and an M3 PASS there is worthless as M3 evidence.
 
 This document is the **ordered procedure for one clean attempt** and the reviewer
 checklist for its evidence. It is a recipe, **not a claim of success**: the clean
-world has not been booted yet (no server start in this lane), so the gamerule
-mechanism and the fresh-world boot remain unverified until the operator runs it.
+current clean target is `m3clean-c1`, seed `4500764503965322344`; its operator
+descriptor is configured, but its world directory has not been prepared or
+booted. Earlier experimental worlds are separate and are not evidence for this
+attempt. The clean target's boot and gamerule state remain unverified until the
+exact-source resident is started and the console checks are captured.
 
 Components:
 
@@ -20,7 +23,7 @@ tools/fixtures/m3-clean-environment.json   the checked-in descriptor (a TEMPLATE
 tools/clean-run-environment.mjs            descriptor schema + clean validator + run-evidence checks
 tools/clean-run-prepare.mjs                offline preparation of the clean world (--dry-run / --apply)
 tools/clean-run-gate.mjs                   the clean verdict, combined with the canonical bundle
-tools/test-clean-run-harness.mjs           13 offline checks (assisted descriptors are refused)
+tools/test-clean-run-harness.mjs           15 offline checks (assisted descriptors are refused)
 runs/m3-clean-measure/                     read-only measurement that grounds the gamerule table
 ```
 
@@ -30,9 +33,12 @@ runs/m3-clean-measure/                     read-only measurement that grounds th
 
 `tools/fixtures/m3-clean-environment.json` is **one file with two jobs**: it is the
 `--environment` record `tools/m3-acceptance-bundle.mjs` feeds to the artifact
-(`readEnvironmentFile` reads `values` and `worldChanges`), and it is the clean-run
-premise `tools/clean-run-gate.mjs` validates. One file, so the premise and the
-environment record can never be two different documents.
+(`readEnvironmentFile` reads `values`, `configurationChanges`, and `worldChanges`),
+and it is the clean-run premise `tools/clean-run-gate.mjs` validates. One file, so
+the premise and the environment record can never be two different documents.
+The checked-in descriptor is a reusable template. This attempt's operator-owned
+descriptor records Easy difficulty as a configuration change with its reason and
+expected impact; it keeps `worldChanges` empty and grants no items or structures.
 
 | field | value (template) | why it is there |
 | --- | --- | --- |
@@ -52,14 +58,15 @@ environment record can never be two different documents.
 | `cleanRun.gamerulePolicy.assistIfChanged` | one justification per rule (59) | "list the assists explicitly and justify each": a reviewer reads the reason here, and the gate fails if any declared rule has none |
 | `cleanRun.gameruleScope` | `perDimension: true` + overworld/nether/end | gamerules are stored **per dimension** in this build (each `level.dat` owns its own `Data.game_rules`; the live world runs `keep_inventory=true` in all three while `advance_time=false` only in the overworld). The M3 route dies in the Nether, so a single-dimension rule set could leave `keep_inventory=true` exactly where it matters |
 | `cleanRun.gameruleMechanism` | console primary, datapack secondary, `datapackFormat` = `min/max [94,1]` | Mineflayer cannot read gamerules and camelCase ids are rejected by this build. The console listings (per dimension) after first boot are the authoritative evidence; the staged datapack asserts every rule in all three dimensions at every world load. Since 1.21.9 a bare `pack_format` no longer declares data-pack support, so the pack declares `min_format`/`max_format` |
-| `values.difficulty` / `mobSpawning` / `spawnAnimals` | `normal` / `true` / `true` | M3 needs hostile mobs: ender pearls and blaze rods. `peaceful` is refused. **`spawn-monsters` is a DEAD key in this build** (0 occurrences in `DedicatedServerProperties`): it is declared for the artifact's environment record and written for diff readability only. Hostile spawning is actually gated by the `spawn_mobs` / `spawn_monsters` **gamerules**, which the descriptor declares and the gate judges |
-| `values.levelName` | `m3clean-b1` | a NEW name: lowercase, not `world*`, not a protected name, and not the previous world |
-| `values.levelSeed` | `-4187923615481` | a NEW seed: not `2024`, not `0`, not empty |
+| `values.difficulty` / `mobSpawning` / `spawnAnimals` | `easy` / `true` / `true` for the current attempt | Easy is the lowest non-peaceful difficulty and is explicitly documented under `configurationChanges`; hostile mobs and drops remain enabled. `peaceful` is refused. **`spawn-monsters` is a DEAD key in this build** (0 occurrences in `DedicatedServerProperties`): it is declared for the artifact's environment record and written for diff readability only. Hostile spawning is actually gated by the `spawn_mobs` / `spawn_monsters` **gamerules**, which the descriptor declares and the gate judges |
+| `values.levelName` | `m3clean-c1` for the current attempt | a NEW name: lowercase, not `world*`, not a protected name, and not a previous world |
+| `values.levelSeed` | `4500764503965322344` for the current attempt | a NEW seed: not `2024`, not `0`, not empty |
 | `values.serverVersion` / `serverImplementation` / `serverId` | `1.21.11` / `leaf-1.21.11-178.jar` / `127.0.0.1:25565` | the world identity: `serverId` is half of the resident's `worldKey` |
 | `values.sourceSha` | `null` → the frozen 40-hex commit | the run's BOOT `source=` must equal it |
 | `values.server` | 15 non-gamerule requirements | `levelType=minecraft:normal` (flat/amplified is a tuned world), `gamemode=survival`, `forceGamemode=false`, `hardcore=false`, `bonusChest=false` (granted items), `allowCheats=false`, `generateStructures=true` (no fortresses/strongholds = M3 impossible), `spawnAnimals=true`, `botOperator=false`, `enableCommandBlock=false`, `pvp=true`, `allowNether=true`, `allowFlight=false`, `spawnProtection=0` (non-zero spawn protection forbids a non-op body from breaking blocks near spawn), `whiteList=false` |
 | `values.gamerules` | the 58 in-world rules at defaults | `keep_inventory=false`, `advance_time=true`, `spawn_mobs=true`, `mob_drops=true`, `block_drops=true`, `ender_pearls_vanish_on_death=true`, `immediate_respawn=false`, `fall_damage=true`, `natural_health_regeneration=true`, `lava_source_conversion=false`, `players_nether_portal_default_delay=80`, `random_tick_speed=3`, … (full list + justification in the file) |
 | `assists` | four empty arrays | granted items / summoned mobs / pre-built structures / operator world edits. Non-empty ⇒ NOT_CLEAN. Absent arrays ⇒ FAIL (absence is not a claim of none) |
+| `configurationChanges` | one reasoned difficulty change for the current attempt | schema v2 carries each `setting/from/to/reason/expectedImpact` into run evidence and binds it to the descriptor hash, runId, and BOOT SHA. These server settings are separate from world edits and do not grant resources or route knowledge |
 | `worldChanges` | `[]` | the artifact carries it verbatim; a clean world has no post-creation change |
 
 The validator (`tools/clean-run-environment.mjs`) is pure and offline. It never
@@ -233,7 +240,7 @@ so a clean premise can never be paired with a run judged against another file.
 
 ## 6. Honest residual (what this harness cannot decide)
 
-- **The clean world has not been booted.** The server must generate it from
+- **The current clean target has not been booted.** The server must generate it from
   `level-seed` on first start; that the world is genuinely new is proved by the
   absence of `level.dat` at prepare time (checked) plus the operator's console
   `seed` output, not by an automated boot.
