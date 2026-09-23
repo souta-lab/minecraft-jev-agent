@@ -1148,7 +1148,227 @@ const STATE_HAZARDS = new Set([
 ])
 
 /** Read-only host-side world truth for the external world-player-state tool. */
-function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: number, verticalRadius: number): Record<string, unknown> {
+const WORLD_CACHE_KEY_LIMIT = 128
+
+interface ChunkColumnCoordinate {
+  chunkX: number
+  chunkZ: number
+}
+
+function chunkColumnKey(column: ChunkColumnCoordinate): string {
+  return `${column.chunkX},${column.chunkZ}`
+}
+
+function worldCacheDiagnosticTargets(b: Bot, radius: number): ChunkColumnCoordinate[] {
+  const position = b.entity === undefined ? null : b.entity.position
+  const targets = new Map<string, ChunkColumnCoordinate>()
+  if (position !== null) {
+    const minBlockX = Math.floor(position.x) - radius
+    const maxBlockX = Math.floor(position.x) + radius
+    const minBlockZ = Math.floor(position.z) - radius
+    const maxBlockZ = Math.floor(position.z) + radius
+    for (let chunkX = Math.floor(minBlockX / 16); chunkX <= Math.floor(maxBlockX / 16); chunkX += 1) {
+      for (let chunkZ = Math.floor(minBlockZ / 16); chunkZ <= Math.floor(maxBlockZ / 16); chunkZ += 1) {
+        const column = { chunkX, chunkZ }
+        targets.set(chunkColumnKey(column), column)
+      }
+    }
+  }
+  const world = b.world as unknown as {
+    getColumns?: () => Array<{ chunkX?: unknown; chunkZ?: unknown }>
+  } | undefined
+  try {
+    const loaded = typeof world?.getColumns === 'function' ? world.getColumns() : []
+    const playerChunk = position === null
+      ? null
+      : { chunkX: Math.floor(position.x / 16), chunkZ: Math.floor(position.z / 16) }
+    const ordered = loaded.map((column) => ({ chunkX: Number(column.chunkX), chunkZ: Number(column.chunkZ) }))
+      .filter((column) => Number.isFinite(column.chunkX) && Number.isFinite(column.chunkZ))
+      .map((column) => ({ chunkX: Math.floor(column.chunkX), chunkZ: Math.floor(column.chunkZ) }))
+      .sort((left, right) => {
+        if (playerChunk === null) return 0
+        const leftDistance = (left.chunkX - playerChunk.chunkX) ** 2 + (left.chunkZ - playerChunk.chunkZ) ** 2
+        const rightDistance = (right.chunkX - playerChunk.chunkX) ** 2 + (right.chunkZ - playerChunk.chunkZ) ** 2
+        return leftDistance - rightDistance
+      })
+    for (const column of ordered.slice(0, WORLD_CACHE_KEY_LIMIT)) {
+      targets.set(chunkColumnKey(column), column)
+    }
+  } catch {
+    // The caller will expose column-list availability as unknown.
+  }
+  return [...targets.values()].slice(0, WORLD_CACHE_KEY_LIMIT)
+}
+
+function liveWorldCacheSnapshot(
+  b: Bot,
+  radius: number,
+  verticalRadius: number,
+  capturedAt: string,
+  provenance: ReturnType<NonNullable<ResidentGeneration['worldProbeProvenance']>> | null,
+): Record<string, unknown> {
+  const position = b.entity === undefined ? null : b.entity.position
+  const world = b.world as unknown as {
+    getColumns?: () => Array<{ chunkX?: unknown; chunkZ?: unknown }>
+  } | undefined
+  let rawColumns: Array<{ chunkX?: unknown; chunkZ?: unknown }> | null = null
+  try {
+    if (typeof world?.getColumns === 'function') rawColumns = world.getColumns()
+  } catch {
+    rawColumns = null
+  }
+
+  const columns = new Map<string, ChunkColumnCoordinate>()
+  for (const column of rawColumns ?? []) {
+    const chunkX = Number(column.chunkX)
+    const chunkZ = Number(column.chunkZ)
+    if (!Number.isFinite(chunkX) || !Number.isFinite(chunkZ)) continue
+    const normalized = { chunkX: Math.floor(chunkX), chunkZ: Math.floor(chunkZ) }
+    columns.set(chunkColumnKey(normalized), normalized)
+  }
+  const playerChunk = position === null
+    ? null
+    : { chunkX: Math.floor(position.x / 16), chunkZ: Math.floor(position.z / 16) }
+  const requestedColumns = new Map<string, ChunkColumnCoordinate>()
+  if (position !== null) {
+    const minBlockX = Math.floor(position.x) - radius
+    const maxBlockX = Math.floor(position.x) + radius
+    const minBlockZ = Math.floor(position.z) - radius
+    const maxBlockZ = Math.floor(position.z) + radius
+    for (let chunkX = Math.floor(minBlockX / 16); chunkX <= Math.floor(maxBlockX / 16); chunkX += 1) {
+      for (let chunkZ = Math.floor(minBlockZ / 16); chunkZ <= Math.floor(maxBlockZ / 16); chunkZ += 1) {
+        const column = { chunkX, chunkZ }
+        requestedColumns.set(chunkColumnKey(column), column)
+      }
+    }
+  }
+
+  const loadedForDiagnostic = [...columns.values()]
+    .sort((left, right) => {
+      if (playerChunk === null) return 0
+      const leftDistance = (left.chunkX - playerChunk.chunkX) ** 2 + (left.chunkZ - playerChunk.chunkZ) ** 2
+      const rightDistance = (right.chunkX - playerChunk.chunkX) ** 2 + (right.chunkZ - playerChunk.chunkZ) ** 2
+      return leftDistance - rightDistance
+    })
+    .slice(0, WORLD_CACHE_KEY_LIMIT)
+  const provenanceByKey = new Map<string, Record<string, unknown>>()
+  for (const column of provenance?.columns ?? []) {
+    provenanceByKey.set(chunkColumnKey(column), {
+      kind: column.kind,
+      dimension: column.dimension,
+      liveDimension: column.liveDimension,
+      reason: column.reason,
+    })
+  }
+  const requested = [...requestedColumns.values()].map((column) => ({
+    ...column,
+    loaded: columns.has(chunkColumnKey(column)),
+    provenance: provenanceByKey.get(chunkColumnKey(column)) ?? null,
+  }))
+  const loaded = loadedForDiagnostic.map((column) => ({
+    ...column,
+    provenance: provenanceByKey.get(chunkColumnKey(column)) ?? null,
+  }))
+  const requestedLoaded = requested.filter((column) => column.loaded).length
+  const requestedAttributable = requested.filter((column) =>
+    column.loaded && column.provenance?.kind === 'attributable').length
+  const requestedForeign = requested.filter((column) =>
+    column.loaded && column.provenance?.kind === 'foreign').length
+  const requestedUnknownProvenance = requested.filter((column) =>
+    column.loaded && (column.provenance === null || column.provenance.kind === 'unknown')).length
+  const binding = {
+    runId,
+    generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+    worldKey: currentWorldKey(),
+  }
+  const refusalByCause = {
+    columnNotLoaded: requested.length - requestedLoaded,
+    unknownProvenance: requestedUnknownProvenance,
+    foreignDimension: requestedForeign,
+    attributable: requestedAttributable,
+  }
+  const refusedColumnCount = requested.length - requestedAttributable
+  const unboundReason = provenance === null
+    ? 'generation-provenance-view-unavailable'
+    : binding.generationId === null
+      ? 'generation-identity-unavailable'
+      : null
+  return {
+    schemaVersion: 1,
+    kind: 'resident-world-cache-diagnostic',
+    readOnly: true,
+    capturedAt,
+    binding,
+    readability: {
+      status: unboundReason !== null
+        ? 'unbound'
+        : refusedColumnCount === 0 ? 'all-requested-columns-attributable'
+          : requestedAttributable > 0 ? 'partial' : 'no-requested-columns-attributable',
+      unboundReason,
+      requestedColumnCount: requested.length,
+      attributableColumnCount: requestedAttributable,
+      refusedColumnCount,
+      refusalByCause,
+      unknownIsNotAir: true,
+    },
+    playerChunk,
+    request: {
+      radius,
+      verticalRadius,
+      bounds: position === null ? null : {
+        min: { x: Math.floor(position.x) - radius, y: Math.floor(position.y) - verticalRadius, z: Math.floor(position.z) - radius },
+        max: { x: Math.floor(position.x) + radius, y: Math.floor(position.y) + verticalRadius, z: Math.floor(position.z) + radius },
+      },
+      columnCount: requested.length,
+      loadedCount: requestedLoaded,
+      unknownCount: requested.length - requestedLoaded,
+      columns: requested,
+    },
+    loadedColumns: {
+      count: rawColumns === null ? null : columns.size,
+      keys: loaded,
+      keysLimit: WORLD_CACHE_KEY_LIMIT,
+      keysTruncated: rawColumns !== null && columns.size > loaded.length,
+      available: rawColumns !== null,
+    },
+    dimensionProvenance: provenance === null ? {
+      status: 'unavailable',
+      liveDimension: null,
+      taggedColumns: null,
+      loadsTagged: null,
+      attachAdopted: null,
+      refusals: null,
+      unloads: null,
+      loadEvents: null,
+      unloadEvents: null,
+      lastColumnLoadAt: null,
+      lastColumnUnloadAt: null,
+      lastLocalColumnUnloadAt: null,
+    } : {
+      status: 'observed',
+      liveDimension: provenance.liveDimension.length > 0 ? provenance.liveDimension : null,
+      taggedColumns: provenance.taggedColumns,
+      loadsTagged: provenance.loadsTagged,
+      attachAdopted: provenance.attachAdopted,
+      refusals: provenance.refusals,
+      unloads: provenance.unloads,
+      loadEvents: provenance.loadEvents,
+      unloadEvents: provenance.unloadEvents,
+      lastColumnLoadAt: provenance.lastColumnLoadAt,
+      lastColumnUnloadAt: provenance.lastColumnUnloadAt,
+      lastLocalColumnUnloadAt: provenance.lastLocalColumnUnloadAt,
+    },
+  }
+}
+
+function liveStateSnapshot(
+  b: Bot,
+  status: GenerationStatus | null,
+  radius: number,
+  verticalRadius: number,
+  worldCache: Record<string, unknown>,
+  capturedAt = new Date().toISOString(),
+): Record<string, unknown> {
   const entity = b.entity
   const position = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
   const truth = status?.truth ?? {
@@ -1163,6 +1383,25 @@ function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: numb
   const counts: Record<string, number> = {}
   const hazards: Array<Record<string, unknown>> = []
   const portals: Array<Record<string, number>> = []
+  const entityCacheAvailable = b.entities !== null && typeof b.entities === 'object'
+  const cachedEntities = entityCacheAvailable ? Object.values(b.entities) : []
+  const requestedColumns = (worldCache.request as { columns?: Array<{
+    chunkX: number
+    chunkZ: number
+    loaded: boolean
+    provenance: { kind?: string } | null
+  }> } | undefined)?.columns ?? []
+  const readableColumns = new Map(requestedColumns.map((column) => [chunkColumnKey(column),
+    column.loaded === true && column.provenance?.kind === 'attributable',
+  ]))
+  const probeBlockAt = (x: number, y: number, z: number): string => {
+    const column = { chunkX: Math.floor(x / 16), chunkZ: Math.floor(z / 16) }
+    // This external probe is a truth surface too: do not report a cached block as
+    // current-dimension fact unless the generation's provenance view attributes
+    // the owning column. Missing diagnostics stay UNKNOWN, never air.
+    if (readableColumns.get(chunkColumnKey(column)) !== true) return 'unknown'
+    return blockNameAt(b, x, y, z)
+  }
   let unknown = 0
   if (center !== null) {
     for (let dx = -radius; dx <= radius; dx += 1) {
@@ -1171,7 +1410,7 @@ function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: numb
           const x = center.x + dx
           const y = center.y + dy
           const z = center.z + dz
-          const name = blockNameAt(b, x, y, z)
+          const name = probeBlockAt(x, y, z)
           if (name === 'unknown') {
             unknown += 1
             continue
@@ -1185,10 +1424,18 @@ function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: numb
   }
   const support = center === null
     ? { name: null, position: null }
-    : { name: blockNameAt(b, center.x, center.y - 1, center.z), position: { x: center.x, y: center.y - 1, z: center.z } }
+    : { name: probeBlockAt(center.x, center.y - 1, center.z), position: { x: center.x, y: center.y - 1, z: center.z } }
+  const sampleBounds = center === null ? null : {
+    min: { x: center.x - radius, y: center.y - verticalRadius, z: center.z - radius },
+    max: { x: center.x + radius, y: center.y + verticalRadius, z: center.z + radius },
+  }
+  const supportWithinSample = support.position !== null && sampleBounds !== null
+    && support.position.x >= sampleBounds.min.x && support.position.x <= sampleBounds.max.x
+    && support.position.y >= sampleBounds.min.y && support.position.y <= sampleBounds.max.y
+    && support.position.z >= sampleBounds.min.z && support.position.z <= sampleBounds.max.z
   const entities: Array<Record<string, unknown>> = []
   if (center !== null) {
-    for (const candidate of Object.values(b.entities)) {
+    for (const candidate of cachedEntities) {
       const candidatePosition = candidate.position
       if (candidatePosition === undefined) continue
       const distance = Math.hypot(candidatePosition.x - center.x, candidatePosition.y - center.y, candidatePosition.z - center.z)
@@ -1206,8 +1453,24 @@ function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: numb
     }
   }
   entities.sort((a, b2) => Number(a.distance ?? Infinity) - Number(b2.distance ?? Infinity))
+  const entityCache = {
+    source: 'mineflayer-bot.entities',
+    available: entityCacheAvailable,
+    completeness: 'client-side-loaded-entity-cache-only',
+    capturedAt,
+    runId,
+    generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+    worldKey: currentWorldKey(),
+    playerEntityId: entity?.id ?? null,
+    totalLoadedEntities: entityCacheAvailable ? cachedEntities.length : null,
+    nearbyRadius: radius,
+    nearbyEntityCount: entities.length,
+    nearbyNonSelfEntityCount: entity === undefined
+      ? entities.length
+      : entities.filter((candidate) => candidate.id !== entity.id).length,
+  }
   return {
-    capturedAt: new Date().toISOString(),
+    capturedAt,
     runId,
     generationHash,
     generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
@@ -1234,9 +1497,25 @@ function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: numb
         portalInteriorCount: portals.length,
         obsidianCount: counts.obsidian ?? 0,
         support,
+        supportEvidence: {
+          source: 'current-player-footing-probe',
+          status: supportWithinSample
+            ? support.name === 'unknown' ? 'refused-or-unavailable' : 'observed-within-sample'
+            : 'outside-requested-sample',
+          capturedAt,
+          playerPosition: position,
+          sampleBounds,
+          position: support.position,
+          coordinateIsCurrentPlayerFooting: supportWithinSample,
+          refusal: support.name === 'unknown'
+            ? (worldCache.readability as { unboundReason?: string | null }).unboundReason ?? 'column-unloaded-or-provenance-refused'
+            : null,
+        },
       },
       entities,
+      entityCache,
     },
+    worldCache,
   }
 }
 
@@ -2041,7 +2320,16 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     const radius = Number.isFinite(rawRadius) ? Math.max(1, Math.min(16, Math.floor(rawRadius))) : 8
     const verticalRadius = Number.isFinite(rawVerticalRadius) ? Math.max(1, Math.min(8, Math.floor(rawVerticalRadius))) : 4
     const status = generation === null ? null : generation.status()
-    controlReply(socket, request, true, liveStateSnapshot(bot, status, radius, verticalRadius))
+    const targets = worldCacheDiagnosticTargets(bot, radius)
+    let provenance: ReturnType<NonNullable<ResidentGeneration['worldProbeProvenance']>> | null = null
+    try {
+      if (generation?.worldProbeProvenance !== undefined) provenance = generation.worldProbeProvenance(targets)
+    } catch {
+      provenance = null
+    }
+    const capturedAt = new Date().toISOString()
+    const cache = liveWorldCacheSnapshot(bot, radius, verticalRadius, capturedAt, provenance)
+    controlReply(socket, request, true, liveStateSnapshot(bot, status, radius, verticalRadius, cache, capturedAt))
     return
   }
   if (cmd === 'report' || cmd === 'status') {

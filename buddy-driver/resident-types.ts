@@ -18,6 +18,7 @@ import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
 import type { LocalOscillationRecordJson } from '../jev-agent/src/localOscillation.ts'
+import type { DimensionProvenanceDiagnostic } from './dimension-provenance.ts'
 import type { RepeatedOutcomeEntryJson } from '../jev-agent/src/repeatedOutcomeEscalation.ts'
 import type { MilestonePredicateObservation } from './milestone-predicates.ts'
 import type { ModelAvailabilitySnapshot } from './model-recovery.ts'
@@ -1142,6 +1143,8 @@ export interface ResidentGeneration {
   stopReason(): string | null
   /** true after the controller stopped for any reason */
   hasStopped(): boolean
+  /** Read-only attribution of the requested chunk columns for the observer probe. */
+  worldProbeProvenance?(columns: readonly { chunkX: number; chunkZ: number }[]): DimensionProvenanceDiagnostic
 }
 
 /**
