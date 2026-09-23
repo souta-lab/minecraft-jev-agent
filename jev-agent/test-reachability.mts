@@ -1709,10 +1709,10 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
 }
 
 // (15) a bounded staircase step can leave the bot on a canopy with no safe
-// downward landing in the current sensor slice. A same-level DescentOption is
-// still a mechanically proven way to reposition and acquire the next descent
-// observation. It must stay inside the selected furnace prerequisite envelope,
-// rather than becoming an unrelated MOVE or an unsafe drop.
+// downward landing in the current sensor slice. A same-level DescentOption is a
+// recovery MOVE only when its target is also in the canonical usable-stand set
+// that the MOVE guard enforces. A merely `safe` probe can have collidable leaf
+// support, which is not a legal destination under that contract.
 {
   const feet: Vec3Json = { x: -15.5, y: 71, z: 3.47 }
   const furnace: KnownResource = { name: 'furnace', kind: 'station', dimension: 'minecraft:overworld', position: { x: 8, y: 65, z: 24 } }
@@ -1735,6 +1735,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     wallSolid: false,
     headSolid: false,
     floorSolid: true,
+    landingUsable: true,
     safe: true,
     reason: 'safe',
     digName: null,
@@ -1780,6 +1781,24 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     '(15c) no unsafe DROP/DOWN candidate is invented',
     !grounded.candidates.some((candidate) => candidate.kind === 'DESCEND' || candidate.meta.verticalRecovery === 'unsafe_drop'),
     grounded.candidates.map((candidate) => `${candidate.kind}:${candidate.id}`).join(','),
+  )
+
+  const canopyState = worldState({
+    position: feet,
+    inventory: inventory({ oak_log: 1, oak_planks: 3, stick: 2 }),
+    descent: [{ ...levelStep, landingUsable: false }],
+    signals: signals({ knownResources: [furnace] }),
+    goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 }),
+    goalQueue: queueWith(smelt),
+  })
+  const canopyGrounded = generateGroundedCandidates(canopyState, optionsWith(null))
+  const canopyRecovery = canopyGrounded.candidates.find(
+    (candidate) => candidate.kind === 'MOVE' && candidate.meta.verticalRecovery === 'safe_level_step',
+  )
+  check(
+    '(15d) a safe level probe without a canonical usable landing is not offered as MOVE',
+    canopyRecovery === undefined,
+    `landingUsable=${canopyState.descent?.[0]?.landingUsable} candidates=[${canopyGrounded.candidates.map((candidate) => candidate.id).join(',')}]`,
   )
 }
 

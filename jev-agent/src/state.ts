@@ -251,6 +251,13 @@ export interface BodySubmersion {
   state: SubmersionState
 }
 
+/** A bounded, observed two-cell-tall water/air position a submerged body can swim toward. */
+export interface SubmersionEscapeTarget {
+  position: Vec3Json
+  feetBlock: string
+  headBlock: string
+}
+
 /** Typed survival fact line; mirrored so a submerging body is never silent. */
 export const BODY_SUBMERGED = 'BODY_SUBMERGED'
 
@@ -612,6 +619,13 @@ export type DescentOption = {
   floorSolid: boolean
   /** solid block under the landing cell (`feet.y - 2`); false means the drop has no floor */
   supportSolid?: boolean
+  /**
+   * Canonical destination truth for the landing feet cell: both body cells are
+   * passable and the support is usable ground. `safe` covers clearance and
+   * support; it can still be true for a collidable leaf-supported landing.
+   * Optional on legacy/hand-built states; movement recovery requires `true`.
+   */
+  landingUsable?: boolean
   /** lava/water is inside the 3x3x3 neighbourhood of one of this step's cells */
   hazardNearby?: boolean
   /**
@@ -925,6 +939,14 @@ export type WorldState = {
    * the prompt).
    */
   envHazardCells?: EnvHazardCell[]
+  /**
+   * SAFE/CAN: locally observed water/air cells above a low-air body whose feet
+   * and head can both occupy the destination. These are swim waypoints, not
+   * claims that the cell is breathable or a semantic surface goal. Only
+   * populated for a submerged body below the low-air boundary; an empty array
+   * means the bounded local sample found no waypoint.
+   */
+  submersionEscapeTargets?: SubmersionEscapeTarget[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
@@ -1947,6 +1969,51 @@ function buildEnvHazardRing(bot: Bot, feet: Vec3Json): EnvHazardCell[] {
     }
   }
   return cells
+}
+
+const SUBMERSION_WAYPOINT_AIR = new Set(['air', 'cave_air', 'void_air'])
+const SUBMERSION_WAYPOINT_RISE = 3
+
+function isSubmersionWaypointBlock(block: ReturnType<Bot['blockAt']>): block is NonNullable<ReturnType<Bot['blockAt']>> {
+  return (
+    block !== null &&
+    block.boundingBox === 'empty' &&
+    (SUBMERSION_WAYPOINT_AIR.has(block.name) || PROBE_FLUIDS.has(block.name))
+  )
+}
+
+/**
+ * SAFE/CAN: bounded upward swim waypoints for a body that is already running
+ * out of breath. The stock pathfinder cannot route through water, so this scans
+ * only the body's own x/z column and records each successive destination while
+ * the two-cell body volume remains observed as water or air. The contiguous
+ * column is the route witness; no horizontal swim route is inferred.
+ */
+function buildSubmersionEscapeTargets(bot: Bot, self: SelfState): SubmersionEscapeTarget[] {
+  if (!bodyIsOutOfAir(self) || !bodyIsSubmerged(self)) return []
+  const base = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const at = (position: Vec3Json) =>
+    sensorBlockAt(bot, scratch.set(position.x, position.y, position.z), 'submersion-waypoint')
+  const targets: SubmersionEscapeTarget[] = []
+  for (let rise = 1; rise <= SUBMERSION_WAYPOINT_RISE; rise += 1) {
+    // Check every newly occupied row, not only the destination. This proves a
+    // contiguous vertical body-sized column and deliberately rules out all
+    // lateral movement that the specialized actuator does not perform.
+    const feet = at({ x: base.x, y: base.y + rise, z: base.z })
+    const head = at({ x: base.x, y: base.y + rise + 1, z: base.z })
+    if (!isSubmersionWaypointBlock(feet) || !isSubmersionWaypointBlock(head)) break
+    targets.push({
+      position: { x: base.x, y: base.y + rise, z: base.z },
+      feetBlock: feet.name,
+      headBlock: head.name,
+    })
+  }
+  return targets
 }
 
 /**
@@ -3350,10 +3417,6 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
   }
   const scratch = bot.entity.position.clone()
   const at = (x: number, y: number, z: number) => sensorBlockAt(bot, scratch.set(x, y, z), 'descent')
-  const solid = (x: number, y: number, z: number): boolean => {
-    const block = at(x, y, z)
-    return block !== null && block.boundingBox === 'block'
-  }
   const diggableSolid = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
     return block !== null && isBreakableSolidBlock(block)
@@ -3382,10 +3445,19 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     const step = { x: feet.x + dx, y: stepY, z: feet.z + dz }
     const floor = { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz }
     const support = { x: feet.x + dx, y: stepY - 1, z: feet.z + dz }
-    const wallSolid = solid(wall.x, wall.y, wall.z)
-    const headSolid = solid(head.x, head.y, head.z)
-    const floorSolid = solid(floor.x, floor.y, floor.z)
-    const supportSolid = solid(support.x, support.y, support.z)
+    const wallBlock = at(wall.x, wall.y, wall.z)
+    const headBlock = at(head.x, head.y, head.z)
+    const floorBlock = at(floor.x, floor.y, floor.z)
+    const supportBlock = at(support.x, support.y, support.z)
+    const wallSolid = wallBlock !== null && wallBlock.boundingBox === 'block'
+    const headSolid = headBlock !== null && headBlock.boundingBox === 'block'
+    const floorSolid = floorBlock !== null && floorBlock.boundingBox === 'block'
+    const supportSolid = supportBlock !== null && supportBlock.boundingBox === 'block'
+    const landingUsable = isUsableStandFromBlocks(
+      mode === 'level' ? wallBlock : floorBlock,
+      mode === 'level' ? headBlock : wallBlock,
+      supportBlock,
+    )
     // The bot's own column needs no front/head clearance: it digs the floor.
     const wallOk = ownColumn || clear(wall.x, wall.y, wall.z) || diggableSolid(wall.x, wall.y, wall.z)
     const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
@@ -3471,6 +3543,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       headSolid,
       floorSolid,
       supportSolid,
+      landingUsable,
       hazardNearby,
       ...(transfersDimension ? { transfersDimension: true } : {}),
       digs,
@@ -4894,6 +4967,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
 
 function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOptions): WorldState {
   const { self, envHazardCells } = buildSelfDetail(bot)
+  const submersionEscapeTargets = buildSubmersionEscapeTargets(bot, self)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   // #14-world-proof: falsify remembered resource cells the loaded world
@@ -4969,6 +5043,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // an inactive body's state keeps exactly the shape it had before this fact
     // existed, and the candidate layer reads "no cells" as "no hazard".
     ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
+    ...(bodyIsOutOfAir(self) && bodyIsSubmerged(self) ? { submersionEscapeTargets } : {}),
     // Both new terrain facts follow the same rule: a body with no portal and no
     // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {

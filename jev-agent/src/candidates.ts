@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, MAX_AIR, bodyIsOutOfAir, bodyIsSubmerged, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -4106,6 +4106,10 @@ function generateRawCandidates(
   // and the clearance filter are unchanged: CAN enumeration, never an override
   // and never a rank.
   const surfaceAscent = surfaceAscentCandidates(state, options)
+  // A low-air body must have an upward waypoint even when the active Option is
+  // unrelated to surface recovery. The sensor proves a contiguous vertical
+  // water/air column; Jev still chooses which waypoint.
+  const submersionAscent = submersionAscentCandidates(state, options)
   // The hungry body's vertical route to where passive animals can exist. Same
   // CAN enumeration: appended alongside every other candidate, never an override
   // and never a rank.
@@ -4622,6 +4626,7 @@ function generateRawCandidates(
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
   candidates.push(...surfaceAscent.candidates)
+  candidates.push(...submersionAscent)
   candidates.push(...foodHabitat.candidates)
 
   // A stranded body (no standable frontier beyond its own cell) has no walking
@@ -5804,6 +5809,45 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
     label: 'ascend toward the surface',
     extraMeta: { surfaceAscent: true, surfaceGoalId: current.id },
   })
+}
+
+/**
+ * Goal-independent swim waypoints for a submerged body below the low-air
+ * boundary. Unlike the scaffold-oriented `surface`/`habitat` routes, these
+ * MOVE candidates target only the sensor's contiguous vertical water/air column;
+ * they spend no blocks and do not assert that the waypoint itself is breathable.
+ */
+export function submersionAscentCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  if (!bodyIsOutOfAir(state.self) || !bodyIsSubmerged(state.self)) return []
+  const maxCandidates = options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES
+  const targets = [...(state.submersionEscapeTargets ?? [])]
+    .filter(
+      (entry) =>
+        entry.position.y > Math.floor(state.self.position.y) &&
+        entry.position.y - Math.floor(state.self.position.y) <= 3,
+    )
+    .sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
+    .slice(0, maxCandidates)
+  return targets.map((entry) => ({
+    id: `ASCEND:breath:${blockId('p', entry.position)}`,
+    kind: 'MOVE',
+    label: `swim upward to observed ${entry.feetBlock}/${entry.headBlock} space at (${entry.position.x},${entry.position.y},${entry.position.z})`,
+    targetName: null,
+    target: entry.position,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(entry.position, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: false,
+    meta: {
+      tick: state.tick,
+      submersionEscape: true,
+      submersionAir: state.self.air ?? MAX_AIR,
+      submersionFeetBlock: entry.feetBlock,
+      submersionHeadBlock: entry.headBlock,
+    },
+  }))
 }
 
 /**
@@ -12778,6 +12822,14 @@ function evaluateCandidate(
 ): CandidateReachability | null {
   const position = candidate.target
   if (position === null) return null
+  // A submersion waypoint is a vertical swim target through a sensor-verified
+  // water/air column. The pinned pathfinder cannot express swimming and will
+  // report no-path for valid routes; the specialized Guard and Executor re-read
+  // and realize this exact column, so do not apply the ordinary ground route
+  // solver or pathProbe here.
+  if (candidate.meta.submersionEscape === true) {
+    return null
+  }
   // A plain survival ATTACK is locomotion too: outside contact range the executor
   // must first GoalFollow the entity into melee. The live portal run repeatedly
   // advertised a skeleton 7.83m away through sealed terrain as the ONLY
@@ -13977,7 +14029,7 @@ function capabilityAcquisitionCandidates(
         // the next observation can then derive the next down plan.  Do not
         // invent a drop or an arbitrary exploration target here.
         const levelSteps = (state.descent ?? [])
-          .filter((step) => step.mode === 'level' && step.safe && step.floorSolid && (step.dx !== 0 || step.dz !== 0))
+          .filter((step) => hasUsableLevelLanding(step) && step.floorSolid && (step.dx !== 0 || step.dz !== 0))
           .map((step) => {
             const target = step.step
             const candidate = exploreMoveCandidate(
@@ -14336,6 +14388,11 @@ function moveAdvancesTowardTarget(
  * the stock path returned `noPath` and the next state starved). Facts only: no
  * item/coordinate/portal special-casing, no ordering, and Jev still chooses.
  */
+/** `safe` proves the step mechanics; MOVE also needs a passable body and usable support. */
+function hasUsableLevelLanding(step: DescentOption): boolean {
+  return step.mode === 'level' && step.safe && step.landingUsable === true
+}
+
 function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candidate[] {
   const feet = {
     x: Math.floor(state.self.position.x),
@@ -14344,7 +14401,7 @@ function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candi
   }
   const out: Candidate[] = []
   for (const step of state.descent ?? []) {
-    if (step.mode !== 'level' || !step.safe) continue
+    if (!hasUsableLevelLanding(step)) continue
     // A solid wall or head is still a DESCEND owned by `descendCandidates`.
     if (step.wallSolid || step.headSolid) continue
     if (step.dx === 0 && step.dz === 0) continue
