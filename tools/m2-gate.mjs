@@ -343,7 +343,11 @@ const DIMENSION_RE = /\bdimension=(minecraft:[a-z_]+|[a-z_]+)\b/
 const BODY_DIMENSION_MARKER_RE = /\b(?:DIMENSION_OBSERVED|DIMENSION_TRANSITION|SPAWN|DEATH)\b/
 
 /** Read-only current-run binding used only to bound live policy evidence. */
-export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, timeoutMs = 1500) {
+// Resident report can take longer than a short CLI probe while generations are
+// recovering from model outages. A timeout here makes a live run look unbounded
+// and turns valid model-authority evidence into UNKNOWN, so match the observer's
+// 5-second control-socket budget.
+export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, timeoutMs = 5000) {
   if (!existsSync(sockPath)) return null
   return await new Promise((resolve) => {
     let settled = false

@@ -315,9 +315,10 @@ function probeHostility(entity) {
   return null
 }
 
-/** Join the explicit on-demand resident state probe with the report that brackets it. */
-export function buildWorldProbe({ report, state, radius = 6, verticalRadius = 3, observedAt = new Date().toISOString() }) {
+/** Join the explicit on-demand resident state probe with reports that bracket it. */
+export function buildWorldProbe({ report, reportAfter = null, state, radius = 6, verticalRadius = 3, observedAt = new Date().toISOString() }) {
   const reportData = report?.ok === true ? report.data : null
+  const reportAfterData = reportAfter?.ok === true ? reportAfter.data : null
   const stateData = state?.ok === true ? state.data : null
   if (stateData === null) {
     return redactSecrets({
@@ -341,9 +342,30 @@ export function buildWorldProbe({ report, state, radius = 6, verticalRadius = 3,
     && reportData.runId === stateData.runId
   const reportGeneration = reportData?.generationId ?? null
   const probeGeneration = stateData.generationId ?? null
+  const afterWorld = normalizeWorldKey(reportAfterData?.worldKey)
+  const reportsBracketSameGeneration = reportData?.runId != null
+    && reportData.runId === reportAfterData?.runId
+    && reportGeneration !== null
+    && reportGeneration === (reportAfterData?.generationId ?? null)
+    && reportWorld !== null
+    && afterWorld !== null
+    && reportWorld.serverId === afterWorld.serverId
+    && reportWorld.dimension === afterWorld.dimension
+    && reportWorld.worldEpoch === afterWorld.worldEpoch
+  const bracketContainsProbe = reportsBracketSameGeneration
+    && reportData.runId === stateData.runId
+    && probeWorld !== null
+    && reportWorld.serverId === probeWorld.serverId
+    && reportWorld.dimension === probeWorld.dimension
+    && reportWorld.worldEpoch === probeWorld.worldEpoch
   const sameGeneration = reportGeneration !== null && probeGeneration !== null
     ? reportGeneration === probeGeneration
-    : null
+    : bracketContainsProbe && probeGeneration === null
+      ? true
+      : null
+  const generationJoin = reportGeneration !== null && probeGeneration !== null
+    ? sameGeneration ? 'direct' : 'mismatch'
+    : sameGeneration === true ? 'stable-report-bracket' : 'unknown'
   const area = stateData.area ?? null
   const blocks = area?.blocks ?? null
   const entities = Array.isArray(area?.entities) ? area.entities : []
@@ -400,6 +422,8 @@ export function buildWorldProbe({ report, state, radius = 6, verticalRadius = 3,
       probeWorld,
       reportGenerationId: reportGeneration,
       probeGenerationId: probeGeneration,
+      generationJoin,
+      generationJoinConfidence: generationJoin === 'direct' ? 'direct' : generationJoin === 'stable-report-bracket' ? 'inferred' : 'unknown',
     },
     world: {
       ...pickFields(stateData.world, ['dimension', 'version', 'serverBrand', 'levelType', 'timeOfDay', 'day', 'raining', 'thunderState']),
@@ -1146,11 +1170,10 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   const worldProbe = async ({ radius = 6, verticalRadius = 3 } = {}) => {
     const horizontal = Number.isFinite(radius) ? Math.max(1, Math.min(8, Math.floor(radius))) : 6
     const vertical = Number.isFinite(verticalRadius) ? Math.max(1, Math.min(4, Math.floor(verticalRadius))) : 3
-    const [report, state] = await Promise.all([
-      callControlSocket(socketPath, 'report'),
-      callControlSocket(socketPath, 'state', DEFAULT_CONTROL_TIMEOUT_MS, { radius: horizontal, verticalRadius: vertical }),
-    ])
-    return buildWorldProbe({ report, state, radius: horizontal, verticalRadius: vertical })
+    const report = await callControlSocket(socketPath, 'report')
+    const state = await callControlSocket(socketPath, 'state', DEFAULT_CONTROL_TIMEOUT_MS, { radius: horizontal, verticalRadius: vertical })
+    const reportAfter = await callControlSocket(socketPath, 'report')
+    return buildWorldProbe({ report, reportAfter, state, radius: horizontal, verticalRadius: vertical })
   }
 
   let snapshotInFlight = null

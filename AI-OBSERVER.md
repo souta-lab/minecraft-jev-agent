@@ -20,10 +20,14 @@ For a fresh local scan around the resident, request
 on-demand read-only probe samples player truth, nearby blocks, hazards, portals
 and entities; its maximum scan is bounded to radius 8 and vertical radius 4.
 It does not run on the observer's regular 2.5-second update loop. The response
-brackets the sample with resident reports and reports run/world/generation
-alignment. A mismatch makes the result `partial`. Local blocks and entities do
-not prove a village, fortress, or stronghold, so structure detection stays
-unknown until a structure or POI sensor is added.
+brackets the state sample with resident reports and reports run/world/generation
+alignment. It joins generation identity directly when the state response has an
+ID, or by an explicitly inferred stable report bracket if both reports and the
+sample keep the same run/world while the state response omits that ID. A
+mismatched direct ID, or an unstable bracket when the state has no ID, leaves
+generation alignment unknown/partial.
+Local blocks and entities do not prove a village, fortress, or stronghold, so
+structure detection stays unknown until a structure or POI sensor is added.
 
 ## Decision evidence
 
