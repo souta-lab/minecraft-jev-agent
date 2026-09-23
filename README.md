@@ -154,6 +154,7 @@ keep it small so causality and rollback remain clear.
 | `M2-HEURISTIC-AUDIT.md` | Heuristic/truth authority audit and migration evidence. |
 | `PRIOR-WORK.md` | Prior-work survey and architecture implications. |
 | `RESIDENT-MODE.md` | Resident persistence/hot-reload/state-ownership specification. |
+| `AI-OBSERVER.md` | Read-only observer API, Jev decision evidence and run-binding limits. |
 
 ## Notes
 

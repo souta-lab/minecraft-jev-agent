@@ -25,6 +25,11 @@ const DEFAULT_CONTROL_TIMEOUT_MS = 5000
 
 const TRACE_EVENTS = new Set([
   'JEV_HEADS',
+  'JEV_STATE_PROJECTION',
+  'JEV_CANDIDATE_SET',
+  'SKILL_END',
+  'SKILL_OUTCOME_PACKET',
+  'CAUSAL',
   'MODEL_UNAVAILABLE',
   'MODEL_AVAILABILITY',
   'MODEL_RETRY_STARTED',
@@ -60,6 +65,12 @@ const TRACE_EVENTS = new Set([
 ])
 
 const SECRET_KEY = /(api.?key|authorization|cookie|password|secret|token)/i
+const PROBE_HOSTILES = new Set([
+  'blaze', 'cave_spider', 'creeper', 'drowned', 'elder_guardian', 'ender_dragon', 'endermite', 'evoker',
+  'ghast', 'guardian', 'hoglin', 'husk', 'magma_cube', 'phantom', 'piglin_brute', 'pillager', 'ravager',
+  'shulker', 'silverfish', 'skeleton', 'slime', 'spider', 'stray', 'vex', 'vindicator', 'warden', 'witch',
+  'wither', 'wither_skeleton', 'zoglin', 'zombie', 'zombie_villager',
+])
 
 function redactSecrets(value) {
   if (Array.isArray(value)) return value.map(redactSecrets)
@@ -232,6 +243,18 @@ function readRunEvent(logPath, eventName, runId) {
   return readLogEvent(logPath, eventName, runId)
 }
 
+/** Read only a bounded JSONL tail; Jev call logs are append-only and can be large. */
+export function readJsonlTail(logPath, maxBytes = 1024 * 1024) {
+  return readTextTail(logPath, maxBytes).flatMap((line) => {
+    try {
+      const value = JSON.parse(line)
+      return value !== null && typeof value === 'object' && !Array.isArray(value) ? [value] : []
+    } catch {
+      return []
+    }
+  })
+}
+
 export function latestEvent(events, names) {
   const accepted = names instanceof Set ? names : new Set(names)
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -241,7 +264,7 @@ export function latestEvent(events, names) {
   return null
 }
 
-export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = DEFAULT_CONTROL_TIMEOUT_MS) {
+export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = DEFAULT_CONTROL_TIMEOUT_MS, args = {}) {
   return await new Promise((resolvePromise) => {
     if (!existsSync(socketPath)) return resolvePromise(null)
     const socket = net.createConnection(socketPath)
@@ -266,8 +289,144 @@ export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = 
       }
     })
     socket.on('connect', () => {
-      socket.write(`${JSON.stringify({ id: Date.now() % 1_000_000, cmd, args: {} })}\n`)
+      socket.write(`${JSON.stringify({ id: Date.now() % 1_000_000, cmd, args })}\n`)
     })
+  })
+}
+
+function normalizeWorldKey(key) {
+  if (key === null || typeof key !== 'object') return null
+  return {
+    serverId: key.serverId ?? null,
+    dimension: normalizeDimension(key.dimension),
+    worldEpoch: key.worldEpoch ?? null,
+  }
+}
+
+function probeHostility(entity) {
+  const name = typeof entity?.name === 'string' ? entity.name.toLowerCase() : ''
+  const kind = typeof entity?.kind === 'string' ? entity.kind : ''
+  if (PROBE_HOSTILES.has(name) || /hostile/i.test(kind)) return true
+  if (entity?.type === 'player' || entity?.type === 'other' || /passive|animal|item/i.test(kind)) return false
+  return null
+}
+
+/** Join the explicit on-demand resident state probe with the report that brackets it. */
+export function buildWorldProbe({ report, state, radius = 6, verticalRadius = 3, observedAt = new Date().toISOString() }) {
+  const reportData = report?.ok === true ? report.data : null
+  const stateData = state?.ok === true ? state.data : null
+  if (stateData === null) {
+    return redactSecrets({
+      schemaVersion: 1,
+      kind: 'ai-buddy-world-probe',
+      observedAt,
+      readOnly: true,
+      status: 'unavailable',
+      error: state?.error ?? state?.data?.error ?? 'resident-state-probe-unavailable',
+      unknown: ['live_world_probe_unavailable'],
+    })
+  }
+
+  const reportWorld = normalizeWorldKey(reportData?.worldKey)
+  const probeWorld = normalizeWorldKey(stateData.worldKey)
+  const sameWorld = reportWorld !== null && probeWorld !== null
+    && reportWorld.serverId === probeWorld.serverId
+    && reportWorld.dimension === probeWorld.dimension
+    && reportWorld.worldEpoch === probeWorld.worldEpoch
+  const sameRun = reportData?.runId !== null && reportData?.runId !== undefined
+    && reportData.runId === stateData.runId
+  const reportGeneration = reportData?.generationId ?? null
+  const probeGeneration = stateData.generationId ?? null
+  const sameGeneration = reportGeneration !== null && probeGeneration !== null
+    ? reportGeneration === probeGeneration
+    : null
+  const area = stateData.area ?? null
+  const blocks = area?.blocks ?? null
+  const entities = Array.isArray(area?.entities) ? area.entities : []
+  const scannedBlocks = (2 * radius + 1) ** 2 * (2 * verticalRadius + 1)
+  const unknownBlocks = typeof blocks?.unknown === 'number' ? blocks.unknown : null
+  const unknown = []
+  if (!sameRun) unknown.push('report_state_run_mismatch_or_unknown')
+  if (!sameWorld) unknown.push('report_state_world_mismatch_or_unknown')
+  if (sameGeneration === false) unknown.push('report_state_generation_mismatch')
+  else if (sameGeneration === null) unknown.push('report_state_generation_alignment_unknown')
+  if (unknownBlocks === null) unknown.push('scanned_block_coverage_unknown')
+  else if (unknownBlocks > 0) unknown.push('some_scanned_blocks_unloaded_or_unknown')
+
+  const projectedEntities = entities.slice(0, 64).map((entity) => ({
+    id: entity.id ?? null,
+    name: entity.name ?? null,
+    type: entity.type ?? null,
+    kind: entity.kind ?? null,
+    position: entity.position ?? null,
+    distance: entity.distance ?? null,
+    health: entity.health ?? null,
+    hostile: probeHostility(entity),
+  }))
+  const hostiles = projectedEntities.filter((entity) => entity.hostile === true)
+  const unclassifiedEntities = projectedEntities.filter((entity) => entity.hostile === null).length
+  if (unclassifiedEntities > 0) unknown.push('some_nearby_entities_unclassified')
+
+  const reportStatus = reportData?.status ?? null
+  const blockCounts = blocks?.counts !== null && typeof blocks?.counts === 'object'
+    ? Object.fromEntries(Object.entries(blocks.counts).slice(0, 80))
+    : null
+  const milestonePredicates = sameRun && sameWorld && sameGeneration === true
+    ? milestonePredicateProjection(reportStatus?.milestonePredicates)
+    : { status: 'not_joined', entries: [] }
+  if (milestonePredicates.status !== 'observed') unknown.push('milestone_predicates_not_joined_to_probe')
+  const identityAligned = sameWorld && sameRun
+  const dataComplete = unknownBlocks === 0 && unclassifiedEntities === 0 && sameGeneration === true
+  return redactSecrets({
+    schemaVersion: 1,
+    kind: 'ai-buddy-world-probe',
+    observedAt,
+    capturedAt: stateData.capturedAt ?? null,
+    readOnly: true,
+    status: identityAligned && dataComplete ? 'known' : 'partial',
+    identityAligned,
+    dataComplete,
+    binding: {
+      reportRunId: reportData?.runId ?? null,
+      probeRunId: stateData.runId ?? null,
+      sameRun,
+      sameWorld,
+      sameGeneration,
+      reportWorld,
+      probeWorld,
+      reportGenerationId: reportGeneration,
+      probeGenerationId: probeGeneration,
+    },
+    world: {
+      ...pickFields(stateData.world, ['dimension', 'version', 'serverBrand', 'levelType', 'timeOfDay', 'day', 'raining', 'thunderState']),
+      worldKey: probeWorld,
+    },
+    player: {
+      ...pickFields(stateData.truth, ['position', 'health', 'food', 'dimension', 'onGround', 'inventory']),
+      stateSource: 'resident-live-state-probe',
+    },
+    area: {
+      radius,
+      verticalRadius,
+      scannedBlocks,
+      knownBlocks: unknownBlocks === null ? null : Math.max(0, scannedBlocks - unknownBlocks),
+      unknownBlocks,
+      coverage: unknownBlocks === null ? null : Math.max(0, scannedBlocks - unknownBlocks) / scannedBlocks,
+      blockCounts,
+      hazards: Array.isArray(blocks?.hazards) ? blocks.hazards.slice(0, 32) : null,
+      portals: Array.isArray(blocks?.portals) ? blocks.portals.slice(0, 32) : null,
+      support: blocks?.support ?? null,
+      entities: projectedEntities,
+      hostiles,
+      hostileStatus: Array.isArray(area?.entities) ? 'observed' : 'not_recorded',
+      unclassifiedEntityCount: unclassifiedEntities,
+    },
+    structures: {
+      status: 'not_identifiable_from_local_block_entity_probe',
+      evidence: 'nearby block counts and entities only; no structure locator or POI scan was performed',
+    },
+    milestones: milestonePredicates,
+    unknown,
   })
 }
 
@@ -304,12 +463,28 @@ function queueProjection(status) {
   }
 }
 
+function milestonePredicateProjection(predicates) {
+  if (!Array.isArray(predicates)) return { status: 'not_recorded', entries: [] }
+  return {
+    status: 'observed',
+    entries: predicates.slice(0, 16).map((predicate) => ({
+      id: predicate?.id ?? null,
+      milestone: predicate?.milestone ?? null,
+      satisfied: predicate?.satisfied ?? null,
+      observedAt: predicate?.observedAt ?? null,
+      source: predicate?.source ?? null,
+      evidence: pickFields(predicate?.evidence, ['rungId', 'rungPredicate', 'dimension', 'portalVerified', 'items']),
+    })),
+    truncated: predicates.length > 16,
+  }
+}
+
 function traceProjection(entry) {
   if (entry === null) return null
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
-export function buildObserverSnapshot({ report, events, mission, runBoot = null, runBuild = null, now = Date.now() }) {
+export function buildObserverSnapshot({ report, events, mission, runBoot = null, runBuild = null, jevCalls = [], now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
   const bootFromTail = latestEvent(events, ['BOOT'])
@@ -343,9 +518,26 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
     'PLAN_REJECTED',
   ]))
   const latestActionEvent = latestEvent(relevantEvents, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
+  const latestDeath = latestEvent(relevantEvents, ['DEATH'])
   const runtimeFailure = latestEvent(relevantEvents, ['FATAL', 'ERROR'])
   const queue = queueProjection(status)
   const current = queue.current
+  const worldKey = data?.worldKey ?? status?.worldKey ?? boot?.detail?.worldKey ?? null
+  const generationId = data?.generationId
+    ?? latestEvent(
+      relevantEvents.filter((entry) => entry.detail?.generationId !== undefined && entry.detail.generationId !== null),
+      TRACE_EVENTS,
+    )?.detail?.generationId
+    ?? null
+  const decisionEvidence = projectJevDecisionEvidence({
+    jevCalls,
+    choiceEvent: jev,
+    events: relevantEvents,
+    runId,
+    runStartedAt,
+    worldKey,
+    generationId,
+  })
 
   return {
     schemaVersion: 1,
@@ -356,14 +548,9 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
       frozen: data?.frozen ?? null,
       modelAvailability: data?.modelAvailability ?? null,
       runId,
-      generationId: data?.generationId
-        ?? latestEvent(
-          relevantEvents.filter((entry) => entry.detail?.generationId !== undefined && entry.detail.generationId !== null),
-          TRACE_EVENTS,
-        )?.detail?.generationId
-        ?? null,
+      generationId,
       generationHash: data?.generationHash ?? build?.detail?.hash ?? null,
-      worldKey: data?.worldKey ?? status?.worldKey ?? boot?.detail?.worldKey ?? null,
+      worldKey,
       sourceCommit: build?.detail?.sourceSha ?? boot?.detail?.source ?? null,
     },
     mission,
@@ -372,6 +559,10 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
       frontierIndex: status?.rungIndex ?? null,
       queue,
     },
+    milestones: milestonePredicateProjection(status?.milestonePredicates),
+    worldMemory: pickFields(data?.worldMemory, [
+      'craftingTables', 'furnaces', 'discoveredOres', 'traversalFailures', 'knownTraversals', 'hazards', 'hardHazards',
+    ]),
     option: current === null ? null : {
       intent: current.semanticOptionIntent ?? current.description,
       templateId: current.semanticOptionTemplateId,
@@ -396,10 +587,12 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
     },
     decisionTrace: {
       jev: traceProjection(jev),
+      jevEvidence: decisionEvidence,
       system2Input: traceProjection(system2Input),
       system2Decision: traceProjection(system2Decision),
       mercury: traceProjection(mercury),
       action: traceProjection(latestActionEvent),
+      death: traceProjection(latestDeath),
     },
     runtimeFailure: traceProjection(runtimeFailure),
     events: relevantEvents.slice(-30).reverse().map(traceProjection),
@@ -409,6 +602,316 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
 function parseTimestamp(value) {
   const timestamp = Date.parse(value ?? '')
   return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function parsePosition(value) {
+  if (value !== null && typeof value === 'object') return pickFields(value, ['x', 'y', 'z'])
+  if (typeof value !== 'string') return null
+  const match = /^\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\s*$/.exec(value)
+  if (match === null) return null
+  return { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) }
+}
+
+function normalizeDimension(value) {
+  if (typeof value !== 'string' || value.length === 0) return null
+  return value.includes(':') ? value : `minecraft:${value}`
+}
+
+function pickFields(value, keys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  return Object.fromEntries(keys
+    .filter((key) => value[key] !== undefined)
+    .map((key) => [key, redactSecrets(value[key])]))
+}
+
+function boundedEntries(value, limit, project) {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, limit).map(project)
+}
+
+function projectAnswer(answer) {
+  if (answer === null || typeof answer !== 'object') return null
+  const probabilities = answer.probabilities !== null && typeof answer.probabilities === 'object'
+    ? Object.entries(answer.probabilities)
+      .filter(([, probability]) => typeof probability === 'number' && Number.isFinite(probability))
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 12)
+      .map(([id, probability]) => ({ id, probability }))
+    : []
+  return {
+    value: answer.value ?? null,
+    probability: answer.probability ?? null,
+    confidence: answer.confidence ?? null,
+    probabilities,
+    note: answer.note ?? null,
+  }
+}
+
+const CANDIDATE_META_FIELDS = [
+  'distance', 'weapon', 'weaponKind', 'weaponDamage', 'targetHostile', 'hostile', 'attackable',
+  'targetLineOfSight', 'targetKind', 'reachability', 'separation', 'separationGain', 'outsideReach',
+  'threatName', 'threatDistance', 'threatStandoff', 'threatOccluded', 'targetEntityId', 'threatEntityId',
+  'safe', 'diggable', 'toolReason', 'missingCapability', 'capabilityAcquisition', 'digRouteReason',
+  'digRouteKind', 'digRouteTarget', 'digRouteFrom', 'digRouteTo', 'hasAdjacentStandable',
+]
+
+function projectCandidate(candidate) {
+  if (candidate === null || typeof candidate !== 'object') return null
+  const meta = pickFields(candidate.meta, CANDIDATE_META_FIELDS)
+  return {
+    id: candidate.id ?? null,
+    kind: candidate.kind ?? null,
+    label: candidate.label ?? null,
+    target: candidate.target ?? null,
+    targetName: candidate.targetName ?? null,
+    meta: meta !== null && Object.keys(meta).length > 0 ? meta : null,
+  }
+}
+
+function projectInventory(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const entries = Object.entries(value).slice(0, 48)
+  return {
+    counts: Object.fromEntries(entries.map(([name, count]) => [name, count])),
+    truncated: Object.keys(value).length > entries.length,
+  }
+}
+
+function projectKnownResource(resource) {
+  return pickFields(resource, ['name', 'kind', 'position', 'dimension', 'worldEpoch'])
+}
+
+function projectNearbyBlock(block) {
+  return pickFields(block, [
+    'kind', 'name', 'position', 'distance', 'diggable', 'inReach', 'hasAdjacentStandable',
+    'adjacentStandable', 'yield', 'harvestTool', 'harvestTier',
+  ])
+}
+
+function projectNearbyEntity(entity) {
+  return pickFields(entity, [
+    'id', 'name', 'kind', 'position', 'distance', 'hostile', 'lineOfSight', 'heldItem', 'health', 'attackedSelf',
+  ])
+}
+
+function projectDecisionState(state) {
+  const world = state?.semantic?.world ?? state?.world ?? null
+  const signals = state?.signals ?? {}
+  const goal = state?.goal ?? null
+  const currentOption = state?.currentOption ?? null
+  const candidates = Array.isArray(state?.candidates) ? state.candidates : []
+  const knownStructures = signals.knownStructures ?? signals.structures ?? state?.knownStructures ?? null
+  const structuresObserved = knownStructures !== null
+  const structures = Array.isArray(knownStructures)
+    ? knownStructures.slice(0, 12).map((structure) => typeof structure === 'string' ? structure : pickFields(structure, [
+      'id', 'name', 'kind', 'type', 'position', 'dimension', 'worldEpoch', 'distance', 'verified', 'source', 'lastSeenAt',
+    ]))
+    : knownStructures !== null && typeof knownStructures === 'object'
+      ? Object.entries(knownStructures).slice(0, 12).map(([name, value]) => ({
+        name,
+        value: value !== null && typeof value === 'object'
+          ? pickFields(value, ['id', 'kind', 'type', 'position', 'dimension', 'worldEpoch', 'distance', 'verified', 'source', 'lastSeenAt'])
+          : value,
+      }))
+      : knownStructures === null ? null : [knownStructures]
+  return {
+    world: pickFields(world, ['dimension', 'worldEpoch', 'generationId', 'alive', 'leaseHeld']),
+    self: pickFields(state?.self, ['position', 'dimension', 'health', 'food', 'lastDamage', 'heldItem', 'equipment']),
+    inventory: projectInventory(state?.inventory),
+    goal: pickFields(goal, ['id', 'description', 'targetItem', 'requiredCount', 'startCount', 'haveCount', 'progress', 'complete']),
+    goalQueue: pickFields(state?.goalQueue, ['depth', 'empty']),
+    currentOption: pickFields(currentOption, ['instanceId', 'templateId', 'semanticInstanceId', 'semanticTemplateId', 'semanticIntent', 'kind', 'target', 'preconditions', 'success', 'allowedSkills', 'abortThreshold', 'runtime']),
+    progress: {
+      have: goal?.haveCount ?? null,
+      required: goal?.requiredCount ?? null,
+      fraction: typeof goal?.haveCount === 'number' && typeof goal?.requiredCount === 'number' && goal.requiredCount > 0
+        ? Math.min(1, goal.haveCount / goal.requiredCount)
+        : null,
+      complete: goal?.complete ?? null,
+      strategicNonProgress: pickFields(signals.strategicNonProgress, [
+        'optionInstanceId', 'windowSize', 'distinctStates', 'bodyProgressDecisions', 'semanticProgressDecisions',
+        'horizon', 'maxDistinctStates', 'exhausted', 'exhaustedRepeats',
+      ]),
+      oscillationsDetected: signals.oscillationsDetected ?? null,
+      consecutiveFailures: signals.consecutiveFailures ?? null,
+      lastFailureCode: signals.lastFailureCode ?? null,
+      lastPathStatus: signals.lastPathStatus ?? null,
+      escalationRecommended: signals.escalationRecommended ?? null,
+    },
+    threat: {
+      status: signals.threat !== null && typeof signals.threat === 'object' ? 'observed' : 'not_recorded',
+      active: signals.threat?.active ?? null,
+      inDanger: signals.threat?.inDanger ?? null,
+      inContact: signals.threat?.inContact ?? null,
+      hostileCount: signals.threat?.hostileCount ?? null,
+      primary: pickFields(signals.threat, [
+        'threatId', 'threatName', 'threatDistance', 'threatHeldItem', 'threatEngaged', 'threatLineOfSight',
+        'entryReason', 'exitReason', 'activeMs', 'clearForMs',
+      ]),
+      nearbyHostilesStatus: Array.isArray(state?.nearestEntities) ? 'observed' : 'not_recorded',
+      nearbyEntityCount: Array.isArray(state?.nearestEntities) ? state.nearestEntities.length : null,
+      nearbyHostiles: boundedEntries(
+        Array.isArray(state?.nearestEntities) ? state.nearestEntities.filter((entity) => entity?.hostile === true) : [],
+        12,
+        projectNearbyEntity,
+      ),
+    },
+    resources: {
+      knownStatus: Array.isArray(signals.knownResources) ? 'observed' : 'not_recorded',
+      knownCount: Array.isArray(signals.knownResources) ? signals.knownResources.length : null,
+      known: boundedEntries(signals.knownResources, 16, projectKnownResource),
+      nearbyBlocksStatus: Array.isArray(state?.nearestBlocks) ? 'observed' : 'not_recorded',
+      nearbyBlocks: boundedEntries(state?.nearestBlocks, 12, projectNearbyBlock),
+    },
+    structures: {
+      status: structuresObserved ? 'observed' : 'not_recorded',
+      count: Array.isArray(knownStructures) || (knownStructures !== null && typeof knownStructures === 'object')
+        ? Object.keys(knownStructures).length
+        : structuresObserved ? 1 : null,
+      known: structures,
+      truncated: structuresObserved && typeof knownStructures === 'object' && Object.keys(knownStructures).length > 12,
+      source: structuresObserved ? 'jev-state' : null,
+    },
+    recentOutcomes: boundedEntries(state?.recentOutcomes?.slice?.(-6), 6, (outcome) => pickFields(outcome, [
+      'actionId', 'candidateId', 'verified', 'status', 'progressDelta', 'failureCode', 'generationId', 'chainId',
+    ])),
+    candidates,
+  }
+}
+
+function outcomeEvidenceForChoice(choiceEvent, events) {
+  if (choiceEvent === null) return null
+  const detail = choiceEvent.detail ?? {}
+  const choiceTime = parseTimestamp(choiceEvent.ts)
+  const actionId = detail.action ?? detail.actionId ?? null
+  const directChainId = typeof detail.chainId === 'string' ? detail.chainId : null
+  const later = (entry) => {
+    const timestamp = parseTimestamp(entry.ts)
+    return choiceTime !== null && timestamp !== null && timestamp >= choiceTime && timestamp - choiceTime <= 60_000
+  }
+  const matchesAction = (entry) => entry.detail?.actionId === actionId
+    && (detail.generationId === undefined || entry.detail?.generationId === detail.generationId)
+    && later(entry)
+  const causalCandidates = events.filter((entry) => entry.event === 'CAUSAL'
+    && (directChainId !== null
+      ? entry.detail?.chainId === directChainId
+      : entry.detail?.actionId === actionId && entry.detail?.candidateId === actionId)
+    && (detail.generationId === undefined || entry.detail?.generationId === detail.generationId)
+    && later(entry))
+    .sort((left, right) => (parseTimestamp(left.ts) ?? 0) - (parseTimestamp(right.ts) ?? 0))
+  const causal = causalCandidates[0] ?? null
+  const causalTime = parseTimestamp(causal?.ts)
+  const nearestLifecycle = (name) => [...events].reverse().find((entry) => entry.event === name
+    && matchesAction(entry)
+    && (causalTime === null || Math.abs((parseTimestamp(entry.ts) ?? 0) - causalTime) <= 5_000))
+  const skillEnd = nearestLifecycle('SKILL_END')
+  const outcomePacket = nearestLifecycle('SKILL_OUTCOME_PACKET')
+  return {
+    chainId: directChainId,
+    actionId,
+    generationId: detail.generationId ?? null,
+    joinMethod: directChainId === null ? 'action+generation+nearest-timestamp' : 'chainId',
+    joinConfidence: causal !== null && directChainId !== null ? 'exact' : causal !== null || skillEnd != null || outcomePacket != null ? 'inferred' : 'unknown',
+    causal: traceProjection(causal ?? null),
+    skillEnd: traceProjection(skillEnd ?? null),
+    skillOutcome: traceProjection(outcomePacket ?? null),
+    status: causal !== null ? 'causal_observed' : skillEnd != null || outcomePacket != null ? 'skill_observed' : 'pending_or_not_observed',
+  }
+}
+
+/** Join one successful Jev evaluation to a resident choice without inventing rationale. */
+export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, events = [], runId = null, runStartedAt = NaN, worldKey = null, generationId = null }) {
+  if (choiceEvent === null || !['JEV_HEADS', 'TOOL_CHOICE'].includes(choiceEvent?.event)) return null
+  const choiceAt = parseTimestamp(choiceEvent.ts)
+  const startedAt = Number.isFinite(runStartedAt) ? runStartedAt : null
+  const expectedDimension = normalizeDimension(worldKey?.dimension)
+  const expectedEpoch = worldKey?.worldEpoch ?? null
+  const candidates = jevCalls.filter((call) => {
+    if (call?.record !== 'jev-call' || call.error !== null && call.error !== undefined) return false
+    if (call.response?.answers?.action?.value === undefined) return false
+    const at = parseTimestamp(call.ts)
+    if (at === null || startedAt === null || at < startedAt) return false
+    const state = call.state ?? {}
+    const callWorld = state.semantic?.world ?? state.world ?? {}
+    if (expectedEpoch !== null && callWorld.worldEpoch !== expectedEpoch) return false
+    if (expectedDimension !== null && normalizeDimension(callWorld.dimension ?? state.self?.dimension) !== expectedDimension) return false
+    if (generationId !== null && callWorld.generationId !== null && callWorld.generationId !== undefined && callWorld.generationId !== generationId) return false
+    return true
+  })
+  const selectedAction = choiceEvent.event === 'TOOL_CHOICE'
+    ? choiceEvent.detail?.actionId ?? null
+    : choiceEvent.detail?.action ?? null
+  const matching = candidates
+    .filter((call) => call.response?.answers?.action?.value === selectedAction)
+    .map((call) => ({ call, at: parseTimestamp(call.ts) }))
+    .filter(({ at }) => choiceAt !== null && at !== null && Math.abs(at - choiceAt) <= 15_000)
+    .sort((left, right) => Math.abs((left.at ?? 0) - (choiceAt ?? 0)) - Math.abs((right.at ?? 0) - (choiceAt ?? 0)))
+  const match = matching[0] ?? null
+  const fallback = candidates
+    .map((call) => ({ call, at: parseTimestamp(call.ts) }))
+    .sort((left, right) => (right.at ?? 0) - (left.at ?? 0))[0] ?? null
+  const selected = match ?? fallback
+  if (selected === null) return {
+    available: false,
+    binding: { runId, directRunId: false, confidence: 'unknown', reason: 'no_successful_same-run Jev call matched the active world epoch and dimension in the bounded log tail' },
+    outcome: outcomeEvidenceForChoice(choiceEvent, events),
+  }
+
+  const call = selected.call
+  const state = projectDecisionState(call.state ?? {})
+  const answer = projectAnswer(call.response?.answers?.action)
+  const selectedCandidate = state.candidates.find((candidate) => candidate?.id === answer?.value) ?? null
+  const candidateById = new Map(state.candidates.filter((candidate) => typeof candidate?.id === 'string').map((candidate) => [candidate.id, candidate]))
+  const alternatives = answer?.probabilities.map(({ id, probability }) => ({
+    id,
+    probability,
+    selected: id === answer.value,
+    candidate: projectCandidate(candidateById.get(id) ?? null),
+  })) ?? []
+  const callAt = parseTimestamp(call.ts)
+  const deltaMs = choiceAt === null || callAt === null ? null : Math.abs(choiceAt - callAt)
+  const actionMatches = match !== null
+  const confidence = actionMatches && deltaMs !== null && deltaMs <= 2_000 ? 'strong' : 'partial'
+  return redactSecrets({
+    available: true,
+    observedAt: call.ts,
+    callId: call.callId ?? null,
+    policy: call.policy ?? null,
+    model: call.model ?? null,
+    stage: call.stage ?? null,
+    latencyMs: call.latencyMs ?? null,
+    error: call.error ?? null,
+    binding: {
+      runId,
+      directRunId: false,
+      choiceEvent: choiceEvent.event,
+      method: 'boot-window+world-epoch+dimension+selected-action+timestamp',
+      confidence,
+      choiceAction: selectedAction,
+      callAction: answer?.value ?? null,
+      sameAction: actionMatches,
+      timestampDeltaMs: deltaMs,
+      worldEpoch: state.world?.worldEpoch ?? null,
+      dimension: state.world?.dimension ?? null,
+      generationIdObservedInCall: state.world?.generationId ?? null,
+    },
+    answer: {
+      action: answer,
+      abandonOption: projectAnswer(call.response?.answers?.abandon_option),
+      otherHeads: Object.fromEntries(Object.entries(call.response?.answers ?? {})
+        .filter(([name]) => !['action', 'abandon_option'].includes(name))
+        .map(([name, value]) => [name, projectAnswer(value)])),
+    },
+    selectedCandidate: projectCandidate(selectedCandidate),
+    alternatives,
+    state: {
+      ...state,
+      candidates: boundedEntries(state.candidates, 20, projectCandidate),
+      candidatesTruncated: state.candidates.length > 20,
+    },
+    outcome: outcomeEvidenceForChoice(choiceEvent, events),
+    rationale: { status: 'not_emitted', text: null },
+  })
 }
 
 function latestProjectedEvent(snapshot, names) {
@@ -489,6 +992,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const actionOutcomeEvent = latestProjectedEvent(snapshot, ['ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED', 'PLAN_REJECTED'])
   const heartbeat = latestProjectedEvent(snapshot, ['HEARTBEAT'])
   const latestRuntimeFailure = latestProjectedEvent(snapshot, ['FATAL', 'ERROR'])
+  const jevEvidence = snapshot.decisionTrace?.jevEvidence ?? null
   const modelRecovered = latestProjectedEvent(snapshot, ['MODEL_RECOVERED'])
   const failureResolved = modelRecovered !== null
     && latestRuntimeFailure !== null
@@ -498,12 +1002,21 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const modelUnavailable = modelAvailability?.state === 'degraded'
   const observedAtMs = parseTimestamp(snapshot.observedAt)
   const freshnessMs = observedAtMs === null ? null : Math.max(0, now - observedAtMs)
+  const heartbeatAt = parseTimestamp(heartbeat?.ts)
+  const heartbeatAgeMs = heartbeatAt === null ? null : Math.max(0, now - heartbeatAt)
+  const heartbeatLive = snapshot.resident.available && snapshot.resident.connected
+    && heartbeatAgeMs !== null && heartbeatAgeMs <= 15_000
   const unknown = []
   if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
   if (modelUnavailable) unknown.push('model_authority_unavailable')
   if (latest === null) unknown.push('no_choice_event_observed')
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
   if (snapshot.truth === null) unknown.push('authoritative_world_truth_unavailable')
+  if (heartbeatLive !== true) unknown.push('world_heartbeat_stale_or_missing')
+  if (latest?.actor === 'jev' && jevEvidence?.available !== true) unknown.push('jev_call_context_unavailable')
+  if (jevEvidence?.available === true && jevEvidence.binding?.confidence !== 'strong') unknown.push('jev_call_binding_is_partial')
+  if (jevEvidence?.available === true && jevEvidence.state?.structures?.status !== 'observed') unknown.push('structures_not_recorded_in_decision_snapshot')
+  if (jevEvidence?.outcome?.status === 'pending_or_not_observed') unknown.push('selected_action_outcome_not_yet_observed')
   const selection = latest?.selected?.strategy
     ?? latest?.selected?.chosen
     ?? latest?.selected?.id
@@ -543,6 +1056,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     choices: {
       latest,
       jev,
+      jevEvidence,
       system2: {
         input: system2Input,
         decision: system2,
@@ -553,21 +1067,50 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       activeAction: snapshot.action,
       latestActionEvent: actionEvent,
       latestOutcomeEvent: actionOutcomeEvent,
+      selectedChoiceOutcome: jevEvidence?.outcome ?? null,
+      latestDeath: snapshot.decisionTrace?.death ?? null,
+    },
+    worldProbe: {
+      href: '/api/world-probe?radius=6&verticalRadius=3',
+      method: 'GET',
+      readOnly: true,
+      purpose: 'on-demand Mineflayer state, nearby block and entity observation',
+    },
+    progress: {
+      liveGoal: snapshot.goal.queue.current === null ? null : {
+        id: snapshot.goal.queue.current.id,
+        description: snapshot.goal.queue.current.description,
+        have: snapshot.goal.queue.current.haveCount,
+        required: snapshot.goal.queue.current.requiredCount,
+        fraction: typeof snapshot.goal.queue.current.haveCount === 'number'
+          && typeof snapshot.goal.queue.current.requiredCount === 'number'
+          && snapshot.goal.queue.current.requiredCount > 0
+          ? Math.min(1, snapshot.goal.queue.current.haveCount / snapshot.goal.queue.current.requiredCount)
+          : null,
+        status: snapshot.goal.queue.current.status,
+      },
+      atLatestJevDecision: jevEvidence?.state?.progress ?? null,
+      stall: jevEvidence?.state?.progress?.strategicNonProgress ?? null,
+      stallStatus: jevEvidence?.state?.progress?.strategicNonProgress?.exhausted === true
+        ? 'exhausted'
+        : jevEvidence?.state?.progress?.strategicNonProgress === null || jevEvidence?.state?.progress?.strategicNonProgress === undefined
+          ? 'not_recorded'
+          : 'tracked_not_exhausted',
     },
     runtimeFailure,
     modelAvailability,
     world: snapshot.truth,
     worldObservation: heartbeat === null ? null : {
       observedAt: heartbeat.ts,
-      ageMs: parseTimestamp(heartbeat.ts) === null ? null : Math.max(0, now - parseTimestamp(heartbeat.ts)),
+      ageMs: heartbeatAgeMs,
       sourceEvent: heartbeat.event,
-      live: snapshot.resident.available && snapshot.resident.connected && !modelUnavailable,
+      live: heartbeatLive,
       worldKey: snapshot.resident.worldKey,
       dimension: snapshot.truth?.dimension ?? snapshot.resident.worldKey?.dimension ?? null,
-      position: heartbeat.detail?.pos ?? null,
-      health: heartbeat.detail?.health ?? null,
-      food: heartbeat.detail?.food ?? null,
-      inventory: heartbeat.detail?.inv ?? null,
+      position: snapshot.truth?.position ?? parsePosition(heartbeat.detail?.pos),
+      health: snapshot.truth?.health ?? heartbeat.detail?.health ?? null,
+      food: snapshot.truth?.food ?? heartbeat.detail?.food ?? null,
+      inventory: snapshot.truth?.inventory ?? heartbeat.detail?.inv ?? null,
       currentAction: heartbeat.detail?.action ?? null,
       frontier: heartbeat.detail?.rung ?? null,
       queueDepth: heartbeat.detail?.depth ?? null,
@@ -582,8 +1125,19 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
 export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = DEFAULT_INTERVAL_MS } = {}) {
   const socketPath = join(runtimeDir, 'data', 'resident', 'control.sock')
   const logPath = join(runtimeDir, 'buddy.log')
+  const jevCallsPath = join(runtimeDir, 'logs', 'jev', 'jev-calls.jsonl')
   const runnerOutPath = join(runtimeDir, 'runner.out')
   const mission = readMission(join(REPO, 'MILESTONE-CONTRACT.json'))
+
+  const worldProbe = async ({ radius = 6, verticalRadius = 3 } = {}) => {
+    const horizontal = Number.isFinite(radius) ? Math.max(1, Math.min(8, Math.floor(radius))) : 6
+    const vertical = Number.isFinite(verticalRadius) ? Math.max(1, Math.min(4, Math.floor(verticalRadius))) : 3
+    const [report, state] = await Promise.all([
+      callControlSocket(socketPath, 'report'),
+      callControlSocket(socketPath, 'state', DEFAULT_CONTROL_TIMEOUT_MS, { radius: horizontal, verticalRadius: vertical }),
+    ])
+    return buildWorldProbe({ report, state, radius: horizontal, verticalRadius: vertical })
+  }
 
   let snapshotInFlight = null
   let cachedRunId = null
@@ -596,7 +1150,8 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     snapshotInFlight = Promise.all([
       callControlSocket(socketPath, 'report'),
       Promise.resolve(readLogTail(logPath)),
-    ]).then(([report, events]) => {
+      Promise.resolve(readJsonlTail(jevCallsPath)),
+    ]).then(([report, events, jevCalls]) => {
       const bootFromTail = latestEvent(events, ['BOOT'])
       if (bootFromTail !== null) {
         latestBootInLog = bootFromTail
@@ -623,13 +1178,13 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         const rightTs = Date.parse(right.ts ?? '')
         return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0)
       })
-      return buildObserverSnapshot({ report, events: combinedEvents, mission, runBoot: cachedRunBoot, runBuild: cachedRunBuild })
+      return buildObserverSnapshot({ report, events: combinedEvents, mission, runBoot: cachedRunBoot, runBuild: cachedRunBuild, jevCalls })
     })
       .finally(() => { snapshotInFlight = null })
     return await snapshotInFlight
   }
 
-  return { runtimeDir, socketPath, logPath, runnerOutPath, mission, intervalMs, snapshot }
+  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission, intervalMs, snapshot, worldProbe }
 }
 
 function htmlPage() {
@@ -767,6 +1322,13 @@ export function startObserverServer(options = {}) {
       if (url.pathname === '/api/ai-summary') {
         const snapshot = await observer.snapshot()
         return Response.json(buildAiSummary(snapshot), { headers: { 'cache-control': 'no-store' } })
+      }
+      if (url.pathname === '/api/world-probe') {
+        const radiusValue = Number(url.searchParams.get('radius') ?? 6)
+        const verticalValue = Number(url.searchParams.get('verticalRadius') ?? 3)
+        const radius = Number.isFinite(radiusValue) ? Math.max(1, Math.min(8, Math.floor(radiusValue))) : 6
+        const verticalRadius = Number.isFinite(verticalValue) ? Math.max(1, Math.min(4, Math.floor(verticalValue))) : 3
+        return Response.json(await observer.worldProbe({ radius, verticalRadius }), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/events') {
         let timer = null
