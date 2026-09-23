@@ -197,6 +197,8 @@ function productionSourceConditions({ bundle, artifact, descriptor, runId }) {
   if (bundle === null) sourceWindowUnknown.push('bundle git provenance is absent')
   if (artifact === null) sourceWindowUnknown.push('run artifact is absent')
   if (typeof runId !== 'string' || runId === '') sourceWindowUnknown.push('exact runId is absent')
+  if (typeof bundle?.runId !== 'string') sourceWindowUnknown.push('bundle runId is missing')
+  else if (bundle.runId !== runId) sourceWindowIssues.push(`bundle runId=${bundle.runId} differs from requested runId=${String(runId)}`)
   const artifactRunIds = [artifact?.runId, artifact?.run?.runId]
   if (artifactRunIds.some((value) => typeof value === 'string' && value !== runId)) {
     sourceWindowIssues.push(`artifact run identity differs from requested runId=${String(runId)}`)
