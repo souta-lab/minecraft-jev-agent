@@ -18,6 +18,7 @@ import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
 import type { LocalOscillationRecordJson } from '../jev-agent/src/localOscillation.ts'
+import type { RepeatedOutcomeEntryJson } from '../jev-agent/src/repeatedOutcomeEscalation.ts'
 import type { MilestonePredicateObservation } from './milestone-predicates.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
@@ -658,6 +659,9 @@ export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | '
  *   knownTraversals    generation-entry `recordTraversalOutcome` from the
  *                      controller/executor locomotion outcome stream (#354)
  *   moveFailures       controller `onMoveFailureMemoryChange`
+ *   repeatedOutcomes   controller `onRepeatedOutcomeChange` (the cross-action
+ *                      bound: N identical typed outcomes with an unchanged
+ *                      grounding fact signature retire the action at that cell)
  *   localOscillation   controller `onLocalOscillationChange` (host-side class-A
  *                      record; only written once a return is observed, so
  *                      ordinary locomotion proposes no delta at all)
@@ -717,6 +721,15 @@ export interface ResidentWorldMemory {
   /** coordinate-level movement failure memory; survives generation recovery (#12) */
   moveFailures: MoveFailEntry[]
   /**
+   * The durable cross-action bound: one entry per (action shape, target cell)
+   * whose typed outcome has repeated identically while the target's grounding
+   * facts stayed unchanged. It lives here because the in-generation counters it
+   * replaces were erased by `progress=body` and by every hot reload - the
+   * measured `ASCEND:habitat:p3_68_22` runaway survived 161 attempts at one cell
+   * because no counter outlived the generation or the interleaved body motion.
+   */
+  repeatedOutcomes: RepeatedOutcomeEntryJson[]
+  /**
    * #oscillation-boundary: the durable record of the BODY re-engaging the same
    * small set of cells with zero semantic progress. Optional so legacy/partial
    * JSON keeps parsing (it defaults to `null`), and deliberately world-keyed like
@@ -755,6 +768,7 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     knownTraversals: [],
     traversalFailures: [],
     moveFailures: [],
+    repeatedOutcomes: [],
     localOscillation: null,
     hazards: [],
   }
@@ -774,6 +788,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.knownTraversals = Array.isArray(memory.knownTraversals) ? memory.knownTraversals : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
+  memory.repeatedOutcomes = Array.isArray(memory.repeatedOutcomes) ? memory.repeatedOutcomes : []
   memory.localOscillation = memory.localOscillation ?? null
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
   return memory
@@ -825,6 +840,8 @@ export interface WorldMemoryDelta {
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   moveFailures?: MoveFailEntry[]
+  /** the durable cross-action repeat ledger; replaced wholesale (it is bounded state, not a log) */
+  repeatedOutcomes?: RepeatedOutcomeEntryJson[]
   /** #oscillation-boundary: the durable local-motion record; `null` clears it (progress / left pocket) */
   localOscillation?: LocalOscillationRecordJson | null
   hazards?: DeathHazard[]
