@@ -22,6 +22,47 @@ export interface ModelAvailabilitySnapshot {
   recoveredAt: string | null
 }
 
+export type ModelRecoveryStartGate =
+  | { allowed: true; reason: 'not-degraded' | 'retry-already-started' | 'retry-due'; delayMs: 0 }
+  | { allowed: false; reason: 'retry-backoff' | 'invalid-retry-deadline'; delayMs: number }
+
+/**
+ * Central lifecycle callers must honor the host's current provider backoff.
+ * Respawn, world-reset, and control paths can all request a generation start
+ * independently of the timer that normally schedules model recovery. Returning
+ * the remaining delay lets the HOST defer those wakes without making a model
+ * decision or changing provider authority.
+ */
+export function modelRecoveryStartGate(
+  availability: ModelAvailabilitySnapshot,
+  nowMs = Date.now(),
+): ModelRecoveryStartGate {
+  if (availability.state !== 'degraded') {
+    return { allowed: true, reason: 'not-degraded', delayMs: 0 }
+  }
+  if (availability.retryAt === null) {
+    // The scheduled retry has already begun. Its caller may start the fresh
+    // generation; unrelated wakeups share that same retry window.
+    return { allowed: true, reason: 'retry-already-started', delayMs: 0 }
+  }
+
+  const retryAtMs = Date.parse(availability.retryAt)
+  if (!Number.isFinite(retryAtMs)) {
+    // Corrupt/invalid internal deadline must not turn an outage into immediate
+    // retry churn. Defer once for the smallest configured bounded interval.
+    return { allowed: false, reason: 'invalid-retry-deadline', delayMs: MODEL_RETRY_BASE_DELAY_MS }
+  }
+
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now()
+  const remainingMs = retryAtMs - now
+  if (remainingMs <= 0) return { allowed: true, reason: 'retry-due', delayMs: 0 }
+  return {
+    allowed: false,
+    reason: 'retry-backoff',
+    delayMs: Math.min(MODEL_RETRY_MAX_DELAY_MS, Math.ceil(remainingMs)),
+  }
+}
+
 export function modelRetryDelayMs(attempt: number): number {
   const normalized = Number.isFinite(attempt) ? Math.max(1, Math.floor(attempt)) : 1
   return Math.min(MODEL_RETRY_MAX_DELAY_MS, MODEL_RETRY_BASE_DELAY_MS * 2 ** Math.min(20, normalized - 1))

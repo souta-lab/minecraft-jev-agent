@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
 import {
+  MODEL_RETRY_BASE_DELAY_MS,
   MODEL_RETRY_MAX_DELAY_MS,
   ModelAvailabilityTracker,
   modelFailureDisposition,
+  modelRecoveryStartGate,
   modelRetryDelayMs,
   stopGenerationForModelRecovery,
 } from './model-recovery.ts'
@@ -61,6 +63,53 @@ describe('model authority recovery host policy', () => {
       state: 'available', consecutiveFailures: 0, retryAt: null,
       recoveredAt: '2026-09-23T00:00:06.000Z',
       lastFailure: { generationId: 'gen-old', context: 'jev-authority', attempts: 4 },
+    })
+  })
+
+  test('central generation-start gate prevents lifecycle wakes from bypassing outage backoff', () => {
+    const tracker = new ModelAvailabilityTracker()
+    const failedAt = Date.parse('2026-09-23T00:00:00.000Z')
+    const failure = tracker.recordUnavailable({
+      generationId: 'gen-old', context: 'jev-authority', attempts: 1, error: '503 unavailable',
+    }, failedAt)
+
+    expect(modelRecoveryStartGate(tracker.snapshot(), failedAt + 1)).toEqual({
+      allowed: false,
+      reason: 'retry-backoff',
+      delayMs: failure.delayMs - 1,
+    })
+    expect(modelRecoveryStartGate(tracker.snapshot(), Date.parse(failure.retryAt))).toEqual({
+      allowed: true,
+      reason: 'retry-due',
+      delayMs: 0,
+    })
+
+    // The scheduled recovery timer clears retryAt immediately before starting
+    // the fresh generation. That start and any coalesced wake share this window.
+    tracker.recordRetryStarted()
+    expect(modelRecoveryStartGate(tracker.snapshot(), Date.parse(failure.retryAt))).toEqual({
+      allowed: true,
+      reason: 'retry-already-started',
+      delayMs: 0,
+    })
+  })
+
+  test('does not defer ordinary availability and fails closed on a malformed degraded deadline', () => {
+    const base = {
+      consecutiveFailures: 1,
+      retryAt: 'not-a-date',
+      lastFailure: null,
+      recoveredAt: null,
+    }
+    expect(modelRecoveryStartGate({ ...base, state: 'available' }, 0)).toEqual({
+      allowed: true,
+      reason: 'not-degraded',
+      delayMs: 0,
+    })
+    expect(modelRecoveryStartGate({ ...base, state: 'degraded' }, 0)).toEqual({
+      allowed: false,
+      reason: 'invalid-retry-deadline',
+      delayMs: MODEL_RETRY_BASE_DELAY_MS,
     })
   })
 })
