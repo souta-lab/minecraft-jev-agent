@@ -2,8 +2,12 @@
 // m3-gate: run-scoped PASS/FAIL/UNKNOWN gate for the CURRENT M3 contract
 // (MILESTONE-CONTRACT.json M3 "12 Eyes of Ender").
 //
-// M3's terminal predicate is ONE inventory threshold: `ender_eye >= 12`. The
-// item id is `ender_eye` (display "Eye of Ender"); `eye_of_ender` is the thrown
+// M3's terminal predicate is ONE final inventory threshold: `ender_eye >= 12`.
+// Historical inventory samples and the sticky milestone predicate prove that
+// the threshold was reached at some point, but cannot prove the eyes are still
+// held at acceptance time. PASS therefore also needs the HOST's current,
+// run-bound inventory observation from the read-only control `report` query.
+// The item id is `ender_eye` (display "Eye of Ender"); `eye_of_ender` is the thrown
 // projectile entity and is never counted here. An M3 PASS is milestone
 // acceptance evidence, so it additionally requires the same model-authority
 // facts the current-M2 gate enforces:
@@ -19,12 +23,13 @@
 //     plus initial/latest/terminal inventory, run-scoped by filename AND body;
 //   * `milestone-predicates-<runId>.json` — the resident's own live predicate
 //     observations (tools/milestone-predicates.mjs). Used when present; rejected
-//     on a record / runId / sourceSha mismatch. It may only UPGRADE a condition to
-//     PASS when a predicate is truly observed as satisfied, and the gate also
-//     emits the full `m3_predicate <id>: PASS|FAIL|UNKNOWN at=… source=…` section;
+//     on a record / runId / sourceSha mismatch, and emitted as historical progress;
 //   * the resident log, bracketed by its BOOT runId boundary: INVENTORY /
-//     MILESTONE lines carry the live counts, and `dimension=` lines are
-//     reported as an intermediate fact.
+//     MILESTONE lines carry the history needed for resource diagnostics, and
+//     `dimension=` lines are reported as an intermediate fact;
+//   * the current-inventory observation returned by the same read-only HOST
+//     `report` query that bounds live policy evidence. This is pinned into the
+//     acceptance artifact and must match R's runId and BOOT source SHA.
 //
 // `--run <runId>` (or M3_RUN_ID) is MANDATORY. Evidence from another run is
 // never attributed to R, so a run's inventory can never be combined with
@@ -100,23 +105,87 @@ function maxObserved(samples, item) {
 }
 
 /**
- * The M3 inventory facts from R's samples. `ready` is the contract predicate;
- * `materialInputsComplete` is true only when ONE sample held every crafting
- * input for 12 eyes, so a FAIL can never be assembled from two instants.
+ * The M3 inventory facts from R's history plus its acceptance-time HOST
+ * observation. `ready` is true only when that current inventory holds 12 eyes;
+ * `materialInputsComplete` is true only when ONE historical sample held every
+ * crafting input for 12 eyes, so a FAIL can never be assembled from two instants.
  */
-export function evaluateEnderEyes(samples) {
+export function evaluateEnderEyes(samples, terminalInventory = null) {
   const list = Array.isArray(samples) ? samples : []
-  const enderEye = maxObserved(list, ENDER_EYE)
+  const maxObservedEnderEye = maxObserved(list, ENDER_EYE)
+  const terminalCounts = terminalInventory?.counts
+  const terminalInventoryObserved = terminalCounts !== null && typeof terminalCounts === 'object' && !Array.isArray(terminalCounts)
+  const enderEye = terminalInventoryObserved ? terminalCounts[ENDER_EYE] ?? 0 : null
   const enderPearl = maxObserved(list, ENDER_PEARL)
   const blazeRod = maxObserved(list, BLAZE_ROD)
   const blazePowder = maxObserved(list, BLAZE_POWDER)
-  const ready = enderEye >= ENDER_EYE_REQUIRED
+  const ready = terminalInventoryObserved && enderEye >= ENDER_EYE_REQUIRED
   const materialInputsComplete = list.some(
     (counts) =>
       (counts?.[ENDER_PEARL] ?? 0) >= ENDER_PEARL_REQUIRED &&
       ((counts?.[BLAZE_POWDER] ?? 0) >= BLAZE_POWDER_REQUIRED || (counts?.[BLAZE_ROD] ?? 0) >= BLAZE_ROD_REQUIRED),
   )
-  return { ready, enderEye, enderPearl, blazeRod, blazePowder, materialInputsComplete }
+  return {
+    ready,
+    enderEye,
+    maxObservedEnderEye,
+    enderPearl,
+    blazeRod,
+    blazePowder,
+    materialInputsComplete,
+    terminalInventoryObserved,
+  }
+}
+
+function bindTerminalInventoryObservation(value, expectedRunId, runSourceSha) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { status: 'unavailable', reason: 'current_inventory_observation_missing', observation: null }
+  }
+  const counts = value.counts
+  if (counts === null || typeof counts !== 'object' || Array.isArray(counts)) {
+    return { status: 'invalid', reason: 'current_inventory_counts_missing', observation: null }
+  }
+  if (value.record !== 'current-inventory-observation' || value.schemaVersion !== 1) {
+    return { status: 'invalid', reason: 'current_inventory_record_invalid', observation: null }
+  }
+  if (value.runId !== expectedRunId) {
+    return { status: 'invalid', reason: `current_inventory_run_mismatch observed=${String(value.runId ?? 'unknown')}`, observation: null }
+  }
+  if (normalizeSourceSha(value.sourceSha) !== runSourceSha) {
+    return {
+      status: 'invalid',
+      reason: `current_inventory_source_sha_mismatch expected=${runSourceSha} observed=${normalizeSourceSha(value.sourceSha) ?? 'invalid'}`,
+      observation: null,
+    }
+  }
+  if (
+    !Number.isFinite(value.observedAtMs) ||
+    typeof value.observedAt !== 'string' ||
+    Date.parse(value.observedAt) !== value.observedAtMs
+  ) {
+    return { status: 'invalid', reason: 'current_inventory_timestamp_invalid', observation: null }
+  }
+  for (const count of Object.values(counts)) {
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+      return { status: 'invalid', reason: 'current_inventory_counts_invalid', observation: null }
+    }
+  }
+  return {
+    status: 'valid',
+    reason: null,
+    observation: {
+      record: value.record,
+      schemaVersion: value.schemaVersion,
+      runId: value.runId,
+      sourceSha: value.sourceSha.toLowerCase(),
+      generationId: typeof value.generationId === 'string' ? value.generationId : null,
+      observedAtMs: value.observedAtMs,
+      observedAt: value.observedAt,
+      worldKey: value.worldKey !== null && typeof value.worldKey === 'object' && !Array.isArray(value.worldKey) ? value.worldKey : null,
+      dimension: typeof value.dimension === 'string' ? value.dimension : null,
+      counts: { ...counts },
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,11 +236,21 @@ function verdict({ status, code, reason, runId, sourceSha = null, conditions, ev
 }
 
 /**
- * Pure run-scoped M3 verdict. PASS (0) only when `ender_eye>=12` AND the full
- * model-authority proof are bound to R. A materials-complete run whose eyes are
- * short is FAIL (1). Everything else is UNKNOWN (2) and can never be PASS.
+ * Pure run-scoped M3 verdict. PASS (0) only when the HOST's acceptance-time
+ * inventory observation proves `ender_eye>=12`, and the full model-authority
+ * proof plus Nether observation are bound to R. A materials-complete run whose
+ * acceptance-time inventory is short is FAIL (1). Missing or mismatched final
+ * inventory is UNKNOWN (2), never PASS.
  */
-export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy = null, dimensions = null, milestonePredicates = null, sourceSha = null } = {}) {
+export function evaluateM3Gate({
+  expectedRunId = null,
+  evidence = null,
+  policy = null,
+  dimensions = null,
+  milestonePredicates = null,
+  sourceSha = null,
+  currentInventoryObservation = null,
+} = {}) {
   if (expectedRunId === null || !RUN_ID_RE.test(String(expectedRunId))) {
     return verdict({
       status: 'UNKNOWN',
@@ -233,7 +312,8 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
 
   const sources = Array.isArray(evidence.sources) ? evidence.sources : []
   const samples = sources.flatMap((source) => (Array.isArray(source.inventorySamples) ? source.inventorySamples : []))
-  const eyes = evaluateEnderEyes(samples)
+  const terminalInventory = bindTerminalInventoryObservation(currentInventoryObservation, expectedRunId, runSourceSha)
+  const eyes = evaluateEnderEyes(samples, terminalInventory.observation)
   const observedDimensions = Array.isArray(dimensions)
     ? dimensions
     : sources.flatMap((source) => (Array.isArray(source.dimensionObservations) ? source.dimensionObservations : []))
@@ -243,9 +323,9 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
   // FIRST-CLASS milestone predicate evidence. When the caller already read the
   // run-scoped predicate section (resident observe-loop observations + log +
   // snapshot) it is used as-is; otherwise it is derived from the SAME run-scoped
-  // sources this gate judges. A predicate may only ever UPGRADE a condition to
-  // PASS when it was truly observed (`satisfied === true`); `false`/UNKNOWN never
-  // manufacture a PASS, and the FAIL path below is driven by the inventory facts.
+  // sources this gate judges. These are historical rung observations: the sticky
+  // `ender_eyes` predicate cannot prove the final count, which is checked from the
+  // current HOST observation. Nether arrival can be proven from run-bound history.
   const deriveFromRunEvidence = (hostObservation = null) =>
     deriveMilestonePredicates({
       runId: expectedRunId,
@@ -271,8 +351,10 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     predicateSection.mismatches.push(reason)
   }
   const predicateTrue = (id) => predicateSection.predicates.some((predicate) => predicate.id === id && predicate.satisfied === true)
-  const eyesReady = eyes.ready || predicateTrue('ender_eyes')
-  const materialsFail = !eyesReady && eyes.materialInputsComplete
+  // The sticky milestone predicate is historical progress. It cannot replace the
+  // final inventory observation required by the M3 acceptance contract.
+  const eyesReady = eyes.ready
+  const materialsFail = terminalInventory.status === 'valid' && !eyesReady && eyes.materialInputsComplete
 
   // M3 is "reach the Nether and prove twelve eyes", so Nether arrival is a REQUIRED condition,
   // not a diagnostic: without it a run could claim M3 from the eyes alone while never having
@@ -298,6 +380,11 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
   const facts = {
     sourceSha: runSourceSha,
     eyes,
+    terminalInventory: {
+      status: terminalInventory.status,
+      reason: terminalInventory.reason,
+      observation: terminalInventory.observation,
+    },
     dimension,
     dimensions: [...new Set(observedDimensions.map((entry) => (typeof entry === 'string' ? entry : entry?.dimension ?? null)))],
     netherReached: netherObserved,
@@ -421,9 +508,10 @@ export async function runM3Gate({
   const resolveEvidence = readEvidence ?? ((runId) => readRunScopedM2Evidence(runId, { logPath, snapshotDir }))
   const scoped = expectedRunId !== null && RUN_ID_RE.test(String(expectedRunId))
   const evidence = scoped ? await resolveEvidence(expectedRunId) : null
+  let socketBinding = policySocket === undefined ? null : policySocket
   let rawPolicy = policyEvidence
   if (scoped && rawPolicy === null) {
-    const socketBinding = policySocket === undefined ? await readPolicySocketBinding(controlSocketPath) : policySocket
+    socketBinding = policySocket === undefined ? await readPolicySocketBinding(controlSocketPath) : policySocket
     // Same run-binding fallback as the M2 gate: the resident is normally started detached,
     // so `runner.out` often does not exist while `buddy.log` carries the identical
     // `[ISO] BOOT ... runId=...` lines. Without this the acceptance verdict degrades to
@@ -440,6 +528,7 @@ export async function runM3Gate({
       runnerOutPath: runnerOutForScan,
     })
   }
+  if (policySocket !== undefined) socketBinding = policySocket
   const policy = scoped
     ? evaluateM3AuthorityEvidence({
         expectedRunId,
@@ -468,7 +557,14 @@ export async function runM3Gate({
           hostObservation,
         })
       : null
-  const result = evaluateM3Gate({ expectedRunId, evidence, policy, milestonePredicates, sourceSha })
+  const result = evaluateM3Gate({
+    expectedRunId,
+    evidence,
+    policy,
+    milestonePredicates,
+    sourceSha,
+    currentInventoryObservation: socketBinding?.runId === expectedRunId ? socketBinding.currentInventoryObservation ?? null : null,
+  })
   if (typeof onResult === 'function') onResult(result)
 
   if (json) {
@@ -500,8 +596,15 @@ export async function runM3Gate({
   if (result.facts !== null) {
     write(
       `m3_facts: ender_pearl=${result.facts.eyes.enderPearl} blaze_rod=${result.facts.eyes.blazeRod} ` +
-        `blaze_powder=${result.facts.eyes.blazePowder} ender_eye=${result.facts.eyes.enderEye} ` +
+        `blaze_powder=${result.facts.eyes.blazePowder} ender_eye=${result.facts.eyes.enderEye ?? 'unknown'} ` +
+        `ender_eye_max_observed=${result.facts.eyes.maxObservedEnderEye} ` +
         `dimension=${result.facts.dimension ?? 'unknown'} dimensions=${result.facts.dimensions.join(',') || 'none'}`,
+    )
+    write(
+      `m3_terminal_inventory: status=${result.facts.terminalInventory.status} ` +
+        `reason=${result.facts.terminalInventory.reason ?? 'none'} ` +
+        `observedAt=${result.facts.terminalInventory.observation?.observedAt ?? 'unknown'} ` +
+        `ender_eye=${result.facts.terminalInventory.observation?.counts?.ender_eye ?? 0}`,
     )
     const section = result.facts.milestonePredicates
     if (section !== undefined && section !== null) {

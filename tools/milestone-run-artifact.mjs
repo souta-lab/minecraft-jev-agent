@@ -1262,6 +1262,7 @@ function composeInventory({ attribution, snapshot }) {
       held: firstHeldAt !== null,
       boot: Object.prototype.hasOwnProperty.call(bootCounts, item) ? bootCounts[item] : 0,
       latest: Object.prototype.hasOwnProperty.call(latestCounts, item) ? latestCounts[item] : 0,
+      final: null,
       max,
       firstObservedAt: samples[0]?.ts ?? null,
       lastObservedAt: samples.at(-1)?.ts ?? null,
@@ -1275,6 +1276,7 @@ function composeInventory({ attribution, snapshot }) {
     observationCount: samples.length,
     boot,
     latest,
+    final: null,
     milestoneItems,
     snapshot: {
       present: snapshot?.present ?? false,
@@ -2227,6 +2229,30 @@ export async function buildRunArtifact({
     policySocket: socketBinding,
     sourceSha: boot?.sourceSha ?? null,
   })
+  const terminalInventory = m3.verdict?.facts?.terminalInventory ?? null
+  const terminalObservation = terminalInventory?.status === 'valid' ? terminalInventory.observation : null
+  inventory.final = terminalObservation === null
+    ? {
+        status: 'MISSING',
+        source: 'control.report',
+        reason: terminalInventory?.reason ?? 'current_inventory_observation_unavailable',
+        counts: null,
+      }
+    : {
+        ...terminalObservation,
+        status: 'PRESENT',
+        source: 'control.report',
+      }
+  if (terminalObservation === null) {
+    missing.add(
+      'inventory.final',
+      `${inventory.final.reason}; final inventory requires the same-run HOST current-inventory observation captured by the read-only report query at acceptance time`,
+    )
+  } else {
+    for (const item of MILESTONE_ITEMS) {
+      inventory.milestoneItems[item].final = inventory.final.counts[item] ?? 0
+    }
+  }
   for (const gap of [...m2.missing, ...m3.missing]) {
     missing.add(gap.field ?? gap, gap.reason ?? `the delegated gate could not produce this verdict fact (${String(gap)})`)
   }
@@ -2394,7 +2420,12 @@ export async function buildRunArtifact({
       socketBinding:
         socketBinding === null
           ? null
-          : { runId: socketBinding.runId ?? null, matched: socketBinding.runId === runId, frozen: socketBinding.frozen ?? null },
+          : {
+              runId: socketBinding.runId ?? null,
+              matched: socketBinding.runId === runId,
+              frozen: socketBinding.frozen ?? null,
+              currentInventoryObservationAt: inventory.final.observedAt ?? null,
+            },
       note:
         'both delegated gates (tools/m2-gate.mjs, tools/m3-gate.mjs) received this exact policy evidence object; a gate invoked separately with a LIVE control-socket report can judge a different authority bundle for the same run, so a bundle that must not disagree pins ONE binding and runs both from it',
     },

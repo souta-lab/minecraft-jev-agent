@@ -342,6 +342,34 @@ const DIMENSION_RE = /\bdimension=(minecraft:[a-z_]+|[a-z_]+)\b/
  */
 const BODY_DIMENSION_MARKER_RE = /\b(?:DIMENSION_OBSERVED|DIMENSION_TRANSITION|SPAWN|DEATH)\b/
 
+function currentInventoryObservationFromReport(value, reportRunId) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const counts = asCounts(value.counts)
+  if (
+    value.record !== 'current-inventory-observation' ||
+    value.schemaVersion !== 1 ||
+    value.runId !== reportRunId ||
+    typeof value.sourceSha !== 'string' || !/^[0-9a-f]{40}$/i.test(value.sourceSha) ||
+    typeof value.observedAtMs !== 'number' || !Number.isFinite(value.observedAtMs) ||
+    typeof value.observedAt !== 'string' ||
+    Date.parse(value.observedAt) !== value.observedAtMs ||
+    counts === null ||
+    Object.values(counts).some((count) => !Number.isInteger(count) || count < 0)
+  ) return null
+  return {
+    record: value.record,
+    schemaVersion: value.schemaVersion,
+    runId: value.runId,
+    sourceSha: value.sourceSha.toLowerCase(),
+    generationId: typeof value.generationId === 'string' ? value.generationId : null,
+    observedAtMs: value.observedAtMs,
+    observedAt: value.observedAt,
+    worldKey: value.worldKey !== null && typeof value.worldKey === 'object' && !Array.isArray(value.worldKey) ? value.worldKey : null,
+    dimension: typeof value.dimension === 'string' ? value.dimension : null,
+    counts,
+  }
+}
+
 /** Read-only current-run binding used only to bound live policy evidence. */
 // Resident report can take longer than a short CLI probe while generations are
 // recovering from model outages. A timeout here makes a live run look unbounded
@@ -389,6 +417,7 @@ export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, t
             : null
         finish({
           runId,
+          currentInventoryObservation: currentInventoryObservationFromReport(data?.currentInventoryObservation, runId),
           policyKind: typeof status?.policyKind === 'string' ? status.policyKind : typeof data?.policyKind === 'string' ? data.policyKind : null,
           policyModel: typeof status?.policyModel === 'string' ? status.policyModel : typeof data?.policyModel === 'string' ? data.policyModel : null,
           generationHash: typeof data?.generationHash === 'string' ? data.generationHash : null,
