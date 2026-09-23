@@ -13323,7 +13323,19 @@ function moveAdvancesTowardTarget(
   blockedTarget: Vec3Json,
 ): boolean {
   if (candidate.target === null) return false
-  const currentDistance = distance(current, blockedTarget)
+  // LIKE FOR LIKE: every candidate target is a CELL, so the current point must be
+  // the body's own CELL too. Comparing a cell against the body's FRACTIONAL
+  // position (the historical form) mis-measures a genuine one-cell advance whenever
+  // the body does not stand at its cell's centre - measured (2026-09-23, a plain
+  // MOVE across a void): a grounded SELF-LANDING scaffold toward a target one cell
+  // over was dropped, because `distance(bodyFraction, target)` was smaller than
+  // `distance(landingCell, target)` even though the step really is one cell closer
+  // - which `bridgeRoute.ts#planBridgeSpan`'s own strict reduction already proved in
+  // the same cell units (`to <= from - BRIDGE_MIN_ADVANCE`, both cells). The intent
+  // is unchanged (a target that is NOT closer than the body's own cell is still
+  // refused, so no lateral wandering), only the measurement is now consistent.
+  const from = { x: Math.floor(current.x), y: Math.floor(current.y), z: Math.floor(current.z) }
+  const currentDistance = distance(from, blockedTarget)
   const nextDistance = distance(candidate.target, blockedTarget)
   return nextDistance + 0.1 < currentDistance
 }
