@@ -468,7 +468,11 @@ export class DecisionScheduler {
       this.lowAirBand = null
       return
     }
-    const band = Math.floor(air / 5)
+    // Mineflayer can report the exhausted-air sentinel as -1. Treat every
+    // value below zero as the same terminal band as 0; otherwise -1 <-> 0
+    // packet variation re-arms this edge and repeatedly interrupts an
+    // in-flight action without any new air loss.
+    const band = Math.max(0, Math.floor(air / 5))
     if (this.lowAirBand === band) return
     this.lowAirBand = band
     const position = this.bot.entity?.position ?? null

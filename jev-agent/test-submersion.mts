@@ -279,6 +279,9 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   breath(8) // same band -> silent
   breath(9) // band 1 -> preempt 2
   breath(4) // band 0 -> preempt 3
+  breath(-1) // exhausted-air sentinel stays in terminal band 0
+  breath(0) // packet variation at exhausted air must not re-arm the edge
+  breath(-1)
   breath(20) // surfaced: re-arm
   breath(5) // band 1 -> preempt 4
   scheduler.stop()
