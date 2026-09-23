@@ -31,10 +31,10 @@ import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { assessSurvivalRace, bodySurvivalFacts, classifyDamageSource, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalDamageRace, formatSurvivalEscapeNone, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
-import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
+import { formatArmorCraft, formatArmorCraftRefusal, formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
 import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
-import type { ArmorRefusal } from './gearPlan.ts'
+import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -1302,6 +1302,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'EQUIP_WEAPON_REFUSED',
   'EQUIP_ARMOR',
   'EQUIP_ARMOR_REFUSED',
+  // The armour PRODUCER plane, the other half of the same survival fact: the
+  // equip markers above can only ever report armour that EXISTS. Measured live
+  // (NETHER-SURVIVAL-2026-09-22, the fatal window) the body carried iron and no
+  // armour, so `armor=0/4` was true for the whole run and no layer said why the
+  // body could not simply make some. `ARMOR_CRAFT` names the grounded craft step
+  // (piece, material, count, candidate) and `ARMOR_CRAFT_REFUSED` names the exact
+  // shortfall (`material=iron_ingot need=8 have=2 shortfall=6`), so a post-mortem
+  // can tell "nothing was craftable" from "the route was never offered".
+  'ARMOR_CRAFT',
+  'ARMOR_CRAFT_REFUSED',
   'WEAPON_CHOICE_REQUIRED',
   // The damage-race plane: whether the body's grounded escape actually outruns the
   // damage it is taking, and the typed statement when NO grounded escape exists.
@@ -2337,6 +2347,8 @@ export class JevController {
   private lastArmorRefusalKey: string | null = null
   /** last logged RESOURCE_SOURCE_EXCLUDED signature set, so one protected structure is one line. */
   private lastSourceExclusionKey: string | null = null
+  /** last logged ARMOR_CRAFT / ARMOR_CRAFT_REFUSED signature set, so one armour picture is one line. */
+  private lastArmorCraftKey: string | null = null
   /** last logged PORTAL_FRAME_SITE_REJECTED line, so one scan rejection is one line. */
   private lastPortalFrameRejectionKey: string | null = null
   /** last logged EXPLORE_ROUTE_BLOCKED signature, so one explore dead end is one line. */
@@ -3260,6 +3272,7 @@ export class JevController {
       this.noteRouteExhaustion(grounded.entryRefusal)
       this.logEntryUnverified(portalEntry)
       this.logArmorRefusal(grounded.armorRefusals)
+      this.logArmorCraft(grounded.armorCraftOffers, grounded.armorCraftRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
@@ -11404,6 +11417,35 @@ export class JevController {
     this.lastArmorRefusalKey = key
     for (const refusal of refusals) {
       this.logger.warn('agent', formatArmorRefusal(refusal), { ...refusal }, this.tickCounter)
+    }
+  }
+
+  /**
+   * Surface the armour PRODUCER picture: every grounded armour craft on offer
+   * (`ARMOR_CRAFT slot=... item=... material=... need=... have=... candidate=...`)
+   * and every piece the carried material cannot afford
+   * (`ARMOR_CRAFT_REFUSED slot=... item=... material=iron_ingot need=8 have=2
+   * shortfall=6 reason=insufficient_material`), once per distinct set.
+   *
+   * The equip markers next door can only report armour that exists; measured
+   * live (the fatal window at 33.3 h) `armor=0/4` held for a whole run and
+   * `COMBAT_KIT_GAP ... missing=[armor] prerequisite=none` named the gap with no
+   * route and no reason. These two lines are the missing half: whether a craft
+   * was offered, and - when none was - exactly which material and how many of it
+   * were short. Both planes must carry it, or a post-mortem cannot tell "nothing
+   * was craftable from what the body carried" from "the route was never offered".
+   */
+  private logArmorCraft(offers: readonly ArmorCraftOffer[], refusals: readonly ArmorCraftRefusal[]): void {
+    const lines = [
+      ...offers.map(formatArmorCraft),
+      ...refusals.map(formatArmorCraftRefusal),
+    ]
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastArmorCraftKey) return
+    this.lastArmorCraftKey = key
+    for (const offer of offers) this.logger.info('agent', formatArmorCraft(offer), { ...offer }, this.tickCounter)
+    for (const refusal of refusals) {
+      this.logger.warn('agent', formatArmorCraftRefusal(refusal), { ...refusal }, this.tickCounter)
     }
   }
 
