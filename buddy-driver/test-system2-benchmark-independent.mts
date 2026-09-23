@@ -100,6 +100,7 @@ const projectedAllowed = projected.allowedGoals as Record<string, string[] | und
 assert.equal(planner.provider, 'muse-spark')
 assert.equal(plan.goals[0]?.targetItem, 'nether_portal', 'the executable factual choice survives validation and compilation')
 assert.equal(projected.humanMission, SYSTEM2_HUMAN_MISSION)
+assert.equal(projected.objective, null, 'an empty queue must not leak the legacy iron_ingot root objective into WHAT')
 assert.equal(projected.dimension, 'minecraft:overworld')
 assert.equal(projected.food, 20)
 assert.equal(projected.starvation, null)
@@ -111,10 +112,42 @@ assert.ok(!Object.hasOwn(projected, 'rungIndex'))
 assert.equal(systemInput, SYSTEM_PROMPT)
 assert.match(systemInput, /Human mission: Defeat the Ender Dragon/)
 assert.match(systemInput, /does not prescribe a fixed subgoal order/)
+assert.match(systemInput, /objective is the active item-counted queue goal, or null when there is none/)
 assert.doesNotMatch(systemInput, /enter_nether|rungIndex|RUNGS|M2|M3/i)
 assert.doesNotMatch(systemInput, /blaze_rod[\s\S]*ender_pearl[\s\S]*ender_eye/i)
 assert.doesNotMatch(userInput, /"rung(Index)?"\s*:/i)
 assert.equal(logs.some(({ event }) => event === 'SYSTEM2_AUTHORITY_DECISION'), true)
+
+const activeNonMissionRequest: System2PlanRequest = {
+  ...request,
+  reason: 'need_llm',
+  goalQueueState: {
+    ...request.goalQueueState,
+    depth: 1,
+    empty: false,
+    current: {
+      id: 'g1:collect:oak_log',
+      kind: 'collect',
+      description: 'collect 4 x oak_log',
+      targetItem: 'oak_log',
+      requiredCount: 4,
+      startCount: 0,
+      haveCount: 2,
+      status: 'active',
+      origin: 'llm',
+      createdAt: 1,
+      updatedAt: 2,
+      detail: null,
+    },
+  },
+  // A configured compatibility objective is not the active local WHAT.
+  objective: { targetItem: 'iron_ingot', requiredCount: 3, haveCount: 0, complete: false },
+}
+assert.deepEqual(
+  buildMercurySummary(bot, world, activeNonMissionRequest, 'no_progress').objective,
+  { targetItem: 'oak_log', requiredCount: 4, haveCount: 2, complete: false },
+  'a non-M3 active queue objective must be projected from the queue, not the compatibility root goal',
+)
 
 const modelLedger: GoalQueueSnapshot = {
   counter: 1,

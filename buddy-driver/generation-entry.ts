@@ -1943,6 +1943,20 @@ export function buildMercurySummary(
       log(formatSystem2PayloadAbsentLine(field), { field, plane: 'payload' })
     }
   }
+  const activeGoal = request.goalQueueState.current
+  // `request.objective` remains for compatibility with the deterministic
+  // planner, but it can be a stale configured root goal after System2 has
+  // emptied its durable queue. Model-mode WHAT must see only a real active
+  // queue objective; an empty queue is represented explicitly as null.
+  const activeObjective =
+    activeGoal === null || activeGoal.targetItem === null
+      ? null
+      : {
+          targetItem: activeGoal.targetItem,
+          requiredCount: activeGoal.requiredCount,
+          haveCount: activeGoal.haveCount,
+          complete: activeGoal.status === 'done',
+        }
   return {
     humanMission: SYSTEM2_HUMAN_MISSION,
     trigger,
@@ -1969,7 +1983,7 @@ export function buildMercurySummary(
       current: request.goalQueueState.current?.description ?? null,
       hasImpossible: request.goalQueueState.hasImpossible,
     },
-    objective: request.objective,
+    objective: activeObjective,
     // Newest-first and BOUNDED: the durable hazard memory is world-scoped and
     // grows for the life of the world, so carrying it whole made the payload a
     // log (measured live: 1098 of 3549 chars, 57 entries) and kept perturbing

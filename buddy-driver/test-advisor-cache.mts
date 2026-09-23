@@ -108,7 +108,8 @@ addCase('Mercury cache identity separates every model-visible recovery input', (
     mercuryState({ position: { x: 28, y: 62, z: 9 } }),
     mercuryState({ health: 8 }),
     mercuryState({ queue: { ...base.queue, done: 4 } }),
-    mercuryState({ objective: { ...base.objective, targetItem: 'obsidian' } }),
+    mercuryState({ objective: { targetItem: 'obsidian', requiredCount: 3, haveCount: 0, complete: false } }),
+    mercuryState({ objective: null }),
     mercuryState({ deathHistory: ['lava@28,62,9x1'] }),
     mercuryState({ allowedGoals: { ...base.allowedGoals, explore_modes: ['cave'] } }),
   ]

@@ -1268,7 +1268,12 @@ export interface MercuryStateSummary {
   recentFailures: string[]
   consecutiveWait: number
   queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
-  objective: { targetItem: string; requiredCount: number; haveCount: number; complete: boolean }
+  /**
+   * Current item-counted queue objective. Null means there is no active local
+   * item goal; the legacy request objective is deliberately not projected here
+   * because it may only be a compatibility seed after the queue is empty.
+   */
+  objective: { targetItem: string; requiredCount: number; haveCount: number; complete: boolean } | null
   /**
    * The most recent durable death-hazard facts, NEWEST FIRST, bounded by
    * `MERCURY_DEATH_HISTORY_LIMIT`. This is world memory, not a log: it is the
@@ -1871,7 +1876,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
 export const SYSTEM_PROMPT = `You are System 2, the long-horizon intent planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
-Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world facts and grounded executable alternatives that can advance it. The mission does not prescribe a fixed subgoal order; the current objective and queue describe local work, not mandatory stages.
+Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world facts and grounded executable alternatives that can advance it. The mission does not prescribe a fixed subgoal order. The objective is the active item-counted queue goal, or null when there is none; it is local work, not a mandatory stage. When objective is null, choose useful work from the mission and current evidence instead of assuming a compatibility objective.
 Health, food, and any typed starvation fact are live body truth. Use them as safety context while choosing among grounded alternatives; they do not prescribe a fixed semantic subgoal.
 
 Answer in NATURAL LANGUAGE: one or two short sentences saying WHAT should happen
