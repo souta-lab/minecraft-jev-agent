@@ -245,7 +245,10 @@ export function seedProblems(levelSeed, previousLevelSeed = null) {
  * descriptor (+ optionally a world container to prove the target does not exist
  * yet) and never touches a run, a gate or the network.
  */
-export function validateCleanEnvironment(document, { descriptorPath = null, descriptorSha256 = null, worldContainer = null } = {}) {
+export function validateCleanEnvironment(
+  document,
+  { descriptorPath = null, descriptorSha256 = null, worldContainer = null, expectedMilestone = 'M3' } = {},
+) {
   const conditions = []
   const parseOk = isPlainObject(document)
   conditions.push(
@@ -272,12 +275,17 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
   const previous = isPlainObject(cleanRun.previousWorld) ? cleanRun.previousWorld : {}
   const assists = isPlainObject(document.assists) ? document.assists : null
 
-  // 1. the descriptor must be for THIS milestone
+  // 1. the descriptor must be for THIS milestone. M3 acceptance callers keep the
+  // default; the M2 reproducibility stager explicitly selects M2 so its peaceful
+  // contract can never be mistaken for an M3 acceptance environment.
+  const supportedMilestone = expectedMilestone === 'M2' || expectedMilestone === 'M3'
   conditions.push(
     condition({
       id: 'descriptor.milestone',
-      verdict: cleanRun.milestone === 'M3' ? 'PASS' : 'FAIL',
-      reason: cleanRun.milestone === 'M3' ? 'declared for M3' : `cleanRun.milestone must be "M3", got ${String(cleanRun.milestone)}`,
+      verdict: supportedMilestone && cleanRun.milestone === expectedMilestone ? 'PASS' : 'FAIL',
+      reason: supportedMilestone && cleanRun.milestone === expectedMilestone
+        ? `declared for ${expectedMilestone}`
+        : `cleanRun.milestone must be ${JSON.stringify(expectedMilestone)} (supported: M2 or M3), got ${String(cleanRun.milestone)}`,
     }),
   )
 
@@ -333,15 +341,22 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
     }),
   )
 
-  // 5. difficulty / mob spawning: the M3 premise needs hostile mobs
+  // 5. difficulty / mob spawning: M2 is measured on the existing peaceful
+  // baseline; M3 needs hostile mobs for pearls and blaze rods.
   const difficulty = values.difficulty
+  const difficultyAllowed = expectedMilestone === 'M2' ? difficulty === 'peaceful' : ['easy', 'normal', 'hard'].includes(difficulty)
   conditions.push(
     condition({
       id: 'descriptor.difficulty',
-      verdict: ['easy', 'normal', 'hard'].includes(difficulty) ? 'PASS' : 'FAIL',
-      reason: ['easy', 'normal', 'hard'].includes(difficulty)
-        ? `difficulty=${difficulty} (hostile mobs can spawn; peaceful is refused because M3 needs endermen and blazes)`
-        : `difficulty=${String(difficulty)} refused: must be easy|normal|hard, never peaceful`,
+      verdict: difficultyAllowed ? 'PASS' : 'FAIL',
+      reason:
+        expectedMilestone === 'M2'
+          ? difficultyAllowed
+            ? 'difficulty=peaceful (the repository M2 policy permits peaceful and does not change difficulty before M3)'
+            : `difficulty=${String(difficulty)} refused for M2: the M2 reproduction contract requires peaceful`
+          : difficultyAllowed
+            ? `difficulty=${difficulty} (hostile mobs can spawn; peaceful is refused because M3 needs endermen and blazes)`
+            : `difficulty=${String(difficulty)} refused: must be easy|normal|hard, never peaceful`,
     }),
   )
   conditions.push(
@@ -350,7 +365,9 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
       verdict: values.mobSpawning === true ? 'PASS' : 'FAIL',
       reason:
         values.mobSpawning === true
-          ? 'hostile spawning is declared ON. NOTE: this build does NOT read the server.properties key `spawn-monsters` (0 occurrences in DedicatedServerProperties); the enforceable gate is the spawn_mobs / spawn_monsters GAMERULE, which descriptor.gamerulesClean checks'
+          ? expectedMilestone === 'M2'
+            ? 'mobSpawning=true and spawn_mobs/spawn_monsters remain at vanilla defaults; M2 keeps difficulty=peaceful, so this does not enable hostile spawns before M3'
+            : 'hostile spawning is declared ON. NOTE: this build does NOT read the server.properties key `spawn-monsters` (0 occurrences in DedicatedServerProperties); the enforceable gate is the spawn_mobs / spawn_monsters GAMERULE, which descriptor.gamerulesClean checks'
           : `values.mobSpawning must be true, got ${String(values.mobSpawning)} (and it is only a declaration: this build gates hostile spawning on the spawn_mobs / spawn_monsters gamerule)`,
     }),
   )
@@ -358,7 +375,7 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
   // 5b. gamerules are PER DIMENSION in this build (each level.dat owns its own
   // set; the live world proves it: keep_inventory=true everywhere while
   // advance_time=false only in the overworld). A clean run must assert the rules
-  // in every dimension, because the M3 route dies in the Nether.
+  // in every dimension so the descriptor's full scope is judged.
   const scope = isPlainObject(cleanRun.gameruleScope) ? cleanRun.gameruleScope : null
   const scopeDimensions = Array.isArray(scope?.dimensions) ? scope.dimensions : []
   const requiredDimensions = ['minecraft:overworld', 'minecraft:the_nether', 'minecraft:the_end']
@@ -369,8 +386,8 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
       verdict: scope?.perDimension === true && missingDimensions.length === 0 ? 'PASS' : 'FAIL',
       reason:
         scope?.perDimension === true && missingDimensions.length === 0
-          ? `gamerules are declared PER DIMENSION for ${scopeDimensions.join(', ')}; the staged datapack asserts every rule in all three (keep_inventory=false must hold in the Nether, where the M3 route dies)`
-          : `cleanRun.gameruleScope must declare perDimension=true and all of ${requiredDimensions.join(', ')} (got perDimension=${String(scope?.perDimension)}, dimensions=${JSON.stringify(scopeDimensions)}); a single-dimension gamerule set can leave keep_inventory=true in the Nether and fake the run`,
+          ? `gamerules are declared PER DIMENSION for ${scopeDimensions.join(', ')}; the staged datapack asserts the declared defaults in all three dimensions`
+          : `cleanRun.gameruleScope must declare perDimension=true and all of ${requiredDimensions.join(', ')} (got perDimension=${String(scope?.perDimension)}, dimensions=${JSON.stringify(scopeDimensions)}); a single-dimension gamerule set would leave other dimensions unjudged`,
       detail: { perDimension: scope?.perDimension ?? null, dimensions: scopeDimensions, missing: missingDimensions },
     }),
   )
@@ -562,8 +579,8 @@ export function validateCleanEnvironment(document, { descriptorPath = null, desc
     failed: failed.map((entry) => entry.id),
     residual:
       status === 'CLEAN'
-        ? ['CLEAN means the DESCRIPTOR is admissible: it still says nothing about whether the actual run obeyed it (that is what run-evidence conditions and the canonical M3 gate decide)']
-        : ['a NOT_CLEAN/UNKNOWN descriptor must not be used as the environment record of an M3 acceptance bundle'],
+        ? [`CLEAN means the ${expectedMilestone} descriptor is admissible: it still says nothing about whether the actual run obeyed it (that is what run-evidence conditions and the canonical ${expectedMilestone} gate decide)`]
+        : [`a NOT_CLEAN/UNKNOWN descriptor must not be used as the environment record of an ${expectedMilestone} acceptance run`],
   }
 }
 
