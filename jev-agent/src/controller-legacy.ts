@@ -7348,6 +7348,12 @@ export class JevController {
       // gaining items, so a verified drop must also reset the progress-stall clock.
       if (descending && yProgressed) this.lastProgressAt = Date.now()
     } else {
+      // The no-progress latch changes strategy once: stop the current tunnel and
+      // begin a bounded lateral search. Later level steps remain part of that same
+      // search; resetting the path on every step zeroed `digDirCount`, so
+      // `DIG_PATH_CAP` could never accumulate (live: DESCEND_LIMIT repeated with
+      // DIG_PATH depth=1 across dozens of same-height blocks).
+      const lateralSearchAlreadyStarted = this.digMemory.snapshot().descendLimitReached
       const budget = this.digMemory.markDescend(false)
       this.logger.info(
         'agent',
@@ -7355,7 +7361,7 @@ export class JevController {
         { actionId: result.actionId, noProgress: budget.noProgress },
         this.tickCounter,
       )
-      if (budget.limitReached) {
+      if (budget.limitReached && !lateralSearchAlreadyStarted) {
         this.logger.warn(
           'agent',
           `DESCEND_LIMIT depth=${this.digMemory.depth} noProgress=${budget.noProgress} -> strategy=lateral`,
@@ -7372,6 +7378,7 @@ export class JevController {
         // genuinely impossible one. Item-goal search keeps the reset.
         if (!descending) this.digMemory.resetPath()
       }
+      if (budget.limitReached) this.signals.descendLimitReached = true
     }
     if (this.digMemory.isOscillating()) {
       const net = Math.round(this.digMemory.netDisplacement() * 100) / 100
