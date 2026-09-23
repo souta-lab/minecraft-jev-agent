@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { DigMemory } from './src/worldMemory.ts'
+import { DigMemory } from '../src/worldMemory.ts'
 
 describe('DigMemory world scope', () => {
   it('retains useful path memory in one world and clears absolute coordinates across dimension/world epochs', () => {
