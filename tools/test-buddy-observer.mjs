@@ -193,7 +193,15 @@ const combatCall = {
   error: null,
   state: {
     semantic: { world: { dimension: 'overworld', worldEpoch: 1, generationId: null, alive: true, leaseHeld: true } },
-    self: { position: { x: 10, y: 64, z: 20 }, dimension: 'overworld', health: 16, food: 17, heldItem: 'iron_sword' },
+    self: {
+      position: { x: 10, y: 64, z: 20 },
+      dimension: 'overworld',
+      health: 16,
+      food: 17,
+      heldItem: 'iron_sword',
+      armor: { head: null, torso: { name: 'iron_chestplate', count: 1, slot: 6, durabilityUsed: 197, maxDurability: 240 }, legs: null, feet: null },
+      offhand: { name: 'shield', count: 1, slot: 45, durabilityUsed: 8, maxDurability: 336 },
+    },
     inventory: { iron_sword: 1, ender_pearl: 2 },
     goal: { id: 'g1:collect:log', description: 'collect log', targetItem: 'log', requiredCount: 3, haveCount: 1, progress: 1, complete: false },
     currentOption: { semanticInstanceId: 'collect:log#c3', semanticIntent: 'collect log', allowedSkills: ['BRANCH_MINE'] },
@@ -242,6 +250,8 @@ assert.equal(combatSummary.choices.jevEvidence.selectedCandidate.meta.weapon, 'i
 assert.ok(combatSummary.choices.jevEvidence.alternatives.some((entry) => entry.id === 'RETREAT:p2'))
 assert.equal(combatSummary.choices.jevEvidence.state.threat.primary.threatHeldItem, 'bow')
 assert.equal(combatSummary.choices.jevEvidence.state.threat.nearbyHostiles.length, 2)
+assert.deepEqual(combatSummary.choices.jevCombatDecision.self.armor, combatCall.state.self.armor)
+assert.deepEqual(combatSummary.choices.jevCombatDecision.self.offhand, combatCall.state.self.offhand)
 assert.equal(combatSummary.choices.jevEvidence.state.resources.known[0].name, 'acacia_log')
 assert.equal(combatSummary.choices.jevEvidence.state.structures.status, 'not_recorded')
 assert.equal(combatSummary.progress.liveGoal.fraction, 1 / 3)

@@ -1002,7 +1002,7 @@ function projectDecisionState(state) {
       : knownStructures === null ? null : [knownStructures]
   return {
     world: pickFields(world, ['dimension', 'worldEpoch', 'generationId', 'alive', 'leaseHeld']),
-    self: pickFields(state?.self, ['position', 'dimension', 'health', 'food', 'lastDamage', 'heldItem', 'equipment']),
+    self: pickFields(state?.self, ['position', 'dimension', 'health', 'food', 'lastDamage', 'heldItem', 'equipment', 'armor', 'offhand']),
     inventory: projectInventory(state?.inventory),
     goal: pickFields(goal, ['id', 'description', 'targetItem', 'requiredCount', 'startCount', 'haveCount', 'progress', 'complete']),
     goalQueue: pickFields(state?.goalQueue, ['depth', 'empty']),
@@ -1193,7 +1193,11 @@ function projectCombatDecision(jevEvidence) {
   const context = {
     observedAt: jevEvidence.observedAt ?? null,
     world: pickFields(state.world, ['dimension', 'worldEpoch', 'generationId']),
-    self: pickFields(state.self, ['position', 'dimension', 'health', 'food', 'heldItem', 'equipment']),
+      // Keep the exact bounded defensive equipment facts beside the choice so
+      // reviewers can see whether Jev knew about worn armor/offhand shielding.
+      // This is observation only; it does not alter candidate eligibility or
+      // preference probabilities.
+      self: pickFields(state.self, ['position', 'dimension', 'health', 'food', 'heldItem', 'equipment', 'armor', 'offhand']),
     objective: {
       goal: state.goal ?? null,
       progress: state.progress ?? null,
