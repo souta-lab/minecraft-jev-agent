@@ -585,8 +585,17 @@ export interface NonProgressYieldResult {
   nextGoalId: string | null
 }
 
-/** The compact `kind:target:count` goal key the controller logs. */
-export function goalKeyOf(goal: Pick<QueuedGoal, 'kind' | 'targetItem' | 'description' | 'requiredCount'>): string {
+/**
+ * The compact `kind:target:count` goal key the controller logs.
+ *
+ * The parameter is widened to the fields the key actually reads, so a caller
+ * holding a pre-queue goal (`PlannedGoal`, whose `targetItem`/`requiredCount` are
+ * optional) names the same goal with the same vocabulary instead of
+ * re-implementing the format.
+ */
+export function goalKeyOf(
+  goal: Pick<QueuedGoal, 'kind' | 'description'> & Partial<Pick<QueuedGoal, 'targetItem' | 'requiredCount'>>,
+): string {
   return `${goal.kind}:${goal.targetItem ?? goal.description}:${goal.requiredCount}`
 }
 
