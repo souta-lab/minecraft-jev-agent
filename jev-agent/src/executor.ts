@@ -7995,6 +7995,14 @@ export class Executor {
       while (Date.now() < until) {
         this.ensureOwned(epoch, signal)
         if (sameCell(feetCellOf(this.bot), landing)) return true
+        // SAFE, every iteration, immediately before the nudge moves the body: the
+        // cell below the body must still be OPEN with a SOLID floor, or the step
+        // would drop the body into a hole it cannot leave. The floor is the block
+        // this leg placed and verified; this re-reads it from the live world, so a
+        // world change between the placement and the step stops the leg exactly
+        // where the body stands - the same "a placement is never followed by a step
+        // onto an unverified cell" rule the bridge's own advance takes.
+        if (!this.descentLandingIsSafe(landing)) return false
         const here = this.bot.entity.position
         // Aim at the landing cell's centre, horizontally only: the drop is gravity's.
         const dx = landing.x + 0.5 - here.x
@@ -8015,6 +8023,21 @@ export class Executor {
     }
     this.ensureOwned(epoch, signal)
     return sameCell(feetCellOf(this.bot), landing)
+  }
+
+  /**
+   * The live truth of a landing cell this leg is about to step DOWN into: the cell
+   * itself and its head cell are passable and the cell below it carries a solid,
+   * load-bearing block (the floor this leg placed). Read from the live world, never
+   * from the candidate's own claim.
+   */
+  private descentLandingIsSafe(landing: Vec3Json): boolean {
+    const feet = this.currentBlockAt(landing)
+    if (feet !== null && feet.boundingBox !== 'empty') return false
+    const head = this.currentBlockAt({ x: landing.x, y: landing.y + 1, z: landing.z })
+    if (head !== null && head.boundingBox !== 'empty') return false
+    const floor = this.currentBlockAt({ x: landing.x, y: landing.y - 1, z: landing.z })
+    return floor !== null && isUsableGroundSupport(floor)
   }
 
   private async runDescend(

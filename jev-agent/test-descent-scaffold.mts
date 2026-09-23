@@ -66,6 +66,9 @@ import {
   strictlyReducesDescentGap,
 } from './src/descentScaffold.ts'
 import type { DescentScaffoldProbe } from './src/descentScaffold.ts'
+import { envelopeForCandidate } from './src/skillCommitment.ts'
+import { guardCandidate } from './src/policy.ts'
+import type { GuardContext } from './src/policy.ts'
 import { capabilityKey } from './src/reachability.ts'
 import type { Capability } from './src/reachability.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
@@ -399,6 +402,18 @@ function worldState(input: {
   }
 }
 
+/** The guard context the controller builds for a candidate decision. */
+function guardContext(candidates: readonly Candidate[]): GuardContext {
+  return {
+    phase: 'decision',
+    candidateIds: new Set(candidates.map((candidate) => candidate.id)),
+    inFlight: null,
+    reach: defaultCandidateOptions.reach,
+    maxCandidateAgeTicks: 40,
+    canComputePath: () => true,
+  }
+}
+
 function descentScaffoldCandidates(candidates: readonly Candidate[]): Candidate[] {
   return candidates.filter(
     (candidate) => typeof candidate.meta[DESCEND_SCAFFOLD_PLACE_META] === 'string',
@@ -510,6 +525,47 @@ function descentScaffoldCandidates(candidates: readonly Candidate[]): Candidate[
       terrain.name({ x: 0, y: 62, z: 0 }) === 'cobblestone' &&
       Math.floor(position.y) === 63,
     `start="${start}" step="${step}" end="${end}" place=${terrain.name({ x: 0, y: 62, z: 0 })} body_y=${position.y}`,
+  )
+
+  // (i-h) the POLICY GUARD accepts the leg it generated. A DESCEND that places
+  // instead of digging can never match a sensor step's wall/floor/head, so without
+  // its own branch `guardDescend` would deny the one route that answers the measured
+  // blocker - the same reason `carriesOwnRoute` exists for a placing MOVE.
+  const guardTarget = offered[0] ?? scaffoldCandidate(feet)
+  const guarded = guardCandidate(guardTarget, state, guardContext(grounded.candidates))
+  check(
+    '(i-h) the guard accepts the self-landing descent, re-verified from the same sensor probe',
+    guarded.ok === true,
+    guarded.ok === true ? 'ok' : `code=${guarded.code} reason=${guarded.reason}`,
+  )
+  // ...and it fails closed the moment the declared cell is not the state's own probe.
+  const stale = guardCandidate(
+    { ...guardTarget, meta: { ...guardTarget.meta, [DESCEND_SCAFFOLD_PLACE_META]: '9,9,9' } },
+    state,
+    guardContext(grounded.candidates),
+  )
+  check(
+    '(i-h) a stale declared place cell is denied (the guard re-reads the sensor, never the meta alone)',
+    stale.ok === false && stale.code === 'TARGET_GONE',
+    stale.ok === true ? 'ok' : `code=${stale.code} reason=${stale.reason}`,
+  )
+
+  // (i-i) THE EFFECT ENVELOPE declares the consumed block and the equip, and grants
+  // NO dig authority: this leg places, it never mines (the portal plane is never
+  // mined). A DESCEND that declared nothing must still get no place authority.
+  const declaredEnvelope = envelopeForCandidate(guardTarget, { equipItems: ['cobblestone'] })
+  const bareEnvelope = envelopeForCandidate(scaffoldCandidateBare(feet), { equipItems: ['cobblestone'] })
+  check(
+    '(i-i) the envelope declares the one block + one cell and grants no dig authority',
+    declaredEnvelope.mayPlaceGroundedRoute === true &&
+      declaredEnvelope.mayDigGroundedRoute === false &&
+      declaredEnvelope.mayPlaceBlocks?.length === 1 &&
+      declaredEnvelope.mayPlaceBlocks[0]?.itemName === 'cobblestone' &&
+      key(declaredEnvelope.mayPlaceBlocks[0]?.position ?? { x: 0, y: 0, z: 0 }) === '0,62,0' &&
+      declaredEnvelope.mayEquipItems?.includes('cobblestone') === true &&
+      bareEnvelope.mayPlaceGroundedRoute === false &&
+      (bareEnvelope.mayPlaceBlocks ?? []).length === 0,
+    `declared={place:${String(declaredEnvelope.mayPlaceGroundedRoute)},dig:${String(declaredEnvelope.mayDigGroundedRoute)},cells:${String(declaredEnvelope.mayPlaceBlocks?.length)}} bare={place:${String(bareEnvelope.mayPlaceGroundedRoute)}}`,
   )
 
   // (i-g) the markers are registered on the controller mirrored path, so a descent
@@ -935,8 +991,8 @@ function makeDescentBot(
         if (goal === null || goal === undefined) return
         const asCell = goal as { x?: number; y?: number; z?: number }
         if (typeof asCell.x !== 'number' || typeof asCell.y !== 'number' || typeof asCell.z !== 'number') return
-        // The server's own rule for THIS leg: a one-level drop onto a cell whose
-        // floor is solid lands the body there (gravity, no jump).
+        // The server's own rule for THIS leg: the body drops ONE level and lands on
+        // the floor the leg just placed, so its feet end up in the landing cell.
         position.x = asCell.x + 0.5
         position.y = asCell.y
         position.z = asCell.z + 0.5
@@ -956,6 +1012,15 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
   return predicate()
+}
+
+/** The same DESCEND without any descent-scaffold declaration: it must gain nothing. */
+function scaffoldCandidateBare(feet: Vec3Json): Candidate {
+  const bare = scaffoldCandidate(feet)
+  const meta: Record<string, string | number | boolean> = { ...bare.meta }
+  delete meta[DESCEND_SCAFFOLD_PLACE_META]
+  delete meta.descentScaffoldBlock
+  return { ...bare, meta }
 }
 
 /** The DESCEND candidate the offer builds, rebuilt here so the executor fixture can claim it. */
