@@ -300,12 +300,16 @@ function makeBot(
   // ---- the live physics loop ---------------------------------------------
   // One prismarine-physics integration per 50 ms frame, emitting the same
   // `physicsTick` mineflayer's `tickPhysics` emits after each `simulatePlayer`.
-  // The scan is the same "feet cell or the cell below" column
-  // `correctStandingOnGround`/`resolvePillarStep` use, so the engine's landing
-  // and the executor's grounding agree on what a floor is.
+  //
+  // The floor is the top of the highest solid block strictly BELOW the feet cell:
+  // that is the block the body stands ON, and it is what an engine may land on.
+  // Scanning the feet cell itself (as `correctStandingOnGround` does for the
+  // executor's grounding, where a slab or snow layer can live in that cell) would
+  // let this loop teleport a body UP a block whenever it moved into a solid
+  // column - a step-up no engine performs, and one the locomotion model owns.
   const floorTopAt = (x: number, z: number, fromFeetY: number): number | null => {
     const column = { x: Math.floor(x), z: Math.floor(z) }
-    for (let y = Math.floor(fromFeetY); y >= Math.floor(fromFeetY) - 4; y -= 1) {
+    for (let y = Math.floor(fromFeetY) - 1; y >= Math.floor(fromFeetY) - 4; y -= 1) {
       const block = grid.get(`${column.x},${y},${column.z}`)
       if (block === undefined || block.boundingBox !== 'block') continue
       return y + 1
