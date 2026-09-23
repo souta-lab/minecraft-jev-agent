@@ -62,6 +62,7 @@ export const RESULT_LINE = 'CLEAN_RUN_RESULT'
 export const ACCEPTANCE_RULES = Object.freeze([
   'descriptor.status === CLEAN',
   'every required run-evidence condition === PASS',
+  'run.preparationFreshness === PASS (exact pre-run manifest and attempt ledger precede this BOOT)',
   'bundle.git.dirty === false',
   'descriptor frozen sourceSha === clean bundle.git.head === this run BOOT sourceSha',
   'the run-scoped source window is complete and every applied reload names the same sourceSha',
@@ -122,8 +123,8 @@ export function usage() {
     '  --artifact <p>          alternatively, a milestone-run-artifact JSON to check run evidence against',
     '  --run <runId>           exact runId the evidence must be scoped to',
     `  --root <tree>           resident tree (default ${REPO_ROOT}); used only to resolve relative log paths`,
-    '  --world-container <d>   override the descriptor world container for the freshness check',
-    '  --observed-world <p>    a level.dat measurement JSON: proves the target world does not exist yet',
+    '  --world-container <d>   override the descriptor world container for the pre-run/final target proof',
+    '  --observed-world <p>    a pre-run level.dat measurement JSON: proves the target did not exist yet',
     '  --gamerule-verification <p> per-dimension console listing (default: gamerule-verification.txt beside the descriptor)',
     '  --out <dir>             write clean-run.json + clean-run.md (additive; never overwrites bundle.json)',
     '  --json                  print the whole verdict JSON to stdout',
@@ -155,6 +156,161 @@ function readText(path) {
 
 function condition({ id, verdict, reason = null, required = true, detail = null }) {
   return { id, verdict, required: required === true, reason, detail }
+}
+
+/**
+ * Prove that this exact resolved descriptor was prepared before this run
+ * opened, while allowing the server to create its normal level.dat afterward.
+ * The prepare manifest binds the descriptor file and the append-only attempt
+ * ledger; the HOST BOOT supplies the run boundary, and the acceptance record
+ * independently supplies the actual level name and seed.
+ */
+function preparationFreshnessCondition({ descriptor, descriptorPath, descriptorSha256, artifact, runId, required }) {
+  const unavailable = (reason, detail = null) => condition({
+    id: 'run.preparationFreshness',
+    verdict: 'UNKNOWN',
+    required,
+    reason,
+    detail,
+  })
+  if (!required) {
+    return unavailable('no run evidence was supplied; pre-run target absence remains the descriptor-only requirement')
+  }
+  if (descriptorPath === null || descriptorSha256 === null) {
+    return unavailable('the resolved descriptor path/hash is unavailable')
+  }
+  const manifestPath = join(dirname(descriptorPath), 'manifest.json')
+  const manifestRead = readJson(manifestPath)
+  if (manifestRead.document === null) {
+    return unavailable(`clean-run prepare manifest is unavailable: ${String(manifestRead.error)}`, { manifestPath })
+  }
+  const manifest = manifestRead.document
+  const target = manifest?.target ?? null
+  const values = descriptor?.values ?? {}
+  const cleanRun = descriptor?.cleanRun ?? {}
+  const container = typeof cleanRun.worldContainer === 'string' ? resolve(cleanRun.worldContainer) : null
+  const expectedWorldDir = container === null || typeof values.levelName !== 'string' ? null : resolve(join(container, values.levelName))
+  const resolvedPath = typeof manifest?.resolved?.path === 'string' ? resolve(manifest.resolved.path) : null
+  const resolvedFile = Array.isArray(manifest?.files)
+    ? manifest.files.find((entry) => typeof entry?.path === 'string' && resolve(entry.path) === resolve(descriptorPath)) ?? null
+    : null
+  const manifestIssues = []
+  const manifestUnknown = []
+
+  if (typeof runId !== 'string' || runId === '') {
+    manifestUnknown.push('the exact requested runId is unavailable')
+  } else if (artifact?.runId !== runId) {
+    manifestIssues.push(`artifact runId=${String(artifact?.runId ?? null)} does not match requested runId=${runId}`)
+  }
+  if (typeof values.sourceSha !== 'string' || values.sourceSha === '') {
+    manifestUnknown.push('the descriptor has no exact source SHA')
+  } else if (artifact?.run?.boot?.sourceSha !== values.sourceSha) {
+    manifestIssues.push(`BOOT source SHA=${String(artifact?.run?.boot?.sourceSha ?? null)} does not match descriptor source SHA=${values.sourceSha}`)
+  }
+
+  if (manifest.record !== 'clean-run-prepare' || manifest.schemaVersion !== 1) {
+    manifestIssues.push(`unexpected prep manifest record/schema=${String(manifest.record)}/${String(manifest.schemaVersion)}`)
+  }
+  if (resolvedPath === null || resolvedPath !== resolve(descriptorPath)) {
+    manifestIssues.push(`prep manifest resolved path=${String(resolvedPath)} does not match descriptor=${resolve(descriptorPath)}`)
+  }
+  if (resolvedFile === null || resolvedFile.sha256 !== descriptorSha256) {
+    manifestIssues.push('prep manifest does not bind the exact resolved descriptor file hash')
+  }
+  if (target === null || target.levelDatPresentAtPrepare !== false) {
+    manifestIssues.push(`prep manifest does not prove target absence before staging (levelDatPresentAtPrepare=${String(target?.levelDatPresentAtPrepare)})`)
+  }
+  if (
+    target === null ||
+    target.levelName !== values.levelName ||
+    String(target.levelSeed) !== String(values.levelSeed) ||
+    target.sourceSha !== values.sourceSha ||
+    container === null ||
+    typeof target.container !== 'string' ||
+    resolve(target.container) !== container ||
+    typeof target.worldDir !== 'string' ||
+    expectedWorldDir === null ||
+    resolve(target.worldDir) !== expectedWorldDir
+  ) {
+    manifestIssues.push('prep manifest target name/seed/source/container/world path does not match the resolved descriptor')
+  }
+
+  const prepTimeMs = typeof manifest.generatedAt === 'string' ? Date.parse(manifest.generatedAt) : Number.NaN
+  const bootTimeMs = typeof artifact?.run?.boot?.ts === 'string' ? Date.parse(artifact.run.boot.ts) : Number.NaN
+  if (!Number.isFinite(prepTimeMs)) manifestUnknown.push('prep manifest generatedAt is missing or invalid')
+  if (!Number.isFinite(bootTimeMs)) manifestUnknown.push('the run artifact has no exact BOOT timestamp')
+  if (Number.isFinite(prepTimeMs) && Number.isFinite(bootTimeMs) && prepTimeMs >= bootTimeMs) {
+    manifestIssues.push(`prep manifest timestamp ${manifest.generatedAt} is not before run BOOT ${artifact.run.boot.ts}`)
+  }
+
+  const attemptLedger = manifest.attemptLedger ?? null
+  if (attemptLedger === null || typeof attemptLedger.path !== 'string' || typeof attemptLedger.sha256 !== 'string') {
+    manifestUnknown.push('prep manifest does not bind an attempts-ledger path and SHA-256')
+  } else if (container === null || resolve(attemptLedger.path) !== resolve(join(container, 'm3-clean-run', 'attempts.json'))) {
+    manifestIssues.push('prep manifest attempts ledger path is outside the M3 run ledger for this target container')
+  } else {
+    const ledgerRead = readJson(resolve(attemptLedger.path))
+    if (ledgerRead.document === null || ledgerRead.text === null) {
+      manifestUnknown.push(`bound attempts ledger is unavailable: ${String(ledgerRead.error)}`)
+    } else if (sha256Text(ledgerRead.text) !== attemptLedger.sha256) {
+      manifestIssues.push('attempts-ledger bytes do not match the hash recorded in the prep manifest')
+    } else if (ledgerRead.document.record !== 'clean-run-attempts' || ledgerRead.document.schemaVersion !== 1 || !Array.isArray(ledgerRead.document.attempts)) {
+      manifestIssues.push('bound attempts ledger has an unexpected record/schema')
+    } else {
+      const matchingAttempt = ledgerRead.document.attempts.some((entry) => {
+        const preparedAtMs = typeof entry?.preparedAt === 'string' ? Date.parse(entry.preparedAt) : Number.NaN
+        return (
+          entry?.levelName === values.levelName &&
+          String(entry?.levelSeed) === String(values.levelSeed) &&
+          entry?.sourceSha === values.sourceSha &&
+          entry?.levelDatPresentAtPrepare === false &&
+          typeof entry?.worldDir === 'string' &&
+          expectedWorldDir !== null &&
+          resolve(entry.worldDir) === expectedWorldDir &&
+          Number.isFinite(preparedAtMs) &&
+          Number.isFinite(prepTimeMs) &&
+          preparedAtMs <= prepTimeMs
+        )
+      })
+      if (!matchingAttempt) manifestIssues.push('bound attempts ledger has no fresh matching target/name/seed/source attempt')
+    }
+  }
+
+  const verdict = manifestIssues.length > 0 ? 'FAIL' : manifestUnknown.length > 0 ? 'UNKNOWN' : 'PASS'
+  return condition({
+    id: 'run.preparationFreshness',
+    verdict,
+    required,
+    reason: verdict === 'PASS'
+      ? `the exact target was absent when prepared, and its descriptor/attempt ledger were recorded before BOOT for runId=${runId} sourceSha=${values.sourceSha}`
+      : verdict === 'FAIL'
+        ? manifestIssues.join('; ')
+        : manifestUnknown.join('; '),
+    detail: {
+      manifestPath,
+      manifestSha256: sha256Text(manifestRead.text),
+      manifestGeneratedAt: manifest.generatedAt ?? null,
+      bootAt: artifact?.run?.boot?.ts ?? null,
+      runId: artifact?.runId ?? null,
+      requestedRunId: runId,
+      bootSourceSha: artifact?.run?.boot?.sourceSha ?? null,
+      resolvedPath,
+      descriptorPath: resolve(descriptorPath),
+      descriptorSha256,
+      target: target === null ? null : {
+        levelName: target.levelName ?? null,
+        levelSeed: target.levelSeed ?? null,
+        sourceSha: target.sourceSha ?? null,
+        worldDir: target.worldDir ?? null,
+        container: target.container ?? null,
+        levelDatPresentAtPrepare: target.levelDatPresentAtPrepare ?? null,
+      },
+      attemptLedgerPath: attemptLedger?.path ?? null,
+      attemptLedgerSha256: attemptLedger?.sha256 ?? null,
+      issues: manifestIssues,
+      unknown: manifestUnknown,
+    },
+  })
 }
 
 /**
@@ -394,10 +550,12 @@ export async function runCleanRunGate({
   const generatedAt = new Date().toISOString()
   const descriptorPath = environment === null ? null : resolve(environment)
   const loaded = loadCleanEnvironment(descriptorPath)
+  const runEvidenceProvided = bundleDir !== null || artifactPath !== null
   const descriptorCheck = validateCleanEnvironment(loaded.document, {
     descriptorPath,
     descriptorSha256: loaded.sha256,
     worldContainer,
+    requireTargetWorldAbsent: !runEvidenceProvided,
   })
   const descriptor = loaded.document
   const values = descriptor?.values ?? {}
@@ -440,13 +598,21 @@ export async function runCleanRunGate({
           descriptorPath,
           descriptorSha256: loaded.sha256,
         })
+  runConditions.push(preparationFreshnessCondition({
+    descriptor,
+    descriptorPath,
+    descriptorSha256: loaded.sha256,
+    artifact,
+    runId,
+    required: runEvidenceProvided,
+  }))
   runConditions.push(
     ...productionSourceConditions({
       bundle,
       artifact,
       descriptor,
       runId,
-      runEvidenceProvided: bundleDir !== null || artifactPath !== null,
+      runEvidenceProvided,
     }),
   )
   const effectiveGameruleVerificationPath =

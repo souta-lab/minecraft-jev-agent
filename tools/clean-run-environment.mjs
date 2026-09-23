@@ -247,7 +247,13 @@ export function seedProblems(levelSeed, previousLevelSeed = null) {
  */
 export function validateCleanEnvironment(
   document,
-  { descriptorPath = null, descriptorSha256 = null, worldContainer = null, expectedMilestone = 'M3' } = {},
+  {
+    descriptorPath = null,
+    descriptorSha256 = null,
+    worldContainer = null,
+    expectedMilestone = 'M3',
+    requireTargetWorldAbsent = true,
+  } = {},
 ) {
   const conditions = []
   const parseOk = isPlainObject(document)
@@ -306,23 +312,27 @@ export function validateCleanEnvironment(
     }),
   )
 
-  // 3. the target world must never have been GENERATED before. A directory that
-  // only holds what clean-run-prepare staged (no level.dat) is still fresh; a
-  // directory with a level.dat is a world that has already been played and can
-  // never be a clean-run target.
+  // 3. Before a run, the target must not already have level data. Once the
+  // server has booted the exact prepared target, level.dat is expected; the
+  // final run gate proves freshness from the pre-run prepare manifest instead
+  // of requiring the generated world to remain absent.
   const containerPath = worldContainer ?? (typeof cleanRun.worldContainer === 'string' ? cleanRun.worldContainer : null)
   const scanned = scanWorldContainer(containerPath, levelName)
+  const generatedBeforeRun = scanned.generated.length > 0
   conditions.push(
     condition({
       id: 'descriptor.worldNotGenerated',
-      verdict: scanned.generated.length > 0 ? 'FAIL' : 'PASS',
+      verdict: !requireTargetWorldAbsent ? 'UNKNOWN' : generatedBeforeRun ? 'FAIL' : 'PASS',
+      required: requireTargetWorldAbsent,
       reason:
-        scanned.generated.length > 0
+        !requireTargetWorldAbsent
+          ? 'post-run validation permits the target level.dat; pre-run absence must be proven by the run-bound clean-run prepare manifest'
+          : generatedBeforeRun
           ? `world already GENERATED under ${String(containerPath)}: ${scanned.generated.join(', ')} (level.dat/level.dat_old exists, so the world has been booted and can never be a clean-run target)`
           : scanned.containerReadable
             ? `${worldDirNames(levelName ?? '').join(', ')} contain no level.dat under ${containerPath}${scanned.staged.length > 0 ? ` (staged by clean-run-prepare, not yet generated: ${scanned.staged.join(', ')})` : ''}`
             : `world container ${String(containerPath)} is absent, so no world can exist there yet (clean-run-prepare refuses to write into a missing root without --create-server-root)`,
-      detail: { container: containerPath, ...scanned },
+      detail: { phase: requireTargetWorldAbsent ? 'pre-run' : 'post-run', required: requireTargetWorldAbsent, container: containerPath, ...scanned },
     }),
   )
 

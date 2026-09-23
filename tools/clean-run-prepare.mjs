@@ -777,6 +777,21 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
 /** Perform the planned writes. Idempotent: identical content is left untouched. */
 export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {}) {
   if (plan.status === 'REFUSED') return { ...plan, applied: 0, unchanged: 0 }
+  const generatedTargets = worldDirNames(plan.levelName ?? '').filter((name) =>
+    worldDataExists(join(plan.container, name)),
+  )
+  if (generatedTargets.length > 0) {
+    return {
+      ...plan,
+      status: 'REFUSED',
+      refusals: [
+        ...(plan.refusals ?? []),
+        { reason: `target_world_generated_before_apply: ${generatedTargets.join(', ')} contains level.dat/level.dat_old` },
+      ],
+      applied: 0,
+      unchanged: 0,
+    }
+  }
   const applied = []
   const unchanged = []
   const mkdirSyncAll = (path) => mkdirSync(path, { recursive: true })
@@ -813,9 +828,21 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
     }
     applied.push(action.path)
   }
-  // the manifest + ledger are written LAST, after every staged file exists
+  // The ledger is written before the manifest so the final manifest can bind
+  // the exact append-only attempt bytes. The manifest remains the last proof
+  // file written after every staged file exists.
   const nowIso = now().toISOString()
   const fileHashes = (plan.files ?? []).map((file) => ({ path: file.path, sha256: sha256Text(file.content), bytes: Buffer.byteLength(file.content, 'utf8'), note: file.note }))
+  const attemptsPath = plan.attemptsPath ?? join(plan.runDir, 'attempts.json')
+  const ledger = existsSync(attemptsPath) ? safeJson(attemptsPath) ?? { record: 'clean-run-attempts', schemaVersion: 1, attempts: [] } : { record: 'clean-run-attempts', schemaVersion: 1, attempts: [] }
+  if (!Array.isArray(ledger.attempts)) ledger.attempts = []
+  if (!ledger.attempts.some((entry) => entry.levelName === plan.levelName && String(entry.levelSeed) === plan.levelSeed)) {
+    ledger.attempts.push({ levelName: plan.levelName, levelSeed: plan.levelSeed, sourceSha: plan.sourceSha, preparedAt: nowIso, worldDir: plan.worldDir, levelDatPresentAtPrepare: false })
+  }
+  ledger.updatedAt = nowIso
+  const attemptsText = `${JSON.stringify(ledger, null, 2)}\n`
+  mkdirSyncAll(dirname(attemptsPath))
+  writeFileSync(attemptsPath, attemptsText, 'utf8')
   const manifest = {
     record: RECORD,
     schemaVersion: SCHEMA_VERSION,
@@ -824,6 +851,7 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
     descriptor: { path: plan.loaded.path, sha256: plan.loaded.sha256 },
     resolved: { path: join(plan.runDir, 'environment-resolved.json'), overrides: plan.overridesApplied },
     target: { levelName: plan.levelName, levelSeed: plan.levelSeed, sourceSha: plan.sourceSha, worldDir: plan.worldDir, container: plan.container, levelDatPresentAtPrepare: false },
+    attemptLedger: { path: attemptsPath, sha256: sha256Text(attemptsText) },
     serverProperties: plan.propertiesChange ?? null,
     guards: plan.guards,
     propertyChecks: plan.propertyChecks ?? [],
@@ -833,14 +861,6 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
   }
   mkdirSyncAll(plan.runDir)
   writeFileSync(plan.manifestPath ?? join(plan.runDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  const attemptsPath = plan.attemptsPath ?? join(plan.runDir, 'attempts.json')
-  const ledger = existsSync(attemptsPath) ? safeJson(attemptsPath) ?? { record: 'clean-run-attempts', schemaVersion: 1, attempts: [] } : { record: 'clean-run-attempts', schemaVersion: 1, attempts: [] }
-  if (!Array.isArray(ledger.attempts)) ledger.attempts = []
-  if (!ledger.attempts.some((entry) => entry.levelName === plan.levelName && String(entry.levelSeed) === plan.levelSeed)) {
-    ledger.attempts.push({ levelName: plan.levelName, levelSeed: plan.levelSeed, sourceSha: plan.sourceSha, preparedAt: nowIso, worldDir: plan.worldDir, levelDatPresentAtPrepare: false })
-  }
-  ledger.updatedAt = nowIso
-  writeFileSync(attemptsPath, `${JSON.stringify(ledger, null, 2)}\n`, 'utf8')
   return { ...plan, status: applied.length === 0 ? 'IDEMPOTENT_NOOP' : 'APPLIED', applied, unchanged, manifest }
 }
 

@@ -48,7 +48,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
 import { runCleanRunGate, runCli as runGateCli } from './clean-run-gate.mjs'
-import { checkRunEvidence, loadCleanEnvironment, validateCleanEnvironment } from './clean-run-environment.mjs'
+import { checkRunEvidence, loadCleanEnvironment, sha256Text, validateCleanEnvironment } from './clean-run-environment.mjs'
 import { applyPlan, planPrepare, runCli as runPrepareCli } from './clean-run-prepare.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -165,6 +165,7 @@ function initCleanFixtureGit(root) {
     join(root, '.gitignore'),
     [
       '/environment-resolved.json',
+      '/manifest.json',
       '/gamerule-verification.txt',
       '/gamerules-observed.json',
       '/buddy-driver/buddy.log',
@@ -206,7 +207,7 @@ function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance 
 }
 
 /** A resolved (frozen) descriptor inside the fixture root. */
-function resolvedDescriptor(root, { levelName = CLEAN_LEVEL, levelSeed = CLEAN_SEED, sourceSha = FIXTURE_SHA, mutate = null, container = null } = {}) {
+function resolvedDescriptor(root, { levelName = CLEAN_LEVEL, levelSeed = CLEAN_SEED, sourceSha = FIXTURE_SHA, mutate = null, container = null, withPreparationProof = true } = {}) {
   const template = JSON.parse(readFileSync(TEMPLATE, 'utf8'))
   template.values.levelName = levelName
   template.values.levelSeed = levelSeed
@@ -216,7 +217,34 @@ function resolvedDescriptor(root, { levelName = CLEAN_LEVEL, levelSeed = CLEAN_S
   if (mutate !== null) mutate(template)
   const path = join(root, 'environment-resolved.json')
   writeFileSync(path, `${JSON.stringify(template, null, 2)}\n`, 'utf8')
-  return { path, document: template }
+  const loaded = loadCleanEnvironment(path)
+  assert.equal(loaded.error, null, `fixture descriptor load: ${String(loaded.error)}`)
+  if (!withPreparationProof) return { path, document: template }
+  const preparedAt = at(-1)
+  const worldContainer = template.cleanRun.worldContainer
+  const worldDir = join(worldContainer, levelName)
+  const attemptsPath = join(worldContainer, 'm3-clean-run', 'attempts.json')
+  mkdirSync(dirname(attemptsPath), { recursive: true })
+  const attemptsText = `${JSON.stringify({
+    record: 'clean-run-attempts',
+    schemaVersion: 1,
+    attempts: [{ levelName, levelSeed, sourceSha, preparedAt, worldDir, levelDatPresentAtPrepare: false }],
+    updatedAt: preparedAt,
+  }, null, 2)}\n`
+  writeFileSync(attemptsPath, attemptsText, 'utf8')
+  const manifest = {
+    record: 'clean-run-prepare',
+    schemaVersion: 1,
+    generatedAt: preparedAt,
+    mode: 'apply',
+    descriptor: { path, sha256: loaded.sha256 },
+    resolved: { path, overrides: [] },
+    target: { levelName, levelSeed, sourceSha, worldDir, container: worldContainer, levelDatPresentAtPrepare: false },
+    attemptLedger: { path: attemptsPath, sha256: sha256Text(attemptsText) },
+    files: [{ path, sha256: loaded.sha256 }],
+  }
+  writeFileSync(join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  return { path, document: template, manifestPath: join(root, 'manifest.json'), attemptsPath }
 }
 
 function writeGameruleVerification(root, runId, descriptor) {
@@ -328,13 +356,26 @@ const runCondition = (verdict, id) => condition(verdict, id)
   assert.equal(envValues.levelSeed, CLEAN_SEED)
   assert.equal(bundle.artifact.document.environment.worldChanges, null)
 
+  // The prepared world now has ordinary server-generated data. A descriptor-
+  // only/pre-run judgement must still reject that state, while the final
+  // run-scoped judgement proves freshness from the manifest written before BOOT.
+  const generatedWorldDir = join(container, CLEAN_LEVEL)
+  mkdirSync(generatedWorldDir, { recursive: true })
+  writeFileSync(join(generatedWorldDir, 'level.dat'), 'fixture server-generated level data\n', 'utf8')
+  const descriptorOnlyAfterBoot = await runCleanRunGate({ environment: descriptor.path, worldContainer: container })
+  assert.equal(descriptorOnlyAfterBoot.status, 'NOT_CLEAN')
+  assert.equal(condition(descriptorOnlyAfterBoot, 'descriptor.worldNotGenerated')?.verdict, 'FAIL')
+
   const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN, out: outDir })
   assert.equal(verdict.status, 'CLEAN', `clean status=${verdict.status} failed=${verdict.failed.join(',')}`)
-  for (const id of ['run.environmentRecordIsThisDescriptor', 'run.bootSourceSha', 'run.acceptanceRecord', 'run.levelNameAttested', 'run.seedAttested', 'run.gamerulesNotContradicted', 'run.noWorldChanges', 'run.bootInventoryEmpty', 'run.keepInventoryBehaviour', 'run.difficultyNotContradicted', 'run.mobSpawningNotContradicted']) {
+  for (const id of ['run.environmentRecordIsThisDescriptor', 'run.bootSourceSha', 'run.acceptanceRecord', 'run.levelNameAttested', 'run.seedAttested', 'run.preparationFreshness', 'run.gamerulesNotContradicted', 'run.noWorldChanges', 'run.bootInventoryEmpty', 'run.keepInventoryBehaviour', 'run.difficultyNotContradicted', 'run.mobSpawningNotContradicted']) {
     const row = runCondition(verdict, id)
     assert.ok(row !== null, `missing condition ${id}`)
     assert.equal(row.verdict, 'PASS', `${id} verdict=${row.verdict} reason=${row.reason}`)
   }
+  assert.equal(condition(verdict, 'descriptor.worldNotGenerated')?.verdict, 'UNKNOWN')
+  assert.equal(condition(verdict, 'descriptor.worldNotGenerated')?.required, false)
+  assert.match(runCondition(verdict, 'run.preparationFreshness').reason, /recorded before BOOT/)
   assert.match(runCondition(verdict, 'run.keepInventoryBehaviour').reason, /empty inventory after death/)
   // A fixture is NEVER a live acceptance: the combined answer says so exactly.
   assert.equal(verdict.acceptanceStatus, 'NOT_ACCEPTED')
@@ -354,6 +395,7 @@ const runCondition = (verdict, id) => condition(verdict, id)
   assert.match(text, /CLEAN_RUN_M3 status=NOT_ACCEPTED/)
   assert.match(text, /CLEAN_RUN_RESULT status=CLEAN acceptance=NOT_ACCEPTED/)
   assert.equal(cli.exitCode, 1)
+  rmSync(generatedWorldDir, { recursive: true, force: true })
   // The proof, printed: every verdict line of the offline acceptance path. This is
   // a FIXTURE judgement (evidenceClass=fixture), never live evidence.
   console.log('    --- full clean-run verdict lines for the CLEAN fixture (FIXTURE, not live evidence) ---')
@@ -817,6 +859,9 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.equal(manifest.target.levelName, 'm3clean-prep')
   assert.equal(manifest.target.levelSeed, '998877665544')
   assert.equal(manifest.descriptor.sha256.length, 64)
+  assert.equal(manifest.target.levelDatPresentAtPrepare, false)
+  assert.equal(manifest.attemptLedger.path, planRun.attemptsPath)
+  assert.equal(manifest.attemptLedger.sha256, sha256Text(readFileSync(planRun.attemptsPath, 'utf8')))
   assert.ok(manifest.files.length >= 5)
   const attempts = JSON.parse(readFileSync(planRun.attemptsPath, 'utf8'))
   assert.equal(attempts.attempts.length, 1)
@@ -891,6 +936,37 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.equal(idempotent.status, 'PLANNED')
   assert.ok(idempotent.warnings.some((warning) => /idempotent no-op/.test(warning)))
   ok(`G4. ${cases.length} prepare refusal paths, each with its exact reason (generated world / protected name / live seed / server-root inside target / unfrozen template / level-name reuse)`)
+
+  // A world can be generated after planning but before the write phase. The
+  // apply-time guard must repeat the absence check so no manifest can falsely
+  // claim that a pre-existing target was clean at preparation.
+  const raceRoot = makeRoot('prepare-world-created-after-plan')
+  const raceContainer = join(SCRATCH, 'prepare-world-created-after-plan-container')
+  mkdirSync(raceContainer, { recursive: true })
+  const raceDescriptor = resolvedDescriptor(raceRoot, {
+    levelName: 'm3clean-race',
+    levelSeed: '998877665546',
+    sourceSha: prepareSourceSha,
+    container: raceContainer,
+    withPreparationProof: false,
+  })
+  const racePlan = planPrepare({
+    descriptorPath: raceDescriptor.path,
+    serverRoot: raceContainer,
+    sourceSha: prepareSourceSha,
+    levelName: 'm3clean-race',
+    seed: '998877665546',
+  })
+  assert.equal(racePlan.status, 'PLANNED')
+  const raceWorldDir = join(raceContainer, 'm3clean-race')
+  mkdirSync(raceWorldDir, { recursive: true })
+  writeFileSync(join(raceWorldDir, 'level.dat'), 'generated after planning\n', 'utf8')
+  const raceApply = applyPlan(racePlan)
+  assert.equal(raceApply.status, 'REFUSED')
+  assert.match(raceApply.refusals.map((entry) => entry.reason).join(' | '), /target_world_generated_before_apply/)
+  assert.equal(existsSync(racePlan.manifestPath ?? join(raceContainer, 'm3-clean-run', 'm3clean-race', 'manifest.json')), false)
+  assert.equal(existsSync(join(raceWorldDir, 'level.dat')), true, 'the generated target remains untouched')
+  ok('G4a. a target generated after planning is refused before any prepare manifest is written')
 }
 // ---------------------------------------------------------------------------
 // H. CLI surfaces
