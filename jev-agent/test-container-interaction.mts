@@ -43,6 +43,16 @@
 //       (M1) the control: a container-free world is byte-identical to the
 //       pristine base's candidate list.
 //
+// STILL BLOCKED LIVE, and NOT by this layer (measured 2026-09-22T19:19-21:27Z):
+// the read-provenance gate refuses the container's own block reads
+// (`DIMENSION_READ_REFUSED cell=10,59,8 chunk=0,0 provenance=unknown
+// dimension=minecraft:the_nether reason=unknown_column`, 33 events, sources
+// `stations:barrel,…,purple_shulker_box,…:16:8` and `container-scan`), so the
+// sensed cell keeps its position but loses its NAME and the open is refused
+// `CONTAINER_REFUSED reason=unreachable container=container@10,59,8
+// block=container detail=block_unknown` - the typed refusal (A4) locks exactly
+// this behaviour, so a refused read can never look like an absent block.
+//
 // Run: bun test-container-interaction.mts
 import type { Bot } from 'mineflayer'
 import { createRequire } from 'node:module'
