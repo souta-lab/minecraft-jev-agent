@@ -93,6 +93,8 @@ function evidenceFrom(lines, runId = RUN) {
   return {
     status: 'valid',
     runId,
+    sourceSha: scanned.sourceSha,
+    sourceShaReason: scanned.sourceShaReason,
     sources: [{ name: 'fixture:log', path: 'fixture', portalEvents: scanned.portalEvents, inventorySamples: scanned.inventorySamples }],
     mismatches: [],
   }
@@ -401,6 +403,7 @@ function chainLinksOf(text) {
     schemaVersion: 1,
     record: 'm2-snapshot',
     runId: RUN,
+    bootSourceSha: SOURCE_SHA,
     atMs: 1,
     at: '2026-09-20T10:00:07.000Z',
     markers: [
@@ -416,11 +419,15 @@ function chainLinksOf(text) {
     terminal: null,
   }
   writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify(snapshot))
+  // The snapshot carries gameplay evidence; a same-run BOOT-only log still
+  // establishes the exact source identity that produced it.
+  const bootOnlyLogPath = join(dir, 'boot-only.log')
+  writeFileSync(bootOnlyLogPath, `${boot(RUN)}\n`)
   const out = capture()
   const code = await runM2Gate({
     expectedRunId: RUN,
     readEvidence: null,
-    logPath: join(dir, 'absent.log'),
+    logPath: bootOnlyLogPath,
     snapshotDir: dir,
     policyEvidence: VERIFIED_POLICY,
     write: out.write,
@@ -594,11 +601,13 @@ function chainLinksOf(text) {
     JSON.stringify({
       record: 'm2-snapshot',
       runId: RUN,
+      bootSourceSha: SOURCE_SHA,
       initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 9 },
       markers: PORTAL_CHAIN.map((line, index) => ({ line, atMs: 1000 + index })),
       inventory: { obsidian: 1, flint_and_steel: 1 },
     }),
   )
+  writeFileSync(join(home, 'buddy-driver', 'buddy.log'), `${boot(RUN)}\n`)
   const out = capture()
   const code = await runM2Gate({
     expectedRunId: RUN,
@@ -626,6 +635,7 @@ function chainLinksOf(text) {
     JSON.stringify({
       record: 'm2-snapshot',
       runId: RUN,
+      bootSourceSha: SOURCE_SHA,
       initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 9 },
       markers: PORTAL_CHAIN.map((line, index) => ({ line, atMs: 1000 + index })),
       inventory: {},
@@ -671,6 +681,7 @@ function chainLinksOf(text) {
     JSON.stringify({
       record: 'm2-snapshot',
       runId: RUN,
+      bootSourceSha: SOURCE_SHA,
       initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 9 },
       markers: [],
       inventory: { flint_and_steel: 1, obsidian: 1 },
@@ -703,7 +714,7 @@ function chainLinksOf(text) {
   mkdirSync(runsDir, { recursive: true })
   writeFileSync(
     join(snapshotDir, `m2-snapshot-${RUN}.json`),
-    JSON.stringify({ record: 'm2-snapshot', runId: RUN, initialInventory: { diamond: 3, diamond_pickaxe: 1 }, markers: [], inventory: {} }),
+    JSON.stringify({ record: 'm2-snapshot', runId: RUN, bootSourceSha: SOURCE_SHA, initialInventory: { diamond: 3, diamond_pickaxe: 1 }, markers: [], inventory: {} }),
   )
   writeFileSync(join(runsDir, 'supervisor-7.out'), `${[boot(RUN), ...PORTAL_CHAIN].join('\n')}\n`)
   const explicit = join(dir, 'explicit.log')

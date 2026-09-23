@@ -497,12 +497,16 @@ export function rehearseFreshRunChain({ inventory = M2_FRESH_INVENTORY, toolRank
 // ---------------------------------------------------------------------------
 
 const RUN_ID = 'run-m2-rehearsal'
+// Synthetic source identity for this offline fixture. It is deliberately an
+// exact SHA-shaped value so the real gate exercises the same source grammar as
+// a live BOOT; it does not claim to identify a production checkout.
+const FIXTURE_SOURCE_SHA = 'a'.repeat(40)
 
 function stamp(seconds) {
   return new Date(Date.UTC(2026, 8, 20, 10, 0, seconds)).toISOString()
 }
 
-const BOOT_LINE = `[${stamp(0)}] BOOT pid=4242 runId=${RUN_ID} bundle=none source=deadbeef worldEpoch=1`
+const BOOT_LINE = `[${stamp(0)}] BOOT pid=4242 runId=${RUN_ID} bundle=none source=${FIXTURE_SOURCE_SHA} worldEpoch=1`
 
 /**
  * Materialize an offline fixture. `markerLines` are the plan-derived lines;

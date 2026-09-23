@@ -385,7 +385,7 @@ function scanLines(lines, fromOffset = 0) {
   mkdirSync(snapshotDir)
   const runId = 'run-missing'
   writeFileSync(join(dir, 'buddy.log'), `${[bootLine(runId), ...READY_INVENTORY, ...CHAIN(3).slice(0, 2)].join('\n')}\n`, 'utf8')
-  writeFileSync(join(snapshotDir, `m2-snapshot-${runId}.json`), JSON.stringify({ record: 'm2-snapshot', runId, initialInventory: {}, markers: [], inventory: {} }))
+  writeFileSync(join(snapshotDir, `m2-snapshot-${runId}.json`), JSON.stringify({ record: 'm2-snapshot', runId, bootSourceSha: FROZEN_SHA, initialInventory: {}, markers: [], inventory: {} }))
   const evidence = await readRunScopedM2Evidence(runId, { logPath: join(dir, 'buddy.log'), snapshotDir })
   const verdict = evaluateM2Gate({ expectedRunId: runId, evidence, policy: null })
   const mine = firstMissingLink(verdict.conditions)

@@ -12,7 +12,7 @@
 // or item-id bug in the 12-eye endgame would only surface at the very end of
 // that run.
 //
-// WHAT THIS DOES (no Minecraft server, no network)
+// WHAT THIS DOES (no Minecraft server or external network)
 // -----------------------------------------------
 // 1. Drives the REAL terminal craft path -- the same entry points the controller
 //    uses, `generateGroundedCandidates` (jev-agent/src/candidates.ts) and
@@ -43,7 +43,7 @@
 // over.
 //
 // Exit: 0 = READY, 1 = GAP.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -66,6 +66,35 @@ import {
 
 const TOOLS_DIR = dirname(fileURLToPath(import.meta.url))
 export const M3_CHAIN_GATE_PATH = join(TOOLS_DIR, 'm3-gate.mjs')
+
+// Synthetic source identity for offline gate fixtures. Every stream in each
+// synthetic run writes this same exact SHA; it is not presented as live-source
+// provenance.
+const FIXTURE_SOURCE_SHA = 'b'.repeat(40)
+
+// The real gate asks the HOST control socket for acceptance-time inventory.
+// This fixture-only process speaks its read-only report protocol over a
+// temporary Unix socket, with runId and sourceSha bound to the synthetic BOOT.
+const REPORT_SOCKET_SERVER_SOURCE = `
+const net = require('node:net')
+const socketPath = process.env.M3_FIXTURE_SOCKET_PATH
+const report = JSON.parse(process.env.M3_FIXTURE_REPORT_JSON)
+const server = net.createServer((socket) => {
+  let buffer = ''
+  socket.on('data', (chunk) => {
+    buffer += chunk.toString('utf8')
+    const newline = buffer.indexOf('\\n')
+    if (newline < 0) return
+    let request = {}
+    try { request = JSON.parse(buffer.slice(0, newline)) } catch {}
+    socket.end(JSON.stringify({ id: request.id ?? null, data: report }) + '\\n', () => {
+      server.close(() => process.exit(0))
+    })
+  })
+})
+server.on('error', () => process.exit(1))
+server.listen(socketPath)
+`
 
 /** 1 blaze_rod -> 2 blaze_powder (pinned by jev-agent/test-m3-terminal-craft.mts). */
 export const POWDER_PER_ROD = 2
@@ -367,7 +396,7 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
   const decisionsLines = []
   runs.forEach((run, index) => {
     const base = index * 10
-    const bootLine = `[${stamp(base)}] BOOT pid=${FIXTURE_PID} runId=${run.runId} bundle=none source=deadbeef worldEpoch=1`
+    const bootLine = `[${stamp(base)}] BOOT pid=${FIXTURE_PID} runId=${run.runId} bundle=none source=${FIXTURE_SOURCE_SHA} worldEpoch=1`
     logLines.push(bootLine)
     runnerOutLines.push(bootLine)
     if (includeAuthority) {
@@ -420,11 +449,12 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
   return {
     dir,
     runId: runs[0].runId,
+    runs,
     logPath: join(dir, 'buddy.log'),
     snapshotDir,
     decisionsPath: join(dir, 'decisions.jsonl'),
     runnerOutPath: join(dir, 'runner.out'),
-    // Deliberately absent: forces the gate to use runner.out, keeping the run offline.
+    // runRealGate starts a one-shot fixture HOST report responder at this local socket path.
     controlSocketPath: join(dir, 'control.sock'),
   }
 }
@@ -442,6 +472,52 @@ export function runRealGate({
   runtime = process.execPath,
   dropRunIdEnv = false,
 } = {}) {
+  const fixtureRuns = Array.isArray(fixture.runs) ? fixture.runs : []
+  const boundRun = expectedRunId === null ? null : fixtureRuns.find((run) => run.runId === expectedRunId) ?? null
+  const terminalInventory = boundRun === null
+    ? null
+    : boundRun.terminalInventory ?? boundRun.samples.at(-1) ?? {}
+  const dimension = boundRun?.dimension ?? 'minecraft:the_nether'
+  const observedAt = stamp(50 + Math.max(0, fixtureRuns.indexOf(boundRun)) * 10)
+  const report = boundRun === null
+    ? null
+    : {
+        runId: boundRun.runId,
+        currentInventoryObservation: {
+          record: 'current-inventory-observation',
+          schemaVersion: 1,
+          runId: boundRun.runId,
+          sourceSha: FIXTURE_SOURCE_SHA,
+          generationId: 'fixture-' + boundRun.runId,
+          observedAtMs: Date.parse(observedAt),
+          observedAt,
+          worldKey: { serverId: 'fixture:offline', dimension, worldEpoch: 1 },
+          dimension,
+          counts: terminalInventory,
+        },
+      }
+  let reportServer = null
+  if (report !== null) {
+    const socketEnv = {
+      ...process.env,
+      M3_FIXTURE_SOCKET_PATH: fixture.controlSocketPath,
+      M3_FIXTURE_REPORT_JSON: JSON.stringify(report),
+    }
+    reportServer = Bun.spawn({
+      cmd: [runtime, '-e', REPORT_SOCKET_SERVER_SOURCE],
+      env: socketEnv,
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    for (let attempt = 0; attempt < 100 && !existsSync(fixture.controlSocketPath); attempt += 1) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+    }
+    if (!existsSync(fixture.controlSocketPath)) {
+      reportServer.kill()
+      throw new Error('fixture report socket failed to start for ' + boundRun.runId)
+    }
+  }
   const cmd = [runtime, gatePath]
   if (expectedRunId !== null) cmd.push('--run', expectedRunId)
   cmd.push(
@@ -461,7 +537,12 @@ export function runRealGate({
     delete env.M3_RUN_ID
     delete env.M2_RUN_ID
   }
-  const proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe', env })
+  let proc
+  try {
+    proc = Bun.spawnSync({ cmd, stdout: 'pipe', stderr: 'pipe', env })
+  } finally {
+    if (reportServer !== null && reportServer.exitCode === null) reportServer.kill()
+  }
   const stdout = proc.stdout.toString('utf8')
   const stderr = proc.stderr.toString('utf8')
   const resultLine = stdout.split('\n').find((line) => line.startsWith(`${M3_RUN_RESULT} `)) ?? null
@@ -744,7 +825,7 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
     missing,
     write,
     caseName: 'positive',
-    runs: [{ runId: RUN_ID, samples: positiveSamples }],
+    runs: [{ runId: RUN_ID, samples: positiveSamples, terminalInventory: terminalSample }],
     expectedRunId: RUN_ID,
     expect: (result) => {
       const problems = []

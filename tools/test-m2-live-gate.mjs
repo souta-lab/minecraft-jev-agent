@@ -3,6 +3,7 @@
 // m2-watch/m2-acceptance fixtures are intentionally not used as acceptance.
 import assert from 'node:assert/strict'
 import { exactRunId, gateOptions, hasRunScope, runGate, CURRENT_M2 } from './m2-live-gate.mjs'
+import { scanRunLines } from './m2-gate.mjs'
 
 let checks = 0
 function ok(label) {
@@ -12,6 +13,7 @@ function ok(label) {
 
 const RUN = 'run-m2-live'
 const OTHER = 'run-m2-other'
+const SOURCE_SHA = 'c'.repeat(40)
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 2, fallbackCount: 0, otherCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
@@ -21,7 +23,7 @@ const FALLBACK_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 2, otherCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
 }
-const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId}`
+const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=${SOURCE_SHA} worldEpoch=1`
 const inv = (counts) => `[2026-09-20T10:00:01.000Z] INVENTORY items=${JSON.stringify(counts)}`
 const portal = [
   '[2026-09-20T10:00:02.000Z] PORTAL_BLOCK_PLACED pos=10,64,20',
@@ -31,21 +33,17 @@ const portal = [
 ]
 
 function evidence(runId, lines) {
+  const scoped = scanRunLines(runId, lines)
   return {
-    status: 'valid',
+    status: scoped.status,
     runId,
+    sourceSha: scoped.sourceSha,
+    sourceShaReason: scoped.sourceShaReason,
     sources: [{
       name: 'fixture:log',
       path: 'fixture',
-      inventorySamples: lines
-        .filter((line) => line.includes('INVENTORY'))
-        .map((line) => JSON.parse(line.slice(line.indexOf('items=') + 6))),
-      portalEvents: [
-        { name: 'PORTAL_BLOCK_PLACED' },
-        { name: 'PORTAL_FRAME_READY', blocks: 10, shape: 'ok' },
-        { name: 'PORTAL_LIT', dimension: 'minecraft:overworld' },
-        { name: 'PORTAL_VERIFIED', verified: true },
-      ],
+      inventorySamples: scoped.inventorySamples,
+      portalEvents: scoped.portalEvents,
     }],
   }
 }
