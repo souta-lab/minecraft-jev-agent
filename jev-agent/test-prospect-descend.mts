@@ -275,6 +275,7 @@ addCase('a descend row passing a buried producer offers the exposure probe besid
   const probes = prospects(grounded.candidates)
   const descends = descendSteps(grounded.candidates)
   const probe = probes[0]
+  const downward = descends.find((candidate) => candidate.meta.mode === 'down' && candidate.meta.dir === 'E')
   const meta = probe?.meta ?? {}
   const pass =
     probes.length === 1 &&
@@ -299,9 +300,11 @@ addCase('a descend row passing a buried producer offers the exposure probe besid
     meta.stepX === 29 &&
     meta.stepY === 59 &&
     meta.stepZ === 33 &&
-    descends.length === 1 &&
-    // enumerated AFTER the step: it can never replace the descent by position
-    grounded.candidates.indexOf(probe) > grounded.candidates.indexOf(descends[0]!) &&
+    downward?.id === 'DESCEND:down:E:b29_58_33' &&
+    // Other safe level headings are also valid descent alternatives. The
+    // exposure probe is appended after the ordinary route set; it never
+    // replaces the downward step.
+    grounded.candidates.indexOf(probe) > grounded.candidates.indexOf(downward!) &&
     grounded.withheld.every((entry) => !entry.candidate.id.startsWith(PROSPECT_PREFIX)) &&
     grounded.prospectRefusal === null &&
     mines(grounded.candidates).length === 0
@@ -466,7 +469,15 @@ addCase('a hazard wall in front of the producer is a typed refusal and no probe'
     focusItem: 'raw_iron',
     blocks: [ore({ x: 31, y: 59, z: 33 })],
     descent: [
-      downStep('E', 1, 0),
+      // Both E steps share the wall/head/floor hazard neighborhood; keep the
+      // fixture consistent with buildDescent so neither E route crosses it.
+      {
+        ...downStep('E', 1, 0),
+        safe: false,
+        reason: 'lava/water in the step column',
+        refusal: 'hazard',
+        hazardNearby: true,
+      },
       levelStep('E', 1, 0, { safe: false, reason: 'lava/water in the step column', refusal: 'hazard' }),
       levelStep('W', -1, 0),
       levelStep('N', 0, -1),
@@ -475,6 +486,9 @@ addCase('a hazard wall in front of the producer is a typed refusal and no probe'
   })
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
   const refusal = grounded.prospectRefusal
+  const descends = descendSteps(grounded.candidates)
+  const unsafeHeadingOffered = descends.some((candidate) => candidate.meta.dir === 'E')
+  const safeAlternativeOffered = descends.some((candidate) => candidate.meta.mode === 'level' && candidate.meta.dir !== 'E')
   const pass =
     prospects(grounded.candidates).length === 0 &&
     refusal !== null &&
@@ -483,7 +497,8 @@ addCase('a hazard wall in front of the producer is a typed refusal and no probe'
     refusal.producer === 'iron_ore' &&
     refusal.producerCell.x === 31 &&
     refusal.digCell.x === 29 &&
-    descendSteps(grounded.candidates).length === 1
+    !unsafeHeadingOffered &&
+    safeAlternativeOffered
   return {
     pass,
     detail: `ids=[${grounded.candidates.map((c) => c.id).join(',')}] refusal=${refusal === null ? 'none' : formatProspectRefused(refusal)}`,
@@ -546,7 +561,7 @@ addCase('a descend for an item with no block producer invents no prospecting', (
   const pass =
     prospects(grounded.candidates).length === 0 &&
     grounded.prospectRefusal === null &&
-    descendSteps(grounded.candidates).length === 1
+    descendSteps(grounded.candidates).some((candidate) => candidate.meta.mode === 'down')
   return { pass, detail: `ids=[${grounded.candidates.map((c) => c.id).join(',')}]` }
 })
 
@@ -557,7 +572,7 @@ addCase('a mineral focus with no sensed producer of that mineral invents no pros
   const pass =
     prospects(grounded.candidates).length === 0 &&
     grounded.prospectRefusal === null &&
-    descendSteps(grounded.candidates).length === 1
+    descendSteps(grounded.candidates).some((candidate) => candidate.meta.mode === 'down')
   return { pass, detail: `ids=[${grounded.candidates.map((c) => c.id).join(',')}]` }
 })
 
