@@ -251,6 +251,13 @@ export interface BodySubmersion {
   state: SubmersionState
 }
 
+/** A bounded, observed two-cell-tall water/air position a submerged body can swim toward. */
+export interface SubmersionEscapeTarget {
+  position: Vec3Json
+  feetBlock: string
+  headBlock: string
+}
+
 /** Typed survival fact line; mirrored so a submerging body is never silent. */
 export const BODY_SUBMERGED = 'BODY_SUBMERGED'
 
@@ -932,6 +939,14 @@ export type WorldState = {
    * the prompt).
    */
   envHazardCells?: EnvHazardCell[]
+  /**
+   * SAFE/CAN: locally observed water/air cells above a low-air body whose feet
+   * and head can both occupy the destination. These are swim waypoints, not
+   * claims that the cell is breathable or a semantic surface goal. Only
+   * populated for a submerged body below the low-air boundary; an empty array
+   * means the bounded local sample found no waypoint.
+   */
+  submersionEscapeTargets?: SubmersionEscapeTarget[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
@@ -1954,6 +1969,51 @@ function buildEnvHazardRing(bot: Bot, feet: Vec3Json): EnvHazardCell[] {
     }
   }
   return cells
+}
+
+const SUBMERSION_WAYPOINT_AIR = new Set(['air', 'cave_air', 'void_air'])
+const SUBMERSION_WAYPOINT_RISE = 3
+
+function isSubmersionWaypointBlock(block: ReturnType<Bot['blockAt']>): block is NonNullable<ReturnType<Bot['blockAt']>> {
+  return (
+    block !== null &&
+    block.boundingBox === 'empty' &&
+    (SUBMERSION_WAYPOINT_AIR.has(block.name) || PROBE_FLUIDS.has(block.name))
+  )
+}
+
+/**
+ * SAFE/CAN: bounded upward swim waypoints for a body that is already running
+ * out of breath. The stock pathfinder cannot route through water, so this scans
+ * only the body's own x/z column and records each successive destination while
+ * the two-cell body volume remains observed as water or air. The contiguous
+ * column is the route witness; no horizontal swim route is inferred.
+ */
+function buildSubmersionEscapeTargets(bot: Bot, self: SelfState): SubmersionEscapeTarget[] {
+  if (!bodyIsOutOfAir(self) || !bodyIsSubmerged(self)) return []
+  const base = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const at = (position: Vec3Json) =>
+    sensorBlockAt(bot, scratch.set(position.x, position.y, position.z), 'submersion-waypoint')
+  const targets: SubmersionEscapeTarget[] = []
+  for (let rise = 1; rise <= SUBMERSION_WAYPOINT_RISE; rise += 1) {
+    // Check every newly occupied row, not only the destination. This proves a
+    // contiguous vertical body-sized column and deliberately rules out all
+    // lateral movement that the specialized actuator does not perform.
+    const feet = at({ x: base.x, y: base.y + rise, z: base.z })
+    const head = at({ x: base.x, y: base.y + rise + 1, z: base.z })
+    if (!isSubmersionWaypointBlock(feet) || !isSubmersionWaypointBlock(head)) break
+    targets.push({
+      position: { x: base.x, y: base.y + rise, z: base.z },
+      feetBlock: feet.name,
+      headBlock: head.name,
+    })
+  }
+  return targets
 }
 
 /**
@@ -4907,6 +4967,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
 
 function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOptions): WorldState {
   const { self, envHazardCells } = buildSelfDetail(bot)
+  const submersionEscapeTargets = buildSubmersionEscapeTargets(bot, self)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   // #14-world-proof: falsify remembered resource cells the loaded world
@@ -4982,6 +5043,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // an inactive body's state keeps exactly the shape it had before this fact
     // existed, and the candidate layer reads "no cells" as "no hazard".
     ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
+    ...(bodyIsOutOfAir(self) && bodyIsSubmerged(self) ? { submersionEscapeTargets } : {}),
     // Both new terrain facts follow the same rule: a body with no portal and no
     // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {

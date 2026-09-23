@@ -3012,9 +3012,180 @@ export class Executor {
     startedAt: number,
   ): Promise<ExecutionResult> {
     if (isBridgeMove(candidate)) return await this.runBridge(candidate, epoch, signal, startedAt)
+    if (candidate.meta.submersionEscape === true) {
+      return await this.runWalkSkill(candidate, epoch, signal, startedAt, (_legSignal, _strict, remainingMs) =>
+        this.runSubmersionSwimLeg(candidate, epoch, _legSignal, startedAt, remainingMs),
+      )
+    }
     return await this.runWalkSkill(candidate, epoch, signal, startedAt, (legSignal, strict, remainingMs) =>
       this.runMoveLeg(candidate, epoch, legSignal, startedAt, strict, remainingMs),
     )
+  }
+
+  /**
+   * One bounded jump swim through a locally observed, vertical water/air column.
+   * The stock pathfinder cannot represent underwater movement, so this arm
+   * validates the candidate's exact column against live blocks and drives only
+   * the declared `jump` effect. A newly obstructed/sideways column fails closed.
+   */
+  private async runSubmersionSwimLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+    remainingMs: number,
+  ): Promise<WalkLegExecution> {
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('target_gone', `${candidate.id} swim waypoint has no coordinates`)
+    this.ensureOwned(epoch, signal)
+    const start = this.bot.entity.position.clone()
+    const startAirValue = (this.bot as { oxygenLevel?: number }).oxygenLevel
+    const startAir = typeof startAirValue === 'number' && Number.isFinite(startAirValue) ? startAirValue : MAX_AIR
+    const initialSubmersion = this.liveSubmersion()
+    if (startAir > LOW_AIR_LEVEL || (!initialSubmersion.feetInWater && !initialSubmersion.eyesInWater)) {
+      return {
+        arrived: true,
+        result: this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'done',
+          'arrived',
+          `submersion escape no-op: body is no longer submerged at low air (${startAir}/${MAX_AIR})`,
+          null,
+          {
+            verified: true,
+            blockRemoved: false,
+            dropObserved: false,
+            itemsGained: 0,
+            goalItemCount: this.countGoalItem(),
+            progressed: false,
+          },
+        ),
+      }
+    }
+
+    const baseX = Math.floor(start.x)
+    const baseY = Math.floor(start.y)
+    const baseZ = Math.floor(start.z)
+    const rise = target.y - baseY
+    if (
+      !Number.isInteger(target.x) ||
+      !Number.isInteger(target.y) ||
+      !Number.isInteger(target.z) ||
+      target.x !== baseX ||
+      target.z !== baseZ ||
+      rise < 1 ||
+      rise > 3
+    ) {
+      throw new ExecutorError('target_gone', `${candidate.id} swim waypoint is outside the current vertical column`)
+    }
+    const expectedFeet = candidate.meta.submersionFeetBlock
+    const expectedHead = candidate.meta.submersionHeadBlock
+    if (typeof expectedFeet !== 'string' || typeof expectedHead !== 'string') {
+      throw new ExecutorError('target_gone', `${candidate.id} swim waypoint has no sensor block witness`)
+    }
+    const airNames = new Set(['air', 'cave_air', 'void_air'])
+    const swimBlockAt = (position: Vec3Json) => this.currentBlockAt(position)
+    const isSwimCell = (block: ReturnType<typeof swimBlockAt>): boolean =>
+      block !== null &&
+      block.boundingBox === 'empty' &&
+      (airNames.has(block.name) || PROBE_FLUIDS.has(block.name))
+    const validateColumn = (fromY: number): void => {
+      for (let y = fromY; y <= target.y + 1; y += 1) {
+        const block = swimBlockAt({ x: baseX, y, z: baseZ })
+        if (!isSwimCell(block)) {
+          throw new ExecutorError(
+            'target_gone',
+            `${candidate.id} swim column changed at (${baseX},${y},${baseZ}); observed ${block?.name ?? 'unloaded'}`,
+          )
+        }
+      }
+    }
+    const targetFeet = swimBlockAt(target)
+    const targetHead = swimBlockAt({ x: target.x, y: target.y + 1, z: target.z })
+    if (
+      targetFeet === null ||
+      targetHead === null ||
+      !isSwimCell(targetFeet) ||
+      !isSwimCell(targetHead) ||
+      targetFeet.name !== expectedFeet ||
+      targetHead.name !== expectedHead
+    ) {
+      throw new ExecutorError('target_gone', `${candidate.id} swim waypoint no longer matches its observed blocks`)
+    }
+    validateColumn(baseY + 1)
+
+    this.setPhase(candidate, epoch, 'pathing')
+    const durationMs = Math.max(1, Math.min(1500, remainingMs))
+    const deadline = Date.now() + durationMs
+    const reliefThreshold = Math.max(startAir, LOW_AIR_LEVEL)
+    let reached = false
+    let breathRecovering = false
+    let progress = false
+    this.setControlState('jump', true)
+    try {
+      while (Date.now() < deadline) {
+        this.ensureOwned(epoch, signal)
+        const position = this.bot.entity.position
+        const x = Math.floor(position.x)
+        const y = Math.floor(position.y)
+        const z = Math.floor(position.z)
+        if (x !== baseX || z !== baseZ) {
+          throw new ExecutorError('path_stuck', `${candidate.id} swim left its grounded x/z column`)
+        }
+        if (y < target.y) validateColumn(y + 1)
+        const airValue = (this.bot as { oxygenLevel?: number }).oxygenLevel
+        const air = typeof airValue === 'number' && Number.isFinite(airValue) ? airValue : MAX_AIR
+        const headCell = swimBlockAt({ x, y: Math.floor(position.y + 1.62), z })
+        const headDry = headCell !== null && airNames.has(headCell.name)
+        const riseNow = position.y - start.y
+        progress = riseNow >= 0.25 || progress
+        reached = y >= target.y
+        breathRecovering = headDry && air > reliefThreshold
+        if (reached || breathRecovering) break
+        await new Promise<void>((resolve) => setTimeout(resolve, 50))
+      }
+    } finally {
+      this.setControlState('jump', false)
+    }
+    this.ensureOwned(epoch, signal)
+    const end = this.bot.entity.position.clone()
+    const airEndValue = (this.bot as { oxygenLevel?: number }).oxygenLevel
+    const airEnd = typeof airEndValue === 'number' && Number.isFinite(airEndValue) ? airEndValue : MAX_AIR
+    const riseEnd = end.y - start.y
+    reached = Math.floor(end.y) >= target.y && Math.floor(end.x) === baseX && Math.floor(end.z) === baseZ
+    const endHead = swimBlockAt({ x: Math.floor(end.x), y: Math.floor(end.y + 1.62), z: Math.floor(end.z) })
+    breathRecovering = endHead !== null && airNames.has(endHead.name) && airEnd > reliefThreshold
+    progress = riseEnd >= 0.25
+    const relieved = reached || breathRecovering
+    this.logger.info(
+      'executor',
+      `SUBMERSION_SWIM action=${candidate.id} start=(${round2(start.x)},${round2(start.y)},${round2(start.z)}) ` +
+        `end=(${round2(end.x)},${round2(end.y)},${round2(end.z)}) targetY=${target.y} air=${startAir}->${airEnd} ` +
+        `reached=${reached} breathRecovering=${breathRecovering}`,
+      { actionId: candidate.id, target, start: { x: start.x, y: start.y, z: start.z }, end: { x: end.x, y: end.y, z: end.z }, airStart: startAir, airEnd, reached, breathRecovering },
+    )
+    if (!relieved && !progress) {
+      throw new ExecutorError('path_stuck', `${candidate.id} swim made no upward progress in ${durationMs}ms`)
+    }
+    const detail = reached
+      ? `swam vertically to observed waypoint (${target.x},${target.y},${target.z})`
+      : breathRecovering
+        ? `swam upward; breathable head cell observed and air recovered ${startAir}->${airEnd}/${MAX_AIR}`
+        : `swam upward ${round2(riseEnd)}m toward (${target.x},${target.y},${target.z}); waypoint not yet reached`
+    return {
+      arrived: relieved,
+      result: this.buildResult(candidate, epoch, startedAt, 'done', relieved ? 'arrived' : 'leg', detail, null, {
+        verified: relieved,
+        blockRemoved: false,
+        dropObserved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+        progressed: progress || relieved,
+        distanceClosed: progress || relieved,
+      }),
+    }
   }
 
   /**

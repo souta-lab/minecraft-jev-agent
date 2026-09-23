@@ -14,7 +14,7 @@ import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META } from './candidates.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 import type { Vec3Json, WorldState } from './state.ts'
-import { bodyIsOutOfAir, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
+import { bodyIsOutOfAir, bodyIsSubmerged, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
@@ -323,7 +323,15 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
   // executor owns the route's own feasibility (column-unless-unsafe, placeable
   // held, step cap / bounded bridge span with its verified far side).
   const ownRoute = carriesOwnRoute(candidate)
-  if (!ownRoute) {
+  const submersionWaypoint = candidate.meta.submersionEscape === true
+  if (submersionWaypoint && !isGroundedSubmersionWaypoint(candidate, state)) {
+    return deny(
+      candidate.id,
+      'TARGET_GONE',
+      'swim waypoint is not the current low-air body column or no longer matches its sensor witness',
+    )
+  }
+  if (!ownRoute && !submersionWaypoint) {
     // SAFE/CAN: a keep-distance destination may come from the threat escape
     // scan, which applies the same `isStandable` predicate over a wider window
     // (`state.terrain.escapeCells`). The ordinary 5x5x3 window can never contain
@@ -360,7 +368,40 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
     }
     return { ok: true, candidate }
   }
+  // The specialized swim actuator rises inside the exact observed vertical
+  // water/air column above. A ground-support predicate and the stock pathfinder
+  // are both inapplicable; its Guard proof is the live, contiguous sensor fact.
+  if (submersionWaypoint) return { ok: true, candidate }
   return guardPathComputable(candidate, context, target)
+}
+
+function isGroundedSubmersionWaypoint(candidate: Candidate, state: WorldState): boolean {
+  const target = candidate.target
+  if (target === null || !bodyIsOutOfAir(state.self) || !bodyIsSubmerged(state.self)) return false
+  const baseX = Math.floor(state.self.position.x)
+  const baseY = Math.floor(state.self.position.y)
+  const baseZ = Math.floor(state.self.position.z)
+  const rise = target.y - baseY
+  if (
+    !Number.isInteger(target.x) ||
+    !Number.isInteger(target.y) ||
+    !Number.isInteger(target.z) ||
+    target.x !== baseX ||
+    target.z !== baseZ ||
+    rise < 1 ||
+    rise > 3
+  ) {
+    return false
+  }
+  const feetBlock = candidate.meta.submersionFeetBlock
+  const headBlock = candidate.meta.submersionHeadBlock
+  if (typeof feetBlock !== 'string' || typeof headBlock !== 'string') return false
+  return (state.submersionEscapeTargets ?? []).some(
+    (entry) =>
+      samePosition(entry.position, target) &&
+      entry.feetBlock === feetBlock &&
+      entry.headBlock === headBlock,
+  )
 }
 
 /**
@@ -469,7 +510,7 @@ export function unreachableMove(
   // leg and then re-plans the standable spot from the new Y, and a bridge places
   // its own floor and steps onto it. Treating either as unreachable here would
   // retire it before the executor can act.
-  if (carriesOwnRoute(candidate)) return null
+  if (carriesOwnRoute(candidate) || candidate.meta.submersionEscape === true) return null
   const dy = Math.round(target.y - state.self.position.y)
   if (dy > MOVE_VERTICAL_GAP_LIMIT) return { target, dy }
   if (canComputePath !== undefined && canComputePath !== null && !canComputePath(target)) return { target, dy }

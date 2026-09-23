@@ -35,8 +35,11 @@ import {
 } from './src/state.ts'
 import type { AgentSignals, GoalState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import {
+  defaultCandidateOptions,
   dryAwarePlacementSpots,
+  generateGroundedCandidates,
   restrictCandidatesDuringSubmersion,
+  submersionAscentCandidates,
 } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import {
@@ -176,6 +179,36 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   const submersion = bodySubmersion(state.self)
   const wetKeys = new Set((state.submergedPlacementSpots ?? []).map(key))
   const dry = dryAwarePlacementSpots(state)
+  const pathProbeTargets: string[] = []
+  const generated = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    reachability: {
+      pathProbe: (position) => {
+        pathProbeTargets.push(key(position))
+        return 'no_path'
+      },
+    },
+  })
+  const ascent = submersionAscentCandidates(state, defaultCandidateOptions)
+  const ascentCandidate = generated.candidates.find((candidate) => candidate.meta.submersionEscape === true)
+  const guardContext: GuardContext = {
+    phase: 'decision',
+    candidateIds: new Set(ascentCandidate === undefined ? [] : [ascentCandidate.id]),
+    inFlight: null,
+    reach: defaultCandidateOptions.reach,
+    maxCandidateAgeTicks: 100,
+    canComputePath: () => false,
+  }
+  const ascentGuard = ascentCandidate === undefined ? null : guardCandidate(ascentCandidate, state, guardContext)
+  const forgedWaypointGuard = ascentCandidate === undefined || ascentCandidate.target === null
+    ? null
+    : guardCandidate(
+        { ...ascentCandidate, target: { ...ascentCandidate.target, x: ascentCandidate.target.x + 1 } },
+        state,
+        guardContext,
+      )
+  const swimReachabilityWasProbed = ascentCandidate !== undefined &&
+    generated.reachability.some((entry) => entry.candidate.id === ascentCandidate.id)
   const pass =
     state.self.air === 3 &&
     state.self.feetInWater === true &&
@@ -185,12 +218,28 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     wetKeys.has(key(WATER_SPOT)) &&
     dry.some((spot) => key(spot) === key(DRY_SPOT)) &&
     !dry.some((spot) => key(spot) === key(WATER_SPOT)) &&
-    dry.length > 0
+    dry.length > 0 &&
+    (state.submersionEscapeTargets?.length ?? 0) > 0 &&
+    state.submersionEscapeTargets?.every(
+      (entry) => entry.position.x === ORIGIN.x && entry.position.z === ORIGIN.z,
+    ) === true &&
+    ascent.length > 0 &&
+    ascentCandidate !== undefined &&
+    ascentCandidate.kind === 'MOVE' &&
+    ascentGuard?.ok === true &&
+    forgedWaypointGuard?.ok === false &&
+    forgedWaypointGuard.code === 'TARGET_GONE' &&
+    !swimReachabilityWasProbed
   check(
-    '(c1) the sensor exposes breath + water cells and the wet-access placement spot',
+    '(c1) low-air sensing grounds a vertical swim MOVE without a pathfinder and rejects a forged column',
     pass,
     `air=${state.self.air} feetWet=${state.self.feetInWater} headWet=${state.self.eyesInWater} state=${submersion.state} ` +
-      `spots=${state.placementSpots.length} wet=${[...wetKeys].join('|') || 'none'} dryAlternatives=${dry.map(key).join('|')}`,
+      `spots=${state.placementSpots.length} wet=${[...wetKeys].join('|') || 'none'} dryAlternatives=${dry.map(key).join('|')} ` +
+      `escapeTargets=${state.submersionEscapeTargets?.length ?? 0} candidate=${ascentCandidate?.id ?? 'none'} ` +
+      `generated=${generated.candidates.length} guard=${ascentGuard?.ok ? 'PASS' : ascentGuard?.code ?? 'none'} ` +
+      `canComputePath=false=${ascentGuard?.ok ? 'accepted' : ascentGuard?.code ?? 'none'} ` +
+      `pathfinderCalls=${pathProbeTargets.length} ` +
+      `swimReachabilityProbe=${swimReachabilityWasProbed} forged=${forgedWaypointGuard?.ok ? 'unexpected PASS' : forgedWaypointGuard?.code ?? 'none'}`,
   )
 }
 
@@ -673,6 +722,107 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
     '(c5) a goal-drop ATTACK lease stops typed `submerged` instead of following the target under water',
     pass,
     `status=${result.status} failure=${result.failure} bodySubmerged=${submergedLines.length} pathGoals=${pathGoals.length} detail="${result.detail}"`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (c6) a grounded low-air waypoint is executed by a bounded vertical swim,
+//      never by Mineflayer's water-blind pathfinder
+// ---------------------------------------------------------------------------
+{
+  const feet: Vec3Json = { x: 2, y: 64, z: 0 }
+  const target: Vec3Json = { x: 2, y: 65, z: 0 }
+  const grid = new Map<string, string>()
+  for (let x = 0; x <= 4; x += 1) {
+    for (let z = -2; z <= 2; z += 1) {
+      for (let y = 60; y <= 68; y += 1) grid.set(`${x},${y},${z}`, y === 63 ? 'stone' : 'air')
+    }
+  }
+  grid.set('2,64,0', 'water')
+  grid.set('2,65,0', 'water')
+  const blockAt = (v: Vec3Json) => {
+    const cell = { x: Math.floor(v.x), y: Math.floor(v.y), z: Math.floor(v.z) }
+    const name = grid.get(key(cell))
+    if (name === undefined) return null
+    return { name, boundingBox: name === 'stone' ? ('block' as const) : ('empty' as const), diggable: name === 'stone' }
+  }
+  const position = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
+  let oxygenLevel = 3
+  const jumpWrites: boolean[] = []
+  const pathGoals: unknown[] = []
+  const bot = {
+    registry,
+    entity: { position, yaw: 0, pitch: 0, onGround: false, width: 0.6, height: 1.8 },
+    get oxygenLevel() { return oxygenLevel },
+    health: 20,
+    food: 20,
+    _client: { write: () => true },
+    physicsEnabled: true,
+    entities: {},
+    inventory: { count: () => 0, items: () => [] },
+    heldItem: null,
+    blockAt,
+    on: () => undefined,
+    removeListener: () => undefined,
+    setControlState: (control: string, value: boolean) => {
+      if (control === 'jump') {
+        jumpWrites.push(value)
+        if (value) {
+          position.y = target.y
+          oxygenLevel = MAX_AIR
+        }
+      }
+    },
+    lookAt: async () => undefined,
+    equip: async () => undefined,
+    canDigBlock: () => true,
+    dig: async () => undefined,
+    placeBlock: async () => undefined,
+    pathfinder: {
+      movements: null as unknown,
+      setMovements: () => undefined,
+      setGoal: (goal: unknown) => pathGoals.push(goal),
+      stop: () => undefined,
+      getPathTo: () => ({ status: 'noPath', path: [] }),
+    },
+  }
+  const candidate: Candidate = {
+    id: 'ASCEND:breath:p2_65_0',
+    kind: 'MOVE',
+    label: 'swim vertically to observed water/air at (2,65,0)',
+    targetName: null,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: false,
+    meta: {
+      tick: 1,
+      submersionEscape: true,
+      submersionAir: 3,
+      submersionFeetBlock: 'water',
+      submersionHeadBlock: 'air',
+    },
+  }
+  const { logger, messages } = makeLogger()
+  const executor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const result = await executor.claim(candidate).completion
+  const swimLines = messages().filter((line) => line.startsWith('SUBMERSION_SWIM'))
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    position.y === target.y &&
+    oxygenLevel === MAX_AIR &&
+    jumpWrites.includes(true) &&
+    jumpWrites.at(-1) === false &&
+    pathGoals.length === 0 &&
+    swimLines.length === 1
+  check(
+    '(c6) a low-air waypoint swims up through its live column without pathfinder calls',
+    pass,
+    `status=${result.status} verified=${result.verified} y=${position.y} air=${oxygenLevel} jump=${jumpWrites.join(',')} pathGoals=${pathGoals.length} swim="${swimLines[0] ?? 'none'}"`,
   )
 }
 

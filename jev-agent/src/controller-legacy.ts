@@ -10433,6 +10433,7 @@ export class JevController {
     'levelScan',
     'contactAscent',
     'pillarPlaceName',
+    'submersionEscape',
   ] as const
 
   private isRouteDeclaredMove(candidate: Candidate): boolean {
