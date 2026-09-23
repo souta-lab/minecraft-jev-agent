@@ -372,16 +372,38 @@ addCase('(c3) an exhausted safe step refuses with reason=exhausted (bounded retr
   }
 })
 
+addCase('(c4) recurrence retires the only column step and hands the no-frontier fact to policy', () => {
+  const only = step(FEET, 'E', 1, 0, { mode: 'down', safe: true })
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL],
+    descent: [only],
+    signals: signals({ digDir: 'E', digMode: 'down', digOscillate: true }),
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const escalate = grounded.candidates.find((candidate) => candidate.kind === 'ESCALATE')
+  return {
+    pass:
+      grounded.columnDescentRefusal?.reason === 'recurrent' &&
+      grounded.candidates.every((candidate) => candidate.kind !== 'DESCEND') &&
+      escalate?.meta.skillOutcome === 'RECURRENT_STATE' &&
+      String(escalate.meta.legPolicyBoundary).includes('reason=recurrent_descent_no_alternative'),
+    detail: `set=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] refusal=${formatColumnDescentRefused(grounded.columnDescentRefusal ?? { reason: 'no_safe_step', cell: FEET_CELL })}`,
+  }
+})
+
 addCase('the typed marker line is stable for every refusal reason', () => {
   const cell = { x: 23, y: 81, z: 8 }
   const noStep = formatColumnDescentRefused({ reason: 'no_safe_step', cell })
   const noTool = formatColumnDescentRefused({ reason: 'no_tool', cell, tool: 'pickaxe', tier: 2 })
   const exhausted = formatColumnDescentRefused({ reason: 'exhausted', cell })
+  const recurrent = formatColumnDescentRefused({ reason: 'recurrent', cell })
   const pass =
     noStep === 'COLUMN_DESCENT_REFUSED reason=no_safe_step cell=23,81,8' &&
     noTool === 'COLUMN_DESCENT_REFUSED reason=no_tool cell=23,81,8 tool=pickaxe tier=2' &&
-    exhausted === 'COLUMN_DESCENT_REFUSED reason=exhausted cell=23,81,8'
-  return { pass, detail: `${noStep} | ${noTool} | ${exhausted}` }
+    exhausted === 'COLUMN_DESCENT_REFUSED reason=exhausted cell=23,81,8' &&
+    recurrent === 'COLUMN_DESCENT_REFUSED reason=recurrent cell=23,81,8'
+  return { pass, detail: `${noStep} | ${noTool} | ${exhausted} | ${recurrent}` }
 })
 
 let failures = 0

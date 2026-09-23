@@ -5,27 +5,15 @@
 // with the budget latched (or every cardinal step unsafe) that left WAIT as the
 // only candidate, so the goal could never reach its target Y and the loop wedged.
 //
-// This module owns the deterministic, model-free half of the fix:
+// This module owns only pure progress and obstruction facts. Grounded recovery
+// alternatives are enumerated in candidates.ts and semantic choice stays with
+// Jev; this module does not rank descent modes or pick a replacement heading.
 //
-//   1. candidate selection for a predicate descend: prefer an aligned cardinal
-//      staircase step, fall back to the bot's own column ("dig down"), and never
-//      let a stale failure count suppress the only body change available;
-//   2. the Y-progress assertion: the feet Y must keep decreasing, or the caller
-//      logs `DESCEND_STALLED` and switches strategy instead of WAITing;
-//   3. the HEADING PLAN of a running descent: one heading is held for as long as
-//      the world offers a safe step under it, and a change is a typed event with
-//      the concrete obstruction that forced it. Measured live
-//      (run-muc3qbug-18vg3, main ab19403) the last 60 descend steps were
-//      `W 23 | E 17 | N 12 | S 8`: every tick re-picked a heading because the
-//      only memory of a chosen heading was a successful-completion record and
-//      the pool silently widened whenever that heading had no safe step. The
-//      result was a winding one-block-per-level bowl instead of a staircase.
-//
-// Pure: no bot, no clock. `pickBestDescendStep` and `resolveDescentHeading` are
-// functions of their inputs so the candidate rules are unit-testable without a
-// live world.
+// A running Skill may keep its selected heading while an equivalent safe step is
+// available. When that contract cannot continue, candidate generation reports
+// the typed obstruction and returns materially distinct grounded alternatives.
+// Pure: no bot, no clock.
 import type { DescentDir, DescentOption, DescentRefusalReason, Vec3Json } from './state.ts'
-import { distance } from './state.ts'
 
 /** Ticks a descend goal may make no vertical progress before it is called stalled. */
 export const DESCEND_STALL_TICKS_DEFAULT = 20
@@ -97,75 +85,12 @@ export function formatDescendProgress(y: number, targetY: number, delta: number,
   return `DESCEND_PROGRESS y=${y} target_y=${targetY} delta=${delta} ticks=${ticks}`
 }
 
-/** Straight down is the bot's own column: no horizontal offset. */
-export function isStraightDown(step: DescentOption): boolean {
-  return step.dx === 0 && step.dz === 0
-}
-
-export interface DescendScoreInput {
-  /** the goal wants to lose altitude (predicate below the bot, or a target below) */
-  wantDown: boolean
-  hasTunnelTarget: boolean
-  /** the active goal is an explicit `descend_to:Y=<n>` predicate */
-  predicateDescend: boolean
-  /** nearest target resource, used to align the staircase with the ore bearing */
-  target: Vec3Json | null
-  feet: Vec3Json
-}
-
-/**
- * Score one descent step: lower is better. A downward step wins when the goal
- * wants altitude loss; alignment toward the target resource is a bonus; the
- * bot's own column (straight down) carries a small penalty so a diagonal
- * staircase is preferred whenever one is safe.
- */
-export function scoreDescendStep(step: DescentOption, input: DescendScoreInput): number {
-  const modePenalty =
-    step.mode === 'down'
-      ? input.wantDown
-        ? 0
-        : 2
-      : input.wantDown && (input.hasTunnelTarget || input.predicateDescend)
-        ? 2
-        : 0
-  let alignment = 0
-  if (input.target !== null) {
-    const tdx = input.target.x - input.feet.x
-    const tdz = input.target.z - input.feet.z
-    const dot = step.dx * Math.sign(tdx) + step.dz * Math.sign(tdz)
-    alignment = dot > 0 ? -1 : dot < 0 ? 1 : 0
-  }
-  const straightPenalty = isStraightDown(step) ? 1 : 0
-  return modePenalty * 10 + alignment * 4 + straightPenalty + distance(step.step, input.feet) * 0.1
-}
-
-/**
- * Pick the best step from an already-safe pool. Returns null on an empty pool.
- * Eligibility (down vs level, fixed direction, oscillation) is decided by the
- * caller's pool; this function only ranks. Pure: same input -> same step.
- */
-export function pickBestDescendStep(
-  steps: readonly DescentOption[],
-  input: DescendScoreInput,
-): DescentOption | null {
-  let best: DescentOption | null = null
-  let bestScore = Number.POSITIVE_INFINITY
-  for (const step of steps) {
-    const score = scoreDescendStep(step, input)
-    if (score < bestScore) {
-      bestScore = score
-      best = step
-    }
-  }
-  return best
-}
-
 /**
  * Why a held heading could not be continued. The sensor's typed refusal when the
  * world itself obstructs the step, or `no_step` when the heading has no option in
  * the current pool at all. This is the ONLY licence to change the plan heading.
  */
-export type DescentHeadingChangeReason = DescentRefusalReason | 'no_step' | 'oscillation' | 'cap'
+export type DescentHeadingChangeReason = DescentRefusalReason | 'no_step' | 'oscillation' | 'cap' | 'budget'
 
 /** A typed heading change: the obstruction that forced it, with its world cell. */
 export interface DescentHeadingChange {
@@ -198,46 +123,7 @@ export interface DescentHeadingObstruction {
 }
 
 /**
- * Resolve the heading of the next descent step.
- *
- * The rule is deliberately not a score: while the world offers ANY safe step
- * under the previous heading, that heading is held (`held`, no change event).
- * Only when the previous heading has no safe/eligible step does the plan move to
- * another heading, and that move carries the typed obstruction that caused it -
- * so a heading change can always be attributed to a world fact instead of a
- * silent re-pick. `null` previous means the plan is starting and the caller's
- * existing selection rule (score, then deterministic scan order) owns the first
- * heading.
- */
-export function resolveDescentHeading(input: {
-  previous: DescentDir | null
-  /** headings with at least one safe, eligible step this tick, in pool order */
-  available: readonly DescentDir[]
-  /** why the previous heading is unavailable (only read when it is) */
-  obstruction: DescentHeadingObstruction | null
-}): DescentHeadingPlan | null {
-  const first = input.available[0]
-  if (first === undefined) return null
-  if (input.previous === null) return { dir: first, status: 'new', from: null, change: null }
-  if (input.available.includes(input.previous)) {
-    return { dir: input.previous, status: 'held', from: input.previous, change: null }
-  }
-  const obstruction = input.obstruction ?? { reason: 'no_step', cell: null, block: null }
-  return {
-    dir: first,
-    status: 'changed',
-    from: input.previous,
-    change: {
-      from: input.previous,
-      to: first,
-      reason: obstruction.reason,
-      cell: obstruction.cell,
-      block: obstruction.block,
-    },
-  }
-}
-
-/** The exact `DESCEND_HEADING` line: the plan heading of the step about to run. */
+/** The exact `DESCEND_HEADING` line: the heading of the selected candidate. */
 export function formatDescentHeading(plan: DescentHeadingPlan): string {
   const held = plan.status === 'held' || plan.status === 'new'
   const change =

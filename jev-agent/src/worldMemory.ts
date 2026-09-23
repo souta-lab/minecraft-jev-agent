@@ -1,11 +1,10 @@
 // worldMemory.ts - terrain-search memory shared across ticks (#3/#4).
 //
-// Keeps three things the per-tick sensor cannot: the dig direction chosen once a
-// tunnel is started (so it is not flipped into a zigzag), the last six dig
-// positions (to detect oscillation), and the count of successful DESCEND actions
-// that produced no resource progress (to cap runaway descents). It also records
-// the deepest known stone/ore level so a staircase has positive evidence to aim
-// at instead of "target === null therefore down".
+// Keeps per-world descent evidence the per-tick sensor cannot: the currently
+// selected direction/mode (so a safe Skill continuation is stable), the last six
+// dig positions (to detect recurrence), and the count of successful DESCEND
+// actions that produced no resource progress (to bound a trajectory). It also
+// records the deepest known stone/ore level as positive evidence for descent.
 import type { Vec3Json } from './state.ts'
 
 export type DigDir = 'E' | 'W' | 'N' | 'S' | 'D'
@@ -28,6 +27,7 @@ const DIG_OSCILLATE_NET = 2.5
 
 export interface DigMemorySnapshot {
   digDir: DigDir | null
+  digMode: DigMode | null
   digDirCount: number
   digDepth: number
   digOscillate: boolean
@@ -84,18 +84,18 @@ export function isOscillatingSteps(steps: readonly DigStep[]): boolean {
 
 /** Increment the no-progress budget on a verified-but-useless descent. Pure. */
 export function descendBudget(previous: number, resourceProgressed: boolean): { noProgress: number; limitReached: boolean } {
-  const noProgress = resourceProgressed ? 0 : previous + 1
+  const noProgress = resourceProgressed ? 0 : Math.min(previous + 1, DESCEND_NO_PROGRESS_LIMIT)
   return { noProgress, limitReached: noProgress >= DESCEND_NO_PROGRESS_LIMIT }
 }
 
 export class DigMemory {
   dir: DigDir | null = null
+  mode: DigMode | null = null
   dirCount = 0
   depth = 0
   knownStoneY: number | null = null
   lastTunnel: Vec3Json | null = null
   descendNoProgress = 0
-  private staircase = false
   private recent: DigStep[] = []
   private scope: DigMemoryScope | null = null
 
@@ -120,50 +120,54 @@ export class DigMemory {
   }
 
   record(step: DigStep): void {
-    if (this.dir === step.dir) this.dirCount += 1
+    if (this.dir === step.dir && this.mode === step.mode) this.dirCount += 1
     else {
       this.dir = step.dir
       this.dirCount = 1
     }
+    this.mode = step.mode
     if (step.mode === 'down') this.depth += 1
     this.lastTunnel = { x: step.x, y: step.y, z: step.z }
     this.recent.push(step)
     while (this.recent.length > DIG_OSCILLATE_WINDOW) this.recent.shift()
-    this.staircase = false
   }
 
   isOscillating(): boolean {
-    return this.staircase || isOscillatingSteps(this.recent)
+    return isOscillatingSteps(this.recent)
   }
 
   netDisplacement(): number {
     return netDisplacementOf(this.recent)
   }
 
-  /** Called on detected oscillation: drop the path and force a straight staircase. */
-  markStaircase(): void {
-    this.dir = null
-    this.dirCount = 0
-    this.recent = []
-    this.staircase = true
-  }
-
   /** Called on verified resource progress: clear strategy-level descent budgets. */
   markResourceProgress(): void {
     this.descendNoProgress = 0
     this.dir = null
+    this.mode = null
     this.dirCount = 0
     this.depth = 0
-    this.staircase = false
     this.recent = []
   }
 
-  /** Stop extending the current tunnel (no-progress cap hit -> lateral search). */
+  /** Clear the selected path after a verified body relocation starts a new local route. */
   resetPath(): void {
     this.dir = null
+    this.mode = null
     this.dirCount = 0
-    this.staircase = false
     this.recent = []
+  }
+
+  /**
+   * Begin a policy-selected recovery trajectory after the previous one reached
+   * a typed terminal boundary. This resets only trajectory-local recurrence and
+   * no-progress budgets; observed world facts such as knownStoneY and lastTunnel
+   * remain available to ground the new choice.
+   */
+  beginSelectedRecoveryPath(): void {
+    this.resetPath()
+    this.depth = 0
+    this.descendNoProgress = 0
   }
 
   /**
@@ -184,6 +188,7 @@ export class DigMemory {
   snapshot(): DigMemorySnapshot {
     return {
       digDir: this.dir,
+      digMode: this.mode,
       digDirCount: this.dirCount,
       digDepth: this.depth,
       digOscillate: this.isOscillating(),
@@ -201,12 +206,12 @@ export class DigMemory {
 
   private clearMemory(): void {
     this.dir = null
+    this.mode = null
     this.dirCount = 0
     this.depth = 0
     this.knownStoneY = null
     this.lastTunnel = null
     this.descendNoProgress = 0
-    this.staircase = false
     this.recent = []
   }
 }

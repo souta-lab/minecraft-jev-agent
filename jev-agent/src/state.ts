@@ -756,13 +756,15 @@ export type AgentSignals = {
    * every pure caller keeps its existing behaviour.
    */
   zeroProgressRoutes?: ZeroProgressRoutes
-  /** fixed dig direction once chosen; do not flip until the cap/resource (#4) */
+  /** selected descent direction, retained while that mode/heading stays grounded */
   digDir?: DescentDir | null
-  /** consecutive digs already executed in `digDir` (cap `DIG_PATH_CAP`) */
+  /** consecutive digs in the selected direction and mode (level paths are capped) */
   digDirCount?: number
   /** staircase depth (down steps) for the current dig path */
   digDepth?: number
-  /** true when the last 6 digs showed near-zero net displacement -> staircase */
+  /** mode of the currently selected descent continuation (`down` or `level`) */
+  digMode?: 'down' | 'level' | null
+  /** true when the last 6 digs showed near-zero net displacement; policy chooses recovery */
   digOscillate?: boolean
   /** deepest stone/ore level observed (positive evidence for a staircase) */
   knownStoneY?: number | null
@@ -770,7 +772,7 @@ export type AgentSignals = {
   lastTunnel?: Vec3Json | null
   /** successful DESCEND actions in a row that produced zero resource progress */
   descendNoProgress?: number
-  /** set once `descendNoProgress >= DESCEND_NO_PROGRESS_LIMIT` -> lateral search */
+  /** set once the bounded no-resource-progress evidence reaches its limit */
   descendLimitReached?: boolean
   /** durable known-resource coordinates injected by the host (issue #43) */
   knownResources?: KnownResource[]

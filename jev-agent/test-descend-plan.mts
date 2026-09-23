@@ -7,11 +7,8 @@ import {
   evaluateDescendProgress,
   formatDescendProgress,
   formatDescendStalled,
-  isStraightDown,
-  pickBestDescendStep,
   resolveDescendStallTicks,
 } from './src/descendPlan.ts'
-import type { DescendScoreInput } from './src/descendPlan.ts'
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { JevController } from './src/controller.ts'
@@ -156,17 +153,6 @@ function worldState(overrides: {
   }
 }
 
-function scoreInput(overrides: Partial<DescendScoreInput> = {}): DescendScoreInput {
-  return {
-    wantDown: true,
-    hasTunnelTarget: false,
-    predicateDescend: true,
-    target: { x: 25, y: 49, z: 36 },
-    feet: { x: 0, y: 55, z: 0 },
-    ...overrides,
-  }
-}
-
 // --- progress assertion ----------------------------------------------------------
 
 addCase('a whole-block drop is progress and re-arms the stall counter', () => {
@@ -210,26 +196,142 @@ addCase('invalid BUDDY_DESCEND_STALL_TICKS falls back to the default', () => {
 
 // --- candidate selection ---------------------------------------------------------
 
-addCase('an aligned cardinal staircase beats digging straight down', () => {
+addCase('an exhausted descent exposes grounded down and level alternatives to policy', () => {
   const feet = { x: 0, y: 55, z: 0 }
-  const straight = downStep('D', 0, 0, feet)
-  const aligned = downStep('E', 1, 0, feet)
-  const best = pickBestDescendStep([straight, aligned], scoreInput())
+  const level = {
+    ...downStep('N', 0, -1, feet),
+    mode: 'level' as const,
+    step: { x: 0, y: feet.y, z: -1 },
+  }
+  const candidates = generateCandidates(
+    worldState({
+      position: feet,
+      goalQueue: queueWith(queuedGoal({ targetY: 46 })),
+      signals: signals({ digDir: 'E', digMode: 'down', digDirCount: 1, descendLimitReached: true }),
+      descent: [downStep('E', 1, 0, feet), downStep('W', -1, 0, feet), level],
+    }),
+    defaultCandidateOptions,
+  ).filter((candidate: Candidate) => candidate.kind === 'DESCEND')
+  const alternatives = candidates.map((candidate) => `${String(candidate.meta.mode)}:${String(candidate.meta.dir)}`)
+  const boundaries = new Set(candidates.map((candidate) => candidate.meta.legPolicyBoundary))
   return {
-    pass: best === aligned && !isStraightDown(best),
-    detail: `best=${best?.dir ?? 'none'} straight=${isStraightDown(straight)}`,
+    pass:
+      alternatives.length === 2 &&
+      alternatives.includes('down:W') &&
+      alternatives.includes('level:N') &&
+      boundaries.size === 1 &&
+      String([...boundaries][0]).includes('reason=descent_budget_exhausted'),
+    detail: `alternatives=[${alternatives.join(',')}] boundary=${String([...boundaries][0])}`,
   }
 })
 
-addCase('digging straight down is chosen when it is the only safe step', () => {
+addCase('a successful policy-selected recovery starts its own bounded Skill continuation', () => {
+  type RecoveryRuntime = {
+    digMemory: DigMemory
+    options: { worldEpoch: number }
+    bot: { game: { dimension: string }; entity: { position: Vec3Json } }
+    logger: {
+      info: (channel: string, message: string, fields: Record<string, unknown>, tick: number) => void
+      warn: (channel: string, message: string, fields: Record<string, unknown>, tick: number) => void
+    }
+    tickCounter: number
+    digOscillationReported: boolean
+    descendHaveBaseline: number
+    actionStart: Vec3Json
+    queue: { current: QueuedGoal }
+    effectiveHave: () => number
+    onDescendComplete: (result: { actionId: string }, candidate: Candidate) => void
+  }
   const feet = { x: 0, y: 55, z: 0 }
-  const straight = downStep('D', 0, 0, feet)
-  const best = pickBestDescendStep([straight], scoreInput())
-  return { pass: best === straight && isStraightDown(straight), detail: `best=${best?.dir ?? 'none'}` }
-})
+  const level = {
+    ...downStep('N', 0, -1, feet),
+    mode: 'level' as const,
+    step: { x: 0, y: feet.y, z: -1 },
+  }
+  const offered = generateCandidates(
+    worldState({
+      position: feet,
+      goalQueue: queueWith(queuedGoal({ targetY: 46 })),
+      signals: signals({
+        digDir: 'E',
+        digMode: 'down',
+        digDirCount: 4,
+        descendNoProgress: 4,
+        descendLimitReached: true,
+      }),
+      descent: [downStep('E', 1, 0, feet), level],
+    }),
+    defaultCandidateOptions,
+  )
+  const selected = offered.find(
+    (candidate: Candidate) =>
+      candidate.kind === 'DESCEND' &&
+      candidate.meta.mode === 'level' &&
+      candidate.meta.dir === 'N',
+  )
+  if (selected === undefined) return { pass: false, detail: 'policy alternative level:N was not offered' }
 
-addCase('an empty pool yields no step', () => {
-  return { pass: pickBestDescendStep([], scoreInput()) === null, detail: 'empty pool -> null' }
+  const memory = new DigMemory()
+  memory.bindScope({ dimension: 'minecraft:overworld', worldEpoch: 1 })
+  memory.observeStoneY(30)
+  memory.record({ x: 1, y: 54, z: 0, dir: 'E', mode: 'down', target: 'raw_iron', atMs: 1 })
+  for (let index = 0; index < 4; index += 1) memory.markDescend(false)
+  const lines: string[] = []
+  const runtime = Object.create(JevController.prototype) as RecoveryRuntime
+  runtime.digMemory = memory
+  runtime.options = { worldEpoch: 1 }
+  runtime.bot = {
+    game: { dimension: 'minecraft:overworld' },
+    entity: { position: feet },
+  }
+  runtime.logger = {
+    info: (_channel, message) => lines.push(message),
+    warn: (_channel, message) => lines.push(message),
+  }
+  runtime.tickCounter = 1
+  runtime.digOscillationReported = false
+  runtime.descendHaveBaseline = 0
+  runtime.actionStart = feet
+  runtime.queue = { current: queuedGoal({ targetY: 46 }) }
+  runtime.effectiveHave = () => 0
+  runtime.onDescendComplete({ actionId: selected.id }, selected)
+
+  const afterSelection = memory.snapshot()
+  const continuation = generateCandidates(
+    worldState({
+      position: feet,
+      goalQueue: queueWith(queuedGoal({ targetY: 46 })),
+      signals: signals({
+        digDir: afterSelection.digDir,
+        digMode: afterSelection.digMode,
+        digDirCount: afterSelection.digDirCount,
+        digDepth: afterSelection.digDepth,
+        digOscillate: afterSelection.digOscillate,
+        descendNoProgress: afterSelection.descendNoProgress,
+        descendLimitReached: afterSelection.descendLimitReached,
+      }),
+      descent: [level],
+    }),
+    defaultCandidateOptions,
+  ).find((candidate: Candidate) => candidate.kind === 'DESCEND')
+
+  return {
+    pass:
+      selected.meta.recoveryBoundaryReason === 'descent_budget_exhausted' &&
+      afterSelection.digDir === 'N' &&
+      afterSelection.digMode === 'level' &&
+      afterSelection.digDirCount === 1 &&
+      afterSelection.descendNoProgress === 1 &&
+      !afterSelection.descendLimitReached &&
+      afterSelection.knownStoneY === 30 &&
+      continuation?.meta.dir === 'N' &&
+      continuation.meta.mode === 'level' &&
+      continuation.meta.recoveryBoundaryReason === undefined &&
+      lines.some((line) => line.startsWith('DESCEND_RECOVERY_SELECTED reason=descent_budget_exhausted')),
+    detail: `selected=${selected.id} next=${continuation?.id ?? 'none'} mode=${afterSelection.digMode} ` +
+      `streak=${afterSelection.descendNoProgress} limit=${afterSelection.descendLimitReached} ` +
+      `nextBoundary=${String(continuation?.meta.recoveryBoundaryReason ?? 'none')}`,
+  }
 })
 
 // --- candidate generation (the measured stall) ----------------------------------
@@ -296,6 +398,7 @@ addCase('a capped lateral tunnel stops offering same-height DESCEND steps', () =
     signals: signals({
       descendLimitReached: true,
       digDir: 'E',
+      digMode: 'level',
       digDirCount: DIG_PATH_CAP,
     }),
     descent: [lateral],
@@ -321,7 +424,7 @@ addCase('the path cap still permits a grounded downward step', () => {
     goalQueue: queueWith(
       queuedGoal({ kind: 'collect', targetY: undefined, description: 'collect raw iron' }),
     ),
-    signals: signals({ digDir: 'E', digDirCount: DIG_PATH_CAP, knownStoneY: 40 }),
+    signals: signals({ digDir: 'E', digMode: 'level', digDirCount: DIG_PATH_CAP, knownStoneY: 40 }),
     descent: [lateral, downStep('D', 0, 0, feet)],
   })
   const descend = generateCandidates(state, defaultCandidateOptions).filter(
@@ -407,10 +510,17 @@ addCase('a predicate goal with only unsafe steps has no DESCEND candidate (escal
     goalQueue: queueWith(queuedGoal({ targetY: 46 })),
     descent: [unsafe],
   })
-  const descend = generateCandidates(state, defaultCandidateOptions).filter(
-    (candidate: Candidate) => candidate.kind === 'DESCEND',
-  )
-  return { pass: descend.length === 0, detail: descend.map((candidate) => candidate.id).join(',') || 'none' }
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const descend = candidates.filter((candidate: Candidate) => candidate.kind === 'DESCEND')
+  const escalate = candidates.find((candidate: Candidate) => candidate.kind === 'ESCALATE')
+  return {
+    pass:
+      descend.length === 0 &&
+      escalate?.meta.reason === 'no_grounded_local_frontier' &&
+      escalate.meta.skillOutcome === 'BLOCKED' &&
+      String(escalate.meta.legPolicyBoundary).includes('reason=no_grounded_local_frontier'),
+    detail: `descend=${descend.length} escalate=${String(escalate?.meta.reason ?? 'none')} boundary=${String(escalate?.meta.legPolicyBoundary ?? 'none')}`,
+  }
 })
 
 addCase('the straight-down candidate records the exact predicate target in its meta', () => {
@@ -472,12 +582,9 @@ addCase('(12) a descend goal with no safe step in its own column retargets a fre
   }
 })
 
-// (13) A spent failure budget on a safe DOWN step must never hand the single
-// DESCEND slot to a LEVEL move: a level step does not lower Y, so a
-// `descend_to:Y=<n>` predicate can never be satisfied by it and the descent
-// budget charged it no-progress forever (live
-// `DESCEND:level:N:b10_64_22 noProgress=2`, target y=-54).
-addCase('(13) a predicate descend retries a spent down step instead of offering a level step', () => {
+// (13) A typed failure on the selected route suppresses that exact hard-invalid
+// candidate; a distinct grounded route remains visible to policy.
+addCase('(13) a spent down candidate is excluded while a grounded level alternative remains for policy', () => {
   const feet: Vec3Json = { x: 10, y: 64, z: 22 }
   const down = downStep('N', 0, -1, feet)
   const level: DescentOption = {
@@ -485,7 +592,6 @@ addCase('(13) a predicate descend retries a spent down step instead of offering 
     mode: 'level',
     step: { x: 10, y: 64, z: 21 },
     floor: { x: 10, y: 63, z: 21 },
-    diggable: false,
   }
   const spent = {
     [`DESCEND:down:N:b${down.floor.x}_${down.floor.y}_${down.floor.z}`]: 99,
@@ -493,7 +599,7 @@ addCase('(13) a predicate descend retries a spent down step instead of offering 
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({ targetY: -54 })),
-    signals: signals({ failedCandidates: spent }),
+    signals: signals({ failedCandidates: spent, digDir: 'N', digMode: 'down' }),
     descent: [level, down],
   })
   const descend = generateCandidates(state, defaultCandidateOptions).find(
@@ -502,9 +608,12 @@ addCase('(13) a predicate descend retries a spent down step instead of offering 
   return {
     pass:
       descend !== undefined &&
-      descend.meta.mode === 'down' &&
-      descend.id.startsWith('DESCEND:down:'),
-    detail: `descend=${descend?.id ?? 'none'} mode=${String(descend?.meta.mode ?? '-')}`,
+      descend.meta.mode === 'level' &&
+      descend.meta.dir === 'N' &&
+      descend.meta.skillOutcome === 'BLOCKED' &&
+      typeof descend.meta.legPolicyBoundary === 'string' &&
+      String(descend.meta.legPolicyBoundary).includes('reason=selected_descent_blocked_or_spent'),
+    detail: `descend=${descend?.id ?? 'none'} mode=${String(descend?.meta.mode ?? '-')} boundary=${String(descend?.meta.legPolicyBoundary ?? 'none')}`,
   }
 })
 

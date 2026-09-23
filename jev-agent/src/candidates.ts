@@ -47,8 +47,8 @@ import {
 import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
-import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
-import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
+import { descentHeadingObstruction, formatDescentHeading } from './descendPlan.ts'
+import type { DescentHeadingChangeReason, DescentHeadingObstruction, DescentHeadingPlan } from './descendPlan.ts'
 import { digRouteBearing, DIG_ROUTE_ARRIVE_DISTANCE, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
 import type { DigRouteRefusal, DigRouteRefusalReason, DigRouteStep } from './digRoute.ts'
 import { formatWallEntry, groundWallEntries } from './wallEntry.ts'
@@ -56,6 +56,7 @@ import type { WallEntryRefusal, WallEntryRoute, WallProbe } from './wallEntry.ts
 import { formatLevelScan, groundLevelScan } from './levelScan.ts'
 import type { LevelScanRefusalReason } from './levelScan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
+import type { DigMode } from './worldMemory.ts'
 import {
   BRIDGE_AUTHORITY_META,
   BRIDGE_BLOCK_META,
@@ -444,6 +445,40 @@ export function threatEscalateCandidate(reason: string, tick = 0): Candidate {
     inReach: true,
     hasStandableAdjacent: true,
     meta: { tick, reason, threatResponse: true },
+  }
+}
+
+type DescentRecoveryOutcome = 'BLOCKED' | 'BUDGET_EXHAUSTED' | 'RECURRENT_STATE'
+
+/** A bounded control candidate that returns an exhausted local Skill to policy. */
+function descentPolicyEscalateCandidate(input: {
+  tick: number
+  reason: string
+  outcome: DescentRecoveryOutcome
+  label: string
+}): Candidate {
+  return {
+    id: 'ESCALATE',
+    kind: 'ESCALATE',
+    label: input.label,
+    targetName: null,
+    target: null,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: input.tick,
+      reason: input.reason,
+      skillOutcome: input.outcome,
+      legPolicyBoundary: formatSkillPolicyBoundary({
+        skill: 'DESCEND(groundedRoute)',
+        reason: input.reason,
+        alternatives: [],
+      }),
+    },
   }
 }
 
@@ -2613,13 +2648,15 @@ export function formatExploreRouteBlocked(blocked: ExploreRouteBlocked): string 
  *   - `no_tool`       a safe step exists but the body lacks the harvest tool
  *                     its block needs;
  *   - `exhausted`     every safe step has spent its bounded failure budget.
+ *   - `recurrent`     the only remembered safe continuation has oscillated; it
+ *                     is retired and the policy boundary receives the no-frontier fact.
  *
  * This is deterministic CAN/SAFE truth about the OFFERED set, never a
  * preference: it exists so "the body is cut off and the safe way down is
  * unavailable" is a typed fact instead of a bare WAIT. A damaging drop is never
  * a substitute - the refusal is the honest answer when no safe step exists.
  */
-export type ColumnDescentRefusalReason = 'no_safe_step' | 'no_tool' | 'exhausted'
+export type ColumnDescentRefusalReason = 'no_safe_step' | 'no_tool' | 'exhausted' | 'recurrent'
 
 export interface ColumnDescentRefusal {
   reason: ColumnDescentRefusalReason
@@ -4638,8 +4675,8 @@ function generateRawCandidates(
   // typed refusal is returned when even that safe step does not exist, so the
   // tick never falls through to a bare WAIT without a stated cause.
   const hasLocomotionCandidate = candidates.some((candidate) =>
-    LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind),
-  )
+      LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind),
+    )
   const columnDescent = hasLocomotionCandidate
     ? { candidates: [], refusal: null }
     : columnDescentCandidates(state, options, focusItem)
@@ -4648,6 +4685,16 @@ function generateRawCandidates(
     if (columnIds.has(candidate.id)) continue
     columnIds.add(candidate.id)
     candidates.push(candidate)
+  }
+  if (columnDescent.refusal?.reason === 'recurrent' && candidates.length === 0) {
+    candidates.push(
+      descentPolicyEscalateCandidate({
+        tick: state.tick,
+        reason: 'recurrent_descent_no_alternative',
+        outcome: 'RECURRENT_STATE',
+        label: 'hand control to System 2 (the only safe column descent is recurrent)',
+      }),
+    )
   }
 
   candidates.push({
@@ -4665,7 +4712,7 @@ function generateRawCandidates(
     meta: { tick: state.tick, waitMs: 300 },
   })
 
-  if (state.signals.escalationRecommended) {
+  if (state.signals.escalationRecommended && !candidates.some((candidate) => candidate.kind === 'ESCALATE')) {
     candidates.push({
       id: 'ESCALATE',
       kind: 'ESCALATE',
@@ -5478,6 +5525,19 @@ function mineCandidates(
         label: 'descend by placing its own landing',
       })
       if (scaffold.candidate !== null) candidates.push(scaffold.candidate)
+    }
+    // A descent predicate with no grounded local route has reached the semantic
+    // boundary. Surface that typed gap to Jev/System2; do not silently leave an
+    // active descent Skill with only WAIT or choose a new recovery strategy here.
+    if (candidates.length === 0 && descendTargetY !== null) {
+      candidates.push(
+        descentPolicyEscalateCandidate({
+          tick: state.tick,
+          reason: 'no_grounded_local_frontier',
+          outcome: 'BLOCKED',
+          label: `hand control to System 2 (no grounded descent recovery at Y=${descendTargetY})`,
+        }),
+      )
     }
   } else if (
     mineActions.length === 0 &&
@@ -6298,11 +6358,13 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
  * #3: `target === null` no longer means "descend". A downward step needs positive
  * evidence (a visible target below, or a remembered stone/ore level below for a
  * stone/ore goal); otherwise only level steps are offered. A per-subgoal
- * no-progress budget (`signals.descendLimitReached`) stops runaway descent.
+ * no-progress budget (`signals.descendLimitReached`) is evidence that the
+ * selected trajectory has stalled and returns recovery choice to Jev.
  *
- * #4: once a dig direction is chosen it is held until the resource appears or the
- * `DIG_PATH_CAP` is reached, so the path cannot zigzag. Oscillation forces a
- * straight downward staircase.
+ * A selected mode and heading are held while their safe continuation remains
+ * grounded. An obstruction, recurrence, or exhausted path budget closes that
+ * continuation and exposes the remaining mechanically valid routes as policy
+ * candidates; this function never chooses a replacement mode or heading.
  */
 function descendCandidates(
   state: WorldState,
@@ -6312,16 +6374,6 @@ function descendCandidates(
   descendTargetY: number | null = null,
 ): Candidate[] {
   if (focusItem === null && descendTargetY === null) return []
-  // #41: the no-progress latch caps runaway descent for *item* goals. A predicate
-  // `descend_to:Y=<n>` is the objective itself; suppressing its only body change
-  // is exactly the permanent WAIT this issue fixes. The controller's stall
-  // assertion bounds a genuinely impossible descent instead.
-  // When the latch fires, the next valid mechanical move is a lateral search
-  // step, not a semantic replan. Preserve safe level steps while suppressing
-  // only further down steps. Returning [] here made the controller manufacture
-  // `ESCALATE`, which promoted local route starvation into a Mercury mission
-  // switch and left the active Option behind a control-only loop.
-  const lateralSearchOnly = state.signals.descendLimitReached === true && descendTargetY === null
   const nowMs = state.timestampMs
   const standKey = cellKey(state.self.position)
   // Zero-progress route memory: a descend step whose dig provably removed nothing
@@ -6332,12 +6384,15 @@ function descendCandidates(
   // body must change its stand cell (a level/lateral step, MOVE, or the existing
   // bounded DESCEND_STALLED escalation) instead of sampling more cells forever.
   const standDownSpent = standFamilyExhausted(state.signals.zeroProgressRoutes, 'DESCEND', standKey, { nowMs })
-  const suppressDown = lateralSearchOnly || standDownSpent
   const steps = (state.descent ?? []).filter(
     (step) =>
       step.safe &&
       !isProtectedStationBlock(step.digName ?? '') &&
-      (!suppressDown || step.mode !== 'down') &&
+      // A spent exact route and a spent family at this stand are hard evidence
+      // that this particular down route cannot execute here. Keep the typed
+      // remaining options; the family exhaustion itself must not install a
+      // lateral-search strategy.
+      !(standDownSpent && step.mode === 'down') &&
       !isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
         kind: 'DESCEND',
         targetKey: cellKey(descentPrimaryCell(step)),
@@ -6384,131 +6439,167 @@ function descendCandidates(
   // even when no ore is visible, and (unlike a collect goal) it does not need one.
   const descendToY = descendTargetY !== null && state.self.position.y > descendTargetY
   const downEvidence = descendToY || targetBelow || (target === null && (knownStoneBelow || stoneGoal))
-  const wantDown = descendToY || targetBelow || (target === null && downEvidence)
-  const hasTunnelTarget = tunnelTargets.length > 0
   const oscillate = state.signals.digOscillate === true
+  const budgetExhausted = state.signals.descendLimitReached === true
   const fixedDir = state.signals.digDir ?? null
+  const fixedMode = state.signals.digMode ?? null
   const fixedCount = state.signals.digDirCount ?? 0
 
-  const base = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
+  const base = steps.filter((step) => downEvidence || step.mode !== 'down')
   if (base.length === 0) return []
-  // HEADING COHERENCE (#staircase): the heading of a running descent is held for
-  // as long as the world offers an eligible step under it, and a change is a
-  // typed event naming the obstruction. The measured live shape
-  // (run-muc3qbug-18vg3, main ab19403) re-picked a heading almost every step:
-  //   DESCEND:down:W:b7_35_20 | DESCEND:down:N:b8_35_19 | DESCEND:down:W:b7_34_20 ...
-  //   heading histogram of 60 steps: W 23 | E 17 | N 12 | S 8
-  // because the only memory of a chosen heading was a SUCCESSFUL-completion
-  // record, and the pool silently widened to every heading whenever the held one
-  // had no safe step (`if (pool.length === 0) pool = steps.filter(...)`). Neither
-  // the cap nor a sensor refusal may be a silent licence to re-pick.
-  //
-  // `DIG_PATH_CAP` bounds a LEVEL search tunnel (no altitude change, so it can run
-  // away); a DOWN staircase is bounded by Y (descend target / known stone level /
-  // DESCEND_STALLED) and holding its heading is what makes it a staircase instead
-  // of a one-block bowl per level. At the cap, fail closed for level steps. The
-  // old fallback to `eligible` silently re-enabled the same tunnel exactly when
-  // every level step had been filtered, so the bot could keep digging forever at
-  // one height. Other grounded candidates (including a safe DOWN step) remain
-  // available to change position or altitude.
-  const downOnly = oscillate ? base.filter((step) => step.mode === 'down') : base
-  const eligible = downOnly.length > 0 ? downOnly : base
-  const usable = eligible.filter((step) => step.mode === 'down' || fixedCount < DIG_PATH_CAP)
-  const poolSteps = usable
-  if (poolSteps.length === 0) return []
-  const availableDirs = dedupeDirs(poolSteps)
-  const headingPlan = resolveDescentHeading({
-    previous: fixedDir,
-    available: availableDirs,
-    obstruction:
-      fixedDir === null || availableDirs.includes(fixedDir)
-        ? null
-        // The obstruction is read from the RAW sensor list (safe AND refused):
-        // `steps` above keeps only the safe ones, so it can never say why the
-        // held heading disappeared.
-        : headingObstructionFor(state.descent ?? [], fixedDir, oscillate, fixedCount),
-  })
-  if (headingPlan === null) return []
-  const pool = poolSteps.filter((step) => step.dir === headingPlan.dir)
-  if (pool.length === 0) return []
-
-  const scoreInput: DescendScoreInput = {
-    wantDown,
-    hasTunnelTarget,
-    predicateDescend: descendTargetY !== null,
-    target: target === null ? null : target.position,
-    feet,
-  }
-  const notFailed = pool.filter(
+  // The level-path budget is a hard bound on continuing the SAME selected
+  // direction/mode. It does not erase a different heading or mode that the world
+  // still grounds; those choices are returned to π as new candidates.
+  const withinPathBudget = base.filter(
     (step) =>
-      failureCount(state.signals.failedCandidates, descendId(step)) <
-      (options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT),
+      step.mode !== 'level' ||
+      step.dir !== fixedDir ||
+      fixedMode !== 'level' ||
+      fixedCount < DIG_PATH_CAP,
   )
-  let best = pickBestDescendStep(notFailed, scoreInput)
-  if (best === null && descendTargetY !== null) {
-    // A predicate goal must yield a body change rather than WAIT. Retry over the
-    // full safe pool even when stale failure memory suppressed every step; the
-    // controller's DESCEND_STALLED assertion bounds a genuinely impossible descent.
-    best = pickBestDescendStep(pool, scoreInput)
-  }
-  if (best === null) return []
+  const failureLimit = options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT
+  const available = withinPathBudget.filter(
+    (step) => failureCount(state.signals.failedCandidates, descendId(step)) < failureLimit,
+  )
+  if (available.length === 0) return []
 
-  // A DESCEND lowers the body. A LEVEL step is still a grounded body change (the
-  // documented lateral-reposition vocabulary every fixture relies on), but it is
-  // NOT altitude loss: for an explicit `descend_to:Y=<n>` predicate a level step
-  // can never satisfy the goal, and charging it to the descent budget produced
-  // the measured live stall
-  //   DESCEND_PROGRESS actionSuccess=true resourceDelta=0 streak=2
-  //   DESCEND:level:N:b10_64_22  (target y=-54, 117 blocks BELOW)
-  // so a spent failure budget on a safe DOWN step must never hand the single
-  // DESCEND slot to a level move. Retry the down step instead; the controller's
-  // DESCEND_STALLED / DESCEND_LIMIT assertions bound a genuinely impossible
-  // descent and escalate, which is exactly "retarget or escalate".
-  if (descendTargetY !== null) {
-    const downNotFailed = notFailed.filter((step) => step.mode === 'down')
-    const downPool = pool.filter((step) => step.mode === 'down')
-    const downPick = pickBestDescendStep(downNotFailed, scoreInput) ?? pickBestDescendStep(downPool, scoreInput)
-    if (downPick !== null) best = downPick
+  const sameSkillContinuation =
+    fixedDir === null || fixedMode === null
+      ? []
+      : available.filter((step) => step.dir === fixedDir && step.mode === fixedMode)
+  let boundaryReason: string | null = null
+  let offeredSteps = available
+  if (budgetExhausted) {
+    boundaryReason = 'descent_budget_exhausted'
+    offeredSteps = endRecoveryContinuation(available, fixedDir, fixedMode)
+  } else if (oscillate) {
+    boundaryReason = 'recurrent_descent_trajectory'
+    offeredSteps = endRecoveryContinuation(available, fixedDir, fixedMode)
+  }
+  else if (fixedDir !== null && fixedMode !== null && sameSkillContinuation.length === 0) {
+    boundaryReason =
+      fixedMode === 'level' && fixedCount >= DIG_PATH_CAP
+        ? 'selected_path_budget_exhausted'
+        : 'selected_descent_blocked_or_spent'
+  } else if (fixedDir !== null && fixedMode !== null) {
+    offeredSteps = sameSkillContinuation
+    if (offeredSteps.length > 1) boundaryReason = 'multiple_grounded_same_skill_routes'
+  } else if (available.length > 1) {
+    boundaryReason = 'multiple_grounded_descent_routes'
   }
 
-  // A DESCEND is a ROUTE only when the world grounds it: a sensed/tunnel target,
-  // an explicit predicate, a remembered stone level below (for an underground
-  // source), or a stone-class focus. Otherwise it is a blind search step, and
-  // the declared-source exploration fallback may run beside it.
-  const built = descendCandidateFromStep(state, options, best, {
-    focusItem,
-    descendTargetY,
-    grounded: descendToY || hasGoalTarget || knownStoneBelow || stoneGoal,
-    staircase: oscillate || (best.mode === 'down' && fixedCount === 0),
-    // The plan heading is `best`'s own direction by construction (the pool was
-    // filtered to it), so the resolved plan and the selected step cannot disagree.
-    heading: { ...headingPlan, dir: best.dir },
-  })
-  return built === null ? [] : [built.candidate]
+  const obstruction = fixedDir === null ? null : headingObstructionFor(state.descent ?? [], fixedDir, fixedMode, fixedCount)
+  const terminalOutcome = boundaryReason === null ? null : descentRecoveryOutcome(boundaryReason)
+  const grounded: Candidate[] = []
+  for (const step of offeredSteps) {
+    const heading = descentHeadingForStep(step.dir, fixedDir, obstruction, oscillate, budgetExhausted, fixedMode, fixedCount)
+    const built = descendCandidateFromStep(state, options, step, {
+      focusItem,
+      descendTargetY,
+      grounded: descendToY || hasGoalTarget || knownStoneBelow || stoneGoal,
+      // This describes the candidate's geometry, not a recovery strategy.
+      staircase: step.mode === 'down' && (step.dx !== 0 || step.dz !== 0),
+      heading,
+      ...(boundaryReason === null
+        ? {}
+        : {
+            extraMeta: {
+              recoveryBoundaryReason: boundaryReason,
+              recoveryAlternatives: offeredSteps.length,
+              ...(terminalOutcome === null ? {} : { skillOutcome: terminalOutcome }),
+            },
+          }),
+    })
+    if (built !== null) grounded.push(built.candidate)
+  }
+
+  const policyBoundary = descentPolicyBoundary(grounded, boundaryReason)
+  if (policyBoundary !== null) {
+    for (const candidate of grounded) candidate.meta.legPolicyBoundary = policyBoundary
+  }
+  return grounded
 }
 
-/** The distinct headings of a step list, in list order (deterministic). */
-function dedupeDirs(steps: readonly DescentOption[]): DescentDir[] {
-  const out: DescentDir[] = []
-  for (const step of steps) if (!out.includes(step.dir)) out.push(step.dir)
-  return out
+function descentHeadingForStep(
+  dir: DescentDir,
+  previous: DescentDir | null,
+  obstruction: DescentHeadingObstruction | null,
+  oscillating: boolean,
+  budgetExhausted: boolean,
+  previousMode: DigMode | null,
+  previousCount: number,
+): DescentHeadingPlan {
+  if (previous === null) return { dir, status: 'new', from: null, change: null }
+  if (previous === dir) return { dir, status: 'held', from: previous, change: null }
+  const reason: DescentHeadingChangeReason = oscillating
+    ? 'oscillation'
+    : budgetExhausted
+      ? 'budget'
+      : previousMode === 'level' && previousCount >= DIG_PATH_CAP
+        ? 'cap'
+        : (obstruction?.reason ?? 'no_step')
+  return {
+    dir,
+    status: 'changed',
+    from: previous,
+    change: {
+      from: previous,
+      to: dir,
+      reason,
+      cell: obstruction?.cell ?? null,
+      block: obstruction?.block ?? null,
+    },
+  }
+}
+
+function descentPolicyBoundary(candidates: readonly Candidate[], reason: string | null): string | null {
+  if (candidates.length === 0 || (reason === null && candidates.length < 2)) return null
+  const alternatives = candidates.map((candidate) => {
+    const position = candidate.target
+    return `${String(candidate.meta.mode)}:${String(candidate.meta.dir)}@${position === null ? 'unknown' : `${position.x},${position.y},${position.z}`}`
+  })
+  return formatSkillPolicyBoundary({
+    skill: 'DESCEND(groundedRoute)',
+    reason: reason ?? 'multiple_grounded_descent_routes',
+    alternatives,
+  })
+}
+
+/** Close the current direction/mode contract when its budget or recurrence fired. */
+function endRecoveryContinuation(
+  steps: readonly DescentOption[],
+  fixedDir: DescentDir | null,
+  fixedMode: DigMode | null,
+): DescentOption[] {
+  if (fixedDir === null || fixedMode === null) return [...steps]
+  return steps.filter((step) => step.dir !== fixedDir || step.mode !== fixedMode)
+}
+
+function descentRecoveryOutcome(reason: string): DescentRecoveryOutcome | null {
+  if (reason === 'descent_budget_exhausted' || reason === 'selected_path_budget_exhausted') {
+    return 'BUDGET_EXHAUSTED'
+  }
+  if (reason === 'recurrent_descent_trajectory') return 'RECURRENT_STATE'
+  if (reason === 'selected_descent_blocked_or_spent' || reason === 'selected_column_descent_blocked_or_spent') {
+    return 'BLOCKED'
+  }
+  return null
 }
 
 /**
- * Why the held heading has no eligible step left. The sensor's typed refusal when
- * the world obstructs it, `cap` when only the level-tunnel cap retired it, and
- * `oscillation` when the oscillation recovery forced the mode.
+ * Why the held heading could not continue: the sensor's typed refusal when the
+ * world obstructs it, or `cap` when the level path budget was spent. This is
+ * evidence attached to each policy-selected alternative, never a code selection.
  */
 function headingObstructionFor(
   steps: readonly DescentOption[],
   dir: DescentDir,
-  oscillate: boolean,
+  fixedMode: DigMode | null,
   fixedCount: number,
 ): DescentHeadingObstruction {
-  if (oscillate) return { reason: 'oscillation', cell: null, block: null }
   const found = descentHeadingObstruction(steps, dir)
   if (found.reason !== 'no_step') return found
-  return { reason: fixedCount >= DIG_PATH_CAP ? 'cap' : 'no_step', cell: null, block: null }
+  return { reason: fixedMode === 'level' && fixedCount >= DIG_PATH_CAP ? 'cap' : 'no_step', cell: null, block: null }
 }
 
 function descendId(step: DescentOption): string {
@@ -6622,7 +6713,7 @@ function descendCandidateFromStep(
     descendTargetY: number | null
     grounded: boolean
     staircase: boolean
-    /** the coherent plan heading this step belongs to (see `resolveDescentHeading`) */
+    /** the selected heading and any typed obstruction being crossed */
     heading?: DescentHeadingPlan
     extraMeta?: Record<string, string | number | boolean>
     /**
@@ -6795,64 +6886,93 @@ function columnDescentCandidates(
   if (safeDown.length === 0) {
     return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
   }
-  // The SAME heading plan the goal-grounded descent uses: this is the same
-  // staircase mechanic, so a stranded body's shaft must also hold one heading
-  // instead of re-picking one per step (the measured live `W 23 | E 17 | N 12 | S 8`).
   const fixedDir = state.signals.digDir ?? null
+  const fixedMode = state.signals.digMode ?? null
   const fixedCount = state.signals.digDirCount ?? 0
-  const availableDirs = dedupeDirs(safeDown)
-  const headingPlan = resolveDescentHeading({
-    previous: fixedDir,
-    available: availableDirs,
-    obstruction:
-      fixedDir === null || availableDirs.includes(fixedDir)
-        ? null
-        : headingObstructionFor(state.descent ?? [], fixedDir, false, fixedCount),
-  })
-  if (headingPlan === null) return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
-  const heading = safeDown.filter((step) => step.dir === headingPlan.dir)
+  const oscillating = state.signals.digOscillate === true
   const failureLimit = options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT
-  const pool = heading.length > 0 ? heading : safeDown
-  const retryable = pool.filter(
+  const retryable = safeDown.filter(
     (step) => failureCount(state.signals.failedCandidates, descendId(step)) < failureLimit,
   )
   if (retryable.length === 0) {
     return { candidates: [], refusal: { reason: 'exhausted', cell: feet } }
   }
-  const best = pickBestDescendStep(retryable, {
-    wantDown: true,
-    hasTunnelTarget: false,
-    predicateDescend: false,
-    target: null,
-    feet,
-  })
-  if (best === null) return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
-  const built = descendCandidateFromStep(state, options, best, {
-    focusItem,
-    descendTargetY: null,
-    // A safe down step lands on solid support one block lower: that is a
-    // grounded body change (verified geometry), not a semantic claim.
-    grounded: true,
-    // A cardinal step is a staircase step; the own-column dig (`dx === dz === 0`)
-    // is "dig straight down", so it is not labelled a staircase.
-    staircase: !(best.dx === 0 && best.dz === 0),
-    heading: { ...headingPlan, dir: best.dir },
-    extraMeta: { columnDescent: true },
-    // This is the body's only way off its own support column: gate it on breakability, not drops.
-    escape: true,
-  })
-  if (built === null) {
-    return {
-      candidates: [],
-      refusal: {
-        reason: 'no_tool',
-        cell: feet,
-        tool: best.digHarvestTool ?? null,
-        tier: best.digHarvestTier ?? null,
-      },
+  const sameSkillContinuation =
+    fixedDir === null || fixedMode !== 'down'
+      ? []
+      : retryable.filter((step) => step.dir === fixedDir && step.mode === 'down')
+  let boundaryReason: string | null = null
+  let offeredSteps = retryable
+  if (oscillating) {
+    boundaryReason = 'recurrent_descent_trajectory'
+    offeredSteps = endRecoveryContinuation(retryable, fixedDir, fixedMode)
+    if (offeredSteps.length === 0) {
+      return { candidates: [], refusal: { reason: 'recurrent', cell: feet } }
     }
   }
-  return { candidates: [built.candidate], refusal: null }
+  else if (fixedDir !== null && fixedMode === 'down' && sameSkillContinuation.length === 0) {
+    boundaryReason = 'selected_column_descent_blocked_or_spent'
+  } else if (fixedDir !== null && fixedMode === 'down') {
+    offeredSteps = sameSkillContinuation
+    if (offeredSteps.length > 1) boundaryReason = 'multiple_grounded_column_steps'
+  } else if (retryable.length > 1) {
+    boundaryReason = 'multiple_grounded_column_descents'
+  }
+
+  const obstruction = fixedDir === null ? null : headingObstructionFor(state.descent ?? [], fixedDir, fixedMode, fixedCount)
+  const terminalOutcome = boundaryReason === null ? null : descentRecoveryOutcome(boundaryReason)
+  const candidates: Candidate[] = []
+  let toolRefusal: DescentOption | null = null
+  for (const step of offeredSteps) {
+    const built = descendCandidateFromStep(state, options, step, {
+      focusItem,
+      descendTargetY: null,
+      grounded: true,
+      staircase: step.dx !== 0 || step.dz !== 0,
+      heading: descentHeadingForStep(
+        step.dir,
+        fixedDir,
+        obstruction,
+        oscillating,
+        false,
+        fixedMode,
+        fixedCount,
+      ),
+      extraMeta: {
+        columnDescent: true,
+        ...(boundaryReason === null
+          ? {}
+          : {
+              recoveryBoundaryReason: boundaryReason,
+              recoveryAlternatives: offeredSteps.length,
+              ...(terminalOutcome === null ? {} : { skillOutcome: terminalOutcome }),
+            }),
+      },
+      // This is the body's only way off its own support column: gate it on breakability, not drops.
+      escape: true,
+    })
+    if (built === null) toolRefusal ??= step
+    else candidates.push(built.candidate)
+  }
+  if (candidates.length === 0) {
+    if (toolRefusal !== null) {
+      return {
+        candidates: [],
+        refusal: {
+          reason: 'no_tool',
+          cell: feet,
+          tool: toolRefusal.digHarvestTool ?? null,
+          tier: toolRefusal.digHarvestTier ?? null,
+        },
+      }
+    }
+    return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
+  }
+  const policyBoundary = descentPolicyBoundary(candidates, boundaryReason)
+  if (policyBoundary !== null) {
+    for (const candidate of candidates) candidate.meta.legPolicyBoundary = policyBoundary
+  }
+  return { candidates, refusal: null }
 }
 
 /** PLACE candidate for a held station at a grounded spot (used for self-placed stations). */

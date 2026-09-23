@@ -243,7 +243,7 @@ addCase('(a) a 10-step descent down a stone column holds ONE heading', () => {
     const state = worldState({
       position,
       descent: stoneColumn(position),
-      signals: signals({ digDir: memory.dir, digDirCount: memory.dirCount }),
+      signals: signals({ digDir: memory.dir, digMode: memory.mode, digDirCount: memory.dirCount }),
     })
     const descend = descendOf(generateCandidates(state, defaultCandidateOptions))
     if (descend === undefined || descend.target === null) break
@@ -301,7 +301,7 @@ addCase('(a3) a goal-grounded descent (not stranded) holds its heading too', () 
       // a walkable frontier exists, so this is the goal-grounded descent family,
       // not the stranded-column one
       standable: [position, { x: position.x + 3, y: position.y, z: position.z }],
-      signals: signals({ digDir: memory.dir, digDirCount: memory.dirCount }),
+      signals: signals({ digDir: memory.dir, digMode: memory.mode, digDirCount: memory.dirCount }),
     })
     const descend = descendOf(generateCandidates(state, defaultCandidateOptions))
     if (descend === undefined || descend.target === null) break
@@ -323,6 +323,97 @@ addCase('(a3) a goal-grounded descent (not stranded) holds its heading too', () 
   }
 })
 
+addCase('(a4) an active safe descent continues only its selected heading and mode', () => {
+  const level: DescentOption = {
+    ...stoneStep(FEET, 'N', 0, -1),
+    mode: 'level',
+    step: { x: FEET_CELL.x, y: FEET_CELL.y, z: FEET_CELL.z - 1 },
+  }
+  const state = worldState({
+    position: FEET,
+    descent: [...stoneColumn(FEET), level],
+    signals: signals({ digDir: 'N', digMode: 'down', digDirCount: 2 }),
+  })
+  const descents = generateCandidates(state, defaultCandidateOptions).filter((candidate) => candidate.kind === 'DESCEND')
+  return {
+    pass:
+      descents.length === 1 &&
+      descents[0]?.meta.dir === 'N' &&
+      descents[0]?.meta.mode === 'down' &&
+      descents[0]?.meta.legPolicyBoundary === undefined,
+    detail: `candidates=[${descents.map((candidate) => `${String(candidate.meta.mode)}:${String(candidate.meta.dir)}`).join(',')}]`,
+  }
+})
+
+addCase('(a5) an exhausted trajectory exposes policy alternatives and hard-invalid routes stay filtered', () => {
+  const feet = FEET
+  const level: DescentOption = {
+    ...stoneStep(feet, 'N', 0, -1),
+    mode: 'level',
+    step: { x: FEET_CELL.x, y: FEET_CELL.y, z: FEET_CELL.z - 1 },
+  }
+  const failed = stoneStep(feet, 'W', -1, 0)
+  const protectedStep = stoneStep(feet, 'S', 0, 1, { digName: 'crafting_table' })
+  const unsafe = stoneStep(feet, 'D', 0, 0, { safe: false, refusal: 'hazard', reason: 'lava in step' })
+  const failedId = `DESCEND:down:W:b${failed.floor.x}_${failed.floor.y}_${failed.floor.z}`
+  const state = worldState({
+    position: feet,
+    descent: [stoneStep(feet, 'E', 1, 0), failed, level, protectedStep, unsafe],
+    signals: signals({
+      digDir: 'E',
+      digMode: 'down',
+      digDirCount: 3,
+      descendLimitReached: true,
+      failedCandidates: { [failedId]: 1 },
+    }),
+  })
+  const descents = generateCandidates(state, { ...defaultCandidateOptions, descendFailureLimit: 1 }).filter(
+    (candidate) => candidate.kind === 'DESCEND',
+  )
+  const routes = descents.map((candidate) => `${String(candidate.meta.mode)}:${String(candidate.meta.dir)}`)
+  const boundary = String(descents[0]?.meta.legPolicyBoundary ?? '')
+  return {
+    pass:
+      routes.length === 1 &&
+      routes.includes('level:N') &&
+      !routes.includes('down:W') &&
+      !routes.includes('down:S') &&
+      !routes.includes('down:D') &&
+      boundary.includes('reason=descent_budget_exhausted') &&
+      descents[0]?.meta.skillOutcome === 'BUDGET_EXHAUSTED' &&
+      descents.every((candidate) => candidate.meta.legPolicyBoundary === boundary),
+    detail: `routes=[${routes.join(',')}] boundary=${boundary}`,
+  }
+})
+
+addCase('(a6) oscillation reports recurrence without forcing staircase mode', () => {
+  const level: DescentOption = {
+    ...stoneStep(FEET, 'N', 0, -1),
+    mode: 'level',
+    step: { x: FEET_CELL.x, y: FEET_CELL.y, z: FEET_CELL.z - 1 },
+  }
+  const state = worldState({
+    position: FEET,
+    descent: [stoneStep(FEET, 'E', 1, 0), stoneStep(FEET, 'W', -1, 0), level],
+    signals: signals({ digDir: 'E', digMode: 'level', digDirCount: 1, digOscillate: true }),
+  })
+  const descents = generateCandidates(state, defaultCandidateOptions).filter((candidate) => candidate.kind === 'DESCEND')
+  const routes = descents.map((candidate) => `${String(candidate.meta.mode)}:${String(candidate.meta.dir)}`)
+  return {
+    pass:
+      routes.length === 3 &&
+      routes.includes('down:E') &&
+      routes.includes('down:W') &&
+      routes.includes('level:N') &&
+      descents.every(
+        (candidate) =>
+          candidate.meta.skillOutcome === 'RECURRENT_STATE' &&
+          String(candidate.meta.legPolicyBoundary).includes('reason=recurrent_descent_trajectory'),
+      ),
+    detail: `routes=[${routes.join(',')}]`,
+  }
+})
+
 // --- (b) a heading change is a typed event ---------------------------------------
 
 addCase('(b) a blocked heading changes only WITH the typed obstruction', () => {
@@ -337,19 +428,23 @@ addCase('(b) a blocked heading changes only WITH the typed obstruction', () => {
     descent: [blocked, ...CARDINALS.slice(1).map(({ dir, dx, dz }) => stoneStep(FEET, dir, dx, dz)), stoneStep(FEET, 'D', 0, 0)],
     signals: signals({ digDir: 'E', digDirCount: 2 }),
   })
-  const descend = descendOf(generateCandidates(state, defaultCandidateOptions))
-  if (descend === undefined) return { pass: false, detail: 'no DESCEND candidate' }
-  const line = String(descend.meta.headingLine ?? '')
+  const descents = generateCandidates(state, defaultCandidateOptions).filter((candidate) => candidate.kind === 'DESCEND')
+  const dirs = descents.map((candidate) => String(candidate.meta.dir))
+  const line = String(descents[0]?.meta.headingLine ?? '')
   return {
     pass:
-      descend.meta.dir === 'W' &&
-      descend.meta.planHeadingHeld === false &&
-      descend.meta.headingChangeFrom === 'E' &&
-      descend.meta.headingChangeReason === 'unbreakable' &&
-      descend.meta.headingChangeCell === `${blocked.floor.x},${blocked.floor.y},${blocked.floor.z}` &&
-      descend.meta.headingChangeBlock === 'bedrock' &&
-      line === `DESCEND_HEADING dir=W held=false from=E reason=unbreakable cell=${blocked.floor.x},${blocked.floor.y},${blocked.floor.z} block=bedrock`,
-    detail: `dir=${String(descend.meta.dir)} line=${line}`,
+      dirs.length === 4 &&
+      ['W', 'N', 'S', 'D'].every((dir) => dirs.includes(dir)) &&
+      descents.every(
+        (candidate) =>
+          candidate.meta.planHeadingHeld === false &&
+          candidate.meta.headingChangeFrom === 'E' &&
+          candidate.meta.headingChangeReason === 'unbreakable' &&
+          candidate.meta.headingChangeCell === `${blocked.floor.x},${blocked.floor.y},${blocked.floor.z}` &&
+          candidate.meta.headingChangeBlock === 'bedrock',
+      ) &&
+      line.startsWith('DESCEND_HEADING dir='),
+    detail: `dirs=[${dirs.join(',')}] line=${line}`,
   }
 })
 
@@ -357,7 +452,7 @@ addCase('(b2) a safe held heading is never re-picked', () => {
   const state = worldState({
     position: FEET,
     descent: stoneColumn(FEET),
-    signals: signals({ digDir: 'N', digDirCount: 3 }),
+    signals: signals({ digDir: 'N', digMode: 'down', digDirCount: 3 }),
   })
   const descend = descendOf(generateCandidates(state, defaultCandidateOptions))
   if (descend === undefined) return { pass: false, detail: 'no DESCEND candidate' }
@@ -535,11 +630,13 @@ addCase('(d3) a stranded body with no safe step keeps its typed refusal and no D
   )
   const state = worldState({ position: FEET, descent: unsafe, inventory: inventory({ dirt: 5 }) })
   const grounded = generateCandidates(state, defaultCandidateOptions)
+  const escalate = grounded.find((candidate) => candidate.kind === 'ESCALATE')
   return {
     pass:
       strandedOnColumn(state) &&
-      grounded.every((candidate) => candidate.kind === 'WAIT') &&
-      descendOf(grounded) === undefined,
+      descendOf(grounded) === undefined &&
+      escalate?.meta.reason === 'no_grounded_local_frontier' &&
+      String(escalate.meta.legPolicyBoundary).includes('reason=no_grounded_local_frontier'),
     detail: `stranded=${strandedOnColumn(state)} set=[${grounded.map((candidate) => candidate.id).join(',')}]`,
   }
 })

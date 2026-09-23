@@ -722,6 +722,7 @@ function emptySignals(): AgentSignals {
     escalationRecommended: false,
     failedCandidates: {},
     digDir: null,
+    digMode: null,
     digDirCount: 0,
     digDepth: 0,
     digOscillate: false,
@@ -1471,6 +1472,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'HOP_PLAN',
   'DESCEND_STALLED',
   'DESCEND_PROGRESS',
+  'DESCEND_NO_PROGRESS',
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
   // The per-step landing guard (`stepLanding.ts`): a locomotion leg that stopped
@@ -2173,6 +2175,17 @@ export function canAuthoritativelyAbandonOption(optionId: string | null): option
   return typeof optionId === 'string' && optionId.length > 0
 }
 
+/** A selected route after one of these outcomes starts a fresh local trajectory. */
+function closesDescentRecoveryBoundary(reason: unknown): reason is string {
+  return (
+    reason === 'descent_budget_exhausted' ||
+    reason === 'recurrent_descent_trajectory' ||
+    reason === 'selected_path_budget_exhausted' ||
+    reason === 'selected_descent_blocked_or_spent' ||
+    reason === 'selected_column_descent_blocked_or_spent'
+  )
+}
+
 /**
  * Verified goal/body/search progress observed for the current decision. Used
  * only to reset the bounded beta-abandon deferral (a productive in-flight action
@@ -2247,6 +2260,7 @@ export class JevController {
   private candidateFailures = new Map<string, number>()
   private candidateFailureAt = new Map<string, number>()
   private digMemoryState = new DigMemory()
+  private digOscillationReported = false
   private descendHaveBaseline = 0
   private descendProgress: DescendProgressState | null = null
   private descendStallTicks = 0
@@ -6998,6 +7012,7 @@ export class JevController {
     if (deepest !== null) this.digMemory.observeStoneY(deepest)
     const memory = this.digMemory.snapshot()
     this.signals.digDir = memory.digDir
+    this.signals.digMode = memory.digMode
     this.signals.digDirCount = memory.digDirCount
     this.signals.digDepth = memory.digDepth
     this.signals.digOscillate = memory.digOscillate
@@ -7513,6 +7528,29 @@ export class JevController {
   }
 
   private onDescendComplete(result: ExecutionResult, candidate: Candidate): void {
+    const recoveryBoundaryReason = candidate.meta.recoveryBoundaryReason
+    if (closesDescentRecoveryBoundary(recoveryBoundaryReason)) {
+      // Jev has selected a grounded route after the previous trajectory reached
+      // its typed boundary. Give that new route its own bounded mechanical
+      // continuation budget; otherwise the exhausted latch would evict the
+      // newly selected heading/mode again on every following dig.
+      this.digMemory.beginSelectedRecoveryPath()
+      this.digOscillationReported = false
+      this.logger.info(
+        'agent',
+        `DESCEND_RECOVERY_SELECTED reason=${recoveryBoundaryReason} action=${result.actionId}`,
+        {
+          actionId: result.actionId,
+          reason: recoveryBoundaryReason,
+          dir: candidate.meta.dir ?? null,
+          mode: candidate.meta.mode ?? null,
+          target: candidate.target,
+          outcome: candidate.meta.skillOutcome ?? null,
+          authority: 'jev_pi',
+        },
+        this.tickCounter,
+      )
+    }
     const target = candidate.target
     const dir = candidate.meta.dir
     if (target !== null && (dir === 'E' || dir === 'W' || dir === 'N' || dir === 'S' || dir === 'D')) {
@@ -7533,53 +7571,59 @@ export class JevController {
     const descending = this.queue.current?.kind === 'descend'
     if (delta > 0 || (descending && yProgressed)) {
       this.descendHaveBaseline = have
-      this.digMemory.markResourceProgress()
+      // Predicate descent has already made monotone Y progress inside its current
+      // Skill. Reset its no-progress budget, while keeping the chosen heading and
+      // mode so the next safe step remains a mechanical continuation. A collected
+      // resource changes the search state, so that separate semantic progress
+      // starts with a fresh path.
+      if (descending && yProgressed) this.digMemory.resetDescendBudget()
+      else this.digMemory.markResourceProgress()
       // A descending predicate goal makes progress by losing altitude, not by
       // gaining items, so a verified drop must also reset the progress-stall clock.
       if (descending && yProgressed) this.lastProgressAt = Date.now()
     } else {
-      // The no-progress latch changes strategy once: stop the current tunnel and
-      // begin a bounded lateral search. Later level steps remain part of that same
-      // search; resetting the path on every step zeroed `digDirCount`, so
-      // `DIG_PATH_CAP` could never accumulate (live: DESCEND_LIMIT repeated with
-      // DIG_PATH depth=1 across dozens of same-height blocks).
-      const lateralSearchAlreadyStarted = this.digMemory.snapshot().descendLimitReached
+      // No resource delta is evidence about this trajectory, not a mandate to
+      // switch to lateral search. Keep the active path contract intact; when the
+      // bounded budget is exhausted, grounding returns distinct alternatives to
+      // Jev instead of installing one recovery strategy here.
+      const budgetAlreadyExhausted = this.digMemory.snapshot().descendLimitReached
       const budget = this.digMemory.markDescend(false)
+      this.logger.info(
+        'agent',
+        `DESCEND_NO_PROGRESS action=${result.actionId} resourceDelta=${delta} streak=${budget.noProgress}`,
+        { actionId: result.actionId, resourceDelta: delta, noProgress: budget.noProgress },
+        this.tickCounter,
+      )
       this.logger.info(
         'agent',
         `DESCEND_PROGRESS actionSuccess=true resourceDelta=${delta} streak=${budget.noProgress}`,
         { actionId: result.actionId, noProgress: budget.noProgress },
         this.tickCounter,
       )
-      if (budget.limitReached && !lateralSearchAlreadyStarted) {
+      if (budget.limitReached && !budgetAlreadyExhausted) {
+        this.skillOutcomeBoundary = true
         this.logger.warn(
           'agent',
-          `DESCEND_LIMIT depth=${this.digMemory.depth} noProgress=${budget.noProgress} -> strategy=lateral`,
-          { actionId: result.actionId },
+          `DESCEND_LIMIT depth=${this.digMemory.depth} noProgress=${budget.noProgress} outcome=BUDGET_EXHAUSTED recovery=policy_boundary`,
+          { actionId: result.actionId, outcome: 'BUDGET_EXHAUSTED', recoveryAuthority: 'jev_pi' },
           this.tickCounter,
         )
         this.signals.descendLimitReached = true
-        // A `descend_to:Y=<n>` predicate makes progress by losing altitude, not by
-        // finding an item, so `resourceDelta=0` says nothing about the plan: the
-        // lateral-search reset would drop the descent heading every 4 steps and
-        // re-open the zig-zag (measured live: `DESCEND_LIMIT` fired at every
-        // fourth D step, `DIG_PATH dir=D depth=1` restarted each time). Keep the
-        // heading for a predicate descent; `DESCEND_STALLED` still bounds a
-        // genuinely impossible one. Item-goal search keeps the reset.
-        if (!descending) this.digMemory.resetPath()
       }
       if (budget.limitReached) this.signals.descendLimitReached = true
     }
-    if (this.digMemory.isOscillating()) {
+    const oscillating = this.digMemory.isOscillating()
+    if (oscillating && !this.digOscillationReported) {
+      this.skillOutcomeBoundary = true
       const net = Math.round(this.digMemory.netDisplacement() * 100) / 100
       this.logger.warn(
         'agent',
-        `DIG_OSCILLATE net=${net} -> strategy=staircase`,
-        { actionId: result.actionId, dir: this.digMemory.dir },
+        `DIG_OSCILLATE net=${net} outcome=RECURRENT_STATE recovery=policy_boundary`,
+        { actionId: result.actionId, dir: this.digMemory.dir, outcome: 'RECURRENT_STATE', recoveryAuthority: 'jev_pi' },
         this.tickCounter,
       )
-      this.digMemory.markStaircase()
     }
+    this.digOscillationReported = oscillating
   }
 
   /**
@@ -13133,6 +13177,7 @@ export class JevController {
 
   private bindDigMemoryScope(dimension: string): void {
     const change = this.digMemoryState.bindScope({ dimension, worldEpoch: this.options.worldEpoch })
+    if (change.changed) this.digOscillationReported = false
     if (!change.changed || change.previous === null) return
     this.logger.warn(
       'agent',
