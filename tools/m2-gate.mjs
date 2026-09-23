@@ -683,8 +683,20 @@ function unknownConditions() {
   }
 }
 
-function verdict({ status, code, reason, runId, conditions, evidence = null, sources = null, facts = null }) {
-  return { id: 'M2', status, code, reason, runId, conditions, evidence, sources, facts }
+function verdict({
+  status,
+  code,
+  reason,
+  runId,
+  conditions,
+  evidence = null,
+  sources = null,
+  facts = null,
+  sourceSha = null,
+  sourceShaReason = null,
+  sourceShaMismatch = null,
+}) {
+  return { id: 'M2', status, code, reason, runId, sourceSha, sourceShaReason, sourceShaMismatch, conditions, evidence, sources, facts }
 }
 
 /**
@@ -700,6 +712,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       reason: 'exact_run_scope_required',
       runId: expectedRunId,
       conditions: unknownConditions(),
+      sourceShaReason: 'run_boot_source_unavailable',
     })
   }
   if (evidence === null || typeof evidence !== 'object' || evidence.status !== 'valid') {
@@ -711,6 +724,38 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       conditions: unknownConditions(),
       evidence: evidence?.status ?? 'unavailable',
       sources: evidence?.sources ?? null,
+      sourceSha: evidence?.sourceSha ?? null,
+      sourceShaReason: evidence?.sourceShaReason ?? null,
+      sourceShaMismatch: evidence?.sourceShaMismatch ?? null,
+    })
+  }
+
+  // M2 is a source-specific acceptance gate: runId alone cannot prove which
+  // checkout produced the gameplay evidence. Require the one valid SHA parsed
+  // from this run's BOOT line(s), and refuse any cross-source mismatch before
+  // evaluating stages (including a known gameplay FAIL).
+  const sourceSha = typeof evidence.sourceSha === 'string' && BOOT_SOURCE_SHA_RE.test(evidence.sourceSha)
+    ? evidence.sourceSha.toLowerCase()
+    : null
+  const sourceShaReason = evidence.sourceShaReason ?? (sourceSha === null
+    ? (evidence.sourceSha == null ? 'run_source_sha_missing' : 'run_source_sha_invalid')
+    : null)
+  const sourceShaMismatch = evidence.sourceShaMismatch ?? null
+  if (sourceSha === null || sourceShaReason !== null || sourceShaMismatch !== null) {
+    const identityReason = sourceShaMismatch !== null
+      ? 'run_source_sha_mismatch'
+      : `run_source_sha_unavailable:${sourceShaReason ?? 'run_source_sha_missing'}`
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: identityReason,
+      runId: expectedRunId,
+      conditions: unknownConditions(),
+      evidence: evidence.status,
+      sources: evidence.sources ?? null,
+      sourceSha,
+      sourceShaReason,
+      sourceShaMismatch,
     })
   }
 
@@ -782,6 +827,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       conditions,
       sources: perSource,
       facts,
+      sourceSha,
     })
   }
   if (allPass && policy?.code !== 0) {
@@ -793,6 +839,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       conditions,
       sources: perSource,
       facts,
+      sourceSha,
     })
   }
   if (allPass) {
@@ -804,6 +851,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       conditions,
       sources: perSource,
       facts,
+      sourceSha,
     })
   }
   // Inherited-portal case (b): R saw an already-verified portal but produced no
@@ -817,6 +865,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       conditions,
       sources: perSource,
       facts,
+      sourceSha,
     })
   }
   return verdict({
@@ -827,6 +876,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
     conditions,
     sources: perSource,
     facts,
+    sourceSha,
   })
 }
 
@@ -1007,7 +1057,13 @@ export function readM2Snapshot(runId, { snapshotDir = M2_GATE_SNAPSHOT_DIR } = {
       reason: `snapshot_run_mismatch expected=${runId} observed=${typeof parsed.runId === 'string' ? parsed.runId : 'unknown'}`,
     }
   }
-  return { status: 'valid', path, portalEvents: snapshotPortalEvents(parsed), inventorySamples: snapshotInventorySamples(parsed) }
+  return {
+    status: 'valid',
+    path,
+    bootSourceSha: parsed.bootSourceSha ?? null,
+    portalEvents: snapshotPortalEvents(parsed),
+    inventorySamples: snapshotInventorySamples(parsed),
+  }
 }
 
 /**
@@ -1028,6 +1084,7 @@ export async function readRunScopedM2Evidence(
   const sources = []
   const mismatches = []
   const bootSourceRecords = []
+  let selectedSnapshot = null
   const dirs = Array.isArray(snapshotDirs) && snapshotDirs.length > 0 ? snapshotDirs : [snapshotDir]
   let snapshotTaken = false
   for (const dir of dirs) {
@@ -1043,6 +1100,7 @@ export async function readRunScopedM2Evidence(
         dimensionObservations: snapshot.portalEvents.map((event) => event.dimension).filter((value) => typeof value === 'string'),
       })
       snapshotTaken = true
+      selectedSnapshot = snapshot
       break
     }
     if (snapshot.status === 'unknown') mismatches.push(snapshot.reason)
@@ -1070,6 +1128,22 @@ export async function readRunScopedM2Evidence(
     if (log.status === 'unknown') mismatches.push(log.reason)
   }
   const runSource = resolveBootSourceSha(bootSourceRecords)
+  let sourceShaMismatch = null
+  let sourceShaReason = runSource.sourceShaReason
+  if (selectedSnapshot !== null && sourceShaReason === null) {
+    const rawSnapshotSha = selectedSnapshot.bootSourceSha
+    const snapshotSha = typeof rawSnapshotSha === 'string' && BOOT_SOURCE_SHA_RE.test(rawSnapshotSha)
+      ? rawSnapshotSha.toLowerCase()
+      : null
+    if (snapshotSha !== runSource.sourceSha) {
+      sourceShaReason = 'run_source_sha_snapshot_mismatch'
+      sourceShaMismatch = {
+        expected: runSource.sourceSha,
+        observed: snapshotSha ?? (rawSnapshotSha == null ? 'missing' : 'invalid'),
+        snapshotPath: selectedSnapshot.path,
+      }
+    }
+  }
   if (sources.length === 0) {
     return {
       status: mismatches.length > 0 ? 'unknown' : 'unavailable',
@@ -1080,7 +1154,15 @@ export async function readRunScopedM2Evidence(
       ...runSource,
     }
   }
-  return { status: 'valid', runId, sources, mismatches, ...runSource }
+  return {
+    status: 'valid',
+    runId,
+    sources,
+    mismatches,
+    sourceSha: runSource.sourceSha,
+    sourceShaReason,
+    sourceShaMismatch,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,8 +1340,17 @@ export async function runM2Gate({
         status: result.status,
         reason: result.reason,
         runId: result.runId,
+        sourceSha: result.sourceSha,
+        sourceShaReason: result.sourceShaReason,
+        sourceShaMismatch: result.sourceShaMismatch,
         conditions: result.conditions,
-        evidence: evidence === null ? null : { status: evidence.status, sources: (evidence.sources ?? []).map((s) => s.name) },
+        evidence: evidence === null ? null : {
+          status: evidence.status,
+          sources: (evidence.sources ?? []).map((s) => s.name),
+          sourceSha: evidence.sourceSha ?? null,
+          sourceShaReason: evidence.sourceShaReason ?? null,
+          sourceShaMismatch: evidence.sourceShaMismatch ?? null,
+        },
         policy: policy === null ? null : { status: policy.status, reason: policy.reason },
         inheritedPortal: result.facts?.inheritedPortal ?? null,
         chain: result.facts?.chain ?? null,
@@ -1272,6 +1363,10 @@ export async function runM2Gate({
 
   write(`${M2_RUN_GATE} — ${stamp}`)
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
+  write(
+    `m2_source_sha: boot=${result.sourceSha ?? 'unknown'} reason=${result.sourceShaReason ?? 'none'}` +
+      (result.sourceShaMismatch === null ? '' : ` expected=${result.sourceShaMismatch.expected} observed=${result.sourceShaMismatch.observed}`),
+  )
   if (evidence !== null) {
     const sourceNames = (evidence.sources ?? []).map((source) => source.name).join(',')
     write(`m2_evidence: ${evidence.status} sources=${sourceNames || 'none'}${evidence.reason ? ` reason=${evidence.reason}` : ''}`)
@@ -1307,7 +1402,7 @@ export async function runM2Gate({
   if (chain.length === 0) write(formatPortalChainLine({ source: 'none' }))
   for (const link of chain) write(formatPortalChainLine(link))
   write(
-    `${M2_RUN_RESULT} status=${result.status} reason=${result.reason} runId=${expectedRunId ?? 'none'} ` +
+    `${M2_RUN_RESULT} status=${result.status} reason=${result.reason} runId=${expectedRunId ?? 'none'} sourceSha=${result.sourceSha ?? 'unknown'} ` +
       `diamond=${result.conditions.diamond_ready} materials=${result.conditions.portal_materials_ready} ` +
       `frame=${result.conditions.portal_built} lit=${result.conditions.portal_lit}`,
   )
