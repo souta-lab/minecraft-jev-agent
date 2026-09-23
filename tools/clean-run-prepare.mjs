@@ -375,7 +375,7 @@ export function planPrepare({
 
   // ---- guards --------------------------------------------------------------
   const protectedRoots = [...new Set([...PROTECTED_LEVEL_NAMES, ...(Array.isArray(resolvedDoc.cleanRun?.protectedWorldNames) ? resolvedDoc.cleanRun.protectedWorldNames : []), ...(resolvedDoc.cleanRun?.previousWorld?.levelName ? [resolvedDoc.cleanRun.previousWorld.levelName] : [])])]
-  const plannedPaths = [worldDir, runDir, join(worldDir, datapackDir), join(runDir, 'environment-resolved.json'), join(runDir, 'manifest.json'), join(runDir, 'attempts.json'), join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
+  const plannedPaths = [worldDir, runDir, join(worldDir, datapackDir), join(runDir, 'environment-resolved.json'), join(runDir, 'manifest.json'), join(runDir, 'attempts.json'), join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
   const protectedHits = plannedPaths.filter((path) => protectedRoots.some((name) => path === join(resolve(container), name) || path.startsWith(join(resolve(container), name) + sep)))
   guards.push({
     id: 'protected_world_paths',
@@ -546,13 +546,33 @@ export function planPrepare({
     }
   }
   const resolvedForFile = { ...resolvedDoc, resolvedBy: { tool: 'tools/clean-run-prepare.mjs', from: loaded.path, fromSha256: loaded.sha256, overrides: overridesApplied, at: 'see manifest.json' } }
-  files.push({ path: join(runDir, 'environment-resolved.json'), content: `${JSON.stringify(resolvedForFile, null, 2)}\n`, note: 'the descriptor the bundle and the clean-run gate must both consume' })
+  const resolvedDescriptorText = `${JSON.stringify(resolvedForFile, null, 2)}\n`
+  const resolvedDescriptorSha256 = sha256Text(resolvedDescriptorText)
+  files.push({ path: join(runDir, 'environment-resolved.json'), content: resolvedDescriptorText, note: 'the descriptor the bundle and the clean-run gate must both consume' })
+  const gameruleVerificationPath = join(runDir, 'gamerule-verification.txt')
+  if (milestone === 'M3' && resolvedDoc.cleanRun?.gameruleMechanism?.primary === 'console') {
+    if (existsSync(gameruleVerificationPath)) {
+      warnings.push(`${gameruleVerificationPath} already exists; the console transcript is preserved and will not be overwritten`)
+    } else {
+      files.push({
+        path: gameruleVerificationPath,
+        content: gameruleVerificationTemplate({
+          descriptorSha256: resolvedDescriptorSha256,
+          levelName: levelName2,
+          seed: levelSeed,
+          sourceSha: frozenSha ?? resolvedDoc.values.sourceSha,
+          dimensions: resolvedDoc.cleanRun?.gameruleScope?.dimensions ?? [],
+        }),
+        note: 'operator-completed, exact-descriptor-bound console gamerule evidence template (filled after first world boot)',
+      })
+    }
+  }
   if (proposedProperties !== null) {
     files.push({ path: join(runDir, 'server.properties.clean'), content: proposedProperties, note: 'staged clean server.properties (owner-only permissions; content is never printed or copied into run evidence)' })
     const diff = (propertiesChange?.changes ?? []).map((entry) => `${entry.key}: ${entry.from === null ? '(absent)' : entry.from} -> ${entry.to}`).join('\n')
     files.push({ path: join(runDir, 'server-properties.diff.txt'), content: `${diff}\n`, note: 'every key this proposal changes' })
   }
-  const operatorCommands = buildOperatorCommands({ container: resolve(container), runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md'), milestone })
+  const operatorCommands = buildOperatorCommands({ container: resolve(container), runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, descriptorSha256: resolvedDescriptorSha256, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md'), milestone })
   files.push({ path: join(runDir, 'operator-commands.txt'), content: `${operatorCommands.join('\n')}\n`, note: 'the exact ordered commands for the clean attempt' })
   const recipeSource = milestone === 'M3' ? join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md') : null
   if (recipeSource !== null && existsSync(recipeSource)) files.push({ path: join(runDir, 'ACCEPTANCE-RECIPE.md'), content: readFileSync(recipeSource, 'utf8'), note: 'copy of the acceptance recipe, next to the run evidence' })
@@ -607,6 +627,26 @@ export function planPrepare({
   }
 }
 
+export function gameruleVerificationTemplate({ descriptorSha256, levelName, seed, sourceSha, dimensions = [] }) {
+  const dimensionList = Array.isArray(dimensions) ? dimensions : []
+  return [
+    'record=m3-clean-gamerule-verification',
+    'schemaVersion=1',
+    'runId=<fill-after-BOOT>',
+    `descriptorSha256=${String(descriptorSha256)}`,
+    `levelName=${String(levelName)}`,
+    `seed=${String(seed)}`,
+    `sourceSha=${String(sourceSha)}`,
+    'capturedAt=<UTC-ISO-8601-time-of-console-capture>',
+    '',
+    ...dimensionList.flatMap((dimension) => [
+      `[dimension=${dimension}]`,
+      `# Paste the complete server-console output of ${dimension === 'minecraft:overworld' ? '`gamerule`' : '`execute in ' + dimension + ' run gamerule`'} below this line.`,
+      '',
+    ]),
+  ].join('\n') + '\n'
+}
+
 function safeJson(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'))
@@ -624,7 +664,7 @@ function safeText(path) {
 }
 
 /** The ordered operator commands. Nothing here is executed by this tool. */
-export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, root = null, recipePath, milestone = 'M3' }) {
+export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, descriptorSha256 = null, root = null, recipePath, milestone = 'M3' }) {
   const tree = root === null || root === undefined ? REPO_ROOT : resolve(root)
   if (milestone === 'M2') {
     return [
@@ -647,9 +687,10 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `# 3. start the clean world from the staged config with both world paths explicit:`,
     `cd ${container} && setsid --fork /usr/lib/jvm/java-21-openjdk-amd64/bin/java -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui --config ${runDir}/server.properties.clean --universe ${container} --level-name ${levelName} </dev/null >>server.log 2>&1 &`,
     `#    --config selects the staged seed/config; --universe and --level-name select the descriptor's world. Never pass --bonusChest.`,
-    `# 4. after the first boot, VERIFY the world + gamerules on the server console and paste the output into:`,
+    `# 4. after the first boot, VERIFY world identity on the server console; paste the gamerule output into:`,
     `#    ${runDir}/gamerule-verification.txt`,
-    `#    (console commands) list  /  seed  /  gamerule`,
+    `#    the template already binds descriptorSha256=${String(descriptorSha256)}; record capturedAt as a UTC ISO-8601 time`,
+    `#    (console checks) list  /  seed; gamerule output only goes under its dimension header`,
     `#    gamerules are PER DIMENSION in this build: also run`,
     `#      execute in minecraft:the_nether run gamerule`,
     `#      execute in minecraft:the_end run gamerule`,
@@ -665,8 +706,8 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `printf '{"id":"acceptance-refresh","cmd":"acceptance"}\\n' | socat - UNIX-CONNECT:${tree}/buddy-driver/data/resident/control.sock`,
     `# 8. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
     `bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> --root ${tree} --environment ${runDir}/environment-resolved.json --evidence-class live`,
-    `# 9. the clean-run gate, written NEXT TO the bundle (additive; bundle.json is never modified):`,
-    `bun tools/clean-run-gate.mjs --environment ${runDir}/environment-resolved.json --bundle-dir ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID> --run <RUN_ID> --out ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID>`,
+    `# 9. set runId in gamerule-verification.txt to the BOOT runId, then run the clean-run gate, written NEXT TO the bundle:`,
+    `bun tools/clean-run-gate.mjs --environment ${runDir}/environment-resolved.json --bundle-dir ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID> --run <RUN_ID> --gamerule-verification ${runDir}/gamerule-verification.txt --out ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID>`,
     `# ACCEPTED requires: descriptor CLEAN + run evidence consistent + bundle PASS + liveAcceptance=true`,
   ]
 }

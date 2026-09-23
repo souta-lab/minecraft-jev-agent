@@ -24,7 +24,7 @@
 //
 //   CLEAN_RUN_M3 status=ACCEPTED
 //     = descriptor CLEAN
-//     + every run-evidence condition not FAIL
+//     + every required run-evidence condition PASS
 //     + bundle.git.dirty === false + this run's complete source window binds to
 //       the same frozen commit, including any applied hot reloads
 //     + the bundle's own acceptanceVerdict.status === PASS
@@ -38,11 +38,13 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   SCHEMA_VERSION,
+  checkConsoleGameruleEvidence,
   checkRunEvidence,
   extractRunWindow,
   loadCleanEnvironment,
   observedDeviations,
   observedWorlds,
+  sha256Text,
   validateCleanEnvironment,
 } from './clean-run-environment.mjs'
 
@@ -59,7 +61,7 @@ export const RESULT_LINE = 'CLEAN_RUN_RESULT'
  */
 export const ACCEPTANCE_RULES = Object.freeze([
   'descriptor.status === CLEAN',
-  'no run-evidence condition FAIL',
+  'every required run-evidence condition === PASS',
   'bundle.git.dirty === false',
   'descriptor frozen sourceSha === clean bundle.git.head === this run BOOT sourceSha',
   'the run-scoped source window is complete and every applied reload names the same sourceSha',
@@ -82,6 +84,7 @@ export function parseArgs(argv) {
     out: null,
     worldContainer: null,
     observedWorld: null,
+    gameruleVerification: null,
     json: false,
     help: false,
   }
@@ -95,6 +98,7 @@ export function parseArgs(argv) {
     else if (arg === '--out') out.out = argv[++i] ?? null
     else if (arg === '--world-container') out.worldContainer = argv[++i] ?? null
     else if (arg === '--observed-world') out.observedWorld = argv[++i] ?? null
+    else if (arg === '--gamerule-verification') out.gameruleVerification = argv[++i] ?? null
     else if (arg === '--json') out.json = true
     else if (arg === '--help' || arg === '-h') out.help = true
     else throw new Error(`unknown argument: ${arg}`)
@@ -120,6 +124,7 @@ export function usage() {
     `  --root <tree>           resident tree (default ${REPO_ROOT}); used only to resolve relative log paths`,
     '  --world-container <d>   override the descriptor world container for the freshness check',
     '  --observed-world <p>    a level.dat measurement JSON: proves the target world does not exist yet',
+    '  --gamerule-verification <p> per-dimension console listing (default: gamerule-verification.txt beside the descriptor)',
     '  --out <dir>             write clean-run.json + clean-run.md (additive; never overwrites bundle.json)',
     '  --json                  print the whole verdict JSON to stdout',
     '',
@@ -135,6 +140,16 @@ function readJson(path) {
     return { path, document: JSON.parse(text), text, error: null }
   } catch (thrown) {
     return { path, document: null, text: null, error: thrown instanceof Error ? thrown.message : String(thrown) }
+  }
+}
+
+function readText(path) {
+  if (typeof path !== 'string' || path === '' || !existsSync(path)) return { path, text: null, sha256: null, error: 'file_not_found' }
+  try {
+    const text = readFileSync(path, 'utf8')
+    return { path, text, sha256: sha256Text(text), error: null }
+  } catch (thrown) {
+    return { path, text: null, sha256: null, error: thrown instanceof Error ? thrown.message : String(thrown) }
   }
 }
 
@@ -364,6 +379,7 @@ export async function runCleanRunGate({
   out = null,
   worldContainer = null,
   observedWorldPath = null,
+  gameruleVerificationPath = null,
   write = () => {},
 } = {}) {
   const generatedAt = new Date().toISOString()
@@ -416,6 +432,24 @@ export async function runCleanRunGate({
           descriptorSha256: loaded.sha256,
         })
   runConditions.push(...productionSourceConditions({ bundle, artifact, descriptor, runId }))
+  const effectiveGameruleVerificationPath =
+    gameruleVerificationPath ?? (descriptorPath === null ? null : join(dirname(descriptorPath), 'gamerule-verification.txt'))
+  const gameruleVerification =
+    artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && effectiveGameruleVerificationPath !== null
+      ? readText(resolve(effectiveGameruleVerificationPath))
+      : { path: effectiveGameruleVerificationPath, text: null, sha256: null, error: artifact === null ? 'no_run_artifact' : null }
+  runConditions.push(
+    checkConsoleGameruleEvidence({
+      descriptor,
+      artifact,
+      runId,
+      descriptorSha256: loaded.sha256,
+      path: gameruleVerification.path,
+      text: gameruleVerification.text,
+      fileSha256: gameruleVerification.sha256,
+      readError: gameruleVerification.error,
+    }),
+  )
   if (log.reason !== null && artifact !== null) {
     runConditions.push(condition({ id: 'run.logReadable', verdict: 'UNKNOWN', required: false, reason: `death/keep-inventory behaviour not checked: ${log.reason}`, detail: { path: log.path } }))
   }
@@ -482,6 +516,8 @@ export async function runCleanRunGate({
       artifactPath: artifactPath === null ? null : resolve(artifactPath),
       bundleDir: bundleDir === null ? null : resolve(bundleDir),
       logPath: log.path,
+      gameruleVerificationPath: gameruleVerification.path === null ? null : resolve(gameruleVerification.path),
+      gameruleVerificationSha256: gameruleVerification.sha256,
       bootSourceSha: artifact?.run?.boot?.sourceSha ?? null,
       acceptanceRecordPath: artifact?.acceptance?.path ?? null,
       bundleVerdict,
@@ -582,6 +618,7 @@ export async function runCli({ argv = process.argv.slice(2), write = (line) => p
     out: args.out,
     worldContainer: args.worldContainer,
     observedWorldPath: args.observedWorld,
+    gameruleVerificationPath: args.gameruleVerification,
     write: writeError,
   })
   if (args.json) write(`${JSON.stringify(verdict)}\n`)

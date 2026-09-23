@@ -128,11 +128,21 @@ cd <container> && setsid --fork java \
   </dev/null >>server.log 2>&1 &
 #     do NOT pass --bonusChest (there is no properties key for it)
 
-# 3.3 after first boot, verify the world + gamerules on the server console and paste output to:
-#     <container>/m3-clean-run/gamerule-verification.txt
-#     Run: list ; seed ; gamerule ; execute in minecraft:the_nether run gamerule ;
-#     execute in minecraft:the_end run gamerule. `seed` must equal values.levelSeed;
-#     keep_inventory must be false in all three dimensions. The ids are snake_case.
+# 3.3 after the FIRST boot, use the server console to verify world identity:
+#       list                                    -> the body's name must be allowed in
+#       seed                                    -> must equal values.levelSeed
+#     Paste each complete gamerule listing below its matching [dimension=...]
+#     header in the prepared file:
+#     <container>/m3-clean-run/gamerule-verification.txt :
+#       gamerule                                -> overworld rules
+#       execute in minecraft:the_nether run gamerule
+#       execute in minecraft:the_end run gamerule
+#     keep_inventory must be FALSE IN ALL THREE DIMENSIONS (the M3 route dies in the
+#     Nether). The ids are the snake_case 1.21.11 ids; camelCase is REJECTED by this build.
+#     The template binds the resolved descriptor SHA, levelName, seed and source SHA.
+#     Set capturedAt when the listings are captured, then replace runId with the exact
+#     BOOT runId before invoking the gate. The gate requires every declared rule in all
+#     declared dimensions to match the descriptor.
 
 # 3.4 start the resident only after the clean server is ready, from the same
 #     FROZEN checkout used by --root. This checkout must be fresh so its durable
@@ -164,6 +174,7 @@ bun tools/clean-run-gate.mjs \
   --environment <container>/m3-clean-run/environment-resolved.json \
   --bundle-dir <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID> \
   --run <RUN_ID> \
+  --gamerule-verification <container>/m3-clean-run/gamerule-verification.txt \
   --out <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>
 #     writes clean-run.json + clean-run.md; prints CLEAN_RUN_RESULT / CLEAN_RUN_M3
 ```
@@ -172,7 +183,7 @@ bun tools/clean-run-gate.mjs \
 
 ```text
 descriptor CLEAN
-+ every required run-evidence condition not FAIL
++ every required run-evidence condition PASS
 + bundle.acceptanceVerdict.status === PASS          (the canonical M3 gate's own verdict, read verbatim)
 + bundle.liveAcceptance === true                    (host.lock + HOST acceptance record + BOOT SHA == tree HEAD)
 + bundle.evidenceClass === live
@@ -192,7 +203,7 @@ descriptor is not an acceptance.
 | `worldKey` | `BOOT ... worldKey={"serverId":…,"dimension":…,"worldEpoch":…}` → `artifact.run.worldKey` (it is the world memory namespace: `serverId|dimension|worldEpoch`; it does NOT contain the seed) |
 | level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()`, which reads `BUDDY_SERVER_PROPERTIES_PATH`; the M3 recipe points it at the same staged config passed to Leaf with `--config` |
 | config (difficulty, spawn-monsters) | run-scoped `ENVIRONMENT`/`GAMERULE` markers in `buddy.log` → `artifact.environment.*` with `source: log, runScoped: true`; the clean gate compares them (`run.difficultyNotContradicted`, `run.mobSpawningNotContradicted`) |
-| gamerules | the descriptor (`artifact.environment.environmentFile.values.gamerules`), plus any run-scoped marker (`artifact.environment.gamerules`), plus the operator's console listing in `gamerule-verification.txt`. Mineflayer cannot read gamerules |
+| gamerules | descriptor values, any run-scoped marker, and the operator's per-dimension console listing in `gamerule-verification.txt`; for a console-primary descriptor, `run.consoleGamerulesVerified` must PASS after the gate binds the transcript to exact runId, resolved descriptor SHA, levelName, seed and BOOT source SHA and compares every listed rule |
 | no world changes | `artifact.environment.worldChanges` must be `null` (`run.noWorldChanges`) |
 | nothing granted | the run's FIRST inventory sample must be empty (`run.bootInventoryEmpty`, from `artifact.inventory.boot`) |
 | keepInventory behaviour | any `LADDER_INVENTORY_SETTLE reason=death` line in the run window: `itemCount>0` ⇒ FAIL (the live world's own signal); an empty drop ⇒ positive evidence |
@@ -212,8 +223,7 @@ so a clean premise can never be paired with a run judged against another file.
 4. `clean-run.md` → the descriptor is the resolved one (`sourceSha` = the frozen
    commit, `levelName`/`levelSeed` = the new world); `run.levelNameAttested`,
    `run.seedAttested`, `run.bootSourceSha`, `run.bootInventoryEmpty` all PASS.
-5. `gamerule-verification.txt` → `keep_inventory=false` and every declared default;
-   `seed` equals `values.levelSeed`; the body is not opped.
+5. `clean-run.md` → `run.consoleGamerulesVerified` PASS; inspect the bound `gamerule-verification.txt` for `keep_inventory=false` and every declared default in each dimension. Separately confirm the section 3.4 console checks: `seed` equals `values.levelSeed` and the body is allowed in.
 6. `bundle.json` → `git.head` == the frozen SHA, `git.dirty` false (or explained),
    `run.worldKey` is the new world's namespace.
 7. `commands/*.txt` → the exact argv and captured output of the artifact, the M3
@@ -227,10 +237,11 @@ so a clean premise can never be paired with a run judged against another file.
   `level-seed` on first start; that the world is genuinely new is proved by the
   absence of `level.dat` at prepare time (checked) plus the operator's console
   `seed` output, not by an automated boot.
-- **Gamerule values are operator-declared + console-verified.** No run-scoped
-  machine fact exists for most rules. The gate can catch a *contradiction* in a
-  run-scoped marker, a `LADDER_INVENTORY_SETTLE` that kept items, and a non-empty
-  boot inventory; it cannot read the world's rule table.
+- **Gamerule values are operator-declared + console-verified.** Mineflayer has no
+  run-scoped fact for most rules. The clean gate parses the saved console
+  transcript, binds its metadata to this exact run and resolved descriptor, and
+  checks every declared value in each required dimension. It cannot independently
+  authenticate that pasted text originated from the server console.
 - **`serverSeed()` defaults** to `<container>/server.properties`. The M3 recipe
   explicitly sets `BUDDY_SERVER_PROPERTIES_PATH` to the staged config used by
   Leaf, so the HOST acceptance seed matches the resolved descriptor without
@@ -245,9 +256,9 @@ so a clean premise can never be paired with a run judged against another file.
 - **`spawn-monsters` proves nothing in this build** (dead key). Hostile spawning is
   gated by the `spawn_mobs` / `spawn_monsters` gamerules, and whether those actually
   yield endermen and blazes at the M3 site is only observable in the run.
-- **Gamerule values are per dimension.** The gate can check a run-scoped marker and
-  the operator's three console listings; it cannot enumerate a dimension's rule
-  table by itself.
+- **Gamerule values are per dimension.** The gate checks the operator's console
+  listing for every declared dimension and gamerule. It still cannot read a
+  dimension's rule table directly; the transcript remains operator-captured evidence.
 - **The live world's durable resident state** (ledger / known resources) is
   namespaced by `worldKey`, which contains no seed: a new world on the same
   `serverId` and epoch could still match old memory. The recipe avoids this by

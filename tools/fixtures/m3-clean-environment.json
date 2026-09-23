@@ -223,7 +223,7 @@
     },
     "gameruleMechanism": {
       "primary": "console",
-      "primaryDetail": "After the FIRST boot of the clean world the operator runs `gamerule`, and `execute in minecraft:the_nether run gamerule` plus `execute in minecraft:the_end run gamerule`, on the server console and pastes the three listings into the run evidence directory; the reviewer checks keep_inventory=false and every declared default in ALL THREE dimensions. Mineflayer cannot read gamerules, and camelCase ids are rejected by this build (ids are snake_case).",
+      "primaryDetail": "After the FIRST boot of the clean world the operator runs `gamerule`, and `execute in minecraft:the_nether run gamerule` plus `execute in minecraft:the_end run gamerule`, on the server console and pastes the three listings into gamerule-verification.txt under their prepared dimension headers. The clean-run gate binds the transcript to the exact runId, resolved descriptor SHA, levelName, seed and BOOT source SHA, then checks keep_inventory=false and every declared default in ALL THREE dimensions. This remains operator-captured evidence: Mineflayer cannot read gamerules or independently authenticate console origin. camelCase ids are rejected by this build (ids are snake_case).",
       "secondary": "datapack",
       "secondaryDetail": "clean-run-prepare writes <world>/datapacks/m3-clean-gamerules with data/minecraft/tags/function/load.json -> m3clean:set_gamerules, so every rule is asserted at every world load in all three dimensions. The load tag is auto-enabled even with initial-enabled-packs=vanilla (measured).",
       "datapackFormat": {

@@ -684,6 +684,164 @@ export function canonicalGameruleKey(key) {
   return GAMERULE_ALIASES[normalized] ?? normalized
 }
 
+/** Parse the operator-captured, dimension-labelled server-console transcript. */
+export function parseConsoleGameruleTranscript(text) {
+  const metadata = {}
+  const dimensions = {}
+  const errors = []
+  let currentDimension = null
+  for (const [index, rawLine] of String(text ?? '').split(/\r?\n/).entries()) {
+    const line = rawLine.trim()
+    if (line === '' || line.startsWith('#')) continue
+    const section = /^\[dimension=([^\]]+)\]$/i.exec(line)
+    if (section !== null) {
+      currentDimension = section[1].trim()
+      if (Object.prototype.hasOwnProperty.call(dimensions, currentDimension)) errors.push(`duplicate dimension section ${currentDimension} at line ${index + 1}`)
+      dimensions[currentDimension] ??= {}
+      continue
+    }
+    if (/^\[dimension=/i.test(line)) {
+      errors.push(`malformed dimension section at line ${index + 1}`)
+      currentDimension = null
+      continue
+    }
+    if (currentDimension === null) {
+      const field = /^([A-Za-z][A-Za-z0-9]*)=(.*)$/.exec(line)
+      if (field === null) {
+        errors.push(`unexpected content before the first dimension section at line ${index + 1}`)
+        continue
+      }
+      if (Object.prototype.hasOwnProperty.call(metadata, field[1])) errors.push(`duplicate metadata field ${field[1]}`)
+      else metadata[field[1]] = field[2].trim()
+      continue
+    }
+    // Accept the id/value output forms used by Minecraft server consoles, with
+    // optional INFO prefixes, and the query form "Gamerule <id> is currently
+    // set to: <value>". The gate compares ids and values, never display names.
+    const entry = /(?:\b(?:game\s*rule|gamerule)\s+)?['"]?([A-Za-z][A-Za-z0-9_:-]*)['"]?\s*(?:=|:|is currently set to:)\s*(.*?)\s*$/i.exec(line)
+    if (entry === null) continue
+    const key = canonicalGameruleKey(entry[1])
+    const valueText = entry[2].replace(/^[."']+|[."']+$/g, '').trim()
+    const value = parseConsoleGameruleValue(valueText)
+    if (value === undefined) {
+      errors.push(`unreadable value for ${entry[1]} at line ${index + 1}`)
+      continue
+    }
+    if (Object.prototype.hasOwnProperty.call(dimensions[currentDimension], key)) {
+      errors.push(`duplicate gamerule ${key} in ${currentDimension}`)
+      continue
+    }
+    dimensions[currentDimension][key] = value
+  }
+  return { metadata, dimensions, errors }
+}
+
+function parseConsoleGameruleValue(raw) {
+  const value = String(raw).trim().replace(/^[."']+|[."']+$/g, '').trim()
+  if (/^true$/i.test(value)) return true
+  if (/^false$/i.test(value)) return false
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value)
+  if (/^[A-Za-z][A-Za-z0-9_.:-]*$/.test(value)) return value
+  return undefined
+}
+
+/** Bind and validate the console transcript against the exact accepted run. */
+export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = null, descriptorSha256 = null, path = null, text = null, fileSha256 = null, readError = null }) {
+  const mechanism = descriptor?.cleanRun?.gameruleMechanism ?? {}
+  const required = mechanism.primary === 'console'
+  const baseDetail = { path, fileSha256, mechanism: mechanism.primary ?? null }
+  if (!required) {
+    return condition({
+      id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: false,
+      reason: `console gamerule capture is not required by cleanRun.gameruleMechanism.primary=${String(mechanism.primary ?? '(unset)')}`,
+      detail: baseDetail,
+    })
+  }
+  if (!isPlainObject(artifact)) {
+    return condition({ id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: false, reason: 'no run artifact was supplied; console gamerule evidence is evaluated only for an exact run', detail: baseDetail })
+  }
+  if (text === null) {
+    return condition({
+      id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: true,
+      reason: `required operator console gamerule transcript is unavailable${readError === null ? '' : `: ${readError}`}`,
+      detail: baseDetail,
+    })
+  }
+
+  const parsed = parseConsoleGameruleTranscript(text)
+  const metadata = parsed.metadata
+  const missingMetadata = []
+  const mismatches = []
+  const expectedMetadata = {
+    record: 'm3-clean-gamerule-verification',
+    schemaVersion: '1',
+    runId,
+    descriptorSha256,
+    levelName: descriptor?.values?.levelName ?? null,
+    seed: descriptor?.values?.levelSeed === undefined ? null : String(descriptor.values.levelSeed),
+    sourceSha: descriptor?.values?.sourceSha ?? null,
+  }
+  for (const [key, expected] of Object.entries(expectedMetadata)) {
+    const actual = metadata[key]
+    if (expected === null || expected === undefined || actual === undefined || actual === '' || /^<.*>$/.test(actual)) {
+      missingMetadata.push(key)
+    } else if (String(actual) !== String(expected)) {
+      mismatches.push(`${key}=${JSON.stringify(actual)} expected ${JSON.stringify(String(expected))}`)
+    }
+  }
+  const capturedAt = metadata.capturedAt
+  if (capturedAt === undefined || capturedAt === '' || /^<.*>$/.test(capturedAt)) missingMetadata.push('capturedAt')
+  else if (!Number.isFinite(Date.parse(capturedAt)) || new Date(capturedAt).toISOString() !== capturedAt) mismatches.push(`capturedAt=${JSON.stringify(capturedAt)} is not a canonical ISO-8601 UTC timestamp`)
+
+  const bootSourceSha = artifact?.run?.boot?.sourceSha ?? null
+  if (bootSourceSha === null) missingMetadata.push('artifact.run.boot.sourceSha')
+  else if (metadata.sourceSha !== undefined && metadata.sourceSha !== bootSourceSha) mismatches.push(`sourceSha=${JSON.stringify(metadata.sourceSha)} does not match BOOT source ${JSON.stringify(bootSourceSha)}`)
+  if (runId === null) missingMetadata.push('requested runId')
+  else if (artifact.runId !== runId) mismatches.push(`artifact.runId=${JSON.stringify(artifact.runId)} does not match requested runId=${JSON.stringify(runId)}`)
+
+  const scope = descriptor?.cleanRun?.gameruleScope ?? {}
+  const requiredDimensions = Array.isArray(scope.dimensions) ? scope.dimensions.filter((dimension) => typeof dimension === 'string') : []
+  const expectedRules = isPlainObject(descriptor?.values?.gamerules) ? descriptor.values.gamerules : {}
+  const knownRules = new Set(Object.keys(expectedRules).map(canonicalGameruleKey))
+  const differences = [...parsed.errors]
+  for (const dimension of requiredDimensions) {
+    const observed = parsed.dimensions[dimension]
+    if (observed === undefined) {
+      differences.push(`missing dimension listing ${dimension}`)
+      continue
+    }
+    for (const [rule, expected] of Object.entries(expectedRules)) {
+      const key = canonicalGameruleKey(rule)
+      if (!Object.prototype.hasOwnProperty.call(observed, key)) differences.push(`${dimension} missing ${key}`)
+      else {
+        const actual = observed[key]
+        const matches = typeof expected === 'string' ? String(actual) === expected : actual === expected
+        if (!matches) differences.push(`${dimension} ${key}=${JSON.stringify(actual)} expected ${JSON.stringify(expected)}`)
+      }
+    }
+    for (const [rule, actual] of Object.entries(observed)) {
+      if (!knownRules.has(canonicalGameruleKey(rule))) differences.push(`${dimension} contains unclassified gamerule ${rule}=${JSON.stringify(actual)}`)
+    }
+  }
+  for (const dimension of Object.keys(parsed.dimensions)) {
+    if (!requiredDimensions.includes(dimension)) differences.push(`unexpected dimension listing ${dimension}`)
+  }
+  if (requiredDimensions.length === 0) differences.push('descriptor declares no per-dimension gamerule scope')
+
+  const uniqueMissingMetadata = [...new Set(missingMetadata)]
+  const bindingReady = uniqueMissingMetadata.length === 0
+  const verdict = mismatches.length > 0 ? 'FAIL' : !bindingReady ? 'UNKNOWN' : differences.length > 0 ? 'FAIL' : 'PASS'
+  const reason = verdict === 'PASS'
+    ? `console transcript is bound to run ${String(runId)}, descriptor ${String(descriptorSha256)}, BOOT source ${String(bootSourceSha)}, and all ${requiredDimensions.length} dimension listings match ${Object.keys(expectedRules).length} declared gamerules`
+    : verdict === 'FAIL'
+      ? `console gamerule transcript contradicts or incompletely verifies the descriptor: ${[...mismatches, ...differences].join('; ')}`
+      : `console gamerule transcript is not fully bound yet; missing metadata: ${uniqueMissingMetadata.join(', ')}${differences.length === 0 ? '' : `; listing issues: ${differences.join('; ')}`}`
+  return condition({
+    id: 'run.consoleGamerulesVerified', verdict, required: true, reason,
+    detail: { ...baseDetail, metadata, requiredDimensions, expectedRuleCount: Object.keys(expectedRules).length, observedRulesByDimension: Object.fromEntries(Object.entries(parsed.dimensions).map(([dimension, rules]) => [dimension, Object.keys(rules).length])), missingMetadata: uniqueMissingMetadata, mismatches, differences, bootSourceSha },
+  })
+}
+
 /** `LADDER_INVENTORY_SETTLE reason=death ... itemCount=N ... counts={...}` lines. */
 export function parseInventorySettleLines(text) {
   const out = []
