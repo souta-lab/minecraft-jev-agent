@@ -21,6 +21,8 @@ const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4173
 const DEFAULT_INTERVAL_MS = 2500
 const DEFAULT_LOG_TAIL_BYTES = 128 * 1024
+const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
+const MAX_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const DEFAULT_CONTROL_TIMEOUT_MS = 5000
 
 const TRACE_EVENTS = new Set([
@@ -29,6 +31,8 @@ const TRACE_EVENTS = new Set([
   'JEV_CANDIDATE_SET',
   'SKILL_END',
   'SKILL_OUTCOME_PACKET',
+  'PICKUP_ACQUIRED',
+  'PICKUP_NOT_ACQUIRED',
   'CAUSAL',
   'MODEL_UNAVAILABLE',
   'MODEL_AVAILABILITY',
@@ -785,18 +789,19 @@ function outcomeEvidenceForChoice(choiceEvent, events) {
   const choiceTime = parseTimestamp(choiceEvent.ts)
   const actionId = detail.action ?? detail.actionId ?? null
   const directChainId = typeof detail.chainId === 'string' ? detail.chainId : null
+  const generationMatches = (entry) => (entry.detail?.generationId ?? null) === (detail.generationId ?? null)
   const later = (entry) => {
     const timestamp = parseTimestamp(entry.ts)
     return choiceTime !== null && timestamp !== null && timestamp >= choiceTime && timestamp - choiceTime <= 60_000
   }
   const matchesAction = (entry) => entry.detail?.actionId === actionId
-    && (detail.generationId === undefined || entry.detail?.generationId === detail.generationId)
+    && generationMatches(entry)
     && later(entry)
   const causalCandidates = events.filter((entry) => entry.event === 'CAUSAL'
     && (directChainId !== null
       ? entry.detail?.chainId === directChainId
       : entry.detail?.actionId === actionId && entry.detail?.candidateId === actionId)
-    && (detail.generationId === undefined || entry.detail?.generationId === detail.generationId)
+    && generationMatches(entry)
     && later(entry))
     .sort((left, right) => (parseTimestamp(left.ts) ?? 0) - (parseTimestamp(right.ts) ?? 0))
   const causal = causalCandidates[0] ?? null
@@ -806,6 +811,10 @@ function outcomeEvidenceForChoice(choiceEvent, events) {
     && (causalTime === null || Math.abs((parseTimestamp(entry.ts) ?? 0) - causalTime) <= 5_000))
   const skillEnd = nearestLifecycle('SKILL_END')
   const outcomePacket = nearestLifecycle('SKILL_OUTCOME_PACKET')
+  const pickupEvidenceCandidates = typeof actionId === 'string' && actionId.startsWith('PICKUP:')
+    ? events.filter((entry) => ['PICKUP_ACQUIRED', 'PICKUP_NOT_ACQUIRED'].includes(entry.event) && matchesAction(entry))
+    : []
+  const pickupEvidence = pickupEvidenceCandidates.at(-1) ?? null
   return {
     chainId: directChainId,
     actionId,
@@ -815,7 +824,12 @@ function outcomeEvidenceForChoice(choiceEvent, events) {
     causal: traceProjection(causal ?? null),
     skillEnd: traceProjection(skillEnd ?? null),
     skillOutcome: traceProjection(outcomePacket ?? null),
-    status: causal !== null ? 'causal_observed' : skillEnd != null || outcomePacket != null ? 'skill_observed' : 'pending_or_not_observed',
+    pickupEvidence: traceProjection(pickupEvidence),
+    pickupEvidenceMatchCount: pickupEvidenceCandidates.length,
+    pickupEvidenceBinding: pickupEvidence !== null
+      ? { method: 'actionId+generationId+post-choice timestamp', confidence: 'inferred' }
+      : null,
+    status: causal !== null ? 'causal_observed' : skillEnd != null || outcomePacket != null ? 'skill_observed' : pickupEvidence !== null ? 'pickup_observed' : 'pending_or_not_observed',
   }
 }
 
@@ -1184,7 +1198,54 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     return await snapshotInFlight
   }
 
-  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission, intervalMs, snapshot, worldProbe }
+  const recentChoiceOutcomes = async ({ limit = 12, maxBytes = DEFAULT_RECENT_CHOICE_LOG_BYTES } = {}) => {
+    const runId = cachedRunId
+    const bootTs = cachedRunBoot?.ts ?? null
+    const bootTime = parseTimestamp(bootTs)
+    const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.floor(limit))) : 12
+    const boundedMaxBytes = Number.isFinite(maxBytes)
+      ? Math.max(1, Math.min(MAX_RECENT_CHOICE_LOG_BYTES, Math.floor(maxBytes)))
+      : DEFAULT_RECENT_CHOICE_LOG_BYTES
+    if (runId === null || bootTime === null) {
+      return {
+        status: 'unknown',
+        binding: { runId, directRunId: false, method: 'current-BOOT-timestamp-window', confidence: 'unknown' },
+        entries: [],
+        unknown: ['current_run_boot_boundary_unavailable'],
+      }
+    }
+    const events = readLogTail(logPath, boundedMaxBytes)
+      .filter((entry) => TRACE_EVENTS.has(entry.event) && (parseTimestamp(entry.ts) ?? 0) >= bootTime)
+    const choices = events.filter((entry) => ['JEV_HEADS', 'TOOL_CHOICE'].includes(entry.event))
+    const entries = choices.slice(-boundedLimit).map((entry) => {
+      const choice = projectChoice(entry, 'jev')
+      return {
+        observedAt: choice.observedAt,
+        event: choice.event,
+        selected: choice.selected,
+        trigger: choice.trigger,
+        reason: choice.reason,
+        generationId: entry.detail?.generationId ?? null,
+        chainId: entry.detail?.chainId ?? null,
+        outcome: outcomeEvidenceForChoice(entry, events),
+      }
+    })
+    return redactSecrets({
+      status: entries.length > 0 ? 'observed' : 'not_recorded',
+      binding: {
+        runId,
+        directRunId: false,
+        method: 'current-BOOT-timestamp-window',
+        confidence: 'inferred',
+        bootObservedAt: bootTs,
+      },
+      bounded: { maxBytes: boundedMaxBytes, limit: boundedLimit },
+      entries,
+      unknown: entries.length > 0 ? [] : ['no_choice_outcome_in_bounded_run_tail'],
+    })
+  }
+
+  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
 }
 
 function bindProbeToSummary(summary, probe) {
@@ -1367,6 +1428,7 @@ export function startObserverServer(options = {}) {
         return Response.json({
           ...summary,
           currentWorldProbe: bindProbeToSummary(summary, probe),
+          recentChoiceOutcomes: await observer.recentChoiceOutcomes(),
         }, { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/world-probe') {

@@ -51,7 +51,19 @@ world epoch is excluded.
 action, generation and nearest timestamp and labels that link `inferred`. The
 associated `SKILL_END` and `SKILL_OUTCOME_PACKET` are matched by action,
 generation and nearby timestamp because those event types do not carry the
-chain ID. Missing records remain null with a pending/not-observed status.
+chain ID. `execution.selectedChoiceOutcome.pickupEvidence` correlates
+`PICKUP_ACQUIRED` or `PICKUP_NOT_ACQUIRED` by action ID, generation ID, and a
+60-second post-choice window. Pickup markers do not carry a unique chain ID,
+so `pickupEvidenceBinding.confidence` is `inferred`; `pickupEvidenceMatchCount`
+shows when multiple markers matched that scope. Missing records remain null
+with a pending/not-observed status.
+
+The top-level `recentChoiceOutcomes` contains up to 12 recent Jev/tool choices
+from the current BOOT time window, read from at most the last 8 MiB of
+`buddy.log` per request. Its run binding is inferred from that BOOT boundary,
+not directly stored on each event. `status="not_recorded"` or an empty list
+means no matching choice was found in that bounded window; it does not prove
+that no earlier choice or outcome occurred.
 
 `progress.liveGoal` comes from the current resident report. In contrast,
 `progress.atLatestJevDecision` and `progress.stall` describe the snapshot the
