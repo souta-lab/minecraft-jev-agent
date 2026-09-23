@@ -2026,8 +2026,12 @@ function fluidAt(bot: Bot, cell: Vec3Json): boolean {
  * Read the four armor destinations from the live player window. Mineflayer
  * window 0 slots 5-8 are armor head->feet; a fake bot without `slots` reports
  * every slot empty rather than throwing.
+ *
+ * Exported so the locomotion fall guard (`executor.ts guardStepLanding`) prices a
+ * landing against the SAME worn-armour read the sensor publishes
+ * (`SelfState.armor`) instead of opening a second window into the inventory.
  */
-function buildArmor(bot: Bot): ArmorState {
+export function buildArmor(bot: Bot): ArmorState {
   const slots = (bot.inventory as { slots?: ReadonlyArray<{ name?: string; count?: number; slot?: number } | null> })
     .slots
   const armor = { ...EMPTY_ARMOR }
