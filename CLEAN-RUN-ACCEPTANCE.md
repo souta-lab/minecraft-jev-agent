@@ -9,12 +9,12 @@ world?"* — the live world has `level-seed=2024`, `keep_inventory=true`,
 and flooded terrain, and an M3 PASS there is worthless as M3 evidence.
 
 This document is the **ordered procedure for one clean attempt** and the reviewer
-checklist for its evidence. It is a recipe, **not a claim of success**: the clean
-current clean target is `m3clean-c1`, seed `4500764503965322344`; its operator
-descriptor is configured, but its world directory has not been prepared or
-booted. Earlier experimental worlds are separate and are not evidence for this
-attempt. The clean target's boot and gamerule state remain unverified until the
-exact-source resident is started and the console checks are captured.
+checklist for its evidence. It is a recipe, **not a claim of success**. The current
+operator descriptor names `m3clean-c1`, seed `4500764503965322344`; the preparation
+manifest must record that no `level.dat` existed before first boot. After boot,
+`level.dat` is expected, and final acceptance must bind the same run's HOST world
+name/seed and BOOT source SHA to the descriptor. Earlier experimental worlds are
+separate and are not evidence for this attempt.
 
 Components:
 
@@ -240,10 +240,12 @@ so a clean premise can never be paired with a run judged against another file.
 
 ## 6. Honest residual (what this harness cannot decide)
 
-- **The current clean target has not been booted.** The server must generate it from
-  `level-seed` on first start; that the world is genuinely new is proved by the
-  absence of `level.dat` at prepare time (checked) plus the operator's console
-  `seed` output, not by an automated boot.
+- **First-boot evidence is phase-bound.** Preparation must record the target's
+  missing `level.dat` before the server starts. The server then generates the
+  world from `level-seed`; final acceptance expects `level.dat` to exist and uses
+  the run-bound HOST world name/seed plus the preparation manifest to establish
+  that it is the prepared target. The operator's console `seed` output remains a
+  cross-check.
 - **Gamerule values are operator-declared + console-verified.** Mineflayer has no
   run-scoped fact for most rules. The clean gate parses the saved console
   transcript, binds its metadata to this exact run and resolved descriptor, and
