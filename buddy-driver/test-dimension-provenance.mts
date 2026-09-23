@@ -358,7 +358,13 @@ addCase('(iii) a dimension transition drops every tag and unloads every known co
     after.kind !== 'attributable' &&
     after.liveDimension === 'minecraft:the_nether' &&
     !staleReadable &&
-    view.stats().taggedColumns === 0
+    view.stats().taggedColumns === 0 &&
+    // THE UNLOAD IS ASSERTED, not merely printed. It used to appear in the detail while the
+    // verdict ignored it, and the code cleared the tag map BEFORE walking it to unload - so
+    // every reset in the live run reported `columnsUnloaded=0` (108 of them) while dropping
+    // up to 190 tags, and a column the world still held was then read as `provenance=unknown`
+    // and refused. This assertion is what makes that ordering a test failure.
+    unloaded.length === 2
   return {
     pass,
     detail: `before=${before.kind}:${before.dimension} after=${after.kind}:${after.reason} unloaded=${JSON.stringify(unloaded)} tagged=${view.stats().taggedColumns}`,
