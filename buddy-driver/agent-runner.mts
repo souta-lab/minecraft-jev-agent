@@ -1371,14 +1371,16 @@ function liveStateSnapshot(
 ): Record<string, unknown> {
   const entity = b.entity
   const position = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
-  const truth = status?.truth ?? {
-    position,
-    health: b.health ?? null,
-    food: b.food ?? null,
-    dimension: normalizeDimension(b.game?.dimension),
-    onGround: null,
-    inventory: inventorySummary(b),
-  }
+  const truth = status?.truth === undefined
+    ? {
+        position,
+        health: b.health ?? null,
+        food: b.food ?? null,
+        dimension: normalizeDimension(b.game?.dimension),
+        onGround: entity?.onGround ?? null,
+        inventory: inventorySummary(b),
+      }
+    : { ...status.truth, position }
   const center = position === null ? null : new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z))
   const counts: Record<string, number> = {}
   const hazards: Array<Record<string, unknown>> = []

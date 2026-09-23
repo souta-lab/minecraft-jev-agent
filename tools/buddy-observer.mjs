@@ -461,6 +461,7 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
   const supportPoint = support?.position ?? null
   const supportBounds = supportEvidence?.sampleBounds ?? null
   const supportPlayerPosition = supportEvidence?.playerPosition ?? null
+  const statePlayerPosition = stateData.truth?.position ?? null
   const supportInsideBounds = supportPoint !== null && supportBounds?.min !== undefined && supportBounds?.max !== undefined
     && supportPoint.x >= supportBounds.min.x && supportPoint.x <= supportBounds.max.x
     && supportPoint.y >= supportBounds.min.y && supportPoint.y <= supportBounds.max.y
@@ -469,15 +470,20 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
     && supportPoint.x === Math.floor(supportPlayerPosition.x)
     && supportPoint.y === Math.floor(supportPlayerPosition.y) - 1
     && supportPoint.z === Math.floor(supportPlayerPosition.z)
+  const supportPlayerPositionMatchesState = supportPlayerPosition !== null && statePlayerPosition !== null
+    && supportPlayerPosition.x === statePlayerPosition.x
+    && supportPlayerPosition.y === statePlayerPosition.y
+    && supportPlayerPosition.z === statePlayerPosition.z
   const supportCaptureMatchesState = supportEvidence?.capturedAt !== null
     && supportEvidence?.capturedAt === stateData.capturedAt
   const supportScopeStatus = supportEvidence === null ? 'unverified'
     : supportInsideBounds && supportMatchesSampledFooting && supportCaptureMatchesState
-      && supportEvidence.coordinateIsCurrentPlayerFooting === true
+      && supportPlayerPositionMatchesState && supportEvidence.coordinateIsCurrentPlayerFooting === true
       ? 'verified-current-player-footing'
       : !supportInsideBounds ? 'outside-requested-sample'
         : !supportCaptureMatchesState ? 'capture-time-mismatch'
-          : 'not-current-player-footing'
+          : !supportPlayerPositionMatchesState ? 'player-position-mismatch'
+            : 'not-current-player-footing'
   const worldCache = stateData.worldCache ?? null
   const worldCacheReadability = worldCache?.readability !== null && typeof worldCache?.readability === 'object'
     ? worldCache.readability
