@@ -1457,6 +1457,17 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     : 'run_source_sha_unavailable')
   if (snapshot.resident.generationBoundary === null) unknown.push('current_generation_boundary_unavailable')
   if (modelUnavailable) unknown.push('model_authority_unavailable')
+  if (snapshot.authority?.policy?.provider == null || snapshot.authority?.policy?.model == null) {
+    unknown.push('effective_jev_provider_model_unavailable')
+  }
+  if (snapshot.authority?.system2?.configured?.provider == null || snapshot.authority?.system2?.configured?.model == null) {
+    unknown.push('configured_system2_provider_model_unavailable')
+  }
+  if (snapshot.authority?.deterministicFallbackEnabled === null || snapshot.authority?.deterministicFallbackEnabled === undefined) {
+    unknown.push('deterministic_fallback_configuration_unavailable')
+  } else if (snapshot.authority.deterministicFallbackEnabled === true) {
+    unknown.push('deterministic_fallback_enabled')
+  }
   if (latest === null) unknown.push('no_choice_event_observed')
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
   if (snapshot.truth === null) unknown.push('authoritative_world_truth_unavailable')
@@ -1503,6 +1514,11 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       connected: snapshot.resident.connected,
       frozen: snapshot.resident.frozen,
       availabilityReason: modelUnavailable ? 'MODEL_UNAVAILABLE' : snapshot.resident.available ? null : runtimeFailure?.detail?.code ?? null,
+    },
+    authority: {
+      jev: snapshot.authority?.policy ?? null,
+      system2: snapshot.authority?.system2 ?? null,
+      deterministicFallbackEnabled: snapshot.authority?.deterministicFallbackEnabled ?? null,
     },
     mission: snapshot.mission,
     goal: snapshot.goal,

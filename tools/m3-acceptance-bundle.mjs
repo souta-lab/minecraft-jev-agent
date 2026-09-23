@@ -86,6 +86,70 @@ function normalizeSourceSha(value) {
   return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : null
 }
 
+/**
+ * Contract facts that a delivered M3 run artifact must carry. The gates decide
+ * whether gameplay predicates passed; this check only ensures the required
+ * audit record is present and bound to the same run/source before the bundle
+ * can call that run accepted.
+ */
+export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
+  const sourceSha = normalizeSourceSha(artifact?.run?.boot?.sourceSha)
+  const dimensions = artifact?.environment?.dimensions
+  const predicates = artifact?.milestonePredicates
+  const authority = artifact?.authority
+  const terminal = artifact?.inventory?.final
+  const transitions = Array.isArray(dimensions?.transitions) ? dimensions.transitions : []
+  const predicateEntries = Array.isArray(predicates?.predicates) ? predicates.predicates : []
+  const normalizedDimension = (value) => typeof value === 'string' ? value.replace(/^minecraft:/, '').toLowerCase() : null
+  const transitionToNether = transitions.some((transition) =>
+    normalizedDimension(transition?.to) === 'the_nether' && normalizedDimension(transition?.from) !== 'the_nether',
+  )
+  const predicateScopeMatches = predicates?.runId === expectedRunId
+    && normalizeSourceSha(predicates?.sourceSha) === sourceSha
+    && predicateEntries.some((entry) => entry?.id === 'nether_reached' && entry.satisfied === true)
+  const terminalInventoryPresent = terminal?.status === 'PRESENT'
+    && terminal?.runId === expectedRunId
+    && normalizeSourceSha(terminal?.sourceSha) === sourceSha
+    && terminal?.counts !== null
+    && typeof terminal?.counts === 'object'
+    && !Array.isArray(terminal.counts)
+    && Number.isInteger(terminal.counts.ender_eye)
+    && terminal.counts.ender_eye >= 12
+  const fallbackAbsent = authority?.fallback?.hiddenDeterministicFallback === 'none_observed'
+    && authority?.fallback?.deterministicFallbackEnabled === false
+    && authority?.fallback?.fallbackCount === 0
+    && authority?.fallback?.otherCount === 0
+  const system2Decisions = authority?.system2?.decisions
+  const system2AllModel = Number.isFinite(authority?.system2?.count)
+    && authority.system2.count > 0
+    && Number.isFinite(authority?.system2?.modelCount)
+    && authority.system2.modelCount === authority.system2.count
+    && Array.isArray(system2Decisions)
+    && authority.system2.disagreements?.length === 0
+  const checks = [
+    { id: 'sourceSha', present: sourceSha !== null && artifact?.runId === expectedRunId },
+    { id: 'minecraftVersion', present: typeof artifact?.run?.serverVersion === 'string' && artifact.run.serverVersion.length > 0 },
+    { id: 'environment.difficulty', present: artifact?.environment?.difficulty?.value !== undefined && artifact.environment.difficulty.value !== null },
+    { id: 'environment.mobSpawning', present: artifact?.environment?.mobSpawning?.value !== undefined && artifact.environment.mobSpawning.value !== null },
+    { id: 'environment.gamerules', present: artifact?.environment?.gamerules?.value !== undefined && artifact.environment.gamerules.value !== null },
+    { id: 'inventory.initial', present: artifact?.inventory?.boot?.counts !== null && typeof artifact?.inventory?.boot?.counts === 'object' },
+    { id: 'inventory.final', present: terminalInventoryPresent },
+    { id: 'dimensionTransition.toNether', present: transitionToNether },
+    { id: 'milestonePredicates', present: predicateScopeMatches },
+    { id: 'authority.jev', present: authority?.jev?.attested === true },
+    { id: 'authority.system2', present: authority?.system2?.attested === true },
+    { id: 'authority.system2NoFallback', present: system2AllModel },
+    { id: 'authority.noHiddenFallback', present: fallbackAbsent },
+  ]
+  return {
+    status: checks.every((check) => check.present) ? 'PASS' : 'UNKNOWN',
+    runId: expectedRunId,
+    sourceSha,
+    checks,
+    missing: checks.filter((check) => !check.present).map((check) => check.id),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -357,6 +421,7 @@ export async function buildAcceptanceBundle({
     },
   })
   const artifact = artifactStep.result
+  const requiredArtifactEvidence = evaluateRequiredM3ArtifactEvidence(artifact, runId)
 
   // ---- step 2: the canonical M3 gate, on the SAME pinned evidence ----------
   const bootSourceSha = artifact?.run?.boot?.sourceSha ?? null
@@ -539,6 +604,18 @@ export async function buildAcceptanceBundle({
       blocking: true,
     }),
   )
+  conditions.push(
+    conditionRow({
+      id: 'artifact.requiredEvidence',
+      verdict: requiredArtifactEvidence.status,
+      source: ARTIFACT_TOOL,
+      reason: requiredArtifactEvidence.missing.length === 0
+        ? 'the required same-run M3 audit facts are present and source-bound'
+        : `required run-scoped evidence is missing or mismatched: ${requiredArtifactEvidence.missing.join(', ')}`,
+      detail: requiredArtifactEvidence,
+      blocking: true,
+    }),
+  )
   // ---- evidence classes (diagnostic; never a fabricated fact) --------------
   const acceptanceClass = artifact?.acceptance?.evidenceClass ?? null
   const acceptancePresent = artifact?.acceptance?.present === true
@@ -618,6 +695,7 @@ export async function buildAcceptanceBundle({
   const liveSignals = [
     { id: 'hostLock', ok: existsSync(hostLockPath), detail: hostLockPath },
     { id: 'acceptanceRecord', ok: acceptancePresent, detail: artifact?.acceptance?.path ?? null },
+    { id: 'sourceTreeClean', ok: git.dirty === false, detail: `dirty=${String(git.dirty)}` },
     {
       id: 'bootSourceMatchesTreeHead',
       ok: bootSourceSha !== null && git.head !== null && bootSourceSha === git.head,
@@ -663,6 +741,7 @@ export async function buildAcceptanceBundle({
       evidenceClasses: artifact?.evidenceClasses ?? [],
       operatorDecisionPremise: premise,
       gateEvidence: artifact?.gateEvidence ?? null,
+      requiredEvidence: requiredArtifactEvidence,
     },
     consistency,
     socketProbe,

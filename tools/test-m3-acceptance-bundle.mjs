@@ -75,8 +75,8 @@ const PORTAL_CHAIN = [
   'PORTAL_VERIFIED=true',
 ]
 
-/** runner.out-shaped authority window; `released` closes it without a socket. */
-function runnerOut(runId) {
+/** runner.out-shaped authority window; a release line brackets its decisions. */
+function runnerOut(runId, { decisions = ['SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'] } = {}) {
   return (
     [
       boot(0, runId),
@@ -88,8 +88,8 @@ function runnerOut(runId) {
           'system2LastAuthority={"provider":"none","model":"none"} deterministicFallbackEnabled=false ' +
           'planner=llm plannerModel=typesafe-ai/jev',
       ),
-      line(2, 'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'),
-      line(3, `HOST_LOCK released runId=${runId}`),
+      ...decisions.map((decision, index) => line(2 + index * 0.1, decision)),
+      line(3 + decisions.length * 0.1, `HOST_LOCK released runId=${runId}`),
     ].join('\n') + '\n'
   )
 }
@@ -135,9 +135,9 @@ function makeRoot(name) {
   return root
 }
 
-function writeFixture(root, runId, { logLines, acceptance = true }) {
+function writeFixture(root, runId, { logLines, acceptance = true, runner = {} }) {
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId), 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
   if (acceptance) {
     writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
@@ -251,6 +251,7 @@ function condition(bundle, id) {
   assert.ok(bundle.consistency.find((entry) => entry.check === 'authority_evidence_bound').ok)
   assert.equal(bundle.artifact.status, 'PASS')
   assert.deepEqual(bundle.artifact.missingEvidence, [])
+  assert.equal(condition(bundle, 'artifact.requiredEvidence').verdict, 'PASS')
   assert.equal(condition(bundle, 'metrics.skillClosure').verdict, 'PRESENT')
   assert.ok(bundle.metrics.report !== null)
   assert.equal(bundle.metrics.report.runId, RUN)
@@ -269,6 +270,64 @@ function condition(bundle, id) {
   assert.equal(bundle.liveAcceptance, false)
   assert.ok(bundle.residual.some((entry) => /evidence class is "fixture"/.test(entry)))
   ok('A. exact-run/source M2 PASS + M3 PASS: accepted fixture, liveAcceptance=false')
+}
+
+// A3. gate PASS cannot replace required environment/run artifact facts
+{
+  const root = makeRoot('missing-required-environment')
+  const logLines = fullLog(RUN, { terminalEye: 12 }).filter((entry) => !entry.includes('ENVIRONMENT difficulty='))
+  writeFixture(root, RUN, { logLines })
+  const { bundle, exitCode } = await buildAcceptanceBundle({
+    runId: RUN,
+    root,
+    outDir: join(root, 'bundle'),
+    evidenceClass: 'fixture',
+    noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
+    write: () => {},
+  })
+  assert.equal(bundle.gate.status, 'PASS')
+  assert.equal(condition(bundle, 'M2.premise').verdict, 'PASS')
+  const evidence = condition(bundle, 'artifact.requiredEvidence')
+  assert.equal(evidence.verdict, 'UNKNOWN')
+  assert.ok(evidence.detail.missing.includes('environment.difficulty'))
+  assert.ok(evidence.detail.missing.includes('environment.gamerules'))
+  assert.equal(bundle.acceptanceVerdict.status, 'UNKNOWN')
+  assert.equal(exitCode, 2)
+  ok('A3. M2/M3 gate PASS with missing required environment facts remains UNKNOWN at artifact acceptance')
+}
+
+// A4. one deterministic System2 decision prevents a no-fallback acceptance
+{
+  const root = makeRoot('system2-fallback')
+  writeFixture(root, RUN, {
+    logLines: fullLog(RUN, { terminalEye: 12 }),
+    runner: {
+      decisions: [
+        'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal',
+        'SYSTEM2_AUTHORITY_DECISION provider=deterministic model=deterministic-baseline chosen=WAIT',
+      ],
+    },
+  })
+  assert.match(readFileSync(join(root, 'buddy-driver', 'runner.out'), 'utf8'), /provider=deterministic model=deterministic-baseline/)
+  const { bundle, exitCode } = await buildAcceptanceBundle({
+    runId: RUN,
+    root,
+    outDir: join(root, 'bundle'),
+    evidenceClass: 'fixture',
+    noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
+    write: () => {},
+  })
+  assert.equal(bundle.gate.status, 'PASS')
+  const evidence = condition(bundle, 'artifact.requiredEvidence')
+  assert.equal(evidence.verdict, 'UNKNOWN', JSON.stringify(bundle.artifact.document.authority.system2))
+  assert.ok(evidence.detail.missing.includes('authority.system2NoFallback'), JSON.stringify(evidence.detail))
+  assert.equal(bundle.acceptanceVerdict.status, 'UNKNOWN')
+  assert.equal(exitCode, 2)
+  ok('A4. a logged deterministic System2 decision cannot be hidden by an earlier model-backed M2 plan')
 }
 {
   const root = makeRoot('pass-files')
@@ -331,6 +390,7 @@ function condition(bundle, id) {
   assert.equal(bundle.liveAcceptance, false, 'a synthetic tree must never be a live PASS')
   const failed = bundle.liveSignals.filter((signal) => !signal.ok).map((signal) => signal.id)
   assert.ok(failed.includes('hostLock'), `failed live signals: ${failed.join(',')}`)
+  assert.ok(failed.includes('sourceTreeClean'), `failed live signals: ${failed.join(',')}`)
   assert.ok(bundle.residual.some((entry) => /live signal\(s\) not satisfied/.test(entry)))
   ok('B. --evidence-class live on a synthetic tree: PASS but liveAcceptance=false (named signals)')
 }

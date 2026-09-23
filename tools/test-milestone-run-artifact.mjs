@@ -4,7 +4,9 @@
 // Every fixture below is a synthetic resident tree (buddy-driver/buddy.log,
 // buddy-driver/logs/jev/decisions.jsonl, buddy-driver/runner.out and
 // buddy-driver/data/resident/acceptance-<runId>.json). No live resident, socket,
-// or network is used: the flags always include --no-control-socket.
+// or network is used. Positive M3 cases inject an explicitly synthetic,
+// same-run acceptance-time report through buildRunArtifact's readSocket seam;
+// `--no-control-socket` cases deliberately have no terminal report.
 //
 //   A. PASS-shaped run   -> exit 0, status PASS, missingEvidence [] and both gates
 //                           delegated PASS verdicts (nothing fabricated)
@@ -218,6 +220,56 @@ function cli(args) {
   }
 }
 
+/**
+ * An offline HOST report fixture, bound to the requested run and BOOT source.
+ * This is test evidence only: it enters through the injected readSocket seam,
+ * never through a production fallback or a real control socket.
+ */
+function currentInventoryObservation(runId, counts, { dimension = 'minecraft:the_nether', sourceSha = SOURCE_SHA } = {}) {
+  const observedAt = at(41)
+  return {
+    record: 'current-inventory-observation',
+    schemaVersion: 1,
+    runId,
+    sourceSha,
+    generationId: 'gen-test-1',
+    observedAtMs: Date.parse(observedAt),
+    observedAt,
+    worldKey: { serverId: '127.0.0.1:25565', dimension, worldEpoch: 1 },
+    dimension,
+    counts,
+  }
+}
+
+async function cliWithReport(args, { runId, counts, dimension } = {}) {
+  let stdout = ''
+  let stderr = ''
+  const result = await runCli({
+    argv: args,
+    write: (chunk) => { stdout += chunk },
+    writeError: (chunk) => { stderr += chunk },
+    build: ({ runId: requestedRunId, root, overrides = {} }) => buildRunArtifact({
+      runId: requestedRunId,
+      root,
+      overrides: { ...overrides, controlSocketPath: '/fixture/control.sock' },
+      readSocket: async () => ({
+        runId,
+        policyKind: 'typesafe',
+        policyModel: 'typesafe-ai/jev',
+        generationId: 'gen-test-1',
+        frozen: false,
+        currentInventoryObservation: currentInventoryObservation(runId, counts, { dimension }),
+      }),
+    }),
+  })
+  return {
+    code: result.exitCode,
+    stdout,
+    stderr,
+    json: () => result.artifact,
+  }
+}
+
 const RUN_PASS = 'run-fixture-pass'
 const RUN_FAIL = 'run-fixture-fail'
 
@@ -226,7 +278,10 @@ const RUN_FAIL = 'run-fixture-fail'
 // ---------------------------------------------------------------------------
 const passRoot = makeRoot('pass')
 writeFixture(passRoot, RUN_PASS, { logLines: fullLog(RUN_PASS, { terminalEye: 12 }) })
-const pass = cli(['--run', RUN_PASS, '--root', passRoot, '--json', '--no-control-socket'])
+const pass = await cliWithReport(['--run', RUN_PASS, '--root', passRoot, '--json'], {
+  runId: RUN_PASS,
+  counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+})
 assert.equal(pass.code, 0, `PASS fixture exit=${pass.code} stderr=${pass.stderr}`)
 const passArtifact = pass.json()
 assert.equal(passArtifact.status, 'PASS')
@@ -253,6 +308,11 @@ assert.ok(passArtifact.verdicts.M3.lines.some((l) => /^M3_RUN_RESULT status=PASS
 // Inventory: boot vs latest and the milestone subset with first/last timestamps.
 assert.equal(passArtifact.inventory.boot.counts.diamond, 3)
 assert.equal(passArtifact.inventory.latest.counts.ender_eye, 12)
+assert.equal(passArtifact.inventory.final.status, 'PRESENT')
+assert.equal(passArtifact.inventory.final.source, 'control.report')
+assert.equal(passArtifact.inventory.final.runId, RUN_PASS)
+assert.equal(passArtifact.inventory.final.sourceSha, SOURCE_SHA)
+assert.equal(passArtifact.inventory.final.counts.ender_eye, 12)
 const eye = passArtifact.inventory.milestoneItems.ender_eye
 assert.equal(eye.boot, 0)
 assert.equal(eye.latest, 12)
@@ -298,6 +358,25 @@ assert.equal(passArtifact.acceptance.record.runId, RUN_PASS)
   )
 }
 ok('PASS-shaped fixture: exit 0, missingEvidence [], both gate verdicts embedded')
+
+// Same synthetic run evidence, without a HOST report, must remain UNKNOWN even
+// though the historical log reaches 12 eyes. This keeps fixture-only report
+// injection explicit and guards the acceptance-time inventory boundary.
+{
+  const runId = 'run-fixture-missing-current-inventory-report'
+  const root = makeRoot('missing-current-inventory-report')
+  writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }) })
+  const missingReport = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  assert.equal(missingReport.code, 2)
+  const artifact = missingReport.json()
+  assert.equal(artifact.status, 'UNKNOWN')
+  assert.equal(artifact.verdicts.M3.status, 'UNKNOWN')
+  assert.equal(artifact.verdicts.M3.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.equal(artifact.inventory.final.status, 'MISSING')
+  assert.ok(artifact.missingEvidence.includes('inventory.final'))
+  assert.ok(artifact.missingEvidence.includes('verdict:M3'))
+}
+ok('12 historical eyes without a same-run acceptance-time HOST report stay UNKNOWN')
 
 // First-class milestone predicate evidence: every M2/M3 predicate is present,
 // names its own evidence source, and the section is run-scoped.
@@ -345,7 +424,10 @@ ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
       ],
     }),
   )
-  const hosted = cli(['--run', runId, '--root', hostRoot, '--json', '--no-control-socket'])
+  const hosted = await cliWithReport(['--run', runId, '--root', hostRoot, '--json'], {
+    runId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+  })
   assert.equal(hosted.code, 0, `hosted fixture exit=${hosted.code} stderr=${hosted.stderr}`)
   const hostedArtifact = hosted.json()
   const eyes = hostedArtifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'ender_eyes')
@@ -370,12 +452,16 @@ ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
       predicates: [{ id: 'ender_eyes', satisfied: true, observedAtMs: T0 + 45000, observedAt: at(45), source: 'host-observe:rung:ender_eyes', evidence: {} }],
     }),
   )
-  const mismatched = cli(['--run', runId, '--root', mismatchRoot, '--json', '--no-control-socket'])
+  const mismatched = await cliWithReport(['--run', runId, '--root', mismatchRoot, '--json'], {
+    runId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+  })
   const mismatchedArtifact = mismatched.json()
   assert.equal(mismatchedArtifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'ender_eyes').satisfied, false)
   assert.equal(mismatchedArtifact.milestonePredicates.mismatches.length, 1)
   assert.ok(mismatchedArtifact.missingEvidence.includes('milestonePredicate:source_mismatch'))
-  assert.notEqual(mismatchedArtifact.verdicts.M3.status, 'PASS')
+  assert.equal(mismatchedArtifact.verdicts.M3.status, 'PASS', 'the independent current-inventory report still proves the eyes')
+  assert.notEqual(mismatchedArtifact.status, 'PASS', 'the rejected source-bound predicate keeps the full artifact incomplete')
 }
 ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is rejected and surfaced')
 
@@ -480,7 +566,10 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
 // ---------------------------------------------------------------------------
 const failRoot = makeRoot('fail')
 writeFixture(failRoot, RUN_FAIL, { logLines: fullLog(RUN_FAIL, { terminalEye: 0 }) })
-const fail = cli(['--run', RUN_FAIL, '--root', failRoot, '--json', '--no-control-socket'])
+const fail = await cliWithReport(['--run', RUN_FAIL, '--root', failRoot, '--json'], {
+  runId: RUN_FAIL,
+  counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 0, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+})
 assert.equal(fail.code, 1, `FAIL fixture exit=${fail.code} stderr=${fail.stderr}`)
 const failArtifact = fail.json()
 assert.equal(failArtifact.status, 'FAIL')
@@ -560,7 +649,11 @@ ok('cross-run fixture: foreign BOOT evidence is not attributed, gates stay UNKNO
   const { artifact, exitCode } = await buildRunArtifact({
     runId: RUN_PASS,
     root: passRoot,
-    overrides: { controlSocketPath: null },
+    overrides: { controlSocketPath: '/fixture/control.sock' },
+    readSocket: async () => ({
+      runId: RUN_PASS,
+      currentInventoryObservation: currentInventoryObservation(RUN_PASS, { ender_eye: 12 }),
+    }),
     gates: {
       M2: async ({ write }) => {
         write('M2_RUN_GATE — fake gate with no status line')
@@ -584,12 +677,11 @@ ok('fake gate without a status line: UNKNOWN, never PASS')
   const help = await runCli({ argv: ['--help'], write: () => {}, writeError: () => {} })
   assert.equal(help.exitCode, 0)
   const outPath = join(passRoot, 'artifact.json')
-  const written = await runCli({
-    argv: ['--run', RUN_PASS, '--root', passRoot, '--out', outPath, '--no-control-socket'],
-    write: () => {},
-    writeError: () => {},
-  })
-  assert.equal(written.exitCode, 0)
+  const written = await cliWithReport(
+    ['--run', RUN_PASS, '--root', passRoot, '--out', outPath],
+    { runId: RUN_PASS, counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12 } },
+  )
+  assert.equal(written.code, 0)
   const parsed = JSON.parse(readFileSync(outPath, 'utf8'))
   assert.equal(parsed.runId, RUN_PASS)
   assert.equal(parsed.missingEvidence.length, 0)
@@ -637,7 +729,11 @@ ok('server.properties reader whitelists facts and never echoes credentials')
   const root = makeRoot('nonether')
   const lines = fullLog(runId, { terminalEye: 12 }).filter((entry) => !entry.includes('dimension=minecraft:the_nether'))
   writeFixture(root, runId, { logLines: lines })
-  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const result = await cliWithReport(['--run', runId, '--root', root, '--json'], {
+    runId,
+    dimension: 'minecraft:overworld',
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12 },
+  })
   const artifact = result.json()
   const nether = artifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'nether_reached')
   assert.equal(nether.satisfied, null, 'a run with no transition observation must not claim the predicate')
@@ -782,7 +878,10 @@ ok('operator decisions are corroborated, annotated without rewriting the gate, a
       decisions: [],
     },
   })
-  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const result = await cliWithReport(['--run', runId, '--root', root, '--json'], {
+    runId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+  })
   const artifact = result.json()
   assert.equal(artifact.authority.system2.provider, 'muse-spark')
   assert.equal(artifact.authority.system2.model, 'meta/muse-spark-1.3-contributor')
@@ -893,7 +992,8 @@ ok('authority markers from a different runId in the same file are never used for
   assert.equal(acceptanceClass.status, 'PRESENT')
   assert.equal(artifact.milestoneAcceptance.status, 'INCOMPLETE')
   assert.deepEqual(artifact.milestoneAcceptance.incompleteMilestones, ['M3'])
-  assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unmetConditions, ['ender_eye_ready'])
+  assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unmetConditions, [])
+  assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unknownConditions, ['ender_eye_ready'])
   assert.notEqual(artifact.status, 'PASS')
   assert.notEqual(result.code, 0)
 
@@ -903,7 +1003,8 @@ ok('authority markers from a different runId in the same file are never used for
   const bare = cli(['--run', runId, '--root', bareRoot, '--json', '--no-control-socket']).json()
   assert.equal(bare.acceptance.present, false)
   assert.equal(bare.milestoneAcceptance.status, 'INCOMPLETE')
-  assert.deepEqual(bare.milestoneAcceptance.milestones.M3.unmetConditions, ['ender_eye_ready'])
+  assert.deepEqual(bare.milestoneAcceptance.milestones.M3.unmetConditions, [])
+  assert.deepEqual(bare.milestoneAcceptance.milestones.M3.unknownConditions, ['ender_eye_ready'])
   const gap = bare.missingEvidenceDetail.find((entry) => entry.field === 'acceptance')
   assert.ok(gap, 'an absent acceptance record must stay a reasoned gap')
   assert.match(gap.reason, /writeAcceptance\(\)/)
@@ -931,7 +1032,10 @@ ok('an acceptance record never turns an incomplete milestone into PASS; its abse
       decisions: ['SYSTEM2_AUTHORITY_DECISION provider=muse-spark model=meta/muse-spark-1.3-contributor chosen=front_nether_portal'],
     },
   })
-  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const result = await cliWithReport(['--run', runId, '--root', root, '--json'], {
+    runId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+  })
   assert.equal(result.code, 0, `complete fixture exit=${result.code} stderr=${result.stderr}`)
   assert.equal(result.stderr, '', 'a complete artifact prints no missing-evidence summary')
   const artifact = result.json()
@@ -1003,7 +1107,10 @@ ok('a synthetic complete run answers source SHA, env, inventory, transitions, pr
       ],
     },
   })
-  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const result = await cliWithReport(['--run', runId, '--root', root, '--json'], {
+    runId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+  })
   // A reload is not by itself a missing fact: this run is still COMPLETE and PASS.
   assert.equal(result.code, 0, `reload fixture exit=${result.code} stderr=${result.stderr}`)
   const artifact = result.json()
@@ -1109,7 +1216,10 @@ ok('two in-window reloads: the LATEST source-changing hash is effective, with tr
   const cleanId = 'run-fixture-reload-clean'
   const cleanRoot = makeRoot('reload-clean')
   writeFixture(cleanRoot, cleanId, { logLines: fullLog(cleanId, { terminalEye: 12 }), runner: { build: 'boot11112222' } })
-  const clean = cli(['--run', cleanId, '--root', cleanRoot, '--json', '--no-control-socket'])
+  const clean = await cliWithReport(['--run', cleanId, '--root', cleanRoot, '--json'], {
+    runId: cleanId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
+  })
   assert.equal(clean.code, 0, `clean no-reload fixture exit=${clean.code} stderr=${clean.stderr}`)
   const cleanArtifact = clean.json()
   assert.deepEqual(cleanArtifact.missingEvidence, [])

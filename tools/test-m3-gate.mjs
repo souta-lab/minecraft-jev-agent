@@ -89,6 +89,21 @@ const PORTAL_CHAIN = [
 const EYES_READY = inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 })
 const MATERIALS_ONLY = inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 4 })
 const FULL_RUN = [boot(RUN), dimensionTransition('minecraft:the_nether'), EYES_READY]
+const currentObservation = (counts, runId = RUN, sourceSha = SOURCE_SHA, dimension = 'minecraft:the_nether') => {
+  const observedAt = '2026-09-20T10:00:08.000Z'
+  return {
+    record: 'current-inventory-observation',
+    schemaVersion: 1,
+    runId,
+    sourceSha,
+    generationId: 'fixture-generation',
+    observedAtMs: Date.parse(observedAt),
+    observedAt,
+    worldKey: { serverId: 'fixture', dimension, worldEpoch: 1 },
+    dimension,
+    counts,
+  }
+}
 
 /** Build injected run-scoped evidence through the real M2 scanner (shared schema). */
 function evidenceFrom(lines, runId = RUN) {
@@ -115,6 +130,44 @@ function evidenceFrom(lines, runId = RUN) {
 }
 
 async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json = false, policyEvidence = VERIFIED_POLICY } = {}) {
+  // M3 acceptance requires a fresh HOST `report` observation of the inventory
+  // held now. Derive a run-scoped fixture observation from the latest inventory
+  // marker inside the requested BOOT window; historical samples alone cannot
+  // make the gate PASS or FAIL.
+  let activeRunId = null
+  let runSourceSha = null
+  let terminalCounts = null
+  let terminalDimension = null
+  for (const entry of lines) {
+    const bootMatch = /\bBOOT\b.*\brunId=(run-[A-Za-z0-9-]+).*\bsource=([0-9a-f]{40})\b/i.exec(entry)
+    if (bootMatch !== null) {
+      activeRunId = bootMatch[1] ?? null
+      runSourceSha = bootMatch[2]?.toLowerCase() ?? null
+      continue
+    }
+    if (activeRunId !== expectedRunId) continue
+    const inventoryMatch = /\bINVENTORY\s+items=(\{.*\})/.exec(entry)
+    if (inventoryMatch !== null) {
+      try { terminalCounts = JSON.parse(inventoryMatch[1] ?? '') } catch { terminalCounts = null }
+    }
+    const dimensionMatch = /\b(?:DIMENSION_OBSERVED|DIMENSION_TRANSITION|SPAWN|DEATH)\b.*\bdimension=(minecraft:[a-z_]+|[a-z_]+)/.exec(entry)
+    if (dimensionMatch !== null) terminalDimension = dimensionMatch[1] ?? terminalDimension
+  }
+  const observedAt = '2026-09-20T10:00:20.000Z'
+  const currentInventoryObservation = terminalCounts === null || expectedRunId === null
+    ? null
+    : {
+        record: 'current-inventory-observation',
+        schemaVersion: 1,
+        runId: expectedRunId,
+        sourceSha: runSourceSha,
+        generationId: 'gen-test',
+        observedAtMs: Date.parse(observedAt),
+        observedAt,
+        worldKey: { serverId: 'fixture', dimension: terminalDimension ?? 'minecraft:overworld', worldEpoch: 1 },
+        dimension: terminalDimension ?? 'minecraft:overworld',
+        counts: terminalCounts,
+      }
   const out = capture()
   const code = await runM3Gate({
     expectedRunId,
@@ -122,6 +175,7 @@ async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json
     write: out.write,
     json,
     policyEvidence,
+    policySocket: expectedRunId === null ? null : { runId: expectedRunId, currentInventoryObservation },
   })
   return { code, text: out.text(), lines: out.lines }
 }
@@ -142,7 +196,8 @@ function runGateCli(args) {
 // ---------------------------------------------------------------------------
 // 1. RED: the pure fact predicates
 // ---------------------------------------------------------------------------
-assert.equal(evaluateEnderEyes([{ ender_eye: 12 }]).ready, true)
+assert.equal(evaluateEnderEyes([{ ender_eye: 12 }]).ready, false, 'historical inventory cannot prove acceptance-time inventory')
+assert.equal(evaluateEnderEyes([{ ender_eye: 12 }], { counts: { ender_eye: 12 } }).ready, true)
 assert.equal(evaluateEnderEyes([{ ender_eye: 11 }]).ready, false)
 assert.equal(evaluateEnderEyes([{ ender_eye: 11 }]).materialInputsComplete, false)
 assert.equal(evaluateEnderEyes([{ ender_pearl: 12, blaze_rod: 7 }]).materialInputsComplete, true)
@@ -181,7 +236,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   )
   assert.match(
     text,
-    /m3_facts: ender_pearl=12 blaze_rod=7 blaze_powder=14 ender_eye=12 dimension=minecraft:the_nether/,
+    /m3_facts: ender_pearl=12 blaze_rod=7 blaze_powder=14 ender_eye=12 ender_eye_max_observed=12 dimension=minecraft:the_nether/,
     text,
   )
   ok('same-run ender_eye>=12 + authority -> PASS/exit 0 (counts + dimension reported)')
@@ -264,14 +319,17 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       '--control-socket', controlSocketPath,
     ]
     const text = runGateCli(commonArgs)
-    assert.equal(text.code, 0, `${text.stderr}\n${text.stdout}`)
+    assert.equal(text.code, 2, `${text.stderr}\n${text.stdout}`)
     assert.match(text.stdout, new RegExp(`sourceSha: ${SOURCE_SHA}`), text.stdout)
     assert.match(text.stdout, new RegExp(`m3_predicates: runId=${RUN} sourceSha=${SOURCE_SHA}`), text.stdout)
     assert.match(text.stdout, /mismatches=none/, text.stdout)
+    assert.match(text.stdout, /current_inventory_observation_missing/, text.stdout)
 
     const json = runGateCli([...commonArgs, '--json'])
-    assert.equal(json.code, 0, `${json.stderr}\n${json.stdout}`)
+    assert.equal(json.code, 2, `${json.stderr}\n${json.stdout}`)
     const parsed = JSON.parse(json.stdout)
+    assert.equal(parsed.status, 'UNKNOWN')
+    assert.equal(parsed.conditions.ender_eye_ready, 'UNKNOWN')
     assert.equal(parsed.sourceSha, SOURCE_SHA)
     assert.equal(parsed.facts.sourceSha, SOURCE_SHA)
     assert.equal(parsed.facts.milestonePredicates.sourceSha, SOURCE_SHA)
@@ -343,7 +401,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
-  ok('normal --run CLI binds matching BOOT/predicate SHA, rejects mismatch and keeps unknown source as UNKNOWN')
+  ok('normal --run CLI binds matching BOOT/predicate SHA, rejects mismatch, and cannot replace terminal inventory with historical predicates')
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +462,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       sources: [{ name: 'fixture:foreign', inventorySamples: [{ ender_eye: 12 }] }],
     }),
     policyEvidence: VERIFIED_POLICY,
+    policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
     write: out.write,
   })
   assert.equal(code, 2, out.text())
@@ -451,10 +510,35 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     policyEvidence: VERIFIED_POLICY,
     write: out.write,
   })
-  assert.equal(code, 0, out.text())
+  assert.equal(code, 2, out.text())
   assert.match(out.text(), /m3_evidence: valid sources=snapshot/, out.text())
   assert.match(out.text(), new RegExp(`sourceSha: ${SOURCE_SHA}`), out.text())
-  assert.match(out.text(), /status=PASS/, out.text())
+  assert.match(out.text(), /status=UNKNOWN/, out.text())
+  assert.match(out.text(), /current_inventory_observation_missing/, out.text())
+
+  const terminalObservation = {
+    record: 'current-inventory-observation',
+    schemaVersion: 1,
+    runId: RUN,
+    sourceSha: SOURCE_SHA,
+    generationId: 'fixture-generation',
+    observedAtMs: Date.parse('2026-09-20T10:00:08.000Z'),
+    observedAt: '2026-09-20T10:00:08.000Z',
+    worldKey: { serverId: 'fixture', dimension: 'minecraft:the_nether', worldEpoch: 1 },
+    dimension: 'minecraft:the_nether',
+    counts: { ender_eye: 12 },
+  }
+  const current = capture()
+  const currentCode = await runM3Gate({
+    expectedRunId: RUN,
+    logPath: sourceLog,
+    snapshotDir: dir,
+    policyEvidence: VERIFIED_POLICY,
+    policySocket: { runId: RUN, currentInventoryObservation: terminalObservation },
+    write: current.write,
+  })
+  assert.equal(currentCode, 0, current.text())
+  assert.match(current.text(), /status=PASS/, current.text())
 
   // A file named for another run but carrying RUN's body is never attributed.
   writeFileSync(join(dir, `m2-snapshot-${OTHER_RUN}.json`), JSON.stringify({ ...snapshot, runId: RUN }))
@@ -473,7 +557,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   })
   assert.equal(code2, 2, out2.text())
   assert.doesNotMatch(out2.text(), /status=PASS/)
-  ok('a run-scoped snapshot passes for its own run and is never borrowed by another')
+  ok('a run-scoped snapshot proves historical progress only; current HOST inventory is required for PASS and cannot be borrowed across runs')
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +607,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       return evidenceFrom(FULL_RUN)
     },
     policyEvidence: VERIFIED_POLICY,
+    policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
     write: out.write,
   })
   assert.equal(code, 0, out.text())
@@ -538,9 +623,10 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const shortRun = [boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 0 })]
   const evidence = evidenceFrom(shortRun)
   const policy = evaluateM3AuthorityEvidence({ expectedRunId: RUN, ...VERIFIED_POLICY })
-  const base = evaluateM3Gate({ expectedRunId: RUN, evidence, policy })
+  const terminal = currentObservation({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 12 })
+  const base = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, currentInventoryObservation: terminal })
   assert.equal(base.status, 'UNKNOWN')
-  assert.equal(base.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.equal(base.conditions.ender_eye_ready, 'PASS')
   assert.equal(base.conditions.nether_reached, 'UNKNOWN')
   // The gate always carries a first-class predicate section, derived from its own
   // run-scoped evidence when the caller did not supply one.
@@ -561,7 +647,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
     ],
   }
-  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: section })
+  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: section, currentInventoryObservation: terminal })
   assert.equal(upgraded.status, 'PASS', 'a truly observed predicate is sufficient proof')
   assert.equal(upgraded.conditions.ender_eye_ready, 'PASS')
   assert.equal(upgraded.conditions.nether_reached, 'PASS')
@@ -574,15 +660,15 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       { id: 'nether_reached', satisfied: null, observedAtMs: null, observedAt: null, source: null, evidence: {} },
     ],
   }
-  const notUpgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: falseSection })
+  const notUpgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: falseSection, currentInventoryObservation: terminal })
   assert.notEqual(notUpgraded.status, 'PASS')
-  assert.equal(notUpgraded.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.equal(notUpgraded.conditions.ender_eye_ready, 'PASS')
   assert.equal(notUpgraded.conditions.nether_reached, 'UNKNOWN')
 
   const wrongSourceSection = { ...section, sourceSha: OTHER_SOURCE_SHA }
-  const wrongSource = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: wrongSourceSection })
+  const wrongSource = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: wrongSourceSection, currentInventoryObservation: terminal })
   assert.notEqual(wrongSource.status, 'PASS')
-  assert.equal(wrongSource.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.equal(wrongSource.conditions.ender_eye_ready, 'PASS')
   assert.ok(wrongSource.facts.milestonePredicates.mismatches.some((reason) => reason.includes('source_sha_mismatch')))
   ok('false / UNKNOWN predicate evidence can never manufacture a PASS')
 }
@@ -614,6 +700,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       expectedRunId: RUN,
       readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
       policyEvidence: VERIFIED_POLICY,
+      policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
       snapshotDir: dir,
       write: out.write,
     })

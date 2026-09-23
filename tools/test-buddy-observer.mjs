@@ -287,6 +287,14 @@ const aiSummary = buildAiSummary({
   resident: { ...snapshot.resident, available: false, connected: false },
   events: [...snapshot.events, fatalEvents[0]],
 })
+assert.equal(aiSummary.authority.jev.provider, 'typesafe-ai')
+assert.equal(aiSummary.authority.jev.model, 'typesafe-ai/jev')
+assert.equal(aiSummary.authority.system2.configured.provider, 'local-mercury')
+assert.equal(aiSummary.authority.system2.configured.model, 'deterministic|mercury:qwen3.5-9b-local')
+assert.equal(aiSummary.authority.system2.last.provider, 'mercury')
+assert.equal(aiSummary.authority.system2.last.model, 'qwen3.5-9b-local')
+assert.equal(aiSummary.authority.deterministicFallbackEnabled, false)
+assert.ok(!aiSummary.unknown.includes('effective_jev_provider_model_unavailable'))
 assert.equal(aiSummary.runtimeFailure?.event, 'FATAL')
 assert.equal(aiSummary.runtimeFailure?.detail.context, 'jev-authority')
 assert.equal(aiSummary.status.availabilityReason, 'MODEL_UNAVAILABLE')
