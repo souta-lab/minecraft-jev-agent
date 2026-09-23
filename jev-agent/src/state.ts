@@ -2094,11 +2094,121 @@ function buildEntities(
 }
 
 /**
- * Line of sight to an entity. Mineflayer's `canSeeBlock` is a ray from the eyes
- * and only needs `position`, so it works on any entity. A fixture bot that does
- * not implement it yields `undefined` (UNKNOWN) rather than a false negative.
+ * THE AIM POINT of an entity: `position + height / 2`.
+ *
+ * This is the point `executor.runAttack` looks at immediately before it swings
+ * (`bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)`) and the
+ * point `selectAttackStand` casts its visibility ray to. Everything that asks
+ * "can the body see/interact with this entity" is really asking about THIS point,
+ * not about the block its feet happen to be inside.
+ *
+ * The height comes from the live entity when it carries one and otherwise from
+ * the registry row for its name. `prismarine-entity` constructs EVERY entity with
+ * `height = 0` and `width = 0`; only Mineflayer's spawn handler fills them in
+ * (`lib/plugins/entities.js` `setEntityData`). A `0` is therefore "not filled in
+ * yet", never "a zero-tall mob" - so it is resolved from the registry instead of
+ * being believed. `null` means the height could not be resolved at all: UNKNOWN,
+ * and never an invented aim point.
  */
-function canSeeEntity(bot: Bot, entity: { position: Vec3Json }): boolean | undefined {
+export function entityAimPoint(
+  bot: Bot,
+  entity: { position: Vec3Json; height?: number; name?: string },
+): Vec3Json | null {
+  let height: number | null =
+    typeof entity.height === 'number' && Number.isFinite(entity.height) && entity.height > 0
+      ? entity.height
+      : null
+  if (height === null) height = registryEntityHeight(bot, entity.name)
+  if (height === null) return null
+  return { x: entity.position.x, y: entity.position.y + height / 2, z: entity.position.z }
+}
+
+/** The entity's height from the connected version's registry, or null. */
+function registryEntityHeight(bot: Bot, name: string | undefined): number | null {
+  if (typeof name !== 'string' || name.length === 0) return null
+  const registry = bot.registry as
+    | { entitiesByName?: Record<string, { height?: number } | undefined> }
+    | undefined
+  const height = registry?.entitiesByName?.[name]?.height
+  return typeof height === 'number' && Number.isFinite(height) && height > 0 ? height : null
+}
+
+/**
+ * Line of sight from an explicit eye position to an entity's AIM POINT.
+ *
+ * ONE ray, the same `bot.world.raycast` Mineflayer's own `canSeeBlock` uses, with
+ * `matcher = null` so it reports the first SOLID block on the segment (non-solid
+ * blocks - the portal plane, grass, the entity's own air column - do not stop it).
+ *
+ * WHY NOT `bot.canSeeBlock(entity)`. Mineflayer's helper cannot answer this
+ * question for an ENTITY, and it never returns `true`:
+ *
+ *   1. it bounds the ray at `headPos.distanceTo(block.position)` - the distance to
+ *      the entity's FEET - while aiming it at `block.position.offset(0.5, 0.5,
+ *      0.5)`, so the ray always stops short of the point it is aimed at; and
+ *   2. its matcher's identity clause is `block.position.equals(inputBlock.position)`,
+ *      comparing the entity's FRACTIONAL position against INTEGER block positions,
+ *      and its return value repeats the same comparison (`blocks.js` `canSeeBlock`).
+ *
+ * The second comparison is unsatisfiable, so the fact is structurally `false`.
+ * Measured over the whole 3.07M-line live record: `los=true` occurs ZERO times
+ * against 1,149 `los=false` and 172 `los=unknown` - including a human player
+ * 0.25 m from the body. A `false` that can never be `true` is not a fact, and the
+ * feet-vs-aim-point error is worst for exactly the TALL mobs: a 2.9-block
+ * enderman standing behind a one-block ledge has its feet occluded and its chest
+ * in plain view.
+ *
+ * `undefined` = UNKNOWN (no world raycast, an unresolvable height, or a
+ * degenerate/throwing ray), never an invented verdict.
+ */
+export function entityVisibleFromEye(
+  bot: Bot,
+  eye: Vec3Json,
+  entity: { position: Vec3Json; height?: number; name?: string },
+): boolean | undefined {
+  const aim = entityAimPoint(bot, entity)
+  if (aim === null) return undefined
+  const world = bot.world as unknown as
+    | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
+    | undefined
+  if (world === undefined || typeof world.raycast !== 'function') return undefined
+  try {
+    const dx = aim.x - eye.x
+    const dy = aim.y - eye.y
+    const dz = aim.z - eye.z
+    const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    if (!Number.isFinite(range) || range <= 0) return undefined
+    const origin = bot.entity.position.clone().set(eye.x, eye.y, eye.z)
+    const direction = bot.entity.position.clone().set(dx / range, dy / range, dz / range)
+    const hit = world.raycast(origin, direction, range, null)
+    return hit === null || hit === undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Line of sight from the BODY's own eyes to an entity's aim point.
+ *
+ * The aim-point ray is used whenever the connected world offers one; a caller
+ * whose bot has no `world.raycast` (fixtures, replays, offline harnesses) keeps
+ * exactly the previous `canSeeBlock` behaviour, so no existing caller changes
+ * verdict. Callers with no sight question to ask at all still get `undefined`
+ * (UNKNOWN) rather than a false negative.
+ */
+function canSeeEntity(
+  bot: Bot,
+  entity: { position: Vec3Json; height?: number; name?: string },
+): boolean | undefined {
+  const eyeHeight = (bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? EYE_HEIGHT
+  const position = bot.entity.position
+  const eye = {
+    x: position.x,
+    y: position.y + eyeHeight,
+    z: position.z,
+  }
+  const aimPointVerdict = entityVisibleFromEye(bot, eye, entity)
+  if (aimPointVerdict !== undefined) return aimPointVerdict
   const canSee = bot.canSeeBlock
   if (typeof canSee !== 'function') return undefined
   try {
