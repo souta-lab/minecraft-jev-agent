@@ -333,6 +333,31 @@ function isRateLimit(error: unknown, depth = 0): boolean {
   return Array.isArray(row.errors) && row.errors.some((entry) => isRateLimit(entry, depth + 1))
 }
 
+/** Retryable transport/provider failures require a fresh decision epoch. */
+export function isTransientProviderFailure(error: unknown, depth = 0): boolean {
+  if (typeof error === 'string') {
+    return /503|service temporarily unavailable|service unavailable|upstream unavailable|connection reset|ECONN(?:RESET|REFUSED|ABORTED)|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|timed? ?out/i.test(error)
+  }
+  if (depth > 5 || typeof error !== 'object' || error === null) return false
+  const row = error as Record<string, unknown>
+  const code = typeof row.code === 'string' ? row.code : ''
+  if (/^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH)$/.test(code)) return true
+  const status = [row.statusCode, row.status, row.httpStatus].find(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+  )
+  if (status === 408 || status === 425 || status === 429 || (status !== undefined && status >= 500 && status <= 599)) return true
+  const name = typeof row.name === 'string' ? row.name : ''
+  const message = typeof row.message === 'string' ? row.message : ''
+  if (/GatewayInternalServerError|ServiceUnavailable|Timeout|NetworkError/i.test(name)) return true
+  if (/503|service temporarily unavailable|service unavailable|upstream unavailable|connection reset|ECONN(?:RESET|REFUSED|ABORTED)|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|timed? ?out/i.test(message)) return true
+  if (
+    isTransientProviderFailure(row.cause, depth + 1) ||
+    isTransientProviderFailure(row.lastError, depth + 1) ||
+    isTransientProviderFailure(row.response, depth + 1)
+  ) return true
+  return Array.isArray(row.errors) && row.errors.some((entry) => isTransientProviderFailure(entry, depth + 1))
+}
+
 function describe(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`
   try { return JSON.stringify(error) } catch { return '<unserialisable>' }
@@ -439,6 +464,17 @@ export class AuthorityJevPolicy implements JevPolicy {
           })
           await sleep(delayMs)
           continue
+        }
+        if (isTransientProviderFailure(error)) {
+          this.options.writer.write({
+            record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+            model: this.model, stage: request.stage, latencyMs: Date.now() - started,
+            rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs, state: modelState,
+            questions, response: null, error: message,
+            authority: { pi: 'model', beta: 'model', failure: 'transient-provider-unavailable' },
+            retryable: true,
+          })
+          throw new FatalModelError('jev-authority', generalAttempt, message, true)
         }
         if (generalAttempt < maxGeneralAttempts) {
           this.options.writer.write({

@@ -17,6 +17,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
+import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
+import { modelFailureDisposition, stopGenerationForModelRecovery } from './model-recovery.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
@@ -2601,10 +2603,26 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // `llm` turns the controller's exception paths into bounded replans.
   const plannerMode = resolvePlannerMode()
 
-  // OWNER DIRECTIVE: a model failure is never hidden. The host terminator logs a
-  // FATAL line (through each component's log) and exits non-zero, so the resident
-  // process stops instead of silently degrading to the deterministic ladder.
-  const terminateResident = (): never => {
+  // A retryable Jev provider outage stops this generation and lets HOST retry
+  // under the same model authority. Construction/configuration failures and
+  // non-Jev model failures retain the process-fatal behavior.
+  let controllerForRecovery: JevController | null = null
+  let modelRecoveryStopReason: string | null = null
+  const terminateResident = (error?: FatalModelError): never => {
+    if (error !== undefined && controllerForRecovery !== null && modelFailureDisposition(error, true) === 'recover-generation') {
+      modelRecoveryStopReason = 'model-unavailable'
+      ctx.log('MODEL_UNAVAILABLE', {
+        code: 'MODEL_UNAVAILABLE',
+        action: 'stop-generation-for-recovery',
+        context: error.context,
+        attempts: error.attempts,
+        error: error.reason,
+        retryable: true,
+        generationId: id,
+      })
+      const recovery = stopGenerationForModelRecovery(error, id, controllerForRecovery)
+      if (recovery !== null) throw recovery
+    }
     ctx.log('ERROR', { code: 'MODEL_UNAVAILABLE', action: 'terminate-resident', pid: process.pid, exitCode: 1 })
     process.exit(1)
   }
@@ -2900,6 +2918,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   const controller = new JevController(bot, options)
+  controllerForRecovery = controller
   // The stock fallback has no DESCEND branch; without this wrapper a stalled
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
@@ -3093,10 +3112,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     runPromise = controller
       .wait()
       .then((result: RunSummary) => {
-        stopped = result.stopped
+        stopped = modelRecoveryStopReason ?? result.stopped
         ctx.log('GENERATION_STOP', {
           id,
-          stopped: result.stopped,
+          stopped,
           success: result.success,
           ticks: result.ticks,
           verifiedDigs: result.verifiedDigs,
