@@ -13,7 +13,8 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { scanRunLines } from './m2-gate.mjs'
 import {
   M3_REQUIRED_CONDITIONS,
@@ -39,6 +40,9 @@ function capture() {
 
 const RUN = 'run-m3-a'
 const OTHER_RUN = 'run-m3-b'
+const SOURCE_SHA = 'a'.repeat(40)
+const OTHER_SOURCE_SHA = 'b'.repeat(40)
+const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
 
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0 },
@@ -63,7 +67,7 @@ const FALLBACK_POLICY = {
   },
 }
 
-const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=abc123 worldEpoch=1`
+const boot = (runId, sourceSha = SOURCE_SHA) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=${sourceSha} worldEpoch=1`
 const inv = (counts, pos = '10,64,20') => `[2026-09-20T10:00:01.000Z] INVENTORY items=${JSON.stringify(counts)} pos=${pos}`
 // The real HEARTBEAT carries NO dimension field (0 occurrences in a live 75 MB log). The body's own
 // dimension is reported by DIMENSION_OBSERVED / DIMENSION_TRANSITION (buddy-driver/dimension-observer.ts)
@@ -95,6 +99,8 @@ function evidenceFrom(lines, runId = RUN) {
   return {
     status: 'valid',
     runId,
+    sourceSha: scanned.sourceSha,
+    sourceShaReason: scanned.sourceShaReason,
     sources: [
       {
         name: 'fixture:log',
@@ -118,6 +124,19 @@ async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json
     policyEvidence,
   })
   return { code, text: out.text(), lines: out.lines }
+}
+
+function runGateCli(args) {
+  const child = Bun.spawnSync(['bun', join(TOOL_DIR, 'm3-gate.mjs'), ...args], {
+    cwd: TOOL_DIR,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  return {
+    code: child.exitCode,
+    stdout: new TextDecoder().decode(child.stdout),
+    stderr: new TextDecoder().decode(child.stderr),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +223,127 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   assert.equal(requestedM3RunId([], { M3_RUN_ID: 'run-env' }), 'run-env')
   assert.equal(requestedM3RunId([], { M2_RUN_ID: 'run-wrong-env' }), null)
   ok('requestedM3RunId reads M3_RUN_ID only and validates the run id shape')
+}
+
+// ---------------------------------------------------------------------------
+// 4b. normal CLI binds host predicates to the independent BOOT source SHA
+// ---------------------------------------------------------------------------
+{
+  const dir = mkdtempSync(join(tmpdir(), 'm3-source-sha-'))
+  try {
+    const logPath = join(dir, 'buddy.log')
+    const runnerOutPath = join(dir, 'runner.out')
+    const decisionsPath = join(dir, 'decisions.jsonl')
+    const controlSocketPath = join(dir, 'missing-control.sock')
+    const predicatePath = join(dir, `milestone-predicates-${RUN}.json`)
+    const runLog = [boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 0 })]
+    const runnerLog = [
+      boot(RUN),
+      '[2026-09-20T10:00:00.100Z] GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false',
+      '[2026-09-20T10:01:00.000Z] HOST_LOCK released reason=fixture',
+    ]
+    const decisionLines = [JSON.stringify({ record: 'decision', ts: '2026-09-20T10:00:01.000Z', source: 'jev' })]
+    const observedPredicates = [
+      { id: 'ender_eyes', satisfied: true, observedAtMs: 1, observedAt: new Date(1).toISOString(), source: 'host-observe:rung:ender_eyes', evidence: {} },
+      { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
+    ]
+    writeFileSync(logPath, `${runLog.join('\n')}\n`)
+    writeFileSync(runnerOutPath, `${runnerLog.join('\n')}\n`)
+    writeFileSync(decisionsPath, `${decisionLines.join('\n')}\n`)
+    writeFileSync(
+      predicatePath,
+      JSON.stringify({ record: 'milestone-predicates', schemaVersion: 1, runId: RUN, sourceSha: SOURCE_SHA, predicates: observedPredicates }),
+    )
+
+    const commonArgs = [
+      '--run', RUN,
+      '--log', logPath,
+      '--snapshot-dir', dir,
+      '--decisions', decisionsPath,
+      '--runner-out', runnerOutPath,
+      '--control-socket', controlSocketPath,
+    ]
+    const text = runGateCli(commonArgs)
+    assert.equal(text.code, 0, `${text.stderr}\n${text.stdout}`)
+    assert.match(text.stdout, new RegExp(`sourceSha: ${SOURCE_SHA}`), text.stdout)
+    assert.match(text.stdout, new RegExp(`m3_predicates: runId=${RUN} sourceSha=${SOURCE_SHA}`), text.stdout)
+    assert.match(text.stdout, /mismatches=none/, text.stdout)
+
+    const json = runGateCli([...commonArgs, '--json'])
+    assert.equal(json.code, 0, `${json.stderr}\n${json.stdout}`)
+    const parsed = JSON.parse(json.stdout)
+    assert.equal(parsed.sourceSha, SOURCE_SHA)
+    assert.equal(parsed.facts.sourceSha, SOURCE_SHA)
+    assert.equal(parsed.facts.milestonePredicates.sourceSha, SOURCE_SHA)
+
+    writeFileSync(
+      predicatePath,
+      JSON.stringify({ record: 'milestone-predicates', schemaVersion: 1, runId: RUN, sourceSha: OTHER_SOURCE_SHA, predicates: observedPredicates }),
+    )
+    const mismatched = runGateCli([...commonArgs, '--json'])
+    assert.equal(mismatched.code, 2, `${mismatched.stderr}\n${mismatched.stdout}`)
+    const mismatchJson = JSON.parse(mismatched.stdout)
+    assert.notEqual(mismatchJson.status, 'PASS')
+    assert.ok(mismatchJson.facts.milestonePredicates.mismatches.some((reason) => reason.includes('source_sha_mismatch')))
+    assert.equal(
+      mismatchJson.facts.milestonePredicates.predicates.find((predicate) => predicate.id === 'ender_eyes').satisfied,
+      false,
+    )
+
+    writeFileSync(
+      predicatePath,
+      JSON.stringify({ record: 'milestone-predicates', schemaVersion: 1, runId: RUN, sourceSha: null, predicates: observedPredicates }),
+    )
+    const missingPredicateSha = runGateCli([...commonArgs, '--json'])
+    assert.equal(missingPredicateSha.code, 2, `${missingPredicateSha.stderr}\n${missingPredicateSha.stdout}`)
+    const missingPredicateJson = JSON.parse(missingPredicateSha.stdout)
+    assert.notEqual(missingPredicateJson.status, 'PASS')
+    assert.ok(missingPredicateJson.facts.milestonePredicates.mismatches.some((reason) => reason.includes('source_sha_missing')))
+    assert.equal(
+      missingPredicateJson.facts.milestonePredicates.predicates.find((predicate) => predicate.id === 'ender_eyes').satisfied,
+      false,
+    )
+
+    const noSourceRun = 'run-m3-no-source'
+    const noSourceLogPath = join(dir, 'no-source.log')
+    const noSourceRunnerOutPath = join(dir, 'no-source-runner.out')
+    const noSourceDecisionsPath = join(dir, 'no-source-decisions.jsonl')
+    const noSourceBoot = `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${noSourceRun} bundle=none worldEpoch=1`
+    writeFileSync(
+      noSourceLogPath,
+      `${[
+        noSourceBoot,
+        dimensionTransition('minecraft:the_nether', noSourceRun),
+        inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 }),
+      ].join('\n')}\n`,
+    )
+    writeFileSync(
+      noSourceRunnerOutPath,
+      `${[
+        noSourceBoot,
+        '[2026-09-20T10:00:00.100Z] GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false',
+        '[2026-09-20T10:01:00.000Z] HOST_LOCK released reason=fixture',
+      ].join('\n')}\n`,
+    )
+    writeFileSync(noSourceDecisionsPath, `${decisionLines.join('\n')}\n`)
+    const unavailable = runGateCli([
+      '--run', noSourceRun,
+      '--log', noSourceLogPath,
+      '--snapshot-dir', dir,
+      '--decisions', noSourceDecisionsPath,
+      '--runner-out', noSourceRunnerOutPath,
+      '--control-socket', controlSocketPath,
+      '--json',
+    ])
+    assert.equal(unavailable.code, 2, `${unavailable.stderr}\n${unavailable.stdout}`)
+    const unavailableJson = JSON.parse(unavailable.stdout)
+    assert.equal(unavailableJson.status, 'UNKNOWN')
+    assert.match(unavailableJson.reason, /run_source_sha_unavailable.*run_source_sha_missing/)
+    assert.equal(unavailableJson.sourceSha, null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  ok('normal --run CLI binds matching BOOT/predicate SHA, rejects mismatch and keeps unknown source as UNKNOWN')
 }
 
 // ---------------------------------------------------------------------------
@@ -300,17 +440,20 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     terminal: null,
   }
   writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify(snapshot))
+  const sourceLog = join(dir, 'source.log')
+  writeFileSync(sourceLog, `${boot(RUN)}\n`)
   const out = capture()
   const code = await runM3Gate({
     expectedRunId: RUN,
     readEvidence: null,
-    logPath: join(dir, 'absent.log'),
+    logPath: sourceLog,
     snapshotDir: dir,
     policyEvidence: VERIFIED_POLICY,
     write: out.write,
   })
   assert.equal(code, 0, out.text())
   assert.match(out.text(), /m3_evidence: valid sources=snapshot/, out.text())
+  assert.match(out.text(), new RegExp(`sourceSha: ${SOURCE_SHA}`), out.text())
   assert.match(out.text(), /status=PASS/, out.text())
 
   // A file named for another run but carrying RUN's body is never attributed.
@@ -409,7 +552,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
 
   const section = {
     runId: RUN,
-    sourceSha: null,
+    sourceSha: SOURCE_SHA,
     observationSources: ['host-observe'],
     missing: [],
     mismatches: [],
@@ -435,6 +578,12 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   assert.notEqual(notUpgraded.status, 'PASS')
   assert.equal(notUpgraded.conditions.ender_eye_ready, 'UNKNOWN')
   assert.equal(notUpgraded.conditions.nether_reached, 'UNKNOWN')
+
+  const wrongSourceSection = { ...section, sourceSha: OTHER_SOURCE_SHA }
+  const wrongSource = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: wrongSourceSection })
+  assert.notEqual(wrongSource.status, 'PASS')
+  assert.equal(wrongSource.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.ok(wrongSource.facts.milestonePredicates.mismatches.some((reason) => reason.includes('source_sha_mismatch')))
   ok('false / UNKNOWN predicate evidence can never manufacture a PASS')
 }
 
@@ -450,7 +599,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
         record: 'milestone-predicates',
         schemaVersion: 1,
         runId: RUN,
-        sourceSha: null,
+        sourceSha: SOURCE_SHA,
         generationId: 'gen-1',
         observationCount: 7,
         updatedAt: new Date(7).toISOString(),

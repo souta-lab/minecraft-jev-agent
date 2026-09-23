@@ -51,6 +51,7 @@ function capture() {
 
 const RUN = 'run-m2-a'
 const OTHER_RUN = 'run-m2-b'
+const SOURCE_SHA = 'a'.repeat(40)
 
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0 },
@@ -62,7 +63,7 @@ const FALLBACK_POLICY = {
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
 }
 
-const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=abc123 worldEpoch=1`
+const boot = (runId, sourceSha = SOURCE_SHA) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=${sourceSha} worldEpoch=1`
 const inv = (counts, pos = '10,64,20') => `[2026-09-20T10:00:01.000Z] INVENTORY items=${JSON.stringify(counts)} pos=${pos}`
 
 const DIAMOND_READY = inv({ diamond: 3, diamond_pickaxe: 1 })
@@ -120,6 +121,8 @@ ok('parseInventoryMarker reads the flat counts map and rejects prose')
   const lines = [boot(RUN), inv({ diamond: 3 }), '[2026-09-20T10:00:02.000Z] PORTAL_LIT pos=1,2,3 dimension=minecraft:overworld']
   const scanned = scanRunLines(RUN, lines)
   assert.equal(scanned.status, 'valid')
+  assert.equal(scanned.sourceSha, SOURCE_SHA)
+  assert.equal(scanned.sourceShaReason, null)
   assert.equal(scanned.inventorySamples.length, 1)
   assert.deepEqual(scanned.portalEvents.map((event) => event.name), ['PORTAL_LIT'])
   ok('scanRunLines attributes untimed markers to the active BOOT run')
@@ -153,6 +156,16 @@ ok('parseInventoryMarker reads the flat counts map and rejects prose')
   assert.equal(scanned.inventorySamples.length, 0)
   assert.equal(scanned.portalEvents.length, 0)
   ok('a marker carrying runId without a real BOOT boundary is unknown')
+}
+
+{
+  const missing = scanRunLines(RUN, [`[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${RUN} bundle=none`])
+  const ambiguous = scanRunLines(RUN, [boot(RUN), boot(RUN, 'b'.repeat(40))])
+  assert.equal(missing.sourceSha, null)
+  assert.equal(missing.sourceShaReason, 'run_source_sha_missing')
+  assert.equal(ambiguous.sourceSha, null)
+  assert.equal(ambiguous.sourceShaReason, 'run_source_sha_ambiguous')
+  ok('BOOT sourceSha must be a single exact SHA and repeated BOOT records must agree')
 }
 
 // ---------------------------------------------------------------------------

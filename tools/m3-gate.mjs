@@ -28,7 +28,10 @@
 //
 // `--run <runId>` (or M3_RUN_ID) is MANDATORY. Evidence from another run is
 // never attributed to R, so a run's inventory can never be combined with
-// another run's. Missing/unbound evidence is UNKNOWN and NEVER PASS.
+// another run's. The run's exact 40-hex source SHA is independently bound from
+// R's BOOT line; a missing/ambiguous SHA is UNKNOWN, and host predicate evidence
+// is accepted only when its own SHA matches that BOOT source. Missing/unbound
+// evidence is UNKNOWN and NEVER PASS.
 //
 // FAIL is reserved for a known capability failure: R's own evidence proves every
 // crafting input for 12 eyes existed at one instant (ender_pearl>=12 AND
@@ -70,6 +73,7 @@ export { BLAZE_POWDER, BLAZE_POWDER_REQUIRED, BLAZE_ROD, BLAZE_ROD_REQUIRED, END
 
 export const M3_RUN_RESULT = 'M3_RUN_RESULT'
 export const M3_RUN_GATE = 'M3_RUN_GATE'
+const SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
 
 /** The conditions M3 must prove; inventory facts beyond these are diagnostics. */
 export const M3_REQUIRED_CONDITIONS = Object.freeze(['ender_eye_ready', 'model_authority', 'nether_reached'])
@@ -151,11 +155,15 @@ export function evaluateM3AuthorityEvidence({ expectedRunId = null, decisions = 
 // ---------------------------------------------------------------------------
 
 function unknownConditions() {
-  return { ender_eye_ready: 'UNKNOWN', model_authority: 'UNKNOWN' }
+  return { ender_eye_ready: 'UNKNOWN', model_authority: 'UNKNOWN', nether_reached: 'UNKNOWN' }
 }
 
-function verdict({ status, code, reason, runId, conditions, evidence = null, sources = null, facts = null }) {
-  return { id: 'M3', status, code, reason, runId, conditions, evidence, sources, facts }
+function normalizeSourceSha(value) {
+  return typeof value === 'string' && SOURCE_SHA_RE.test(value) ? value.toLowerCase() : null
+}
+
+function verdict({ status, code, reason, runId, sourceSha = null, conditions, evidence = null, sources = null, facts = null }) {
+  return { id: 'M3', status, code, reason, runId, sourceSha, conditions, evidence, sources, facts }
 }
 
 /**
@@ -197,6 +205,32 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     })
   }
 
+  // The run's source identity comes only from its BOOT line in the run-scoped
+  // resident log. A predicate artifact's own sourceSha, or a caller-supplied
+  // value, cannot establish the expected source.
+  const runSourceSha = normalizeSourceSha(evidence.sourceSha)
+  if (runSourceSha === null) {
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: `run_source_sha_unavailable reason=${evidence.sourceShaReason ?? 'run_source_sha_missing'}`,
+      runId: expectedRunId,
+      conditions: unknownConditions(),
+      evidence: evidence.status,
+    })
+  }
+  if (sourceSha !== null && normalizeSourceSha(sourceSha) !== runSourceSha) {
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: `run_source_sha_mismatch expected=${runSourceSha} observed=${normalizeSourceSha(sourceSha) ?? 'invalid'}`,
+      runId: expectedRunId,
+      sourceSha: runSourceSha,
+      conditions: unknownConditions(),
+      evidence: evidence.status,
+    })
+  }
+
   const sources = Array.isArray(evidence.sources) ? evidence.sources : []
   const samples = sources.flatMap((source) => (Array.isArray(source.inventorySamples) ? source.inventorySamples : []))
   const eyes = evaluateEnderEyes(samples)
@@ -212,18 +246,30 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
   // sources this gate judges. A predicate may only ever UPGRADE a condition to
   // PASS when it was truly observed (`satisfied === true`); `false`/UNKNOWN never
   // manufacture a PASS, and the FAIL path below is driven by the inventory facts.
-  const predicateSection =
-    milestonePredicates ??
+  const deriveFromRunEvidence = (hostObservation = null) =>
     deriveMilestonePredicates({
       runId: expectedRunId,
-      runSourceSha: sourceSha ?? null,
+      runSourceSha,
       inventorySamples: samples.map((counts) => ({ counts, source: 'log' })),
       dimensionObservations: observedDimensions.map((entry) => ({
         dimension: typeof entry === 'string' ? entry : entry?.dimension,
         source: typeof entry === 'object' && entry?.source ? entry.source : 'log',
       })),
       portalEvents: sources.flatMap((source) => (Array.isArray(source.portalEvents) ? source.portalEvents.map((event) => ({ ...event, source: source.name })) : [])),
+      hostObservation,
     })
+  let predicateSection = milestonePredicates ?? deriveFromRunEvidence()
+  if (
+    milestonePredicates !== null &&
+    (milestonePredicates.runId !== expectedRunId || normalizeSourceSha(milestonePredicates.sourceSha) !== runSourceSha)
+  ) {
+    const observedSha = normalizeSourceSha(milestonePredicates.sourceSha) ?? 'unknown'
+    const reason = milestonePredicates.runId !== expectedRunId
+      ? `milestone_predicates_run_mismatch expected=${expectedRunId} observed=${milestonePredicates.runId ?? 'unknown'}`
+      : `milestone_predicates_source_sha_mismatch expected=${runSourceSha} observed=${observedSha}`
+    predicateSection = deriveFromRunEvidence()
+    predicateSection.mismatches.push(reason)
+  }
   const predicateTrue = (id) => predicateSection.predicates.some((predicate) => predicate.id === id && predicate.satisfied === true)
   const eyesReady = eyes.ready || predicateTrue('ender_eyes')
   const materialsFail = !eyesReady && eyes.materialInputsComplete
@@ -250,6 +296,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     dimensionObservations: Array.isArray(source.dimensionObservations) ? source.dimensionObservations : [],
   }))
   const facts = {
+    sourceSha: runSourceSha,
     eyes,
     dimension,
     dimensions: [...new Set(observedDimensions.map((entry) => (typeof entry === 'string' ? entry : entry?.dimension ?? null)))],
@@ -278,6 +325,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
       code: 1,
       reason: 'ender_eyes_short_with_crafting_materials',
       runId: expectedRunId,
+      sourceSha: runSourceSha,
       conditions,
       sources: perSource,
       facts,
@@ -304,6 +352,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
       code: 2,
       reason: `m3_stages_incomplete:${unmetRequired.join(',')}`,
       runId: expectedRunId,
+      sourceSha: runSourceSha,
       conditions,
       sources: perSource,
       facts,
@@ -315,6 +364,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
       code: 0,
       reason: 'twelve_eyes_of_ender_verified',
       runId: expectedRunId,
+      sourceSha: runSourceSha,
       conditions,
       sources: perSource,
       facts,
@@ -326,6 +376,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     code: 2,
     reason: `m3_stages_incomplete:${missing.join(',')}`,
     runId: expectedRunId,
+    sourceSha: runSourceSha,
     conditions,
     sources: perSource,
     facts,
@@ -404,7 +455,7 @@ export async function runM3Gate({
     scoped && hostObservation !== null && hostObservation.present
       ? deriveMilestonePredicates({
           runId: expectedRunId,
-          runSourceSha: sourceSha ?? null,
+          runSourceSha: evidence?.sourceSha ?? null,
           inventorySamples: (evidence?.sources ?? []).flatMap((source) =>
             (Array.isArray(source.inventorySamples) ? source.inventorySamples : []).map((counts) => ({ counts, source: 'log' })),
           ),
@@ -427,6 +478,7 @@ export async function runM3Gate({
         status: result.status,
         reason: result.reason,
         runId: result.runId,
+        sourceSha: result.sourceSha,
         conditions: result.conditions,
         evidence: evidence === null ? null : { status: evidence.status, sources: (evidence.sources ?? []).map((s) => s.name) },
         policy: policy === null ? null : { status: policy.status, reason: policy.reason },
@@ -438,6 +490,7 @@ export async function runM3Gate({
 
   write(`${M3_RUN_GATE} — ${stamp}`)
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
+  write(`sourceSha: ${result.sourceSha ?? 'unknown'}`)
   if (evidence !== null) {
     const sourceNames = (evidence.sources ?? []).map((source) => source.name).join(',')
     write(`m3_evidence: ${evidence.status} sources=${sourceNames || 'none'}${evidence.reason ? ` reason=${evidence.reason}` : ''}`)
@@ -456,7 +509,8 @@ export async function runM3Gate({
         `m3_predicates: runId=${section.runId ?? 'none'} sourceSha=${section.sourceSha ?? 'unknown'} ` +
           `sources=${section.observationSources.join(',') || 'none'} ` +
           `observed=${section.predicates.filter((predicate) => predicate.satisfied !== null).length}/${section.predicates.length} ` +
-          `missing=${section.missing.join(',') || 'none'}`,
+          `missing=${section.missing.join(',') || 'none'} ` +
+          `mismatches=${section.mismatches.join(',') || 'none'}`,
       )
       for (const predicate of section.predicates) {
         write(
@@ -468,7 +522,8 @@ export async function runM3Gate({
   }
   write(
     `${M3_RUN_RESULT} status=${result.status} reason=${result.reason} runId=${expectedRunId ?? 'none'} ` +
-      `ender_eye=${result.conditions.ender_eye_ready} authority=${result.conditions.model_authority}`,
+      `ender_eye=${result.conditions.ender_eye_ready} authority=${result.conditions.model_authority} ` +
+      `sourceSha=${result.sourceSha ?? 'unknown'}`,
   )
   return result.code
 }
