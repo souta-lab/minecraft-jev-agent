@@ -71,9 +71,9 @@ check(
   formatMoveFailMem(moveFailureKey(OVERWORLD, pos), third.entry.attempts, 'stuck'),
 )
 check(
-  'a guard-level NO_PATH charges tracked movement as unreachable',
-  guardMoveFailureReason({ kind: 'MOVE' }, 'NO_PATH') === 'unreachable' &&
-    guardMoveFailureReason({ kind: 'RETRIEVE' }, 'NO_PATH') === 'unreachable',
+  'a guard-level NO_PATH preserves the typed no_path movement failure',
+  guardMoveFailureReason({ kind: 'MOVE' }, 'NO_PATH') === 'no_path' &&
+    guardMoveFailureReason({ kind: 'RETRIEVE' }, 'NO_PATH') === 'no_path',
   `move=${guardMoveFailureReason({ kind: 'MOVE' }, 'NO_PATH')} retrieve=${guardMoveFailureReason({ kind: 'RETRIEVE' }, 'NO_PATH')}`,
 )
 check(

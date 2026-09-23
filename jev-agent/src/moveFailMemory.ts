@@ -51,6 +51,21 @@ export interface MoveFailEntry {
    * on the entry), so a reload does not reset the escalation.
    */
   oscillationStrikes?: number
+  /**
+   * A pathfinder/guard NO_PATH is immediately reusable while the body remains
+   * in this cell and the observed world revision is unchanged. Unlike the
+   * bounded cooldown, this is a state-conditioned mechanical fact: moving the
+   * body, mutating the world, or starting a new resident generation invalidates
+   * it.
+   */
+  pathFailureScope?: MoveFailurePathScope
+}
+
+export interface MoveFailurePathScope {
+  origin: Vec3Like
+  worldRevision: number
+  /** Unique to one resident generation; worldRevision counters may restart. */
+  generationId: string
 }
 
 /** Upper bound for the escalation applied by repeated oscillation escapes (#360). */
@@ -183,6 +198,25 @@ export class MoveFailMemory {
           ? source.lastReason
           : 'unreachable'
       const blacklistedUntil = Number.isFinite(source.blacklistedUntil) ? Math.max(0, source.blacklistedUntil) : 0
+      const sourceScope = source.pathFailureScope
+      const pathFailureScope =
+        sourceScope !== undefined &&
+        sourceScope !== null &&
+        typeof sourceScope === 'object' &&
+        sourceScope.origin !== null &&
+        typeof sourceScope.origin === 'object' &&
+        Number.isFinite(sourceScope.origin.x) &&
+        Number.isFinite(sourceScope.origin.y) &&
+        Number.isFinite(sourceScope.origin.z) &&
+        Number.isFinite(sourceScope.worldRevision) &&
+        typeof sourceScope.generationId === 'string' &&
+        sourceScope.generationId.length > 0
+          ? {
+              origin: moveFailureCell(sourceScope.origin),
+              worldRevision: sourceScope.worldRevision,
+              generationId: sourceScope.generationId,
+            }
+          : undefined
       const entry: MoveFailEntry = {
         key: moveFailureKey(dimension, position),
         dimension,
@@ -192,6 +226,7 @@ export class MoveFailMemory {
         lastFailedAt,
         lastReason,
         blacklistedUntil,
+        ...(pathFailureScope === undefined ? {} : { pathFailureScope }),
       }
       this.entries.set(entry.key, entry)
     }
@@ -220,6 +255,9 @@ export class MoveFailMemory {
     entry.attempts += 1
     entry.lastFailedAt = now
     entry.lastReason = reason
+    // A non-path outcome no longer supports the same state-conditioned route
+    // refusal. `recordPathFailure` attaches a fresh scope after this method.
+    entry.pathFailureScope = undefined
     let newlyBlacklisted = false
     if (entry.attempts >= this.failureLimit) {
       // Never SHORTEN an active (possibly escalated) escape cooldown: a later
@@ -230,6 +268,26 @@ export class MoveFailMemory {
     }
     this.evictIfNeeded()
     return { entry, blacklisted: entry.attempts >= this.failureLimit, newlyBlacklisted }
+  }
+
+  /**
+   * Record a NO_PATH and suppress this destination immediately for the same
+   * body cell, world revision, and resident generation. The ordinary failure
+   * threshold/cooldown remains the fallback when that complete witness changes
+   * or is unavailable.
+   */
+  recordPathFailure(
+    dimension: string,
+    position: Vec3Like,
+    scope: MoveFailurePathScope,
+  ): MoveFailRecordResult {
+    const result = this.record(dimension, position, 'no_path')
+    result.entry.pathFailureScope = {
+      origin: moveFailureCell(scope.origin),
+      worldRevision: scope.worldRevision,
+      generationId: scope.generationId,
+    }
+    return result
   }
 
   /** Force a coordinate onto the blacklist immediately (oscillation escape). */
@@ -258,6 +316,7 @@ export class MoveFailMemory {
     base.attempts = attempts
     base.lastReason = reason
     base.lastFailedAt = now
+    base.pathFailureScope = undefined
     const strikes = (base.oscillationStrikes ?? 0) + 1
     base.oscillationStrikes = strikes
     const escalated = Math.min(this.cooldownMs * 2 ** (strikes - 1), MAX_OSCILLATION_COOLDOWN_MS)
@@ -268,24 +327,33 @@ export class MoveFailMemory {
   }
 
   /** Consult the memory before attempting a coordinate. */
-  check(dimension: string, position: Vec3Like): MoveFailCheck {
+  check(dimension: string, position: Vec3Like, scope?: MoveFailurePathScope | null): MoveFailCheck {
     const now = this.now()
     const entry = this.entries.get(moveFailureKey(dimension, position))
     if (entry === undefined) {
       return { known: false, attempts: 0, blacklisted: false, cooldownRemainingMs: 0, lastReason: null }
     }
-    const blacklisted = entry.attempts >= this.failureLimit && entry.blacklistedUntil > now
+    const cooldownBlacklisted = entry.attempts >= this.failureLimit && entry.blacklistedUntil > now
+    const pathFactStillApplies =
+      scope !== undefined &&
+      scope !== null &&
+      entry.lastReason === 'no_path' &&
+      entry.pathFailureScope !== undefined &&
+      entry.pathFailureScope.worldRevision === scope.worldRevision &&
+      entry.pathFailureScope.generationId === scope.generationId &&
+      moveFailureKey(dimension, entry.pathFailureScope.origin) === moveFailureKey(dimension, scope.origin)
+    const blacklisted = cooldownBlacklisted || pathFactStillApplies
     return {
       known: true,
       attempts: entry.attempts,
       blacklisted,
-      cooldownRemainingMs: blacklisted ? entry.blacklistedUntil - now : 0,
+      cooldownRemainingMs: cooldownBlacklisted ? entry.blacklistedUntil - now : 0,
       lastReason: entry.lastReason,
     }
   }
 
-  isBlacklisted(dimension: string, position: Vec3Like): boolean {
-    return this.check(dimension, position).blacklisted
+  isBlacklisted(dimension: string, position: Vec3Like, scope?: MoveFailurePathScope | null): boolean {
+    return this.check(dimension, position, scope).blacklisted
   }
 
   /** Success resets the coordinate's memory. Returns true when an entry existed. */
@@ -351,6 +419,7 @@ export function filterBlacklistedMoves<T extends TrackableMoveCandidate>(
   candidates: readonly T[],
   memory: MoveFailMemory,
   dimension: string,
+  pathFailureScope?: MoveFailurePathScope | null,
 ): FilterBlacklistedResult<T> {
   const kept: T[] = []
   const skipped: SkippedMoveCandidate<T>[] = []
@@ -359,7 +428,7 @@ export function filterBlacklistedMoves<T extends TrackableMoveCandidate>(
       kept.push(candidate)
       continue
     }
-    const check = memory.check(dimension, candidate.target)
+    const check = memory.check(dimension, candidate.target, pathFailureScope)
     if (!check.blacklisted) {
       kept.push(candidate)
       continue

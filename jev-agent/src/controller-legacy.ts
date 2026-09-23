@@ -168,6 +168,7 @@ import { isResourceClass, matchesResourceClass, resourceMatches } from './resour
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
+import { createPositionFactCache } from './positionFactCache.ts'
 import {
   detectOscillation,
   filterBlacklistedMoves,
@@ -180,7 +181,7 @@ import {
   moveFailureKey,
   StateFingerprintMemory,
 } from './moveFailMemory.ts'
-import type { MoveFailEntry, MoveFailureReason } from './moveFailMemory.ts'
+import type { MoveFailEntry, MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
 // The durable cross-action bound on one action's own typed outcome repeating
 // identically at the same target. The module owns the ONE bound; the controller
 // only observes and prunes.
@@ -828,7 +829,7 @@ export function guardMoveFailureReason(
   code: GuardCode,
 ): MoveFailureReason | null {
   if (candidate === undefined || !isTrackedMoveKind(candidate.kind)) return null
-  return code === 'NO_PATH' ? 'unreachable' : null
+  return code === 'NO_PATH' ? 'no_path' : null
 }
 
 /**
@@ -2473,6 +2474,8 @@ export class JevController {
   private readonly stationApproachLogged = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
   private moveFailMemory: MoveFailMemory
+  /** Prevent a persisted worldRevision counter from aliasing this resident's path facts. */
+  private readonly movePathFailureGenerationId = randomUUID()
   /**
    * #oscillation-boundary: the DURABLE local-motion record. It is seeded from
    * class-A world memory at construction and written back through
@@ -4437,18 +4440,25 @@ export class JevController {
           freshIds.add(controlId)
         }
       }
+      const sharedReachability = this.reachabilityGateOptions()
       const guarded = guardDecision(chosenId, freshCandidates, freshState, {
         phase: 'decision',
         candidateIds: freshIds,
         inFlight: this.inFlight(),
         reach: this.options.reach,
         maxCandidateAgeTicks: this.options.maxCandidateAgeTicks,
-        canComputePath: (position) => this.canComputePath(position),
+        // Candidate grounding and the final guard must consume ONE path fact in
+        // this tick. A second GoalBlock search here used to contradict a passing
+        // candidate probe and let the same target cycle through again.
+        canComputePath: (position) =>
+          sharedReachability.pathProbe === undefined || sharedReachability.pathProbe === null
+            ? this.canComputePath(position)
+            : sharedReachability.pathProbe(position) === 'reachable',
         // The SAME per-tick station-approach fact the candidate layer gates on
         // (`reachabilityGateOptions()` is memoised per tick), so a station the
         // grounding proved reachable through its interaction stand can never be
         // refused here by a probe of the station's own cell.
-        stationApproach: this.reachabilityGateOptions().stationApproach ?? null,
+        stationApproach: sharedReachability.stationApproach ?? null,
       })
 
       const record = makeDecisionRecord({
@@ -11050,10 +11060,11 @@ export class JevController {
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
     const keys = new Set<string>()
     const dimension = state.self.dimension
+    const pathFailureScope = this.movePathFailureScope(state)
     const consider = (name: string, position: Vec3Json): void => {
       const retrieveId = `RETRIEVE:known:station:${name}:${blockId('b', position)}`
       const withheld = this.withheldCandidateIds.has(retrieveId)
-      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, position)) return
+      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, position, pathFailureScope)) return
       keys.add(knownStationKey({ name, position }))
     }
     for (const resource of state.signals.knownResources ?? []) {
@@ -11076,10 +11087,11 @@ export class JevController {
    */
   private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
     const dimension = state.self.dimension
+    const pathFailureScope = this.movePathFailureScope(state)
     const keys = new Set<string>()
     for (const entry of this.moveFailMemory.snapshot()) {
       if (entry.dimension !== dimension) continue
-      if (this.moveFailMemory.isBlacklisted(dimension, entry)) keys.add(entry.key)
+      if (this.moveFailMemory.isBlacklisted(dimension, entry, pathFailureScope)) keys.add(entry.key)
     }
     return keys
   }
@@ -12391,16 +12403,8 @@ export class JevController {
     // there at all, and whether the route it would walk stands it in a
     // dimension-transfer cell. Computing the plan twice would double the
     // pathfinder cost of the whole gate.
-    const pathCache = new Map<string, { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute }>()
     const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
-    const pathFacts = (position: Vec3Json) => {
-      const key = `${position.x},${position.y},${position.z}`
-      const cached = pathCache.get(key)
-      if (cached !== undefined) return cached
-      const result = this.computePathFacts(position)
-      pathCache.set(key, result)
-      return result
-    }
+    const pathFacts = createPositionFactCache((position) => this.computePathFacts(position))
     this.gateOptions = {
       memory: this.reachabilityProofs,
       pathProbe: (position) => pathFacts(position).probe,
@@ -12885,7 +12889,12 @@ export class JevController {
   /** #8: drop movement targets still inside their blacklist cooldown. */
   private filterMoveCandidates(candidates: readonly Candidate[], state: WorldState, log = true): Candidate[] {
     const dimension = state.self.dimension
-    const { kept, skipped } = filterBlacklistedMoves(candidates, this.moveFailMemory, dimension)
+    const { kept, skipped } = filterBlacklistedMoves(
+      candidates,
+      this.moveFailMemory,
+      dimension,
+      this.movePathFailureScope(state),
+    )
     if (!log) return kept
     for (const entry of skipped) {
       this.logger.warn(
@@ -12914,7 +12923,11 @@ export class JevController {
   private recordMoveFailure(candidate: Candidate, reason: MoveFailureReason): void {
     if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
     const dimension = this.currentDimension()
-    const result = this.moveFailMemory.record(dimension, candidate.target, reason)
+    const pathFailureScope = reason === 'no_path' ? this.movePathFailureScope() : null
+    const result =
+      pathFailureScope === null
+        ? this.moveFailMemory.record(dimension, candidate.target, reason)
+        : this.moveFailMemory.recordPathFailure(dimension, candidate.target, pathFailureScope)
     const key = moveFailureKey(dimension, candidate.target)
     this.logger.warn(
       'agent',
@@ -12930,6 +12943,19 @@ export class JevController {
       { actionId: candidate.id, key, attempts: result.entry.attempts, reason },
       this.tickCounter,
     )
+  }
+
+  /** Complete witness for reusing a path refusal; null disables state-scoped suppression. */
+  private movePathFailureScope(state?: WorldState | null): MoveFailurePathScope | null {
+    const worldRevision = this.scheduler.worldRevision
+    if (worldRevision === null) return null
+    const position = state?.self.position ?? this.bot.entity.position
+    if (![position.x, position.y, position.z].every(Number.isFinite)) return null
+    return {
+      origin: { x: position.x, y: position.y, z: position.z },
+      worldRevision,
+      generationId: this.movePathFailureGenerationId,
+    }
   }
 
   /**
