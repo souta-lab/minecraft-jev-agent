@@ -1592,6 +1592,26 @@ export function formatSmeltLog(event: string, detail: Record<string, unknown>): 
   return `SMELT_PLACED input=${detail.inputItem}:${detail.inputCount} fuel=${detail.fuelItem}:${detail.fuelCount}`
 }
 
+/**
+ * The typed craft evidence, mirroring `formatSmeltLog` for the OTHER transform
+ * arm. Until this existed the craft link - "obtain a tool", the only way the M2
+ * chain gets from `iron_ingot` to a pickaxe - emitted NO marker at all: its only
+ * evidence was the diagnostic `craft attempt#N ...` line, which is not a marker
+ * and not mirrored, so a run-scoped acceptance artifact could not say that a
+ * pickaxe was ever crafted. `tools/m2-chain-execution.mjs` measures exactly that
+ * gap: its craft links are the only ones with no typed line.
+ *
+ * `CRAFT_DONE` is earned from the VERIFIED inventory delta (`gained`), never from
+ * the intent; `CRAFT_FAILED` names the item and the refusal so the mirrored run
+ * carries a diagnosable fact instead of only a thrown error.
+ */
+export function formatCraftLog(event: 'CRAFT_DONE' | 'CRAFT_FAILED', detail: Record<string, unknown>): string {
+  if (event === 'CRAFT_DONE') {
+    return `CRAFT_DONE item=${detail.item} gained=${detail.gained} recipe=${detail.recipe} table=${detail.table} attempt=${detail.attempt}`
+  }
+  return `CRAFT_FAILED item=${detail.item} reason=${detail.reason} recipe=${detail.recipe} table=${detail.table}`
+}
+
 /** The station-family items whose VERIFIED placement is itself station proof. */
 export const STATION_PLACE_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
 
@@ -7335,6 +7355,9 @@ export class Executor {
     this.setPhase(candidate, epoch, 'crafting')
     let gained = 0
     let after = this.countItem(itemName)
+    // The attempt that produced the gain, so the typed CRAFT_DONE line can name
+    // it without reaching outside the retry loop's scope.
+    let producedOnAttempt = 0
     for (let attempt = 0; attempt < 3 && gained <= 0; attempt += 1) {
       if (attempt > 0) {
         await delay(400, signal)
@@ -7384,6 +7407,7 @@ export class Executor {
         after = this.countItem(itemName)
       }
       gained = after - before
+      if (gained > 0) producedOnAttempt = attempt
       this.logger.info(
         'executor',
         `craft attempt#${attempt} ${itemName} before=${before} after=${after} gained=${gained} window=${this.bot.currentWindow?.type ?? 'none'} inventory=${JSON.stringify(this.inventoryCounts())}`,
@@ -7391,11 +7415,35 @@ export class Executor {
       )
     }
     if (gained <= 0) {
+      this.logger.warn(
+        'agent',
+        formatCraftLog('CRAFT_FAILED', {
+          item: itemName,
+          reason: 'gained_zero',
+          recipe: JSON.stringify(logRecipe.delta ?? null),
+          table: table === null ? 'none' : `${table.name}@${table.position.x},${table.position.y},${table.position.z}`,
+        }),
+        { actionId: candidate.id, item: itemName, reason: 'gained_zero' },
+      )
       throw new ExecutorError(
         'verify_failed',
         `craft ${itemName} gained 0 (after>=${after}); recipe=${JSON.stringify(logRecipe.delta ?? null)} inventory=${JSON.stringify(this.inventoryCounts())} window=${this.bot.currentWindow?.type ?? 'none'}`,
       )
     }
+    // The typed, mirrored craft evidence. `gained` is the VERIFIED inventory
+    // delta of this attempt, so the line can never claim a craft that did not
+    // move the inventory.
+    this.logger.info(
+      'agent',
+      formatCraftLog('CRAFT_DONE', {
+        item: itemName,
+        gained,
+        recipe: JSON.stringify(logRecipe.delta ?? null),
+        table: table === null ? 'none' : `${table.name}@${table.position.x},${table.position.y},${table.position.z}`,
+        attempt: producedOnAttempt,
+      }),
+      { actionId: candidate.id, item: itemName, gained },
+    )
     const result = this.buildResult(candidate, epoch, startedAt, 'done', 'crafted', `crafted ${gained}x ${itemName}`, null, {
       verified: true,
       dropObserved: false,

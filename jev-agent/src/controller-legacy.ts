@@ -1561,6 +1561,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CONTAINER_READY',
   'SMELT_DONE',
   'SMELT_INPUT_PREREQ',
+  // The craft arm's OWN outcome evidence. Both transform arms are now on the
+  // mirrored path: `SMELT_DONE` proves "smelt an input" and `CRAFT_DONE` proves
+  // "obtain a tool" from the verified inventory delta. Without them the M2
+  // chain's pickaxe crafts had no typed line in the run-scoped artifact at all.
+  'CRAFT_DONE',
+  'CRAFT_FAILED',
   'CRAFT_INGREDIENT_PREREQ',
   CRAFT_STATION_ALREADY_KNOWN,
   // Portal milestones are run-scoped acceptance evidence as well as human
