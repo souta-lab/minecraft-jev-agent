@@ -22,6 +22,13 @@ Do not run the bundle against the shared main tree while the resident runs from 
 worktree: `--root` must name the tree that owns `buddy-driver/buddy.log`,
 `buddy-driver/logs/jev/decisions.jsonl` and `buddy-driver/data/resident/`.
 
+`tools/m2-gate.mjs` takes the same `--root <resident-tree>` and resolves the run's
+log, snapshot dir, decisions and authority stream from it. By default it also treats
+this repository's other git worktrees as declared resident homes (newest resident
+evidence first), so a run's own evidence is findable without naming a private path;
+`--no-discover` restricts it to the declared root alone. Every candidate stays
+runId-scoped, and the file that answered is reported on the `m2_evidence_roots:` line.
+
 ## 1. The command
 
 ```bash
@@ -106,6 +113,7 @@ reviews, archived evidence).
 bun run m3-acceptance-bundle-test   # synthetic trees only: never a live PASS
 bun run m3-gate-test
 bun run m2-gate-test
+bun run m2-chain-rehearsal-test
 bun run milestone-run-artifact-test
 ```
 
