@@ -77,6 +77,22 @@ import {
   planBridgeRoute,
 } from './bridgeRoute.ts'
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
+import type { DescendPlanRefusalReason } from './reachability.ts'
+import {
+  DESCEND_SCAFFOLD_BLOCK_META,
+  DESCEND_SCAFFOLD_FROM_META,
+  DESCEND_SCAFFOLD_GAP_META,
+  DESCEND_SCAFFOLD_LANDING_META,
+  DESCEND_SCAFFOLD_PLACE_META,
+  DESCEND_SCAFFOLD_POCKET_META,
+  DESCEND_SCAFFOLD_REFERENCE_META,
+  DESCEND_SCAFFOLD_REFUSED_META,
+  descentScaffoldBridgeReason,
+  descendScaffoldReachabilityReason,
+  formatDescentScaffoldRefused,
+  planDescentScaffoldStep,
+} from './descentScaffold.ts'
+import type { DescentScaffoldPlan, DescentScaffoldRefusal } from './descentScaffold.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint, reachabilityTargetSignature } from './reachability.ts'
 import type { AscendPlanRefusalReason } from './reachability.ts'
@@ -1519,13 +1535,31 @@ export interface ReachabilityGateOptions {
 /**
  * Why a withheld capability had NO grounded acquisition route, as a typed fact.
  *
- *   `no_producer`  - the sensor proved no world source for the missing thing
- *                    (no producer block/mob in the observation envelope, or the
- *                    named cell is an unobserved/unknown fact);
+ *   `no_producer`  - the sensor proved no world source for the missing thing (no
+ *                    producer block/mob in the observation envelope);
  *   `no_material`  - a recipe route exists (the thing is craftable in principle)
- *                    but its ingredient is neither held nor producible.
+ *                    but its ingredient is neither held nor producible;
+ *   `no_station`   - a recipe route exists and EVERY ingredient is held, but the
+ *                    craft needs a placed station the body cannot obtain or
+ *                    place; the named item is the STATION, not the product. The
+ *                    measured shape (`run-mudlqw62-19miy`, live): a body holding
+ *                    planks + sticks + a carried crafting_table in a flooded
+ *                    pocket with no placement geometry was told
+ *                    `no_material item=wooden_pickaxe count=1` - naming the tool
+ *                    as its own missing material while it held everything the
+ *                    recipe needs;
+ *   `cell_unread`  - the missing fact is a CELL the sensor could not read at all
+ *                    (an unloaded / provenance-refused column). No harvest
+ *                    requirement and no clearance route can exist for a cell
+ *                    whose block was never observed, so the refusal names the
+ *                    CELL instead of inventing an item. The measured live freeze:
+ *                    `CANDIDATE_ACQUISITION_REFUSED ... missing=headroom@-8,52,-6
+ *                    reason=no_producer item=null count=null` while
+ *                    `DIMENSION_READ_REFUSED cell=-8,52,-6 provenance=unknown
+ *                    reason=unknown_column source=world-state` proves the read
+ *                    itself was refused.
  */
-export type AcquisitionRefusalReason = 'no_producer' | 'no_material'
+export type AcquisitionRefusalReason = 'no_producer' | 'no_material' | 'no_station' | 'cell_unread'
 
 /**
  * The acquisition evidence for ONE capability a candidate was withheld for: the
@@ -1552,6 +1586,12 @@ export interface CandidateAcquisition {
   count: number | null
   /** how many of `item` the body actually holds (item facts only) */
   held: number | null
+  /**
+   * The CELL the missing fact belongs to, for a fact that is a cell rather than
+   * an item (`cell_unread`). Null for every item/material fact, so the marker
+   * stays byte-identical wherever it named an item before.
+   */
+  cell?: Vec3Json | null
   /** the held tool state per family the missing fact named, e.g. `pickaxe:-1` */
   tools: string
 }
@@ -1591,14 +1631,20 @@ export function formatCandidateAcquisition(candidateId: string, entry: Candidate
  * `CANDIDATE_ACQUISITION_REFUSED`: no grounded route exists for a withheld fact.
  * The item+count are named whenever the missing thing is a material, so the line
  * is actionable (`item=oak_log count=3`) instead of a token that can only be
- * retried.
+ * retried. A fact that is a CELL rather than an item (`cell_unread`) names the
+ * cell (`cell=-8,52,-6`) and adds no item fields - the two shapes never mix, so a
+ * reader can tell "get this material" from "this cell was never read".
  */
 export function formatCandidateAcquisitionRefused(candidateId: string, entry: CandidateAcquisition): string {
   const named =
     entry.item === null
       ? ''
       : ` item=${entry.item} count=${entry.count ?? 1} held=${entry.held ?? 0}`
-  return `CANDIDATE_ACQUISITION_REFUSED candidate=${candidateId} missing=${entry.missing} reason=${entry.reason ?? 'no_producer'}${named} tools=${entry.tools}`
+  const cell =
+    entry.cell === undefined || entry.cell === null
+      ? ''
+      : ` cell=${entry.cell.x},${entry.cell.y},${entry.cell.z}`
+  return `CANDIDATE_ACQUISITION_REFUSED candidate=${candidateId} missing=${entry.missing} reason=${entry.reason ?? 'no_producer'}${named}${cell} tools=${entry.tools}`
 }
 
 export interface GroundedCandidatesResult {
@@ -1905,6 +1951,17 @@ function falsifiedKnownCellKeys(state: WorldState): ReadonlySet<string> {
 /** The live-structure membership index for this world state (empty when none). */
 function liveStructureIndexOf(state: WorldState): ReadonlyMap<string, string> {
   return liveStructureMemberIndex(state.liveStructureMembers)
+}
+
+/**
+ * The ONE protected-resource predicate every placing route offers with: a
+ * protected station block by NAME, or any cell of a LIVE structure (which is what
+ * a portal frame and its interior cells are). Shared so a descent scaffold, a
+ * bridge and a wall entry can never disagree about what may be placed into.
+ */
+export function protectedResourceTest(state: WorldState): (cell: Vec3Json, name: string | null) => boolean {
+  const liveStructures = liveStructureIndexOf(state)
+  return (cell, name) => (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell)
 }
 
 /**
@@ -5228,6 +5285,19 @@ function mineCandidates(
     // next observation re-derives the descent there.
     if (candidates.length === 0 && descendTargetY !== null) {
       candidates.push(...descentRetargetCandidates(state, options))
+    }
+    // THE MIRROR OF THE CROSSING. When the landing cell has AIR under it, no dig
+    // can answer the descent and the bounded retarget above is a lateral step, not
+    // a descent: the body lays the floor of the cell under its own feet and drops
+    // onto it (`descentScaffold.ts`), which is exactly what the bridge does
+    // sideways. Offered ALONGSIDE the retarget, never instead of it.
+    if (candidates.length === 0 && descendTargetY !== null) {
+      const scaffold = descentScaffoldForLevel(state, options, {
+        targetY: descendTargetY,
+        goalId: state.goalQueue?.current?.id ?? null,
+        label: 'descend by placing its own landing',
+      })
+      if (scaffold.candidate !== null) candidates.push(scaffold.candidate)
     }
   } else if (
     mineActions.length === 0 &&
@@ -9948,6 +10018,249 @@ function verticalRemedyCandidates(
 }
 
 /**
+ * THE DOWNWARD SELF-LANDING remedy for a locomotion target BELOW the body: the
+ * exact mirror of the bridge (`groundBridgeLeg`), one level down.
+ *
+ * MEASURED (main 974e954, the operator's floated-portal trial; body 23.5,79.0,1.5,
+ * portal interior 26,67,9):
+ *
+ *   CANDIDATE_ACQUISITION candidate=MOVE:b26_74_-14 kind=MOVE reachable=false
+ *     reason=needs_descend missing=["descend_plan:no_support@25,78,-2:air"]
+ *   counts in this run: needs_descend 1912 | column_descent 4006
+ *
+ * The typed fact was right and the ANSWER did not exist: the descent vocabulary's
+ * only two remedies are DIGS (cut a staircase step, dig the body's own column), so
+ * a landing whose support is air could only be refused - 1912 times - although the
+ * body held blocks it could have laid. The missing mechanic is the bridge's own
+ * `self_landing` scaffold rotated: lay the floor of the cell below, drop onto it.
+ *
+ * WHAT BOUNDS IT (nothing here is an unbounded project):
+ *   * the SAME one-block-per-leg discipline: the rule grounds exactly one cell and
+ *     the executor's budget is 1 by construction (`descentScaffold.ts`, `span` 1);
+ *   * STRICT VERTICAL REDUCTION the SAME way the horizontal scaffold strictly
+ *     reduces horizontal distance: the landing must not step past the target level,
+ *     and it is one block below the body by construction, so every leg closes
+ *     exactly one of the gap and the loop stops at the target level;
+ *   * the SAME per-cell pocket rule the wall entry / level scan / bridge use
+ *     (`wallEntry.ts#wallPocketOccupationRefusal` + `#wallPocketFloodRefusal`, via
+ *     `bridgeRoute.ts#scaffoldPocketRefusal`): hazard, protected, dimension-transfer
+ *     plane, unobserved and would_flood are all refused in the shared vocabulary;
+ *   * the portal plane is never mined at all - this route never digs.
+ *
+ * OFFERED ALONGSIDE, NEVER INSTEAD: the caller enumerates it as one more grounded
+ * remedy class beside the walk / dig / ascend routes and stops at the policy
+ * boundary when more than one is grounded. A route the ordinary walk can already
+ * express grounds nothing here (`walkable`), so the walkable control is untouched.
+ */
+function groundDescentScaffoldLeg(
+  state: WorldState,
+  spec: { target: Vec3Json; walkable: boolean },
+): { plan: DescentScaffoldPlan | null; refusal: DescentScaffoldRefusal | null; line: string | null } {
+  // Only a target genuinely BELOW the body asks the descent question, and only a
+  // leg the ordinary walk cannot already express. A walkable leg grounds nothing.
+  if (spec.walkable) return { plan: null, refusal: null, line: null }
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  if (!(spec.target.y < feet.y)) return { plan: null, refusal: null, line: null }
+  const probe = state.descentScaffold ?? null
+  const placeable = selectPlaceableBlock(state.inventory.counts)
+  const decision = planDescentScaffoldStep({
+    probe,
+    blockName: placeable?.name ?? null,
+    blockCount: placeable?.count ?? 0,
+    targetY: Math.floor(spec.target.y),
+    target: spec.target,
+    isProtected: protectedResourceTest(state),
+  })
+  if (decision.kind === 'step') return { plan: decision.plan, refusal: null, line: null }
+  if (decision.kind === 'not_a_gap') return { plan: null, refusal: null, line: null }
+  return { plan: null, refusal: decision.refusal, line: formatDescentScaffoldRefused(decision.refusal) }
+}
+
+/**
+ * The offered DESCEND: the downward self-landing leg. It DECLARES the one block it
+ * consumes and the one cell it places into (`descentScaffold.ts` meta keys), which
+ * is what the `EffectEnvelope` derives `mayPlaceGroundedRoute` + `mayPlaceBlocks`
+ * from and what `routePlaceDeclaration.ts` authorizes the EQUIP with - the mirror
+ * of the bridge MOVE's own declaration.
+ */
+function descentScaffoldCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; targetName: string | null; reason: string; skill: string | null },
+  plan: DescentScaffoldPlan,
+  authority: string,
+  reflex: string | null,
+  boundary: string | null,
+): Candidate {
+  const gap = plan.fromGap === null || plan.toGap === null ? 'gap=none' : `gap=${plan.fromGap}->${plan.toGap}`
+  return {
+    id: `DESCEND:place:D:${blockId('b', plan.place)}`,
+    kind: 'DESCEND',
+    label:
+      `descend by placing ${plan.block} at (${cellText(plan.place)}) against the footing's underside and dropping onto the floor it ` +
+      `makes at (${cellText(plan.landing)}), toward (${cellText(spec.target)})`,
+    targetName: spec.targetName,
+    // The primary cell is the cell this leg PLACES into, exactly as a dig step's
+    // primary is the cell it removes: the leg's target is the cell it changes.
+    target: plan.place,
+    targetEntityId: null,
+    // The effect lives in meta (`mayPlaceBlocks` + the consumed block), never in
+    // `itemName`: a DESCEND is not a PLACE, and the item bookkeeping paths must not
+    // read a descent as "a route for cobblestone".
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(plan.place, state.self.eyePosition) <= options.reach,
+    // The landing is a 1x2 pocket the step itself creates the floor of, exactly
+    // like a pillar apex that is air until the executor places the column.
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: plan.place.x,
+      y: plan.place.y,
+      z: plan.place.z,
+      [DESCEND_SCAFFOLD_FROM_META]: cellText(plan.from),
+      [DESCEND_SCAFFOLD_LANDING_META]: cellText(plan.landing),
+      [DESCEND_SCAFFOLD_PLACE_META]: cellText(plan.place),
+      [DESCEND_SCAFFOLD_BLOCK_META]: plan.block,
+      [DESCEND_SCAFFOLD_REFERENCE_META]: cellText(plan.reference),
+      [DESCEND_SCAFFOLD_POCKET_META]: plan.pocketEvidence,
+      [DESCEND_SCAFFOLD_GAP_META]: gap,
+      [BRIDGE_AUTHORITY_META]: authority,
+      ...(spec.skill === null ? {} : { legContinuationSkill: spec.skill }),
+      approachLeg: spec.reason,
+      approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+      ...(reflex === null ? {} : { legReflex: reflex }),
+      ...(boundary === null ? {} : { legPolicyBoundary: boundary }),
+    },
+  }
+}
+
+/**
+ * #436 section 7 uniqueness proof for a downward scaffold that is the ONLY grounded
+ * remedy: the exact geometry (landing / placement cell / the block below it) plus
+ * the strict vertical-reduction claim, in the ONE `REFLEX` vocabulary
+ * `netherPortalPlan.ts` owns.
+ */
+function formatDescentScaffoldReflex(skill: string, plan: DescentScaffoldPlan): string {
+  return formatReflex({
+    ownerSkill: skill,
+    action: 'descent_scaffold',
+    evidence:
+      `gap@${cellText(plan.landing)}:no_support;place@${cellText(plan.place)}:${plan.block};` +
+      `landing@${cellText(plan.landing)}:placed;from@${cellText(plan.from)};` +
+      `gap=${plan.fromGap ?? 'none'}->${plan.toGap ?? 'none'}`,
+  })
+}
+
+/**
+ * The DESCEND remedy offer for one locomotion leg target below the body. Returns
+ * the candidate plus its declared authority line; `plan === null` NEVER becomes a
+ * candidate, so an ungrounded descent can never surface as an executable action.
+ */
+function descentRemedyCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; targetName: string | null; reason: string; skill: string | null; walkable: boolean },
+): {
+  candidates: Candidate[]
+  classes: string[]
+  refusal: DescentScaffoldRefusal | null
+  refusalLine: string | null
+} {
+  const grounded = groundDescentScaffoldLeg(state, spec)
+  if (grounded.plan === null) {
+    return { candidates: [], classes: [], refusal: grounded.refusal, refusalLine: grounded.line }
+  }
+  const plan = grounded.plan
+  const authority = formatSkillStepAuthority(
+    'MECHANICAL_CONTINUATION',
+    `cell=${cellText(plan.place)} landing=${cellText(plan.landing)} from=${cellText(plan.from)} ` +
+      `block=${plan.block} self_landing_down=true probe=bounded(1)`,
+    'place_blocks=1',
+    { budget: 1 },
+  )
+  return {
+    candidates: [
+      descentScaffoldCandidate(
+        state,
+        options,
+        spec,
+        plan,
+        authority,
+        formatDescentScaffoldReflex(spec.skill ?? 'descend', plan),
+        null,
+      ),
+    ],
+    classes: ['place:descent_scaffold'],
+    refusal: null,
+    refusalLine: null,
+  }
+}
+
+/**
+ * The descent scaffold for a `descend_to:Y=<n>` PREDICATE row, where there is no
+ * locomotion target - only a level to reach. The same rule, the same candidate
+ * contract, the same executor leg; only the leg's declared aim differs (a LEVEL
+ * instead of a target cell), so a predicate descent and a target-below leg can
+ * never ground two different mechanics.
+ */
+function descentScaffoldForLevel(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { targetY: number; goalId: string | null; label: string },
+): { candidate: Candidate | null; refusal: DescentScaffoldRefusal | null } {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  if (!(feet.y > spec.targetY)) return { candidate: null, refusal: null }
+  const probe = state.descentScaffold ?? null
+  const placeable = selectPlaceableBlock(state.inventory.counts)
+  const decision = planDescentScaffoldStep({
+    probe,
+    blockName: placeable?.name ?? null,
+    blockCount: placeable?.count ?? 0,
+    targetY: spec.targetY,
+    target: null,
+    isProtected: protectedResourceTest(state),
+  })
+  if (decision.kind !== 'step') {
+    return { candidate: null, refusal: decision.kind === 'refuse' ? decision.refusal : null }
+  }
+  const plan = decision.plan
+  const authority = formatSkillStepAuthority(
+    'MECHANICAL_CONTINUATION',
+    `cell=${cellText(plan.place)} landing=${cellText(plan.landing)} from=${cellText(plan.from)} ` +
+      `block=${plan.block} self_landing_down=true probe=bounded(1)`,
+    'place_blocks=1',
+    { budget: 1 },
+  )
+  const built = descentScaffoldCandidate(
+    state,
+    options,
+    { target: plan.landing, targetName: null, reason: 'predicate_descend', skill: spec.goalId },
+    plan,
+    authority,
+    formatDescentScaffoldReflex(spec.goalId ?? 'descend', plan),
+    null,
+  )
+  return {
+    candidate: {
+      ...built,
+      id: `DESCEND:place:D:${blockId('b', plan.place)}`,
+      label: `${spec.label}: ${built.label}`,
+    },
+    refusal: null,
+  }
+}
+
+/**
  * The BOUNDED LEVEL SCAN offer: the own-column descent that starts a composed route whose
  * TERMINUS (a lateral dig or walk at a level below) strictly reduces the distance to the
  * target.
@@ -12084,7 +12397,7 @@ export function applyReachabilityGate(
   const acquisitionRoutes = new Map<string, string[]>()
   const acquisitionRefusals = new Map<
     string,
-    { reason: AcquisitionRefusalReason; item: string | null; count: number | null }
+    { reason: AcquisitionRefusalReason; item: string | null; count: number | null; cell?: Vec3Json | null }
   >()
   // The acquisition closure is over CAPABILITIES, not only over station
   // retirement. A withheld fact is often answered by a route that is itself
@@ -12136,6 +12449,7 @@ export function applyReachabilityGate(
         item,
         count: refusal?.count ?? null,
         held: item === null ? null : (state.inventory.counts[item] ?? 0),
+        cell: refusal?.cell ?? null,
         tools: toolStateForCapabilities(state, [capability]),
       }
     })
@@ -13105,18 +13419,58 @@ export function deriveReachabilityAbilities(
       // belongs to. A bare `descend_plan` token is only kept when the sensor pool
       // carried no down step at all to judge.
       const refusal = route.descentRefusal
-      descendMissing.push(
-        refusal === null
-          ? { kind: 'descend_plan' }
-          : {
+      // THE ANSWER BEFORE THE REFUSAL. A landing whose support is air is the ONE
+      // shape no dig can answer, and it is exactly the shape the body measured live
+      // 1912 times (`descend_plan:no_support@25,78,-2:air` on the operator's floated
+      // gate). The downward self-landing scaffold (`descentScaffold.ts`) changes it
+      // by PLACING the floor it lands on - the mirror of the bridge the same run
+      // proved live. So the descent is available exactly when that step grounds, and
+      // when it does not the refusal names the missing fact instead of the same
+      // retryable token.
+      if (refusal !== null && refusal.reason === 'no_support') {
+        const scaffold = groundDescentScaffoldLeg(state, { target, walkable: false })
+        if (scaffold.plan === null) {
+          const missing = scaffold.refusal
+          if (missing !== null && missing.reason === 'no_block') {
+            // The body holds nothing it could place: the ONE capability that would
+            // make the descent reachable. Named as the material fact (the same
+            // shape the ascent branch uses) so the acquisition pass can ROUTE to
+            // obtaining a block instead of retrying a token.
+            descendMissing.push({ kind: 'placeable_block' })
+          } else if (missing !== null) {
+            descendMissing.push({
+              kind: 'descend_plan',
+              reason: descendScaffoldReachabilityReason(missing.reason) as DescendPlanRefusalReason,
+              cell: missing.cell,
+              block: missing.block,
+              tool: null,
+              tier: null,
+            })
+          } else {
+            descendMissing.push({
               kind: 'descend_plan',
               reason: refusal.reason,
               cell: refusal.cell,
               block: refusal.block,
               tool: null,
               tier: null,
-            },
-      )
+            })
+          }
+        }
+      } else {
+        descendMissing.push(
+          refusal === null
+            ? { kind: 'descend_plan' }
+            : {
+                kind: 'descend_plan',
+                reason: refusal.reason,
+                cell: refusal.cell,
+                block: refusal.block,
+                tool: null,
+                tier: null,
+              },
+        )
+      }
     } else if (plan.kind === 'staircase' && typeof plan.harvestTool === 'string') {
       const tier = plan.harvestTier ?? 0
       if (bestToolTier(counts, plan.harvestTool) < tier) {
@@ -13329,7 +13683,10 @@ interface AcquisitionPassResult {
    */
   routes: Map<string, string[]>
   /** `capabilityKey` -> the typed reason no grounded route exists for it */
-  refusals: Map<string, { reason: AcquisitionRefusalReason; item: string | null; count: number | null }>
+  refusals: Map<
+    string,
+    { reason: AcquisitionRefusalReason; item: string | null; count: number | null; cell?: Vec3Json | null }
+  >
 }
 
 /**
@@ -13337,20 +13694,48 @@ interface AcquisitionPassResult {
  * concrete item and count when the missing thing is a MATERIAL. The item comes
  * from the SAME recipe view the craft route uses (`craftIngredientRoute`), so the
  * refusal names what the body would have to obtain rather than a token.
+ *
+ * Every arm below is a fact the acquisition pass MEASURED this tick: the generic
+ * `no_producer` is reserved for the case where the sensor really did prove no
+ * world source, and a cell the sensor never read is named as such instead of
+ * being reported as a world verdict (`cell_unread`).
  */
 function acquisitionRefusalFor(
   state: WorldState,
   options: CandidateOptions,
   capability: Capability,
-): { reason: AcquisitionRefusalReason; item: string | null; count: number | null } {
+): { reason: AcquisitionRefusalReason; item: string | null; count: number | null; cell?: Vec3Json | null } {
   if (capability.kind === 'tool') {
     const item = toolItemsForCapability(state, options, capability)[0]
     if (item === undefined) return { reason: 'no_producer', item: null, count: null }
     const route = craftIngredientRoute(state, options, item)
-    if (route === null) return { reason: 'no_material', item, count: 1 }
+    if (route === null) {
+      // Every ingredient of the recipe IS held, so the plan cannot be short of
+      // material: what it can be short of is the STATION a 3x3 step needs. Naming
+      // the tool as its own missing material (the old shape) is a false fact; the
+      // station is the obtainable thing (place the carried one / walk to a known
+      // one / craft it from what the body carries).
+      const recipes = options.recipes ?? null
+      if (
+        recipes !== null &&
+        planRequiresTable(recipes, item, state.inventory.counts, craftGoalRequirement(state, item))
+      ) {
+        return { reason: 'no_station', item: 'crafting_table', count: 1 }
+      }
+      return { reason: 'no_material', item, count: 1 }
+    }
     // `producer: 'none'` is the route's own statement that no raw source exists;
     // either way the ingredient the body lacks is named with its count.
     return { reason: 'no_material', item: route.missing, count: route.missingCount }
+  }
+  if (capability.kind === 'headroom' && capability.cell !== null) {
+    // A clearance cell the sensor never read is not a missing producer and not a
+    // missing material: it is a missing READ. Naming the cell keeps the record
+    // honest (`cell_unread cell=-8,52,-6`) instead of the bare `no_producer`
+    // token, which reads as a world verdict the pass never measured.
+    if (cellHarvestBarrier(state, capability.cell) === null && observedCutName(state, capability.cell) === 'unknown') {
+      return { reason: 'cell_unread', item: null, count: null, cell: capability.cell }
+    }
   }
   return { reason: 'no_producer', item: null, count: null }
 }
@@ -13463,7 +13848,24 @@ function capabilityAcquisitionCandidates(
         // pool that never advances (live run-muc3qbug-18vg3: ENTER withheld for
         // `descend_plan` while every offered MOVE/MINE stayed around the body).
         const approach = descentApproachCandidates(state, options, entry.candidate.target)
-        source = [...levelSteps, ...approach]
+        // AND the answer this capability was measured to be missing: when the
+        // withheld descent is refused because the landing has no support, the
+        // downward self-landing scaffold IS the grounded prerequisite - the exact
+        // one block and one cell that makes the withheld target reachable. Offered
+        // here, beside the level step and the approach leg, never instead of them:
+        // the measured live shape was 1912 acquisitions with no route at all
+        // (`descend_plan:no_support@25,78,-2:air`).
+        const scaffold =
+          entry.candidate.target === null
+            ? { candidates: [], classes: [], refusal: null, refusalLine: null }
+            : descentRemedyCandidates(state, options, {
+                target: entry.candidate.target,
+                targetName: null,
+                reason: 'acquisition_prerequisite',
+                skill: null,
+                walkable: false,
+              })
+        source = [...levelSteps, ...approach, ...scaffold.candidates]
       }
       const key = capabilityKey(capability)
       const emitted: string[] = []
@@ -13705,6 +14107,27 @@ function routeOpeningCandidates(
   if (bridge.refusal !== null && out.length > 0) {
     const line = formatBridgeRefused(bridge.refusal)
     for (const leg of out) leg.meta[BRIDGE_REFUSED_META] = line
+  }
+  // The MIRROR remedy, one level down: when the withheld target lies BELOW the body
+  // and its landing cell has no floor, the descent changes the route by PLACING the
+  // floor it lands on instead of removing rock - the downward rotation of the same
+  // bounded one-cell scaffold. Grounded on the sensor's own downward probe
+  // (`state.descentScaffold`) plus a held placeable block, offered ALONGSIDE every
+  // other remedy in this family (never instead of one), and it never digs. No
+  // enclosing Skill owns this offer, so it is an ordinary candidate:
+  // `MECHANICAL_CONTINUATION`, no section 7 prerequisite claim, no boundary ranking.
+  const descentRemedy = descentRemedyCandidates(state, options, {
+    target: goalTarget,
+    targetName: null,
+    reason: 'route_withheld',
+    skill: null,
+    walkable: false,
+  })
+  for (const descended of descentRemedy.candidates) {
+    if (!out.some((candidate) => candidate.id === descended.id)) out.push(descended)
+  }
+  if (descentRemedy.refusalLine !== null && out.length > 0) {
+    for (const leg of out) leg.meta[DESCEND_SCAFFOLD_REFUSED_META] = descentRemedy.refusalLine
   }
   // REVERTED (da7d66e): returning the unfiltered family when the advancing set is
   // empty stopped the WAIT wedge but produced a pacing loop - the operator watched

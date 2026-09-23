@@ -84,6 +84,7 @@
     "anti-flap-test": "bun test ./test-anti-flap.mts",
     "predicate-goal-test": "bun test ./test-predicate-goal.mts",
     "descend-plan-test": "bun test ./test-descend-plan.mts",
+    "descent-scaffold-test": "bun ./test-descent-scaffold.mts",
     "staircase-descent-test": "bun test ./test-staircase-descent.mts",
     "column-descent-test": "bun test ./test-column-descent.mts",
     "replan-throttle-test": "bun test ./test-replan-throttle.mts",

@@ -12,6 +12,7 @@
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META } from './candidates.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
+import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 import type { Vec3Json, WorldState } from './state.ts'
 import { bodyIsOutOfAir, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
@@ -1039,6 +1040,60 @@ function guardDescend(candidate: Candidate, state: WorldState, context: GuardCon
   if (target === null) {
     return deny(candidate.id, 'TARGET_GONE', 'DESCEND candidate carries no dig target')
   }
+  // A DOWNWARD SELF-LANDING DESCEND carries its OWN route (`descentScaffold.ts`):
+  // it does not dig a sensor step at all, it PLACES the floor of the cell under the
+  // body's own feet and drops onto it - the mirror of the bridge MOVE's own placing
+  // route. The sensor-step lookup below can never express it (a sensor step is a
+  // DIG, and the declared cell is the placement, not a wall/floor/head of any
+  // stepped option), so without this branch the only descent that can answer the
+  // measured blocker would be generated and then denied NO_SUPPORT by the guard.
+  //
+  // The exemption is deliberately narrow and re-verified from the SAME sensor tick:
+  //   * the candidate's declared place cell must BE the state's own downward probe
+  //     for this body cell (so a stale or hand-built candidate never places);
+  //   * the landing column must be open and the placement cell replaceable air;
+  //   * the declared block must still be held (the `EMPTY_HAND` rule below);
+  //   * the geometry is the one the offer used (`planDescentScaffoldStep` re-runs
+  //     over the SAME probe), so legality is a function of the live world, never of
+  //     candidate meta alone. The executor re-checks the placement cell immediately
+  //     before the side effect and the envelope authorizes exactly that one cell.
+  const scaffoldPlace = readMetaCell(candidate, DESCEND_SCAFFOLD_PLACE_META)
+  if (scaffoldPlace !== null) {
+    const probe = state.descentScaffold ?? null
+    if (probe === null || !samePosition(probe.place, scaffoldPlace)) {
+      return deny(
+        candidate.id,
+        'TARGET_GONE',
+        `no downward descent probe at (${scaffoldPlace.x},${scaffoldPlace.y},${scaffoldPlace.z}) in the current state`,
+      )
+    }
+    if (!probe.landingOpen || !probe.landingHeadOpen) {
+      return deny(
+        candidate.id,
+        'NO_SUPPORT',
+        `the landing column at (${probe.landing.x},${probe.landing.y},${probe.landing.z}) is not open air`,
+      )
+    }
+    if (!probe.placeable) {
+      return deny(
+        candidate.id,
+        'NO_SUPPORT',
+        `the placement cell at (${probe.place.x},${probe.place.y},${probe.place.z}) is not replaceable air`,
+      )
+    }
+    const declaredBlock = readMetaString(candidate, DESCEND_SCAFFOLD_BLOCK_META)
+    if (declaredBlock !== null && (state.inventory.counts[declaredBlock] ?? 0) < 1) {
+      return deny(candidate.id, 'EMPTY_HAND', `the descent declares ${declaredBlock} but the inventory has none`)
+    }
+    if (probe.hazard) {
+      return deny(
+        candidate.id,
+        'LAVA_RISK',
+        `${probe.hazardBlock ?? 'a hazard'} is inside the column the descent occupies or places into`,
+      )
+    }
+    return { ok: true, candidate }
+  }
   // The descent step digs arbitrary terrain (dirt/grass), which is not in
   // `state.blocks` (logs/stone/ore/hazard only). Validate against the sensor's
   // own pre-computed `descent` options, exactly like `guardStep` uses stepCuts:
@@ -1154,6 +1209,17 @@ function nearestHazardTo(state: WorldState, position: Vec3Json) {
 
 function samePosition(a: Vec3Json, b: Vec3Json): boolean {
   return a.x === b.x && a.y === b.y && a.z === b.z
+}
+
+/** A `"x,y,z"` cell a candidate declared in its own contract meta; null when absent/malformed. */
+function readMetaCell(candidate: Candidate, key: string): Vec3Json | null {
+  const raw = readMetaString(candidate, key)
+  if (raw === null) return null
+  const parts = raw.split(',').map((entry) => Number(entry))
+  const [x, y, z] = parts
+  if (x === undefined || y === undefined || z === undefined) return null
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  return { x, y, z }
 }
 
 function readMetaString(candidate: Candidate, key: string): string | null {

@@ -37,6 +37,7 @@
 // Pure: no bot, no inventory, no clock. The caller supplies the carried counts.
 
 import { BRIDGE_BLOCK_META, BRIDGE_META } from './bridgeRoute.ts'
+import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 
 /** The pillar route's declared place block: the key `executor.ts#runVerticalLeg` reads. */
 export const PILLAR_PLACE_NAME_META = 'pillarPlaceName'
@@ -96,6 +97,15 @@ export function declaredRoutePlacements(candidate: RoutePlaceCandidate): RoutePl
   if (candidate.meta[BRIDGE_META] === true) {
     const block = readMetaString(candidate, BRIDGE_BLOCK_META)
     if (block !== null) declarations.push({ block, source: BRIDGE_BLOCK_META })
+  }
+  // The DOWNWARD SELF-LANDING declaration: a DESCEND leg that creates the floor it
+  // lands on. The exact cell it places into is declared too
+  // (`DESCEND_SCAFFOLD_PLACE_META`), because a descent placement is a cell BELOW
+  // the body that no other route can name - the envelope authorizes the block AND
+  // the one cell, never "any carried placeable block".
+  if (candidate.meta[DESCEND_SCAFFOLD_PLACE_META] !== undefined) {
+    const block = readMetaString(candidate, DESCEND_SCAFFOLD_BLOCK_META)
+    if (block !== null) declarations.push({ block, source: DESCEND_SCAFFOLD_BLOCK_META })
   }
   // The VERTICAL declaration: the same keys the executor's pillar leg reads.
   for (const key of [PILLAR_PLACE_NAME_META, FALLBACK_PILLAR_PLACE_NAME_META]) {

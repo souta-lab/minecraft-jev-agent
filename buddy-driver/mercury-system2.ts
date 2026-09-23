@@ -57,8 +57,15 @@ import { generateText, tool } from 'ai'
 import type { Tool } from 'ai'
 import { z } from 'zod'
 import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
+import { goalKeyOf } from '../jev-agent/src/goalQueue.ts'
 import { compilePlannedGoal, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
-import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type {
+  System2Brain,
+  System2Outcome,
+  System2Plan,
+  System2PlanRequest,
+  System2WithheldCandidate,
+} from '../jev-agent/src/system2.ts'
 import type { System2PayloadShape } from '../jev-agent/src/system2Payload.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
@@ -79,6 +86,7 @@ import {
   NETHER_PORTAL,
   OBSIDIAN,
   OVERWORLD,
+  PORTAL_ENTERED_PREDICATE,
   PORTAL_LIT_PREDICATE,
   PORTAL_OBSIDIAN_REQUIRED,
   netherPortalEntryGoal,
@@ -851,6 +859,193 @@ export function validateMercuryPlanAgainstState(
     }
   }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// #cached-plan-executability: is the installed WHAT EXECUTABLE in this state?
+// ---------------------------------------------------------------------------
+//
+// `validateMercuryPlanAgainstState` above answers ADMISSIBILITY - may this goal
+// exist at all (is the gate live, is there a death point). It never asks whether
+// the BODY can execute it here, now. Measured live: the body stood 12 blocks
+// ABOVE the portal interior and the affordance gate had already typed the
+// refusal -
+//   CANDIDATE_WITHHELD reason=needs_descend candidate=ENTER:26,79,-4
+//     missing=["descend_plan:no_support@27,78,-4:air"]
+// - so ENTER was not executable, yet the cached answer
+// `mercury_patch_enter_portal_goal` ("gate verified, so enter instead of a
+// blocked descent") passed admissibility, was re-installed, and the very next
+// tick refused it as `action_impossible`.
+//
+// The executable-here fact is ALREADY in hand and is not re-derived here:
+// `MercuryStateSummary.blockers` (== `System2PlanRequest.blockers`,
+// `System2BlockerFacts`) is the tick's typed refusal projection - one entry per
+// withheld candidate with `{candidate, kind, reason, missing, suppressed}` - it
+// is already part of the cache KEY (`hashMercuryState`), and it needs no live bot
+// and no geometry. `reconcileNotExecutableHead`/`ROW_NOT_EXECUTABLE_HERE` cannot
+// serve here: that verdict is dimension-only, and the transfer-row exemption
+// (`isDimensionTransferGoal`) deliberately excludes exactly the portal-entry row
+// this defect is about.
+//
+// Three outcomes, in the existing tri-state shape (`PredicateTruth` in
+// `optionSpec-legacy.ts`); `unknown` is first-class and never collapsed:
+//
+//   executable          the state measured refusals and none refuses this goal's
+//                       executor -> install exactly as today, byte-identical
+//   not_executable_now  the state's typed withheld fact refuses that executor ->
+//                       typed + mirrored refusal naming goal/blocker/provenance,
+//                       no install, ordinary replan path takes over
+//   unknown             no grounded verdict (this tick measured no refusal, or
+//                       code owns no exclusive executor mapping for the goal) ->
+//                       neither "install as verified" nor "refuse"
+//
+// UNKNOWN must not refuse: an ordinary summon carries no `blockers` field at all
+// (`system2Payload.ts` returns null when nothing was withheld), so reading "no
+// evidence" as "not executable" would empty the cache. It equally must not be
+// reported as executable-verified: that would be the silent apply this closes.
+
+/** The three outcomes. A verdict, never a boolean: `unknown` is first-class. */
+export type MercuryPlanExecutability = 'executable' | 'not_executable_now' | 'unknown'
+
+/** Mirrored marker for the verdict itself; emitted for all three outcomes. */
+export const MERCURY_PLAN_EXECUTABILITY_MARKER = 'MERCURY_PLAN_EXECUTABILITY'
+/** Mirrored marker for one refused goal; names the goal, its blocker and the provenance. */
+export const MERCURY_PLAN_NOT_EXECUTABLE_MARKER = 'MERCURY_PLAN_NOT_EXECUTABLE'
+/**
+ * `System2PlanProvenance.noGoalsReason` of the typed zero-goal hand-off a refusal
+ * returns, so the queue-side line already in place (`SYSTEM2_PLAN_NO_GOALS
+ * reason=...`) names the same fact instead of reporting a generic empty answer.
+ */
+export const MERCURY_PLAN_NOT_EXECUTABLE_NO_GOALS_REASON = 'plan_not_executable_now'
+
+/** One goal whose executor the state's typed withheld facts refuse, verbatim. */
+export interface MercuryPlanGoalRefusal {
+  index: number
+  /** compact `kind:target:count` goal key (`goalKeyOf`) - the named goal */
+  goal: string
+  /** the withheld candidate id, verbatim (`ENTER:26,79,-4`) */
+  candidate: string
+  /** the withheld candidate's class, verbatim (`ENTER_PORTAL`) */
+  candidateKind: string
+  /** the withheld typed reason, verbatim (`needs_descend`) */
+  reason: string
+  /** the withheld typed missing capability keys, verbatim (`descend_plan:no_support@...`) */
+  missing: string[]
+}
+
+export interface MercuryPlanExecutabilityVerdict {
+  verdict: MercuryPlanExecutability
+  /** Plan-ordered; empty unless `verdict === 'not_executable_now'`. */
+  refusals: MercuryPlanGoalRefusal[]
+  /** Typed reason the verdict is `unknown`; `null` for a grounded verdict. */
+  unknownReason: string | null
+}
+
+/**
+ * The only part of a typed blocker projection an executability verdict reads: one
+ * entry per WITHHELD candidate. Both projections that carry it satisfy this -
+ * `System2PlanRequest.blockers` (`System2BlockerFacts`) and
+ * `MercuryStateSummary.blockers` - so neither call site has to reshape the fact.
+ */
+export interface MercuryExecutabilityBlockerFacts {
+  withheld: readonly Pick<System2WithheldCandidate, 'candidate' | 'kind' | 'reason' | 'missing'>[]
+}
+
+/**
+ * The candidate classes that can EXECUTE a compiled plan goal, derived from the
+ * SAME gate the grounded candidate generators use. `null` = code owns no
+ * exclusive executor mapping for this goal, which makes its executability
+ * UNKNOWN - never "not executable".
+ *
+ * ONLY exclusive mappings belong here. A goal several candidate classes can serve
+ * (a `collect` count can rise through RETRIEVE, MINE, PICKUP, CRAFT, SMELT,
+ * CONTAINER or ATTACK) must return `null`: one withheld candidate does not prove
+ * that goal cannot run, and refusing on it would make the cache unusable.
+ */
+export function goalExecutorCandidateKinds(goal: PlannedGoal): readonly string[] | null {
+  // `entryCandidates` generates nothing whose `targetPredicate` is not
+  // PORTAL_ENTERED_PREDICATE (jev-agent/src/candidates.ts), so a portal-entered
+  // `place nether_portal` goal - the lowering of the model's `enter_portal` - has
+  // exactly one executor class.
+  if (goal.targetPredicate === PORTAL_ENTERED_PREDICATE) return ['ENTER_PORTAL']
+  // `ignitionCandidates` accepts only the lit predicate on a `nether_portal` row
+  // and is the only IGNITE generator.
+  if (goal.targetPredicate === PORTAL_LIT_PREDICATE && goal.targetItem === NETHER_PORTAL) return ['IGNITE']
+  return null
+}
+
+/**
+ * Classify a plan's EXECUTABILITY in the state it is about to be installed into.
+ * Pure: same facts in, same verdict out.
+ *
+ * `blockers` is the tick's typed refusal projection. Its ABSENCE is not evidence
+ * of anything - no refusal was measured - so the verdict is `unknown` and nothing
+ * is refused.
+ */
+export function classifyMercuryPlanExecutability(
+  goals: readonly PlannedGoal[],
+  blockers: MercuryExecutabilityBlockerFacts | null | undefined,
+): MercuryPlanExecutabilityVerdict {
+  // Nothing has to execute, so nothing can be not-executable here: an
+  // `abort`/`complete` answer and a plan that compiled to no row keep their
+  // existing outcome.
+  if (goals.length === 0) return { verdict: 'executable', refusals: [], unknownReason: null }
+  if (blockers === undefined || blockers === null) {
+    return { verdict: 'unknown', refusals: [], unknownReason: 'no_blocker_facts_in_state' }
+  }
+  const withheld = blockers.withheld ?? []
+  const refusals: MercuryPlanGoalRefusal[] = []
+  let unmapped: string | null = null
+  goals.forEach((goal, index) => {
+    const kinds = goalExecutorCandidateKinds(goal)
+    if (kinds === null) {
+      unmapped ??= goalKeyOf(goal)
+      return
+    }
+    for (const entry of withheld) {
+      if (!kinds.includes(entry.kind)) continue
+      refusals.push({
+        index,
+        goal: goalKeyOf(goal),
+        candidate: entry.candidate,
+        candidateKind: entry.kind,
+        reason: entry.reason,
+        missing: [...entry.missing],
+      })
+    }
+  })
+  if (refusals.length > 0) return { verdict: 'not_executable_now', refusals, unknownReason: null }
+  if (unmapped !== null) {
+    return { verdict: 'unknown', refusals: [], unknownReason: `no_executor_mapping_for_goal:${unmapped}` }
+  }
+  return { verdict: 'executable', refusals: [], unknownReason: null }
+}
+
+/** The mirrored verdict line. Emitted for all three outcomes so `unknown` is visible. */
+export function formatMercuryPlanExecutability(
+  result: MercuryPlanExecutabilityVerdict,
+  context: { intentSource: string; trigger: string; goals: number; strategy?: string },
+): string {
+  return (
+    `${MERCURY_PLAN_EXECUTABILITY_MARKER} verdict=${result.verdict} intentSource=${context.intentSource}` +
+    ` trigger=${context.trigger} goals=${context.goals}` +
+    (context.strategy === undefined ? '' : ` strategy=${context.strategy}`) +
+    ` refusals=${result.refusals.length}` +
+    (result.unknownReason === null ? '' : ` unknownReason=${result.unknownReason}`)
+  )
+}
+
+/**
+ * The mirrored refusal line: the goal, the fact that blocks it (verbatim reason,
+ * missing capability keys, and the exact withheld candidate), and where the plan
+ * came from (`cached` for a replay, `continued` for the planner's memo).
+ */
+export function formatMercuryPlanNotExecutable(refusal: MercuryPlanGoalRefusal, intentSource: string): string {
+  return (
+    `${MERCURY_PLAN_NOT_EXECUTABLE_MARKER} intentSource=${intentSource} index=${refusal.index}` +
+    ` goal=${refusal.goal} candidate=${refusal.candidate} candidateKind=${refusal.candidateKind}` +
+    ` reason=${refusal.reason} missing=[${refusal.missing.join(',')}] action=refused`
+  )
 }
 
 /** Stable cache key for a Mercury state summary. Exported so tests can seed the cache. */
@@ -2100,11 +2295,62 @@ export class MercurySystem2 implements System2Brain {
       const restored = validateMercuryPlan({ op: cached.op, goals: cached.goals, reason: cached.reason })
       const restoredGroundingError = restored.ok ? validateMercuryPlanAgainstState(restored.plan, state) : null
       if (restored.ok && restoredGroundingError === null && !replayLimit && !consecutiveLimit) {
+        const plan = restored.plan
+        const goals = plannedGoalsFromMercury(plan, state)
+        // #cached-plan-executability: admissibility is not executability. The
+        // cached answer passed `validateMercuryPlanAgainstState` (the gate is
+        // verified) but the state may already have typed that the BODY cannot run
+        // it here (the measured shape: `needs_descend` +
+        // `descend_plan:no_support@27,78,-4:air` on the ENTER candidate). A hit
+        // is legitimate for the state it was GIVEN, so this is not a cache-key
+        // bug: it is the missing install-time check. Refusing here is what stops
+        // the apply-then-`action_impossible` cycle at its source.
+        const executability = classifyMercuryPlanExecutability(goals, state.blockers)
+        this.log(formatMercuryPlanExecutability(executability, { intentSource: 'cached', trigger, goals: goals.length, strategy: cached.strategy }), {
+          ...executability,
+          strategy: cached.strategy,
+          stateHash,
+        })
+        if (executability.verdict === 'not_executable_now') {
+          // Typed AND mirrored, and NOTHING is applied. The refusal is NOT charged
+          // as a replay (nothing was replayed) and the entry is kept: the same
+          // state must keep getting the honest answer, and the ordinary
+          // escalation path re-asks the WHAT owner once the state changes.
+          for (const refusal of executability.refusals) {
+            this.log(formatMercuryPlanNotExecutable(refusal, 'cached'), {
+              ...refusal,
+              strategy: cached.strategy,
+              stateHash,
+              trigger,
+              withheld: state.blockers?.withheld ?? [],
+            })
+          }
+          const ms = Date.now() - started
+          return {
+            plan: {
+              op: 'patch',
+              goals: [],
+              note: `cached mercury ${cached.strategy} refused: not executable here`,
+              // The same typed shape as the `ungrounded` terminal outcome: a
+              // zero-goal hand-off the queue can name, never a silent no-op and
+              // never a fatal.
+              provenance: {
+                intentSource: 'cached',
+                intent: cached.reason.slice(0, 400),
+                noGoalsReason: MERCURY_PLAN_NOT_EXECUTABLE_NO_GOALS_REASON,
+              },
+            },
+            strategy: cached.strategy,
+            op: 'patch',
+            goals: [],
+            costUsd: 0,
+            ms,
+            cached: true,
+          }
+        }
         cached.replays = replays + 1
         this.bumpConsecutive(cached.strategy)
         this.saveCache()
-        const plan = restored.plan
-        const goals = plannedGoalsFromMercury(plan, state)
         // A replayed plan compiles through the SAME lowering, so it can also drop
         // goals; the replay carries the same typed provenance as a fresh answer.
         const uncompiledCached = uncompiledMercuryGoals(plan, state)
