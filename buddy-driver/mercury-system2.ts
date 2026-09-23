@@ -1067,6 +1067,8 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     position: state.position,
     dimension: state.dimension,
     health: state.health,
+    food: state.food ?? null,
+    starvation: state.starvation ?? null,
     inventory: state.inventory,
     toolRank: state.toolRank,
     stations: state.stations,
@@ -1212,6 +1214,9 @@ export interface MercuryStateSummary {
   position: { x: number; y: number; z: number } | null
   dimension: string | null
   health: number | null
+  /** Live food level and code-owned starvation truth; absent only in old fixtures. */
+  food?: number | null
+  starvation?: string | null
   toolRank: number
   inventory: Record<string, number>
   stations: { craftingTables: number; furnaces: number }
@@ -1825,6 +1830,7 @@ export const SYSTEM_PROMPT = `You are System 2, the long-horizon intent planner 
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
 Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world facts and grounded executable alternatives that can advance it. The mission does not prescribe a fixed subgoal order; the current objective and queue describe local work, not mandatory stages.
+Health, food, and any typed starvation fact are live body truth. Use them as safety context while choosing among grounded alternatives; they do not prescribe a fixed semantic subgoal.
 
 Answer in NATURAL LANGUAGE: one or two short sentences saying WHAT should happen
 next and why, naming the real Minecraft item, resource or portal step involved.

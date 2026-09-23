@@ -78,6 +78,7 @@ import {
   resolvePlannerMode,
   rungConsumesItem,
   rungProducesGoal,
+  starvationFact,
   worldOutcomeRungFloor,
 } from './planner.ts'
 import type { Counts, DurableLadderProgress, DurableLadderSource, Rung } from './planner.ts'
@@ -1953,6 +1954,8 @@ export function buildMercurySummary(
         : { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) },
     dimension: bot.game?.dimension ?? null,
     health: entity === undefined ? null : bot.health,
+    food: entity === undefined || typeof bot.food !== 'number' ? null : bot.food,
+    starvation: starvationFact(bot),
     toolRank: bestPickaxeRank(counts),
     inventory,
     stations: { craftingTables: world.craftingTables.length, furnaces: world.furnaces.length },

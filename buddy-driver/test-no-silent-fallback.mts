@@ -192,7 +192,7 @@ addCase('PlannerBrain: repeated planner model failure fatals + terminates, no de
       thrown.message === 'resident-terminated' &&
       fatal !== undefined &&
       fatal.includes('code=MODEL_UNAVAILABLE') &&
-      fatal.includes('context=planner-key') &&
+      fatal.includes('context=system2-unavailable') &&
       fatal.includes('attempts=3') &&
       !degraded,
     detail: `terminated=${terminated} fatal=${fatal ?? 'none'} retries=${retries.length} degraded=${degraded}`,

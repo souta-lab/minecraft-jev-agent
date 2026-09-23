@@ -13,12 +13,21 @@ import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent
 import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
 import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
+import { bodyStarving, formatBodyStarvingFact } from '../jev-agent/src/state.ts'
 import { PlannerBrain as LegacyPlannerBrain } from './planner-legacy.ts'
 import type { PlannerOptions as LegacyPlannerOptions } from './planner-legacy.ts'
 
 export type PlannerMode = 'llm' | 'deterministic' | 'local-mercury'
 
 type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & { mode?: PlannerMode }
+
+/** Position-free, code-owned hunger truth for compact System2 state. */
+export function starvationFact(bot: Pick<Bot, 'food' | 'health'>): string | null {
+  const { food, health } = bot
+  if (typeof food !== 'number' || typeof health !== 'number') return null
+  const self = { food, health }
+  return bodyStarving(self) ? formatBodyStarvingFact(self) : null
+}
 
 /** Model authority is the resident default; deterministic planning is explicit baseline only. */
 export function resolvePlannerMode(
@@ -107,7 +116,7 @@ export class PlannerBrain implements System2Brain {
   private readonly maxAttempts: number
   private readonly terminate: (() => never) | undefined
   private readonly refreshLiveFacts: (() => void) | undefined
-  private readonly legacy: LegacyPlannerBrain
+  private readonly legacy: LegacyPlannerBrain | null
   private readonly mercury: MercurySystem2 | undefined
   private lastAuthorityProvider: string
   private lastAuthorityModel: string
@@ -126,19 +135,19 @@ export class PlannerBrain implements System2Brain {
     this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
     this.lastAuthorityModel = this.mode === 'deterministic' ? this.model : 'none'
 
-    // This compatibility planner is reachable only in the explicit baseline
-    // mode. Its ordered ladder is not part of production/model authority.
-    this.legacy = new LegacyPlannerBrain({
-      ...options,
-      mode: 'deterministic',
-      advisor: undefined,
-      mercury: undefined,
-      postDeathRecovery: false,
-      // The wrapped legacy planner exists only for an explicitly selected
-      // deterministic baseline. Do not even seed it with observer frontier data
-      // in model mode.
-      durableLadderProgress: this.mode === 'deterministic' ? options.durableLadderProgress : null,
-    })
+    // Do not even construct the compatibility planner in model mode: its cache
+    // fingerprint and plan machinery inspect the ordered capability ladder.
+    // That code belongs only to the explicit deterministic baseline.
+    this.legacy =
+      this.mode === 'deterministic'
+        ? new LegacyPlannerBrain({
+            ...options,
+            mode: 'deterministic',
+            advisor: undefined,
+            mercury: undefined,
+            postDeathRecovery: false,
+          })
+        : null
   }
 
   get provider(): string {
@@ -160,7 +169,10 @@ export class PlannerBrain implements System2Brain {
 
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     this.refreshLiveFacts?.()
-    if (this.mode === 'deterministic') return this.legacy.plan(request)
+    if (this.mode === 'deterministic') {
+      if (this.legacy === null) return this.fatal('deterministic-planner-unavailable', 'explicit baseline planner was not constructed')
+      return this.legacy.plan(request)
+    }
     return this.planWithModelAuthority(request)
   }
 
