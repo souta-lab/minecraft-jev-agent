@@ -15,7 +15,7 @@
 //   ATTACK:e19           attack entity id 19
 //   EAT:bread            eat one bread
 //   WAIT                 do nothing this tick
-//   ESCALATE             hand control to System 2
+//   ESCALATE             request a System 2 semantic review
 //
 // Generation is GOAL-DIRECTED: the current goal-queue subgoal selects the
 // resource to mine, the craft step to surface, or the smelt/place operation, so
@@ -434,7 +434,7 @@ export function threatEscalateCandidate(reason: string, tick = 0): Candidate {
   return {
     id: 'ESCALATE',
     kind: 'ESCALATE',
-    label: `hand control to System 2 (${reason})`,
+    label: `request System 2 review (${reason})`,
     targetName: null,
     target: null,
     targetEntityId: null,
@@ -4669,7 +4669,7 @@ function generateRawCandidates(
     candidates.push({
       id: 'ESCALATE',
       kind: 'ESCALATE',
-      label: `hand control to System 2 (${state.signals.lastFailureCode ?? 'unknown trigger'})`,
+      label: `request System 2 review (${state.signals.lastFailureCode ?? 'unknown trigger'})`,
       targetName: null,
       target: null,
       targetEntityId: null,
@@ -14590,7 +14590,7 @@ function escalateRefusal(state: WorldState, withheld: readonly CandidateReachabi
   return {
     id: 'ESCALATE',
     kind: 'ESCALATE',
-    label: `hand control to System 2: no reachable candidate (missing: ${missing.join(',') || 'unknown'})`,
+    label: `request System 2 review: no reachable candidate (missing: ${missing.join(',') || 'unknown'})`,
     targetName: null,
     target: null,
     targetEntityId: null,

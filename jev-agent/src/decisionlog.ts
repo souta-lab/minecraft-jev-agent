@@ -83,6 +83,8 @@ export interface DecisionLlmResummonLog {
   triggered: boolean
   reason: LlmSummonReason | null
   detail: string | null
+  /** Present only when this record owns a concrete System2 request. */
+  requestId?: string
 }
 
 /**

@@ -279,6 +279,7 @@ import {
   system2BodyOwned,
 } from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
+import { submitSystem2Handoff } from './system2Handoff.ts'
 import {
   evaluateBetaTerminationBoundary,
   evaluateCandidateStarvationBoundary,
@@ -1397,6 +1398,10 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SYSTEM2_PLAN_NO_GOALS',
   // The applied half of the same record: what the answer BECAME.
   'SYSTEM2_PLAN_APPLIED',
+  // A Jev-selected escalation is only a successful handoff when this marker
+  // names the concrete System2 request that accepted it; suppressed requests
+  // use the same marker with `status=unavailable` and a typed blocker.
+  'ESCALATE_HANDOFF',
   // The BOUNDED LEVEL SCAN (`levelScan.ts`): the descent a body takes when NOTHING at its
   // own level can ground a route and the rock below can. Without these in the mirrored
   // list the live sink DROPS the two lines that say which level the body descended to, which
@@ -6830,6 +6835,57 @@ export class JevController {
     const completionTrigger: DecisionTrigger = isActionTimeout(result) ? 'action_timeout' : 'action_completed'
     const deferred = this.deferredTrigger
     this.deferredTrigger = null
+    if (result.kind === 'ESCALATE') {
+      const candidateReason =
+        typeof candidate.meta.reason === 'string' ? candidate.meta.reason.slice(0, 120) : 'selected_by_jev'
+      const capabilities =
+        typeof candidate.meta.capabilities === 'string' ? candidate.meta.capabilities.slice(0, 180) : ''
+      const reason: LlmSummonReason = this.queue.current === null ? 'queue_empty' : 'action_impossible'
+      const detail =
+        `Jev selected ESCALATE actionId=${result.actionId} leaseEpoch=${result.epoch} ` +
+        `candidateReason=${candidateReason}${capabilities.length > 0 ? ` capabilities=${capabilities}` : ''}`
+      const handoff = submitSystem2Handoff({ reason, detail }, (summonReason, summonDetail) =>
+        this.summonLlm(summonReason, summonDetail),
+      )
+      if (handoff.status === 'submitted') {
+        this.logger.warn(
+          'system2',
+          `ESCALATE_HANDOFF status=submitted actionId=${result.actionId} leaseEpoch=${result.epoch} requestId=${handoff.requestId ?? 'unknown'} reason=${handoff.reason}`,
+          {
+            status: handoff.status,
+            actionId: result.actionId,
+            leaseEpoch: result.epoch,
+            requestId: handoff.requestId,
+            reason: handoff.reason,
+            detail: handoff.detail,
+          },
+          this.tickCounter,
+        )
+      } else {
+        this.logger.error(
+          'system2',
+          `ESCALATE_HANDOFF status=unavailable actionId=${result.actionId} leaseEpoch=${result.epoch} reason=${handoff.reason} blocker=${handoff.blocker}`,
+          {
+            status: handoff.status,
+            actionId: result.actionId,
+            leaseEpoch: result.epoch,
+            reason: handoff.reason,
+            detail: handoff.detail,
+            blocker: handoff.blocker,
+          },
+          this.tickCounter,
+        )
+      }
+      // ESCALATE is a control-plane request, not a physical Skill completion.
+      // The System2 response schedules the next decision after dispatch. If the
+      // request is suppressed, wait for a separate wake instead of immediately
+      // asking Jev to select ESCALATE again from unchanged facts. Preserve a
+      // critical safety event that arrived while the control action settled.
+      if (deferred !== null && CRITICAL_TRIGGERS.has(deferred.trigger)) {
+        this.requestDecision(deferred.trigger, deferred.detail)
+      }
+      return
+    }
     const trigger =
       deferred !== null && TRIGGER_PRIORITY[deferred.trigger] > TRIGGER_PRIORITY[completionTrigger]
         ? deferred.trigger
@@ -8623,7 +8679,12 @@ export class JevController {
         return blockers === null ? {} : { blockers }
       })(),
     }
-    const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail: groundedDetail }
+    const resummon: DecisionLlmResummonLog = {
+      triggered: true,
+      reason,
+      detail: groundedDetail,
+      requestId: requestContext.requestId,
+    }
     this.tickResummonLog.push(resummon)
 
     // #plan-reconciliation: remember WHICH row and WHICH question this request is

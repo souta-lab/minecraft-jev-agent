@@ -2832,13 +2832,22 @@ export class Executor {
         case 'WAIT':
           return await this.runWait(candidate, epoch, signal, startedAt)
         case 'ESCALATE':
-          return this.buildResult(candidate, epoch, startedAt, 'done', 'escalating', 'handed to System 2', null, {
-            verified: false,
-            dropObserved: false,
-            blockRemoved: false,
-            itemsGained: 0,
-            goalItemCount: this.countGoalItem(),
-          })
+          return this.buildResult(
+            candidate,
+            epoch,
+            startedAt,
+            'done',
+            'handoff_request_staged',
+            'System 2 handoff request staged for controller dispatch',
+            null,
+            {
+              verified: false,
+              dropObserved: false,
+              blockRemoved: false,
+              itemsGained: 0,
+              goalItemCount: this.countGoalItem(),
+            },
+          )
       }
     } catch (error) {
       if (error instanceof ActionCancelled) {
