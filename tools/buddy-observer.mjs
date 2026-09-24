@@ -33,6 +33,7 @@ const VTR_TRACE_EVENTS = new Set([
   'VTR_TRANSITION_COMMIT',
   'VTR_TRANSITION_PROGRESS',
   'VTR_TRANSITION_ACTUATION',
+  'VTR_REACH_ROUTE_DECISION',
   'VTR_TRANSITION_VERIFY',
   'VTR_TRANSITION_OUTCOME',
   'VTR_ORPHAN_ACTION_OUTCOME',
@@ -858,6 +859,62 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
+function projectVtrReachRouteDecision(entry) {
+  if (entry === null) return null
+  const detail = entry.detail ?? {}
+  const routeIds = Array.isArray(detail.routeIds)
+    ? detail.routeIds.filter((routeId) => typeof routeId === 'string' && routeId.length > 0).slice(0, 64)
+    : []
+  const selectedRouteId = typeof detail.selectedRouteId === 'string' && detail.selectedRouteId.length > 0
+    ? detail.selectedRouteId
+    : null
+  const selectedIsGrounded = selectedRouteId !== null && routeIds.includes(selectedRouteId)
+  const rawProbabilities = detail.probabilities
+  const probabilityEntries = rawProbabilities !== null && typeof rawProbabilities === 'object' && !Array.isArray(rawProbabilities)
+    ? Object.entries(rawProbabilities).filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+    : null
+  const source = typeof detail.source === 'string' ? detail.source : null
+  const actor = source === 'jev' ? 'jev'
+    : source === 'fallback' ? 'fallback'
+      : source === 'reflex' ? 'reflex'
+        : 'unknown'
+  return redactSecrets({
+    observedAt: entry.ts,
+    event: entry.event,
+    actor,
+    source,
+    policy: typeof detail.policy === 'string' ? detail.policy : null,
+    model: typeof detail.model === 'string' ? detail.model : null,
+    callId: typeof detail.callId === 'string' ? detail.callId : null,
+    transitionId: detail.transitionId ?? null,
+    contractHash: detail.contractHash ?? null,
+    status: selectedIsGrounded ? 'selected_grounded_route'
+      : detail.reason !== undefined ? 'unavailable'
+        : selectedRouteId !== null ? 'selected_route_not_in_grounded_set' : 'selection_unavailable',
+    selectedRouteId,
+    selectedRoute: selectedIsGrounded ? {
+      routeId: selectedRouteId,
+      grounded: true,
+      groundingSource: 'VTR_REACH_ROUTE_DECISION.detail.routeIds',
+    } : null,
+    routeIds,
+    routeIdsTruncated: Array.isArray(detail.routeIds) && detail.routeIds.length > routeIds.length,
+    actionProbability: typeof detail.actionProbability === 'number' && Number.isFinite(detail.actionProbability)
+      ? detail.actionProbability
+      : null,
+    probabilities: probabilityEntries === null ? null : Object.fromEntries(probabilityEntries.slice(0, 64)),
+    probabilitiesTruncated: probabilityEntries !== null && probabilityEntries.length > 64,
+    latencyMs: typeof detail.latencyMs === 'number' && Number.isFinite(detail.latencyMs) ? detail.latencyMs : null,
+    reason: detail.reason ?? null,
+    binding: {
+      runId: detail.runId ?? detail.identity?.runId ?? null,
+      generationId: detail.generationId ?? detail.identity?.generationId ?? null,
+      sourceSha: detail.sourceSha ?? detail.sourceCommit ?? detail.identity?.sourceSha ?? null,
+      worldKey: worldKeyFromVtrDetail(detail),
+    },
+  })
+}
+
 function worldKeyFromVtrDetail(detail) {
   return normalizeWorldKey(detail?.worldKey ?? detail?.identity?.worldKey
     ?? (typeof detail?.serverId === 'string' && typeof detail?.dimension === 'string'
@@ -896,6 +953,15 @@ function vtrEventMatchesLiveFence(entry, { runId, generationId, sourceCommit, wo
       && eventWorld !== null
       && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
   }
+  if (entry.event === 'VTR_REACH_ROUTE_DECISION') {
+    return directRunId === runId
+      && directGenerationId === generationId
+      && directSourceSha === sourceCommit
+      && typeof detail.transitionId === 'string'
+      && typeof detail.contractHash === 'string'
+      && eventWorld !== null
+      && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
+  }
   return true
 }
 
@@ -921,6 +987,7 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
       && (entry.detail?.contractHash === undefined || entry.detail.contractHash === contractHash))
     const progressEvent = latestEvent(linked, ['VTR_TRANSITION_PROGRESS'])
     const actuationEvent = latestEvent(linked, ['VTR_TRANSITION_ACTUATION'])
+    const routeDecisionEvent = latestEvent(linked, ['VTR_REACH_ROUTE_DECISION'])
     const verifyEvent = latestEvent(linked, ['VTR_TRANSITION_VERIFY'])
     const outcomeEvent = latestEvent(linked, ['VTR_TRANSITION_OUTCOME'])
     const verifyDetail = verifyEvent?.detail ?? null
@@ -969,6 +1036,7 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
       },
       progress: progressEvent?.detail?.progress ?? null,
       progressEvent: traceProjection(progressEvent),
+      routeDecision: projectVtrReachRouteDecision(routeDecisionEvent),
       actuation: actuationEvent === null ? null : {
         candidate: actuationEvent.detail?.candidate ?? null,
         target: actuationEvent.detail?.target ?? null,
@@ -999,6 +1067,55 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
   })
   const latest = transitions.at(-1) ?? null
   const latestCommit = commits.at(-1) ?? null
+  const latestRouteDecision = transitions
+    .map((transition) => transition.routeDecision)
+    .filter((decision) => decision !== null)
+    .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
+  const latestRouteTransition = latestRouteDecision === null ? null : transitions.find((transition) =>
+    transition.transitionId === latestRouteDecision.transitionId && transition.contractHash === latestRouteDecision.contractHash) ?? null
+  const latestAdmission = latestCommit === null ? null : {
+    observedAt: latestCommit.ts,
+    actor: 'vtr',
+    event: latestCommit.event,
+    selected: {
+      transitionId: latestCommit.detail.transitionId,
+      contractHash: latestCommit.detail.contractHash,
+      ensures: latestCommit.detail.desiredPredicate?.id ?? latestCommit.detail.ensures?.[0]?.id ?? null,
+      mission: latestCommit.detail.mission ?? null,
+    },
+    reason: latestCommit.detail.routePolicy ?? 'grounded VTR transition admitted',
+    generationId,
+  }
+  const routeDecisionSummary = latestRouteDecision === null ? null : {
+    observedAt: latestRouteDecision.observedAt,
+    actor: latestRouteDecision.actor,
+    event: latestRouteDecision.event,
+    selected: {
+      transitionId: latestRouteDecision.transitionId,
+      contractHash: latestRouteDecision.contractHash,
+      ensures: latestRouteTransition?.desiredPredicate?.id ?? null,
+      routeId: latestRouteDecision.selectedRoute?.routeId ?? null,
+      grounded: latestRouteDecision.selectedRoute?.grounded ?? false,
+      source: latestRouteDecision.source,
+      policy: latestRouteDecision.policy,
+      model: latestRouteDecision.model,
+      callId: latestRouteDecision.callId,
+      probabilities: latestRouteDecision.probabilities,
+    },
+    reason: latestRouteDecision.reason ?? (latestRouteDecision.source === 'jev'
+      ? 'Jev selected among grounded VTR Reach routes'
+      : latestRouteDecision.source === 'fallback'
+        ? 'Explicit fallback policy selected among grounded VTR Reach routes'
+        : latestRouteDecision.source === 'reflex'
+          ? 'Code reflex selected a grounded VTR Reach route'
+          : null),
+    generationId,
+    routeDecision: latestRouteDecision,
+  }
+  const latestDecision = latestAdmission === null ? routeDecisionSummary
+    : routeDecisionSummary === null || (parseTimestamp(latestAdmission.observedAt) ?? 0) > (parseTimestamp(routeDecisionSummary.observedAt) ?? 0)
+      ? latestAdmission
+      : routeDecisionSummary
   return {
     status: latest === null ? 'not_recorded' : 'observed',
     binding: {
@@ -1010,19 +1127,9 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
       confidence: 'direct',
     },
     latest,
-    latestDecision: latestCommit === null ? null : {
-      observedAt: latestCommit.ts,
-      actor: 'vtr',
-      event: latestCommit.event,
-      selected: {
-        transitionId: latestCommit.detail.transitionId,
-        contractHash: latestCommit.detail.contractHash,
-        ensures: latestCommit.detail.desiredPredicate?.id ?? latestCommit.detail.ensures?.[0]?.id ?? null,
-        mission: latestCommit.detail.mission ?? null,
-      },
-      reason: latestCommit.detail.routePolicy ?? 'grounded VTR transition admitted',
-      generationId,
-    },
+    latestDecision,
+    latestAdmission,
+    latestRouteDecision,
     transitions: transitions.slice(-12),
     events: scopedEvents.slice(-24).reverse().map(traceProjection),
     unknown: latest === null ? ['no_vtr_transition_commit_in_bounded_run_tail'] : [],
@@ -1055,7 +1162,14 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     generationBound,
   }))
   const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
-  const relevantVtrEvents = runEvents.filter((entry) => entry.source === 'vtr' && VTR_TRACE_EVENTS.has(entry.event))
+  const relevantVtrEvents = runEvents
+    .filter((entry) => VTR_TRACE_EVENTS.has(entry.event)
+      && (entry.source === 'vtr' || (entry.event === 'VTR_REACH_ROUTE_DECISION'
+        && entry.source === undefined
+        && entry.detail?.runId === runId
+        && entry.detail?.generationId === generationId
+        && typeof entry.detail?.sourceSha === 'string')))
+    .map((entry) => entry.source === 'vtr' ? entry : { ...entry, source: 'vtr', projectionStream: 'buddy.log' })
   const boot = latestEvent(relevantEvents, ['BOOT'])
     ?? (runId !== null && runBoot?.detail?.runId === runId ? runBoot : null)
   const build = latestEvent(relevantEvents, ['BUILD'])
@@ -1916,6 +2030,10 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const jev = projectChoice(jevEvent, 'jev')
   const system2 = projectChoice(system2Event, 'system2', system2Reason)
   const vtrDecision = snapshot.vtr?.latestDecision ?? null
+  const jevReachRouteDecision = snapshot.vtr?.latestRouteDecision?.source === 'jev'
+    ? snapshot.vtr.latestRouteDecision
+    : null
+  const latestIsVtrReachRouteDecision = vtrDecision?.event === 'VTR_REACH_ROUTE_DECISION'
   const latest = [jev, system2, vtrDecision]
     .filter((choice) => choice !== null)
     .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
@@ -1962,15 +2080,17 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
   if (snapshot.truth === null) unknown.push('authoritative_world_truth_unavailable')
   if (heartbeatLive !== true) unknown.push('world_heartbeat_stale_or_missing')
-  if (latest?.actor === 'jev' && jevEvidence?.available !== true) unknown.push('jev_call_context_unavailable')
-  if (jevEvidence?.available === true && jevEvidence.binding?.confidence !== 'strong') unknown.push('jev_call_binding_is_partial')
-  if (jevEvidence?.available === true && jevEvidence.state?.structures?.status !== 'observed') unknown.push('structures_not_recorded_in_decision_snapshot')
-  if (jevEvidence?.outcome?.status === 'pending_or_not_observed') unknown.push('selected_action_outcome_not_yet_observed')
+  const latestHasVtrJevRouteEvidence = latestIsVtrReachRouteDecision && jevReachRouteDecision !== null
+  if (latest?.actor === 'jev' && jevEvidence?.available !== true && !latestHasVtrJevRouteEvidence) unknown.push('jev_call_context_unavailable')
+  if (!latestIsVtrReachRouteDecision && jevEvidence?.available === true && jevEvidence.binding?.confidence !== 'strong') unknown.push('jev_call_binding_is_partial')
+  if (!latestIsVtrReachRouteDecision && jevEvidence?.available === true && jevEvidence.state?.structures?.status !== 'observed') unknown.push('structures_not_recorded_in_decision_snapshot')
+  if (!latestIsVtrReachRouteDecision && jevEvidence?.outcome?.status === 'pending_or_not_observed') unknown.push('selected_action_outcome_not_yet_observed')
   const selection = latest?.selected?.strategy
     ?? latest?.selected?.chosen
     ?? latest?.selected?.id
     ?? latest?.selected?.actionId
     ?? latest?.selected?.toolName
+    ?? latest?.selected?.routeId
     ?? (latest?.actor === 'vtr'
       ? `Transition ${latest.selected?.transitionId ?? 'UNKNOWN'} ensures ${latest.selected?.ensures ?? 'UNKNOWN'}`
       : null)
@@ -2024,7 +2144,8 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     choices: {
       latest,
       jev,
-      jevStatus: jev === null ? 'not_recorded' : 'observed',
+      jevStatus: jev === null && jevReachRouteDecision === null ? 'not_recorded' : 'observed',
+      jevReachRouteDecision,
       vtr: snapshot.vtr ?? null,
       jevEvidence,
       jevCombatDecision,

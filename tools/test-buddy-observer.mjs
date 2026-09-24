@@ -400,8 +400,8 @@ assert.equal(staleIdentitySnapshot.vtr.latest.transitionId, vtrTransitionId)
 assert.equal(staleIdentitySnapshot.vtr.latest.status, 'verified_success')
 
 // Exercise the live observer ingress, not only the pure projector: a
-// structured VTR journal commit + bound VERIFY + matching terminal outcome
-// must reach the same AI summary without inventing a Jev choice.
+// structured VTR journal commit + bound Jev route choice + VERIFY + terminal
+// outcome must preserve Jev's route decision separately from VTR admission.
 const ingressRuntimeDir = mkdtempSync(join(tmpdir(), 'buddy-observer-vtr-ingress-'))
 const ingressRunId = 'run-observer-vtr-ingress'
 const ingressGenerationId = 'gen-observer-vtr-ingress'
@@ -413,6 +413,8 @@ const ingressMission = { id: 'mission:oak-log', kind: 'inventory_at_least', item
 const ingressBootTs = '2026-09-21T12:59:59.000Z'
 const ingressReadyTs = '2026-09-21T13:00:00.000Z'
 const ingressCommitTs = '2026-09-21T13:00:01.000Z'
+const ingressRouteTs = '2026-09-21T13:00:01.050Z'
+const ingressRouteMirrorTs = '2026-09-21T13:00:01.051Z'
 const ingressVerifyTs = '2026-09-21T13:00:02.000Z'
 const ingressOutcomeTs = '2026-09-21T13:00:02.010Z'
 const ingressWorld = {
@@ -452,6 +454,37 @@ const ingressCommit = {
     identity: ingressContractIdentity,
   },
 }
+const ingressRouteDetail = {
+  transitionId: ingressTransitionId,
+  contractHash: ingressContractHash,
+  desiredPredicate: { id: 'reach.resource-source' },
+  routeIds: ['reach:oak-log:walk', 'reach:oak-log:jump'],
+  selectedRouteId: 'reach:oak-log:jump',
+  source: 'jev',
+  policy: 'typesafe',
+  model: 'typesafe-ai/jev',
+  callId: 'jev-reach-route-call-1',
+  latencyMs: 27,
+  actionProbability: 0.72,
+  probabilities: { 'reach:oak-log:walk': 0.28, 'reach:oak-log:jump': 0.72 },
+  identity: {
+    worldKey: ingressWorldKey,
+    dimension: 'overworld',
+    worldEpoch: 44,
+    generationId: ingressGenerationId,
+    leaseId: ingressGenerationId,
+  },
+}
+const ingressRouteRecord = {
+  record: 'agent-event',
+  ts: ingressRouteTs,
+  source: 'vtr',
+  message: `VTR_REACH_ROUTE_DECISION transition=${ingressTransitionId} selected=reach:oak-log:jump source=jev policy=typesafe model=typesafe-ai/jev`,
+  detail: ingressRouteDetail,
+}
+const ingressBoundRouteDetail = { ...ingressRouteDetail, ...ingressContractIdentity }
+const ingressRouteMirrorLine = `[${ingressRouteMirrorTs}] VTR_REACH_ROUTE_DECISION ${Object.entries(ingressBoundRouteDetail)
+  .map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(' ')}`
 const ingressVerify = {
   record: 'agent-event',
   ts: ingressVerifyTs,
@@ -507,6 +540,13 @@ const wrongBoundaryRecord = (ts, id, identityOverrides) => ({
     identity: { ...ingressContractIdentity, ...identityOverrides },
   },
 })
+const wrongRouteBoundaryRecord = (ts, overrides) => ({
+  record: 'agent-event',
+  ts,
+  source: 'vtr',
+  message: `VTR_REACH_ROUTE_DECISION transition=${ingressTransitionId} selected=stale-route source=jev`,
+  detail: { ...ingressBoundRouteDetail, ...overrides },
+})
 const wrongRunVerify = {
   ...ingressVerify,
   ts: '2026-09-21T13:00:03.000Z',
@@ -515,8 +555,13 @@ const wrongRunVerify = {
 }
 const ingressRecords = [
   ingressCommit,
+  ingressRouteRecord,
   ingressVerify,
   ingressOutcome,
+  wrongRouteBoundaryRecord('2026-09-21T13:00:02.100Z', { runId: 'run-prior' }),
+  wrongRouteBoundaryRecord('2026-09-21T13:00:02.200Z', { generationId: 'gen-prior' }),
+  wrongRouteBoundaryRecord('2026-09-21T13:00:02.300Z', { sourceSha: 'd'.repeat(40) }),
+  wrongRouteBoundaryRecord('2026-09-21T13:00:02.400Z', { worldKey: 'other-world|overworld|44' }),
   wrongBoundaryRecord('2026-09-21T13:00:03.100Z', 'wrong-run', { runId: 'run-prior' }),
   wrongBoundaryRecord('2026-09-21T13:00:03.200Z', 'wrong-generation', { generationId: 'gen-prior' }),
   wrongBoundaryRecord('2026-09-21T13:00:03.300Z', 'wrong-source', { sourceSha: 'd'.repeat(40) }),
@@ -529,6 +574,7 @@ mkdirSync(join(ingressRuntimeDir, 'logs', 'jev'), { recursive: true })
 writeFileSync(join(ingressRuntimeDir, 'buddy.log'), [
   `[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha}`,
   `[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`,
+  ingressRouteMirrorLine,
 ].join('\n') + '\n')
 writeFileSync(join(ingressRuntimeDir, 'logs', 'jev', 'run.jsonl'), ingressRecords.map((record) => JSON.stringify(record)).join('\n') + '\n')
 const ingressSocketPath = join(ingressRuntimeDir, 'data', 'resident', 'control.sock')
@@ -561,6 +607,20 @@ try {
   assert.equal(ingressSnapshot.resident.sourceCommitBinding, 'run-BOOT+GENERATION_READY')
   assert.equal(ingressSnapshot.resident.generationBoundary?.generationId, ingressGenerationId)
   assert.equal(ingressSnapshot.vtr.latest.status, 'verified_success')
+  assert.equal(ingressSnapshot.vtr.latest.routeDecision.actor, 'jev')
+  assert.equal(ingressSnapshot.vtr.latest.routeDecision.selectedRoute.grounded, true)
+  assert.equal(ingressSnapshot.vtr.latest.routeDecision.selectedRoute.routeId, 'reach:oak-log:jump')
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.source, 'jev')
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.model, 'typesafe-ai/jev')
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.callId, 'jev-reach-route-call-1')
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.binding.runId, ingressRunId)
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.binding.generationId, ingressGenerationId)
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.binding.sourceSha, ingressSourceSha)
+  assert.deepEqual(ingressSnapshot.vtr.latestRouteDecision.binding.worldKey, ingressWorld)
+  assert.deepEqual(ingressSnapshot.vtr.latestRouteDecision.probabilities, {
+    'reach:oak-log:walk': 0.28,
+    'reach:oak-log:jump': 0.72,
+  })
   assert.equal(ingressSnapshot.vtr.latest.verification.truth, 'TRUE')
   assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
   assert.equal(ingressSnapshot.vtr.latest.binding.runId, ingressRunId)
@@ -571,16 +631,64 @@ try {
   assert.equal(ingressSnapshot.mission.provenance.source, 'VTR_TRANSITION_COMMIT.detail.mission')
   assert.deepEqual(ingressSnapshot.mission.predicate, { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
   assert.equal(ingressSummary.transition.status, 'verified_success')
-  assert.equal(ingressSummary.choices.vtr.latestDecision.actor, 'vtr')
+  assert.equal(ingressSummary.transition.routeDecision.source, 'jev')
+  assert.equal(ingressSummary.choices.vtr.latestDecision.actor, 'jev')
+  assert.equal(ingressSummary.choices.vtr.latestDecision.event, 'VTR_REACH_ROUTE_DECISION')
+  assert.equal(ingressSummary.choices.vtr.latestDecision.selected.routeId, 'reach:oak-log:jump')
+  assert.equal(ingressSummary.choices.vtr.latestDecision.selected.grounded, true)
+  assert.equal(ingressSummary.choices.vtr.latestAdmission.actor, 'vtr')
+  assert.equal(ingressSummary.choices.jevReachRouteDecision.callId, 'jev-reach-route-call-1')
   assert.equal(ingressSummary.choices.vtr.latestDecision.selected.transitionId, ingressTransitionId)
   assert.equal(ingressSummary.choices.vtr.latestDecision.selected.ensures, 'reach.resource-source')
-  assert.equal(ingressSummary.choices.latest.actor, 'vtr')
+  assert.equal(ingressSummary.choices.latest.actor, 'jev')
   assert.equal(ingressSummary.choices.latest.selected.transitionId, ingressTransitionId)
-  assert.equal(ingressSummary.choices.jevStatus, 'not_recorded')
+  assert.equal(ingressSummary.choices.jevStatus, 'observed')
+  assert.equal(ingressSummary.unknown.includes('jev_call_context_unavailable'), false)
 } finally {
   await new Promise((resolve) => ingressControlServer.close(resolve))
   rmSync(ingressRuntimeDir, { recursive: true, force: true })
 }
+
+const fallbackRouteRecord = {
+  record: 'agent-event',
+  ts: '2026-09-21T13:00:03.000Z',
+  source: 'vtr',
+  message: `VTR_REACH_ROUTE_DECISION transition=${ingressTransitionId} selected=reach:oak-log:walk source=fallback policy=fallback`,
+  detail: {
+    ...ingressBoundRouteDetail,
+    selectedRouteId: 'reach:oak-log:walk',
+    source: 'fallback',
+    policy: 'fallback',
+    model: 'fallback-local',
+    callId: 'fallback-reach-route-call-1',
+    actionProbability: 1,
+    probabilities: { 'reach:oak-log:walk': 1 },
+  },
+}
+const fallbackBoot = parseBuddyLogLine(`[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha}`)
+const fallbackReady = parseBuddyLogLine(`[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`)
+const fallbackRouteSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, runId: ingressRunId, generationId: ingressGenerationId, worldKey: ingressWorld } },
+  events: [fallbackBoot, fallbackReady, ...parseVtrRunJsonlEvents([ingressCommit, ingressVerify, ingressOutcome, fallbackRouteRecord])],
+  runBoot: fallbackBoot,
+  runMetadata: {
+    runArtifactsMatched: false,
+    sourceSha: null,
+    sourceShaConflict: false,
+    acceptance: null,
+    predicates: { runId: ingressRunId, sourceSha: ingressSourceSha, generationId: ingressGenerationId },
+  },
+  runGenerationReady: fallbackReady,
+  now: Date.parse('2026-09-21T13:00:04.000Z'),
+})
+const fallbackRouteSummary = buildAiSummary(fallbackRouteSnapshot, { now: Date.parse('2026-09-21T13:00:04.000Z') })
+assert.equal(fallbackRouteSnapshot.vtr.latestDecision.actor, 'fallback')
+assert.equal(fallbackRouteSnapshot.vtr.latestRouteDecision.source, 'fallback')
+assert.equal(fallbackRouteSnapshot.vtr.latestRouteDecision.callId, 'fallback-reach-route-call-1')
+assert.equal(fallbackRouteSummary.choices.latest.actor, 'fallback')
+assert.equal(fallbackRouteSummary.choices.latest.selected.routeId, 'reach:oak-log:walk')
+assert.equal(fallbackRouteSummary.choices.jevStatus, 'not_recorded')
+assert.equal(fallbackRouteSummary.choices.jevReachRouteDecision, null)
 
 const boundedRunLogDir = mkdtempSync(join(tmpdir(), 'buddy-observer-vtr-'))
 try {
