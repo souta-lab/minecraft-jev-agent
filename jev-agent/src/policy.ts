@@ -150,13 +150,17 @@ export function guardCandidate(
     return deny(candidate.id, 'STALE_COORDS', `candidate is ${age} ticks old (limit ${context.maxCandidateAgeTicks})`)
   }
 
-  // A completed work goal does not make an already-grounded hostile response
-  // meaningless. RETREAT still passes through guardMove below, and ATTACK still
-  // passes through guardAttack; only the active hostile's current grounded
-  // response affordance may cross this lifecycle guard. Ordinary post-goal work
-  // and optional hunts remain ALREADY_DONE.
+  // Completion belongs to the exact active queue head. When the queue advances
+  // to empty, WorldState can still carry the just-completed Goal as context for
+  // System2 until its next plan arrives. That stale completion must not become a
+  // global execution lock: the new horizon has no active Option to reject.
+  // Within the active head, a completed work goal still does not make an already-
+  // grounded hostile response meaningless. RETREAT still passes through
+  // guardMove below, and ATTACK still passes through guardAttack; only the active
+  // hostile's current grounded response affordance may cross this lifecycle gate.
   if (
     state.goal.complete &&
+    state.goalQueue.current?.id === state.goal.id &&
     candidate.kind !== 'RETREAT' &&
     !isGroundedHostileResponseAttack(candidate, state)
   ) {

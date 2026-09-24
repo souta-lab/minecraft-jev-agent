@@ -37,7 +37,7 @@ import { pickHigherPriority } from './src/controller-legacy.ts'
 import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
-import type { AgentSignals, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { JevRequest } from './src/jev-legacy.ts'
 
@@ -620,9 +620,16 @@ addCase('a skeleton shooting from 10m (beyond melee, inside bow range) gets a gr
 
 addCase('a completed stale goal leaves grounded hostile ATTACK and RETREAT to Jev, while WAIT remains ALREADY_DONE', () => {
   const unfinished = goalState()
-  const completed: GoalState = { ...unfinished, haveCount: 1, progress: 1, complete: true }
+  const activeState = baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 1.33 }))
+  const completed: GoalState = {
+    ...unfinished,
+    id: activeState.goalQueue.current?.id ?? unfinished.id,
+    haveCount: 1,
+    progress: 1,
+    complete: true,
+  }
   const state: WorldState = {
-    ...baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 1.33 })),
+    ...activeState,
     goal: completed,
   }
   const candidates = generateCandidates(state, defaultCandidateOptions)
@@ -689,9 +696,71 @@ addCase('a completed stale goal leaves grounded hostile ATTACK and RETREAT to Je
   }
 })
 
+addCase('a completed Goal from a retired Option cannot reject the empty-queue horizon as ALREADY_DONE', () => {
+  const goal: GoalState = {
+    ...goalState(),
+    id: 'g1:collect:log',
+    description: 'collect log',
+    targetItem: 'log',
+    haveCount: 1,
+    progress: 1,
+    complete: true,
+  }
+  const log: BlockState = {
+    kind: 'log',
+    name: 'birch_log',
+    position: { x: 1.5, y: 10, z: 0.5 },
+    distance: 1,
+    diggable: true,
+    inReach: true,
+    hasAdjacentStandable: true,
+    adjacentStandable: SELF,
+    yield: 'birch_log',
+    visible: true,
+  }
+  const state: WorldState = {
+    ...baseState([], null, selfState(SELF)),
+    goal,
+    inventory: { slots: [], counts: { birch_log: 1 }, totalItems: 1 },
+    blocks: [log],
+    goalQueue: { depth: 0, current: null, empty: true, hasImpossible: false, done: 1, goals: [] },
+    currentOption: null,
+  }
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const mine = candidates.find((candidate) => candidate.kind === 'MINE' && candidate.target?.x === log.position.x)
+  const wait = candidates.find((candidate) => candidate.kind === 'WAIT')
+  const context = {
+    phase: 'decision' as const,
+    candidateIds: new Set(candidates.map((candidate) => candidate.id)),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 10,
+    canComputePath: () => true,
+  }
+  const mineResult = mine === undefined ? null : guardCandidate(mine, state, context)
+  const waitResult = wait === undefined ? null : guardCandidate(wait, state, context)
+  const pass =
+    state.goal.complete &&
+    state.goalQueue.current === null &&
+    state.currentOption === null &&
+    mineResult?.ok === true &&
+    waitResult?.ok === true
+  return {
+    pass,
+    detail: `completedGoal=${state.goal.id} activeOption=${state.goalQueue.current?.id ?? 'none'} mine=${mineResult?.ok ? 'accepted' : mineResult?.code ?? 'missing'} wait=${waitResult?.ok ? 'accepted' : waitResult?.code ?? 'missing'}`,
+  }
+})
+
 addCase('a completed goal still rejects an optional nonhostile ATTACK as ALREADY_DONE', () => {
   const unfinished = goalState()
-  const completed: GoalState = { ...unfinished, haveCount: 1, progress: 1, complete: true }
+  const activeState = baseState([], null, selfState(SELF, { food: 10 }))
+  const completed: GoalState = {
+    ...unfinished,
+    id: activeState.goalQueue.current?.id ?? unfinished.id,
+    haveCount: 1,
+    progress: 1,
+    complete: true,
+  }
   const cow: EntityState = {
     id: 55,
     name: 'cow',
@@ -705,7 +774,8 @@ addCase('a completed goal still rejects an optional nonhostile ATTACK as ALREADY
     attackedSelf: false,
   }
   const state: WorldState = {
-    ...baseState([cow], null, selfState(SELF, { food: 10 })),
+    ...activeState,
+    entities: [cow],
     goal: completed,
   }
   const candidates = generateCandidates(state, defaultCandidateOptions)
