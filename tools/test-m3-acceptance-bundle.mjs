@@ -107,7 +107,10 @@ function runnerOut(runId, { decisions = [`SYSTEM2_AUTHORITY_DECISION ${SYSTEM2_I
   )
 }
 
-const DECISIONS = `${JSON.stringify({ record: 'decision', ts: at(2), source: 'jev', action: 'GOTO:nether_portal' })}\n`
+const DECISIONS = `${JSON.stringify({
+  record: 'decision', ts: at(2), source: 'jev', runId: RUN,
+  generationId: GENERATION_ID, sourceSha: SOURCE_SHA, action: 'GOTO:nether_portal',
+})}\n`
 
 const ACCEPTANCE = (runId) =>
   JSON.stringify({

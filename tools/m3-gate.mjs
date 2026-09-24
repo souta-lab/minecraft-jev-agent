@@ -341,11 +341,11 @@ export function evaluateM3Gate({
   // Defense in depth: even an already-`valid` evidence bundle must name R. The
   // reader binds by filename/BOOT boundary; this guard makes cross-run joining
   // impossible even through an injected reader.
-  if (typeof evidence.runId === 'string' && evidence.runId !== expectedRunId) {
+  if (evidence.runId !== expectedRunId) {
     return verdict({
       status: 'UNKNOWN',
       code: 2,
-      reason: `evidence_run_mismatch expected=${expectedRunId} observed=${evidence.runId}`,
+      reason: `evidence_run_mismatch expected=${expectedRunId} observed=${typeof evidence.runId === 'string' ? evidence.runId : 'unknown'}`,
       runId: expectedRunId,
       conditions: unknownConditions(),
     })

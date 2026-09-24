@@ -173,7 +173,10 @@ function runnerOut(
   return lines.join('\n') + '\n'
 }
 
-const DECISIONS = `${JSON.stringify({ record: 'decision', ts: at(2), source: 'jev', action: 'GOTO:nether_portal' })}\n`
+const decisionsFor = (runId, sourceSha = SOURCE_SHA, sec = 2) => `${JSON.stringify({
+  record: 'decision', ts: at(sec), source: 'jev', runId,
+  generationId: 'gen-test-1', sourceSha, action: 'GOTO:nether_portal',
+})}\n`
 
 const ACCEPTANCE = (runId) =>
   JSON.stringify({
@@ -204,7 +207,11 @@ function makeRoot(name) {
 function writeFixture(root, runId, { logLines, acceptance = true, runner = {} }) {
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
+  writeFileSync(
+    join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'),
+    decisionsFor(runId, runner.sourceSha ?? SOURCE_SHA, (runner.offsetSec ?? 0) + 2),
+    'utf8',
+  )
   if (acceptance) {
     writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
   }
@@ -1626,7 +1633,7 @@ ok('the control-socket generation hash is a read-only cross-check: agreement/dis
       `${boot(200, successor)}\n`,
     'utf8',
   )
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisionsFor(runId), 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
 
   const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])

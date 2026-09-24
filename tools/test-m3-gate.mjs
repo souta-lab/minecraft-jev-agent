@@ -389,10 +389,13 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     const runLog = [boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 0 })]
     const runnerLog = [
       boot(RUN),
-      '[2026-09-20T10:00:00.100Z] GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false',
+      `[2026-09-20T10:00:00.100Z] GENERATION_READY id=gen-test generationId=gen-test sourceSha=${SOURCE_SHA} buildHash=1234567890ab system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false`,
       '[2026-09-20T10:01:00.000Z] HOST_LOCK released reason=fixture',
     ]
-    const decisionLines = [JSON.stringify({ record: 'decision', ts: '2026-09-20T10:00:01.000Z', source: 'jev' })]
+    const decisionLines = [JSON.stringify({
+      record: 'decision', ts: '2026-09-20T10:00:01.000Z', source: 'jev', runId: RUN,
+      generationId: 'gen-test', sourceSha: SOURCE_SHA,
+    })]
     const observedPredicates = [
       { id: 'ender_eyes', satisfied: true, observedAtMs: 1, observedAt: new Date(1).toISOString(), source: 'host-observe:rung:ender_eyes', evidence: {} },
       { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'log:PORTAL_LIT', evidence: { dimension: 'minecraft:the_nether' } },
@@ -581,6 +584,25 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   assert.match(out.text(), /status=UNKNOWN reason=evidence_run_mismatch/, out.text())
   assert.doesNotMatch(out.text(), /status=PASS/)
   ok('an injected evidence bundle naming another run cannot PASS')
+}
+
+{
+  // A missing scope is just as unsafe as a different scope: otherwise a
+  // caller-provided bundle can borrow this run's source SHA and terminal report
+  // while supplying another run's inventory and BODY transition.
+  const unscopedEvidence = evidenceFrom([boot(RUN), dimensionTransition('minecraft:the_nether'), EYES_READY])
+  delete unscopedEvidence.runId
+  const result = evaluateM3Gate({
+    expectedRunId: RUN,
+    evidence: unscopedEvidence,
+    policy: { code: 0, status: 'VERIFIED', reason: 'fixture-policy-pass' },
+    currentInventoryObservation: currentObservation({ ender_eye: 12 }),
+    sourceExactness: exactSource(),
+  })
+  assert.equal(result.status, 'UNKNOWN')
+  assert.equal(result.reason, `evidence_run_mismatch expected=${RUN} observed=unknown`)
+  assert.notEqual(result.status, 'PASS')
+  ok('an injected evidence bundle with missing runId cannot PASS')
 }
 
 // ---------------------------------------------------------------------------

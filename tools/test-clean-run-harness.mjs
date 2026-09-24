@@ -115,7 +115,10 @@ function runnerOut(runId, source = FIXTURE_SHA) {
   )
 }
 
-const DECISIONS = `${JSON.stringify({ record: 'decision', ts: at(2), source: 'jev', action: 'GOTO:nether_portal' })}\n`
+const decisionsFor = (runId, source = FIXTURE_SHA) => `${JSON.stringify({
+  record: 'decision', ts: at(2), source: 'jev', runId,
+  generationId: SYSTEM2_GENERATION_ID, sourceSha: source, action: 'GOTO:nether_portal',
+})}\n`
 
 function acceptanceRecord(runId, { levelName = CLEAN_LEVEL, seed = CLEAN_SEED, gitCommit = FIXTURE_SHA } = {}) {
   return JSON.stringify({
@@ -197,10 +200,10 @@ function initCleanFixtureGit(root) {
   return head
 }
 
-function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance = true, acceptanceOptions = {}, decisions = DECISIONS, descriptor = null } = {}) {
+function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance = true, acceptanceOptions = {}, decisions = null, descriptor = null } = {}) {
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, source), 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisions, 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisions ?? decisionsFor(runId, source), 'utf8')
   if (acceptance) {
     writeFileSync(
       join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`),
