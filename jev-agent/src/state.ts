@@ -2150,9 +2150,10 @@ function buildEnvHazard(
 }
 
 /**
- * The remaining breath. Mineflayer sets `bot.oxygenLevel` from the server's
- * `air_supply` metadata. Missing or malformed metadata stays unknown; the
- * sensor never turns absence into a full-air world fact.
+ * The remaining breath. The resident binds `bot.oxygenLevel` to the bot's own
+ * entity `air_supply` metadata on modern named-metadata clients; older clients
+ * retain Mineflayer's self-filtered breath listener. Missing or malformed
+ * metadata stays unknown rather than becoming a full-air world fact.
  */
 function readAir(bot: Bot): number | null {
   return observedAir((bot as { oxygenLevel?: number }).oxygenLevel)

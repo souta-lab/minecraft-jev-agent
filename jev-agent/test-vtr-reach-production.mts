@@ -1,13 +1,73 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
-import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
+import { MIRRORED_MARKERS, mirroredEventToken, reachMoveFitsLocomotionContract } from './src/controller-legacy.ts'
+import { envelopeForCandidate } from './src/skillCommitment.ts'
+import type { Candidate } from './src/candidates.ts'
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
 const generationEntry = readFileSync(new URL('../buddy-driver/generation-entry.ts', import.meta.url), 'utf8')
 
+function moveCandidate(meta: Record<string, string | number | boolean> = {}, id = 'MOVE:oak_log:source'): Candidate {
+  return {
+    id,
+    kind: 'MOVE',
+    label: 'approach the oak log source',
+    targetName: 'oak_log',
+    target: { x: 10, y: 64, z: 10 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { targetBlockName: 'oak_log', targetBlockX: 10, targetBlockY: 64, targetBlockZ: 10, ...meta },
+  }
+}
+
 describe('VTR Reach production authority seam', () => {
+  it('refuses resource MOVE candidates whose Executor envelope admits terrain mutation', () => {
+    const plain = moveCandidate()
+    assert.equal(reachMoveFitsLocomotionContract(plain), true)
+    const explicitLevel = moveCandidate({ vertical: 'none' })
+    const levelEnvelope = envelopeForCandidate(explicitLevel)
+    assert.equal(levelEnvelope.mayDigGroundedRoute, false)
+    assert.equal(levelEnvelope.mayPlaceGroundedRoute, false)
+    assert.equal(reachMoveFitsLocomotionContract(explicitLevel), true, 'vertical=none names an ordinary level route')
+
+    for (const vertical of ['staircase', 'staircase-up', 'pillar', 'reuse']) {
+      const candidate = moveCandidate({ vertical })
+      const envelope = envelopeForCandidate(candidate)
+      assert.equal(envelope.mayDigGroundedRoute, true, `vertical=${vertical} must be recognized as a mutating route`)
+      assert.equal(envelope.mayPlaceGroundedRoute, true, `vertical=${vertical} must be recognized as a mutating route`)
+      assert.equal(reachMoveFitsLocomotionContract(candidate), false, `vertical=${vertical} exceeds locomotion-only Reach`)
+    }
+
+    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ digRoute: true })), false)
+    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ digStep: true })), false)
+    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ vertical: 'none', fallbackVertical: 'staircase' })), false)
+    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ mayPlaceBlocks: true })), false)
+    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ bridge: true }, 'BRIDGE:oak_log')), false)
+
+    const shapeStart = controller.indexOf('private reachWitnessForCandidateShape(')
+    const shapeEnd = controller.indexOf('private sourcePositionForCandidate(', shapeStart)
+    const shape = controller.slice(shapeStart, shapeEnd)
+    const witnessStart = controller.indexOf('private reachWitnessForCandidate(')
+    const witnessEnd = controller.indexOf('private reachObservation(', witnessStart)
+    const witness = controller.slice(witnessStart, witnessEnd)
+    assert.match(shape, /reachMoveFitsLocomotionContract\(candidate\)/)
+    assert.match(witness, /reachMoveFitsLocomotionContract\(candidate\)/)
+
+    const activeStart = controller.indexOf('private async tickReachTransition(')
+    const noCandidateStart = controller.indexOf('if (selected === undefined)', activeStart)
+    const noCandidateEnd = controller.indexOf('if (runtime.state.witness?.witnessId !== selected.witness.witnessId)', noCandidateStart)
+    const noCandidate = controller.slice(noCandidateStart, noCandidateEnd)
+    assert.match(noCandidate, /knownResourceEvidence/)
+    assert.match(noCandidate, /terminateReachAsInfeasible/)
+    assert.match(noCandidate, /bounded contract remains scheduler-owned while fresh evidence is unknown/)
+  })
+
   it('mirrors every Reach runtime event into the HOST event sink', () => {
     const markers = new Set([...controller.matchAll(/\b(VTR_[A-Z0-9_]+)\b/g)].map((match) => match[1]!))
     assert.ok(markers.size > 0, 'expected VTR event markers in the production controller')

@@ -524,6 +524,13 @@ export function envelopeForCandidate(
         typeof candidate.meta[DESCEND_SCAFFOLD_BLOCK_META] === 'string'
           ? (candidate.meta[DESCEND_SCAFFOLD_BLOCK_META] as string)
           : null
+      // verticalPlanMeta writes `vertical: 'none'` to ordinary level routes so
+      // the executor can distinguish them from a missing route declaration. It
+      // does not grant terrain mutation authority; only a concrete vertical
+      // plan (or the candidate's explicit fallback plan) can do that.
+      const hasVerticalRoute = [candidate.meta.vertical, candidate.meta.fallbackVertical].some(
+        (value) => typeof value === 'string' && value !== 'none',
+      )
       // The block(s) this route's OWN placement step DECLARED at candidate time:
       // `bridgeBlock` for a bridge, `pillarPlaceName` / `fallbackPillarPlaceName`
       // for a vertical pillar route - the very keys the executor's own legs read
@@ -537,8 +544,8 @@ export function envelopeForCandidate(
       const declaredPlaceBlocks = declaredRoutePlaceBlocks(candidate)
       return {
         ...base,
-        mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.digStep === true || candidate.meta.vertical !== undefined,
-        mayPlaceGroundedRoute: candidate.meta.vertical !== undefined || bridge || descentPlaceCell !== null,
+        mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.digStep === true || hasVerticalRoute,
+        mayPlaceGroundedRoute: hasVerticalRoute || bridge || descentPlaceCell !== null,
         mayPlaceBlocks:
           descentPlaceCell !== null && descentBlock !== null
             ? [{ position: descentPlaceCell, itemName: descentBlock }]

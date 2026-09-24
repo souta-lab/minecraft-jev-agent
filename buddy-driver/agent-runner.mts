@@ -116,6 +116,7 @@ const LISTENER_EVENTS = [
   'blockUpdate',
   'entitySpawn',
   'health',
+  'breath',
   'playerCollect',
   'death',
   'end',
@@ -168,7 +169,7 @@ function isModelAuthorityMismatch(value: unknown): value is ModelAuthorityMismat
 // configuration.  The HOST must not capture its leak baseline until this set
 // is attached; otherwise deterministic bootstrap (which awaits its plan
 // before scheduler.start()) makes a healthy generation look like a leak.
-const GENERATION_SCHEDULER_EVENTS = ['goal_reached', 'blockUpdate', 'entitySpawn', 'health', 'playerCollect'] as const
+const GENERATION_SCHEDULER_EVENTS = ['goal_reached', 'blockUpdate', 'entitySpawn', 'health', 'breath', 'playerCollect'] as const
 
 for (const dir of [DATA, LOGS, JEV_LOGS, FREEZE_DIR]) mkdirSync(dir, { recursive: true })
 

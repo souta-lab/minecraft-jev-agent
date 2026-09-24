@@ -409,6 +409,8 @@ process.stdout.write('issue #437 §2/§3 - SkillOutcomePacket + decision-epoch i
   const pillar = envelopeForCandidate(retrieveCandidate({ vertical: 'pillar-up' }))
   const digRoute = envelopeForCandidate(retrieveCandidate({ digRoute: true }))
   const plain = envelopeForCandidate(retrieveCandidate({}))
+  const explicitLevelRoute = envelopeForCandidate(retrieveCandidate({ vertical: 'none' }))
+  const fallbackVerticalRoute = envelopeForCandidate(retrieveCandidate({ vertical: 'none', fallbackVertical: 'staircase' }))
   const pass =
     pillar.mayPlaceGroundedRoute === true &&
     pillar.mayDigGroundedRoute === true &&
@@ -418,13 +420,22 @@ process.stdout.write('issue #437 §2/§3 - SkillOutcomePacket + decision-epoch i
     plain.mayPlaceGroundedRoute === false &&
     plain.mayDigGroundedRoute === false &&
     (plain.mayDigBlocks ?? []).length === 0 &&
-    (plain.mayPlaceBlocks ?? []).length === 0
+    (plain.mayPlaceBlocks ?? []).length === 0 &&
+    // verticalPlanMeta uses an explicit sentinel for ordinary level movement;
+    // it must not accidentally grant terrain effects that the executor skips.
+    explicitLevelRoute.mayPlaceGroundedRoute === false &&
+    explicitLevelRoute.mayDigGroundedRoute === false &&
+    // A real fallback vertical tactic remains covered by the same envelope.
+    fallbackVerticalRoute.mayPlaceGroundedRoute === true &&
+    fallbackVerticalRoute.mayDigGroundedRoute === true
   report(
     pass,
     '8. RETRIEVE/RETREAT carry their own grounded route authority, and a plain one carries none (U4)',
     `pillar place=${pillar.mayPlaceGroundedRoute} dig=${pillar.mayDigGroundedRoute} | ` +
       `digRoute dig=${digRoute.mayDigGroundedRoute} place=${digRoute.mayPlaceGroundedRoute} | ` +
-      `plain place=${plain.mayPlaceGroundedRoute} dig=${plain.mayDigGroundedRoute}`,
+      `plain place=${plain.mayPlaceGroundedRoute} dig=${plain.mayDigGroundedRoute} | ` +
+      `vertical=none place=${explicitLevelRoute.mayPlaceGroundedRoute} dig=${explicitLevelRoute.mayDigGroundedRoute} | ` +
+      `fallback=staircase place=${fallbackVerticalRoute.mayPlaceGroundedRoute} dig=${fallbackVerticalRoute.mayDigGroundedRoute}`,
   )
 }
 

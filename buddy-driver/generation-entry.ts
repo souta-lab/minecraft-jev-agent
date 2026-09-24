@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
+import { bindSelfAirMetadataProjection } from '../jev-agent/src/air.ts'
 import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
 import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForModelRecovery } from './model-recovery.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
@@ -2036,6 +2037,11 @@ export function buildMercurySummary(
 }
 
 export function createGeneration(ctx: GenerationContext): ResidentGeneration {
+  const selfAirBinding = bindSelfAirMetadataProjection(ctx.bot)
+  ctx.log('AIR_SENSOR_BINDING', { binding: selfAirBinding })
+  if (selfAirBinding === 'unavailable-nonconfigurable-property' || selfAirBinding === 'unavailable-self-air-metadata-key') {
+    throw new Error(`Cannot bind the self-entity air sensor over Mineflayer oxygenLevel: ${selfAirBinding}`)
+  }
   const startedAt = Date.now()
   const now = startedAt
   const counts = inventoryCounts(ctx.bot)

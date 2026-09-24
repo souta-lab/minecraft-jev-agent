@@ -76,6 +76,7 @@ import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog
 // selection is allowed to DO and feeds its real id + contract hashes here.
 import {
   commitmentInvalidation,
+  envelopeForCandidate,
   effectEnvelopeHash,
   formatSkillInvalidated,
   postconditionHash,
@@ -187,6 +188,7 @@ import {
   terminateReachAsInfeasible,
   verifyReachEnsures,
 } from './vtr/reach.ts'
+import { assessReachViability } from './vtr/reach-safety.ts'
 import type {
   ReachIdentity,
   ReachObservation,
@@ -1943,6 +1945,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'VTR_MECHANICAL_OUTCOME',
   'VTR_TRANSITION_OUTCOME',
   'VTR_LEGACY_REACH_MOVE_WITHHELD',
+  'VTR_SAFETY_TRIGGER_STALE',
 ])
 
 /**
@@ -2295,6 +2298,25 @@ class MirroringEventLogger extends EventLogger {
  */
 export function controllerUnreachableMoveReason(candidate: Candidate, state: WorldState): ReturnType<typeof unreachableMove> {
   return unreachableMove(candidate, state)
+}
+
+/**
+ * The production Reach contract currently admits locomotion only. Derive the
+ * candidate's real Executor envelope and refuse a MOVE that can mutate terrain.
+ * An explicit `vertical: 'none'` sentinel describes an ordinary level route and
+ * must not be mistaken for authority to dig or place terrain.
+ */
+export function reachMoveFitsLocomotionContract(candidate: Candidate): boolean {
+  if (candidate.kind !== 'MOVE' || candidate.meta.mayPlaceBlocks === true || candidate.id.startsWith('BRIDGE:')) {
+    return false
+  }
+  const envelope = envelopeForCandidate(candidate)
+  return (
+    (envelope.mayDigBlocks?.length ?? 0) === 0 &&
+    envelope.mayDigGroundedRoute !== true &&
+    (envelope.mayPlaceBlocks?.length ?? 0) === 0 &&
+    envelope.mayPlaceGroundedRoute !== true
+  )
 }
 
 /** Beta is semantic authority only when one canonical current Option exists. */
@@ -2913,6 +2935,11 @@ export class JevController {
   private modelRecoveryStopping = false
   /** Hard upper bound for settling a committed safety Skill during model recovery. */
   private modelRecoveryDrainTimer: NodeJS.Timeout | null = null
+  /** Existing VTR owner allowed to finish its already-committed Reach contract during outage. */
+  private modelRecoveryReachDrainTransitionId: string | null = null
+  /** Serializes recovery-only direct controller turns against each other. */
+  private modelRecoveryReachDrainAdvancing = false
+  private modelRecoveryReachDrainPending = false
   private ticking = false
   private startedAt = 0
   private completion: Promise<RunSummary> | null = null
@@ -3403,10 +3430,11 @@ export class JevController {
   }
 
   /**
-   * HOST model recovery withdraws all future decision authority immediately. If a
-   * bounded, already-committed escape Skill is running, keep its lease only until
-   * that Skill reaches its own terminal boundary; otherwise stop as usual. This
-   * never replays a Jev answer or chooses a replacement action.
+   * HOST model recovery withdraws all model/scheduler decision authority
+   * immediately. An already-committed VTR Reach contract retains only its own
+   * controller until deterministic VERIFY or a typed contract boundary; each
+   * subordinate Skill still carries that same transitionId. Legacy bounded
+   * escape Skills retain their existing one-Skill drain.
    */
   stopForModelRecovery(): void {
     if (!this.running || this.modelRecoveryStopping) return
@@ -3416,6 +3444,19 @@ export class JevController {
     this.clearDecisionTimer()
     this.pendingTrigger = null
     this.deferredTrigger = null
+
+    const reach = this.reachTransition ?? null
+    if (reach !== null) {
+      if (reach.state.status === 'active') {
+        this.beginModelRecoveryReachDrain(reach)
+        return
+      }
+      if (reach.state.terminalOutcome !== null) {
+        this.closeReachTransition(reach.state.terminalOutcome, reach.state, 'model-recovery-observed-terminal')
+        this.finish('stopped-by-caller', false)
+        return
+      }
+    }
 
     const current = this.modelRecoveryDrainAction()
     const commitment = current?.commitment ?? null
@@ -3511,6 +3552,157 @@ export class JevController {
     )
   }
 
+  private beginModelRecoveryReachDrain(runtime: ActiveReachTransition): void {
+    const transitionId = runtime.contract.transitionId
+    this.modelRecoveryReachDrainTransitionId = transitionId
+    const deadlineAt = runtime.state.startedAtMs + runtime.contract.budget.maxElapsedMs + JevController.MODEL_RECOVERY_DRAIN_GRACE_MS
+    const deadlineDelayMs = Math.max(0, deadlineAt - Date.now())
+    this.logger.warn(
+      'agent',
+      `MODEL_RECOVERY_DRAIN phase=begin transitionId=${transitionId} kind=reach_transition budgetMs=${runtime.contract.budget.maxElapsedMs} remainingMs=${deadlineDelayMs}`,
+      {
+        transitionId,
+        contractHash: runtime.contract.contractHash,
+        ensures: runtime.contract.ensures,
+        mechanicalSteps: runtime.state.usage.mechanicalSteps,
+        budgetMs: runtime.contract.budget.maxElapsedMs,
+        deadlineAt,
+        authority: 'vtr-reach-controller',
+      },
+      this.tickCounter,
+    )
+    this.modelRecoveryDrainTimer = setTimeout(() => {
+      this.modelRecoveryDrainTimer = null
+      if (this.reachTransition?.contract.transitionId !== transitionId) {
+        this.finish('stopped-by-caller', false)
+        return
+      }
+      const current = this.executor.current
+      if (
+        current !== null && current.status === 'running' &&
+        current.authority === 'vtr-reach' && current.transitionId === transitionId
+      ) {
+        this.logger.warn(
+          'agent',
+          `MODEL_RECOVERY_DRAIN phase=deadline transitionId=${transitionId} actionId=${current.id} -> cancel over-budget Reach leg`,
+          { transitionId, actionId: current.id, epoch: current.epoch, contractHash: runtime.contract.contractHash },
+          this.tickCounter,
+        )
+        this.executor.cancelCurrent('model recovery Reach contract exceeded its committed time budget')
+      }
+      void this.advanceModelRecoveryReachDrain(transitionId, 'contract-deadline')
+    }, deadlineDelayMs)
+
+    const current = this.executor.current
+    if (
+      current !== null && current.status === 'running' &&
+      current.authority === 'vtr-reach' && current.transitionId === transitionId
+    ) {
+      // The existing completion handler will continue the same contract. Do not
+      // attach a second callback that would finish the generation after one leg.
+      return
+    }
+    void this.advanceModelRecoveryReachDrain(transitionId, 'model-outage')
+  }
+
+  /** Continue only the named active Reach owner; this path never enters tick(), Jev, or System2. */
+  private async advanceModelRecoveryReachDrain(transitionId: string, trigger: string): Promise<void> {
+    if (
+      !this.running || !this.modelRecoveryStopping ||
+      this.modelRecoveryReachDrainTransitionId !== transitionId
+    ) return
+    if (this.ticking || this.modelRecoveryReachDrainAdvancing) {
+      this.modelRecoveryReachDrainPending = true
+      return
+    }
+
+    const runtime = this.reachTransition
+    if (runtime === null || runtime.contract.transitionId !== transitionId || runtime.state.status !== 'active') {
+      this.completeModelRecoveryReachDrain(transitionId, 'transition-already-terminal')
+      return
+    }
+    const current = this.executor.current
+    if (
+      current !== null && current.status === 'running' &&
+      current.authority === 'vtr-reach' && current.transitionId === transitionId
+    ) {
+      return
+    }
+
+    this.modelRecoveryReachDrainAdvancing = true
+    this.modelRecoveryReachDrainPending = false
+    try {
+      this.logger.info(
+        'agent',
+        `MODEL_RECOVERY_DRAIN phase=continue transitionId=${transitionId} trigger=${trigger} mechanicalSteps=${runtime.state.usage.mechanicalSteps}`,
+        { transitionId, contractHash: runtime.contract.contractHash, trigger, mechanicalSteps: runtime.state.usage.mechanicalSteps },
+        this.tickCounter,
+      )
+      await this.tickReachTransition('heartbeat', { source: 'model-recovery-reach-drain', transitionId, trigger })
+
+      const after = this.reachTransition
+      if (after === null || after.contract.transitionId !== transitionId || after.state.status !== 'active') {
+        this.completeModelRecoveryReachDrain(transitionId, after?.state.terminalOutcome?.kind ?? 'typed-terminal')
+        return
+      }
+
+      const nowMs = Date.now()
+      if (nowMs > after.state.startedAtMs + after.contract.budget.maxElapsedMs) {
+        const identity = this.liveReachIdentity(after.contract.identity)
+        const bounded = setReachTactic(after.contract, after.state, identity, after.state.tactic, nowMs)
+        if (bounded.status === 'terminal') {
+          this.closeReachTransition(bounded.outcome, bounded.state, 'model-recovery-budget')
+          this.completeModelRecoveryReachDrain(transitionId, bounded.outcome.kind)
+          return
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.logger.error(
+        'agent',
+        `MODEL_RECOVERY_DRAIN phase=controller_error transitionId=${transitionId} error=${message}`,
+        { transitionId, error: message },
+        this.tickCounter,
+      )
+      const active = this.reachTransition
+      if (active !== null && active.contract.transitionId === transitionId && active.state.status === 'active') {
+        const observed = this.liveReachIdentity(active.contract.identity)
+        const violation = supersedeReachTransition(active.contract, active.state, observed, {
+          reason: `model-recovery Reach controller failed: ${message}`,
+          evidenceId: `model-recovery-controller-error:${transitionId}:${Date.now()}`,
+          nowMs: Date.now(),
+        })
+        if (violation.status === 'terminal') this.closeReachTransition(violation.outcome, violation.state, 'model-recovery-controller-error')
+      }
+      this.completeModelRecoveryReachDrain(transitionId, 'controller-error')
+      return
+    } finally {
+      this.modelRecoveryReachDrainAdvancing = false
+    }
+
+    if (this.modelRecoveryReachDrainPending) {
+      this.modelRecoveryReachDrainPending = false
+      setImmediate(() => void this.advanceModelRecoveryReachDrain(transitionId, 'pending-controller-turn'))
+    }
+  }
+
+  private completeModelRecoveryReachDrain(transitionId: string, outcome: string): void {
+    if (this.modelRecoveryReachDrainTransitionId !== transitionId) return
+    this.logger.warn(
+      'agent',
+      `MODEL_RECOVERY_DRAIN phase=terminal transitionId=${transitionId} outcome=${outcome}`,
+      { transitionId, outcome, schedulerStopped: true, modelAuthority: 'withdrawn' },
+      this.tickCounter,
+    )
+    this.modelRecoveryReachDrainTransitionId = null
+    this.modelRecoveryReachDrainPending = false
+    if (this.modelRecoveryDrainTimer !== null) {
+      clearTimeout(this.modelRecoveryDrainTimer)
+      this.modelRecoveryDrainTimer = null
+    }
+    this.finish('stopped-by-caller', false)
+  }
+
   wait(): Promise<RunSummary> {
     if (this.completion !== null) return this.completion
     return Promise.resolve(this.summary('stopped-by-caller', this.runSuccess()))
@@ -3518,6 +3710,14 @@ export class JevController {
 
   private modelRecoveryDrainAction(): CurrentAction | null {
     const current = this.executor.current
+    const recoveryReachId = this.modelRecoveryReachDrainTransitionId ?? null
+    if (
+      current !== null && current.status === 'running' &&
+      recoveryReachId !== null && current.authority === 'vtr-reach' && current.transitionId === recoveryReachId &&
+      this.reachTransition?.contract.transitionId === recoveryReachId && this.reachTransition.state.status === 'active'
+    ) {
+      return current
+    }
     const commitment = current?.commitment ?? null
     if (
       current === null ||
@@ -3837,7 +4037,7 @@ export class JevController {
     state: WorldState,
   ): ReachWitness | null {
     if (candidate.kind !== 'MOVE' || candidate.target === null || candidate.meta.explore === true) return null
-    if (candidate.meta.mayPlaceBlocks === true || candidate.id.startsWith('BRIDGE:')) return null
+    if (!reachMoveFitsLocomotionContract(candidate)) return null
     const sourceName =
       typeof candidate.meta.targetBlockName === 'string'
         ? candidate.meta.targetBlockName
@@ -3924,6 +4124,11 @@ export class JevController {
   }
 
   private async tickReachTransition(trigger: DecisionTrigger, detail: Record<string, unknown>): Promise<boolean> {
+    if (
+      this.modelRecoveryStopping &&
+      (this.modelRecoveryReachDrainTransitionId === null ||
+        this.reachTransition?.contract.transitionId !== this.modelRecoveryReachDrainTransitionId)
+    ) return true
     const mission = this.options.vtrMission
     if (mission === null || mission === undefined || mission.id.trim() === '' || mission.item.trim() === '') return false
     if (!Number.isSafeInteger(mission.count) || mission.count < 1) return false
@@ -4011,15 +4216,17 @@ export class JevController {
         return true
       }
 
-      const unsafeTrigger = trigger === 'damage_taken' || trigger === 'hp_changed' || trigger === 'low_air' || trigger === 'air_unknown_head_submerged'
       const threat = state.signals.threat
-      const unsafeState =
-        state.self.health <= CRITICAL_COMBAT_HEALTH ||
-        bodyNeedsBreathEscape(state.self) ||
-        state.self.envHazard?.active === true ||
-        threat?.active === true
-      if (unsafeTrigger || unsafeState) {
-        const reason = unsafeTrigger ? `safety trigger ${trigger}` : 'fresh viability facts require a different transition'
+      const viability = assessReachViability(trigger, {
+        criticalHealth: state.self.health <= CRITICAL_COMBAT_HEALTH,
+        needsBreathEscape: bodyNeedsBreathEscape(state.self),
+        environmentalHazard: state.self.envHazard?.active === true,
+        activeThreat: threat?.active === true,
+      })
+      if (viability.shouldInterrupt) {
+        const reason = viability.safetyTrigger
+          ? `safety trigger ${trigger} confirmed by ${viability.unsafeFacts.join(',')}`
+          : `fresh viability facts require a different transition: ${viability.unsafeFacts.join(',')}`
         const result = interruptReachForSafety(runtime.contract, runtime.state, identity, {
           reason,
           evidenceId: `viability:${state.tick}:${trigger}:${state.self.health}:${state.self.food}`,
@@ -4028,6 +4235,25 @@ export class JevController {
         if (result.status === 'terminal') this.closeReachTransition(result.outcome, result.state, 'safety-interrupt')
         if (current?.authority === 'vtr-reach') this.executor.cancelCurrent(`VTR safety interrupt: ${reason}`)
         return true
+      }
+      if (viability.safetyTrigger) {
+        this.logger.info(
+          'vtr',
+          `VTR_SAFETY_TRIGGER_STALE transition=${runtime.contract.transitionId} trigger=${trigger} -> continue; no current unsafe fact`,
+          {
+            transitionId: runtime.contract.transitionId,
+            trigger,
+            observedFacts: {
+              health: state.self.health,
+              air: state.self.air,
+              needsBreathEscape: bodyNeedsBreathEscape(state.self),
+              environmentalHazard: state.self.envHazard?.active === true,
+              activeThreat: threat?.active === true,
+            },
+            actionId: current?.id ?? null,
+          },
+          this.tickCounter,
+        )
       }
 
       const grounded = this.reachCandidates(state, runtime.mission)
@@ -4315,7 +4541,7 @@ export class JevController {
 
   private reachWitnessForCandidateShape(item: string, candidate: Candidate, state: WorldState): boolean {
     if (candidate.kind !== 'MOVE' || candidate.target === null || candidate.meta.explore === true) return false
-    if (candidate.meta.mayPlaceBlocks === true || candidate.id.startsWith('BRIDGE:')) return false
+    if (!reachMoveFitsLocomotionContract(candidate)) return false
     const name = typeof candidate.meta.targetBlockName === 'string' ? candidate.meta.targetBlockName : candidate.targetName
     const x = candidate.meta.targetBlockX
     const y = candidate.meta.targetBlockY
@@ -4428,6 +4654,9 @@ export class JevController {
     const runtime = this.reachTransition
     if (runtime === null || runtime.contract.transitionId !== transitionId) {
       this.logger.warn('vtr', `VTR_ORPHAN_ACTION_OUTCOME transition=${transitionId} action=${result.actionId} status=${result.status}`, { transitionId, result }, this.tickCounter)
+      if (this.modelRecoveryReachDrainTransitionId === transitionId) {
+        this.completeModelRecoveryReachDrain(transitionId, 'transition-closed-during-action')
+      }
       return
     }
     this.lastReachActionFailure = result.status === 'failed' || result.status === 'cancelled' ? result.failure ?? 'cancelled' : null
@@ -4442,7 +4671,11 @@ export class JevController {
     if (runtime.state.status === 'terminal' && runtime.state.terminalOutcome !== null) {
       this.closeReachTransition(runtime.state.terminalOutcome, runtime.state, 'actuation-reservation')
     }
-    this.requestDecision('action_completed', { actionId: result.actionId, transitionId, authority: 'vtr-reach' })
+    if (this.modelRecoveryReachDrainTransitionId === transitionId) {
+      void this.advanceModelRecoveryReachDrain(transitionId, 'action-completed')
+    } else {
+      this.requestDecision('action_completed', { actionId: result.actionId, transitionId, authority: 'vtr-reach' })
+    }
   }
 
   private closeReachTransition(outcome: ReachTerminalOutcome, state: ReachTransitionState, boundary: string): void {
@@ -4544,6 +4777,7 @@ export class JevController {
         const handled = await this.tickReachTransition(trigger, detail)
         if (handled) return
       }
+      if (this.modelRecoveryStopping) return
 
       // These legacy recovery observers may wake System2. Run them only after
       // the VTR slice has had first refusal over its own contract boundary.
@@ -5775,6 +6009,11 @@ export class JevController {
     } finally {
       this.ticking = false
       this.drainPending()
+      if (this.modelRecoveryReachDrainPending && this.modelRecoveryReachDrainTransitionId !== null) {
+        const transitionId = this.modelRecoveryReachDrainTransitionId
+        this.modelRecoveryReachDrainPending = false
+        setImmediate(() => void this.advanceModelRecoveryReachDrain(transitionId, 'scheduler-turn-settled'))
+      }
     }
   }
 
@@ -14672,16 +14911,22 @@ export class JevController {
     if (!this.running) return
     if (this.modelRecoveryStopping && stopped !== 'disconnected') {
       const draining = this.modelRecoveryDrainAction()
-      if (draining !== null) {
+      const recoveryReachId = this.modelRecoveryReachDrainTransitionId ?? null
+      const reachDrain = recoveryReachId !== null &&
+        this.reachTransition?.contract.transitionId === recoveryReachId &&
+        this.reachTransition.state.status === 'active'
+      if (draining !== null || reachDrain) {
+        const transitionId = this.modelRecoveryReachDrainTransitionId
         this.logger.warn(
           'agent',
-          `MODEL_RECOVERY_DRAIN phase=finish_deferred actionId=${draining.id} kind=${draining.kind} requestedReason=${stopped}`,
+          `MODEL_RECOVERY_DRAIN phase=finish_deferred actionId=${draining?.id ?? 'none'} kind=${draining?.kind ?? 'reach_transition'} transitionId=${transitionId ?? 'none'} requestedReason=${stopped}`,
           {
-            actionId: draining.id,
-            kind: draining.kind,
-            commitmentId: draining.commitment?.commitmentId ?? null,
+            actionId: draining?.id ?? null,
+            kind: draining?.kind ?? 'reach_transition',
+            commitmentId: draining?.commitment?.commitmentId ?? null,
             requestedReason: stopped,
-            epoch: draining.epoch,
+            epoch: draining?.epoch ?? null,
+            transitionId,
           },
           this.tickCounter,
         )
@@ -14701,6 +14946,8 @@ export class JevController {
       clearTimeout(this.modelRecoveryDrainTimer)
       this.modelRecoveryDrainTimer = null
     }
+    this.modelRecoveryReachDrainTransitionId = null
+    this.modelRecoveryReachDrainPending = false
     this.bot.removeListener('end', this.onBotEnd)
     this.bot.removeListener('kicked', this.onBotKicked)
     this.bot.removeListener('death', this.onBotDeath)
