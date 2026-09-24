@@ -25,7 +25,9 @@
 //   (h) a fresh identical semantic Option has a distinct request occurrence,
 //       survives JSON persistence, and cannot be retired by an old consumer;
 //   (h2) ownerless legacy M2 rows stay visible rather than gaining inferred edges;
-//   (i) a same-occurrence compiled prerequisite still retires after JSON restore.
+//   (i) a same-occurrence compiled prerequisite still retires after JSON restore;
+//   (j) one deduplicated prerequisite unions owners from two accepted consumers,
+//       including when the durable queue is serialized and restored.
 //
 // Run: bun test ./test-prereq-orphan-retire.mts
 import { GoalQueue, PREREQ_REORDERED, PREREQ_RETIRED, setPrereqAuditSink } from './src/goalQueue.ts'
@@ -467,6 +469,44 @@ addCase('(i) an Option-expanded prerequisite retires against its same-occurrence
   return {
     pass,
     detail: `producer=${queuedProducer?.status} semantic=${producer.semanticOptionInstanceId ?? 'none'} causal=${sharedOwners.join(',')} consumer=${consumer.id}/${consumer.status} retired=${retired || 'none'}`,
+  }
+})
+
+addCase('(j) a shared producer unions causal owners from distinct accepted consumers across JSON restore', () => {
+  const snapshot = makeOptionSnapshot({ inventory: {}, toolRank: 0 })
+  const rawIronPlan = applyCompiledPlan(
+    [{ kind: 'collect', description: 'collect 1 x raw_iron', targetItem: 'raw_iron', requiredCount: 1 }],
+    snapshot,
+    { enabled: true, causalOccurrenceId: 'request-raw-iron' },
+  )
+  const coalPlan = applyCompiledPlan(
+    [{ kind: 'collect', description: 'collect 1 x coal', targetItem: 'coal', requiredCount: 1 }],
+    snapshot,
+    { enabled: true, causalOccurrenceId: 'request-coal' },
+  )
+  const queue = new GoalQueue()
+  queue.applyPlan(rawIronPlan.goals, 'llm', 'replace')
+  queue.applyPlan(coalPlan.goals, 'llm', 'continue')
+
+  const producer = queue.state.goals.find((goal) => goal.kind === 'collect' && goal.targetItem === 'log')
+  if (producer === undefined) return { pass: false, detail: 'shared collect:log producer is missing' }
+  const ownerRawIron = 'prereq:request-raw-iron:collect:raw_iron'
+  const ownerCoal = 'prereq:request-coal:collect:coal'
+  const hasBothBeforeRestore = [ownerRawIron, ownerCoal].every((owner) =>
+    (producer.prerequisiteCausalOwnerIds ?? []).includes(owner),
+  )
+
+  const restored = new GoalQueue()
+  restored.restore(JSON.parse(JSON.stringify(queue.snapshot())))
+  const persistedProducer = restored.state.goals.find((goal) => goal.id === producer.id)
+  const hasBothAfterRestore = [ownerRawIron, ownerCoal].every((owner) =>
+    (persistedProducer?.prerequisiteCausalOwnerIds ?? []).includes(owner),
+  )
+  const owners = persistedProducer?.prerequisiteCausalOwnerIds ?? []
+  const pass = hasBothBeforeRestore && hasBothAfterRestore && owners.length === 2
+  return {
+    pass,
+    detail: `producer=${producer.id} owners=[${owners.join(',')}] bothBeforeRestore=${hasBothBeforeRestore} bothAfterRestore=${hasBothAfterRestore}`,
   }
 })
 
