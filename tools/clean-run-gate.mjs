@@ -47,6 +47,7 @@ import {
   sha256Text,
   validateCleanEnvironment,
 } from './clean-run-environment.mjs'
+import { SCHEMA_VERSION as PREPARE_SCHEMA_VERSION } from './clean-run-prepare.mjs'
 
 export const RECORD = 'clean-run-gate'
 export const GATE_LINE = 'CLEAN_RUN_GATE'
@@ -218,7 +219,7 @@ function preparationFreshnessCondition({ descriptor, descriptorPath, descriptorS
     manifestIssues.push(`BOOT source SHA=${String(artifact?.run?.boot?.sourceSha ?? null)} does not match descriptor source SHA=${values.sourceSha}`)
   }
 
-  if (manifest.record !== 'clean-run-prepare' || manifest.schemaVersion !== 1) {
+  if (manifest.record !== 'clean-run-prepare' || manifest.schemaVersion !== PREPARE_SCHEMA_VERSION) {
     manifestIssues.push(`unexpected prep manifest record/schema=${String(manifest.record)}/${String(manifest.schemaVersion)}`)
   }
   if (resolvedPath === null || resolvedPath !== resolve(descriptorPath)) {

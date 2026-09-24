@@ -258,11 +258,11 @@ function resolvedDescriptor(root, { levelName = CLEAN_LEVEL, levelSeed = CLEAN_S
   writeFileSync(attemptsPath, attemptsText, 'utf8')
   const manifest = {
     record: 'clean-run-prepare',
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: preparedAt,
     mode: 'apply',
     descriptor: { path, sha256: loaded.sha256 },
-    resolved: { path, overrides: [] },
+    resolved: { path, sha256: loaded.sha256, overrides: [] },
     target: { levelName, levelSeed, sourceSha, worldDir, container: worldContainer, levelDatPresentAtPrepare: false },
     attemptLedger: { path: attemptsPath, sha256: sha256Text(attemptsText) },
     files: [{ path, sha256: loaded.sha256 }],
@@ -285,13 +285,28 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
   writeFileSync(propertiesPath, propertiesText, { encoding: 'utf8', mode: 0o600 })
   const propertiesSha256 = sha256Text(propertiesText)
   const manifestPath = join(runDir, 'manifest.json')
+  const attemptsPath = join(container, 'm3-clean-run', 'attempts.json')
+  const attemptsText = readFileSync(attemptsPath, 'utf8')
   const manifestText = `${JSON.stringify({
     record: 'clean-run-prepare',
     schemaVersion: 2,
+    generatedAt: at(-1),
+    mode: 'apply',
     descriptor: { path: descriptor.path, sha256: loaded.sha256 },
-    resolved: { path: descriptor.path, overrides: [] },
-    target: { levelName: descriptor.document.values.levelName, levelSeed: descriptor.document.values.levelSeed, sourceSha: descriptor.document.values.sourceSha },
-    files: [{ path: propertiesPath, sha256: propertiesSha256, bytes: Buffer.byteLength(propertiesText), note: 'synthetic test fixture only' }],
+    resolved: { path: descriptor.path, sha256: loaded.sha256, overrides: [] },
+    target: {
+      levelName: descriptor.document.values.levelName,
+      levelSeed: descriptor.document.values.levelSeed,
+      sourceSha: descriptor.document.values.sourceSha,
+      worldDir: join(container, descriptor.document.values.levelName),
+      container,
+      levelDatPresentAtPrepare: false,
+    },
+    attemptLedger: { path: attemptsPath, sha256: sha256Text(attemptsText) },
+    files: [
+      { path: descriptor.path, sha256: loaded.sha256, bytes: Buffer.byteLength(readFileSync(descriptor.path)), note: 'synthetic resolved descriptor' },
+      { path: propertiesPath, sha256: propertiesSha256, bytes: Buffer.byteLength(propertiesText), note: 'synthetic test fixture only' },
+    ],
     serverLaunch: expectedLeafLaunchIdentity(descriptor.document, container),
   }, null, 2)}\n`
   writeFileSync(manifestPath, manifestText, 'utf8')
@@ -1089,6 +1104,8 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.match(startupRecipe, /Never pass --bonusChest/)
   assert.doesNotMatch(startupRecipe, /<\/dev\/null|execute in minecraft:the_nether run gamerule/)
   assert.match(startupRecipe, /clean-run-console-capture\.mjs/)
+  assert.match(startupRecipe, /clean-run-acceptance-refresh\.mjs/)
+  assert.doesNotMatch(startupRecipe, /socat|UNIX-CONNECT/)
   assert.match(startupRecipe, /descriptor\/run\/PID-bound commands\.jsonl, capture\.json/)
   assert.ok(startupRecipe.indexOf('clean-run-server-launch.mjs') < startupRecipe.indexOf('agent-runner.mts'))
   assert.ok(startupRecipe.indexOf('agent-runner.mts') < startupRecipe.indexOf('clean-run-console-capture.mjs'), 'capture must run after BOOT is possible')
@@ -1174,6 +1191,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
     levelSeed: '4500764503965322344',
     sourceSha: prepareSourceSha,
     container,
+    withPreparationProof: false,
     mutate: (doc) => { delete doc.cleanRun.runtimePolicy },
   })
   const c1Plan = planPrepare({
@@ -1238,6 +1256,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   const raceRoot = makeRoot('prepare-world-created-after-plan')
   const raceContainer = join(SCRATCH, 'prepare-world-created-after-plan-container')
   mkdirSync(raceContainer, { recursive: true })
+  writeFileSync(join(raceContainer, 'leaf-1.21.11-178.jar'), 'fixture Leaf identity', 'utf8')
   const raceDescriptor = resolvedDescriptor(raceRoot, {
     levelName: 'm3clean-race',
     levelSeed: '998877665546',
@@ -1252,7 +1271,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
     levelName: 'm3clean-race',
     seed: '998877665546',
   })
-  assert.equal(racePlan.status, 'PLANNED')
+  assert.equal(racePlan.status, 'PLANNED', `race plan refusals=${racePlan.refusals.map((entry) => entry.reason).join(' | ')}`)
   const raceWorldDir = join(raceContainer, 'm3clean-race')
   mkdirSync(raceWorldDir, { recursive: true })
   writeFileSync(join(raceWorldDir, 'level.dat'), 'generated after planning\n', 'utf8')

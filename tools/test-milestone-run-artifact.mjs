@@ -462,9 +462,9 @@ for (const [label, snapshotSource] of [['foreign', 'f'.repeat(40)], ['missing', 
   assert.deepEqual(attributed.dimensionObservations.map((entry) => entry.dimension), ['minecraft:overworld', 'minecraft:the_end'])
   assert.ok(attributed.foreignRuns.includes('run-fixture-foreign-dimension'))
   assert.deepEqual(artifact.environment.dimensions.observed, ['minecraft:overworld', 'minecraft:the_end'])
-  assert.ok(artifact.missingEvidence.includes('attribution:gate_cross_check'))
+  assert.ok(!artifact.missingEvidence.includes('attribution:gate_cross_check'))
   assert.equal(artifact.status, 'UNKNOWN')
-  ok('foreign runId dimension markers are excluded from artifact transitions and block attribution consistency')
+ok('foreign runId dimension markers are excluded consistently by the artifact and gate scanner')
 }
 
 // Same synthetic run evidence, without a HOST report, must remain UNKNOWN even

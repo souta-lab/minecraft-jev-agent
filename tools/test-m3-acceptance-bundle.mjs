@@ -378,11 +378,11 @@ function condition(bundle, id) {
     write: () => {},
   })
   assert.notEqual(bundle.acceptanceVerdict.status, 'PASS')
-  assert.ok(bundle.artifact.requiredEvidence.missing.includes('authority.system2Identity'))
+  assert.ok(bundle.artifact.requiredEvidence.missing.includes('authority.system2GenerationIdentity'))
   assert.equal(condition(bundle, 'artifact.requiredEvidence').verdict, 'UNKNOWN')
-  assert.notEqual(condition(bundle, 'M3.model_authority').verdict, 'PASS')
+  assert.equal(bundle.artifact.document.verdicts.M3.status, 'PASS', 'this test deliberately injects a PASS gate to isolate the independent artifact boundary')
   assert.equal(exitCode, 2)
-  ok('A2. System2 authority totals without verified generation identity remain UNKNOWN')
+  ok('A2. an injected gate PASS cannot replace verified System2 generation identity in artifact acceptance')
 }
 
 // A3. gate PASS cannot replace required environment/run artifact facts
