@@ -127,6 +127,11 @@ try {
 
   const attestationPath = join(runDir, 'server-start-attestation.json')
   writeFileSync(attestationPath, `${JSON.stringify(attestation, null, 2)}\n`)
+  // Leaf's Java properties store adds a timestamp comment on first startup.
+  // That changes the on-disk digest while preserving every runtime property.
+  const normalizedPropertiesText = `#Thu Sep 24 19:42:01 JST 2026\n${propertiesText}`
+  assert.notEqual(sha256Text(normalizedPropertiesText), propertiesSha256)
+  writeFileSync(propertiesPath, normalizedPropertiesText)
   const previousSeedReadPath = process.env.BUDDY_SERVER_PROPERTIES_PATH
   process.env.BUDDY_SERVER_PROPERTIES_PATH = join(temporaryRoot, 'shared-server.properties')
   const bound = cleanRunServerConfigAtBoot({
@@ -221,8 +226,8 @@ try {
   })
   assert.equal(rejected.find((entry) => entry.id === 'run.serverConfigAttestation')?.verdict, 'FAIL')
 
-  const staleProperties = `${propertiesText}# changed after Leaf startup\n`
-  writeFileSync(propertiesPath, staleProperties)
+  const driftedProperties = normalizedPropertiesText.replace('difficulty=normal', 'difficulty=hard')
+  writeFileSync(propertiesPath, driftedProperties)
   const changed = cleanRunServerConfigAtBoot({
     runId: RUN_ID,
     bootSourceSha: SOURCE_SHA,
@@ -233,9 +238,17 @@ try {
     readProcessExecutableBytes: () => readFileSync(javaIdentity.path),
   })
   assert.equal(changed.status, 'rejected')
-  assert.match(String(changed.reason), /changed_after_leaf_startup/)
+  assert.match(String(changed.reason), /runtime_server_properties_do_not_match_descriptor/)
+  const driftedGate = checkRunEvidence({
+    descriptor,
+    artifact,
+    runId: RUN_ID,
+    descriptorPath,
+    descriptorSha256,
+  })
+  assert.equal(driftedGate.find((entry) => entry.id === 'run.serverConfigAttestation')?.verdict, 'FAIL')
 
-  console.log('PASS clean-run Leaf startup config provenance (launcher argv/hash, BOOT binding, gate fail-closed)')
+  console.log('PASS clean-run Leaf startup config provenance (immutable prepare hash, server-normalized disk projection, semantic drift refusal)')
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true })
 }

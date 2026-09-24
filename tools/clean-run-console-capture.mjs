@@ -377,6 +377,7 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
     const relayState = validateConsoleRelayJournal(relayJournalAtForward, {
       leafPid: binding.processInfo.pid,
       expectedCommands: ['seed', ...queries.map((entry) => entry.command)].slice(0, relaySequence + 1),
+      totalExpectedCommandCount: queries.length + 1,
     })
     if (!relayState.valid) throw new Error(relayState.reason)
     let response = null

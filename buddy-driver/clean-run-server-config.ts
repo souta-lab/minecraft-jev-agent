@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
-import { assertExactLeafArgv, expectedLeafLaunchIdentity, expectedLeafServerArgs, parseServerProperties } from '../tools/clean-run-server-config.mjs'
+import { assertExactLeafArgv, compareRuntimeServerProperties, expectedLeafLaunchIdentity, expectedLeafServerArgs, parseServerProperties } from '../tools/clean-run-server-config.mjs'
 
 type Plain = Record<string, unknown>
 
@@ -108,8 +108,6 @@ export function cleanRunServerConfigAtBoot({
       return rejected('staged_server_properties_hash_does_not_match_prepared_manifest')
     }
     const propertiesText = readFileSync(stagedProperties, 'utf8')
-    const propertiesSha256 = sha256(propertiesText)
-    if (propertiesSha256 !== config.sha256) return rejected('staged_server_properties_changed_after_leaf_startup')
     const properties = parseServerProperties(propertiesText)
 
     const processInfo = asObject(attestation.process)
@@ -186,16 +184,22 @@ export function cleanRunServerConfigAtBoot({
       processInfo.serverJarSha256 !== expectedLaunchIdentity.serverJar.sha256
     ) return rejected('live_leaf_argv_does_not_match_descriptor_and_staged_config')
 
-    const expectedServerId = String(values.serverId ?? '')
-    const expectedPort = /:(\d+)$/.exec(expectedServerId)?.[1] ?? null
     const launchProperties = asObject(config.properties)
+    if (launchProperties === null) return rejected('startup_attested_properties_are_missing')
+    const attestedComparison = compareRuntimeServerProperties(descriptor, launchProperties)
+    const currentComparison = compareRuntimeServerProperties(descriptor, properties)
+    if (!attestedComparison.agrees || !currentComparison.agrees) {
+      return rejected('runtime_server_properties_do_not_match_descriptor')
+    }
+    const attestedPropertyKeys = Object.keys(launchProperties)
+    const expectedPropertyKeys = Object.keys(attestedComparison.expected)
     if (
-      launchProperties === null ||
-      properties.difficulty !== String(values.difficulty ?? '') ||
-      properties['level-seed'] !== String(values.levelSeed ?? '') ||
-      properties['spawn-monsters'] !== String(values.mobSpawning ?? '') ||
-      properties['server-port'] !== expectedPort
-    ) return rejected('runtime_server_properties_do_not_match_descriptor')
+      attestedPropertyKeys.length !== expectedPropertyKeys.length ||
+      expectedPropertyKeys.some((key) => !Object.hasOwn(launchProperties, key))
+    ) return rejected('startup_attested_properties_outside_safe_acceptance_projection')
+    if (JSON.stringify(attestedComparison.observed) !== JSON.stringify(currentComparison.observed)) {
+      return rejected('runtime_server_property_projection_changed_after_leaf_startup')
+    }
 
     return {
       status: 'verified',
@@ -227,7 +231,10 @@ export function cleanRunServerConfigAtBoot({
         java: expectedLaunchIdentity.java,
         paperIgnoreJavaVersion: runtime.paperIgnoreJavaVersion,
       },
-      config: { path: stagedProperties, sha256: propertiesSha256, properties: launchProperties },
+      // Leaf rewrites `--config` with a timestamp/comment during normal startup.
+      // Keep the immutable pre-spawn hash bound to the prepare manifest; the
+      // current file is checked by its descriptor-relevant property projection.
+      config: { path: stagedProperties, sha256: config.sha256, properties: launchProperties },
       console: {
         mode: 'run-private-fifo-and-log',
         directory: consoleDir,

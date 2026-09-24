@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { checkConsoleGameruleEvidence, consoleGameruleEvidenceSet } from './clean-run-environment.mjs'
 import { bindConsoleQueryResponse, collectConsoleQueries, expectedConsoleQueries } from './clean-run-console-capture.mjs'
+import { validateConsoleRelayJournal } from './clean-run-console-relay.mjs'
 import { sha256Text } from './clean-run-server-config.mjs'
 
 const TEMPLATE = new URL('./fixtures/m3-clean-environment.json', import.meta.url)
@@ -244,6 +245,7 @@ function evaluate(evidence) {
 try {
   const { selected, excluded } = consoleGameruleEvidenceSet(descriptor)
   const { queries, exclusions } = expectedConsoleQueries(descriptor)
+  const expectedCommands = ['seed', ...queries.map((query) => query.command)]
   assert.equal(exclusions.length, Object.keys(excluded).length)
   assert.equal(queries.length, Object.keys(selected).length * descriptor.cleanRun.gameruleScope.dimensions.length)
   assert.equal(queries.some((query) => query.descriptorRule === 'max_minecart_speed'), false)
@@ -291,6 +293,20 @@ try {
   }), /strictly ordered/)
 
   const complete = makeMachineEvidence()
+  const seedRelayPrefix = `${JSON.stringify({ event: 'console-relay-start', leafPid: PID, expectedCommandCount: expectedCommands.length })}\n${JSON.stringify({ event: 'console-relay-forwarded', leafPid: PID, sequence: 0, command: 'seed' })}\n`
+  const seedPrefixValidation = validateConsoleRelayJournal(seedRelayPrefix, {
+    leafPid: PID,
+    expectedCommands: expectedCommands.slice(0, 1),
+    totalExpectedCommandCount: expectedCommands.length,
+  })
+  assert.equal(seedPrefixValidation.valid, true, seedPrefixValidation.reason)
+  const fullRelayValidation = validateConsoleRelayJournal(complete.relayJournalText, {
+    leafPid: PID,
+    expectedCommands,
+    totalExpectedCommandCount: expectedCommands.length,
+  })
+  assert.equal(fullRelayValidation.valid, true, fullRelayValidation.reason)
+  assert.equal(fullRelayValidation.forwarded.length, expectedCommands.length)
   const passed = evaluate(complete)
   assert.equal(passed.verdict, 'PASS', passed.reason)
   assert.equal(passed.detail.expectedRuleCount, Object.keys(selected).length)

@@ -1653,7 +1653,6 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
     startupRecord = JSON.parse(startupText)
     if (sha256Text(manifestText) !== startupAttestation.manifestSha256) return fail('prepared manifest changed after the HOST bound the startup attestation')
     if (sha256Text(startupText) !== startupAttestation.attestationSha256) return fail('Leaf startup attestation file changed after the HOST bound it to BOOT')
-    if (sha256Text(propertiesText) !== config?.sha256) return fail('staged server.properties changed after Leaf startup')
   } catch {
     return unknown('prepared manifest, Leaf startup attestation, or staged server.properties is unavailable to verify at acceptance time', { expectedAttestationPath, expectedManifestPath, expectedPropertiesPath })
   }
