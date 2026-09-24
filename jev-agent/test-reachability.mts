@@ -680,8 +680,8 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     `presented=${grounded.candidates.some((candidate) => candidate.id === id)} withheld=${withheld?.result.reason ?? 'none'}`,
   )
   check(
-    'the live refusal names BOTH the headroom cell and the missing pickaxe',
-    missing.includes('headroom') && missing.includes('tool'),
+    'the live refusal names the binding headroom cell without inventing a harvest-tool need',
+    missing.length === 1 && missing[0] === 'headroom',
     JSON.stringify(withheld?.result.missingCapabilities ?? []),
   )
   check(
@@ -690,7 +690,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       formatReachability(
         { candidateId: id, kind: 'RETRIEVE', position: { x: 29, y: 61, z: 35 }, barrier: null },
         withheld.result,
-      ) === 'REACHABILITY target=29,61,35 reachable=false reason=needs_ascend missing=[headroom@39,10,33,tool:pickaxe@0]' &&
+      ) === 'REACHABILITY target=29,61,35 reachable=false reason=needs_ascend missing=[headroom@39,10,33]' &&
       formatCandidateWithheld(id, withheld.result.reason) === `CANDIDATE_WITHHELD reason=needs_ascend candidate=${id}`,
     withheld === undefined
       ? 'no withheld record'
@@ -1198,9 +1198,9 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     )
   }
 
-  // (b) the same geometry without the tool is refused by name ONLY while no
-  // placeable block is held: the cell and the required tool tier are both
-  // carried, and the tool ladder stays actionable. The refusal is not weakened.
+  // (b) a safe step cut is a clearance route even without its harvest tool or a
+  // placeable block. The route does not need the block's drop: it only opens the
+  // supported step, matching the clearance contract in test-vertical-plan.
   {
     const state = worldState({
       position: feet,
@@ -1211,22 +1211,27 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       goalQueue: queueWith(smelt),
     })
     const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const retrieve = grounded.candidates.find((candidate) => candidate.id.includes('station:furnace'))
     const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
-    const missing = withheld?.result.missingCapabilities.map(capabilityKey) ?? []
     check(
-      '(12b) stone geometry without the tool and WITHOUT a placeable retains the refusal by name',
-      withheld !== undefined &&
-        withheld.result.reason === 'needs_ascend' &&
-        missing.join(',') ===
-          'placeable_block,safe_column:no_tool@32,35,37:pickaxe@0,tool:pickaxe@0',
-      `missing=[${missing.join(',')}]`,
+      '(12b) a safe clearance staircase stays feasible without a pickaxe or pillar block',
+      retrieve !== undefined &&
+        retrieve.affordance?.feasible === true &&
+        retrieve.meta.vertical === 'staircase-up' &&
+        retrieve.meta.upDigX === 32 &&
+        retrieve.meta.upDigY === 35 &&
+        retrieve.meta.upDigZ === 37 &&
+        withheld === undefined,
+      retrieve === undefined
+        ? `withheld=${withheld?.result.reason ?? 'none'} missing=[${(withheld?.result.missingCapabilities ?? []).map(capabilityKey).join(',')}]`
+        : `vertical=${String(retrieve.meta.vertical)} dig=${String(retrieve.meta.upDigX)},${String(retrieve.meta.upDigY)},${String(retrieve.meta.upDigZ)} affordance=${JSON.stringify(retrieve.affordance)}`,
     )
   }
 
-  // (b2) the measured live amplification (RC d54d9a8, run-mu7x7wym-onhb): the
-  // same stone cut with a placeable block held (cobblestone 170) but no pickaxe
-  // must NOT be blocked by `safe_column:no_tool@...:pickaxe@0`, because the
-  // pillar-up mechanic needs no pickaxe at all.
+  // (b2) with both a safe stone cut and a held placeable, the grounded staircase
+  // remains the plan returned by the shared vertical solver. The pure planner
+  // pins this mechanically grounded route; this gate must not turn it into a
+  // false tool refusal or silently change its geometry.
   {
     const state = worldState({
       position: feet,
@@ -1240,15 +1245,17 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     const retrieve = grounded.candidates.find((candidate) => candidate.id.includes('station:furnace'))
     const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
     check(
-      '(12b2) the same stone cut with a held placeable is feasible via the pillar plan (no pickaxe needed)',
+      '(12b2) the same safe stone cut with a held placeable remains feasible via staircase-up',
       retrieve !== undefined &&
         retrieve.affordance?.feasible === true &&
-        retrieve.meta.vertical === 'pillar' &&
-        retrieve.meta.pillarPlaceName === 'cobblestone' &&
+        retrieve.meta.vertical === 'staircase-up' &&
+        retrieve.meta.upDigX === 32 &&
+        retrieve.meta.upDigY === 35 &&
+        retrieve.meta.upDigZ === 37 &&
         withheld === undefined,
       retrieve === undefined
         ? `withheld=${withheld?.result.reason ?? 'none'} missing=[${(withheld?.result.missingCapabilities ?? []).map(capabilityKey).join(',')}]`
-        : `vertical=${String(retrieve.meta.vertical)} place=${String(retrieve.meta.pillarPlaceName)} affordance=${JSON.stringify(retrieve.affordance)}`,
+        : `vertical=${String(retrieve.meta.vertical)} dig=${String(retrieve.meta.upDigX)},${String(retrieve.meta.upDigY)},${String(retrieve.meta.upDigZ)} affordance=${JSON.stringify(retrieve.affordance)}`,
     )
   }
 
@@ -1392,8 +1399,9 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   //            "tool:pickaxe@0"]
   // Live body: pos=(39.5,11,32.3) underground, birch_planks=2 stick=2
   // cobblestone=170 dirt=37 andesite=7, NO pickaxe; log at y=65; the only upward
-  // cut is stone at (39,12,31). Pillar-up needs no pickaxe, so the log RETRIEVE
-  // must be offered with vertical=pillar instead of the safe_column refusal.
+  // cut is stone at (39,12,31). The cut is a supported clearance staircase and
+  // needs no drop, so the RETRIEVE must remain executable without inventing a
+  // safe_column:no_tool refusal.
   {
     const liveFeet: Vec3Json = { x: 39.5, y: 11, z: 32.3 }
     const liveCut: StepCut = {
@@ -1435,19 +1443,20 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     const withheld = grounded.withheld.find((entry) => entry.candidate.id === id)
     const missing = grounded.withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey))
     check(
-      '(12g) the measured ascent boundary is feasible via pillar and NOT refused as safe_column:no_tool',
+      '(12g) the measured ascent boundary is feasible via clearance staircase without safe_column:no_tool',
       retrieve !== undefined &&
         retrieve.affordance?.feasible === true &&
         retrieve.affordance.reason === 'reachable' &&
-        retrieve.meta.vertical === 'pillar' &&
-        retrieve.meta.pillarPlaceName === 'cobblestone' &&
-        Number(retrieve.meta.pillarSteps) === 24 &&
+        retrieve.meta.vertical === 'staircase-up' &&
+        retrieve.meta.upDigX === 39 &&
+        retrieve.meta.upDigY === 12 &&
+        retrieve.meta.upDigZ === 31 &&
         retrieve.meta.logRoute === 'ascend_then_mine' &&
         withheld === undefined &&
         !missing.some((key) => key.startsWith('safe_column')),
       retrieve === undefined
         ? `not presented; withheld=${withheld?.result.reason ?? 'none'} missing=[${missing.join(',')}]`
-        : `vertical=${String(retrieve.meta.vertical)} place=${String(retrieve.meta.pillarPlaceName)} steps=${String(retrieve.meta.pillarSteps)} route=${String(retrieve.meta.logRoute)} affordance=${JSON.stringify(retrieve.affordance)} withheld=${withheld?.result.reason ?? 'none'}`,
+        : `vertical=${String(retrieve.meta.vertical)} dig=${String(retrieve.meta.upDigX)},${String(retrieve.meta.upDigY)},${String(retrieve.meta.upDigZ)} route=${String(retrieve.meta.logRoute)} affordance=${JSON.stringify(retrieve.affordance)} withheld=${withheld?.result.reason ?? 'none'}`,
     )
     check(
       '(12g) no safe_column/tool capability is emitted for the live log route',
