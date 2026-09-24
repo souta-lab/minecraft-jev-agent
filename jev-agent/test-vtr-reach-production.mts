@@ -36,6 +36,15 @@ describe('VTR Reach production authority seam', () => {
     assert.match(conflictGate, /throw new ExecutionAuthorityConflict/)
   })
 
+  it('charges observed world risk before the declared ensures predicate may verify', () => {
+    const tickReachStart = controller.indexOf('private async tickReachTransition(')
+    const tickReachEnd = controller.indexOf('private reachWitnessForCandidateShape(', tickReachStart)
+    const tickReach = controller.slice(tickReachStart, tickReachEnd)
+    const observedRisk = tickReach.indexOf('recordReachObservedRisk(runtime.contract, runtime.state, identity')
+    const verify = tickReach.indexOf('verifyReachEnsures(runtime.contract, runtime.state, observation)')
+    assert.ok(observedRisk >= 0 && verify > observedRisk)
+  })
+
   it('records typed outcomes before a fresh scheduler handoff; no action completion asks legacy beta', () => {
     const completionStart = controller.indexOf('private onReachActionComplete(')
     const closeStart = controller.indexOf('private closeReachTransition(', completionStart)

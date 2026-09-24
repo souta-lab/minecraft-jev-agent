@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { resourceMatches } from '../resourceClass.ts'
 
 /** JSON-shaped facts keep the contract independent of Mineflayer and model APIs. */
 export type ReachJson = null | boolean | number | string | readonly ReachJson[] | { readonly [key: string]: ReachJson }
@@ -8,6 +9,29 @@ export interface ReachPredicate {
   readonly id: string
   readonly proposition: ReachJson
   readonly expected: boolean
+}
+
+/** Match a source by the Mission's exact item/resource class, never by suffix coincidence. */
+export function missionResourceSourceMatches(
+  missionItem: string,
+  sourceName: string | null | undefined,
+  yieldedItem: string | null | undefined,
+  knownSourceNames: readonly string[] = [],
+): boolean {
+  if (sourceName === null || sourceName === undefined) return false
+  return (
+    sourceName === missionItem ||
+    knownSourceNames.includes(sourceName) ||
+    resourceMatches(yieldedItem ?? sourceName, missionItem)
+  )
+}
+
+/** Count either one exact Mission item or all concrete members of a resource class. */
+export function countMissionInventoryResource(counts: Readonly<Record<string, number>>, missionItem: string): number {
+  return Object.entries(counts).reduce(
+    (total, [item, count]) => total + (resourceMatches(item, missionItem) ? count : 0),
+    0,
+  )
 }
 
 /** Identity pinned at commit and checked before every controller update or actuation reservation. */

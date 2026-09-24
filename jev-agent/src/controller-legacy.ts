@@ -172,8 +172,10 @@ import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import {
   createReachTransitionContract,
+  countMissionInventoryResource,
   finishReachForMissionSatisfied,
   interruptReachForSafety,
+  missionResourceSourceMatches,
   recordReachMechanicalStep,
   recordReachObservedRisk,
   recordReachProgress,
@@ -430,6 +432,7 @@ export function filterFurnacePrerequisiteCandidates(
 export interface VtrInventoryMission {
   readonly id: string
   readonly kind: 'inventory_at_least'
+  /** A concrete Minecraft item id or a grounded ResourceClass such as `log`. */
   readonly item: string
   readonly count: number
 }
@@ -3745,7 +3748,7 @@ export class JevController {
 
   /** Build a VTR-only fact view. The empty GoalQueue projection is for old sensor helpers only. */
   private buildReachWorldState(mission: VtrInventoryMission): WorldState {
-    const have = this.countItem(mission.item)
+    const have = countMissionInventoryResource(this.inventorySnapshot(), mission.item)
     const required = Math.max(1, Math.floor(mission.count))
     const goal: GoalState = {
       id: mission.id,
@@ -3798,14 +3801,7 @@ export class JevController {
   }
 
   private isMissionSource(item: string, name: string | null | undefined, yielded: string | null | undefined = null): boolean {
-    if (name === null || name === undefined) return false
-    const sourceNames = this.missionSourceNames(item)
-    return (
-      name === item ||
-      sourceNames.includes(name) ||
-      (item.endsWith('_log') && name.endsWith('_log')) ||
-      resourceMatches(yielded ?? name, item)
-    )
+    return missionResourceSourceMatches(item, name, yielded, this.missionSourceNames(item))
   }
 
   private missionSourceAlreadyReachable(state: WorldState, item: string): boolean {
@@ -3855,7 +3851,7 @@ export class JevController {
   ): ReachObservation {
     const mission = active.mission
     const required = Math.max(1, Math.floor(mission.count))
-    const have = state.inventory.counts[mission.item] ?? 0
+    const have = countMissionInventoryResource(state.inventory.counts, mission.item)
     const inReachSources = state.blocks.filter(
       (block) => this.isMissionSource(mission.item, block.name, block.yield) && block.inReach && block.visible !== false,
     )
@@ -4195,7 +4191,7 @@ export class JevController {
     // No VTR transition may start over a legacy lease; drain it first, then this
     // scheduler gets the next idle turn before Jev or System2 can act again.
     if (this.executor.current !== null) return false
-    if ((state.inventory.counts[mission.item] ?? 0) >= mission.count) return false
+    if (countMissionInventoryResource(state.inventory.counts, mission.item) >= mission.count) return false
     if (this.missionSourceAlreadyReachable(state, mission.item)) {
       this.vtrOwnsReachMoveThisTick = true
       return false

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'bun:test'
 import {
   createReachTransitionContract,
+  countMissionInventoryResource,
   interruptReachForSafety,
+  missionResourceSourceMatches,
   recordReachMechanicalStep,
   recordReachObservedRisk,
   recordReachProgress,
@@ -107,6 +109,15 @@ function reserve(
 }
 
 describe('pure VTR Reach contract and controller state machine', () => {
+  it('matches exact Mission wood species and counts resource classes without crossing species', () => {
+    assert.equal(missionResourceSourceMatches('oak_log', 'oak_log', 'oak_log'), true)
+    assert.equal(missionResourceSourceMatches('oak_log', 'acacia_log', 'acacia_log'), false)
+    assert.equal(missionResourceSourceMatches('oak_log', 'birch_log', 'oak_log'), true)
+    assert.equal(missionResourceSourceMatches('log', 'acacia_log', 'acacia_log'), true)
+    assert.equal(countMissionInventoryResource({ oak_log: 2, acacia_log: 3 }, 'oak_log'), 2)
+    assert.equal(countMissionInventoryResource({ oak_log: 2, acacia_log: 3 }, 'log'), 5)
+  })
+
   it('pins a stable desired predicate while tactics, waypoint, and valid witness change', () => {
     const contract = makeContract()
     const initialWitness = {
