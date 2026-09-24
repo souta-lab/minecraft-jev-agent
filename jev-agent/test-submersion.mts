@@ -329,7 +329,7 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     unknownWet.self.air === null &&
       wetProjection.safety.airBand === 'unknown' && wetProjection.safety.submerged === true &&
       bodySubmersion(unknownWet.self).state === 'submerged' &&
-      unknownWet.self.envHazard?.drowning === false && knownLowIsDrowning &&
+      unknownWet.self.envHazard?.drowning === null && knownLowIsDrowning &&
       state.self.air === 3 && knownLowProjection.safety.airBand === 'critical' &&
       bodySubmersion(state.self).state === 'out_of_air' &&
       observedAirWet.self.air === 17 && observedProjection.safety.airBand === 'low' &&

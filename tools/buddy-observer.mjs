@@ -1069,7 +1069,14 @@ function projectDecisionState(state) {
       : knownStructures === null ? null : [knownStructures]
   return {
     world: pickFields(world, ['dimension', 'worldEpoch', 'generationId', 'alive', 'leaseHeld']),
-    self: pickFields(state?.self, ['position', 'dimension', 'health', 'food', 'lastDamage', 'heldItem', 'equipment', 'armor', 'offhand']),
+    self: pickFields(state?.self, [
+      'position', 'dimension', 'health', 'food', 'air', 'feetInWater', 'eyesInWater', 'envHazard',
+      'lastDamage', 'heldItem', 'equipment', 'armor', 'offhand',
+    ]),
+    // Air and drowning are also available as raw self facts above. Keep the
+    // actual Jev semantic bands beside them so the observer shows exactly what
+    // the model was given, including airBand=unknown.
+    safety: pickFields(state?.semantic?.safety, ['airBand', 'submerged']),
     inventory: projectInventory(state?.inventory),
     goal: pickFields(goal, ['id', 'description', 'targetItem', 'requiredCount', 'startCount', 'haveCount', 'progress', 'complete']),
     goalQueue: pickFields(state?.goalQueue, ['depth', 'empty']),
@@ -1264,7 +1271,11 @@ function projectCombatDecision(jevEvidence) {
       // reviewers can see whether Jev knew about worn armor/offhand shielding.
       // This is observation only; it does not alter candidate eligibility or
       // preference probabilities.
-      self: pickFields(state.self, ['position', 'dimension', 'health', 'food', 'heldItem', 'equipment', 'armor', 'offhand']),
+      self: pickFields(state.self, [
+        'position', 'dimension', 'health', 'food', 'air', 'feetInWater', 'eyesInWater', 'envHazard',
+        'heldItem', 'equipment', 'armor', 'offhand',
+      ]),
+    safety: state.safety ?? null,
     objective: {
       goal: state.goal ?? null,
       progress: state.progress ?? null,

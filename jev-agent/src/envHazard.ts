@@ -157,8 +157,12 @@ export interface EnvHazardState {
   inLava: boolean
   /** Mineflayer's own on-fire flag; null = not exposed by this client */
   onFire: boolean | null
-  /** breath at/below the low-air threshold (the `bodySubmersion` fact) */
-  drowning: boolean
+  /**
+   * Whether measured low breath is present while submerged. `null` means the
+   * body is known to be in water but its breath sensor did not report a value;
+   * an unobserved measurement is never published as "not drowning".
+   */
+  drowning: boolean | null
   /** the body's eyes cell holds water: the "water at the head" boundary */
   headInWater: boolean
   /**
@@ -207,8 +211,8 @@ export interface EnvHazardFacts {
   supportBlock: string | null
   /** Mineflayer's own on-fire flag (entity metadata shared_flags bit 0x01) */
   onFire: boolean | null
-  /** breath at/below `LOW_AIR_LEVEL` (`bodyIsOutOfAir`) */
-  outOfAir: boolean
+  /** breath at/below `LOW_AIR_LEVEL`; null means breath was not observed */
+  outOfAir: boolean | null
   /** the body's feet or eyes cell holds water (`bodyIsSubmerged`) */
   inWater: boolean
   /** the body's eyes cell holds water */
@@ -260,7 +264,12 @@ export function buildEnvHazardState(facts: EnvHazardFacts): EnvHazardState {
   // it does not prove the body is currently drowning or needs a surface route.
   // Keep the recent air reading in the scheduler/projection; only name this
   // environmental hazard while authoritative submersion evidence is present.
-  const drowning = facts.outOfAir === true && facts.inWater === true
+  const drowning =
+    facts.inWater !== true
+      ? false
+      : facts.outOfAir === null || facts.outOfAir === undefined
+        ? null
+        : facts.outOfAir === true
   const headInWater = facts.headInWater === true
   const airAbove = facts.airAbove === true
   const inWaterWhileBurning = onFire === true && facts.inWater === true

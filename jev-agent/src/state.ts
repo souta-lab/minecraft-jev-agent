@@ -2047,6 +2047,11 @@ function buildEnvHazard(
   // drowning geometry ("water at the head, air immediately above").
   const aboveHeadBlock = at(input.feet.y + 2)
   const inWater = input.feetInWater === true || input.eyesInWater === true
+  const submersion = bodySubmersion({
+    air: input.air,
+    feetInWater: input.feetInWater,
+    eyesInWater: input.eyesInWater,
+  })
   return buildEnvHazardState({
     self: input.feet,
     feetBlock: feetBlock?.name ?? null,
@@ -2055,11 +2060,7 @@ function buildEnvHazard(
     onFire: input.onFire,
     // The breath/water facts are `bodySubmersion`'s (one owner); the hazard
     // state only re-expresses drowning so one marker can name it.
-    outOfAir: bodySubmersion({
-      air: input.air,
-      feetInWater: input.feetInWater,
-      eyesInWater: input.eyesInWater,
-    }).state === 'out_of_air',
+    outOfAir: submersion.air === null ? null : submersion.state === 'out_of_air',
     inWater,
     headInWater: input.eyesInWater === true,
     // "Verified AIR immediately above" is not merely "passable above": a fluid

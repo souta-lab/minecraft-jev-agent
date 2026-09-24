@@ -267,12 +267,19 @@ const combatCall = {
   },
   error: null,
   state: {
-    semantic: { world: { dimension: 'overworld', worldEpoch: 1, generationId: null, alive: true, leaseHeld: true } },
+    semantic: {
+      world: { dimension: 'overworld', worldEpoch: 1, generationId: null, alive: true, leaseHeld: true },
+      safety: { airBand: 'unknown', submerged: true },
+    },
     self: {
       position: { x: 10, y: 64, z: 20 },
       dimension: 'overworld',
       health: 16,
       food: 17,
+      air: null,
+      feetInWater: true,
+      eyesInWater: true,
+      envHazard: { active: false, drowning: null, kinds: [] },
       heldItem: 'iron_sword',
       armor: { head: null, torso: { name: 'iron_chestplate', count: 1, slot: 6, durabilityUsed: 197, maxDurability: 240 }, legs: null, feet: null },
       offhand: { name: 'shield', count: 1, slot: 45, durabilityUsed: 8, maxDurability: 336 },
@@ -327,6 +334,11 @@ assert.equal(combatSummary.choices.jevEvidence.state.threat.primary.threatHeldIt
 assert.equal(combatSummary.choices.jevEvidence.state.threat.nearbyHostiles.length, 2)
 assert.deepEqual(combatSummary.choices.jevCombatDecision.self.armor, combatCall.state.self.armor)
 assert.deepEqual(combatSummary.choices.jevCombatDecision.self.offhand, combatCall.state.self.offhand)
+assert.equal(combatSummary.choices.jevEvidence.state.self.air, null)
+assert.equal(combatSummary.choices.jevEvidence.state.self.envHazard.drowning, null)
+assert.deepEqual(combatSummary.choices.jevEvidence.state.safety, { airBand: 'unknown', submerged: true })
+assert.equal(combatSummary.choices.jevCombatDecision.self.air, null)
+assert.equal(combatSummary.choices.jevCombatDecision.self.envHazard.drowning, null)
 assert.equal(combatSummary.choices.jevEvidence.state.resources.known[0].name, 'acacia_log')
 assert.equal(combatSummary.choices.jevEvidence.state.structures.status, 'not_recorded')
 assert.equal(combatSummary.progress.liveGoal.fraction, 1 / 3)

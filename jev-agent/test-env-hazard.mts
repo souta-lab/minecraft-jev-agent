@@ -970,6 +970,52 @@ function pocket(): Map<string, BlockSpec> {
     unknown.active === false && unknown.onFire === null && unknown.kinds.length === 0 && unknown.cell === null,
     `state=${JSON.stringify(unknown)}`,
   )
+  const unknownBreathInWater = buildEnvHazardState({
+    self: FEET,
+    feetBlock: 'water',
+    headBlock: 'water',
+    supportBlock: 'stone',
+    onFire: false,
+    outOfAir: null,
+    inWater: true,
+    headInWater: true,
+    airAbove: true,
+    cells: [],
+  })
+  const lowBreathInWater = buildEnvHazardState({
+    self: FEET,
+    feetBlock: 'water',
+    headBlock: 'water',
+    supportBlock: 'stone',
+    onFire: false,
+    outOfAir: true,
+    inWater: true,
+    headInWater: true,
+    airAbove: true,
+    cells: [],
+  })
+  const healthyBreathInWater = buildEnvHazardState({
+    self: FEET,
+    feetBlock: 'water',
+    headBlock: 'water',
+    supportBlock: 'stone',
+    onFire: false,
+    outOfAir: false,
+    inWater: true,
+    headInWater: true,
+    airAbove: true,
+    cells: [],
+  })
+  check(
+    '(g2) submerged drowning preserves unknown breath separately from measured low and healthy breath',
+    unknownBreathInWater.drowning === null &&
+      unknownBreathInWater.active === false &&
+      unknownBreathInWater.kinds.length === 0 &&
+      lowBreathInWater.drowning === true &&
+      lowBreathInWater.kinds.includes('drowning') &&
+      healthyBreathInWater.drowning === false,
+    `unknown=${String(unknownBreathInWater.drowning)} low=${String(lowBreathInWater.drowning)} healthy=${String(healthyBreathInWater.drowning)}`,
+  )
   const cells: EnvHazardCell[] = [
     { position: { x: 11, y: 60, z: 5 }, standable: true, hazard: null, hazardBlock: null, water: false },
     { position: { x: 11, y: 60, z: 6 }, standable: true, hazard: null, hazardBlock: null, water: false },
