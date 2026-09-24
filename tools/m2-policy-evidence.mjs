@@ -72,6 +72,7 @@ export function parseGenerationLine(line) {
   const fallback = /\bdeterministicFallbackEnabled=(true|false)\b/.exec(line)?.[1] ?? null
   const generationId = /\bgenerationId=(\S+)/.exec(line)?.[1] ?? /\bid=(\S+)/.exec(line)?.[1] ?? null
   return {
+    runId: /\brunId=(\S+)/.exec(line)?.[1] ?? null,
     generationId,
     sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
     buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
@@ -92,6 +93,8 @@ export function parseSystem2AuthorityLine(line) {
   const chosen = /\bchosen=(\S+)/.exec(line)?.[1] ?? null
   const portalPlan = chosen === 'front_nether_portal' || /\bgoals=\[[^\n]*portal/i.test(line)
   return {
+    runId: /\brunId=(\S+)/.exec(line)?.[1] ?? null,
+    requestId: /\brequestId=(\S+)/.exec(line)?.[1] ?? null,
     generationId: /\bgenerationId=(\S+)/.exec(line)?.[1] ?? null,
     sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
     buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
@@ -108,6 +111,8 @@ export function parseSystem2AuthorityLine(line) {
 export function parseSystem2AuthorityInputLine(line) {
   if (!/\bSYSTEM2_AUTHORITY_INPUT\b/.test(line)) return null
   return {
+    runId: /\brunId=(\S+)/.exec(line)?.[1] ?? null,
+    requestId: /\brequestId=(\S+)/.exec(line)?.[1] ?? null,
     generationId: /\bgenerationId=(\S+)/.exec(line)?.[1] ?? null,
     sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
     buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
@@ -116,6 +121,22 @@ export function parseSystem2AuthorityInputLine(line) {
     configuredProvider: /\bconfiguredProvider=(\S+)/.exec(line)?.[1] ?? null,
     configuredModel: /\bconfiguredModel=(\S+)/.exec(line)?.[1] ?? null,
     trigger: /\btrigger=(\S+)/.exec(line)?.[1] ?? null,
+  }
+}
+
+export function parseSystem2PlanAppliedLine(line) {
+  if (!/(?:^|\s)SYSTEM2_PLAN_APPLIED(?:\s|$)/.test(line)) return null
+  const appliedText = /\bapplied=(\d+)\b/.exec(line)?.[1] ?? null
+  const acceptedText = /\baccepted=(true|false)\b/.exec(line)?.[1] ?? null
+  return {
+    runId: /\brunId=(\S+)/.exec(line)?.[1] ?? null,
+    requestId: /\brequestId=(\S+)/.exec(line)?.[1] ?? null,
+    generationId: /\bgenerationId=(\S+)/.exec(line)?.[1] ?? null,
+    sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
+    buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
+    op: /\bop=(\S+)/.exec(line)?.[1] ?? null,
+    accepted: acceptedText === null ? null : acceptedText === 'true',
+    applied: appliedText === null ? null : Number(appliedText),
   }
 }
 
@@ -138,6 +159,7 @@ export async function scanRunnerOut(runnerOutPath) {
   const generations = []
   const system2Inputs = []
   const system2Decisions = []
+  const system2Applications = []
   const rl = createInterface({ input: createReadStream(runnerOutPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
     const tsMs = extractTimestampMs(line)
@@ -162,11 +184,16 @@ export async function scanRunnerOut(runnerOutPath) {
       continue
     }
     if (tsMs !== null) {
+      const application = parseSystem2PlanAppliedLine(line)
+      if (application !== null) {
+        system2Applications.push({ tsMs, ...application })
+        continue
+      }
       const system2 = parseSystem2AuthorityLine(line)
       if (system2 !== null) system2Decisions.push({ tsMs, ...system2 })
     }
   }
-  return { boots, releases, generations, system2Inputs, system2Decisions }
+  return { boots, releases, generations, system2Inputs, system2Decisions, system2Applications }
 }
 
 /** Bracket R's lifetime: [BOOT runId=R, next BOOT | HOST_LOCK released | now-live). */
@@ -183,10 +210,12 @@ export function resolveRunWindow(boots, releases, runId, { live = false, nowMs =
   return { startMs, endMs, bounded: endMs !== null }
 }
 
-function buildSystem2GenerationLineage({ generations, inputs, decisions, bootSourceSha }) {
+function buildSystem2GenerationLineage({ generations, inputs, decisions, applications, bootSourceSha, runId }) {
   const issues = []
   const generationById = new Map()
   const usedInputs = new Set()
+  const usedApplications = new Set()
+  const appliedModelDecisions = []
   const addIssue = (reason) => {
     if (!issues.includes(reason)) issues.push(reason)
   }
@@ -226,8 +255,36 @@ function buildSystem2GenerationLineage({ generations, inputs, decisions, bootSou
     .map((generation) => `${generation.system2ConfiguredProvider}\u0000${generation.system2ConfiguredModel}`))
   if (configuredAuthorities.size > 1) addIssue(`system2_authority_changed_across_generations count=${configuredAuthorities.size}`)
 
+  const decisionRequestCounts = new Map()
+  for (const decision of decisions) {
+    const requestId = decision.requestId
+    if (typeof requestId === 'string' && requestId.length > 0 && requestId !== 'null') {
+      decisionRequestCounts.set(requestId, (decisionRequestCounts.get(requestId) ?? 0) + 1)
+    }
+  }
+  const applicationRequestCounts = new Map()
+  for (const application of applications) {
+    const requestId = application.requestId
+    if (typeof requestId === 'string' && requestId.length > 0 && requestId !== 'null') {
+      applicationRequestCounts.set(requestId, (applicationRequestCounts.get(requestId) ?? 0) + 1)
+    }
+  }
+
   for (const decision of decisions) {
     const id = decision.generationId
+    const requestId = decision.requestId
+    let identityValid = true
+    if (decision.runId !== runId) {
+      addIssue(`system2_decision_run_id_missing_or_mismatch expected=${runId} observed=${decision.runId ?? 'missing'}`)
+      identityValid = false
+    }
+    if (typeof requestId !== 'string' || requestId.length === 0 || requestId === 'null') {
+      addIssue('system2_decision_request_id_missing')
+      identityValid = false
+    } else if (decisionRequestCounts.get(requestId) !== 1) {
+      addIssue(`system2_decision_request_id_duplicate requestId=${requestId}`)
+      identityValid = false
+    }
     if (typeof id !== 'string' || id.length === 0) {
       addIssue('system2_decision_generation_id_missing')
       continue
@@ -237,31 +294,93 @@ function buildSystem2GenerationLineage({ generations, inputs, decisions, bootSou
       addIssue(`system2_decision_generation_unjoined id=${id}`)
       continue
     }
+    if (generation.runId !== runId) {
+      addIssue(`generation_run_id_missing_or_mismatch expected=${runId} observed=${generation.runId ?? 'missing'}`)
+      identityValid = false
+    }
     if (typeof decision.sourceSha !== 'string' || !SOURCE_SHA_RE.test(decision.sourceSha)) {
       addIssue(`system2_decision_source_sha_missing_or_invalid id=${id}`)
+      identityValid = false
     } else if (decision.sourceSha.toLowerCase() !== String(generation.sourceSha ?? '').toLowerCase()) {
       addIssue(`system2_decision_source_sha_mismatch id=${id}`)
+      identityValid = false
     }
     if (typeof decision.buildHash !== 'string' || !BUILD_HASH_RE.test(decision.buildHash)) {
       addIssue(`system2_decision_build_hash_missing_or_invalid id=${id}`)
+      identityValid = false
     } else if (decision.buildHash.toLowerCase() !== String(generation.buildHash ?? '').toLowerCase()) {
       addIssue(`system2_decision_build_hash_mismatch id=${id}`)
+      identityValid = false
     }
     if (decision.configuredProvider !== generation.system2ConfiguredProvider || decision.configuredModel !== generation.system2ConfiguredModel) {
       addIssue(`system2_decision_config_mismatch id=${id}`)
+      identityValid = false
     }
-    if (!isModelSystem2Decision(decision)) addIssue(`system2_decision_non_model_authority id=${id}`)
+    const isModelDecision = isModelSystem2Decision(decision)
+    if (!isModelDecision) {
+      addIssue(`system2_decision_non_model_authority id=${id}`)
+      identityValid = false
+    }
 
-    const inputIndex = inputs.findIndex((input, index) =>
+    const inputMatches = inputs.flatMap((input, index) =>
       !usedInputs.has(index) && input.tsMs >= generation.tsMs && input.tsMs <= decision.tsMs &&
+      input.runId === runId && input.requestId === requestId &&
       input.generationId === decision.generationId &&
       input.sourceSha === decision.sourceSha && input.buildHash === decision.buildHash &&
       input.provider === decision.provider && input.model === decision.model &&
       input.configuredProvider === decision.configuredProvider && input.configuredModel === decision.configuredModel &&
-      input.trigger === decision.trigger,
+      input.trigger === decision.trigger
+        ? [index]
+        : [],
     )
-    if (inputIndex < 0) addIssue(`system2_decision_input_unjoined id=${id}`)
-    else usedInputs.add(inputIndex)
+    if (inputMatches.length !== 1) {
+      addIssue(`system2_decision_input_unjoined id=${id} requestId=${requestId ?? 'missing'}`)
+      identityValid = false
+    } else {
+      usedInputs.add(inputMatches[0])
+    }
+
+    if (typeof requestId !== 'string' || requestId.length === 0 || requestId === 'null') continue
+    const applicationMatches = applications.flatMap((application, index) =>
+      !usedApplications.has(index) && application.tsMs >= decision.tsMs &&
+      application.runId === runId && application.requestId === requestId &&
+      application.generationId === decision.generationId &&
+      application.sourceSha === decision.sourceSha && application.buildHash === decision.buildHash
+        ? [index]
+        : [],
+    )
+    if (applicationMatches.length !== 1) {
+      addIssue(`system2_decision_plan_application_unjoined id=${id} requestId=${requestId}`)
+      identityValid = false
+      continue
+    }
+    const applicationIndex = applicationMatches[0]
+    const application = applications[applicationIndex]
+    usedApplications.add(applicationIndex)
+    const validApplication =
+      applicationRequestCounts.get(requestId) === 1 &&
+      ['continue', 'patch', 'replace', 'abandon', 'complete', 'abort'].includes(application.op) &&
+      application.accepted === true &&
+      Number.isSafeInteger(application.applied) && application.applied >= 0
+    if (!validApplication) {
+      addIssue(`system2_plan_application_invalid requestId=${requestId}`)
+      identityValid = false
+      continue
+    }
+    if (identityValid && isModelDecision) appliedModelDecisions.push(decision)
+  }
+
+  for (let index = 0; index < applications.length; index += 1) {
+    const application = applications[index]
+    if (application.runId !== runId) {
+      addIssue(`system2_plan_application_run_id_missing_or_mismatch expected=${runId} observed=${application.runId ?? 'missing'}`)
+    }
+    if (typeof application.requestId !== 'string' || application.requestId.length === 0 || application.requestId === 'null') {
+      addIssue('system2_plan_application_request_id_missing')
+    }
+    if (application.accepted !== true) addIssue(`system2_plan_application_not_accepted requestId=${application.requestId ?? 'missing'}`)
+    if (usedApplications.has(index)) continue
+    addIssue(`system2_plan_application_unmatched requestId=${application.requestId ?? 'missing'}`)
   }
 
   const decisionAuthorities = new Set(decisions
@@ -280,6 +399,9 @@ function buildSystem2GenerationLineage({ generations, inputs, decisions, bootSou
     issues,
     generationCount: generations.length,
     decisionCount: decisions.length,
+    applicationCount: applications.length,
+    appliedDecisionCount: appliedModelDecisions.length,
+    appliedModelDecisions,
     configuredProvider,
     configuredModel,
     effectiveProvider,
@@ -361,7 +483,7 @@ function duplicateTopLevelJsonKeys(jsonText) {
   return duplicates
 }
 
-function decisionGenerationIndex(generations, expectedSourceSha) {
+function decisionGenerationIndex(generations, expectedSourceSha, expectedRunId) {
   const byId = new Map()
   const expectedSha = typeof expectedSourceSha === 'string' && SOURCE_SHA_RE.test(expectedSourceSha)
     ? expectedSourceSha.toLowerCase()
@@ -377,6 +499,7 @@ function decisionGenerationIndex(generations, expectedSourceSha) {
   for (const [id, entries] of byId) {
     if (entries.length !== 1 || expectedSha === null) continue
     const [generation] = entries
+    if (generation.runId !== expectedRunId) continue
     const sourceSha = typeof generation.sourceSha === 'string' && SOURCE_SHA_RE.test(generation.sourceSha)
       ? generation.sourceSha.toLowerCase()
       : null
@@ -408,7 +531,7 @@ export async function countDecisionSources(decisionsPath, startMs, endMs, {
   let unclassifiableCount = 0
   let firstJevTs = null
   let lastJevTs = null
-  const { eligible: eligibleGenerations, expectedSha } = decisionGenerationIndex(generations, sourceSha)
+  const { eligible: eligibleGenerations, expectedSha } = decisionGenerationIndex(generations, sourceSha, runId)
   const rl = createInterface({ input: createReadStream(decisionsPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
     let record
@@ -528,8 +651,9 @@ export async function loadPolicyEvidence({
   const bootRecord = evidence.boots.find((entry) => entry.runId === runId && entry.tsMs === window.startMs) ?? null
   const bootSourceSha = bootRecord?.sourceSha ?? null
   const inWindow = evidence.generations.filter((g) => g.tsMs >= window.startMs && g.tsMs <= window.endMs)
-  const withPolicy = inWindow.filter((g) => typeof g.policyKind === 'string' && g.policyKind.length > 0)
-  const chosen = withPolicy.at(-1) ?? inWindow.at(-1) ?? null
+  const sameRunGenerations = inWindow.filter((entry) => entry.runId === runId)
+  const withPolicy = sameRunGenerations.filter((g) => typeof g.policyKind === 'string' && g.policyKind.length > 0)
+  const chosen = withPolicy.at(-1) ?? sameRunGenerations.at(-1) ?? null
   let generation = null
   if (live && typeof socket.policyKind === 'string' && typeof socket.policyModel === 'string') {
     generation = {
@@ -571,13 +695,18 @@ export async function loadPolicyEvidence({
   const system2InputsInWindow = (evidence.system2Inputs ?? []).filter(
     (entry) => entry.tsMs >= window.startMs && entry.tsMs <= window.endMs,
   )
+  const system2ApplicationsInWindow = (evidence.system2Applications ?? []).filter(
+    (entry) => entry.tsMs >= window.startMs && entry.tsMs <= window.endMs,
+  )
   const system2Lineage = buildSystem2GenerationLineage({
     generations: inWindow,
     inputs: system2InputsInWindow,
     decisions: system2InWindow,
+    applications: system2ApplicationsInWindow,
     bootSourceSha,
+    runId,
   })
-  const modelDecisions = system2InWindow.filter(isModelSystem2Decision)
+  const modelDecisions = system2Lineage.appliedModelDecisions
   const system2 = {
     runId,
     source: runnerOutPath,
@@ -585,6 +714,8 @@ export async function loadPolicyEvidence({
     modelCount: modelDecisions.length,
     ineligibleModelCount: system2InWindow.length - modelDecisions.length,
     portalPlanCount: modelDecisions.filter((entry) => entry.portalPlan === true).length,
+    planApplicationCount: system2ApplicationsInWindow.length,
+    appliedDecisionCount: system2Lineage.appliedDecisionCount,
     identityStatus: system2Lineage.status,
     identityReason: system2Lineage.reason,
     identityIssues: system2Lineage.issues,
@@ -598,6 +729,7 @@ export async function loadPolicyEvidence({
     inputCount: system2InputsInWindow.length,
     inputs: system2InputsInWindow,
     decisions: system2InWindow,
+    applications: system2ApplicationsInWindow,
   }
 
   const counts = await countDecisionSources(decisionsPath, window.startMs, window.endMs, {

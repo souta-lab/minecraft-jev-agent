@@ -168,6 +168,8 @@ function sanitizeCompiledToken(value: string): string {
 export interface System2AppliedLine {
   requestId: string
   op: string
+  /** False when the controller/GoalQueue rejected the operation or protected empty plan. */
+  accepted: boolean
   /** rows the queue accepted */
   applied: number
   /** unfinished queue depth after the apply */
@@ -194,6 +196,7 @@ export interface System2AppliedLine {
 export function formatSystem2PlanApplied(line: System2AppliedLine): string {
   return (
     `${SYSTEM2_PLAN_APPLIED} op=${sanitizeCompiledToken(line.op)} requestId=${sanitizeCompiledToken(line.requestId)}` +
+    ` accepted=${line.accepted}` +
     ` applied=${line.applied} depth=${line.depth} intentSource=${sanitizeCompiledToken(line.intentSource)}` +
     ` uncompiled=${line.uncompiled} compiled=[${formatCompiledGoalRows(line.rows)}]` +
     ` intent="${flattenProse(line.intent)}"`

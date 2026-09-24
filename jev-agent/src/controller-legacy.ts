@@ -3189,11 +3189,21 @@ export class JevController {
     const restoredHead = this.queue.current !== null
     const requestedOp = plan.op ?? 'replace'
     const op = resolveBootstrapPlanOp(this.queue, plan.op)
+    let operationRejected = false
     const added = this.queue.applyPlan(plan.goals, 'llm', op, {
       reason: plan.note,
-      onProtection: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
+      onProtection: (line) => {
+        // A protected empty plan is refused through this callback rather than
+        // `onOperationRejected`; retain that decision in the run-scoped marker.
+        if (line.startsWith('PROTECTED_GOAL_DROPPED_REJECTED ')) operationRejected = true
+        this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter)
+      },
       onDuplicate: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
       protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
+      onOperationRejected: (line) => {
+        operationRejected = true
+        this.logger.warn('system2', line, { requestId, op }, this.tickCounter)
+      },
     })
     const acceptedGoals = acceptedSystem2PlanGoals({
       operation: op,
@@ -3216,6 +3226,46 @@ export class JevController {
       blockersBefore: null,
       successSnapshot: successSnapshotBefore,
     })
+    const accepted = !operationRejected
+    const provenance = plan.provenance ?? null
+    const compiledRows = added.map((goal) => ({
+      id: goal.id,
+      kind: goal.kind,
+      targetItem: goal.targetItem ?? null,
+      targetY: goal.targetY ?? null,
+      dimension: goal.dimension ?? null,
+      description: goal.description,
+    }))
+    const system2Authority = this.system2AuthorityStack
+    this.logger.warn(
+      'system2',
+      formatSystem2PlanApplied({
+        requestId,
+        op,
+        accepted,
+        applied: added.length,
+        depth: this.queue.state.depth,
+        intentSource: provenance?.intentSource ?? 'unrecorded',
+        uncompiled: provenance?.uncompiled?.length ?? 0,
+        intent: provenance?.intent ?? plan.note,
+        rows: compiledRows,
+      }),
+      {
+        requestId,
+        provider: system2Authority.provider,
+        model: system2Authority.model,
+        op,
+        requestedOp,
+        accepted,
+        applied: added.length,
+        compiled: compiledRows,
+        uncompiled: provenance?.uncompiled ?? [],
+        intentSource: provenance?.intentSource ?? 'unrecorded',
+        intent: provenance?.intent ?? null,
+        note: plan.note,
+      },
+      this.tickCounter,
+    )
     this.subgoalCount = Math.max(added.length, this.queue.size)
     if (restoredHead && op !== requestedOp) {
       this.logger.warn(
@@ -9048,6 +9098,7 @@ export class JevController {
         const operation = plan.op ?? 'replace'
         const queueRevisionBeforeApply = this.queue.revision
         const currentBeforeApply = this.queue.state.current
+        let operationRejected = false
         // Recovery provenance is checked at the actual commit point. Keep BOTH
         // queue mutations (answering the current head and installing the plan)
         // behind the host-owned fence so a cached/stale answer cannot mutate the
@@ -9083,11 +9134,19 @@ export class JevController {
           }
           return this.queue.applyPlan(plan.goals, 'llm', operation, {
             reason: plan.note,
-            onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+            onProtection: (line) => {
+              // GoalQueue reports the protected-empty-plan rejection on the
+              // protection channel (there is no onOperationRejected callback).
+              if (line.startsWith('PROTECTED_GOAL_DROPPED_REJECTED ')) operationRejected = true
+              this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter)
+            },
             onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
             protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
             verifyCurrentComplete: (goal) => this.verifyQueuedGoalComplete(goal),
-            onOperationRejected: (line) => this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter),
+            onOperationRejected: (line) => {
+              operationRejected = true
+              this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter)
+            },
           })
         }
         let added: QueuedGoal[]
@@ -9159,6 +9218,7 @@ export class JevController {
         }))
         const compiledSummary = formatCompiledGoalRows(compiledRows)
         const intentSource = provenance?.intentSource ?? 'unrecorded'
+        const accepted = !operationRejected
         // `abort`/`complete`/`continue` are lifecycle ops whose meaning IS the op,
         // so an empty goal list is their correct shape; only a goal-carrying op can
         // "carry no goals".
@@ -9174,6 +9234,7 @@ export class JevController {
           formatSystem2PlanApplied({
             requestId: requestContext.requestId,
             op: planOp,
+            accepted,
             applied: added.length,
             depth: this.queue.state.depth,
             intentSource,
@@ -9187,6 +9248,7 @@ export class JevController {
             provider: system2Authority.provider,
             model: system2Authority.model,
             op: planOp,
+            accepted,
             applied: added.length,
             compiled: compiledRows,
             uncompiled: provenance?.uncompiled ?? [],

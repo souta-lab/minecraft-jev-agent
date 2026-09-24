@@ -406,6 +406,7 @@ describe('model authority recovery host policy', () => {
           typeof detail.intentSource === 'string' ? detail.intentSource : null,
           SOURCE_SHA,
           now + 2_000,
+          detail.accepted === true,
         ))
       },
     })
@@ -439,6 +440,87 @@ describe('model authority recovery host policy', () => {
     expect(appliedResponses).toHaveLength(1)
     expect(appliedResponses[0]).toMatchObject({ accepted: true, recovered: true, responseSource: 'system2' })
     expect(tracker.snapshot()).toMatchObject({ state: 'available', recoveryAuthority: null, recoverySourceSha: null })
+
+    // A provider-authored plan can still be rejected by the code-owned queue
+    // verifier. That marker must not restore System2 authority; the HOST keeps
+    // the run degraded and arms a typed retry instead.
+    tracker.recordUnavailable({
+      generationId: 'gen-before-rejected-application',
+      context: 'system2-authority',
+      attempts: 2,
+      error: 'transient provider 503',
+      authorityKind: 'system2',
+      authority: expectedAuthority,
+      sourceSha: SOURCE_SHA,
+    }, now + 3_000)
+    tracker.recordRetryStarted()
+    const rejectedMarkers: Record<string, unknown>[] = []
+    const rejectedResponses: ReturnType<typeof recordSystem2PlanResponse>[] = []
+    const rejectedController = new JevController(bot, {
+      goalItem: 'ender_pearl',
+      goalCount: 12,
+      logDir: dir,
+      forceFallbackPolicy: true,
+      recoverySystem2Authority: expectedAuthority,
+      recoverySourceSha: SOURCE_SHA,
+      generationSourceSha: SOURCE_SHA,
+      eventSink: (event, detail) => {
+        if (event !== 'SYSTEM2_PLAN_APPLIED') return
+        rejectedMarkers.push(detail)
+        const provider = typeof detail.provider === 'string' ? detail.provider : null
+        const model = typeof detail.model === 'string' ? detail.model : null
+        rejectedResponses.push(recordSystem2PlanResponse(
+          tracker,
+          provider === null || model === null ? null : { provider, model },
+          typeof detail.intentSource === 'string' ? detail.intentSource : null,
+          SOURCE_SHA,
+          now + 4_000,
+          detail.accepted === true,
+        ))
+      },
+    })
+    rejectedController.setSystem2({
+      provider: expectedAuthority.provider,
+      model: 'qwen3.5-9b-local',
+      authorityModel: 'qwen3.5-9b-local',
+      authorityStack: expectedAuthority,
+      plan: async () => ({
+        op: 'complete',
+        goals: [],
+        note: 'completion request without code-owned proof',
+        provenance: { intentSource: 'intent', intent: 'complete the current option' },
+      }),
+    } satisfies System2Brain)
+    const rejectedInternals = rejectedController as unknown as {
+      running: boolean
+      summonLlm(reason: 'action_impossible', detail: string): unknown
+    }
+    rejectedInternals.running = true
+    rejectedInternals.summonLlm('action_impossible', 'completion requires code-owned verification')
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    rejectedController.stop()
+
+    expect(rejectedMarkers).toHaveLength(1)
+    expect(rejectedMarkers[0]).toMatchObject({ accepted: false, op: 'complete' })
+    expect(rejectedResponses).toHaveLength(1)
+    expect(rejectedResponses[0]).toMatchObject({
+      accepted: false,
+      recovered: false,
+      reason: 'plan-application-rejected',
+      responseSource: 'system2',
+      retry: { attempt: 2, delayMs: 10_000 },
+    })
+    expect(tracker.snapshot()).toMatchObject({
+      state: 'degraded',
+      recoveryAuthorityKind: 'system2',
+      recoveryAuthority: expectedAuthority,
+      recoverySourceSha: SOURCE_SHA,
+      lastRecoveryRejection: { reason: 'plan-application-rejected' },
+    })
+    expect(modelRecoveryStartGate(tracker.snapshot(), now + 4_001)).toMatchObject({
+      allowed: false,
+      reason: 'retry-backoff',
+    })
   })
 
   test('scheduled recovery stays armed while a generation drains, then starts retry', () => {

@@ -33,6 +33,7 @@ export type ModelAuthorityMismatch =
   | 'actual-source-missing'
   | 'source-mismatch'
   | 'response-source-mismatch'
+  | 'plan-application-rejected'
 
 /**
  * Compare non-secret, effective provider/model identity. Empty values are

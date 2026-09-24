@@ -9,6 +9,7 @@ import type { System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import { MUSE_SPARK_MODEL, MercurySystem2 } from './mercury-system2.ts'
 import { PlannerBrain } from './planner.ts'
+import { bindGenerationEventIdentity } from './generation-entry.ts'
 
 const logs: Array<{ event: string; detail: Record<string, unknown> }> = []
 const bot = {
@@ -74,12 +75,25 @@ const request: System2PlanRequest = {
     { actionId: 'WAIT', status: 'done', failure: null, verified: true, detail: '' },
     { actionId: 'WAIT', status: 'done', failure: null, verified: true, detail: '' },
   ],
+  requestContext: {
+    requestId: 'request-authority-wire-1',
+    queueRevision: 0,
+    optionInstanceId: null,
+    optionTemplateId: null,
+    worldEpoch: 1,
+    stateFingerprint: 'fixture-state-fingerprint',
+    authorityEpoch: 1,
+  },
 }
 
 const planner = new PlannerBrain({
   bot,
   world: emptyWorldMemory(),
   log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
+  runId: 'run-authority-wire',
+  generationId: 'gen-authority-wire',
+  sourceSha: 'a'.repeat(40),
+  buildHash: 'b'.repeat(12),
   cachePath: join(dir, 'planner-cache.json'),
   mode: 'llm',
   mercury,
@@ -106,11 +120,24 @@ assert.equal(plan.goals[0]?.targetItem, 'raw_iron')
 assert.match(plan.note, /mercury/i)
 assert.equal(logs.some((entry) => entry.event === 'MERCURY_ATTEMPT'), true)
 assert.equal(
-  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.source === 'muse-spark'),
+  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.source === 'muse-spark' &&
+    entry.detail.requestId === 'request-authority-wire-1' && entry.detail.runId === 'run-authority-wire' &&
+    entry.detail.generationId === 'gen-authority-wire' && entry.detail.sourceSha === 'a'.repeat(40) && entry.detail.buildHash === 'b'.repeat(12)),
   true,
 )
 assert.equal(
-  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_DECISION' && entry.detail.model === MUSE_SPARK_MODEL),
+  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_DECISION' && entry.detail.model === MUSE_SPARK_MODEL &&
+    entry.detail.requestId === 'request-authority-wire-1' && entry.detail.runId === 'run-authority-wire' &&
+    entry.detail.generationId === 'gen-authority-wire' && entry.detail.sourceSha === 'a'.repeat(40) && entry.detail.buildHash === 'b'.repeat(12)),
   true,
+)
+
+const appliedHostDetail = bindGenerationEventIdentity(
+  { runId: 'caller-run', generationId: 'caller-generation', sourceSha: 'caller-sha', buildHash: 'caller-build', requestId: 'request-authority-wire-1', op: 'continue', applied: 0 },
+  { runId: 'run-authority-wire', generationId: 'gen-authority-wire', sourceSha: 'a'.repeat(40), buildHash: 'b'.repeat(12) },
+)
+assert.deepEqual(
+  { runId: appliedHostDetail.runId, generationId: appliedHostDetail.generationId, sourceSha: appliedHostDetail.sourceSha, buildHash: appliedHostDetail.buildHash },
+  { runId: 'run-authority-wire', generationId: 'gen-authority-wire', sourceSha: 'a'.repeat(40), buildHash: 'b'.repeat(12) },
 )
 console.log('mercury-authority-wiring: PASS (exception WHAT NEXT uses Muse; Jev fallback is not reached)')

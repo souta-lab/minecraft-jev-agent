@@ -104,15 +104,16 @@ function runnerOut(runId, source = FIXTURE_SHA) {
       boot(0, runId, source),
       line(
         1,
-        `GENERATION_READY id=${SYSTEM2_GENERATION_ID} generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} ` +
+        `GENERATION_READY runId=${runId} id=${SYSTEM2_GENERATION_ID} generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} ` +
           'system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev rungIndex=13 rungId=nether_portal ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
           'system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"} ' +
           'system2LastAuthority={"provider":"none","model":"none"} deterministicFallbackEnabled=false ' +
           'planner=llm plannerModel=typesafe-ai/jev',
       ),
-      line(1.5, `SYSTEM2_AUTHORITY_INPUT generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=${SYSTEM2_TRIGGER} provider=typesafe-ai model=typesafe-ai/jev`),
-      line(2, `SYSTEM2_AUTHORITY_DECISION generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=${SYSTEM2_TRIGGER} provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal`),
+      line(1.5, `SYSTEM2_AUTHORITY_INPUT runId=${runId} requestId=clean-plan-${runId} generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=${SYSTEM2_TRIGGER} provider=typesafe-ai model=typesafe-ai/jev`),
+      line(2, `SYSTEM2_AUTHORITY_DECISION runId=${runId} requestId=clean-plan-${runId} generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=${SYSTEM2_TRIGGER} provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal`),
+      line(2.1, `SYSTEM2_PLAN_APPLIED runId=${runId} requestId=clean-plan-${runId} generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} op=patch accepted=true applied=1`),
       line(3, `HOST_LOCK released runId=${runId}`),
     ].join('\n') + '\n'
   )
@@ -120,7 +121,8 @@ function runnerOut(runId, source = FIXTURE_SHA) {
 
 const decisionsFor = (runId, source = FIXTURE_SHA) => `${JSON.stringify({
   record: 'decision', ts: at(2), source: 'jev', runId,
-  generationId: SYSTEM2_GENERATION_ID, sourceSha: source, action: 'GOTO:nether_portal',
+  generationId: SYSTEM2_GENERATION_ID, sourceSha: source,
+  jev: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, action: 'GOTO:nether_portal',
 })}\n`
 
 function acceptanceRecord(runId, { levelName = CLEAN_LEVEL, seed = CLEAN_SEED, gitCommit = FIXTURE_SHA } = {}) {
@@ -522,6 +524,7 @@ async function buildBundle(
   const observedAt = at(35)
   const reportBinding = {
     runId,
+    worldKey: { ...JSON.parse(WORLD_KEY), dimension: 'minecraft:the_nether' },
     currentInventoryObservation: {
       record: 'current-inventory-observation',
       schemaVersion: 1,

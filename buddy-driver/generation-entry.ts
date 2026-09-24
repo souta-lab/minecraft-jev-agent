@@ -126,6 +126,14 @@ import {
 
 export const CONTRACT_VERSION = 3
 
+/** Host-owned lineage attached to mirrored controller markers for run-scoped evidence. */
+export function bindGenerationEventIdentity(
+  detail: Record<string, unknown>,
+  identity: { runId: string | null; generationId: string; sourceSha: string | null; buildHash: string | null },
+): Record<string, unknown> {
+  return { ...detail, ...identity }
+}
+
 // Loud-fail craft capability check: a future Mineflayer bump that removes the
 // private `_syncWindow` API must fail loudly here instead of silently degrading
 // to the stock `bot.craft` silent-3x3-failure path (#3906).
@@ -2994,7 +3002,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     scanRadius: 48,
     verbose: true,
     eventSink: (event, detail) => {
-      ctx.log(event, { ...detail, generationId: id, sourceSha: ctx.sourceSha ?? null })
+      ctx.log(event, bindGenerationEventIdentity(detail, {
+        runId: ctx.runId ?? null,
+        generationId: id,
+        sourceSha: ctx.sourceSha ?? null,
+        buildHash: ctx.buildHash ?? null,
+      }))
       m2Snapshot?.recordMarker(event, detail)
       const actionId = typeof detail.actionId === 'string' ? detail.actionId : null
       const verified = detail.verified === true
@@ -3074,6 +3087,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     bot,
     world,
     log: (event, detail) => ctx.log(event, detail),
+    runId: ctx.runId ?? null,
     generationId: id,
     sourceSha: ctx.sourceSha ?? null,
     buildHash: ctx.buildHash ?? null,
@@ -3104,6 +3118,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   controller.setSystem2(system2)
 
   ctx.log('GENERATION_READY', {
+    runId: ctx.runId ?? null,
     id,
     generationId: id,
     sourceSha: ctx.sourceSha ?? null,

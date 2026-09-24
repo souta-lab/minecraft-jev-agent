@@ -400,11 +400,26 @@ export function recordSystem2PlanResponse(
   intentSource: string | null,
   sourceSha: string | null,
   nowMs = Date.now(),
+  applicationAccepted = true,
 ): System2PlanResponseAcceptance {
   const responseSource = intentSource === 'intent' || intentSource === 'enrichment' || intentSource === 'ungrounded'
     ? 'system2'
     : intentSource === 'cached' ? 'system2-cache' : null
   const before = tracker.snapshot()
+  if (!applicationAccepted && before.state === 'degraded' && before.recoveryAuthorityKind === 'system2') {
+    const actualSource = normalizeSourceSha(sourceSha)
+    const sourceMismatch: ModelAuthorityMismatch | null = before.recoverySourceSha === null
+      ? 'expected-source-missing'
+      : actualSource === null
+        ? 'actual-source-missing'
+        : actualSource !== before.recoverySourceSha
+          ? 'source-mismatch'
+          : null
+    const authorityMismatch = modelAuthorityIdentityMismatch(before.recoveryAuthority, authority)
+    const reason = sourceMismatch ?? authorityMismatch ?? 'plan-application-rejected'
+    const retry = tracker.recordRecoveryRejected(reason, authority, nowMs, sourceSha)
+    return { accepted: false, recovered: false, reason, responseSource, retry }
+  }
   let response: ModelResponseAcceptance
   if (before.state === 'degraded' && before.recoveryAuthorityKind === 'system2') {
     const actualSource = normalizeSourceSha(sourceSha)

@@ -154,6 +154,7 @@ const MODEL_AUTHORITY_MISMATCHES: readonly ModelAuthorityMismatch[] = [
   'actual-source-missing',
   'source-mismatch',
   'response-source-mismatch',
+  'plan-application-rejected',
 ]
 
 function isModelAuthorityMismatch(value: unknown): value is ModelAuthorityMismatch {
@@ -950,6 +951,8 @@ function makeGenerationContext(
           authority,
           intentSource,
           typeof detail.sourceSha === 'string' ? detail.sourceSha : null,
+          Date.now(),
+          detail.accepted === true,
         )
         if (!response.accepted && response.reason !== null) {
           const retry = response.retry

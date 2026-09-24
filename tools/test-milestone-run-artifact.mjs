@@ -150,7 +150,7 @@ function runnerOut(
     lines.push(
       line(
         offsetSec + 1,
-        'GENERATION_READY id=gen-test-1 rungIndex=13 rungId=nether_portal ' +
+        `GENERATION_READY runId=${runId} id=gen-test-1 rungIndex=13 rungId=nether_portal ` +
           'goals=["verify the lit nether_portal block in the overworld","enter the lit nether_portal"] ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
           `generationId=gen-test-1 sourceSha=${sourceSha} buildHash=${SYSTEM2_BUILD_HASH} ` + configuredLineage +
@@ -161,14 +161,17 @@ function runnerOut(
     )
   }
   for (const [index, decision] of decisions.entries()) {
+    const requestId = `artifact-plan-${runId}-${index}`
     const provider = /\bprovider=(\S+)/.exec(decision)?.[1]
     const model = /\bmodel=(\S+)/.exec(decision)?.[1]
     if (provider !== undefined && model !== undefined && system2Configured !== null) {
       const identity =
-        `generationId=gen-test-1 sourceSha=${sourceSha} buildHash=${SYSTEM2_BUILD_HASH} ` +
+        `runId=${runId} requestId=${requestId} generationId=gen-test-1 sourceSha=${sourceSha} buildHash=${SYSTEM2_BUILD_HASH} ` +
         `configuredProvider=${system2Configured.provider} configuredModel=${system2Configured.model} trigger=run_artifact_fixture `
       lines.push(line(offsetSec + 1.5 + index * 0.1, `SYSTEM2_AUTHORITY_INPUT provider=${provider} model=${model} ${identity}`))
       lines.push(line(offsetSec + 2 + index * 0.1, `${decision} ${identity}`))
+      const op = /\bop=(\S+)/.exec(decision)?.[1] ?? 'patch'
+      lines.push(line(offsetSec + 2.05 + index * 0.1, `SYSTEM2_PLAN_APPLIED ${identity} op=${op} accepted=true applied=${op === 'patch' || op === 'replace' ? 1 : 0}`))
     } else {
       lines.push(line(offsetSec + 2 + index * 0.1, decision))
     }
@@ -184,7 +187,8 @@ function runnerOut(
 
 const decisionsFor = (runId, sourceSha = SOURCE_SHA, sec = 2) => `${JSON.stringify({
   record: 'decision', ts: at(sec), source: 'jev', runId,
-  generationId: 'gen-test-1', sourceSha, action: 'GOTO:nether_portal',
+  generationId: 'gen-test-1', sourceSha,
+  jev: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, action: 'GOTO:nether_portal',
 })}\n`
 
 const ACCEPTANCE = (runId) =>
@@ -308,6 +312,7 @@ async function cliWithReport(args, { runId, counts, dimension } = {}) {
       overrides: { ...overrides, controlSocketPath: '/fixture/control.sock' },
       readSocket: async () => ({
         runId,
+        worldKey: { serverId: '127.0.0.1:25565', dimension: dimension ?? 'minecraft:the_nether', worldEpoch: 1 },
         policyKind: 'typesafe',
         policyModel: 'typesafe-ai/jev',
         generationId: 'gen-test-1',
@@ -769,6 +774,7 @@ ok('cross-run fixture: foreign BOOT evidence is not attributed, gates stay UNKNO
     overrides: { controlSocketPath: '/fixture/control.sock' },
     readSocket: async () => ({
       runId: RUN_PASS,
+      worldKey: { serverId: '127.0.0.1:25565', dimension: 'minecraft:the_nether', worldEpoch: 1 },
       currentInventoryObservation: currentInventoryObservation(RUN_PASS, { ender_eye: 12 }),
     }),
     gates: {
@@ -1801,14 +1807,17 @@ ok('a frozen host cannot make its staged candidate look like the executing sourc
     join(root, 'buddy-driver', 'runner.out'),
     [
       boot(0, runId),
-      line(1, `GENERATION_READY id=${generationId} generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} system2ConfiguredProvider=${configuredProvider} system2ConfiguredModel=${configuredModel} policy=typesafe policyProvider=typesafe-ai policyModel=typesafe-ai/jev planner=llm plannerModel=typesafe-ai/jev deterministicFallbackEnabled=false system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}`),
-      line(2, `SYSTEM2_AUTHORITY_INPUT generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} provider=${actualProvider} model=${actualModel} configuredProvider=${configuredProvider} configuredModel=${configuredModel} trigger=queue_empty`),
-      line(3, `SYSTEM2_AUTHORITY_DECISION generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} provider=${actualProvider} model=${actualModel} configuredProvider=${configuredProvider} configuredModel=${configuredModel} trigger=queue_empty chosen=front_nether_portal`),
+      line(1, `GENERATION_READY runId=${runId} id=${generationId} generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} system2ConfiguredProvider=${configuredProvider} system2ConfiguredModel=${configuredModel} policy=typesafe policyProvider=typesafe-ai policyModel=typesafe-ai/jev planner=llm plannerModel=typesafe-ai/jev deterministicFallbackEnabled=false system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}`),
+      line(2, `SYSTEM2_AUTHORITY_INPUT runId=${runId} requestId=request-lineage-1 generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} provider=${actualProvider} model=${actualModel} configuredProvider=${configuredProvider} configuredModel=${configuredModel} trigger=queue_empty`),
+      line(3, `SYSTEM2_AUTHORITY_DECISION runId=${runId} requestId=request-lineage-1 generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} provider=${actualProvider} model=${actualModel} configuredProvider=${configuredProvider} configuredModel=${configuredModel} trigger=queue_empty chosen=front_nether_portal`),
+      line(3.1, `SYSTEM2_PLAN_APPLIED runId=${runId} requestId=request-lineage-1 generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} op=patch accepted=true applied=1`),
       line(4, `HOST_LOCK released runId=${runId}`),
     ].join('\n') + '\n',
     'utf8',
   )
   const baseEntry = {
+    runId,
+    requestId: 'request-lineage-1',
     tsMs: inputTsMs,
     generationId,
     sourceSha: SOURCE_SHA,
@@ -1837,8 +1846,11 @@ ok('a frozen host cannot make its staged candidate look like the executing sourc
     generationIds: [generationId],
     generationCount: 1,
     inputCount: 1,
+    applicationCount: 1,
+    appliedDecisionCount: 1,
     inputs: [{ ...baseEntry, tsMs: inputTsMs }],
     decisions: [{ ...baseEntry, tsMs: decisionTsMs, chosen: 'front_nether_portal', portalPlan: true }],
+    applications: [{ ...baseEntry, tsMs: Date.parse(at(3.1)), op: 'patch', accepted: true, applied: 1 }],
   }
   const built = await buildRunArtifact({
     runId,

@@ -579,6 +579,7 @@ addCase('(i) the mirrored apply line names the intent, the compiled rows and the
   const line = formatSystem2PlanApplied({
     requestId: '3840717e-7f31-4e12-a574-51973b893f6c',
     op: 'patch',
+    accepted: true,
     applied: added.length,
     depth: queue.state.depth,
     intentSource: result?.plan.provenance?.intentSource ?? 'unrecorded',
@@ -597,6 +598,7 @@ addCase('(i) the mirrored apply line names the intent, the compiled rows and the
   const forged = formatSystem2PlanApplied({
     requestId: 'r',
     op: 'patch',
+    accepted: true,
     applied: 1,
     depth: 1,
     intentSource: 'enrichment',

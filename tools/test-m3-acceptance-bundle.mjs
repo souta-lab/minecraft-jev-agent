@@ -82,19 +82,26 @@ const PORTAL_CHAIN = [
 /** runner.out-shaped authority window; a release line brackets its decisions. */
 function runnerOut(runId, { decisions = [`SYSTEM2_AUTHORITY_DECISION ${SYSTEM2_IDENTITY} provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal`] } = {}) {
   const withInputs = decisions.flatMap((decision, index) => {
+    const requestId = `bundle-plan-${runId}-${index}`
     const fields = ['generationId', 'sourceSha', 'buildHash', 'configuredProvider', 'configuredModel', 'trigger', 'provider', 'model']
       .map((key) => [key, new RegExp(`\\b${key}=(\\S+)`).exec(decision)?.[1] ?? null])
       .filter(([, value]) => value !== null)
       .map(([key, value]) => `${key}=${value}`)
       .join(' ')
-    return [line(1.5 + index * 0.2, `SYSTEM2_AUTHORITY_INPUT ${fields}`), line(2 + index * 0.2, decision)]
+    const hostIdentity = `runId=${runId} requestId=${requestId} ${fields}`
+    const op = /\bop=(\S+)/.exec(decision)?.[1] ?? 'patch'
+    return [
+      line(1.5 + index * 0.2, `SYSTEM2_AUTHORITY_INPUT ${hostIdentity}`),
+      line(2 + index * 0.2, `${decision} ${hostIdentity}`),
+      line(2.1 + index * 0.2, `SYSTEM2_PLAN_APPLIED ${hostIdentity} op=${op} accepted=true applied=${op === 'patch' || op === 'replace' ? 1 : 0}`),
+    ]
   })
   return (
     [
       boot(0, runId),
       line(
         1,
-        `GENERATION_READY id=${GENERATION_ID} generationId=${GENERATION_ID} sourceSha=${SOURCE_SHA} buildHash=${BUILD_HASH} ` +
+        `GENERATION_READY runId=${runId} id=${GENERATION_ID} generationId=${GENERATION_ID} sourceSha=${SOURCE_SHA} buildHash=${BUILD_HASH} ` +
           'system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev rungIndex=13 rungId=nether_portal ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
           'system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"} ' +
@@ -109,7 +116,8 @@ function runnerOut(runId, { decisions = [`SYSTEM2_AUTHORITY_DECISION ${SYSTEM2_I
 
 const DECISIONS = `${JSON.stringify({
   record: 'decision', ts: at(2), source: 'jev', runId: RUN,
-  generationId: GENERATION_ID, sourceSha: SOURCE_SHA, action: 'GOTO:nether_portal',
+  generationId: GENERATION_ID, sourceSha: SOURCE_SHA,
+  jev: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, action: 'GOTO:nether_portal',
 })}\n`
 
 const ACCEPTANCE = (runId) =>
@@ -214,7 +222,7 @@ async function runM3GatePassStub({ onResult, expectedRunId, sourceSha = SOURCE_S
     generationId: 'gen-test-1',
     observedAtMs: Date.parse(observedAt),
     observedAt,
-    worldKey: JSON.parse(WORLD_KEY),
+    worldKey: { ...JSON.parse(WORLD_KEY), dimension: 'minecraft:the_nether' },
     dimension: 'minecraft:the_nether',
     counts: { ender_eye: 12 },
   }

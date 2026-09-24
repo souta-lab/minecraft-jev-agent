@@ -21,6 +21,7 @@ export type PlannerMode = 'llm' | 'deterministic' | 'local-mercury'
 
 type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & {
   mode?: PlannerMode
+  runId?: string | null
   generationId?: string | null
   sourceSha?: string | null
   buildHash?: string | null
@@ -125,6 +126,7 @@ export class PlannerBrain implements System2Brain {
   private readonly refreshLiveFacts: (() => void) | undefined
   private readonly legacy: LegacyPlannerBrain | null
   private readonly mercury: MercurySystem2 | undefined
+  private readonly runId: string | null
   private readonly generationId: string | null
   private readonly sourceSha: string | null
   private readonly buildHash: string | null
@@ -134,12 +136,14 @@ export class PlannerBrain implements System2Brain {
 
   constructor(options: ModelPlannerOptions) {
     this.mode = options.mode ?? resolvePlannerMode()
+    this.runId = options.runId ?? null
     this.generationId = options.generationId ?? null
     this.sourceSha = options.sourceSha ?? null
     this.buildHash = options.buildHash ?? null
     this.requireFreshProviderDecision = options.requireFreshProviderDecision === true
     this.log = (event, detail) => options.log(event, {
       ...detail,
+      runId: this.runId,
       generationId: this.generationId,
       sourceSha: this.sourceSha,
       buildHash: this.buildHash,
@@ -243,6 +247,7 @@ export class PlannerBrain implements System2Brain {
     this.lastAuthorityModel = this.mercury.model
     const configured = this.authorityStack
     this.log('SYSTEM2_AUTHORITY_INPUT', {
+      requestId: request.requestContext?.requestId ?? null,
       provider: this.provider,
       model: this.authorityModel,
       configuredProvider: configured.provider,
@@ -275,6 +280,7 @@ export class PlannerBrain implements System2Brain {
       return this.fatal('system2-unavailable', `no System2 repair for trigger=${trigger}`)
     }
     this.log('SYSTEM2_AUTHORITY_DECISION', {
+      requestId: request.requestContext?.requestId ?? null,
       provider: this.provider,
       model: this.authorityModel,
       configuredProvider: configured.provider,
