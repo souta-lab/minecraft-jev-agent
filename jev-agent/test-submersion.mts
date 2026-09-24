@@ -313,8 +313,16 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     { tick: 3, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
     { ...defaultSensorOptions, maxPlacementSpots: 24 },
   )
+  const observedAirWetBot = { ...bot, oxygenLevel: 17 } as unknown as Bot
+  const observedAirWet = buildWorldState(
+    observedAirWetBot,
+    { tick: 4, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
   const wetProjection = selfAirProjection(unknownWet)
   const dryProjection = selfAirProjection(unknownDry)
+  const observedProjection = selfAirProjection(observedAirWet)
+  const knownLowProjection = selfAirProjection(state)
   const knownLowIsDrowning = state.self.envHazard?.drowning === true
   check(
     '(c1b) missing/nonfinite sensor breath stays unknown through self projection and does not invent drowning',
@@ -322,10 +330,17 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
       wetProjection.safety.airBand === 'unknown' && wetProjection.safety.submerged === true &&
       bodySubmersion(unknownWet.self).state === 'submerged' &&
       unknownWet.self.envHazard?.drowning === false && knownLowIsDrowning &&
+      state.self.air === 3 && knownLowProjection.safety.airBand === 'critical' &&
+      bodySubmersion(state.self).state === 'out_of_air' &&
+      observedAirWet.self.air === 17 && observedProjection.safety.airBand === 'low' &&
+      bodySubmersion(observedAirWet.self).state === 'submerged' &&
+      observedAirWet.self.envHazard?.drowning === false &&
       unknownDry.self.air === null &&
       dryProjection.safety.airBand === 'unknown' && dryProjection.safety.submerged === false,
     `wet=${String(unknownWet.self.air)}/${wetProjection.safety.airBand}/${wetProjection.safety.submerged}/drowning=${unknownWet.self.envHazard?.drowning} ` +
-      `knownLowDrowning=${knownLowIsDrowning} dry=${String(unknownDry.self.air)}/${dryProjection.safety.airBand}/${dryProjection.safety.submerged}`,
+      `knownLow=${state.self.air}/${knownLowProjection.safety.airBand}/drowning=${knownLowIsDrowning} ` +
+      `observed=${observedAirWet.self.air}/${observedProjection.safety.airBand}/${observedAirWet.self.envHazard?.drowning} ` +
+      `dry=${String(unknownDry.self.air)}/${dryProjection.safety.airBand}/${dryProjection.safety.submerged}`,
   )
 }
 
