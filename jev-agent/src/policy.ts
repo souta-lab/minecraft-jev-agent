@@ -14,7 +14,7 @@ import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META } from './candidates.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 import type { Vec3Json, WorldState } from './state.ts'
-import { bodyIsOutOfAir, bodyIsSubmerged, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
+import { bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyNeedsBreathEscape, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
@@ -413,7 +413,7 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
 
 function isGroundedSubmersionWaypoint(candidate: Candidate, state: WorldState): boolean {
   const target = candidate.target
-  if (target === null || !bodyIsOutOfAir(state.self) || !bodyIsSubmerged(state.self)) return false
+  if (target === null || !bodyNeedsBreathEscape(state.self)) return false
   const baseX = Math.floor(state.self.position.x)
   const baseY = Math.floor(state.self.position.y)
   const baseZ = Math.floor(state.self.position.z)
@@ -641,13 +641,17 @@ function guardAttack(candidate: Candidate, state: WorldState): GuardResult {
   // SAFE: an attack lease holds the body where it is (or follows the target)
   // while the breath runs out. The measured death was exactly this: a goal-drop
   // ATTACK on a salmon kept closing under water until the body drowned, so a
-  // body already out of air may not start or continue one.
-  if (bodyIsOutOfAir(state.self)) {
+  // body already out of air may not start or continue one. If the head is
+  // confirmed underwater but breath is unknown, an attack is also not safe to
+  // authorize: the lease can follow a target and keep the head submerged.
+  if (bodyIsOutOfAir(state.self) || bodyHasUnknownAirWithSubmergedEyes(state.self)) {
     const submersion = bodySubmersion(state.self)
     return deny(
       candidate.id,
       'SUBMERGED',
-      `body is out of air (${submersion.air ?? 'unknown'}/${MAX_AIR}); the attack lease cannot continue under water`,
+      submersion.air === null
+        ? 'head is underwater and remaining breath is unknown; the attack lease cannot continue under water'
+        : `body is out of air (${submersion.air}/${MAX_AIR}); the attack lease cannot continue under water`,
     )
   }
   // SAFE: an empty hunger bar at critical health is already dealing starvation
@@ -803,11 +807,13 @@ function submergedPlacementRefusal(
   target: Vec3Json,
 ): GuardResult | null {
   const submersion = bodySubmersion(state.self)
-  if (submersion.state === 'out_of_air') {
+  if (submersion.state === 'out_of_air' || bodyHasUnknownAirWithSubmergedEyes(state.self)) {
     return deny(
       candidate.id,
       'SUBMERGED',
-      `body is out of air (${submersion.air ?? 'unknown'}/${MAX_AIR}); surface before placing`,
+      submersion.air === null
+        ? 'head is underwater and remaining breath is unknown; surface before placing'
+        : `body is out of air (${submersion.air}/${MAX_AIR}); surface before placing`,
     )
   }
   const wet = state.submergedPlacementSpots ?? []

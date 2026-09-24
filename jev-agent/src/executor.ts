@@ -8817,7 +8817,10 @@ export class Executor {
    */
   private requireBreath(candidate: Candidate, at: Vec3Json, doing: string): void {
     const submersion = this.liveSubmersion()
-    if (submersion.state !== 'out_of_air') return
+    if (
+      submersion.state !== 'out_of_air' &&
+      !(submersion.air === null && submersion.eyesInWater)
+    ) return
     this.logger.warn('executor', formatBodySubmerged(submersion, at), {
       actionId: candidate.id,
       air: submersion.air,
@@ -8829,7 +8832,9 @@ export class Executor {
     })
     throw new ExecutorError(
       'submerged',
-      `breath at ${submersion.air ?? 'unknown'}/${MAX_AIR} while ${doing} at (${at.x},${at.y},${at.z}); surface before continuing`,
+      submersion.air === null
+        ? `head underwater with unknown breath while ${doing} at (${at.x},${at.y},${at.z}); surface before continuing`
+        : `breath at ${submersion.air}/${MAX_AIR} while ${doing} at (${at.x},${at.y},${at.z}); surface before continuing`,
     )
   }
 

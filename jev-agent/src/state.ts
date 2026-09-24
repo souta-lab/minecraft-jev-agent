@@ -334,6 +334,27 @@ export function bodyIsOutOfAir(self: Pick<SelfState, 'air' | 'feetInWater' | 'ey
 }
 
 /**
+ * true when the head is confirmed underwater but remaining breath is unknown.
+ * Feet-only water is intentionally excluded: it does not establish the
+ * head-underwater condition that consumes breath.
+ */
+export function bodyHasUnknownAirWithSubmergedEyes(
+  self: Pick<SelfState, 'air' | 'eyesInWater'>,
+): boolean {
+  return observedAir(self.air) === null && self.eyesInWater === true
+}
+
+/** The body needs an upward breath route for measured low air or unknown air at submerged eyes. */
+export function bodyNeedsBreathEscape(
+  self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>,
+): boolean {
+  return (
+    (bodyIsOutOfAir(self) && bodyIsSubmerged(self)) ||
+    bodyHasUnknownAirWithSubmergedEyes(self)
+  )
+}
+
+/**
  * SAFE: an empty hunger bar at critical health is a body that IS taking
  * vanilla starvation damage right now (1 HP every 4 s), not an inference - the
  * measured `run-mubj6ucc-si3e` slide from 14 HP to 1 HP carried `food:0` and an
@@ -1200,7 +1221,7 @@ export interface SensorInput {
   containerContents?: readonly ContainerObservation[]
 }
 
-const EYE_HEIGHT = 1.62
+export const EYE_HEIGHT = 1.62
 const LOG_NAME = /_log$/
 const HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire', 'soul_campfire', 'sweet_berry_bush', 'cactus'])
 const STONE_LIKE = new Set([
@@ -1992,7 +2013,7 @@ function isSubmersionWaypointBlock(block: ReturnType<Bot['blockAt']>): block is 
  * column is the route witness; no horizontal swim route is inferred.
  */
 function buildSubmersionEscapeTargets(bot: Bot, self: SelfState): SubmersionEscapeTarget[] {
-  if (!bodyIsOutOfAir(self) || !bodyIsSubmerged(self)) return []
+  if (!bodyNeedsBreathEscape(self)) return []
   const base = {
     x: Math.floor(self.position.x),
     y: Math.floor(self.position.y),
@@ -5122,7 +5143,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // an inactive body's state keeps exactly the shape it had before this fact
     // existed, and the candidate layer reads "no cells" as "no hazard".
     ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
-    ...(bodyIsOutOfAir(self) && bodyIsSubmerged(self) ? { submersionEscapeTargets } : {}),
+    ...(bodyNeedsBreathEscape(self) ? { submersionEscapeTargets } : {}),
     // Both new terrain facts follow the same rule: a body with no portal and no
     // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {

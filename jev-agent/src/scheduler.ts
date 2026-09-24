@@ -19,7 +19,7 @@ import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { EventLogger } from './jev.ts'
 import { observedAir } from './air.ts'
-import { isHostileEntityName, LOW_AIR_LEVEL, MAX_AIR } from './state.ts'
+import { EYE_HEIGHT, isHostileEntityName, LOW_AIR_LEVEL, MAX_AIR, PROBE_FLUIDS } from './state.ts'
 
 export const DECISION_TRIGGERS = [
   'start',
@@ -30,6 +30,7 @@ export const DECISION_TRIGGERS = [
   'damage_taken',
   'hp_changed',
   'low_air',
+  'air_unknown_head_submerged',
   'inventory_changed',
   'action_completed',
   'action_timeout',
@@ -98,6 +99,7 @@ export const PREEMPTIVE_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<Decisio
   'damage_taken',
   'hp_changed',
   'low_air',
+  'air_unknown_head_submerged',
   'action_timeout',
 ])
 
@@ -118,6 +120,7 @@ export function shouldInterruptAttackLease(
   criticalHealth = 6,
   air: number | null = null,
 ): boolean {
+  if (trigger === 'air_unknown_head_submerged') return true
   if (trigger === 'low_air') {
     const observed = observedAir(air)
     return observed !== null && observed <= LOW_AIR_LEVEL
@@ -127,6 +130,23 @@ export function shouldInterruptAttackLease(
     Number.isFinite(health) &&
     health <= criticalHealth
   )
+}
+
+/**
+ * The controller's active-lease disposition for a preemptive safety trigger.
+ * Kept pure so the exact branch that interrupts an in-flight ATTACK is
+ * regression-tested alongside the scheduler edge that emits the trigger.
+ */
+export function shouldPreemptActiveActionLease(
+  trigger: DecisionTrigger,
+  actionKind: string,
+  health: number,
+  criticalHealth = 6,
+  air: number | null = null,
+): boolean {
+  if (!PREEMPTIVE_TRIGGERS.has(trigger)) return false
+  if (actionKind !== 'ATTACK') return true
+  return shouldInterruptAttackLease(trigger, health, criticalHealth, air)
 }
 
 /**
@@ -185,6 +205,7 @@ function readAir(bot: Bot): number | null {
   damage_taken: 10,
   hp_changed: 9,
   low_air: 9,
+  air_unknown_head_submerged: 9,
   mob_appeared: 8,
   path_stuck: 7,
   path_no_path: 7,
@@ -260,6 +281,8 @@ export class DecisionScheduler {
   private lastFood: number | null = null
   /** last low-air band (10/5/0) announced, so the breath trigger stays an edge */
   private lowAirBand: number | null = null
+  /** whether the eyes are currently underwater while the breath sensor is unknown */
+  private unknownAirHeadSubmerged = false
   /**
    * Whether this scheduler currently observes every world mutation. Both the
    * block-state listener and the chunk-column listeners must be attached before
@@ -347,6 +370,7 @@ export class DecisionScheduler {
     }
     if (this.enabled.has('hp_changed')) this.bot.on('health', this.onHealth)
     if (this.enabled.has('low_air')) this.bot.on('breath', this.onBreath)
+    if (this.enabled.has('air_unknown_head_submerged')) this.bot.on('physicsTick', this.onPhysicsTick)
     if (this.enabled.has('inventory_changed')) {
       this.bot.on('playerCollect', this.onPlayerCollect)
       this.bot.inventory.on('updateSlot', this.onInventorySlot)
@@ -371,6 +395,7 @@ export class DecisionScheduler {
     this.client()?.removeListener('damage_event', this.onDamageEvent)
     this.bot.removeListener('health', this.onHealth)
     this.bot.removeListener('breath', this.onBreath)
+    this.bot.removeListener('physicsTick', this.onPhysicsTick)
     this.bot.removeListener('playerCollect', this.onPlayerCollect)
     this.bot.inventory.removeListener('updateSlot', this.onInventorySlot)
     if (this.heartbeatTimer !== null) {
@@ -378,6 +403,7 @@ export class DecisionScheduler {
       this.heartbeatTimer = null
     }
     this.clearPending()
+    this.unknownAirHeadSubmerged = false
     this.handler = null
   }
 
@@ -512,6 +538,7 @@ export class DecisionScheduler {
    * typed `submerged` failure.
    */
   private readonly onBreath = (): void => {
+    this.observeUnknownAirHeadSubmersion()
     const air = readAir(this.bot)
     if (air === null || air > LOW_AIR_LEVEL) {
       this.lowAirBand = null
@@ -525,6 +552,45 @@ export class DecisionScheduler {
     const position = this.bot.entity?.position ?? null
     this.logger.warn('scheduler', formatLowAirPreempt(air, position), { air, threshold: LOW_AIR_LEVEL, trigger: 'low_air' })
     this.request('low_air', { air, threshold: LOW_AIR_LEVEL })
+  }
+
+  private readonly onPhysicsTick = (): void => {
+    this.observeUnknownAirHeadSubmersion()
+  }
+
+  /** Emit one preemptive edge when the eyes enter observed water without breath metadata. */
+  private observeUnknownAirHeadSubmersion(): void {
+    const air = readAir(this.bot)
+    const position = this.bot.entity?.position ?? null
+    let headBlock: Block | null = null
+    if (air === null && position !== null && typeof this.bot.blockAt === 'function') {
+      try {
+        headBlock = this.bot.blockAt(position.offset(0, EYE_HEIGHT, 0))
+      } catch {
+        headBlock = null
+      }
+    }
+    const headInWater = headBlock !== null && PROBE_FLUIDS.has(headBlock.name)
+    const unknownAirUnderwater = air === null && headInWater
+    if (!unknownAirUnderwater) {
+      this.unknownAirHeadSubmerged = false
+      return
+    }
+    if (this.unknownAirHeadSubmerged) return
+    this.unknownAirHeadSubmerged = true
+    const at = position === null ? 'unknown' : `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`
+    const detail = {
+      air: null,
+      headInWater: true,
+      headBlock: headBlock?.name ?? 'unknown',
+      position: position === null ? null : { x: position.x, y: position.y, z: position.z },
+    }
+    this.logger.warn(
+      'scheduler',
+      `UNKNOWN_AIR_HEAD_SUBMERGED layer=scheduler air=unknown/${MAX_AIR} headBlock=${detail.headBlock} at=${at} -> preempt in-flight action`,
+      detail,
+    )
+    this.request('air_unknown_head_submerged', detail)
   }
 
   private readonly onPlayerCollect = (collector: Entity, collected: Entity): void => {

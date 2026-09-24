@@ -26,6 +26,8 @@ import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import {
   bodyIsOutOfAir,
+  bodyHasUnknownAirWithSubmergedEyes,
+  bodyNeedsBreathEscape,
   bodySubmersion,
   buildWorldState,
   defaultSensorOptions,
@@ -55,6 +57,7 @@ import {
   LOW_AIR_PREEMPT,
   PREEMPTIVE_TRIGGERS,
   shouldInterruptAttackLease,
+  shouldPreemptActiveActionLease,
   TRIGGER_PRIORITY,
 } from './src/scheduler.ts'
 import type { DecisionTrigger } from './src/scheduler.ts'
@@ -314,6 +317,21 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     { tick: 3, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
     { ...defaultSensorOptions, maxPlacementSpots: 24 },
   )
+  const feetOnlyUnknownBot = {
+    ...missingAirWetBot,
+    blockAt: (position: Vec3Json) => {
+      const cell = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+      if (cell.x === ORIGIN.x && cell.z === ORIGIN.z && cell.y === ORIGIN.y + 1) {
+        return { name: 'air', boundingBox: 'empty' as const, diggable: false }
+      }
+      return blockAt(position)
+    },
+  } as unknown as Bot
+  const unknownFeetOnly = buildWorldState(
+    feetOnlyUnknownBot,
+    { tick: 6, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
   const observedAirWetBot = { ...bot, oxygenLevel: 17 } as unknown as Bot
   const observedAirWet = buildWorldState(
     observedAirWetBot,
@@ -324,6 +342,11 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   const legacyScaleAirWet = buildWorldState(
     legacyScaleAirWetBot,
     { tick: 5, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
+  const fullAirWet = buildWorldState(
+    { ...bot, oxygenLevel: MAX_AIR } as unknown as Bot,
+    { tick: 7, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
     { ...defaultSensorOptions, maxPlacementSpots: 24 },
   )
   const wetProjection = selfAirProjection(unknownWet)
@@ -346,13 +369,24 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
       selfAirProjection(legacyScaleAirWet).safety.airBand === 'unknown' &&
       bodySubmersion(legacyScaleAirWet.self).state === 'submerged' &&
       legacyScaleAirWet.self.envHazard?.drowning === null &&
-      submersionAscentCandidates(legacyScaleAirWet, defaultCandidateOptions).length === 0 &&
+      bodyNeedsBreathEscape(unknownWet.self) &&
+      bodyHasUnknownAirWithSubmergedEyes(unknownWet.self) &&
+      submersionAscentCandidates(unknownWet, defaultCandidateOptions).length > 0 &&
+      unknownFeetOnly.self.feetInWater === true && unknownFeetOnly.self.eyesInWater === false &&
+      !bodyNeedsBreathEscape(unknownFeetOnly.self) &&
+      submersionAscentCandidates(unknownFeetOnly, defaultCandidateOptions).length === 0 &&
+      fullAirWet.self.air === MAX_AIR && !bodyNeedsBreathEscape(fullAirWet.self) &&
+      submersionAscentCandidates(fullAirWet, defaultCandidateOptions).length === 0 &&
+      bodyNeedsBreathEscape(legacyScaleAirWet.self) &&
+      submersionAscentCandidates(legacyScaleAirWet, defaultCandidateOptions).length > 0 &&
       unknownDry.self.air === null &&
       dryProjection.safety.airBand === 'unknown' && dryProjection.safety.submerged === false,
     `wet=${String(unknownWet.self.air)}/${wetProjection.safety.airBand}/${wetProjection.safety.submerged}/drowning=${unknownWet.self.envHazard?.drowning} ` +
       `knownLow=${state.self.air}/${knownLowProjection.safety.airBand}/drowning=${knownLowIsDrowning} ` +
       `observed=${observedAirWet.self.air}/${observedProjection.safety.airBand}/${observedAirWet.self.envHazard?.drowning} ` +
       `legacy300=${String(legacyScaleAirWet.self.air)}/${selfAirProjection(legacyScaleAirWet).safety.airBand}/${legacyScaleAirWet.self.envHazard?.drowning} ` +
+      `feetOnly=${String(unknownFeetOnly.self.air)}/${unknownFeetOnly.self.feetInWater}/${unknownFeetOnly.self.eyesInWater} ` +
+      `fullWet=${fullAirWet.self.air}/${bodyNeedsBreathEscape(fullAirWet.self)} ` +
       `dry=${String(unknownDry.self.air)}/${dryProjection.safety.airBand}/${dryProjection.safety.submerged}`,
   )
 }
@@ -455,6 +489,78 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
 }
 
 // ---------------------------------------------------------------------------
+// (c2b) confirmed head water + unknown breath is an edge-triggered preempt
+// ---------------------------------------------------------------------------
+{
+  type Handler = (...args: unknown[]) => void
+  const handlers = new Map<string, Handler[]>()
+  let oxygenLevel: number | undefined
+  let headBlockName = 'water'
+  const bot = {
+    entity: { position: new Vec3(67.5, 64, 28.5) },
+    health: 20,
+    food: 20,
+    get oxygenLevel() { return oxygenLevel },
+    blockAt: (position: Vec3Json) => {
+      const y = Math.floor(position.y)
+      const name = y === 65 ? headBlockName : y === 64 ? 'water' : 'air'
+      return { name, boundingBox: 'empty' as const, diggable: false }
+    },
+    on: (event: string, handler: Handler) => {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler])
+    },
+    removeListener: () => undefined,
+    inventory: { on: () => undefined, removeListener: () => undefined },
+  }
+  const { logger, messages } = makeLogger()
+  const events: Array<{ trigger: DecisionTrigger; detail: Record<string, unknown> }> = []
+  const scheduler = new DecisionScheduler(bot as unknown as Bot, logger, {
+    heartbeatMs: 3_600_000,
+    enabledTriggers: ['air_unknown_head_submerged'],
+    coalesceMs: 1,
+  })
+  scheduler.onDecision((event) => events.push({ trigger: event.trigger, detail: event.detail }))
+  scheduler.start()
+  const physicsTick = (): void => {
+    for (const handler of handlers.get('physicsTick') ?? []) handler()
+  }
+  physicsTick()
+  physicsTick()
+  oxygenLevel = MAX_AIR
+  physicsTick() // observed safe breath resets the edge
+  oxygenLevel = undefined
+  headBlockName = 'air' // feet remain wet; head-only condition must not fire
+  physicsTick()
+  headBlockName = 'water'
+  physicsTick()
+  scheduler.stop()
+
+  const unknownAirEvents = events.filter((event) => event.trigger === 'air_unknown_head_submerged')
+  const activeAttackInterrupts = unknownAirEvents.every(
+    (event) =>
+      PREEMPTIVE_TRIGGERS.has(event.trigger) &&
+      shouldPreemptActiveActionLease(event.trigger, 'ATTACK', 20, 6, null),
+  )
+  const lines = messages().filter((line) => line.startsWith('UNKNOWN_AIR_HEAD_SUBMERGED'))
+  const pass =
+    unknownAirEvents.length === 2 &&
+    activeAttackInterrupts &&
+    CRITICAL_TRIGGERS.has('air_unknown_head_submerged') &&
+    questionSetForTrigger('air_unknown_head_submerged') === 'threat' &&
+    shouldPreemptActiveActionLease('air_unknown_head_submerged', 'MOVE', 20, 6, null) &&
+    !shouldPreemptActiveActionLease('inventory_changed', 'ATTACK', 20, 6, null) &&
+    unknownAirEvents.every((event) => event.detail.headInWater === true && event.detail.air === null) &&
+    events.every((event) => event.trigger !== 'damage_taken') &&
+    lines.length === 2
+  check(
+    '(c2b) head-submerged unknown breath preempts an active ATTACK edge once and never synthesizes damage_taken',
+    pass,
+    `events=${unknownAirEvents.length} triggers=${events.map((event) => event.trigger).join('|')} ` +
+      `activeAttackInterrupt=${activeAttackInterrupts} lines=${lines.length}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // (c3) the CANDIDATE layer keeps only routes that can end the submersion
 // ---------------------------------------------------------------------------
 {
@@ -470,7 +576,10 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     toolName: null,
     inReach: true,
     hasStandableAdjacent: true,
-    meta: { tick: 1 },
+    meta: {
+      tick: 1,
+      ...(id.startsWith('ASCEND:') ? { submersionEscape: true, surfaceAscent: true } : {}),
+    },
   })
   const all = [
     candidate('ATTACK:e7', 'ATTACK'),
@@ -483,9 +592,22 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     self: { ...({} as SelfState), air: 3, feetInWater: true, eyesInWater: true },
   }
   const dryBody: Pick<WorldState, 'self'> = { self: { ...({} as SelfState), air: MAX_AIR } }
+  const wetUnknownHead: Pick<WorldState, 'self'> = {
+    self: { ...({} as SelfState), air: null, feetInWater: true, eyesInWater: true },
+  }
+  const wetUnknownFeetOnly: Pick<WorldState, 'self'> = {
+    self: { ...({} as SelfState), air: null, feetInWater: true, eyesInWater: false },
+  }
+  const wetKnownSafe: Pick<WorldState, 'self'> = {
+    self: { ...({} as SelfState), air: MAX_AIR, feetInWater: true, eyesInWater: true },
+  }
   const kept = restrictCandidatesDuringSubmersion(drowning, all).map((entry) => entry.id)
   const untouched = restrictCandidatesDuringSubmersion(dryBody, all).map((entry) => entry.id)
   const noRescue = restrictCandidatesDuringSubmersion(drowning, [all[0]!, all[1]!, all[4]!]).map((entry) => entry.id)
+  const unknownKept = restrictCandidatesDuringSubmersion(wetUnknownHead, all).map((entry) => entry.id)
+  const feetOnlyKept = restrictCandidatesDuringSubmersion(wetUnknownFeetOnly, all).map((entry) => entry.id)
+  const knownSafeKept = restrictCandidatesDuringSubmersion(wetKnownSafe, all).map((entry) => entry.id)
+  const unknownWithoutAscent = restrictCandidatesDuringSubmersion(wetUnknownHead, [all[0]!, all[4]!])
   const pass =
     kept.length === 2 &&
     kept.includes('ASCEND:surface:p1_65_0') &&
@@ -493,11 +615,17 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     !kept.includes('ATTACK:e7') &&
     !kept.includes('PLACE:furnace:p2_64_0') &&
     untouched.length === all.length &&
-    noRescue.length === 3
+    noRescue.length === 3 &&
+    unknownKept.length === 1 && unknownKept[0] === 'ASCEND:surface:p1_65_0' &&
+    feetOnlyKept.length === all.length &&
+    knownSafeKept.length === all.length &&
+    unknownWithoutAscent.length === 1 && unknownWithoutAscent[0]?.kind === 'ESCALATE'
   check(
-    '(c3) an out-of-air body is only offered routes that can end the submersion',
+    '(c3) low air and unknown breath at submerged eyes remove hold actions; feet-only unknown and known-safe air remain Jev choices',
     pass,
-    `kept=${kept.join('|')} untouched=${untouched.length} noRescue=${noRescue.length}`,
+    `low=${kept.join('|')} unknownEyes=${unknownKept.join('|')} feetOnly=${feetOnlyKept.length} ` +
+      `known20=${knownSafeKept.length} unknownNoAscent=${unknownWithoutAscent.map((entry) => entry.kind).join('|')} ` +
+      `dry=${untouched.length} noRescueLow=${noRescue.length}`,
   )
 }
 
@@ -581,6 +709,22 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   }
   const places = guardCandidate(place, state, context)
   const attacks = guardCandidate(attack, state, context)
+  const unknownEyesState = {
+    ...state,
+    self: { ...self, air: null, feetInWater: false, eyesInWater: true },
+  } as WorldState
+  const unknownEyesAttack = guardCandidate(attack, unknownEyesState, context)
+  const unknownEyesPlace = guardCandidate(place, unknownEyesState, context)
+  const feetOnlyUnknownState = {
+    ...state,
+    self: { ...self, air: null, feetInWater: true, eyesInWater: false },
+  } as WorldState
+  const feetOnlyUnknownAttack = guardCandidate(attack, feetOnlyUnknownState, context)
+  const knownSafeEyesState = {
+    ...state,
+    self: { ...self, air: MAX_AIR, feetInWater: false, eyesInWater: true },
+  } as WorldState
+  const knownSafeEyesAttack = guardCandidate(attack, knownSafeEyesState, context)
   const dryState = { ...state, self: { ...self, air: MAX_AIR, feetInWater: false, eyesInWater: false } } as WorldState
   const dryPlace = guardCandidate(place, dryState, context)
   const pass =
@@ -588,12 +732,22 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     places.code === 'SUBMERGED' &&
     attacks.ok === false &&
     attacks.code === 'SUBMERGED' &&
+    unknownEyesAttack.ok === false &&
+    unknownEyesAttack.code === 'SUBMERGED' &&
+    unknownEyesPlace.ok === false &&
+    unknownEyesPlace.code === 'SUBMERGED' &&
+    feetOnlyUnknownAttack.ok === true &&
+    knownSafeEyesAttack.ok === true &&
     dryPlace.ok === true &&
     guardRejectionChargesOption('SUBMERGED') === false
   check(
-    '(c4) the guard refuses PLACE/ATTACK with typed SUBMERGED and does not charge the option',
+    '(c4) the guard refuses low-air or unknown-head ATTACK, while feet-only unknown and known-safe breath remain legal',
     pass,
-    `place=${places.ok ? 'ok' : places.code} attack=${attacks.ok ? 'ok' : attacks.code} dryPlace=${dryPlace.ok ? 'ok' : dryPlace.code} charges=${guardRejectionChargesOption('SUBMERGED')} ` +
+    `place=${places.ok ? 'ok' : places.code} low=${attacks.ok ? 'ok' : attacks.code} ` +
+      `unknownEyes=${unknownEyesAttack.ok ? 'ok' : unknownEyesAttack.code}/${unknownEyesPlace.ok ? 'ok' : unknownEyesPlace.code} ` +
+      `feetOnly=${feetOnlyUnknownAttack.ok ? 'ok' : feetOnlyUnknownAttack.code} ` +
+      `known20=${knownSafeEyesAttack.ok ? 'ok' : knownSafeEyesAttack.code} dryPlace=${dryPlace.ok ? 'ok' : dryPlace.code} ` +
+      `charges=${guardRejectionChargesOption('SUBMERGED')} ` +
       `reason="${places.ok ? '' : places.reason}"`,
   )
 }
@@ -805,6 +959,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   }
   const position = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
   const pathGoals: unknown[] = []
+  let oxygenLevel: number | undefined = 2
   const bot = {
     registry,
     entity: {
@@ -816,7 +971,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
       height: 1.8,
     },
     // The measured body: health 20, breath almost gone, head under water.
-    oxygenLevel: 2,
+    get oxygenLevel() { return oxygenLevel },
     health: 20,
     food: 20,
     _client: { write: () => true },
@@ -861,16 +1016,24 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   const { logger, messages } = makeLogger()
   const executor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
   const result = await executor.claim(attack).completion
+  oxygenLevel = undefined
+  const unknownExecutor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const unknownResult = await unknownExecutor.claim(attack).completion
   const submergedLines = messages().filter((line) => line.startsWith('BODY_SUBMERGED'))
   const pass =
     result.status === 'failed' &&
     result.failure === 'submerged' &&
-    submergedLines.length === 1 &&
-    result.detail.includes('breath at 2/20')
+    result.detail.includes('breath at 2/20') &&
+    unknownResult.status === 'failed' &&
+    unknownResult.failure === 'submerged' &&
+    unknownResult.detail.includes('head underwater with unknown breath') &&
+    submergedLines.length === 2 &&
+    pathGoals.length === 0
   check(
-    '(c5) a goal-drop ATTACK lease stops typed `submerged` instead of following the target under water',
+    '(c5) ATTACK stops before following the target under water at low or unknown head breath',
     pass,
-    `status=${result.status} failure=${result.failure} bodySubmerged=${submergedLines.length} pathGoals=${pathGoals.length} detail="${result.detail}"`,
+    `low=${result.status}/${result.failure} unknown=${unknownResult.status}/${unknownResult.failure} ` +
+      `bodySubmerged=${submergedLines.length} pathGoals=${pathGoals.length} unknownDetail="${unknownResult.detail}"`,
   )
 }
 
@@ -972,6 +1135,101 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
     '(c6) a low-air waypoint swims up through its live column without pathfinder calls',
     pass,
     `status=${result.status} verified=${result.verified} y=${position.y} air=${oxygenLevel} jump=${jumpWrites.join(',')} pathGoals=${pathGoals.length} swim="${swimLines[0] ?? 'none'}"`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (c6b) unknown breath at submerged eyes uses the same bounded swim actuator
+// ---------------------------------------------------------------------------
+{
+  const feet: Vec3Json = { x: 2, y: 64, z: 0 }
+  const target: Vec3Json = { x: 2, y: 65, z: 0 }
+  const grid = new Map<string, string>()
+  for (let x = 0; x <= 4; x += 1) {
+    for (let z = -2; z <= 2; z += 1) {
+      for (let y = 60; y <= 68; y += 1) grid.set(`${x},${y},${z}`, y === 63 ? 'stone' : 'air')
+    }
+  }
+  grid.set('2,64,0', 'water')
+  grid.set('2,65,0', 'water')
+  const blockAt = (v: Vec3Json) => {
+    const name = grid.get(key({ x: Math.floor(v.x), y: Math.floor(v.y), z: Math.floor(v.z) }))
+    if (name === undefined) return null
+    return { name, boundingBox: name === 'stone' ? ('block' as const) : ('empty' as const), diggable: name === 'stone' }
+  }
+  const position = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
+  const jumpWrites: boolean[] = []
+  const pathGoals: unknown[] = []
+  const bot = {
+    registry,
+    entity: { position, yaw: 0, pitch: 0, onGround: false, width: 0.6, height: 1.8 },
+    oxygenLevel: undefined,
+    health: 20,
+    food: 20,
+    _client: { write: () => true },
+    physicsEnabled: true,
+    entities: {},
+    inventory: { count: () => 0, items: () => [] },
+    heldItem: null,
+    blockAt,
+    on: () => undefined,
+    removeListener: () => undefined,
+    setControlState: (control: string, value: boolean) => {
+      if (control === 'jump') {
+        jumpWrites.push(value)
+        if (value) position.y = target.y
+      }
+    },
+    lookAt: async () => undefined,
+    equip: async () => undefined,
+    canDigBlock: () => true,
+    dig: async () => undefined,
+    placeBlock: async () => undefined,
+    pathfinder: {
+      movements: null as unknown,
+      setMovements: () => undefined,
+      setGoal: (goal: unknown) => pathGoals.push(goal),
+      stop: () => undefined,
+      getPathTo: () => ({ status: 'noPath', path: [] }),
+    },
+  }
+  const candidate: Candidate = {
+    id: 'ASCEND:breath:p2_65_0',
+    kind: 'MOVE',
+    label: 'swim upward while head water is confirmed and air is unknown',
+    targetName: null,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: false,
+    meta: {
+      tick: 1,
+      submersionEscape: true,
+      submersionEscapeReason: 'head_wet_air_unknown',
+      submersionFeetBlock: 'water',
+      submersionHeadBlock: 'air',
+    },
+  }
+  const { logger, messages } = makeLogger()
+  const executor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const result = await executor.claim(candidate).completion
+  const swimLine = messages().find((line) => line.startsWith('SUBMERSION_SWIM'))
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    position.y === target.y &&
+    jumpWrites.includes(true) &&
+    jumpWrites.at(-1) === false &&
+    pathGoals.length === 0 &&
+    swimLine?.includes('air=unknown->unknown') === true
+  check(
+    '(c6b) unknown head breath swims through a grounded vertical column without waiting for an air reading',
+    pass,
+    `status=${result.status} verified=${result.verified} y=${position.y} jump=${jumpWrites.join(',')} ` +
+      `pathGoals=${pathGoals.length} swim="${swimLine ?? 'none'}"`,
   )
 }
 

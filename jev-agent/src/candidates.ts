@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyIsSubmerged, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyIsSubmerged, bodyNeedsBreathEscape, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -838,6 +838,24 @@ export function restrictCandidatesDuringSubmersion(
   state: Pick<WorldState, 'self'>,
   candidates: readonly Candidate[],
 ): Candidate[] {
+  if (bodyHasUnknownAirWithSubmergedEyes(state.self)) {
+    // Unknown breath with the head confirmed underwater is not a safe fact.
+    // Keep only a grounded upward route (or a semantic handoff if no route is
+    // available); generic movement, combat, work and WAIT do not prove that the
+    // body will leave the water.
+    const ascent = candidates.filter(
+      (candidate) =>
+        candidate.kind === 'ESCALATE' ||
+        (candidate.kind === 'MOVE' &&
+          (candidate.meta.submersionEscape === true || candidate.meta.surfaceAscent === true)),
+    )
+    if (ascent.length > 0) return ascent
+    const escalation = candidates.find((candidate) => candidate.kind === 'ESCALATE')
+    const tick = candidates
+      .map((candidate) => candidate.meta.tick)
+      .find((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    return [escalation ?? threatEscalateCandidate('head_submerged_air_unknown', tick)]
+  }
   if (!bodyIsOutOfAir(state.self)) return [...candidates]
   const rescue = candidates.filter((candidate) => SURVIVAL_KINDS.has(candidate.kind))
   return rescue.length > 0 ? rescue : [...candidates]
@@ -5902,13 +5920,14 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
 }
 
 /**
- * Goal-independent swim waypoints for a submerged body below the low-air
- * boundary. Unlike the scaffold-oriented `surface`/`habitat` routes, these
- * MOVE candidates target only the sensor's contiguous vertical water/air column;
- * they spend no blocks and do not assert that the waypoint itself is breathable.
+ * Goal-independent swim waypoints for a body with measured low air or unknown
+ * breath while its eyes are underwater. Unlike the scaffold-oriented
+ * `surface`/`habitat` routes, these MOVE candidates target only the sensor's
+ * contiguous vertical water/air column; they spend no blocks and do not assert
+ * that the waypoint itself is breathable.
  */
 export function submersionAscentCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  if (!bodyIsOutOfAir(state.self) || !bodyIsSubmerged(state.self)) return []
+  if (!bodyNeedsBreathEscape(state.self)) return []
   const maxCandidates = options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES
   const targets = [...(state.submersionEscapeTargets ?? [])]
     .filter(
@@ -5933,6 +5952,7 @@ export function submersionAscentCandidates(state: WorldState, options: Candidate
     meta: {
       tick: state.tick,
       submersionEscape: true,
+      submersionEscapeReason: bodyIsOutOfAir(state.self) ? 'low_air' : 'head_wet_air_unknown',
       ...(typeof state.self.air === 'number' && Number.isFinite(state.self.air)
         ? { submersionAir: state.self.air }
         : {}),

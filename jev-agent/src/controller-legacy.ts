@@ -161,7 +161,7 @@ import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
@@ -707,12 +707,17 @@ export const CRITICAL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionT
   // because drowning IS injury damage in progress - the air gauge is simply an
   // earlier, cheaper signal than the first drowning hit.
   'low_air',
+  // A confirmed head-underwater reading with unavailable breath metadata is a
+  // separate sensor safety event, not synthetic damage.
+  'air_unknown_head_submerged',
 ])
 
-type CriticalThreatFamily = 'injury' | 'mob'
+type CriticalThreatFamily = 'injury' | 'breath' | 'mob'
 
 function criticalThreatFamily(trigger: DecisionTrigger): CriticalThreatFamily {
-  return trigger === 'mob_appeared' ? 'mob' : 'injury'
+  if (trigger === 'mob_appeared') return 'mob'
+  if (trigger === 'low_air' || trigger === 'air_unknown_head_submerged') return 'breath'
+  return 'injury'
 }
 
 const STALL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
@@ -3487,7 +3492,7 @@ export class JevController {
         // highest-priority threat trigger immediately after the short lease.
         if (inFlight.kind === 'ATTACK') {
           const air = this.liveAir()
-          if (shouldInterruptAttackLease(trigger, this.bot.health, CRITICAL_COMBAT_HEALTH, air)) {
+          if (shouldPreemptActiveActionLease(trigger, inFlight.kind, this.bot.health, CRITICAL_COMBAT_HEALTH, air)) {
             this.logger.warn(
               'scheduler',
               `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${this.bot.health} air=${air}`,
