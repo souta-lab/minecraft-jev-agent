@@ -5,7 +5,15 @@ import type { CurrentAction } from './src/executor.ts'
 import { bodyNeedsBreathEscape } from './src/state.ts'
 import type { WorldState } from './src/state.ts'
 import { envelopeForCandidate } from './src/skillCommitment.ts'
-import { ReachController, nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
+import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
+import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+
+function newReachRuntime(): ReachMissionRuntime {
+  return new ReachMissionRuntime({
+    routePolicy: nearestGroundedReachRoutePolicy,
+    commitFreshnessFence: () => ({ status: 'current' }),
+  })
+}
 
 const mission = { id: 'mission-reach-oak-log', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
 
@@ -102,7 +110,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
   Object.assign(controllerState, {
     options: { vtrMission: mission, serverId: '127.0.0.1:25565', worldEpoch: 1, actuationPort: null },
     queue: { current: null },
-    reachController: new ReachController(nearestGroundedReachRoutePolicy),
+    reachRuntime: newReachRuntime(),
     reachRunMetadata: null,
     reachTerminalHandoff: null,
     modelRecoveryStopping: false,
@@ -164,7 +172,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
   Object.assign(probeController as unknown as Record<string, any>, {
     options: { vtrMission: mission, vtrReachProbe: true, serverId: '127.0.0.1:25565', worldEpoch: 1, actuationPort: null },
     queue: { current: null },
-    reachController: new ReachController(nearestGroundedReachRoutePolicy),
+    reachRuntime: newReachRuntime(),
     reachRunMetadata: null,
     reachTerminalHandoff: null,
     modelRecoveryStopping: false,
@@ -248,7 +256,7 @@ test('a running legacy walk for the configured Reach predicate is revoked before
   const controller = Object.create(JevController.prototype) as JevController
   Object.assign(controller as unknown as Record<string, any>, {
     options: { vtrMission: mission, serverId: '127.0.0.1:25569', worldEpoch: identity.worldEpoch, reach: 4, maxCandidateAgeTicks: 8, actuationPort: null },
-    queue: { current: null }, reachController: new ReachController(nearestGroundedReachRoutePolicy), reachRunMetadata: null, reachTerminalHandoff: null,
+    queue: { current: null }, reachRuntime: newReachRuntime(), reachRunMetadata: null, reachTerminalHandoff: null,
     modelRecoveryStopping: false, modelRecoveryReachDrainTransitionId: null,
     vtrOwnsReachMoveThisTick: false, tickCounter: world.tick,
     jevCalls: 0, runtimeLlmCalls: 0, planCalls: 0, lastReachActionFailure: null,

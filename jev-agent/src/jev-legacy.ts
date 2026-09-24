@@ -102,6 +102,12 @@ export interface JevRequest {
   stage: string
   state: WorldState
   candidates: readonly Candidate[]
+  /** Bounded V4 authority frame for a non-Option choice such as grounded Reach routing. */
+  decisionFrame?: {
+    readonly kind: 'vtr-reach-route'
+    readonly instructions: string
+    readonly context: Readonly<Record<string, unknown>>
+  }
   /** CORE + trigger-specific set to send; defaults to the full set. */
   questionNames?: readonly QuestionName[]
   /**

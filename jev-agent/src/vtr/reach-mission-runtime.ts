@@ -32,7 +32,8 @@ export interface StartInventoryReachInput {
   readonly sourceNames: readonly string[]
   readonly identity: ReachIdentity
   readonly transitionId: string
-  readonly snapshot: ReachRuntimeSnapshot
+  /** Typed Minecraft adapter projects facts/routes only after VTR derives the contract. */
+  readonly snapshotForContract: (contract: ReachTransitionContract) => ReachRuntimeSnapshot
 }
 
 export interface InventoryReachCommit {
@@ -78,10 +79,11 @@ export class ReachMissionRuntime {
       identity: input.identity,
       transitionId: input.transitionId,
     })
+    const snapshot = input.snapshotForContract(contract)
     return {
       mission: input.mission,
       contract,
-      result: await this.controller.commit(contract, input.snapshot),
+      result: await this.controller.commit(contract, snapshot),
     }
   }
 

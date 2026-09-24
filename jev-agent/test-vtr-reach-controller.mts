@@ -4,6 +4,8 @@ import { describe, it } from 'bun:test'
 import {
   ReachController,
   nearestGroundedReachRoutePolicy,
+  type ReachCommitFreshnessFence,
+  type ReachRouteDecision,
   type ReachRoute,
   type ReachRuntimeSnapshot,
 } from './src/vtr/reach-controller.ts'
@@ -205,6 +207,122 @@ describe('raw-client-free VTR Reach controller', () => {
     assert.equal(selected.status, 'active')
     if (selected.status !== 'active' || selected.intent === undefined) throw new Error('expected configured deterministic policy to commit')
     assert.equal(selected.intent.routeId, 'near')
+  })
+
+  it('does not commit a delayed initial route answer after a newer observation is submitted', async () => {
+    const oldSnapshot = makeSnapshot(2_100, false, [
+      makeRoute('old-near', 2_100, 4, 4),
+      makeRoute('old-far', 2_100, 25, 25),
+    ])
+    const freshRoute = makeRoute('fresh-only', 2_101, 8, 8)
+    const freshSnapshot = makeSnapshot(2_101, false, [freshRoute])
+    let currentSnapshot = oldSnapshot
+    let releaseOldDecision!: (decision: ReachRouteDecision) => void
+    let signalPolicyStarted!: () => void
+    const policyStarted = new Promise<void>((resolve) => { signalPolicyStarted = resolve })
+    const freshnessFence: ReachCommitFreshnessFence = ({ snapshot }) => {
+      const current = currentSnapshot.observation
+      if (
+        current.identity.worldKey !== snapshot.observation.identity.worldKey ||
+        current.identity.dimension !== snapshot.observation.identity.dimension ||
+        current.identity.worldEpoch !== snapshot.observation.identity.worldEpoch ||
+        current.identity.generationId !== snapshot.observation.identity.generationId ||
+        current.identity.leaseId !== snapshot.observation.identity.leaseId
+      ) {
+        return { status: 'stale', reason: 'identity_changed', currentIdentity: current.identity }
+      }
+      if (current.observedAtMs !== snapshot.observation.observedAtMs) {
+        return { status: 'stale', reason: 'observation_advanced', currentObservedAtMs: current.observedAtMs, currentIdentity: current.identity }
+      }
+      return { status: 'current' }
+    }
+    const controller = new ReachController({
+      async chooseRoute() {
+        signalPolicyStarted()
+        return new Promise<ReachRouteDecision>((resolve) => { releaseOldDecision = resolve })
+      },
+    }, freshnessFence)
+
+    const oldCommit = controller.commit(contract, oldSnapshot)
+    await policyStarted
+    currentSnapshot = freshSnapshot
+    const freshCommit = controller.commit(contract, freshSnapshot)
+    releaseOldDecision({ status: 'selected', routeId: 'old-near' })
+
+    const oldResult = await oldCommit
+    assert.equal(oldResult.status, 'decision_required')
+    if (oldResult.status !== 'decision_required') throw new Error('a stale route choice must be returned to the scheduler')
+    assert.match(oldResult.reason, /reach_commit_stale_observation_advanced/)
+    assert.equal(controller.currentOutcome, null, 'stale route evidence cannot become SUCCESS or another terminal outcome')
+
+    const freshResult = await freshCommit
+    assert.equal(freshResult.status, 'active')
+    if (freshResult.status !== 'active' || freshResult.intent === undefined) throw new Error('expected the newer single route to commit')
+    assert.equal(freshResult.intent.routeId, 'fresh-only')
+    assert.equal(controller.current?.route.routeId, 'fresh-only', 'the delayed old route must never own or emit an intent')
+  })
+
+  it('refuses initial route commit when the runtime freshness fence reports a changed identity', async () => {
+    const routes = [makeRoute('epoch-a', 2_200, 7, 7)]
+    const snapshot = makeSnapshot(2_200, false, routes)
+    const changedIdentity: ReachIdentity = { ...identity, worldKey: 'probe-world-2', worldEpoch: 4 }
+    const controller = new ReachController(undefined, () => ({
+      status: 'stale',
+      reason: 'identity_changed',
+      currentObservedAtMs: 2_201,
+      currentIdentity: changedIdentity,
+    }))
+
+    const result = await controller.commit(contract, snapshot)
+    assert.equal(result.status, 'decision_required')
+    if (result.status !== 'decision_required') throw new Error('world identity changes before commit must require scheduler review')
+    assert.match(result.reason, /reach_commit_stale_identity_changed/)
+    assert.equal(controller.current, null)
+    assert.equal(controller.currentOutcome, null)
+  })
+
+  it('will not actuate a grounded route answer after same-timestamp facts change during Jev arbitration', async () => {
+    let releaseDecision!: (decision: ReachRouteDecision) => void
+    let signalPolicyStarted!: () => void
+    const policyStarted = new Promise<void>((resolve) => { signalPolicyStarted = resolve })
+    const controller = new ReachController({
+      async chooseRoute() {
+        signalPolicyStarted()
+        return new Promise<ReachRouteDecision>((resolve) => { releaseDecision = resolve })
+      },
+    })
+
+    const initial = await controller.commit(contract, makeSnapshot(2_300, false, [makeRoute('initial', 2_300, 8, 8)]))
+    assert.equal(initial.status, 'active')
+    if (initial.status !== 'active' || initial.intent === undefined) throw new Error('expected the initial grounded route intent')
+    const settled = await controller.complete(initial.intent.intentId, {
+      status: 'failed',
+      evidenceId: 'first-route-needs-arbitration',
+      snapshot: makeSnapshot(2_301, false, [makeRoute('initial', 2_301, 8, 8)]),
+    })
+    assert.equal(settled.status, 'active')
+
+    const oldRoutes = [makeRoute('old-a', 2_302, 7, 7), makeRoute('old-b', 2_302, 11, 11)]
+    const waitingForJev = controller.tick(makeSnapshot(2_302, false, oldRoutes))
+    await policyStarted
+    const changedSameTimeFacts = makeSnapshot(2_302, false, [makeRoute('new-only', 2_302, 9, 9)])
+    const freshSubmission = controller.tick(changedSameTimeFacts)
+    releaseDecision({ status: 'selected', routeId: 'old-a' })
+
+    const staleChoice = await waitingForJev
+    assert.equal(staleChoice.status, 'active')
+    if (staleChoice.status !== 'active') throw new Error('expected the owner to stay active')
+    assert.equal(staleChoice.phase, 'waiting')
+    assert.match(staleChoice.reason ?? '', /stale_snapshot_during_policy_consultation/)
+    assert.equal(staleChoice.intent, undefined, 'same-ms changed facts must fence the delayed Jev route')
+    await freshSubmission
+
+    const freshRoute = await controller.tick(makeSnapshot(2_303, false, [makeRoute('fresh-only', 2_303, 9, 9)]))
+    assert.equal(freshRoute.status, 'active')
+    if (freshRoute.status !== 'active' || freshRoute.intent === undefined) throw new Error('expected a fresh grounded route intent')
+    assert.equal(freshRoute.intent.routeId, 'fresh-only')
+    assert.equal(freshRoute.transitionId, contract.transitionId)
+    assert.equal(controller.currentOutcome, null)
   })
 
   it('will not commit a route without fresh TRUE grounding evidence', async () => {

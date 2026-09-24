@@ -2,7 +2,8 @@ import { expect, test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
-import { ReachController, nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
+import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 
 const mission = { id: 'runtime-reach-oak', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
 const identity = {
@@ -71,7 +72,10 @@ test('production Reach uses injected VTR authority through same-contract continu
     const claims: Array<{ candidate: string; authority: string; transitionId: string }> = []
     const legOutcomes: boolean[] = []
     const events: string[] = []
-    const reachController = new ReachController(nearestGroundedReachRoutePolicy)
+    const reachRuntime = new ReachMissionRuntime({
+      routePolicy: nearestGroundedReachRoutePolicy,
+      commitFreshnessFence: () => ({ status: 'current' }),
+    })
     let unavailableAuthorityCalls = 0
     const unavailableAuthority = new Proxy({}, {
       get(_target, key) {
@@ -101,7 +105,7 @@ test('production Reach uses injected VTR authority through same-contract continu
       queue: { current: null },
       // The test injects the VTR object itself. `reachRunMetadata` is diagnostic
       // projection only; no legacy runtime state is assigned as authority.
-      reachController,
+      reachRuntime,
       reachRunMetadata: null,
       reachTerminalHandoff: null,
       // Active Reach must finish under a Jev/System2 outage because its
@@ -151,7 +155,7 @@ test('production Reach uses injected VTR authority through same-contract continu
         },
       },
     })
-    expect(controllerFields.reachController).toBe(reachController)
+    expect(controllerFields.reachRuntime).toBe(reachRuntime)
 
     const tickReachTransition = (JevController.prototype as unknown as {
       tickReachTransition(this: JevController, trigger: string, detail: Record<string, unknown>): Promise<boolean>
@@ -159,7 +163,7 @@ test('production Reach uses injected VTR authority through same-contract continu
 
     expect(await tickReachTransition.call(controller, 'heartbeat', {})).toBe(true)
     expect(pendingCompletions).toHaveLength(1)
-    const firstOwner = reachController.current
+    const firstOwner = reachRuntime.current
     expect(firstOwner).not.toBeNull()
     if (firstOwner === null || firstOwner.intent === null) throw new Error('expected committed authoritative Reach state')
     const transitionId = firstOwner.contract.transitionId
@@ -182,12 +186,12 @@ test('production Reach uses injected VTR authority through same-contract continu
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    const afterFirstCompletion = reachController.current
+    const afterFirstCompletion = reachRuntime.current
     expect(afterFirstCompletion).not.toBeNull()
     if (afterFirstCompletion === null) throw new Error('executor completion must retain active Reach owner')
     expect(afterFirstCompletion.contract.contractHash).toBe(contractHash)
     expect(afterFirstCompletion.state.status).toBe('active')
-    expect(reachController.currentOutcome).toBeNull()
+    expect(reachRuntime.current?.state.terminalOutcome).toBeNull()
     expect(afterFirstCompletion.intent).toBeNull()
 
     // A fresh tick chooses the replacement route inside the same desired predicate.
@@ -196,7 +200,7 @@ test('production Reach uses injected VTR authority through same-contract continu
     expect(await tickReachTransition.call(controller, 'heartbeat', {})).toBe(true)
     expect(pendingCompletions).toHaveLength(2)
 
-    const continued = reachController.current
+    const continued = reachRuntime.current
     expect(continued).not.toBeNull()
     if (continued === null || continued.intent === null) throw new Error('expected second controller-owned action')
     expect(continued.contract.transitionId).toBe(transitionId)
@@ -219,15 +223,15 @@ test('production Reach uses injected VTR authority through same-contract continu
       progressed: true, distanceClosed: true,
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(reachController.current?.state.status).toBe('active')
-    expect(reachController.current?.state.usage.mechanicalSteps).toBe(2)
-    expect(reachController.current?.intent).toBeNull()
-    expect(reachController.currentOutcome).toBeNull()
+    expect(reachRuntime.current?.state.status).toBe('active')
+    expect(reachRuntime.current?.state.usage.mechanicalSteps).toBe(2)
+    expect(reachRuntime.current?.intent).toBeNull()
+    expect(reachRuntime.current?.state.terminalOutcome).toBeNull()
 
     advanceWorld(37, 14, 16, true)
     offered = candidate(16, 15, 37)
     expect(await tickReachTransition.call(controller, 'heartbeat', {})).toBe(true)
-    expect(reachController.current).toBeNull()
+    expect(reachRuntime.current).toBeNull()
     expect(controllerFields.reachRunMetadata).toBeNull()
     const verifyIndex = events.findIndex((line) => line.includes(`VTR_TRANSITION_VERIFY id=${transitionId} `))
     const outcomeIndex = events.findIndex((line) => line.includes(`VTR_TRANSITION_OUTCOME id=${transitionId} outcome=SUCCESS`))

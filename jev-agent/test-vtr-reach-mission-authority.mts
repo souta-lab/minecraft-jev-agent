@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
-import { ReachController, nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
+import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
+import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
 
@@ -123,7 +124,10 @@ function makeController(input: {
   const requestedDecisions: string[] = []
   const world = worldWithOakSource()
   const reachCandidateCalls: Array<{ missionItem: string; worldGoalItem: string | null }> = []
-  const reachController = new ReachController(nearestGroundedReachRoutePolicy)
+  const reachRuntime = new ReachMissionRuntime({
+    routePolicy: nearestGroundedReachRoutePolicy,
+    commitFreshnessFence: () => ({ status: 'current' }),
+  })
 
   Object.assign(controller as unknown as Record<string, unknown>, {
     options: {
@@ -149,7 +153,7 @@ function makeController(input: {
         origin: 'system2',
       },
     },
-    reachController,
+    reachRuntime,
     reachRunMetadata: null,
     reachTerminalHandoff: null,
     lastReachActionFailure: null,
@@ -225,8 +229,8 @@ test('Reach contract uses configured Mission when ladder root and GoalQueue head
   for (const divergentAuthority of cases) {
     const fixture = makeController({ probe: false, ...divergentAuthority, candidates: [moveToOakLog()] })
     const handled = await tickReachTransition.call(fixture.controller, 'heartbeat', {})
-    const runtime = fixture.controller as unknown as { reachController: ReachController }
-    const active = runtime.reachController.current
+    const runtime = fixture.controller as unknown as { reachRuntime: ReachMissionRuntime }
+    const active = runtime.reachRuntime.current
 
     assert.equal(handled, true)
     assert.ok(active)
@@ -253,13 +257,13 @@ test('normal mode reconciles a non-admitted Mission source so legacy cannot repl
     candidates: [],
   })
   const handled = await tickReachTransition.call(fixture.controller, 'heartbeat', {})
-  const runtime = fixture.controller as unknown as { reachController: ReachController; vtrOwnsReachMoveThisTick: boolean }
+  const runtime = fixture.controller as unknown as { reachRuntime: ReachMissionRuntime; vtrOwnsReachMoveThisTick: boolean }
 
   // A missing admissible route has no active Reach controller state. The
   // compatibility scheduler may continue for other work, but the currently
   // grounded same-Mission source MOVE is marked for suppression/reconciliation.
   assert.equal(handled, false)
-  assert.equal(runtime.reachController.current, null)
+  assert.equal(runtime.reachRuntime.current, null)
   assert.equal(runtime.vtrOwnsReachMoveThisTick, true)
   assert.deepEqual(fixture.claimed, [])
   assert.equal(fixture.events.some(({ line }) => line.includes('VTR_REACH_PROBE_HOLD')), false)

@@ -51,18 +51,31 @@ function fixture() {
     state: { ...terminalState, status: 'active' },
     intent: { intentId, transitionId, contractHash },
   }
+  const terminalHandoff = { contractHash, state: terminalState, outcome }
+  const reachRuntime = {
+    get current() { return active },
+    handoff: null as typeof terminalHandoff | null,
+    recordMechanicalStepOutcome() {
+      this.handoff = terminalHandoff
+      return { status: 'terminal', outcome, state: terminalState, cancelIntentId: null }
+    },
+    async complete() {
+      this.handoff = terminalHandoff
+      return { status: 'terminal', outcome, state: terminalState, cancelIntentId: null }
+    },
+    takeTerminalHandoff() {
+      const handoff = this.handoff
+      this.handoff = null
+      return handoff
+    },
+  }
   const controller = Object.create(JevController.prototype) as JevController
   const fields = controller as unknown as Record<string, any>
   Object.assign(fields, {
     options: {
       decisionProvenance: { runId: 'run-success-boundary', sourceSha: 'source-success-boundary', buildHash: null },
     },
-    reachController: {
-      get current() { return active },
-      recordMechanicalStepOutcome: () => ({ status: 'terminal', outcome, state: terminalState, cancelIntentId: null }),
-      complete: async () => ({ status: 'terminal', outcome, state: terminalState, cancelIntentId: null }),
-      takeOutcome: () => outcome,
-    },
+    reachRuntime,
     reachRunMetadata: {
       mission: { id: 'mission-reach-oak', item: 'oak_log', count: 1 },
       transitionId,
@@ -96,7 +109,7 @@ function fixture() {
       error: (_source: string, line: string, detail: Record<string, unknown> = {}) => events.push({ line, detail }),
     },
   })
-  return { controller, fields, events, decisions, terminalState }
+  return { controller, fields, events, decisions, terminalState, reachRuntime }
 }
 
 function assertVerifiedBoundary(events: Array<{ line: string; detail: Record<string, unknown> }>): void {
@@ -153,7 +166,7 @@ test('SUCCESS found at action completion is journaled with the same verified-ter
 })
 
 test('non-success outcomes keep their typed terminal boundary', () => {
-  const { controller, events, terminalState } = fixture()
+  const { controller, events, terminalState, reachRuntime } = fixture()
   const closeReachTransition = (JevController.prototype as unknown as {
     closeReachTransition(
       this: JevController,
@@ -163,9 +176,11 @@ test('non-success outcomes keep their typed terminal boundary', () => {
     ): void
   }).closeReachTransition
 
-  closeReachTransition.call(controller, {
+  const budgetOutcome = {
     kind: 'BUDGET_EXHAUSTED', contractHash, budget: 'mechanicalSteps', limit: 1, attempted: 2,
-  }, terminalState, 'typed-terminal')
+  }
+  reachRuntime.handoff = { contractHash, state: terminalState, outcome: budgetOutcome as any }
+  closeReachTransition.call(controller, budgetOutcome, terminalState, 'typed-terminal')
 
   const terminal = events.find(({ line }) => line.includes(`VTR_TRANSITION_OUTCOME id=${transitionId} outcome=BUDGET_EXHAUSTED`))
   expect(terminal?.line).toContain('boundary=typed-terminal')

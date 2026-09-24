@@ -245,6 +245,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
 
     let schedulerHandoff = 0
     const adapter = Object.create(JevController.prototype) as JevController
+    const adapterFields = adapter as unknown as Record<string, any>
     Object.assign(adapter as unknown as Record<string, unknown>, {
       reachRunMetadata: {
         mission,
@@ -257,7 +258,14 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
         duplicateAuthorityObserved: false,
       },
       reachTerminalHandoff: null,
-      reachController: controller,
+      reachRuntime: {
+        current: null,
+        takeTerminalHandoff: () => ({
+          contractHash: typedTerminal.state.contractHash,
+          state: typedTerminal.state,
+          outcome: typedTerminal.outcome,
+        }),
+      },
       executor,
       jevCalls: 0,
       runtimeLlmCalls: 0,
@@ -269,7 +277,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
         expect(detail).toMatchObject({ typedOutcome: 'CONTRACT_VIOLATION', schedulerHandoff: true })
         expect(currentAction?.status).toBe('cancelled')
         expect(executor.current).toBeNull()
-        expect(controller.currentOutcome).toBeNull()
+        expect(adapterFields.reachRuntime.current).toBeNull()
         schedulerHandoff += 1
       },
     })

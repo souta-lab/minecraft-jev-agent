@@ -101,13 +101,14 @@ export type AuthorityTaggedJevResult = JevResult & { authorityDecision: Authorit
 export function buildAuthorityQuestions(
   candidates: readonly Candidate[],
   names: readonly QuestionName[] = QUESTION_NAMES,
+  actionInstructions = AUTHORITY_PRIMARY_INSTRUCTIONS,
 ): Questions {
   const requested = new Set(names)
   const out: Questions = {}
   if (requested.has('action')) {
     const criteria: Record<string, string> = {}
     for (const candidate of candidates) criteria[candidate.id] = candidateCriteria(candidate)
-    out.action = { type: 'choice', instructions: AUTHORITY_PRIMARY_INSTRUCTIONS, criteria }
+    out.action = { type: 'choice', instructions: actionInstructions, criteria }
   }
   if (requested.has('abandon_option')) {
     out.abandon_option = {
@@ -247,6 +248,7 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
 export function authorityState(request: JevRequest): Record<string, unknown> {
   const state = request.state
   const projection = request.semanticProjection ?? null
+  const reachRouteFrame = request.decisionFrame?.kind === 'vtr-reach-route' ? request.decisionFrame : null
   const self = {
     position: state.self.position,
     health: state.self.health,
@@ -286,13 +288,12 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
   }
   const shared = {
     inventory: state.inventory.counts,
-    goal: state.goal,
-    goalQueue: {
-      depth: state.goalQueue.depth,
-      empty: state.goalQueue.empty,
-      current: state.goalQueue.current,
-    },
-    currentOption: state.currentOption ?? null,
+    goal: reachRouteFrame === null ? state.goal : { authority: 'vtr-reach-route', context: reachRouteFrame.context },
+    goalQueue: reachRouteFrame === null
+      ? { depth: state.goalQueue.depth, empty: state.goalQueue.empty, current: state.goalQueue.current }
+      : { depth: 0, empty: true, current: null },
+    currentOption: reachRouteFrame === null ? state.currentOption ?? null : null,
+    ...(reachRouteFrame === null ? {} : { decisionFrame: reachRouteFrame }),
     recentOutcomes: (state.recentOutcomes ?? []).slice(-8),
     candidates: request.candidates.map((candidate) => ({
       id: candidate.id,
@@ -753,7 +754,11 @@ export class AuthorityJevPolicy implements JevPolicy {
   async decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult> {
     const callId = randomUUID()
     const requested = request.questionNames ?? QUESTION_NAMES
-    const questions = buildAuthorityQuestions(request.candidates, requested)
+    const questions = buildAuthorityQuestions(
+      request.candidates,
+      requested,
+      request.decisionFrame?.instructions ?? AUTHORITY_PRIMARY_INSTRUCTIONS,
+    )
     const modelState = authorityState(request) as Parameters<typeof evaluate>[0]['state']
     const maxGeneralAttempts = Math.max(1, this.options.maxRetries + 1)
     let generalAttempt = 0

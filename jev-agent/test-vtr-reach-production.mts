@@ -5,12 +5,17 @@ import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 const reachController = readFileSync(new URL('./src/vtr/reach-controller.ts', import.meta.url), 'utf8')
+const reachMissionRuntime = readFileSync(new URL('./src/vtr/reach-mission-runtime.ts', import.meta.url), 'utf8')
+const jevRoutePolicy = readFileSync(new URL('./src/jev-reach-route-policy.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
 const generationEntry = readFileSync(new URL('../buddy-driver/generation-entry.ts', import.meta.url), 'utf8')
 
 describe('VTR Reach production authority seam', () => {
   it('grounds production Reach routes from current world evidence before the persistent owner may use them', () => {
-    assert.match(controller, /private readonly reachController = new ReachController\(nearestGroundedReachRoutePolicy\)/)
+    assert.match(controller, /private readonly reachRuntime = new ReachMissionRuntime\(\{[\s\S]*?routePolicy: new JevReachRouteDecisionPolicy\(/)
+    assert.doesNotMatch(controller, /new ReachController\(nearestGroundedReachRoutePolicy\)/)
+    assert.match(controller, /this\.reachRuntime\.startInventoryReach\(/)
+    assert.doesNotMatch(controller, /createInventoryReachTransition\(/)
 
     const observationStart = controller.indexOf('private reachObservation(')
     const snapshotStart = controller.indexOf('private reachRuntimeSnapshot(', observationStart)
@@ -79,9 +84,9 @@ describe('VTR Reach production authority seam', () => {
     const reachStart = controller.indexOf('private async tickReachTransition(')
     const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
     const reachTick = controller.slice(reachStart, reachEnd)
-    assert.match(reachTick, /this\.reachController\.current/)
-    assert.match(reachTick, /this\.reachController\.tick\(snapshot\)/)
-    assert.match(reachTick, /this\.reachController\.commit\(contract, snapshot\)/)
+    assert.match(reachTick, /this\.reachRuntime\.current/)
+    assert.match(reachTick, /this\.reachRuntime\.tick\(snapshot\)/)
+    assert.match(reachTick, /this\.reachRuntime\.startInventoryReach\(/)
     assert.match(reachTick, /await this\.dispatchReachIntent\(/)
     assert.doesNotMatch(reachTick, /decideBeta|applyBeta/)
   })
@@ -99,7 +104,7 @@ describe('VTR Reach production authority seam', () => {
       reachTick.indexOf("current.authority !== 'vtr-reach' || current.transitionId"),
       reachTick.indexOf('const threat = state.signals.threat'),
     )
-    assert.match(foreignLeaseFence, /this\.reachController\.supersede\(/)
+    assert.match(foreignLeaseFence, /this\.reachRuntime\.supersede\(/)
     assert.match(foreignLeaseFence, /this\.executor\.cancelCurrent\('VTR dual-authority fence'\)/)
     assert.match(foreignLeaseFence, /actionTransitionId: current\.transitionId \?\? null/)
   })
@@ -116,8 +121,22 @@ describe('VTR Reach production authority seam', () => {
     assert.match(adapter, /pathProbe\?\.\(position\) === 'reachable'/)
     assert.match(adapter, /this\.reachCandidates\(state, /)
     assert.match(adapter, /reachRuntimeSnapshot\(/)
-    assert.match(adapter, /compatibility runtime adapter/)
-    assert.match(adapter, /typed world\/locomotion[\s\S]*?ports carry exact-source live proof/)
+    assert.match(adapter, /ReachMissionRuntime owns Mission-to-contract[\s\S]*?Mineflayer adapter/)
+    assert.match(adapter, /Delete Reach-specific orchestration,[\s\S]*?no-double-authority under runtime ports/)
+    assert.doesNotMatch(jevRoutePolicy, /from ['"]mineflayer['"]|\bBot\b/)
+    assert.match(jevRoutePolicy, /ReachRouteDecisionInput/)
+    assert.match(jevRoutePolicy, /decisionFrame: \{/)
+    assert.match(jevRoutePolicy, /input\.contract\.(desiredPredicate|budget|admissibleEffects|identity)/)
+    assert.match(controller, /selectedRoute: this\.reachRuntime\.current\?\.route/)
+    assert.match(controller, /probabilities: routeSelection\.probabilities/)
+    assert.doesNotMatch(reachMissionRuntime, /from ['"]mineflayer['"]|\bBot\b/)
+  })
+
+  it('does not journal an admitted Transition when its initial Jev route choice is unresolved', () => {
+    const start = controller.indexOf('const scheduled = await this.reachRuntime.startInventoryReach({')
+    const decisionRequired = controller.indexOf("if (started.status === 'decision_required')", start)
+    const commitEvent = controller.indexOf('VTR_TRANSITION_COMMIT', start)
+    assert.ok(start >= 0 && decisionRequired > start && commitEvent > decisionRequired)
   })
 
   it('makes the explicit Reach probe fail closed before any legacy recovery/model/Executor dispatch', () => {
@@ -181,13 +200,13 @@ describe('VTR Reach production authority seam', () => {
     const authorize = controller.slice(authorizeStart, outcomeStart)
     const mechanicalOutcome = controller.slice(outcomeStart, actionCompleteStart)
     const completion = controller.slice(actionCompleteStart, closeStart)
-    assert.match(authorize, /this\.reachController\.authorizeMechanicalStep\(/)
+    assert.match(authorize, /this\.reachRuntime\.authorizeMechanicalStep\(/)
     assert.match(authorize, /this\.options\.actuationPort\?\.assertLease\(/)
     assert.match(authorize, /VTR_MECHANICAL_STEP_RESERVED/)
-    assert.match(mechanicalOutcome, /this\.reachController\.recordMechanicalStepOutcome\(/)
+    assert.match(mechanicalOutcome, /this\.reachRuntime\.recordMechanicalStepOutcome\(/)
     assert.match(mechanicalOutcome, /step\.stepId/)
     assert.match(completion, /VTR_MECHANICAL_OUTCOME/)
-    assert.match(completion, /await this\.reachController\.complete\(intentId/)
+    assert.match(completion, /await this\.reachRuntime\.complete\(intentId/)
     assert.match(completion, /status: result\.status === 'done' \? 'completed'/)
     assert.match(completion, /if \(completed\.status === 'terminal'\)/)
     assert.doesNotMatch(completion, /if \(result\.status === 'done'\)[\s\S]{0,80}closeReachTransition/)
@@ -199,7 +218,7 @@ describe('VTR Reach production authority seam', () => {
     const closeEnd = controller.indexOf('// -------------------------------------------------------------------------\n  // the one loop', closeStart)
     const completion = controller.slice(completionStart, closeStart)
     const close = controller.slice(closeStart, closeEnd)
-    assert.match(completion, /await this\.reachController\.complete\(intentId/)
+    assert.match(completion, /await this\.reachRuntime\.complete\(intentId/)
     assert.match(completion, /if \(completed\.status === 'terminal'\)/)
     assert.doesNotMatch(completion, /decideBeta|applyBeta/)
     assert.match(completion, /requestDecision\('action_completed'/)
@@ -209,7 +228,7 @@ describe('VTR Reach production authority seam', () => {
     assert.match(close, /mechanicalStepsPerTransition: state\.usage\.mechanicalSteps/)
     assert.match(close, /typedOutcome: outcome\.kind/)
     assert.match(close, /schedulerHandoff: true/)
-    assert.match(close, /this\.reachController\.takeOutcome\(\)/)
+    assert.match(close, /this\.reachRuntime\.takeTerminalHandoff\(\)/)
   })
 
   it('withholds same-Mission resource MOVE from the legacy decision plane while VTR owns Reach', () => {

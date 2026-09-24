@@ -56,8 +56,12 @@ export interface ReachRouteDecisionInput {
   readonly transitionId: string
   readonly contractHash: string
   readonly desiredPredicateIdentity: string
+  /** Full immutable VTR authority frame; providers must not infer intent from legacy Options. */
+  readonly contract: ReachTransitionContract
   readonly identity: ReachIdentity
   readonly observedAtMs: number
+  readonly observation: ReachObservation
+  readonly progress: ReachRuntimeSnapshot['progress']
   readonly currentRouteId: string | null
   readonly routes: readonly ReachRoute[]
 }
@@ -70,6 +74,24 @@ export type ReachRouteDecision =
 export interface ReachRouteDecisionPolicy {
   chooseRoute(input: ReachRouteDecisionInput): Promise<ReachRouteDecision>
 }
+
+/** Runtime-owned check for whether a pre-commit snapshot is still the current observation. */
+export interface ReachCommitFreshnessInput {
+  readonly contract: ReachTransitionContract
+  readonly snapshot: ReachRuntimeSnapshot
+}
+
+export type ReachCommitFreshnessResult =
+  | { readonly status: 'current' }
+  | {
+      readonly status: 'stale'
+      readonly reason: 'observation_advanced' | 'identity_changed' | 'unavailable'
+      readonly currentObservedAtMs?: number
+      readonly currentIdentity?: ReachIdentity
+    }
+
+/** Must be rechecked after Jev's initial route-choice wait and before contract commit. */
+export type ReachCommitFreshnessFence = (input: ReachCommitFreshnessInput) => ReachCommitFreshnessResult
 
 /** Explicit deterministic policy for no-LLM probes and configured offline runs. */
 export const nearestGroundedReachRoutePolicy: ReachRouteDecisionPolicy = {
@@ -242,8 +264,13 @@ export class ReachController {
   private outcome: ReachTerminalOutcome | null = null
   private terminalState: ReachTransitionState | null = null
   private operationTail: Promise<void> = Promise.resolve()
+  private submittedObservationRevision = 0
+  private submittedObservation: { readonly identity: ReachIdentity; readonly observedAtMs: number; readonly fingerprint: string } | null = null
 
-  constructor(private readonly routePolicy?: ReachRouteDecisionPolicy) {}
+  constructor(
+    private readonly routePolicy?: ReachRouteDecisionPolicy,
+    private readonly commitFreshnessFence?: ReachCommitFreshnessFence,
+  ) {}
 
   get current(): ReachControllerCurrent | null {
     const active = this.active
@@ -275,10 +302,15 @@ export class ReachController {
   }
 
   async commit(contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot): Promise<ReachControllerResult> {
-    return this.exclusive(() => this.commitInternal(contract, snapshot))
+    const submittedRevision = this.noteSubmittedObservation(snapshot)
+    return this.exclusive(() => this.commitInternal(contract, snapshot, submittedRevision))
   }
 
-  private async commitInternal(contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot): Promise<ReachControllerResult> {
+  private async commitInternal(
+    contract: ReachTransitionContract,
+    snapshot: ReachRuntimeSnapshot,
+    submittedRevision: number,
+  ): Promise<ReachControllerResult> {
     if (this.active !== null) return { status: 'refused', reason: `transition ${this.active.contract.transitionId} already owns Reach` }
     if (this.outcome !== null) return { status: 'refused', reason: 'unconsumed typed terminal outcome must be handed to the scheduler first' }
     const routes = this.groundedRoutes(contract, snapshot, null)
@@ -288,6 +320,16 @@ export class ReachController {
       return { status: 'decision_required', transitionId: contract.transitionId, contractHash: contract.contractHash, reason: selection.reason, routeIds: selection.routeIds }
     }
     if (selection.status === 'none') return { status: 'not_enabled', blockers: ['no_grounded_admissible_reach_route'] }
+    const staleReason = this.initialCommitStaleReason(contract, snapshot, submittedRevision)
+    if (staleReason !== null) {
+      return {
+        status: 'decision_required',
+        transitionId: contract.transitionId,
+        contractHash: contract.contractHash,
+        reason: staleReason,
+        routeIds: routes.map(({ routeId }) => routeId),
+      }
+    }
     const route = selection.route
     const started = startReachTransition(contract, snapshot.observation, { tactic: route.tactic, witness: route.witness })
     if (started.status === 'not_enabled') return { status: 'not_enabled', blockers: started.blockers }
@@ -307,7 +349,58 @@ export class ReachController {
 
   /** Reconcile fresh facts, verify the contract, then either continue or emit one typed actuation intent. */
   async tick(snapshot: ReachRuntimeSnapshot): Promise<ReachControllerResult> {
+    this.noteSubmittedObservation(snapshot)
     return this.exclusive(() => this.advance(snapshot, true))
+  }
+
+  private noteSubmittedObservation(snapshot: ReachRuntimeSnapshot): number {
+    const observation = snapshot.observation
+    const fingerprint = JSON.stringify(snapshot)
+    const previous = this.submittedObservation
+    const identityChanged = previous !== null && !sameIdentity(previous.identity, observation.identity)
+    const newerObservation = previous !== null && observation.observedAtMs > previous.observedAtMs
+    const sameTimeFactsChanged = previous !== null && observation.observedAtMs === previous.observedAtMs && fingerprint !== previous.fingerprint
+    if (previous === null || identityChanged || newerObservation || sameTimeFactsChanged) {
+      this.submittedObservationRevision += 1
+      this.submittedObservation = { identity: observation.identity, observedAtMs: observation.observedAtMs, fingerprint }
+    }
+    return this.submittedObservationRevision
+  }
+
+  /** Initial route selection may await an external model; never commit its old snapshot afterward. */
+  private initialCommitStaleReason(
+    contract: ReachTransitionContract,
+    snapshot: ReachRuntimeSnapshot,
+    submittedRevision: number,
+  ): string | null {
+    if (this.commitFreshnessFence !== undefined) {
+      let freshness: ReachCommitFreshnessResult
+      try {
+        freshness = this.commitFreshnessFence({ contract, snapshot })
+      } catch (error) {
+        const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        return `reach_commit_freshness_unavailable:${reason}`
+      }
+      if (freshness.status === 'stale') {
+        const current = freshness.currentObservedAtMs === undefined
+          ? ''
+          : `:current_observed_at=${freshness.currentObservedAtMs}`
+        return `reach_commit_stale_${freshness.reason}${current}`
+      }
+    }
+    const latest = this.submittedObservation
+    if (latest !== null) {
+      if (!sameIdentity(latest.identity, snapshot.observation.identity)) {
+        return 'reach_commit_stale_identity_changed_since_observation_submission'
+      }
+      if (snapshot.observation.observedAtMs !== latest.observedAtMs || JSON.stringify(snapshot) !== latest.fingerprint) {
+        return `reach_commit_stale_observation_mismatch:latest_observed_at=${latest.observedAtMs}`
+      }
+    }
+    if (submittedRevision !== this.submittedObservationRevision) {
+      return 'reach_commit_stale_newer_observation_submitted_during_route_selection'
+    }
+    return null
   }
 
   private async advance(snapshot: ReachRuntimeSnapshot, allowDispatch: boolean): Promise<ReachControllerResult> {
@@ -371,9 +464,18 @@ export class ReachController {
       return this.waiting(active, 'no_grounded_admissible_route')
     }
     const stillCurrent = routes.find((route) => route.routeId === active.route.routeId)
+    const routeChoiceObservationRevision = this.submittedObservationRevision
     const selection = stillCurrent === undefined
       ? await this.selectRoute(contract, snapshot, routes, active.route.routeId)
       : { status: 'selected' as const, route: stillCurrent }
+    const latestSubmittedObservation = this.submittedObservation
+    if (
+      routeChoiceObservationRevision !== this.submittedObservationRevision ||
+      latestSubmittedObservation === null ||
+      latestSubmittedObservation.fingerprint !== JSON.stringify(snapshot)
+    ) {
+      return this.waiting(active, 'grounded_route_choice_stale_snapshot_during_policy_consultation')
+    }
     if (selection.status === 'decision_required') {
       return {
         status: 'active', phase: 'decision_required', transitionId: contract.transitionId,
@@ -614,8 +716,11 @@ export class ReachController {
         transitionId: contract.transitionId,
         contractHash: contract.contractHash,
         desiredPredicateIdentity: contract.desiredPredicateIdentity,
+        contract,
         identity: snapshot.observation.identity,
         observedAtMs: snapshot.observation.observedAtMs,
+        observation: snapshot.observation,
+        progress: snapshot.progress,
         currentRouteId,
         routes,
       })

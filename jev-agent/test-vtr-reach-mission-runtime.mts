@@ -97,7 +97,10 @@ test('Mission-to-Reach derives a generic resource predicate without benchmark la
     sourceNames: ['budding_amethyst', 'amethyst_cluster'],
     identity,
     transitionId: 'transition-amethyst-source-reach',
-    snapshot,
+    snapshotForContract: (contract) => {
+      expect(contract.desiredPredicate.proposition).toMatchObject({ item: 'amethyst_shard' })
+      return snapshot
+    },
   })
 
   expect(started.contract.desiredPredicate.proposition).toMatchObject({
@@ -123,7 +126,7 @@ test('stale commit fence prevents the VTR Mission runtime from acquiring Reach o
     sourceNames: ['budding_amethyst', 'amethyst_cluster'],
     identity,
     transitionId: 'transition-amethyst-source-reach',
-    snapshot: makeSnapshot(1_000, false),
+    snapshotForContract: () => makeSnapshot(1_000, false),
   })
   expect(started.result.status).toBe('decision_required')
   expect(runtime.current).toBeNull()
@@ -147,7 +150,7 @@ test('committed Reach continues the same contract through policy outage and succ
     sourceNames: ['budding_amethyst', 'amethyst_cluster'],
     identity,
     transitionId: 'transition-amethyst-source-reach',
-    snapshot: makeSnapshot(1_000, false),
+    snapshotForContract: () => makeSnapshot(1_000, false),
   })
   expect(started.result.status).toBe('active')
   if (started.result.status !== 'active' || started.result.intent === undefined) throw new Error('expected a committed mechanical intent')
