@@ -377,6 +377,7 @@ export interface ProviderErrorDiagnostics {
   providerErrorCode?: string
   providerErrorType?: string
   errorName?: string
+  retryAfterMs?: number
   requestId?: string
   requestIdHeader?: string
 }
@@ -397,6 +398,9 @@ const MAX_ERROR_DEPTH = 5
 const MAX_PROVIDER_CODE_LENGTH = 80
 const MAX_REQUEST_ID_LENGTH = 160
 const MAX_ERROR_MESSAGE_LENGTH = 512
+const TRANSIENT_RETRY_BASE_DELAY_MS = 250
+const TRANSIENT_RETRY_MAX_BACKOFF_MS = 4_000
+const TRANSIENT_RETRY_MAX_DELAY_MS = 15_000
 
 type UnknownRecord = Record<string, unknown>
 
@@ -499,6 +503,73 @@ function requestIdFromHeaders(value: unknown): Array<{ header: string; value: st
   return candidates
 }
 
+function retryAfterHeader(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null
+  let get: unknown
+  try {
+    get = (value as { get?: unknown }).get
+  } catch {
+    return null
+  }
+  if (typeof get === 'function') {
+    try {
+      const result = get.call(value, 'retry-after')
+      return typeof result === 'string' ? result : null
+    } catch {
+      return null
+    }
+  }
+  let keys: string[]
+  try {
+    keys = Object.keys(value).slice(0, 64)
+  } catch {
+    return null
+  }
+  const actual = keys.find((key) => key.toLowerCase() === 'retry-after')
+  if (actual === undefined) return null
+  let result: unknown
+  try {
+    result = (value as UnknownRecord)[actual]
+  } catch {
+    return null
+  }
+  return typeof result === 'string' ? result : null
+}
+
+function parseRetryAfterMs(value: string, nowMs = Date.now()): number | null {
+  const header = value.trim()
+  if (header.length === 0 || header.length > 128) return null
+  let delayMs: number
+  if (/^\d+(?:\.\d+)?$/.test(header)) {
+    delayMs = Number(header) * 1_000
+  } else {
+    const dateMs = Date.parse(header)
+    if (!Number.isFinite(dateMs)) return null
+    delayMs = dateMs - nowMs
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) return null
+  return Math.min(delayMs, TRANSIENT_RETRY_MAX_DELAY_MS)
+}
+
+function isCancellationFailure(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const row = error as Record<string, unknown>
+  return row.name === 'AbortError' || row.code === 'ABORT_ERR'
+}
+
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
+function transientRetryDelayMs(attempt: number, retryAfterMs: number | undefined, random: () => number): number {
+  const exponent = Math.min(30, Math.max(0, attempt - 1))
+  const base = Math.min(TRANSIENT_RETRY_MAX_BACKOFF_MS, TRANSIENT_RETRY_BASE_DELAY_MS * 2 ** exponent)
+  const randomValue = random()
+  const boundedRandom = Number.isFinite(randomValue) ? Math.min(0.999_999, Math.max(0, randomValue)) : 0.5
+  const jitteredBackoff = Math.round(base * (0.5 + boundedRandom))
+  return Math.min(TRANSIENT_RETRY_MAX_DELAY_MS, Math.max(jitteredBackoff, retryAfterMs ?? 0))
+}
+
 function parseErrorBody(value: unknown): unknown {
   if (typeof value !== 'string' || value.length === 0 || value.length > 8192) return null
   try {
@@ -518,6 +589,7 @@ export function extractProviderErrorDiagnostics(error: unknown): ProviderErrorDi
   const seen = new Set<object>()
   const requestIds: Array<{ header: string; value: string }> = []
   let httpStatus: number | undefined
+  let retryAfterMs: number | undefined
   let providerErrorCode: string | undefined
   let providerErrorType: string | undefined
   let errorName: string | undefined
@@ -546,7 +618,12 @@ export function extractProviderErrorDiagnostics(error: unknown): ProviderErrorDi
     }
 
     for (const headerKey of ['responseHeaders', 'headers'] as const) {
-      requestIds.push(...requestIdFromHeaders(readErrorField(row, headerKey)))
+      const headers = readErrorField(row, headerKey)
+      requestIds.push(...requestIdFromHeaders(headers))
+      if (retryAfterMs === undefined) {
+        const retryAfter = retryAfterHeader(headers)
+        if (retryAfter !== null) retryAfterMs = parseRetryAfterMs(retryAfter) ?? undefined
+      }
     }
     const directId = safeRequestId(readErrorField(row, 'requestId'))
     if (directId !== null) requestIds.push({ header: 'requestId', value: directId })
@@ -577,6 +654,7 @@ export function extractProviderErrorDiagnostics(error: unknown): ProviderErrorDi
   if (providerErrorCode !== undefined) diagnostics.providerErrorCode = providerErrorCode
   if (providerErrorType !== undefined) diagnostics.providerErrorType = providerErrorType
   if (errorName !== undefined) diagnostics.errorName = errorName
+  if (retryAfterMs !== undefined) diagnostics.retryAfterMs = retryAfterMs
   if (selectedRequestId !== undefined) {
     diagnostics.requestId = selectedRequestId.value
     diagnostics.requestIdHeader = selectedRequestId.header
@@ -619,17 +697,50 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function sleepWithSignal(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return sleep(ms)
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort)
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      cleanup()
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+}
+
+export interface AuthorityJevPolicyDependencies {
+  /** Internal transport seam used by deterministic retry regressions. */
+  evaluate?: typeof evaluate
+  /** Internal wait seam; production waits remain abortable. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+  random?: () => number
+}
+
 export class AuthorityJevPolicy implements JevPolicy {
   readonly kind = 'typesafe' as const
   readonly model: string
   readonly keyOrigin: string
 
   private readonly options: JevPolicyOptions
+  private readonly requestEvaluation: typeof evaluate
+  private readonly wait: (ms: number, signal?: AbortSignal) => Promise<void>
+  private readonly random: () => number
 
-  constructor(options: JevPolicyOptions, key: KeyResolution) {
+  constructor(options: JevPolicyOptions, key: KeyResolution, dependencies: AuthorityJevPolicyDependencies = {}) {
     this.options = options
     this.keyOrigin = key.origin
     this.model = options.model ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    this.requestEvaluation = dependencies.evaluate ?? evaluate
+    this.wait = dependencies.sleep ?? sleepWithSignal
+    this.random = dependencies.random ?? Math.random
     process.env.AI_GATEWAY_API_KEY = key.key
   }
 
@@ -642,6 +753,8 @@ export class AuthorityJevPolicy implements JevPolicy {
     let generalAttempt = 0
     let rateAttempt = 0
     let rateWaitMs = 0
+    let transientRetryCount = 0
+    let transientWaitMs = 0
 
     for (;;) {
       if (signal?.aborted === true) throw new FatalModelError('jev-authority', generalAttempt, 'aborted before model call')
@@ -650,7 +763,7 @@ export class AuthorityJevPolicy implements JevPolicy {
       const timeout = AbortSignal.timeout(this.options.timeoutMs)
       const abortSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
       try {
-        const response = await evaluate({
+        const response = await this.requestEvaluation({
           model: this.model,
           state: modelState,
           questions,
@@ -679,6 +792,8 @@ export class AuthorityJevPolicy implements JevPolicy {
           latencyMs,
           rateLimitRetries: rateAttempt,
           rateLimitWaitMs: rateWaitMs,
+          transientRetries: transientRetryCount,
+          transientWaitMs,
           // IMPORTANT: this is the exact state supplied to evaluate(), making
           // authority/replay evidence inspectable rather than logging a different snapshot.
           state: modelState,
@@ -707,6 +822,20 @@ export class AuthorityJevPolicy implements JevPolicy {
         const message = describeProviderError(error)
         const providerDiagnostics = extractProviderErrorDiagnostics(error)
         const providerDiagnosticsField = providerDiagnostics === null ? {} : { providerDiagnostics }
+        const callerCancelled = isSignalAborted(signal)
+        const callTimedOut = timeout.aborted
+        if (callerCancelled || (isCancellationFailure(error) && !callTimedOut)) {
+          this.options.writer.write({
+            record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+            model: this.model, stage: request.stage, latencyMs: Date.now() - started,
+            rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
+            transientRetries: transientRetryCount, transientWaitMs,
+            state: modelState, questions, response: null, error: message,
+            authority: { pi: 'model', beta: 'model', failure: 'cancelled' },
+            ...providerDiagnosticsField,
+          })
+          throw new FatalModelError('jev-authority', generalAttempt, message)
+        }
         if (isRateLimit(error) && rateAttempt < this.options.rateLimitRetries) {
           rateAttempt += 1
           generalAttempt -= 1
@@ -717,14 +846,60 @@ export class AuthorityJevPolicy implements JevPolicy {
             delayMs, totalWaitMs: rateWaitMs, error: message,
             ...providerDiagnosticsField,
           })
-          await sleep(delayMs)
+          try {
+            await this.wait(delayMs, signal)
+          } catch (waitError) {
+            if (isSignalAborted(signal) || isCancellationFailure(waitError)) {
+              throw new FatalModelError('jev-authority', Math.max(1, generalAttempt), 'aborted during rate-limit retry wait')
+            }
+            throw waitError
+          }
           continue
         }
-        if (isTransientProviderFailure(error)) {
+        if ((callTimedOut && isCancellationFailure(error)) || isTransientProviderFailure(error)) {
+          const retryableStatus = !isRateLimit(error) && generalAttempt < maxGeneralAttempts
+          if (retryableStatus) {
+            const retryDelayMs = transientRetryDelayMs(
+              transientRetryCount + 1,
+              providerDiagnostics?.retryAfterMs,
+              this.random,
+            )
+            transientRetryCount += 1
+            transientWaitMs += retryDelayMs
+            this.options.writer.write({
+              record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+              model: this.model, stage: request.stage, latencyMs: Date.now() - started,
+              rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
+              transientRetries: transientRetryCount, transientWaitMs,
+              state: modelState, questions, response: null, error: message,
+              authority: { pi: 'model', beta: 'model', failure: 'transient-provider-retry' },
+              retryScheduled: true,
+              ...providerDiagnosticsField,
+            })
+            this.options.writer.write({
+              record: 'jev-retry', callId, ts: new Date().toISOString(),
+              attempt: generalAttempt, delayMs: retryDelayMs, totalWaitMs: rateWaitMs + transientWaitMs,
+              retryClass: 'transient-provider', error: message,
+              ...providerDiagnosticsField,
+            })
+            try {
+              await this.wait(retryDelayMs, signal)
+            } catch (waitError) {
+              if (isSignalAborted(signal) || isCancellationFailure(waitError)) {
+                throw new FatalModelError('jev-authority', generalAttempt, 'aborted during transient retry wait')
+              }
+              throw waitError
+            }
+            if (isSignalAborted(signal)) {
+              throw new FatalModelError('jev-authority', generalAttempt, 'aborted during transient retry wait')
+            }
+            continue
+          }
           this.options.writer.write({
             record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
-            rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs, state: modelState,
+            rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
+            transientRetries: transientRetryCount, transientWaitMs, state: modelState,
             questions, response: null, error: message,
             authority: { pi: 'model', beta: 'model', failure: 'transient-provider-unavailable' },
             retryable: true,
@@ -743,7 +918,8 @@ export class AuthorityJevPolicy implements JevPolicy {
         this.options.writer.write({
           record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
           model: this.model, stage: request.stage, latencyMs: Date.now() - started,
-          rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs, state: modelState,
+          rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
+          transientRetries: transientRetryCount, transientWaitMs, state: modelState,
           questions, response: null, error: message,
           authority: { pi: 'model', beta: 'model', failure: 'fatal-no-fallback' },
           ...providerDiagnosticsField,
