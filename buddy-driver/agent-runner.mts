@@ -78,7 +78,7 @@ import type { PendingProposals } from './proposal-staging.ts'
 import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { isHostileEntityName } from '../jev-agent/src/state.ts'
-import { AGENT_SNAPSHOT_SCHEMA_VERSION, goalQueueSnapshotFromState } from './state-snapshot.ts'
+import { AGENT_SNAPSHOT_SCHEMA_VERSION, goalQueueSnapshotFromState, rebindSnapshotServerIdentity } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
 import { connectAfterGenerationValidation, generationModuleReadinessError } from './generation-connection-gate.ts'
@@ -324,6 +324,24 @@ function loadState(): AgentSnapshot {
 }
 
 let state = loadState()
+const serverRebind = rebindSnapshotServerIdentity(state, SERVER_ID)
+if (serverRebind.changed) {
+  const previousWorldKey = {
+    serverId: serverRebind.previousServerId,
+    dimension: state.dimension,
+    worldEpoch: state.worldEpoch,
+  }
+  state = serverRebind.snapshot
+  log('WORLD_IDENTITY_REBOUND', {
+    previousServerId: serverRebind.previousServerId,
+    serverId: SERVER_ID,
+    previousWorldKey,
+    worldKey: { serverId: state.serverId, dimension: state.dimension, worldEpoch: state.worldEpoch },
+    archivedWorldMemoryKeys: Object.keys(state.worldMemoryByKey),
+    clearedWorldBoundLedger: true,
+    clearedMilestone: true,
+  })
+}
 
 /**
  * Issue #48: revision at which the authoritative ledger was last committed by an

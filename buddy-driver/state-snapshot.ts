@@ -316,6 +316,41 @@ export function restoreAgentSnapshot(raw: unknown, base: AgentSnapshot, log: Sna
   return result.snapshot
 }
 
+export interface SnapshotServerRebindResult {
+  snapshot: AgentSnapshot
+  changed: boolean
+  previousServerId: string
+}
+
+/**
+ * A persisted snapshot is bound to the server identity that produced its
+ * world-scoped facts. When the HOST is configured for another server, retain
+ * the old keyed memory as archival state but start a new epoch with no active
+ * generation, ladder milestone, or world-bound plan/ledger. The live connection
+ * will establish current server truth after boot.
+ */
+export function rebindSnapshotServerIdentity(snapshot: AgentSnapshot, serverId: string): SnapshotServerRebindResult {
+  if (snapshot.serverId === serverId) return { snapshot, changed: false, previousServerId: snapshot.serverId }
+
+  const previousServerId = snapshot.serverId
+  return {
+    changed: true,
+    previousServerId,
+    snapshot: {
+      ...snapshot,
+      serverId,
+      worldEpoch: Math.max(1, snapshot.worldEpoch) + 1,
+      generationId: null,
+      lastGenerationId: snapshot.generationId ?? snapshot.lastGenerationId,
+      dimension: 'minecraft:overworld',
+      levelName: null,
+      milestoneIndex: -1,
+      milestone: null,
+      ledger: null,
+    },
+  }
+}
+
 /** Bump the commit revision and stamp the current schema. HOST-only commit step. */
 export function bumpRevision(snapshot: AgentSnapshot, now = Date.now()): number {
   snapshot.schemaVersion = AGENT_SNAPSHOT_SCHEMA_VERSION
