@@ -112,6 +112,10 @@ export interface DecisionSubgoalLog {
 export interface DecisionRecord {
   record: 'decision'
   decisionId: string
+  /** Host-issued run/generation/source identity; never read from Jev or candidate data. */
+  runId: string | null
+  generationId: string | null
+  sourceSha: string | null
   ts: string
   stateHash: string
   tick: number
@@ -232,10 +236,59 @@ export interface DecisionRecordInput {
   inventory: Record<string, number>
 }
 
-export function makeDecisionRecord(input: DecisionRecordInput): DecisionRecord {
+/**
+ * Identity captured by the resident HOST for the active controller generation.
+ * This is a separate argument from the Jev result and candidate payload so those
+ * untrusted semantic inputs cannot claim another run's evidence lineage.
+ */
+export interface DecisionRecordProvenance {
+  readonly runId: string | null
+  readonly generationId: string | null
+  readonly sourceSha: string | null
+}
+
+/** Copy only the typed Jev wire fields; provider extras are not record fields. */
+function logDecisionJev(input: DecisionJevLog): DecisionJevLog {
+  const answers = Object.fromEntries(
+    Object.entries(input.answers).map(([key, answer]) => [key, {
+      name: answer.name,
+      type: answer.type,
+      value: answer.value,
+      probability: answer.probability,
+      confidence: answer.confidence,
+      probabilities: answer.probabilities === null ? null : { ...answer.probabilities },
+      legend: answer.legend === null ? null : [...answer.legend],
+      note: answer.note,
+    }]),
+  )
+  return {
+    policy: input.policy,
+    source: input.source,
+    model: input.model,
+    callId: input.callId,
+    latencyMs: input.latencyMs,
+    usage: input.usage === null ? null : { ...input.usage },
+    answers,
+    dangerGate: {
+      legend: [...input.dangerGate.legend],
+      value: input.dangerGate.value,
+      level: input.dangerGate.level,
+      confidence: input.dangerGate.confidence,
+      threshold: input.dangerGate.threshold,
+      confidenceQualified: input.dangerGate.confidenceQualified,
+      reason: input.dangerGate.reason,
+    },
+    trigger: input.trigger,
+  }
+}
+
+export function makeDecisionRecord(input: DecisionRecordInput, provenance: DecisionRecordProvenance): DecisionRecord {
   return {
     record: 'decision',
     decisionId: input.decisionId,
+    runId: provenance.runId,
+    generationId: provenance.generationId,
+    sourceSha: provenance.sourceSha,
     ts: new Date().toISOString(),
     stateHash: input.stateHash,
     tick: input.tick,
@@ -247,7 +300,7 @@ export function makeDecisionRecord(input: DecisionRecordInput): DecisionRecord {
       input.semanticOptionInstanceId ?? input.goalQueueState.current?.semanticOptionInstanceId ?? input.goalQueueState.current?.optionInstanceId ?? null,
     strategy: input.strategy ?? null,
     candidates: logCandidates(input.candidates, input.failedCandidates),
-    jev: input.jev,
+    jev: logDecisionJev(input.jev),
     chosenAction: input.chosenAction,
     confidence: input.confidence,
     dangerOverride: input.dangerOverride,

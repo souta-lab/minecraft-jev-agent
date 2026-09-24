@@ -19,7 +19,7 @@ import type { ActiveItemUseState, AgentSignals, BlockState, EntityState, GoalSta
 import { applyReachabilityGate, defaultCandidateOptions, formatExploreRouteBlocked, formatResourceSourceExclusion, generateCandidates, generateGroundedCandidates, resourceDimensionMatches, resourceDimensionRefusals, resourceDimensionVerdict, resourceSourceExclusions } from './candidates.ts'
 import type { Candidate, CandidateAffordance, CandidateKind, CandidateOptions, CandidateReachability, ExploreRouteBlocked, GroundedCandidatesResult, ReachabilityGateOptions, ResourceSourceExclusion } from './candidates.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
-import type { CalibrationEntry, DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionResultLog, DecisionSubgoalLog } from './decisionlog.ts'
+import type { CalibrationEntry, DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionRecordProvenance, DecisionResultLog, DecisionSubgoalLog } from './decisionlog.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { CraftOp, CraftPlanResult, RecipeIndex, RecipeIngredient, RecipeVariant } from './crafting.ts'
 import { emptyGoalQueueState, GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
@@ -202,6 +202,7 @@ export type {
   JevOutcomeRecord,
   JevQuestionType,
   DecisionRecord,
+  DecisionRecordProvenance,
   DecisionJevLog,
   DecisionLlmResummonLog,
   DecisionResultLog,

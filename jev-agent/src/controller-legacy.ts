@@ -81,7 +81,7 @@ import {
   postconditionHash,
   targetIdentityKey,
 } from './skillCommitment.ts'
-import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
+import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionRecordProvenance, DecisionSubgoalLog } from './decisionlog.ts'
 // Issue #437: the Skill <-> Jev semantic boundary (projection, decision epochs,
 // stable candidate identity, typed SkillOutcomePacket). Raw mechanical telemetry
 // stays on the log plane; only these objects cross into policy.
@@ -611,6 +611,8 @@ export interface JevAgentOptions {
   serverId: string
   /** resident world epoch captured when this controller generation was created */
   worldEpoch: number
+  /** Immutable lineage supplied by the resident HOST for this controller generation. */
+  decisionProvenance: Readonly<DecisionRecordProvenance>
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -662,6 +664,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   prereqRankPolicy: resolvePrereqRankPolicy(),
   serverId: 'local',
   worldEpoch: 0,
+  decisionProvenance: { runId: null, generationId: null, sourceSha: null },
 }
 
 export interface RunSummary {
@@ -1238,7 +1241,13 @@ const PATH_PROBE_TIMEOUT_MS = 750
 const { goals } = pathfinderModule
 
 function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
-  return { ...options, reach: Math.min(options.reach, MAX_BLOCK_REACH) }
+  return {
+    ...options,
+    // Copy the host-issued tuple at each controller configuration boundary. The
+    // model result and candidate objects are never consulted for this identity.
+    decisionProvenance: Object.freeze({ ...options.decisionProvenance }),
+    reach: Math.min(options.reach, MAX_BLOCK_REACH),
+  }
 }
 
 export interface WaitWedgeInput {
@@ -4645,7 +4654,7 @@ export class JevController {
         llm: this.llmLog(),
         subgoal: this.consumeTransition(),
         inventory: state.inventory.counts,
-      })
+      }, this.options.decisionProvenance)
 
       if (!guarded.ok) {
         // §8/§17: a reflex the mechanical guard REFUSED is a typed failure, never

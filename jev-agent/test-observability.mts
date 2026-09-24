@@ -13,7 +13,8 @@ import {
 import type { JevAnswer, JevPolicyKind, JevResult, JevSource } from './src/jev.ts'
 import { gateDanger } from './src/gating.ts'
 import { makeDecisionRecord } from './src/decisionlog.ts'
-import type { DecisionJevLog, DecisionRecord } from './src/decisionlog.ts'
+import type { DecisionJevLog, DecisionRecord, DecisionRecordProvenance } from './src/decisionlog.ts'
+import type { Candidate } from './src/candidates.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, optionIdForGoal, planRevisionForGoal } from './src/causal.ts'
 import type { CausalGoalRef } from './src/causal.ts'
 
@@ -53,7 +54,14 @@ function choiceAnswer(name: string, id: string, probability: number): JevAnswer 
   }
 }
 
-function decisionRecord(answers: Record<string, JevAnswer>): DecisionRecord {
+function decisionRecord(
+  answers: Record<string, JevAnswer>,
+  provenance: DecisionRecordProvenance = { runId: null, generationId: null, sourceSha: null },
+  spoofedIdentity: DecisionRecordProvenance | null = null,
+): DecisionRecord {
+  if (spoofedIdentity !== null) {
+    for (const answer of Object.values(answers)) Object.assign(answer, spoofedIdentity)
+  }
   const policy: JevPolicyKind = 'typesafe'
   const source: JevSource = 'jev'
   const jev: DecisionJevLog = {
@@ -67,6 +75,21 @@ function decisionRecord(answers: Record<string, JevAnswer>): DecisionRecord {
     dangerGate: gateDanger(answers.danger),
     trigger: 'start',
   }
+  const untrustedJev = spoofedIdentity === null
+    ? jev
+    : Object.assign(jev, spoofedIdentity) as DecisionJevLog
+  const candidate = {
+    id: 'MOVE:b1_64_0',
+    kind: 'MOVE',
+    label: 'move',
+    targetName: null,
+    inReach: true,
+    meta: {},
+    createdAt: Date.now(),
+  } as unknown as Candidate
+  const untrustedCandidate = spoofedIdentity === null
+    ? candidate
+    : Object.assign(candidate, spoofedIdentity) as Candidate
   return makeDecisionRecord({
     decisionId: 'decision-1',
     tick: 1,
@@ -76,9 +99,9 @@ function decisionRecord(answers: Record<string, JevAnswer>): DecisionRecord {
     optionId: 'collect:raw_iron',
     semanticOptionInstanceId: 'system2:front_raw_iron',
     strategy: 'llm:collect',
-    candidates: [],
+    candidates: [untrustedCandidate],
     failedCandidates: {},
-    jev,
+    jev: untrustedJev,
     chosenAction: 'MINE:b1_64_0',
     confidence: 0.8,
     dangerOverride: null,
@@ -89,7 +112,7 @@ function decisionRecord(answers: Record<string, JevAnswer>): DecisionRecord {
     llm: { called: false, runtimeCalls: 0, planCalls: 0 },
     subgoal: null,
     inventory: {},
-  })
+  }, provenance)
 }
 
 const GOAL: CausalGoalRef = {
@@ -114,6 +137,39 @@ addCase('#32: raw 0.08 survives API parse -> result -> decision record JSONL', (
     json.includes('"probability":0.08') &&
     record.jev.answers.abandon_option?.value === 0.08
   return { pass, detail: `probability=${estimate?.probability} atHalf=${estimate?.atHalf} would=${estimate?.would} jsonHasRaw=${json.includes('"probability":0.08')}` }
+})
+
+addCase('#source-lineage: every serialized Jev decision keeps HOST provenance; Jev/candidate fields cannot replace it', () => {
+  const host: DecisionRecordProvenance = {
+    runId: 'run-host-issued-1',
+    generationId: 'generation-host-issued-7',
+    sourceSha: 'a'.repeat(40),
+  }
+  const spoofed: DecisionRecordProvenance = {
+    runId: 'run-model-invented',
+    generationId: 'generation-candidate-invented',
+    sourceSha: 'b'.repeat(40),
+  }
+  const record = decisionRecord({ abandon_option: boolAnswer('abandon_option', 0.08) }, host, spoofed)
+  const serialized = JSON.stringify(record)
+  const roundTrip = JSON.parse(serialized) as DecisionRecord
+  const pass =
+    roundTrip.runId === host.runId &&
+    roundTrip.generationId === host.generationId &&
+    roundTrip.sourceSha === host.sourceSha &&
+    !serialized.includes('run-model-invented') &&
+    !serialized.includes('generation-candidate-invented') &&
+    !serialized.includes('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+  return {
+    pass,
+    detail: `runId=${roundTrip.runId} generationId=${roundTrip.generationId} sourceSha=${roundTrip.sourceSha} spoofRejected=${pass}`,
+  }
+})
+
+addCase('#source-lineage: missing HOST context stays explicitly unbound', () => {
+  const record = JSON.parse(JSON.stringify(decisionRecord({ action: choiceAnswer('action', 'WAIT', 1) }))) as DecisionRecord
+  const pass = record.runId === null && record.generationId === null && record.sourceSha === null
+  return { pass, detail: `runId=${record.runId} generationId=${record.generationId} sourceSha=${record.sourceSha}` }
 })
 
 addCase('#56: completion preserves the canonical semantic Option instance', () => {

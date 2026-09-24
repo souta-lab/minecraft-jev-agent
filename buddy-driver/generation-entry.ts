@@ -2958,6 +2958,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     forceFallbackPolicy: (process.env.BUDDY_POLICY ?? '').trim().toLowerCase() === 'fallback',
     serverId: ctx.worldKey.serverId,
     worldEpoch: ctx.worldKey.worldEpoch,
+    // Pass HOST identities through a dedicated options channel. DecisionRecord
+    // construction does not inspect Jev answers or candidate metadata for these.
+    decisionProvenance: {
+      runId: ctx.runId ?? null,
+      generationId: id,
+      sourceSha: ctx.sourceSha ?? null,
+    },
     terminateOnModelFailure: terminateResident,
     recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null,
     actuation: 'pathfinder',
