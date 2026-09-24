@@ -401,10 +401,12 @@ export function planPrepare({
   const worldDir = join(resolve(container), levelName2)
   const propertiesPath = join(resolve(container), 'server.properties')
   let launchIdentity = null
-  try {
-    launchIdentity = expectedLeafLaunchIdentity(resolvedDoc, resolve(container))
-  } catch (error) {
-    refusals.push({ reason: `leaf_runtime_identity_unavailable: ${error instanceof Error ? error.message : String(error)}` })
+  if (milestone === 'M3') {
+    try {
+      launchIdentity = expectedLeafLaunchIdentity(resolvedDoc, resolve(container))
+    } catch (error) {
+      refusals.push({ reason: `leaf_runtime_identity_unavailable: ${error instanceof Error ? error.message : String(error)}` })
+    }
   }
   const files = []
 

@@ -214,6 +214,7 @@ function scanLines(lines, fromOffset = 0) {
   })
   assert.equal(plan.status, 'PLANNED')
   assert.equal(plan.check.status, 'CLEAN')
+  assert.equal(plan.launchIdentity, null, 'M2 staging does not require the M3 Leaf/JVM startup-attestation identity')
   assert.equal(plan.runDir, join(root, M2_RUN_DIR_NAME))
   assert.ok(plan.files.some((file) => file.path.includes(`${M2_DATAPACK_DIR}/data/${M2_DATAPACK_NAMESPACE}/function/set_gamerules.mcfunction`)))
   assert.ok(!plan.actions.some((action) => action.path === sharedProperties), 'M2 staging must not plan a shared properties write')
