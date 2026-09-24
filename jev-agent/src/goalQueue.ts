@@ -122,8 +122,11 @@ export interface DominatedPrerequisiteDecision {
   outcome?: readonly string[]
 }
 
-export function formatPrereqRetired(goal: QueuedGoal, decision: { dependents: number; causalOwner: string | null; dependentIds: readonly string[] }): string {
-  const causal = ` causalOwner=${decision.causalOwner ?? 'unknown'} consumers=[${decision.dependentIds.join(',')}]`
+export function formatPrereqRetired(
+  goal: QueuedGoal,
+  decision: { dependents: number; causalOwnerIds: readonly string[]; dependentIds: readonly string[] },
+): string {
+  const causal = ` causalOwners=[${decision.causalOwnerIds.join(',')}] consumers=[${decision.dependentIds.join(',')}]`
   return (
     `${PREREQ_RETIRED} id=${goal.id} item=${goal.targetItem ?? 'none'} reason=all_dependents_resolved` +
     ` dependents=${decision.dependents}${causal} protected=${goal.protected === true} core=${goal.core === true}`
@@ -707,6 +710,12 @@ export interface QueuedGoal {
   semanticOptionInstanceId?: string
   semanticOptionTemplateId?: string
   semanticOptionIntent?: string
+  /**
+   * Runtime causal occurrence witnesses for prerequisite reconciliation.
+   * Unlike semantic Option identity, these distinguish accepted plan occurrences
+   * and are unioned when one compiled producer is shared by multiple consumers.
+   */
+  prerequisiteCausalOwnerIds?: string[]
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
   /** Code-grounded navigation target. System2 selects the semantic goal but never supplies these coordinates. */
@@ -781,6 +790,8 @@ export interface PlannedGoal {
   semanticOptionInstanceId?: string
   semanticOptionTemplateId?: string
   semanticOptionIntent?: string
+  /** Persisted causal occurrence witnesses for exact dependency edges (#467). */
+  prerequisiteCausalOwnerIds?: string[]
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
   /** Code-grounded navigation target. System2 selects the semantic goal but never supplies these coordinates. */
@@ -1176,6 +1187,14 @@ export class GoalQueue {
     const insert = (plan: PlannedGoal): void => {
       const key = goalInstanceKey(plan)
       if (unfinishedInstances.has(key)) {
+        const existing = this.goals.find(
+          (goal) => goalInstanceKey(goal) === key && (goal.status === 'pending' || goal.status === 'active'),
+        )
+        if (existing !== undefined && plan.prerequisiteCausalOwnerIds !== undefined) {
+          existing.prerequisiteCausalOwnerIds = [
+            ...new Set([...(existing.prerequisiteCausalOwnerIds ?? []), ...plan.prerequisiteCausalOwnerIds]),
+          ].sort()
+        }
         options.onDuplicate?.(formatDuplicateGoalSkipped(plan))
         return
       }
@@ -1286,6 +1305,9 @@ export class GoalQueue {
       ...(plan.semanticOptionInstanceId === undefined ? {} : { semanticOptionInstanceId: plan.semanticOptionInstanceId }),
       ...(plan.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: plan.semanticOptionTemplateId }),
       ...(plan.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: plan.semanticOptionIntent }),
+      ...(plan.prerequisiteCausalOwnerIds === undefined
+        ? {}
+        : { prerequisiteCausalOwnerIds: [...plan.prerequisiteCausalOwnerIds] }),
       ...(plan.placementCells === undefined ? {} : { placementCells: [...plan.placementCells] }),
       ...(plan.targetPosition === undefined
         ? {}
@@ -1545,7 +1567,7 @@ export class GoalQueue {
         goal.status = 'impossible'
         goal.detail =
           `retired prerequisite: reason=${decision.reason} dependents=${decision.dependents}` +
-          ` causalOwner=${decision.causalOwner ?? 'unknown'} consumers=[${decision.dependentIds.join(',')}]`
+          ` causalOwners=[${decision.causalOwnerIds.join(',')}] consumers=[${decision.dependentIds.join(',')}]`
         goal.updatedAt = now
         retired.push(goal)
         sink(formatPrereqRetired(goal, decision))
@@ -1595,7 +1617,12 @@ export class GoalQueue {
   snapshot(): GoalQueueSnapshot {
     return {
       counter: this.counter,
-      goals: this.goals.map((goal) => ({ ...goal })),
+      goals: this.goals.map((goal) => ({
+        ...goal,
+        ...(goal.prerequisiteCausalOwnerIds === undefined
+          ? {}
+          : { prerequisiteCausalOwnerIds: [...goal.prerequisiteCausalOwnerIds] }),
+      })),
       revision: this.queueRevision,
       ...(this.planIdentity === null ? {} : { planIdentity: { ...this.planIdentity } }),
     }
@@ -1604,7 +1631,12 @@ export class GoalQueue {
   restore(snapshot: GoalQueueSnapshot): void {
     this.counter = snapshot.counter
     this.goals = snapshot.goals.map((goal) => {
-      const copy = { ...goal }
+      const copy = {
+        ...goal,
+        ...(goal.prerequisiteCausalOwnerIds === undefined
+          ? {}
+          : { prerequisiteCausalOwnerIds: [...goal.prerequisiteCausalOwnerIds] }),
+      }
       const spec = copy.optionSpec ?? compilePlannedGoal(queuedToPlanned(copy as QueuedGoal))
       copy.optionSpec = spec
       copy.optionTemplateId = copy.optionTemplateId ?? spec.id

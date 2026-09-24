@@ -36,6 +36,7 @@ const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
 const FLINT_STEEL_OWNER = 'craft:flint_and_steel#instance'
+const FLINT_STEEL_CAUSAL_OWNER = 'prereq:fixture:flint_and_steel'
 
 const world = emptyWorldMemory()
 
@@ -229,9 +230,9 @@ addCase('(e) the existing orphaned-smelt retirement still behaves', () => {
     counter: 47,
     goals: [
       row({ id: 'g1:collect:raw_iron', kind: 'collect', targetItem: 'raw_iron', requiredCount: 1, status: 'done', haveCount: 3, protected: true, core: true }),
-      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true, semanticOptionInstanceId: FLINT_STEEL_OWNER }),
+      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true, semanticOptionInstanceId: FLINT_STEEL_OWNER, prerequisiteCausalOwnerIds: [FLINT_STEEL_CAUSAL_OWNER] }),
       row({ id: 'g3:collect:flint', kind: 'collect', targetItem: 'flint', requiredCount: 1, status: 'done', haveCount: 1, protected: true, core: true }),
-      row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1, protected: true, core: true, semanticOptionInstanceId: FLINT_STEEL_OWNER }),
+      row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1, protected: true, core: true, semanticOptionInstanceId: FLINT_STEEL_OWNER, prerequisiteCausalOwnerIds: [FLINT_STEEL_CAUSAL_OWNER] }),
       row({ id: 'g5:collect:obsidian', kind: 'collect', targetItem: 'obsidian', requiredCount: 10, status: 'active', protected: true, core: true }),
     ],
     revision: 7,
@@ -241,7 +242,7 @@ addCase('(e) the existing orphaned-smelt retirement still behaves', () => {
   const pass =
     smelt?.status === 'impossible' &&
     smelt.detail?.includes('reason=all_dependents_resolved') === true &&
-    retired.some((line) => line.includes('id=g2:smelt:iron_ingot') && line.includes(`causalOwner=${FLINT_STEEL_OWNER}`) && line.includes('consumers=[g4:craft:flint_and_steel]')) &&
+    retired.some((line) => line.includes('id=g2:smelt:iron_ingot') && line.includes(`causalOwners=[${FLINT_STEEL_CAUSAL_OWNER}]`) && line.includes('consumers=[g4:craft:flint_and_steel]')) &&
     queue.current?.targetItem === 'obsidian' &&
     marker(lines, PREREQ_DOMINATED).length === 0
   return { pass, detail: `smelt=${smelt?.status} current=${queue.current?.id ?? 'none'} retired=[${retired.join(' | ')}]` }

@@ -226,7 +226,7 @@ addCase('the host wrapper emits the blocked-Option log and never silently drops 
   // the return statement's source text, which the system2-compile lane had to
   // change when it added typed provenance to that same return; the invariant is
   // what matters, not the literal.
-  const incoming: PlannedGoal = { kind: 'collect', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1 }
+  const incoming: PlannedGoal = { kind: 'collect', description: 'collect 1 x raw_iron', targetItem: 'raw_iron', requiredCount: 1 }
   const inner = { model: 'fixture-brain', plan: () => Promise.resolve({ op: 'patch' as const, goals: [incoming], note: 'fixture' }) }
   const events: string[] = []
   const wrapper = new OptionCompilingSystem2(inner, {
@@ -234,12 +234,24 @@ addCase('the host wrapper emits the blocked-Option log and never silently drops 
     snapshot: () => makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:overworld', position: null }),
     enabled: true,
   })
-  const out = await wrapper.plan({ reason: 'queue_empty', detail: 'fixture', tick: 1 } as Parameters<typeof wrapper.plan>[0])
+  const out = await wrapper.plan({
+    reason: 'queue_empty',
+    detail: 'fixture',
+    tick: 1,
+    requestContext: { requestId: 'req-wrapper-occurrence' },
+  } as Parameters<typeof wrapper.plan>[0])
+  const producer = out.goals.find((goal) => goal.kind === 'craft' && goal.targetItem === 'stone_pickaxe')
+  const consumer = out.goals.find((goal) => goal.kind === 'collect' && goal.targetItem === 'raw_iron')
+  const causalOwner = 'prereq:req-wrapper-occurrence:collect:raw_iron'
   const goalsFromCompiled =
-    out.goals.length === 1 && out.goals[0]?.targetItem === 'log' && typeof out.goals[0]?.optionTemplateId === 'string'
+    producer !== undefined &&
+    consumer !== undefined &&
+    typeof producer.optionTemplateId === 'string' &&
+    producer.prerequisiteCausalOwnerIds?.includes(causalOwner) === true &&
+    consumer.prerequisiteCausalOwnerIds?.includes(causalOwner) === true
   return {
     pass: emitsSharedMarker && carriesStructured && goalsFromCompiled,
-    detail: `emit=${emitsSharedMarker} structured=${carriesStructured} goalsFromCompiled=${goalsFromCompiled} compiled=${JSON.stringify(out.goals.map((goal) => goal.optionTemplateId ?? null))} logs=${events.join(',')}`,
+    detail: `emit=${emitsSharedMarker} structured=${carriesStructured} goalsFromCompiled=${goalsFromCompiled} causalOwner=${causalOwner} compiled=${JSON.stringify(out.goals.map((goal) => goal.optionTemplateId ?? null))} logs=${events.join(',')}`,
   }
 })
 

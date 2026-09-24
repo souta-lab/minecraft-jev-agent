@@ -1,11 +1,10 @@
-// option-brain.ts - opt-in adapter that compiles PlannerBrain goals into
-// grounded Options before they are applied to the GoalQueue (#21).
+// option-brain.ts - host adapter that compiles System2 goals into grounded
+// Options before they are applied to the GoalQueue (#11/#21).
 //
-// The GoalQueue remains the EXECUTION LEDGER: this wrapper only transforms the
-// planned goal list on its way in. It is a transparent pass-through unless
-// `BUDDY_OPTION_COMPILER` is enabled, so the current behavior (and the
-// `llm.called == false` deterministic guarantee) is unchanged by default.
+// The GoalQueue remains the EXECUTION LEDGER. Normal runs compile Options by
+// default; explicit `BUDDY_OPTION_COMPILER=off` is a rollback/A-B baseline.
 import type { Bot } from 'mineflayer'
+import { randomUUID } from 'node:crypto'
 import { applyCompiledPlan, emitBlockedOptionLogs, resolveOptionCompilerEnabled, snapshotFromResident, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
@@ -25,7 +24,8 @@ export interface OptionBrainOptions {
 
 /**
  * Wrap a `System2Brain` so its bounded goal list is compiled into Options with
- * dependency expansion. Disabled by default: `plan()` then delegates verbatim.
+ * dependency expansion. The facade enables this by default; explicit OFF makes
+ * `plan()` delegate verbatim for the rollback baseline.
  */
 export class OptionCompilingSystem2 implements System2Brain {
   private readonly inner: System2Brain
@@ -61,13 +61,19 @@ export class OptionCompilingSystem2 implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const plan = await this.inner.plan(request)
     if (!this.enabled || plan.goals.length === 0) return plan
+    // Semantic Option identity survives identical replans. Bind prerequisite
+    // edges to this accepted System2 request occurrence so historical consumers
+    // cannot retire a fresh producer merely because their WHATs match.
+    const causalOccurrenceId = request.requestContext?.requestId ?? randomUUID()
     const result = applyCompiledPlan(plan.goals, this.snapshot(), {
       enabled: true,
       maxDepth: this.maxDepth,
+      causalOccurrenceId,
       onDedupe: (record) => this.log('OPTION_DEDUPED', { id: record.id, instances: record.instances }),
     })
     this.log('OPTION_COMPILE', {
       enabled: true,
+      causalOccurrenceId,
       planned: plan.goals.map((goal) => goal.description),
       compiled: result.goals.map((goal) => goal.description),
       specs: result.specs.map((spec) => spec.id),

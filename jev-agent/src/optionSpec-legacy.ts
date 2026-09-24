@@ -1159,6 +1159,9 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.semanticOptionInstanceId === undefined ? {} : { semanticOptionInstanceId: goal.semanticOptionInstanceId }),
     ...(goal.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: goal.semanticOptionTemplateId }),
     ...(goal.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: goal.semanticOptionIntent }),
+    ...(goal.prerequisiteCausalOwnerIds === undefined
+      ? {}
+      : { prerequisiteCausalOwnerIds: [...goal.prerequisiteCausalOwnerIds] }),
     ...(goal.placementCells === undefined ? {} : { placementCells: [...goal.placementCells] }),
     ...(goal.targetPosition === undefined
       ? {}
@@ -1724,12 +1727,8 @@ export interface QueuePrerequisiteRow {
   targetItem?: string | null
   /** lifecycle status on a queued row; absent on a fresh `PlannedGoal`. */
   status?: string
-  /**
-   * Explicit semantic Option owner. The Option compiler stamps one owner on a
-   * prerequisite and the consumer it expanded for; absent means legacy or
-   * independent work with no proven causal edge.
-   */
-  semanticOptionInstanceId?: string
+  /** Accepted dependency-occurrence witnesses persisted on queue rows. */
+  prerequisiteCausalOwnerIds?: readonly string[]
   protected?: boolean
   core?: boolean
   targetY?: number | null
@@ -1847,12 +1846,12 @@ export function dependentRows(
   row: QueuePrerequisiteRow,
   ledger: readonly QueuePrerequisiteRow[],
 ): QueuePrerequisiteRow[] {
-  const causalOwner = row.semanticOptionInstanceId
-  if (typeof row.targetItem !== 'string' || row.targetItem.length === 0 || typeof causalOwner !== 'string' || causalOwner.length === 0) return []
+  const causalOwners = new Set(row.prerequisiteCausalOwnerIds ?? [])
+  if (typeof row.targetItem !== 'string' || row.targetItem.length === 0 || causalOwners.size === 0) return []
   return ledger.filter(
     (other) =>
       other !== row &&
-      other.semanticOptionInstanceId === causalOwner &&
+      other.prerequisiteCausalOwnerIds?.some((owner) => causalOwners.has(owner)) === true &&
       queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicateExactly(row, predicate)),
   )
 }
@@ -1864,14 +1863,14 @@ export interface OrphanPrerequisiteDecision {
   reason: string
   /** number of resolved dependent rows that consumed this row's target */
   dependents: number
-  /** shared Option owner that proves the prerequisite and consumer are causal */
-  causalOwner: string | null
+  /** exact plan-occurrence witnesses shared by these prerequisite/consumer edges */
+  causalOwnerIds: string[]
   /** concrete ledger row identities for the consumers used in this decision */
   dependentIds: string[]
 }
 
 function keepRow(reason: string): OrphanPrerequisiteDecision {
-  return { retire: false, reason, dependents: 0, causalOwner: null, dependentIds: [] }
+  return { retire: false, reason, dependents: 0, causalOwnerIds: [], dependentIds: [] }
 }
 
 /**
@@ -1883,8 +1882,9 @@ function keepRow(reason: string): OrphanPrerequisiteDecision {
  *     (an EXACT item/station/tier edge - a bare resource-class match does not
  *     count, see `dependentRows`), otherwise it is not a prerequisite and
  *     retiring it would drop live work;
- *   - producer and consumer carry the same explicit semantic Option owner,
- *     proving this prerequisite came from the consumer's dependency expansion;
+ *   - producer and consumer carry a shared, persisted occurrence token created
+ *     by one accepted dependency expansion; semantic Option identity alone is
+ *     stable across replans and cannot prove this edge;
  *   - every consuming row is resolved (done/impossible), so no live row still
  *     requires the target.
  *
@@ -1896,8 +1896,8 @@ function keepRow(reason: string): OrphanPrerequisiteDecision {
  * becomes `impossible` with a recording `detail`, and emits `PREREQ_RETIRED`.
  *
  * Deliberately conservative: a compatibility match without the shared causal
- * owner is not a dependency edge. This prevents historical rows from deleting a
- * fresh independent goal (#467). A live causal consumer keeps the row, so a
+ * occurrence token is not a dependency edge. This prevents historical rows
+ * from deleting a fresh independent goal (#467). A live causal consumer keeps the row, so a
  * genuinely required but unsatisfiable prerequisite still fails visibly instead
  * of being silently removed (issue #55 / AGENTS.md authority invariant).
  */
@@ -1907,18 +1907,20 @@ export function orphanedPrerequisiteDecision(
 ): OrphanPrerequisiteDecision {
   const item = row.targetItem
   if (typeof item !== 'string' || item.length === 0) return keepRow('no_target_item')
-  if (typeof row.semanticOptionInstanceId !== 'string' || row.semanticOptionInstanceId.length === 0) {
-    return keepRow('missing_causal_option_owner')
+  const rowOwners = new Set(row.prerequisiteCausalOwnerIds ?? [])
+  if (rowOwners.size === 0) {
+    return keepRow('missing_causal_occurrence_owner')
   }
   const dependents = dependentRows(row, ledger)
   if (dependents.length === 0) return keepRow('no_dependents')
   const dependentIds = dependents.map((other) => other.id).filter((id): id is string => typeof id === 'string' && id.length > 0)
+  const causalOwnerIds = [...new Set(dependents.flatMap((other) => (other.prerequisiteCausalOwnerIds ?? []).filter((owner) => rowOwners.has(owner))))].sort()
   if (dependentIds.length !== dependents.length) {
     return {
       retire: false,
       reason: 'missing_consumer_identity',
       dependents: dependents.length,
-      causalOwner: row.semanticOptionInstanceId,
+      causalOwnerIds,
       dependentIds,
     }
   }
@@ -1928,7 +1930,7 @@ export function orphanedPrerequisiteDecision(
       retire: false,
       reason: 'dependent_unfinished',
       dependents: dependents.length,
-      causalOwner: row.semanticOptionInstanceId,
+      causalOwnerIds,
       dependentIds,
     }
   }
@@ -1936,7 +1938,7 @@ export function orphanedPrerequisiteDecision(
     retire: true,
     reason: 'all_dependents_resolved',
     dependents: dependents.length,
-    causalOwner: row.semanticOptionInstanceId,
+    causalOwnerIds,
     dependentIds,
   }
 }
@@ -2065,6 +2067,8 @@ export function applyCompiledPlan(
     enabled?: boolean
     custom?: CustomPredicateRegistry
     maxDepth?: number
+    /** Unique accepted System2 request/plan occurrence, never the semantic Option id. */
+    causalOccurrenceId?: string
     onDedupe?: (record: OptionDedupeRecord) => void
   },
 ): OptionCompileResult {
@@ -2072,6 +2076,7 @@ export function applyCompiledPlan(
   const specs: OptionSpec[] = []
   const order: string[] = []
   const counts = new Map<string, number>()
+  const causalOwnersByInstanceId = new Map<string, Set<string>>()
   const added: string[] = []
   const blocked: string[] = []
   const blockedOptions: BlockedOptionEntry[] = []
@@ -2086,8 +2091,20 @@ export function applyCompiledPlan(
       continue
     }
     const expansion = expandOptionDependencies(spec, snapshot, { custom: options?.custom, maxDepth: options?.maxDepth })
+    // A semantic Option id intentionally survives replans, so it cannot prove
+    // that a historical consumer caused this producer. Stamp the dependency
+    // closure with a per-request occurrence token; GoalQueue later persists it.
+    const causalOwner =
+      enabled && expansion.added.length > 0 && typeof options?.causalOccurrenceId === 'string'
+        ? `prereq:${options.causalOccurrenceId}:${stableOptionInstanceId(spec)}`
+        : null
     for (const expanded of expansion.specs) {
       const instanceId = stableOptionInstanceId(expanded)
+      if (causalOwner !== null) {
+        const owners = causalOwnersByInstanceId.get(instanceId) ?? new Set<string>()
+        owners.add(causalOwner)
+        causalOwnersByInstanceId.set(instanceId, owners)
+      }
       const previous = counts.get(instanceId)
       if (previous !== undefined) {
         counts.set(instanceId, previous + 1)
@@ -2113,10 +2130,19 @@ export function applyCompiledPlan(
     options?.onDedupe?.(record)
   }
 
+  const compiledGoals = enabled
+    ? optionSpecsToPlannedGoals(specs).map((goal) => {
+        const occurrenceOwners = causalOwnersByInstanceId.get(goal.optionInstanceId ?? '')
+        return occurrenceOwners === undefined || occurrenceOwners.size === 0
+          ? goal
+          : { ...goal, prerequisiteCausalOwnerIds: [...occurrenceOwners].sort() }
+      })
+    : [...planned]
+
   return {
     enabled,
     specs,
-    goals: enabled ? optionSpecsToPlannedGoals(specs) : [...planned],
+    goals: compiledGoals,
     added,
     blocked,
     blockedOptions,
