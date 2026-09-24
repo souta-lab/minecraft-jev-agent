@@ -24,8 +24,11 @@ tools/clean-run-environment.mjs            descriptor schema + clean validator +
 tools/clean-run-prepare.mjs                offline preparation of the clean world (--dry-run / --apply)
 tools/clean-run-server-launch.mjs           Leaf/JVM/JAR argv attestation + allowlisted private console relay and stdout capture
 tools/clean-run-console-capture.mjs         run-bound read-only console query and response capture
+tools/clean-run-resident-control.mjs        legacy resident's native Unix-socket quit request and HOST-lock release wait
+tools/clean-run-acceptance-refresh.mjs      native Unix-socket acceptance refresh and run/source verification
+tools/clean-run-runner-output.mjs           inactive-only immutable archive rotation + fresh owner-only runner.out creation
 tools/clean-run-gate.mjs                   the clean verdict, combined with the canonical bundle
-tools/test-clean-run-harness.mjs           15 offline checks (assisted descriptors are refused)
+tools/test-clean-run-harness.mjs           18 offline checks (assisted descriptors are refused)
 runs/m3-clean-measure/                     read-only measurement that grounds the gamerule table
 ```
 
@@ -82,16 +85,16 @@ re-judges a milestone: it decides only whether the descriptor is admissible
 
 ```bash
 cd <frozen-checkout>            # the tree that WILL produce the run
-bun install --frozen-lockfile
+<absolute-bun> install --frozen-lockfile
 ENV=/home/s0u7a/mc-server/m3-clean-run/environment-m3easy-template.json
 
 # 2a. see exactly what would happen. Writes nothing.
-bun tools/clean-run-prepare.mjs \
+<absolute-bun> tools/clean-run-prepare.mjs \
   --environment "$ENV" \
   --root "$PWD" --dry-run
 
 # 2b. stage it
-bun tools/clean-run-prepare.mjs \
+<absolute-bun> tools/clean-run-prepare.mjs \
   --environment "$ENV" \
   --root "$PWD" --apply
 ```
@@ -136,19 +139,36 @@ match the staged manifest exactly.
 
 ## 3. The run, in order
 
+In these commands, replace `<absolute-bun>` with the absolute Bun executable path
+from the operator checkout (for this host, `/home/s0u7a/.local/bin/bun`). User
+systemd services have a PATH that does not include Bun, so service commands use an
+absolute executable path too.
+
 ```bash
 # 3.1 OPERATOR / H4: stop the current resident through its own control socket,
 #     then wait for it to exit. Stop the current Leaf server gracefully from its
 #     console and wait for that process to exit before starting the clean world.
 #     Do NOT copy, replace, or restore <container>/server.properties.
 #     Keep this ordering: resident stopped -> server stopped -> clean server started.
+#     For the managed unit, use systemctl --user stop ai-buddy-resident.service.
+#     If a legacy direct resident remains, use the repository helper, which sends
+#     only the implementation's native cmd=quit and waits for socket + HOST lock:
+if test -S <frozen-tree>/buddy-driver/data/resident/control.sock; then \
+  <absolute-bun> <frozen-tree>/tools/clean-run-resident-control.mjs --root <frozen-tree>
+fi
 
-# 3.2 start Leaf with the exact wrapper command printed in
+# 3.2 start Leaf with the exact service command printed in
 #     <run-dir>/operator-commands.txt [OPERATOR ACTION — H4]. Use the target-specific
 #     runDir printed by clean-run-prepare under <container>/m3-clean-run/.
-#     Its required arguments have this form; keep the --console-input and --stdout-log
-#     paths and the `--` separator before the actual Java command:
-cd <frozen-checkout> && bun tools/clean-run-server-launch.mjs \
+#     The transient service keeps launcher and Leaf in one systemd cgroup, so the
+#     private FIFO relay survives closing the operator terminal. Keep the
+#     --console-input/--stdout-log paths and both `--` separators:
+systemd-run --user --unit=ai-buddy-clean-leaf --collect --no-block \
+  --property=Restart=no \
+  --property=KillMode=mixed \
+  --property=TimeoutStopSec=30s \
+  --property=WorkingDirectory=<container> \
+  -- <absolute-bun> <frozen-checkout>/tools/clean-run-server-launch.mjs \
   --environment <run-dir>/environment-resolved.json \
   --properties <run-dir>/server.properties.clean \
   --attestation <run-dir>/server-start-attestation.json \
@@ -159,20 +179,30 @@ cd <frozen-checkout> && bun tools/clean-run-server-launch.mjs \
   -- /usr/lib/jvm/java-21-openjdk-amd64/bin/java \
   -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui \
   --config <run-dir>/server.properties.clean \
-  --universe <container> --level-name <levelName> &
-#     Do not replace the wrapper with direct java/setsid or /dev/null stdin. It
+  --universe <container> --level-name <levelName>
+#     Do not replace the wrapper with direct java, a shell background job, or /dev/null stdin. It
 #     verifies --config/--universe/--level-name and staged properties before spawn,
 #     then records actual /proc argv, PID, Java -version output, Java/JAR hashes,
 #     config/manifest hashes and the effective Paper.IgnoreJavaVersion flag. Its private
 #     FIFO relay forwards only the exact ordered read-only queries generated for this
 #     descriptor; direct Leaf stdin is not available. There is no --seed flag; the staged config supplies the seed
-#     on first world creation. The shared server.properties remains untouched. The
+#     on first world creation. Stop this service only after stopping the resident:
+#     systemctl --user stop ai-buddy-clean-leaf.service. The shared server.properties remains untouched. The
 #     wrapper refuses --bonusChest because this Leaf build has no matching properties key.
 
 # 3.3 start the resident only after the clean server is ready, from the same
 #     FROZEN checkout used by --root. This checkout must be fresh so its durable
-#     state is empty. Run the user-systemd command printed as step 5 in
-#     operator-commands.txt. It sets BUDDY_SERVER_PROPERTIES_PATH for HOST seed reading
+#     state is empty. The helper checks host.lock, control.sock and the resident
+#     user-systemd unit. If inactive, it preserves an existing regular single-link
+#     runner.out as owner-read-only under runs/clean-run-runner-archives, then
+#     creates a fresh mode-0600 runner.out. Symlinks and hard links are refused.
+#     Then run the user-systemd command printed as
+#     step 6 in operator-commands.txt. StandardOutput/StandardError append to this
+#     exact runner.out path so BOOT, generation identity, and authority lines reach
+#     the run-scoped evidence readers (`--property=StandardOutput=append:<frozen-checkout>/buddy-driver/runner.out`
+#     and matching StandardError); the external provider env file is not output.
+<absolute-bun> <frozen-checkout>/tools/clean-run-runner-output.mjs --root <frozen-checkout>
+#     The service sets BUDDY_SERVER_PROPERTIES_PATH for HOST seed reading
 #     and BUDDY_SERVER_START_ATTESTATION_PATH / BUDDY_CLEAN_RUN_DESCRIPTOR_PATH so BOOT
 #     can recheck the separate Leaf launch record. Seed-reader configuration alone
 #     never proves Leaf startup argv/config. BOOT must report source=<the frozen sha>
@@ -182,7 +212,7 @@ cd <frozen-checkout> && bun tools/clean-run-server-launch.mjs \
 #     checkout. It sends only `seed` and per-dimension read-only gamerule queries to
 #     the private FIFO, then records actual Leaf log response byte offsets and hashes.
 #     It never accepts pasted responses.
-bun <frozen-checkout>/tools/clean-run-console-capture.mjs \
+<absolute-bun> <frozen-checkout>/tools/clean-run-console-capture.mjs \
   --environment <run-dir>/environment-resolved.json \
   --attestation <run-dir>/server-start-attestation.json \
   --resident-log <frozen-checkout>/buddy-driver/buddy.log --run <RUN_ID>
@@ -196,11 +226,11 @@ bun <frozen-checkout>/tools/clean-run-console-capture.mjs \
 
 # 3.6 refresh the HOST acceptance record with the read-only control query
 #     (it is the only attestation of levelName + seed; it is NOT written at boot)
-printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
-  | socat - UNIX-CONNECT:<frozen-tree>/buddy-driver/data/resident/control.sock
+<absolute-bun> <frozen-tree>/tools/clean-run-acceptance-refresh.mjs \
+  --run <RUN_ID> --source-sha <EXACT_SOURCE_SHA> --root <frozen-tree>
 
 # 3.7 the canonical bundle, with the RESOLVED descriptor as the environment record
-bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
+<absolute-bun> tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
   --root <frozen-tree> \
   --environment <run-dir>/environment-resolved.json \
   --evidence-class live
@@ -208,7 +238,7 @@ bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
 #     bundle.json / bundle.md / artifact-<RUN_ID>.json / metrics.json / commands/
 
 # 3.8 the clean verdict, written NEXT TO the bundle (additive: bundle.json is never modified)
-bun tools/clean-run-gate.mjs \
+<absolute-bun> tools/clean-run-gate.mjs \
   --environment <run-dir>/environment-resolved.json \
   --bundle-dir <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID> \
   --run <RUN_ID> \

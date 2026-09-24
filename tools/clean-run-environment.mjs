@@ -853,15 +853,15 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   const mechanism = descriptor?.cleanRun?.gameruleMechanism ?? {}
   const required = mechanism.primary === 'console'
   const baseDetail = { path, fileSha256, mechanism: mechanism.primary ?? null }
-  if (!required) {
-    return condition({
-      id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: false,
-      reason: `console gamerule capture is not required by cleanRun.gameruleMechanism.primary=${String(mechanism.primary ?? '(unset)')}`,
-      detail: baseDetail,
-    })
-  }
   if (!isPlainObject(artifact)) {
     return condition({ id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: false, reason: 'no run artifact was supplied; console gamerule evidence is evaluated only for an exact run', detail: baseDetail })
+  }
+  if (!required) {
+    return condition({
+      id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: true,
+      reason: `final live acceptance requires machine-captured Leaf console gamerules; cleanRun.gameruleMechanism.primary=${String(mechanism.primary ?? '(unset)')} does not select that evidence`,
+      detail: baseDetail,
+    })
   }
   if (text === null) {
     return condition({
@@ -1250,6 +1250,24 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
       detail: { boot: bootSha, descriptor: values.sourceSha ?? null },
     }),
   )
+  const observedServerVersion = document?.run?.serverVersion
+  const expectedServerVersion = values.serverVersion
+  conditions.push(
+    condition({
+      id: 'run.serverVersionMatchesDescriptor',
+      verdict: typeof observedServerVersion !== 'string' || typeof expectedServerVersion !== 'string'
+        ? 'UNKNOWN'
+        : observedServerVersion === expectedServerVersion ? 'PASS' : 'FAIL',
+      reason:
+        typeof observedServerVersion !== 'string' || typeof expectedServerVersion !== 'string'
+          ? `run-observed Minecraft server version (${String(observedServerVersion ?? 'missing')}) or descriptor version (${String(expectedServerVersion ?? 'missing')}) is unavailable`
+          : observedServerVersion === expectedServerVersion
+            ? `run-observed Minecraft server version ${observedServerVersion} matches the clean descriptor`
+            : `run-observed Minecraft server version ${observedServerVersion} differs from descriptor version ${expectedServerVersion}`,
+      detail: { observed: observedServerVersion ?? null, expected: expectedServerVersion ?? null },
+      required: true,
+    }),
+  )
 
   const configurationChangesDeclared = Array.isArray(descriptor?.configurationChanges)
   const expectedConfigurationChanges = configurationChangesDeclared ? descriptor.configurationChanges : []
@@ -1326,6 +1344,46 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
             ? `acceptance.seed=${String(record.seed)} equals the descriptor's new seed`
             : `acceptance.seed=${String(record.seed)} != descriptor levelSeed=${String(values.levelSeed)}: the run did not happen in the new-seed world (NOTE: serverSeed() in agent-runner.mts reads the seed from the hard-coded path <server-root>/server.properties, so a clean world served from a DIFFERENT root would be reported with the wrong seed - keep the same root)`,
       detail: { attested: record?.seed ?? null, descriptor: values.levelSeed ?? null },
+    }),
+  )
+  const bootWorldKey = isPlainObject(document?.run?.boot?.worldKey) ? document.run.boot.worldKey : null
+  const worldIdentityAvailable = record !== null &&
+    typeof record.serverId === 'string' && record.serverId.length > 0 &&
+    typeof bootWorldKey?.serverId === 'string' && bootWorldKey.serverId.length > 0
+  const worldIdentityMatches = worldIdentityAvailable &&
+    record.serverId === bootWorldKey.serverId
+  conditions.push(
+    condition({
+      id: 'run.acceptanceWorldIdentity',
+      verdict: !worldIdentityAvailable ? 'UNKNOWN' : worldIdentityMatches ? 'PASS' : 'FAIL',
+      reason: !worldIdentityAvailable
+        ? 'the HOST acceptance record and BOOT do not both carry a serverId'
+        : worldIdentityMatches
+          ? `HOST acceptance serverId=${record.serverId} matches the run BOOT server identity`
+          : `HOST acceptance serverId=${record.serverId} differs from BOOT serverId=${bootWorldKey.serverId}`,
+      detail: { accepted: record === null ? null : { serverId: record.serverId ?? null, levelName: record.levelName ?? null, seed: record.seed ?? null }, boot: bootWorldKey },
+      required: true,
+    }),
+  )
+  const finalInventory = isPlainObject(document.inventory?.final) ? document.inventory.final : null
+  const finalWorldKey = isPlainObject(finalInventory?.worldKey) ? finalInventory.worldKey : null
+  const finalWorldIdentityMatches = worldIdentityMatches &&
+    finalInventory?.status === 'PRESENT' &&
+    finalInventory?.runId === runId &&
+    typeof finalInventory?.sourceSha === 'string' && finalInventory.sourceSha.toLowerCase() === String(bootSha ?? '').toLowerCase() &&
+    finalWorldKey?.serverId === record.serverId &&
+    typeof finalInventory?.dimension === 'string' && finalInventory.dimension.length > 0 && finalWorldKey?.dimension === finalInventory.dimension
+  conditions.push(
+    condition({
+      id: 'run.finalInventoryWorldIdentity',
+      verdict: !worldIdentityAvailable || finalInventory?.status !== 'PRESENT' ? 'UNKNOWN' : finalWorldIdentityMatches ? 'PASS' : 'FAIL',
+      reason: !worldIdentityAvailable || finalInventory?.status !== 'PRESENT'
+        ? 'final HOST inventory or accepted server/world identity is unavailable'
+        : finalWorldIdentityMatches
+          ? `final HOST inventory matches accepted serverId=${record.serverId}; dimension=${finalInventory.dimension} may differ from BOOT because dimension transitions are part of the run`
+          : 'final HOST inventory is not bound to the accepted server/world identity or its own dimension field',
+      detail: { final: finalInventory === null ? null : { runId: finalInventory.runId ?? null, sourceSha: finalInventory.sourceSha ?? null, dimension: finalInventory.dimension ?? null, worldKey: finalWorldKey }, accepted: record === null ? null : { serverId: record.serverId ?? null, levelName: record.levelName ?? null, seed: record.seed ?? null } },
+      required: true,
     }),
   )
 
@@ -1430,7 +1488,8 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   const bootEvidenceBound = boot?.source === 'snapshot' &&
     bootEvidence?.status === 'verified' &&
     bootEvidence?.runId === runId &&
-    bootEvidence?.bootSourceSha === bootSourceSha
+    bootEvidence?.bootSourceSha === bootSourceSha &&
+    bootEvidence?.snapshotBootSourceSha === bootSourceSha
   const nonZero = bootCounts === null ? [] : Object.entries(bootCounts).filter(([, count]) => typeof count === 'number' && count > 0)
   conditions.push(
     condition({

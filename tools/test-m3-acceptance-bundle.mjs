@@ -341,6 +341,17 @@ function condition(bundle, id) {
   const identityEvidence = evaluateRequiredM3ArtifactEvidence(unverifiedIdentityArtifact, RUN)
   assert.equal(identityEvidence.status, 'UNKNOWN')
   assert.ok(identityEvidence.missing.includes('authority.system2GenerationIdentity'))
+  assert.equal(evaluateRequiredM3ArtifactEvidence(bundle.artifact.document, RUN).checks.find((entry) => entry.id === 'inventory.initial').present, true)
+  const periodicOnlyInventory = JSON.parse(JSON.stringify(bundle.artifact.document))
+  delete periodicOnlyInventory.inventory.bootEvidence
+  const periodicOnlyEvidence = evaluateRequiredM3ArtifactEvidence(periodicOnlyInventory, RUN)
+  assert.equal(periodicOnlyEvidence.status, 'UNKNOWN')
+  assert.ok(periodicOnlyEvidence.missing.includes('inventory.initial'), 'a first periodic inventory dump cannot substitute for exact BOOT-bound snapshot evidence')
+  const foreignInitialSnapshot = JSON.parse(JSON.stringify(bundle.artifact.document))
+  foreignInitialSnapshot.inventory.bootEvidence.snapshotBootSourceSha = 'f'.repeat(40)
+  const foreignInitialEvidence = evaluateRequiredM3ArtifactEvidence(foreignInitialSnapshot, RUN)
+  assert.equal(foreignInitialEvidence.status, 'UNKNOWN')
+  assert.ok(foreignInitialEvidence.missing.includes('inventory.initial'))
   assert.equal(condition(bundle, 'artifact.requiredEvidence').verdict, 'PASS')
   assert.equal(condition(bundle, 'metrics.skillClosure').verdict, 'PRESENT')
   assert.ok(bundle.metrics.report !== null)
@@ -359,7 +370,7 @@ function condition(bundle, id) {
   // A fixture PASS is never a live acceptance.
   assert.equal(bundle.liveAcceptance, false)
   assert.ok(bundle.residual.some((entry) => /evidence class is "fixture"/.test(entry)))
-  ok('A. exact-run/source M2 PASS + M3 PASS: accepted fixture, liveAcceptance=false')
+  ok('A. exact-run/source M2 PASS + M3 PASS: BOOT-bound initial snapshot required; fixture liveAcceptance=false')
 }
 
 // A2. model counts are not a substitute for a verified generation/call join.

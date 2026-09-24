@@ -129,6 +129,14 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
   const predicateScopeMatches = predicates?.runId === expectedRunId
     && normalizeSourceSha(predicates?.sourceSha) === sourceSha
     && predicateLineageMatches
+  const bootInventory = artifact?.inventory?.boot
+  const bootInventoryEvidence = artifact?.inventory?.bootEvidence
+  const bootInventoryBound = bootInventory?.source === 'snapshot' &&
+    bootInventory?.counts !== null && typeof bootInventory.counts === 'object' && !Array.isArray(bootInventory.counts) &&
+    bootInventoryEvidence?.status === 'verified' &&
+    bootInventoryEvidence?.runId === expectedRunId &&
+    normalizeSourceSha(bootInventoryEvidence?.bootSourceSha) === sourceSha &&
+    normalizeSourceSha(bootInventoryEvidence?.snapshotBootSourceSha) === sourceSha
   const terminalInventoryPresent = terminal?.status === 'PRESENT'
     && terminal?.runId === expectedRunId
     && normalizeSourceSha(terminal?.sourceSha) === sourceSha
@@ -156,7 +164,7 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
     { id: 'environment.difficulty', present: artifact?.environment?.difficulty?.value !== undefined && artifact.environment.difficulty.value !== null },
     { id: 'environment.mobSpawning', present: artifact?.environment?.mobSpawning?.value !== undefined && artifact.environment.mobSpawning.value !== null },
     { id: 'environment.gamerules', present: artifact?.environment?.gamerules?.value !== undefined && artifact.environment.gamerules.value !== null },
-    { id: 'inventory.initial', present: artifact?.inventory?.boot?.counts !== null && typeof artifact?.inventory?.boot?.counts === 'object' },
+    { id: 'inventory.initial', present: bootInventoryBound },
     { id: 'inventory.final', present: terminalInventoryPresent },
     { id: 'dimensionTransition.toNether', present: transitionToNether !== null },
     { id: 'milestonePredicates', present: predicateScopeMatches },

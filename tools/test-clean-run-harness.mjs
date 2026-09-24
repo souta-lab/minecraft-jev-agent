@@ -42,13 +42,13 @@
 //
 // Usage: bun tools/test-clean-run-harness.mjs
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
 import { runCleanRunGate, runCli as runGateCli } from './clean-run-gate.mjs'
-import { checkRunEvidence, loadCleanEnvironment, sha256Text, validateCleanEnvironment } from './clean-run-environment.mjs'
+import { checkConsoleGameruleEvidence, checkRunEvidence, loadCleanEnvironment, sha256Text, validateCleanEnvironment } from './clean-run-environment.mjs'
 import { buildLeafStartupAttestation } from './clean-run-server-launch.mjs'
 import { expectedLeafLaunchIdentity, expectedRuntimeServerProperties } from './clean-run-server-config.mjs'
 import { expectedConsoleQueries } from './clean-run-console-capture.mjs'
@@ -530,7 +530,7 @@ async function buildBundle(
       generationId: 'gen-test-1',
       observedAtMs: Date.parse(observedAt),
       observedAt,
-      worldKey: JSON.parse(WORLD_KEY),
+      worldKey: { ...JSON.parse(WORLD_KEY), dimension: 'minecraft:the_nether' },
       dimension: 'minecraft:the_nether',
       counts: currentInventoryCounts,
     },
@@ -610,7 +610,7 @@ const runCondition = (verdict, id) => condition(verdict, id)
 
   const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN, out: outDir })
   assert.equal(verdict.status, 'CLEAN', `clean status=${verdict.status} failed=${verdict.failed.join(',')} unknown=${JSON.stringify(verdict.unknown ?? verdict.conditions ?? verdict)}`)
-  for (const id of ['run.environmentRecordIsThisDescriptor', 'run.bootSourceSha', 'run.acceptanceRecord', 'run.levelNameAttested', 'run.seedAttested', 'run.preparationFreshness', 'run.gamerulesNotContradicted', 'run.noWorldChanges', 'run.bootInventoryEmpty', 'run.keepInventoryBehaviour', 'run.difficultyNotContradicted', 'run.mobSpawningNotContradicted']) {
+  for (const id of ['run.environmentRecordIsThisDescriptor', 'run.bootSourceSha', 'run.serverVersionMatchesDescriptor', 'run.acceptanceRecord', 'run.levelNameAttested', 'run.seedAttested', 'run.acceptanceWorldIdentity', 'run.finalInventoryWorldIdentity', 'run.preparationFreshness', 'run.serverConfigAttestation', 'run.consoleGamerulesVerified', 'run.gamerulesNotContradicted', 'run.noWorldChanges', 'run.bootInventoryEmpty', 'run.keepInventoryBehaviour', 'run.difficultyNotContradicted', 'run.mobSpawningNotContradicted']) {
     const row = runCondition(verdict, id)
     assert.ok(row !== null, `missing condition ${id}`)
     assert.equal(row.verdict, 'PASS', `${id} verdict=${row.verdict} reason=${row.reason}`)
@@ -631,6 +631,37 @@ const runCondition = (verdict, id) => condition(verdict, id)
   const bootInventoryCondition = bootEvidenceChecks.find((entry) => entry.id === 'run.bootInventoryEmpty')
   assert.equal(bootInventoryCondition.verdict, 'UNKNOWN', 'a foreign-source generation-entry snapshot cannot certify a clean boot inventory')
   assert.match(bootInventoryCondition.reason, /not bound to this run's exact BOOT source/)
+  const wrongVersion = JSON.parse(JSON.stringify(bundle.artifact.document))
+  wrongVersion.run.serverVersion = '1.20.1'
+  const wrongVersionConditions = checkRunEvidence({
+    descriptor: descriptor.document,
+    artifact: wrongVersion,
+    runId: RUN,
+    descriptorPath: descriptor.path,
+    descriptorSha256: loadCleanEnvironment(descriptor.path).sha256,
+  })
+  assert.equal(wrongVersionConditions.find((entry) => entry.id === 'run.serverVersionMatchesDescriptor').verdict, 'FAIL')
+  const wrongAcceptedServer = JSON.parse(JSON.stringify(bundle.artifact.document))
+  wrongAcceptedServer.acceptance.record.serverId = '198.51.100.1:25565'
+  const wrongAcceptedConditions = checkRunEvidence({
+    descriptor: descriptor.document,
+    artifact: wrongAcceptedServer,
+    runId: RUN,
+    descriptorPath: descriptor.path,
+    descriptorSha256: loadCleanEnvironment(descriptor.path).sha256,
+  })
+  assert.equal(wrongAcceptedConditions.find((entry) => entry.id === 'run.acceptanceWorldIdentity').verdict, 'FAIL')
+  assert.equal(wrongAcceptedConditions.find((entry) => entry.id === 'run.finalInventoryWorldIdentity').verdict, 'FAIL')
+  const wrongFinalServer = JSON.parse(JSON.stringify(bundle.artifact.document))
+  wrongFinalServer.inventory.final.worldKey.serverId = '198.51.100.2:25565'
+  const wrongFinalConditions = checkRunEvidence({
+    descriptor: descriptor.document,
+    artifact: wrongFinalServer,
+    runId: RUN,
+    descriptorPath: descriptor.path,
+    descriptorSha256: loadCleanEnvironment(descriptor.path).sha256,
+  })
+  assert.equal(wrongFinalConditions.find((entry) => entry.id === 'run.finalInventoryWorldIdentity').verdict, 'FAIL')
   assert.match(runCondition(verdict, 'run.keepInventoryBehaviour').reason, /empty inventory after death/)
   // A fixture is NEVER a live acceptance: the combined answer says so exactly.
   assert.equal(verdict.acceptanceStatus, 'NOT_ACCEPTED')
@@ -772,7 +803,35 @@ const runCondition = (verdict, id) => condition(verdict, id)
   assert.equal(verdict.run.liveAcceptance, true)
   assert.equal(verdict.run.evidenceClass, 'live')
   assert.ok(verdict.failure === undefined)
-  ok('C. simulated live signals (FIXTURE: git HEAD + host.lock + acceptance record) reach CLEAN_RUN_M3 status=ACCEPTED')
+  for (const id of ['run.serverConfigAttestation', 'run.consoleGamerulesVerified', 'run.serverVersionMatchesDescriptor', 'run.finalInventoryWorldIdentity']) {
+    assert.equal(runCondition(verdict, id)?.verdict, 'PASS', `${id} must be run-bound before live acceptance`)
+  }
+
+  const bundlePath = join(outDir, 'bundle.json')
+  const pristineBundleText = readFileSync(bundlePath, 'utf8')
+  const missingStartup = JSON.parse(pristineBundleText)
+  missingStartup.artifact.document.run.boot.cleanRunServerConfig = null
+  writeFileSync(bundlePath, `${JSON.stringify(missingStartup, null, 2)}\n`, 'utf8')
+  const noStartupAcceptance = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
+  assert.notEqual(noStartupAcceptance.acceptanceStatus, 'ACCEPTED')
+  assert.equal(runCondition(noStartupAcceptance, 'run.serverConfigAttestation')?.verdict, 'UNKNOWN')
+  writeFileSync(bundlePath, pristineBundleText, 'utf8')
+
+  const capturePath = join(dirname(descriptor.path), 'server-console', 'capture.json')
+  const captureText = readFileSync(capturePath, 'utf8')
+  rmSync(capturePath)
+  const noCaptureAcceptance = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
+  assert.notEqual(noCaptureAcceptance.acceptanceStatus, 'ACCEPTED')
+  assert.equal(runCondition(noCaptureAcceptance, 'run.consoleGamerulesVerified')?.verdict, 'UNKNOWN')
+  writeFileSync(capturePath, captureText, { encoding: 'utf8', mode: 0o600 })
+
+  const nonConsoleGamerules = checkConsoleGameruleEvidence({
+    descriptor: { cleanRun: { gameruleMechanism: { primary: 'datapack' } } },
+    artifact: { record: 'milestone-run-artifact' },
+  })
+  assert.equal(nonConsoleGamerules.required, true)
+  assert.equal(nonConsoleGamerules.verdict, 'UNKNOWN')
+  ok('C. simulated live signals reach ACCEPTED only with BOOT-bound Leaf/JVM/config and machine-captured gamerule evidence')
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,13 +1160,26 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.match(startupRecipe, /clean-run-server-launch\.mjs/)
   assert.match(startupRecipe, /--console-input/)
   assert.match(startupRecipe, /--stdout-log/)
+  assert.match(startupRecipe, /--unit=ai-buddy-clean-leaf/)
+  assert.match(startupRecipe, /--no-block/)
+  assert.match(startupRecipe, /KillMode=mixed/)
+  assert.ok(startupRecipe.includes(`'${process.execPath}'`), 'systemd-managed Leaf, resident, and evidence commands use the absolute Bun executable')
+  assert.ok(startupRecipe.includes(`StandardOutput=append:${join(operatorRoot, 'buddy-driver', 'runner.out')}`), 'resident stdout appends to the exact bundle runner.out')
+  assert.ok(startupRecipe.includes(`StandardError=append:${join(operatorRoot, 'buddy-driver', 'runner.out')}`), 'resident stderr appends to the same run-bound output artifact')
+  assert.doesNotMatch(startupRecipe, /VERCEL_API_KEY=|API_KEY=.{12}/, 'provider secrets stay in the protected environment file and are not embedded in commands')
+  assert.doesNotMatch(startupRecipe, /clean-run-server-launch\.mjs[^\n]*&/)
   assert.match(startupRecipe, /Never pass --bonusChest/)
   assert.doesNotMatch(startupRecipe, /<\/dev\/null|execute in minecraft:the_nether run gamerule/)
   assert.match(startupRecipe, /clean-run-console-capture\.mjs/)
+  assert.match(startupRecipe, /clean-run-resident-control\.mjs/)
   assert.match(startupRecipe, /clean-run-acceptance-refresh\.mjs/)
-  assert.doesNotMatch(startupRecipe, /socat|UNIX-CONNECT/)
+  assert.match(startupRecipe, /clean-run-runner-output\.mjs/)
+  assert.match(startupRecipe, /StandardOutput=append:[^\s']*buddy-driver\/runner\.out/)
+  assert.match(startupRecipe, /StandardError=append:[^\s']*buddy-driver\/runner\.out/)
+  assert.doesNotMatch(startupRecipe, /socat|UNIX-CONNECT|control-quit/)
   assert.match(startupRecipe, /descriptor\/run\/PID-bound commands\.jsonl, capture\.json/)
   assert.ok(startupRecipe.indexOf('clean-run-server-launch.mjs') < startupRecipe.indexOf('agent-runner.mts'))
+  assert.ok(startupRecipe.indexOf('clean-run-runner-output.mjs') < startupRecipe.indexOf('agent-runner.mts'), 'runner.out must be created before systemd appends stdout/stderr')
   assert.ok(startupRecipe.indexOf('agent-runner.mts') < startupRecipe.indexOf('clean-run-console-capture.mjs'), 'capture must run after BOOT is possible')
   assert.doesNotMatch(startupRecipe, /setsid --fork nohup bun agent-runner|agent-runner\.mts <\/dev\/null/)
   const packMeta = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'pack.mcmeta'), 'utf8')
@@ -1142,6 +1214,13 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.match(operatorCommands, /Restart=no/)
   assert.match(operatorCommands, /agent-runner\.mts/)
   assert.doesNotMatch(operatorCommands, /resident-supervisor\.mjs|Restart=on-failure/)
+  assert.ok(operatorCommands.indexOf('clean-run-resident-control.mjs') < operatorCommands.indexOf('clean-run-server-launch.mjs'), 'legacy resident shutdown must precede clean Leaf startup')
+  const acceptanceRecipe = readFileSync(join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md'), 'utf8')
+  assert.match(acceptanceRecipe, /clean-run-resident-control\.mjs/)
+  assert.match(acceptanceRecipe, /clean-run-acceptance-refresh\.mjs/)
+  assert.match(acceptanceRecipe, /--unit=ai-buddy-clean-leaf/)
+  assert.match(acceptanceRecipe, /StandardOutput=append:/)
+  assert.doesNotMatch(acceptanceRecipe, /socat|UNIX-CONNECT|control-quit/)
   // the resolved descriptor is CLEAN and consumable by the canonical bundle
   const cleanCheck = validateCleanEnvironment(resolved, { descriptorPath: resolvedPath, worldContainer: container })
   assert.equal(cleanCheck.status, 'CLEAN', cleanCheck.failed.join(','))
@@ -1155,6 +1234,65 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.ok(reapplied.unchanged.length >= 4)
   assert.equal(JSON.parse(readFileSync(planRun.attemptsPath, 'utf8')).attempts.length, 1, 'a re-apply is not a new attempt')
   ok('G3. a second --apply is an IDEMPOTENT_NOOP (no rewrite, no new attempt)')
+
+  // Symlink targets are rejected at planning time, and again immediately before
+  // apply so a link created after a valid dry-run cannot redirect proof writes.
+  function makeSymlinkContainer(name) {
+    const path = join(root, name)
+    mkdirSync(path, { recursive: true })
+    writeFileSync(join(path, 'server.properties'), 'level-name=world\nlevel-seed=2024\ndifficulty=normal\nserver-port=25565\n', 'utf8')
+    writeFileSync(join(path, 'leaf-1.21.11-178.jar'), 'symlink refusal Leaf identity fixture')
+    return path
+  }
+  const symlinkContainer = makeSymlinkContainer('symlink-target-container')
+  const symlinkPlan = planPrepare({ descriptorPath, serverRoot: symlinkContainer, root: operatorRoot, levelName: 'm3clean-symlink-target', seed: '998877665546', sourceSha: prepareSourceSha })
+  mkdirSync(symlinkPlan.runDir, { recursive: true })
+  const sentinel = join(root, 'symlink-target-sentinel.txt')
+  writeFileSync(sentinel, 'must remain untouched\n', 'utf8')
+  symlinkSync(sentinel, join(symlinkPlan.runDir, 'server.properties.clean'))
+  const refusedSymlinkPlan = planPrepare({ descriptorPath, serverRoot: symlinkContainer, root: operatorRoot, levelName: 'm3clean-symlink-target', seed: '998877665546', sourceSha: prepareSourceSha })
+  assert.equal(refusedSymlinkPlan.status, 'REFUSED')
+  assert.ok(refusedSymlinkPlan.refusals.some((entry) => /symlinked_or_aliased_planned_path/.test(entry.reason)))
+  assert.equal(refusedSymlinkPlan.guards.find((guard) => guard.id === 'no_symlinked_planned_paths')?.verdict, 'FAIL')
+  assert.equal(readFileSync(sentinel, 'utf8'), 'must remain untouched\n')
+
+  const hardlinkContainer = makeSymlinkContainer('hardlink-target-container')
+  const hardlinkPlan = planPrepare({ descriptorPath, serverRoot: hardlinkContainer, root: operatorRoot, levelName: 'm3clean-hardlink-target', seed: '998877665549', sourceSha: prepareSourceSha })
+  mkdirSync(hardlinkPlan.runDir, { recursive: true })
+  const hardlinkSentinel = join(root, 'hardlink-target-sentinel.txt')
+  writeFileSync(hardlinkSentinel, 'must remain untouched\n', 'utf8')
+  linkSync(hardlinkSentinel, join(hardlinkPlan.runDir, 'server.properties.clean'))
+  const refusedHardlinkPlan = planPrepare({ descriptorPath, serverRoot: hardlinkContainer, root: operatorRoot, levelName: 'm3clean-hardlink-target', seed: '998877665549', sourceSha: prepareSourceSha })
+  assert.equal(refusedHardlinkPlan.status, 'REFUSED')
+  assert.ok(refusedHardlinkPlan.refusals.some((entry) => /hardlinked_target/.test(entry.reason)))
+  assert.equal(statSync(hardlinkSentinel).nlink, 2)
+  assert.equal(readFileSync(hardlinkSentinel, 'utf8'), 'must remain untouched\n')
+
+  const ancestorContainer = makeSymlinkContainer('symlink-ancestor-container')
+  const ancestorPlan = planPrepare({ descriptorPath, serverRoot: ancestorContainer, root: operatorRoot, levelName: 'm3clean-symlink-ancestor', seed: '998877665548', sourceSha: prepareSourceSha })
+  const outsideStageRoot = join(root, 'outside-stage-root')
+  mkdirSync(outsideStageRoot)
+  symlinkSync(outsideStageRoot, ancestorPlan.runRootDir, 'dir')
+  const refusedAncestorPlan = planPrepare({ descriptorPath, serverRoot: ancestorContainer, root: operatorRoot, levelName: 'm3clean-symlink-ancestor', seed: '998877665548', sourceSha: prepareSourceSha })
+  assert.equal(refusedAncestorPlan.status, 'REFUSED')
+  assert.ok(refusedAncestorPlan.refusals.some((entry) => /symlinked_or_aliased_planned_path/.test(entry.reason)))
+  assert.equal(readdirSync(outsideStageRoot).length, 0, 'a symlinked run-root ancestor is rejected before staging')
+
+  const symlinkRaceContainer = makeSymlinkContainer('symlink-apply-race-container')
+  const symlinkRacePlan = planPrepare({ descriptorPath, serverRoot: symlinkRaceContainer, root: operatorRoot, levelName: 'm3clean-symlink-race', seed: '998877665547', sourceSha: prepareSourceSha })
+  assert.equal(symlinkRacePlan.status, 'PLANNED')
+  mkdirSync(symlinkRacePlan.runDir, { recursive: true })
+  const raceSentinel = join(root, 'symlink-race-sentinel.txt')
+  writeFileSync(raceSentinel, 'must remain untouched\n', 'utf8')
+  symlinkSync(raceSentinel, join(symlinkRacePlan.runDir, 'server.properties.clean'))
+  const refusedRaceApply = applyPlan(symlinkRacePlan)
+  assert.equal(refusedRaceApply.status, 'REFUSED')
+  assert.equal(refusedRaceApply.applied, 0)
+  assert.equal(refusedRaceApply.guards.find((guard) => guard.id === 'no_symlinked_planned_paths')?.verdict, 'FAIL')
+  assert.equal(readFileSync(raceSentinel, 'utf8'), 'must remain untouched\n')
+  assert.equal(existsSync(symlinkRacePlan.attemptsPath), false, 'the apply-time refusal must precede ledger writes')
+  assert.equal(existsSync(symlinkRacePlan.manifestPath), false, 'the apply-time refusal must precede manifest writes')
+  ok('G3b. symlink aliases and hard-linked targets fail during planning; apply-time recheck refuses new symlinks before ledger writes')
 
   // G3a. a different clean target gets a separate evidence directory; the
   // prior target's operator-filled transcript and manifest remain byte-identical.

@@ -65,6 +65,8 @@ export const ACCEPTANCE_RULES = Object.freeze([
   'every required run-evidence condition === PASS',
   'run.preparationFreshness === PASS (exact pre-run manifest and attempt ledger precede this BOOT)',
   'the Leaf startup attestation binds actual --config argv/process and staged properties SHA to this runId, BOOT SHA, descriptor, and prepared manifest',
+  'the observed Minecraft server version matches the descriptor, and the run-bound final inventory matches the accepted serverId and clean level/seed (dimension may change)',
+  'machine-captured Leaf console gamerules are bound to this run, descriptor, BOOT SHA, and every declared dimension',
   'bundle.git.dirty === false',
   'descriptor frozen sourceSha === clean bundle.git.head === this run BOOT sourceSha',
   'the run-scoped source window is complete and every applied reload names the same sourceSha',

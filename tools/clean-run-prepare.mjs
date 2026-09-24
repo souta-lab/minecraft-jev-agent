@@ -36,9 +36,9 @@
 //
 // Exit: 0 = planned / applied / idempotent no-op, 1 = REFUSED (not clean), 2 = usage.
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, parse as parsePath, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PROTECTED_LEVEL_NAMES, loadCleanEnvironment, validateCleanEnvironment, worldDataExists, worldDirNames } from './clean-run-environment.mjs'
 import { deriveJavaRuntimePolicy, EXPECTED_JAVA_EXECUTABLE, expectedLeafLaunchIdentity, SERVER_PROPERTY_MAP } from './clean-run-server-config.mjs'
@@ -413,6 +413,15 @@ export function planPrepare({
   const attemptsPath = join(runRootDir, 'attempts.json')
   const manifestPath = join(runDir, 'manifest.json')
   const plannedPaths = [worldDir, runRootDir, runDir, join(worldDir, datapackDir), join(runDir, 'server-console'), join(runDir, 'environment-resolved.json'), manifestPath, attemptsPath, join(runDir, 'server.properties.clean'), join(runDir, 'server-start-attestation.json'), join(runDir, 'server-console', 'server-console.fifo'), join(runDir, 'server-console', 'leaf-server.log'), join(runDir, 'server-console', 'leaf-console-relay.jsonl'), join(runDir, 'server-console', 'commands.jsonl'), join(runDir, 'server-console', 'capture.json'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
+  const unsafePathIssues = plannedPathIssues([resolve(container), ...plannedPaths])
+  guards.push({
+    id: 'no_symlinked_planned_paths',
+    verdict: unsafePathIssues.length === 0 ? 'PASS' : 'FAIL',
+    detail: unsafePathIssues.length === 0
+      ? `lstat/realpath checks found no symlink, alias or non-directory ancestor among ${plannedPaths.length} staged paths`
+      : unsafePathIssues.map(({ path, issue }) => `${issue} in ${path}`).join('; '),
+  })
+  if (unsafePathIssues.length > 0) refusals.push({ reason: `symlinked_or_aliased_planned_path: ${unsafePathIssues.map(({ path, issue }) => `${issue} in ${path}`).join('; ')}` })
   const protectedHits = plannedPaths.filter((path) => protectedRoots.some((name) => path === join(resolve(container), name) || path.startsWith(join(resolve(container), name) + sep)))
   guards.push({
     id: 'protected_world_paths',
@@ -617,6 +626,17 @@ export function planPrepare({
   const recipeSource = milestone === 'M3' ? join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md') : null
   if (recipeSource !== null && existsSync(recipeSource)) files.push({ path: join(runDir, 'ACCEPTANCE-RECIPE.md'), content: readFileSync(recipeSource, 'utf8'), note: 'copy of the acceptance recipe, next to the run evidence' })
 
+  const fullWritePathIssues = plannedPathIssues([resolve(container), ...plannedPaths, ...files.map((file) => file.path), manifestPath, attemptsPath])
+  if (fullWritePathIssues.length > 0) {
+    const detail = fullWritePathIssues.map(({ path, issue }) => `${issue} in ${path}`).join('; ')
+    const existingGuard = guards.findIndex((guard) => guard.id === 'no_symlinked_planned_paths')
+    const failureGuard = { id: 'no_symlinked_planned_paths', verdict: 'FAIL', detail: `lstat/realpath rejected staged output path: ${detail}` }
+    if (existingGuard >= 0) guards[existingGuard] = failureGuard
+    else guards.push(failureGuard)
+    refusals.push({ reason: `symlinked_or_aliased_planned_write_path: ${detail}` })
+    return { status: 'REFUSED', refusals, warnings, guards, actions: [], operatorCommands: [], resolved: resolvedDoc, check, loaded, overridesApplied, container: resolve(container), propertyChecks }
+  }
+
   for (const file of files) {
     const exists = existsSync(file.path)
     const same = exists ? safeText(file.path) === file.content : false
@@ -704,6 +724,45 @@ function safeText(path) {
   }
 }
 
+/** Reject symlinked aliases at every existing ancestor and at the target path. */
+export function inspectPlannedPath(path) {
+  const absolute = resolve(path)
+  const parsed = parsePath(absolute)
+  const components = absolute.slice(parsed.root.length).split(sep).filter(Boolean)
+  let current = parsed.root
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index])
+    let stat
+    try {
+      stat = lstatSync(current)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null
+      return `cannot_lstat_component:${current}:${String(error?.code ?? error?.message ?? error)}`
+    }
+    if (stat.isSymbolicLink()) return `symlink_component:${current}`
+    const isTarget = index === components.length - 1
+    if (isTarget && stat.isFile() && stat.nlink > 1) return `hardlinked_target:${current}:nlink=${stat.nlink}`
+    if (!isTarget && !stat.isDirectory()) return `non_directory_ancestor:${current}`
+    let physical
+    try {
+      physical = realpathSync(current)
+    } catch (error) {
+      return `cannot_realpath_component:${current}:${String(error?.code ?? error?.message ?? error)}`
+    }
+    if (resolve(physical) !== current) return `realpath_mismatch:${current}->${physical}`
+  }
+  return null
+}
+
+function plannedPathIssues(paths) {
+  const issues = []
+  for (const path of [...new Set(paths.filter((entry) => typeof entry === 'string').map((entry) => resolve(entry)))]) {
+    const issue = inspectPlannedPath(path)
+    if (issue !== null) issues.push({ path, issue })
+  }
+  return issues
+}
+
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
 }
@@ -711,6 +770,7 @@ function shellQuote(value) {
 /** The ordered operator commands. Nothing here is executed by this tool. */
 export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, descriptorSha256 = null, root = null, recipePath, milestone = 'M3', serverImplementation = 'leaf-1.21.11-178.jar' }) {
   const tree = root === null || root === undefined ? REPO_ROOT : resolve(root)
+  const bunExecutable = shellQuote(process.execPath)
   if (milestone === 'M2') {
     return [
       `# ==== M2 REPRODUCTION: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
@@ -724,7 +784,40 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     ]
   }
   const driverDir = join(tree, 'buddy-driver')
+  const runnerOutPath = join(driverDir, 'runner.out')
   const environmentFile = join(process.env.HOME ?? '/home/s0u7a', '.config', 'mc-ai', 'resident.env')
+  const managedLeafCommand = [
+    'systemd-run',
+    '--user',
+    '--unit=ai-buddy-clean-leaf',
+    '--collect',
+    '--no-block',
+    '--property=Restart=no',
+    '--property=KillMode=mixed',
+    '--property=TimeoutStopSec=30s',
+    `--property=WorkingDirectory=${container}`,
+    '--',
+    process.execPath,
+    join(tree, 'tools', 'clean-run-server-launch.mjs'),
+    '--environment', join(runDir, 'environment-resolved.json'),
+    '--properties', join(runDir, 'server.properties.clean'),
+    '--attestation', join(runDir, 'server-start-attestation.json'),
+    '--manifest', join(runDir, 'manifest.json'),
+    '--cwd', container,
+    '--console-input', join(runDir, 'server-console', 'server-console.fifo'),
+    '--stdout-log', join(runDir, 'server-console', 'leaf-server.log'),
+    '--',
+    EXPECTED_JAVA_EXECUTABLE,
+    '-Xmx1G',
+    '-Xms1G',
+    '-DPaper.IgnoreJavaVersion=true',
+    '-jar',
+    serverImplementation,
+    '--nogui',
+    '--config', join(runDir, 'server.properties.clean'),
+    '--universe', container,
+    '--level-name', levelName,
+  ].map(shellQuote).join(' ')
   const managedResidentCommand = [
     'systemd-run',
     '--user',
@@ -733,6 +826,8 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     '--property=Restart=no',
     '--property=KillMode=mixed',
     '--property=TimeoutStopSec=30s',
+    `--property=StandardOutput=append:${runnerOutPath}`,
+    `--property=StandardError=append:${runnerOutPath}`,
     `--property=WorkingDirectory=${driverDir}`,
     `--property=EnvironmentFile=${environmentFile}`,
     `--setenv=MC_AI_ROOT=${tree}`,
@@ -749,59 +844,57 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `# 0. this file is the plan; the recipe is ${recipePath}`,
     `# 1. OPERATOR / H4: stop the current owner and wait. For a managed resident, this deliberate unit stop is not restarted:`,
     `if systemctl --user is-active --quiet ai-buddy-resident.service; then systemctl --user stop ai-buddy-resident.service; fi`,
-    `#    If a legacy direct resident remains, send its control-socket control-quit command and wait for HOST_LOCK released.`,
+    `#    If a legacy direct resident remains, send the protocol's cmd=quit and wait for both control.sock and host.lock to release:`,
+    `if test -S ${shellQuote(join(tree, 'buddy-driver/data/resident/control.sock'))}; then ${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-resident-control.mjs'))} --root ${shellQuote(tree)}; fi`,
     `# 2. OPERATOR / H4: stop the current Leaf server gracefully from its console; wait for it to exit.`,
     `#    Do not copy over, edit, or restore the shared ${container}/server.properties.`,
-    `# 3. start the clean world from the staged config with both world paths explicit:`,
-    [
-      'bun',
-      join(tree, 'tools', 'clean-run-server-launch.mjs'),
-      '--environment', join(runDir, 'environment-resolved.json'),
-      '--properties', join(runDir, 'server.properties.clean'),
-      '--attestation', join(runDir, 'server-start-attestation.json'),
-      '--manifest', join(runDir, 'manifest.json'),
-      '--cwd', container,
-      '--console-input', join(runDir, 'server-console', 'server-console.fifo'),
-      '--stdout-log', join(runDir, 'server-console', 'leaf-server.log'),
-      '--',
-      EXPECTED_JAVA_EXECUTABLE,
-      '-Xmx1G',
-      '-Xms1G',
-      '-DPaper.IgnoreJavaVersion=true',
-      '-jar',
-      'leaf-1.21.11-178.jar',
-      '--nogui',
-      '--config', join(runDir, 'server.properties.clean'),
-      '--universe', container,
-      '--level-name', levelName,
-    ].map(shellQuote).join(' ') + ' &',
+    `# 3. start the clean world and keep its allowlisted console relay alive in a transient user-systemd service:`,
+    managedLeafCommand,
     `#    --config selects the staged seed/config; --universe and --level-name select the descriptor's world. Never pass --bonusChest.`,
-    `#    The wrapper accepts only the generated read-only seed/gamerule query sequence from the private 0600 FIFO, relays it to Leaf stdin, and captures all attempts to a private journal. No other console command is forwarded; use SIGTERM on the Leaf PID as the emergency stop.`,
+    `#    The --no-block service survives the terminal session; systemd tracks the launcher and Leaf in one cgroup. The launcher owns the relay for Leaf's full lifetime, accepts only the generated read-only seed/gamerule sequence from the private 0600 FIFO, and journals every attempt. No other console command is forwarded; stop it with systemctl --user stop ai-buddy-clean-leaf.service.`,
     `# 4. Configure the external provider environment file once, mode 0600, without committing it: ${environmentFile}`,
     `#    It must carry the currently authorized Jev/System2 provider settings and credentials; no model is selected here.`,
-    `# 5. launch the exact resident process under a user-systemd transient service:`,
+    `# 5. create this fresh run's empty 0600 runner.out. If an old regular single-link file remains, the helper refuses while a resident is live and preserves it read-only under runs/clean-run-runner-archives before creating the new file:`,
+    `${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-runner-output.mjs'))} --root ${shellQuote(tree)}`,
+    `# 6. launch the exact resident process under a user-systemd transient service:`,
     managedResidentCommand,
+    `#    StandardOutput/StandardError append to that exact runner.out used by M2/M3 evidence readers; the log is owner-only and starts empty for this fresh run. No provider environment values are printed by this command.`,
     `#    Do not auto-restart the process: each new host process gets a new runId, which cannot be joined to this M3 proof. Retryable model outages use same-process typed recovery; an unexpected process exit is recorded as an incomplete run.`,
     `#    The Leaf launcher records its observed --config argv, process identity, staged file SHA-256, and prepared-manifest binding. The HOST BUDDY_SERVER_PROPERTIES_PATH only supplies the acceptance-record seed read. BOOT must report source=${String(sourceSha)} and bind that attestation to this runId and descriptor SHA.`,
-    `# 6. after the resident BOOT, machine-capture the live read-only console queries (seed + each declared gamerule in each declared dimension):`,
-    `bun tools/clean-run-console-capture.mjs --environment ${runDir}/environment-resolved.json --attestation ${runDir}/server-start-attestation.json --resident-log ${driverDir}/buddy.log --run <RUN_ID>`,
+    `#    The clean Leaf service must still be active before starting the resident; confirm with systemctl --user status ai-buddy-clean-leaf.service.`,
+    `# 7. after the resident BOOT, machine-capture the live read-only console queries (seed + each declared gamerule in each declared dimension):`,
+    `${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-console-capture.mjs'))} --environment ${shellQuote(join(runDir, 'environment-resolved.json'))} --attestation ${shellQuote(join(runDir, 'server-start-attestation.json'))} --resident-log ${shellQuote(join(driverDir, 'buddy.log'))} --run <RUN_ID>`,
     `#    This creates the descriptor/run/PID-bound commands.jsonl, capture.json, and gamerule-verification.txt. The gate requires the relay journal to contain exactly this read-only sequence and remains invalid if console input changes afterward.`,
     `#    The command helper only sends read-only seed and gamerule queries. Review the actual responses in ${join(runDir, 'server-console', 'leaf-server.log')}.`,
-    `# 7. continue the M3 attempt (Nether arrival + 12 eyes) and record the runId from BOOT.`,
-    `# 8. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
-    `bun tools/clean-run-acceptance-refresh.mjs --run <RUN_ID> --source-sha ${sourceSha} --root ${shellQuote(tree)} --socket ${shellQuote(join(tree, 'buddy-driver/data/resident/control.sock'))}`,
-    `# 9. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
-    `bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> --root ${tree} --environment ${runDir}/environment-resolved.json --evidence-class live`,
-    `# 10. run the clean-run gate, written NEXT TO the bundle; it verifies the machine capture and Leaf log itself:`,
-    `bun tools/clean-run-gate.mjs --environment ${runDir}/environment-resolved.json --bundle-dir ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID> --run <RUN_ID> --out ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID>`,
+    `# 8. continue the M3 attempt (Nether arrival + 12 eyes) and record the runId from BOOT.`,
+    `# 9. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
+    `${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-acceptance-refresh.mjs'))} --run <RUN_ID> --source-sha ${sourceSha} --root ${shellQuote(tree)} --socket ${shellQuote(join(tree, 'buddy-driver/data/resident/control.sock'))}`,
+    `# 10. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
+    `${bunExecutable} ${shellQuote(join(tree, 'tools/m3-acceptance-bundle.mjs'))} --run <RUN_ID> --root ${shellQuote(tree)} --environment ${shellQuote(join(runDir, 'environment-resolved.json'))} --evidence-class live`,
+    `# 11. run the clean-run gate, written NEXT TO the bundle; it verifies the machine capture and Leaf log itself:`,
+    `${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-gate.mjs'))} --environment ${shellQuote(join(runDir, 'environment-resolved.json'))} --bundle-dir ${shellQuote(join(tree, 'runs/m3-live/acceptance-bundle-<RUN_ID>'))} --run <RUN_ID> --out ${shellQuote(join(tree, 'runs/m3-live/acceptance-bundle-<RUN_ID>'))}`,
     `# ACCEPTED requires: descriptor CLEAN + run evidence consistent + bundle PASS + liveAcceptance=true`,
-    `# Deliberate owner stop when requested: systemctl --user stop ai-buddy-resident.service.`,
+    `# Deliberate owner stop when requested: stop ai-buddy-resident.service first, then systemctl --user stop ai-buddy-clean-leaf.service.`,
   ]
 }
 
 /** Perform the planned writes. Idempotent: identical content is left untouched. */
 export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {}) {
   if (plan.status === 'REFUSED') return { ...plan, applied: 0, unchanged: 0 }
+  const applyPathIssues = plannedPathIssues([plan.container, ...(plan.actions ?? []).map((action) => action.path), plan.attemptsPath, plan.manifestPath])
+  if (applyPathIssues.length > 0) {
+    const detail = applyPathIssues.map(({ path, issue }) => `${issue} in ${path}`).join('; ')
+    const guards = (plan.guards ?? []).filter((guard) => guard.id !== 'no_symlinked_planned_paths')
+    guards.push({ id: 'no_symlinked_planned_paths', verdict: 'FAIL', detail: `apply-time lstat/realpath check refused: ${detail}` })
+    return {
+      ...plan,
+      status: 'REFUSED',
+      guards,
+      refusals: [...(plan.refusals ?? []), { reason: `apply_path_symlink_or_alias: ${detail}` }],
+      applied: 0,
+      unchanged: 0,
+    }
+  }
   const generatedTargets = worldDirNames(plan.levelName ?? '').filter((name) =>
     worldDataExists(join(plan.container, name)),
   )
