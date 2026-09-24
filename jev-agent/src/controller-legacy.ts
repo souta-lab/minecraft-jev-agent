@@ -5024,6 +5024,10 @@ export class JevController {
   ): void {
     const metadata = this.reachRunMetadata
     if (metadata === null) return
+    // SUCCESS is evidence-backed predicate verification, irrespective of which
+    // runtime callback observed it. The validator and downstream journal use
+    // this boundary to distinguish verified closure from an action/step result.
+    const terminalBoundary = outcome.kind === 'SUCCESS' ? 'verified-terminal' : boundary
     if (cancelIntentId !== null) {
       const current = this.executor.current
       if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
@@ -5049,12 +5053,12 @@ export class JevController {
     }
     this.logger.info(
       'vtr',
-      `VTR_TRANSITION_OUTCOME id=${metadata.transitionId} outcome=${outcome.kind} boundary=${boundary} mechanicalSteps=${state.usage.mechanicalSteps} jevCalls=${jevCalls} system2Calls=${system2Calls}`,
+      `VTR_TRANSITION_OUTCOME id=${metadata.transitionId} outcome=${outcome.kind} boundary=${terminalBoundary} mechanicalSteps=${state.usage.mechanicalSteps} jevCalls=${jevCalls} system2Calls=${system2Calls}`,
       {
         transitionId: metadata.transitionId,
         contractHash: metadata.contractHash,
         outcome,
-        boundary,
+        boundary: terminalBoundary,
         progress: state.progress,
         usage: state.usage,
         metrics: {
@@ -5077,7 +5081,7 @@ export class JevController {
       transitionId: metadata.transitionId,
       typedOutcome: outcome.kind,
       schedulerHandoff: true,
-      boundary,
+      boundary: terminalBoundary,
     })
   }
 
