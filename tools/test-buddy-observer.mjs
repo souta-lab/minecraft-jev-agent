@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, readVtrRunJsonlEvents } from './buddy-observer.mjs'
@@ -397,6 +398,189 @@ const staleIdentitySnapshot = buildObserverSnapshot({
 assert.equal(staleIdentitySnapshot.vtr.transitions.length, 1)
 assert.equal(staleIdentitySnapshot.vtr.latest.transitionId, vtrTransitionId)
 assert.equal(staleIdentitySnapshot.vtr.latest.status, 'verified_success')
+
+// Exercise the live observer ingress, not only the pure projector: a
+// structured VTR journal commit + bound VERIFY + matching terminal outcome
+// must reach the same AI summary without inventing a Jev choice.
+const ingressRuntimeDir = mkdtempSync(join(tmpdir(), 'buddy-observer-vtr-ingress-'))
+const ingressRunId = 'run-observer-vtr-ingress'
+const ingressGenerationId = 'gen-observer-vtr-ingress'
+const ingressSourceSha = 'c'.repeat(40)
+const ingressWorldKey = 'observer-local|overworld|44'
+const ingressContractHash = 'contract-observer-vtr-ingress'
+const ingressTransitionId = 'transition-observer-vtr-ingress'
+const ingressMission = { id: 'mission:oak-log', kind: 'inventory_at_least', item: 'oak_log', count: 1 }
+const ingressBootTs = '2026-09-21T12:59:59.000Z'
+const ingressReadyTs = '2026-09-21T13:00:00.000Z'
+const ingressCommitTs = '2026-09-21T13:00:01.000Z'
+const ingressVerifyTs = '2026-09-21T13:00:02.000Z'
+const ingressOutcomeTs = '2026-09-21T13:00:02.010Z'
+const ingressWorld = {
+  serverId: 'observer-local',
+  dimension: 'minecraft:overworld',
+  worldEpoch: 44,
+}
+const ingressContractIdentity = {
+  runId: ingressRunId,
+  generationId: ingressGenerationId,
+  sourceSha: ingressSourceSha,
+  worldKey: ingressWorldKey,
+  dimension: 'overworld',
+  worldEpoch: 44,
+}
+const ingressCommit = {
+  record: 'agent-event',
+  ts: ingressCommitTs,
+  source: 'vtr',
+  message: `VTR_TRANSITION_COMMIT id=${ingressTransitionId} ensures=reach.resource-source contractHash=${ingressContractHash}`,
+  detail: {
+    runId: ingressRunId,
+    generationId: ingressGenerationId,
+    sourceSha: ingressSourceSha,
+    worldKey: ingressWorldKey,
+    dimension: 'overworld',
+    worldEpoch: 44,
+    transitionId: ingressTransitionId,
+    contractHash: ingressContractHash,
+    mission: ingressMission,
+    desiredPredicate: { id: 'reach.resource-source', proposition: { kind: 'within-interaction-reach-of-resource-source', item: 'oak_log' }, expected: true },
+    requires: [{ id: 'mission.unsatisfied', expected: true }],
+    ensures: [{ id: 'reach.resource-source', expected: true }],
+    invariants: [{ id: 'body.alive', expected: true }],
+    admissibleEffects: [{ kind: 'locomotion', maxUses: null }],
+    budget: { maxMechanicalSteps: 24, maxElapsedMs: 120000, resources: {}, risk: { damage: 1 } },
+    identity: ingressContractIdentity,
+  },
+}
+const ingressVerify = {
+  record: 'agent-event',
+  ts: ingressVerifyTs,
+  source: 'vtr',
+  message: `VTR_TRANSITION_VERIFY id=${ingressTransitionId} truth=TRUE`,
+  detail: {
+    runId: ingressRunId,
+    generationId: ingressGenerationId,
+    sourceSha: ingressSourceSha,
+    worldKey: ingressWorldKey,
+    dimension: 'overworld',
+    worldEpoch: 44,
+    transitionId: ingressTransitionId,
+    contractHash: ingressContractHash,
+    truth: 'TRUE',
+    predicates: [{ id: 'reach.resource-source', expected: true, truth: 'true', evidenceId: 'verify:observer-vtr-ingress' }],
+    evidenceIds: ['verify:observer-vtr-ingress'],
+    identityMatches: true,
+    predicatesVerified: true,
+  },
+}
+const ingressOutcome = {
+  record: 'agent-event',
+  ts: ingressOutcomeTs,
+  source: 'vtr',
+  message: `VTR_TRANSITION_OUTCOME id=${ingressTransitionId} outcome=SUCCESS`,
+  detail: {
+    runId: ingressRunId,
+    generationId: ingressGenerationId,
+    sourceSha: ingressSourceSha,
+    worldKey: ingressWorldKey,
+    dimension: 'overworld',
+    worldEpoch: 44,
+    transitionId: ingressTransitionId,
+    contractHash: ingressContractHash,
+    outcome: { kind: 'SUCCESS', contractHash: ingressContractHash, evidenceIds: ['verify:observer-vtr-ingress'] },
+    metrics: { verifiedTransitionCompletion: 1, mechanicalStepsPerTransition: 2, jevCallsPerTransition: 0, duplicateAuthority: false },
+  },
+}
+const wrongBoundaryRecord = (ts, id, identityOverrides) => ({
+  record: 'agent-event',
+  ts,
+  source: 'vtr',
+  message: `VTR_TRANSITION_COMMIT id=${id} ensures=stale contractHash=${id}-contract`,
+  detail: {
+    runId: identityOverrides.runId ?? ingressRunId,
+    generationId: identityOverrides.generationId ?? ingressGenerationId,
+    sourceSha: identityOverrides.sourceSha ?? ingressSourceSha,
+    worldKey: identityOverrides.worldKey ?? ingressWorldKey,
+    transitionId: id,
+    contractHash: `${id}-contract`,
+    mission: { id: `stale:${id}`, kind: 'inventory_at_least', item: 'stone', count: 1 },
+    identity: { ...ingressContractIdentity, ...identityOverrides },
+  },
+})
+const wrongRunVerify = {
+  ...ingressVerify,
+  ts: '2026-09-21T13:00:03.000Z',
+  message: `VTR_TRANSITION_VERIFY id=${ingressTransitionId} truth=FALSE`,
+  detail: { ...ingressVerify.detail, runId: 'run-prior', truth: 'FALSE', identityMatches: false, predicatesVerified: false },
+}
+const ingressRecords = [
+  ingressCommit,
+  ingressVerify,
+  ingressOutcome,
+  wrongBoundaryRecord('2026-09-21T13:00:03.100Z', 'wrong-run', { runId: 'run-prior' }),
+  wrongBoundaryRecord('2026-09-21T13:00:03.200Z', 'wrong-generation', { generationId: 'gen-prior' }),
+  wrongBoundaryRecord('2026-09-21T13:00:03.300Z', 'wrong-source', { sourceSha: 'd'.repeat(40) }),
+  wrongBoundaryRecord('2026-09-21T13:00:03.400Z', 'wrong-world', { worldKey: 'other-world|overworld|44' }),
+  wrongRunVerify,
+]
+
+mkdirSync(join(ingressRuntimeDir, 'data', 'resident'), { recursive: true })
+mkdirSync(join(ingressRuntimeDir, 'logs', 'jev'), { recursive: true })
+writeFileSync(join(ingressRuntimeDir, 'buddy.log'), [
+  `[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha}`,
+  `[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`,
+].join('\n') + '\n')
+writeFileSync(join(ingressRuntimeDir, 'logs', 'jev', 'run.jsonl'), ingressRecords.map((record) => JSON.stringify(record)).join('\n') + '\n')
+const ingressSocketPath = join(ingressRuntimeDir, 'data', 'resident', 'control.sock')
+const ingressReportData = {
+  ...report.data,
+  runId: ingressRunId,
+  generationId: ingressGenerationId,
+  worldKey: ingressWorld,
+}
+const ingressControlServer = createServer((socket) => {
+  let pending = ''
+  socket.setEncoding('utf8')
+  socket.on('data', (chunk) => {
+    pending += chunk
+    const newline = pending.indexOf('\n')
+    if (newline < 0) return
+    const request = JSON.parse(pending.slice(0, newline))
+    socket.end(`${JSON.stringify({ id: request.id, ok: true, data: ingressReportData })}\n`)
+  })
+})
+try {
+  await new Promise((resolve, reject) => {
+    ingressControlServer.once('error', reject)
+    ingressControlServer.listen(ingressSocketPath, resolve)
+  })
+  const ingressSnapshot = await createObserver({ runtimeDir: ingressRuntimeDir }).snapshot()
+  const ingressSummary = buildAiSummary(ingressSnapshot)
+  assert.equal(ingressSnapshot.vtr.transitions.length, 1, 'run/generation/source/world mismatches must not enter the live VTR projection')
+  assert.equal(ingressSnapshot.resident.sourceCommit, ingressSourceSha)
+  assert.equal(ingressSnapshot.resident.sourceCommitBinding, 'run-BOOT+GENERATION_READY')
+  assert.equal(ingressSnapshot.resident.generationBoundary?.generationId, ingressGenerationId)
+  assert.equal(ingressSnapshot.vtr.latest.status, 'verified_success')
+  assert.equal(ingressSnapshot.vtr.latest.verification.truth, 'TRUE')
+  assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
+  assert.equal(ingressSnapshot.vtr.latest.binding.runId, ingressRunId)
+  assert.equal(ingressSnapshot.vtr.latest.binding.generationId, ingressGenerationId)
+  assert.equal(ingressSnapshot.vtr.latest.binding.sourceSha, ingressSourceSha)
+  assert.deepEqual(ingressSnapshot.vtr.latest.binding.worldKey, ingressWorld)
+  assert.equal(ingressSnapshot.mission.status, 'observed')
+  assert.equal(ingressSnapshot.mission.provenance.source, 'VTR_TRANSITION_COMMIT.detail.mission')
+  assert.deepEqual(ingressSnapshot.mission.predicate, { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
+  assert.equal(ingressSummary.transition.status, 'verified_success')
+  assert.equal(ingressSummary.choices.vtr.latestDecision.actor, 'vtr')
+  assert.equal(ingressSummary.choices.vtr.latestDecision.selected.transitionId, ingressTransitionId)
+  assert.equal(ingressSummary.choices.vtr.latestDecision.selected.ensures, 'reach.resource-source')
+  assert.equal(ingressSummary.choices.latest.actor, 'vtr')
+  assert.equal(ingressSummary.choices.latest.selected.transitionId, ingressTransitionId)
+  assert.equal(ingressSummary.choices.jevStatus, 'not_recorded')
+} finally {
+  await new Promise((resolve) => ingressControlServer.close(resolve))
+  rmSync(ingressRuntimeDir, { recursive: true, force: true })
+}
 
 const boundedRunLogDir = mkdtempSync(join(tmpdir(), 'buddy-observer-vtr-'))
 try {
