@@ -1194,6 +1194,8 @@ export interface GenerationContext {
   /** configured objective seed. */
   goalItem: string
   goalCount: number
+  /** Host-pinned Jev identity required only while recovering from provider outage. */
+  recoveryPolicyAuthority?: { provider: string; model: string } | null
   /** why this generation was created fresh (e.g. "death"); drives LADDER_RESET. */
   resetReason: string | null
   /** host-captured facts for the immediately preceding real death. */

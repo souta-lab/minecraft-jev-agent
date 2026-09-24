@@ -18,6 +18,69 @@ export type FailureLog = (event: string, detail?: Record<string, unknown>) => vo
  */
 export type FatalTerminator = (error: FatalModelError) => never
 
+/** Effective model authority identity shared by the HOST and Jev controller. */
+export interface ModelAuthorityIdentity {
+  provider: string
+  model: string
+}
+
+export type ModelAuthorityMismatch =
+  | 'expected-identity-missing'
+  | 'actual-identity-missing'
+  | 'provider-mismatch'
+  | 'model-mismatch'
+  | 'response-source-mismatch'
+
+/**
+ * Compare non-secret, effective provider/model identity. Empty values are
+ * missing evidence: callers must not silently fill them from configuration.
+ */
+export function modelAuthorityIdentityMismatch(
+  expected: ModelAuthorityIdentity | null | undefined,
+  actual: ModelAuthorityIdentity | null | undefined,
+): ModelAuthorityMismatch | null {
+  if (expected === null || expected === undefined || !hasIdentity(expected)) return 'expected-identity-missing'
+  if (actual === null || actual === undefined || !hasIdentity(actual)) return 'actual-identity-missing'
+  if (expected.provider.trim() !== actual.provider.trim()) return 'provider-mismatch'
+  if (expected.model.trim() !== actual.model.trim()) return 'model-mismatch'
+  return null
+}
+
+/**
+ * A fresh response only proves Jev recovered when it came from the real Jev
+ * policy and returned the exact model pinned before the outage. Reflex and
+ * fallback decisions do not restore Jev authority.
+ */
+export function modelResponseAuthorityMismatch(
+  expected: ModelAuthorityIdentity | null | undefined,
+  actual: ModelAuthorityIdentity | null | undefined,
+  source: string | null | undefined,
+): ModelAuthorityMismatch | null {
+  if (source !== 'jev') return 'response-source-mismatch'
+  return modelAuthorityIdentityMismatch(expected, actual)
+}
+
+/** Reject an unproven recovery response before its decision can be consumed. */
+export function assertRecoveryModelAuthority(
+  expected: ModelAuthorityIdentity,
+  actual: ModelAuthorityIdentity | null | undefined,
+  source: string | null | undefined,
+): void {
+  const mismatch = modelResponseAuthorityMismatch(expected, actual, source)
+  if (mismatch === null) return
+  throw new FatalModelError(
+    'jev-authority',
+    1,
+    `recovery authority identity rejected (${mismatch}); expected=${JSON.stringify(expected)} actual=${JSON.stringify({ authority: actual ?? null, source: source ?? null })}`,
+    true,
+  )
+}
+
+function hasIdentity(identity: ModelAuthorityIdentity): boolean {
+  return typeof identity.provider === 'string' && identity.provider.trim().length > 0 &&
+    typeof identity.model === 'string' && identity.model.trim().length > 0
+}
+
 /**
  * The one fatal error shape for "the model did not answer". `attempts` is the
  * number of bounded attempts already spent; `reason` is the underlying error.

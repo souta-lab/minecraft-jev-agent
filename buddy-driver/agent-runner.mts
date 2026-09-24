@@ -798,11 +798,15 @@ function makeGenerationContext(
   buildHash: string | null = generationHash,
 ): GenerationContext {
   const generationWorldKey = currentWorldKey()
+  const availabilityAtCreate = modelAvailability.snapshot()
   pending.worldKey = generationWorldKey
   return {
     runId,
     bootSourceSha,
     buildHash,
+    recoveryPolicyAuthority: availabilityAtCreate.state === 'degraded'
+      ? availabilityAtCreate.recoveryAuthority
+      : null,
     m2SnapshotDir: DATA,
     bot: b,
     log: (event, detail = {}) => {
@@ -813,6 +817,9 @@ function makeGenerationContext(
           context: typeof detail.context === 'string' ? detail.context : 'unknown',
           attempts: typeof detail.attempts === 'number' ? detail.attempts : 0,
           error: typeof detail.error === 'string' ? detail.error : 'model authority unavailable',
+          authority: typeof detail.provider === 'string' && typeof detail.model === 'string'
+            ? { provider: detail.provider, model: detail.model }
+            : null,
         })
         log('MODEL_AVAILABILITY', {
           runId,
@@ -824,17 +831,39 @@ function makeGenerationContext(
         try { writeAcceptance() } catch { /* availability log remains durable */ }
       } else if (event === 'JEV_HEADS') {
         const previousState = modelAvailability.snapshot().state
-        const recovered = modelAvailability.recordSuccess()
-        if (recovered) {
+        const authority = typeof detail.provider === 'string' && typeof detail.model === 'string'
+          ? { provider: detail.provider, model: detail.model }
+          : null
+        const response = modelAvailability.recordPolicyResponse(
+          authority,
+          typeof detail.source === 'string' ? detail.source : null,
+        )
+        if (!response.accepted) {
+          if (previousState === 'degraded' && response.reason !== null) {
+            const retry = modelAvailability.recordRecoveryRejected(response.reason, authority)
+            log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
+              runId,
+              generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+              reason: response.reason,
+              expected: modelAvailability.snapshot().recoveryAuthority,
+              actual: authority,
+              retryAt: retry?.retryAt ?? modelAvailability.snapshot().retryAt,
+              retryDelayMs: retry?.delayMs ?? null,
+            })
+            if (retry !== null) scheduleGenerationRestart('model-unavailable', retry.delayMs)
+          }
+          return
+        }
+        if (response.recovered) {
           log('MODEL_RECOVERED', {
             runId,
             generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
-            provider: typeof detail.provider === 'string' ? detail.provider : null,
-            model: typeof detail.model === 'string' ? detail.model : null,
+            provider: authority?.provider ?? null,
+            model: authority?.model ?? null,
             recoveredAt: modelAvailability.snapshot().recoveredAt,
           })
         }
-        if (recovered || previousState === 'unknown') {
+        if (response.recovered || previousState === 'unknown') {
           log('MODEL_AVAILABILITY', { runId, generationId: detail.generationId ?? null, ...modelAvailability.snapshot() })
           try { writeAcceptance() } catch { /* success event remains durable */ }
         }
@@ -1076,6 +1105,42 @@ async function startGeneration(trigger: string): Promise<boolean> {
   pending.generationId = gen.id
   pendingByGeneration.set(gen.id, pending)
   registerGenerationResources(gen, ctx)
+  const statusBeforeStart = gen.status()
+  const candidateAuthority = {
+    provider: statusBeforeStart.policyProvider,
+    model: statusBeforeStart.policyModel,
+  }
+  const authorityAdmission = modelAvailability.admitGenerationAuthority(candidateAuthority)
+  if (!authorityAdmission.allowed) {
+    const availability = modelAvailability.snapshot()
+    const retry = availability.state === 'degraded'
+      ? modelAvailability.recordRecoveryRejected(authorityAdmission.reason, candidateAuthority)
+      : null
+    log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
+      runId,
+      generationId: gen.id,
+      trigger,
+      reason: authorityAdmission.reason,
+      expected: authorityAdmission.expected,
+      actual: candidateAuthority,
+      retryAt: retry?.retryAt ?? availability.retryAt,
+      retryDelayMs: retry?.delayMs ?? null,
+      started: false,
+    })
+    disposeGeneration(gen)
+    discardStagedProposals(gen.id, 'model-recovery-authority-rejected')
+    if (retry !== null) scheduleGenerationRestart('model-unavailable', retry.delayMs)
+    else scheduleGenerationRestart('generation-stopped', GEN_RESTART_MS)
+    return false
+  }
+  log('GENERATION_MODEL_AUTHORITY', {
+    runId,
+    generationId: gen.id,
+    trigger,
+    provider: candidateAuthority.provider,
+    model: candidateAuthority.model,
+    recovery: authorityAdmission.reason === 'same-recovery-authority',
+  })
   pendingResetReason = null
   gen.attach()
   try {

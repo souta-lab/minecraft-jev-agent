@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
+import { FatalModelError, ModelRecoveryRequested, assertRecoveryModelAuthority, modelAuthorityIdentityMismatch, modelResponseAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
 import {
   MODEL_RETRY_BASE_DELAY_MS,
   MODEL_RETRY_MAX_DELAY_MS,
@@ -47,24 +47,90 @@ describe('model authority recovery host policy', () => {
     const tracker = new ModelAvailabilityTracker()
     expect(tracker.snapshot()).toEqual({
       state: 'unknown', consecutiveFailures: 0, retryAt: null, lastFailure: null, recoveredAt: null,
+      recoveryAuthority: null, lastRecoveryRejection: null,
     })
 
+    expect(tracker.admitGenerationAuthority({ provider: 'typesafe-ai', model: 'typesafe-ai/jev' })).toMatchObject({
+      allowed: true, reason: 'ordinary-generation',
+    })
     const first = tracker.recordUnavailable({
       generationId: 'gen-old', context: 'jev-authority', attempts: 4, error: 'GatewayInternalServerError: unavailable',
     }, Date.parse('2026-09-23T00:00:00.000Z'))
     expect(first.attempt).toBe(1)
     expect(first.delayMs).toBe(5_000)
     expect(first.retryAt).toBe('2026-09-23T00:00:05.000Z')
-    expect(tracker.snapshot().state).toBe('degraded')
+    expect(tracker.snapshot()).toMatchObject({
+      state: 'degraded',
+      recoveryAuthority: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' },
+      lastFailure: { authority: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' } },
+    })
 
     tracker.recordRetryStarted()
     expect(tracker.snapshot().retryAt).toBeNull()
-    expect(tracker.recordSuccess(Date.parse('2026-09-23T00:00:06.000Z'))).toBe(true)
+    expect(tracker.recordPolicyResponse(
+      { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, 'jev', Date.parse('2026-09-23T00:00:06.000Z'),
+    )).toEqual({ accepted: true, recovered: true, reason: null })
     expect(tracker.snapshot()).toMatchObject({
       state: 'available', consecutiveFailures: 0, retryAt: null,
       recoveredAt: '2026-09-23T00:00:06.000Z',
       lastFailure: { generationId: 'gen-old', context: 'jev-authority', attempts: 4 },
+      recoveryAuthority: null,
     })
+  })
+
+  test('fault-injected outage recovery requires the pinned Jev identity at candidate start and response', () => {
+    const tracker = new ModelAvailabilityTracker()
+    const oldAuthority = { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }
+    const t0 = Date.parse('2026-09-23T00:00:00.000Z')
+    expect(tracker.admitGenerationAuthority(oldAuthority).allowed).toBe(true)
+    tracker.recordUnavailable({
+      generationId: 'gen-old', context: 'jev-authority', attempts: 3,
+      error: 'GatewayInternalServerError: Service temporarily unavailable',
+    }, t0)
+
+    tracker.recordRetryStarted()
+    const wrongProvider = { provider: 'openai-compatible', model: 'typesafe-ai/jev' }
+    const providerAdmission = tracker.admitGenerationAuthority(wrongProvider)
+    expect(providerAdmission).toMatchObject({ allowed: false, reason: 'provider-mismatch', expected: oldAuthority })
+    const providerRetry = tracker.recordRecoveryRejected('provider-mismatch', wrongProvider, t0 + 5_000)
+    expect(providerRetry).toMatchObject({ attempt: 2, delayMs: 10_000, retryAt: '2026-09-23T00:00:15.000Z' })
+    expect(modelRecoveryStartGate(tracker.snapshot(), t0 + 5_001)).toMatchObject({ allowed: false, reason: 'retry-backoff' })
+
+    tracker.recordRetryStarted()
+    const wrongModel = { provider: 'typesafe-ai', model: 'typesafe-ai/jev-next' }
+    const modelAdmission = tracker.admitGenerationAuthority(wrongModel)
+    expect(modelAdmission).toMatchObject({ allowed: false, reason: 'model-mismatch' })
+    expect(tracker.recordPolicyResponse(wrongModel, 'jev', t0 + 15_001)).toMatchObject({
+      accepted: false, recovered: false, reason: 'model-mismatch',
+    })
+    expect(tracker.snapshot().state).toBe('degraded')
+
+    const noIdentity = tracker.admitGenerationAuthority(null)
+    expect(noIdentity).toMatchObject({ allowed: false, reason: 'actual-identity-missing' })
+
+    const sameAuthority = tracker.admitGenerationAuthority(oldAuthority)
+    expect(sameAuthority).toMatchObject({ allowed: true, reason: 'same-recovery-authority' })
+    expect(tracker.recordPolicyResponse(oldAuthority, 'fallback', t0 + 15_002)).toMatchObject({
+      accepted: false, recovered: false, reason: 'response-source-mismatch',
+    })
+    expect(tracker.snapshot().state).toBe('degraded')
+    expect(tracker.recordPolicyResponse(oldAuthority, 'jev', t0 + 15_003)).toEqual({
+      accepted: true, recovered: true, reason: null,
+    })
+    expect(tracker.snapshot()).toMatchObject({ state: 'available', recoveryAuthority: null })
+  })
+
+  test('authority validator rejects absent or changed identity and non-Jev response sources', () => {
+    const expected = { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }
+    expect(modelAuthorityIdentityMismatch(expected, null)).toBe('actual-identity-missing')
+    expect(modelAuthorityIdentityMismatch(null, expected)).toBe('expected-identity-missing')
+    expect(modelAuthorityIdentityMismatch(expected, { provider: 'other', model: expected.model })).toBe('provider-mismatch')
+    expect(modelAuthorityIdentityMismatch(expected, { provider: expected.provider, model: 'other-model' })).toBe('model-mismatch')
+    expect(modelResponseAuthorityMismatch(expected, expected, 'fallback')).toBe('response-source-mismatch')
+    expect(modelResponseAuthorityMismatch(expected, expected, 'jev')).toBeNull()
+    expect(() => assertRecoveryModelAuthority(expected, { provider: 'other', model: expected.model }, 'jev')).toThrow(
+      expect.objectContaining({ context: 'jev-authority', retryable: true }),
+    )
   })
 
   test('central generation-start gate prevents lifecycle wakes from bypassing outage backoff', () => {
@@ -101,6 +167,8 @@ describe('model authority recovery host policy', () => {
       retryAt: 'not-a-date',
       lastFailure: null,
       recoveredAt: null,
+      recoveryAuthority: null,
+      lastRecoveryRejection: null,
     }
     expect(modelRecoveryStartGate({ ...base, state: 'available' }, 0)).toEqual({
       allowed: true,
@@ -137,6 +205,33 @@ describe('model authority recovery host policy', () => {
     expect(retryStarted).toBeLessThan(moduleLoad)
     expect(body.slice(gate, moduleLoad)).toContain("reason: 'model-recovery-backoff'")
     expect(body.slice(gate, defer)).toContain('recoveryGate.delayMs')
+    const authorityAdmission = body.indexOf('modelAvailability.admitGenerationAuthority(candidateAuthority)')
+    const generationStart = body.indexOf('gen.start()')
+    expect(authorityAdmission).toBeGreaterThan(create)
+    expect(authorityAdmission).toBeLessThan(generationStart)
+    expect(body.slice(authorityAdmission, generationStart)).toContain('started: false')
+    expect(body.slice(authorityAdmission, generationStart)).toContain("discardStagedProposals(gen.id, 'model-recovery-authority-rejected')")
+  })
+
+  test('recovery authority flows from host snapshot into Jev and the live result is checked before selection', () => {
+    const runner = readFileSync(new URL('./agent-runner.mts', import.meta.url), 'utf8')
+    const contextStart = runner.indexOf('function makeGenerationContext(')
+    const contextEnd = runner.indexOf('\nfunction ', contextStart + 1)
+    const context = runner.slice(contextStart, contextEnd)
+    expect(context).toContain('recoveryPolicyAuthority: availabilityAtCreate.state === \'degraded\'')
+    expect(context).toContain('availabilityAtCreate.recoveryAuthority')
+    expect(context).toContain('modelAvailability.recordPolicyResponse(')
+    expect(context).toContain('modelAvailability.recordRecoveryRejected(response.reason, authority)')
+
+    const generationEntry = readFileSync(new URL('./generation-entry.ts', import.meta.url), 'utf8')
+    expect(generationEntry).toContain('recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null')
+    const controller = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
+    const decisionStart = controller.indexOf('const result = await this.jev.decide({')
+    const authorityCheck = controller.indexOf('assertRecoveryModelAuthority(', decisionStart)
+    const recordDecision = controller.indexOf('this.lastDecision = result', decisionStart)
+    expect(authorityCheck).toBeGreaterThan(decisionStart)
+    expect(authorityCheck).toBeLessThan(recordDecision)
+    expect(controller.slice(authorityCheck, recordDecision)).toContain('result.source')
   })
 
   test('host quiesce drains the controller before revoking an incumbent lease', () => {

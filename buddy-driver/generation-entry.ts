@@ -2722,6 +2722,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         error: error.reason,
         retryable: true,
         generationId: id,
+        provider: controllerForRecovery.policyProvider,
+        model: controllerForRecovery.policyModel,
       })
       const recovery = stopGenerationForModelRecovery(error, id, controllerForRecovery)
       if (recovery !== null) throw recovery
@@ -2955,6 +2957,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     serverId: ctx.worldKey.serverId,
     worldEpoch: ctx.worldKey.worldEpoch,
     terminateOnModelFailure: terminateResident,
+    recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null,
     actuation: 'pathfinder',
     actuationPort,
     reach: 5,

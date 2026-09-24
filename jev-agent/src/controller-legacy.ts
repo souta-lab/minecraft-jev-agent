@@ -156,7 +156,8 @@ import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, 
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
-import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
+import { FatalModelError, ModelRecoveryRequested, assertRecoveryModelAuthority, describeFailure, failLoud } from './modelFailure.ts'
+import type { ModelAuthorityIdentity } from './modelFailure.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
@@ -451,6 +452,11 @@ export interface JevAgentOptions {
    * remain fatal. Tests omit it and observe the thrown FatalModelError.
    */
   terminateOnModelFailure?: (error: FatalModelError) => never
+  /**
+   * Set only by the HOST on an outage-recovery generation. A returned decision
+   * must prove the exact pinned Jev provider/model before it can reach π/actuation.
+   */
+  recoveryPolicyAuthority?: ModelAuthorityIdentity | null
   /**
    * #22: `false` (default) keeps `abandon_option` shadow-only: it is recorded
    * as a `BETA_SHADOW` vote and can never, by itself, cause a replan/abandon.
@@ -4878,6 +4884,10 @@ export class JevController {
         abandonSuppressed: verdict.suppressed,
         attempts: verdict.classification.attempts,
         chainId,
+        provider: this.policyProvider,
+        policy: result.policy,
+        source: result.source,
+        model: result.model,
       },
       this.tickCounter,
     )
@@ -5976,6 +5986,13 @@ export class JevController {
         projectionHash: hash,
         questionNames: questionNamesFor(questionSetForTrigger(trigger)),
       })
+      if (this.options.recoveryPolicyAuthority !== undefined && this.options.recoveryPolicyAuthority !== null) {
+        assertRecoveryModelAuthority(
+          this.options.recoveryPolicyAuthority,
+          { provider: this.policyProvider, model: result.model },
+          result.source,
+        )
+      }
       this.jevCalls += 1
       this.lastJevAt = Date.now()
       this.lastDecision = result

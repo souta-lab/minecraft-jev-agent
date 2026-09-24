@@ -1,4 +1,9 @@
-import { ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
+import {
+  ModelRecoveryRequested,
+  modelAuthorityIdentityMismatch,
+  modelResponseAuthorityMismatch,
+} from '../jev-agent/src/modelFailure.ts'
+import type { ModelAuthorityIdentity, ModelAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
 import type { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 
 export const MODEL_RETRY_BASE_DELAY_MS = 5_000
@@ -12,6 +17,14 @@ export interface ModelFailureRecord {
   context: string
   attempts: number
   error: string
+  authority: ModelAuthorityIdentity | null
+}
+
+export interface ModelRecoveryRejection {
+  ts: string
+  reason: ModelAuthorityMismatch
+  expected: ModelAuthorityIdentity | null
+  actual: ModelAuthorityIdentity | null
 }
 
 export interface ModelAvailabilitySnapshot {
@@ -20,6 +33,19 @@ export interface ModelAvailabilitySnapshot {
   retryAt: string | null
   lastFailure: ModelFailureRecord | null
   recoveredAt: string | null
+  /** Exact Jev authority pinned before the current outage; cleared on recovery. */
+  recoveryAuthority: ModelAuthorityIdentity | null
+  lastRecoveryRejection: ModelRecoveryRejection | null
+}
+
+export type ModelAuthorityAdmission =
+  | { allowed: true; reason: 'ordinary-generation' | 'same-recovery-authority'; expected: ModelAuthorityIdentity | null }
+  | { allowed: false; reason: ModelAuthorityMismatch; expected: ModelAuthorityIdentity | null; actual: ModelAuthorityIdentity | null }
+
+export interface ModelResponseAcceptance {
+  accepted: boolean
+  recovered: boolean
+  reason: ModelAuthorityMismatch | null
 }
 
 export type ModelRecoveryStartGate =
@@ -100,11 +126,45 @@ export class ModelAvailabilityTracker {
   private retryAt: string | null = null
   private lastFailure: ModelFailureRecord | null = null
   private recoveredAt: string | null = null
+  private activeAuthority: ModelAuthorityIdentity | null = null
+  private recoveryAuthority: ModelAuthorityIdentity | null = null
+  private lastRecoveryRejection: ModelRecoveryRejection | null = null
+
+  /**
+   * Record a generation's effective Jev configuration before start/actuation.
+   * During recovery, the stored pre-outage identity is immutable until a real
+   * response from that exact authority is observed.
+   */
+  admitGenerationAuthority(actual: ModelAuthorityIdentity | null | undefined): ModelAuthorityAdmission {
+    if (this.state === 'degraded') {
+      const reason = modelAuthorityIdentityMismatch(this.recoveryAuthority, actual)
+      if (reason !== null) {
+        return { allowed: false, reason, expected: cloneAuthority(this.recoveryAuthority), actual: cloneAuthority(actual ?? null) }
+      }
+      this.activeAuthority = cloneAuthority(actual ?? null)
+      return { allowed: true, reason: 'same-recovery-authority', expected: cloneAuthority(this.recoveryAuthority) }
+    }
+
+    const reason = modelAuthorityIdentityMismatch(actual, actual)
+    if (reason !== null) {
+      return { allowed: false, reason: 'actual-identity-missing', expected: cloneAuthority(actual ?? null), actual: cloneAuthority(actual ?? null) }
+    }
+    this.activeAuthority = cloneAuthority(actual ?? null)
+    return { allowed: true, reason: 'ordinary-generation', expected: cloneAuthority(this.activeAuthority) }
+  }
 
   recordUnavailable(
-    failure: Omit<ModelFailureRecord, 'ts'> & { ts?: string },
+    failure: Omit<ModelFailureRecord, 'ts' | 'authority'> & { ts?: string; authority?: ModelAuthorityIdentity | null },
     nowMs = Date.now(),
   ): { attempt: number; delayMs: number; retryAt: string } {
+    // Prefer the HOST's last admitted/observed authority. MODEL_UNAVAILABLE
+    // metadata is retained as a fallback for older callers, never as a way to
+    // replace the pre-failure identity being pinned.
+    const authority = cloneAuthority(this.activeAuthority) ?? cloneAuthority(failure.authority)
+    if (this.state !== 'degraded') {
+      this.recoveryAuthority = authority
+      this.lastRecoveryRejection = null
+    }
     this.state = 'degraded'
     this.consecutiveFailures += 1
     const delayMs = modelRetryDelayMs(this.consecutiveFailures)
@@ -117,6 +177,28 @@ export class ModelAvailabilityTracker {
       context: failure.context,
       attempts: failure.attempts,
       error: failure.error,
+      authority,
+    }
+    return { attempt: this.consecutiveFailures, delayMs, retryAt }
+  }
+
+  /** A changed/missing authority is a failed recovery attempt, with bounded backoff. */
+  recordRecoveryRejected(
+    reason: ModelAuthorityMismatch,
+    actual: ModelAuthorityIdentity | null | undefined,
+    nowMs = Date.now(),
+  ): { attempt: number; delayMs: number; retryAt: string } | null {
+    if (this.state !== 'degraded') return null
+    this.consecutiveFailures += 1
+    const delayMs = modelRetryDelayMs(this.consecutiveFailures)
+    const retryAt = new Date(nowMs + delayMs).toISOString()
+    this.retryAt = retryAt
+    this.recoveredAt = null
+    this.lastRecoveryRejection = {
+      ts: new Date(nowMs).toISOString(),
+      reason,
+      expected: cloneAuthority(this.recoveryAuthority),
+      actual: cloneAuthority(actual ?? null),
     }
     return { attempt: this.consecutiveFailures, delayMs, retryAt }
   }
@@ -125,13 +207,27 @@ export class ModelAvailabilityTracker {
     if (this.state === 'degraded') this.retryAt = null
   }
 
-  recordSuccess(nowMs = Date.now()): boolean {
+  recordPolicyResponse(
+    authority: ModelAuthorityIdentity | null | undefined,
+    source: string | null | undefined,
+    nowMs = Date.now(),
+  ): ModelResponseAcceptance {
     const recovered = this.state === 'degraded'
+    const reason = recovered
+      ? modelResponseAuthorityMismatch(this.recoveryAuthority, authority, source)
+      : (source === 'jev' ? modelAuthorityIdentityMismatch(authority, authority) : 'response-source-mismatch')
+    if (reason !== null) {
+      return { accepted: false, recovered: false, reason }
+    }
+
+    this.activeAuthority = cloneAuthority(authority ?? null)
     this.state = 'available'
     this.consecutiveFailures = 0
     this.retryAt = null
     if (recovered) this.recoveredAt = new Date(nowMs).toISOString()
-    return recovered
+    this.recoveryAuthority = null
+    this.lastRecoveryRejection = null
+    return { accepted: true, recovered, reason: null }
   }
 
   snapshot(): ModelAvailabilitySnapshot {
@@ -141,6 +237,17 @@ export class ModelAvailabilityTracker {
       retryAt: this.retryAt,
       lastFailure: this.lastFailure === null ? null : { ...this.lastFailure },
       recoveredAt: this.recoveredAt,
+      recoveryAuthority: cloneAuthority(this.recoveryAuthority),
+      lastRecoveryRejection: this.lastRecoveryRejection === null ? null : {
+        ...this.lastRecoveryRejection,
+        expected: cloneAuthority(this.lastRecoveryRejection.expected),
+        actual: cloneAuthority(this.lastRecoveryRejection.actual),
+      },
     }
   }
+}
+
+function cloneAuthority(identity: ModelAuthorityIdentity | null | undefined): ModelAuthorityIdentity | null {
+  if (identity === null || identity === undefined || typeof identity.provider !== 'string' || typeof identity.model !== 'string') return null
+  return { provider: identity.provider, model: identity.model }
 }
