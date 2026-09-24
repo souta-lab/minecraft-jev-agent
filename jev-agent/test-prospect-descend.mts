@@ -398,6 +398,25 @@ addCase('a producer behind a wall that is already pickup-adjacent gets the wall 
   }
 })
 
+addCase('a lower-target collect row keeps the prospect beside an in-range MINE', () => {
+  // The acquisition row can be `collect` with a lower grounded target, not only
+  // an explicit `descend`. A sibling MINE is a real route, but must not make the
+  // prospect's clearance-tagged DESCEND disappear during candidate pruning.
+  const state = world({
+    focusItem: 'raw_iron',
+    blocks: [ore({ x: 30, y: 59, z: 33 }, { inReach: true })],
+    current: { kind: 'collect' },
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const probe = prospects(grounded.candidates)[0]
+  const pass =
+    mines(grounded.candidates).length === 1 &&
+    probe?.id === 'PROSPECT:level:E:b29_59_33' &&
+    probe.meta[PROSPECT_META] === true &&
+    probe.meta.prospectExposure === 'exposed_by_this_dig'
+  return { pass, detail: `ids=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 addCase('a producer one level above or below is not a lateral probe target', () => {
   const above = world({ focusItem: 'raw_iron', blocks: [ore({ x: 30, y: 60, z: 33 })] })
   const below = world({ focusItem: 'raw_iron', blocks: [ore({ x: 30, y: 58, z: 33 })] })
