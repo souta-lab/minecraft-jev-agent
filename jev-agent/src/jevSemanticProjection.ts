@@ -971,7 +971,7 @@ export function foodBand(food: number): string {
   return bandFood(food)
 }
 
-/** `undefined` air means "not observed"; bands use the sensor's 0..MAX_AIR scale. */
+/** Missing/null air means "not observed"; bands use the sensor's 0..MAX_AIR scale. */
 export function airBand(air: number | null | undefined): string {
   if (air === null || air === undefined || !Number.isFinite(air)) return 'unknown'
   if (air <= LOW_AIR_LEVEL) return 'critical'

@@ -614,7 +614,7 @@ function guardAttack(candidate: Candidate, state: WorldState): GuardResult {
     return deny(
       candidate.id,
       'SUBMERGED',
-      `body is out of air (${submersion.air}/${MAX_AIR}); the attack lease cannot continue under water`,
+      `body is out of air (${submersion.air ?? 'unknown'}/${MAX_AIR}); the attack lease cannot continue under water`,
     )
   }
   // SAFE: an empty hunger bar at critical health is already dealing starvation
@@ -774,7 +774,7 @@ function submergedPlacementRefusal(
     return deny(
       candidate.id,
       'SUBMERGED',
-      `body is out of air (${submersion.air}/${MAX_AIR}); surface before placing`,
+      `body is out of air (${submersion.air ?? 'unknown'}/${MAX_AIR}); surface before placing`,
     )
   }
   const wet = state.submergedPlacementSpots ?? []

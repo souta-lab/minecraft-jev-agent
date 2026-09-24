@@ -20,6 +20,7 @@
 //                -> re-summon only on queue_empty | action_impossible |
 //                   unknown_situation | no_progress | need_llm=true
 import { randomUUID } from 'node:crypto'
+import { observedAir } from './air.ts'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
@@ -162,7 +163,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, MAX_AIR, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -5497,11 +5498,10 @@ export class JevController {
    * The live breath reading, used by the ATTACK-lease safety exception. The
    * scheduler owns the `low_air` preempt and the sensor owns `SelfState.air`;
    * this is only the controller's view of the same fact for the interrupt
-   * decision. A version that never reports `oxygenLevel` reads full air.
+   * decision. A version that never reports `oxygenLevel` leaves air unknown.
    */
-  private liveAir(): number {
-    const air = (this.bot as { oxygenLevel?: number }).oxygenLevel
-    return typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR
+  private liveAir(): number | null {
+    return observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
   }
 
   private placeRetryCount(item: string | null): number {

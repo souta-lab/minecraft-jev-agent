@@ -10,6 +10,11 @@
  */
 export const MAX_AIR = 20
 
+/** Normalize Mineflayer's optional breath metadata without asserting a value. */
+export function observedAir(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
 /**
  * At or below this remaining-breath value the controller must preempt other
  * work and surface. The threshold is a code-owned safety boundary; route choice

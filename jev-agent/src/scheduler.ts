@@ -18,6 +18,7 @@ import type { Bot } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { EventLogger } from './jev.ts'
+import { observedAir } from './air.ts'
 import { isHostileEntityName, LOW_AIR_LEVEL, MAX_AIR } from './state.ts'
 
 export const DECISION_TRIGGERS = [
@@ -115,9 +116,9 @@ export function shouldInterruptAttackLease(
   trigger: DecisionTrigger,
   health: number,
   criticalHealth = 6,
-  air: number = MAX_AIR,
+  air: number | null = null,
 ): boolean {
-  if (trigger === 'low_air') return air <= LOW_AIR_LEVEL
+  if (trigger === 'low_air') return air !== null && air <= LOW_AIR_LEVEL
   return (
     (trigger === 'damage_taken' || trigger === 'hp_changed') &&
     Number.isFinite(health) &&
@@ -170,13 +171,11 @@ export function formatLowAirPreempt(air: number, position: { x: number; y: numbe
 }
 
 /**
- * Remaining breath from the live bot. A bot/version that never reports
- * `oxygenLevel` has no drowning signal, so full air is the honest default (the
- * same rule the sensor uses for `SelfState.air`).
+ * Remaining breath from the live bot. Missing or malformed metadata remains
+ * unknown; only a measured low value can fire the preemptive trigger.
  */
-function readAir(bot: Bot): number {
-  const air = (bot as { oxygenLevel?: number }).oxygenLevel
-  return typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR
+function readAir(bot: Bot): number | null {
+  return observedAir((bot as { oxygenLevel?: number }).oxygenLevel)
 }
 
 /** Higher wins when a burst of triggers is coalesced; a critical trigger is never overwritten. */export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
@@ -511,7 +510,7 @@ export class DecisionScheduler {
    */
   private readonly onBreath = (): void => {
     const air = readAir(this.bot)
-    if (air > LOW_AIR_LEVEL) {
+    if (air === null || air > LOW_AIR_LEVEL) {
       this.lowAirBand = null
       return
     }

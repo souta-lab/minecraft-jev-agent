@@ -16,6 +16,7 @@ import type { Bot, EquipmentDestination } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
+import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
@@ -3071,10 +3072,9 @@ export class Executor {
     if (target === null) throw new ExecutorError('target_gone', `${candidate.id} swim waypoint has no coordinates`)
     this.ensureOwned(epoch, signal)
     const start = this.bot.entity.position.clone()
-    const startAirValue = (this.bot as { oxygenLevel?: number }).oxygenLevel
-    const startAir = typeof startAirValue === 'number' && Number.isFinite(startAirValue) ? startAirValue : MAX_AIR
+    const startAir = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
     const initialSubmersion = this.liveSubmersion()
-    if (startAir > LOW_AIR_LEVEL || (!initialSubmersion.feetInWater && !initialSubmersion.eyesInWater)) {
+    if ((startAir !== null && startAir > LOW_AIR_LEVEL) || (!initialSubmersion.feetInWater && !initialSubmersion.eyesInWater)) {
       return {
         arrived: true,
         result: this.buildResult(
@@ -3083,7 +3083,7 @@ export class Executor {
           startedAt,
           'done',
           'arrived',
-          `submersion escape no-op: body is no longer submerged at low air (${startAir}/${MAX_AIR})`,
+          `submersion escape no-op: body is no longer submerged at low air (${startAir ?? 'unknown'}/${MAX_AIR})`,
           null,
           {
             verified: true,
@@ -3151,7 +3151,7 @@ export class Executor {
     this.setPhase(candidate, epoch, 'pathing')
     const durationMs = Math.max(1, Math.min(1500, remainingMs))
     const deadline = Date.now() + durationMs
-    const reliefThreshold = Math.max(startAir, LOW_AIR_LEVEL)
+    const reliefThreshold = Math.max(startAir ?? LOW_AIR_LEVEL, LOW_AIR_LEVEL)
     let reached = false
     let breathRecovering = false
     let progress = false
@@ -3167,14 +3167,13 @@ export class Executor {
           throw new ExecutorError('path_stuck', `${candidate.id} swim left its grounded x/z column`)
         }
         if (y < target.y) validateColumn(y + 1)
-        const airValue = (this.bot as { oxygenLevel?: number }).oxygenLevel
-        const air = typeof airValue === 'number' && Number.isFinite(airValue) ? airValue : MAX_AIR
+        const air = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
         const headCell = swimBlockAt({ x, y: Math.floor(position.y + 1.62), z })
         const headDry = headCell !== null && airNames.has(headCell.name)
         const riseNow = position.y - start.y
         progress = riseNow >= 0.25 || progress
         reached = y >= target.y
-        breathRecovering = headDry && air > reliefThreshold
+        breathRecovering = headDry && air !== null && air > reliefThreshold
         if (reached || breathRecovering) break
         await new Promise<void>((resolve) => setTimeout(resolve, 50))
       }
@@ -3183,18 +3182,17 @@ export class Executor {
     }
     this.ensureOwned(epoch, signal)
     const end = this.bot.entity.position.clone()
-    const airEndValue = (this.bot as { oxygenLevel?: number }).oxygenLevel
-    const airEnd = typeof airEndValue === 'number' && Number.isFinite(airEndValue) ? airEndValue : MAX_AIR
+    const airEnd = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
     const riseEnd = end.y - start.y
     reached = Math.floor(end.y) >= target.y && Math.floor(end.x) === baseX && Math.floor(end.z) === baseZ
     const endHead = swimBlockAt({ x: Math.floor(end.x), y: Math.floor(end.y + 1.62), z: Math.floor(end.z) })
-    breathRecovering = endHead !== null && airNames.has(endHead.name) && airEnd > reliefThreshold
+    breathRecovering = endHead !== null && airNames.has(endHead.name) && airEnd !== null && airEnd > reliefThreshold
     progress = riseEnd >= 0.25
     const relieved = reached || breathRecovering
     this.logger.info(
       'executor',
       `SUBMERSION_SWIM action=${candidate.id} start=(${round2(start.x)},${round2(start.y)},${round2(start.z)}) ` +
-        `end=(${round2(end.x)},${round2(end.y)},${round2(end.z)}) targetY=${target.y} air=${startAir}->${airEnd} ` +
+        `end=(${round2(end.x)},${round2(end.y)},${round2(end.z)}) targetY=${target.y} air=${startAir ?? 'unknown'}->${airEnd ?? 'unknown'} ` +
         `reached=${reached} breathRecovering=${breathRecovering}`,
       { actionId: candidate.id, target, start: { x: start.x, y: start.y, z: start.z }, end: { x: end.x, y: end.y, z: end.z }, airStart: startAir, airEnd, reached, breathRecovering },
     )
@@ -3204,7 +3202,7 @@ export class Executor {
     const detail = reached
       ? `swam vertically to observed waypoint (${target.x},${target.y},${target.z})`
       : breathRecovering
-        ? `swam upward; breathable head cell observed and air recovered ${startAir}->${airEnd}/${MAX_AIR}`
+        ? `swam upward; breathable head cell observed and air recovered ${startAir ?? 'unknown'}->${airEnd ?? 'unknown'}/${MAX_AIR}`
         : `swam upward ${round2(riseEnd)}m toward (${target.x},${target.y},${target.z}); waypoint not yet reached`
     return {
       arrived: relieved,
@@ -8792,9 +8790,9 @@ export class Executor {
    * `SelfState` (`buildSelf`), not here.
    */
   private liveSubmersion(): BodySubmersion {
-    const air = (this.bot as { oxygenLevel?: number }).oxygenLevel
-    if (typeof air !== 'number' || !Number.isFinite(air) || air > LOW_AIR_LEVEL) {
-      return { air: typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR, feetInWater: false, eyesInWater: false, state: 'dry' }
+    const air = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
+    if (air !== null && air > LOW_AIR_LEVEL) {
+      return { air, feetInWater: false, eyesInWater: false, state: 'dry' }
     }
     const position = this.bot.entity.position
     const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
@@ -8831,7 +8829,7 @@ export class Executor {
     })
     throw new ExecutorError(
       'submerged',
-      `breath at ${submersion.air}/${MAX_AIR} while ${doing} at (${at.x},${at.y},${at.z}); surface before continuing`,
+      `breath at ${submersion.air ?? 'unknown'}/${MAX_AIR} while ${doing} at (${at.x},${at.y},${at.z}); surface before continuing`,
     )
   }
 

@@ -59,6 +59,8 @@ import {
 import type { DecisionTrigger } from './src/scheduler.ts'
 import { defaultExecutorOptions, Executor } from './src/executor.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
+import { airBand, buildJevSemanticProjection, foodBand, healthBand } from './src/jevSemanticProjection.ts'
+import type { SemanticProjectionInput } from './src/jevSemanticProjection.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -71,6 +73,47 @@ function check(label: string, ok: boolean, detail: string): void {
 }
 
 const key = (p: Vec3Json): string => `${p.x},${p.y},${p.z}`
+
+function selfAirProjection(state: WorldState) {
+  const input: SemanticProjectionInput = {
+    goal: { key: 'collect:log:3', targetItem: 'log', have: 0, required: 3, complete: false, progress: 0 },
+    option: { instanceId: 'option:air-observation', templateId: 'air-observation', skillKind: 'MOVE', targetKey: null },
+    world: {
+      dimension: state.self.dimension,
+      worldEpoch: 1,
+      generationId: 'air-observation-test',
+      leaseHeld: true,
+      alive: state.self.health > 0,
+    },
+    safety: {
+      healthBand: healthBand(state.self.health),
+      foodBand: foodBand(state.self.food),
+      airBand: airBand(state.self.air),
+      submerged: state.self.feetInWater === true || state.self.eyesInWater === true,
+      threatKey: null,
+      criticalDamageKey: null,
+      lastDamageKey: null,
+      wornArmor: null,
+      offhand: null,
+    },
+    progress: {
+      consecutiveFailures: 0,
+      lastFailureCode: null,
+      escalationRecommended: false,
+      oscillationsDetected: 0,
+      stallExhausted: false,
+      stallDistinctStates: 1,
+    },
+    inventory: {},
+    candidates: [],
+    identityContext: {
+      optionInstanceId: 'option:air-observation',
+      dimension: state.self.dimension,
+      worldEpoch: 1,
+    },
+  }
+  return buildJevSemanticProjection(input)
+}
 
 function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'submersion-'))
@@ -241,6 +284,49 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
       `pathfinderCalls=${pathProbeTargets.length} ` +
       `swimReachabilityProbe=${swimReachabilityWasProbed} forged=${forgedWaypointGuard?.ok ? 'unexpected PASS' : forgedWaypointGuard?.code ?? 'none'}`,
   )
+
+  const missingAirWetBot = { ...bot, oxygenLevel: undefined } as unknown as Bot
+  const unknownWet = buildWorldState(
+    missingAirWetBot,
+    { tick: 2, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
+  const invalidAirDryBot = {
+    ...bot,
+    oxygenLevel: Number.NaN,
+    blockAt: (position: Vec3Json) => {
+      const cell = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+      if (cell.x === ORIGIN.x && cell.z === ORIGIN.z && cell.y === ORIGIN.y) {
+        return { name: 'air', boundingBox: 'empty' as const, diggable: false }
+      }
+      if (cell.x === ORIGIN.x && cell.z === ORIGIN.z && cell.y === ORIGIN.y + 1) {
+        return { name: 'air', boundingBox: 'empty' as const, diggable: false }
+      }
+      if (cell.x === ORIGIN.x && cell.z === ORIGIN.z && cell.y === ORIGIN.y - 1) {
+        return { name: 'stone', boundingBox: 'block' as const, diggable: true }
+      }
+      return blockAt(position)
+    },
+  } as unknown as Bot
+  const unknownDry = buildWorldState(
+    invalidAirDryBot,
+    { tick: 3, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
+  const wetProjection = selfAirProjection(unknownWet)
+  const dryProjection = selfAirProjection(unknownDry)
+  const knownLowIsDrowning = state.self.envHazard?.drowning === true
+  check(
+    '(c1b) missing/nonfinite sensor breath stays unknown through self projection and does not invent drowning',
+    unknownWet.self.air === null &&
+      wetProjection.safety.airBand === 'unknown' && wetProjection.safety.submerged === true &&
+      bodySubmersion(unknownWet.self).state === 'submerged' &&
+      unknownWet.self.envHazard?.drowning === false && knownLowIsDrowning &&
+      unknownDry.self.air === null &&
+      dryProjection.safety.airBand === 'unknown' && dryProjection.safety.submerged === false,
+    `wet=${String(unknownWet.self.air)}/${wetProjection.safety.airBand}/${wetProjection.safety.submerged}/drowning=${unknownWet.self.envHazard?.drowning} ` +
+      `knownLowDrowning=${knownLowIsDrowning} dry=${String(unknownDry.self.air)}/${dryProjection.safety.airBand}/${dryProjection.safety.submerged}`,
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +380,7 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     CRITICAL_TRIGGERS.has('low_air') &&
     questionSetForTrigger('low_air') === 'threat' &&
     shouldInterruptAttackLease('low_air', 20, 6, 4) === true &&
+    shouldInterruptAttackLease('low_air', 20, 6, null) === false &&
     shouldInterruptAttackLease('low_air', 20, 6, MAX_AIR) === false &&
     shouldInterruptAttackLease('hp_changed', 5) === true &&
     shouldInterruptAttackLease('action_completed', 1) === false &&

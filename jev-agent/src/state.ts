@@ -10,8 +10,8 @@
 //   3. replayed in the pure guard unit test with no bot at all.
 import type { Bot } from 'mineflayer'
 import { Vec3 } from 'vec3'
-import { LOW_AIR_LEVEL, MAX_AIR } from './air.ts'
-export { LOW_AIR_LEVEL, MAX_AIR } from './air.ts'
+import { LOW_AIR_LEVEL, MAX_AIR, observedAir } from './air.ts'
+export { LOW_AIR_LEVEL, MAX_AIR, observedAir } from './air.ts'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { System2Outcome } from './system2.ts'
@@ -238,8 +238,8 @@ export type SubmersionState = 'dry' | 'submerged' | 'out_of_air'
 
 /** The body's live water/breath facts, all mechanically sensed (no inference). */
 export interface BodySubmersion {
-  /** remaining breath, 0..`MAX_AIR` */
-  air: number
+  /** remaining breath, 0..`MAX_AIR`; null means Mineflayer did not observe it */
+  air: number | null
   /** the cell the feet occupy holds a fluid */
   feetInWater: boolean
   /** the cell the eyes occupy holds a fluid - the head is underwater */
@@ -258,7 +258,8 @@ export interface SubmersionEscapeTarget {
 export const BODY_SUBMERGED = 'BODY_SUBMERGED'
 
 export function formatBodySubmerged(submersion: BodySubmersion, at: Vec3Json): string {
-  return `${BODY_SUBMERGED} state=${submersion.state} air=${submersion.air}/${MAX_AIR} feetWet=${submersion.feetInWater} headWet=${submersion.eyesInWater} at=${at.x},${at.y},${at.z}`
+  const air = submersion.air === null ? 'unknown' : String(submersion.air)
+  return `${BODY_SUBMERGED} state=${submersion.state} air=${air}/${MAX_AIR} feetWet=${submersion.feetInWater} headWet=${submersion.eyesInWater} at=${at.x},${at.y},${at.z}`
 }
 
 export type SelfState = {
@@ -278,11 +279,10 @@ export type SelfState = {
   offhand?: OffhandState | null
   /**
    * Remaining breath (vanilla bubbles) and the two fluid cells that decide
-   * whether the body is underwater. Optional so pure fixtures that predate the
-   * submersion facts need not restate them: `buildWorldState` always populates
-   * them and consumers treat an absent value as "full air, dry body".
+   * whether the body is underwater. `null`/absent means the client did not
+   * expose breath metadata; unknown is never promoted to full air.
    */
-  air?: number
+  air?: number | null
   feetInWater?: boolean
   eyesInWater?: boolean
   /**
@@ -305,18 +305,17 @@ export type SelfState = {
 
 /**
  * The body's submersion state, derived from the three sensed facts. Pure, so
- * the guard, the executor and the fixtures all read the same answer; absent
- * facts mean "full air, dry body", which keeps pre-submersion fixtures
- * behaviourally unchanged.
+ * the guard, the executor and the fixtures all read the same answer. Air
+ * remains null when unobserved, while water occupancy is derived independently.
  */
 export function bodySubmersion(
   self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>,
 ): BodySubmersion {
-  const air = typeof self.air === 'number' && Number.isFinite(self.air) ? self.air : MAX_AIR
+  const air = observedAir(self.air)
   const feetInWater = self.feetInWater === true
   const eyesInWater = self.eyesInWater === true
   const state: SubmersionState =
-    air <= LOW_AIR_LEVEL ? 'out_of_air' : feetInWater || eyesInWater ? 'submerged' : 'dry'
+    air !== null && air <= LOW_AIR_LEVEL ? 'out_of_air' : feetInWater || eyesInWater ? 'submerged' : 'dry'
   return { air, feetInWater, eyesInWater, state }
 }
 
@@ -2033,7 +2032,7 @@ function buildEnvHazard(
   bot: Bot,
   input: {
     feet: Vec3Json
-    air: number
+    air: number | null
     feetInWater: boolean
     eyesInWater: boolean
     onFire: boolean | null
@@ -2078,12 +2077,11 @@ function buildEnvHazard(
 
 /**
  * The remaining breath. Mineflayer sets `bot.oxygenLevel` from the server's
- * `air_supply` metadata; a bot/version that never reports it has no drowning
- * signal to read, so the honest default is full air rather than a fake alarm.
+ * `air_supply` metadata. Missing or malformed metadata stays unknown; the
+ * sensor never turns absence into a full-air world fact.
  */
-function readAir(bot: Bot): number {
-  const air = (bot as { oxygenLevel?: number }).oxygenLevel
-  return typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR
+function readAir(bot: Bot): number | null {
+  return observedAir((bot as { oxygenLevel?: number }).oxygenLevel)
 }
 
 /** true when the loaded cell holds a fluid (`null` = unloaded, so not a fluid). */

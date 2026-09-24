@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, MAX_AIR, bodyIsOutOfAir, bodyIsSubmerged, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyIsSubmerged, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -5933,7 +5933,9 @@ export function submersionAscentCandidates(state: WorldState, options: Candidate
     meta: {
       tick: state.tick,
       submersionEscape: true,
-      submersionAir: state.self.air ?? MAX_AIR,
+      ...(typeof state.self.air === 'number' && Number.isFinite(state.self.air)
+        ? { submersionAir: state.self.air }
+        : {}),
       submersionFeetBlock: entry.feetBlock,
       submersionHeadBlock: entry.headBlock,
     },
