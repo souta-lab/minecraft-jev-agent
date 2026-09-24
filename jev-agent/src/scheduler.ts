@@ -118,7 +118,10 @@ export function shouldInterruptAttackLease(
   criticalHealth = 6,
   air: number | null = null,
 ): boolean {
-  if (trigger === 'low_air') return air !== null && air <= LOW_AIR_LEVEL
+  if (trigger === 'low_air') {
+    const observed = observedAir(air)
+    return observed !== null && observed <= LOW_AIR_LEVEL
+  }
   return (
     (trigger === 'damage_taken' || trigger === 'hp_changed') &&
     Number.isFinite(health) &&
@@ -514,10 +517,8 @@ export class DecisionScheduler {
       this.lowAirBand = null
       return
     }
-    // Mineflayer can report the exhausted-air sentinel as -1. Treat every
-    // value below zero as the same terminal band as 0; otherwise -1 <-> 0
-    // packet variation re-arms this edge and repeatedly interrupts an
-    // in-flight action without any new air loss.
+    // Only values on the Mineflayer 0..20 scale reach this point; malformed or
+    // legacy raw-tick values were normalized to unknown above.
     const band = Math.max(0, Math.floor(air / 5))
     if (this.lowAirBand === band) return
     this.lowAirBand = band

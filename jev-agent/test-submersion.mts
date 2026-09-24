@@ -32,6 +32,7 @@ import {
   formatBodySubmerged,
   LOW_AIR_LEVEL,
   MAX_AIR,
+  observedAir,
 } from './src/state.ts'
 import type { AgentSignals, GoalState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import {
@@ -319,6 +320,12 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     { tick: 4, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
     { ...defaultSensorOptions, maxPlacementSpots: 24 },
   )
+  const legacyScaleAirWetBot = { ...bot, oxygenLevel: 300 } as unknown as Bot
+  const legacyScaleAirWet = buildWorldState(
+    legacyScaleAirWetBot,
+    { tick: 5, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
   const wetProjection = selfAirProjection(unknownWet)
   const dryProjection = selfAirProjection(unknownDry)
   const observedProjection = selfAirProjection(observedAirWet)
@@ -326,7 +333,7 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   const knownLowIsDrowning = state.self.envHazard?.drowning === true
   check(
     '(c1b) missing/nonfinite sensor breath stays unknown through self projection and does not invent drowning',
-    unknownWet.self.air === null &&
+      unknownWet.self.air === null &&
       wetProjection.safety.airBand === 'unknown' && wetProjection.safety.submerged === true &&
       bodySubmersion(unknownWet.self).state === 'submerged' &&
       unknownWet.self.envHazard?.drowning === null && knownLowIsDrowning &&
@@ -335,12 +342,43 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
       observedAirWet.self.air === 17 && observedProjection.safety.airBand === 'low' &&
       bodySubmersion(observedAirWet.self).state === 'submerged' &&
       observedAirWet.self.envHazard?.drowning === false &&
+      legacyScaleAirWet.self.air === null &&
+      selfAirProjection(legacyScaleAirWet).safety.airBand === 'unknown' &&
+      bodySubmersion(legacyScaleAirWet.self).state === 'submerged' &&
+      legacyScaleAirWet.self.envHazard?.drowning === null &&
+      submersionAscentCandidates(legacyScaleAirWet, defaultCandidateOptions).length === 0 &&
       unknownDry.self.air === null &&
       dryProjection.safety.airBand === 'unknown' && dryProjection.safety.submerged === false,
     `wet=${String(unknownWet.self.air)}/${wetProjection.safety.airBand}/${wetProjection.safety.submerged}/drowning=${unknownWet.self.envHazard?.drowning} ` +
       `knownLow=${state.self.air}/${knownLowProjection.safety.airBand}/drowning=${knownLowIsDrowning} ` +
       `observed=${observedAirWet.self.air}/${observedProjection.safety.airBand}/${observedAirWet.self.envHazard?.drowning} ` +
+      `legacy300=${String(legacyScaleAirWet.self.air)}/${selfAirProjection(legacyScaleAirWet).safety.airBand}/${legacyScaleAirWet.self.envHazard?.drowning} ` +
       `dry=${String(unknownDry.self.air)}/${dryProjection.safety.airBand}/${dryProjection.safety.submerged}`,
+  )
+}
+
+{
+  const cases: Array<{ input: unknown; expected: number | null }> = [
+    { input: 0, expected: 0 },
+    { input: MAX_AIR, expected: MAX_AIR },
+    { input: -0.1, expected: null },
+    { input: -1, expected: null },
+    { input: MAX_AIR + 1, expected: null },
+    { input: 300, expected: null },
+    { input: null, expected: null },
+    { input: undefined, expected: null },
+    { input: Number.NaN, expected: null },
+    { input: Number.POSITIVE_INFINITY, expected: null },
+  ]
+  const negativeWet = bodySubmersion({ air: -1, feetInWater: true, eyesInWater: true })
+  const pass =
+    cases.every(({ input, expected }) => observedAir(input) === expected) &&
+    negativeWet.air === null && negativeWet.state === 'submerged' && !bodyIsOutOfAir({ air: -1, feetInWater: true, eyesInWater: true })
+  check(
+    '(c1c) Mineflayer breath normalization accepts only finite values on the 0..20 scale',
+    pass,
+    cases.map(({ input, expected }) => `${String(input)}->${String(observedAir(input))}${observedAir(input) === expected ? '' : ` (expected ${String(expected)})`}`).join(' ') +
+      ` body[-1,wet]=${negativeWet.state}/${String(negativeWet.air)}`,
   )
 }
 
@@ -354,7 +392,7 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     entity: { position: { x: 67.5, y: 58.3, z: 28.5 } },
     health: 20,
     food: 20,
-    oxygenLevel: MAX_AIR,
+    oxygenLevel: MAX_AIR as number | undefined,
     on: (event: string, handler: Handler) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler])
     },
@@ -370,19 +408,23 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
   })
   scheduler.start()
   scheduler.onDecision((event) => events.push({ trigger: event.trigger, detail: event.detail }))
-  const breath = (air: number): void => {
+  const breath = (air: number | undefined): void => {
     bot.oxygenLevel = air
     for (const handler of handlers.get('breath') ?? []) handler()
   }
   breath(MAX_AIR)
+  breath(undefined)
+  breath(Number.NaN)
+  breath(Number.POSITIVE_INFINITY)
+  breath(-1)
+  breath(21)
+  breath(300)
   breath(12) // above the SAFE threshold: no preempt
   breath(10) // band 2 -> preempt 1
-  breath(8) // same band -> silent
-  breath(9) // band 1 -> preempt 2
+  breath(8) // band 1 -> preempt 2
+  breath(9) // same band -> silent
   breath(4) // band 0 -> preempt 3
-  breath(-1) // exhausted-air sentinel stays in terminal band 0
-  breath(0) // packet variation at exhausted air must not re-arm the edge
-  breath(-1)
+  breath(0) // same measured band -> silent
   breath(20) // surfaced: re-arm
   breath(5) // band 1 -> preempt 4
   scheduler.stop()
@@ -396,6 +438,8 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     questionSetForTrigger('low_air') === 'threat' &&
     shouldInterruptAttackLease('low_air', 20, 6, 4) === true &&
     shouldInterruptAttackLease('low_air', 20, 6, null) === false &&
+    shouldInterruptAttackLease('low_air', 20, 6, -1) === false &&
+    shouldInterruptAttackLease('low_air', 20, 6, MAX_AIR + 1) === false &&
     shouldInterruptAttackLease('low_air', 20, 6, MAX_AIR) === false &&
     shouldInterruptAttackLease('hp_changed', 5) === true &&
     shouldInterruptAttackLease('action_completed', 1) === false &&

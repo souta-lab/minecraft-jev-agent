@@ -10,9 +10,14 @@
  */
 export const MAX_AIR = 20
 
-/** Normalize Mineflayer's optional breath metadata without asserting a value. */
+/**
+ * Normalize Mineflayer's optional breath metadata without asserting a value.
+ * The supported Mineflayer client maps `air_supply` into the vanilla 0..20
+ * bubble scale. Missing, malformed, and out-of-scale values remain unknown;
+ * in particular, old callers must not feed raw 0..300 server ticks here.
+ */
 export function observedAir(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= MAX_AIR ? value : null
 }
 
 /**

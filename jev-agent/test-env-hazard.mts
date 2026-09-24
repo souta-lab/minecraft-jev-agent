@@ -126,7 +126,7 @@ function envBot(input: {
     heldItem: null,
     health: 12,
     food: 18,
-    oxygenLevel: input.oxygenLevel ?? 300,
+    oxygenLevel: input.oxygenLevel ?? 20,
     game: { gameMode: 'survival', dimension: 'minecraft:the_nether', minY: 0, height: 256 },
     time: { isDay: false },
     registry: null,

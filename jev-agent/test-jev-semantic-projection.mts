@@ -183,7 +183,7 @@ const SRC_CONTROLLER = readFileSync(new URL('./src/controller-legacy.ts', import
 addCase('(0) air bands share the sensor scale and low-air safety boundary', () => {
   const values = [0, LOW_AIR_LEVEL, LOW_AIR_LEVEL + 1, MAX_AIR]
   const bands = values.map((value) => airBand(value))
-  const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY].map((value) => airBand(value))
+  const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, MAX_AIR + 1, 300].map((value) => airBand(value))
   const dryFull = buildJevSemanticProjection(projectionInput({
     safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
   }))
