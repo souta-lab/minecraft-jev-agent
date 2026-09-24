@@ -539,6 +539,7 @@ let generationRestartTimer: NodeJS.Timeout | null = null
 let generationConnectionRetryTimer: NodeJS.Timeout | null = null
 let generationConnectionAttempt: Promise<boolean> | null = null
 let reloadTimer: NodeJS.Timeout | null = null
+let deferredModelReloadTrigger: string | null = null
 let reloadArbiter: ReloadArbiter | null = null
 let lastSrcSignature = ''
 let lastInventoryHash = ''
@@ -862,6 +863,11 @@ function makeGenerationContext(
             model: authority?.model ?? null,
             recoveredAt: modelAvailability.snapshot().recoveredAt,
           })
+          if (deferredModelReloadTrigger !== null) {
+            const deferredTrigger = deferredModelReloadTrigger
+            deferredModelReloadTrigger = null
+            scheduleReload(`model-recovered:${deferredTrigger}`)
+          }
         }
         if (response.recovered || previousState === 'unknown') {
           log('MODEL_AVAILABILITY', { runId, generationId: detail.generationId ?? null, ...modelAvailability.snapshot() })
@@ -968,12 +974,25 @@ function makeSwapPorts(previousModule: GenerationModule | null): SwapPorts {
     afterQuiesce: (target) => log('LISTENERS', { phase: 'after_quiesce', generationId: target.id, listeners: listenerCounts() }),
     buildResume: () => {
       if (previousModule === null || bot === null) return null
+      const trigger = `rollback:${currentBundle ?? 'previous-module'}`
+      if (!gateModelRecoveryStart(trigger, 'rollback')) return null
       const pending = newPendingProposals()
       const ctx = makeGenerationContext(bot, pending)
       const resumed = previousModule.createGeneration(ctx)
       pending.generationId = resumed.id
       pendingByGeneration.set(resumed.id, pending)
       registerGenerationResources(resumed, ctx)
+      const authorityCheck = inspectGenerationAuthority(resumed, trigger)
+      if (!authorityCheck.admission.allowed) {
+        const retryDelayMs = logRejectedGenerationAuthority(
+          resumed.id, trigger, authorityCheck.authority, authorityCheck.admission, true,
+        )
+        disposeGeneration(resumed)
+        discardStagedProposals(resumed.id, 'rollback-model-authority-rejected')
+        if (retryDelayMs !== null) scheduleGenerationRestart('model-unavailable', retryDelayMs)
+        else scheduleGenerationRestart('generation-stopped', GEN_RESTART_MS)
+        return null
+      }
       return resumed
     },
     dispose: (target: SwapGeneration) => disposeGeneration(target as ResidentGeneration),
@@ -1021,6 +1040,83 @@ function watchGenerationStop(gen: ResidentGeneration): void {
   generationStopWatch.set(gen.id, guard)
 }
 
+type RecoveryStartPath = 'generation' | 'reload' | 'rollback'
+
+/** Every path that can commit a fresh generation shares the provider backoff. */
+function gateModelRecoveryStart(trigger: string, path: RecoveryStartPath): boolean {
+  const recoveryGate = modelRecoveryStartGate(modelAvailability.snapshot())
+  if (!recoveryGate.allowed) {
+    const availability = modelAvailability.snapshot()
+    const detail = {
+      runId,
+      trigger,
+      path,
+      reason: 'model-recovery-backoff',
+      backoffReason: recoveryGate.reason,
+      deferMs: recoveryGate.delayMs,
+      retryAt: availability.retryAt,
+      consecutiveFailures: availability.consecutiveFailures,
+      lastFailure: availability.lastFailure,
+    }
+    log(path === 'reload' ? 'RELOAD_DEFERRED' : 'GENERATION_START_SUPPRESSED', detail)
+    scheduleGenerationRestart('model-unavailable', recoveryGate.delayMs)
+    return false
+  }
+  if (recoveryGate.reason === 'retry-due') {
+    // Direct lifecycle wakes and reload/rollback paths record the same durable
+    // transition as the scheduled retry before constructing a generation.
+    modelAvailability.recordRetryStarted()
+    log('MODEL_RETRY_STARTED', { runId, trigger, path, ...modelAvailability.snapshot() })
+    try { writeAcceptance() } catch { /* retry event remains in the resident log */ }
+  }
+  return true
+}
+
+function inspectGenerationAuthority(gen: ResidentGeneration, trigger: string): {
+  authority: { provider: string; model: string }
+  admission: ReturnType<ModelAvailabilityTracker['admitGenerationAuthority']>
+} {
+  const status = gen.status()
+  const authority = { provider: status.policyProvider, model: status.policyModel }
+  const admission = modelAvailability.admitGenerationAuthority(authority)
+  if (admission.allowed) {
+    log('GENERATION_MODEL_AUTHORITY', {
+      runId,
+      generationId: gen.id,
+      trigger,
+      provider: authority.provider,
+      model: authority.model,
+      recovery: admission.reason === 'same-recovery-authority',
+    })
+  }
+  return { authority, admission }
+}
+
+function logRejectedGenerationAuthority(
+  generationId: string,
+  trigger: string,
+  authority: { provider: string; model: string },
+  admission: Exclude<ReturnType<ModelAvailabilityTracker['admitGenerationAuthority']>, { allowed: true }>,
+  countRecoveryAttempt: boolean,
+): number | null {
+  const before = modelAvailability.snapshot()
+  const retry = countRecoveryAttempt && before.state === 'degraded'
+    ? modelAvailability.recordRecoveryRejected(admission.reason, authority)
+    : null
+  log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
+    runId,
+    generationId,
+    trigger,
+    reason: admission.reason,
+    expected: admission.expected,
+    actual: authority,
+    retryAt: retry?.retryAt ?? before.retryAt,
+    retryDelayMs: retry?.delayMs ?? null,
+    started: false,
+  })
+  return retry?.delayMs ?? null
+}
+
 async function startGeneration(trigger: string): Promise<boolean> {
   // `freeze` is a lifecycle invariant, not merely a restart-timer hint. Direct
   // spawn/respawn/control paths all funnel through this function, so enforcing it
@@ -1029,30 +1125,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     log('GENERATION_START_SUPPRESSED', { trigger, reason: 'frozen' })
     return false
   }
-  const recoveryGate = modelRecoveryStartGate(modelAvailability.snapshot())
-  if (!recoveryGate.allowed) {
-    const availability = modelAvailability.snapshot()
-    log('GENERATION_START_SUPPRESSED', {
-      runId,
-      trigger,
-      reason: 'model-recovery-backoff',
-      backoffReason: recoveryGate.reason,
-      deferMs: recoveryGate.delayMs,
-      retryAt: availability.retryAt,
-      consecutiveFailures: availability.consecutiveFailures,
-      lastFailure: availability.lastFailure,
-    })
-    scheduleGenerationRestart('model-unavailable', recoveryGate.delayMs)
-    return false
-  }
-  if (recoveryGate.reason === 'retry-due') {
-    // A lifecycle wake can arrive after the deadline without coming through the
-    // scheduled recovery timer. Record that first due retry just as the timer
-    // path does, so acceptance evidence keeps one consistent transition.
-    modelAvailability.recordRetryStarted()
-    log('MODEL_RETRY_STARTED', { runId, trigger, ...modelAvailability.snapshot() })
-    try { writeAcceptance() } catch { /* retry event remains in the resident log */ }
-  }
+  if (!gateModelRecoveryStart(trigger, 'generation')) return false
   if (bot === null || bot.entity === undefined) {
     log('ERROR', { where: 'startGeneration', message: 'no spawned bot', trigger })
     return false
@@ -1105,42 +1178,17 @@ async function startGeneration(trigger: string): Promise<boolean> {
   pending.generationId = gen.id
   pendingByGeneration.set(gen.id, pending)
   registerGenerationResources(gen, ctx)
-  const statusBeforeStart = gen.status()
-  const candidateAuthority = {
-    provider: statusBeforeStart.policyProvider,
-    model: statusBeforeStart.policyModel,
-  }
-  const authorityAdmission = modelAvailability.admitGenerationAuthority(candidateAuthority)
-  if (!authorityAdmission.allowed) {
-    const availability = modelAvailability.snapshot()
-    const retry = availability.state === 'degraded'
-      ? modelAvailability.recordRecoveryRejected(authorityAdmission.reason, candidateAuthority)
-      : null
-    log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
-      runId,
-      generationId: gen.id,
-      trigger,
-      reason: authorityAdmission.reason,
-      expected: authorityAdmission.expected,
-      actual: candidateAuthority,
-      retryAt: retry?.retryAt ?? availability.retryAt,
-      retryDelayMs: retry?.delayMs ?? null,
-      started: false,
-    })
+  const authorityCheck = inspectGenerationAuthority(gen, trigger)
+  if (!authorityCheck.admission.allowed) {
+    const retryDelayMs = logRejectedGenerationAuthority(
+      gen.id, trigger, authorityCheck.authority, authorityCheck.admission, true,
+    )
     disposeGeneration(gen)
     discardStagedProposals(gen.id, 'model-recovery-authority-rejected')
-    if (retry !== null) scheduleGenerationRestart('model-unavailable', retry.delayMs)
+    if (retryDelayMs !== null) scheduleGenerationRestart('model-unavailable', retryDelayMs)
     else scheduleGenerationRestart('generation-stopped', GEN_RESTART_MS)
     return false
   }
-  log('GENERATION_MODEL_AUTHORITY', {
-    runId,
-    generationId: gen.id,
-    trigger,
-    provider: candidateAuthority.provider,
-    model: candidateAuthority.model,
-    recovery: authorityAdmission.reason === 'same-recovery-authority',
-  })
   pendingResetReason = null
   gen.attach()
   try {
@@ -2267,6 +2315,10 @@ async function performReload(trigger: string): Promise<void> {
     log('RELOAD', { ok: false, trigger, reason: 'no live bot' })
     return
   }
+  if (!frozen && !gateModelRecoveryStart(trigger, 'reload')) {
+    deferredModelReloadTrigger = trigger
+    return
+  }
   let candidate: ResidentGeneration | null = null
   try {
     const built = await buildGeneration()
@@ -2286,6 +2338,32 @@ async function performReload(trigger: string): Promise<void> {
     nextPending.generationId = candidate.id
     pendingByGeneration.set(candidate.id, nextPending)
     registerGenerationResources(candidate, ctx)
+    if (!frozen) {
+      const authorityCheck = inspectGenerationAuthority(candidate, `reload:${trigger}`)
+      if (!authorityCheck.admission.allowed) {
+        const retryDelayMs = logRejectedGenerationAuthority(
+          candidate.id,
+          `reload:${trigger}`,
+          authorityCheck.authority,
+          authorityCheck.admission,
+          generation === null,
+        )
+        disposeGeneration(candidate)
+        discardStagedProposals(candidate.id, 'reload-model-authority-rejected')
+        candidate = null
+        stats.reloadsFailed += 1
+        if (modelAvailability.snapshot().state === 'degraded') deferredModelReloadTrigger = trigger
+        log('RELOAD_REJECTED', {
+          trigger,
+          action: 'keep-previous-generation',
+          reason: authorityCheck.admission.reason,
+          retryDelayMs,
+        })
+        if (retryDelayMs !== null) scheduleGenerationRestart('model-unavailable', retryDelayMs)
+        else if (generation === null) scheduleGenerationRestart('reload-failed')
+        return
+      }
+    }
     candidate.attach()
     let smoke: StructuralSmokeResult
     try {
