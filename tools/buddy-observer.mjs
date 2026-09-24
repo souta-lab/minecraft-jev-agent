@@ -685,13 +685,50 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
   })
 }
 
-function readMission(contractPath) {
-  try {
-    const parsed = JSON.parse(readFileSync(contractPath, 'utf8'))
-    const m4 = parsed?.milestones?.M4
-    return { id: 'M4', title: typeof m4?.title === 'string' ? m4.title : 'Ender Dragon' }
-  } catch {
-    return { id: 'M4', title: 'Ender Dragon' }
+function projectMission(mission, { runId, generationId, generationBound, sourceCommit }) {
+  const provenance = mission?.provenance ?? null
+  const source = typeof provenance?.source === 'string' && provenance.source.trim() !== ''
+    ? provenance.source
+    : null
+  const provenanceRunId = provenance?.runId ?? null
+  const provenanceGenerationId = provenance?.generationId ?? null
+  let reason = null
+
+  if (runId === null) reason = 'mission_live_run_identity_unavailable'
+  else if (generationId === null) reason = 'mission_current_generation_identity_unavailable'
+  else if (generationBound !== true) reason = 'mission_current_generation_boundary_unavailable'
+  else if (source === null) reason = 'mission_source_unavailable'
+  else if (typeof mission?.id !== 'string' || mission.id.trim() === ''
+    || typeof mission?.title !== 'string' || mission.title.trim() === '') reason = 'mission_identity_unavailable'
+  else if (provenanceRunId !== runId) reason = 'mission_source_run_mismatch'
+  else if (provenanceGenerationId !== generationId) reason = 'mission_source_generation_mismatch'
+
+  if (reason !== null) {
+    return {
+      status: 'unknown',
+      id: null,
+      title: null,
+      provenance: {
+        status: 'unbound',
+        source,
+        runId,
+        generationId,
+        reason,
+      },
+    }
+  }
+
+  return {
+    status: 'observed',
+    id: mission.id,
+    title: mission.title,
+    provenance: {
+      status: 'run_generation_bound',
+      source,
+      runId,
+      generationId,
+      sourceCommit,
+    },
   }
 }
 
@@ -739,7 +776,7 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
-export function buildObserverSnapshot({ report, events, mission, runBoot = null, runBuild = null, runMetadata = null, runGenerationReady = null, jevCalls = [], now = Date.now() }) {
+export function buildObserverSnapshot({ report, events, mission = null, runBoot = null, runBuild = null, runMetadata = null, runGenerationReady = null, jevCalls = [], now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
   const bootFromTail = latestEvent(events, ['BOOT'])
@@ -802,6 +839,12 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
     : eventSourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+acceptance+predicate-artifacts'
       : artifactSourceSha !== null ? 'run-acceptance+predicate-artifacts'
         : 'run-BOOT-event'
+  const missionProjection = projectMission(mission, {
+    runId,
+    generationId,
+    generationBound,
+    sourceCommit,
+  })
   const decisionEvidence = projectJevDecisionEvidence({
     jevCalls,
     choiceEvent: jev,
@@ -839,7 +882,7 @@ export function buildObserverSnapshot({ report, events, mission, runBoot = null,
         confidence: 'direct',
       } : null,
     },
-    mission,
+    mission: missionProjection,
     goal: {
       frontier: status?.rungId ?? data?.milestone ?? null,
       frontierIndex: status?.rungIndex ?? null,
@@ -1456,6 +1499,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   const unknown = []
   if (!snapshot.resident.available) unknown.push('resident_report_unavailable')
   if (snapshot.resident.runId === null) unknown.push('live_run_identity_unavailable')
+  if (snapshot.mission?.status !== 'observed') unknown.push(snapshot.mission?.provenance?.reason ?? 'mission_authority_unavailable')
   if (snapshot.resident.sourceCommit === null) unknown.push(snapshot.resident.sourceCommitConflict === true
     ? 'run_source_sha_conflict'
     : 'run_source_sha_unavailable')
@@ -1604,7 +1648,6 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   const logPath = join(runtimeDir, 'buddy.log')
   const jevCallsPath = join(runtimeDir, 'logs', 'jev', 'jev-calls.jsonl')
   const runnerOutPath = join(runtimeDir, 'runner.out')
-  const mission = readMission(join(REPO, 'MILESTONE-CONTRACT.json'))
 
   // Summary requests also expose the on-demand live probe. Multiple readers
   // asking for the same radius at once must share its report -> state -> report
@@ -1683,7 +1726,10 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       return buildObserverSnapshot({
         report,
         events: combinedEvents,
-        mission,
+        // A repository milestone label is not evidence of the active mission.
+        // A future runtime source must bind its mission record to this run and
+        // generation before the observer can project it as observed.
+        mission: null,
         runBoot: cachedRunBoot,
         runBuild: cachedRunBuild,
         runMetadata,
@@ -1884,7 +1930,7 @@ function htmlPage() {
       $('flow-action').textContent = text(s.action?.kind, text(s.decisionTrace.action?.detail?.kind))
       $('flow-action-sub').textContent = s.action ? text(s.action.phase) + ' · ' + text(s.action.id) : text(s.decisionTrace.action?.detail?.id)
       rows($('goal'), [
-        ['mission', s.mission.id + ': ' + s.mission.title], ['frontier', s.goal.frontier], ['current', current?.description], ['progress', current ? text(current.haveCount) + '/' + text(current.requiredCount) : null], ['queue depth', s.goal.queue.depth], ['queue revision', s.goal.queue.revision], ['option', s.option?.intent], ['option id', s.option?.templateId]
+        ['mission', s.mission.status === 'observed' ? s.mission.id + ': ' + s.mission.title : 'unknown'], ['mission provenance', s.mission.provenance?.source ?? s.mission.provenance?.reason], ['frontier', s.goal.frontier], ['current', current?.description], ['progress', current ? text(current.haveCount) + '/' + text(current.requiredCount) : null], ['queue depth', s.goal.queue.depth], ['queue revision', s.goal.queue.revision], ['option', s.option?.intent], ['option id', s.option?.templateId]
       ])
       rows($('jev'), [
         ['provider', s.authority.policy?.provider], ['model', s.authority.policy?.model], ['policy', s.authority.policy?.kind], ['selected action', j?.detail?.action], ['abandon p', j?.detail?.abandon], ['beta decision', j?.detail?.decision], ['beta authority', j?.detail?.betaAuthority]

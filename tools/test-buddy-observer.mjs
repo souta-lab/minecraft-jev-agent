@@ -99,7 +99,11 @@ const anchoredEvents = events.map((event) => ({ ...event, detail: { ...event.det
 const snapshot = buildObserverSnapshot({
   report,
   events: anchoredEvents,
-  mission: { id: 'M4', title: 'Ender Dragon' },
+  mission: {
+    id: 'M4',
+    title: 'Ender Dragon',
+    provenance: { source: 'SYSTEM2_AUTHORITY_INPUT.humanMission', runId: 'run-1', generationId: 'gen-7' },
+  },
   runBoot: observerBoot(),
   runMetadata: observerRunMetadata(),
   runGenerationReady: observerGenerationReady(),
@@ -113,6 +117,68 @@ assert.equal(snapshot.decisionTrace.jev?.detail.action, 'MINE:b1')
 assert.equal(snapshot.decisionTrace.system2Decision?.detail.strategy, 'rebuild_equipment')
 assert.equal(snapshot.action?.kind, 'MINE')
 assert.equal(snapshot.authority.system2?.last?.model, 'qwen3.5-9b-local')
+assert.deepEqual(snapshot.mission, {
+  status: 'observed',
+  id: 'M4',
+  title: 'Ender Dragon',
+  provenance: {
+    status: 'run_generation_bound',
+    source: 'SYSTEM2_AUTHORITY_INPUT.humanMission',
+    runId: 'run-1',
+    generationId: 'gen-7',
+    sourceCommit: observerSourceSha,
+  },
+})
+
+const unavailableMissionSnapshot = buildObserverSnapshot({
+  report: { ok: false, error: 'resident-unavailable' },
+  events: [],
+  // A static repository label alone is not current-run mission evidence.
+  mission: { id: 'M4', title: 'Ender Dragon' },
+})
+assert.deepEqual(unavailableMissionSnapshot.mission, {
+  status: 'unknown',
+  id: null,
+  title: null,
+  provenance: {
+    status: 'unbound',
+    source: null,
+    runId: null,
+    generationId: null,
+    reason: 'mission_live_run_identity_unavailable',
+  },
+})
+assert.ok(buildAiSummary(unavailableMissionSnapshot).unknown.includes('mission_live_run_identity_unavailable'))
+
+const missionWithoutSourceSnapshot = buildObserverSnapshot({
+  report,
+  events: anchoredEvents,
+  mission: { id: 'M4', title: 'Ender Dragon' },
+  runBoot: observerBoot(),
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady(),
+})
+assert.equal(missionWithoutSourceSnapshot.mission.status, 'unknown')
+assert.equal(missionWithoutSourceSnapshot.mission.id, null)
+assert.equal(missionWithoutSourceSnapshot.mission.title, null)
+assert.equal(missionWithoutSourceSnapshot.mission.provenance.reason, 'mission_source_unavailable')
+
+const crossRunMissionSnapshot = buildObserverSnapshot({
+  report,
+  events: anchoredEvents,
+  mission: {
+    id: 'M4',
+    title: 'Ender Dragon',
+    provenance: { source: 'SYSTEM2_AUTHORITY_INPUT.humanMission', runId: 'run-prior', generationId: 'gen-7' },
+  },
+  runBoot: observerBoot(),
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady(),
+})
+assert.equal(crossRunMissionSnapshot.mission.status, 'unknown')
+assert.equal(crossRunMissionSnapshot.mission.id, null)
+assert.equal(crossRunMissionSnapshot.mission.title, null)
+assert.equal(crossRunMissionSnapshot.mission.provenance.reason, 'mission_source_run_mismatch')
 
 const laggedGenerationEvents = [
   parseBuddyLogLine(`[2026-09-23T19:36:20.000Z] BOOT pid=1 runId=run-observer-1 source=${observerSourceSha}`),
@@ -160,6 +226,10 @@ const unboundGenerationSnapshot = buildObserverSnapshot({
 })
 assert.equal(unboundGenerationSnapshot.resident.generationBoundary, null)
 assert.equal(unboundGenerationSnapshot.decisionTrace.jev, null)
+assert.equal(unboundGenerationSnapshot.mission.status, 'unknown')
+assert.equal(unboundGenerationSnapshot.mission.id, null)
+assert.equal(unboundGenerationSnapshot.mission.title, null)
+assert.equal(unboundGenerationSnapshot.mission.provenance.reason, 'mission_current_generation_boundary_unavailable')
 
 const combatEvents = [
   observerBoot('run-1', '2026-09-21T12:00:00.000Z'),
