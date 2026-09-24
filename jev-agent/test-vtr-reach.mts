@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'bun:test'
+import { createHash } from 'node:crypto'
 import {
   createReachTransitionContract,
   countMissionInventoryResource,
@@ -109,6 +110,17 @@ function reserve(
   })
 }
 
+function canonicalJson(value: ReachJson): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const record = value as { readonly [key: string]: ReachJson }
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key]!)}`).join(',')}}`
+}
+
+function hashJson(value: ReachJson): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex')
+}
+
 describe('pure VTR Reach contract and controller state machine', () => {
   it('matches exact Mission wood species and counts resource classes without crossing species', () => {
     assert.equal(missionResourceSourceMatches('oak_log', 'oak_log', 'oak_log'), true)
@@ -117,6 +129,41 @@ describe('pure VTR Reach contract and controller state machine', () => {
     assert.equal(missionResourceSourceMatches('log', 'acacia_log', 'acacia_log'), true)
     assert.equal(countMissionInventoryResource({ oak_log: 2, acacia_log: 3 }, 'oak_log'), 2)
     assert.equal(countMissionInventoryResource({ oak_log: 2, acacia_log: 3 }, 'log'), 5)
+  })
+
+  it('declares immutable predicate-relative world progress and binds it into the contract hash', () => {
+    const contract = makeContract()
+    assert.deepEqual(contract.progressDefinition, {
+      measure: 'predicate_distance',
+      predicateId: 'mission.reach-village',
+      evidenceBasis: 'grounded_world_observation',
+      bodyMotionOnlyCredit: false,
+    })
+    assert.ok(Object.isFrozen(contract.progressDefinition))
+    assert.equal(Reflect.set(contract.progressDefinition, 'predicateId', 'body.position'), false)
+    assert.equal(contract.progressDefinition.predicateId, contract.desiredPredicate.id)
+
+    const normalized = {
+      schema: 'vtr.reach.contract.v2',
+      transitionId: contract.transitionId,
+      desiredPredicate: contract.desiredPredicate,
+      requires: contract.requires,
+      ensures: contract.ensures,
+      invariants: contract.invariants,
+      admissibleEffects: contract.admissibleEffects,
+      budget: contract.budget,
+      controller: contract.controller,
+      progressDefinition: contract.progressDefinition,
+      identity: contract.identity,
+    } as unknown as ReachJson
+    assert.equal(hashJson(normalized), contract.contractHash)
+    const withoutProgress = { ...(normalized as Record<string, ReachJson>) }
+    delete withoutProgress.progressDefinition
+    assert.notEqual(hashJson(withoutProgress), contract.contractHash)
+    assert.notEqual(hashJson({
+      ...(normalized as Record<string, ReachJson>),
+      progressDefinition: { ...contract.progressDefinition, bodyMotionOnlyCredit: true },
+    } as unknown as ReachJson), contract.contractHash)
   })
 
   it('pins a stable desired predicate while tactics, waypoint, and valid witness change', () => {
@@ -163,18 +210,22 @@ describe('pure VTR Reach contract and controller state machine', () => {
     assert.equal(substituted.state.tactic, 'jump')
   })
 
-  it('does not let body progress or a mechanical action verify the desired predicate', () => {
+  it('records progress from the contract predicate observation and does not let body progress or an action verify it', () => {
     const contract = makeContract()
     const state = start(contract)
+    const progressObservation = observation(contract, 1_100, { 'mission.reach-village': 'false' })
+    const predicateEvidenceId = progressObservation.predicates[contract.progressDefinition.predicateId]!.evidenceId!
     const progress = recordReachProgress(contract, state, identity, {
-      observation: observation(contract, 1_100),
+      observation: progressObservation,
       predicateDistance: 1.25,
       reachability: 'reachable',
       frontierId: 'frontier:village-approach',
-      evidenceId: 'verified-world-distance:1',
+      evidenceId: predicateEvidenceId,
     })
     assert.equal(progress.status, 'active')
     assert.equal(progress.state.progress.bestPredicateDistance, 1.25)
+    assert.equal(progress.state.progress.evidenceId, predicateEvidenceId)
+    assert.equal(progress.state.progress.observationSequence, 1)
 
     const action = reserve(contract, progress.state)
     assert.equal(action.status, 'authorized')

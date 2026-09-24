@@ -73,6 +73,15 @@ export interface ReachBudget {
   readonly risk: Readonly<Record<string, number>>
 }
 
+/** Immutable, predicate-relative progress semantics owned by a Reach contract. */
+export interface ReachProgressDefinition {
+  readonly measure: 'predicate_distance'
+  readonly predicateId: string
+  readonly evidenceBasis: 'grounded_world_observation'
+  /** Position/body motion by itself never earns semantic progress credit. */
+  readonly bodyMotionOnlyCredit: false
+}
+
 export interface ReachTransitionContractInput {
   readonly transitionId: string
   readonly desiredPredicate: ReachPredicate
@@ -86,6 +95,7 @@ export interface ReachTransitionContractInput {
 }
 
 export interface ReachTransitionContract extends ReachTransitionContractInput {
+  readonly progressDefinition: ReachProgressDefinition
   readonly contractHash: string
   readonly desiredPredicateIdentity: string
   readonly ensuresIdentity: string
@@ -412,6 +422,12 @@ export function createReachTransitionContract(input: ReachTransitionContractInpu
     allowTemporaryWaypointChanges: input.controller.allowTemporaryWaypointChanges,
     allowWitnessSubstitution: input.controller.allowWitnessSubstitution,
   })
+  const progressDefinition: ReachProgressDefinition = freezeDeep({
+    measure: 'predicate_distance',
+    predicateId: desiredPredicate.id,
+    evidenceBasis: 'grounded_world_observation',
+    bodyMotionOnlyCredit: false,
+  })
   const normalized = {
     transitionId: input.transitionId,
     desiredPredicate,
@@ -421,11 +437,12 @@ export function createReachTransitionContract(input: ReachTransitionContractInpu
     admissibleEffects: freezeDeep(admissibleEffects),
     budget: validateBudget(input.budget),
     controller,
+    progressDefinition,
     identity: validateIdentity(input.identity),
   }
   const desiredPredicateIdentity = fingerprint(desiredPredicate as unknown as ReachJson)
   const ensuresIdentity = fingerprint(ensures as unknown as ReachJson)
-  const contractHash = fingerprint({ schema: 'vtr.reach.contract.v1', ...normalized } as unknown as ReachJson)
+  const contractHash = fingerprint({ schema: 'vtr.reach.contract.v2', ...normalized } as unknown as ReachJson)
   return freezeDeep({ ...normalized, desiredPredicateIdentity, ensuresIdentity, contractHash })
 }
 
