@@ -878,6 +878,15 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     worldKey,
     generationId,
   })
+  const jevRecentFailures = projectJevProviderFailures({
+    jevCalls,
+    runId,
+    runStartedAt: Number.isFinite(generationStartedAt) ? generationStartedAt : runStartedAt,
+    worldKey,
+    generationId,
+    generationBound,
+    observedAt: now,
+  })
 
   return {
     schemaVersion: 1,
@@ -936,6 +945,7 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
           model: status.system2Model ?? null,
         },
       },
+      jevRecentFailures,
       deterministicFallbackEnabled: status?.deterministicFallbackEnabled ?? null,
     },
     decisionTrace: {
@@ -1438,6 +1448,93 @@ export function projectJevDecisionEvidence({ jevCalls = [], choiceEvent = null, 
   })
 }
 
+const SAFE_PROVIDER_DIAGNOSTIC_HEADERS = new Set([
+  'x-vercel-id', 'x-vercel-request-id', 'x-request-id', 'request-id', 'x-typesafe-request-id', 'requestid',
+])
+
+function safeProviderDiagnosticToken(value, maxLength = 80) {
+  if (typeof value !== 'string') return null
+  const token = value.trim()
+  if (token.length === 0 || token.length > maxLength || !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(token)) return null
+  if (/(?:bearer|token|secret|password|authorization|api.?key)/i.test(token)) return null
+  if (/^(?:sk|pk|rk|sess|gh[pousr])[-_]/i.test(token) || /^[A-Fa-f0-9]{32,}$/.test(token)) return null
+  return token
+}
+
+function projectProviderDiagnostics(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const result = {}
+  const status = value.httpStatus
+  if (Number.isInteger(status) && status >= 100 && status <= 599) result.httpStatus = status
+  for (const key of ['providerErrorCode', 'providerErrorType', 'errorName']) {
+    const token = safeProviderDiagnosticToken(value[key])
+    if (token !== null) result[key] = token
+  }
+  const header = typeof value.requestIdHeader === 'string' ? value.requestIdHeader.toLowerCase() : null
+  const requestId = safeProviderDiagnosticToken(value.requestId, 160)
+  if (header !== null && SAFE_PROVIDER_DIAGNOSTIC_HEADERS.has(header) && requestId !== null) {
+    result.requestId = requestId
+    result.requestIdHeader = header
+  }
+  return Object.keys(result).length === 0 ? null : result
+}
+
+/**
+ * Surface bounded transport failures to the observer without reading prompts,
+ * request bodies, or arbitrary provider headers. Jev JSONL has no direct runId;
+ * bind it to the active run/generation only by its exact start-time window and
+ * matching world epoch/dimension. Older call records may lack generationId, so
+ * those joins are explicitly marked as time-window inferences.
+ */
+export function projectJevProviderFailures({
+  jevCalls = [], runId = null, runStartedAt = NaN, worldKey = null, generationId = null,
+  generationBound = false, observedAt = Date.now(),
+} = {}) {
+  if (generationBound !== true || typeof generationId !== 'string' || generationId.length === 0) return []
+  const startAt = Number.isFinite(runStartedAt) ? runStartedAt : null
+  if (startAt === null) return []
+  const expectedDimension = normalizeDimension(worldKey?.dimension)
+  const expectedEpoch = worldKey?.worldEpoch ?? null
+  return jevCalls
+    .filter((call) => {
+      if (call?.record !== 'jev-call' || typeof call.error !== 'string' || call.error.length === 0) return false
+      const at = parseTimestamp(call.ts)
+      if (at === null || at < startAt || at > observedAt) return false
+      const callWorld = call.state?.semantic?.world ?? call.state?.world ?? {}
+      if (expectedEpoch !== null && callWorld.worldEpoch !== expectedEpoch) return false
+      if (expectedDimension !== null && normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension) !== expectedDimension) return false
+      const callGenerationId = call.generationId ?? callWorld.generationId ?? null
+      if (callGenerationId !== null && callGenerationId !== generationId) return false
+      return true
+    })
+    .slice(-5)
+    .map((call) => {
+      const callWorld = call.state?.semantic?.world ?? call.state?.world ?? {}
+      const callGenerationId = call.generationId ?? callWorld.generationId ?? null
+      const providerDiagnostics = projectProviderDiagnostics(call.providerDiagnostics)
+      return redactSecrets({
+        observedAt: call.ts,
+        callId: call.callId ?? null,
+        provider: 'typesafe-ai',
+        model: call.model ?? null,
+        stage: call.stage ?? null,
+        latencyMs: Number.isFinite(call.latencyMs) ? call.latencyMs : null,
+        retryable: call.retryable === true,
+        error: call.error.slice(0, 320),
+        providerDiagnostics,
+        binding: {
+          runId,
+          generationId,
+          callGenerationId,
+          worldEpoch: callWorld.worldEpoch ?? null,
+          dimension: normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension),
+          confidence: callGenerationId === generationId ? 'direct' : 'generation-window-inferred',
+          method: 'GENERATION_READY-window+world-epoch+dimension',
+        },
+      })
+    })
+}
+
 function latestProjectedEvent(snapshot, names) {
   const accepted = new Set(names)
   const entries = (snapshot.events ?? []).filter((entry) => accepted.has(entry.event))
@@ -1600,6 +1697,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     },
     authority: {
       jev: snapshot.authority?.policy ?? null,
+      jevRecentFailures: snapshot.authority?.jevRecentFailures ?? [],
       system2: snapshot.authority?.system2 ?? null,
       deterministicFallbackEnabled: snapshot.authority?.deterministicFallbackEnabled ?? null,
     },

@@ -348,6 +348,66 @@ assert.equal(combatSummary.execution.selectedChoiceOutcome.skillOutcome.detail.p
 assert.deepEqual(combatSummary.choices.jevEvidence.rationale, { status: 'not_emitted', text: null })
 assert.equal(Object.hasOwn(combatSummary.choices.jevEvidence, 'questions'), false)
 
+const gatewayFailure = {
+  record: 'jev-call',
+  callId: 'jev-503-call',
+  ts: '2026-09-21T12:00:09.000Z',
+  model: 'typesafe-ai/jev',
+  stage: 'policy-tick-2-start',
+  latencyMs: 812,
+  error: 'GatewayInternalServerError: Service temporarily unavailable. api_key=private-token',
+  retryable: true,
+  providerDiagnostics: {
+    httpStatus: 503,
+    providerErrorCode: 'provider_overloaded',
+    errorName: 'GatewayInternalServerError',
+    requestId: 'iad1::sfo1::gateway-503-1234',
+    requestIdHeader: 'x-vercel-id',
+    authorization: 'Bearer private-token',
+  },
+  state: {
+    semantic: {
+      world: { dimension: 'overworld', worldEpoch: 1, generationId: null },
+    },
+  },
+}
+const providerFailureSnapshot = buildObserverSnapshot({
+  report,
+  events: combatEvents,
+  runBoot: combatEvents[0],
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady('gen-7', '2026-09-21T12:00:01.000Z'),
+  jevCalls: [
+    { ...gatewayFailure, callId: 'old-run-failure', ts: '2026-09-21T11:59:59.000Z' },
+    gatewayFailure,
+    { ...gatewayFailure, callId: 'wrong-world-failure', state: { semantic: { world: { dimension: 'overworld', worldEpoch: 2 } } } },
+    { ...gatewayFailure, callId: 'wrong-generation-failure', generationId: 'gen-old' },
+  ],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+})
+const providerFailureSummary = buildAiSummary(providerFailureSnapshot, { now: Date.parse('2026-09-21T12:00:12.000Z') })
+assert.equal(providerFailureSummary.authority.jevRecentFailures.length, 1)
+assert.equal(providerFailureSummary.authority.jevRecentFailures[0].callId, 'jev-503-call')
+assert.deepEqual(providerFailureSummary.authority.jevRecentFailures[0].providerDiagnostics, {
+  httpStatus: 503,
+  providerErrorCode: 'provider_overloaded',
+  errorName: 'GatewayInternalServerError',
+  requestId: 'iad1::sfo1::gateway-503-1234',
+  requestIdHeader: 'x-vercel-id',
+})
+assert.equal(providerFailureSummary.authority.jevRecentFailures[0].binding.confidence, 'generation-window-inferred')
+assert.ok(!JSON.stringify(providerFailureSummary.authority.jevRecentFailures).includes('private-token'))
+const unboundProviderFailureSnapshot = buildObserverSnapshot({
+  report,
+  events: combatEvents,
+  runBoot: combatEvents[0],
+  runMetadata: null,
+  runGenerationReady: null,
+  jevCalls: [gatewayFailure],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+})
+assert.deepEqual(unboundProviderFailureSnapshot.authority.jevRecentFailures, [])
+
 const toolChoiceEvents = [
   observerBoot('run-1', '2026-09-21T12:01:00.000Z'),
   parseBuddyLogLine('[2026-09-21T12:01:10.000Z] TOOL_CHOICE actionId=MINE:b1 toolName=mine tier=wood generationId=gen-7'),
