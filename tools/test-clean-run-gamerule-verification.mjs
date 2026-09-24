@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { checkConsoleGameruleEvidence } from './clean-run-environment.mjs'
+import { checkConsoleGameruleEvidence, parseConsoleGameruleTranscript } from './clean-run-environment.mjs'
 
 const TEMPLATE = new URL('./fixtures/m3-clean-environment.json', import.meta.url)
 const RUN_ID = 'run-gamerule-verification-fixture'
@@ -65,83 +65,41 @@ function makeTranscript(descriptor, {
   return lines.join('\n')
 }
 
-function evaluate(descriptor, text, { runId = RUN_ID, bootSourceSha = descriptor.values.sourceSha, descriptorSha256 = descriptorSha(descriptor) } = {}) {
-  const artifact = { record: 'milestone-run-artifact', runId, run: { runId, boot: { sourceSha: bootSourceSha } } }
-  return checkConsoleGameruleEvidence({ descriptor, artifact, runId, descriptorSha256, text })
-}
-
 const descriptor = makeDescriptor()
 
-// 1. All declared values in every descriptor dimension bind to this run.
+// 1. The human-readable report parser remains useful for diagnostics, but the
+// report alone is not machine-captured evidence and therefore cannot PASS.
 {
-  const result = evaluate(descriptor, makeTranscript(descriptor))
-  assert.equal(result.verdict, 'PASS', result.reason)
-  assert.equal(result.detail.requiredDimensions.length, 3)
-  assert.equal(result.detail.expectedRuleCount, 58)
-  assert.deepEqual(result.detail.observedRulesByDimension, {
+  const transcript = makeTranscript(descriptor)
+  const parsed = parseConsoleGameruleTranscript(transcript)
+  assert.deepEqual(parsed.errors, [])
+  assert.deepEqual(Object.fromEntries(Object.entries(parsed.dimensions).map(([dimension, rules]) => [dimension, Object.keys(rules).length])), {
     'minecraft:overworld': 58,
     'minecraft:the_nether': 58,
     'minecraft:the_end': 58,
   })
-  ok('bound exact-source transcript verifies 58 gamerules in all three dimensions')
+  assert.equal(parsed.dimensions['minecraft:overworld'].max_minecart_speed, undefined)
+  ok('capture report parses 58 queryable rules in each dimension while excluded rules remain unobserved')
 }
 
-// 2. An unfilled template field is not evidence and stays UNKNOWN.
+// 2. Even perfectly formatted, exact-run-looking pasted output stays UNKNOWN
+// until the machine capture, journal and Leaf stdout bytes are all present.
 {
-  const result = evaluate(descriptor, makeTranscript(descriptor, { missingMetadata: 'runId' }))
+  const transcript = makeTranscript(descriptor)
+  const sha256 = descriptorSha(descriptor)
+  const artifact = { record: 'milestone-run-artifact', runId: RUN_ID, run: { runId: RUN_ID, boot: { sourceSha: SOURCE_SHA } } }
+  const result = checkConsoleGameruleEvidence({
+    descriptor,
+    artifact,
+    runId: RUN_ID,
+    descriptorSha256: sha256,
+    path: '/fixture/gamerule-verification.txt',
+    text: transcript,
+    fileSha256: createHash('sha256').update(transcript).digest('hex'),
+  })
   assert.equal(result.verdict, 'UNKNOWN')
-  assert.ok(result.detail.missingMetadata.includes('runId'))
-  ok('missing run metadata remains UNKNOWN')
+  assert.match(result.reason, /machine-captured Leaf console query evidence is unavailable/)
+  ok('pasted transcript alone remains UNKNOWN even when its run metadata and values look complete')
 }
 
-// 3. The transcript runId must equal the requested and artifact runId.
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor, { runId: 'another-run' }))
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /runId=/)
-  ok('runId mismatch FAILs')
-}
-
-// 4. Both the bound source and its BOOT provenance must equal the descriptor.
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor, { sourceSha: OTHER_SHA }))
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /sourceSha=/)
-  ok('transcript source SHA mismatch FAILs')
-}
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor), { bootSourceSha: OTHER_SHA })
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /BOOT source/)
-  ok('artifact BOOT source mismatch FAILs')
-}
-
-// 5. A transcript cannot bind to a different resolved descriptor digest.
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor, { sha256: '0'.repeat(64) }))
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /descriptorSha256=/)
-  ok('descriptor digest mismatch FAILs')
-}
-
-// 6. Every scoped dimension and every declared gamerule must be present.
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor, { omittedDimension: 'minecraft:the_nether' }))
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /missing dimension listing minecraft:the_nether/)
-  ok('missing dimension listing FAILs')
-}
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor, { omittedRule: { dimension: 'minecraft:the_end', rule: 'keep_inventory' } }))
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /minecraft:the_end missing keep_inventory/)
-  ok('incomplete dimension gamerule listing FAILs')
-}
-{
-  const result = evaluate(descriptor, makeTranscript(descriptor, { extraDimension: 'minecraft:custom' }))
-  assert.equal(result.verdict, 'FAIL')
-  assert.match(result.reason, /unexpected dimension listing minecraft:custom/)
-  ok('unexpected dimension listing FAILs')
-}
-
-console.log(`PASS clean-run gamerule verification fixtures (${checks} checks)`)
+console.log(`PASS clean-run gamerule report parser fixtures (${checks} checks)`)

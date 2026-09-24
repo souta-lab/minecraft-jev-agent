@@ -22,6 +22,8 @@ Components:
 tools/fixtures/m3-clean-environment.json   the checked-in descriptor (a TEMPLATE until the SHA is frozen)
 tools/clean-run-environment.mjs            descriptor schema + clean validator + run-evidence checks
 tools/clean-run-prepare.mjs                offline preparation of the clean world (--dry-run / --apply)
+tools/clean-run-server-launch.mjs           Leaf argv/config attestation + private stdin/stdout capture
+tools/clean-run-console-capture.mjs         run-bound read-only console query and response capture
 tools/clean-run-gate.mjs                   the clean verdict, combined with the canonical bundle
 tools/test-clean-run-harness.mjs           15 offline checks (assisted descriptors are refused)
 runs/m3-clean-measure/                     read-only measurement that grounds the gamerule table
@@ -44,7 +46,7 @@ expected impact; it keeps `worldChanges` empty and grants no items or structures
 | --- | --- | --- |
 | `cleanRun.milestone` | `M3` | a descriptor may only authorise the milestone it was written for |
 | `cleanRun.requirement` | the operator sentence, verbatim | the acceptance criterion itself, not a paraphrase |
-| `cleanRun.worldContainer` | `/home/s0u7a/mc-server` | the world CONTAINER; all three dimensions of the target world live under it. It is passed explicitly as the server's `--universe`. The resident's seed attestation reads the same staged config through `BUDDY_SERVER_PROPERTIES_PATH`; the shared `<container>/server.properties` is not changed. |
+| `cleanRun.worldContainer` | `/home/s0u7a/mc-server` | the world CONTAINER; all three dimensions of the target world live under it. It is passed explicitly as the server's `--universe`. The resident's `BUDDY_SERVER_PROPERTIES_PATH` supplies the HOST's seed read only; it is not evidence of the Leaf process configuration. The shared `<container>/server.properties` is not changed. |
 | `cleanRun.botUsername` | `AI_Buddy` | the prep step refuses if that name is in `ops.json`: command authority is the generic assist |
 | `cleanRun.protectedWorldNames` | `world`, `world_nether`, `world_the_end` | the live worlds. Nothing in this harness may write inside them, and the target level name may not collide with them |
 | `cleanRun.previousWorld` | `world` / `2024` + why | states exactly what the target must differ from, and records the measured assistance of the current world |
@@ -90,7 +92,7 @@ bun tools/clean-run-prepare.mjs \
   --root "$PWD" --apply
 ```
 
-`--apply` writes, inside the container and nowhere else:
+`--apply` writes these staged files inside the container and nowhere else:
 
 ```text
 <container>/<levelName>/                         the new world dir (empty; the server generates level.dat on first boot)
@@ -103,6 +105,11 @@ bun tools/clean-run-prepare.mjs \
 <container>/m3-clean-run/operator-commands.txt          the ordered commands, printed
 <container>/m3-clean-run/ACCEPTANCE-RECIPE.md           a copy of this file, next to the evidence
 ```
+
+The Leaf launcher creates `server-start-attestation.json`, a mode-0700
+`server-console/` directory, a mode-0600 FIFO and output log. After BOOT, the
+console capture helper creates `commands.jsonl`, `capture.json`, and the
+machine-generated `gamerule-verification.txt` in that run directory.
 
 Guarantees, printed as `CLEAN_RUN_PREPARE_GUARD` lines: the resident/operator tree
 HEAD equals the frozen source SHA; no server start/stop, no deletion or move of
@@ -123,45 +130,53 @@ unstaged-but-not-generated world is an `IDEMPOTENT_NOOP`.
 #     Do NOT copy, replace, or restore <container>/server.properties.
 #     Keep this ordering: resident stopped -> server stopped -> clean server started.
 
-# 3.2 start Leaf directly with the staged properties [OPERATOR ACTION — H4].
-#     start.sh does NOT forward "$@". --config selects the staged seed/config;
-#     --universe and --level-name select this descriptor's new world. There is no
-#     --seed flag in this build; the seed is consumed from the config only before
-#     level.dat exists. The shared server.properties remains untouched.
-cd <container> && setsid --fork java \
+# 3.2 start Leaf with the exact wrapper command printed in
+#     <container>/m3-clean-run/operator-commands.txt [OPERATOR ACTION — H4].
+#     Its required arguments have this form; keep the --console-input and --stdout-log
+#     paths and the `--` separator before the actual Java command:
+cd <frozen-checkout> && bun tools/clean-run-server-launch.mjs \
+  --environment <container>/m3-clean-run/environment-resolved.json \
+  --properties <container>/m3-clean-run/server.properties.clean \
+  --attestation <container>/m3-clean-run/server-start-attestation.json \
+  --manifest <container>/m3-clean-run/manifest.json \
+  --cwd <container> \
+  --console-input <container>/m3-clean-run/server-console/server-console.fifo \
+  --stdout-log <container>/m3-clean-run/server-console/leaf-server.log \
+  -- /usr/lib/jvm/java-21-openjdk-amd64/bin/java \
   -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui \
   --config <container>/m3-clean-run/server.properties.clean \
-  --universe <container> --level-name <levelName> \
-  </dev/null >>server.log 2>&1 &
-#     do NOT pass --bonusChest (there is no properties key for it)
+  --universe <container> --level-name <levelName> &
+#     Do not replace the wrapper with direct java/setsid or /dev/null stdin. It
+#     verifies --config/--universe/--level-name and staged properties before spawn,
+#     then records actual /proc argv, PID, config/manifest hashes and opens the private
+#     FIFO and output log. There is no --seed flag; the staged config supplies the seed
+#     on first world creation. The shared server.properties remains untouched. The
+#     wrapper refuses --bonusChest because this Leaf build has no matching properties key.
 
-# 3.3 after the FIRST boot, use the server console to verify world identity:
-#       list                                    -> the body's name must be allowed in
-#       seed                                    -> must equal values.levelSeed
-#     Paste each complete gamerule listing below its matching [dimension=...]
-#     header in the prepared file:
-#     <container>/m3-clean-run/gamerule-verification.txt :
-#       gamerule                                -> overworld rules
-#       execute in minecraft:the_nether run gamerule
-#       execute in minecraft:the_end run gamerule
-#     keep_inventory must be FALSE IN ALL THREE DIMENSIONS (the M3 route dies in the
-#     Nether). The ids are the snake_case 1.21.11 ids; camelCase is REJECTED by this build.
-#     The template binds the resolved descriptor SHA, levelName, seed and source SHA.
-#     Set capturedAt when the listings are captured, then replace runId with the exact
-#     BOOT runId before invoking the gate. The gate requires every declared rule in all
-#     declared dimensions to match the descriptor.
-
-# 3.4 start the resident only after the clean server is ready, from the same
+# 3.3 start the resident only after the clean server is ready, from the same
 #     FROZEN checkout used by --root. This checkout must be fresh so its durable
-#     state is empty. The environment variable makes HOST acceptance seed
-#     attestation read the staged file the server used, without changing the
-#     shared server.properties.
-cd <frozen-checkout>/buddy-driver && \
-  BUDDY_SERVER_PROPERTIES_PATH=<container>/m3-clean-run/server.properties.clean \
-  setsid --fork nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
-#     the BOOT line must read source=<the frozen sha>
+#     state is empty. Run the user-systemd command printed as step 5 in
+#     operator-commands.txt. It sets BUDDY_SERVER_PROPERTIES_PATH for HOST seed reading
+#     and BUDDY_SERVER_START_ATTESTATION_PATH / BUDDY_CLEAN_RUN_DESCRIPTOR_PATH so BOOT
+#     can recheck the separate Leaf launch record. Seed-reader configuration alone
+#     never proves Leaf startup argv/config. BOOT must report source=<the frozen sha>
+#     and include a verified launch record.
 
-# 3.5 run the M3 attempt; record the runId from the BOOT line
+# 3.4 after the resident BOOT, run the machine capture helper from the frozen
+#     checkout. It sends only `seed` and per-dimension read-only gamerule queries to
+#     the private FIFO, then records actual Leaf log response byte offsets and hashes.
+#     It never accepts pasted responses.
+bun <frozen-checkout>/tools/clean-run-console-capture.mjs \
+  --environment <container>/m3-clean-run/environment-resolved.json \
+  --attestation <container>/m3-clean-run/server-start-attestation.json \
+  --resident-log <frozen-checkout>/buddy-driver/buddy.log --run <RUN_ID>
+#     All declared/queryable gamerules are checked in each required dimension.
+#     A missing/ambiguous response exits UNKNOWN; any mismatch fails closed.
+#     max_minecart_speed is explicitly unavailable in this world and remains UNKNOWN,
+#     never represented as an observed value.
+
+# 3.5 continue the M3 attempt that began with resident startup; progress to Nether
+#     arrival + 12 eyes. Keep the runId recorded from BOOT for the final bundle.
 
 # 3.6 refresh the HOST acceptance record with the read-only control query
 #     (it is the only attestation of levelName + seed; it is NOT written at boot)
@@ -181,7 +196,6 @@ bun tools/clean-run-gate.mjs \
   --environment <container>/m3-clean-run/environment-resolved.json \
   --bundle-dir <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID> \
   --run <RUN_ID> \
-  --gamerule-verification <container>/m3-clean-run/gamerule-verification.txt \
   --out <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>
 #     writes clean-run.json + clean-run.md; prints CLEAN_RUN_RESULT / CLEAN_RUN_M3
 ```
@@ -208,9 +222,9 @@ descriptor is not an acceptance.
 | frozen SHA | `BOOT ... source=<sha>` in `buddy.log`; `artifact.run.boot.sourceSha`; the clean gate compares it to `values.sourceSha` (`run.bootSourceSha`) |
 | tree HEAD | `bundle.git.head` + `liveSignals.bootSourceMatchesTreeHead` |
 | `worldKey` | `BOOT ... worldKey={"serverId":…,"dimension":…,"worldEpoch":…}` → `artifact.run.worldKey` (it is the world memory namespace: `serverId|dimension|worldEpoch`; it does NOT contain the seed) |
-| level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()`, which reads `BUDDY_SERVER_PROPERTIES_PATH`; the M3 recipe points it at the same staged config passed to Leaf with `--config` |
-| config (difficulty, spawn-monsters) | run-scoped `ENVIRONMENT`/`GAMERULE` markers in `buddy.log` → `artifact.environment.*` with `source: log, runScoped: true`; the clean gate compares them (`run.difficultyNotContradicted`, `run.mobSpawningNotContradicted`) |
-| gamerules | descriptor values, any run-scoped marker, and the operator's per-dimension console listing in `gamerule-verification.txt`; for a console-primary descriptor, `run.consoleGamerulesVerified` must PASS after the gate binds the transcript to exact runId, resolved descriptor SHA, levelName, seed and BOOT source SHA and compares every listed rule |
+| level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()` via `BUDDY_SERVER_PROPERTIES_PATH`; that is only HOST seed evidence, not proof of the server's runtime config |
+| Leaf launch/config | wrapper-produced `server-start-attestation.json` records the observed Leaf PID/argv, `--config` path, safe property projection, config/manifest hashes and run-private console paths. HOST rechecks the descriptor, BOOT SHA, manifest, property bytes and live `/proc` argv into `artifact.run.boot.cleanRunServerConfig`; the gate rechecks those bindings from disk and requires `run.serverConfigAttestation=PASS` |
+| gamerules | `clean-run-console-capture.mjs` records seed plus each queryable declared gamerule response from the private Leaf stdout log, including byte offsets and hashes, and writes `commands.jsonl`, `capture.json`, and `gamerule-verification.txt`. The gate checks command safety, response bytes, hashes, exact runId, descriptor SHA, startup attestation/PID, BOOT source SHA, and every dimension/rule. A pasted file cannot PASS. Rules explicitly excluded as unavailable (currently `max_minecart_speed`) remain UNKNOWN and are never described as observed |
 | no world changes | `artifact.environment.worldChanges` must be `null` (`run.noWorldChanges`) |
 | nothing granted | the run's FIRST inventory sample must be empty (`run.bootInventoryEmpty`, from `artifact.inventory.boot`) |
 | keepInventory behaviour | any `LADDER_INVENTORY_SETTLE reason=death` line in the run window: `itemCount>0` ⇒ FAIL (the live world's own signal); an empty drop ⇒ positive evidence |
@@ -230,7 +244,7 @@ so a clean premise can never be paired with a run judged against another file.
 4. `clean-run.md` → the descriptor is the resolved one (`sourceSha` = the frozen
    commit, `levelName`/`levelSeed` = the new world); `run.levelNameAttested`,
    `run.seedAttested`, `run.bootSourceSha`, `run.bootInventoryEmpty` all PASS.
-5. `clean-run.md` → `run.consoleGamerulesVerified` PASS; inspect the bound `gamerule-verification.txt` for `keep_inventory=false` and every declared default in each dimension. Separately confirm the section 3.3 console checks: `seed` equals `values.levelSeed` and the body is allowed in.
+5. `clean-run.md` → `run.serverConfigAttestation` and `run.consoleGamerulesVerified` PASS. Inspect `capture.json`, `commands.jsonl`, and the transcript generated by the helper; confirm the Leaf PID/argv/config hashes and captured `seed` equal the descriptor. The unavailable `max_minecart_speed` must remain UNKNOWN, not observed.
 6. `bundle.json` → `git.head` == the frozen SHA, `git.dirty` false (or explained),
    `run.worldKey` is the new world's namespace.
 7. `commands/*.txt` → the exact argv and captured output of the artifact, the M3
@@ -246,15 +260,21 @@ so a clean premise can never be paired with a run judged against another file.
   the run-bound HOST world name/seed plus the preparation manifest to establish
   that it is the prepared target. The operator's console `seed` output remains a
   cross-check.
-- **Gamerule values are operator-declared + console-verified.** Mineflayer has no
-  run-scoped fact for most rules. The clean gate parses the saved console
-  transcript, binds its metadata to this exact run and resolved descriptor, and
-  checks every declared value in each required dimension. It cannot independently
-  authenticate that pasted text originated from the server console.
+- **The clean world has not been booted.** The server must generate it from
+  `level-seed` on first start; that the world is genuinely new is proved by the
+  absence of `level.dat` at prepare time (checked) plus the operator's console
+  `seed` output, not by an automated boot.
+- **The Leaf process config and console queries are captured by a run-private wrapper.**
+  The gate requires the wrapper's startup record to match the live process argv,
+  staged properties bytes, descriptor, prepared manifest and BOOT source. Console
+  responses must match captured byte ranges in the Leaf process log and the
+  machine-generated command journal. Missing or ambiguous output stays UNKNOWN;
+  pasted output cannot satisfy acceptance.
 - **`serverSeed()` defaults** to `<container>/server.properties`. The M3 recipe
-  explicitly sets `BUDDY_SERVER_PROPERTIES_PATH` to the staged config used by
-  Leaf, so the HOST acceptance seed matches the resolved descriptor without
-  mutating shared server configuration.
+  sets `BUDDY_SERVER_PROPERTIES_PATH` to the staged config so HOST can report the
+  seed, but this does not attest Leaf startup. Only the wrapper's observed
+  `--config` argv + properties hash + BOOT-bound startup record can pass the
+  runtime configuration condition.
 - **The datapack's own execution is unverified without a boot.** Its format
   (`min_format`/`max_format` = `[94,1]`, the build's data format) and its load tag
   (`data/minecraft/tags/function/load.json`) are verified statically in this build's
@@ -265,9 +285,11 @@ so a clean premise can never be paired with a run judged against another file.
 - **`spawn-monsters` proves nothing in this build** (dead key). Hostile spawning is
   gated by the `spawn_mobs` / `spawn_monsters` gamerules, and whether those actually
   yield endermen and blazes at the M3 site is only observable in the run.
-- **Gamerule values are per dimension.** The gate checks the operator's console
-  listing for every declared dimension and gamerule. It still cannot read a
-  dimension's rule table directly; the transcript remains operator-captured evidence.
+- **Gamerule values are per dimension.** The machine helper queries each declared
+  rule in every required dimension and verifies genuine responses from the Leaf
+  stdout log. `max_minecart_speed` is explicitly unavailable under this world's
+  feature flags, so it is excluded from queries and shown as UNKNOWN rather than
+  claimed as an observed default.
 - **The live world's durable resident state** (ledger / known resources) is
   namespaced by `worldKey`, which contains no seed: a new world on the same
   `serverId` and epoch could still match old memory. The recipe avoids this by
@@ -276,6 +298,7 @@ so a clean premise can never be paired with a run judged against another file.
   `tools/m2-gate.mjs`, `tools/milestone-run-artifact.mjs` and
   `tools/m3-acceptance-bundle.mjs` are untouched: their verdicts are read, never
   re-implemented. An M3 PASS without `clean-run.json` is still only an M3 PASS.
-- Fixtures prove the wiring, not the world: `tools/test-clean-run-harness.mjs`
-  runs entirely offline under `runs/clean-run-tests/` and its "simulated live"
-  case exists only to exercise the ACCEPTED branch — it is not evidence.
+- Fixtures prove the wiring, not the world: the clean-run, console-capture and
+  server-config tests run entirely offline under temporary fixture directories.
+  Synthetic output exists only to exercise acceptance plumbing; it is not live
+  evidence and cannot be used for M3 acceptance.

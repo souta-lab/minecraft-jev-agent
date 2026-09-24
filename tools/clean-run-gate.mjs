@@ -63,6 +63,7 @@ export const ACCEPTANCE_RULES = Object.freeze([
   'descriptor.status === CLEAN',
   'every required run-evidence condition === PASS',
   'run.preparationFreshness === PASS (exact pre-run manifest and attempt ledger precede this BOOT)',
+  'the Leaf startup attestation binds actual --config argv/process and staged properties SHA to this runId, BOOT SHA, descriptor, and prepared manifest',
   'bundle.git.dirty === false',
   'descriptor frozen sourceSha === clean bundle.git.head === this run BOOT sourceSha',
   'the run-scoped source window is complete and every applied reload names the same sourceSha',
@@ -151,6 +152,15 @@ function readText(path) {
     return { path, text, sha256: sha256Text(text), error: null }
   } catch (thrown) {
     return { path, text: null, sha256: null, error: thrown instanceof Error ? thrown.message : String(thrown) }
+  }
+}
+
+function readBytes(path) {
+  if (typeof path !== 'string' || path === '' || !existsSync(path)) return { path, bytes: null, error: 'file_not_found' }
+  try {
+    return { path, bytes: readFileSync(path), error: null }
+  } catch (thrown) {
+    return { path, bytes: null, error: thrown instanceof Error ? thrown.message : String(thrown) }
   }
 }
 
@@ -621,6 +631,19 @@ export async function runCleanRunGate({
     artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && effectiveGameruleVerificationPath !== null
       ? readText(resolve(effectiveGameruleVerificationPath))
       : { path: effectiveGameruleVerificationPath, text: null, sha256: null, error: artifact === null ? 'no_run_artifact' : null }
+  const serverConsoleDir = descriptorPath === null ? null : join(dirname(descriptorPath), 'server-console')
+  const consoleCapturePath = serverConsoleDir === null ? null : join(serverConsoleDir, 'capture.json')
+  const consoleCommandJournalPath = serverConsoleDir === null ? null : join(serverConsoleDir, 'commands.jsonl')
+  const consoleServerLogPath = serverConsoleDir === null ? null : join(serverConsoleDir, 'leaf-server.log')
+  const consoleCaptureRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleCapturePath !== null
+    ? readJson(consoleCapturePath)
+    : { path: consoleCapturePath, document: null, text: null, error: artifact === null ? 'no_run_artifact' : null }
+  const consoleJournalRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleCommandJournalPath !== null
+    ? readText(consoleCommandJournalPath)
+    : { path: consoleCommandJournalPath, text: null, sha256: null, error: artifact === null ? 'no_run_artifact' : null }
+  const consoleServerLogRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleServerLogPath !== null
+    ? readBytes(consoleServerLogPath)
+    : { path: consoleServerLogPath, bytes: null, error: artifact === null ? 'no_run_artifact' : null }
   runConditions.push(
     checkConsoleGameruleEvidence({
       descriptor,
@@ -631,6 +654,11 @@ export async function runCleanRunGate({
       text: gameruleVerification.text,
       fileSha256: gameruleVerification.sha256,
       readError: gameruleVerification.error,
+      capture: consoleCaptureRead.document,
+      captureSha256: consoleCaptureRead.text === null ? null : sha256Text(consoleCaptureRead.text),
+      captureError: consoleCaptureRead.error ?? consoleJournalRead.error ?? consoleServerLogRead.error,
+      commandJournalText: consoleJournalRead.text,
+      serverLogBuffer: consoleServerLogRead.bytes,
     }),
   )
   if (log.reason !== null && artifact !== null) {
@@ -677,7 +705,7 @@ export async function runCleanRunGate({
     acceptanceReason = `the bundle is a PASS but NOT a live acceptance (evidenceClass=${String(evidenceClass)}, liveAcceptance=false): ${(bundle.residual ?? []).filter((entry) => /live signal|evidence class/.test(String(entry))).join(' | ') || 'objective live signals not satisfied'}`
   } else {
     acceptanceStatus = 'ACCEPTED'
-    acceptanceReason = 'descriptor CLEAN + clean frozen checkout + exact run source provenance + run evidence consistent + canonical M3 gate PASS + liveAcceptance=true'
+    acceptanceReason = 'descriptor CLEAN + attested Leaf startup config/argv + clean frozen checkout + exact run source provenance + run evidence consistent + canonical M3 gate PASS + liveAcceptance=true'
   }
   const exitCode = cleanStatus === 'NOT_CLEAN' || acceptanceStatus === 'NOT_ACCEPTED' ? 1 : cleanStatus === 'UNKNOWN' || acceptanceStatus === 'UNKNOWN' ? 2 : 0
 

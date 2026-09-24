@@ -270,6 +270,7 @@ export function parseBootLine(line) {
     revision: numberOrNull(kv.revision),
     worldEpoch: numberOrNull(kv.worldEpoch),
     worldKey: isPlainObject(kv.worldKey) ? kv.worldKey : null,
+    cleanRunServerConfig: isPlainObject(kv.cleanRunServerConfig) ? kv.cleanRunServerConfig : null,
   }
 }
 
@@ -428,8 +429,8 @@ function emptyAttribution(reason) {
  * Attribute every inventory/dimension/environment observation to exactly ONE
  * run, using the gates' BOOT-boundary rule. A BOOT line opens the active run; a
  * later BOOT closes the previous one; lines before any BOOT belong to no run. A
- * non-BOOT line's own `runId=` field is NOT a boundary, so a copied/stale marker
- * can never be attributed to the requested run.
+ * non-BOOT line's own `runId=` field is not a boundary, but when present it must
+ * match the active BOOT run. Explicitly foreign markers are skipped.
  */
 export function attributeRunLines(runId, lines) {
   const bootLines = []
@@ -457,6 +458,11 @@ export function attributeRunLines(runId, lines) {
     if (activeRunId !== runId) {
       const foreign = RUN_ID_LINE_RE.exec(line)?.[1] ?? activeRunId
       if (foreign !== null) foreignRuns.add(foreign)
+      continue
+    }
+    const explicitLineRunId = RUN_ID_LINE_RE.exec(line)?.[1] ?? null
+    if (explicitLineRunId !== null && explicitLineRunId !== runId) {
+      foreignRuns.add(explicitLineRunId)
       continue
     }
     const ts = timestampOf(line)
@@ -1312,13 +1318,30 @@ function operatorDecisionAnnotation({ selection, decisionsPath, gateVerdict }) {
 // descriptive composition (never a verdict)
 // ---------------------------------------------------------------------------
 
-function composeInventory({ attribution, snapshot }) {
+function composeInventory({ attribution, snapshot, bootSourceSha, runId }) {
   const samples = attribution.inventorySamples.map((sample) => ({ source: 'log', ts: sample.ts, counts: sample.counts }))
   const snapshotInitial = asCounts(snapshot?.record?.initialInventory)
   const snapshotLatest = asCounts(snapshot?.record?.terminal?.inventory) ?? asCounts(snapshot?.record?.inventory)
-  let boot = samples[0] ?? null
+  const snapshotBootSourceSha = typeof snapshot?.record?.bootSourceSha === 'string' ? snapshot.record.bootSourceSha : null
+  let bootReason = null
+  let boot = null
+  if (!snapshot?.present || snapshot?.status !== 'valid' || snapshot?.record?.runId !== runId) {
+    bootReason = 'run_scoped_initial_inventory_snapshot_unavailable'
+  } else if (snapshotInitial === null) {
+    bootReason = 'snapshot_initial_inventory_missing'
+  } else if (bootSourceSha === null || bootSourceSha === undefined) {
+    bootReason = 'run_boot_source_sha_missing'
+  } else if (snapshotBootSourceSha === null) {
+    bootReason = 'snapshot_boot_source_sha_missing'
+  } else if (snapshotBootSourceSha !== bootSourceSha) {
+    bootReason = `snapshot_boot_source_sha_mismatch expected=${bootSourceSha} observed=${snapshotBootSourceSha}`
+  } else {
+    // Generation-entry initialInventory is the only boot-time sample. Periodic
+    // INVENTORY lines can describe an already-changed inventory and never
+    // substitute for this source, even when they happen to be the first log row.
+    boot = { source: 'snapshot', ts: snapshot?.record?.at ?? null, counts: snapshotInitial }
+  }
   let latest = samples.at(-1) ?? null
-  if (boot === null && snapshotInitial !== null) boot = { source: 'snapshot', ts: snapshot?.record?.at ?? null, counts: snapshotInitial }
   if (latest === null && snapshotLatest !== null) {
     latest = { source: 'snapshot', ts: snapshot?.record?.terminal?.at ?? null, counts: snapshotLatest }
   }
@@ -1350,7 +1373,7 @@ function composeInventory({ attribution, snapshot }) {
       observed: samples.length > 0,
       keySeen,
       held: firstHeldAt !== null,
-      boot: Object.prototype.hasOwnProperty.call(bootCounts, item) ? bootCounts[item] : 0,
+      boot: boot === null ? null : Object.prototype.hasOwnProperty.call(bootCounts, item) ? bootCounts[item] : 0,
       latest: Object.prototype.hasOwnProperty.call(latestCounts, item) ? latestCounts[item] : 0,
       final: null,
       max,
@@ -1365,6 +1388,7 @@ function composeInventory({ attribution, snapshot }) {
     source: samples.length > 0 ? 'log' : boot === null && latest === null ? 'none' : 'snapshot',
     observationCount: samples.length,
     boot,
+    bootEvidence: { status: boot === null ? 'unknown' : 'verified', reason: bootReason, runId, bootSourceSha: bootSourceSha ?? null, snapshotBootSourceSha },
     latest,
     final: null,
     milestoneItems,
@@ -2165,12 +2189,12 @@ export async function buildRunArtifact({
 
   // ---- snapshot / inventory
   const snapshot = readSnapshotForRun(runId, paths.snapshotDir)
-  const inventory = composeInventory({ attribution, snapshot })
+  const inventory = composeInventory({ attribution, snapshot, bootSourceSha: boot?.sourceSha ?? null, runId })
   if (inventory.observationCount === 0 && inventory.snapshot.present) {
     missing.add('inventory:log', `the run-scoped snapshot exists but ${paths.logPath} holds no INVENTORY/MILESTONE sample bound to runId=${runId}`)
   }
   if (inventory.boot === null) {
-    missing.add('inventory.boot', 'no log inventory sample, no snapshot initialInventory and no snapshot latest inventory could be bound to this run')
+    missing.add('inventory.boot', inventory.bootEvidence.reason ?? 'generation-entry initialInventory could not be bound to the exact BOOT source SHA')
   }
   if (inventory.latest === null) {
     missing.add('inventory.latest', 'no log inventory sample, no snapshot inventory and no snapshot terminal inventory could be bound to this run')

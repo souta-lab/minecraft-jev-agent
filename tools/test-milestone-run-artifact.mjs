@@ -204,7 +204,7 @@ function makeRoot(name) {
   return root
 }
 
-function writeFixture(root, runId, { logLines, acceptance = true, runner = {} }) {
+function writeFixture(root, runId, { logLines, acceptance = true, runner = {}, initialSnapshot = false }) {
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
   writeFileSync(
@@ -212,6 +212,16 @@ function writeFixture(root, runId, { logLines, acceptance = true, runner = {} })
     decisionsFor(runId, runner.sourceSha ?? SOURCE_SHA, (runner.offsetSec ?? 0) + 2),
     'utf8',
   )
+  if (initialSnapshot) {
+    const scoped = attributeRunLines(runId, logLines)
+    const bootSourceSha = /\bsource=([a-f0-9]{40})/i.exec(scoped.bootLines[0]?.line ?? '')?.[1] ?? null
+    const initialInventory = scoped.inventorySamples[0]?.counts ?? {}
+    writeFileSync(
+      join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+      JSON.stringify({ record: 'm2-snapshot', runId, bootSourceSha, initialInventory, inventory: initialInventory, markers: [] }),
+      'utf8',
+    )
+  }
   if (acceptance) {
     writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
   }
@@ -312,7 +322,7 @@ const RUN_FAIL = 'run-fixture-fail'
 // A. PASS-shaped run
 // ---------------------------------------------------------------------------
 const passRoot = makeRoot('pass')
-writeFixture(passRoot, RUN_PASS, { logLines: fullLog(RUN_PASS, { terminalEye: 12 }) })
+writeFixture(passRoot, RUN_PASS, { logLines: fullLog(RUN_PASS, { terminalEye: 12 }), initialSnapshot: true })
 const pass = await cliWithReport(['--run', RUN_PASS, '--root', passRoot, '--json'], {
   runId: RUN_PASS,
   counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
@@ -345,6 +355,8 @@ assert.ok(passArtifact.verdicts.M2.lines.some((l) => /^M2_RUN_RESULT status=PASS
 assert.ok(passArtifact.verdicts.M3.lines.some((l) => /^M3_RUN_RESULT status=PASS\b/.test(l)))
 // Inventory: boot vs latest and the milestone subset with first/last timestamps.
 assert.equal(passArtifact.inventory.boot.counts.diamond, 3)
+assert.equal(passArtifact.inventory.boot.source, 'snapshot')
+assert.equal(passArtifact.inventory.bootEvidence.status, 'verified')
 assert.equal(passArtifact.inventory.latest.counts.ender_eye, 12)
 assert.equal(passArtifact.inventory.final.status, 'PRESENT')
 assert.equal(passArtifact.inventory.final.source, 'control.report')
@@ -396,6 +408,55 @@ assert.equal(passArtifact.acceptance.record.runId, RUN_PASS)
   )
 }
 ok('PASS-shaped fixture: exit 0, missingEvidence [], both gate verdicts embedded')
+
+// The initial inventory is generation-entry evidence and must be tied to BOOT's
+// exact source. A same-run snapshot with a foreign or missing source binding
+// cannot be replaced by the first periodic INVENTORY row.
+for (const [label, snapshotSource] of [['foreign', 'f'.repeat(40)], ['missing', null]]) {
+  const runId = `run-fixture-inventory-snapshot-${label}`
+  const root = makeRoot(`inventory-snapshot-${label}`)
+  const logs = [
+    boot(0, runId),
+    spawnLine(1),
+    line(10, 'INVENTORY items={"diamond":3,"ender_eye":12} pos=0.5,64.0,0.5'),
+    line(20, 'INVENTORY items={} pos=0.5,64.0,0.5'),
+  ]
+  writeFixture(root, runId, { logLines: logs })
+  const snapshot = { record: 'm2-snapshot', runId, initialInventory: {}, inventory: {} }
+  if (snapshotSource !== null) snapshot.bootSourceSha = snapshotSource
+  writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`), JSON.stringify(snapshot), 'utf8')
+  const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(artifact.inventory.boot, null)
+  assert.equal(artifact.inventory.bootEvidence.status, 'unknown')
+  assert.equal(artifact.inventory.milestoneItems.ender_eye.boot, null)
+  assert.ok(artifact.missingEvidence.includes('inventory.boot'))
+  assert.equal(artifact.status, 'UNKNOWN')
+  assert.match(artifact.inventory.bootEvidence.reason, snapshotSource === null ? /snapshot_boot_source_sha_missing/ : /snapshot_boot_source_sha_mismatch/)
+  ok(`${label} snapshot source binding leaves inventory.boot UNKNOWN despite a later nonempty periodic sample`)
+}
+
+// The active BOOT owns untagged and exact-run observations only. A foreign
+// explicit runId on a transition must be excluded and surfaced by the reader vs
+// gate scanner cross-check, so it cannot authenticate Nether arrival here.
+{
+  const runId = 'run-fixture-foreign-dimension-marker'
+  const root = makeRoot('foreign-dimension-marker')
+  const lines = [
+    boot(0, runId),
+    spawnLine(1),
+    line(2, 'DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether runId=run-fixture-foreign-dimension reason=live-change source=live-world'),
+    line(3, `DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_end dimension=minecraft:the_end runId=${runId} reason=live-change source=live-world`),
+  ]
+  writeFixture(root, runId, { logLines: lines })
+  const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
+  const attributed = attributeRunLines(runId, lines)
+  assert.deepEqual(attributed.dimensionObservations.map((entry) => entry.dimension), ['minecraft:overworld', 'minecraft:the_end'])
+  assert.ok(attributed.foreignRuns.includes('run-fixture-foreign-dimension'))
+  assert.deepEqual(artifact.environment.dimensions.observed, ['minecraft:overworld', 'minecraft:the_end'])
+  assert.ok(artifact.missingEvidence.includes('attribution:gate_cross_check'))
+  assert.equal(artifact.status, 'UNKNOWN')
+  ok('foreign runId dimension markers are excluded from artifact transitions and block attribution consistency')
+}
 
 // Same synthetic run evidence, without a HOST report, must remain UNKNOWN even
 // though the historical log reaches 12 eyes. This keeps fixture-only report
@@ -455,7 +516,7 @@ ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
 {
   const runId = 'run-fixture-host'
   const hostRoot = makeRoot('host')
-  writeFixture(hostRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }) })
+  writeFixture(hostRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }), initialSnapshot: true })
   writeFileSync(
     join(hostRoot, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
     JSON.stringify({
@@ -488,7 +549,7 @@ ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
   // The SAME host file with a DIFFERENT source SHA must be rejected, the derived
   // log fact kept, and the top-level integrity gap surfaced.
   const mismatchRoot = makeRoot('host-mismatch')
-  writeFixture(mismatchRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }) })
+  writeFixture(mismatchRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }), initialSnapshot: true })
   writeFileSync(
     join(mismatchRoot, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
     JSON.stringify({
@@ -525,7 +586,7 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
   const chain = passArtifact.verdicts.M2.chain
   assert.ok(chain !== null && typeof chain === 'object', `M2 chain missing: ${JSON.stringify(passArtifact.verdicts.M2)}`)
   assert.equal(chain.ordered, true)
-  assert.deepEqual(chain.sources, ['log'])
+  assert.deepEqual(chain.sources, ['snapshot', 'log'])
   // built: the validated frame, with the frame's OWN blocks/shape and its index.
   assert.equal(chain.built.status, 'PASS')
   assert.equal(chain.built.source, 'log')
@@ -612,7 +673,7 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
 // B. FAIL-shaped run (materials complete, eyes short)
 // ---------------------------------------------------------------------------
 const failRoot = makeRoot('fail')
-writeFixture(failRoot, RUN_FAIL, { logLines: fullLog(RUN_FAIL, { terminalEye: 0 }) })
+writeFixture(failRoot, RUN_FAIL, { logLines: fullLog(RUN_FAIL, { terminalEye: 0 }), initialSnapshot: true })
 const fail = await cliWithReport(['--run', RUN_FAIL, '--root', failRoot, '--json'], {
   runId: RUN_FAIL,
   counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 0, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },
@@ -1117,6 +1178,7 @@ ok('an acceptance record never turns an incomplete milestone into PASS; its abse
   const root = makeRoot('complete')
   writeFixture(root, runId, {
     logLines: fullLog(runId, { terminalEye: 12 }),
+    initialSnapshot: true,
     runner: {
       stack: '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev|muse-spark:meta/muse-spark-1.3-contributor"}',
       decisions: ['SYSTEM2_AUTHORITY_DECISION provider=muse-spark model=meta/muse-spark-1.3-contributor chosen=front_nether_portal'],
@@ -1328,7 +1390,7 @@ ok('two in-window reloads: the LATEST source-changing hash is effective, with tr
   // artifact (provenance is recorded, not implied).
   const cleanId = 'run-fixture-reload-clean'
   const cleanRoot = makeRoot('reload-clean')
-  writeFixture(cleanRoot, cleanId, { logLines: fullLog(cleanId, { terminalEye: 12 }), runner: { build: 'boot11112222' } })
+  writeFixture(cleanRoot, cleanId, { logLines: fullLog(cleanId, { terminalEye: 12 }), initialSnapshot: true, runner: { build: 'boot11112222' } })
   const clean = await cliWithReport(['--run', cleanId, '--root', cleanRoot, '--json'], {
     runId: cleanId,
     counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12, ender_pearl: 0, blaze_rod: 0, blaze_powder: 0 },

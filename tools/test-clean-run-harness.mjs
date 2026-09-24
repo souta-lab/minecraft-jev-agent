@@ -42,13 +42,16 @@
 //
 // Usage: bun tools/test-clean-run-harness.mjs
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
 import { runCleanRunGate, runCli as runGateCli } from './clean-run-gate.mjs'
 import { checkRunEvidence, loadCleanEnvironment, sha256Text, validateCleanEnvironment } from './clean-run-environment.mjs'
+import { buildLeafStartupAttestation } from './clean-run-server-launch.mjs'
+import { expectedRuntimeServerProperties } from './clean-run-server-config.mjs'
+import { expectedConsoleQueries } from './clean-run-console-capture.mjs'
 import { applyPlan, planPrepare, runCli as runPrepareCli } from './clean-run-prepare.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -175,6 +178,10 @@ function initCleanFixtureGit(root) {
       '/environment-resolved.json',
       '/manifest.json',
       '/gamerule-verification.txt',
+      '/server.properties.clean',
+      '/manifest.json',
+      '/server-start-attestation.json',
+      '/server-console/',
       '/gamerules-observed.json',
       '/buddy-driver/buddy.log',
       '/buddy-driver/runner.out',
@@ -201,9 +208,19 @@ function initCleanFixtureGit(root) {
 }
 
 function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance = true, acceptanceOptions = {}, decisions = null, descriptor = null } = {}) {
-  writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, source), 'utf8')
+  const startupMarker = descriptor === null ? null : writeGameruleVerification(root, runId, descriptor, source)
+  const attachMarker = (lines) => startupMarker === null
+    ? lines
+    : lines.map((entry) => /\bBOOT\b(?!_)/.test(entry) ? `${entry} cleanRunServerConfig=${JSON.stringify(startupMarker)}` : entry)
+  writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${attachMarker(logLines).join('\n')}\n`, 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), `${attachMarker(runnerOut(runId, source).trimEnd().split('\n')).join('\n')}\n`, 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisions ?? decisionsFor(runId, source), 'utf8')
+  const firstInventory = logLines.map((entry) => /\bINVENTORY items=(\{.*\})/.exec(entry)?.[1] ?? null).find((entry) => entry !== null)
+  writeFileSync(
+    join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+    JSON.stringify({ record: 'm2-snapshot', runId, bootSourceSha: source, initialInventory: firstInventory === null ? {} : JSON.parse(firstInventory), markers: [] }),
+    'utf8',
+  )
   if (acceptance) {
     writeFileSync(
       join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`),
@@ -211,7 +228,6 @@ function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance 
       'utf8',
     )
   }
-  if (descriptor !== null) writeGameruleVerification(root, runId, descriptor)
 }
 
 /** A resolved (frozen) descriptor inside the fixture root. */
@@ -255,26 +271,192 @@ function resolvedDescriptor(root, { levelName = CLEAN_LEVEL, levelSeed = CLEAN_S
   return { path, document: template, manifestPath: join(root, 'manifest.json'), attemptsPath }
 }
 
-function writeGameruleVerification(root, runId, descriptor) {
+function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
   const loaded = loadCleanEnvironment(descriptor.path)
   assert.equal(loaded.error, null, `fixture descriptor load: ${String(loaded.error)}`)
-  const lines = [
+  const runDir = dirname(descriptor.path)
+  const container = descriptor.document.cleanRun.worldContainer
+  const propertiesPath = join(runDir, 'server.properties.clean')
+  const properties = expectedRuntimeServerProperties(descriptor.document)
+  let propertiesText = `${Object.entries(properties).map(([key, value]) => `${key}=${value}`).join('\n')}\n`
+  propertiesText = propertiesText.replace('level-type=minecraft:normal', 'level-type=minecraft\\:normal')
+  writeFileSync(propertiesPath, propertiesText, { encoding: 'utf8', mode: 0o600 })
+  const propertiesSha256 = sha256Text(propertiesText)
+  const manifestPath = join(runDir, 'manifest.json')
+  const manifestText = `${JSON.stringify({
+    record: 'clean-run-prepare',
+    schemaVersion: 2,
+    descriptor: { path: descriptor.path, sha256: loaded.sha256 },
+    resolved: { path: descriptor.path, overrides: [] },
+    target: { levelName: descriptor.document.values.levelName, levelSeed: descriptor.document.values.levelSeed, sourceSha: descriptor.document.values.sourceSha },
+    files: [{ path: propertiesPath, sha256: propertiesSha256, bytes: Buffer.byteLength(propertiesText), note: 'synthetic test fixture only' }],
+  }, null, 2)}\n`
+  writeFileSync(manifestPath, manifestText, 'utf8')
+  const manifestSha256 = sha256Text(manifestText)
+  const consoleDir = join(runDir, 'server-console')
+  mkdirSync(consoleDir, { mode: 0o700 })
+  chmodSync(consoleDir, 0o700)
+  const fifoPath = join(consoleDir, 'server-console.fifo')
+  execFileSync('mkfifo', ['-m', '600', '--', fifoPath])
+  const stdoutLogPath = join(consoleDir, 'leaf-server.log')
+  writeFileSync(stdoutLogPath, '', { mode: 0o600 })
+
+  const pid = 4242
+  const java = '/usr/lib/jvm/java-21-openjdk-amd64/bin/java'
+  const args = [
+    '-Xmx1G', '-Xms1G', '-DPaper.IgnoreJavaVersion=true', '-jar', descriptor.document.values.serverImplementation,
+    '--nogui', '--config', propertiesPath, '--universe', container, '--level-name', descriptor.document.values.levelName,
+  ]
+  const procArgs = [java, ...args]
+  const startedAt = '2026-09-23T09:59:00.000Z'
+  const startup = buildLeafStartupAttestation({
+    descriptorPath: descriptor.path,
+    descriptorText: readFileSync(descriptor.path, 'utf8'),
+    descriptor: descriptor.document,
+    propertiesPath,
+    propertiesText,
+    manifestPath,
+    manifestText,
+    consoleInputPath: fifoPath,
+    stdoutLogPath,
+    cwd: container,
+    executable: java,
+    args,
+    pid,
+    startedAt,
+    procCmdline: procArgs,
+  })
+  const startupPath = join(runDir, 'server-start-attestation.json')
+  const startupText = `${JSON.stringify(startup, null, 2)}\n`
+  writeFileSync(startupPath, startupText, { encoding: 'utf8', mode: 0o600 })
+  const startupSha256 = sha256Text(startupText)
+  const marker = {
+    status: 'verified',
+    runId,
+    bootSourceSha,
+    descriptorPath: descriptor.path,
+    descriptorSha256: loaded.sha256,
+    attestationPath: startupPath,
+    attestationSha256: startupSha256,
+    manifestPath,
+    manifestSha256,
+    process: {
+      pid,
+      startedAt,
+      commandLineSha256: sha256Text(procArgs.join('\0')),
+      serverJar: basename(descriptor.document.values.serverImplementation),
+      configArg: propertiesPath,
+      universeArg: resolve(container),
+      levelNameArg: descriptor.document.values.levelName,
+    },
+    config: { path: propertiesPath, sha256: propertiesSha256, properties: startup.config.properties },
+    console: startup.console,
+    preparedManifest: { stagedPropertiesSha256: propertiesSha256 },
+  }
+
+  // These generated bytes simulate process stdout only inside this offline test.
+  // Production capture uses the FIFO writer and the live Leaf stdout log.
+  const { queries } = expectedConsoleQueries(descriptor.document)
+  const bootTime = at(0)
+  const capturedAt = at(36)
+  let leafLog = Buffer.alloc(0)
+  const appendResponse = (line) => {
+    const bytes = Buffer.from(line, 'utf8')
+    const byteStart = leafLog.length
+    leafLog = Buffer.concat([leafLog, bytes, Buffer.from('\n')])
+    return { line, byteStart, byteEnd: byteStart + bytes.length, lineSha256: sha256Text(bytes) }
+  }
+  const seed = { value: String(descriptor.document.values.levelSeed), ...appendResponse(`[Server thread/INFO]: Seed: [${descriptor.document.values.levelSeed}]`) }
+  const responses = []
+  const journal = []
+  const appendJournalPair = (query, response) => {
+    const common = {
+      runId,
+      sourceSha: bootSourceSha,
+      descriptorSha256: loaded.sha256,
+      startupAttestationSha256: startupSha256,
+      leafPid: pid,
+      kind: query.kind,
+      command: query.command,
+      dimension: query.dimension ?? null,
+      rule: query.rule ?? null,
+      descriptorRule: query.descriptorRule ?? null,
+    }
+    journal.push({ ...common, event: 'console-query-attempt', at: capturedAt })
+    journal.push({
+      ...common,
+      event: 'console-query-response',
+      value: response.value,
+      responseLine: response.line,
+      byteStart: response.byteStart,
+      byteEnd: response.byteEnd,
+      responseLineSha256: response.lineSha256,
+      completedAt: capturedAt,
+    })
+  }
+  appendJournalPair({ kind: 'seed', command: 'seed' }, { ...seed, command: 'seed' })
+  for (const query of queries) {
+    const response = {
+      value: query.expected,
+      ...appendResponse(`[Server thread/INFO]: Gamerule ${query.descriptorRule} is currently set to: ${String(query.expected)}`),
+      command: query.command,
+    }
+    responses.push({
+      dimension: query.dimension,
+      rule: query.rule,
+      descriptorRule: query.descriptorRule,
+      expected: query.expected,
+      command: query.command,
+      ...response,
+    })
+    appendJournalPair(query, response)
+  }
+  writeFileSync(stdoutLogPath, leafLog, { mode: 0o600 })
+  const commandJournalText = `${journal.map((entry) => JSON.stringify(entry)).join('\n')}\n`
+  const commandTranscriptPath = join(consoleDir, 'commands.jsonl')
+  writeFileSync(commandTranscriptPath, commandJournalText, { encoding: 'utf8', mode: 0o600 })
+  const transcriptPath = join(runDir, 'gamerule-verification.txt')
+  const transcriptLines = [
     'record=m3-clean-gamerule-verification',
     'schemaVersion=1',
     `runId=${runId}`,
     `descriptorSha256=${loaded.sha256}`,
     `levelName=${descriptor.document.values.levelName}`,
-    `seed=${String(descriptor.document.values.levelSeed)}`,
-    `sourceSha=${descriptor.document.values.sourceSha}`,
-    `capturedAt=${at(36)}`,
+    `seed=${seed.value}`,
+    `sourceSha=${bootSourceSha}`,
+    `capturedAt=${capturedAt}`,
   ]
   for (const dimension of descriptor.document.cleanRun.gameruleScope.dimensions) {
-    lines.push(`[dimension=${dimension}]`)
-    for (const [rule, value] of Object.entries(descriptor.document.values.gamerules)) lines.push(`${rule}=${String(value)}`)
+    transcriptLines.push('', `[dimension=${dimension}]`)
+    for (const response of responses.filter((entry) => entry.dimension === dimension)) transcriptLines.push(response.line)
   }
-  const path = join(dirname(descriptor.path), 'gamerule-verification.txt')
-  writeFileSync(path, `${lines.join('\n')}\n`, 'utf8')
-  return path
+  const transcriptText = `${transcriptLines.join('\n')}\n`
+  writeFileSync(transcriptPath, transcriptText, { encoding: 'utf8', mode: 0o600 })
+  const capturePath = join(consoleDir, 'capture.json')
+  const capture = {
+    record: 'clean-run-console-capture',
+    schemaVersion: 1,
+    status: 'complete',
+    runId,
+    sourceSha: bootSourceSha,
+    descriptor: { path: descriptor.path, sha256: loaded.sha256 },
+    startupAttestation: { path: startupPath, sha256: startupSha256 },
+    process: { pid, commandLineSha256: marker.process.commandLineSha256 },
+    residentLog: { path: join(root, 'buddy-driver', 'buddy.log'), sourceSha: bootSourceSha },
+    capturePath,
+    console: { directory: consoleDir, stdoutLogPath, commandTranscriptPath },
+    commandTranscript: { path: commandTranscriptPath, sha256: sha256Text(commandJournalText), queryCount: queries.length + 1 },
+    seed,
+    requiredDimensions: descriptor.document.cleanRun.gameruleScope.dimensions,
+    observedRuleCount: responses.length,
+    excludedRules: Object.keys(descriptor.document.cleanRun.gamerulePolicy.notRegisteredInWorld ?? {}),
+    responses,
+    transcript: { path: transcriptPath, sha256: sha256Text(transcriptText) },
+    capturedAt,
+    bootTime,
+  }
+  writeFileSync(capturePath, `${JSON.stringify(capture, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  return marker
 }
 
 async function buildBundle(
@@ -384,6 +566,19 @@ const runCondition = (verdict, id) => condition(verdict, id)
   assert.equal(condition(verdict, 'descriptor.worldNotGenerated')?.verdict, 'UNKNOWN')
   assert.equal(condition(verdict, 'descriptor.worldNotGenerated')?.required, false)
   assert.match(runCondition(verdict, 'run.preparationFreshness').reason, /recorded before BOOT/)
+  const wrongInitialSource = JSON.parse(JSON.stringify(bundle.artifact.document))
+  wrongInitialSource.inventory.bootEvidence.bootSourceSha = 'f'.repeat(40)
+  const bootEvidenceChecks = checkRunEvidence({
+    descriptor: descriptor.document,
+    artifact: wrongInitialSource,
+    logText: readFileSync(join(root, 'buddy-driver', 'buddy.log'), 'utf8'),
+    runId: RUN,
+    descriptorPath: descriptor.path,
+    descriptorSha256: loadCleanEnvironment(descriptor.path).sha256,
+  })
+  const bootInventoryCondition = bootEvidenceChecks.find((entry) => entry.id === 'run.bootInventoryEmpty')
+  assert.equal(bootInventoryCondition.verdict, 'UNKNOWN', 'a foreign-source generation-entry snapshot cannot certify a clean boot inventory')
+  assert.match(bootInventoryCondition.reason, /not bound to this run's exact BOOT source/)
   assert.match(runCondition(verdict, 'run.keepInventoryBehaviour').reason, /empty inventory after death/)
   // A fixture is NEVER a live acceptance: the combined answer says so exactly.
   assert.equal(verdict.acceptanceStatus, 'NOT_ACCEPTED')
@@ -849,7 +1044,17 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.ok(existsSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'data', 'm3clean', 'function', 'set_gamerules.mcfunction')))
   const mcfunction = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'data', 'm3clean', 'function', 'set_gamerules.mcfunction'), 'utf8')
   assert.match(mcfunction, /^gamerule keep_inventory false$/m)
-  assert.match(readFileSync(join(planRun.runDir, 'operator-commands.txt'), 'utf8'), /execute in minecraft:the_nether run gamerule/)
+  const startupRecipe = readFileSync(join(planRun.runDir, 'operator-commands.txt'), 'utf8')
+  assert.match(startupRecipe, /clean-run-server-launch\.mjs/)
+  assert.match(startupRecipe, /--console-input/)
+  assert.match(startupRecipe, /--stdout-log/)
+  assert.match(startupRecipe, /Never pass --bonusChest/)
+  assert.doesNotMatch(startupRecipe, /<\/dev\/null|execute in minecraft:the_nether run gamerule/)
+  assert.match(startupRecipe, /clean-run-console-capture\.mjs/)
+  assert.match(startupRecipe, /descriptor\/run\/PID-bound commands\.jsonl, capture\.json/)
+  assert.ok(startupRecipe.indexOf('clean-run-server-launch.mjs') < startupRecipe.indexOf('agent-runner.mts'))
+  assert.ok(startupRecipe.indexOf('agent-runner.mts') < startupRecipe.indexOf('clean-run-console-capture.mjs'), 'capture must run after BOOT is possible')
+  assert.doesNotMatch(startupRecipe, /setsid --fork nohup bun agent-runner|agent-runner\.mts <\/dev\/null/)
   const packMeta = readFileSync(join(container, 'm3clean-prep', 'datapacks', 'm3-clean-gamerules', 'pack.mcmeta'), 'utf8')
   assert.match(packMeta, /"min_format": \[\s*94,\s*1\s*\]/)
   assert.match(packMeta, /"max_format": \[\s*94,\s*1\s*\]/)

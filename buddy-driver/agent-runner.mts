@@ -592,6 +592,7 @@ const generationStopWatch = new Map<string, NodeJS.Timeout>()
 
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
 import { acceptanceProvenance } from './acceptance-provenance.ts'
+import { cleanRunServerConfigAtBoot } from './clean-run-server-config.ts'
 
 const bootSourceSha = gitCommit()
 const stats = {
@@ -2978,6 +2979,7 @@ log('BOOT', {
   revision: state.revision,
   worldEpoch: state.worldEpoch,
   worldKey: currentWorldKey(),
+  cleanRunServerConfig: cleanRunServerConfigAtBoot({ runId, bootSourceSha }),
   frozen,
 })
 startControlServer()

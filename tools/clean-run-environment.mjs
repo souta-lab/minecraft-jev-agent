@@ -38,8 +38,9 @@
 // The clean-run question is answered ONLY here; `CLEAN` is a premise, never a
 // milestone verdict.
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { compareRuntimeServerProperties, parseServerProperties } from './clean-run-server-config.mjs'
 
 export const RECORD = 'clean-run-environment'
 export const SCHEMA_VERSION = 2
@@ -467,6 +468,20 @@ export function validateCleanEnvironment(
       detail: { mandatory: REQUIRED_GAMERULES, declaredRequired, missing: missingRules },
     }),
   )
+  const consoleRuleEvidence = consoleGameruleEvidenceSet(document)
+  conditions.push(
+    condition({
+      id: 'descriptor.consoleGameruleExclusions',
+      verdict: consoleRuleEvidence.invalidExclusions.length > 0 ? 'FAIL' : Object.keys(consoleRuleEvidence.excluded).length > 0 ? 'UNKNOWN' : 'PASS',
+      required: consoleRuleEvidence.invalidExclusions.length > 0,
+      reason: consoleRuleEvidence.invalidExclusions.length > 0
+        ? `console gamerule exclusions are invalid: ${consoleRuleEvidence.invalidExclusions.join('; ')}`
+        : Object.keys(consoleRuleEvidence.excluded).length > 0
+          ? `these declared gamerules are unavailable for observation and are not claimed as observed: ${Object.keys(consoleRuleEvidence.excluded).join(', ')}`
+          : 'no gamerules are excluded from run-scoped console observation',
+      detail: { excluded: consoleRuleEvidence.excluded, invalid: consoleRuleEvidence.invalidExclusions },
+    }),
+  )
 
   // 8. every declared gamerule at its declared default, and keepInventory=false
   const deviations = []
@@ -789,6 +804,26 @@ export function parseConsoleGameruleTranscript(text) {
   return { metadata, dimensions, errors }
 }
 
+/** Exact descriptor query set plus explicitly declared unavailable rules. */
+export function consoleGameruleEvidenceSet(descriptor) {
+  const rules = isPlainObject(descriptor?.values?.gamerules) ? descriptor.values.gamerules : {}
+  const policy = isPlainObject(descriptor?.cleanRun?.gamerulePolicy) ? descriptor.cleanRun.gamerulePolicy : {}
+  const exclusions = isPlainObject(policy.notRegisteredInWorld) ? policy.notRegisteredInWorld : {}
+  const defaults = isPlainObject(policy.defaults) ? policy.defaults : {}
+  const required = new Set([...REQUIRED_GAMERULES, ...(Array.isArray(policy.requiredRules) ? policy.requiredRules.filter((key) => typeof key === 'string') : [])])
+  const invalidExclusions = []
+  for (const [rule, rationale] of Object.entries(exclusions)) {
+    if (!Object.hasOwn(rules, rule) && !Object.hasOwn(defaults, rule)) invalidExclusions.push(`${rule}:not_declared`)
+    if (typeof rationale !== 'string' || rationale.trim() === '') invalidExclusions.push(`${rule}:rationale_missing`)
+    if (required.has(rule)) invalidExclusions.push(`${rule}:required_rule_cannot_be_excluded`)
+  }
+  return {
+    selected: Object.fromEntries(Object.entries(rules).filter(([rule]) => !Object.hasOwn(exclusions, rule))),
+    excluded: exclusions,
+    invalidExclusions: [...new Set(invalidExclusions)],
+  }
+}
+
 function parseConsoleGameruleValue(raw) {
   const value = String(raw).trim().replace(/^[."']+|[."']+$/g, '').trim()
   if (/^true$/i.test(value)) return true
@@ -799,7 +834,7 @@ function parseConsoleGameruleValue(raw) {
 }
 
 /** Bind and validate the console transcript against the exact accepted run. */
-export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = null, descriptorSha256 = null, path = null, text = null, fileSha256 = null, readError = null }) {
+export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = null, descriptorSha256 = null, path = null, text = null, fileSha256 = null, capture = null, captureSha256 = null, captureError = null, commandJournalText = null, serverLogBuffer = null, readError = null }) {
   const mechanism = descriptor?.cleanRun?.gameruleMechanism ?? {}
   const required = mechanism.primary === 'console'
   const baseDetail = { path, fileSha256, mechanism: mechanism.primary ?? null }
@@ -818,6 +853,17 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
       id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: true,
       reason: `required operator console gamerule transcript is unavailable${readError === null ? '' : `: ${readError}`}`,
       detail: baseDetail,
+    })
+  }
+
+  // Editable/pasted console output is no longer an acceptance source. The
+  // capture record is generated only by clean-run-console-capture.mjs after it
+  // observes each read-only response in the run-private Leaf stdout log.
+  if (!isPlainObject(capture) || typeof captureSha256 !== 'string' || commandJournalText === null || !Buffer.isBuffer(serverLogBuffer)) {
+    return condition({
+      id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: true,
+      reason: `machine-captured Leaf console query evidence is unavailable${captureError === null ? '' : `: ${captureError}`}`,
+      detail: { path, fileSha256, captureSha256, captureError },
     })
   }
 
@@ -854,7 +900,8 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
 
   const scope = descriptor?.cleanRun?.gameruleScope ?? {}
   const requiredDimensions = Array.isArray(scope.dimensions) ? scope.dimensions.filter((dimension) => typeof dimension === 'string') : []
-  const expectedRules = isPlainObject(descriptor?.values?.gamerules) ? descriptor.values.gamerules : {}
+  const evidenceSet = consoleGameruleEvidenceSet(descriptor)
+  const expectedRules = evidenceSet.selected
   const knownRules = new Set(Object.keys(expectedRules).map(canonicalGameruleKey))
   const differences = [...parsed.errors]
   for (const dimension of requiredDimensions) {
@@ -881,18 +928,154 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   }
   if (requiredDimensions.length === 0) differences.push('descriptor declares no per-dimension gamerule scope')
 
+  const captureMismatches = []
+  const captureMissing = []
+  const boot = artifact?.run?.boot ?? null
+  const startup = boot?.cleanRunServerConfig ?? null
+  const boundDescriptorPath = typeof startup?.descriptorPath === 'string' ? resolve(startup.descriptorPath) : null
+  const expectedCapturePath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'capture.json')
+  const expectedServerLogPath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'leaf-server.log')
+  const expectedCommandJournalPath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'commands.jsonl')
+  if (capture.record !== 'clean-run-console-capture' || capture.schemaVersion !== 1 || capture.status !== 'complete') captureMismatches.push('capture record/schema/status is invalid')
+  for (const [key, expected] of Object.entries({
+    runId,
+    sourceSha: bootSourceSha,
+    'descriptor.sha256': descriptorSha256,
+    'descriptor.path': boundDescriptorPath,
+    'startupAttestation.path': startup?.attestationPath ?? null,
+    'startupAttestation.sha256': startup?.attestationSha256 ?? null,
+    'process.pid': startup?.process?.pid ?? null,
+    'process.commandLineSha256': startup?.process?.commandLineSha256 ?? null,
+  })) {
+    const [root, child] = key.includes('.') ? key.split('.', 2) : [null, key]
+    const actual = root === null ? capture[child] : capture[root]?.[child]
+    if (expected === null || expected === undefined) captureMissing.push(key)
+    else if (String(actual) !== String(expected)) captureMismatches.push(`${key} does not match run/BOOT startup binding`)
+  }
+  if (expectedCapturePath !== null && resolve(String(capture.capturePath ?? '')) !== resolve(expectedCapturePath)) captureMismatches.push('capture path is not the descriptor sibling server-console/capture.json')
+  if (expectedServerLogPath !== null && resolve(String(capture.console?.stdoutLogPath ?? '')) !== resolve(expectedServerLogPath)) captureMismatches.push('Leaf stdout path is not the descriptor sibling server-console/leaf-server.log')
+  if (expectedCommandJournalPath !== null && resolve(String(capture.commandTranscript?.path ?? '')) !== resolve(expectedCommandJournalPath)) captureMismatches.push('command journal path is not the descriptor sibling server-console/commands.jsonl')
+  if (capture.transcript?.sha256 !== fileSha256 || capture.transcript?.path !== path) captureMismatches.push('capture transcript digest/path does not match the transcript file')
+  if (capture.commandTranscript?.sha256 !== sha256Text(commandJournalText)) captureMismatches.push('command journal digest does not match its file')
+  if (capture.commandTranscript?.queryCount !== Object.keys(expectedRules).length * requiredDimensions.length + 1) captureMismatches.push('command journal query count does not match descriptor scope')
+  if (capture.capturedAt !== metadata.capturedAt || capture.residentLog?.sourceSha !== bootSourceSha) captureMismatches.push('capture timestamp/resident BOOT source is not bound to the transcript')
+  if (capture.requiredDimensions?.length !== requiredDimensions.length || requiredDimensions.some((dimension, index) => capture.requiredDimensions[index] !== dimension)) captureMismatches.push('captured dimension list differs from descriptor scope')
+  const seedLine = typeof capture.seed?.line === 'string' ? Buffer.from(capture.seed.line, 'utf8') : null
+  const seedStart = capture.seed?.byteStart
+  const seedEnd = capture.seed?.byteEnd
+  const seedResponse = typeof capture.seed?.line === 'string' ? /\bSeed:\s*\[?(-?\d+)\]?/i.exec(capture.seed.line) : null
+  if (seedLine === null || !Number.isInteger(seedStart) || !Number.isInteger(seedEnd) || seedEnd - seedStart !== seedLine.length || sha256BytesForGate(seedLine) !== capture.seed?.lineSha256) {
+    captureMismatches.push('captured seed response range/hash is invalid')
+  } else if (!serverLogBuffer.subarray(seedStart, seedEnd).equals(seedLine) || seedResponse === null || seedResponse[1] !== String(capture.seed?.value)) {
+    captureMismatches.push('captured seed response is not present in the Leaf stdout log')
+  }
+  if (String(capture.seed?.value ?? '') !== String(descriptor?.values?.levelSeed ?? '')) captureMismatches.push('captured Leaf seed differs from descriptor')
+
+  const captureResponses = Array.isArray(capture.responses) ? capture.responses : []
+  const expectedResponseCount = requiredDimensions.length * Object.keys(expectedRules).length
+  if (captureResponses.length !== expectedResponseCount || capture.observedRuleCount !== expectedResponseCount) captureMismatches.push(`capture has ${captureResponses.length} responses; expected ${expectedResponseCount}`)
+  const responseKeys = new Set()
+  const journalRows = []
+  for (const [index, raw] of captureResponses.entries()) {
+    if (!isPlainObject(raw)) {
+      captureMismatches.push(`capture response ${index} is malformed`)
+      continue
+    }
+    const dimension = String(raw.dimension ?? '')
+    const rule = canonicalGameruleKey(String(raw.rule ?? ''))
+    const key = `${dimension}\0${rule}`
+    if (responseKeys.has(key)) captureMismatches.push(`duplicate captured response ${dimension}/${rule}`)
+    responseKeys.add(key)
+    const expectedValue = expectedRules[raw.descriptorRule]
+    if (!requiredDimensions.includes(dimension) || expectedValue === undefined || canonicalGameruleKey(raw.descriptorRule) !== rule) captureMismatches.push(`unexpected captured response ${dimension}/${rule}`)
+    else if ((typeof expectedValue === 'string' ? String(raw.value) : raw.value) !== expectedValue) captureMismatches.push(`captured response value contradicts descriptor at ${dimension}/${rule}`)
+    const responseLine = typeof raw.line === 'string' ? Buffer.from(raw.line, 'utf8') : null
+    if (responseLine === null || !Number.isInteger(raw.byteStart) || !Number.isInteger(raw.byteEnd) || raw.byteEnd - raw.byteStart !== responseLine.length || sha256BytesForGate(responseLine) !== raw.lineSha256) {
+      captureMismatches.push(`captured response range/hash is invalid for ${dimension}/${rule}`)
+    } else if (!serverLogBuffer.subarray(raw.byteStart, raw.byteEnd).equals(responseLine)) captureMismatches.push(`captured response is absent from Leaf stdout log for ${dimension}/${rule}`)
+    const parsedResponse = /(?:\b(?:game\s*rule|gamerule)\s+)?['"]?([A-Za-z][A-Za-z0-9_:-]*)['"]?\s*(?:=|:|is currently set to:)\s*(.*?)\s*$/i.exec(String(raw.line ?? ''))
+    if (parsedResponse === null || canonicalGameruleKey(parsedResponse[1]) !== rule) captureMismatches.push(`captured output line does not name ${dimension}/${rule}`)
+    else {
+      const lineValueText = parsedResponse[2].replace(/^[."']+|[."']+$/g, '').trim()
+      const lineValue = /^true$/i.test(lineValueText) ? true : /^false$/i.test(lineValueText) ? false : /^-?\d+(?:\.\d+)?$/.test(lineValueText) ? Number(lineValueText) : lineValueText
+      if (lineValue !== raw.value) captureMismatches.push(`captured output line value differs from recorded value at ${dimension}/${rule}`)
+    }
+    const expectedCommand = `execute in ${dimension} run gamerule ${raw.descriptorRule}`
+    if (raw.command !== expectedCommand) captureMismatches.push(`captured command is not a read-only ${dimension}/${rule} query`)
+    journalRows.push({ dimension, rule, command: raw.command, line: raw.line, byteStart: raw.byteStart, byteEnd: raw.byteEnd, lineSha256: raw.lineSha256 })
+  }
+  for (const dimension of requiredDimensions) {
+    for (const [descriptorRule] of Object.entries(expectedRules)) {
+      if (!responseKeys.has(`${dimension}\0${canonicalGameruleKey(descriptorRule)}`)) captureMismatches.push(`capture missing ${dimension}/${descriptorRule}`)
+    }
+  }
+  for (const line of String(commandJournalText).split(/\r?\n/).filter(Boolean)) {
+    try { journalRows.push(JSON.parse(line)) } catch { captureMismatches.push('command journal contains invalid JSON'); break }
+  }
+  const journalAttempts = journalRows.filter((entry) => entry?.event === 'console-query-attempt')
+  const journalResponses = journalRows.filter((entry) => entry?.event === 'console-query-response')
+  const expectedQueryCount = expectedResponseCount + 1
+  if (journalAttempts.length !== expectedQueryCount || journalResponses.length !== expectedQueryCount || journalRows.some((entry) => entry?.event === 'console-query-response-missing')) {
+    captureMismatches.push(`command journal must contain ${expectedQueryCount} completed read-only queries`)
+  }
+  for (const entry of [...journalAttempts, ...journalResponses]) {
+    if (entry.runId !== runId || entry.sourceSha !== bootSourceSha || entry.descriptorSha256 !== descriptorSha256 || entry.startupAttestationSha256 !== startup?.attestationSha256 || entry.leafPid !== startup?.process?.pid) {
+      captureMismatches.push('command journal row is not bound to this run/descriptor/Leaf process')
+      break
+    }
+    if (entry.event === 'console-query-attempt' && entry.kind !== 'seed' && !/^execute in minecraft:[a-z0-9_]+ run gamerule [a-z0-9_]+$/.test(String(entry.command))) {
+      captureMismatches.push('command journal contains a non-query console command')
+      break
+    }
+    if (entry.event === 'console-query-attempt' && entry.kind === 'seed' && entry.command !== 'seed') {
+      captureMismatches.push('command journal contains a non-query seed command')
+      break
+    }
+  }
+  const journalResponseKeys = new Set(journalResponses.map((entry) => `${entry.kind}\0${entry.dimension ?? ''}\0${entry.descriptorRule ?? ''}`))
+  const captureJournalExpected = [
+    `seed\0\0`,
+    ...captureResponses.map((entry) => `gamerule\0${entry.dimension}\0${entry.descriptorRule}`),
+  ]
+  for (const key of captureJournalExpected) if (!journalResponseKeys.has(key)) captureMismatches.push('command journal lacks a response row for one captured query')
+  const expectedCommands = new Set(['seed', ...captureResponses.map((entry) => entry.command)])
+  const attemptedCommands = journalAttempts.map((entry) => entry.command)
+  if (new Set(attemptedCommands).size !== expectedQueryCount || attemptedCommands.some((command) => !expectedCommands.has(command))) {
+    captureMismatches.push('command journal attempts do not exactly match the read-only query set')
+  }
+  for (const entry of journalResponses) {
+    const matchingCapture = entry.kind === 'seed'
+      ? capture.seed
+      : captureResponses.find((response) => response.dimension === entry.dimension && response.descriptorRule === entry.descriptorRule)
+    if (
+      matchingCapture === undefined || matchingCapture === null || entry.command !== (entry.kind === 'seed' ? 'seed' : matchingCapture.command) ||
+      entry.responseLine !== (entry.kind === 'seed' ? matchingCapture.line : matchingCapture.line) ||
+      entry.responseLineSha256 !== (entry.kind === 'seed' ? matchingCapture.lineSha256 : matchingCapture.lineSha256)
+    ) captureMismatches.push('command journal response does not match captured Leaf output')
+  }
+  for (const rule of Object.keys(evidenceSet.excluded)) {
+    // Excluded gamerules are explicitly unavailable in this world and must not
+    // be represented as observed console values.
+    if (captureResponses.some((entry) => entry?.descriptorRule === rule)) captureMismatches.push(`excluded gamerule ${rule} was incorrectly claimed as observed`)
+  }
+  if (evidenceSet.invalidExclusions.length > 0) captureMismatches.push(`descriptor gamerule exclusions are invalid: ${evidenceSet.invalidExclusions.join(', ')}`)
+
   const uniqueMissingMetadata = [...new Set(missingMetadata)]
   const bindingReady = uniqueMissingMetadata.length === 0
-  const verdict = mismatches.length > 0 ? 'FAIL' : !bindingReady ? 'UNKNOWN' : differences.length > 0 ? 'FAIL' : 'PASS'
+  const verdict = mismatches.length > 0 || captureMismatches.length > 0 ? 'FAIL' : !bindingReady || captureMissing.length > 0 ? 'UNKNOWN' : differences.length > 0 ? 'FAIL' : 'PASS'
   const reason = verdict === 'PASS'
-    ? `console transcript is bound to run ${String(runId)}, descriptor ${String(descriptorSha256)}, BOOT source ${String(bootSourceSha)}, and all ${requiredDimensions.length} dimension listings match ${Object.keys(expectedRules).length} declared gamerules`
+    ? `machine-captured Leaf console responses are bound to run ${String(runId)}, descriptor ${String(descriptorSha256)}, BOOT source ${String(bootSourceSha)}, and all ${requiredDimensions.length} dimension listings match ${Object.keys(expectedRules).length} queryable gamerules`
     : verdict === 'FAIL'
-      ? `console gamerule transcript contradicts or incompletely verifies the descriptor: ${[...mismatches, ...differences].join('; ')}`
-      : `console gamerule transcript is not fully bound yet; missing metadata: ${uniqueMissingMetadata.join(', ')}${differences.length === 0 ? '' : `; listing issues: ${differences.join('; ')}`}`
+      ? `machine-captured Leaf console evidence contradicts or incompletely verifies the descriptor: ${[...mismatches, ...differences, ...captureMismatches].join('; ')}`
+      : `machine-captured Leaf console evidence is not fully bound yet; missing metadata: ${[...uniqueMissingMetadata, ...captureMissing].join(', ')}${differences.length === 0 ? '' : `; listing issues: ${differences.join('; ')}`}`
   return condition({
     id: 'run.consoleGamerulesVerified', verdict, required: true, reason,
-    detail: { ...baseDetail, metadata, requiredDimensions, expectedRuleCount: Object.keys(expectedRules).length, observedRulesByDimension: Object.fromEntries(Object.entries(parsed.dimensions).map(([dimension, rules]) => [dimension, Object.keys(rules).length])), missingMetadata: uniqueMissingMetadata, mismatches, differences, bootSourceSha },
+    detail: { ...baseDetail, metadata, captureSha256, requiredDimensions, expectedRuleCount: Object.keys(expectedRules).length, excludedRules: Object.keys(evidenceSet.excluded), excludedRuleEvidence: Object.fromEntries(Object.keys(evidenceSet.excluded).map((rule) => [rule, 'UNKNOWN:declared_not_registered_in_world'])), observedRulesByDimension: Object.fromEntries(Object.entries(parsed.dimensions).map(([dimension, rules]) => [dimension, Object.keys(rules).length])), missingMetadata: uniqueMissingMetadata, mismatches, differences, captureMismatches, bootSourceSha },
   })
+}
+
+function sha256BytesForGate(value) {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 /** `LADDER_INVENTORY_SETTLE reason=death ... itemCount=N ... counts={...}` lines. */
@@ -1086,25 +1269,49 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
     }),
   )
 
-  // 3. the artifact's environment facts must not contradict the descriptor
+  // 3. The actual Leaf startup must be bound to this run, descriptor, and staged
+  // server.properties. Operator records and the resident's seed-reader path are
+  // not observations of the server process's effective `--config` argument.
+  const startupAttestation = artifact?.run?.boot?.cleanRunServerConfig ?? null
+  const startupAttestationCondition = cleanRunServerConfigCondition({
+    descriptor,
+    artifact,
+    runId,
+    descriptorPath,
+    descriptorSha256,
+    startupAttestation,
+  })
+  conditions.push(startupAttestationCondition)
+
+  // 4. The difficulty/spawn facts are read from the same verified startup bytes.
+  // Descriptor-sourced environment values remain useful context, but cannot pass
+  // these run conditions without the runtime attestation above.
   for (const [id, key, expected] of [
     ['run.difficultyNotContradicted', 'difficulty', values.difficulty],
     ['run.mobSpawningNotContradicted', 'mobSpawning', values.mobSpawning],
   ]) {
     const fact = isPlainObject(env[key]) ? env[key] : null
-    const runScoped = fact?.runScoped === true
+    const propertyKey = key === 'difficulty' ? 'difficulty' : 'spawn-monsters'
+    const observedRuntimeValue = startupAttestationCondition.verdict === 'PASS'
+      ? startupAttestation?.config?.properties?.[propertyKey] ?? null
+      : null
+    const expectedRuntimeValue = key === 'difficulty' ? expected : String(expected)
+    const logContradiction = fact?.runScoped === true && fact.value !== expected
+    const mismatch = observedRuntimeValue !== null && String(observedRuntimeValue) !== String(expectedRuntimeValue)
     conditions.push(
       condition({
         id,
-        verdict: fact === null ? 'UNKNOWN' : runScoped && fact.value !== expected ? 'FAIL' : 'PASS',
+        verdict: logContradiction || mismatch ? 'FAIL' : observedRuntimeValue === null ? 'UNKNOWN' : 'PASS',
         reason:
-          fact === null
-            ? `no ${key} fact in the artifact's environment section`
-            : runScoped && fact.value !== expected
-              ? `run-scoped log fact ${key}=${JSON.stringify(fact.value)} contradicts the descriptor's ${JSON.stringify(expected)} (at ${String(fact.at)})`
-              : `${key}=${JSON.stringify(fact.value)} from ${String(fact.source)}${runScoped ? ' (run-scoped)' : ' (operator record: the descriptor itself)'}`,
-        detail: { fact },
-        required: runScoped,
+          logContradiction
+            ? `run-scoped log fact ${key}=${JSON.stringify(fact.value)} contradicts the descriptor's ${JSON.stringify(expected)}`
+            : observedRuntimeValue === null
+            ? `${key} is UNKNOWN until a verified Leaf startup attestation records the actual server.properties values${fact === null ? '' : `; descriptive artifact fact is ${JSON.stringify(fact.value)} from ${String(fact.source)}`}`
+            : mismatch
+              ? `Leaf startup config ${propertyKey}=${JSON.stringify(observedRuntimeValue)} contradicts the descriptor's ${JSON.stringify(expectedRuntimeValue)}`
+              : `Leaf startup config ${propertyKey}=${JSON.stringify(observedRuntimeValue)} matches the descriptor (attestation ${startupAttestation.attestationSha256})`,
+        detail: { fact, attestedRuntimeValue: observedRuntimeValue, propertyKey, expected: expectedRuntimeValue },
+        required: true,
       }),
     )
   }
@@ -1158,18 +1365,24 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   // 5. the body must have started with NOTHING (a fresh world hands out no kit)
   const boot = isPlainObject(document.inventory) ? document.inventory.boot : null
   const bootCounts = isPlainObject(boot?.counts) ? boot.counts : null
+  const bootEvidence = isPlainObject(document.inventory?.bootEvidence) ? document.inventory.bootEvidence : null
+  const bootSourceSha = document?.run?.boot?.sourceSha ?? null
+  const bootEvidenceBound = boot?.source === 'snapshot' &&
+    bootEvidence?.status === 'verified' &&
+    bootEvidence?.runId === runId &&
+    bootEvidence?.bootSourceSha === bootSourceSha
   const nonZero = bootCounts === null ? [] : Object.entries(bootCounts).filter(([, count]) => typeof count === 'number' && count > 0)
   conditions.push(
     condition({
       id: 'run.bootInventoryEmpty',
-      verdict: bootCounts === null ? 'UNKNOWN' : nonZero.length === 0 ? 'PASS' : 'FAIL',
+      verdict: bootCounts === null || !bootEvidenceBound ? 'UNKNOWN' : nonZero.length === 0 ? 'PASS' : 'FAIL',
       reason:
-        bootCounts === null
-          ? 'the artifact has no boot inventory sample, so "the body started with nothing" is unproven'
+        bootCounts === null || !bootEvidenceBound
+          ? `generation-entry initialInventory is not bound to this run's exact BOOT source${bootEvidence?.reason ? `: ${bootEvidence.reason}` : ''}`
           : nonZero.length === 0
-            ? `the run's first inventory sample is empty (${String(boot?.source)} at ${String(boot?.ts)})`
+            ? `the run-scoped generation-entry inventory is empty (${String(boot?.source)} at ${String(boot?.ts)})`
             : `the run started with items it cannot have on a fresh world: ${nonZero.map(([item, count]) => `${item}x${count}`).join(', ')} (granted kit)`,
-      detail: { boot },
+      detail: { boot, bootEvidence, expectedRunId: runId, expectedBootSourceSha: bootSourceSha },
     }),
   )
 
@@ -1199,6 +1412,176 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   )
 
   return conditions
+}
+
+function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptorPath, descriptorSha256, startupAttestation }) {
+  const unknown = (reason, detail = null) => condition({
+    id: 'run.serverConfigAttestation', verdict: 'UNKNOWN', required: true, reason, detail,
+  })
+  const fail = (reason, detail = null) => condition({
+    id: 'run.serverConfigAttestation', verdict: 'FAIL', required: true, reason, detail,
+  })
+  if (!isPlainObject(startupAttestation)) return unknown('BOOT has no Leaf startup attestation; a descriptor and BUDDY_SERVER_PROPERTIES_PATH do not prove Leaf startup argv/config')
+  if (startupAttestation.status === 'unavailable') {
+    return unknown(`Leaf startup attestation could not be verified: ${String(startupAttestation.reason ?? 'reason_missing')}`, startupAttestation)
+  }
+  if (startupAttestation.status === 'rejected') {
+    return fail(`Leaf startup attestation rejected the run: ${String(startupAttestation.reason ?? 'reason_missing')}`, startupAttestation)
+  }
+  if (startupAttestation.status !== 'verified') {
+    return fail(`Leaf startup attestation reports ${String(startupAttestation.status)}: ${String(startupAttestation.reason ?? 'reason_missing')}`, startupAttestation)
+  }
+  if (startupAttestation.runId !== runId) return fail(`attestation runId=${String(startupAttestation.runId)} differs from requested runId=${String(runId)}`)
+  const boot = artifact?.run?.boot ?? null
+  if (startupAttestation.bootSourceSha !== boot?.sourceSha) return fail('attestation BOOT source SHA differs from the artifact BOOT source SHA')
+  if (descriptorPath === null) return unknown('clean-run descriptor path is unavailable for startup attestation binding')
+  if (startupAttestation.descriptorPath !== resolve(String(descriptorPath ?? ''))) return fail('attested descriptor path differs from the clean-run gate input')
+  if (startupAttestation.descriptorSha256 !== descriptorSha256) return fail('attested descriptor SHA-256 differs from the clean-run gate input')
+
+  const expectedPropertiesPath = descriptorPath === null ? null : resolve(dirname(descriptorPath), 'server.properties.clean')
+  const expectedManifestPath = descriptorPath === null ? null : resolve(dirname(descriptorPath), 'manifest.json')
+  const expectedAttestationPath = descriptorPath === null ? null : resolve(dirname(descriptorPath), 'server-start-attestation.json')
+  const config = startupAttestation.config
+  const processInfo = startupAttestation.process
+  const consoleInfo = startupAttestation.console
+  const preparedManifest = startupAttestation.preparedManifest
+  const attestedManifestPath = startupAttestation.manifestPath
+  if (startupAttestation.attestationPath !== expectedAttestationPath) return fail('Leaf launch attestation path is not the descriptor sibling server-start-attestation.json')
+  if (!/^[0-9a-f]{64}$/.test(String(startupAttestation.attestationSha256 ?? ''))) return fail('Leaf launch attestation SHA-256 is missing or malformed')
+  const propertiesPath = config?.path
+  if (expectedPropertiesPath === null || propertiesPath !== expectedPropertiesPath || processInfo?.configArg !== expectedPropertiesPath) {
+    return fail('Leaf `--config` and attested file path must be the descriptor sibling server.properties.clean', { expectedPropertiesPath, propertiesPath, configArg: processInfo?.configArg })
+  }
+  if (attestedManifestPath !== expectedManifestPath) return fail('startup attestation does not reference the sibling prepared manifest', { expectedManifestPath, attestedManifestPath })
+  if (processInfo?.universeArg !== resolve(String(descriptor?.cleanRun?.worldContainer ?? '')) || processInfo?.levelNameArg !== descriptor?.values?.levelName) {
+    return fail('Leaf startup `--universe` or `--level-name` differs from the descriptor', { process: processInfo, worldContainer: descriptor?.cleanRun?.worldContainer, levelName: descriptor?.values?.levelName })
+  }
+  if (processInfo?.serverJar !== String(descriptor?.values?.serverImplementation ?? '').split(/[\\/]/).at(-1)) {
+    return fail('Leaf startup server jar differs from descriptor serverImplementation', { serverJar: processInfo?.serverJar, serverImplementation: descriptor?.values?.serverImplementation })
+  }
+  if (!Number.isInteger(processInfo?.pid) || !/^[0-9a-f]{64}$/.test(String(processInfo?.commandLineSha256 ?? ''))) {
+    return fail('startup process identity is incomplete', processInfo ?? null)
+  }
+  const expectedConsoleDir = resolve(dirname(expectedAttestationPath ?? descriptorPath), 'server-console')
+  const expectedConsole = {
+    directory: expectedConsoleDir,
+    inputPath: resolve(expectedConsoleDir, 'server-console.fifo'),
+    stdoutLogPath: resolve(expectedConsoleDir, 'leaf-server.log'),
+    commandTranscriptPath: resolve(expectedConsoleDir, 'commands.jsonl'),
+    capturePath: resolve(expectedConsoleDir, 'capture.json'),
+  }
+  if (
+    consoleInfo?.mode !== 'run-private-fifo-and-log' ||
+    resolve(String(consoleInfo?.directory ?? '')) !== expectedConsole.directory ||
+    resolve(String(consoleInfo?.inputPath ?? '')) !== expectedConsole.inputPath ||
+    resolve(String(consoleInfo?.stdoutLogPath ?? '')) !== expectedConsole.stdoutLogPath ||
+    resolve(String(consoleInfo?.commandTranscriptPath ?? '')) !== expectedConsole.commandTranscriptPath ||
+    resolve(String(consoleInfo?.capturePath ?? '')) !== expectedConsole.capturePath
+  ) return fail('Leaf console input/output is not bound to the run-private console directory')
+  try {
+    const directoryStat = lstatSync(expectedConsoleDir)
+    const fifoStat = lstatSync(expectedConsole.inputPath)
+    const outputStat = lstatSync(expectedConsole.stdoutLogPath)
+    if (
+      !directoryStat.isDirectory() || directoryStat.uid !== process.getuid?.() || (directoryStat.mode & 0o777) !== 0o700 ||
+      !fifoStat.isFIFO() || fifoStat.uid !== process.getuid?.() || (fifoStat.mode & 0o777) !== 0o600 ||
+      !outputStat.isFile() || outputStat.isSymbolicLink() || outputStat.uid !== process.getuid?.() || (outputStat.mode & 0o777) !== 0o600
+    ) return fail('Leaf console FIFO/log are not private owner-only objects')
+  } catch {
+    return unknown('Leaf console FIFO/log are unavailable for run-scoped command capture', expectedConsole)
+  }
+  const bootMs = Date.parse(String(boot?.ts ?? ''))
+  const processStartedMs = Date.parse(String(processInfo?.startedAt ?? ''))
+  if (!Number.isFinite(bootMs) || !Number.isFinite(processStartedMs) || processStartedMs > bootMs) {
+    return fail('attested Leaf process did not start before this run BOOT', { bootAt: boot?.ts ?? null, processStartedAt: processInfo?.startedAt ?? null })
+  }
+
+  let manifest
+  let propertiesText
+  let startupText
+  let startupRecord
+  try {
+    const manifestText = readFileSync(expectedManifestPath, 'utf8')
+    manifest = JSON.parse(manifestText)
+    propertiesText = readFileSync(expectedPropertiesPath, 'utf8')
+    startupText = readFileSync(expectedAttestationPath, 'utf8')
+    startupRecord = JSON.parse(startupText)
+    if (sha256Text(manifestText) !== startupAttestation.manifestSha256) return fail('prepared manifest changed after the HOST bound the startup attestation')
+    if (sha256Text(startupText) !== startupAttestation.attestationSha256) return fail('Leaf startup attestation file changed after the HOST bound it to BOOT')
+    if (sha256Text(propertiesText) !== config?.sha256) return fail('staged server.properties changed after Leaf startup')
+  } catch {
+    return unknown('prepared manifest, Leaf startup attestation, or staged server.properties is unavailable to verify at acceptance time', { expectedAttestationPath, expectedManifestPath, expectedPropertiesPath })
+  }
+  if (
+    startupRecord?.record !== 'clean-run-leaf-startup-attestation' ||
+    startupRecord?.descriptor?.path !== startupAttestation.descriptorPath ||
+    startupRecord?.descriptor?.sha256 !== startupAttestation.descriptorSha256 ||
+    startupRecord?.descriptor?.sourceSha !== boot?.sourceSha ||
+    startupRecord?.config?.path !== config?.path ||
+    startupRecord?.config?.sha256 !== config?.sha256 ||
+    startupRecord?.process?.pid !== processInfo?.pid ||
+    startupRecord?.process?.commandLineSha256 !== processInfo?.commandLineSha256 ||
+    startupRecord?.console?.mode !== consoleInfo?.mode ||
+    startupRecord?.console?.directory !== consoleInfo?.directory ||
+    startupRecord?.console?.inputPath !== consoleInfo?.inputPath ||
+    startupRecord?.console?.stdoutLogPath !== consoleInfo?.stdoutLogPath ||
+    startupRecord?.console?.commandTranscriptPath !== consoleInfo?.commandTranscriptPath ||
+    startupRecord?.console?.capturePath !== consoleInfo?.capturePath
+  ) return fail('run BOOT binding disagrees with the persisted Leaf startup attestation')
+  const preparedResolvedPath = resolve(String(manifest?.resolved?.path ?? ''))
+  const stagedEntry = Array.isArray(manifest?.files)
+    ? manifest.files.find((entry) => typeof entry?.path === 'string' && resolve(entry.path) === expectedPropertiesPath)
+    : null
+  if (
+    manifest?.record !== 'clean-run-prepare' ||
+    preparedResolvedPath !== resolve(descriptorPath) ||
+    manifest?.target?.levelName !== descriptor?.values?.levelName ||
+    String(manifest?.target?.levelSeed ?? '') !== String(descriptor?.values?.levelSeed ?? '') ||
+    manifest?.target?.sourceSha !== boot?.sourceSha ||
+    stagedEntry?.sha256 !== config?.sha256 ||
+    preparedManifest?.stagedPropertiesSha256 !== stagedEntry?.sha256
+  ) return fail('prepared manifest target or staged file hash differs from the run descriptor/Leaf startup')
+
+  const diskProperties = parseServerProperties(propertiesText)
+  const runtimeComparison = compareRuntimeServerProperties(descriptor, diskProperties)
+  if (!runtimeComparison.agrees) {
+    return fail('actual staged Leaf config contradicts or omits descriptor server values', {
+      missing: runtimeComparison.missing,
+      mismatches: runtimeComparison.mismatches,
+    })
+  }
+  const attestedComparison = compareRuntimeServerProperties(descriptor, config?.properties ?? {})
+  if (!attestedComparison.agrees) {
+    return fail('run-bound startup properties do not match descriptor values', {
+      missing: attestedComparison.missing,
+      mismatches: attestedComparison.mismatches,
+    })
+  }
+  const diskProjection = Object.fromEntries(Object.keys(attestedComparison.expected).map((key) => [key, diskProperties[key] ?? null]))
+  const attestedPropertyKeys = Object.keys(config?.properties ?? {})
+  if (attestedPropertyKeys.length !== Object.keys(diskProjection).length || attestedPropertyKeys.some((key) => !Object.hasOwn(diskProjection, key))) {
+    return fail('startup attestation contains unexpected properties outside the safe acceptance whitelist', { attestedPropertyKeys })
+  }
+  if (JSON.stringify(config?.properties) !== JSON.stringify(diskProjection)) {
+    const valueMismatches = Object.keys(diskProjection).filter((key) => config?.properties?.[key] !== diskProjection[key])
+    return fail('startup attested property values differ from the staged bytes', { valueMismatches })
+  }
+  return condition({
+    id: 'run.serverConfigAttestation',
+    verdict: 'PASS',
+    required: true,
+    reason: `Leaf process ${processInfo.pid} used --config ${expectedPropertiesPath}; startup SHA-256 matches the prepared manifest and exact descriptor/run BOOT binding`,
+    detail: {
+      runId,
+      bootSourceSha: boot?.sourceSha ?? null,
+      descriptorPath: startupAttestation.descriptorPath,
+      descriptorSha256: startupAttestation.descriptorSha256,
+      process: processInfo,
+      console: expectedConsole,
+      config: { path: config.path, sha256: config.sha256, properties: diskProjection },
+      manifest: { path: expectedManifestPath, sha256: startupAttestation.manifestSha256, stagedPropertiesSha256: stagedEntry.sha256 },
+    },
+  })
 }
 
 /**

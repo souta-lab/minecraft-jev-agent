@@ -41,6 +41,7 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PROTECTED_LEVEL_NAMES, loadCleanEnvironment, validateCleanEnvironment, worldDataExists, worldDirNames } from './clean-run-environment.mjs'
+import { SERVER_PROPERTY_MAP } from './clean-run-server-config.mjs'
 
 export const RECORD = 'clean-run-prepare'
 export const SCHEMA_VERSION = 1
@@ -62,22 +63,7 @@ export const M2_DATAPACK_NAMESPACE = 'm2repro'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..')
 
-/** descriptor `values.server` key -> server.properties key. */
-export const SERVER_PROPERTY_MAP = Object.freeze({
-  levelType: 'level-type',
-  gamemode: 'gamemode',
-  forceGamemode: 'force-gamemode',
-  hardcore: 'hardcore',
-  bonusChest: 'bonus-chest',
-  generateStructures: 'generate-structures',
-  spawnAnimals: 'spawn-animals',
-  enableCommandBlock: 'enable-command-block',
-  pvp: 'pvp',
-  allowNether: 'allow-nether',
-  allowFlight: 'allow-flight',
-  spawnProtection: 'spawn-protection',
-  whiteList: 'white-list',
-})
+export { SERVER_PROPERTY_MAP }
 
 export function parseArgs(argv) {
   const out = {
@@ -408,7 +394,7 @@ export function planPrepare({
   const protectedRoots = [...new Set([...PROTECTED_LEVEL_NAMES, ...(Array.isArray(resolvedDoc.cleanRun?.protectedWorldNames) ? resolvedDoc.cleanRun.protectedWorldNames : []), ...(resolvedDoc.cleanRun?.previousWorld?.levelName ? [resolvedDoc.cleanRun.previousWorld.levelName] : [])])]
   const attemptsPath = join(runRootDir, 'attempts.json')
   const manifestPath = join(runDir, 'manifest.json')
-  const plannedPaths = [worldDir, runRootDir, runDir, join(worldDir, datapackDir), join(runDir, 'environment-resolved.json'), manifestPath, attemptsPath, join(runDir, 'server.properties.clean'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
+  const plannedPaths = [worldDir, runRootDir, runDir, join(worldDir, datapackDir), join(runDir, 'server-console'), join(runDir, 'environment-resolved.json'), manifestPath, attemptsPath, join(runDir, 'server.properties.clean'), join(runDir, 'server-start-attestation.json'), join(runDir, 'server-console', 'server-console.fifo'), join(runDir, 'server-console', 'leaf-server.log'), join(runDir, 'server-console', 'commands.jsonl'), join(runDir, 'server-console', 'capture.json'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
   const protectedHits = plannedPaths.filter((path) => protectedRoots.some((name) => path === join(resolve(container), name) || path.startsWith(join(resolve(container), name) + sep)))
   guards.push({
     id: 'protected_world_paths',
@@ -594,7 +580,7 @@ export function planPrepare({
           sourceSha: frozenSha ?? resolvedDoc.values.sourceSha,
           dimensions: resolvedDoc.cleanRun?.gameruleScope?.dimensions ?? [],
         }),
-        note: 'operator-completed, exact-descriptor-bound console gamerule evidence template (filled after first world boot)',
+        note: 'machine-capture output placeholder; clean-run-console-capture.mjs replaces it only after read-only replies from the attested Leaf console',
       })
     }
   }
@@ -672,12 +658,8 @@ export function gameruleVerificationTemplate({ descriptorSha256, levelName, seed
     `seed=${String(seed)}`,
     `sourceSha=${String(sourceSha)}`,
     'capturedAt=<UTC-ISO-8601-time-of-console-capture>',
-    '',
-    ...dimensionList.flatMap((dimension) => [
-      `[dimension=${dimension}]`,
-      `# Paste the complete server-console output of ${dimension === 'minecraft:overworld' ? '`gamerule`' : '`execute in ' + dimension + ' run gamerule`'} below this line.`,
-      '',
-    ]),
+    '# Placeholder only. clean-run-console-capture.mjs replaces this file with responses captured from the attested Leaf process.',
+    ...dimensionList.flatMap((dimension) => ['', `[dimension=${dimension}]`]),
   ].join('\n') + '\n'
 }
 
@@ -731,6 +713,8 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `--setenv=MC_AI_ROOT=${tree}`,
     '--setenv=BUDDY_PLANNER=llm',
     `--setenv=BUDDY_SERVER_PROPERTIES_PATH=${join(runDir, 'server.properties.clean')}`,
+    `--setenv=BUDDY_CLEAN_RUN_DESCRIPTOR_PATH=${join(runDir, 'environment-resolved.json')}`,
+    `--setenv=BUDDY_SERVER_START_ATTESTATION_PATH=${join(runDir, 'server-start-attestation.json')}`,
     process.execPath,
     join(driverDir, 'agent-runner.mts'),
   ].map(shellQuote).join(' \\\n  ')
@@ -744,31 +728,47 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `# 2. OPERATOR / H4: stop the current Leaf server gracefully from its console; wait for it to exit.`,
     `#    Do not copy over, edit, or restore the shared ${container}/server.properties.`,
     `# 3. start the clean world from the staged config with both world paths explicit:`,
-    `cd ${container} && setsid --fork /usr/lib/jvm/java-21-openjdk-amd64/bin/java -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui --config ${runDir}/server.properties.clean --universe ${container} --level-name ${levelName} </dev/null >>server.log 2>&1 &`,
+    [
+      'bun',
+      join(tree, 'tools', 'clean-run-server-launch.mjs'),
+      '--environment', join(runDir, 'environment-resolved.json'),
+      '--properties', join(runDir, 'server.properties.clean'),
+      '--attestation', join(runDir, 'server-start-attestation.json'),
+      '--manifest', join(runDir, 'manifest.json'),
+      '--cwd', container,
+      '--console-input', join(runDir, 'server-console', 'server-console.fifo'),
+      '--stdout-log', join(runDir, 'server-console', 'leaf-server.log'),
+      '--',
+      '/usr/lib/jvm/java-21-openjdk-amd64/bin/java',
+      '-Xmx1G',
+      '-Xms1G',
+      '-DPaper.IgnoreJavaVersion=true',
+      '-jar',
+      'leaf-1.21.11-178.jar',
+      '--nogui',
+      '--config', join(runDir, 'server.properties.clean'),
+      '--universe', container,
+      '--level-name', levelName,
+    ].map(shellQuote).join(' ') + ' &',
     `#    --config selects the staged seed/config; --universe and --level-name select the descriptor's world. Never pass --bonusChest.`,
-    `# 4. after the first boot, VERIFY world identity on the server console; paste the gamerule output into:`,
-    `#    ${runDir}/gamerule-verification.txt`,
-    `#    the template already binds descriptorSha256=${String(descriptorSha256)}; record capturedAt as a UTC ISO-8601 time`,
-    `#    (console checks) list  /  seed; gamerule output only goes under its dimension header`,
-    `#    gamerules are PER DIMENSION in this build: also run`,
-    `#      execute in minecraft:the_nether run gamerule`,
-    `#      execute in minecraft:the_end run gamerule`,
-    `#    the gamerule ids are the snake_case ids from ${runDir}/environment-resolved.json (camelCase is`,
-    `#    REJECTED by this build); keep_inventory must be false in ALL THREE dimensions because the M3 route dies in the Nether`,
-    `#    reviewer check: keepInventory=false and every rule in ${runDir}/environment-resolved.json`,
-    `# 5. Configure the external provider environment file once, mode 0600, without committing it: ${environmentFile}`,
+    `#    The wrapper keeps Leaf stdin attached to this run-private 0600 FIFO and captures stdout/stderr to a 0600 log under the 0700 server-console directory.`,
+    `# 4. Configure the external provider environment file once, mode 0600, without committing it: ${environmentFile}`,
     `#    It must carry the currently authorized Jev/System2 provider settings and credentials; no model is selected here.`,
-    `# 6. launch the exact resident process under a user-systemd transient service:`,
+    `# 5. launch the exact resident process under a user-systemd transient service:`,
     managedResidentCommand,
     `#    Do not auto-restart the process: each new host process gets a new runId, which cannot be joined to this M3 proof. Retryable model outages use same-process typed recovery; an unexpected process exit is recorded as an incomplete run.`,
-    `#    The run's BOOT line must report source=${String(sourceSha)}; BUDDY_SERVER_PROPERTIES_PATH attests the staged config.`,
-    `# 7. run the M3 attempt (drive the agent to the Nether + 12 eyes). Record the runId from BOOT.`,
+    `#    The Leaf launcher records its observed --config argv, process identity, staged file SHA-256, and prepared-manifest binding. The HOST BUDDY_SERVER_PROPERTIES_PATH only supplies the acceptance-record seed read. BOOT must report source=${String(sourceSha)} and bind that attestation to this runId and descriptor SHA.`,
+    `# 6. after the resident BOOT, machine-capture the live read-only console queries (seed + each declared gamerule in each declared dimension):`,
+    `bun tools/clean-run-console-capture.mjs --environment ${runDir}/environment-resolved.json --attestation ${runDir}/server-start-attestation.json --resident-log ${driverDir}/buddy.log --run <RUN_ID>`,
+    `#    This creates the descriptor/run/PID-bound commands.jsonl, capture.json, and gamerule-verification.txt. Any missing or contradictory Leaf response exits UNKNOWN; the gate will not accept a pasted transcript.`,
+    `#    The command helper only sends read-only seed and gamerule queries. Review the actual responses in ${join(runDir, 'server-console', 'leaf-server.log')}.`,
+    `# 7. continue the M3 attempt (Nether arrival + 12 eyes) and record the runId from BOOT.`,
     `# 8. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
     `printf '{"id":"acceptance-refresh","cmd":"acceptance"}\\n' | socat - UNIX-CONNECT:${tree}/buddy-driver/data/resident/control.sock`,
     `# 9. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
     `bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> --root ${tree} --environment ${runDir}/environment-resolved.json --evidence-class live`,
-    `# 10. set runId in gamerule-verification.txt to the BOOT runId, then run the clean-run gate, written NEXT TO the bundle:`,
-    `bun tools/clean-run-gate.mjs --environment ${runDir}/environment-resolved.json --bundle-dir ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID> --run <RUN_ID> --gamerule-verification ${runDir}/gamerule-verification.txt --out ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID>`,
+    `# 10. run the clean-run gate, written NEXT TO the bundle; it verifies the machine capture and Leaf log itself:`,
+    `bun tools/clean-run-gate.mjs --environment ${runDir}/environment-resolved.json --bundle-dir ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID> --run <RUN_ID> --out ${tree}/runs/m3-live/acceptance-bundle-<RUN_ID>`,
     `# ACCEPTED requires: descriptor CLEAN + run evidence consistent + bundle PASS + liveAcceptance=true`,
     `# Deliberate owner stop when requested: systemctl --user stop ai-buddy-resident.service.`,
   ]

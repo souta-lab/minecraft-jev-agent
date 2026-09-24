@@ -155,6 +155,18 @@ function writeFixture(root, runId, { logLines, acceptance = true, runner = {} })
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
+  const firstInventory = logLines.map((entry) => /\bINVENTORY items=(\{.*\})/.exec(entry)?.[1] ?? null).find((entry) => entry !== null)
+  writeFileSync(
+    join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+    JSON.stringify({
+      record: 'm2-snapshot',
+      runId,
+      bootSourceSha: SOURCE_SHA,
+      initialInventory: firstInventory === null ? {} : JSON.parse(firstInventory),
+      markers: [],
+    }),
+    'utf8',
+  )
   if (acceptance) {
     writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
   }
