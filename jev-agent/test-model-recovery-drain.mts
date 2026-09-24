@@ -4,9 +4,13 @@ import type { CurrentAction, ExecutionResult } from './src/executor.ts'
 import type { SkillCommitment } from './src/skillCommitment.ts'
 import type { Candidate } from './src/candidates.ts'
 import {
+  ReachController,
+  nearestGroundedReachRoutePolicy,
+  type ReachRoute,
+  type ReachRuntimeSnapshot,
+} from './src/vtr/reach-controller.ts'
+import {
   createReachTransitionContract,
-  startReachTransition,
-  verifyReachEnsures,
   type ReachIdentity,
   type ReachObservation,
   type ReachTerminalOutcome,
@@ -62,7 +66,8 @@ function makeFixture(startedAt = Date.now()): Fixture {
     modelRecoveryReachDrainTransitionId: null,
     modelRecoveryReachDrainAdvancing: false,
     modelRecoveryReachDrainPending: false,
-    reachTransition: null,
+    reachController: new ReachController(nearestGroundedReachRoutePolicy),
+    reachRunMetadata: null,
     tickCounter: 1,
     watchdog: null,
     completion: runCompletion,
@@ -161,7 +166,7 @@ test('an over-budget recovery drain has an explicit cancellation terminal bounda
   expect(fixture.events.some((line) => line.includes('phase=deadline') && line.includes('over-budget Skill'))).toBe(true)
 })
 
-function makeReachContract(at: number): { contract: ReachTransitionContract; state: ReachTransitionState; identity: ReachIdentity } {
+function makeReachContract(): { contract: ReachTransitionContract; identity: ReachIdentity } {
   const identity: ReachIdentity = {
     worldKey: 'server|minecraft:overworld|epoch:8',
     dimension: 'minecraft:overworld',
@@ -189,36 +194,97 @@ function makeReachContract(at: number): { contract: ReachTransitionContract; sta
     },
     identity,
   })
+  return { contract, identity }
+}
+
+function makeReachRoute(contract: ReachTransitionContract, identity: ReachIdentity, at: number): ReachRoute {
+  const evidenceId = `reach-route:${at}`
+  return {
+    routeId: 'MOVE:reach-recovery-route',
+    groundingPredicateId: 'reach.route:recovery',
+    waypointGroundingPredicateId: null,
+    witness: {
+      witnessId: 'log@12,64,8',
+      target: { x: 12, y: 64, z: 8 },
+      desiredPredicateIdentity: contract.desiredPredicateIdentity,
+      evidenceId,
+      observedIdentity: identity,
+      observedAtMs: at,
+    },
+    waypoint: null,
+    tactic: 'walk',
+    effectKind: 'locomotion',
+    estimatedDistance: 12,
+    resources: {},
+    risk: {},
+  }
+}
+
+function makeReachSnapshot(
+  contract: ReachTransitionContract,
+  identity: ReachIdentity,
+  at: number,
+  reached: boolean,
+): ReachRuntimeSnapshot {
+  const route = makeReachRoute(contract, identity, at)
   const observation: ReachObservation = {
     identity,
     observedAtMs: at,
     predicates: {
       'mission.unsatisfied': { truth: 'true', evidenceId: `mission:${at}` },
       'body.alive': { truth: 'true', evidenceId: `alive:${at}` },
-      'reach.resource-source': { truth: 'false', evidenceId: `not-reached:${at}` },
+      'reach.resource-source': { truth: reached ? 'true' : 'false', evidenceId: `reach:${at}` },
+      [route.groundingPredicateId]: { truth: 'true', evidenceId: route.witness.evidenceId },
     },
   }
-  const started = startReachTransition(contract, observation, { tactic: 'walk' })
-  if (started.status !== 'active') throw new Error(`Reach fixture failed to start: ${JSON.stringify(started)}`)
-  return { contract, state: started.state, identity }
+  return {
+    observation,
+    routes: [route],
+    progress: {
+      predicateDistance: reached ? 0 : route.estimatedDistance,
+      reachability: 'reachable',
+      frontierId: route.routeId,
+      evidenceId: `reach-progress:${at}`,
+    },
+  }
 }
 
-function makeReachRecoveryFixture(): {
+async function makeReachRecoveryFixture(): Promise<{
   controller: JevController
   transitionId: string
   actions: CurrentAction[]
   completeAction: (index: number) => void
   events: string[]
   metrics: { legacyActuations: number; cancellations: number; schedulerStops: number }
-} {
+}> {
   const startedAt = Date.now()
-  const { contract, state, identity } = makeReachContract(startedAt)
+  const { contract, identity } = makeReachContract()
   const transitionId = contract.transitionId
+  let observedAt = startedAt
+  const reachController = new ReachController(nearestGroundedReachRoutePolicy)
+  const committed = await reachController.commit(contract, makeReachSnapshot(contract, identity, observedAt, false))
+  if (committed.status !== 'active' || committed.intent === undefined) {
+    throw new Error(`Reach fixture failed to commit: ${JSON.stringify(committed)}`)
+  }
   const events: string[] = []
   const metrics = { legacyActuations: 0, cancellations: 0, schedulerStops: 0 }
   const actions: CurrentAction[] = []
   const resolvers: Array<(result: ExecutionResult) => void> = []
   let active: CurrentAction | null = null
+  const candidateFor = (intentIndex: number): Candidate => ({
+    id: `MOVE:reach-recovery-leg-${intentIndex}`,
+    kind: 'MOVE',
+    label: 'continue the committed Reach predicate',
+    targetName: 'log',
+    target: { x: 12 + intentIndex, y: 64, z: 8 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {},
+  } as Candidate)
   let resolveRun: (summary: never) => void = () => undefined
   const runCompletion = new Promise<never>((resolve) => { resolveRun = resolve })
   const controller = Object.create(JevController.prototype) as JevController
@@ -230,6 +296,19 @@ function makeReachRecoveryFixture(): {
     modelRecoveryReachDrainTransitionId: null,
     modelRecoveryReachDrainAdvancing: false,
     modelRecoveryReachDrainPending: false,
+    reachController,
+    reachRunMetadata: {
+      mission: { id: 'mission-log-1', kind: 'inventory_at_least', item: 'log', count: 1 },
+      transitionId,
+      contractHash: contract.contractHash,
+      ensures: contract.ensures,
+      identity,
+      jevCallsAtStart: 0,
+      system2CallsAtStart: 0,
+      authorityConflictsAtStart: 0,
+      duplicateAuthorityObserved: false,
+      lastHealth: 20,
+    },
     ticking: false,
     tickCounter: 1,
     watchdog: null,
@@ -253,16 +332,14 @@ function makeReachRecoveryFixture(): {
     runtimeLlmCalls: 0,
     planCalls: 0,
     lastReachActionFailure: null,
-    reachTransition: {
-      mission: { id: 'mission-log-1', kind: 'inventory_at_least', item: 'log', count: 1 },
-      contract,
-      state,
-      jevCallsAtStart: 0,
-      system2CallsAtStart: 0,
-      authorityConflictsAtStart: 0,
-      duplicateAuthorityObserved: false,
-      lastHealth: 20,
+    buildReachWorldState: () => {
+      observedAt = Math.max(Date.now(), observedAt + 1)
+      return { timestampMs: observedAt, self: { health: 20 } }
     },
+    reachIdentity: () => identity,
+    reachCandidates: () => ({ candidates: [candidateFor(actions.length)], grounded: {} }),
+    reachRuntimeSnapshot: (_runtime: unknown, world: { timestampMs: number }, _identity: ReachIdentity) =>
+      makeReachSnapshot(contract, identity, world.timestampMs, false),
     executor: {
       get current() { return active },
       authorityConflictCount: 0,
@@ -301,8 +378,8 @@ function makeReachRecoveryFixture(): {
     },
   })
 
-  // Stand in for grounded candidate selection only; terminal verification uses
-  // the real deterministic VTR verifier and the committed contract object.
+  // Stand in for grounded candidate selection only. Controller progression,
+  // action completion and terminal verification use the real ReachController.
   Object.defineProperty(controller, 'tickReachTransition', {
     configurable: true,
     value: async function (this: JevController): Promise<boolean> {
@@ -311,62 +388,35 @@ function makeReachRecoveryFixture(): {
       const current = (this as unknown as Record<string, any>).executor.current as CurrentAction | null
       if (current !== null) return true
       const actionCount = actions.length
-      if (actionCount < 3) {
-        ;(JevController.prototype as unknown as { finish(this: JevController, stopped: string, success: boolean): void })
-          .finish.call(this, 'max-runtime', false)
-        if (!(this as unknown as Record<string, any>).running) throw new Error('HOST finish escaped the active Reach contract between legs')
-        const candidate = {
-          id: `MOVE:reach-recovery-leg-${actionCount + 1}`,
-          kind: 'MOVE',
-          label: 'continue the committed Reach predicate',
-          targetName: 'log',
-          target: { x: 12 + actionCount, y: 64, z: 8 },
-          targetEntityId: null,
-          itemName: null,
-          requiresTool: false,
-          toolName: null,
-          inReach: false,
-          hasStandableAdjacent: true,
-          meta: {},
-        } as Candidate
-        const claim = (this as unknown as Record<string, any>).executor.claim(candidate, {
-          authority: 'vtr-reach',
-          transitionId,
-        })
-        void claim.completion.then((result: ExecutionResult) => {
-          ;(this as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string): void })
-            .onReachActionComplete(result, candidate, transitionId)
-        })
+      observedAt = Math.max(Date.now(), observedAt + 1)
+      const reached = actionCount >= 3
+      const result = await reachController.tick(makeReachSnapshot(contract, identity, observedAt, reached))
+      if (result.status === 'terminal') {
+        if (result.outcome.kind !== 'SUCCESS') throw new Error(`unexpected Reach terminal: ${JSON.stringify(result.outcome)}`)
+        ;(this as unknown as { closeReachTransition(outcome: ReachTerminalOutcome, state: ReachTransitionState, boundary: string): void })
+          .closeReachTransition(result.outcome, result.state, 'verified-terminal')
         return true
       }
-      const nowMs = Date.now()
-      const evidence: ReachObservation = {
-        identity,
-        observedAtMs: nowMs,
-        predicates: {
-          'mission.unsatisfied': { truth: 'true', evidenceId: `mission:${nowMs}` },
-          'body.alive': { truth: 'true', evidenceId: `alive:${nowMs}` },
-          'reach.resource-source': { truth: 'true', evidenceId: `reach-verified:${transitionId}:${nowMs}` },
-        },
-      }
-      const verified = verifyReachEnsures(contract, runtime.state, evidence)
-      if (verified.status !== 'terminal') throw new Error(`deterministic Reach VERIFY did not terminate: ${verified.status}`)
-      const outcome = verified.outcome as ReachTerminalOutcome
-      ;(this as unknown as { closeReachTransition(outcome: ReachTerminalOutcome, state: ReachTransitionState, boundary: string): void })
-        .closeReachTransition(outcome, verified.state, 'verified-terminal')
+      if (result.status !== 'active' || result.intent === undefined) throw new Error(`Reach controller did not issue next intent: ${JSON.stringify(result)}`)
+      const candidate = candidateFor(actionCount + 1)
+      const claim = (this as unknown as Record<string, any>).executor.claim(candidate, {
+        authority: 'vtr-reach',
+        transitionId,
+      })
+      void claim.completion.then((completion: ExecutionResult) => {
+        void (this as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string, intentId: string): Promise<void> })
+          .onReachActionComplete(completion, candidate, transitionId, result.intent!.intentId)
+      })
       return true
     },
   })
 
-  const initial = (controller as unknown as { executor: { claim(candidate: Candidate, context: { authority: string; transitionId: string }): { completion: Promise<ExecutionResult> } } })
-    .executor.claim({
-      id: 'MOVE:reach-recovery-leg-0', kind: 'MOVE', label: 'in-flight Reach leg', targetName: 'log',
-      target: { x: 12, y: 64, z: 8 }, targetEntityId: null, itemName: null, requiresTool: false,
-      toolName: null, inReach: false, hasStandableAdjacent: true, meta: {},
-    } as Candidate, { authority: 'vtr-reach', transitionId })
-  void initial.completion.then((result) => {
-    ;(controller as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string): void })
-      .onReachActionComplete(result, { id: 'MOVE:reach-recovery-leg-0' } as Candidate, transitionId)
+  const claimInitial = (controller as unknown as Record<string, any>).executor.claim
+  const initialCandidate = candidateFor(0)
+  const initial = claimInitial(initialCandidate, { authority: 'vtr-reach', transitionId })
+  void initial.completion.then((result: ExecutionResult) => {
+    void (controller as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string, intentId: string): Promise<void> })
+      .onReachActionComplete(result, initialCandidate, transitionId, committed.intent!.intentId)
   })
 
   return {
@@ -402,7 +452,7 @@ function makeReachRecoveryFixture(): {
 }
 
 test('model recovery keeps one committed Reach transition through multiple actions and deterministic VERIFY', async () => {
-  const fixture = makeReachRecoveryFixture()
+  const fixture = await makeReachRecoveryFixture()
   fixture.controller.stopForModelRecovery()
   const finish = (JevController.prototype as unknown as {
     finish(this: JevController, stopped: string, success: boolean): void

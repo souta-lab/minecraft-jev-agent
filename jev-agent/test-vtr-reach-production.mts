@@ -1,71 +1,48 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
-import { MIRRORED_MARKERS, mirroredEventToken, reachMoveFitsLocomotionContract } from './src/controller-legacy.ts'
-import { envelopeForCandidate } from './src/skillCommitment.ts'
-import type { Candidate } from './src/candidates.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+const reachController = readFileSync(new URL('./src/vtr/reach-controller.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
 const generationEntry = readFileSync(new URL('../buddy-driver/generation-entry.ts', import.meta.url), 'utf8')
 
-function moveCandidate(meta: Record<string, string | number | boolean> = {}, id = 'MOVE:oak_log:source'): Candidate {
-  return {
-    id,
-    kind: 'MOVE',
-    label: 'approach the oak log source',
-    targetName: 'oak_log',
-    target: { x: 10, y: 64, z: 10 },
-    targetEntityId: null,
-    itemName: null,
-    requiresTool: false,
-    toolName: null,
-    inReach: false,
-    hasStandableAdjacent: true,
-    meta: { targetBlockName: 'oak_log', targetBlockX: 10, targetBlockY: 64, targetBlockZ: 10, ...meta },
-  }
-}
-
 describe('VTR Reach production authority seam', () => {
-  it('refuses resource MOVE candidates whose Executor envelope admits terrain mutation', () => {
-    const plain = moveCandidate()
-    assert.equal(reachMoveFitsLocomotionContract(plain), true)
-    const explicitLevel = moveCandidate({ vertical: 'none' })
-    const levelEnvelope = envelopeForCandidate(explicitLevel)
-    assert.equal(levelEnvelope.mayDigGroundedRoute, false)
-    assert.equal(levelEnvelope.mayPlaceGroundedRoute, false)
-    assert.equal(reachMoveFitsLocomotionContract(explicitLevel), true, 'vertical=none names an ordinary level route')
+  it('grounds production Reach routes from current world evidence before the persistent owner may use them', () => {
+    assert.match(controller, /private readonly reachController = new ReachController\(nearestGroundedReachRoutePolicy\)/)
 
-    for (const vertical of ['staircase', 'staircase-up', 'pillar', 'reuse']) {
-      const candidate = moveCandidate({ vertical })
-      const envelope = envelopeForCandidate(candidate)
-      assert.equal(envelope.mayDigGroundedRoute, true, `vertical=${vertical} must be recognized as a mutating route`)
-      assert.equal(envelope.mayPlaceGroundedRoute, true, `vertical=${vertical} must be recognized as a mutating route`)
-      assert.equal(reachMoveFitsLocomotionContract(candidate), false, `vertical=${vertical} exceeds locomotion-only Reach`)
-    }
+    const observationStart = controller.indexOf('private reachObservation(')
+    const snapshotStart = controller.indexOf('private reachRuntimeSnapshot(', observationStart)
+    const snapshotEnd = controller.indexOf('/** Map one typed VTR intent', snapshotStart)
+    const observation = controller.slice(observationStart, snapshotStart)
+    const snapshot = controller.slice(snapshotStart, snapshotEnd)
+    assert.ok(observationStart >= 0 && snapshotStart > observationStart && snapshotEnd > snapshotStart)
+    assert.match(observation, /isMissionSource\(mission\.item, block\.name, block\.yield\) && block\.inReach/)
+    assert.match(observation, /'reach\.resource-source':\s*\{\s*truth:/)
+    assert.match(observation, /predicates\[`reach\.route:\$\{candidate\.id\}`\] = \{ truth: 'true', evidenceId: witness\.evidenceId \}/)
+    assert.match(snapshot, /const routes: ReachRoute\[\] = candidates\.flatMap/)
+    assert.match(snapshot, /groundingPredicateId: `reach\.route:\$\{candidate\.id\}`/)
+    assert.match(snapshot, /witness,/)
+    assert.match(snapshot, /effectKind: 'locomotion'/)
+    assert.match(snapshot, /resources: \{\}/)
+    assert.match(snapshot, /risk: \{\}/)
 
-    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ digRoute: true })), false)
-    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ digStep: true })), false)
-    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ vertical: 'none', fallbackVertical: 'staircase' })), false)
-    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ mayPlaceBlocks: true })), false)
-    assert.equal(reachMoveFitsLocomotionContract(moveCandidate({ bridge: true }, 'BRIDGE:oak_log')), false)
-
-    const shapeStart = controller.indexOf('private reachWitnessForCandidateShape(')
-    const shapeEnd = controller.indexOf('private sourcePositionForCandidate(', shapeStart)
-    const shape = controller.slice(shapeStart, shapeEnd)
-    const witnessStart = controller.indexOf('private reachWitnessForCandidate(')
-    const witnessEnd = controller.indexOf('private reachObservation(', witnessStart)
-    const witness = controller.slice(witnessStart, witnessEnd)
-    assert.match(shape, /reachMoveFitsLocomotionContract\(candidate\)/)
-    assert.match(witness, /reachMoveFitsLocomotionContract\(candidate\)/)
-
-    const activeStart = controller.indexOf('private async tickReachTransition(')
-    const noCandidateStart = controller.indexOf('if (selected === undefined)', activeStart)
-    const noCandidateEnd = controller.indexOf('if (runtime.state.witness?.witnessId !== selected.witness.witnessId)', noCandidateStart)
-    const noCandidate = controller.slice(noCandidateStart, noCandidateEnd)
-    assert.match(noCandidate, /knownResourceEvidence/)
-    assert.match(noCandidate, /terminateReachAsInfeasible/)
-    assert.match(noCandidate, /bounded contract remains scheduler-owned while fresh evidence is unknown/)
+    const groundingStart = reachController.indexOf('function routeIsGrounded(')
+    const groundingEnd = reachController.indexOf('\n}\n', groundingStart)
+    const routeGrounding = reachController.slice(groundingStart, groundingEnd)
+    const commitStart = reachController.indexOf('private async commitInternal(')
+    const commitEnd = reachController.indexOf('/** Reconcile fresh facts', commitStart)
+    const commit = reachController.slice(commitStart, commitEnd)
+    assert.ok(groundingStart >= 0 && groundingEnd > groundingStart && commitEnd > commitStart)
+    assert.match(routeGrounding, /grounding\?\.truth !== 'true'/)
+    assert.match(routeGrounding, /grounding\.evidenceId !== witness\.evidenceId/)
+    assert.match(routeGrounding, /contract\.controller\.allowedTactics\.includes\(route\.tactic\)/)
+    assert.match(routeGrounding, /contract\.admissibleEffects\.some/)
+    assert.match(routeGrounding, /sameIdentity\(witness\.observedIdentity, observation\.identity\)/)
+    assert.match(routeGrounding, /amount > limit/)
+    assert.match(commit, /this\.groundedRoutes\(contract, snapshot, null\)/)
+    assert.match(commit, /this\.advance\(snapshot, true\)/)
   })
 
   it('mirrors every Reach runtime event into the HOST event sink', () => {
@@ -98,6 +75,49 @@ describe('VTR Reach production authority seam', () => {
     const queueAuthority = tick.indexOf('this.syncQueue(trigger)', reachDispatch)
     assert.ok(reachDispatch >= 0 && consume > reachDispatch)
     assert.ok(legacyRecovery > consume && queueAuthority > consume)
+
+    const reachStart = controller.indexOf('private async tickReachTransition(')
+    const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
+    const reachTick = controller.slice(reachStart, reachEnd)
+    assert.match(reachTick, /this\.reachController\.current/)
+    assert.match(reachTick, /this\.reachController\.tick\(snapshot\)/)
+    assert.match(reachTick, /this\.reachController\.commit\(contract, snapshot\)/)
+    assert.match(reachTick, /await this\.dispatchReachIntent\(/)
+    assert.doesNotMatch(reachTick, /decideBeta|applyBeta/)
+  })
+
+  it('terminalizes a foreign VTR transition lease instead of treating it as this Reach owner', () => {
+    const reachStart = controller.indexOf('private async tickReachTransition(')
+    const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
+    const reachTick = controller.slice(reachStart, reachEnd)
+    assert.ok(reachStart >= 0 && reachEnd > reachStart)
+    assert.match(
+      reachTick,
+      /if \(current !== null && \(\s*current\.authority !== 'vtr-reach' \|\| current\.transitionId !== runtime\.contract\.transitionId\s*\)\)/,
+    )
+    const foreignLeaseFence = reachTick.slice(
+      reachTick.indexOf("current.authority !== 'vtr-reach' || current.transitionId"),
+      reachTick.indexOf('const threat = state.signals.threat'),
+    )
+    assert.match(foreignLeaseFence, /this\.reachController\.supersede\(/)
+    assert.match(foreignLeaseFence, /this\.executor\.cancelCurrent\('VTR dual-authority fence'\)/)
+    assert.match(foreignLeaseFence, /actionTransitionId: current\.transitionId \?\? null/)
+  })
+
+  it('keeps raw-client reads out of the Reach controller and behind its typed runtime adapter', () => {
+    const dispatchStart = controller.indexOf('private async dispatchReachIntent(')
+    const releaseStart = controller.indexOf('private async releaseUnstartedReachIntent(', dispatchStart)
+    const reachStart = controller.indexOf('private async tickReachTransition(')
+    const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
+    assert.ok(dispatchStart >= 0 && releaseStart > dispatchStart && reachEnd > reachStart)
+    const adapter = `${controller.slice(dispatchStart, releaseStart)}\n${controller.slice(reachStart, reachEnd)}`
+    assert.doesNotMatch(adapter, /this\.bot\./)
+    assert.match(adapter, /guardCandidate\(candidate, state/)
+    assert.match(adapter, /pathProbe\?\.\(position\) === 'reachable'/)
+    assert.match(adapter, /this\.reachCandidates\(state, /)
+    assert.match(adapter, /reachRuntimeSnapshot\(/)
+    assert.match(adapter, /compatibility runtime adapter/)
+    assert.match(adapter, /typed world\/locomotion[\s\S]*?ports carry exact-source live proof/)
   })
 
   it('makes the explicit Reach probe fail closed before any legacy recovery/model/Executor dispatch', () => {
@@ -119,51 +139,101 @@ describe('VTR Reach production authority seam', () => {
     assert.match(entry, /productionPlanAuthority: vtrReachProbe \? 'vtr-reach-probe'/)
   })
 
-  it('binds every VTR body action to its transition and reserves/records each mechanical leg', () => {
-    const claimStart = controller.indexOf("const claim = this.executor.claim(guard.candidate, {", controller.indexOf('private async tickReachTransition'))
-    const claimEnd = controller.indexOf('})', claimStart)
-    const claim = controller.slice(claimStart, claimEnd)
-    assert.match(claim, /authority: 'vtr-reach'/)
-    assert.match(claim, /transitionId,/)
-    assert.match(claim, /beforeMechanicalStep:/)
-    assert.match(claim, /afterMechanicalStep:/)
+  it('maps only the controller intent through fresh candidate grounding, Guard, and the VTR Executor lease', () => {
+    const dispatchStart = controller.indexOf('private async dispatchReachIntent(')
+    const dispatchEnd = controller.indexOf('private async releaseUnstartedReachIntent(', dispatchStart)
+    const dispatch = controller.slice(dispatchStart, dispatchEnd)
+    const locate = dispatch.indexOf('const candidate = candidates.find((entry) => entry.id === intent.routeId)')
+    const guard = dispatch.indexOf('const guard = guardCandidate(candidate, state, {', locate)
+    const claim = dispatch.indexOf('claim = this.executor.claim(guard.candidate, {', guard)
+    assert.ok(dispatchStart >= 0 && dispatchEnd > dispatchStart && locate >= 0 && guard > locate && claim > guard)
+    assert.match(dispatch, /result\.status !== 'active' \|\| result\.phase !== 'actuate' \|\| result\.intent === undefined/)
+    assert.match(dispatch.slice(locate, guard), /candidate\.target === null/)
+    assert.match(dispatch.slice(locate, guard), /JSON\.stringify\(candidate\.target\) !== JSON\.stringify\(intent\.target\)/)
+    assert.match(dispatch.slice(guard, claim), /phase: 'decision'/)
+    assert.match(dispatch.slice(guard, claim), /candidateIds: new Set\(\[candidate\.id\]\)/)
+    assert.match(dispatch.slice(guard, claim), /canComputePath: \(position\) => this\.reachabilityGateOptions\(\)\.pathProbe/)
+    assert.match(dispatch.slice(guard, claim), /if \(!guard\.ok\)/)
+    assert.match(dispatch.slice(guard, claim), /releaseUnstartedReachIntent\(/)
+    assert.match(dispatch.slice(claim), /authority: 'vtr-reach'/)
+    assert.match(dispatch.slice(claim), /transitionId: intent\.transitionId/)
+    assert.match(dispatch.slice(claim), /beforeMechanicalStep: \(step\) => this\.authorizeReachMechanicalStep/)
+    assert.match(dispatch.slice(claim), /afterMechanicalStep: \(step\) => this\.recordReachMechanicalOutcome/)
 
-    const activeAction = executor.slice(executor.indexOf('export interface CurrentAction'), executor.indexOf('export interface ExecutionClaimContext'))
-    const conflictGate = executor.slice(executor.indexOf('claim(candidate: Candidate'), executor.indexOf('get activeCommitment'))
+    const activeActionStart = executor.indexOf('export interface CurrentAction')
+    const activeActionEnd = executor.indexOf('export interface ExecutionClaimContext', activeActionStart)
+    const claimStart = executor.indexOf('claim(candidate: Candidate', activeActionEnd)
+    const claimEnd = executor.indexOf('get activeCommitment', claimStart)
+    const activeAction = executor.slice(activeActionStart, activeActionEnd)
+    const conflictGate = executor.slice(claimStart, claimEnd)
     assert.match(activeAction, /authority\?: 'legacy' \| 'vtr-reach'/)
     assert.match(activeAction, /transitionId\?: string/)
     assert.match(conflictGate, /actuation authority conflict/)
     assert.match(conflictGate, /throw new ExecutionAuthorityConflict/)
   })
 
-  it('charges observed world risk before the declared ensures predicate may verify', () => {
-    const tickReachStart = controller.indexOf('private async tickReachTransition(')
-    const tickReachEnd = controller.indexOf('private reachWitnessForCandidateShape(', tickReachStart)
-    const tickReach = controller.slice(tickReachStart, tickReachEnd)
-    const observedRisk = tickReach.indexOf('recordReachObservedRisk(runtime.contract, runtime.state, identity')
-    const verify = tickReach.indexOf('verifyReachEnsures(runtime.contract, runtime.state, observation)')
-    assert.ok(observedRisk >= 0 && verify > observedRisk)
+  it('reserves each mechanical leg before actuation, accounts its outcome, and never treats action success as Reach success', () => {
+    const authorizeStart = controller.indexOf('private authorizeReachMechanicalStep(')
+    const outcomeStart = controller.indexOf('private recordReachMechanicalOutcome(', authorizeStart)
+    const actionCompleteStart = controller.indexOf('private async onReachActionComplete(', outcomeStart)
+    const closeStart = controller.indexOf('private closeReachTransition(', actionCompleteStart)
+    assert.ok(authorizeStart >= 0 && outcomeStart > authorizeStart && actionCompleteStart > outcomeStart && closeStart > actionCompleteStart)
+    const authorize = controller.slice(authorizeStart, outcomeStart)
+    const mechanicalOutcome = controller.slice(outcomeStart, actionCompleteStart)
+    const completion = controller.slice(actionCompleteStart, closeStart)
+    assert.match(authorize, /this\.reachController\.authorizeMechanicalStep\(/)
+    assert.match(authorize, /this\.options\.actuationPort\?\.assertLease\(/)
+    assert.match(authorize, /VTR_MECHANICAL_STEP_RESERVED/)
+    assert.match(mechanicalOutcome, /this\.reachController\.recordMechanicalStepOutcome\(/)
+    assert.match(mechanicalOutcome, /step\.stepId/)
+    assert.match(completion, /VTR_MECHANICAL_OUTCOME/)
+    assert.match(completion, /await this\.reachController\.complete\(intentId/)
+    assert.match(completion, /status: result\.status === 'done' \? 'completed'/)
+    assert.match(completion, /if \(completed\.status === 'terminal'\)/)
+    assert.doesNotMatch(completion, /if \(result\.status === 'done'\)[\s\S]{0,80}closeReachTransition/)
   })
 
-  it('records typed outcomes before a fresh scheduler handoff; no action completion asks legacy beta', () => {
-    const completionStart = controller.indexOf('private onReachActionComplete(')
+  it('records the controller typed terminal before handing scheduling back; no action completion asks legacy beta', () => {
+    const completionStart = controller.indexOf('private async onReachActionComplete(')
     const closeStart = controller.indexOf('private closeReachTransition(', completionStart)
     const closeEnd = controller.indexOf('// -------------------------------------------------------------------------\n  // the one loop', closeStart)
     const completion = controller.slice(completionStart, closeStart)
     const close = controller.slice(closeStart, closeEnd)
-    assert.doesNotMatch(completion, /onActionComplete|decideBeta|applyBeta/)
+    assert.match(completion, /await this\.reachController\.complete\(intentId/)
+    assert.match(completion, /if \(completed\.status === 'terminal'\)/)
+    assert.doesNotMatch(completion, /decideBeta|applyBeta/)
     assert.match(completion, /requestDecision\('action_completed'/)
     assert.match(close, /VTR_TRANSITION_OUTCOME/)
+    assert.match(close, /typedTerminalOutcome: outcome\.kind/)
+    assert.match(close, /verifiedTransitionCompletion: outcome\.kind === 'SUCCESS' \? 1 : 0/)
+    assert.match(close, /mechanicalStepsPerTransition: state\.usage\.mechanicalSteps/)
     assert.match(close, /typedOutcome: outcome\.kind/)
     assert.match(close, /schedulerHandoff: true/)
+    assert.match(close, /this\.reachController\.takeOutcome\(\)/)
   })
 
-  it('keeps the old mission-source MOVE candidate out only on a tick where VTR owns that predicate', () => {
+  it('withholds same-Mission resource MOVE from the legacy decision plane while VTR owns Reach', () => {
     const ownerFilter = controller.indexOf('if (this.vtrOwnsReachMoveThisTick && vtrMission !== null')
     const filterEnd = controller.indexOf('candidates = this.applyFurnacePrereq', ownerFilter)
     assert.ok(ownerFilter >= 0 && filterEnd > ownerFilter)
-    assert.match(controller.slice(ownerFilter, filterEnd), /VTR_LEGACY_REACH_MOVE_WITHHELD/)
-    assert.match(controller.slice(ownerFilter, filterEnd), /reachMissionSourceCandidateShape/)
+    const suppression = controller.slice(ownerFilter, filterEnd)
+    assert.match(suppression, /candidates\.filter\(\(candidate\) =>\s*this\.reachMissionSourceCandidateShape\(vtrMission\.item, candidate, state\)/)
+    assert.match(suppression, /candidates = candidates\.filter\(\(candidate\) => !legacyReachMoves\.includes\(candidate\)\)/)
+    assert.match(suppression, /VTR_LEGACY_REACH_MOVE_WITHHELD/)
+
+    const sourceShapeStart = controller.indexOf('private reachMissionSourceCandidateShape(')
+    const sourceShapeEnd = controller.indexOf('/**\n   * Match only a still-current legacy walk commitment', sourceShapeStart)
+    const sourceShape = controller.slice(sourceShapeStart, sourceShapeEnd)
+    assert.ok(sourceShapeStart >= 0 && sourceShapeEnd > sourceShapeStart)
+    assert.match(sourceShape, /candidate\.kind !== 'MOVE'/)
+    assert.match(sourceShape, /this\.isMissionSource\(item, name\)/)
+    assert.match(sourceShape, /state\.blocks\.some\(/)
+
+    const schedulerStart = controller.indexOf('private async tickReachTransition(')
+    const schedulerEnd = controller.indexOf('private reachWitnessForCandidateShape(', schedulerStart)
+    const scheduler = controller.slice(schedulerStart, schedulerEnd)
+    assert.match(scheduler, /this\.vtrOwnsReachMoveThisTick = state\.blocks\.some/)
+    assert.match(scheduler, /this\.isMissionSource\(mission\.item, block\.name, block\.yield\)/)
     assert.match(controller, /this\.vtrOwnsReachMoveThisTick = true/)
   })
 })

@@ -245,6 +245,8 @@ export interface DecisionRecordProvenance {
   readonly runId: string | null
   readonly generationId: string | null
   readonly sourceSha: string | null
+  /** HOST build identity, copied into auditable VTR verification events. */
+  readonly buildHash?: string | null
 }
 
 /** Copy only the typed Jev wire fields; provider extras are not record fields. */

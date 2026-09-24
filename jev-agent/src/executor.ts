@@ -331,6 +331,8 @@ export type FailureCode =
   | 'fall_lethal'
   /** issue #436 section 5/27: the step was outside the commitment's effect envelope */
   | 'effect_envelope_violation'
+  /** a VTR internal-effect budget/lease reservation refused before actuation */
+  | 'effect_reservation_refused'
   /** issue #436 section 14/23: the world this commitment was grounded in changed */
   | 'world_changed'
   /** issue #436 section 11: two or more strategically distinct carried weapons */
@@ -476,6 +478,36 @@ export interface CurrentAction {
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
   /** Record observed effects/risk after a leg, before any terminal verification. */
   afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Reserve and account for candidate-declared internal dig/place/equip calls. */
+  internalEffectCallbacks?: InternalEffectCallbacks
+}
+
+/** Internal effects whose exact candidate declaration is checked by the executor. */
+export type CandidateDeclaredInternalEffect = Extract<Effect, { type: 'dig' | 'place' | 'equip' }>
+
+/** Stable identity passed to the VTR budget/journal at an internal mutation boundary. */
+export interface InternalEffectReservation {
+  readonly actionId: string
+  readonly actionEpoch: number
+  readonly transitionId: string | null
+  readonly effectId: string
+  readonly effect: Readonly<CandidateDeclaredInternalEffect>
+}
+
+/**
+ * The actuator promise outcome only. `actuator-returned` is deliberately not a
+ * claim that the world predicate was verified; deterministic VERIFY remains a
+ * separate executor/controller responsibility.
+ */
+export type InternalEffectActuationOutcome =
+  | { status: 'actuator-returned' }
+  | { status: 'actuator-rejected'; error: string }
+
+export interface InternalEffectCallbacks {
+  /** Must reserve the exact declared effect before the executor calls the actuator. */
+  before: (reservation: InternalEffectReservation) => boolean
+  /** Receives the matching actuator promise outcome after it settles. */
+  after: (settlement: InternalEffectReservation & { readonly outcome: InternalEffectActuationOutcome }) => void
 }
 
 export interface ExecutionClaimContext {
@@ -489,6 +521,8 @@ export interface ExecutionClaimContext {
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
   /** Record observed effects/risk after a leg, before any terminal verification. */
   afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Optional paired hooks for candidate-declared internal dig/place/equip effects. */
+  internalEffectCallbacks?: InternalEffectCallbacks
 }
 
 export interface ClaimResult {
@@ -2051,6 +2085,8 @@ export class Executor {
 
   private epochCounter = 0
   private activeEpoch = 0
+  /** Monotonic within the current action; combined with action id/epoch for stable effect IDs. */
+  private internalEffectSequence = 0
   private controller: AbortController | null = null
   private action: CurrentAction | null = null
   private owned = 0
@@ -2260,10 +2296,12 @@ export class Executor {
       ...(context.transitionId === undefined ? {} : { transitionId: context.transitionId }),
       ...(context.beforeMechanicalStep === undefined ? {} : { beforeMechanicalStep: context.beforeMechanicalStep }),
       ...(context.afterMechanicalStep === undefined ? {} : { afterMechanicalStep: context.afterMechanicalStep }),
+      ...(context.internalEffectCallbacks === undefined ? {} : { internalEffectCallbacks: context.internalEffectCallbacks }),
       liveStructureMembers,
     }
     this.action = action
     this.activeCommitment = commitment
+    this.internalEffectSequence = 0
     this.stepLog.clear()
     // NOTE (§17 single owner): `SKILL_COMMIT` is NOT emitted here. The controller
     // owns it, because section 3 makes the ACTIVE decision epoch the thing that
@@ -2684,7 +2722,7 @@ export class Executor {
    * active. A step outside the declared envelope FAILS CLOSED - it is never a
    * reason to widen the envelope (section 16).
    */
-  private assertEffect(effect: Effect): void {
+  private assertEffect(effect: Effect, recordStep = true): void {
     const commitment = this.activeCommitment
     if (commitment === null) return
     this.assertCommitmentValid()
@@ -2702,7 +2740,100 @@ export class Executor {
         `${effect.type} is outside the ${commitment.skillKind} effect envelope (${violation}); failing closed`,
       )
     }
-    this.noteMechanicalStep(commitment, effect)
+    if (recordStep) this.noteMechanicalStep(commitment, effect)
+  }
+
+  /**
+   * Run one candidate-declared dig/place/equip actuator call. The existing
+   * SkillCommitment envelope check remains the first gate; a VTR reservation is
+   * then obtained immediately before the actuator and the matching callback
+   * reports only whether that actuator promise returned or rejected. It never
+   * claims deterministic world-state success.
+   */
+  private async performInternalEffect<T>(
+    effect: CandidateDeclaredInternalEffect,
+    actuator: () => Promise<T>,
+  ): Promise<T> {
+    this.assertEffect(effect, false)
+    const action = this.action
+    const callbacks = action?.internalEffectCallbacks
+    if (action === null || action === undefined || callbacks === undefined) {
+      const commitment = this.activeCommitment
+      if (commitment !== null) this.noteMechanicalStep(commitment, effect)
+      return await actuator()
+    }
+
+    const effectId = `${action.id}:epoch:${action.epoch}:effect:${++this.internalEffectSequence}`
+    const immutableEffect = effect.type === 'dig'
+      ? Object.freeze({ ...effect, position: Object.freeze({ ...effect.position }) })
+      : effect.type === 'place'
+        ? Object.freeze({ ...effect, position: Object.freeze({ ...effect.position }) })
+        : Object.freeze({ ...effect })
+    const reservation: InternalEffectReservation = Object.freeze({
+      actionId: action.id,
+      actionEpoch: action.epoch,
+      transitionId: action.transitionId ?? null,
+      effectId,
+      effect: immutableEffect,
+    })
+
+    let reserved = false
+    try {
+      reserved = callbacks.before(reservation)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new ExecutorError(
+        'effect_reservation_refused',
+        `VTR refused ${effect.type} reservation ${effectId} before actuation: ${reason}`,
+      )
+    }
+    if (!reserved) {
+      throw new ExecutorError(
+        'effect_reservation_refused',
+        `VTR refused ${effect.type} reservation ${effectId} before actuation`,
+      )
+    }
+
+    // Record mechanical continuation only after a configured VTR reservation
+    // accepts it; a refused budget must not appear as an executed step.
+    const commitment = this.activeCommitment
+    if (commitment !== null) this.noteMechanicalStep(commitment, effect)
+
+    let afterCalled = false
+    try {
+      const result = await actuator()
+      afterCalled = true
+      callbacks.after({ ...reservation, outcome: { status: 'actuator-returned' } })
+      return result
+    } catch (error) {
+      if (!afterCalled) {
+        afterCalled = true
+        const message = error instanceof Error ? error.message : String(error)
+        callbacks.after({ ...reservation, outcome: { status: 'actuator-rejected', error: message } })
+      }
+      throw error
+    }
+  }
+
+  private performEquipEffect(item: Item, destination: EquipmentDestination): Promise<void> {
+    return this.performInternalEffect(
+      { type: 'equip', itemName: item.name, destination },
+      async () => {
+        if (this.options.actuationPort !== undefined) {
+          await this.options.actuationPort.equip(item, destination)
+        } else {
+          await this.bot.equip(item, destination)
+        }
+      },
+    )
+  }
+
+  private performPlaceEffect(
+    position: Vec3Json,
+    itemName: string,
+    actuator: () => Promise<void>,
+  ): Promise<void> {
+    return this.performInternalEffect({ type: 'place', position: { ...position }, itemName }, actuator)
   }
 
   /**
@@ -4112,9 +4243,8 @@ export class Executor {
         // effect-envelope gate (and section 17 step evidence) as every other
         // mechanical step, so a bridge cell outside its declared span fails
         // closed instead of silently widening the envelope.
-        this.assertEffect({ type: 'place', position: span.place, itemName: block })
         try {
-          await this.bot.placeBlock(reference.block, reference.face)
+          await this.performPlaceEffect(span.place, block, () => this.bot.placeBlock(reference.block, reference.face))
         } catch (error) {
           if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
           const observed = this.currentBlockAt(span.place)?.name ?? null
@@ -5056,8 +5186,7 @@ export class Executor {
     const budget = decidePillarStepBudget(toY - Math.floor(this.bot.entity.position.y), PILLAR_SEARCH_POLICY)
     this.logger.info('agent', formatPillarSearch(budget), { actionId: candidate.id })
     this.setPhase(candidate, epoch, 'equipping')
-    this.assertEffect({ type: 'equip', itemName: item.name, destination: 'hand' })
-    await this.bot.equip(item, 'hand')
+    await this.performEquipEffect(item, 'hand')
     this.ensureOwned(epoch, signal)
     const solidAt: SolidAt = (x, y, z) => this.solidSupportAt(x, y, z)
     // Physics on, and the stale onGround flag patched from the block grid -
@@ -5239,8 +5368,7 @@ export class Executor {
           const held = this.bot.inventory.items().find((entry) => entry.name === placeName)
           if (held === undefined) break
           this.setPhase(candidate, epoch, 'equipping')
-          this.assertEffect({ type: 'equip', itemName: held.name, destination: 'hand' })
-          await this.bot.equip(held, 'hand')
+          await this.performEquipEffect(held, 'hand')
           this.ensureOwned(epoch, signal)
         }
         // Re-read immediately before the placement: the gate above answered from
@@ -5351,7 +5479,6 @@ export class Executor {
               // The envelope declares the CELL that may be placed, not the face
               // direction: recording the direction made a per-cell declaration
               // unmatchable against its own effect.
-              this.assertEffect({ type: 'place', position: cell, itemName: placeName })
               // The attempt-time observation. `pillarStepUp` re-reads the body in
               // the tick it authorises, and this is the tick the packet is written
               // in, so the two are the same instant. It is what the live record was
@@ -5363,7 +5490,7 @@ export class Executor {
                 cellTop: placeCell.y + 1,
                 handshakeTicks: this.pillarPlaceHandshakeTicks(),
               }
-              return this.placePillarBlock(liveFooting, toVec3(this.bot, face))
+              return this.performPlaceEffect(cell, placeName, () => this.placePillarBlock(liveFooting, toVec3(this.bot, face)))
             },
             blockPlaced: () => this.currentBlockAt(placeCell)?.boundingBox === 'block',
           },
@@ -6606,8 +6733,7 @@ export class Executor {
     const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
     if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
     this.setPhase(candidate, epoch, 'equipping')
-    this.assertEffect({ type: 'equip', itemName: item.name, destination: 'hand' })
-    await this.bot.equip(item, 'hand')
+    await this.performEquipEffect(item, 'hand')
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'consuming')
     await this.bot.consume()
@@ -8394,9 +8520,8 @@ export class Executor {
           // effect-envelope gate as every other mechanical step, so a descent cell
           // outside its declared contract fails closed instead of silently widening
           // the envelope.
-          this.assertEffect({ type: 'place', position: place, itemName: block })
           try {
-            await this.bot.placeBlock(reference.block, reference.face)
+            await this.performPlaceEffect(place, block, () => this.bot.placeBlock(reference.block, reference.face))
           } catch (error) {
             if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
             const observed = this.currentBlockAt(place)?.name ?? null
@@ -8768,12 +8893,7 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<void> {
-    this.assertEffect({ type: 'equip', itemName: item.name, destination })
-    if (this.options.actuationPort !== undefined) {
-      await this.options.actuationPort.equip(item, destination)
-    } else {
-      await this.bot.equip(item, destination)
-    }
+    await this.performEquipEffect(item, destination)
     this.ensureOwned(epoch, signal)
   }
 
@@ -8830,12 +8950,7 @@ export class Executor {
     await this.equipPlacementItem(candidate, itemName, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
     try {
-      this.assertEffect({
-        type: 'place',
-        position: { x: target.x, y: target.y, z: target.z },
-        itemName,
-      })
-      await this.bot.placeBlock(reference.block, reference.face)
+      await this.performPlaceEffect(target, itemName, () => this.bot.placeBlock(reference.block, reference.face))
     } catch (error) {
       // The placement mechanism's own rejection was previously an untyped
       // `unknown_event`: mineflayer's `placeBlock` throws a plain `Error`
@@ -9283,12 +9398,7 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.equipPlacementItem(candidate, supportItem.name, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
-    this.assertEffect({
-      type: 'place',
-      position: { x: scaffold.x, y: scaffold.y, z: scaffold.z },
-      itemName: supportItem.name,
-    })
-    await this.bot.placeBlock(reference.block, reference.face)
+    await this.performPlaceEffect(scaffold, supportItem.name, () => this.bot.placeBlock(reference.block, reference.face))
     this.ensureOwned(epoch, signal)
     const placedName = await this.waitForPlacedBlock(scaffold, supportItem.name, epoch, signal)
     if (!isPlacePostconditionMet(placedName, supportItem.name)) {
@@ -9380,12 +9490,7 @@ export class Executor {
     }
 
     this.setPhase(candidate, epoch, 'equipping')
-    this.assertEffect({ type: 'equip', itemName: held.name, destination: 'hand' })
-    if (this.options.actuationPort !== undefined) {
-      await this.options.actuationPort.equip(held, 'hand')
-    } else {
-      await this.bot.equip(held, 'hand')
-    }
+    await this.performEquipEffect(held, 'hand')
     this.ensureOwned(epoch, signal)
 
     const block = this.currentBlockAt(target)
@@ -11767,8 +11872,7 @@ export class Executor {
       )
       const tool = this.bot.inventory.items().find((item) => ids.has(item.type))
       if (tool !== undefined) {
-        this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
-        await this.bot.equip(tool, 'hand')
+        await this.performEquipEffect(tool, 'hand')
         this.ensureOwned(epoch, signal)
       }
     }
@@ -12092,11 +12196,6 @@ export class Executor {
     // held item is replaced by a carried admissible tool, and when none exists the
     // dig FAILS CLOSED with the typed `dig_no_tool` instead of proceeding.
     if (purpose === 'harvest') await this.requireHarvestTool(block, epoch, signal)
-    this.assertEffect({
-      type: 'dig',
-      position: { x: block.position.x, y: block.position.y, z: block.position.z },
-      blockName: block.name,
-    })
     this.assertEffect({ type: 'look' })
     await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
     this.ensureOwned(epoch, signal)
@@ -12115,7 +12214,10 @@ export class Executor {
     // `DIG_BUDGET` marker records any extension.
     const mechanism: DigMechanism = {
       digTime: () => this.bot.digTime(block),
-      dig: () => this.bot.dig(block, 'ignore'),
+      dig: () => this.performInternalEffect(
+        { type: 'dig', position: { x: block.position.x, y: block.position.y, z: block.position.z }, blockName: block.name },
+        () => this.bot.dig(block, 'ignore'),
+      ),
       stopDigging: () => this.bot.stopDigging(),
     }
     this.digStartedAt = Date.now()
@@ -12545,7 +12647,6 @@ export class Executor {
         `held=${held?.name ?? 'none'} -> equip=${tool.name} reason=non_harvesting_held_item`,
       { block: block.name, held: held?.name ?? null, equipped: tool.name },
     )
-    this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
     await this.equipItemTo(tool, 'hand', epoch, signal)
   }
 
@@ -12567,8 +12668,7 @@ export class Executor {
           throw new ExecutorError('dig_no_tool', `no ${toolName} in the inventory`)
         }
       } else {
-        this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
-        await this.bot.equip(tool, 'hand')
+        await this.performEquipEffect(tool, 'hand')
         this.ensureOwned(epoch, signal)
       }
     }

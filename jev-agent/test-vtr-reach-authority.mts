@@ -1,14 +1,32 @@
 import { expect, test } from 'bun:test'
+import { createRequire } from 'node:module'
+import { EventEmitter } from 'node:events'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Vec3 } from 'vec3'
+import type { Bot } from 'mineflayer'
 import { JevController } from './src/controller-legacy.ts'
+import type { Candidate } from './src/candidates.ts'
+import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import type { CurrentAction } from './src/executor.ts'
+import type { EventLogger } from './src/jev.ts'
+import { EventLogger as JsonLogger, JsonlWriter } from './src/jev.ts'
+import {
+  ReachController,
+  type ReachRoute,
+  type ReachRuntimeSnapshot,
+} from './src/vtr/reach-controller.ts'
 import {
   createReachTransitionContract,
-  startReachTransition,
   type ReachIdentity,
-  type ReachObservation,
+  type ReachTerminalOutcome,
+  type ReachTransitionState,
   type ReachTransitionContract,
 } from './src/vtr/reach.ts'
-import type { WorldState } from './src/state.ts'
+
+const require = createRequire(import.meta.url)
+const registry = require('minecraft-data')('1.21.11')
 
 const identity: ReachIdentity = {
   worldKey: 'authority-test-world',
@@ -18,11 +36,72 @@ const identity: ReachIdentity = {
   leaseId: 'authority-test-lease',
 }
 
-const mission = { id: 'mission-reach-log', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
+const mission = { id: 'mission-reach-log', item: 'oak_log', count: 1 }
 const desiredPredicate = {
   id: 'reach.resource-source',
   proposition: { kind: 'within-interaction-reach-of-resource-source', item: 'oak_log' },
   expected: true,
+}
+
+interface FakeMovementBot {
+  readonly bot: Bot
+  readonly goalStarts: () => number
+  readonly goalClears: () => number
+  readonly pathStops: () => number
+}
+
+function makeBot(): FakeMovementBot {
+  const events = new EventEmitter()
+  const position = new Vec3(0.5, 64, 0.5)
+  let goalsStarted = 0
+  let goalsCleared = 0
+  let pathStops = 0
+  const pathfinder = {
+    movements: null as { maxDropDown?: number } | null,
+    setMovements(movements: { maxDropDown?: number }): void {
+      this.movements = movements
+    },
+    setGoal(goal: unknown | null): void {
+      if (goal === null) goalsCleared += 1
+      else goalsStarted += 1
+    },
+    stop(): void {
+      pathStops += 1
+    },
+    getPathTo: () => ({ status: 'noPath', path: [] }),
+  }
+
+  const bot = {
+    registry,
+    game: { dimension: identity.dimension },
+    health: 20,
+    food: 20,
+    heldItem: null,
+    entity: {
+      position,
+      yaw: 0,
+      pitch: 0,
+      onGround: true,
+      width: 0.6,
+      height: 1.8,
+      velocity: new Vec3(0, 0, 0),
+    },
+    inventory: { items: () => [], count: () => 0 },
+    pathfinder,
+    blockAt: () => null,
+    stopDigging: () => undefined,
+    clearControlStates: () => undefined,
+    canDigBlock: () => false,
+    on: events.on.bind(events),
+    removeListener: events.removeListener.bind(events),
+  } as unknown as Bot
+
+  return {
+    bot,
+    goalStarts: () => goalsStarted,
+    goalClears: () => goalsCleared,
+    pathStops: () => pathStops,
+  }
 }
 
 function makeContract(): ReachTransitionContract {
@@ -43,132 +122,177 @@ function makeContract(): ReachTransitionContract {
   })
 }
 
-test('a typed Reach progress terminal cancels an already-running VTR body action before closing authority', async () => {
-  const contract = makeContract()
-  const nowMs = Date.now()
-  const startObservation: ReachObservation = {
-    identity,
-    observedAtMs: nowMs,
-    predicates: {
-      'mission.unsatisfied': { truth: 'true', evidenceId: 'mission:oak_log:0/1' },
-      'body.alive': { truth: 'true', evidenceId: 'body:health:20' },
-      'reach.resource-source': { truth: 'false', evidenceId: 'reach:outside-interaction-range' },
+function makeRoute(contract: ReachTransitionContract, atMs: number): ReachRoute {
+  const evidenceId = `route-grounding:${atMs}`
+  return {
+    routeId: 'MOVE:reach-authority-fixture',
+    groundingPredicateId: 'route.resource-source-grounded',
+    waypointGroundingPredicateId: null,
+    witness: {
+      witnessId: 'oak-log-source:12,64,4',
+      target: { x: 12, y: 64, z: 4 },
+      desiredPredicateIdentity: contract.desiredPredicateIdentity,
+      evidenceId,
+      observedIdentity: identity,
+      observedAtMs: atMs,
     },
+    waypoint: null,
+    tactic: 'walk',
+    effectKind: 'locomotion',
+    estimatedDistance: 12,
+    resources: {},
+    risk: {},
   }
-  const started = startReachTransition(contract, startObservation, { tactic: 'walk' })
-  expect(started.status).toBe('active')
-  if (started.status !== 'active') return
+}
 
-  // Finite world coordinates can still overflow the Euclidean-distance calculation.
-  // That makes recordReachProgress return typed invalid_evidence while the ensure
-  // verifier remains pending, exercising the production progress-terminal branch.
-  const world = {
-    tick: 7,
-    timestampMs: nowMs + 1,
-    self: {
-      dimension: identity.dimension,
-      position: { x: -Number.MAX_VALUE, y: 64, z: 0 },
-      health: 20,
-      food: 20,
-      air: 20,
-      feetInWater: false,
-      eyesInWater: false,
-      envHazard: { active: false },
-    },
-    signals: { threat: { active: false } },
-    blocks: [{
-      name: 'oak_log',
-      yield: 'oak_log',
-      inReach: false,
-      visible: true,
-      position: { x: Number.MAX_VALUE, y: 64, z: 0 },
-    }],
-    inventory: { counts: { oak_log: 0 } },
-  } as unknown as WorldState
-
-  const observation: ReachObservation = {
-    ...startObservation,
-    observedAtMs: nowMs + 1,
-    predicates: {
-      ...startObservation.predicates,
-      'reach.resource-source': { truth: 'false', evidenceId: 'reach:still-outside-interaction-range' },
-    },
-  }
-
-  let currentAction: CurrentAction | null = {
-    id: 'MOVE:oak-log-source',
-    kind: 'MOVE',
-    epoch: 3,
-    startedAt: nowMs,
-    phase: 'moving',
-    status: 'running',
-    detail: '',
-    completion: new Promise(() => undefined),
-    authority: 'vtr-reach',
-    transitionId: contract.transitionId,
-  }
-  let cancellations = 0
-  const decisions: Array<{ trigger: string; detail: Record<string, unknown> }> = []
-  const events: string[] = []
-
-  const controller = Object.create(JevController.prototype) as JevController
-  Object.assign(controller as unknown as Record<string, any>, {
-    options: { vtrMission: mission, reach: 4, actuationPort: null },
-    queue: { current: null },
-    reachTransition: {
-      mission,
-      contract,
-      state: started.state,
-      jevCallsAtStart: 0,
-      system2CallsAtStart: 0,
-      authorityConflictsAtStart: 0,
-      duplicateAuthorityObserved: false,
-      lastHealth: 20,
-    },
-    reachTerminalHandoff: null,
-    lastReachActionFailure: null,
-    tickCounter: 7,
-    jevCalls: 0,
-    runtimeLlmCalls: 0,
-    planCalls: 0,
-    executor: {
-      get current() { return currentAction },
-      authorityConflictCount: 0,
-      cancelCurrent: () => {
-        if (currentAction === null || currentAction.status !== 'running') return false
-        cancellations += 1
-        currentAction.status = 'cancelled'
-        currentAction = null
-        return true
+function makeSnapshot(contract: ReachTransitionContract, atMs: number, predicateDistance: number): ReachRuntimeSnapshot {
+  const route = makeRoute(contract, atMs)
+  return {
+    observation: {
+      identity,
+      observedAtMs: atMs,
+      predicates: {
+        'mission.unsatisfied': { truth: 'true', evidenceId: `mission:oak_log:0/1:${atMs}` },
+        'body.alive': { truth: 'true', evidenceId: `body:health:20:${atMs}` },
+        'reach.resource-source': { truth: 'false', evidenceId: `reach:outside-interaction-range:${atMs}` },
+        [route.groundingPredicateId]: { truth: 'true', evidenceId: route.witness.evidenceId },
       },
     },
-    logger: {
-      info: (_source: string, line: string) => events.push(line),
-      warn: (_source: string, line: string) => events.push(line),
-      error: (_source: string, line: string) => events.push(line),
+    routes: [route],
+    progress: {
+      predicateDistance,
+      reachability: 'reachable',
+      frontierId: route.routeId,
+      evidenceId: `progress:${atMs}`,
     },
-    requestDecision: (trigger: string, detail: Record<string, unknown>) => decisions.push({ trigger, detail }),
-    buildReachWorldState: () => world,
-    reachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [] }),
-    reachObservation: () => observation,
-    isMissionSource: () => true,
+  }
+}
+
+function moveCandidate(target: { x: number; y: number; z: number }): Candidate {
+  return {
+    id: 'MOVE:reach-authority-fixture',
+    kind: 'MOVE',
+    label: `move to ${target.x},${target.y},${target.z}`,
+    targetName: null,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {},
+  }
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${message}`)
+    await new Promise<void>((resolve) => setTimeout(resolve, 2))
+  }
+}
+
+test('typed Reach terminal revokes its real Executor lease before scheduler handoff', async () => {
+  const contract = makeContract()
+  const controller = new ReachController()
+  const startAtMs = Date.now()
+  const initial = await controller.commit(contract, makeSnapshot(contract, startAtMs, 12))
+  expect(initial.status).toBe('active')
+  expect(initial.status === 'active' ? initial.phase : '').toBe('actuate')
+  if (initial.status !== 'active' || initial.intent === undefined) throw new Error('expected committed VTR intent')
+  const intent = initial.intent
+
+  const authorization = controller.authorizeMechanicalStep(intent.intentId, identity, {
+    stepId: `${intent.intentId}:leg:1`,
+    effectKind: intent.effectKind,
+    resources: {},
+    risk: {},
+    nowMs: startAtMs + 1,
+  })
+  expect(authorization.status).toBe('authorized')
+
+  const fixture = makeBot()
+  const logDir = mkdtempSync(join(tmpdir(), 'vtr-reach-authority-'))
+  const logger = new JsonLogger(new JsonlWriter(join(logDir, 'executor.jsonl')), false) as EventLogger
+  const executor = new Executor(fixture.bot, logger, {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+    pathTimeoutMs: 10_000,
   })
 
-  const tickReachTransition = (JevController.prototype as unknown as {
-    tickReachTransition(this: JevController, trigger: string, detail: Record<string, unknown>): Promise<boolean>
-  }).tickReachTransition
-  expect(await tickReachTransition.call(controller, 'heartbeat', {})).toBe(true)
+  try {
+    const claim = executor.claim(moveCandidate(intent.target as { x: number; y: number; z: number }), {
+      authority: 'vtr-reach',
+      transitionId: intent.transitionId,
+    })
+    await waitFor(() => fixture.goalStarts() === 1, 'the authorized Reach MOVE to reach pathfinder')
+    const currentAction: CurrentAction | null = executor.current
+    expect(currentAction).not.toBeNull()
+    expect(currentAction?.status).toBe('running')
+    expect(currentAction?.authority).toBe('vtr-reach')
+    expect(currentAction?.transitionId).toBe(intent.transitionId)
 
-  const controllerState = controller as unknown as Record<string, any>
-  expect(controllerState.reachTransition).toBeNull()
-  expect(events.some((line) => line.includes('outcome=CONTRACT_VIOLATION'))).toBe(true)
-  expect(decisions).toHaveLength(1)
-  expect(decisions[0]?.detail).toMatchObject({ typedOutcome: 'CONTRACT_VIOLATION', schedulerHandoff: true })
+    // Infinity is rejected as typed progress evidence while the ensures remain
+    // false. The route/contract stay valid; only recordReachProgress terminalizes.
+    const typedTerminal = await controller.tick(makeSnapshot(contract, startAtMs + 2, Number.POSITIVE_INFINITY))
+    expect(typedTerminal.status).toBe('terminal')
+    if (typedTerminal.status !== 'terminal') throw new Error('expected typed Reach terminal')
+    expect(typedTerminal.outcome.kind).toBe('CONTRACT_VIOLATION')
+    expect(typedTerminal.cancelIntentId).toBe(intent.intentId)
+    expect(controller.current).toBeNull()
+    expect(executor.current).toBe(currentAction)
 
-  // The terminal branch must revoke physical ownership before it tells the
-  // scheduler the contract has closed. Current 55011cd closes the state but
-  // leaves this already-running VTR action active.
-  expect(cancellations).toBe(1)
-  expect(currentAction).toBeNull()
+    let schedulerHandoff = 0
+    const adapter = Object.create(JevController.prototype) as JevController
+    Object.assign(adapter as unknown as Record<string, unknown>, {
+      reachRunMetadata: {
+        mission,
+        transitionId: contract.transitionId,
+        contractHash: contract.contractHash,
+        identity,
+        jevCallsAtStart: 0,
+        system2CallsAtStart: 0,
+        authorityConflictsAtStart: executor.authorityConflictCount,
+        duplicateAuthorityObserved: false,
+      },
+      reachTerminalHandoff: null,
+      reachController: controller,
+      executor,
+      jevCalls: 0,
+      runtimeLlmCalls: 0,
+      planCalls: 0,
+      tickCounter: 7,
+      lastReachActionFailure: null,
+      logger: { info: () => undefined },
+      requestDecision: (_trigger: string, detail: Record<string, unknown>) => {
+        expect(detail).toMatchObject({ typedOutcome: 'CONTRACT_VIOLATION', schedulerHandoff: true })
+        expect(currentAction?.status).toBe('cancelled')
+        expect(executor.current).toBeNull()
+        expect(controller.currentOutcome).toBeNull()
+        schedulerHandoff += 1
+      },
+    })
+    const closeReachTransition = (JevController.prototype as unknown as {
+      closeReachTransition(
+        this: JevController,
+        outcome: ReachTerminalOutcome,
+        state: ReachTransitionState,
+        boundary: string,
+        cancelIntentId: string | null,
+      ): void
+    }).closeReachTransition
+    closeReachTransition.call(adapter, typedTerminal.outcome, typedTerminal.state, 'typed-terminal', typedTerminal.cancelIntentId)
+
+    expect(schedulerHandoff).toBe(1)
+    const execution = await claim.completion
+    expect(execution.status).toBe('cancelled')
+    expect(currentAction?.status).toBe('cancelled')
+    expect(executor.current).toBeNull()
+    expect(fixture.goalClears()).toBe(1)
+    expect(fixture.pathStops()).toBe(1)
+  } finally {
+    executor.cancelCurrent('fixture teardown')
+    rmSync(logDir, { recursive: true, force: true })
+  }
 })

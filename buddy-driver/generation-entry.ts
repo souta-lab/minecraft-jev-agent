@@ -3010,6 +3010,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       runId: ctx.runId ?? null,
       generationId: id,
       sourceSha: ctx.sourceSha ?? null,
+      buildHash: ctx.buildHash ?? null,
     },
     terminateOnModelFailure: terminateResident,
     recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null,
