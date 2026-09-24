@@ -17,14 +17,10 @@
 // sibling must not cross the active row). A queued row is not a substitute for
 // the recipe-owned prerequisite expansion, so the fixture now supplies recipes.
 //
-// (1) With a placeable block held (the measured d54d9a8 live shape), the ascent
-// is feasible via the no-pickaxe pillar-up mechanic, so the prerequisite is the
-// direct RETRIEVE route.
-// (2) Without any placeable block the remembered ascent is truthfully withheld
-// as needs_ascend and the sensed-log route keeps the policy off WAIT.
-// (3) With neither a placeable block nor a sensed log, the withheld log route
-// must not reduce the policy to WAIT; the exploration fallback is aimed at the
-// log bearing rather than at the craft item.
+// A safe step cut is preferred over pillar-up when available. Without one, a
+// held placeable block grounds the pillar route and no block leaves a typed
+// needs_ascend refusal plus sensed/exploration recovery. A separate case pins
+// the no-placeable safe staircase introduced by #462.
 
 import { craftStationGap, defaultCandidateOptions, formatCraftStationGap, generateGroundedCandidates, logRouteOf, optionsWithWithheldStationRetirements } from './src/candidates.ts'
 import { createRequire } from 'node:module'
@@ -105,6 +101,7 @@ function world(
   inventoryCounts: Record<string, number> = { birch_planks: 2, stick: 2, cobblestone: 170, dirt: 37 },
   withSensedLog = true,
   extraStandable: Vec3Json[] = [],
+  withSafeUpStep = false,
 ): WorldState {
   const position = { x: 39, y: 11, z: 32 }
   const current = queuedGoal({})
@@ -189,7 +186,7 @@ function world(
     furnaces: [],
     placementSpots: [],
     descent: [],
-    stepCuts: [blockedStep],
+    stepCuts: withSafeUpStep ? [blockedStep] : [],
     headroomCuts: [],
     goal,
     goalQueue: queue(current, logGoal),
@@ -230,10 +227,7 @@ function world(
   if (!pass) process.exitCode = 1
 }
 
-// (1) The repaired live shape (FIRST_FAILED_BOUNDARY, RC d54d9a8): the same
-// underground body holds cobblestone 170, so the pillar-up mechanic reaches the
-// remembered log at (27,65,19) without a pickaxe. The craft prerequisite is a
-// direct body-moving RETRIEVE instead of a needs_ascend refusal.
+// (1) The pillar route remains available when geometry has no safe stair cut.
 {
   const grounded = generateGroundedCandidates(world(), { ...defaultCandidateOptions, recipes })
   const ids = grounded.candidates.map((candidate) => candidate.id)
@@ -255,10 +249,8 @@ function world(
   if (!pass) process.exitCode = 1
 }
 
-// (2) Without any placeable block the remembered ascent is truthfully withheld
-// as needs_ascend. The same world also senses a log 11m away, so the grounded
-// log route is the sensed-log `mine_sensed` leg: the policy is not reduced to
-// WAIT and the unreachable remembered trip is not resurrected.
+// (2) Without a placeable block or a safe stair cut, the remembered ascent is
+// truthfully withheld; the sensed log is still a grounded craft-prerequisite route.
 {
   const grounded = generateGroundedCandidates(
     world({ birch_planks: 2, stick: 2 }),
@@ -281,12 +273,8 @@ function world(
   if (!pass) process.exitCode = 1
 }
 
-// (3) With no placeable block AND no sensed log, the withheld remembered log
-// route must still not reduce the craft policy to WAIT. The exploration
-// fallback is only reached for a log need, so it must be aimed at the log
-// bearing: the log-ward frontier (36,11,32), not the nearer same-level cell
-// (41,11,32) the generic nearest-first pick would choose. This is the
-// search-direction regression `logExploreCandidates`'s #341 path introduced.
+// (3) With no placeable, sensed log, or safe stair cut, the remembered log
+// route is withheld and bounded exploration points toward the log bearing.
 {
   const grounded = generateGroundedCandidates(
     world({ birch_planks: 2, stick: 2 }, false, [{ x: 36, y: 11, z: 32 }]),
@@ -307,6 +295,31 @@ function world(
     `craft prerequisite log route (no placeable, no sensed log): ${pass ? 'PASS' : 'FAIL'} ` +
       `candidates=[${ids.join(',')}] mode=${route?.mode ?? 'none'} target=${route === null ? 'none' : `${route.target.x},${route.target.y},${route.target.z}`} ` +
       `withheld=${withheldLog?.result.reason ?? 'none'}\n`,
+  )
+  if (!pass) process.exitCode = 1
+}
+
+// (4) #462 separates clearing a known blocker from harvesting its drop. A safe
+// stone cut can be punched by hand, so a placeable block is not required for
+// this grounded staircase-up retrieval. This keeps the old ascent refusal test
+// honest without accidentally classifying mechanically valid step geometry as
+// an unavailable route.
+{
+  const grounded = generateGroundedCandidates(
+    world({ birch_planks: 2, stick: 2 }, true, [], true),
+    { ...defaultCandidateOptions, recipes },
+  )
+  const retrieve = grounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:log:b27_65_19')
+  const withheldLog = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'log')
+  const pass =
+    retrieve?.affordance?.feasible === true &&
+    retrieve.meta.vertical === 'staircase-up' &&
+    retrieve.meta.logRoute === 'ascend_then_mine' &&
+    withheldLog === undefined
+  process.stdout.write(
+    `craft prerequisite log route (safe step cut, no placeable): ${pass ? 'PASS' : 'FAIL'} ` +
+      `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] ` +
+      `vertical=${String(retrieve?.meta.vertical ?? 'none')} withheld=${withheldLog?.result.reason ?? 'none'}\n`,
   )
   if (!pass) process.exitCode = 1
 }
