@@ -33,7 +33,7 @@ import { isEdibleFoodItem } from './foodSources.ts'
 import type { FoodSourceGap, FoodSourceMissingLink } from './foodSources.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
-import { selectDigTool, strongestDigRequirement } from './toolChoice.ts'
+import { selectClearanceTool, selectDigTool, strongestDigRequirement } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
 import {
   cellKey,
@@ -6102,14 +6102,16 @@ function ascentRouteTo(
     ...verticalPlanMeta(plan, feet.y, spec.targetY),
     ...(plan.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
   }
+  const planHarvest = plan.kind === 'staircase' ? resolveHarvest(loadGameData(), plan.digName ?? '') : null
   const digTool =
     plan.kind === 'staircase'
-      ? selectDigTool(
+      ? selectClearanceTool(
           {
             name: plan.digName ?? '',
             harvestTool: plan.harvestTool ?? null,
             harvestTier: plan.harvestTier ?? null,
             diggable: true,
+            knownBlock: planHarvest !== null && planHarvest.yield !== null,
           },
           (tool, tier) => hasTool(state, tool, tier),
         )
@@ -6124,10 +6126,9 @@ function ascentRouteTo(
         target: targetCell,
         targetEntityId: null,
         itemName: null,
-        // The plan itself already proved the dig is executable (`selectUpStep`
-        // checks `canDigBlock` against the live inventory), so an up-staircase
-        // needs no separate tool gate here.
-        requiresTool: plan.kind === 'staircase',
+        // A staircase is a clearance action. The selected tool is an optional
+        // speed preference; the harvest tier controls drops, not breakability.
+        requiresTool: false,
         toolName: digTool !== null && digTool.ok ? digTool.tool : null,
         toolTier: plan.kind === 'staircase' ? plan.harvestTier : null,
         inReach: distance(targetCell, state.self.eyePosition) <= options.reach,
@@ -6139,6 +6140,7 @@ function ascentRouteTo(
           z: targetCell.z,
           ...spec.extraMeta,
           ascentTargetY: spec.targetY,
+          ...(plan.kind === 'staircase' || plan.kind === 'staircase-up' ? { clearance: true } : {}),
           ...verticalMeta,
         },
       },
@@ -6197,15 +6199,23 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  return cuts.slice(0, 2).map((cut) => {
-    // The clearance dig is a MINE like any other and must declare the harvest
-    // requirement the sensor proved for this cell. Hard-coding `requiresTool:
-    // false` advertised an executable lease for a block the bare hand cannot
-    // harvest (live 38cbb22: stone jump cell, no pickaxe of any tier, dig_timeout
-    // until move-failure memory retired the cut) and hid the tool need from the
-    // gate, so no acquisition route for the missing tool could ever be derived.
+  return cuts.slice(0, 2).flatMap((cut) => {
+    // Clearance only requires the block to be mechanically diggable. A harvest
+    // tool is an optional speed preference because these drops are not the goal.
     const barrier = cellHarvestBarrier(state, cut.pos)
-    return {
+    const profile = resolveHarvest(loadGameData(), cut.name)
+    const choice = selectClearanceTool(
+      {
+        name: cut.name,
+        harvestTool: barrier?.requiredTool ?? profile.harvestTool,
+        harvestTier: barrier?.requiredTier ?? profile.harvestTier,
+        diggable: true,
+        knownBlock: profile.yield !== null,
+      },
+      (tool, tier) => hasTool(state, tool, tier),
+    )
+    if (!choice.ok) return []
+    return [{
       id: `MINE:${blockId('b', cut.pos)}`,
       kind: 'MINE' as const,
       label: `mine the ${cut.name} ceiling block at (${cut.pos.x},${cut.pos.y},${cut.pos.z}) to open jump headroom and escape the pocket`,
@@ -6213,8 +6223,9 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
       target: cut.pos,
       targetEntityId: null,
       itemName: null,
-      requiresTool: barrier !== null,
-      toolName: barrier?.requiredTool ?? null,
+      requiresTool: false,
+      toolName: choice.tool,
+      toolTier: choice.tier,
       inReach: distance(cut.pos, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
       meta: {
@@ -6223,11 +6234,12 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
         y: cut.pos.y,
         z: cut.pos.z,
         clearance: true,
+        toolReason: choice.reason,
         requiresPickup: false,
         yieldItem: cut.name,
         distance: Math.hypot(cut.pos.x + 0.5 - feet.x, cut.pos.z + 0.5 - feet.z),
       },
-    }
+    }]
   })
 }
 
@@ -6251,9 +6263,9 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
   const scored: Array<{
     cut: NonNullable<WorldState['stepCuts']>[number]
     score: number
-    /** the cut cell's REAL harvest requirement (see `cellHarvestBarrier`) */
     tool: HarvestTool | null
     tier: number | null
+    toolReason: string
   }> = []
   const standKey = cellKey(state.self.position)
   for (const cut of cuts) {
@@ -6261,22 +6273,18 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       (block) =>
         block.position.x === cut.cut.x && block.position.y === cut.cut.y && block.position.z === cut.cut.z,
     )
-    // The cell's harvest truth comes from EVERY sensor pool, not only the resource
-    // index: a terrain cell is sensed as a CUT carrying only its name, so `known`
-    // is undefined for exactly the cells a step cut is made of. Reading only
-    // `known` declared the cut hand-diggable (requiresTool=false) and the body
-    // discovered otherwise at execution time - the live
-    // `STEP:S:b23_80_8 ... outcome=CAPABILITY_LOST failure=dig_no_tool` pair.
-    // (landed on main as f9f139f; this branch keeps that resolution verbatim)
+    // The cell's harvest truth comes from every sensor pool, not only the
+    // resource index. The registry confirms the cut name is a known block; its
+    // harvest tool remains only an optional speed preference for clearance.
     const barrier = cellHarvestBarrier(state, cut.cut)
-    const tool = barrier?.requiredTool ?? known?.harvestTool ?? null
-    const tier = barrier?.requiredTier ?? known?.harvestTier ?? null
-    // The cut is NOT dropped here when the tool is missing: it is the FACT that
-    // the step needs a tool the body lacks, and dropping it left that fact
-    // invisible - no `missing_tool` withhold, no acquisition route. The
-    // executable cuts keep their pre-existing top-2 slots (the offer is
-    // unchanged) and the unharvestable ones are emitted after them, where the
-    // dig-tool gate withholds them and the acquisition pass answers them.
+    const harvestTool = barrier?.requiredTool ?? known?.harvestTool ?? null
+    const harvestTier = barrier?.requiredTier ?? known?.harvestTier ?? null
+    const profile = resolveHarvest(loadGameData(), cut.name)
+    const choice = selectClearanceTool(
+      { name: cut.name, harvestTool, harvestTier, diggable: true, knownBlock: profile.yield !== null },
+      (candidateTool, candidateTier) => hasTool(state, candidateTool, candidateTier),
+    )
+    if (!choice.ok) continue
     // The same 1-block step cut that just proved it changes nothing from this
     // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
     // dir/step route), so a different cut or a body that moved stays offerable.
@@ -6314,17 +6322,12 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       const dot = cut.dx * Math.sign(tdx) + cut.dz * Math.sign(tdz)
       penalty = dot > 0 ? 0 : 10
     }
-    scored.push({ cut, score: penalty + distance(cut.step, state.self.position), tool, tier })
+    scored.push({ cut, score: penalty + distance(cut.step, state.self.position), tool: choice.tool, tier: choice.tier, toolReason: choice.reason })
   }
   if (scored.length === 0) return []
   scored.sort((a, b) => a.score - b.score)
 
-  // Executable cuts keep the pre-existing top-2 slots; the unharvestable ones
-  // follow as fact-carrying candidates (see the loop note above).
-  const executable = scored.filter((entry) => hasTool(state, entry.tool, entry.tier))
-  const blocked = scored.filter((entry) => !hasTool(state, entry.tool, entry.tier))
-
-  return [...executable.slice(0, 2), ...blocked.slice(0, 2)].map(({ cut, tool, tier }) => {
+  return scored.slice(0, 2).map(({ cut, tool, tier, toolReason }) => {
     return {
       id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
       kind: 'STEP' as const,
@@ -6333,7 +6336,7 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
       target: cut.cut,
       targetEntityId: null,
       itemName: null,
-      requiresTool: tool !== null,
+      requiresTool: false,
       toolName: tool,
       toolTier: tier,
       inReach: distance(cut.cut, state.self.eyePosition) <= options.reach,
@@ -6348,6 +6351,8 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
         stepY: cut.step.y,
         stepZ: cut.step.z,
         diggable: true,
+        clearance: true,
+        toolReason,
         // This arm builds the SAME kind of step cut as its sibling above (it removes
         // the cell it cuts into), so it must declare the dig for the same reason: the
         // commitment's EffectEnvelope derives mayDigGroundedRoute from a declared dig,
@@ -6668,6 +6673,7 @@ function strictStepDigProfile(
   primary: Vec3Json
   requirement: ReturnType<typeof strongestDigRequirement> | null
   choice: ReturnType<typeof selectDigTool>
+  clearanceChoice: ReturnType<typeof selectClearanceTool>
 } {
   const digPlan = descentDigPlan(step)
   const primary = descentPrimaryCell(step)
@@ -6702,7 +6708,18 @@ function strictStepDigProfile(
     },
     (tool, tier) => hasTool(state, tool, tier),
   )
-  return { digPlan, primary, requirement, choice }
+  const requirementHarvest = resolveHarvest(loadGameData(), requirement.name ?? '')
+  const clearanceChoice = selectClearanceTool(
+    {
+      name: requirement.name ?? '',
+      harvestTool: requirement.harvestTool ?? null,
+      harvestTier: requirement.harvestTier ?? null,
+      diggable: requirement.diggable === true,
+      knownBlock: requirementHarvest.yield !== null,
+    },
+    (tool, tier) => hasTool(state, tool, tier),
+  )
+  return { digPlan, primary, requirement, choice, clearanceChoice }
 }
 
 /** A descent's entire dig profile must preserve stations and live structures. */
@@ -6731,7 +6748,8 @@ function protectedStepProfileRefusal(
  * (`columnDescentCandidates`), so a body descending toward a resource and a body
  * descending off its own support column execute through exactly the same
  * mechanics, guard and postcondition. Returns null when the step's block needs a
- * harvest tool the body does not hold; the caller owns the typed reason.
+ * known, mechanically diggable block; a harvest tool is only an optional
+ * speed preference because route clearance does not require the block's drops.
  */
 function descendCandidateFromStep(
   state: WorldState,
@@ -6745,15 +6763,6 @@ function descendCandidateFromStep(
     /** the selected heading and any typed obstruction being crossed */
     heading?: DescentHeadingPlan
     extraMeta?: Record<string, string | number | boolean>
-    /**
-     * A stranded body's own-column ESCAPE dig. Such a step is gated on whether the block can be
-     * broken at all (`diggable`), not on the harvest tool that yields DROPS: leaves are
-     * hand-breakable but their harvest tool is shears/hoe, and refusing the step for that reason
-     * left a body inside an oak-leaf canopy (world truth: 151 oak_leaves around it) with
-     * `explore_route_blocked:no_frontier` and no route out at all - the run could not reach the
-     * known furnace 7 blocks below. Goal-directed mining keeps the strict drop-tool gate.
-     */
-    escape?: boolean
   },
 ): { candidate: Candidate; toolReason: string } | null {
   const profile = strictStepDigProfile(state, best)
@@ -6763,21 +6772,8 @@ function descendCandidateFromStep(
   if (protectedStepProfileRefusal(state, profile) !== null) return null
   const digPlan = profile.digPlan
   const primary = profile.primary
-  // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
-  // broken at all (obsidian), and the state carries no hardness/hand-break fact to tell the two apart -
-  // so case (c2) (a step needing a pickaxe tier the body lacks) must keep refusing. Every other
-  // harvest tool only decides DROPS (leaves: shears/hoe, logs: axe, dirt/sand: shovel), so for a
-  // stranded body's escape step the dig is offered and the block is simply broken without its drop.
-  // The relaxation covers the WHOLE profile: a step whose passage cell is pickaxe-gated is refused
-  // like any other pickaxe gate, because an escape the body cannot finish is not an escape.
-  const escapeBreakable =
-    spec.escape === true &&
-    digPlan.every((item) => item.diggable && (item.harvestTool ?? null) !== 'pickaxe')
-  const requirement = escapeBreakable ? null : profile.requirement
-  const choice =
-    requirement === null
-      ? { ok: true as const, tool: null, tier: null, reason: 'escape_breakable_without_drop_tool' }
-      : profile.choice
+  const requirement = profile.requirement
+  const choice = profile.clearanceChoice
   if (!choice.ok) return null
   const toward =
     spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
@@ -6794,7 +6790,7 @@ function descendCandidateFromStep(
       target: primary,
       targetEntityId: null,
       itemName: null,
-      requiresTool: choice.tool !== null,
+      requiresTool: false,
       toolName: choice.tool,
       toolTier: choice.tier,
       inReach: distance(primary, state.self.eyePosition) <= options.reach,
@@ -6821,6 +6817,7 @@ function descendCandidateFromStep(
         descendTargetY: spec.descendTargetY ?? 'none',
         digBlockName: best.digName ?? 'unknown',
         toolReason: choice.reason,
+        clearance: true,
         staircase: spec.staircase,
         stepX: best.step.x,
         stepY: best.step.y,
@@ -6981,8 +6978,6 @@ function columnDescentCandidates(
               ...(terminalOutcome === null ? {} : { skillOutcome: terminalOutcome }),
             }),
       },
-      // This is the body's only way off its own support column: gate it on breakability, not drops.
-      escape: true,
     })
     if (built === null) toolRefusal ??= step
     else candidates.push(built.candidate)
@@ -10000,11 +9995,6 @@ function digRouteCandidate(
       digRouteLine: formatDigRoute(route, spec.reason, spec.target),
       ...(spec.extraMeta ?? {}),
     },
-    // The STRICT tool gate (no escape relaxation): a tunnel the body cannot
-    // finish must be refused with `no_tool`, never offered and then re-aimed
-    // forever. A stranded-body escape dig is a different action with its own
-    // relaxation (`columnDescentCandidates`).
-    escape: false,
   })
   if (built === null) {
     refusals.push({
@@ -10031,8 +10021,8 @@ function digRouteCandidate(
 /**
  * The ONE gate a dig step's whole 1x2 profile must pass before it may be a route:
  * #436 U5 (a protected station / a live structure's member is never mined as a route)
- * and the STRICT tool gate (a profile the held tools cannot finish is refused with
- * `no_tool`). Shared by the descent dig route and the wall entry so a step the
+ * and the mechanical clearance gate (an unknown/non-diggable profile is refused).
+ * Shared by the descent dig route and the wall entry so a step the
  * builder would refuse can never be the route either - the disagreement that arm
  * exists to prevent.
  */
@@ -10050,12 +10040,12 @@ function stepGateRefusal(
   if (protectedRefusal !== null) {
     return { reason: 'protected', ...protectedRefusal }
   }
-  if (profile.choice.ok) return null
+  if (profile.clearanceChoice.ok) return null
   const requirement = profile.requirement
   return {
     reason: 'no_tool',
     block: requirement?.name ?? step.digName ?? null,
-    detail: `${requirement?.name ?? 'the binding block'} needs ${requirement?.harvestTool ?? 'a tool'} tier ${requirement?.harvestTier ?? 0}`,
+    detail: `cannot prove clearance for ${requirement?.name ?? 'the binding block'} (${profile.clearanceChoice.reason})`,
   }
 }
 
@@ -10168,9 +10158,6 @@ function wallEntryCandidates(
         }),
         ...(spec.extraMeta ?? {}),
       },
-      // The STRICT tool gate: an entry the body cannot finish is refused with
-      // `no_tool`, never offered and then re-aimed forever.
-      escape: false,
     })
     if (built === null) {
       refusals.push({
@@ -10805,7 +10792,6 @@ function levelScanCandidates(
       }),
       ...(spec.extraMeta ?? {}),
     },
-    escape: false,
   })
   if (built === null) {
     refusals.push({
@@ -12629,6 +12615,10 @@ function declaredDigToolRefusal(
   state: WorldState,
   candidate: Candidate,
 ): { barrier: ReachabilityBarrier; capability: Capability } | null {
+  // This typed action removes a known blocker without requiring its drop. Its
+  // candidate was already grounded from the sensor's `safe`/`diggable` fact;
+  // harvest-tool acquisition is relevant only to resource-yield actions.
+  if (candidate.meta.clearance === true) return null
   for (const cell of declaredDigCells(candidate)) {
     const barrier = cellHarvestBarrier(state, cell)
     if (barrier === null) continue
@@ -13474,6 +13464,7 @@ function evaluateMineCandidate(
       return reachabilityRecord(candidate, target, world, result, context)
     }
   }
+  if (candidate.meta.clearance === true) return null
   const barrier = barrierForCandidate(context.state, candidate)
   if (barrier === null) return null
   const missing = missingToolCapability(barrier, context.state.inventory.counts)
@@ -13733,8 +13724,8 @@ export function deriveReachabilityAbilities(
 
   // A plan counts as an available ascend only when it is mechanically
   // executable NOW: a pillar needs a supported, safe column with jump headroom;
-  // an up-staircase needs the held tool for the block it cuts, or the executor
-  // would walk into a dig it cannot finish (`RETRIEVE staircase cannot dig`).
+  // an up-staircase needs a known clearance block, but not the harvest tool for
+  // drops the route does not require.
   const explicitPlanAvailable =
     plan !== null &&
     (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
@@ -13751,29 +13742,13 @@ export function deriveReachabilityAbilities(
     if (column.placeable === null) ascendMissing.push({ kind: 'placeable_block' })
     if (!column.headroomClear) {
       // The blocked jump cell is the binding immediate fact; the acquisition
-      // pass offers its clearance. That clearance is only executable with the
-      // cell's own harvest requirement, so when the requirement is not held the
-      // SAME fact is named as a missing tool - the acquisition pass then has a
-      // capability it can route to (craft/collect), instead of an undiggable
-      // lease that can only time out.
+      // pass offers its mechanical clearance. Harvest-tool requirements apply
+      // only when the action needs this block's drops, which headroom clearance
+      // does not.
       ascendMissing.push({ kind: 'headroom', cell: column.headroomCell })
-      const cell = column.headroomCell
-      // The clearance cell is TERRAIN: the scanner's resource index usually has
-      // no entry for it, so its harvest requirement comes from the same
-      // cell-level truth the gate uses. Without this the fact carried no tool at
-      // all (`missing=[headroom@27,62,15] tools=[]`) and the acquisition pass had
-      // no `{kind:'tool'}` to answer with - the measured freeze.
-      const blocker = cell === null ? null : cellHarvestBarrier(state, cell)
-      const blockerTool = blocker?.requiredTool ?? null
-      if (blockerTool !== null) {
-        const tier = blocker?.requiredTier ?? 0
-        if (bestToolTier(counts, blockerTool) < tier) {
-          ascendMissing.push({ kind: 'tool', tool: blockerTool, tier })
-        }
-      }
     } else if (ascent.kind === 'refuse') {
       // Name the specific absent fact (`safe_column:no_clearance@x,y,z` /
-      // `safe_column:no_tool@x,y,z:pickaxe@n`) instead of a bare token.
+      // `safe_column:no_tool@x,y,z`) instead of a bare token.
       const requiredTool = ascent.blocker?.requiredTool ?? null
       ascendMissing.push({
         kind: 'safe_column',
@@ -13782,9 +13757,6 @@ export function deriveReachabilityAbilities(
         tool: requiredTool,
         tier: ascent.blocker?.requiredTier ?? null,
       })
-      if (ascent.reason === 'no_tool' && requiredTool !== null) {
-        ascendMissing.push({ kind: 'tool', tool: requiredTool, tier: ascent.blocker?.requiredTier ?? 0 })
-      }
     }
     if (ascendMissing.length === 0) {
       // Nothing else named a fact, and a bare `ascend_plan` would hide WHICH

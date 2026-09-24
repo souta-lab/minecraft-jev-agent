@@ -410,7 +410,7 @@ addCase('an unsafe step-cut does not ground an upward staircase', () => {
 // chosen when `canDigBlock` proves the dig executable, so the pillar fallback
 // gets its chance and the soft classes never require a pickaxe.
 
-addCase('a stone step-cut without a pickaxe falls through to the pillar fallback', () => {
+addCase('a stone step-cut without a pickaxe remains a valid clearance staircase', () => {
   const feet = { x: 39, y: 31, z: 33 }
   const plan = planVerticalApproach({
     selfFeetY: feet.y,
@@ -423,14 +423,14 @@ addCase('a stone step-cut without a pickaxe falls through to the pillar fallback
     inventory: inventory({ cobblestone: 119 }).counts,
   })
   const pass =
-    plan?.kind === 'pillar' &&
-    plan.placeName === 'cobblestone' &&
+    plan?.kind === 'staircase-up' &&
+    plan.digName === 'stone' &&
     plan.fromY === 31 &&
     plan.toY === 36
   return { pass, detail: JSON.stringify(plan) }
 })
 
-addCase('a stone step-cut without a pickaxe AND without a placeable yields no upward plan', () => {
+addCase('a stone clearance staircase needs no pillar block or harvest tool', () => {
   const feet = { x: 39, y: 31, z: 33 }
   const plan = planVerticalApproach({
     selfFeetY: feet.y,
@@ -442,7 +442,7 @@ addCase('a stone step-cut without a pickaxe AND without a placeable yields no up
     placeable: null,
     inventory: inventory({ birch_planks: 2 }).counts,
   })
-  return { pass: plan === null, detail: JSON.stringify(plan) }
+  return { pass: plan?.kind === 'staircase-up' && plan.digName === 'stone', detail: JSON.stringify(plan) }
 })
 
 addCase('a dirt step-cut is diggable by hand without a pickaxe (soft class)', () => {
@@ -764,7 +764,7 @@ addCase('a diggable ceiling block is cleared and the pillar step then proceeds (
     diggable: true,
     fluidOrHazard: false,
     floodRisk: false,
-    toolOk: true,
+    canClear: true,
   })
   const noObstacle = classifyHeadroomBlocker(null)
   const step = evaluatePillarStep({
@@ -787,18 +787,18 @@ addCase('a diggable ceiling block is cleared and the pillar step then proceeds (
   }
 })
 
-addCase('an undiggable ceiling refuses with the typed marker and offers the adjacent open column', () => {
+addCase('a truly undiggable ceiling refuses while the adjacent open column remains available', () => {
   const ceiling = { x: 40, y: 9, z: 31 }
   const feet = { x: 40, y: 8, z: 31 }
-  // Live inventory: cobblestone x62 and no pickaxe -> selectDigTool refuses the
-  // stone-family ceiling, which used to be a silent `false` from clearPillarHeadroom.
+  // The live block fact says this ceiling cannot be broken; missing a pickaxe
+  // alone is not a clearance refusal.
   const decision = classifyHeadroomBlocker({
     cell: ceiling,
     name: 'cobblestone',
-    diggable: true,
+    diggable: false,
     fluidOrHazard: false,
     floodRisk: false,
-    toolOk: false,
+    canClear: false,
   })
   const marker =
     decision.kind === 'refuse'
@@ -814,8 +814,8 @@ addCase('an undiggable ceiling refuses with the typed marker and offers the adja
   const fallback = selectPillarFallbackColumn(probes, feet)
   const pass =
     decision.kind === 'refuse' &&
-    decision.reason === 'needs_tool' &&
-    marker === 'PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31 cause=needs_tool' &&
+    decision.reason === 'not_diggable' &&
+    marker === 'PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31 cause=not_diggable' &&
     fallback !== null &&
     fallback.x === 40 &&
     fallback.y === 8 &&
@@ -833,7 +833,7 @@ addCase('fluid, flood-risk and unbreakable ceilings refuse with their own causes
     diggable: false,
     fluidOrHazard: true,
     floodRisk: true,
-    toolOk: false,
+    canClear: false,
   })
   const flood = classifyHeadroomBlocker({
     cell: { x: 40, y: 10, z: 31 },
@@ -841,7 +841,7 @@ addCase('fluid, flood-risk and unbreakable ceilings refuse with their own causes
     diggable: true,
     fluidOrHazard: false,
     floodRisk: true,
-    toolOk: true,
+    canClear: true,
   })
   const unbreakable = classifyHeadroomBlocker({
     cell: { x: 40, y: 9, z: 31 },
@@ -849,7 +849,7 @@ addCase('fluid, flood-risk and unbreakable ceilings refuse with their own causes
     diggable: false,
     fluidOrHazard: false,
     floodRisk: false,
-    toolOk: false,
+    canClear: false,
   })
   const pass =
     fluid.kind === 'refuse' &&
@@ -916,12 +916,12 @@ addCase('the live pocket marker sequence pins refusal, relocation and the execut
     reason: 'no_headroom',
     cell: { x: 40, y: 8, z: 31 },
     obstacle,
-    cause: 'needs_tool',
+    cause: 'not_clearable',
   })
   const relocate = formatPillarRelocate({ x: 40, y: 8, z: 31 }, { x: 40, y: 8, z: 32 }, obstacle)
   const step = formatPillarUpStep(1, 8, 9, 'cobblestone')
   const pass =
-    refused === 'PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31 cause=needs_tool' &&
+    refused === 'PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31 cause=not_clearable' &&
     relocate === 'PILLAR_RELOCATE from=40,8,31 to=40,8,32 obstacle=cobblestone@40,9,31' &&
     step === 'PILLAR_UP_STEP step=1 from_y=8 to_y=9 placed=cobblestone'
   return { pass, detail: `${refused} | ${relocate} | ${step}` }
@@ -1147,7 +1147,7 @@ const blockedBy = (cell: Vec3Json, name: string, ok = true): TunnelEntryBlockerP
   diggable: ok,
   fluidOrHazard: false,
   floodRisk: false,
-  toolOk: ok,
+  canClear: ok,
 })
 
 addCase('a reused tunnel whose entry is blocked yields the clearance step, never a blind waypoint', () => {
@@ -1209,7 +1209,7 @@ addCase('a blocked waypoint 1.5 m away produces a local clearance attempt, not p
     pathFailed: true,
     distanceToTunnel: 1.5,
     approachBlockages: [
-      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, canClear: true },
       { cell: { x: 32, y: 35, z: 35 }, passable: true },
     ],
   })
@@ -1218,7 +1218,7 @@ addCase('a blocked waypoint 1.5 m away produces a local clearance attempt, not p
     pathFailed: true,
     distanceToTunnel: LOCAL_CLEAR_RADIUS + 5,
     approachBlockages: [
-      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, canClear: true },
     ],
   })
   const multiple = planReuseLeg({
@@ -1226,8 +1226,8 @@ addCase('a blocked waypoint 1.5 m away produces a local clearance attempt, not p
     pathFailed: true,
     distanceToTunnel: 1.5,
     approachBlockages: [
-      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
-      { cell: { x: 31, y: 36, z: 35 }, passable: false, name: 'stone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, canClear: true },
+      { cell: { x: 31, y: 36, z: 35 }, passable: false, name: 'stone', diggable: true, fluidOrHazard: false, floodRisk: false, canClear: true },
     ],
   })
   const pass =
@@ -1372,13 +1372,13 @@ addCase('the safe_column fact: a clearable column with the held tool is satisfie
       decision.cell.x === 32 &&
       decision.cell.y === 35 &&
       decision.blocker.name === 'cobblestone' &&
-      decision.blocker.toolOk &&
+      decision.blocker.canClear &&
       decision.blocker.requiredTool === 'pickaxe',
     detail: JSON.stringify(decision),
   }
 })
 
-addCase('the safe_column fact: clearable geometry without the tool refuses as no_tool', () => {
+addCase('the safe_column fact: clearable geometry remains available without a harvest tool', () => {
   const feet = { x: 31, y: 34, z: 37 }
   const cut: StepCut = {
     dir: 'E',
@@ -1400,8 +1400,8 @@ addCase('the safe_column fact: clearable geometry without the tool refuses as no
   })
   return {
     pass:
-      decision.kind === 'refuse' &&
-      decision.reason === 'no_tool' &&
+      decision.kind === 'clearable' &&
+      decision.blocker?.canClear === true &&
       decision.cell.x === 32 &&
       decision.blocker?.requiredTool === 'pickaxe' &&
       decision.blocker?.requiredTier === 0,
@@ -1511,7 +1511,7 @@ addCase('the safe_column fact: a shovel/axe cut still clears by hand (no false n
     inventory: inventory({}).counts,
   })
   return {
-    pass: decision.kind === 'clearable' && decision.blocker.toolOk,
+    pass: decision.kind === 'clearable' && decision.blocker.canClear,
     detail: JSON.stringify(decision),
   }
 })

@@ -1,8 +1,6 @@
-// test-acquisition-route.mts - THE ACQUISITION ROUTE for a withheld mechanical
-// fact: "a grounded candidate is withheld because a mechanical precondition is
-// absent; the precondition is obtainable from the world or from carried
-// materials; therefore a grounded acquisition route exists and must be offered
-// (or a typed, actionable refusal must be reported)".
+// test-acquisition-route.mts - acquisition routes apply to required harvest
+// outputs and other real preconditions. A clearance dig consumes no drops, so
+// its block's harvest-tool requirement must not create a fake tool prerequisite.
 //
 // THE MEASURED LIVE SHAPE (main 38cbb22, the operator's floated-portal trial):
 //
@@ -18,16 +16,9 @@
 //      (flint_and_steel 1, flint 4, diamond_sword 1, iron_ingot 2, raw_iron 2,
 //      furnace 1, oak_log 81, cobblestone 177, dirt 128, soul_soil 222).
 //
-// The clearance cell is TERRAIN, so the scanner's resource index did not carry
-// it; the tool need was therefore never derived (`tools=[]`), the clearance MINE
-// advertised `requiresTool=false`, and the lease dug the block bare-handed into
-// `dig_timeout` until move-failure memory retired the cut - after which the
-// missing fact had no acquisition route at all and nothing in the run turned
-// "the climb needs the cell above cleared" into "get a tool".
-//
-// The cases below pin the general contract, not the incident: no coordinate, no
-// milestone ordering and no "if the goal is the portal then ..." appears in the
-// implementation. The withheld candidate STAYS withheld in every case.
+// The route's headroom MINE is tagged `clearance`, carries an optional speed
+// tool, and is executable without that harvest tool. The cases below also keep
+// strict tool acquisition coverage for resource harvests and required drops.
 //
 //   bun ./test-acquisition-route.mts
 import { createRequire } from 'node:module'
@@ -204,52 +195,44 @@ function entryCandidate(): Candidate {
 const options = { ...defaultCandidateOptions, recipes }
 
 // ---------------------------------------------------------------------------
-// (i) THE MEASURED LIVE SHAPE: an ascend withheld for a headroom cell whose
-//     clearance needs a tool that is craftable from carried materials.
+// (i) THE MEASURED SHAPE: the ascend remains withheld until headroom is cleared,
+//     while its grounded clearance action is offered without a drop-tool gate.
 // ---------------------------------------------------------------------------
-addCase('(i) an ascend withheld for a headroom cell names the tool the clearance needs', () => {
+addCase('(i) an ascend names headroom while its clearance is offered without a pickaxe', () => {
   const state = liveState({ inventory: { cobblestone: 177, oak_log: 81, flint: 4 } })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = withheldEntry(gate, 'ENTER:26,67,9')
   const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
+  const clearance = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
     pass:
       entry !== null &&
       entry.result.reason === 'needs_ascend' &&
       missing.includes('headroom@27,62,15') &&
-      // THE BREAK: this tool fact is what the measured run never had (`tools=[]`).
-      missing.includes('tool:pickaxe@0'),
-    detail: `reason=${entry?.result.reason ?? 'offered'} missing=[${missing.join(',')}]`,
+      !missing.some((capability) => capability.startsWith('tool:')) &&
+      clearance !== undefined &&
+      clearance.requiresTool === false &&
+      clearance.toolName === null,
+    detail: `reason=${entry?.result.reason ?? 'offered'} missing=[${missing.join(',')}] clearance=${clearance?.id ?? 'none'} requiresTool=${clearance?.requiresTool}`,
   }
 })
 
-addCase('(i) the acquisition pass offers a grounded craft route for the missing tool', () => {
+addCase('(i) the acquisition pass does not bootstrap a tool for a clearance-only blocker', () => {
   const state = liveState({ inventory: { cobblestone: 177, oak_log: 81, flint: 4 } })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = withheldEntry(gate, 'ENTER:26,67,9')
-  const fact = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
-  const productive = gate.candidates.filter(
-    (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
+  const toolFacts = entry?.acquisition?.filter((fact) => fact.missing.startsWith('tool:')) ?? []
+  const toolRoutes = gate.candidates.filter(
+    (candidate) => typeof candidate.meta.missingCapability === 'string' && candidate.meta.missingCapability.startsWith('tool:'),
   )
-  // The route must be a candidate Jev can CHOOSE (not a marker), and it must be
-  // the acquisition for the missing tool - never the withheld entry itself.
-  const crafted = productive.filter((candidate) => candidate.meta.capabilityAcquisition === true)
   return {
-    pass:
-      fact !== null &&
-      fact.routes.length > 0 &&
-      crafted.length > 0 &&
-      crafted.every((candidate) => candidate.meta.missingCapability === 'tool:pickaxe@0') &&
-      entry?.withheld === true,
-    detail: `routes=[${(fact?.routes ?? []).join(',')}] tools=${fact?.tools ?? 'none'} offered=[${productive.map((c) => c.id).join(',')}]`,
+    pass: entry?.withheld === true && toolFacts.length === 0 && toolRoutes.length === 0,
+    detail: `withheld=${entry?.withheld ?? false} missing=[${(entry?.result.missingCapabilities ?? []).map(capabilityKey).join(',')}] toolFacts=${toolFacts.length} toolRoutes=${toolRoutes.map((c) => c.id).join(',') || 'none'}`,
   }
 })
 
-addCase('(i) executing the acquisition route makes the withheld entry offerable again', () => {
-  // The mechanical effect of the offered route: the body ends up holding a
-  // pickaxe and the headroom cell is cleared (that is what the craft route plus
-  // the MINE lease it points at produce). No other fact is changed.
-  const state = liveState({ inventory: { cobblestone: 177, oak_log: 81, wooden_pickaxe: 1 } })
+addCase('(i) clearing headroom makes the entry offerable without a pickaxe', () => {
+  const state = liveState({ inventory: { cobblestone: 177, oak_log: 81 } })
   state.headroomCuts = []
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = withheldEntry(gate, 'ENTER:26,67,9')
@@ -260,50 +243,40 @@ addCase('(i) executing the acquisition route makes the withheld entry offerable 
 })
 
 // ---------------------------------------------------------------------------
-// (ii) THE SAME SHAPE WITH NO OBTAINABLE MATERIAL: typed refusal naming the
-//      missing item and count, and no doomed attempt.
+// (ii) An unobserved clearance cell is refused as missing world truth, not
+//      misreported as a missing harvest tool.
 // ---------------------------------------------------------------------------
-addCase('(ii) no obtainable material yields a typed refusal naming item and count', () => {
-  // Cobblestone is held (so the pillar's placeable fact is satisfied) and no log,
-  // plank or station exists anywhere: the tool cannot be made.
-  const state = liveState({ inventory: { cobblestone: 177, flint: 4, dirt: 128 } })
+addCase('(ii) unread clearance has a typed refusal and no tool-acquisition route', () => {
+  const state = liveState({
+    inventory: { cobblestone: 177, flint: 4, dirt: 128 },
+    headroomCuts: [{ pos: HEAD_CELL, name: 'unknown', safe: false, reason: 'unloaded/unknown', currentFootprint: true }],
+  })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = withheldEntry(gate, 'ENTER:26,67,9')
-  const fact = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
-  const line = entry === null || fact === null ? null : formatCandidateAcquisitionRefused('ENTER:26,67,9', fact)
+  const fact = entry === null ? null : acquisitionFor(entry, 'headroom@27,62,15')
+  const toolFacts = entry?.acquisition?.filter((candidate) => candidate.missing.startsWith('tool:')) ?? []
   return {
     pass:
-      fact !== null &&
-      fact.routes.length === 0 &&
-      fact.reason === 'no_material' &&
-      typeof fact.item === 'string' &&
-      (fact.count ?? 0) >= 1 &&
-      line !== null &&
-      line.includes(`item=${fact.item}`) &&
-      line.includes(`count=${fact.count}`),
-    detail: line ?? `routes=[${(fact?.routes ?? []).join(',')}]`,
+      entry !== null &&
+      fact?.reason === 'cell_unread' &&
+      entry.result.reason === 'needs_ascend' &&
+      gate.candidates.every((candidate) => candidate.meta.clearance !== true) &&
+      toolFacts.length === 0,
+    detail: `reason=${entry?.result.reason ?? 'offered'} headroom=${fact?.reason ?? 'none'} clearance=${gate.candidates.some((candidate) => candidate.meta.clearance === true)} toolFacts=${toolFacts.length}`,
   }
 })
 
-addCase('(ii) no attempt: the undiggable clearance cell is withheld, never offered', () => {
-  const state = liveState({ inventory: { cobblestone: 177, flint: 4, dirt: 128 } })
+addCase('(ii) a safe-looking cut with an unregistered block name is not offered', () => {
+  const state = liveState({
+    inventory: { cobblestone: 177, flint: 4, dirt: 128 },
+    headroomCuts: [
+      { pos: HEAD_CELL, name: 'modded_unlisted_block', safe: true, reason: 'safe', currentFootprint: true },
+    ],
+  })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
-  const clearance = gate.candidates.find((candidate) => candidate.meta.clearance === true)
-  const withheldClearance = gate.withheld.find((entry) => entry.candidate.meta.clearance === true)
-  const starvation = candidateStarvationLine(
-    gate.candidates,
-    'place:nether_portal:1',
-    false,
-    'no_productive_action',
-    candidateStarvationMissing(gate.withheld),
-  )
   return {
-    pass:
-      clearance === undefined &&
-      withheldClearance !== undefined &&
-      withheldClearance.result.reason === 'missing_tool' &&
-      starvation !== null,
-    detail: `offeredClearance=${clearance?.id ?? 'none'} withheldClearance=${withheldClearance?.result.reason ?? 'none'} starvation=${starvation ?? 'none'}`,
+    pass: !gate.candidates.some((candidate) => candidate.meta.clearance === true),
+    detail: `clearance=${gate.candidates.find((candidate) => candidate.meta.clearance === true)?.id ?? 'none'} offer=[${gate.candidates.map((candidate) => candidate.id).join(',')}]`,
   }
 })
 
@@ -372,7 +345,7 @@ addCase('(iv) a satisfied precondition changes nothing (byte-identical offer)', 
   }
 })
 
-addCase('(iv) a held tool keeps the clearance cell offerable and invents no tool route', () => {
+addCase('(iv) holding a pickaxe only changes the optional clearance speed tool', () => {
   const state = liveState({ inventory: { cobblestone: 177, oak_log: 81, stone_pickaxe: 1 } })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = withheldEntry(gate, 'ENTER:26,67,9')
@@ -382,7 +355,7 @@ addCase('(iv) a held tool keeps the clearance cell offerable and invents no tool
   return {
     pass:
       clearance !== undefined &&
-      clearance.requiresTool === true &&
+      clearance.requiresTool === false &&
       clearance.toolName === 'pickaxe' &&
       missing.includes('headroom@27,62,15') &&
       !missing.some((key) => key.startsWith('tool:')) &&
@@ -492,7 +465,7 @@ addCase('(vii) the assembled offer for the live shape is not a WAIT/ESCALATE sta
   }
 })
 
-addCase('(vii) the no-material shape keeps the starvation AND names the item it needs', () => {
+addCase('(vii) a stone clearance remains productive without material/tool starvation', () => {
   const state = liveState({ inventory: { cobblestone: 177, flint: 4, dirt: 128 } })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const line = candidateStarvationLine(
@@ -502,27 +475,20 @@ addCase('(vii) the no-material shape keeps the starvation AND names the item it 
     'no_productive_action',
     candidateStarvationMissing(gate.withheld),
   )
-  const refusals = gate.withheld.flatMap((entry) => (entry.acquisition ?? []).filter((fact) => fact.routes.length === 0))
+  const clearance = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
     pass:
-      line !== null &&
-      refusals.some((fact) => fact.reason === 'no_material' && fact.item !== null && (fact.count ?? 0) >= 1),
-    detail: `starvation=${line ?? 'none'} refusals=[${refusals.map((f) => `${f.missing}:${f.reason}:${f.item}x${f.count}`).join(',')}]`,
+      line === null &&
+      clearance !== undefined &&
+      clearance.requiresTool === false &&
+      !gate.withheld.some((entry) => (entry.acquisition ?? []).some((fact) => fact.missing.startsWith('tool:'))),
+    detail: `starvation=${line ?? 'none'} clearance=${clearance?.id ?? 'none'} requiresTool=${clearance?.requiresTool}`,
   }
 })
 
 // ---------------------------------------------------------------------------
-// (viii) THE STEP (step-cut) DIG ARM - the second live reading of the same
-//        property, measured as a COMMITTED dig that failed at execution:
-//          SKILL_END actionId=STEP:S:b23_80_8 outcome=CAPABILITY_LOST
-//          failure=dig_no_tool policyBoundary=true
-//        The cut cell is TERRAIN, so the scanner's resource index has no entry
-//        for it: the arm used to read the truth from `state.blocks`, resolve "no
-//        tool required" and hand the STEP to Jev, which only found out inside the
-//        executor. The property is the same one, for every dig arm: a candidate
-//        whose execution needs a tool the body lacks must be withheld
-//        `missing_tool` BEFORE it is leased, with the acquisition route (or the
-//        typed refusal) offered instead.
+// (viii) The step-cut action is clearance too. It may use a held tool as a speed
+//        preference, but its route does not need harvest drops.
 // ---------------------------------------------------------------------------
 const STEP_CUT: NonNullable<WorldState['stepCuts']>[number] = {
   dir: 'S',
@@ -572,57 +538,41 @@ const stepWithheld = (gate: { withheld: CandidateReachability[] }): CandidateRea
 const stepOffered = (gate: { candidates: Candidate[] }): Candidate | undefined =>
   gate.candidates.find((candidate) => candidate.kind === 'STEP')
 
-addCase('(viii) a step cut whose cell needs a tool is withheld missing_tool before lease', () => {
+addCase('(viii) a stone step cut is offered as clearance without a pickaxe', () => {
   const gate = applyReachabilityGate([approachlessMove()], stepState({ oak_log: 81, cobblestone: 177 }), options)
   const withheld = stepWithheld(gate)
-  const missing = (withheld?.result.missingCapabilities ?? []).map(capabilityKey)
+  const offered = stepOffered(gate)
   return {
     pass:
-      withheld !== null &&
-      withheld.candidate.id === 'STEP:S:b23_80_8' &&
-      withheld.result.reason === 'missing_tool' &&
-      missing.includes('tool:pickaxe@0') &&
-      // never leased: the STEP is not in the offer at all
-      stepOffered(gate) === undefined,
-    detail: `withheld=${withheld?.candidate.id ?? 'none'}:${withheld?.result.reason ?? '-'} missing=[${missing.join(',')}] offeredStep=${stepOffered(gate)?.id ?? 'none'}`,
+      offered !== undefined &&
+      offered.id === 'STEP:S:b23_80_8' &&
+      offered.meta.clearance === true &&
+      offered.requiresTool === false &&
+      withheld === null,
+    detail: `offered=${offered?.id ?? 'none'} clearance=${offered?.meta.clearance} requiresTool=${offered?.requiresTool} withheld=${withheld?.result.reason ?? 'none'}`,
   }
 })
 
-addCase('(viii) the withheld step cut gets its grounded acquisition route in the same tick', () => {
-  const gate = applyReachabilityGate([approachlessMove()], stepState({ oak_log: 81, cobblestone: 177 }), options)
-  const withheld = stepWithheld(gate)
-  const fact = withheld === null ? null : acquisitionFor(withheld, 'tool:pickaxe@0')
-  const routes = (fact?.routes ?? []).map((id) => gate.candidates.find((candidate) => candidate.id === id))
+addCase('(viii) a held pickaxe is an optional speed tool for the step cut', () => {
+  const gate = applyReachabilityGate(
+    [approachlessMove()],
+    stepState({ oak_log: 81, cobblestone: 177, wooden_pickaxe: 1 }),
+    options,
+  )
+  const offered = stepOffered(gate)
   return {
-    pass:
-      fact !== null &&
-      fact.reason === null &&
-      fact.routes.length > 0 &&
-      routes.some((candidate) => candidate?.meta.capabilityAcquisition === true && candidate.meta.missingCapability === 'tool:pickaxe@0'),
-    detail: `withheld=${withheld?.candidate.id ?? 'none'} routes=[${(fact?.routes ?? []).join(',')}] tools=${fact?.tools ?? '-'}`,
+    pass: offered !== undefined && offered.requiresTool === false && offered.toolName === 'pickaxe',
+    detail: `offered=${offered?.id ?? 'none'} requiresTool=${offered?.requiresTool} tool=${offered?.toolName ?? 'none'}`,
   }
 })
 
-addCase('(viii) no obtainable material and no world route yields the typed refusal, not an attempt', () => {
-  // Nothing but the body's own cell: no log to collect, no surface route, nothing
-  // to make planks from. The tool fact must be refused in typed form, naming the
-  // item and count - and the step must not be leased.
-  const gate = applyReachabilityGate([approachlessMove()], stepState({ cobblestone: 177, flint: 4, dirt: 128 }, [STEP_CUT], [FEET]), options)
+addCase('(viii) an unknown step cut is withheld rather than offered as clearance', () => {
+  const unknownCut = { ...STEP_CUT, name: 'unknown', safe: false, reason: 'unloaded' }
+  const gate = applyReachabilityGate([approachlessMove()], stepState({ cobblestone: 177, flint: 4, dirt: 128 }, [unknownCut], [FEET]), options)
   const withheld = stepWithheld(gate)
-  const fact = withheld === null ? null : acquisitionFor(withheld, 'tool:pickaxe@0')
-  const line = withheld !== null && fact !== null ? formatCandidateAcquisitionRefused(withheld.candidate.id, fact) : null
   return {
-    pass:
-      stepOffered(gate) === undefined &&
-      fact !== null &&
-      fact.routes.length === 0 &&
-      fact.reason === 'no_material' &&
-      typeof fact.item === 'string' &&
-      (fact.count ?? 0) >= 1 &&
-      line !== null &&
-      line.includes(`item=${fact.item}`) &&
-      line.includes(`count=${fact.count}`),
-    detail: line ?? `routes=[${(fact?.routes ?? []).join(',')}]`,
+    pass: stepOffered(gate) === undefined && withheld === null,
+    detail: `offered=${stepOffered(gate)?.id ?? 'none'} withheld=${withheld?.result.reason ?? 'none'}`,
   }
 })
 
@@ -633,7 +583,7 @@ addCase('(viii) control: with the tool held the same step cut is offered, tool d
     pass:
       offered !== undefined &&
       offered.id === 'STEP:S:b23_80_8' &&
-      offered.requiresTool === true &&
+      offered.requiresTool === false &&
       offered.toolName === 'pickaxe' &&
       offered.toolTier === 0 &&
       stepWithheld(gate) === null,

@@ -302,7 +302,7 @@ addCase('a pit with no standable rim spot yields no escape MOVE (nothing to clim
   return { pass, detail: `escape=none moves=[${movementCandidates(candidates).map((c) => c.id).join(',')}] candidates=[${candidates.map((c) => c.id).join(',')}]` }
 })
 
-addCase('a ceiling-capped pocket column refuses with the marker and offers the adjacent open pillar column', () => {
+addCase('a ceiling-capped pocket can clear stone without a pickaxe and retains a relocation alternative', () => {
   // Live pocket: feet (40,8,31), cobblestone ceiling at (40,9,31), no pickaxe;
   // (40,8,32) is the open neighbour the pillar must relocate to.
   const feet = { x: 40, y: 8, z: 31 }
@@ -312,21 +312,19 @@ addCase('a ceiling-capped pocket column refuses with the marker and offers the a
     diggable: true,
     fluidOrHazard: false,
     floodRisk: false,
-    toolOk: false,
+    canClear: true,
   })
-  const marker =
-    decision.kind === 'refuse'
-      ? formatPillarRefused({ reason: 'no_headroom', cell: feet, obstacle: decision.obstacle, cause: decision.reason })
-      : 'not-refused'
+  const marker = decision.kind === 'refuse'
+    ? formatPillarRefused({ reason: 'no_headroom', cell: feet, obstacle: decision.obstacle, cause: decision.reason })
+    : 'clearable'
   const probes: PillarColumnProbe[] = [
     { cell: { x: 40, y: 8, z: 32 }, supported: true, feetClear: true, headClear: true, aboveHeadClear: true, unsafe: false },
     { cell: { x: 39, y: 9, z: 32 }, supported: true, feetClear: true, headClear: true, aboveHeadClear: true, unsafe: false },
   ]
   const fallback = selectPillarFallbackColumn(probes, feet)
   const pass =
-    decision.kind === 'refuse' &&
-    decision.reason === 'needs_tool' &&
-    marker.startsWith('PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31') &&
+    decision.kind === 'dig' &&
+    marker === 'clearable' &&
     fallback?.x === 40 &&
     fallback?.y === 8 &&
     fallback?.z === 32

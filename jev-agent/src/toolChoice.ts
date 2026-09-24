@@ -18,6 +18,8 @@ import type { HarvestTool } from './state.ts'
 export interface DigBlockInfo {
   /** concrete block name from the live world (`''` means unknown) */
   name: string
+  /** true only when the caller's block registry contains this exact name */
+  knownBlock?: boolean
   /** registry harvest family; null = hand-harvestable */
   harvestTool: HarvestTool | null
   /** minimum pickaxe rank when `harvestTool === 'pickaxe'` */
@@ -138,6 +140,43 @@ export function selectDigTool(block: DigBlockInfo, has: HasTool): ToolChoice {
 
   // Genuinely unknown/untracked block: bare hand. Never invent a pickaxe.
   return { ok: true, tool: null, tier: null, reason: 'untracked_hand' }
+}
+
+/**
+ * Resolve the best available tool for removing a block when its drops are not
+ * required. Harvest requirements decide whether a block yields an item; they do
+ * not decide whether Minecraft permits a slower hand/tool break. `diggable` is
+ * the mechanical truth supplied by the live block/sensor, while the block name
+ * must still be known so unloaded/unknown cells fail closed.
+ *
+ * If a harvest tool is available, `selectDigTool` remains the preferred speed
+ * choice. If the only reason it refused is the missing harvest tier/family,
+ * clearance may proceed bare-handed. This preserves strict resource harvesting
+ * while allowing route/headroom/step cuts to trade time for drops they do not
+ * need.
+ */
+export function selectClearanceTool(block: DigBlockInfo, has: HasTool): ToolChoice {
+  if (!block.diggable) return { ok: false, tool: null, tier: null, reason: 'not_diggable' }
+  const name = block.name.trim()
+  const knownByFamily =
+    name !== '' &&
+    (SOFT_BLOCKS.has(name) ||
+      STONE_FAMILY.has(name) ||
+      ORE_NAME.test(name) ||
+      WOOD_NAME.test(name))
+  if (
+    name === '' ||
+    ['unknown', 'air', 'cave_air', 'void_air'].includes(name) ||
+    block.knownBlock === false ||
+    (block.knownBlock !== true && !knownByFamily)
+  ) {
+    return { ok: false, tool: null, tier: null, reason: 'unknown_block' }
+  }
+
+  const preferred = selectDigTool(block, has)
+  if (preferred.ok) return preferred
+  if (preferred.reason === 'not_diggable' || preferred.reason === 'unknown_block') return preferred
+  return { ok: true, tool: null, tier: null, reason: `clear_by_hand_without_${preferred.reason}` }
 }
 
 /** Human/log label for a chosen tool (`hand` when nothing is equipped). */

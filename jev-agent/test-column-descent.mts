@@ -331,7 +331,7 @@ addCase('(c) a pillar surrounded by a hurtful drop with no safe step refuses wit
   }
 })
 
-addCase('(c2) a safe step needing a tool the body lacks refuses with reason=no_tool', () => {
+addCase('(c2) a safe stone step is offered as clearance without requiring its harvest tool', () => {
   const state = worldState({
     position: FEET,
     standable: [FEET_CELL],
@@ -339,16 +339,38 @@ addCase('(c2) a safe step needing a tool the body lacks refuses with reason=no_t
     descent: [step(FEET, 'D', 0, 0, { mode: 'down', safe: true, digName: 'stone', tool: 'pickaxe', tier: 1 })],
   })
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const candidate = grounded.candidates.find((entry) => entry.kind === 'DESCEND')
+  const refusal = grounded.columnDescentRefusal
+  const pass =
+    candidate !== undefined &&
+    candidate.meta.clearance === true &&
+    candidate.requiresTool === false &&
+    candidate.toolName === null &&
+    String(candidate.meta.toolReason).startsWith('clear_by_hand_without_needs_pickaxe') &&
+    refusal === null
+  return {
+    pass,
+    detail: `set=[${grounded.candidates.map((c) => c.id).join(',')}] clearance=${candidate?.id ?? 'none'} reason=${String(candidate?.meta.toolReason)} refusal=${refusal === null ? 'none' : formatColumnDescentRefused(refusal)}`,
+  }
+})
+
+addCase('(c2b) an unbreakable own-column step remains unavailable', () => {
+  const impossible = {
+    ...step(FEET, 'D', 0, 0, { mode: 'down', safe: true, digName: 'bedrock' }),
+    diggable: false,
+  }
+  const grounded = generateGroundedCandidates(
+    worldState({ position: FEET, standable: [FEET_CELL], inventory: inventory({}), descent: [impossible] }),
+    defaultCandidateOptions,
+  )
   const refusal = grounded.columnDescentRefusal
   const pass =
     grounded.candidates.every((candidate) => candidate.kind === 'WAIT') &&
     refusal !== null &&
-    refusal.reason === 'no_tool' &&
-    refusal.tool === 'pickaxe' &&
-    refusal.tier === 1
+    refusal.reason === 'no_safe_step'
   return {
     pass,
-    detail: `set=[${grounded.candidates.map((c) => c.id).join(',')}] refusal=${refusal === null ? 'none' : formatColumnDescentRefused(refusal)}`,
+    detail: `set=[${grounded.candidates.map((entry) => entry.id).join(',')}] refusal=${refusal === null ? 'none' : formatColumnDescentRefused(refusal)}`,
   }
 })
 

@@ -22,7 +22,7 @@ import {
   smeltsPerFuel,
 } from './src/gameData.ts'
 import { ORE_SOURCES } from './src/state.ts'
-import { selectDigTool } from './src/toolChoice.ts'
+import { selectClearanceTool, selectDigTool } from './src/toolChoice.ts'
 import { FURNACE_STONE_COST } from './src/prereqOption.ts'
 
 interface Case {
@@ -73,6 +73,49 @@ addCase('oak_log -> axe with an axe, hand without (old and new agree)', () => {
   const noAxe = selectDigTool({ name: 'oak_log', harvestTool: profile.harvestTool, harvestTier: profile.harvestTier, diggable: true }, () => false)
   const pass = withAxe.tool === 'axe' && withAxe.ok && noAxe.tool === null && noAxe.ok
   return { pass, detail: `axe=${withAxe.tool}/${withAxe.reason} hand=${String(noAxe.tool)}/${noAxe.reason}` }
+})
+
+addCase('stone harvest still needs a pickaxe, while route clearance may break it by hand', () => {
+  const profile = resolveHarvest(reg, 'stone')
+  const block = { name: 'stone', harvestTool: profile.harvestTool, harvestTier: profile.harvestTier, diggable: true }
+  const harvest = selectDigTool(block, () => false)
+  const clearance = selectClearanceTool(block, () => false)
+  return {
+    pass:
+      !harvest.ok &&
+      harvest.reason === 'needs_pickaxe_tier_0' &&
+      clearance.ok &&
+      clearance.tool === null &&
+      clearance.reason === 'clear_by_hand_without_needs_pickaxe_tier_0',
+    detail: `harvest=${harvest.ok}/${harvest.reason} clearance=${clearance.ok}/${clearance.reason}`,
+  }
+})
+
+addCase('obsidian clearance is possible without a diamond pickaxe, but its drops remain gated', () => {
+  const profile = resolveHarvest(reg, 'obsidian')
+  const block = { name: 'obsidian', harvestTool: profile.harvestTool, harvestTier: profile.harvestTier, diggable: true }
+  const harvest = selectDigTool(block, () => false)
+  const clearance = selectClearanceTool(block, () => false)
+  const unbreakable = selectClearanceTool({ ...block, diggable: false }, () => true)
+  const unknown = selectClearanceTool({ ...block, name: 'unknown' }, () => true)
+  const untracked = selectClearanceTool(
+    { ...block, name: 'modded_unlisted_block', harvestTool: null, harvestTier: null },
+    () => true,
+  )
+  return {
+    pass:
+      !harvest.ok &&
+      harvest.reason === 'needs_pickaxe_tier_4' &&
+      clearance.ok &&
+      clearance.tool === null &&
+      !unbreakable.ok &&
+      unbreakable.reason === 'not_diggable' &&
+      !unknown.ok &&
+      unknown.reason === 'unknown_block' &&
+      !untracked.ok &&
+      untracked.reason === 'unknown_block',
+    detail: `harvest=${harvest.reason} clearance=${clearance.reason} unbreakable=${unbreakable.reason} unknown=${unknown.reason} untracked=${untracked.reason}`,
+  }
 })
 
 addCase('iron ore -> stone pickaxe tier (rank 2); old and new agree', () => {

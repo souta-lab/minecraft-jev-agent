@@ -18,7 +18,7 @@ import type { DescentOption, DescentRefusalReason, HarvestTool, StepCut, Vec3Jso
 import { distance } from './state.ts'
 import { resolveHarvest, loadGameData } from './gameData.ts'
 import { bestToolTier, HAZARD_PROXIMITY } from './reachability.ts'
-import { selectDigTool } from './toolChoice.ts'
+import { selectClearanceTool } from './toolChoice.ts'
 import {
   decidePillarStepBudget,
   DEFAULT_PILLAR_SEARCH_POLICY,
@@ -237,7 +237,7 @@ export function resolvePillarStep(input: {
 export type HeadroomClearRefusal =
   | 'no_obstacle'
   | 'not_diggable'
-  | 'needs_tool'
+  | 'not_clearable'
   | 'fluid_or_hazard'
   | 'flood_risk'
   | 'dig_failed'
@@ -258,8 +258,8 @@ export interface HeadroomBlockerProbe {
   fluidOrHazard: boolean
   /** a fluid/hazard touches the opened cell, so a dig could flood the pocket */
   floodRisk: boolean
-  /** a usable tool for this block is in the inventory (`selectDigTool(...).ok`) */
-  toolOk: boolean
+  /** the block has a known name and a mechanical clearance action is available */
+  canClear: boolean
 }
 
 export type HeadroomClearDecision =
@@ -282,7 +282,7 @@ export function classifyHeadroomBlocker(probe: HeadroomBlockerProbe | null): Hea
   if (probe.fluidOrHazard) return { kind: 'refuse', obstacle, reason: 'fluid_or_hazard' }
   if (!probe.diggable) return { kind: 'refuse', obstacle, reason: 'not_diggable' }
   if (probe.floodRisk) return { kind: 'refuse', obstacle, reason: 'flood_risk' }
-  if (!probe.toolOk) return { kind: 'refuse', obstacle, reason: 'needs_tool' }
+  if (!probe.canClear) return { kind: 'refuse', obstacle, reason: 'not_clearable' }
   return { kind: 'dig', obstacle }
 }
 
@@ -429,8 +429,8 @@ export interface VerticalInput {
   placeable?: PlaceableBlock | null
   /**
    * live inventory counts. When provided, an upward stair cut is only chosen
-   * when `canDigBlock(cut.name, inventory)` proves the held tools can finish the
-   * dig, so a stone cut without a pickaxe never shadows the pillar fallback.
+   * when the cell is known and mechanically clearable. Harvest-tool inventory
+   * may select a faster tool but never gates a route whose drops are not needed.
    * Tool-agnostic callers omit it and keep the geometry-only choice.
    */
   inventory?: Readonly<Record<string, number>>
@@ -468,7 +468,7 @@ export interface TunnelEntryBlockerProbe {
   diggable: boolean
   fluidOrHazard: boolean
   floodRisk: boolean
-  toolOk: boolean
+  canClear: boolean
 }
 
 /** Live enterability facts for a tunnel cell the body must occupy. */
@@ -497,8 +497,8 @@ export interface TunnelEntryRefusal {
 /**
  * Pure enterability decision for a reused tunnel cell. A blocked body/head cell
  * is clearable only when exactly one diggable, non-fluid, non-flooding block is
- * identified and a usable tool is held; otherwise the entry is refused with the
- * cause so the caller can select a different vertical plan.
+ * identified and mechanically breakable; otherwise the entry is refused with
+ * the cause so the caller can select a different vertical plan.
  */
 export function evaluateTunnelEntry(probe: TunnelEntryProbe): TunnelEntryDecision {
   if (!probe.bodyClear || !probe.headClear) {
@@ -508,7 +508,7 @@ export function evaluateTunnelEntry(probe: TunnelEntryProbe): TunnelEntryDecisio
       blocker.diggable &&
       !blocker.fluidOrHazard &&
       !blocker.floodRisk &&
-      blocker.toolOk
+      blocker.canClear
     ) {
       return { kind: 'clear', blocker }
     }
@@ -529,7 +529,7 @@ export interface ApproachBlockage {
   diggable?: boolean
   fluidOrHazard?: boolean
   floodRisk?: boolean
-  toolOk?: boolean
+  canClear?: boolean
 }
 
 export type LocalClearDecision =
@@ -549,7 +549,7 @@ export function selectLocalClearCell(blockages: readonly ApproachBlockage[]): Lo
   const only = blocked[0]
   if (only === undefined) return { kind: 'none' }
   const safe =
-    only.diggable === true && only.fluidOrHazard !== true && only.floodRisk !== true && only.toolOk === true
+    only.diggable === true && only.fluidOrHazard !== true && only.floodRisk !== true && only.canClear === true
   return safe ? { kind: 'clear', cell: only.cell } : { kind: 'none' }
 }
 
@@ -610,7 +610,7 @@ export function formatLocalClear(
 // candidate existed although the ascent geometry did. The evaluation below is
 // the FACT the gate must carry instead of a bare token: is there at least one
 // adjacent/forward cell whose 2-block body column one level up is clear (a
-// walkable step) or clearable (exactly one diggable blocker + the held tool),
+// walkable step) or clearable (exactly one known diggable blocker),
 // with solid support beneath and no hazard/liquid?
 //
 // The classification reuses the audited machinery rather than adding a ladder:
@@ -620,9 +620,7 @@ export function formatLocalClear(
 //                   already turns into the grounded `staircase-up` leg (dig the
 //                   one blocker, step into the cut) and `LOCAL_CLEAR` covers
 //                   for a blocked reuse entry;
-//   - no_tool    -> the same cut geometry without the held tool, so the gate
-//                   withholds instead of offering a dig the executor cannot
-//                   finish;
+//   - no_tool    -> clearance breakability could not be proved for the cut;
 //   - no_clearance -> neither exists; the refusal names the examined cell.
 
 /** Why no usable ascent column exists at all. */
@@ -632,25 +630,33 @@ export type AscentColumnRefusalReason = 'no_clearance' | 'no_tool'
 export interface AscentColumnBlocker {
   cell: Vec3Json
   name: string
-  /** the inventory holds a tool that harvests this blocker */
-  toolOk: boolean
+  /** the block is known breakable and may be cleared with the held tool or hand */
+  canClear: boolean
+  /** preferred harvest tool, used only as an optional speed improvement */
   requiredTool: HarvestTool | null
   /** minimum pickaxe rank when `requiredTool === 'pickaxe'` */
   requiredTier: number | null
 }
 
 /**
- * The executor's live dig rule, pure: does the inventory hold a usable tool for
- * `blockName`? Identical to `Executor.resolveLiveDigTool` (`selectDigTool` over
- * the block's own harvest profile), so any plan/dig the gate offers is one the
- * executor can finish. Soft classes (dirt/gravel/sand/grass/...) answer true
- * without a pickaxe - `selectDigTool` falls back to the bare hand - while only
- * stone-family/ore blocks require a pickaxe.
+ * The executor's live clearance rule, pure: can the known diggable block be
+ * removed, and which available tool should speed it up? A harvest tool affects
+ * drops, not whether a slower clearance is mechanically possible. The executor
+ * revalidates `canDigBlock` and the live structure/station guards before acting.
  */
-export function canDigBlock(blockName: string, inventory: Readonly<Record<string, number>>): boolean {
-  const profile = resolveHarvest(loadGameData(), blockName)
-  return selectDigTool(
-    { name: blockName, harvestTool: profile.harvestTool, harvestTier: profile.harvestTier, diggable: true },
+export function canClearBlock(blockName: string, inventory: Readonly<Record<string, number>>): boolean {
+  const registry = loadGameData()
+  const block = registry.blocksByName?.[blockName]
+  if (block === undefined || block.diggable !== true) return false
+  const profile = resolveHarvest(registry, blockName)
+  return selectClearanceTool(
+    {
+      name: blockName,
+      harvestTool: profile.harvestTool,
+      harvestTier: profile.harvestTier,
+      diggable: block.diggable,
+      knownBlock: true,
+    },
     (tool, tier) => bestToolTier(inventory, tool) >= (tier ?? 0),
   ).ok
 }
@@ -737,7 +743,7 @@ export function evaluateAscentColumn(input: AscentColumnInput): AscentColumnDeci
 
   // 2. Grounded 2-block faces (sensor `StepCut`): cut the top block of the face
   //    and step into the cut. `safe` already encodes breakable + landing support
-  //    + headroom + no hazard; the held tool is the remaining gate.
+    //    + headroom + no hazard; only known breakability remains to prove.
   let bestCut: { cut: StepCut; blocker: AscentColumnBlocker; score: number } | null = null
   let bestUnsafe: { cut: StepCut; score: number } | null = null
   for (const cut of input.stepCuts ?? []) {
@@ -748,20 +754,19 @@ export function evaluateAscentColumn(input: AscentColumnInput): AscentColumnDeci
       continue
     }
     const profile = resolveHarvest(loadGameData(), cut.name)
-    // The executor resolves the same block live through `selectDigTool`
-    // (`Executor.resolveLiveDigTool`), so the gate must use the identical rule:
-    // only a pickaxe is a hard requirement, an axe/shovel cut falls back to hand.
+    // Clearance uses the block's mechanics, not its drop requirement. The
+    // executor makes the same distinction at its live block boundary.
     const blocker: AscentColumnBlocker = {
       cell: cut.cut,
       name: cut.name,
-      toolOk: canDigBlock(cut.name, input.inventory),
+      canClear: canClearBlock(cut.name, input.inventory),
       requiredTool: profile.harvestTool,
       requiredTier: profile.harvestTier,
     }
     if (bestCut === null || score < bestCut.score) bestCut = { cut, blocker, score }
   }
   if (bestCut !== null) {
-    return bestCut.blocker.toolOk
+    return bestCut.blocker.canClear
       ? { kind: 'clearable', cell: bestCut.cut.cut, blocker: bestCut.blocker }
       : { kind: 'refuse', reason: 'no_tool', cell: bestCut.cut.cut, blocker: bestCut.blocker }
   }
@@ -800,12 +805,11 @@ function selectUpStep(input: VerticalInput, fromY: number, targetY: number): Ver
     // The up mirror of the down staircase cuts the block directly above the
     // landing step; a higher cut is a 2-block jump and is not grounded.
     if (cut.cut.y !== fromY + 1) continue
-    // A plan is only offered when its dig is mechanically executable NOW: the
-    // executor re-resolves the same `selectDigTool` rule live, so a staircase-up
-    // through stone without a pickaxe must fall through to the pillar fallback
-    // (or to a truthful refusal) instead of shadowing it. Soft classes answer
-    // true by hand, so only stone-family/ore cuts need the pickaxe here.
-    if (input.inventory !== undefined && !canDigBlock(cut.name, input.inventory)) continue
+    // A plan is only offered when its dig is mechanically executable NOW. The
+    // executor uses the same clearance rule; harvest-tool availability only
+    // selects a speed preference, so a stone-family cell remains a route even
+    // when it will not drop without a pickaxe.
+    if (input.inventory !== undefined && !canClearBlock(cut.name, input.inventory)) continue
     const alignment = cut.dx * targetSignX + cut.dz * targetSignZ
     const score = (alignment > 0 ? 0 : 10) + distance(cut.step, input.selfPosition) * 0.1
     if (score < bestScore) {

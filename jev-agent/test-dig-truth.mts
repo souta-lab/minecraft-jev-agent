@@ -31,7 +31,8 @@ import { Vec3 } from 'vec3'
 import { EventLogger } from './src/jev.ts'
 import { Executor, ExecutorError, defaultExecutorOptions } from './src/executor.ts'
 import type { Candidate } from './src/candidates.ts'
-import { selectDigTool } from './src/toolChoice.ts'
+import { liveStructureCellKey } from './src/blockSafety.ts'
+import { selectClearanceTool, selectDigTool } from './src/toolChoice.ts'
 import {
   DIG_BUDGET_MAX_MS,
   DIG_BUDGET_SLACK_MS,
@@ -326,6 +327,20 @@ addCase('(e) a missing tool is a typed dig_no_tool, not a silent hand dig', () =
   }
 })
 
+addCase('(e) clearance may remove stone by hand while strict harvest still needs a pickaxe', () => {
+  const stone = { name: 'stone', harvestTool: 'pickaxe' as const, harvestTier: 0, diggable: true }
+  const harvest = selectDigTool(stone, () => false)
+  const clearance = selectClearanceTool(stone, () => false)
+  return {
+    pass:
+      !harvest.ok &&
+      harvest.reason === 'needs_pickaxe_tier_0' &&
+      clearance.ok &&
+      clearance.tool === null,
+    detail: `harvest=${harvest.reason} clearance=${clearance.reason}`,
+  }
+})
+
 // --- (f) the real Executor seams ---------------------------------------------
 
 class CapturingLogger extends EventLogger {
@@ -404,7 +419,9 @@ function fakeBot(registry: Record<string, unknown>, block: RegistryBlockLike): F
   return bot
 }
 
-type DigBlockCaller = { digBlock(block: unknown, epoch: number, signal: AbortSignal): Promise<void> }
+type DigBlockCaller = {
+  digBlock(block: unknown, epoch: number, signal: AbortSignal, purpose?: 'harvest' | 'clearance'): Promise<void>
+}
 type EquipCaller = { equipTool(candidate: Candidate, epoch: number, signal: AbortSignal): Promise<void> }
 
 addCase('(f) the constructed Executor repairs the mechanism before the first dig', () => {
@@ -436,6 +453,95 @@ addCase('(f) digBlock completes the repaired obsidian dig and emits no DIG_FAILE
     pass: schedule === 9400 && budget > schedule && !logger.lines.some((line) => line.startsWith('DIG_FAILED')),
     detail: `schedule=${schedule}ms budget=${budget}ms lines=${logger.lines.join(' | ') || '(none)'}`,
   }
+})
+
+addCase('(f) clearance dig bypasses the harvest-drop gate and records its intent', async () => {
+  const registry = freshRegistry()
+  const block = blockOn(registry, 'stone')
+  const bot = fakeBot(registry, block)
+  bot.heldItem = null
+  bot.inventoryItems = []
+  bot.digTime = () => 1
+  const logger = new CapturingLogger()
+  const executor = new Executor(bot as never, logger, defaultExecutorOptions)
+  const live = block as RegistryBlockLike & { position: Vec3 }
+  live.position = new Vec3(28, 67, 9)
+  await (executor as unknown as DigBlockCaller).digBlock(live, 0, new AbortController().signal, 'clearance')
+  return {
+    pass:
+      logger.lines.some((line) => line === 'DIG_INTENT purpose=clearance block=stone cell=28,67,9 dropRequired=false') &&
+      !logger.lines.some((line) => line.startsWith('DIG_TOOL_LEGALITY')),
+    detail: logger.lines.join(' | ') || '(no markers)',
+  }
+})
+
+addCase('(f) direct clearance still refuses protected stations', async () => {
+  const registry = freshRegistry()
+  const block = blockOn(registry, 'crafting_table')
+  const bot = fakeBot(registry, block)
+  bot.heldItem = null
+  bot.inventoryItems = []
+  const logger = new CapturingLogger()
+  const executor = new Executor(bot as never, logger, defaultExecutorOptions)
+  const live = block as RegistryBlockLike & { position: Vec3 }
+  live.position = new Vec3(28, 67, 9)
+  let code: string | null = null
+  try {
+    await (executor as unknown as DigBlockCaller).digBlock(live, 0, new AbortController().signal, 'clearance')
+  } catch (error) {
+    code = error instanceof ExecutorError ? error.code : null
+  }
+  return {
+    pass: code === 'protected_station' && !logger.lines.some((line) => line.startsWith('DIG_INTENT')),
+    detail: `code=${code ?? 'none'} intent=${logger.lines.find((line) => line.startsWith('DIG_INTENT')) ?? 'none'}`,
+  }
+})
+
+addCase('(f) direct clearance still refuses a live portal-frame member', async () => {
+  const registry = freshRegistry()
+  const block = obsidianOn(registry)
+  const bot = fakeBot(registry, block)
+  bot.heldItem = null
+  bot.inventoryItems = []
+  const logger = new CapturingLogger()
+  const executor = new Executor(bot as never, logger, defaultExecutorOptions)
+  const live = block as RegistryBlockLike & { position: Vec3 }
+  live.position = new Vec3(28, 67, 9)
+  ;(executor as unknown as { action: { liveStructureMembers: ReadonlyMap<string, string> } | null }).action = {
+    liveStructureMembers: new Map([[liveStructureCellKey(live.position), 'nether_portal']]),
+  }
+  let code: string | null = null
+  try {
+    await (executor as unknown as DigBlockCaller).digBlock(live, 0, new AbortController().signal, 'clearance')
+  } catch (error) {
+    code = error instanceof ExecutorError ? error.code : null
+  }
+  return {
+    pass:
+      code === 'live_structure_member' &&
+      logger.lines.some((line) => line.includes('LIVE_STRUCTURE_MEMBER_DIG_REFUSED structure=nether_portal')) &&
+      !logger.lines.some((line) => line.startsWith('DIG_INTENT')),
+    detail: `code=${code ?? 'none'} lines=${logger.lines.join(' | ') || 'none'}`,
+  }
+})
+
+addCase('(f) ordinary harvest dig still refuses stone without a harvest tool', async () => {
+  const registry = freshRegistry()
+  const block = blockOn(registry, 'stone')
+  const bot = fakeBot(registry, block)
+  bot.heldItem = null
+  bot.inventoryItems = []
+  const logger = new CapturingLogger()
+  const executor = new Executor(bot as never, logger, defaultExecutorOptions)
+  const live = block as RegistryBlockLike & { position: Vec3 }
+  live.position = new Vec3(28, 67, 9)
+  let code: string | null = null
+  try {
+    await (executor as unknown as DigBlockCaller).digBlock(live, 0, new AbortController().signal)
+  } catch (error) {
+    code = error instanceof ExecutorError ? error.code : null
+  }
+  return { pass: code === 'dig_no_tool', detail: `code=${code ?? 'none'}` }
 })
 
 addCase('(f) a missing tool throws the typed dig_no_tool from the real equip seam', async () => {

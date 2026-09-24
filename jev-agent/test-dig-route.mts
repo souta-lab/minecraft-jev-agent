@@ -349,7 +349,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 {
   const FEET: Vec3Json = { x: 11, y: 66, z: 24 }
   const TARGET: Vec3Json = { x: 24, y: 66, z: 24 }
-  const counts = { wooden_pickaxe: 1 }
+  const counts = {}
   const base = worldState({
     feet: FEET,
     descent: shaftDescent(FEET),
@@ -498,9 +498,8 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 }
 
 // ---------------------------------------------------------------------------
-// (b) NO TOOL for the intervening block: the stone needs a pickaxe. The route is
-// refused with the typed reason and the arm keeps its existing bounded
-// escalation - no invented route, no substitute loop.
+// (b) A route clears intervening stone without requiring the drops. Resource
+// mining remains strict elsewhere; this candidate only changes terrain.
 // ---------------------------------------------------------------------------
 {
   const FEET: Vec3Json = { x: 11, y: 66, z: 24 }
@@ -511,21 +510,15 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const tick = worldState({ feet: FEET, descent: shaftDescent(FEET), counts: {}, enterCell: TARGET, routes: spent })
   const offered = entryCandidates(tick, options)
   const grounded = generateGroundedCandidates(tick, options)
-  const refusal = grounded.digRefusals.find((entry) => entry.reason === 'no_tool')
+  const route = digCandidates(offered.candidates)[0]
   check(
-    '(b) no tool for the intervening stone: typed no_tool refusal and no invented dig route',
-    refusal !== undefined &&
-      refusal.block === 'stone' &&
-      digCandidates(grounded.candidates).length === 0 &&
-      digCandidates(offered.candidates).length === 0 &&
-      offered.refusal?.reason === 'all_routes_spent',
-    `refusals=[${grounded.digRefusals.map((entry) => `${entry.reason}:${entry.block ?? 'none'}`).join(',')}] offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}] refusal=${offered.refusal?.line ?? 'none'}`,
-  )
-  check(
-    '(b) the typed refusal line names the cause, the bearing and the target',
-    refusal !== undefined &&
-      formatDigRouteRefused(refusal).startsWith('DIG_ROUTE_REFUSED reason=no_tool target=24,66,24 bearing=E cell=12,66,24 block=stone'),
-    refusal === undefined ? 'no refusal' : formatDigRouteRefused(refusal),
+    '(b) the stone route is offered as clearance without a pickaxe drop gate',
+    route !== undefined &&
+      route.meta.clearance === true &&
+      route.requiresTool === false &&
+      route.toolName === null &&
+      digCandidates(grounded.candidates).some((candidate) => candidate.meta.clearance === true),
+    `refusals=[${grounded.digRefusals.map((entry) => `${entry.reason}:${entry.block ?? 'none'}`).join(',')}] offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}]`,
   )
 }
 
@@ -798,8 +791,12 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   }
   const descent = shaftDescent(FEET, spec)
   const standable = [FEET, VIA, LANDING, WAYPOINT]
+  const portalMembers = [
+    { kind: 'nether_portal' as const, position: { x: 25, y: 67, z: 9 } },
+    { kind: 'nether_portal' as const, position: { x: 25, y: 68, z: 9 } },
+  ]
   const current = queuedPlace(TARGET)
-  const base = worldState({ feet: FEET, descent, counts, current, enterCell: TARGET, standable })
+  const base = worldState({ feet: FEET, descent, counts, current, enterCell: TARGET, standable, liveStructureMembers: portalMembers })
   const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
   const spent = spendEntryRoute(base, options, TARGET)
   const tick = worldState({
@@ -811,6 +808,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     standable,
     routes: spent,
     failedCandidates: exhausted,
+    liveStructureMembers: portalMembers,
   })
   const offered = entryCandidates(tick, options)
   const cont = offered.candidates.find((candidate) => candidate.meta.legContinuation === true)
@@ -936,6 +934,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     current,
     enterCell: TARGET,
     standable,
+    liveStructureMembers: portalMembers,
   })
   const normal = entryCandidates(entryState, options)
   const faceLeg = normal.candidates.find((candidate) => candidate.meta.approachLeg === 'portal_open_face')
@@ -1038,10 +1037,10 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   // (i4) A WALK-REACHABLE WAYPOINT IS UNTOUCHED: the ordinary leg keeps exactly
   // the meta it had (no `vertical`, no continuation, no reflex).
   const walkable = [FEET, WAYPOINT]
-  const walkBase = worldState({ feet: FEET, descent, counts, current, enterCell: TARGET, standable: walkable })
+  const walkBase = worldState({ feet: FEET, descent, counts, current, enterCell: TARGET, standable: walkable, liveStructureMembers: portalMembers })
   const walkOptions = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
   const walkSpent = spendEntryRoute(walkBase, walkOptions, TARGET)
-  const walkTick = worldState({ feet: FEET, descent, counts, current, enterCell: TARGET, standable: walkable, routes: walkSpent })
+  const walkTick = worldState({ feet: FEET, descent, counts, current, enterCell: TARGET, standable: walkable, routes: walkSpent, liveStructureMembers: portalMembers })
   const walkOffer = entryCandidates(walkTick, walkOptions)
   const walkLeg = walkOffer.candidates.find((candidate) => candidate.meta.approachLeg !== undefined)
   check(
@@ -1069,13 +1068,17 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const counts = { wooden_pickaxe: 1 }
   const spec: ShaftSpec = { dirSpec: { E: { block: 'obsidian', harvestTier: 4 } } }
   const descent = shaftDescent(FEET, spec)
+  const protectedE = [
+    { kind: 'nether_portal' as const, position: { x: 12, y: 66, z: 24 } },
+    { kind: 'nether_portal' as const, position: { x: 12, y: 67, z: 24 } },
+  ]
   // The planner is pure: the tool feasibility of a step arrives as the caller's
   // probe (the same gate `digRouteCandidate` injects in production).
   const probe = (
     step: DescentOption,
-  ): { dir: DescentOption['dir']; mode: 'down' | 'level'; reason: 'no_tool'; block: string | null; detail: string } | null =>
+  ): { dir: DescentOption['dir']; mode: 'down' | 'level'; reason: 'no_tool' | 'protected'; block: string | null; detail: string } | null =>
     step.digName === 'obsidian'
-      ? { dir: step.dir, mode: step.mode, reason: 'no_tool', block: step.digName, detail: 'obsidian needs pickaxe tier 4' }
+      ? { dir: step.dir, mode: step.mode, reason: 'protected', block: step.digName, detail: 'live structure member' }
       : null
   const decision = planDigRoute({ selfPosition: FEET, target: TARGET, descent, sealed: false, stepRefusal: probe })
   const route = decision.kind === 'route' ? decision.route : null
@@ -1087,11 +1090,11 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
       route.detour === true &&
       route.skipped !== null &&
       route.skipped.dir === 'E' &&
-      route.skipped.reason === 'no_tool' &&
+      route.skipped.reason === 'protected' &&
       route.dir === 'S' &&
       route.mode === 'level' &&
       to < from &&
-      formatDigRoute(route, 'no_walkable_route', TARGET).endsWith(' detour=true skipped=E:no_tool'),
+      formatDigRoute(route, 'no_walkable_route', TARGET).endsWith(' detour=true skipped=E:protected'),
     route === null
       ? `refused=${decision.kind === 'refuse' ? decision.refusal.reason : 'none'}`
       : `dir=${route.dir} from=${round2(route.fromDistance)} to=${round2(route.toDistance)} skipped=${String(route.skipped?.dir)}:${String(route.skipped?.reason)} line=${formatDigRoute(route, 'no_walkable_route', TARGET)}`,
@@ -1104,6 +1107,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     current: queuedPlace(TARGET),
     enterCell: TARGET,
     standable: [FEET, { x: 11, y: 66, z: 22 }],
+    liveStructureMembers: protectedE,
   })
   const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
   const spent = spendEntryRoute(base, options, TARGET)
@@ -1115,6 +1119,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     enterCell: TARGET,
     standable: [FEET, { x: 11, y: 66, z: 22 }],
     routes: spent,
+    liveStructureMembers: protectedE,
   })
   const offered = entryCandidates(tick, options)
   const dig = digCandidates(offered.candidates)[0]
@@ -1123,7 +1128,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     '(g) the arm offers the detour with its skipped primary on the candidate meta',
     dig !== undefined &&
       dig.meta.digRouteDetour === true &&
-      dig.meta.digRouteSkipped === 'E:no_tool' &&
+      dig.meta.digRouteSkipped === 'E:protected' &&
       dig.meta.dir === 'S' &&
       dig.meta.digRouteKind === 'tunnel' &&
       typeof dig.meta.digRouteFrom === 'number' &&
@@ -1141,10 +1146,9 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 // interior (26,67,9) is behind it; the only standable open face is SOUTH at
 // (26,67,10) over dirt; (24,67,10) has no floor at all (air at y=66).
 //
-// (h1) THE DIG DEAD END: the east step closes the bearing (2.0 -> 1.0) but needs
-// pickaxe tier 4 for the gate's obsidian, the south step is `no_support`, and the
-// north/west steps do not reduce the distance. NO safe step reduces it, so the
-// arm keeps today's typed refusal + escalation - that is the honest dead end.
+// (h1) LIVE STRUCTURE SAFETY: the east step closes the bearing through the frame's
+// own obsidian, so it is protected regardless of the fact that bare-hand clearance
+// could remove it without yielding obsidian.
 // ---------------------------------------------------------------------------
 {
   const FEET: Vec3Json = { x: 24, y: 67, z: 9 }
@@ -1155,18 +1159,62 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     faults: { 'S:level': { reason: 'no_support' } },
   }
   const descent = shaftDescent(FEET, spec)
-  const base = worldState({ feet: FEET, descent, counts, current: queuedPlace(TARGET), enterCell: TARGET })
   const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
+  const unprotectedBase = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+  })
+  const unprotectedRoutes = spendEntryRoute(unprotectedBase, options, TARGET)
+  const unprotected = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    routes: unprotectedRoutes,
+  })
+  const unprotectedOffer = entryCandidates(unprotected, options)
+  const unprotectedDig = digCandidates(unprotectedOffer.candidates)[0]
+  check(
+    '(h0) known obsidian may be cleared without its diamond-pickaxe drop requirement',
+    unprotectedDig !== undefined &&
+      unprotectedDig.meta.clearance === true &&
+      unprotectedDig.requiresTool === false &&
+      unprotectedDig.meta.digRouteBlock === 'obsidian',
+    `offer=[${unprotectedOffer.candidates.map((candidate) => candidate.id).join(',')}] dig=${unprotectedDig?.id ?? 'none'} clearance=${unprotectedDig?.meta.clearance}`,
+  )
+  const frameMembers = [
+    { kind: 'nether_portal' as const, position: { x: 25, y: 67, z: 9 } },
+    { kind: 'nether_portal' as const, position: { x: 25, y: 68, z: 9 } },
+  ]
+  const base = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    liveStructureMembers: frameMembers,
+  })
   const spent = spendEntryRoute(base, options, TARGET)
-  const tick = worldState({ feet: FEET, descent, counts, current: queuedPlace(TARGET), enterCell: TARGET, routes: spent })
+  const tick = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    routes: spent,
+    liveStructureMembers: frameMembers,
+  })
   const offered = entryCandidates(tick, options)
   const grounded = generateGroundedCandidates(tick, options)
-  const refusal = grounded.digRefusals[0]
+  const refusal = grounded.digRefusals.find((entry) => entry.reason === 'protected')
   check(
-    '(h1) measured pocket, no reducing safe step: typed no_tool refusal naming the gate obsidian, and the existing escalation',
+    '(h1) measured pocket frame cells are refused as protected even without a diamond pickaxe',
     digCandidates(offered.candidates).length === 0 &&
       refusal !== undefined &&
-      refusal.reason === 'no_tool' &&
       refusal.block === 'obsidian' &&
       refusal.cell !== null &&
       key(refusal.cell) === '25,67,9' &&
@@ -1174,10 +1222,10 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     `offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}] refusal=${refusal === undefined ? 'none' : formatDigRouteRefused(refusal)}`,
   )
   check(
-    '(h1) the refusal line matches the live marker shape (target/bearing/cell/block/detail)',
+    '(h1) the typed refusal identifies the protected obsidian frame member',
     refusal !== undefined &&
       formatDigRouteRefused(refusal).startsWith(
-        'DIG_ROUTE_REFUSED reason=no_tool target=26,67,9 bearing=E cell=25,67,9 block=obsidian detail=obsidian needs pickaxe tier 4',
+        'DIG_ROUTE_REFUSED reason=protected target=26,67,9 bearing=E cell=25,67,9 block=obsidian',
       ),
     refusal === undefined ? 'no refusal' : formatDigRouteRefused(refusal),
   )
@@ -1194,6 +1242,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     current: queuedPlace(TARGET),
     enterCell: TARGET,
     standable,
+    liveStructureMembers: frameMembers,
   })
   const spentWalk = spendEntryRoute(walkable, options, TARGET)
   const walkTick = worldState({
@@ -1204,6 +1253,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     enterCell: TARGET,
     standable,
     routes: spentWalk,
+    liveStructureMembers: frameMembers,
   })
   const after = entryCandidates(walkTick, options)
   const leg = after.candidates.find((candidate) => candidate.meta.approachLeg !== undefined)
@@ -1227,6 +1277,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     current: queuedPlace(TARGET),
     enterCell: TARGET,
     standable: [FEET, TARGET],
+    liveStructureMembers: frameMembers,
   })
   const spentOnly = spendEntryRoute(onlyTarget, options, TARGET)
   const onlyTick = worldState({
@@ -1237,6 +1288,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     enterCell: TARGET,
     standable: [FEET, TARGET],
     routes: spentOnly,
+    liveStructureMembers: frameMembers,
   })
   const onlyOffer = entryCandidates(onlyTick, options)
   check(

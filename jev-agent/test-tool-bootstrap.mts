@@ -1,6 +1,6 @@
-// test-tool-bootstrap.mts - THE COLD BOOTSTRAP: "a body that cannot clear the
-// cell blocking it must be able to obtain the tool that clears it, and a craft
-// that needs a station must be able to reach one (sensed / carried / crafted)".
+// test-tool-bootstrap.mts - clearance must not bootstrap a harvest tool just to
+// remove a known blocker. Resource harvest still has strict tool acquisition
+// coverage in test-acquisition-route.mts.
 //
 // THE MEASURED LIVE FREEZE (main 67388ac, run-mudlqw62-19miy, the operator's
 // floated-portal trial, generation gen-mudlroc8-lev5py at 2026-09-23T04:28:24Z):
@@ -13,29 +13,10 @@
 //     reason=no_producer item=null count=null held=null tools=none   (92x)
 //   CANDIDATE_STARVATION presented=2 productive=0 goal=place:nether_portal:1
 //
-// The body held 81 oak_log and no pickaxe of any tier. The measurement below
-// separates the two facts the live line conflated:
-//
-//   (b) the headroom cell's tool requirement was never derived, because the CELL
-//       ITSELF WAS NEVER READ: `DIMENSION_READ_REFUSED cell=-8,52,-6 chunk=-1,-1
-//       provenance=unknown reason=unknown_column source=world-state` is the
-//       sensor refusing that read, so the cut is the `block === null` shape
-//       (`name:'unknown'`, `safe:false`) and no harvest family exists to derive.
-//       That is a missing READ, not a missing producer, and case (vii) pins the
-//       typed marker that says so instead of inventing a tool;
-//   (a)/(c) the station chain itself EXISTS and is live: with a cell whose
-//       requirement IS derivable (a stone-family cut, cases (i1)-(i5)) the body
-//       is offered planks -> sticks -> crafting_table -> place -> wooden_pickaxe,
-//       and once the pickaxe is held the blocked cell is diggable again.
-//
-// Fixtures (the operator's five, plus the two evidence shapes):
-//   (i)   THE LIVE SHAPE: logs, no table, no pickaxe, a stone headroom cell
-//   (ii)  a reachable sensed table -> the historical route, offer byte-identical
-//   (iii) a carried table -> placed and used; unplaceable -> typed no_station
-//   (iv)  no logs and no table -> typed refusal naming the item and count
-//   (v)   control with a pickaxe already held -> nothing new offered
-//   (vi)  an EMPTY inventory and a standing tree -> a working tool is reachable
-//   (vii) an unread headroom cell -> `cell_unread cell=...`, no invented tool
+// The measured shape has a stone-family headroom cell, which is mechanically
+// clearable without a pickaxe even though its drops require one. Inventory and
+// station variations below ensure that this clearance fact never creates an
+// unrelated tool-crafting chain. An unread cell remains fail-closed and typed.
 //
 //   cd jev-agent && bun ./test-tool-bootstrap.mts
 import { createRequire } from 'node:module'
@@ -246,74 +227,68 @@ function acquisitionIds(gate: { candidates: Candidate[] }): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// (i) THE LIVE SHAPE: a stone headroom cell + logs in hand -> the bootstrap.
+// (i) A stone headroom cell + logs in hand -> a clearance offer, no tool bootstrap.
 // ---------------------------------------------------------------------------
-addCase('(i1) the blocked ascend names the tool its clearance needs, and the tool route is offered', () => {
+addCase('(i1) the blocked ascend names headroom and offers its clearance directly', () => {
   const state = liveState({ inventory: { oak_log: 81, dirt: 140 } })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = entryFor(gate, 'ENTER:26,67,9')
   const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
-  const tool = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
+  const mine = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
     pass:
       missing.includes(`headroom@${HEAD_CELL.x},${HEAD_CELL.y},${HEAD_CELL.z}`) &&
-      missing.includes('tool:pickaxe@0') &&
-      tool !== null &&
-      tool.routes.includes('CRAFT:oak_planks') &&
-      acquisitionIds(gate).includes('CRAFT:oak_planks'),
-    detail: `missing=[${missing.join(',')}] routes=[${(tool?.routes ?? []).join(',')}] offer=[${ids(gate.candidates).join(',')}]`,
+      !missing.some((capability) => capability.startsWith('tool:')) &&
+      mine !== undefined &&
+      mine.requiresTool === false &&
+      mine.target?.x === HEAD_CELL.x,
+    detail: `missing=[${missing.join(',')}] clearance=${mine?.id ?? 'none'} requiresTool=${mine?.requiresTool}`,
   }
 })
 
-addCase('(i2) the chain is enumerable step by step: planks -> sticks -> crafting_table', () => {
-  const step = (counts: Record<string, number>): string[] => {
+addCase('(i2) changing carried materials never creates a tool-craft chain for clearance', () => {
+  const step = (counts: Record<string, number>): Candidate[] => {
     const gate = applyReachabilityGate([entryCandidate()], liveState({ inventory: { dirt: 140, ...counts } }), options)
-    return acquisitionIds(gate)
+    return gate.candidates
   }
   const logs = step({ oak_log: 81 })
   const planks = step({ oak_log: 81, oak_planks: 4 })
   const sticks = step({ oak_log: 81, oak_planks: 4, stick: 4 })
+  const hasClearanceWithoutCrafts = (candidates: Candidate[]): boolean =>
+    candidates.some((candidate) => candidate.meta.clearance === true) &&
+    !candidates.some((candidate) => candidate.id.startsWith('CRAFT:') || candidate.meta.missingCapability === 'tool:pickaxe@0')
   return {
-    pass:
-      logs.includes('CRAFT:oak_planks') &&
-      planks.includes('CRAFT:stick') &&
-      sticks.includes('CRAFT:crafting_table'),
-    detail: `logs=[${logs.join(',')}] planks=[${planks.join(',')}] sticks=[${sticks.join(',')}]`,
+    pass: hasClearanceWithoutCrafts(logs) && hasClearanceWithoutCrafts(planks) && hasClearanceWithoutCrafts(sticks),
+    detail: `logs=[${ids(logs).join(',')}] planks=[${ids(planks).join(',')}] sticks=[${ids(sticks).join(',')}]`,
   }
 })
 
-addCase('(i3) the station a tool needs is reached from a CARRIED table (placed, then used)', () => {
+addCase('(i3) a carried station does not become a clearance prerequisite', () => {
   const carried = { oak_log: 81, oak_planks: 4, stick: 4, crafting_table: 1 }
   const gate = applyReachabilityGate(
     [entryCandidate()],
     liveState({ inventory: carried, placementSpots: [PLACE_SPOT] }),
     options,
   )
-  const entry = entryFor(gate, 'ENTER:26,67,9')
-  const tool = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
-  const place = tool?.routes.find((id) => id.startsWith('PLACE:crafting_table')) ?? null
+  const mine = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
-    pass: place === `PLACE:crafting_table:p${PLACE_SPOT.x}_${PLACE_SPOT.y}_${PLACE_SPOT.z}` && place !== null,
-    detail: `routes=[${(tool?.routes ?? []).join(',')}] offer=[${ids(gate.candidates).join(',')}]`,
+    pass: mine !== undefined && !gate.candidates.some((candidate) => candidate.id.startsWith('PLACE:crafting_table')),
+    detail: `clearance=${mine?.id ?? 'none'} offer=[${ids(gate.candidates).join(',')}]`,
   }
 })
 
-addCase('(i4) with the station PLACED (sensed, reachable) the tool craft itself is offered', () => {
+addCase('(i4) a sensed station does not create a tool craft for clearance', () => {
   const state = liveState({
     inventory: { oak_log: 81, oak_planks: 4, stick: 4 },
     craftingTables: [{ ...PLACE_SPOT, source: 'sensed', name: 'crafting_table' } as StationEntry],
   })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
-  const entry = entryFor(gate, 'ENTER:26,67,9')
-  const tool = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
+  const mine = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
     pass:
-      tool !== null &&
-      tool.routes.includes('CRAFT:wooden_pickaxe') &&
-      acquisitionIds(gate).includes('CRAFT:wooden_pickaxe') &&
-      // The sensed station is the route: the 2x2 station craft must NOT compete.
-      !acquisitionIds(gate).includes('CRAFT:crafting_table'),
-    detail: `routes=[${(tool?.routes ?? []).join(',')}] offer=[${ids(gate.candidates).join(',')}]`,
+      mine !== undefined &&
+      !gate.candidates.some((candidate) => candidate.id === 'CRAFT:wooden_pickaxe' || candidate.id === 'CRAFT:crafting_table'),
+    detail: `clearance=${mine?.id ?? 'none'} offer=[${ids(gate.candidates).join(',')}]`,
   }
 })
 
@@ -353,9 +328,9 @@ addCase('(i5) once the pickaxe is held the blocked cell is diggable, and clearin
 })
 
 // ---------------------------------------------------------------------------
-// (ii) THE HISTORICAL ROUTE: a reachable sensed table -> the craft, byte-identical.
+// (ii) A reachable sensed table does not change the clearance offer.
 // ---------------------------------------------------------------------------
-addCase('(ii) a reachable sensed station keeps the historical offer byte-identical', () => {
+addCase('(ii) a reachable sensed station has no influence on clearance', () => {
   const state = liveState({
     inventory: { oak_log: 81, oak_planks: 4, stick: 4 },
     craftingTables: [{ ...PLACE_SPOT, source: 'sensed', name: 'crafting_table' } as StationEntry],
@@ -364,63 +339,44 @@ addCase('(ii) a reachable sensed station keeps the historical offer byte-identic
   const grounded = generateGroundedCandidates(state, options)
   return {
     pass:
-      // The historical route: ONE in-place craft at the sensed station, no
-      // station-source step competing with it.
-      ids(gate.candidates).join(',') === 'CRAFT:wooden_pickaxe' &&
-      !ids(grounded.candidates).includes('CRAFT:crafting_table') &&
+      gate.candidates.some((candidate) => candidate.meta.clearance === true) &&
+      !ids(gate.candidates).some((id) => id.startsWith('CRAFT:')) &&
       ids(grounded.candidates).includes('WAIT'),
     detail: `offer=[${ids(gate.candidates).join(',')}] grounded=[${ids(grounded.candidates).join(',')}]`,
   }
 })
 
 // ---------------------------------------------------------------------------
-// (iii) A CARRIED STATION: placed when it can be; a typed station refusal when not.
+// (iii) Station state does not affect clearance.
 // ---------------------------------------------------------------------------
-addCase('(iii1) an unplaceable carried station refuses as a STATION fact, never as a missing material', () => {
+addCase('(iii1) an unplaceable carried station does not block known clearance', () => {
   const state = liveState({
     inventory: { oak_log: 81, oak_planks: 4, stick: 4, crafting_table: 1 },
     placementSpots: [],
   })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
-  const entry = entryFor(gate, 'ENTER:26,67,9')
-  const fact = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
-  const line = entry === null ? 'none' : refusalLine(entry, 'tool:pickaxe@0')
+  const mine = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
     pass:
-      fact !== null &&
-      fact.routes.length === 0 &&
-      fact.reason === 'no_station' &&
-      fact.item === 'crafting_table' &&
-      fact.count === 1 &&
-      fact.held === 1 &&
-      line ===
-        'CANDIDATE_ACQUISITION_REFUSED candidate=ENTER:26,67,9 missing=tool:pickaxe@0 reason=no_station item=crafting_table count=1 held=1 tools=pickaxe:-1' &&
-      // the tool is never named as its own missing material
-      !line.includes('item=wooden_pickaxe'),
-    detail: line,
+      mine !== undefined &&
+      !gate.withheld.some((entry) => (entry.acquisition ?? []).some((fact) => fact.missing.startsWith('tool:'))),
+    detail: `clearance=${mine?.id ?? 'none'} toolAcquisitions=${gate.withheld.flatMap((entry) => entry.acquisition ?? []).filter((fact) => fact.missing.startsWith('tool:')).length}`,
   }
 })
 
 // ---------------------------------------------------------------------------
-// (iv) NO LOGS AND NO TABLE: typed refusal naming the item and count, no dig.
+// (iv) An empty inventory still permits a mechanically valid clearance.
 // ---------------------------------------------------------------------------
-addCase('(iv) with nothing carried the refusal names the item and the count, and nothing is dug', () => {
+addCase('(iv) with nothing carried clearance is offered without crafting a tool', () => {
   const state = liveState({ inventory: {} })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
-  const entry = entryFor(gate, 'ENTER:26,67,9')
-  const fact = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
-  const line = entry === null ? 'none' : refusalLine(entry, 'tool:pickaxe@0')
-  const dig = gate.candidates.filter((candidate) => candidate.kind === 'MINE')
+  const mine = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
     pass:
-      fact !== null &&
-      fact.routes.length === 0 &&
-      fact.reason === 'no_material' &&
-      fact.item !== null &&
-      (fact.count ?? 0) >= 1 &&
-      /reason=no_material item=\S+ count=\d+/.test(line) &&
-      dig.length === 0,
-    detail: `${line} :: digs=[${ids(dig).join(',')}]`,
+      mine !== undefined &&
+      mine.requiresTool === false &&
+      !gate.candidates.some((candidate) => candidate.id.startsWith('CRAFT:')),
+    detail: `clearance=${mine?.id ?? 'none'} requiresTool=${mine?.requiresTool} offer=[${ids(gate.candidates).join(',')}]`,
   }
 })
 
@@ -441,22 +397,19 @@ addCase('(v) a body that already holds the tool gets no craft step for it', () =
 })
 
 // ---------------------------------------------------------------------------
-// (vi) THE ACCEPTANCE SHAPE: an EMPTY inventory and a standing tree.
+// (vi) An unrelated tree does not create a pickaxe prerequisite for clearance.
 // ---------------------------------------------------------------------------
-addCase('(vi) from an empty inventory and a standing tree the tool route starts at the log', () => {
+addCase('(vi) from an empty inventory and a standing tree no tool route is invented for clearance', () => {
   const state = liveState({
     inventory: {},
     blocks: [treeBlock()],
     standable: [FEET, LOG_BLOCK],
   })
   const gate = applyReachabilityGate([entryCandidate()], state, options)
-  const entry = entryFor(gate, 'ENTER:26,67,9')
-  const tool = entry === null ? null : acquisitionFor(entry, 'tool:pickaxe@0')
+  const mine = gate.candidates.find((candidate) => candidate.meta.clearance === true)
   return {
-    pass:
-      tool !== null &&
-      tool.routes.some((id) => id === `MINE:b${LOG_BLOCK.x}_${LOG_BLOCK.y}_${LOG_BLOCK.z}`),
-    detail: `routes=[${(tool?.routes ?? []).join(',')}] offer=[${ids(gate.candidates).join(',')}]`,
+    pass: mine !== undefined && !gate.candidates.some((candidate) => candidate.meta.missingCapability === 'tool:pickaxe@0'),
+    detail: `clearance=${mine?.id ?? 'none'} offer=[${ids(gate.candidates).join(',')}]`,
   }
 })
 

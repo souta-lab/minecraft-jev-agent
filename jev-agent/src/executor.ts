@@ -76,7 +76,7 @@ import type {
   StepLandingReads,
 } from './stepLanding.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
-import { selectDigTool, toolLabel } from './toolChoice.ts'
+import { selectClearanceTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import {
   correctDigSpeedMaterials,
@@ -2942,7 +2942,7 @@ export class Executor {
         )
       }
       await this.equipTool(candidate, epoch, signal)
-      await this.digBlock(block, epoch, signal)
+      await this.digBlock(block, epoch, signal, clearance ? 'clearance' : 'harvest')
     } catch (error) {
       // A supersede/dispose is a cancellation, not a dig failure.
       if (error instanceof ActionCancelled) throw error
@@ -4575,7 +4575,7 @@ export class Executor {
       return false
     }
     this.setPhase(candidate, epoch, 'digging')
-    const live = this.resolveLiveDigTool(block)
+    const live = this.resolveLiveClearanceTool(block)
     if (!live.ok) {
       this.lastVerticalFailureReason = `dig_refused:${live.reason}`
       this.logger.warn(
@@ -4590,14 +4590,14 @@ export class Executor {
         ...candidate,
         toolName: live.tool,
         toolTier: live.tier,
-        requiresTool: live.tool !== null,
+        requiresTool: false,
         meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
       },
       epoch,
       signal,
     )
     try {
-      await this.digBlock(block, epoch, signal)
+      await this.digBlock(block, epoch, signal, 'clearance')
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       this.lastVerticalFailureReason = 'dig_failed'
@@ -4820,14 +4820,14 @@ export class Executor {
       const blockerCell = !bodyClear ? cell : { x: cell.x, y: cell.y + 1, z: cell.z }
       const block = this.currentBlockAt(blockerCell)
       if (block !== null && block.boundingBox !== 'empty') {
-        const live = this.resolveLiveDigTool(block)
+        const live = this.resolveLiveClearanceTool(block)
         blocker = {
           cell: blockerCell,
           name: block.name,
           diggable: block.diggable === true,
           fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
           floodRisk: !this.cellClearOfFluids(blockerCell),
-          toolOk: live.ok,
+          canClear: live.ok,
         }
       }
     }
@@ -4859,7 +4859,7 @@ export class Executor {
         continue
       }
       const block = this.currentBlockAt(cell)
-      const live = block !== null ? this.resolveLiveDigTool(block) : null
+      const live = block !== null ? this.resolveLiveClearanceTool(block) : null
       out.push({
         cell,
         passable: false,
@@ -4867,7 +4867,7 @@ export class Executor {
         diggable: block?.diggable === true,
         fluidOrHazard: block !== null && (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)),
         floodRisk: !this.cellClearOfFluids(cell),
-        toolOk: live?.ok === true,
+        canClear: live?.ok === true,
       })
     }
     return out
@@ -4882,7 +4882,7 @@ export class Executor {
   ): Promise<boolean> {
     const block = this.currentBlockAt(cell)
     if (block === null || block.boundingBox === 'empty') return false
-    const live = this.resolveLiveDigTool(block)
+    const live = this.resolveLiveClearanceTool(block)
     this.logger.info('agent', formatLocalClear(cell, block.name, live.tool, live.tier), {
       actionId: candidate.id,
       hint: nameHint,
@@ -4901,13 +4901,13 @@ export class Executor {
           ...candidate,
           toolName: live.tool,
           toolTier: live.tier,
-          requiresTool: live.tool !== null,
+          requiresTool: false,
           meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
         },
         epoch,
         signal,
       )
-      await this.digBlock(block, epoch, signal)
+      await this.digBlock(block, epoch, signal, 'clearance')
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       this.logger.warn('executor', `LOCAL_CLEAR dig failed: ${error instanceof Error ? error.message : String(error)}`, {
@@ -5622,14 +5622,14 @@ export class Executor {
       }
       const block = this.currentBlockAt(blockingCell)
       if (block === null || block.boundingBox === 'empty') continue
-      const live = this.resolveLiveDigTool(block)
+      const live = this.resolveLiveClearanceTool(block)
       const decision = classifyHeadroomBlocker({
         cell: blockingCell,
         name: block.name,
         diggable: block.diggable === true,
         fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
         floodRisk: !this.cellClearOfFluids({ x: blockingCell.x, y: blockingCell.y + 1, z: blockingCell.z }),
-        toolOk: live.ok,
+        canClear: live.ok,
       })
       if (decision.kind === 'refuse') return { cleared: false, obstacle: decision.obstacle, reason: decision.reason }
       const obstacle: HeadroomObstacle = decision.obstacle
@@ -5642,14 +5642,14 @@ export class Executor {
           ...candidate,
           toolName: live.tool,
           toolTier: live.tier,
-          requiresTool: live.tool !== null,
+          requiresTool: false,
           meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
         },
         epoch,
         signal,
       )
       try {
-        await this.digBlock(block, epoch, signal)
+        await this.digBlock(block, epoch, signal, 'clearance')
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
         this.logger.warn(
@@ -8521,7 +8521,7 @@ export class Executor {
       if (cell === undefined) continue
       const block = this.currentBlockAt(cell)
       if (block === null || block.boundingBox === 'empty') continue
-      const live = this.resolveLiveDigTool(block)
+      const live = this.resolveLiveClearanceTool(block)
       if (!live.ok) {
         throw new ExecutorError('dig_error', `cannot dig ${block.name} at (${cell.x},${cell.y},${cell.z}): ${live.reason}`)
       }
@@ -8530,7 +8530,7 @@ export class Executor {
           ...candidate,
           toolName: live.tool,
           toolTier: live.tier,
-          requiresTool: live.tool !== null,
+          requiresTool: false,
           meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
         },
         epoch,
@@ -8541,7 +8541,7 @@ export class Executor {
         cell,
         block: block.name,
       })
-      await this.digBlock(block, epoch, signal)
+      await this.digBlock(block, epoch, signal, 'clearance')
       this.ensureOwned(epoch, signal)
       dug += 1
     }
@@ -8607,7 +8607,7 @@ export class Executor {
     }
     this.setPhase(candidate, epoch, 'digging')
     await this.equipTool(candidate, epoch, signal)
-    await this.digBlock(block, epoch, signal)
+    await this.digBlock(block, epoch, signal, 'clearance')
     this.ensureOwned(epoch, signal)
 
     const after = this.currentBlockAt(target)
@@ -9106,7 +9106,7 @@ export class Executor {
       throw new ExecutorError('frame_build_blocked', line)
     }
     this.setPhase(candidate, epoch, 'digging')
-    await this.digBlock(block, epoch, signal)
+    await this.digBlock(block, epoch, signal, 'clearance')
     this.ensureOwned(epoch, signal)
     const after = this.currentBlockAt(cell)
     if (after !== null && after.boundingBox === 'block') {
@@ -11682,7 +11682,7 @@ export class Executor {
       }
     }
     if (!this.bot.canDigBlock(block)) return false
-    await this.digBlock(block, epoch, signal)
+    await this.digBlock(block, epoch, signal, 'clearance')
     return true
   }
 
@@ -11958,7 +11958,12 @@ export class Executor {
     })
   }
 
-  private async digBlock(block: Block, epoch: number, signal: AbortSignal): Promise<void> {
+  private async digBlock(
+    block: Block,
+    epoch: number,
+    signal: AbortSignal,
+    purpose: 'harvest' | 'clearance' = 'harvest',
+  ): Promise<void> {
     this.ensureOwned(epoch, signal)
     if (isProtectedStationBlock(block.name)) {
       throw new ExecutorError(
@@ -11981,6 +11986,11 @@ export class Executor {
     if (!this.bot.canDigBlock(block)) {
       throw new ExecutorError('dig_error', `canDigBlock() returned false for ${block.name}`)
     }
+    this.logger.info(
+      'executor',
+      `DIG_INTENT purpose=${purpose} block=${block.name} cell=${memberKey} dropRequired=${purpose === 'harvest'}`,
+      { actionId: this.action?.id ?? 'unknown', purpose, block: block.name, cell: memberKey },
+    )
     // CAN / LEGALITY (operator report: "stone being mined with the sword").
     // Mineflayer's own `canDigBlock` checks only diggable + distance, and its
     // `digTime` reads whatever is in hand, so nothing below this line stops the
@@ -11990,7 +12000,7 @@ export class Executor {
     // `cutApproachStep` already uses) is the legality contract: an inadmissible
     // held item is replaced by a carried admissible tool, and when none exists the
     // dig FAILS CLOSED with the typed `dig_no_tool` instead of proceeding.
-    await this.requireHarvestTool(block, epoch, signal)
+    if (purpose === 'harvest') await this.requireHarvestTool(block, epoch, signal)
     this.assertEffect({
       type: 'dig',
       position: { x: block.position.x, y: block.position.y, z: block.position.z },
@@ -12489,15 +12499,16 @@ export class Executor {
    * can be stale; the actual block in front of the bot is authoritative, so a
    * dirt cell can never inherit a pickaxe from an old resource-scan lookup.
    */
-  private resolveLiveDigTool(block: { name: string; diggable: boolean }): ToolChoice {
+  private resolveLiveClearanceTool(block: { name: string; diggable: boolean }): ToolChoice {
     const harvest = resolveBlockHarvest(this.bot, block.name)
     const info: DigBlockInfo = {
       name: block.name,
+      knownBlock: harvest.yield !== null,
       harvestTool: harvest.harvestTool,
       harvestTier: harvest.harvestTier,
       diggable: block.diggable,
     }
-    return selectDigTool(info, (tool, tier) => this.findTool(tool, tier) !== undefined)
+    return selectClearanceTool(info, (tool, tier) => this.findTool(tool, tier) !== undefined)
   }
 
   private findPlaceReference(target: Vec3Json): { block: Block; face: ReturnType<Bot['entity']['position']['clone']> } | null {
