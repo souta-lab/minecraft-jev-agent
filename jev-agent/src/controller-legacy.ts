@@ -285,6 +285,7 @@ import {
 } from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
 import {
+  acceptedSystem2PlanGoals,
   createSystem2SemanticOutcome,
   finalizeSystem2SemanticOutcomes,
   recordSystem2SemanticAction,
@@ -3128,6 +3129,7 @@ export class JevController {
     const before = this.queue.state
     const requestId = randomUUID()
     const semanticStateFingerprint = this.semanticStateFingerprint()
+    const successSnapshotBefore = this.semanticOptionSnapshot()
     const requestContext: System2RequestContext = {
       requestId,
       queueRevision: this.queue.revision,
@@ -3152,6 +3154,8 @@ export class JevController {
     const plan = await this.system2.plan(request)
     this.planCalls += 1
     const depthBefore = this.queue.state.depth
+    const queueRevisionBeforeApply = this.queue.revision
+    const currentBeforeApply = this.queue.state.current
     const restoredHead = this.queue.current !== null
     const requestedOp = plan.op ?? 'replace'
     const op = resolveBootstrapPlanOp(this.queue, plan.op)
@@ -3161,18 +3165,26 @@ export class JevController {
       onDuplicate: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
       protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
     })
+    const acceptedGoals = acceptedSystem2PlanGoals({
+      operation: op,
+      added,
+      currentBefore: currentBeforeApply,
+      currentAfter: this.queue.state.current,
+      applied: this.queue.revision > queueRevisionBeforeApply,
+    })
     this.logQueueDepthDelta(depthBefore, op, `bootstrap`)
     this.rememberSystem2PlanOutcome({
       proposalId: requestId,
-      operation: plan.op ?? op,
+      operation: op,
       intentSource: plan.provenance?.intentSource ?? 'none',
       intent: plan.provenance?.intent ?? plan.note,
       requestedGoalsTotal: plan.goals.length,
-      acceptedGoals: added,
+      acceptedGoals,
       optionInstanceBefore: requestContext.optionInstanceId,
       queueDoneBefore: before.done,
       stateFingerprintBefore: semanticStateFingerprint,
       blockersBefore: null,
+      successSnapshot: successSnapshotBefore,
     })
     this.subgoalCount = Math.max(added.length, this.queue.size)
     if (restoredHead && op !== requestedOp) {
@@ -6708,7 +6720,6 @@ export class JevController {
       this.recentSemanticOutcomes,
       pending?.record.goalQueueState.current?.id ?? null,
       taxonomy.progressKinds,
-      this.queue.state.done,
     )
     let completedOptionId: string | null = null
     let completedPlanId: string | null = null
@@ -8371,6 +8382,12 @@ export class JevController {
     return goalPreconditionCause(queuedToPlanned(current), this.optionSnapshot(state))
   }
 
+  private semanticOptionSnapshot(): OptionWorldSnapshot {
+    return this.lastWorldState === null
+      ? this.queuePreconditionSnapshot()
+      : this.optionSnapshot(this.lastWorldState)
+  }
+
   private optionSnapshot(state: WorldState): OptionWorldSnapshot {
     const counts = this.inventorySnapshot()
     let toolRank = 0
@@ -8715,6 +8732,7 @@ export class JevController {
     queueDoneBefore: number
     stateFingerprintBefore: string
     blockersBefore: System2BlockerFacts | null
+    successSnapshot: OptionWorldSnapshot
   }): void {
     const record = createSystem2SemanticOutcome({
       ...input,
@@ -8848,9 +8866,11 @@ export class JevController {
     const currentOption = queueState.current
     const blockers = this.system2BlockerFacts()
     const semanticStateFingerprint = this.semanticStateFingerprint()
+    const successSnapshotBefore = this.semanticOptionSnapshot()
     this.recentSemanticOutcomes = finalizeSystem2SemanticOutcomes(this.recentSemanticOutcomes, {
       stateFingerprint: semanticStateFingerprint,
       blocker: system2SemanticBlocker(blockers),
+      snapshot: successSnapshotBefore,
     })
     const requestContext: System2RequestContext = {
       requestId: randomUUID(),
@@ -9020,7 +9040,10 @@ export class JevController {
           }
         }
         const depthBefore = this.queue.state.depth
-        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+        const operation = plan.op ?? 'replace'
+        const queueRevisionBeforeApply = this.queue.revision
+        const currentBeforeApply = this.queue.state.current
+        const added = this.queue.applyPlan(plan.goals, 'llm', operation, {
           reason: plan.note,
           onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
           onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
@@ -9028,18 +9051,26 @@ export class JevController {
           verifyCurrentComplete: (goal) => this.verifyQueuedGoalComplete(goal),
           onOperationRejected: (line) => this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter),
         })
-        this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `summon:${reason}`)
+        const acceptedGoals = acceptedSystem2PlanGoals({
+          operation,
+          added,
+          currentBefore: currentBeforeApply,
+          currentAfter: this.queue.state.current,
+          applied: this.queue.revision > queueRevisionBeforeApply,
+        })
+        this.logQueueDepthDelta(depthBefore, operation, `summon:${reason}`)
         this.rememberSystem2PlanOutcome({
           proposalId: requestContext.requestId,
-          operation: plan.op ?? 'replace',
+          operation,
           intentSource: plan.provenance?.intentSource ?? 'none',
           intent: plan.provenance?.intent ?? plan.note,
           requestedGoalsTotal: plan.goals.length,
-          acceptedGoals: added,
+          acceptedGoals,
           optionInstanceBefore: requestContext.optionInstanceId,
           queueDoneBefore: queueState.done,
           stateFingerprintBefore: requestContext.semanticStateFingerprint ?? 'unobserved',
           blockersBefore: blockers,
+          successSnapshot: successSnapshotBefore,
         })
         this.waitReplans = 0
         if (added.length > 0) {

@@ -30,6 +30,7 @@
 import type { GoalQueueState, PlanOp, PlannedGoal } from './goalQueue.ts'
 import type { JsonlWriter } from './jev.ts'
 import type { System2RequestContext } from './system2Authority.ts'
+import type { OptionWorldSnapshot, Predicate, PredicateTruth } from './optionSpec.ts'
 
 /** Why the long-horizon layer was woken up. */
 export type LlmSummonReason =
@@ -75,6 +76,10 @@ export interface System2SemanticAcceptedGoal {
   optionId: string | null
   optionInstanceId: string | null
   description: string
+  /** Typed code-owned success contract. Missing for old persisted projections. */
+  successPredicates?: readonly Predicate[]
+  /** Truth in the pre-proposal snapshot; custom predicates remain unknown. */
+  successTruthBefore?: PredicateTruth
 }
 
 export interface System2SemanticBlocker {
