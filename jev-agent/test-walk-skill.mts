@@ -43,7 +43,7 @@ import { join } from 'node:path'
 import { Vec3 } from 'vec3'
 import type { Bot } from 'mineflayer'
 import type { Candidate, CandidateKind } from './src/candidates.ts'
-import { Executor, defaultExecutorOptions } from './src/executor.ts'
+import { ExecutionAuthorityConflict, Executor, defaultExecutorOptions } from './src/executor.ts'
 import type { ExecutionResult } from './src/executor.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 import {
@@ -401,6 +401,7 @@ function retrieveCandidate(target: Vec3Json): Candidate {
 
 interface WalkRun {
   result: ExecutionResult
+  selectedBy: string | null
   position: Vec3
   trace: string[]
   messages: string[]
@@ -419,6 +420,7 @@ interface RunOptions {
   maxStepsPerWaypoint?: number
   packetStepMs?: number
   pathTimeoutMs?: number
+  claimContext?: Parameters<Executor['claim']>[1]
   hook?: (writes: number, bot: Bot, executor: Executor | null) => void
 }
 
@@ -440,7 +442,9 @@ async function runWalk(
   })
   fixture.executorRef.current = executor
   const startedAt = Date.now()
-  const result = await executor.claim(candidate).completion
+  const claim = executor.claim(candidate, options.claimContext)
+  const selectedBy = executor.current?.commitment?.selectedBy ?? null
+  const result = await claim.completion
   const elapsedMs = Date.now() - startedAt
   const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
@@ -450,6 +454,7 @@ async function runWalk(
     messages.filter((line) => line.startsWith(prefix) && (contains === undefined || line.includes(contains)))
   return {
     result,
+    selectedBy,
     position: fixture.position,
     trace: fixture.trace,
     messages,
@@ -462,6 +467,94 @@ async function runWalk(
     pathCalls: fixture.pathCalls(),
     grid,
   }
+}
+
+// ---------------------------------------------------------------------------
+// VTR/legacy authority exclusion and VTR walk reservation seam
+// ---------------------------------------------------------------------------
+{
+  const grid: Grid = new Map()
+  fill(grid, 0, 16, 63, 63, -1, 1, 'stone')
+  fill(grid, 0, 16, 64, 68, -1, 1, 'air')
+  const dir = mkdtempSync(join(tmpdir(), 'walk-vtr-authority-'))
+  const fixture = makeBot({ x: 0, y: 64, z: 0 }, grid)
+  const logger = new EventLogger(new JsonlWriter(join(dir, 'agent.jsonl')), false)
+  const executor = new Executor(fixture.bot, logger, {
+    ...defaultExecutorOptions,
+    actuation: 'packet',
+    packetStepMs: 1,
+  })
+  fixture.executorRef.current = executor
+  const candidate = moveCandidate({ x: 12, y: 64, z: 0 })
+  const vtr = executor.claim(candidate, {
+    authority: 'vtr-reach',
+    transitionId: 'transition:reach-test',
+    beforeMechanicalStep: () => true,
+  })
+  check(
+    '(vtr) one active executor lease records the VTR transition owner',
+    executor.current?.authority === 'vtr-reach' && executor.current.transitionId === 'transition:reach-test',
+    `authority=${executor.current?.authority ?? 'none'} transition=${executor.current?.transitionId ?? 'none'}`,
+  )
+  let sameCandidateRejected = false
+  try {
+    executor.claim(candidate, { authority: 'legacy' })
+  } catch (error) {
+    sameCandidateRejected = error instanceof ExecutionAuthorityConflict
+  }
+  let competingActionRejected = false
+  try {
+    executor.claim(moveCandidate({ x: 8, y: 64, z: 0 }), { authority: 'legacy' })
+  } catch (error) {
+    competingActionRejected = error instanceof ExecutionAuthorityConflict
+  }
+  check(
+    '(vtr) neither same-id adoption nor a new legacy claim can steal an active VTR body lease',
+    sameCandidateRejected && competingActionRejected && executor.current?.authority === 'vtr-reach',
+    `sameIdRejected=${sameCandidateRejected} competingRejected=${competingActionRejected} still=${executor.current?.authority ?? 'none'}`,
+  )
+  const sameTransition = executor.claim(candidate, {
+    authority: 'vtr-reach',
+    transitionId: 'transition:reach-test',
+  })
+  check(
+    '(vtr) the same transition can reattach to its already-running mechanical action',
+    sameTransition.kept && sameTransition.epoch === vtr.epoch,
+    `kept=${sameTransition.kept} epoch=${sameTransition.epoch}/${vtr.epoch}`,
+  )
+  executor.cancelCurrent('authority fixture complete')
+  await vtr.completion
+}
+
+{
+  const grid: Grid = new Map()
+  fill(grid, 0, 20, 63, 63, -1, 1, 'stone')
+  fill(grid, 0, 20, 64, 68, -1, 1, 'air')
+  fill(grid, 8, 9, 64, 64, -1, 1, 'stone')
+  fill(grid, 8, 9, 65, 68, -1, 1, 'air')
+  let reservations = 0
+  let outcomes = 0
+  const run = await runWalk({ x: 0, y: 64, z: 0 }, grid, moveCandidate({ x: 16, y: 64, z: 0 }), {
+    maxStepsPerWaypoint: 12,
+    claimContext: {
+      authority: 'vtr-reach',
+      transitionId: 'transition:reach-walk-fixture',
+      beforeMechanicalStep: () => {
+        reservations += 1
+        return true
+      },
+      afterMechanicalStep: () => {
+        outcomes += 1
+        return true
+      },
+    },
+  })
+  check(
+    '(vtr) walkSkill preserves VTR provenance and reserves every leg before movement',
+    run.result.status === 'done' && reservations >= 3 && reservations === run.legs.length && outcomes === run.legs.length &&
+      run.selectedBy === 'vtr_transition',
+    `status=${run.result.status} selectedBy=${run.selectedBy} reservations=${reservations} outcomes=${outcomes} legs=${run.legs.length}`,
+  )
 }
 
 const cell = (p: Vec3Json): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`

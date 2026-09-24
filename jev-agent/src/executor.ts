@@ -468,11 +468,27 @@ export interface CurrentAction {
    * Persisted for the whole action lifetime and carried into the evidence.
    */
   commitment?: SkillCommitment
+  /** V4 controller ownership; absent means this is a legacy selected action. */
+  authority?: 'legacy' | 'vtr-reach'
+  /** Active Reach Transition that authorized this subordinate mechanical action. */
+  transitionId?: string
+  /** Contract reservation hook run immediately before each physical walk leg. */
+  beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Record observed effects/risk after a leg, before any terminal verification. */
+  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
 }
 
 export interface ExecutionClaimContext {
   /** currently validated members from the fresh, merged world observation */
   liveStructureMembers?: readonly LiveStructureMember[]
+  /** VTR is the authority for this mechanical action; legacy policy did not select it. */
+  authority?: 'legacy' | 'vtr-reach'
+  /** stable parent Transition identity for correlated evidence */
+  transitionId?: string
+  /** Reserve the VTR transition's per-leg budget before any physical movement. */
+  beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Record observed effects/risk after a leg, before any terminal verification. */
+  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
 }
 
 export interface ClaimResult {
@@ -480,6 +496,14 @@ export interface ClaimResult {
   kept: boolean
   epoch: number
   completion: Promise<ExecutionResult>
+}
+
+/** A running body lease cannot be silently adopted across authority boundaries. */
+export class ExecutionAuthorityConflict extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ExecutionAuthorityConflict'
+  }
 }
 
 /**
@@ -2031,6 +2055,7 @@ export class Executor {
   private action: CurrentAction | null = null
   private owned = 0
   private maxConcurrent = 0
+  private authorityConflicts = 0
   private movementsReady = false
   private lastResultValue: ExecutionResult | null = null
   /** issue #436 section 4: the commitment of the running action, or null */
@@ -2100,6 +2125,10 @@ export class Executor {
     return this.maxConcurrent
   }
 
+  get authorityConflictCount(): number {
+    return this.authorityConflicts
+  }
+
   /**
    * The contents this body has OBSERVED, for the controller to inject into the
    * next sensor tick (`SensorInput.containerContents`). Containers nobody opened
@@ -2163,6 +2192,29 @@ export class Executor {
   claim(candidate: Candidate, context: ExecutionClaimContext = {}): ClaimResult {
     this.ensureMovements()
     const running = this.action
+    const requestedAuthority = context.authority ?? 'legacy'
+    if (requestedAuthority === 'vtr-reach' && (context.transitionId === undefined || context.transitionId.length === 0)) {
+      throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionId')
+    }
+    if (
+      running !== null && running.status === 'running' &&
+      (running.authority !== requestedAuthority ||
+        (requestedAuthority === 'vtr-reach' && running.transitionId !== context.transitionId))
+    ) {
+      this.authorityConflicts += 1
+      const message =
+        `actuation authority conflict: running=${running.authority ?? 'legacy'}:${running.transitionId ?? running.id} ` +
+        `requested=${requestedAuthority}:${context.transitionId ?? candidate.id}`
+      this.logger.error('executor', `ACTUATION_AUTHORITY_CONFLICT ${message}`, {
+        runningActionId: running.id,
+        runningAuthority: running.authority ?? 'legacy',
+        runningTransitionId: running.transitionId ?? null,
+        requestedActionId: candidate.id,
+        requestedAuthority,
+        requestedTransitionId: context.transitionId ?? null,
+      })
+      throw new ExecutionAuthorityConflict(message)
+    }
     if (running !== null && running.status === 'running' && running.id === candidate.id) {
       return { kept: true, epoch: running.epoch, completion: running.completion }
     }
@@ -2184,7 +2236,7 @@ export class Executor {
     // the whole bounded lifetime of the action - identity, target, declared
     // postconditions, effect envelope, budget, interrupt policy, and the
     // provenance (who selected it, at which state fingerprint).
-    const commitment = this.buildCommitment(candidate)
+    const commitment = this.buildCommitment(candidate, context)
     const liveStructureMembers =
       context.liveStructureMembers === undefined
         ? undefined
@@ -2204,6 +2256,10 @@ export class Executor {
       detail: '',
       completion,
       commitment,
+      authority: context.authority ?? 'legacy',
+      ...(context.transitionId === undefined ? {} : { transitionId: context.transitionId }),
+      ...(context.beforeMechanicalStep === undefined ? {} : { beforeMechanicalStep: context.beforeMechanicalStep }),
+      ...(context.afterMechanicalStep === undefined ? {} : { afterMechanicalStep: context.afterMechanicalStep }),
       liveStructureMembers,
     }
     this.action = action
@@ -2499,7 +2555,7 @@ export class Executor {
   }
 
   /** Build the first-class commitment for one policy-selected candidate. */
-  private buildCommitment(candidate: Candidate): SkillCommitment {
+  private buildCommitment(candidate: Candidate, context: ExecutionClaimContext = {}): SkillCommitment {
     const dimension = this.observedDimension()
     const worldEpoch = readMetaNumber(candidate, 'worldEpoch', 0)
     const selectedBy = readMetaString(candidate, 'selectedBy')
@@ -2543,7 +2599,12 @@ export class Executor {
         transfers: this.groundedTransfers(candidate),
       }),
       budget: { ms: this.budgetMsFor(candidate), steps: null, retries: 0 },
-      selectedBy: selectedBy === 'hard_safety' ? 'hard_safety' : 'jev_pi',
+      selectedBy:
+        context.authority === 'vtr-reach'
+          ? 'vtr_transition'
+          : selectedBy === 'hard_safety'
+            ? 'hard_safety'
+            : 'jev_pi',
       selectedAtStateFingerprint: readMetaString(candidate, 'stateFingerprint'),
       params: {
         candidateId: candidate.id,
@@ -3309,6 +3370,19 @@ export class Executor {
       // fails closed with the typed SKILL_INVALIDATED event and never re-plans into
       // the new world - the replacement target belongs to policy.
       this.assertCommitmentValid()
+      const activeAction = this.action
+      const mechanicalStep = {
+        stepId: `${activeAction?.id ?? candidate.id}#${epoch}:walk-leg-${legs + 1}`,
+        leg: legs + 1,
+        effectKind: 'locomotion' as const,
+      }
+      if (
+        activeAction?.epoch === epoch &&
+        activeAction.beforeMechanicalStep !== undefined &&
+        !activeAction.beforeMechanicalStep(mechanicalStep)
+      ) {
+        throw new ActionCancelled(`VTR refused walk leg ${legs + 1} before mechanical dispatch`)
+      }
       const bound = this.boundWalkLeg(signal, deadlineAt)
       const before = remaining
       let arrived = false
@@ -3329,6 +3403,13 @@ export class Executor {
         legFailure = this.walkLegFailureOf(error, bound.timedOut())
       } finally {
         bound.cleanup()
+      }
+      if (
+        activeAction?.epoch === epoch &&
+        activeAction.afterMechanicalStep !== undefined &&
+        !activeAction.afterMechanicalStep(mechanicalStep)
+      ) {
+        throw new ActionCancelled(`VTR rejected observed effects after walk leg ${legs}`)
       }
       // A fail-closed envelope refusal is a statement about the COMMITMENT, not a
       // transient leg failure: the commitment cannot perform a step it needs, so

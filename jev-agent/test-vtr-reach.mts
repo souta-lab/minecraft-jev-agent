@@ -4,6 +4,7 @@ import {
   createReachTransitionContract,
   interruptReachForSafety,
   recordReachMechanicalStep,
+  recordReachObservedRisk,
   recordReachProgress,
   reserveReachActuation,
   setReachTactic,
@@ -215,6 +216,35 @@ describe('pure VTR Reach contract and controller state machine', () => {
       assert.equal(denied.status, 'terminal')
       assert.equal(denied.state.usage.mechanicalSteps, 0)
     }
+  })
+
+  it('records post-leg risk before deterministic verification and rejects a budget overrun', () => {
+    const contract = makeContract({ budget: { ...makeContract().budget, risk: { damage: 1 } } })
+    const state = start(contract)
+    const step = recordReachMechanicalStep(contract, state, identity, {
+      stepId: 'path-execution-8:leg-1', effectKind: 'move', resources: {}, risk: {}, nowMs: 1_010,
+    })
+    assert.equal(step.status, 'authorized')
+    const observed = recordReachObservedRisk(contract, step.state, identity, {
+      observationId: 'path-execution-8:leg-1', risk: { damage: 1 }, nowMs: 1_020,
+    })
+    assert.equal(observed.status, 'active')
+    if (observed.status !== 'active') return
+    assert.equal(observed.state.usage.risk.damage, 1)
+    const second = recordReachObservedRisk(contract, observed.state, identity, {
+      observationId: 'path-execution-8:leg-2', risk: { damage: 1 }, nowMs: 1_030,
+    })
+    assert.equal(second.status, 'terminal')
+    if (second.status === 'terminal') {
+      assert.equal(second.outcome.kind, 'BUDGET_EXHAUSTED')
+      if (second.outcome.kind === 'BUDGET_EXHAUSTED') assert.equal(second.outcome.budget, 'risk:damage')
+      assert.equal(second.state.usage.risk.damage, 1, 'an over-budget observation cannot mutate the recorded total')
+    }
+    const cannotVerifyAfterOverrun = verifyReachEnsures(contract, second.state, observation(contract, 1_040, {
+      'mission.reach-village': 'true',
+      'body.alive': 'true',
+    }))
+    assert.equal(cannotVerifyAfterOverrun.status, 'terminal')
   })
 
   it('rejects actuation when world epoch, generation, or lease identity changes', () => {

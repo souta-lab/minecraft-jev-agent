@@ -647,7 +647,7 @@ export const DEFAULT_INTERRUPT_POLICY: InterruptPolicy = {
   maxSafetyInterrupts: 1,
 }
 
-export type SelectedBy = 'jev_pi' | 'hard_safety'
+export type SelectedBy = 'jev_pi' | 'hard_safety' | 'vtr_transition'
 
 export interface SkillCommitment<P = Record<string, string | number | boolean | null>> {
   commitmentId: string

@@ -43,6 +43,7 @@ import type {
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { milestoneReport } from './milestone-report.ts'
+import { resolveResidentBootConfig } from './resident-config.ts'
 import { MilestonePredicateRecorder } from './milestone-predicates.ts'
 import {
   MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
@@ -134,8 +135,9 @@ const LOCK_PATH = join(DATA, 'host.lock')
 const MC_AI = dirname(HERE)
 const JEV_SRC = join(MC_AI, 'jev-agent', 'src')
 
-const HOST = '127.0.0.1'
-const PORT = 25565
+const RESIDENT_BOOT_CONFIG = resolveResidentBootConfig(process.env)
+const HOST = RESIDENT_BOOT_CONFIG.host
+const PORT = RESIDENT_BOOT_CONFIG.port
 const USERNAME = process.env.BUDDY_USERNAME ?? 'AI_Buddy'
 const VERSION = '1.21.11'
 const HEARTBEAT_MS = 15000
@@ -144,8 +146,8 @@ const RELOAD_DEBOUNCE_MS = 1200
 const GEN_RESTART_MS = 3000
 const LISTENER_BASELINE_POLL_MS = 25
 const LISTENER_BASELINE_MAX_POLLS = 200
-const GOAL_ITEM = 'iron_ingot'
-const GOAL_COUNT = 3
+const GOAL_ITEM = RESIDENT_BOOT_CONFIG.goalItem
+const GOAL_COUNT = RESIDENT_BOOT_CONFIG.goalCount
 const MODEL_AUTHORITY_MISMATCHES: readonly ModelAuthorityMismatch[] = [
   'expected-identity-missing',
   'actual-identity-missing',
@@ -3129,6 +3131,8 @@ log('BOOT', {
   pid: process.pid,
   runId,
   source: bootSourceSha,
+  connection: { host: HOST, port: PORT, serverId: SERVER_ID },
+  mission: { kind: 'inventory_at_least', item: GOAL_ITEM, count: GOAL_COUNT, source: 'BUDDY_MISSION_* or default' },
   runtime: 'bun',
   runtimeVersion: Bun.version,
   bundle: currentBundle ?? 'none',

@@ -2944,6 +2944,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const options: Partial<JevAgentOptions> = {
     goalItem: rootGoal.goalItem,
     goalCount: rootGoal.goalCount,
+    // V4 Mission truth is the run's configured objective, never the deterministic
+    // benchmark ladder's compatibility projection. The Reach scheduler reads
+    // this separately before GoalQueue/System2/π dispatch.
+    vtrMission: {
+      id: `run-mission:${ctx.goalItem}:${ctx.goalCount}`,
+      kind: 'inventory_at_least',
+      item: ctx.goalItem,
+      count: ctx.goalCount,
+    },
     // Every decision-time world read carries provenance: a cell whose column was
     // not loaded under the live dimension is refused (typed) instead of read.
     dimensionProvenance,

@@ -159,6 +159,17 @@ export type ReachTerminalOutcome =
       readonly evidenceId: string
     }
   | {
+      readonly kind: 'MISSION_SATISFIED'
+      readonly contractHash: string
+      readonly evidenceId: string
+    }
+  | {
+      readonly kind: 'CONTRACT_SUPERSEDED'
+      readonly contractHash: string
+      readonly reason: string
+      readonly evidenceId: string
+    }
+  | {
       readonly kind: 'CONTRACT_VIOLATION'
       readonly contractHash: string
       readonly violation:
@@ -194,6 +205,7 @@ export interface ReachTransitionState {
   readonly progress: ReachProgress
   readonly usage: ReachResourceUse
   readonly reservedActuationIds: readonly string[]
+  readonly recordedRiskObservationIds: readonly string[]
   readonly terminalOutcome: ReachTerminalOutcome | null
 }
 
@@ -463,6 +475,7 @@ export function startReachTransition(
       progress: initialProgress(),
       usage: emptyUsage(),
       reservedActuationIds: [],
+      recordedRiskObservationIds: [],
       terminalOutcome: null,
     })
     return terminal(empty, mismatch)
@@ -491,6 +504,7 @@ export function startReachTransition(
     progress: initialProgress(),
     usage: emptyUsage(),
     reservedActuationIds: [],
+    recordedRiskObservationIds: [],
     terminalOutcome: null,
   })
   return { status: 'active', state }
@@ -679,6 +693,35 @@ export function recordReachMechanicalStep(
   })
 }
 
+/** Charge observed risk after a mechanical leg, before VERIFY may issue SUCCESS. */
+export function recordReachObservedRisk(
+  contract: ReachTransitionContract,
+  state: ReachTransitionState,
+  identity: ReachIdentity,
+  input: { readonly observationId: string; readonly risk: Readonly<Record<string, number>>; readonly nowMs: number },
+): ReachActiveResult {
+  const guard = guardState(contract, state, identity, input.nowMs)
+  const blocked = fromGuard(state, guard)
+  if (blocked !== null) return blocked
+  if (!input.observationId.trim()) {
+    return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'invalid_evidence', detail: 'risk observation id must be non-empty' })
+  }
+  if (state.recordedRiskObservationIds.includes(input.observationId)) {
+    return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'duplicate_actuation_id', detail: `risk:${input.observationId}` })
+  }
+  const riskResult = addDelta(contract, state.usage.risk, input.risk, contract.budget.risk, 'risk')
+  if (riskResult.outcome !== undefined) return terminal(state, riskResult.outcome)
+  return {
+    status: 'active',
+    state: freezeDeep({
+      ...state,
+      recordedRiskObservationIds: [...state.recordedRiskObservationIds, input.observationId],
+      controllerRevision: state.controllerRevision + 1,
+      usage: { ...state.usage, elapsedMs: input.nowMs - state.startedAtMs, risk: riskResult.values! },
+    }),
+  }
+}
+
 /** Record navigation-specific, world-grounded progress; it never closes the contract. */
 export function recordReachProgress(
   contract: ReachTransitionContract,
@@ -767,4 +810,36 @@ export function interruptReachForSafety(
     return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'invalid_evidence', detail: 'safety interrupt requires reason and evidence id' })
   }
   return terminal(state, { kind: 'SAFETY_INTERRUPT', contractHash: contract.contractHash, reason: input.reason, evidenceId: input.evidenceId })
+}
+
+/** Hand the child navigation contract back when its parent Mission predicate is already true. */
+export function finishReachForMissionSatisfied(
+  contract: ReachTransitionContract,
+  state: ReachTransitionState,
+  identity: ReachIdentity,
+  input: { readonly evidenceId: string; readonly nowMs: number },
+): ReachActiveResult {
+  const guard = guardState(contract, state, identity, input.nowMs)
+  const blocked = fromGuard(state, guard)
+  if (blocked !== null) return blocked
+  if (!input.evidenceId.trim()) {
+    return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'invalid_evidence', detail: 'mission completion handoff requires evidence' })
+  }
+  return terminal(state, { kind: 'MISSION_SATISFIED', contractHash: contract.contractHash, evidenceId: input.evidenceId })
+}
+
+/** End a child Transition when its scheduler-owned assumptions are explicitly replaced. */
+export function supersedeReachTransition(
+  contract: ReachTransitionContract,
+  state: ReachTransitionState,
+  identity: ReachIdentity,
+  input: { readonly reason: string; readonly evidenceId: string; readonly nowMs: number },
+): ReachActiveResult {
+  const guard = guardState(contract, state, identity, input.nowMs)
+  const blocked = fromGuard(state, guard)
+  if (blocked !== null) return blocked
+  if (!input.reason.trim() || !input.evidenceId.trim()) {
+    return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'invalid_evidence', detail: 'supersession requires a reason and evidence' })
+  }
+  return terminal(state, { kind: 'CONTRACT_SUPERSEDED', contractHash: contract.contractHash, reason: input.reason, evidenceId: input.evidenceId })
 }
