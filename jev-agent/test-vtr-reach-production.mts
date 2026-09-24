@@ -1,11 +1,32 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
+import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
+const generationEntry = readFileSync(new URL('../buddy-driver/generation-entry.ts', import.meta.url), 'utf8')
 
 describe('VTR Reach production authority seam', () => {
+  it('mirrors every Reach runtime event into the HOST event sink', () => {
+    const markers = new Set([...controller.matchAll(/\b(VTR_[A-Z0-9_]+)\b/g)].map((match) => match[1]!))
+    assert.ok(markers.size > 0, 'expected VTR event markers in the production controller')
+
+    for (const marker of markers) {
+      assert.ok(MIRRORED_MARKERS.has(marker), `${marker} must be registered for HOST mirroring`)
+      assert.equal(mirroredEventToken(`${marker} transitionId=t1 contractHash=h1`), marker)
+    }
+
+    const loggerStart = controller.indexOf('class MirroringEventLogger')
+    const loggerEnd = controller.indexOf('\n}\n', loggerStart)
+    const mirror = controller.slice(loggerStart, loggerEnd)
+    assert.match(mirror, /const token = mirroredEventToken\(message\)/)
+    assert.match(mirror, /if \(token !== null\) this\.sink\(token, detail\)/)
+
+    const hostEventSink = generationEntry.slice(generationEntry.indexOf('eventSink: (event, detail) => {'))
+    assert.match(hostEventSink, /ctx\.log\(event, bindGenerationEventIdentity\(detail,\s*\{[\s\S]*?runId: ctx\.runId \?\? null,[\s\S]*?generationId: id,[\s\S]*?sourceSha: ctx\.sourceSha \?\? null,[\s\S]*?buildHash: ctx\.buildHash \?\? null,/)
+  })
+
   it('dispatches the active Reach owner before legacy queue/model control and consumes its tick', () => {
     const tickStart = controller.indexOf('private async tick(trigger: DecisionTrigger')
     const tickEnd = controller.indexOf('private jevLog(', tickStart)

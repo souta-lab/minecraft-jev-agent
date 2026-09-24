@@ -1094,6 +1094,31 @@ function targetIdentityKeyOf(identity: CausalTargetIdentity): string {
 }
 
 {
+  // VTR's direct Executor.claim path does not pass through the legacy candidate
+  // stamper. When its MOVE has no explicit epoch, the HOST-owned live epoch must
+  // be bound here rather than silently defaulting to epoch 0.
+  const fixture = makeFixture()
+  const candidate = measuredMoveCandidate()
+  candidate.meta = { ...candidate.meta }
+  delete candidate.meta.worldEpoch
+  const executor = makeExecutor(fixture, { observedWorldEpoch: () => 3 })
+  const claim = executor.claim(candidate)
+  const target = executor.current?.commitment?.target
+  const committedEpoch = target !== undefined && target.kind === 'position' ? target.worldEpoch : null
+  const changedWorldInvalidation = fixture.logger
+    .matching('SKILL_INVALIDATED')
+    .some((line) => line.includes('reason=WORLD_CHANGED'))
+  executor.cancelCurrent('epoch-binding-fixture-complete')
+  const result = await claim.completion
+  const pass = committedEpoch === 3 && !changedWorldInvalidation && result.skillOutcome !== 'WORLD_CHANGED'
+  report(
+    pass,
+    '7a. VTR candidates without provenance bind the HOST live world epoch',
+    `committedEpoch=${committedEpoch} invalidated=${changedWorldInvalidation} outcome=${result.skillOutcome ?? 'none'}`,
+  )
+}
+
+{
   // `unknown` is the UNOBSERVED dimension, never a verdict: it must not
   // invalidate a commitment (a fixture host with no game state / unloaded world).
   const ctx = { dimension: 'minecraft:the_nether', worldEpoch: 3 }

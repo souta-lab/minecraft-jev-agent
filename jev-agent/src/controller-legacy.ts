@@ -1924,6 +1924,25 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   SYSTEM2_PAYLOAD,
   SYSTEM2_PAYLOAD_REFUSED,
   SYSTEM2_PAYLOAD_ABSENT,
+  // V4 Reach owns a committed navigation predicate across many mechanical
+  // actions. These events carry contract identity and typed causal evidence.
+  // The generation event sink binds run/generation/source identity to each
+  // mirrored detail; without registration these exist only in shared run JSONL.
+  'VTR_DUAL_AUTHORITY_FENCE',
+  'VTR_RISK_OBSERVED',
+  'VTR_TRANSITION_PROGRESS',
+  'VTR_REACH_GUARD_REFUSED',
+  'VTR_TRANSITION_ACTUATION',
+  'VTR_ACTION_COMPLETION_HANDLER_FAILED',
+  'VTR_SCHEDULER_HOLDS_TERMINAL',
+  'VTR_TRANSITION_COMMIT',
+  'VTR_MECHANICAL_STEP_REFUSED',
+  'VTR_MECHANICAL_STEP_RESERVED',
+  'VTR_MECHANICAL_OUTCOME_REJECTED',
+  'VTR_ORPHAN_ACTION_OUTCOME',
+  'VTR_MECHANICAL_OUTCOME',
+  'VTR_TRANSITION_OUTCOME',
+  'VTR_LEGACY_REACH_MOVE_WITHHELD',
 ])
 
 /**

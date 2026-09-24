@@ -2557,7 +2557,12 @@ export class Executor {
   /** Build the first-class commitment for one policy-selected candidate. */
   private buildCommitment(candidate: Candidate, context: ExecutionClaimContext = {}): SkillCommitment {
     const dimension = this.observedDimension()
-    const worldEpoch = readMetaNumber(candidate, 'worldEpoch', 0)
+    // Candidate provenance may be absent on a VTR-owned action: it reaches
+    // claim() directly and does not pass through the legacy selection stamper.
+    // Bind that missing identity at the executor/host trust boundary. An
+    // explicitly supplied epoch is preserved so stale candidates still fail
+    // closed in commitmentInvalidation().
+    const worldEpoch = readMetaNumber(candidate, 'worldEpoch', this.options.observedWorldEpoch?.() ?? 0)
     const selectedBy = readMetaString(candidate, 'selectedBy')
     // #436 section 5/17: the block(s) this locomotion route's own placement step
     // declared at candidate time are what authorizes the equip below, so the
