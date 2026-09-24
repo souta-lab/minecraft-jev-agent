@@ -338,15 +338,21 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
 }
 
 function isRateLimit(error: unknown, depth = 0): boolean {
-  if (depth > 4 || typeof error !== 'object' || error === null) return false
+  if (depth > 5 || typeof error !== 'object' || error === null) return false
   const row = error as Record<string, unknown>
-  if (row.statusCode === 429) return true
-  if (typeof row.name === 'string' && row.name.includes('RateLimit')) return true
-  if (isRateLimit(row.cause, depth + 1) || isRateLimit(row.lastError, depth + 1)) return true
+  if ([row.statusCode, row.status, row.httpStatus].some(
+    (value) => typeof value === 'number' && Number.isFinite(value) && value === 429,
+  )) return true
+  if (typeof row.name === 'string' && /ratelimit/i.test(row.name)) return true
+  if (
+    isRateLimit(row.cause, depth + 1) ||
+    isRateLimit(row.lastError, depth + 1) ||
+    isRateLimit(row.response, depth + 1)
+  ) return true
   return Array.isArray(row.errors) && row.errors.some((entry) => isRateLimit(entry, depth + 1))
 }
 
-/** Retryable transport/provider failures require a fresh decision epoch. */
+/** Transient provider failures retry within this decision; exhaustion requests host recovery. */
 export function isTransientProviderFailure(error: unknown, depth = 0): boolean {
   if (typeof error === 'string') {
     return /503|service temporarily unavailable|service unavailable|upstream unavailable|connection reset|ECONN(?:RESET|REFUSED|ABORTED)|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|timed? ?out/i.test(error)
@@ -839,7 +845,11 @@ export class AuthorityJevPolicy implements JevPolicy {
         if (isRateLimit(error) && rateAttempt < this.options.rateLimitRetries) {
           rateAttempt += 1
           generalAttempt -= 1
-          const delayMs = this.options.rateLimitBaseDelayMs * rateAttempt
+          const configuredDelayMs = this.options.rateLimitBaseDelayMs * rateAttempt
+          const delayMs = Math.min(
+            TRANSIENT_RETRY_MAX_DELAY_MS,
+            Math.max(configuredDelayMs, providerDiagnostics?.retryAfterMs ?? 0),
+          )
           rateWaitMs += delayMs
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: rateAttempt,

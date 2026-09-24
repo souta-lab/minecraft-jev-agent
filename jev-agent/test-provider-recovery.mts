@@ -182,4 +182,33 @@ function retryPolicy(
   assert.equal(records.some((row) => (row as { retryClass?: string }).retryClass === 'transient-provider'), false)
 }
 
+for (const [label, rateLimitError, expectedDelayMs] of [
+  ['status', { status: 429 }, 7_000],
+  ['httpStatus', { httpStatus: 429 }, 7_000],
+  ['nested response', { response: { status: 429, headers: new Headers({ 'retry-after': '10' }) } }, 10_000],
+  ['nested cause', { cause: { status: 429 } }, 7_000],
+  ['nested lastError', { lastError: { httpStatus: 429 } }, 7_000],
+  ['nested errors', { errors: [{ statusCode: 429 }] }, 7_000],
+] as const) {
+  const records: unknown[] = []
+  const waits: number[] = []
+  let calls = 0
+  const policy = retryPolicy(async () => {
+    calls += 1
+    if (calls === 1) throw rateLimitError
+    return evaluationResponse()
+  }, records, waits, { maxRetries: 0, rateLimitRetries: 1, rateLimitBaseDelayMs: 7_000 })
+  const result = await policy.decide(request())
+  assert.equal(result.source, 'jev', `${label}: rate limit retry must retain Jev authority`)
+  assert.equal(calls, 2, `${label}: status 429 must use the dedicated rate-limit retry budget`)
+  assert.deepEqual(waits, [expectedDelayMs], `${label}: status 429 must use dedicated delay and honor Retry-After`)
+  assert.equal(records.some((row) => (row as { retryClass?: string }).retryClass === 'transient-provider'), false,
+    `${label}: status 429 must not consume the generic transient-provider retry path`)
+  assert.equal(
+    (records.find((row) => (row as { record?: string }).record === 'jev-call') as { rateLimitRetries?: number }).rateLimitRetries,
+    1,
+    `${label}: successful call should report the dedicated rate-limit retry`,
+  )
+}
+
 console.log('provider recovery classification: PASS')
