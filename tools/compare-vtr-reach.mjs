@@ -92,9 +92,23 @@ function vectorDifference(position, origin, floorOrigin = false) {
 
 function structuredFixture(raw) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
-  const source = raw.relativeResourceSource ?? raw
+  const source = raw.relativeResourceSource ?? raw.witness ?? raw
   const position = source.position ?? raw.position ?? raw.sourcePosition ?? raw.targetPosition ?? null
-  const player = raw.initialPlayerPosition ?? raw.playerPosition ?? raw.mission?.initialPosition ?? null
+  // A Reach slice may teleport the bot from its boot/spawn position to the
+  // controlled fixture before committing the Transition. Use the recorded
+  // transition start when available; `mission.initialPosition` can predate
+  // that harness setup and describe a different geometry.
+  const transitionStartPosition = raw.transitionStartPosition ?? source.transitionStartPosition ?? null
+  const player = transitionStartPosition ?? raw.initialPlayerPosition ?? raw.playerPosition ?? raw.mission?.initialPosition ?? null
+  const initialPlayerPositionSource = transitionStartPosition !== null
+    ? (raw.transitionStartPosition !== undefined ? 'transitionStartPosition' : 'relativeResourceSource.transitionStartPosition')
+    : raw.initialPlayerPosition !== undefined
+      ? 'initialPlayerPosition'
+      : raw.playerPosition !== undefined
+        ? 'playerPosition'
+        : raw.mission?.initialPosition !== undefined
+          ? 'mission.initialPosition'
+          : null
   const exactCartesianDelta = vectorDifference(position, player)
   const relativeBlockOffset = vectorDifference(position, player, true)
   const declaredOffset = raw.sourceOffsetFromInitialPlayer ?? raw.relativeOffset ?? raw.offset ?? null
@@ -114,6 +128,8 @@ function structuredFixture(raw) {
     block: block.replace(/^minecraft:/, ''),
     position,
     initialPlayerPosition: player,
+    initialPlayerPositionSource,
+    initialPlayerPositionEvidence: raw.transitionStartEvidence ?? raw.initialPlayerPositionEvidence ?? null,
     exactCartesianDelta,
     relativeBlockOffset,
     declaredOffset,
@@ -127,6 +143,16 @@ function structuredFixture(raw) {
 function readOptionalJson(path, label) {
   if (!existsSync(path)) return null
   return readJson(path, label).value
+}
+
+function findArchiveRoot(inputPath, requiredRelativePath) {
+  let current = dirname(resolve(inputPath))
+  while (true) {
+    if (existsSync(join(current, requiredRelativePath))) return current
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
 }
 
 function legacyFixtureFromArchive(archiveRoot, expected) {
@@ -194,13 +220,14 @@ function parseLegacy(raw, sourceText, legacyPath) {
     const effectiveJev = record(baseline.effectiveJev, 'legacy.baseline.effectiveJev')
     const effectiveSystem2 = record(baseline.effectiveSystem2, 'legacy.baseline.effectiveSystem2')
     const comparison = record(input.comparison, 'legacy.comparison')
-    const archiveFixture = legacyFixtureFromArchive(dirname(legacyPath), {
+    const archiveRoot = findArchiveRoot(legacyPath, join('runner', 'reach-slice-evidence.json')) ?? dirname(legacyPath)
+    const archiveFixture = legacyFixtureFromArchive(archiveRoot, {
       runId: baseline.runId,
       generationId: baseline.generationId,
       sourceSha: baseline.commit,
       buildHash: baseline.buildHash,
     })
-    const fixtureRaw = comparison.fixture ?? baseline.fixture ?? input.fixture ?? archiveFixture.fixture
+    const fixtureRaw = comparison.fixture ?? archiveFixture.fixture ?? baseline.fixture ?? input.fixture
     return {
       schema: input.schema,
       sourceSha: text(baseline.commit, 'legacy.baseline.commit'),
@@ -319,6 +346,164 @@ function exactNumericField(sourceText, expression, parsedValue, path) {
   return exact
 }
 
+function readArchivedTransitionStart(raw, archiveRoot) {
+  const fixture = record(raw.fixture, 'archive.fixture')
+  const transition = record(raw.transition, 'archive.transition')
+  const commit = record(transition.commit, 'archive.transition.commit')
+  const transitionId = text(commit.transitionId, 'archive.transition.commit.transitionId')
+  const start = record(fixture.transitionStartPosition, 'archive.fixture.transitionStartPosition')
+  const command = text(fixture.harnessTeleportCommand, 'archive.fixture.harnessTeleportCommand')
+  const target = /^tp\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/i.exec(command)
+  if (target === null) throw new Error('archive harness teleport must record an absolute tp command')
+  const tpPlayer = target[1]
+  const tpPosition = { x: Number(target[2]), y: Number(target[3]), z: Number(target[4]) }
+  if (!['x', 'y', 'z'].every((key) => Number.isFinite(start[key]))) {
+    throw new Error('archive transitionStartPosition must contain finite x/y/z')
+  }
+  const verticalOffset = tpPosition.y - start.y
+  if (Math.abs(start.x - tpPosition.x) > 0.011 || Math.abs(start.z - tpPosition.z) > 0.011 ||
+      (Math.abs(verticalOffset) > 0.011 && Math.abs(verticalOffset - 1) > 0.011)) {
+    throw new Error('archive transitionStartPosition does not match the recorded grounded harness teleport')
+  }
+
+  const commandsPath = join(archiveRoot, 'server', 'fixture-commands.jsonl')
+  const runnerLogPath = join(archiveRoot, 'runner', 'buddy.log')
+  if (!existsSync(commandsPath) || !existsSync(runnerLogPath)) {
+    throw new Error('archive transition-start proof requires server/fixture-commands.jsonl and runner/buddy.log')
+  }
+  const commandRows = readFileSync(commandsPath, 'utf8').split(/\r?\n/).filter((line) => line.trim() !== '').map((line, index) => {
+    try { return JSON.parse(line) } catch (error) { throw new Error(`${commandsPath}:${index + 1}: invalid JSONL (${error.message})`) }
+  })
+  const teleport = commandRows.find((row) => row.command === command && (row.username === undefined || row.username === tpPlayer))
+  if (teleport === undefined || typeof teleport.recordedAt !== 'string') {
+    throw new Error('archive has no timestamped console record for the harness teleport')
+  }
+  const teleportAt = Date.parse(teleport.recordedAt)
+  if (!Number.isFinite(teleportAt)) throw new Error('archive harness teleport timestamp is invalid')
+  const log = readFileSync(runnerLogPath, 'utf8')
+  const commitLine = log.split(/\r?\n/).find((line) => line.includes(`VTR_TRANSITION_COMMIT transitionId=${transitionId} `))
+  const commitTime = commitLine?.match(/^\[([^\]]+)\]/)?.[1]
+  const commitAt = commitTime === undefined ? NaN : Date.parse(commitTime)
+  if (!Number.isFinite(commitAt) || teleportAt >= commitAt) {
+    throw new Error('archive does not prove the harness teleport occurred before Transition commit')
+  }
+  return { position: start, source: 'fixture.transitionStartPosition (console tp precedes commit)' }
+}
+
+function adaptArchivedVtrProbe(raw, archiveRoot) {
+  if (raw?.record !== 'vtr-reach-live-probe') return raw
+  const input = record(raw, 'VTR archive probe')
+  const server = record(input.server, 'archive.server')
+  const mission = record(input.mission, 'archive.mission')
+  const fixture = record(input.fixture, 'archive.fixture')
+  const transition = record(input.transition, 'archive.transition')
+  const commit = record(transition.commit, 'archive.transition.commit')
+  const verify = record(transition.verify, 'archive.transition.verify')
+  const terminal = record(transition.terminalOutcome, 'archive.transition.terminalOutcome')
+  const terminalOutcome = record(terminal.outcome, 'archive.transition.terminalOutcome.outcome')
+  const identity = record(commit.identity, 'archive.transition.commit.identity')
+  const desiredPredicate = record(commit.desiredPredicate, 'archive.transition.commit.desiredPredicate')
+  if (commit.identity?.generationId !== input.generationId || commit.identity?.leaseId !== input.generationId ||
+      verify.transitionId !== commit.transitionId || terminal.transitionId !== commit.transitionId ||
+      verify.runId !== input.runId || verify.generationId !== input.generationId || verify.sourceSha !== input.sourceSha ||
+      verify.worldKey !== identity.worldKey || verify.worldEpoch !== identity.worldEpoch ||
+      verify.contractHash !== terminal.contractHash) {
+    throw new Error('archive Transition commit/verification/outcome identity binding is inconsistent')
+  }
+  const metrics = record(input.metrics, 'archive.metrics')
+  const configuration = record(input.configuration, 'archive.configuration')
+  const archiveStart = readArchivedTransitionStart(input, archiveRoot)
+  const noDoubleProof = readOptionalJson(join(archiveRoot, 'proofs', 'no-double-authority.json'), 'VTR no-double-authority proof')
+  if (noDoubleProof === null || noDoubleProof.result !== 'PASS' || noDoubleProof.runId !== input.runId ||
+      noDoubleProof.sourceSha !== input.sourceSha || noDoubleProof.generationId !== input.generationId ||
+      noDoubleProof.duplicateAuthority !== false || noDoubleProof.duplicateAuthorityConflicts !== 0 ||
+      noDoubleProof.legacyActuationCount !== 0 || noDoubleProof.vtrActuationCount !== 1) {
+    throw new Error('archive lacks a run/source/generation-bound PASS no-double-authority proof')
+  }
+  const eventSequence = Array.isArray(transition.eventSequence) ? transition.eventSequence : []
+  const verifyEventIndex = eventSequence.findIndex((event) => String(event).includes('VTR_TRANSITION_VERIFY'))
+  const outcomeEventIndex = eventSequence.findIndex((event) => String(event).includes('VTR_TRANSITION_OUTCOME'))
+  const verificationEvidenceMatches = verify.truth === 'TRUE' && verify.identityMatches === true && verify.predicatesVerified === true &&
+    Array.isArray(verify.evidenceIds) && isDeepStrictEqual(verify.evidenceIds, terminalOutcome.evidenceIds) &&
+    verify.desiredPredicateIdentity === terminalOutcome.desiredPredicateIdentity && verifyEventIndex >= 0 &&
+    outcomeEventIndex > verifyEventIndex
+  const typedTerminalProof = verificationEvidenceMatches && terminalOutcome.kind === 'SUCCESS'
+  const commitEventIndex = eventSequence.findIndex((event) => String(event).includes('VTR_TRANSITION_COMMIT'))
+  const precommitUnknownSourceHolds = eventSequence.slice(0, Math.max(0, commitEventIndex))
+    .filter((event) => String(event).includes('VTR_REACH_PROBE_HOLD') && /unknown|unavailable/i.test(String(event))).length
+  const witness = commit.witness
+  const witnessChosenByProductionSensor = typeof witness?.evidenceId === 'string' && witness.evidenceId.startsWith('sensor:block:') &&
+    witness.observedIdentity?.generationId === input.generationId
+  const finalInventory = record(mission.finalInventory, 'archive.mission.finalInventory')
+  const missionCompleted = (finalInventory[mission.item] ?? 0) >= mission.count
+  const contractWorldKey = text(identity.worldKey, 'archive.transition.commit.identity.worldKey')
+
+  return {
+    schema: 'vtr-reach-live-probe/v1',
+    archivedProbeAdapter: 'vtr-reach-live-probe-record/v1',
+    source: { commit: input.sourceSha, buildHash: input.generationHash },
+    run: {
+      runId: input.runId,
+      generationId: input.generationId,
+      worldKey: contractWorldKey,
+      serverId: server.serverId,
+      worldEpoch: server.worldEpoch,
+      dimension: server.dimension,
+      levelName: server.worldName,
+      seed: String(server.worldSeedFromLevelDat),
+      minecraftVersion: server.minecraftVersion,
+      gameMode: server.gamemode,
+      difficulty: server.difficulty,
+      seedAssessment: input.identity?.seedAssessment ?? null,
+    },
+    mission: {
+      id: commit.mission?.id,
+      kind: mission.kind,
+      item: mission.item,
+      count: mission.count,
+      initialInventory: record(mission.initialInventory, 'archive.mission.initialInventory'),
+      finalInventory,
+      initialPosition: fixture.runnerBootPosition,
+      missionCompletion: missionCompleted,
+    },
+    fixture: {
+      relativeResourceSource: { block: fixture.witness?.block, position: fixture.witness?.position },
+      transitionStartPosition: archiveStart.position,
+      transitionStartEvidence: archiveStart.source,
+      flatSolidGround: typeof fixture.flatSolidGround === 'boolean' ? fixture.flatSolidGround : null,
+      witnessChosenByProductionSensor,
+    },
+    transition: {
+      transitionId: commit.transitionId,
+      contractHash: terminal.contractHash,
+      desiredPredicate,
+      ensures: commit.ensures,
+      worldIdentity: identity,
+      metrics: { ...metrics, concurrentLegacyActuations: 0 },
+      outcome: { kind: terminalOutcome.kind, boundary: terminal.boundary, evidenceIds: terminalOutcome.evidenceIds },
+      precommitUnknownSourceHolds,
+      actionSkillReportedSuccessWasNotUsedAsTransitionTerminal: typedTerminalProof,
+      archivedVerificationBeforeOutcome: typedTerminalProof,
+      witness,
+    },
+    configuredNoLlmProbe: {
+      networkModelCalls: configuration.networkModelCalls,
+      effectiveJev: {
+        provider: configuration.effectiveJevProvider,
+        model: configuration.effectiveJevModel,
+        configuredPolicy: configuration.BUDDY_POLICY,
+        decisionCalls: metrics.jevCallsPerTransition,
+      },
+      effectiveSystem2: {
+        provider: configuration.effectiveSystem2Provider,
+        model: configuration.effectiveSystem2Model,
+        configuredMode: configuration.BUDDY_SYSTEM2,
+        decisionCalls: metrics.system2CallsPerTransition,
+      },
+    },
+  }
+}
+
 function parseVtr(raw) {
   const input = record(raw, 'VTR input')
   if (input.schema !== 'vtr-reach-live-probe/v1') {
@@ -392,8 +577,10 @@ function parseVtr(raw) {
   if (desiredProposition.kind !== 'within-interaction-reach-of-resource-source') {
     throw new Error('VTR desired predicate is not the declared resource-source Reach predicate')
   }
-  if (outcome.kind !== vtrMetrics.typedTerminalOutcome || outcome.boundary !== 'verified-terminal') {
-    throw new Error('VTR outcome must match typedTerminalOutcome and verified-terminal boundary')
+  const archiveVerifiedTerminal = input.archivedProbeAdapter === 'vtr-reach-live-probe-record/v1' &&
+    transition.archivedVerificationBeforeOutcome === true && outcome.boundary === 'mechanical-step-outcome'
+  if (outcome.kind !== vtrMetrics.typedTerminalOutcome || (outcome.boundary !== 'verified-terminal' && !archiveVerifiedTerminal)) {
+    throw new Error('VTR outcome must match typedTerminalOutcome and include a verified terminal boundary proof')
   }
   if (vtrMetrics.verifiedTransitions !== 1 || outcome.kind !== 'SUCCESS') {
     throw new Error('VTR artifact must contain exactly one verified Reach SUCCESS for this comparator')
@@ -433,6 +620,7 @@ function parseVtr(raw) {
     dimension: run.dimension,
     levelName: run.levelName,
     seed: run.seed,
+    seedAssessment: typeof run.seedAssessment === 'string' ? run.seedAssessment : null,
     minecraftVersion: run.minecraftVersion,
     gameMode: run.gameMode,
     difficulty: run.difficulty,
@@ -448,10 +636,17 @@ function parseVtr(raw) {
     fixture: structuredFixture({
       block: fixture.relativeResourceSource?.block,
       position: fixture.relativeResourceSource?.position,
-      initialPlayerPosition: mission.initialPosition,
+      // Preserve the distinction between where the process booted and where
+      // the Reach contract began. The archive's transition start is the
+      // controlled comparator input when the harness teleported before commit.
+      transitionStartPosition: fixture.transitionStartPosition,
+      transitionStartEvidence: fixture.transitionStartEvidence,
+      mission,
       sourceOffsetFromInitialPlayer: fixture.sourceOffsetFromInitialPlayer,
-      flatSolidGround: fixture.flatSolidGround === true,
-      witnessChosenByProductionSensor: fixture.witnessChosenByProductionSensor === true,
+      flatSolidGround: typeof fixture.flatSolidGround === 'boolean' ? fixture.flatSolidGround : null,
+      witnessChosenByProductionSensor: typeof fixture.witnessChosenByProductionSensor === 'boolean'
+        ? fixture.witnessChosenByProductionSensor
+        : null,
     }),
     transition: {
       transitionId: transition.transitionId,
@@ -504,7 +699,7 @@ function checkLegacy(legacy) {
 const legacyInput = readJson(legacyPath, 'legacy')
 const vtrInput = readJson(vtrPath, 'VTR')
 const legacy = checkLegacy(parseLegacy(legacyInput.value, legacyInput.sourceText, legacyPath))
-const vtr = parseVtr(vtrInput.value)
+const vtr = parseVtr(adaptArchivedVtrProbe(vtrInput.value, dirname(vtrPath)))
 
 if (legacy.runId === vtr.runId || legacy.generationId === vtr.generationId) {
   throw new Error('legacy and VTR inputs must be distinct runs and generations')
@@ -561,6 +756,9 @@ const environmentMatch = Object.fromEntries(['minecraftVersion', 'gameMode', 'di
     ? 'unknown'
     : legacy[field] === vtr[field],
 ]))
+if (vtr.seedAssessment !== null) {
+  environmentMatch.seedProvenance = /disagree|mismatch|conflict/i.test(vtr.seedAssessment) ? false : true
+}
 const environmentAlignment = Object.values(environmentMatch).includes(false)
   ? false
   : Object.values(environmentMatch).every((value) => value === true)
@@ -618,6 +816,7 @@ const output = {
       dimension: vtr.dimension,
       levelName: vtr.levelName,
       seed: vtr.seed,
+      seedAssessment: vtr.seedAssessment,
       minecraftVersion: vtr.minecraftVersion,
       gameMode: vtr.gameMode,
       difficulty: vtr.difficulty,
@@ -638,6 +837,8 @@ const output = {
       block: vtr.fixture.block,
       sourcePosition: vtr.fixture.position,
       initialPlayerPosition: vtr.fixture.initialPlayerPosition,
+      initialPlayerPositionSource: vtr.fixture.initialPlayerPositionSource,
+      initialPlayerPositionEvidence: vtr.fixture.initialPlayerPositionEvidence,
       exactCartesianDelta: vtr.fixture.exactCartesianDelta,
       relativeBlockOffset: vtr.fixture.relativeBlockOffset,
       declaredOffset: vtr.fixture.declaredOffset,
