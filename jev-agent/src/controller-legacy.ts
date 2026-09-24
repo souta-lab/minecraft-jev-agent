@@ -2935,7 +2935,7 @@ export class JevController {
 
   /** Swap in a real long-horizon model. The interface is system2.ts#System2Brain. */
   setSystem2(brain: System2Brain): void {
-    if (this.system2 !== brain) this.system2.cancelPending?.('system2-replaced')
+    if (this.system2 !== brain) this.system2?.cancelPending?.('system2-replaced')
     this.system2 = brain
   }
 
@@ -3310,7 +3310,7 @@ export class JevController {
   }
 
   stop(): void {
-    this.system2.cancelPending?.('controller-stop')
+    this.system2?.cancelPending?.('controller-stop')
     this.finish('stopped-by-caller', this.runSuccess())
   }
 
@@ -3329,7 +3329,7 @@ export class JevController {
   stopForModelRecovery(): void {
     if (!this.running || this.modelRecoveryStopping) return
     this.modelRecoveryStopping = true
-    this.system2.cancelPending?.('model-recovery')
+    this.system2?.cancelPending?.('model-recovery')
     this.scheduler.stop()
     this.clearDecisionTimer()
     this.pendingTrigger = null
@@ -13815,7 +13815,7 @@ export class JevController {
         return
       }
     }
-    this.system2.cancelPending?.(`controller-finished:${stopped}`)
+    this.system2?.cancelPending?.(`controller-finished:${stopped}`)
     this.running = false
     this.saveLedger()
     this.scheduler.stop()
