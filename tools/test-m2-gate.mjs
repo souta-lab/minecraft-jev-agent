@@ -14,7 +14,8 @@
 // the live world / durable memory, or a chainless PORTAL_VERIFIED=true) is a
 // named UNKNOWN (`inherited_portal`), not a PASS and not an anonymous gap.
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -31,6 +32,7 @@ import {
   parseInventoryMarker,
   parsePortalChainLine,
   readM2Snapshot,
+  readPolicySocketBinding,
   readRunScopedM2Evidence,
   requestedRunId,
   residentPaths,
@@ -54,9 +56,44 @@ const RUN = 'run-m2-a'
 const OTHER_RUN = 'run-m2-b'
 const SOURCE_SHA = 'a'.repeat(40)
 
+{
+  const dir = mkdtempSync(join(tmpdir(), 'm2-report-binding-'))
+  const sockPath = join(dir, 'control.sock')
+  const observedAt = '2026-09-20T10:00:08.000Z'
+  const worldKey = { serverId: 'fixture-server', dimension: 'minecraft:overworld', worldEpoch: 2 }
+  const report = {
+    runId: RUN,
+    worldKey,
+    currentInventoryObservation: {
+      record: 'current-inventory-observation', schemaVersion: 1, runId: RUN, sourceSha: SOURCE_SHA,
+      generationId: 'fixture-generation', observedAtMs: Date.parse(observedAt), observedAt,
+      worldKey: { ...worldKey, dimension: 'minecraft:the_nether' }, dimension: 'minecraft:the_nether', counts: { ender_eye: 12 },
+    },
+    status: { policyKind: 'typesafe', policyProvider: 'typesafe-ai', policyModel: 'typesafe-ai/jev' },
+  }
+  const server = createServer((socket) => {
+    socket.once('data', () => socket.end(`${JSON.stringify({ ok: true, data: report })}\n`))
+  })
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(sockPath, resolve)
+    })
+    const binding = await readPolicySocketBinding(sockPath)
+    assert.equal(binding.runId, RUN)
+    assert.deepEqual(binding.worldKey, worldKey)
+    assert.equal(binding.currentInventoryObservation.worldKey.dimension, 'minecraft:the_nether')
+    assert.equal(binding.policyProvider, 'typesafe-ai')
+    ok('the same HOST report binding carries top-level worldKey and live terminal inventory across dimension transit')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
-  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyProvider: 'typesafe-ai', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
   system2: {
     runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1,
     identityStatus: 'verified', identityReason: null,
@@ -65,7 +102,7 @@ const VERIFIED_POLICY = {
 }
 const FALLBACK_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0, unclassifiableCount: 0 },
-  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyProvider: 'deterministic', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
 }
 
 const boot = (runId, sourceSha = SOURCE_SHA) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=${sourceSha} worldEpoch=1`

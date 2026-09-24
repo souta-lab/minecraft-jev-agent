@@ -31,15 +31,30 @@ const ok = (label) => {
 const line = (ts, body) => `[${ts}] ${body}`
 const SOURCE_SHA = 'a'.repeat(40)
 const BUILD_HASH = 'b'.repeat(12)
+const HOST_JEV_PROVIDER = 'typesafe-ai'
 const decision = (ts, source, {
   runId = 'run-b',
   generationId = 'g-b',
   sourceSha = SOURCE_SHA,
-} = {}) => JSON.stringify({ record: 'decision', ts, source, runId, generationId, sourceSha })
+  actualModel = source === 'jev' ? REQUIRED_POLICY_MODEL : null,
+  actualProvider = null,
+} = {}) => JSON.stringify({
+  record: 'decision', ts, source, runId, generationId, sourceSha,
+  ...(source === 'jev' ? { jev: {
+    ...(actualModel === null ? {} : { model: actualModel }),
+    ...(actualProvider === null ? {} : { provider: actualProvider }),
+  } } : {}),
+})
 const decisionScope = (runId = 'run-b', generationId = 'g-b') => ({
   runId,
   sourceSha: SOURCE_SHA,
-  generations: [{ generationId, sourceSha: SOURCE_SHA, tsMs: Date.parse('2026-09-18T09:10:01.000Z') }],
+  generations: [{
+    generationId,
+    sourceSha: SOURCE_SHA,
+    tsMs: Date.parse('2026-09-18T09:10:01.000Z'),
+    policyProvider: HOST_JEV_PROVIDER,
+    policyModel: REQUIRED_POLICY_MODEL,
+  }],
 })
 const generation = (id, overrides = {}) => [
   `id=${id}`,
@@ -48,6 +63,7 @@ const generation = (id, overrides = {}) => [
   `buildHash=${overrides.buildHash ?? BUILD_HASH}`,
   `policy=${overrides.policy ?? 'typesafe'}`,
   `model=${overrides.policyModel ?? 'typesafe-ai/jev'}`,
+  `policyProvider=${overrides.policyProvider ?? HOST_JEV_PROVIDER}`,
   `planner=${overrides.planner ?? 'llm'}`,
   `deterministicFallbackEnabled=${overrides.deterministicFallbackEnabled ?? 'false'}`,
   `system2ConfiguredProvider=${overrides.system2Provider ?? 'model-provider'}`,
@@ -110,13 +126,13 @@ try {
     assert.deepEqual(parsed, {
       generationId: 'g', sourceSha: SOURCE_SHA, buildHash: BUILD_HASH,
       policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'unknown', deterministicFallbackEnabled: false,
-      system2ConfiguredProvider: 'model-provider', system2ConfiguredModel: 'model-v1',
+      system2ConfiguredProvider: 'model-provider', system2ConfiguredModel: 'model-v1', policyProvider: 'typesafe-ai',
     })
     const fallback = parseGenerationLine('GENERATION_READY id=g policy=fallback model=deterministic-local-fallback')
     assert.deepEqual(fallback, {
       generationId: 'g', sourceSha: null, buildHash: null,
       policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: null, deterministicFallbackEnabled: null,
-      system2ConfiguredProvider: null, system2ConfiguredModel: null,
+      system2ConfiguredProvider: null, system2ConfiguredModel: null, policyProvider: null,
     })
     const rich = parseGenerationLine('GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false')
     assert.equal(rich.plannerMode, 'llm')
@@ -270,17 +286,47 @@ try {
     const nowMs = Date.parse('2026-09-18T09:20:03.000Z')
     const evidence = await loadPolicyEvidence({
       runId: 'run-c',
-      socket: { runId: 'run-c', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      socket: { runId: 'run-c', policyKind: 'typesafe', policyProvider: HOST_JEV_PROVIDER, policyModel: 'typesafe-ai/jev' },
       decisionsPath: decisions,
       runnerOutPath: runnerOut,
       now: () => nowMs,
     })
     assert.equal(evidence.generation.source, 'socket_report')
     assert.equal(evidence.generation.policyKind, 'typesafe')
+    assert.equal(evidence.generation.policyProvider, HOST_JEV_PROVIDER)
+    assert.equal(evidence.generation.policyModel, REQUIRED_POLICY_MODEL)
     assert.equal(evidence.decisions.jevCount, 1)
     const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-c', ...evidence })
     assert.equal(verdict.code, 0)
     ok('a live run is bracketed by now and its socket generation status verifies')
+  }
+
+  {
+    const startMs = Date.parse('2026-09-18T09:10:00.000Z')
+    const endMs = Date.parse('2026-09-18T09:10:05.000Z')
+    const mismatchPath = join(dir, 'decision-model-mismatch.jsonl')
+    const missingPath = join(dir, 'decision-model-missing.jsonl')
+    const deterministicPath = join(dir, 'decision-model-deterministic.jsonl')
+    writeFileSync(mismatchPath, `${decision('2026-09-18T09:10:02.000Z', 'jev', { actualModel: 'other-model' })}\n`)
+    writeFileSync(missingPath, `${decision('2026-09-18T09:10:02.000Z', 'jev', { actualModel: null })}\n`)
+    writeFileSync(deterministicPath, `${decision('2026-09-18T09:10:02.000Z', 'jev', { actualModel: 'deterministic-local-fallback' })}\n`)
+    for (const [label, path] of [
+      ['mismatched', mismatchPath],
+      ['missing', missingPath],
+      ['deterministic-looking', deterministicPath],
+    ]) {
+      const counts = await countDecisionSources(path, startMs, endMs, decisionScope())
+      assert.equal(counts.jevCount, 0, `${label} result model cannot count as a Jev model decision`)
+      assert.equal(counts.unclassifiableCount, 1, `${label} result model must remain UNKNOWN`)
+    }
+    const injectedProviderPath = join(dir, 'decision-provider-is-not-authority.jsonl')
+    writeFileSync(injectedProviderPath, `${decision('2026-09-18T09:10:02.000Z', 'jev', { actualProvider: 'caller-injected-provider' })}\n`)
+    const injected = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: injectedProviderPath, runnerOutPath: runnerOut })
+    assert.equal(injected.decisions.jevCount, 1)
+    assert.equal(injected.generation.policyProvider, HOST_JEV_PROVIDER)
+    assert.equal(injected.generation.policyModel, REQUIRED_POLICY_MODEL)
+    assert.equal(evaluatePolicyEvidence({ expectedRunId: 'run-b', ...injected }).facts.effectiveProvider, HOST_JEV_PROVIDER)
+    ok('every Jev row model joins its HOST generation model; decision-row provider cannot replace HOST identity')
   }
 
   {
@@ -514,8 +560,15 @@ try {
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason.startsWith('policy_provider_unverified'),
+    )
+    assert.ok(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyProvider: HOST_JEV_PROVIDER, policyModel: 'typesafe-ai/jev' },
       }).reason.startsWith("no_jev_decisions"),
     )
     assert.ok(
@@ -607,7 +660,7 @@ try {
       expectedRunId: 'run-current',
       decisions: { runId: 'run-current', source: 'fixture', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
       generation: {
-        runId: 'run-current', source: 'fixture', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev',
+        runId: 'run-current', source: 'fixture', policyKind: 'typesafe', policyProvider: HOST_JEV_PROVIDER, policyModel: 'typesafe-ai/jev',
         plannerMode: 'llm', deterministicFallbackEnabled: false,
       },
       system2: {

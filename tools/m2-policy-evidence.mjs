@@ -81,6 +81,7 @@ export function parseGenerationLine(line) {
     deterministicFallbackEnabled: fallback === null ? null : fallback === 'true',
     system2ConfiguredProvider: /\bsystem2ConfiguredProvider=(\S+)/.exec(line)?.[1] ?? null,
     system2ConfiguredModel: /\bsystem2ConfiguredModel=(\S+)/.exec(line)?.[1] ?? null,
+    policyProvider: /\bpolicyProvider=(\S+)/.exec(line)?.[1] ?? null,
   }
 }
 
@@ -380,7 +381,12 @@ function decisionGenerationIndex(generations, expectedSourceSha) {
       ? generation.sourceSha.toLowerCase()
       : null
     if (sourceSha !== expectedSha || !Number.isFinite(generation.tsMs)) continue
-    eligible.set(id, { tsMs: generation.tsMs, sourceSha })
+    eligible.set(id, {
+      tsMs: generation.tsMs,
+      sourceSha,
+      policyProvider: typeof generation.policyProvider === 'string' ? generation.policyProvider.trim() : null,
+      policyModel: typeof generation.policyModel === 'string' ? generation.policyModel.trim() : null,
+    })
   }
   return { eligible, expectedSha }
 }
@@ -456,6 +462,21 @@ export async function countDecisionSources(decisionsPath, startMs, endMs, {
     }
 
     if (record.source === 'jev') {
+      // `record.source` identifies the Jev path, but a JSONL row is not proof
+      // of which model answered it. Require the nested result model to match
+      // the HOST-owned policyModel on this exact GENERATION_READY identity.
+      // The generation's provider/model remain the effective identity; values
+      // carried by the decision row can only corroborate that identity.
+      const actualModel = typeof record.jev?.model === 'string' ? record.jev.model.trim() : ''
+      const hostModel = joinedGeneration.policyModel
+      if (
+        actualModel.length === 0 || NON_MODEL_AUTHORITY_RE.test(actualModel) ||
+        typeof hostModel !== 'string' || hostModel.length === 0 || NON_MODEL_AUTHORITY_RE.test(hostModel) ||
+        actualModel !== hostModel
+      ) {
+        unclassifiableCount += 1
+        continue
+      }
       jevCount += 1
       if (firstJevTs === null) firstJevTs = record.ts
       lastJevTs = record.ts
@@ -515,6 +536,7 @@ export async function loadPolicyEvidence({
       runId,
       source: 'socket_report',
       policyKind: socket.policyKind,
+      policyProvider: typeof socket.policyProvider === 'string' ? socket.policyProvider : chosen?.policyProvider ?? null,
       policyModel: socket.policyModel,
       plannerMode: chosen?.plannerMode ?? null,
       deterministicFallbackEnabled: chosen?.deterministicFallbackEnabled ?? null,
@@ -530,6 +552,7 @@ export async function loadPolicyEvidence({
       runId,
       source: runnerOutPath,
       policyKind: chosen.policyKind,
+      policyProvider: chosen.policyProvider ?? null,
       policyModel: chosen.policyModel,
       plannerMode: chosen.plannerMode ?? null,
       deterministicFallbackEnabled: chosen.deterministicFallbackEnabled ?? null,
@@ -615,7 +638,10 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
     generationRunId: generation?.runId ?? null,
     generationSource: generation?.source ?? null,
     policyKind: generation?.policyKind ?? null,
+    policyProvider: generation?.policyProvider ?? null,
     policyModel: generation?.policyModel ?? null,
+    effectiveProvider: generation?.policyProvider ?? null,
+    effectiveModel: generation?.policyModel ?? null,
   }
 
   if (expectedRunId === null || !RUN_ID_RE.test(String(expectedRunId))) {
@@ -663,6 +689,9 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
   }
   if (generation.policyModel !== REQUIRED_POLICY_MODEL) {
     return outcome(2, 'UNKNOWN', `policy_model_not_typesafe observed=${generation.policyModel ?? 'unknown'}`, facts)
+  }
+  if (typeof generation.policyProvider !== 'string' || generation.policyProvider.trim().length === 0 || NON_MODEL_AUTHORITY_RE.test(generation.policyProvider)) {
+    return outcome(2, 'UNKNOWN', `policy_provider_unverified observed=${generation.policyProvider ?? 'unknown'}`, facts)
   }
   return outcome(0, 'VERIFIED', 'real_policy_evidence_verified', facts)
 }

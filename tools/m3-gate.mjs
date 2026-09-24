@@ -138,7 +138,7 @@ export function evaluateEnderEyes(samples, terminalInventory = null) {
   }
 }
 
-function bindTerminalInventoryObservation(value, expectedRunId, runSourceSha) {
+function bindTerminalInventoryObservation(value, expectedRunId, runSourceSha, reportWorldKey) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return { status: 'unavailable', reason: 'current_inventory_observation_missing', observation: null }
   }
@@ -165,6 +165,25 @@ function bindTerminalInventoryObservation(value, expectedRunId, runSourceSha) {
     Date.parse(value.observedAt) !== value.observedAtMs
   ) {
     return { status: 'invalid', reason: 'current_inventory_timestamp_invalid', observation: null }
+  }
+  const observationWorldKey = value.worldKey
+  if (observationWorldKey === null || typeof observationWorldKey !== 'object' || Array.isArray(observationWorldKey)) {
+    return { status: 'invalid', reason: 'current_inventory_world_key_missing', observation: null }
+  }
+  if (reportWorldKey === null || typeof reportWorldKey !== 'object' || Array.isArray(reportWorldKey)) {
+    return { status: 'invalid', reason: 'report_world_key_missing', observation: null }
+  }
+  const validWorldIdentity = (key) =>
+    typeof key.serverId === 'string' && key.serverId.trim().length > 0 &&
+    Number.isInteger(key.worldEpoch) && key.worldEpoch >= 0
+  if (!validWorldIdentity(observationWorldKey) || !validWorldIdentity(reportWorldKey)) {
+    return { status: 'invalid', reason: 'current_inventory_world_identity_invalid', observation: null }
+  }
+  if (observationWorldKey.serverId !== reportWorldKey.serverId || observationWorldKey.worldEpoch !== reportWorldKey.worldEpoch) {
+    return { status: 'invalid', reason: 'current_inventory_world_identity_mismatch', observation: null }
+  }
+  if (typeof value.dimension !== 'string' || value.dimension.length === 0 || observationWorldKey.dimension !== value.dimension) {
+    return { status: 'invalid', reason: 'current_inventory_dimension_world_key_mismatch', observation: null }
   }
   for (const count of Object.values(counts)) {
     if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
@@ -316,6 +335,7 @@ export function evaluateM3Gate({
   milestonePredicates = null,
   sourceSha = null,
   currentInventoryObservation = null,
+  reportWorldKey = null,
   sourceExactness = null,
 } = {}) {
   if (expectedRunId === null || !RUN_ID_RE.test(String(expectedRunId))) {
@@ -420,7 +440,7 @@ export function evaluateM3Gate({
 
   const sources = Array.isArray(evidence.sources) ? evidence.sources : []
   const samples = sources.flatMap((source) => (Array.isArray(source.inventorySamples) ? source.inventorySamples : []))
-  const terminalInventory = bindTerminalInventoryObservation(currentInventoryObservation, expectedRunId, runSourceSha)
+  const terminalInventory = bindTerminalInventoryObservation(currentInventoryObservation, expectedRunId, runSourceSha, reportWorldKey)
   const eyes = evaluateEnderEyes(samples, terminalInventory.observation)
   const observedDimensions = Array.isArray(dimensions)
     ? dimensions
@@ -757,6 +777,7 @@ export async function runM3Gate({
     milestonePredicates,
     sourceSha,
     currentInventoryObservation: socketBinding?.runId === expectedRunId ? socketBinding.currentInventoryObservation ?? null : null,
+    reportWorldKey: socketBinding?.runId === expectedRunId ? socketBinding.worldKey ?? null : null,
     sourceExactness,
   })
   if (typeof onResult === 'function') onResult(result)

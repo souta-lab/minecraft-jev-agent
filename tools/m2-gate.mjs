@@ -404,6 +404,10 @@ export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, t
         const runId = typeof data?.runId === 'string' ? data.runId : null
         if (runId === null) return finish(null)
         const status = data?.status
+        const rawWorldKey = data?.worldKey
+        const worldKey = rawWorldKey !== null && typeof rawWorldKey === 'object' && !Array.isArray(rawWorldKey)
+          ? rawWorldKey
+          : null
         // generationHash/generationId/frozen are ADDITIVE: they let a reader
         // cross-check the live generation against file evidence (the host's
         // `report` reply already carries them, so no extra query is issued and
@@ -418,7 +422,13 @@ export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, t
         finish({
           runId,
           currentInventoryObservation: currentInventoryObservationFromReport(data?.currentInventoryObservation, runId),
+          // The terminal inventory's worldKey is joined against this same
+          // synchronous HOST report snapshot. Its dimension can lag the live
+          // bot dimension across a portal transition; serverId/worldEpoch are
+          // the report-level identity fields used by the M3 gate.
+          worldKey,
           policyKind: typeof status?.policyKind === 'string' ? status.policyKind : typeof data?.policyKind === 'string' ? data.policyKind : null,
+          policyProvider: typeof status?.policyProvider === 'string' ? status.policyProvider : typeof data?.policyProvider === 'string' ? data.policyProvider : null,
           policyModel: typeof status?.policyModel === 'string' ? status.policyModel : typeof data?.policyModel === 'string' ? data.policyModel : null,
           generationHash: typeof data?.generationHash === 'string' ? data.generationHash : null,
           generationId,
