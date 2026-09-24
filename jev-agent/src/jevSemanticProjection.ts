@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 4
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v4'
+export const JEV_PROJECTION_VERSION = 5
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v5'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -755,6 +755,221 @@ export interface SemanticSafetyFacts {
   offhand: SemanticOffhandFacts | null
 }
 
+/**
+ * A bounded combat observation used in the semantic cache key. The live model
+ * payload already receives exact entities and candidate metadata, but those
+ * values used to be absent from the requery hash. The quantized fields below
+ * make only meaningful combat changes open a new Jev decision epoch: no world
+ * positions, sub-block movement, timestamps, or per-tick attack telemetry.
+ */
+export interface SemanticCombatTarget {
+  entityId: number
+  name: string
+  /** Two metre buckets, capped so a distant target cannot grow the projection. */
+  distanceBucket: number | null
+  /** Two HP buckets; exact observed health remains available to the model call. */
+  healthBucket: number | null
+  hostile: boolean | null
+  lineOfSight: boolean | null
+  heldItem: string | null
+  attackedSelf: boolean
+  inMeleeReach: boolean
+}
+
+export interface SemanticCombatEscape {
+  /** Buckets summarize what this grounded destination buys. */
+  separationBucket: number | null
+  separationGainBucket: number | null
+  outsideReach: boolean
+  occluded: boolean
+  threatId: number | null
+  threatDistanceBucket: number | null
+}
+
+export interface SemanticCombatThreat {
+  active: boolean
+  entityId: number | null
+  name: string | null
+  distanceBucket: number | null
+  lineOfSight: boolean | null
+  heldItem: string | null
+  engaged: boolean
+  inContact: boolean
+  inDanger: boolean
+  hostileCount: number
+}
+
+export interface SemanticCombatFacts {
+  /** One-HP body health buckets and two-food-level buckets are decision evidence. */
+  bodyHealthBucket: number | null
+  bodyFoodBucket: number | null
+  canRegenerate: boolean | null
+  heldWeapon: string | null
+  effectiveWeapon: string | null
+  effectiveDamage: number | null
+  threat: SemanticCombatThreat | null
+  targets: SemanticCombatTarget[]
+  escapes: SemanticCombatEscape[]
+}
+
+export interface SemanticCombatInput {
+  health: number | null | undefined
+  food: number | null | undefined
+  canRegenerate: boolean | null
+  heldWeapon: string | null | undefined
+  candidates: readonly Candidate[]
+  threat?: {
+    active: boolean
+    threatId: number | null
+    threatName: string | null
+    threatDistance: number | null
+    threatHeldItem: string | null
+    threatEngaged: boolean
+    threatLineOfSight: boolean | null
+    inContact: boolean
+    inDanger: boolean
+    hostileCount: number
+  } | null
+}
+
+const COMBAT_DISTANCE_BUCKET_METRES = 2
+const COMBAT_TARGET_HEALTH_BUCKET_HP = 2
+const MAX_COMBAT_DISTANCE_BUCKET = 64
+const MAX_COMBAT_HEALTH_BUCKET = 128
+const MAX_COMBAT_DAMAGE_BUCKET = 32
+const MAX_COMBAT_HOSTILE_COUNT = 32
+const MAX_COMBAT_TEXT_LENGTH = 64
+
+function combatBucket(value: number | null | undefined, step: number, maximum: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+  return Math.min(maximum, Math.floor(value / step))
+}
+
+function combatEntityId(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function combatText(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null
+  return value.slice(0, MAX_COMBAT_TEXT_LENGTH)
+}
+
+function readMetaNumber(candidate: Candidate, key: string): number | null {
+  const value = candidate.meta[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function readMetaBoolean(candidate: Candidate, key: string): boolean | null {
+  const value = candidate.meta[key]
+  return typeof value === 'boolean' ? value : null
+}
+
+function readMetaString(candidate: Candidate, key: string): string | null {
+  const value = candidate.meta[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/**
+ * Build combat-specific cache evidence from the same grounded candidate set
+ * given to π. This records facts only; it neither removes nor ranks ATTACK,
+ * RETREAT, or any other choice.
+ */
+export function buildSemanticCombatFacts(input: SemanticCombatInput): SemanticCombatFacts | null {
+  const attackCandidates = input.candidates
+    .filter(
+      (candidate) =>
+        candidate.kind === 'ATTACK' &&
+        combatEntityId(candidate.targetEntityId) !== null,
+    )
+    .sort((a, b) => (a.targetEntityId as number) - (b.targetEntityId as number))
+  const retreatCandidates = input.candidates.filter((candidate) => candidate.kind === 'RETREAT')
+  const threat = input.threat ?? null
+  if (attackCandidates.length === 0 && retreatCandidates.length === 0 && threat?.active !== true) return null
+
+  const uniqueTargets = new Map<number, SemanticCombatTarget>()
+  for (const candidate of attackCandidates) {
+    const entityId = combatEntityId(candidate.targetEntityId) as number
+    if (uniqueTargets.has(entityId)) continue
+    uniqueTargets.set(entityId, {
+      entityId,
+      name: combatText(candidate.targetName) ?? 'unknown',
+      distanceBucket: combatBucket(readMetaNumber(candidate, 'distance'), COMBAT_DISTANCE_BUCKET_METRES, MAX_COMBAT_DISTANCE_BUCKET),
+      healthBucket: combatBucket(readMetaNumber(candidate, 'targetHealth'), COMBAT_TARGET_HEALTH_BUCKET_HP, MAX_COMBAT_HEALTH_BUCKET),
+      hostile: readMetaBoolean(candidate, 'hostile'),
+      lineOfSight: readMetaBoolean(candidate, 'targetLineOfSight'),
+      heldItem: combatText(readMetaString(candidate, 'targetHeldItem')),
+      attackedSelf: readMetaBoolean(candidate, 'attackedSelf') === true,
+      inMeleeReach: candidate.inReach,
+    })
+  }
+
+  const representativeAttack = attackCandidates[0]
+  const heldWeapon = input.heldWeapon ?? null
+  const effectiveWeapon =
+    representativeAttack === undefined
+      ? heldWeapon
+      : readMetaString(representativeAttack, 'swingItem') ??
+        readMetaString(representativeAttack, 'weaponItem') ??
+        readMetaString(representativeAttack, 'weapon') ??
+        heldWeapon
+  const effectiveDamage =
+    representativeAttack === undefined
+      ? null
+      : combatBucket(
+          readMetaNumber(representativeAttack, 'swingDamage') ?? readMetaNumber(representativeAttack, 'weaponDamage'),
+          1,
+          MAX_COMBAT_DAMAGE_BUCKET,
+        )
+
+  const escapes: SemanticCombatEscape[] = retreatCandidates
+    .map((candidate) => ({
+      separationBucket: combatBucket(readMetaNumber(candidate, 'separation'), COMBAT_DISTANCE_BUCKET_METRES, MAX_COMBAT_DISTANCE_BUCKET),
+      separationGainBucket: combatBucket(readMetaNumber(candidate, 'separationGain'), 1, MAX_COMBAT_DISTANCE_BUCKET),
+      outsideReach: readMetaBoolean(candidate, 'outsideReach') === true,
+      occluded: readMetaBoolean(candidate, 'threatOccluded') === true,
+      threatId: combatEntityId(readMetaNumber(candidate, 'threatEntityId')),
+      threatDistanceBucket: combatBucket(readMetaNumber(candidate, 'threatDistance'), COMBAT_DISTANCE_BUCKET_METRES, MAX_COMBAT_DISTANCE_BUCKET),
+    }))
+    .sort((a, b) => {
+      const key = (entry: SemanticCombatEscape): string =>
+        `${entry.separationBucket ?? 'u'}:${entry.separationGainBucket ?? 'u'}:${Number(entry.outsideReach)}:` +
+        `${Number(entry.occluded)}:${entry.threatId ?? 'u'}:${entry.threatDistanceBucket ?? 'u'}`
+      const aKey = key(a)
+      const bKey = key(b)
+      return aKey < bKey ? -1 : aKey > bKey ? 1 : 0
+    })
+    .slice(0, JEV_PROJECTION_LIMITS.candidates)
+
+  return {
+    bodyHealthBucket: combatBucket(input.health, 1, MAX_COMBAT_HEALTH_BUCKET),
+    bodyFoodBucket: combatBucket(input.food, 2, 10),
+    canRegenerate: input.canRegenerate,
+    heldWeapon: combatText(heldWeapon),
+    effectiveWeapon: combatText(effectiveWeapon),
+    effectiveDamage,
+    threat:
+      threat === null
+        ? null
+        : {
+            active: threat.active,
+            entityId: combatEntityId(threat.threatId),
+            name: combatText(threat.threatName),
+            distanceBucket: combatBucket(threat.threatDistance, COMBAT_DISTANCE_BUCKET_METRES, MAX_COMBAT_DISTANCE_BUCKET),
+            lineOfSight: threat.threatLineOfSight,
+            heldItem: combatText(threat.threatHeldItem),
+            engaged: threat.threatEngaged,
+            inContact: threat.inContact,
+            inDanger: threat.inDanger,
+            hostileCount:
+              Number.isFinite(threat.hostileCount)
+                ? Math.min(MAX_COMBAT_HOSTILE_COUNT, Math.max(0, Math.floor(threat.hostileCount)))
+                : 0,
+          },
+    targets: [...uniqueTargets.values()].slice(0, JEV_PROJECTION_LIMITS.candidates),
+    escapes,
+  }
+}
+
 export type ArmorSlotName = 'head' | 'torso' | 'legs' | 'feet'
 export type ArmorDurabilityBand = 'fresh' | 'worn' | 'low' | 'critical' | 'unknown'
 
@@ -900,6 +1115,8 @@ export interface SemanticProjectionInput {
   option: SemanticOptionFacts
   world: SemanticWorldFacts
   safety: SemanticSafetyFacts
+  /** Meaningful combat changes that must invalidate a cached pi choice. */
+  combat?: SemanticCombatFacts | null
   progress: SemanticProgressFacts
   /** sensed world in semantic form; omitted means "not observed" */
   sense?: SemanticSenseFacts
@@ -929,6 +1146,7 @@ export interface JevSemanticProjection {
   option: SemanticOptionFacts
   world: SemanticWorldFacts
   safety: SemanticSafetyFacts
+  combat: SemanticCombatFacts | null
   progress: SemanticProgressFacts
   sense: SemanticSenseFacts | null
   events: string[]
@@ -1026,6 +1244,7 @@ export function buildJevSemanticProjection(input: SemanticProjectionInput): JevS
     option: { ...input.option },
     world: { ...input.world },
     safety: { ...input.safety },
+    combat: input.combat ?? null,
     progress: { ...input.progress },
     sense: boundedSense(input.sense),
     events: meaningfulEventKinds(input.events ?? []),
@@ -1139,6 +1358,7 @@ function projectionCore(projection: JevSemanticProjection): Record<string, unkno
     option: projection.option,
     world: projection.world,
     safety: projection.safety,
+    combat: projection.combat,
     progress: projection.progress,
     sense: projection.sense,
     events: projection.events,
@@ -1280,6 +1500,7 @@ export function diffSemanticProjections(
   push('safety.threatKey', previous.safety.threatKey, current.safety.threatKey)
   push('safety.criticalDamageKey', previous.safety.criticalDamageKey, current.safety.criticalDamageKey)
   push('safety.lastDamageKey', previous.safety.lastDamageKey, current.safety.lastDamageKey)
+  push('combat.context', previous.combat, current.combat)
   push('progress.consecutiveFailures', previous.progress.consecutiveFailures, current.progress.consecutiveFailures)
   push('progress.lastFailureCode', previous.progress.lastFailureCode, current.progress.lastFailureCode)
   push('progress.escalationRecommended', previous.progress.escalationRecommended, current.progress.escalationRecommended)

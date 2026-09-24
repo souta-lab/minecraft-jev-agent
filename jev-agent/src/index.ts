@@ -90,6 +90,7 @@ export { attachResult, makeDecisionRecord, stableStateHash }
 // stable candidate identity, SkillOutcomePacket).
 export {
   buildJevSemanticProjection,
+  buildSemanticCombatFacts,
   buildSkillOutcomePacket,
   classifyProjectionChange,
   classifySemanticBoundary,
@@ -132,6 +133,11 @@ export {
 } from './jevSemanticProjection.ts'
 export type {
   CompactOutcome,
+  SemanticCombatEscape,
+  SemanticCombatFacts,
+  SemanticCombatInput,
+  SemanticCombatTarget,
+  SemanticCombatThreat,
   DecisionEpoch,
   GroundedFact,
   JevSemanticProjection,

@@ -71,6 +71,12 @@ class P {
   clone(): P {
     return new P(this.x, this.y, this.z)
   }
+  set(x: number, y: number, z: number): P {
+    this.x = x
+    this.y = y
+    this.z = z
+    return this
+  }
   offset(x: number, y: number, z: number): P {
     return new P(this.x + x, this.y + y, this.z + z)
   }
@@ -172,6 +178,7 @@ function makeFight(options: {
   Object.assign(bot, {
     registry: REGISTRY,
     health: 20,
+    oxygenLevel: 20,
     physicsEnabled: true,
     entity: {
       id: 1,

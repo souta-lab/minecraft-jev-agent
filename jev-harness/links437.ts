@@ -1,5 +1,5 @@
-// jev-harness/links437.ts - the landing seam for the #437 boundary that is now
-// on main (`jev-agent/src/jevSemanticProjection.ts`).
+// jev-harness/links437.ts - the landing seam for the #437 boundary contract in
+// `jev-agent/src/jevSemanticProjection.ts`.
 //
 // The harness deliberately does NOT import jev-agent (I10: the plain-data core
 // must not reach gameplay/runtime modules). Instead this module declares the
@@ -13,9 +13,9 @@ import type { DecisionId, RequestIdentity, SkillOutcomeProjection } from './cont
 import type { SkillOutcomeLink } from './artifacts.ts'
 import type { StaleReason } from './identity.ts'
 
-/** The landed #437 schema string and version (`JEV_PROJECTION_SCHEMA`/`JEV_PROJECTION_VERSION`). */
-export const LANDED_437_PROJECTION_ID = 'jev-semantic-projection/v2'
-export const LANDED_437_PROJECTION_VERSION = 2
+/** The current #437 schema string and version (`JEV_PROJECTION_SCHEMA`/`JEV_PROJECTION_VERSION`). */
+export const LANDED_437_PROJECTION_ID = 'jev-semantic-projection/v5'
+export const LANDED_437_PROJECTION_VERSION = 5
 
 /**
  * The landed #437 `SkillTerminalReason` value space. The harness's
@@ -164,6 +164,7 @@ export const LANDED_437_PROJECTION_MODEL_FIELDS: readonly string[] = [
   'option',
   'world',
   'safety',
+  'combat',
   'progress',
   'sense',
   'events',

@@ -19,6 +19,7 @@ const registry = require('minecraft-data')('1.21.11')
 class P {
   constructor(public x: number, public y: number, public z: number) {}
   clone(): P { return new P(this.x, this.y, this.z) }
+  set(x: number, y: number, z: number): P { this.x = x; this.y = y; this.z = z; return this }
   offset(x: number, y: number, z: number): P { return new P(this.x + x, this.y + y, this.z + z) }
   distanceTo(other: { x: number; y: number; z: number }): number {
     return Math.hypot(this.x - other.x, this.y - other.y, this.z - other.z)
@@ -45,6 +46,8 @@ function makeFixture(mode: HuntMode): HuntFixture {
   Object.assign(bot, {
     registry,
     health: 20,
+    oxygenLevel: 20,
+    blockAt: () => null,
     physicsEnabled: true,
     entity: { id: 1, position: feet, yaw: 0, pitch: 0, onGround: true, width: 0.6, height: 1.8 },
     entities: { 31: mob },

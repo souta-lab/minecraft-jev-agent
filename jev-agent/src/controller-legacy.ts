@@ -110,6 +110,7 @@ import {
   healthBand,
   semanticWornArmor,
   semanticOffhand,
+  buildSemanticCombatFacts,
   projectionHash as semanticProjectionHash,
 } from './jevSemanticProjection.ts'
 import type {
@@ -6244,6 +6245,28 @@ export class JevController {
         wornArmor: semanticWornArmor(state.self.armor),
         offhand: semanticOffhand(state.self.offhand),
       },
+      combat: buildSemanticCombatFacts({
+        health: state.self.health,
+        food: state.self.food,
+        canRegenerate: bodySurvivalFacts(state.self).regenerating,
+        heldWeapon: state.self.heldItem?.name ?? null,
+        candidates,
+        threat:
+          threat === null
+            ? null
+            : {
+                active: threat.active,
+                threatId: threat.threatId,
+                threatName: threat.threatName,
+                threatDistance: threat.threatDistance,
+                threatHeldItem: threat.threatHeldItem,
+                threatEngaged: threat.threatEngaged,
+                threatLineOfSight: threat.threatLineOfSight,
+                inContact: threat.inContact,
+                inDanger: threat.inDanger,
+                hostileCount: threat.hostileCount,
+              },
+      }),
       progress,
       sense: {
         blockNames: state.blocks.map((block) => block.name),

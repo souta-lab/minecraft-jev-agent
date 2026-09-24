@@ -34,6 +34,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import {
   buildJevSemanticProjection,
+  buildSemanticCombatFacts,
   buildSkillOutcomePacket,
   classifySemanticBoundary,
   commitmentRefFor,
@@ -157,6 +158,85 @@ function attackCandidate(entityId: number, id = `ATTACK:e${entityId}`): Candidat
     targetEntityId: entityId,
     inReach: true,
   })
+}
+
+function combatProjection(overrides: {
+  distance?: number
+  targetHealth?: number
+  lineOfSight?: boolean
+  bodyHealth?: number
+  food?: number
+  canRegenerate?: boolean
+  heldWeapon?: string
+  effectiveWeapon?: string
+  effectiveDamage?: number
+  threatDistance?: number
+  separation?: number
+  separationGain?: number
+  outsideReach?: boolean
+  occluded?: boolean
+} = {}): JevSemanticProjection {
+  const attack = candidate({
+    id: 'ATTACK:e42',
+    kind: 'ATTACK',
+    label: 'attack skeleton with the currently grounded swing',
+    targetName: 'skeleton',
+    target: { x: 9.1, y: 64, z: 0 },
+    targetEntityId: 42,
+    inReach: (overrides.distance ?? 9.1) <= 3.1,
+    meta: {
+      distance: overrides.distance ?? 9.1,
+      targetHealth: overrides.targetHealth ?? 20,
+      targetLineOfSight: overrides.lineOfSight ?? true,
+      hostile: true,
+      attackedSelf: true,
+      weaponItem: 'wooden_axe',
+      weaponDamage: 4,
+      swingItem: overrides.effectiveWeapon ?? 'iron_sword',
+      swingDamage: overrides.effectiveDamage ?? 6,
+    },
+  })
+  const retreat = candidate({
+    id: 'RETREAT:p-6_64_0',
+    kind: 'RETREAT',
+    label: 'keep distance from skeleton',
+    target: { x: -6, y: 64, z: 0 },
+    meta: {
+      separation: overrides.separation ?? 6.8,
+      separationGain: overrides.separationGain ?? 4.8,
+      outsideReach: overrides.outsideReach ?? true,
+      threatOccluded: overrides.occluded ?? true,
+      threatEntityId: 42,
+      threatDistance: overrides.threatDistance ?? overrides.distance ?? 9.1,
+    },
+  })
+  const candidates = [attack, retreat]
+  const combat = buildSemanticCombatFacts({
+    health: overrides.bodyHealth ?? 20,
+    food: overrides.food ?? 18,
+    canRegenerate: overrides.canRegenerate ?? true,
+    heldWeapon: overrides.heldWeapon ?? 'wooden_axe',
+    candidates,
+    threat: {
+      active: true,
+      threatId: 42,
+      threatName: 'skeleton',
+      threatDistance: overrides.threatDistance ?? overrides.distance ?? 9.1,
+      threatHeldItem: 'bow',
+      threatEngaged: true,
+      threatLineOfSight: overrides.lineOfSight ?? true,
+      inContact: false,
+      inDanger: false,
+      hostileCount: 1,
+    },
+  })
+  return buildJevSemanticProjection(
+    projectionInput({
+      candidates,
+      combat,
+      inventory: { wooden_axe: 1, iron_sword: 1, shield: 1 },
+    }),
+  )
 }
 
 function outcomePacket(
@@ -386,7 +466,7 @@ addCase('(5b) a verified kill without its declared drop is a typed search bounda
   })
   const line = formatSkillOutcomePacket(partial)
   const pass =
-    JEV_PROJECTION_VERSION === 4 &&
+    JEV_PROJECTION_VERSION === 5 &&
     terminalReasonFor({ status: 'done', failure: 'drop_not_acquired', verified: true }) === 'drop_not_acquired' &&
     partial.terminalReason === 'drop_not_acquired' &&
     partial.verification.verified === false &&
@@ -503,6 +583,99 @@ addCase('Jev receives observed worn armor and banded condition without choosing 
   return {
     pass,
     detail: `armor=${JSON.stringify(modelView.safety.wornArmor)} offhand=${JSON.stringify(modelView.safety.offhand)} stableWithinBand=${projectionHash(worn) === projectionHash(sameBand)} armorDelta=${armorDelta} offhandDelta=${offhandDelta} choicesUnchanged=${JSON.stringify(worn.candidates.map((view) => view.kind))}`,
+  }
+})
+
+addCase('combat choice facts open a semantic boundary only when bounded threat/choice facts change', () => {
+  const initial = combatProjection({ targetHealth: 18.8, food: 18 })
+  const stable = combatProjection({
+    distance: 8.2,
+    targetHealth: 18.2,
+    food: 19,
+    threatDistance: 8.2,
+    separation: 6.2,
+    separationGain: 4.2,
+  })
+  const meaningfulChanges = [
+    combatProjection({ distance: 11.1, threatDistance: 11.1 }),
+    combatProjection({ targetHealth: 14.8 }),
+    combatProjection({ lineOfSight: false }),
+    combatProjection({ bodyHealth: 19 }),
+    combatProjection({ food: 16 }),
+    combatProjection({ canRegenerate: false }),
+    combatProjection({ heldWeapon: 'iron_sword' }),
+    combatProjection({ effectiveWeapon: 'stone_sword', effectiveDamage: 5 }),
+    combatProjection({ threatDistance: 11.1 }),
+    combatProjection({ separation: 4.1 }),
+    combatProjection({ separationGain: 2.1 }),
+    combatProjection({ outsideReach: false }),
+    combatProjection({ occluded: false }),
+  ]
+  const initialHash = projectionHash(initial)
+  const active = {
+    epoch: 17,
+    projectionHash: initialHash,
+    candidateIdentities: initial.candidates.map((view) => view.identity),
+    dimension: OVERWORLD,
+    worldEpoch: 7,
+    openedAtMs: 0,
+    cacheHit: false,
+    reusedFrom: null,
+    closed: false,
+    closeReason: null,
+    commitmentId: null,
+    selectedIdentity: null,
+  }
+  const stableBoundary = classifySemanticBoundary({
+    active,
+    projectionHash: projectionHash(stable),
+    candidateIdentities: stable.candidates.map((view) => view.identity),
+    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
+    optionKey: 'option:enter_portal#1',
+    safetyKey: 'stable',
+    goalKey: 'collect:flint:1',
+  })
+  const changed = meaningfulChanges[0] as JevSemanticProjection
+  const changedBoundary = classifySemanticBoundary({
+    active,
+    projectionHash: projectionHash(changed),
+    candidateIdentities: changed.candidates.map((view) => view.identity),
+    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
+    optionKey: 'option:enter_portal#1',
+    safetyKey: 'stable',
+    goalKey: 'collect:flint:1',
+  })
+  const combatText = JSON.stringify(initial.combat)
+  const sameChoices = meaningfulChanges.every(
+    (projection) =>
+      JSON.stringify(projection.candidates.map((view) => view.identity)) ===
+      JSON.stringify(initial.candidates.map((view) => view.identity)),
+  )
+  const view = projectionModelView(initial)
+  const choicesRemainWithJev =
+    view.candidates.some((entry) => entry.kind === 'ATTACK') &&
+    view.candidates.some((entry) => entry.kind === 'RETREAT')
+  const pass =
+    initial.combat !== null &&
+    initial.combat.targets.length === 1 &&
+    initial.combat.escapes.length === 1 &&
+    !/[{,](?:\s*)"(?:x|y|z)"\s*:/.test(combatText) &&
+    projectionHash(initial) === projectionHash(stable) &&
+    stableBoundary.requery === false &&
+    stableBoundary.reason === 'same_semantic_state' &&
+    meaningfulChanges.every((projection) => projectionHash(projection) !== initialHash) &&
+    changedBoundary.requery === true &&
+    changedBoundary.reason === 'semantic_state_changed' &&
+    sameChoices &&
+    choicesRemainWithJev &&
+    SRC_CONTROLLER.includes('combat: buildSemanticCombatFacts({') &&
+    SRC_CONTROLLER.includes('heldWeapon: state.self.heldItem?.name ?? null')
+  return {
+    pass,
+    detail:
+      `stableHash=${projectionHash(initial) === projectionHash(stable)} changed=${meaningfulChanges.length}/${meaningfulChanges.length} ` +
+      `boundary=${changedBoundary.reason} choices=${JSON.stringify(view.candidates.map((entry) => entry.kind))} ` +
+      `coordinatesAbsent=${!/[{,](?:\s*)"(?:x|y|z)"\s*:/.test(combatText)}`,
   }
 })
 

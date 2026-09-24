@@ -158,6 +158,8 @@ function makeFixture(
   Object.assign(bot, {
     registry: REGISTRY,
     health: 20,
+    oxygenLevel: 20,
+    blockAt: () => null,
     physicsEnabled: true,
     entity: { id: 1, position: new FixtureVec(0, 64, 0), yaw: 0, pitch: 0, onGround: true, width: 0.6, height: 1.8 },
     entities: { 31: mob },
