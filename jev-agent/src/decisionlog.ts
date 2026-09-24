@@ -129,7 +129,7 @@ export interface DecisionRecord {
   jev: DecisionJevLog
   chosenAction: string
   confidence: number | null
-  /** set only when a danger override replaced the Jev action */
+  /** legacy evidence field; current Jev authority leaves it null */
   dangerOverride: string | null
   /** Jev's raw P(need_llm=true); null when the answer was absent */
   needLlm: number | null

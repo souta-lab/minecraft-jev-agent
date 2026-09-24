@@ -30,10 +30,7 @@ mineflayer  →  pathfinder / tool plugins  →  jev-agent plugin  →  brain / 
              │  signals             │   │ MOVE:p1_64_0 / WAIT  │                    │ chosen candidate id
              └──────────────────────┘   │ RETREAT / ESCALATE   │                    ▼
                         ▲               └──────────────────────┘   ┌──────────────────────────────────┐
-                        │                                          │ 2D GATE  gating.ts               │
-                        │                                          │ score = (value x certainty); a   │
-                        │                                          │ low-certainty score is ignored   │
-                        │                                          └────────────────┬─────────────────┘
+                        │                                                           │
                         │                                                           ▼
                         │               ┌──────────────────────────────────────────────────────────┐
                         │               │  GUARD  policy.ts  - 100% mechanical, never a model call  │
@@ -90,7 +87,7 @@ yield, which stops a fast-failing action from hot-looping and starving timers.
 | `src/state.ts` | SENSOR: live bot → JSON `WorldState`. Jev consumes this object directly. |
 | `src/candidates.ts` | Deterministic candidate generator. Only emits actions that are executable *right now*. |
 | `src/jev.ts` | `JevPolicy`: `TypeSafeJevPolicy` (`ai` v7 `experimental_evaluate`) + marked `FallbackJevPolicy`. JSONL logging. |
-| `src/gating.ts` | The `(value x certainty)` gate for `score` answers; `DANGER_CONFIDENCE_THRESHOLD`, `applyDangerGate`, `preserveCurrentSafeAction`. |
+| `src/gating.ts` | Diagnostic classification for `score` answers; records raw value/confidence and a confidence band without action authority. |
 | `src/scheduler.ts` | The event-driven `DecisionScheduler` (world events + configurable heartbeat). |
 | `src/decisionlog.ts` | The decision record schema, the stable `stateHash`, and the reliability-diagram `calibration` block. |
 | `src/policy.ts` | The deterministic guard. Two phases (`decision`, `dig`). Pure functions of the JSON state. |
@@ -99,7 +96,7 @@ yield, which stops a fast-failing action from hot-looping and starving timers.
 | `src/index.ts` | The plugin: `bot.loadPlugin(jevAgent)` attaches `bot.jev`. |
 | `demo.mts` | The runnable PoC (offline `AI_Bot` → find tree → dig → verify). |
 | `test-guard.mts` | Deterministic guard rejections, no bot and no model. |
-| `test-gating.mts` | Proof that a low-certainty `score` never changes behaviour. |
+| `test-gating.mts` | Score-evidence diagnostics, Jev pi action authority, and code-owned low-health safety. |
 
 ## Local Mineflayer movement patch (applied by `postinstall`)
 
@@ -142,7 +139,7 @@ Requires **Bun ≥ 1.4.2**. A Minecraft server must be reachable
 bun install
 bun run typecheck     # tsc --noEmit
 bun run guard-test    # 10/10 deterministic guard cases
-bun run gating-test   # 6/6 (value x certainty) gating cases
+bun run gating-test   # danger-score authority and safety regressions
 bun run demo          # the PoC; add --help for options
 ```
 
@@ -204,27 +201,15 @@ detects a 429 even when the AI SDK wraps it in an `AI_RetryError`, and retries w
 (`rateLimitRetries`, `rateLimitBaseDelayMs`). The backoff time is **excluded** from the recorded
 `latencyMs`, so the latency distribution stays clean. Each retry is written as a `jev-retry` record.
 
-## 2D `score` gating: never act on a raw score (`src/gating.ts`)
+## Danger score evidence (`src/gating.ts`)
 
-A `score` answer is `(value x certainty)`. A high score with a low calibrated confidence must not
-change behaviour:
-
-```ts
-export const DANGER_CONFIDENCE_THRESHOLD = 0.4
-
-export function applyDangerGate(chosenId, gate, safeAction) {
-  if (!gate.actionable) {
-    // the danger score itself is not actionable
-    return { chosenId: preserveCurrentSafeAction(chosenId), overridden: false, outcome: 'preserved' }
-  }
-  ...
-}
-```
-
-`gate.actionable` is true only when the provider reported a confidence **and** it is `>= 0.4`.
-The observed sample `danger.score = 0.91` with `providerMetadata.typesafe.confidence.danger = 0.09`
-therefore leaves the executor's current action untouched. `bun run gating-test` proves the exact
-sample, the severe override, the confident-safe case and the missing/`null` cases.
+A Jev `danger` score and its provider-reported confidence are model evidence, not Minecraft truth
+and not permission to replace Jev pi's selected candidate. The runtime records the raw score,
+confidence, nearest label, and a diagnostic confidence band. Deterministic safety restrictions,
+guards, and uniquely grounded safety reflexes continue to use code-owned world truth. The
+`dangerOverride` decision-log field remains only for reading historical logs and is null on the
+current Jev path. `bun run gating-test` covers a high-confidence score alongside a valid ATTACK,
+the low-confidence sample, and the exact code-owned low-health ATTACK interruption.
 
 ## Decision log (`logs/decisions.jsonl`)
 
@@ -242,7 +227,7 @@ finishes (keyed by the executor's `epoch`):
     "policy": "typesafe", "model": "typesafe-ai/jev", "latencyMs": 784,
     "usage": { "inputTokens": 4054, "outputTokens": 307, "totalTokens": 4361 },
     "answers": { "action": { "value": "MINE:b6_63_-67", "confidence": 0.99 }, … },
-    "dangerGate": { "value": 0.33, "confidence": 0.67, "threshold": 0.4, "actionable": true }
+    "dangerGate": { "value": 0.33, "confidence": 0.67, "threshold": 0.4, "confidenceQualified": true }
   },
   "chosenAction": "MINE:b6_63_-67",
   "confidence": 0.99,
@@ -317,8 +302,7 @@ Running the demo on **Leaf 26.1.2 / protocol 775 with `mineflayer@4.39.0` + `min
 
 * `bun run typecheck` → clean (`tsc --noEmit`, exit 0).
 * `bun run guard-test` → **12/12** guard cases.
-* `bun run gating-test` → **6/6** cases, including the documented `danger` sample
-  (score `0.91`, confidence `0.09` → `preserved`, action unchanged).
+* `bun run gating-test` → danger-score authority and low-health safety regressions.
 * Real-Jev demo (key from the secrets file, `--reach 5 --settle 8000`):
   `[agent] stopped reason=… success=true verifiedDigs=1`, `[verify] blockRemoved=true dropObserved=true`,
   and the server no longer has the dug `oak_log` at `(6,63,-67)`.

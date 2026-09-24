@@ -126,7 +126,7 @@ import type {
 import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
 import type { ActuationMode, CurrentAction, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
-import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
+import { gateBoolean, gateDanger } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import {
   PLAN_IDENTITY_CHANGED,
@@ -4303,19 +4303,19 @@ export class JevController {
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
       // SAFE: a hard-safety reflex is never held behind a skill lease or a
       // previous model decision - it exists to interrupt them. Both commitment
-      // layers and the danger gate are model-decision machinery, so a reflex tick
-      // passes them by; the guard below still validates the candidate
+      // layers are model-decision machinery, so a reflex tick passes them by;
+      // the guard below still validates the candidate mechanically.
       // mechanically.
       const committedId = reflex === null ? this.applyCandidateCommitment(rawChosenId, candidates, state) : rawChosenId
       const heldId = reflex === null ? this.applyActionCommitment(committedId, candidates, state) : committedId
+      // Keep Jev's danger score as model evidence in the decision record only.
+      // It cannot replace pi's selected semantic action. The exact code-owned
+      // safety envelope and reflex above already restrict/interrupt choices when
+      // grounded Minecraft truth requires it.
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated =
-        reflex === null
-          ? this.applyDangerGate(heldId, dangerGate, candidates)
-          : { chosenId: heldId, overridden: false }
       // Re-groundable: a vanished survival action is replaced below by the SAME
       // action kind from the fresh offer (see the guard at the revalidation).
-      let chosenId = gated.chosenId
+      let chosenId = heldId
       this.noteWaitStreak(chosenId, actionable)
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
@@ -4636,7 +4636,7 @@ export class JevController {
         jev: this.jevLog(decision, dangerGate, trigger),
         chosenAction: guarded.ok ? guarded.candidate.id : guarded.candidateId,
         confidence: decision.answers.action?.confidence ?? null,
-        dangerOverride: gated.overridden ? chosenId : null,
+        dangerOverride: null,
         needLlm: null,
         needLlmAdopted,
         goalQueueState: toGoalQueueStateLog(state.goalQueue),
@@ -5408,38 +5408,6 @@ export class JevController {
 
   private logShadowMetrics(state: WorldState): void {
     this.logger.info('shadow', `SHADOW_METRICS ${JSON.stringify(this.shadowMetrics(state))}`, this.shadowMetrics(state), this.tickCounter)
-  }
-
-  /**
-   * The 2D rule: a `score` answer is (value x certainty). A low-certainty danger
-   * score must not change behaviour - the executor keeps the current safe action.
-   */
-  private applyDangerGate(
-    chosenId: string,
-    gate: GatedScore,
-    candidates: readonly Candidate[],
-  ): { chosenId: string; overridden: boolean } {
-    const safeAction =
-      candidates.find((candidate) => candidate.kind === 'RETREAT')?.id ??
-      candidates.find((candidate) => candidate.kind === 'ESCALATE')?.id ??
-      null
-    const decision = applyDangerGate(chosenId, gate, safeAction)
-    if (decision.outcome === 'preserved') {
-      this.logger.info(
-        'gating',
-        `danger score=${gate.value} confidence=${gate.confidence} < ${gate.threshold}: score NOT actionable -> preserveCurrentSafeAction(${decision.chosenId})`,
-        { dangerGate: gate },
-        this.tickCounter,
-      )
-    } else if (decision.outcome === 'override') {
-      this.logger.warn(
-        'gating',
-        `danger score=${gate.value} (${gate.level}) confidence=${gate.confidence} >= ${gate.threshold}: actionable -> forcing safe action ${decision.chosenId} over ${chosenId}`,
-        { dangerGate: gate },
-        this.tickCounter,
-      )
-    }
-    return { chosenId: decision.chosenId, overridden: decision.overridden }
   }
 
   private semanticEscalation(decision: JevResult): { escalate: boolean; reason: string } {

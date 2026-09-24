@@ -28,8 +28,8 @@ import { ACTING_KINDS, guardCandidate, guardDecision } from './policy.ts'
 import type { GuardCode, GuardContext, GuardPhase, GuardResult, InFlightAction } from './policy.ts'
 import { Executor, defaultExecutorOptions } from './executor.ts'
 import type { ActuationMode, ClaimResult, CurrentAction, ExecutionResult, ExecutorHooks, ExecutorOptions, FailureCode, PathCompletedEvent, PathFailedEvent } from './executor.ts'
-import { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, applyDangerGate, dangerRequiresSafeAction, gateDanger, gateScore, preserveCurrentSafeAction } from './gating.ts'
-import type { DangerGateDecision, DangerGateOutcome, GatedScore } from './gating.ts'
+import { DANGER_CONFIDENCE_THRESHOLD, gateDanger, gateScore } from './gating.ts'
+import type { GatedScore } from './gating.ts'
 import { abandonRequested, AUTHORITATIVE_QUESTION_NAMES, betaShadowDecision, booleanEstimate, booleanEstimates, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, QUESTION_NAMES, resolveBetaAuthority, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, shouldRetreatFrom, writeOutcome } from './jev.ts'
 import type { BooleanEstimate, BetaShadow, JevAnswer, JevCallRecord, JevOutcomeRecord, JevPolicy, JevQuestionType, JevRequest, JevResult, JevSource, JevUsage, QuestionName, QuestionSetKind } from './jev.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
@@ -84,8 +84,7 @@ export type { BooleanEstimate, BetaShadow, CausalChain, CausalGoalRef, CausalSta
 export type { BetaAuthorityDecision, BetaAuthorityInput }
 export type { QuestionName, QuestionSetKind }
 export { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions }
-export { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, dangerRequiresSafeAction, gateDanger, gateScore }
-export { applyDangerGate, preserveCurrentSafeAction }
+export { DANGER_CONFIDENCE_THRESHOLD, gateDanger, gateScore }
 export { attachResult, makeDecisionRecord, stableStateHash }
 // Issue #437: the Skill <-> Jev semantic boundary (projection, decision epochs,
 // stable candidate identity, SkillOutcomePacket).
@@ -204,8 +203,6 @@ export type {
   TriggerEvent,
   JevSchedulerOptions,
   GatedScore,
-  DangerGateDecision,
-  DangerGateOutcome,
   GoalKind,
   GoalOrigin,
   GoalStatus,

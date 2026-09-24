@@ -1,13 +1,14 @@
-// gating.ts - the (value x certainty) gate for `score` answers.
+// gating.ts - diagnostic classification for `score` answers.
 //
 // A `score` answer is two-dimensional:
 //
 //     value       - the fractional position in [0, levels-1]
 //     confidence  - TypeSafe's *calibrated* certainty in that score
 //
-// A raw score is never actionable on its own. A high danger score with a low
-// certainty must not change the bot's behaviour at all; the executor keeps the
-// current safe action. This module is the single place that rule lives.
+// Score and confidence remain model evidence. This module records their values
+// and a diagnostic confidence band; it never authorizes or selects an action.
+// Only deterministic, code-owned safety truth may restrict a grounded choice or
+// interrupt a committed Skill.
 //
 // The threshold is deliberately named and exported so it can be re-calibrated
 // from the decision log once real data accumulates (the log records predicted
@@ -17,17 +18,10 @@ import { BOOLEAN_HIGH, BOOLEAN_LOW, DANGER_LEVELS } from './jev.ts'
 import type { JevAnswer } from './jev.ts'
 
 /**
- * Below this calibrated confidence a `score` answer is treated as *no answer*:
- * it may not influence behaviour. Validated later against real outcomes.
+ * Diagnostic confidence band boundary. Crossing it does not give the score
+ * production authority; raw value/confidence remain evidence only.
  */
 export const DANGER_CONFIDENCE_THRESHOLD = 0.4
-
-/**
- * A `danger` score at or above this level index is severe enough to force a
- * safe action (retreat/escalate) - but ONLY when the score is also confident
- * enough to pass `DANGER_CONFIDENCE_THRESHOLD`.
- */
-export const DANGER_ACTIONABLE_SCORE = 2
 
 export interface GatedScore {
   /** the ordered level labels the score indexes into */
@@ -40,18 +34,18 @@ export interface GatedScore {
   confidence: number | null
   /** the threshold this score was compared against */
   threshold: number
-  /** true only when confidence is a number AND >= threshold */
-  actionable: boolean
+  /** true only when confidence is a number AND >= threshold; diagnostic only */
+  confidenceQualified: boolean
   /** human-readable explanation, suitable for the decision log */
   reason: string
 }
 
 /**
- * Apply the 2D rule to a single score answer.
+ * Classify the reported confidence for diagnostics. This result must not be
+ * used to replace Jev pi's choice or to assert Minecraft danger as truth.
  *
- * `fallback` source is accepted at face value only when it carries a confidence
- * (the fallback computes its level mechanically and sets certainty 1); anything
- * with a missing confidence is non-actionable.
+ * Missing confidence remains unqualified; even a qualified score has no action
+ * authority.
  */
 export function gateScore(answer: JevAnswer | undefined, threshold: number): GatedScore {
   if (answer === undefined || answer.type !== 'score') {
@@ -61,7 +55,7 @@ export function gateScore(answer: JevAnswer | undefined, threshold: number): Gat
       level: null,
       confidence: null,
       threshold,
-      actionable: false,
+      confidenceQualified: false,
       reason: 'no score answer was returned',
     }
   }
@@ -76,8 +70,8 @@ export function gateScore(answer: JevAnswer | undefined, threshold: number): Gat
       level,
       confidence,
       threshold,
-      actionable: false,
-      reason: 'no confidence reported: a score without certainty is never acted on',
+      confidenceQualified: false,
+      reason: 'no confidence reported; score retained as unqualified evidence',
     }
   }
   if (confidence < threshold) {
@@ -87,8 +81,8 @@ export function gateScore(answer: JevAnswer | undefined, threshold: number): Gat
       level,
       confidence,
       threshold,
-      actionable: false,
-      reason: `confidence ${confidence} < ${threshold}: the score itself is not actionable`,
+      confidenceQualified: false,
+      reason: `confidence ${confidence} < ${threshold}: diagnostic confidence band not reached`,
     }
   }
   return {
@@ -97,50 +91,14 @@ export function gateScore(answer: JevAnswer | undefined, threshold: number): Gat
     level,
     confidence,
     threshold,
-    actionable: true,
-    reason: `confidence ${confidence} >= ${threshold}`,
+    confidenceQualified: true,
+    reason: `confidence ${confidence} >= ${threshold}; diagnostic only, no action authority`,
   }
 }
 
 /** Gate the `danger` question with the named threshold. */
 export function gateDanger(answer: JevAnswer | undefined): GatedScore {
   return gateScore(answer, DANGER_CONFIDENCE_THRESHOLD)
-}
-
-/** True when an actionable danger score is severe enough to force a safe action. */
-export function dangerRequiresSafeAction(gate: GatedScore): boolean {
-  return gate.actionable && gate.value !== null && gate.value >= DANGER_ACTIONABLE_SCORE
-}
-
-export type DangerGateOutcome = 'preserved' | 'override' | 'ignored'
-
-export interface DangerGateDecision {
-  chosenId: string
-  overridden: boolean
-  outcome: DangerGateOutcome
-}
-
-/**
- * The 2D rule applied to a decision.
- *
- *   preserved - the score had no usable certainty, so it may not change
- *               behaviour; the current action is kept unchanged.
- *   override  - a confident, severe danger score forces the safe action.
- *   ignored   - a confident, non-severe score leaves the action alone.
- */
-export function applyDangerGate(chosenId: string, gate: GatedScore, safeAction: string | null): DangerGateDecision {
-  if (!gate.actionable) {
-    return { chosenId: preserveCurrentSafeAction(chosenId), overridden: false, outcome: 'preserved' }
-  }
-  if (dangerRequiresSafeAction(gate) && safeAction !== null && safeAction !== chosenId) {
-    return { chosenId: safeAction, overridden: true, outcome: 'override' }
-  }
-  return { chosenId, overridden: false, outcome: 'ignored' }
-}
-
-/** Keep the current (already safe) action; a low-certainty score changes nothing. */
-export function preserveCurrentSafeAction(chosenId: string): string {
-  return chosenId
 }
 
 export type BooleanBand = 'strong_false' | 'uncertain' | 'strong_true'

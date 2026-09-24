@@ -1,17 +1,15 @@
-// test-gating.mts - proof that `score` answers are treated as (value x certainty).
+// test-gating.mts - model danger scores are evidence, never action authority.
 //
 // Run: bun run gating-test
-//
-// The head-line case is the exact sample observed from the real model:
-//   danger.score = 0.91 with providerMetadata.typesafe.confidence.danger = 0.09
-// A 0.91 danger score sounds alarming, but its certainty is far below the named
-// threshold, so the code must keep the current safe action unchanged.
-import {
-  DANGER_CONFIDENCE_THRESHOLD,
-  applyDangerGate,
-  gateDanger,
-} from './src/gating.ts'
-import type { JevAnswer } from './src/jev.ts'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { test } from 'bun:test'
+import { CRITICAL_COMBAT_HEALTH, restrictCandidatesAtCriticalHealth } from './src/candidates.ts'
+import type { Candidate } from './src/candidates.ts'
+import { decisionIdFrom } from './src/jev.ts'
+import type { JevAnswer, JevResult } from './src/jev.ts'
+import { gateDanger, DANGER_CONFIDENCE_THRESHOLD } from './src/gating.ts'
+import { shouldInterruptAttackLease } from './src/scheduler.ts'
 
 function dangerAnswer(value: number | null, confidence: number | null): JevAnswer {
   return {
@@ -26,84 +24,85 @@ function dangerAnswer(value: number | null, confidence: number | null): JevAnswe
   }
 }
 
-interface Case {
-  name: string
-  run: () => { pass: boolean; detail: string }
-}
-
-const cases: Case[] = []
-
-function addCase(name: string, run: Case['run']): void {
-  cases.push({ name, run })
-}
-
-addCase('documented sample: score 0.91 @ confidence 0.09 keeps the current action', () => {
-  const gate = gateDanger(dangerAnswer(0.91, 0.09))
-  const decision = applyDangerGate('MINE:b6_63_-67', gate, 'RETREAT:p5_64_-61')
-  const pass =
-    gate.actionable === false &&
-    decision.outcome === 'preserved' &&
-    decision.overridden === false &&
-    decision.chosenId === 'MINE:b6_63_-67'
+function candidate(id: string, kind: Candidate['kind']): Candidate {
   return {
-    pass,
-    detail: `actionable=${gate.actionable} conf=${gate.confidence} < ${gate.threshold} outcome=${decision.outcome} chosen=${decision.chosenId} (unchanged)`,
+    id,
+    kind,
+    label: id,
+    targetName: null,
+    target: null,
+    targetEntityId: kind === 'ATTACK' ? 7 : null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: {},
   }
-})
-
-addCase('confident severe danger (score 3 @ 0.9) overrides with the safe action', () => {
-  const gate = gateDanger(dangerAnswer(3, 0.9))
-  const decision = applyDangerGate('MINE:b6_63_-67', gate, 'RETREAT:p5_64_-61')
-  const pass = gate.actionable === true && decision.outcome === 'override' && decision.chosenId === 'RETREAT:p5_64_-61'
-  return {
-    pass,
-    detail: `actionable=${gate.actionable} outcome=${decision.outcome} chosen=${decision.chosenId}`,
-  }
-})
-
-addCase('confident mild danger (score 0.2 @ 0.8) leaves the action alone', () => {
-  const gate = gateDanger(dangerAnswer(0.2, 0.8))
-  const decision = applyDangerGate('MINE:b6_63_-67', gate, 'RETREAT:p5_64_-61')
-  const pass = gate.actionable === true && decision.outcome === 'ignored' && decision.chosenId === 'MINE:b6_63_-67'
-  return {
-    pass,
-    detail: `actionable=${gate.actionable} outcome=${decision.outcome} chosen=${decision.chosenId}`,
-  }
-})
-
-addCase('missing confidence is never actionable', () => {
-  const gate = gateDanger(dangerAnswer(3, null))
-  const decision = applyDangerGate('MINE:b6_63_-67', gate, 'RETREAT:p5_64_-61')
-  const pass = gate.actionable === false && decision.outcome === 'preserved'
-  return { pass, detail: `actionable=${gate.actionable} reason="${gate.reason}"` }
-})
-
-addCase('missing score answer is never actionable', () => {
-  const gate = gateDanger(undefined)
-  const decision = applyDangerGate('WAIT', gate, null)
-  const pass = gate.actionable === false && decision.outcome === 'preserved' && decision.chosenId === 'WAIT'
-  return { pass, detail: `actionable=${gate.actionable} reason="${gate.reason}"` }
-})
-
-addCase('threshold boundary: exactly the threshold is actionable', () => {
-  const gate = gateDanger(dangerAnswer(1, DANGER_CONFIDENCE_THRESHOLD))
-  const pass = gate.actionable === true
-  return { pass, detail: `confidence=${DANGER_CONFIDENCE_THRESHOLD} actionable=${gate.actionable}` }
-})
-
-let failures = 0
-process.stdout.write('score answers are (value x certainty)\n')
-process.stdout.write(`DANGER_CONFIDENCE_THRESHOLD = ${DANGER_CONFIDENCE_THRESHOLD}\n`)
-process.stdout.write('-'.repeat(72) + '\n')
-for (const testCase of cases) {
-  const observed = testCase.run()
-  if (!observed.pass) failures += 1
-  process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
-  process.stdout.write(`      ${observed.detail}\n`)
 }
-process.stdout.write('-'.repeat(72) + '\n')
-process.stdout.write(`${cases.length - failures}/${cases.length} gating cases passed\n`)
 
-if (failures > 0) {
-  process.exit(1)
-}
+const attack = candidate('ATTACK:e7', 'ATTACK')
+const retreat = candidate('RETREAT:p1', 'RETREAT')
+test('a high danger score remains evidence and cannot replace a valid Jev ATTACK', () => {
+  const answer = dangerAnswer(3, 0.9)
+  const highDanger: JevResult = {
+    callId: 'danger-evidence',
+    policy: 'typesafe',
+    source: 'jev',
+    model: 'test-model',
+    latencyMs: 1,
+    usage: null,
+    answers: {
+      action: {
+        name: 'action',
+        type: 'choice',
+        value: 'ATTACK:e7',
+        probability: 0.62,
+        confidence: 0.8,
+        probabilities: { 'ATTACK:e7': 0.62, 'RETREAT:p1': 0.38 },
+        legend: null,
+        note: null,
+      },
+      danger: answer,
+    },
+  }
+  const classified = gateDanger(answer)
+  assert.equal(classified.value, 3)
+  assert.equal(classified.confidence, 0.9)
+  assert.equal(classified.confidenceQualified, true)
+  assert.match(classified.reason, /diagnostic only, no action authority/)
+
+  // Pin the real selection path as well as the score parser: high danger evidence
+  // must leave a valid Jev ATTACK untouched when RETREAT is also offered.
+  const selectedId = decisionIdFrom(highDanger)
+  assert.equal(selectedId, 'ATTACK:e7')
+  assert.ok([attack.id, retreat.id].includes(selectedId ?? ''))
+  const controllerSource = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  assert.match(controllerSource, /const dangerGate = gateDanger\(decision\.answers\.danger\)/)
+  assert.match(controllerSource, /let chosenId = heldId/)
+  assert.match(controllerSource, /dangerOverride: null/)
+  assert.doesNotMatch(controllerSource, /applyDangerGate\s*\(/)
+})
+
+test('a low-confidence danger score remains visible as unqualified evidence', () => {
+  const lowConfidence = gateDanger(dangerAnswer(0.91, 0.09))
+  assert.equal(lowConfidence.value, 0.91)
+  assert.equal(lowConfidence.confidenceQualified, false)
+  assert.equal(lowConfidence.threshold, DANGER_CONFIDENCE_THRESHOLD)
+})
+
+test('exact code-owned low-health safety still interrupts ATTACK and narrows work choices', () => {
+  assert.equal(shouldInterruptAttackLease('hp_changed', CRITICAL_COMBAT_HEALTH, CRITICAL_COMBAT_HEALTH), true)
+  assert.equal(shouldInterruptAttackLease('hp_changed', CRITICAL_COMBAT_HEALTH + 0.01, CRITICAL_COMBAT_HEALTH), false)
+  const work = candidate('MINE:b1', 'MINE')
+  const criticalChoices = restrictCandidatesAtCriticalHealth(
+    {
+      self: { health: CRITICAL_COMBAT_HEALTH },
+      entities: [{ hostile: true, distance: 1 }],
+    } as never,
+    [attack, retreat, work],
+  )
+  assert.deepEqual(criticalChoices.map(({ id }) => id), ['ATTACK:e7', 'RETREAT:p1'])
+  const controllerSource = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  assert.match(controllerSource, /shouldInterruptAttackLease\(trigger, this\.bot\.health, CRITICAL_COMBAT_HEALTH, air\)/)
+})
