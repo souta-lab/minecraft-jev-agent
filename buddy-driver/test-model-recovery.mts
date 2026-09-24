@@ -10,6 +10,8 @@ import { applySystem2RecoveryFence } from '../jev-agent/src/system2Authority.ts'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { Bot } from 'mineflayer'
 import type { System2Brain } from '../jev-agent/src/system2.ts'
+import { MercurySystem2 } from './mercury-system2.ts'
+import type { MercuryStateSummary } from './mercury-system2.ts'
 import {
   MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
   MODEL_RETRY_BASE_DELAY_MS,
@@ -28,6 +30,163 @@ import { isTransientSystem2ProviderFailure } from './mercury-system2.ts'
 const SOURCE_SHA = 'c4698e51a98d2a484e43b94112ded3433bdea3f7'
 
 describe('model authority recovery host policy', () => {
+  test('controller cancellation aborts in-flight System2 transport without changing queue or authority', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'system2-generation-cancel-'))
+    const bot = Object.assign(new EventEmitter(), {
+      inventory: { items: () => [] },
+      entity: { position: new Vec3(0, 64, 0) },
+      game: { dimension: 'minecraft:overworld' },
+      health: 20,
+      food: 20,
+      registry: { itemsByName: {}, recipes: {}, materials: {}, blocksByName: {} },
+      findBlocks: () => [],
+    }) as unknown as Bot
+    let transportStarted!: () => void
+    const started = new Promise<void>((resolve) => { transportStarted = resolve })
+    let requestAborted = false
+    let fatalFailures = 0
+    const mercuryLogs: string[] = []
+    const appliedMarkers: Record<string, unknown>[] = []
+    const summary: MercuryStateSummary = {
+      humanMission: 'Defeat the Ender Dragon',
+      trigger: 'no_progress',
+      wakeReason: 'action_impossible',
+      wakeDetail: 'controller cancellation regression',
+      position: { x: 0, y: 64, z: 0 },
+      dimension: 'minecraft:overworld',
+      health: 20,
+      toolRank: 0,
+      inventory: {},
+      stations: { craftingTables: 0, furnaces: 0 },
+      knownOres: [],
+      recentFailures: [],
+      consecutiveWait: 0,
+      queue: { depth: 1, done: 0, current: 'collect oak log', hasImpossible: false },
+      objective: { targetItem: 'oak_log', requiredCount: 2, haveCount: 0, complete: false },
+      deathHistory: [],
+      allowedGoals: { collect: ['oak_log'], craft: [], smelt: [] },
+    }
+    const mercury = new MercurySystem2({
+      summarize: () => summary,
+      log: (event) => mercuryLogs.push(event),
+      callsPath: join(dir, 'mercury-calls.jsonl'),
+      cachePath: join(dir, 'mercury-cache.json'),
+      model: 'meta/muse-spark-1.3-contributor',
+      localEndpoint: null,
+      resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+      retries: 2,
+      transport: ({ signal }) => new Promise((_resolve, reject) => {
+        transportStarted()
+        if (signal === undefined) {
+          reject(new Error('generation signal was not passed to transport'))
+          return
+        }
+        signal.addEventListener('abort', () => {
+          requestAborted = true
+          reject(signal.reason)
+        }, { once: true })
+      }),
+    })
+    const controller = new JevController(bot, {
+      goalItem: 'ender_pearl',
+      goalCount: 12,
+      logDir: dir,
+      forceFallbackPolicy: true,
+      eventSink: (event, detail) => {
+        if (event === 'SYSTEM2_PLAN_APPLIED') appliedMarkers.push(detail)
+      },
+      terminateOnModelFailure: (error) => {
+        fatalFailures += 1
+        throw error
+      },
+    })
+    controller.setSystem2(mercury)
+    const internals = controller as unknown as {
+      running: boolean
+      queue: GoalQueue
+      summonLlm(reason: 'action_impossible', detail: string): unknown
+    }
+    internals.queue.applyPlan([
+      { kind: 'collect', description: 'collect oak log', targetItem: 'oak_log', requiredCount: 2 },
+    ], 'llm', 'replace')
+    const queueBefore = internals.queue.state
+    const revisionBefore = internals.queue.revision
+    const authorityBefore = controller.system2AuthorityStack
+    internals.running = true
+
+    internals.summonLlm('action_impossible', 'current head is blocked')
+    await started
+    controller.stopForModelRecovery()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+    expect(requestAborted).toBe(true)
+    expect(internals.queue.revision).toBe(revisionBefore)
+    expect(internals.queue.state).toEqual(queueBefore)
+    expect(controller.system2AuthorityStack).toEqual(authorityBefore)
+    expect(controller.isRunning).toBe(false)
+    expect(mercury.callCount).toBe(0)
+    expect(mercury.fallbackCount).toBe(0)
+    expect(fatalFailures).toBe(0)
+    expect(mercuryLogs).toContain('MERCURY_REQUEST_CANCELLED')
+    expect(mercuryLogs).not.toContain('FATAL')
+    expect(appliedMarkers).toHaveLength(0)
+  })
+
+  test('a real System2 503 still returns a host recovery signal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'system2-503-recovery-'))
+    const summary: MercuryStateSummary = {
+      humanMission: 'Defeat the Ender Dragon',
+      trigger: 'no_progress',
+      wakeReason: 'queue_empty',
+      wakeDetail: '503 regression',
+      position: null,
+      dimension: 'minecraft:overworld',
+      health: 20,
+      toolRank: 0,
+      inventory: {},
+      stations: { craftingTables: 0, furnaces: 0 },
+      knownOres: [],
+      recentFailures: [],
+      consecutiveWait: 0,
+      queue: { depth: 0, done: 0, current: null, hasImpossible: false },
+      objective: null,
+      deathHistory: [],
+      allowedGoals: { collect: ['oak_log'], craft: [], smelt: [] },
+    }
+    const mercury = new MercurySystem2({
+      summarize: () => summary,
+      log: () => undefined,
+      callsPath: join(dir, 'mercury-calls.jsonl'),
+      cachePath: join(dir, 'mercury-cache.json'),
+      model: 'meta/muse-spark-1.3-contributor',
+      localEndpoint: null,
+      resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+      retries: 0,
+      transport: async () => {
+        throw Object.assign(new Error('Service temporarily unavailable'), { statusCode: 503 })
+      },
+    })
+    let hostStopCalled = false
+    let outage: unknown = null
+    try {
+      await mercury.plan({
+        reason: 'queue_empty', detail: '503 regression', tick: 1,
+        goalQueueState: { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [] },
+        objective: { targetItem: 'ender_pearl', requiredCount: 12, haveCount: 0, complete: false },
+        recentEvents: [], recentOutcomes: [],
+      })
+    } catch (error) {
+      outage = error
+    }
+    expect(outage).toBeInstanceOf(FatalModelError)
+    if (!(outage instanceof FatalModelError)) throw new Error('System2 503 did not produce a FatalModelError')
+    const recovery = stopGenerationForModelRecovery(outage, 'gen-system2-503', { stop: () => { hostStopCalled = true } })
+    expect(outage).toMatchObject({ context: 'system2-authority', retryable: true })
+    expect(modelFailureDisposition(outage, true)).toBe('recover-generation')
+    expect(hostStopCalled).toBe(true)
+    expect(recovery).toMatchObject({ context: 'system2-authority', generationId: 'gen-system2-503' })
+  })
+
   test('uses bounded exponential backoff', () => {
     expect(modelRetryDelayMs(1)).toBe(5_000)
     expect(modelRetryDelayMs(2)).toBe(10_000)

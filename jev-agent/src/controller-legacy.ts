@@ -266,7 +266,7 @@ import { formatDigRouteProgress, formatDigRouteRefused } from './digRoute.ts'
 import { formatLevelScanStep } from './levelScan.ts'
 import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
-import { StubSystem2 } from './system2.ts'
+import { StubSystem2, System2RequestCancelledError } from './system2.ts'
 import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2.ts'
 import {
   buildSystem2BlockerFacts,
@@ -2935,6 +2935,7 @@ export class JevController {
 
   /** Swap in a real long-horizon model. The interface is system2.ts#System2Brain. */
   setSystem2(brain: System2Brain): void {
+    if (this.system2 !== brain) this.system2.cancelPending?.('system2-replaced')
     this.system2 = brain
   }
 
@@ -3304,6 +3305,7 @@ export class JevController {
   }
 
   stop(): void {
+    this.system2.cancelPending?.('controller-stop')
     this.finish('stopped-by-caller', this.runSuccess())
   }
 
@@ -3322,6 +3324,7 @@ export class JevController {
   stopForModelRecovery(): void {
     if (!this.running || this.modelRecoveryStopping) return
     this.modelRecoveryStopping = true
+    this.system2.cancelPending?.('model-recovery')
     this.scheduler.stop()
     this.clearDecisionTimer()
     this.pendingTrigger = null
@@ -9027,10 +9030,10 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
-        if (!this.running) {
+        if (!this.running || this.modelRecoveryStopping) {
           this.logger.warn(
             'system2',
-            'SYSTEM2_STALE_DISCARD reason=controller_stopped',
+            `SYSTEM2_STALE_DISCARD reason=${this.modelRecoveryStopping ? 'authority_withdrawn' : 'controller_stopped'}`,
             { reason, requestId: requestContext.requestId, note: plan.note, op: plan.op ?? 'replace' },
             this.tickCounter,
           )
@@ -9306,6 +9309,15 @@ export class JevController {
         if (this.headAnswerWarrant?.requestId === requestContext.requestId) this.headAnswerWarrant = null
         this.llmInFlight = false
         if (error instanceof ModelRecoveryRequested) return
+        if (error instanceof System2RequestCancelledError) {
+          this.logger.warn(
+            'system2',
+            'SYSTEM2_REQUEST_CANCELLED',
+            { reason, requestId: requestContext.requestId, cancellationReason: error.reason },
+            this.tickCounter,
+          )
+          return
+        }
         if (!this.running) {
           this.logger.warn(
             'system2',
@@ -13655,6 +13667,7 @@ export class JevController {
         return
       }
     }
+    this.system2.cancelPending?.(`controller-finished:${stopped}`)
     this.running = false
     this.saveLedger()
     this.scheduler.stop()

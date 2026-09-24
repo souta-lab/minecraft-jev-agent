@@ -321,6 +321,19 @@ export interface System2Brain {
   /** Configured authority stack, distinct from the last provider that answered. */
   readonly authorityStack?: { provider: string; model: string }
   plan(request: System2PlanRequest): Promise<System2Plan>
+  /** Cancel generation-owned in-flight transport when HOST withdraws this brain. */
+  cancelPending?(reason?: string): void
+}
+
+/** A generation stopped while a System2 request was in flight. */
+export class System2RequestCancelledError extends Error {
+  readonly reason: string
+
+  constructor(reason = 'generation-stopped') {
+    super(`System2 request cancelled: ${reason}`)
+    this.name = 'System2RequestCancelledError'
+    this.reason = reason
+  }
 }
 
 /** One explicit DTO for audit/report code; never infer authority from `model`. */

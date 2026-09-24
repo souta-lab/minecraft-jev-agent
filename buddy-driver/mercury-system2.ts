@@ -65,6 +65,7 @@ import type {
   System2SemanticOutcome,
   System2WithheldCandidate,
 } from '../jev-agent/src/system2.ts'
+import { System2RequestCancelledError } from '../jev-agent/src/system2.ts'
 import type { System2PayloadShape } from '../jev-agent/src/system2Payload.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
@@ -1660,6 +1661,8 @@ export interface MercuryTransportRequest {
   readonly prompt: string
   readonly maxOutputTokens: number
   readonly timeoutMs: number
+  /** Generation-scoped signal; transports combine it with the per-attempt timeout. */
+  readonly signal?: AbortSignal
 }
 
 export interface MercuryTransportToolCall {
@@ -1780,7 +1783,7 @@ interface LocalChatCompletion {
 
 /** Direct OpenAI-compatible chat-completions transport for local servers. */
 export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpoint): MercuryTransport {
-  return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+  return async ({ system, prompt, maxOutputTokens, timeoutMs, signal }) => {
     const response = await fetch(`${endpoint.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -1798,7 +1801,7 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
         stream: false,
         ...(endpoint.chatTemplateKwargs !== undefined ? { chat_template_kwargs: endpoint.chatTemplateKwargs } : {}),
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
     })
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
@@ -1837,7 +1840,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
   const local = resolveMercuryLocalEndpoint()
   if (local !== null) return localMercuryTransport(model, local)
   if (mercuryTransportMode(model) === 'json-text') {
-    return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+    return async ({ system, prompt, maxOutputTokens, timeoutMs, signal }) => {
       // Muse Spark is the default System2 model. Do not route it through the
       // old Mercury-specific named-tool contract: the gateway rejects named
       // tool_choice for this model. Ask for natural language and keep the raw
@@ -1848,7 +1851,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
         prompt,
         maxOutputTokens,
         maxRetries: 0,
-        abortSignal: AbortSignal.timeout(timeoutMs),
+        abortSignal: signal ?? AbortSignal.timeout(timeoutMs),
       })
       const parsed = parseMercuryJsonTextDetailed(result.text)
       const repair: MercuryTransportRepair = {
@@ -1868,7 +1871,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
       }
     }
   }
-  return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+  return async ({ system, prompt, maxOutputTokens, timeoutMs, signal }) => {
     const result = await generateText({
       model,
       system: `${system}\n\n${TOOL_CALL_TRANSPORT_INSTRUCTIONS}`,
@@ -1882,7 +1885,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
       toolChoice: { type: 'tool', toolName: 'emitPlan' },
       maxOutputTokens,
       maxRetries: 0,
-      abortSignal: AbortSignal.timeout(timeoutMs),
+      abortSignal: signal ?? AbortSignal.timeout(timeoutMs),
     })
     return { toolCalls: result.toolCalls, usage: result.usage, text: result.text }
   }
@@ -2120,14 +2123,25 @@ export interface MercuryAttemptOptions<T> {
    * then terminated the resident (`FATAL context=mercury:<trigger>`).
    */
   readonly retryDelayMs?: (attempt: number) => number
+  /** Stop a retry delay immediately when its owning generation is cancelled. */
+  readonly signal?: AbortSignal
 }
 
 /** Bounded backoff between Mercury retries (see retryDelayMs above). */
 const MERCURY_RETRY_BASE_MS = Number(process.env.BUDDY_MERCURY_RETRY_BASE_MS ?? 1500)
 const MERCURY_RETRY_MAX_MS = Number(process.env.BUDDY_MERCURY_RETRY_MAX_MS ?? 15000)
 
-function mercurySleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function mercurySleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, ms)
+    signal?.addEventListener('abort', finish, { once: true })
+  })
 }
 
 /** Run attempts with accounting at the boundary immediately before each provider call. */
@@ -2166,7 +2180,7 @@ export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): 
       const nextFeedback = options.feedbackFor?.(error)
       if (nextFeedback !== null && nextFeedback !== undefined) feedback = nextFeedback
       const delay = options.retryDelayMs?.(attempt) ?? 0
-      if (delay > 0) await mercurySleep(delay)
+      if (delay > 0) await mercurySleep(delay, options.signal)
     }
   }
   return { ok: false, error: new Error('mercury: retry loop produced no result'), attempts, failures }
@@ -2202,6 +2216,7 @@ function trailingWaitStreak(outcomes: readonly System2Outcome[]): number {
 export class MercurySystem2 implements System2Brain {
   readonly model: string
   readonly authorityModel: string
+  private readonly generationCancellation = new AbortController()
   private readonly summarize: MercurySystem2Options['summarize']
   private readonly log: MercurySystem2Options['log']
   private readonly callsPath: string
@@ -2310,7 +2325,14 @@ export class MercurySystem2 implements System2Brain {
   }
 
   get generationCurrent(): boolean {
-    return this.isCurrent()
+    return !this.generationCancellation.signal.aborted && this.isCurrent()
+  }
+
+  /** HOST withdraws this generation's semantic authority before it is replaced. */
+  cancelPending(reason = 'generation-stopped'): void {
+    if (this.generationCancellation.signal.aborted) return
+    this.log('MERCURY_REQUEST_CANCELLED', { reason })
+    this.generationCancellation.abort(reason)
   }
 
   /** Standalone System2Brain entry point. Fatals when the configured model cannot answer. */
@@ -2319,7 +2341,15 @@ export class MercurySystem2 implements System2Brain {
     const trigger = this.deriveTrigger(request)
     const started = Date.now()
     const repair = await this.tryRepair(request, trigger)
-    if (repair === null) return this.modelFailure(trigger, started, this.summarize(request, trigger), 'mercury returned no repair')
+    if (repair === null) {
+      if (this.generationCancellation.signal.aborted || !this.isCurrent()) {
+        const reason = this.generationCancellation.signal.aborted && typeof this.generationCancellation.signal.reason === 'string'
+          ? this.generationCancellation.signal.reason
+          : 'generation-no-longer-current'
+        throw new System2RequestCancelledError(reason)
+      }
+      return this.modelFailure(trigger, started, this.summarize(request, trigger), 'mercury returned no repair')
+    }
     return repair.plan
   }
 
@@ -2407,7 +2437,7 @@ export class MercurySystem2 implements System2Brain {
   async tryRepair(request: System2PlanRequest, trigger: MercuryTriggerReason): Promise<MercuryRepairResult | null> {
     const started = Date.now()
     if (trigger === 'post_death') this.postDeathPending = false
-    if (!this.isCurrent()) {
+    if (!this.generationCurrent) {
       this.log('MERCURY_STALE_DISCARD', {
         trigger,
         stage: 'before_summary',
@@ -2575,18 +2605,31 @@ export class MercurySystem2 implements System2Brain {
     const userPrompt = JSON.stringify(state)
     const callId = `mercury-${++this.callCounter}-${started.toString(36)}`
 
-    // A generation swap / lease event does NOT own this promise and must not abort
-    // it: the only abort signal is the per-attempt timeout below. On a timeout the
-    // call is re-issued with a fresh signal instead of being abandoned.
+    // HOST owns this promise through the generation cancellation signal below.
+    // Authority withdrawal aborts it; an ordinary per-attempt timeout remains a
+    // retryable transport failure and each retry receives a fresh timeout signal.
     const callOnce = async (context: MercuryAttemptContext): Promise<MercuryAttemptSuccess> => {
       const prompt = context.feedback === null ? userPrompt : buildCorrectivePrompt(userPrompt, context.feedback)
-      const result = await this.transport({
-        system: SYSTEM_PROMPT,
-        prompt,
-        maxOutputTokens: this.maxOutputTokens,
-        timeoutMs: this.timeoutMs,
-      })
-      if (!this.isCurrent()) throw new StaleMercuryGenerationError()
+      const signal = AbortSignal.any([
+        this.generationCancellation.signal,
+        AbortSignal.timeout(this.timeoutMs),
+      ])
+      let result: MercuryTransportResult
+      try {
+        result = await this.transport({
+          system: SYSTEM_PROMPT,
+          prompt,
+          maxOutputTokens: this.maxOutputTokens,
+          timeoutMs: this.timeoutMs,
+          signal,
+        })
+      } catch (error) {
+        // Host cancellation is a typed stale request, never an outage. In
+        // particular, do not feed its AbortError into the transport retry loop.
+        if (!this.generationCurrent) throw new StaleMercuryGenerationError()
+        throw error
+      }
+      if (!this.generationCurrent) throw new StaleMercuryGenerationError()
       for (const repair of result.repairs ?? []) {
         if (repair.shape === 'none') {
           this.log('MERCURY_JSON_TEXT_UNPARSED', {
@@ -2853,7 +2896,7 @@ export class MercurySystem2 implements System2Brain {
       const attemptRun = await runMercuryAttempts({
         maxAttempts: this.maxAttempts,
         reserveAttempt: (attempt) => {
-          if (!this.isCurrent()) throw new StaleMercuryGenerationError()
+          if (!this.generationCurrent) throw new StaleMercuryGenerationError()
           const now = Date.now()
           const budgeted = Number.isFinite(this.maxPerHour)
           if (budgeted) {
@@ -2877,6 +2920,7 @@ export class MercurySystem2 implements System2Brain {
         isRetryable: isRetryableMercuryAttempt,
         feedbackFor: mercuryRetryFeedback,
         retryDelayMs: (attempt) => Math.min(MERCURY_RETRY_BASE_MS * 2 ** (attempt - 1), MERCURY_RETRY_MAX_MS),
+        signal: this.generationCancellation.signal,
         onRetry: ({ attempt, nextAttempt, error, feedback }) => {
           this.log('MERCURY_RETRY', {
             callId,
@@ -2892,7 +2936,7 @@ export class MercurySystem2 implements System2Brain {
       attempts = attemptRun.attempts
       failures = attemptRun.failures
       retriesUsed = Math.max(0, attempts - 1)
-      if (!this.isCurrent() || (!attemptRun.ok && attemptRun.error instanceof StaleMercuryGenerationError)) {
+      if (!this.generationCurrent || (!attemptRun.ok && attemptRun.error instanceof StaleMercuryGenerationError)) {
         return this.staleDiscard(
           trigger,
           started,
@@ -3216,7 +3260,7 @@ export class MercurySystem2 implements System2Brain {
         cached: false,
       }
     } catch (error) {
-      if (error instanceof StaleMercuryGenerationError || !this.isCurrent()) {
+      if (error instanceof StaleMercuryGenerationError || !this.generationCurrent) {
         return this.staleDiscard(trigger, started, state, callId, attempts, failures, retriesUsed, userPrompt, null, null)
       }
       // modelFailure() already wrote the authoritative record; do not fabricate a 'fallback'.
