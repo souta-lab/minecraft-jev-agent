@@ -3,11 +3,12 @@
 // by clean-run-server-launch.mjs. Responses are sliced from that process's
 // private stdout log and bound to the resident BOOT run/source.
 import { createHash } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { scanRunLines } from './m2-gate.mjs'
 import { canonicalGameruleKey, consoleGameruleEvidenceSet } from './clean-run-environment.mjs'
-import { sha256Text } from './clean-run-server-config.mjs'
+import { assertExactLeafArgv, expectedLeafLaunchIdentity, expectedLeafServerArgs, sha256Text } from './clean-run-server-config.mjs'
+import { parseConsoleRelayJournal, validateConsoleRelayJournal } from './clean-run-console-relay.mjs'
 
 const SHA_RE = /^[a-f0-9]{40}$/i
 const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
@@ -65,7 +66,9 @@ function parseValue(value) {
 }
 
 export function parseGameruleConsoleResponse(line) {
-  const match = /(?:\b(?:game\s*rule|gamerule)\s+)?['"]?([A-Za-z][A-Za-z0-9_:-]*)['"]?\s*(?:=|:|is currently set to:)\s*(.*?)\s*$/i.exec(String(line).trim())
+  const message = /^\[Server thread\/INFO\]: (.+)$/.exec(String(line).trim())?.[1]
+  if (message === undefined) return null
+  const match = /^Gamerule\s+([A-Za-z][A-Za-z0-9_:-]*)\s+is currently set to:\s*(.*?)\s*$/i.exec(message)
   if (match === null) return null
   const value = parseValue(match[2])
   if (value === undefined) return null
@@ -73,38 +76,40 @@ export function parseGameruleConsoleResponse(line) {
 }
 
 export function parseSeedConsoleResponse(line) {
-  const text = String(line).trim()
-  const match = /(?:^|\b)Seed:\s*\[?(-?\d+)\]?\s*$/i.exec(text)
+  const message = /^\[Server thread\/INFO\]: (.+)$/.exec(String(line).trim())?.[1]
+  if (message === undefined) return null
+  const match = /^Seed:\s*\[?(-?\d+)\]?\s*$/i.exec(message)
   if (match === null) return null
   return { seed: match[1] }
 }
 
 function extractResponses(bytes, offset, query) {
   if (bytes.length < offset) throw new Error('Leaf stdout log was truncated after startup')
-  const suffix = bytes.subarray(offset)
-  const text = suffix.toString('utf8')
-  let charOffset = 0
+  if (offset > 0 && bytes[offset - 1] !== 0x0a) throw new Error('Leaf stdout query offset does not start at a log line boundary')
   const responses = []
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (trimmed !== '') {
-      if (query.kind === 'seed') {
-        const parsed = parseSeedConsoleResponse(trimmed)
-        if (parsed !== null) {
-          const byteStart = offset + Buffer.byteLength(text.slice(0, charOffset), 'utf8')
-          responses.push({ value: parsed.seed, line: trimmed, byteStart, byteEnd: byteStart + Buffer.byteLength(line, 'utf8') })
-        }
-      } else {
-        const parsed = parseGameruleConsoleResponse(trimmed)
-        if (parsed !== null && parsed.rule === query.rule) {
-          const byteStart = offset + Buffer.byteLength(text.slice(0, charOffset), 'utf8')
-          responses.push({ value: parsed.value, line: trimmed, byteStart, byteEnd: byteStart + Buffer.byteLength(line, 'utf8') })
-        }
-      }
-    }
-    charOffset += line.length + 1
+  let lineStart = offset
+  while (lineStart < bytes.length) {
+    const newline = bytes.indexOf(0x0a, lineStart)
+    if (newline < 0) break // incomplete final line is never a response
+    const byteEnd = newline > lineStart && bytes[newline - 1] === 0x0d ? newline - 1 : newline
+    const line = bytes.subarray(lineStart, byteEnd).toString('utf8')
+    const parsed = query.kind === 'seed' ? parseSeedConsoleResponse(line) : parseGameruleConsoleResponse(line)
+    if (query.kind === 'seed' && parsed !== null) responses.push({ value: parsed.seed, line, byteStart: lineStart, byteEnd })
+    else if (query.kind !== 'seed' && parsed !== null && parsed.rule === query.rule) responses.push({ value: parsed.value, line, byteStart: lineStart, byteEnd })
+    lineStart = newline + 1
   }
   return responses
+}
+
+export function writeFifoCommand(path, command) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_NONBLOCK)
+  try {
+    const payload = Buffer.from(`${command}\n`, 'utf8')
+    const written = writeSync(fd, payload, 0, payload.length)
+    if (written !== payload.length) throw new Error(`FIFO accepted only ${written}/${payload.length} command bytes`)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 export async function collectConsoleQueries({ queries, seed, issueCommandAndCapture }) {
@@ -121,9 +126,50 @@ export async function collectConsoleQueries({ queries, seed, issueCommandAndCapt
   return { seed: seedResponse, responses }
 }
 
+/** Bind one Leaf reply to its query attempt and advance the run-local sequence. */
+export function bindConsoleQueryResponse({ attempt, response, state, completedAt }) {
+  const byteOffsetBefore = attempt?.byteOffsetBefore
+  const relaySequence = state?.relaySequence
+  const previousResponseEnd = state?.previousResponseEnd
+  if (!Number.isInteger(byteOffsetBefore) || !Number.isInteger(relaySequence) || relaySequence < 0 || !Number.isInteger(previousResponseEnd)) {
+    throw new Error('console query attempt/state is missing its sequence or byte boundary')
+  }
+  if (byteOffsetBefore < previousResponseEnd || response?.byteStart < byteOffsetBefore || response?.byteEnd <= response?.byteStart) {
+    throw new Error('console query response is not strictly ordered after its attempt and previous response')
+  }
+  const lineSha256 = sha256Bytes(Buffer.from(String(response.line), 'utf8'))
+  const journalRecord = {
+    ...attempt,
+    event: 'console-query-response',
+    completedAt,
+    value: response.value,
+    responseLine: response.line,
+    byteStart: response.byteStart,
+    byteEnd: response.byteEnd,
+    responseLineSha256: lineSha256,
+    responseByteStart: response.byteStart,
+    responseByteEnd: response.byteEnd,
+    relaySequence,
+  }
+  return {
+    journalRecord,
+    captured: {
+      value: response.value,
+      line: response.line,
+      byteStart: response.byteStart,
+      byteEnd: response.byteEnd,
+      lineSha256,
+      command: attempt.command,
+      byteOffsetBefore,
+      relaySequence,
+    },
+    nextState: { previousResponseEnd: response.byteEnd, relaySequence: relaySequence + 1 },
+  }
+}
+
 function validateLaunchBinding({ descriptorPath, descriptorText, descriptor, attestationPath, attestationText, attestation, runId, residentLogPath, residentLogText }) {
   if (!RUN_ID_RE.test(runId)) throw new Error('run id is invalid')
-  if (attestation?.record !== 'clean-run-leaf-startup-attestation' || attestation.schemaVersion !== 1) throw new Error('Leaf startup attestation is missing or invalid')
+  if (attestation?.record !== 'clean-run-leaf-startup-attestation' || attestation.schemaVersion !== 2) throw new Error('Leaf startup attestation is missing or invalid')
   const descriptorSha256 = sha256Text(descriptorText)
   const descriptorMeta = attestation.descriptor ?? {}
   if (
@@ -138,18 +184,21 @@ function validateLaunchBinding({ descriptorPath, descriptorText, descriptor, att
   const stdoutLogPath = resolve(String(consoleInfo.stdoutLogPath ?? ''))
   const commandTranscriptPath = resolve(String(consoleInfo.commandTranscriptPath ?? ''))
   const capturePath = resolve(String(consoleInfo.capturePath ?? ''))
+  const relayJournalPath = resolve(String(consoleInfo.relayJournalPath ?? ''))
   if (
     consoleInfo.mode !== 'run-private-fifo-and-log' || fifoPath !== resolve(consoleDir, 'server-console.fifo') ||
     stdoutLogPath !== resolve(consoleDir, 'leaf-server.log') || commandTranscriptPath !== resolve(consoleDir, 'commands.jsonl') ||
-    capturePath !== resolve(consoleDir, 'capture.json')
+    capturePath !== resolve(consoleDir, 'capture.json') || relayJournalPath !== resolve(consoleDir, 'leaf-console-relay.jsonl')
   ) throw new Error('Leaf console paths are not bound to the private run directory')
   const dirStat = lstatSync(consoleDir)
   const fifoStat = lstatSync(fifoPath)
   const outputStat = lstatSync(stdoutLogPath)
+  const relayStat = lstatSync(relayJournalPath)
   if (
     !dirStat.isDirectory() || dirStat.uid !== process.getuid?.() || (dirStat.mode & 0o777) !== 0o700 ||
     !fifoStat.isFIFO() || fifoStat.uid !== process.getuid?.() || (fifoStat.mode & 0o777) !== 0o600 ||
-    !outputStat.isFile() || outputStat.isSymbolicLink() || outputStat.uid !== process.getuid?.() || (outputStat.mode & 0o777) !== 0o600
+    !outputStat.isFile() || outputStat.isSymbolicLink() || outputStat.uid !== process.getuid?.() || (outputStat.mode & 0o777) !== 0o600 ||
+    !relayStat.isFile() || relayStat.isSymbolicLink() || relayStat.uid !== process.getuid?.() || (relayStat.mode & 0o777) !== 0o600
   ) throw new Error('Leaf console objects are not private owner-only files')
   if (!Number.isInteger(processInfo.pid) || processInfo.pid < 1 || !/^[a-f0-9]{64}$/.test(String(processInfo.commandLineSha256 ?? ''))) {
     throw new Error('Leaf process identity is missing from startup attestation')
@@ -159,6 +208,17 @@ function validateLaunchBinding({ descriptorPath, descriptorText, descriptor, att
   if (cmdArgs.length < 2 || sha256Bytes(Buffer.from(cmdArgs.join('\0'))) !== processInfo.commandLineSha256) {
     throw new Error('Leaf process command line no longer matches startup attestation')
   }
+  const expectedIdentity = expectedLeafLaunchIdentity(descriptor)
+  assertExactLeafArgv(cmdArgs.slice(1), expectedLeafServerArgs(descriptor, resolve(dirname(descriptorPath), 'server.properties.clean'), descriptor.cleanRun?.worldContainer), 'captured Leaf')
+  const executablePath = realpathSync(`/proc/${processInfo.pid}/exe`)
+  const executableSha256 = sha256Bytes(readFileSync(`/proc/${processInfo.pid}/exe`))
+  if (
+    cmdArgs[0] !== expectedIdentity.java.path || JSON.stringify(processInfo.argv ?? null) !== JSON.stringify(cmdArgs) ||
+    processInfo.executableRealpath !== expectedIdentity.java.realpath || processInfo.executableSha256 !== expectedIdentity.java.sha256 ||
+    executablePath !== expectedIdentity.java.realpath || executableSha256 !== expectedIdentity.java.sha256 ||
+    processInfo.serverJarPath !== expectedIdentity.serverJar.path || processInfo.serverJarRealpath !== expectedIdentity.serverJar.realpath ||
+    processInfo.serverJarSha256 !== expectedIdentity.serverJar.sha256
+  ) throw new Error('Leaf process Java/JAR identity no longer matches startup attestation')
   const runWindow = scanRunLines(runId, residentLogText.split(/\r?\n/))
   if (runWindow.status !== 'valid' || runWindow.sourceSha !== descriptorMeta.sourceSha) {
     throw new Error('resident BOOT run/source boundary does not bind this console capture')
@@ -173,6 +233,7 @@ function validateLaunchBinding({ descriptorPath, descriptorText, descriptor, att
     stdoutLogPath,
     commandTranscriptPath,
     capturePath,
+    relayJournalPath,
     residentLogPath: resolve(residentLogPath),
   }
 }
@@ -248,8 +309,26 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
   const existingTranscript = readFileSync(transcriptPath, 'utf8')
   if (!existingTranscript.includes('runId=<fill-after-BOOT>')) throw new Error('gamerule verification file is not the untouched prepare template')
   const serverLogPath = binding.stdoutLogPath
+  const relayJournalPath = binding.relayJournalPath
   const serverLogStat = lstatSync(serverLogPath)
   if (!serverLogStat.isFile()) throw new Error('Leaf stdout capture is not a regular file')
+  let relaySequence = 0
+  let previousResponseEnd = -1
+
+  const waitForRelayForward = async ({ command, sequence, deadline }) => {
+    while (Date.now() < deadline) {
+      const journal = readFileSync(relayJournalPath, 'utf8')
+      const parsed = parseConsoleRelayJournal(journal)
+      const rows = parsed.rows
+      if (parsed.error !== null || rows[0]?.event !== 'console-relay-start' || rows[0]?.leafPid !== binding.processInfo.pid || rows[0]?.expectedCommandCount !== queries.length + 1) throw new Error('Leaf console relay journal has no valid start binding')
+      if (rows.some((row) => ['console-relay-rejected', 'console-relay-forward-failed', 'console-relay-partial-rejected'].includes(row?.event) || (row?.event === 'console-relay-buffer-state' && row.byteLength !== 0))) {
+        throw new Error('Leaf console relay rejected an unexpected command')
+      }
+      if (rows.some((row) => row?.event === 'console-relay-forwarded' && row.sequence === sequence && row.command === command)) return journal
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
+    }
+    throw new Error('Leaf console relay did not forward the expected read-only query')
+  }
 
   const issueCommandAndCapture = async (query) => {
     const command = query.command
@@ -260,6 +339,9 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
     if (query.kind === 'gamerule' && !/^execute in minecraft:[a-z0-9_]+ run gamerule [a-z0-9_]+$/.test(command)) throw new Error('invalid gamerule query')
     const before = readFileSync(serverLogPath)
     const offset = before.length
+    if (offset > 0 && before[offset - 1] !== 0x0a) throw new Error('Leaf stdout log does not end at a query-safe line boundary')
+    if (offset < previousResponseEnd) throw new Error('Leaf query offset precedes the previous response range')
+    const relayBefore = readFileSync(relayJournalPath)
     const attempt = {
       event: 'console-query-attempt',
       kind: query.kind,
@@ -274,16 +356,29 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
       descriptorRule: query.descriptorRule ?? null,
       stdoutLogPath: serverLogPath,
       byteOffsetBefore: offset,
+      relayOffsetBefore: relayBefore.length,
+      relaySequence,
       at: new Date().toISOString(),
     }
     appendOwnerOnlyJsonLine(commandTranscriptPath, attempt)
-    const fifoFd = openSync(binding.fifoPath, constants.O_WRONLY)
     try {
-      writeFileSync(fifoFd, `${command}\n`, 'utf8')
-    } finally {
-      closeSync(fifoFd)
+      writeFifoCommand(binding.fifoPath, command)
+    } catch (error) {
+      appendOwnerOnlyJsonLine(commandTranscriptPath, {
+        ...attempt,
+        event: 'console-query-send-failed',
+        reason: String(error?.code ?? error?.message ?? error),
+        completedAt: new Date().toISOString(),
+      })
+      throw error
     }
     const deadline = Date.now() + 5000
+    const relayJournalAtForward = await waitForRelayForward({ command, sequence: relaySequence, deadline })
+    const relayState = validateConsoleRelayJournal(relayJournalAtForward, {
+      leafPid: binding.processInfo.pid,
+      expectedCommands: ['seed', ...queries.map((entry) => entry.command)].slice(0, relaySequence + 1),
+    })
+    if (!relayState.valid) throw new Error(relayState.reason)
     let response = null
     let currentBytes = null
     while (Date.now() < deadline) {
@@ -302,6 +397,9 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
       })
       throw new Error(`Leaf did not return a verifiable response for ${query.kind === 'seed' ? 'seed' : `${query.dimension}/${query.rule}`}`)
     }
+    if (response.byteStart < offset || response.byteStart < previousResponseEnd || response.byteEnd > currentBytes.length) {
+      throw new Error('Leaf response byte range is not strictly ordered after its query attempt')
+    }
     // Let the current command finish logging before assigning its response
     // range. A duplicated response is ambiguous and therefore refused.
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
@@ -309,25 +407,16 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
     const responseRows = extractResponses(currentBytes, offset, query)
     if (responseRows.length !== 1 || responseRows[0].line !== response.line) throw new Error('Leaf response was missing or ambiguous while capturing')
     const responseBytes = currentBytes.subarray(response.byteStart, response.byteEnd)
-    const completed = {
-      ...attempt,
-      event: 'console-query-response',
+    const completion = bindConsoleQueryResponse({
+      attempt,
+      response: { ...response, lineSha256: sha256Bytes(responseBytes) },
+      state: { relaySequence, previousResponseEnd },
       completedAt: new Date().toISOString(),
-      value: response.value,
-      responseLine: response.line,
-      byteStart: response.byteStart,
-      byteEnd: response.byteEnd,
-      responseLineSha256: sha256Bytes(responseBytes),
-    }
-    appendOwnerOnlyJsonLine(commandTranscriptPath, completed)
-    return {
-      value: response.value,
-      line: response.line,
-      byteStart: response.byteStart,
-      byteEnd: response.byteEnd,
-      lineSha256: completed.responseLineSha256,
-      command,
-    }
+    })
+    appendOwnerOnlyJsonLine(commandTranscriptPath, completion.journalRecord)
+    previousResponseEnd = completion.nextState.previousResponseEnd
+    relaySequence = completion.nextState.relaySequence
+    return completion.captured
   }
 
   const { seed, responses } = await collectConsoleQueries({
@@ -346,9 +435,15 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
     capturedAt,
   })
   const transcriptSha256 = sha256Text(text)
+  const relayJournalText = readFileSync(relayJournalPath, 'utf8')
+  const relayValidation = validateConsoleRelayJournal(relayJournalText, {
+    leafPid: binding.processInfo.pid,
+    expectedCommands: ['seed', ...queries.map((entry) => entry.command)],
+  })
+  if (!relayValidation.valid) throw new Error(relayValidation.reason)
   const capture = {
     record: 'clean-run-console-capture',
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'complete',
     runId,
     sourceSha: binding.sourceSha,
@@ -357,9 +452,15 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
     process: { pid: binding.processInfo.pid, commandLineSha256: binding.processInfo.commandLineSha256 },
     residentLog: { path: binding.residentLogPath, sourceSha: binding.sourceSha },
     capturePath: capturePath,
-    console: { directory: dirname(binding.fifoPath), fifoPath: binding.fifoPath, stdoutLogPath: serverLogPath, commandTranscriptPath },
+    console: {
+      directory: dirname(binding.fifoPath), fifoPath: binding.fifoPath, stdoutLogPath: serverLogPath, commandTranscriptPath,
+      relayJournalPath,
+      relayJournalSha256: sha256Text(relayJournalText),
+      relayJournalBytes: Buffer.byteLength(relayJournalText),
+      relayCommandCount: relayValidation.forwarded.length,
+    },
     commandTranscript: { path: commandTranscriptPath, sha256: sha256Text(readFileSync(commandTranscriptPath, 'utf8')), queryCount: responses.length + 1 },
-    seed: { value: String(seed.value), line: seed.line, byteStart: seed.byteStart, byteEnd: seed.byteEnd, lineSha256: seed.lineSha256 },
+    seed: { value: String(seed.value), line: seed.line, byteStart: seed.byteStart, byteEnd: seed.byteEnd, lineSha256: seed.lineSha256, byteOffsetBefore: seed.byteOffsetBefore, relaySequence: seed.relaySequence },
     requiredDimensions: descriptor.cleanRun.gameruleScope.dimensions,
     observedRuleCount: responses.length,
     excludedRules: exclusions,
@@ -370,6 +471,8 @@ export async function runConsoleCapture({ descriptorPath, attestationPath, resid
       byteStart: response.byteStart,
       byteEnd: response.byteEnd,
       lineSha256: response.lineSha256,
+      byteOffsetBefore: response.byteOffsetBefore,
+      relaySequence: response.relaySequence,
     })),
     transcript: { path: transcriptPath, sha256: transcriptSha256 },
     capturedAt,

@@ -19,10 +19,10 @@ separate and are not evidence for this attempt.
 Components:
 
 ```text
-tools/fixtures/m3-clean-environment.json   the checked-in descriptor (a TEMPLATE until the SHA is frozen)
+/home/s0u7a/mc-server/m3-clean-run/environment-m3easy-template.json   active fresh c1 descriptor (read-only input template)
 tools/clean-run-environment.mjs            descriptor schema + clean validator + run-evidence checks
 tools/clean-run-prepare.mjs                offline preparation of the clean world (--dry-run / --apply)
-tools/clean-run-server-launch.mjs           Leaf argv/config attestation + private stdin/stdout capture
+tools/clean-run-server-launch.mjs           Leaf/JVM/JAR argv attestation + allowlisted private console relay and stdout capture
 tools/clean-run-console-capture.mjs         run-bound read-only console query and response capture
 tools/clean-run-gate.mjs                   the clean verdict, combined with the canonical bundle
 tools/test-clean-run-harness.mjs           15 offline checks (assisted descriptors are refused)
@@ -33,14 +33,16 @@ runs/m3-clean-measure/                     read-only measurement that grounds th
 
 ## 1. The descriptor: every field, and why it is there
 
-`tools/fixtures/m3-clean-environment.json` is **one file with two jobs**: it is the
+`/home/s0u7a/mc-server/m3-clean-run/environment-m3easy-template.json` is **one file with two jobs**: it is the
 `--environment` record `tools/m3-acceptance-bundle.mjs` feeds to the artifact
 (`readEnvironmentFile` reads `values`, `configurationChanges`, and `worldChanges`),
-and it is the clean-run premise `tools/clean-run-gate.mjs` validates. One file, so
-the premise and the environment record can never be two different documents.
-The checked-in descriptor is a reusable template. This attempt's operator-owned
-descriptor records Easy difficulty as a configuration change with its reason and
-expected impact; it keeps `worldChanges` empty and grants no items or structures.
+and it is the clean-run premise `tools/clean-run-gate.mjs` validates after
+`clean-run-prepare.mjs` freezes it. The checked-in descriptor is a reusable
+template. The active c1 template stays unchanged; it describes `m3clean-c1` with
+seed `4500764503965322344` and records Easy difficulty as a reasoned configuration
+change. Prepare derives the pinned Java runtime policy into the resolved
+descriptor and binds that resolved file to the manifest. The older checked-in
+`tools/fixtures/m3-clean-environment.json` is not the active attempt input.
 
 | field | value (template) | why it is there |
 | --- | --- | --- |
@@ -61,8 +63,9 @@ expected impact; it keeps `worldChanges` empty and grants no items or structures
 | `cleanRun.gameruleScope` | `perDimension: true` + overworld/nether/end | gamerules are stored **per dimension** in this build (each `level.dat` owns its own `Data.game_rules`; the live world runs `keep_inventory=true` in all three while `advance_time=false` only in the overworld). The M3 route dies in the Nether, so a single-dimension rule set could leave `keep_inventory=true` exactly where it matters |
 | `cleanRun.gameruleMechanism` | console primary, datapack secondary, `datapackFormat` = `min/max [94,1]` | Mineflayer cannot read gamerules and camelCase ids are rejected by this build. The console listings (per dimension) after first boot are the authoritative evidence; the staged datapack asserts every rule in all three dimensions at every world load. Since 1.21.9 a bare `pack_format` no longer declares data-pack support, so the pack declares `min_format`/`max_format` |
 | `values.difficulty` / `mobSpawning` / `spawnAnimals` | `easy` / `true` / `true` for the current attempt | Easy is the lowest non-peaceful difficulty and is explicitly documented under `configurationChanges`; hostile mobs and drops remain enabled. `peaceful` is refused. **`spawn-monsters` is a DEAD key in this build** (0 occurrences in `DedicatedServerProperties`): it is declared for the artifact's environment record and written for diff readability only. Hostile spawning is actually gated by the `spawn_mobs` / `spawn_monsters` **gamerules**, which the descriptor declares and the gate judges |
+| `cleanRun.runtimePolicy` | derived during prepare from `/usr/lib/jvm/java-21-openjdk-amd64/bin/java -version` | the external c1 template remains unchanged; the resolved descriptor records the exact executable, version and `Paper.IgnoreJavaVersion=true` policy |
 | `values.levelName` | `m3clean-c1` for the current attempt | a NEW name: lowercase, not `world*`, not a protected name, and not a previous world |
-| `values.levelSeed` | `4500764503965322344` for the current attempt | a NEW seed: not `2024`, not `0`, not empty |
+| `values.levelSeed` | `4500764503965322344` for the current attempt | a NEW seed; prepare checks it against every earlier M3 attempt regardless of target name |
 | `values.serverVersion` / `serverImplementation` / `serverId` | `1.21.11` / `leaf-1.21.11-178.jar` / `127.0.0.1:25565` | the world identity: `serverId` is half of the resident's `worldKey` |
 | `values.sourceSha` | `null` → the frozen 40-hex commit | the run's BOOT `source=` must equal it |
 | `values.server` | 15 non-gamerule requirements | `levelType=minecraft:normal` (flat/amplified is a tuned world), `gamemode=survival`, `forceGamemode=false`, `hardcore=false`, `bonusChest=false` (granted items), `allowCheats=false`, `generateStructures=true` (no fortresses/strongholds = M3 impossible), `spawnAnimals=true`, `botOperator=false`, `enableCommandBlock=false`, `pvp=true`, `allowNether=true`, `allowFlight=false`, `spawnProtection=0` (non-zero spawn protection forbids a non-op body from breaking blocks near spawn), `whiteList=false` |
@@ -80,30 +83,37 @@ re-judges a milestone: it decides only whether the descriptor is admissible
 ```bash
 cd <frozen-checkout>            # the tree that WILL produce the run
 bun install --frozen-lockfile
+ENV=/home/s0u7a/mc-server/m3-clean-run/environment-m3easy-template.json
 
 # 2a. see exactly what would happen. Writes nothing.
 bun tools/clean-run-prepare.mjs \
-  --environment tools/fixtures/m3-clean-environment.json \
+  --environment "$ENV" \
   --root "$PWD" --dry-run
 
 # 2b. stage it
 bun tools/clean-run-prepare.mjs \
-  --environment tools/fixtures/m3-clean-environment.json \
+  --environment "$ENV" \
   --root "$PWD" --apply
 ```
+
+The active descriptor currently names `m3clean-c1` with seed
+`4500764503965322344`; the old b1 seed `-4187923615481` is reserved and must
+remain rejected even when assigned a different level name. Preparation writes only
+the resolved descriptor with the derived runtime policy; it does not mutate the
+external c1 template.
 
 `--apply` writes these staged files inside the container and nowhere else:
 
 ```text
 <container>/<levelName>/                         the new world dir (empty; the server generates level.dat on first boot)
 <container>/<levelName>/datapacks/m3-clean-gamerules/   the gamerule datapack (skipped loudly when datapackPackFormat is null)
-<container>/m3-clean-run/environment-resolved.json      the descriptor the bundle AND the clean gate must both consume
-<container>/m3-clean-run/server.properties.clean        the PROPOSED clean server.properties
-<container>/m3-clean-run/server-properties.diff.txt     every key it changes
-<container>/m3-clean-run/manifest.json                  descriptor sha, world/seed/sha, file hashes, guards, property checks
+<container>/m3-clean-run/<levelName>-<fingerprint>/environment-resolved.json      the descriptor the bundle AND the clean gate must both consume
+<container>/m3-clean-run/<levelName>-<fingerprint>/server.properties.clean        the PROPOSED clean server.properties
+<container>/m3-clean-run/<levelName>-<fingerprint>/server-properties.diff.txt     every key it changes
+<container>/m3-clean-run/<levelName>-<fingerprint>/manifest.json                  descriptor/resolved-descriptor sha, world/seed/source SHA, file hashes, guards, property checks
 <container>/m3-clean-run/attempts.json                  append-only attempt ledger (a reused seed is refused)
-<container>/m3-clean-run/operator-commands.txt          the ordered commands, printed
-<container>/m3-clean-run/ACCEPTANCE-RECIPE.md           a copy of this file, next to the evidence
+<container>/m3-clean-run/<levelName>-<fingerprint>/operator-commands.txt          the ordered commands, printed
+<container>/m3-clean-run/<levelName>-<fingerprint>/ACCEPTANCE-RECIPE.md           a copy of this file, next to the evidence
 ```
 
 The Leaf launcher creates `server-start-attestation.json`, a mode-0700
@@ -117,9 +127,12 @@ any file, no write inside `world` / `world_nether` / `world_the_end`, no
 `--server-root` that is a world directory or inside the target world, and no
 overwrite of the shared `server.properties` (`--overwrite-properties` is refused
 for both M2 and M3). It refuses: a descriptor that is not CLEAN, a target world that already has a
-`level.dat`, an existing level-name directory it did not stage, a reused seed, an
+`level.dat`, an existing level-name directory it did not stage, any seed already
+reserved in this milestone's append-only ledger regardless of level name, an
 unfrozen SHA, a protected level name, and an opped bot. A second `--apply` on an
-unstaged-but-not-generated world is an `IDEMPOTENT_NOOP`.
+ungenerated world is an `IDEMPOTENT_NOOP` only when target name, seed, original
+descriptor SHA, resolved descriptor SHA, source SHA and Leaf launch identity all
+match the staged manifest exactly.
 
 ## 3. The run, in order
 
@@ -131,25 +144,28 @@ unstaged-but-not-generated world is an `IDEMPOTENT_NOOP`.
 #     Keep this ordering: resident stopped -> server stopped -> clean server started.
 
 # 3.2 start Leaf with the exact wrapper command printed in
-#     <container>/m3-clean-run/operator-commands.txt [OPERATOR ACTION — H4].
+#     <run-dir>/operator-commands.txt [OPERATOR ACTION — H4]. Use the target-specific
+#     runDir printed by clean-run-prepare under <container>/m3-clean-run/.
 #     Its required arguments have this form; keep the --console-input and --stdout-log
 #     paths and the `--` separator before the actual Java command:
 cd <frozen-checkout> && bun tools/clean-run-server-launch.mjs \
-  --environment <container>/m3-clean-run/environment-resolved.json \
-  --properties <container>/m3-clean-run/server.properties.clean \
-  --attestation <container>/m3-clean-run/server-start-attestation.json \
-  --manifest <container>/m3-clean-run/manifest.json \
+  --environment <run-dir>/environment-resolved.json \
+  --properties <run-dir>/server.properties.clean \
+  --attestation <run-dir>/server-start-attestation.json \
+  --manifest <run-dir>/manifest.json \
   --cwd <container> \
-  --console-input <container>/m3-clean-run/server-console/server-console.fifo \
-  --stdout-log <container>/m3-clean-run/server-console/leaf-server.log \
+  --console-input <run-dir>/server-console/server-console.fifo \
+  --stdout-log <run-dir>/server-console/leaf-server.log \
   -- /usr/lib/jvm/java-21-openjdk-amd64/bin/java \
   -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui \
-  --config <container>/m3-clean-run/server.properties.clean \
+  --config <run-dir>/server.properties.clean \
   --universe <container> --level-name <levelName> &
 #     Do not replace the wrapper with direct java/setsid or /dev/null stdin. It
 #     verifies --config/--universe/--level-name and staged properties before spawn,
-#     then records actual /proc argv, PID, config/manifest hashes and opens the private
-#     FIFO and output log. There is no --seed flag; the staged config supplies the seed
+#     then records actual /proc argv, PID, Java -version output, Java/JAR hashes,
+#     config/manifest hashes and the effective Paper.IgnoreJavaVersion flag. Its private
+#     FIFO relay forwards only the exact ordered read-only queries generated for this
+#     descriptor; direct Leaf stdin is not available. There is no --seed flag; the staged config supplies the seed
 #     on first world creation. The shared server.properties remains untouched. The
 #     wrapper refuses --bonusChest because this Leaf build has no matching properties key.
 
@@ -167,8 +183,8 @@ cd <frozen-checkout> && bun tools/clean-run-server-launch.mjs \
 #     the private FIFO, then records actual Leaf log response byte offsets and hashes.
 #     It never accepts pasted responses.
 bun <frozen-checkout>/tools/clean-run-console-capture.mjs \
-  --environment <container>/m3-clean-run/environment-resolved.json \
-  --attestation <container>/m3-clean-run/server-start-attestation.json \
+  --environment <run-dir>/environment-resolved.json \
+  --attestation <run-dir>/server-start-attestation.json \
   --resident-log <frozen-checkout>/buddy-driver/buddy.log --run <RUN_ID>
 #     All declared/queryable gamerules are checked in each required dimension.
 #     A missing/ambiguous response exits UNKNOWN; any mismatch fails closed.
@@ -186,14 +202,14 @@ printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
 # 3.7 the canonical bundle, with the RESOLVED descriptor as the environment record
 bun tools/m3-acceptance-bundle.mjs --run <RUN_ID> \
   --root <frozen-tree> \
-  --environment <container>/m3-clean-run/environment-resolved.json \
+  --environment <run-dir>/environment-resolved.json \
   --evidence-class live
 #     outputs land in <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>/
 #     bundle.json / bundle.md / artifact-<RUN_ID>.json / metrics.json / commands/
 
 # 3.8 the clean verdict, written NEXT TO the bundle (additive: bundle.json is never modified)
 bun tools/clean-run-gate.mjs \
-  --environment <container>/m3-clean-run/environment-resolved.json \
+  --environment <run-dir>/environment-resolved.json \
   --bundle-dir <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID> \
   --run <RUN_ID> \
   --out <frozen-tree>/runs/m3-live/acceptance-bundle-<RUN_ID>
@@ -220,13 +236,16 @@ descriptor is not an acceptance.
 | --- | --- |
 | `runId` | `bundle.json:runId`, `artifact-<runId>.json:runId`, the filename, every `CLEAN_RUN_*` line |
 | frozen SHA | `BOOT ... source=<sha>` in `buddy.log`; `artifact.run.boot.sourceSha`; the clean gate compares it to `values.sourceSha` (`run.bootSourceSha`) |
+| Java runtime | `cleanRun.runtimePolicy` declares the pinned executable, exact version string, and `Paper.IgnoreJavaVersion=true`. The manifest binds executable path/hash and full `java -version` output/hash; Leaf startup, HOST and the gate recheck that identity and the effective JVM flag. |
 | tree HEAD | `bundle.git.head` + `liveSignals.bootSourceMatchesTreeHead` |
 | `worldKey` | `BOOT ... worldKey={"serverId":…,"dimension":…,"worldEpoch":…}` → `artifact.run.worldKey` (it is the world memory namespace: `serverId|dimension|worldEpoch`; it does NOT contain the seed) |
 | level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()` via `BUDDY_SERVER_PROPERTIES_PATH`; that is only HOST seed evidence, not proof of the server's runtime config |
-| Leaf launch/config | wrapper-produced `server-start-attestation.json` records the observed Leaf PID/argv, `--config` path, safe property projection, config/manifest hashes and run-private console paths. HOST rechecks the descriptor, BOOT SHA, manifest, property bytes and live `/proc` argv into `artifact.run.boot.cleanRunServerConfig`; the gate rechecks those bindings from disk and requires `run.serverConfigAttestation=PASS` |
+| Leaf launch/config | wrapper-produced `server-start-attestation.json` records the observed Leaf PID/argv, Java version/executable, JAR path/hash, effective `Paper.IgnoreJavaVersion` flag, `--config` path, safe property projection, config/manifest hashes and run-private console paths. HOST rechecks the descriptor, BOOT SHA, manifest, property bytes and live `/proc` argv into `artifact.run.boot.cleanRunServerConfig`; the gate rechecks those bindings from disk and requires `run.serverConfigAttestation=PASS` |
 | gamerules | `clean-run-console-capture.mjs` records seed plus each queryable declared gamerule response from the private Leaf stdout log, including byte offsets and hashes, and writes `commands.jsonl`, `capture.json`, and `gamerule-verification.txt`. The gate checks command safety, response bytes, hashes, exact runId, descriptor SHA, startup attestation/PID, BOOT source SHA, and every dimension/rule. A pasted file cannot PASS. Rules explicitly excluded as unavailable (currently `max_minecart_speed`) remain UNKNOWN and are never described as observed |
+| initial inventory | `artifact.inventory.boot` comes only from the generation-entry `initialInventory` snapshot whose `runId` and `bootSourceSha` match this run's BOOT. A periodic `INVENTORY` line cannot stand in for that starting state. `run.bootInventoryEmpty` requires this source-bound snapshot to be empty |
+| model authority / no fallback | `artifact.authority.system2.identityStatus` must be `verified`: each same-run decision is joined to its `generationId`, source SHA, build hash, actual provider/model, and configured System2 provider/model. M3 requires every recorded System2 decision to count as model-backed. The run-scoped Jev decision log must contain only classifiable decisions, at least one `source=jev`, no fallback/other/unclassifiable sources, and `GENERATION_READY` must bind typesafe Jev policy with planner mode `llm` and deterministic fallback disabled. Missing, malformed, stub-only, or unknown-source evidence stays UNKNOWN |
 | no world changes | `artifact.environment.worldChanges` must be `null` (`run.noWorldChanges`) |
-| nothing granted | the run's FIRST inventory sample must be empty (`run.bootInventoryEmpty`, from `artifact.inventory.boot`) |
+| nothing granted | the exact-run generation-entry inventory snapshot must be empty (`run.bootInventoryEmpty`, from `artifact.inventory.boot`); a later periodic inventory sample is not starting-inventory evidence |
 | keepInventory behaviour | any `LADDER_INVENTORY_SETTLE reason=death` line in the run window: `itemCount>0` ⇒ FAIL (the live world's own signal); an empty drop ⇒ positive evidence |
 | clean verdict | `clean-run.json` / `clean-run.md` next to `bundle.json`, plus the `CLEAN_RUN_*` lines |
 
@@ -243,13 +262,16 @@ so a clean premise can never be paired with a run judged against another file.
    (`ender_eye_ready`, `nether_reached`, `model_authority`).
 4. `clean-run.md` → the descriptor is the resolved one (`sourceSha` = the frozen
    commit, `levelName`/`levelSeed` = the new world); `run.levelNameAttested`,
-   `run.seedAttested`, `run.bootSourceSha`, `run.bootInventoryEmpty` all PASS.
-5. `clean-run.md` → `run.serverConfigAttestation` and `run.consoleGamerulesVerified` PASS. Inspect `capture.json`, `commands.jsonl`, and the transcript generated by the helper; confirm the Leaf PID/argv/config hashes and captured `seed` equal the descriptor. The unavailable `max_minecart_speed` must remain UNKNOWN, not observed.
-6. `bundle.json` → `git.head` == the frozen SHA, `git.dirty` false (or explained),
+   `run.seedAttested`, `run.bootSourceSha`, `run.bootInventoryEmpty` all PASS. Check
+   that `artifact.inventory.bootEvidence` says `verified` and carries the same
+   `runId` and BOOT source SHA; a periodic `INVENTORY` row cannot replace it.
+5. `clean-run.md` → `run.serverConfigAttestation` and `run.consoleGamerulesVerified` PASS. Inspect `capture.json`, `commands.jsonl`, and the transcript generated by the helper; confirm Leaf PID/argv/JVM version/JAR/config hashes, `Paper.IgnoreJavaVersion`, and captured `seed` equal the descriptor. The unavailable `max_minecart_speed` must remain UNKNOWN, not observed.
+6. `bundle.md` / `artifact-<runId>.json` → Jev is bound to the run, `authority.system2.identityStatus=verified`, each System2 decision joins to its same-run generation/source/build and effective/configured provider-model identity, policy/planner facts are `typesafe` / `typesafe-ai/jev` / `llm`, deterministic fallback is disabled, and decision-source completeness is known with no fallback or unclassifiable records.
+7. `bundle.json` → `git.head` == the frozen SHA, `git.dirty` false (or explained),
    `run.worldKey` is the new world's namespace.
-7. `commands/*.txt` → the exact argv and captured output of the artifact, the M3
+8. `commands/*.txt` → the exact argv and captured output of the artifact, the M3
    gate and the metrics step; `clean-run.json` for the machine-readable verdict.
-8. Anything `UNKNOWN` in `clean-run.md`'s residual section is a named gap: it must
+9. Anything `UNKNOWN` in `clean-run.md`'s residual section is a named gap: it must
    be resolved or explicitly accepted, never silently ignored.
 
 ## 6. Honest residual (what this harness cannot decide)
@@ -294,10 +316,12 @@ so a clean premise can never be paired with a run judged against another file.
   namespaced by `worldKey`, which contains no seed: a new world on the same
   `serverId` and epoch could still match old memory. The recipe avoids this by
   running the resident from a FRESH worktree of the frozen SHA.
-- **The clean gate is an addition, not a modification.** `tools/m3-gate.mjs`,
-  `tools/m2-gate.mjs`, `tools/milestone-run-artifact.mjs` and
-  `tools/m3-acceptance-bundle.mjs` are untouched: their verdicts are read, never
-  re-implemented. An M3 PASS without `clean-run.json` is still only an M3 PASS.
+- **The clean gate is an addition, not a replacement.** Canonical gate verdicts
+  remain binding and are never re-implemented here. `tools/milestone-run-artifact.mjs`
+  now carries additive schema 9 evidence: source-bound initial inventory,
+  foreign-run marker filtering, and verified System2 generation/call identity.
+  Those artifact changes feed the canonical gates but do not replace their
+  verdicts. An M3 PASS without `clean-run.json` is still only an M3 PASS.
 - Fixtures prove the wiring, not the world: the clean-run, console-capture and
   server-config tests run entirely offline under temporary fixture directories.
   Synthetic output exists only to exercise acceptance plumbing; it is not live

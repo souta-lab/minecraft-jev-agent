@@ -48,7 +48,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { attributeRunLines, buildRunArtifact, coercePropertyValue, readEnvironmentFile, readServerProperties, runCli } from './milestone-run-artifact.mjs'
+import { attributeRunLines, buildRunArtifact, coercePropertyValue, parseKeyValues, readEnvironmentFile, readServerProperties, runCli } from './milestone-run-artifact.mjs'
 import { scanRunLines } from './m2-gate.mjs'
 import { runM3Gate } from './m3-gate.mjs'
 
@@ -68,6 +68,15 @@ const line = (sec, body) => `[${at(sec)}] ${body}`
 const SOURCE_SHA = '7164b92586fec83c340f5ce874dd81416d4247b2'
 const SYSTEM2_BUILD_HASH = 'e6be1812c804'
 const WORLD_KEY = '{"serverId":"127.0.0.1:25565","dimension":"minecraft:overworld","worldEpoch":1}'
+
+{
+  const startup = { status: 'verified', runtime: { java: { version: '21.0.13-ea', versionOutput: { stderr: 'version output with spaces' } } }, process: { argv: ['java', '-Xmx1G', '-jar', 'leaf.jar'], nested: { detail: 'JSON key=value text must stay nested' } } }
+  const parsed = parseKeyValues(`BOOT runId=run-parser-fixture cleanRunServerConfig=${JSON.stringify(startup)} frozen=true`)
+  assert.deepEqual(parsed.cleanRunServerConfig, startup)
+  assert.equal(parsed.frozen, 'true')
+  assert.equal(parsed.version, undefined)
+  ok('BOOT key/value parser retains nested startup JSON and continues with following fields')
+}
 
 const boot = (sec, runId, { generations = 0, reloads = 0, sourceSha = SOURCE_SHA } = {}) =>
   line(
@@ -582,7 +591,7 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
 // of the artifact. The gate's `m2_chain:` line is the ordered trace, and the
 // artifact must carry it as `verdicts.M2.chain` with built/lit/verified.
 {
-  assert.equal(passArtifact.schemaVersion, 6)
+  assert.equal(passArtifact.schemaVersion, 9)
   const chain = passArtifact.verdicts.M2.chain
   assert.ok(chain !== null && typeof chain === 'object', `M2 chain missing: ${JSON.stringify(passArtifact.verdicts.M2)}`)
   assert.equal(chain.ordered, true)
@@ -1771,6 +1780,123 @@ ok('a frozen host cannot make its staged candidate look like the executing sourc
 // ---------------------------------------------------------------------------
 // cleanup
 // ---------------------------------------------------------------------------
+
+// System2 identity is computed by the policy-evidence reader and carried through
+// the artifact together with the raw per-generation markers. This fixture uses
+// a controlled loader only to isolate the artifact's serialization/merge path;
+// the raw runner.out still supplies every event that is asserted below.
+{
+  const runId = 'run-fixture-system2-lineage'
+  const root = makeRoot('system2-lineage')
+  const generationId = 'gen-lineage-2'
+  const buildHash = 'abc123def456'
+  const configuredProvider = 'hybrid'
+  const configuredModel = 'typesafe-ai:typesafe-ai/jev'
+  const actualProvider = 'typesafe-ai'
+  const actualModel = 'typesafe-ai/jev'
+  const inputTsMs = Date.parse(at(2))
+  const decisionTsMs = Date.parse(at(3))
+  writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }), initialSnapshot: true })
+  writeFileSync(
+    join(root, 'buddy-driver', 'runner.out'),
+    [
+      boot(0, runId),
+      line(1, `GENERATION_READY id=${generationId} generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} system2ConfiguredProvider=${configuredProvider} system2ConfiguredModel=${configuredModel} policy=typesafe policyProvider=typesafe-ai policyModel=typesafe-ai/jev planner=llm plannerModel=typesafe-ai/jev deterministicFallbackEnabled=false system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}`),
+      line(2, `SYSTEM2_AUTHORITY_INPUT generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} provider=${actualProvider} model=${actualModel} configuredProvider=${configuredProvider} configuredModel=${configuredModel} trigger=queue_empty`),
+      line(3, `SYSTEM2_AUTHORITY_DECISION generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} provider=${actualProvider} model=${actualModel} configuredProvider=${configuredProvider} configuredModel=${configuredModel} trigger=queue_empty chosen=front_nether_portal`),
+      line(4, `HOST_LOCK released runId=${runId}`),
+    ].join('\n') + '\n',
+    'utf8',
+  )
+  const baseEntry = {
+    tsMs: inputTsMs,
+    generationId,
+    sourceSha: SOURCE_SHA,
+    buildHash,
+    provider: actualProvider,
+    model: actualModel,
+    configuredProvider,
+    configuredModel,
+    trigger: 'queue_empty',
+  }
+  const policySystem2 = {
+    runId,
+    source: 'fixture:verified-system2-lineage',
+    count: 1,
+    modelCount: 1,
+    ineligibleModelCount: 0,
+    portalPlanCount: 1,
+    identityStatus: 'verified',
+    identityReason: null,
+    identityIssues: [],
+    effectiveProvider: actualProvider,
+    effectiveModel: actualModel,
+    configuredProvider,
+    configuredModel,
+    sourceSha: SOURCE_SHA,
+    generationIds: [generationId],
+    generationCount: 1,
+    inputCount: 1,
+    inputs: [{ ...baseEntry, tsMs: inputTsMs }],
+    decisions: [{ ...baseEntry, tsMs: decisionTsMs, chosen: 'front_nether_portal', portalPlan: true }],
+  }
+  const built = await buildRunArtifact({
+    runId,
+    root,
+    overrides: { controlSocketPath: null },
+    readSocket: async () => null,
+    loadPolicy: async () => ({
+      reason: null,
+      window: { startMs: Date.parse(at(0)), endMs: Date.parse(at(10)), bounded: true },
+      generation: {
+        runId,
+        source: 'fixture:generation',
+        policyKind: 'typesafe',
+        policyModel: 'typesafe-ai/jev',
+        plannerMode: 'llm',
+        deterministicFallbackEnabled: false,
+      },
+      decisions: {
+        runId,
+        source: 'fixture:decision-sources',
+        jevCount: 1,
+        fallbackCount: 0,
+        otherCount: 0,
+        unclassifiableCount: 0,
+      },
+      system2: policySystem2,
+    }),
+  })
+  const { system2 } = built.artifact.authority
+  assert.equal(system2.identityStatus, 'verified')
+  assert.equal(system2.identityReason, null)
+  assert.deepEqual(system2.identityIssues, [])
+  assert.equal(system2.effectiveProvider, actualProvider)
+  assert.equal(system2.effectiveModel, actualModel)
+  assert.equal(system2.configuredProvider, configuredProvider)
+  assert.equal(system2.configuredModel, configuredModel)
+  assert.equal(system2.sourceSha, SOURCE_SHA)
+  assert.deepEqual(system2.generationIds, [generationId])
+  assert.equal(system2.generations[0].sourceSha, SOURCE_SHA)
+  assert.equal(system2.generations[0].buildHash, buildHash)
+  assert.equal(system2.generations[0].system2ConfiguredProvider, configuredProvider)
+  assert.equal(system2.generations[0].system2ConfiguredModel, configuredModel)
+  assert.equal(system2.inputs[0].generationId, generationId)
+  assert.equal(system2.inputs[0].sourceSha, SOURCE_SHA)
+  assert.equal(system2.inputs[0].buildHash, buildHash)
+  assert.equal(system2.inputs[0].provider, actualProvider)
+  assert.equal(system2.inputs[0].configuredProvider, configuredProvider)
+  assert.equal(system2.decisions[0].generationId, generationId)
+  assert.equal(system2.decisions[0].sourceSha, SOURCE_SHA)
+  assert.equal(system2.decisions[0].buildHash, buildHash)
+  assert.equal(system2.decisions[0].provider, actualProvider)
+  assert.equal(system2.decisions[0].model, actualModel)
+  assert.equal(system2.decisions[0].configuredProvider, configuredProvider)
+  assert.equal(system2.decisions[0].chosen, 'front_nether_portal')
+  assert.ok(system2.lineageEvents.some((event) => event.event === 'SYSTEM2_AUTHORITY_INPUT' && event.generationId === generationId))
+}
+ok('artifact preserves verified System2 identity plus exact per-generation and per-decision lineage fields')
+
 for (const root of ROOTS) rmSync(root, { recursive: true, force: true })
 console.log(`\ntest-milestone-run-artifact: ${checks} checks passed`)
 

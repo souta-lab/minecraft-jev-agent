@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { cleanRunServerConfigAtBoot } from '../buddy-driver/clean-run-server-config.ts'
 import { checkRunEvidence } from './clean-run-environment.mjs'
 import { buildLeafStartupAttestation } from './clean-run-server-launch.mjs'
-import { expectedRuntimeServerProperties, parseServerProperties, sha256Text } from './clean-run-server-config.mjs'
+import { expectedLeafLaunchIdentity, expectedRuntimeServerProperties, inspectJavaRuntime, parseServerProperties, sha256Text } from './clean-run-server-config.mjs'
 
 const TEMPLATE = new URL('./fixtures/m3-clean-environment.json', import.meta.url)
 const SOURCE_SHA = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd'
@@ -28,6 +28,7 @@ try {
   descriptor.values.levelSeed = '-4187923615481'
   descriptor.values.sourceSha = SOURCE_SHA
   descriptor.cleanRun.sourceSha.state = 'FROZEN'
+  writeFileSync(join(container, descriptor.values.serverImplementation), 'fixture Leaf jar bytes')
   const descriptorPath = join(runDir, 'environment-resolved.json')
   const descriptorText = `${JSON.stringify(descriptor, null, 2)}\n`
   writeFileSync(descriptorPath, descriptorText)
@@ -48,6 +49,7 @@ try {
     resolved: { path: descriptorPath, overrides: [] },
     target: { levelName: descriptor.values.levelName, levelSeed: descriptor.values.levelSeed, sourceSha: SOURCE_SHA },
     files: [{ path: propertiesPath, sha256: propertiesSha256, bytes: Buffer.byteLength(propertiesText), note: 'staged properties fixture' }],
+    serverLaunch: expectedLeafLaunchIdentity(descriptor, container),
   }
   const manifestText = `${JSON.stringify(manifest, null, 2)}\n`
   writeFileSync(manifestPath, manifestText)
@@ -59,6 +61,7 @@ try {
   const consoleInputPath = join(consoleDir, 'server-console.fifo')
   execFileSync('mkfifo', ['-m', '600', '--', consoleInputPath])
   writeFileSync(join(consoleDir, 'leaf-server.log'), '', { mode: 0o600 })
+  writeFileSync(join(consoleDir, 'leaf-console-relay.jsonl'), '', { mode: 0o600 })
 
   const java = '/usr/lib/jvm/java-21-openjdk-amd64/bin/java'
   const args = [
@@ -66,46 +69,60 @@ try {
     '--nogui', '--config', propertiesPath, '--universe', container, '--level-name', descriptor.values.levelName,
   ]
   const procArgs = [java, ...args]
-  const attestation = buildLeafStartupAttestation({
+  const javaIdentity = manifest.serverLaunch.java
+  const startup = (overrides = {}) => buildLeafStartupAttestation({
     descriptorPath, descriptorText, descriptor,
     propertiesPath, propertiesText, manifestPath, manifestText,
     consoleInputPath,
     stdoutLogPath: join(consoleDir, 'leaf-server.log'),
     cwd: container, executable: java, args, pid: 4242,
     startedAt: '2026-09-23T09:59:00.000Z', procCmdline: procArgs,
+    procExecutablePath: javaIdentity.realpath,
+    procExecutableSha256: javaIdentity.sha256,
+    ...overrides,
   })
+  const attestation = startup()
   assert.equal(attestation.record, 'clean-run-leaf-startup-attestation')
   assert.equal(attestation.config.sha256, propertiesSha256)
   assert.equal(attestation.process.configArg, propertiesPath)
   assert.equal(attestation.config.properties.difficulty, 'normal')
   assert.equal(Object.hasOwn(attestation.config.properties, 'bonus-chest'), false)
   assert.equal(attestation.console.directory, consoleDir)
+  assert.equal(attestation.runtime.java.version, descriptor.cleanRun.runtimePolicy.javaVersion)
+  assert.equal(attestation.runtime.java.versionOutputSha256, manifest.serverLaunch.java.versionOutputSha256)
+  assert.equal(attestation.runtime.paperIgnoreJavaVersion, true)
   assert.equal(JSON.stringify(attestation).includes('rcon.password'), false)
 
   assert.throws(
-    () => buildLeafStartupAttestation({
-      descriptorPath, descriptorText, descriptor,
-      propertiesPath, propertiesText, manifestPath, manifestText,
-      consoleInputPath,
-      stdoutLogPath: join(consoleDir, 'leaf-server.log'),
-      cwd: container, executable: java,
-      args: args.map((entry, index) => index === args.indexOf(propertiesPath) ? join(runDir, 'wrong.properties') : entry),
-      pid: 4242, startedAt: '2026-09-23T09:59:00.000Z', procCmdline: procArgs,
-    }),
-    /staged server.properties.clean/,
+    () => startup({ args: args.map((entry, index) => index === args.indexOf(propertiesPath) ? join(runDir, 'wrong.properties') : entry) }),
+    /unsupported runtime arguments/,
   )
 
   assert.throws(
-    () => buildLeafStartupAttestation({
-      descriptorPath, descriptorText, descriptor,
-      propertiesPath, propertiesText, manifestPath, manifestText,
-      consoleInputPath,
-      stdoutLogPath: join(consoleDir, 'leaf-server.log'),
-      cwd: container, executable: java,
-      args: [...args, '--bonusChest'],
-      pid: 4242, startedAt: '2026-09-23T09:59:00.000Z', procCmdline: [...procArgs, '--bonusChest'],
-    }),
-    /omit --bonusChest/,
+    () => startup({ args: [...args, '--bonusChest'], procCmdline: [...procArgs, '--bonusChest'] }),
+    /unsupported runtime arguments/,
+  )
+
+  assert.throws(() => startup({ procExecutablePath: '/usr/bin/echo' }), /observed process executable is not the expected Java runtime identity/)
+  assert.throws(() => startup({ args: [...args, '--port', '25566'], procCmdline: [...procArgs, '--port', '25566'] }), /unsupported runtime arguments/)
+  assert.throws(() => startup({ args: [...args, '--config', propertiesPath], procCmdline: [...procArgs, '--config', propertiesPath] }), /unsupported runtime arguments/)
+  assert.throws(
+    () => inspectJavaRuntime(java, descriptor.cleanRun.runtimePolicy, () => ({ status: 0, stdout: '', stderr: 'openjdk version "22.0.1"\n' })),
+    /differs from descriptor policy/,
+  )
+  assert.throws(
+    () => inspectJavaRuntime(java, descriptor.cleanRun.runtimePolicy, () => ({ status: 1, stdout: '', stderr: '', error: new Error('not executable') })),
+    /could not be obtained/,
+  )
+
+  const altJarPath = join(temporaryRoot, descriptor.values.serverImplementation)
+  writeFileSync(altJarPath, 'same basename, different jar')
+  const alteredManifest = structuredClone(manifest)
+  alteredManifest.serverLaunch.serverJar = expectedLeafLaunchIdentity(descriptor, temporaryRoot).serverJar
+  const alteredManifestText = `${JSON.stringify(alteredManifest, null, 2)}\n`
+  assert.throws(
+    () => startup({ manifestText: alteredManifestText }),
+    /prepared manifest does not bind expected Java and Leaf JAR identity/,
   )
 
   const attestationPath = join(runDir, 'server-start-attestation.json')
@@ -118,6 +135,8 @@ try {
     attestationPath,
     descriptorPath,
     readProcessCommandLine: () => Buffer.from(`${procArgs.join('\0')}\0`),
+    readProcessExecutablePath: () => javaIdentity.realpath,
+    readProcessExecutableBytes: () => readFileSync(javaIdentity.path),
   })
   if (previousSeedReadPath === undefined) delete process.env.BUDDY_SERVER_PROPERTIES_PATH
   else process.env.BUDDY_SERVER_PROPERTIES_PATH = previousSeedReadPath
@@ -155,6 +174,28 @@ try {
   assert.equal(row('run.difficultyNotContradicted')?.verdict, 'PASS')
   assert.equal(row('run.mobSpawningNotContradicted')?.verdict, 'PASS')
 
+  const alteredRuntime = structuredClone(artifact)
+  alteredRuntime.run.boot.cleanRunServerConfig.runtime.java.version = '21.99.0'
+  const rejectedRuntime = checkRunEvidence({
+    descriptor,
+    artifact: alteredRuntime,
+    runId: RUN_ID,
+    descriptorPath,
+    descriptorSha256,
+  })
+  assert.equal(rejectedRuntime.find((entry) => entry.id === 'run.serverConfigAttestation')?.verdict, 'FAIL')
+
+  const alteredJvmFlag = structuredClone(artifact)
+  alteredJvmFlag.run.boot.cleanRunServerConfig.runtime.paperIgnoreJavaVersion = false
+  const rejectedJvmFlag = checkRunEvidence({
+    descriptor,
+    artifact: alteredJvmFlag,
+    runId: RUN_ID,
+    descriptorPath,
+    descriptorSha256,
+  })
+  assert.equal(rejectedJvmFlag.find((entry) => entry.id === 'run.serverConfigAttestation')?.verdict, 'FAIL')
+
   const noStartupEvidence = structuredClone(artifact)
   delete noStartupEvidence.run.boot.cleanRunServerConfig
   const unproven = checkRunEvidence({
@@ -188,6 +229,8 @@ try {
     attestationPath,
     descriptorPath,
     readProcessCommandLine: () => Buffer.from(`${procArgs.join('\0')}\0`),
+    readProcessExecutablePath: () => javaIdentity.realpath,
+    readProcessExecutableBytes: () => readFileSync(javaIdentity.path),
   })
   assert.equal(changed.status, 'rejected')
   assert.match(String(changed.reason), /changed_after_leaf_startup/)

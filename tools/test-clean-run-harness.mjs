@@ -50,7 +50,7 @@ import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
 import { runCleanRunGate, runCli as runGateCli } from './clean-run-gate.mjs'
 import { checkRunEvidence, loadCleanEnvironment, sha256Text, validateCleanEnvironment } from './clean-run-environment.mjs'
 import { buildLeafStartupAttestation } from './clean-run-server-launch.mjs'
-import { expectedRuntimeServerProperties } from './clean-run-server-config.mjs'
+import { expectedLeafLaunchIdentity, expectedRuntimeServerProperties } from './clean-run-server-config.mjs'
 import { expectedConsoleQueries } from './clean-run-console-capture.mjs'
 import { applyPlan, planPrepare, runCli as runPrepareCli } from './clean-run-prepare.mjs'
 
@@ -276,6 +276,8 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
   assert.equal(loaded.error, null, `fixture descriptor load: ${String(loaded.error)}`)
   const runDir = dirname(descriptor.path)
   const container = descriptor.document.cleanRun.worldContainer
+  mkdirSync(container, { recursive: true })
+  writeFileSync(join(container, descriptor.document.values.serverImplementation), 'fixture Leaf jar bytes')
   const propertiesPath = join(runDir, 'server.properties.clean')
   const properties = expectedRuntimeServerProperties(descriptor.document)
   let propertiesText = `${Object.entries(properties).map(([key, value]) => `${key}=${value}`).join('\n')}\n`
@@ -290,6 +292,7 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     resolved: { path: descriptor.path, overrides: [] },
     target: { levelName: descriptor.document.values.levelName, levelSeed: descriptor.document.values.levelSeed, sourceSha: descriptor.document.values.sourceSha },
     files: [{ path: propertiesPath, sha256: propertiesSha256, bytes: Buffer.byteLength(propertiesText), note: 'synthetic test fixture only' }],
+    serverLaunch: expectedLeafLaunchIdentity(descriptor.document, container),
   }, null, 2)}\n`
   writeFileSync(manifestPath, manifestText, 'utf8')
   const manifestSha256 = sha256Text(manifestText)
@@ -300,6 +303,7 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
   execFileSync('mkfifo', ['-m', '600', '--', fifoPath])
   const stdoutLogPath = join(consoleDir, 'leaf-server.log')
   writeFileSync(stdoutLogPath, '', { mode: 0o600 })
+  const relayJournalPath = join(consoleDir, 'leaf-console-relay.jsonl')
 
   const pid = 4242
   const java = '/usr/lib/jvm/java-21-openjdk-amd64/bin/java'
@@ -308,6 +312,7 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     '--nogui', '--config', propertiesPath, '--universe', container, '--level-name', descriptor.document.values.levelName,
   ]
   const procArgs = [java, ...args]
+  const javaIdentity = expectedLeafLaunchIdentity(descriptor.document, container).java
   const startedAt = '2026-09-23T09:59:00.000Z'
   const startup = buildLeafStartupAttestation({
     descriptorPath: descriptor.path,
@@ -325,6 +330,8 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     pid,
     startedAt,
     procCmdline: procArgs,
+    procExecutablePath: javaIdentity.realpath,
+    procExecutableSha256: javaIdentity.sha256,
   })
   const startupPath = join(runDir, 'server-start-attestation.json')
   const startupText = `${JSON.stringify(startup, null, 2)}\n`
@@ -341,14 +348,10 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     manifestPath,
     manifestSha256,
     process: {
-      pid,
-      startedAt,
+      ...startup.process,
       commandLineSha256: sha256Text(procArgs.join('\0')),
-      serverJar: basename(descriptor.document.values.serverImplementation),
-      configArg: propertiesPath,
-      universeArg: resolve(container),
-      levelNameArg: descriptor.document.values.levelName,
     },
+    runtime: startup.runtime,
     config: { path: propertiesPath, sha256: propertiesSha256, properties: startup.config.properties },
     console: startup.console,
     preparedManifest: { stagedPropertiesSha256: propertiesSha256 },
@@ -369,7 +372,20 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
   const seed = { value: String(descriptor.document.values.levelSeed), ...appendResponse(`[Server thread/INFO]: Seed: [${descriptor.document.values.levelSeed}]`) }
   const responses = []
   const journal = []
-  const appendJournalPair = (query, response) => {
+  let relayJournalText = ''
+  const appendRelay = (row) => { relayJournalText += `${JSON.stringify(row)}\n` }
+  const relayCommands = ['seed', ...queries.map((query) => query.command)]
+  appendRelay({ event: 'console-relay-start', leafPid: pid, launcherPid: 31337, expectedCommandCount: relayCommands.length, at: capturedAt })
+  let relaySequence = 0
+  const appendRelayCommand = (command) => {
+    const relayOffsetBefore = Buffer.byteLength(relayJournalText)
+    const commandBytes = Buffer.from(`${command}\n`)
+    appendRelay({ event: 'console-relay-input', leafPid: pid, byteLength: commandBytes.length, sha256: sha256Text(commandBytes), at: capturedAt })
+    appendRelay({ event: 'console-relay-forwarded', leafPid: pid, sequence: relaySequence, command, at: capturedAt })
+    relaySequence += 1
+    return relayOffsetBefore
+  }
+  const appendJournalPair = (query, response, { byteOffsetBefore, relayOffsetBefore, sequence }) => {
     const common = {
       runId,
       sourceSha: bootSourceSha,
@@ -381,6 +397,9 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
       dimension: query.dimension ?? null,
       rule: query.rule ?? null,
       descriptorRule: query.descriptorRule ?? null,
+      byteOffsetBefore,
+      relayOffsetBefore,
+      relaySequence: sequence,
     }
     journal.push({ ...common, event: 'console-query-attempt', at: capturedAt })
     journal.push({
@@ -390,16 +409,25 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
       responseLine: response.line,
       byteStart: response.byteStart,
       byteEnd: response.byteEnd,
+      responseByteStart: response.byteStart,
+      responseByteEnd: response.byteEnd,
       responseLineSha256: response.lineSha256,
       completedAt: capturedAt,
     })
   }
-  appendJournalPair({ kind: 'seed', command: 'seed' }, { ...seed, command: 'seed' })
-  for (const query of queries) {
+  const seedRelayOffsetBefore = appendRelayCommand('seed')
+  seed.byteOffsetBefore = 0
+  seed.relaySequence = 0
+  appendJournalPair({ kind: 'seed', command: 'seed' }, { ...seed, command: 'seed' }, { byteOffsetBefore: 0, relayOffsetBefore: seedRelayOffsetBefore, sequence: 0 })
+  for (const [queryIndex, query] of queries.entries()) {
+    const byteOffsetBefore = leafLog.length
+    const relayOffsetBefore = appendRelayCommand(query.command)
     const response = {
       value: query.expected,
       ...appendResponse(`[Server thread/INFO]: Gamerule ${query.descriptorRule} is currently set to: ${String(query.expected)}`),
       command: query.command,
+      byteOffsetBefore,
+      relaySequence: queryIndex + 1,
     }
     responses.push({
       dimension: query.dimension,
@@ -409,12 +437,13 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
       command: query.command,
       ...response,
     })
-    appendJournalPair(query, response)
+    appendJournalPair(query, response, { byteOffsetBefore, relayOffsetBefore, sequence: queryIndex + 1 })
   }
   writeFileSync(stdoutLogPath, leafLog, { mode: 0o600 })
   const commandJournalText = `${journal.map((entry) => JSON.stringify(entry)).join('\n')}\n`
   const commandTranscriptPath = join(consoleDir, 'commands.jsonl')
   writeFileSync(commandTranscriptPath, commandJournalText, { encoding: 'utf8', mode: 0o600 })
+  writeFileSync(relayJournalPath, relayJournalText, { encoding: 'utf8', mode: 0o600 })
   const transcriptPath = join(runDir, 'gamerule-verification.txt')
   const transcriptLines = [
     'record=m3-clean-gamerule-verification',
@@ -435,7 +464,7 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
   const capturePath = join(consoleDir, 'capture.json')
   const capture = {
     record: 'clean-run-console-capture',
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'complete',
     runId,
     sourceSha: bootSourceSha,
@@ -444,7 +473,15 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     process: { pid, commandLineSha256: marker.process.commandLineSha256 },
     residentLog: { path: join(root, 'buddy-driver', 'buddy.log'), sourceSha: bootSourceSha },
     capturePath,
-    console: { directory: consoleDir, stdoutLogPath, commandTranscriptPath },
+    console: {
+      directory: consoleDir,
+      stdoutLogPath,
+      commandTranscriptPath,
+      relayJournalPath,
+      relayJournalSha256: sha256Text(relayJournalText),
+      relayJournalBytes: Buffer.byteLength(relayJournalText),
+      relayCommandCount: relayCommands.length,
+    },
     commandTranscript: { path: commandTranscriptPath, sha256: sha256Text(commandJournalText), queryCount: queries.length + 1 },
     seed,
     requiredDimensions: descriptor.document.cleanRun.gameruleScope.dimensions,
@@ -557,7 +594,7 @@ const runCondition = (verdict, id) => condition(verdict, id)
   assert.equal(condition(descriptorOnlyAfterBoot, 'descriptor.worldNotGenerated')?.verdict, 'FAIL')
 
   const verdict = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN, out: outDir })
-  assert.equal(verdict.status, 'CLEAN', `clean status=${verdict.status} failed=${verdict.failed.join(',')}`)
+  assert.equal(verdict.status, 'CLEAN', `clean status=${verdict.status} failed=${verdict.failed.join(',')} unknown=${JSON.stringify(verdict.unknown ?? verdict.conditions ?? verdict)}`)
   for (const id of ['run.environmentRecordIsThisDescriptor', 'run.bootSourceSha', 'run.acceptanceRecord', 'run.levelNameAttested', 'run.seedAttested', 'run.preparationFreshness', 'run.gamerulesNotContradicted', 'run.noWorldChanges', 'run.bootInventoryEmpty', 'run.keepInventoryBehaviour', 'run.difficultyNotContradicted', 'run.mobSpawningNotContradicted']) {
     const row = runCondition(verdict, id)
     assert.ok(row !== null, `missing condition ${id}`)
@@ -1004,6 +1041,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   )
 
   writeFileSync(join(container, 'ops.json'), '[]', 'utf8')
+  writeFileSync(join(container, 'leaf-1.21.11-178.jar'), 'clean-run prepare fixture Leaf identity')
   const descriptorPath = join(root, 'descriptor.json')
   const descriptorDoc = JSON.parse(readFileSync(TEMPLATE, 'utf8'))
   descriptorDoc.cleanRun.worldContainer = container
@@ -1126,6 +1164,42 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.equal(JSON.parse(readFileSync(planRun.attemptsPath, 'utf8')).attempts.length, 2)
   ok('G3a. distinct targets keep separate manifest, environment, and gamerule evidence while sharing the seed ledger')
 
+  // G3b. M3 seeds are reserved across target names. The old b1 seed is rejected
+  // under a different name, while the fresh active c1 seed remains admissible.
+  const attemptsLedger = JSON.parse(readFileSync(planRun.attemptsPath, 'utf8'))
+  attemptsLedger.attempts.push({ levelName: 'm3clean-b1', levelSeed: '-4187923615481', preparedAt: 'historical-b1-fixture' })
+  writeFileSync(planRun.attemptsPath, `${JSON.stringify(attemptsLedger, null, 2)}\n`, 'utf8')
+  const c1Descriptor = resolvedDescriptor(root, {
+    levelName: 'm3clean-c1',
+    levelSeed: '4500764503965322344',
+    sourceSha: prepareSourceSha,
+    container,
+    mutate: (doc) => { delete doc.cleanRun.runtimePolicy },
+  })
+  const c1Plan = planPrepare({
+    descriptorPath: c1Descriptor.path,
+    serverRoot: container,
+    root: operatorRoot,
+    enforceOperatorTreeSource: true,
+    sourceSha: prepareSourceSha,
+  })
+  assert.equal(c1Plan.status, 'PLANNED', `fresh c1 seed must be accepted: ${c1Plan.refusals.map((entry) => entry.reason).join('|')}`)
+  assert.equal(c1Plan.levelName, 'm3clean-c1')
+  assert.equal(c1Plan.levelSeed, '4500764503965322344')
+  assert.equal(c1Plan.overridesApplied.some((entry) => entry.startsWith('cleanRun.runtimePolicy=derived from ')), true)
+  const renamedB1 = planPrepare({
+    descriptorPath: c1Descriptor.path,
+    serverRoot: container,
+    root: operatorRoot,
+    enforceOperatorTreeSource: true,
+    levelName: 'm3clean-c1-renamed',
+    seed: '-4187923615481',
+    sourceSha: prepareSourceSha,
+  })
+  assert.equal(renamedB1.status, 'REFUSED')
+  assert.match(renamedB1.refusals.map((entry) => entry.reason).join(' | '), /seed_already_used:.*m3clean-b1.*all M3 target names/)
+  ok('G3b. fresh c1 is accepted with derived runtime policy; the historical b1 seed is rejected across level names')
+
   // G4. refusals, each with the EXACT reason it must give
   const basePlan = { descriptorPath, serverRoot: container, root: operatorRoot, enforceOperatorTreeSource: true, levelName: 'm3clean-prep', seed: '998877665544', sourceSha: prepareSourceSha }
   const cases = [
@@ -1143,12 +1217,20 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
     assert.match(planned.refusals.map((refusal) => refusal.reason).join(' | '), entry.expect, `refusal ${entry.id} reasons: ${planned.refusals.map((refusal) => refusal.reason).join(' | ')}`)
     if (entry.touchLevelDat === true) rmSync(join(container, 'm3clean-prep', 'level.dat'))
   }
+  const changedSourceRetry = planPrepare({
+    ...basePlan,
+    root: null,
+    enforceOperatorTreeSource: false,
+    sourceSha: '2'.repeat(40),
+  })
+  assert.equal(changedSourceRetry.status, 'REFUSED')
+  assert.match(changedSourceRetry.refusals.map((entry) => entry.reason).join(' | '), /seed_already_used/)
   // the SAME descriptor+name+seed on an ungenerated staged world is the
   // idempotent path, not a refusal (and it says so)
   const idempotent = planPrepare(basePlan)
   assert.equal(idempotent.status, 'PLANNED')
   assert.ok(idempotent.warnings.some((warning) => /idempotent no-op/.test(warning)))
-  ok(`G4. ${cases.length} prepare refusal paths, each with its exact reason (generated world / protected name / live seed / server-root inside target / unfrozen template / level-name reuse)`)
+  ok(`G4. ${cases.length} prepare refusal paths plus changed-source retry, each with its exact reason (generated world / protected name / live seed / server-root inside target / unfrozen template / level-name reuse)`)
 
   // A world can be generated after planning but before the write phase. The
   // apply-time guard must repeat the absence check so no manifest can falsely

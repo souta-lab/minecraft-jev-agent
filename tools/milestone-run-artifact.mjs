@@ -96,7 +96,18 @@ export const RECORD = 'milestone-run-artifact'
 //     (+ top-level `evidenceClasses`) and `gateEvidence` (the exact authority evidence
 //     both delegated gates received).
 // Every schema-5 field is kept.
-export const SCHEMA_VERSION = 6
+// 7 = additive authority diagnostics: run-window decision-source completeness
+// (`fallback.unclassifiableCount` / `decisions.unclassifiableCount`) and the
+// count of ineligible System2 records (`system2.ineligibleModelCount`). Every
+// schema-6 field is kept.
+// 8 = source-bound initial inventory: `inventory.bootEvidence` records whether
+// the generation-entry snapshot matches this BOOT's runId and source SHA. A
+// periodic INVENTORY marker can no longer stand in for the starting inventory.
+// 9 = System2 source/generation lineage: every in-window GENERATION_READY and
+// System2 input/decision marker is preserved, with the policy loader's identity
+// verdict and per-decision generation/source/provider/model joins.
+// Every schema-8 field is kept.
+export const SCHEMA_VERSION = 9
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
 /** Repo-level operator decision file; run-scoped by each entry's own runId. */
 export const OPERATOR_DECISION_RECORD = 'operator-decision'
@@ -172,7 +183,7 @@ const RESUME_RE = /\bRESUME\b(?!_)/
 const BUILD_RE = /\bBUILD\b(?!_)/
 const ENV_MARKER_RE = /\b(?:ENVIRONMENT|SERVER_ENV|SERVER_CONFIG|WORLD_ENV|GAMERULES?)\b/
 const SERVER_LINE_RE = /\b(?:SPAWN|SERVER_VERSION|SERVER_START)\b/
-const KV_RE = /(?:^|\s)([A-Za-z_][A-Za-z0-9_-]*)=("(?:[^"\\]|\\.)*"|\{[^{}]*\}|\[[^[\]]*\]|\S+)/g
+const KV_KEY_RE = /(?:^|\s)([A-Za-z_][A-Za-z0-9_-]*)=/g
 
 // ---------------------------------------------------------------------------
 // small parsing helpers
@@ -217,34 +228,69 @@ function timestampMsOf(line) {
 }
 
 /**
- * Tolerant `key=value` reader. Values that look like JSON objects/arrays are
- * parsed; quoted strings are unquoted. Only the first `(?:^|\s)` occurrence of a
- * key is matched, so JSON `"key":` inside an already-consumed value is ignored.
+ * Tolerant `key=value` reader. JSON object/array values may be nested and contain
+ * spaces. After consuming a structured value the cursor skips its full extent,
+ * so keys inside JSON strings/objects are never mistaken for top-level fields.
  */
 export function parseKeyValues(line) {
   const out = {}
   if (typeof line !== 'string') return out
-  for (const match of line.matchAll(KV_RE)) {
+  const keyRegex = new RegExp(KV_KEY_RE.source, 'g')
+  let cursor = 0
+  while (cursor < line.length) {
+    keyRegex.lastIndex = cursor
+    const match = keyRegex.exec(line)
+    if (match === null) break
     const key = match[1]
-    const raw = match[2]
+    const valueStart = keyRegex.lastIndex
+    const opener = line[valueStart]
+    let valueEnd = valueStart
+    if (opener === '"' || opener === '{' || opener === '[') {
+      const stack = []
+      let quoted = false
+      let escaped = false
+      for (let index = valueStart; index < line.length; index += 1) {
+        const char = line[index]
+        if (quoted) {
+          if (escaped) escaped = false
+          else if (char === '\\') escaped = true
+          else if (char === '"') quoted = false
+          continue
+        }
+        if (char === '"') {
+          quoted = true
+          continue
+        }
+        if (char === '{' || char === '[') stack.push(char)
+        else if (char === '}' || char === ']') {
+          const opening = stack.pop()
+          if ((char === '}' && opening !== '{') || (char === ']' && opening !== '[')) break
+          if (stack.length === 0) {
+            valueEnd = index + 1
+            break
+          }
+        }
+      }
+      if (valueEnd === valueStart) valueEnd = line.length
+    } else {
+      valueEnd = valueStart
+      while (valueEnd < line.length && !/\s/.test(line[valueEnd])) valueEnd += 1
+    }
+    const raw = line.slice(valueStart, valueEnd)
     if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
       try {
         out[key] = JSON.parse(raw)
-        continue
       } catch {
         out[key] = raw.slice(1, -1)
-        continue
       }
-    }
-    if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
+    } else if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
       try {
         out[key] = JSON.parse(raw)
-        continue
       } catch {
-        /* fall through to the raw string */
+        out[key] = raw
       }
-    }
-    out[key] = raw
+    } else out[key] = raw
+    cursor = valueEnd > valueStart ? valueEnd : valueStart + 1
   }
   return out
 }
@@ -1557,8 +1603,11 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
   let bootTsMs = null
   let generation = null
   let generationCount = 0
+  const generationMarkers = []
   let system2Decision = null
   const system2Decisions = []
+  const system2Inputs = []
+  const system2LineageEvents = []
   let lineIndex = -1
   const rl = createInterface({ input: createReadStream(runnerOutPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
@@ -1572,7 +1621,11 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
           boundaryFound = true
           bootTsMs = timestampMsOf(line)
           generation = null
+          generationMarkers.length = 0
           system2Decision = null
+          system2Decisions.length = 0
+          system2Inputs.length = 0
+          system2LineageEvents.length = 0
         }
       }
     }
@@ -1587,6 +1640,8 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
         tsMs,
         lineIndex,
         generationId: stringOrNull(kv.id),
+        sourceSha: stringOrNull(kv.sourceSha),
+        buildHash: stringOrNull(kv.buildHash),
         policyKind: stringOrNull(kv.policy ?? kv.policyKind),
         policyProvider: stringOrNull(kv.policyProvider),
         policyModel: stringOrNull(kv.policyModel ?? kv.model),
@@ -1597,27 +1652,40 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
         // initialises it to `none` until a model actually answers.
         system2Provider: stringOrNull(kv.system2Provider),
         system2Model: stringOrNull(kv.system2Model),
+        system2ConfiguredProvider: stringOrNull(kv.system2ConfiguredProvider),
+        system2ConfiguredModel: stringOrNull(kv.system2ConfiguredModel),
         system2AuthorityStack: isPlainObject(kv.system2AuthorityStack) ? kv.system2AuthorityStack : null,
         system2LastAuthority: isPlainObject(kv.system2LastAuthority) ? kv.system2LastAuthority : null,
         advisor: stringOrNull(kv.advisor),
         advisorSource: stringOrNull(kv.advisorSource),
         optionCompiler: booleanOrNull(kv.optionCompiler),
       }
-    } else if (line.includes('SYSTEM2_AUTHORITY_DECISION')) {
+      generationMarkers.push(generation)
+    } else if (line.includes('SYSTEM2_AUTHORITY_INPUT') || line.includes('SYSTEM2_AUTHORITY_DECISION') || line.includes('SYSTEM2_AUTHORITY_STALE_DISCARD') || line.includes('SYSTEM2_AUTHORITY_WAIT_LIMIT_HELD')) {
       const kv = parseKeyValues(line)
-      const decision = {
+      const record = {
         tsMs,
         lineIndex,
+        event: line.match(/\b(SYSTEM2_AUTHORITY_[A-Z_]+)/)?.[1] ?? 'SYSTEM2_AUTHORITY_UNKNOWN',
+        generationId: stringOrNull(kv.generationId ?? kv.id),
+        sourceSha: stringOrNull(kv.sourceSha),
+        buildHash: stringOrNull(kv.buildHash),
         provider: stringOrNull(kv.provider),
         model: stringOrNull(kv.model),
+        configuredProvider: stringOrNull(kv.configuredProvider),
+        configuredModel: stringOrNull(kv.configuredModel),
         chosen: stringOrNull(kv.chosen),
         source: stringOrNull(kv.source),
         trigger: stringOrNull(kv.trigger),
-        op: stringOrNull(kv.op),
-        strategy: stringOrNull(kv.strategy),
+        reason: stringOrNull(kv.reason),
       }
-      system2Decisions.push(decision)
-      system2Decision = decision
+      system2LineageEvents.push(record)
+      if (record.event === 'SYSTEM2_AUTHORITY_INPUT') system2Inputs.push(record)
+      if (record.event === 'SYSTEM2_AUTHORITY_DECISION') {
+        const decision = { ...record, op: stringOrNull(kv.op), strategy: stringOrNull(kv.strategy) }
+        system2Decisions.push(decision)
+        system2Decision = decision
+      }
     }
   }
   if (!boundaryFound) return null
@@ -1628,13 +1696,52 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
     window: policy?.window ?? null,
     generation,
     generationCount,
+    generationMarkers,
     system2Decision,
     system2Decisions,
+    system2Inputs,
+    system2LineageEvents,
   }
 }
 
 /** How many of the (sparse) System2 decisions the artifact keeps verbatim. */
 export const SYSTEM2_DECISION_KEEP = 20
+
+function mergeAuthorityLineageRecords(preferred, raw) {
+  const primary = Array.isArray(preferred) ? preferred : []
+  const secondary = Array.isArray(raw) ? raw : []
+  if (primary.length === 0) return secondary
+  if (secondary.length === 0) return primary
+  const unused = new Set(secondary.map((_, index) => index))
+  const merged = primary.map((record) => {
+    let matchIndex = -1
+    if (record?.lineIndex != null) {
+      matchIndex = secondary.findIndex((candidate, index) => unused.has(index) && candidate?.lineIndex === record.lineIndex)
+    }
+    if (matchIndex < 0) {
+      matchIndex = secondary.findIndex((candidate, index) => unused.has(index) &&
+        candidate?.tsMs === record?.tsMs && candidate?.event === record?.event &&
+        candidate?.provider === record?.provider && candidate?.model === record?.model &&
+        candidate?.chosen === record?.chosen && candidate?.generationId === record?.generationId)
+    }
+    const fallback = matchIndex < 0 ? null : secondary[matchIndex]
+    if (matchIndex >= 0) unused.delete(matchIndex)
+    const combined = { ...(fallback ?? {}), ...(record ?? {}) }
+    for (const [key, value] of Object.entries(fallback ?? {})) {
+      if ((combined[key] === null || combined[key] === undefined) && value !== null && value !== undefined) combined[key] = value
+    }
+    return combined
+  })
+  for (const index of unused) merged.push(secondary[index])
+  return merged.sort((left, right) => {
+    const leftTs = Number.isFinite(left?.tsMs) ? left.tsMs : Number.MAX_SAFE_INTEGER
+    const rightTs = Number.isFinite(right?.tsMs) ? right.tsMs : Number.MAX_SAFE_INTEGER
+    if (leftTs !== rightTs) return leftTs - rightTs
+    const leftIndex = Number.isFinite(left?.lineIndex) ? left.lineIndex : Number.MAX_SAFE_INTEGER
+    const rightIndex = Number.isFinite(right?.lineIndex) ? right.lineIndex : Number.MAX_SAFE_INTEGER
+    return leftIndex - rightIndex
+  })
+}
 
 /**
  * Compose the authority section from run-scoped facts only.
@@ -1653,7 +1760,12 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
   const decisions = policy?.decisions ?? null
   const policyDecisions = Array.isArray(system2?.decisions) ? system2.decisions : []
   const extraDecisions = Array.isArray(extras?.system2Decisions) ? extras.system2Decisions : []
-  const decisionList = policyDecisions.length > 0 ? policyDecisions : extraDecisions
+  const decisionList = mergeAuthorityLineageRecords(policyDecisions, extraDecisions)
+  const inputList = mergeAuthorityLineageRecords(system2?.inputs, extras?.system2Inputs)
+  const generationMarkers = Array.isArray(extras?.generationMarkers) ? extras.generationMarkers : []
+  const identityStatus = system2?.identityStatus ?? 'unknown'
+  const identityReason = system2?.identityReason ?? (identityStatus === 'verified' ? null : 'policy_loader_did_not_verify_system2_generation_lineage')
+  const identityIssues = Array.isArray(system2?.identityIssues) ? system2.identityIssues : []
   const latestDecision = decisionList.at(-1) ?? null
   const stack = parseAuthorityStack(extra?.system2AuthorityStack)
 
@@ -1742,7 +1854,7 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
     fallbackReason = fallbackEnabled === true ? 'deterministicFallbackEnabled=true' : `fallback_decisions=${fallbackDecisions}`
   } else if (fallbackEnabled === false && countsKnown && fallbackDecisions === 0 && otherDecisions === 0 && unclassifiableDecisions === 0) {
     hiddenFallback = 'none_observed'
-    fallbackReason = 'deterministicFallbackEnabled=false and every in-window decision carries source=jev'
+    fallbackReason = 'deterministicFallbackEnabled=false and every in-window decision source is classifiable with no fallback or other sources'
   } else {
     hiddenFallback = 'unknown'
     fallbackReason =
@@ -1796,13 +1908,29 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
       chosen: latestDecision?.chosen ?? extras?.system2Decision?.chosen ?? null,
       count: Number.isFinite(system2?.count) ? system2.count : decisionList.length,
       modelCount: Number.isFinite(system2?.modelCount) ? system2.modelCount : null,
+      ineligibleModelCount: Number.isFinite(system2?.ineligibleModelCount) ? system2.ineligibleModelCount : null,
       portalPlanCount: Number.isFinite(system2?.portalPlanCount) ? system2.portalPlanCount : null,
+      identityStatus,
+      identityReason,
+      identityIssues,
+      effectiveProvider: system2?.effectiveProvider ?? null,
+      effectiveModel: system2?.effectiveModel ?? null,
+      configuredProvider: system2?.configuredProvider ?? null,
+      configuredModel: system2?.configuredModel ?? null,
+      sourceSha: system2?.sourceSha ?? null,
+      generationIds: Array.isArray(system2?.generationIds) ? system2.generationIds : generationMarkers.map((marker) => marker?.generationId).filter((id) => typeof id === 'string'),
+      generationCount: Number.isFinite(system2?.generationCount) ? system2.generationCount : extras?.generationCount ?? null,
+      inputCount: Number.isFinite(system2?.inputCount) ? system2.inputCount : inputList.length,
+      inputs: inputList,
+      generations: generationMarkers,
+      lineageEvents: Array.isArray(extras?.system2LineageEvents) ? extras.system2LineageEvents : [],
       authorityStack: extra?.system2AuthorityStack ?? null,
       stack,
       lastAuthority: extra?.system2LastAuthority ?? null,
       lastDecision: latestDecision,
       decisionCount: decisionList.length,
-      decisions: decisionList.slice(-SYSTEM2_DECISION_KEEP),
+      decisions: decisionList,
+      recentDecisions: decisionList.slice(-SYSTEM2_DECISION_KEEP),
       generationMarkerCount: extras?.generationCount ?? null,
       disagreements,
       note: 'provider/model are the CONFIGURED System2 authority stack attested by the run\'s own GENERATION_READY marker; lastAuthority/lastDecision are the last provider that actually answered',

@@ -362,6 +362,29 @@ function condition(bundle, id) {
   ok('A. exact-run/source M2 PASS + M3 PASS: accepted fixture, liveAcceptance=false')
 }
 
+// A2. model counts are not a substitute for a verified generation/call join.
+{
+  const runId = 'run-fixture-system2-identity-unknown'
+  const root = makeRoot('system2-identity-unknown')
+  writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }), runner: { decisions: [] } })
+  const { bundle, exitCode } = await buildAcceptanceBundle({
+    runId,
+    root,
+    outDir: join(root, 'bundle'),
+    evidenceClass: 'fixture',
+    noControlSocket: true,
+    gates: PASS_BUNDLE_GATES,
+    runGate: runM3GatePassStub,
+    write: () => {},
+  })
+  assert.notEqual(bundle.acceptanceVerdict.status, 'PASS')
+  assert.ok(bundle.artifact.requiredEvidence.missing.includes('authority.system2Identity'))
+  assert.equal(condition(bundle, 'artifact.requiredEvidence').verdict, 'UNKNOWN')
+  assert.notEqual(condition(bundle, 'M3.model_authority').verdict, 'PASS')
+  assert.equal(exitCode, 2)
+  ok('A2. System2 authority totals without verified generation identity remain UNKNOWN')
+}
+
 // A3. gate PASS cannot replace required environment/run artifact facts
 {
   const root = makeRoot('missing-required-environment')

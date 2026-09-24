@@ -635,6 +635,7 @@ export async function runCleanRunGate({
   const consoleCapturePath = serverConsoleDir === null ? null : join(serverConsoleDir, 'capture.json')
   const consoleCommandJournalPath = serverConsoleDir === null ? null : join(serverConsoleDir, 'commands.jsonl')
   const consoleServerLogPath = serverConsoleDir === null ? null : join(serverConsoleDir, 'leaf-server.log')
+  const consoleRelayJournalPath = serverConsoleDir === null ? null : join(serverConsoleDir, 'leaf-console-relay.jsonl')
   const consoleCaptureRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleCapturePath !== null
     ? readJson(consoleCapturePath)
     : { path: consoleCapturePath, document: null, text: null, error: artifact === null ? 'no_run_artifact' : null }
@@ -644,6 +645,9 @@ export async function runCleanRunGate({
   const consoleServerLogRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleServerLogPath !== null
     ? readBytes(consoleServerLogPath)
     : { path: consoleServerLogPath, bytes: null, error: artifact === null ? 'no_run_artifact' : null }
+  const consoleRelayJournalRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleRelayJournalPath !== null
+    ? readText(consoleRelayJournalPath)
+    : { path: consoleRelayJournalPath, text: null, sha256: null, error: artifact === null ? 'no_run_artifact' : null }
   runConditions.push(
     checkConsoleGameruleEvidence({
       descriptor,
@@ -656,9 +660,10 @@ export async function runCleanRunGate({
       readError: gameruleVerification.error,
       capture: consoleCaptureRead.document,
       captureSha256: consoleCaptureRead.text === null ? null : sha256Text(consoleCaptureRead.text),
-      captureError: consoleCaptureRead.error ?? consoleJournalRead.error ?? consoleServerLogRead.error,
+      captureError: consoleCaptureRead.error ?? consoleJournalRead.error ?? consoleServerLogRead.error ?? consoleRelayJournalRead.error,
       commandJournalText: consoleJournalRead.text,
       serverLogBuffer: consoleServerLogRead.bytes,
+      relayJournalText: consoleRelayJournalRead.text,
     }),
   )
   if (log.reason !== null && artifact !== null) {

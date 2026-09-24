@@ -40,7 +40,8 @@
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { compareRuntimeServerProperties, parseServerProperties } from './clean-run-server-config.mjs'
+import { assertExactLeafArgv, compareRuntimeServerProperties, expectedLeafLaunchIdentity, expectedLeafServerArgs, EXPECTED_JAVA_EXECUTABLE, parseServerProperties } from './clean-run-server-config.mjs'
+import { validateConsoleRelayJournal } from './clean-run-console-relay.mjs'
 
 export const RECORD = 'clean-run-environment'
 export const SCHEMA_VERSION = 2
@@ -295,6 +296,20 @@ export function validateCleanEnvironment(
         : `cleanRun.milestone must be ${JSON.stringify(expectedMilestone)} (supported: M2 or M3), got ${String(cleanRun.milestone)}`,
     }),
   )
+
+  const runtimePolicy = isPlainObject(cleanRun.runtimePolicy) ? cleanRun.runtimePolicy : {}
+  const runtimePolicyValid =
+    runtimePolicy.javaExecutable === EXPECTED_JAVA_EXECUTABLE &&
+    typeof runtimePolicy.javaVersion === 'string' && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(runtimePolicy.javaVersion) &&
+    runtimePolicy.paperIgnoreJavaVersion === true
+  conditions.push(condition({
+    id: 'descriptor.runtimePolicy',
+    verdict: runtimePolicyValid ? 'PASS' : 'FAIL',
+    reason: runtimePolicyValid
+      ? `Java executable=${runtimePolicy.javaExecutable}, version=${runtimePolicy.javaVersion}, Paper.IgnoreJavaVersion=true are declared and will be checked against the prepared manifest and Leaf startup attestation`
+      : `cleanRun.runtimePolicy must declare pinned javaExecutable=${EXPECTED_JAVA_EXECUTABLE}, an exact Java version, and paperIgnoreJavaVersion=true`,
+    detail: runtimePolicy,
+  }))
 
   // 2. a NEW level name that cannot collide with the protected worlds
   const levelName = values.levelName
@@ -834,7 +849,7 @@ function parseConsoleGameruleValue(raw) {
 }
 
 /** Bind and validate the console transcript against the exact accepted run. */
-export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = null, descriptorSha256 = null, path = null, text = null, fileSha256 = null, capture = null, captureSha256 = null, captureError = null, commandJournalText = null, serverLogBuffer = null, readError = null }) {
+export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = null, descriptorSha256 = null, path = null, text = null, fileSha256 = null, capture = null, captureSha256 = null, captureError = null, commandJournalText = null, serverLogBuffer = null, relayJournalText = null, readError = null }) {
   const mechanism = descriptor?.cleanRun?.gameruleMechanism ?? {}
   const required = mechanism.primary === 'console'
   const baseDetail = { path, fileSha256, mechanism: mechanism.primary ?? null }
@@ -859,7 +874,7 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   // Editable/pasted console output is no longer an acceptance source. The
   // capture record is generated only by clean-run-console-capture.mjs after it
   // observes each read-only response in the run-private Leaf stdout log.
-  if (!isPlainObject(capture) || typeof captureSha256 !== 'string' || commandJournalText === null || !Buffer.isBuffer(serverLogBuffer)) {
+  if (!isPlainObject(capture) || typeof captureSha256 !== 'string' || commandJournalText === null || !Buffer.isBuffer(serverLogBuffer) || typeof relayJournalText !== 'string') {
     return condition({
       id: 'run.consoleGamerulesVerified', verdict: 'UNKNOWN', required: true,
       reason: `machine-captured Leaf console query evidence is unavailable${captureError === null ? '' : `: ${captureError}`}`,
@@ -936,7 +951,8 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   const expectedCapturePath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'capture.json')
   const expectedServerLogPath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'leaf-server.log')
   const expectedCommandJournalPath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'commands.jsonl')
-  if (capture.record !== 'clean-run-console-capture' || capture.schemaVersion !== 1 || capture.status !== 'complete') captureMismatches.push('capture record/schema/status is invalid')
+  const expectedRelayJournalPath = boundDescriptorPath === null ? null : join(dirname(boundDescriptorPath), 'server-console', 'leaf-console-relay.jsonl')
+  if (capture.record !== 'clean-run-console-capture' || capture.schemaVersion !== 2 || capture.status !== 'complete') captureMismatches.push('capture record/schema/status is invalid')
   for (const [key, expected] of Object.entries({
     runId,
     sourceSha: bootSourceSha,
@@ -946,6 +962,7 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
     'startupAttestation.sha256': startup?.attestationSha256 ?? null,
     'process.pid': startup?.process?.pid ?? null,
     'process.commandLineSha256': startup?.process?.commandLineSha256 ?? null,
+    'console.relayJournalPath': startup?.console?.relayJournalPath ?? null,
   })) {
     const [root, child] = key.includes('.') ? key.split('.', 2) : [null, key]
     const actual = root === null ? capture[child] : capture[root]?.[child]
@@ -955,6 +972,7 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   if (expectedCapturePath !== null && resolve(String(capture.capturePath ?? '')) !== resolve(expectedCapturePath)) captureMismatches.push('capture path is not the descriptor sibling server-console/capture.json')
   if (expectedServerLogPath !== null && resolve(String(capture.console?.stdoutLogPath ?? '')) !== resolve(expectedServerLogPath)) captureMismatches.push('Leaf stdout path is not the descriptor sibling server-console/leaf-server.log')
   if (expectedCommandJournalPath !== null && resolve(String(capture.commandTranscript?.path ?? '')) !== resolve(expectedCommandJournalPath)) captureMismatches.push('command journal path is not the descriptor sibling server-console/commands.jsonl')
+  if (expectedRelayJournalPath !== null && resolve(String(capture.console?.relayJournalPath ?? '')) !== resolve(expectedRelayJournalPath)) captureMismatches.push('console relay journal path is not the descriptor sibling server-console/leaf-console-relay.jsonl')
   if (capture.transcript?.sha256 !== fileSha256 || capture.transcript?.path !== path) captureMismatches.push('capture transcript digest/path does not match the transcript file')
   if (capture.commandTranscript?.sha256 !== sha256Text(commandJournalText)) captureMismatches.push('command journal digest does not match its file')
   if (capture.commandTranscript?.queryCount !== Object.keys(expectedRules).length * requiredDimensions.length + 1) captureMismatches.push('command journal query count does not match descriptor scope')
@@ -963,12 +981,13 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   const seedLine = typeof capture.seed?.line === 'string' ? Buffer.from(capture.seed.line, 'utf8') : null
   const seedStart = capture.seed?.byteStart
   const seedEnd = capture.seed?.byteEnd
-  const seedResponse = typeof capture.seed?.line === 'string' ? /\bSeed:\s*\[?(-?\d+)\]?/i.exec(capture.seed.line) : null
-  if (seedLine === null || !Number.isInteger(seedStart) || !Number.isInteger(seedEnd) || seedEnd - seedStart !== seedLine.length || sha256BytesForGate(seedLine) !== capture.seed?.lineSha256) {
+  const seedResponse = typeof capture.seed?.line === 'string' ? /^\[Server thread\/INFO\]: Seed:\s*\[?(-?\d+)\]?$/i.exec(capture.seed.line) : null
+  if (seedLine === null || !Number.isInteger(seedStart) || !Number.isInteger(seedEnd) || seedEnd - seedStart !== seedLine.length || !hasLeafLogLineBoundaries(serverLogBuffer, seedStart, seedEnd) || sha256BytesForGate(seedLine) !== capture.seed?.lineSha256) {
     captureMismatches.push('captured seed response range/hash is invalid')
   } else if (!serverLogBuffer.subarray(seedStart, seedEnd).equals(seedLine) || seedResponse === null || seedResponse[1] !== String(capture.seed?.value)) {
     captureMismatches.push('captured seed response is not present in the Leaf stdout log')
   }
+  if (!Number.isInteger(capture.seed?.byteOffsetBefore) || capture.seed.byteStart < capture.seed.byteOffsetBefore || capture.seed.relaySequence !== 0) captureMismatches.push('captured seed response is not causally bound to its first query attempt')
   if (String(capture.seed?.value ?? '') !== String(descriptor?.values?.levelSeed ?? '')) captureMismatches.push('captured Leaf seed differs from descriptor')
 
   const captureResponses = Array.isArray(capture.responses) ? capture.responses : []
@@ -990,10 +1009,10 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
     if (!requiredDimensions.includes(dimension) || expectedValue === undefined || canonicalGameruleKey(raw.descriptorRule) !== rule) captureMismatches.push(`unexpected captured response ${dimension}/${rule}`)
     else if ((typeof expectedValue === 'string' ? String(raw.value) : raw.value) !== expectedValue) captureMismatches.push(`captured response value contradicts descriptor at ${dimension}/${rule}`)
     const responseLine = typeof raw.line === 'string' ? Buffer.from(raw.line, 'utf8') : null
-    if (responseLine === null || !Number.isInteger(raw.byteStart) || !Number.isInteger(raw.byteEnd) || raw.byteEnd - raw.byteStart !== responseLine.length || sha256BytesForGate(responseLine) !== raw.lineSha256) {
+    if (responseLine === null || !Number.isInteger(raw.byteStart) || !Number.isInteger(raw.byteEnd) || raw.byteEnd - raw.byteStart !== responseLine.length || !hasLeafLogLineBoundaries(serverLogBuffer, raw.byteStart, raw.byteEnd) || sha256BytesForGate(responseLine) !== raw.lineSha256) {
       captureMismatches.push(`captured response range/hash is invalid for ${dimension}/${rule}`)
     } else if (!serverLogBuffer.subarray(raw.byteStart, raw.byteEnd).equals(responseLine)) captureMismatches.push(`captured response is absent from Leaf stdout log for ${dimension}/${rule}`)
-    const parsedResponse = /(?:\b(?:game\s*rule|gamerule)\s+)?['"]?([A-Za-z][A-Za-z0-9_:-]*)['"]?\s*(?:=|:|is currently set to:)\s*(.*?)\s*$/i.exec(String(raw.line ?? ''))
+    const parsedResponse = /^\[Server thread\/INFO\]: Gamerule\s+([A-Za-z][A-Za-z0-9_:-]*)\s+is currently set to:\s*(.*?)\s*$/i.exec(String(raw.line ?? ''))
     if (parsedResponse === null || canonicalGameruleKey(parsedResponse[1]) !== rule) captureMismatches.push(`captured output line does not name ${dimension}/${rule}`)
     else {
       const lineValueText = parsedResponse[2].replace(/^[."']+|[."']+$/g, '').trim()
@@ -1002,7 +1021,7 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
     }
     const expectedCommand = `execute in ${dimension} run gamerule ${raw.descriptorRule}`
     if (raw.command !== expectedCommand) captureMismatches.push(`captured command is not a read-only ${dimension}/${rule} query`)
-    journalRows.push({ dimension, rule, command: raw.command, line: raw.line, byteStart: raw.byteStart, byteEnd: raw.byteEnd, lineSha256: raw.lineSha256 })
+    if (!Number.isInteger(raw.byteOffsetBefore) || raw.byteStart < raw.byteOffsetBefore || raw.relaySequence !== index + 1) captureMismatches.push(`captured response is not causally bound to its query attempt for ${dimension}/${rule}`)
   }
   for (const dimension of requiredDimensions) {
     for (const [descriptorRule] of Object.entries(expectedRules)) {
@@ -1012,47 +1031,79 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
   for (const line of String(commandJournalText).split(/\r?\n/).filter(Boolean)) {
     try { journalRows.push(JSON.parse(line)) } catch { captureMismatches.push('command journal contains invalid JSON'); break }
   }
-  const journalAttempts = journalRows.filter((entry) => entry?.event === 'console-query-attempt')
-  const journalResponses = journalRows.filter((entry) => entry?.event === 'console-query-response')
-  const expectedQueryCount = expectedResponseCount + 1
-  if (journalAttempts.length !== expectedQueryCount || journalResponses.length !== expectedQueryCount || journalRows.some((entry) => entry?.event === 'console-query-response-missing')) {
-    captureMismatches.push(`command journal must contain ${expectedQueryCount} completed read-only queries`)
-  }
-  for (const entry of [...journalAttempts, ...journalResponses]) {
-    if (entry.runId !== runId || entry.sourceSha !== bootSourceSha || entry.descriptorSha256 !== descriptorSha256 || entry.startupAttestationSha256 !== startup?.attestationSha256 || entry.leafPid !== startup?.process?.pid) {
-      captureMismatches.push('command journal row is not bound to this run/descriptor/Leaf process')
-      break
-    }
-    if (entry.event === 'console-query-attempt' && entry.kind !== 'seed' && !/^execute in minecraft:[a-z0-9_]+ run gamerule [a-z0-9_]+$/.test(String(entry.command))) {
-      captureMismatches.push('command journal contains a non-query console command')
-      break
-    }
-    if (entry.event === 'console-query-attempt' && entry.kind === 'seed' && entry.command !== 'seed') {
-      captureMismatches.push('command journal contains a non-query seed command')
-      break
-    }
-  }
-  const journalResponseKeys = new Set(journalResponses.map((entry) => `${entry.kind}\0${entry.dimension ?? ''}\0${entry.descriptorRule ?? ''}`))
-  const captureJournalExpected = [
-    `seed\0\0`,
-    ...captureResponses.map((entry) => `gamerule\0${entry.dimension}\0${entry.descriptorRule}`),
+  const expectedQueries = [
+    { kind: 'seed', command: 'seed', dimension: null, descriptorRule: null, rule: null },
+    ...requiredDimensions.flatMap((dimension) => Object.keys(expectedRules).map((descriptorRule) => ({
+      kind: 'gamerule', command: `execute in ${dimension} run gamerule ${descriptorRule}`,
+      dimension, descriptorRule, rule: canonicalGameruleKey(descriptorRule),
+    }))),
   ]
-  for (const key of captureJournalExpected) if (!journalResponseKeys.has(key)) captureMismatches.push('command journal lacks a response row for one captured query')
-  const expectedCommands = new Set(['seed', ...captureResponses.map((entry) => entry.command)])
-  const attemptedCommands = journalAttempts.map((entry) => entry.command)
-  if (new Set(attemptedCommands).size !== expectedQueryCount || attemptedCommands.some((command) => !expectedCommands.has(command))) {
-    captureMismatches.push('command journal attempts do not exactly match the read-only query set')
+  const expectedQueryCount = expectedQueries.length
+  if (captureResponses.length !== expectedResponseCount || journalRows.length !== expectedQueryCount * 2) {
+    captureMismatches.push(`command journal/capture must contain exactly ${expectedQueryCount} ordered queries`)
   }
-  for (const entry of journalResponses) {
-    const matchingCapture = entry.kind === 'seed'
-      ? capture.seed
-      : captureResponses.find((response) => response.dimension === entry.dimension && response.descriptorRule === entry.descriptorRule)
+  const expectedCommands = new Set(expectedQueries.map((query) => query.command))
+  for (const row of journalRows) {
+    if (row?.event === 'console-query-attempt' && !expectedCommands.has(row.command)) {
+      captureMismatches.push(`non-query console command recorded: ${String(row.command ?? '(missing)')}`)
+    }
+  }
+  let previousResponseEnd = -1
+  let previousRelayOffset = -1
+  const seenRanges = new Set()
+  for (let index = 0; index < expectedQueryCount; index += 1) {
+    const expectedQuery = expectedQueries[index]
+    const captureRow = index === 0 ? capture.seed : captureResponses[index - 1]
+    const attempt = journalRows[index * 2]
+    const response = journalRows[index * 2 + 1]
+    if (!isPlainObject(attempt) || !isPlainObject(response) || attempt.event !== 'console-query-attempt' || response.event !== 'console-query-response') {
+      captureMismatches.push(`command journal order is invalid for query ${index}`)
+      continue
+    }
+    for (const entry of [attempt, response]) {
+      if (entry.runId !== runId || entry.sourceSha !== bootSourceSha || entry.descriptorSha256 !== descriptorSha256 || entry.startupAttestationSha256 !== startup?.attestationSha256 || entry.leafPid !== startup?.process?.pid) {
+        captureMismatches.push(`command journal query ${index} is not bound to this run/descriptor/Leaf process`)
+      }
+    }
     if (
-      matchingCapture === undefined || matchingCapture === null || entry.command !== (entry.kind === 'seed' ? 'seed' : matchingCapture.command) ||
-      entry.responseLine !== (entry.kind === 'seed' ? matchingCapture.line : matchingCapture.line) ||
-      entry.responseLineSha256 !== (entry.kind === 'seed' ? matchingCapture.lineSha256 : matchingCapture.lineSha256)
-    ) captureMismatches.push('command journal response does not match captured Leaf output')
+      attempt.kind !== expectedQuery.kind || attempt.command !== expectedQuery.command ||
+      attempt.dimension !== expectedQuery.dimension || attempt.descriptorRule !== expectedQuery.descriptorRule || attempt.rule !== expectedQuery.rule ||
+      response.kind !== expectedQuery.kind || response.command !== expectedQuery.command ||
+      response.dimension !== expectedQuery.dimension || response.descriptorRule !== expectedQuery.descriptorRule || response.rule !== expectedQuery.rule
+    ) captureMismatches.push(`journal query ${index} does not match the canonical seed/dimension/rule order`)
+    if (
+      !Number.isInteger(attempt.byteOffsetBefore) || attempt.byteOffsetBefore < previousResponseEnd ||
+      !hasLeafLogLineStart(serverLogBuffer, attempt.byteOffsetBefore) ||
+      !Number.isInteger(attempt.relayOffsetBefore) || attempt.relayOffsetBefore < previousRelayOffset ||
+      attempt.relaySequence !== index || response.relaySequence !== index || response.byteOffsetBefore !== attempt.byteOffsetBefore
+    ) captureMismatches.push(`journal query ${index} has missing, regressing, or incorrectly bound log/relay offsets`)
+    previousRelayOffset = Number.isInteger(attempt.relayOffsetBefore) ? attempt.relayOffsetBefore : previousRelayOffset
+    const start = captureRow?.byteStart
+    const end = captureRow?.byteEnd
+    const rangeKey = `${String(start)}:${String(end)}`
+    if (seenRanges.has(rangeKey)) captureMismatches.push(`Leaf output range ${rangeKey} was reused for more than one query`)
+    seenRanges.add(rangeKey)
+    if (
+      !Number.isInteger(start) || !Number.isInteger(end) || start < attempt.byteOffsetBefore || start < previousResponseEnd || end <= start || end > serverLogBuffer.length ||
+      !hasLeafLogLineBoundaries(serverLogBuffer, start, end)
+    ) captureMismatches.push(`Leaf output range is not monotonic, in-bounds, or after query ${index}`)
+    if (
+      response.byteStart !== start || response.byteEnd !== end || response.responseByteStart !== start || response.responseByteEnd !== end ||
+      response.value !== captureRow?.value || response.responseLine !== captureRow?.line || response.responseLineSha256 !== captureRow?.lineSha256 ||
+      response.byteOffsetBefore !== attempt.byteOffsetBefore
+    ) captureMismatches.push(`journal response ${index} does not exactly bind captured bytes/value/query attempt`)
+    if (Number.isInteger(end)) previousResponseEnd = end
   }
+  const relayValidation = validateConsoleRelayJournal(relayJournalText, {
+    leafPid: startup?.process?.pid,
+    expectedCommands: expectedQueries.map((query) => query.command),
+  })
+  if (!relayValidation.valid) captureMismatches.push(relayValidation.reason)
+  if (
+    capture.console?.relayJournalSha256 !== sha256Text(relayJournalText) ||
+    capture.console?.relayJournalBytes !== Buffer.byteLength(relayJournalText) ||
+    capture.console?.relayCommandCount !== expectedQueryCount
+  ) captureMismatches.push('console relay journal changed after capture or does not bind every read-only command')
   for (const rule of Object.keys(evidenceSet.excluded)) {
     // Excluded gamerules are explicitly unavailable in this world and must not
     // be represented as observed console values.
@@ -1076,6 +1127,15 @@ export function checkConsoleGameruleEvidence({ descriptor, artifact, runId = nul
 
 function sha256BytesForGate(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function hasLeafLogLineStart(buffer, offset) {
+  return Number.isInteger(offset) && offset >= 0 && offset <= buffer.length && (offset === 0 || buffer[offset - 1] === 0x0a)
+}
+
+function hasLeafLogLineBoundaries(buffer, start, end) {
+  if (!hasLeafLogLineStart(buffer, start) || !Number.isInteger(end) || end <= start || end >= buffer.length) return false
+  return buffer[end] === 0x0a || (buffer[end] === 0x0d && buffer[end + 1] === 0x0a)
 }
 
 /** `LADDER_INVENTORY_SETTLE reason=death ... itemCount=N ... counts={...}` lines. */
@@ -1462,6 +1522,28 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
   if (!Number.isInteger(processInfo?.pid) || !/^[0-9a-f]{64}$/.test(String(processInfo?.commandLineSha256 ?? ''))) {
     return fail('startup process identity is incomplete', processInfo ?? null)
   }
+  let expectedLaunchIdentity
+  try {
+    expectedLaunchIdentity = expectedLeafLaunchIdentity(descriptor, descriptor?.cleanRun?.worldContainer)
+    assertExactLeafArgv(processInfo?.argv?.slice?.(1), expectedLeafServerArgs(descriptor, expectedPropertiesPath, descriptor?.cleanRun?.worldContainer), 'attested Leaf')
+  } catch (error) {
+    return fail(`Leaf startup identity is invalid: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const runtime = startupAttestation.runtime
+  if (
+    JSON.stringify(runtime?.java ?? null) !== JSON.stringify(expectedLaunchIdentity.java) ||
+    runtime?.paperIgnoreJavaVersion !== expectedLaunchIdentity.paperIgnoreJavaVersion ||
+    runtime?.paperIgnoreJavaVersion !== true ||
+    !processInfo?.argv?.includes?.('-DPaper.IgnoreJavaVersion=true')
+  ) return fail('Leaf JVM version output/hash or Paper.IgnoreJavaVersion flag differs from the descriptor policy', { expected: { java: expectedLaunchIdentity.java, paperIgnoreJavaVersion: expectedLaunchIdentity.paperIgnoreJavaVersion }, observed: runtime ?? null })
+  if (
+    processInfo?.executable !== EXPECTED_JAVA_EXECUTABLE ||
+    processInfo?.executableRealpath !== expectedLaunchIdentity.java.realpath ||
+    processInfo?.executableSha256 !== expectedLaunchIdentity.java.sha256 ||
+    processInfo?.serverJarPath !== expectedLaunchIdentity.serverJar.path ||
+    processInfo?.serverJarRealpath !== expectedLaunchIdentity.serverJar.realpath ||
+    processInfo?.serverJarSha256 !== expectedLaunchIdentity.serverJar.sha256
+  ) return fail('Leaf Java executable or server JAR identity differs from the prepared runtime', { expectedLaunchIdentity, process: processInfo })
   const expectedConsoleDir = resolve(dirname(expectedAttestationPath ?? descriptorPath), 'server-console')
   const expectedConsole = {
     directory: expectedConsoleDir,
@@ -1469,6 +1551,7 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
     stdoutLogPath: resolve(expectedConsoleDir, 'leaf-server.log'),
     commandTranscriptPath: resolve(expectedConsoleDir, 'commands.jsonl'),
     capturePath: resolve(expectedConsoleDir, 'capture.json'),
+    relayJournalPath: resolve(expectedConsoleDir, 'leaf-console-relay.jsonl'),
   }
   if (
     consoleInfo?.mode !== 'run-private-fifo-and-log' ||
@@ -1476,16 +1559,19 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
     resolve(String(consoleInfo?.inputPath ?? '')) !== expectedConsole.inputPath ||
     resolve(String(consoleInfo?.stdoutLogPath ?? '')) !== expectedConsole.stdoutLogPath ||
     resolve(String(consoleInfo?.commandTranscriptPath ?? '')) !== expectedConsole.commandTranscriptPath ||
-    resolve(String(consoleInfo?.capturePath ?? '')) !== expectedConsole.capturePath
+    resolve(String(consoleInfo?.capturePath ?? '')) !== expectedConsole.capturePath ||
+    resolve(String(consoleInfo?.relayJournalPath ?? '')) !== expectedConsole.relayJournalPath
   ) return fail('Leaf console input/output is not bound to the run-private console directory')
   try {
     const directoryStat = lstatSync(expectedConsoleDir)
     const fifoStat = lstatSync(expectedConsole.inputPath)
     const outputStat = lstatSync(expectedConsole.stdoutLogPath)
+    const relayStat = lstatSync(expectedConsole.relayJournalPath)
     if (
       !directoryStat.isDirectory() || directoryStat.uid !== process.getuid?.() || (directoryStat.mode & 0o777) !== 0o700 ||
       !fifoStat.isFIFO() || fifoStat.uid !== process.getuid?.() || (fifoStat.mode & 0o777) !== 0o600 ||
-      !outputStat.isFile() || outputStat.isSymbolicLink() || outputStat.uid !== process.getuid?.() || (outputStat.mode & 0o777) !== 0o600
+      !outputStat.isFile() || outputStat.isSymbolicLink() || outputStat.uid !== process.getuid?.() || (outputStat.mode & 0o777) !== 0o600 ||
+      !relayStat.isFile() || relayStat.isSymbolicLink() || relayStat.uid !== process.getuid?.() || (relayStat.mode & 0o777) !== 0o600
     ) return fail('Leaf console FIFO/log are not private owner-only objects')
   } catch {
     return unknown('Leaf console FIFO/log are unavailable for run-scoped command capture', expectedConsole)
@@ -1514,19 +1600,29 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
   }
   if (
     startupRecord?.record !== 'clean-run-leaf-startup-attestation' ||
+    startupRecord?.schemaVersion !== 2 ||
     startupRecord?.descriptor?.path !== startupAttestation.descriptorPath ||
     startupRecord?.descriptor?.sha256 !== startupAttestation.descriptorSha256 ||
     startupRecord?.descriptor?.sourceSha !== boot?.sourceSha ||
     startupRecord?.config?.path !== config?.path ||
     startupRecord?.config?.sha256 !== config?.sha256 ||
+    JSON.stringify(startupRecord?.runtime ?? null) !== JSON.stringify(runtime ?? null) ||
     startupRecord?.process?.pid !== processInfo?.pid ||
     startupRecord?.process?.commandLineSha256 !== processInfo?.commandLineSha256 ||
+    JSON.stringify(startupRecord?.process?.argv ?? null) !== JSON.stringify(processInfo?.argv ?? null) ||
+    startupRecord?.process?.executable !== processInfo?.executable ||
+    startupRecord?.process?.executableRealpath !== processInfo?.executableRealpath ||
+    startupRecord?.process?.executableSha256 !== processInfo?.executableSha256 ||
+    startupRecord?.process?.serverJarPath !== processInfo?.serverJarPath ||
+    startupRecord?.process?.serverJarRealpath !== processInfo?.serverJarRealpath ||
+    startupRecord?.process?.serverJarSha256 !== processInfo?.serverJarSha256 ||
     startupRecord?.console?.mode !== consoleInfo?.mode ||
     startupRecord?.console?.directory !== consoleInfo?.directory ||
     startupRecord?.console?.inputPath !== consoleInfo?.inputPath ||
     startupRecord?.console?.stdoutLogPath !== consoleInfo?.stdoutLogPath ||
     startupRecord?.console?.commandTranscriptPath !== consoleInfo?.commandTranscriptPath ||
     startupRecord?.console?.capturePath !== consoleInfo?.capturePath
+    || startupRecord?.console?.relayJournalPath !== consoleInfo?.relayJournalPath
   ) return fail('run BOOT binding disagrees with the persisted Leaf startup attestation')
   const preparedResolvedPath = resolve(String(manifest?.resolved?.path ?? ''))
   const stagedEntry = Array.isArray(manifest?.files)
@@ -1539,6 +1635,7 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
     String(manifest?.target?.levelSeed ?? '') !== String(descriptor?.values?.levelSeed ?? '') ||
     manifest?.target?.sourceSha !== boot?.sourceSha ||
     stagedEntry?.sha256 !== config?.sha256 ||
+    JSON.stringify(manifest?.serverLaunch ?? null) !== JSON.stringify(expectedLaunchIdentity) ||
     preparedManifest?.stagedPropertiesSha256 !== stagedEntry?.sha256
   ) return fail('prepared manifest target or staged file hash differs from the run descriptor/Leaf startup')
 
@@ -1577,6 +1674,7 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
       descriptorPath: startupAttestation.descriptorPath,
       descriptorSha256: startupAttestation.descriptorSha256,
       process: processInfo,
+      runtime,
       console: expectedConsole,
       config: { path: config.path, sha256: config.sha256, properties: diskProjection },
       manifest: { path: expectedManifestPath, sha256: startupAttestation.manifestSha256, stagedPropertiesSha256: stagedEntry.sha256 },

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { checkConsoleGameruleEvidence, consoleGameruleEvidenceSet } from './clean-run-environment.mjs'
-import { collectConsoleQueries, expectedConsoleQueries } from './clean-run-console-capture.mjs'
+import { bindConsoleQueryResponse, collectConsoleQueries, expectedConsoleQueries } from './clean-run-console-capture.mjs'
 import { sha256Text } from './clean-run-server-config.mjs'
 
 const TEMPLATE = new URL('./fixtures/m3-clean-environment.json', import.meta.url)
@@ -28,6 +28,8 @@ const transcriptPath = join(temporaryRoot, 'gamerule-verification.txt')
 const capturePath = join(serverConsoleDir, 'capture.json')
 const journalPath = join(serverConsoleDir, 'commands.jsonl')
 const leafLogPath = join(serverConsoleDir, 'leaf-server.log')
+const fifoPath = join(serverConsoleDir, 'server-console.fifo')
+const relayJournalPath = join(serverConsoleDir, 'leaf-console-relay.jsonl')
 const startupPath = join(temporaryRoot, 'server-start-attestation.json')
 const startupSha256 = 'c'.repeat(64)
 const commandLineSha256 = 'd'.repeat(64)
@@ -41,6 +43,14 @@ const startup = {
   attestationPath: startupPath,
   attestationSha256: startupSha256,
   process: { pid: PID, commandLineSha256 },
+  console: {
+    mode: 'run-private-fifo-and-log',
+    inputPath: fifoPath,
+    stdoutLogPath: leafLogPath,
+    commandTranscriptPath: journalPath,
+    capturePath,
+    relayJournalPath,
+  },
 }
 const artifact = {
   record: 'milestone-run-artifact',
@@ -52,10 +62,18 @@ function hashBytes(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
-function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false, injectMutatingCommand = false } = {}) {
+function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false, injectMutatingCommand = false, tamperRelaySequence = false, tamperByteOffset = false, reuseResponseRange = false } = {}) {
   const { selected, excluded } = consoleGameruleEvidenceSet(descriptor)
   const dimensions = descriptor.cleanRun.gameruleScope.dimensions
   const { queries } = expectedConsoleQueries(descriptor)
+  const expectedCommands = ['seed', ...queries.map((query) => query.command)]
+  const relayRows = [{ event: 'console-relay-start', leafPid: PID, expectedCommandCount: expectedCommands.length }]
+  const relayOffsetBefore = []
+  for (const [sequence, command] of expectedCommands.entries()) {
+    relayOffsetBefore.push(Buffer.byteLength(`${relayRows.map((row) => `${JSON.stringify(row)}\n`).join('')}`, 'utf8'))
+    relayRows.push({ event: 'console-relay-forwarded', leafPid: PID, sequence: tamperRelaySequence && sequence === 1 ? sequence + 1 : sequence, command })
+  }
+  const relayJournalText = `${relayRows.map((row) => JSON.stringify(row)).join('\n')}\n`
   let serverLog = Buffer.alloc(0)
   const addLine = (line) => {
     const bytes = Buffer.from(line, 'utf8')
@@ -68,7 +86,7 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
   const responses = []
   const commands = []
 
-  const recordQuery = (query, response) => {
+  const recordQuery = (query, response, sequence, relayOffset) => {
     const base = {
       runId: RUN_ID,
       sourceSha: SOURCE_SHA,
@@ -80,6 +98,10 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
       dimension: query.dimension ?? null,
       rule: query.rule ?? null,
       descriptorRule: query.descriptorRule ?? null,
+      stdoutLogPath: leafLogPath,
+      byteOffsetBefore: response.byteOffsetBefore,
+      relayOffsetBefore: relayOffset,
+      relaySequence: sequence,
     }
     commands.push({ ...base, event: 'console-query-attempt', at: '2026-09-24T00:00:01.000Z' })
     commands.push({
@@ -89,15 +111,20 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
       responseLine: response.line,
       byteStart: response.byteStart,
       byteEnd: response.byteEnd,
+      responseByteStart: response.byteStart,
+      responseByteEnd: response.byteEnd,
       responseLineSha256: response.lineSha256,
       completedAt: '2026-09-24T00:00:02.000Z',
     })
   }
-  recordQuery({ kind: 'seed', command: 'seed' }, { ...seed, command: 'seed' })
+  const seedOffsetBefore = 0
+  recordQuery({ kind: 'seed', command: 'seed' }, { ...seed, command: 'seed', byteOffsetBefore: seedOffsetBefore }, 0, relayOffsetBefore[0])
 
   for (const query of queries) {
     const line = `[Server thread/INFO]: Gamerule ${query.descriptorRule} is currently set to: ${String(query.expected)}`
-    const response = { value: query.expected, ...addLine(line), command: query.command }
+    const byteOffsetBefore = serverLog.length
+    const relaySequence = responses.length + 1
+    const response = { value: query.expected, ...addLine(line), command: query.command, byteOffsetBefore, relaySequence }
     responses.push({
       dimension: query.dimension,
       rule: query.rule,
@@ -106,7 +133,7 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
       command: query.command,
       ...response,
     })
-    recordQuery(query, response)
+    recordQuery(query, response, relaySequence, relayOffsetBefore[relaySequence])
   }
 
   const capturedResponses = omitCaptureResponse ? responses.slice(1) : responses
@@ -122,6 +149,10 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
       event: 'console-query-attempt',
       command: 'give @s diamond',
     }]
+  }
+  if (tamperByteOffset) {
+    const secondAttempt = commandRows.find((row) => row.event === 'console-query-attempt' && row.relaySequence === 1)
+    secondAttempt.byteOffsetBefore = 0
   }
   const commandJournalText = `${commandRows.map((entry) => JSON.stringify(entry)).join('\n')}\n`
   const capturedAt = '2026-09-24T00:00:03.000Z'
@@ -144,7 +175,7 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
   const transcriptSha = sha256Text(transcriptText)
   const capture = {
     record: 'clean-run-console-capture',
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'complete',
     runId: RUN_ID,
     sourceSha: SOURCE_SHA,
@@ -153,13 +184,26 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
     process: { pid: PID, commandLineSha256 },
     residentLog: { path: join(temporaryRoot, 'buddy.log'), sourceSha: SOURCE_SHA },
     capturePath,
-    console: { stdoutLogPath: leafLogPath },
+    console: {
+      directory: serverConsoleDir,
+      fifoPath,
+      stdoutLogPath: leafLogPath,
+      commandTranscriptPath: journalPath,
+      relayJournalPath,
+      relayJournalSha256: sha256Text(relayJournalText),
+      relayJournalBytes: Buffer.byteLength(relayJournalText),
+      relayCommandCount: expectedCommands.length,
+    },
     commandTranscript: { path: journalPath, sha256: sha256Text(commandJournalText), queryCount: responses.length + 1 },
-    seed,
+    seed: { ...seed, byteOffsetBefore: seedOffsetBefore, relaySequence: 0 },
     requiredDimensions: dimensions,
     observedRuleCount: capturedResponses.length,
     excludedRules: Object.keys(excluded),
-    responses: capturedResponses,
+    responses: reuseResponseRange && capturedResponses.length > 1
+      ? capturedResponses.map((response, index) => index === 1
+        ? { ...response, byteStart: capturedResponses[0].byteStart, byteEnd: capturedResponses[0].byteEnd, lineSha256: capturedResponses[0].lineSha256 }
+        : response)
+      : capturedResponses,
     transcript: { path: transcriptPath, sha256: transcriptSha },
     capturedAt,
   }
@@ -176,6 +220,7 @@ function makeMachineEvidence({ omitCaptureResponse = false, tamperOutput = false
     captureSha256: sha256Text(`${JSON.stringify(capture, null, 2)}\n`),
     commandJournalText,
     serverLogBuffer: outputBuffer,
+    relayJournalText,
   }
 }
 
@@ -192,6 +237,7 @@ function evaluate(evidence) {
     captureSha256: evidence.captureSha256,
     commandJournalText: evidence.commandJournalText,
     serverLogBuffer: evidence.serverLogBuffer,
+    relayJournalText: evidence.relayJournalText,
   })
 }
 
@@ -219,6 +265,31 @@ try {
     issueCommandAndCapture: async () => ({ value: 'wrong', line: 'no answer' }),
   }), /seed query does not match/)
 
+  let queryState = { relaySequence: 0, previousResponseEnd: -1 }
+  const seedBound = bindConsoleQueryResponse({
+    attempt: { command: 'seed', byteOffsetBefore: 0 },
+    response: { value: '-1', line: 'seed', byteStart: 4, byteEnd: 8 },
+    state: queryState,
+    completedAt: '2026-09-24T00:00:02.000Z',
+  })
+  queryState = seedBound.nextState
+  const ruleBound = bindConsoleQueryResponse({
+    attempt: { command: 'execute in minecraft:overworld run gamerule keep_inventory', byteOffsetBefore: 9 },
+    response: { value: false, line: 'gamerule keep_inventory=false', byteStart: 12, byteEnd: 40 },
+    state: queryState,
+    completedAt: '2026-09-24T00:00:03.000Z',
+  })
+  assert.equal(seedBound.captured.relaySequence, 0)
+  assert.equal(ruleBound.captured.relaySequence, 1)
+  assert.ok(ruleBound.captured.byteOffsetBefore >= seedBound.journalRecord.byteEnd)
+  assert.ok(ruleBound.captured.byteStart > seedBound.journalRecord.byteStart)
+  assert.throws(() => bindConsoleQueryResponse({
+    attempt: { command: 'replayed', byteOffsetBefore: 0 },
+    response: { value: false, line: 'replay', byteStart: 2, byteEnd: 8 },
+    state: ruleBound.nextState,
+    completedAt: '2026-09-24T00:00:04.000Z',
+  }), /strictly ordered/)
+
   const complete = makeMachineEvidence()
   const passed = evaluate(complete)
   assert.equal(passed.verdict, 'PASS', passed.reason)
@@ -243,7 +314,19 @@ try {
   assert.equal(mutating.verdict, 'FAIL')
   assert.match(mutating.reason, /non-query console command/)
 
-  console.log(`PASS clean-run Leaf console capture (${queries.length} per-dimension gamerule queries, seed, output hashes, missing/mutating response refusals)`)
+  const badRelaySequence = evaluate(makeMachineEvidence({ tamperRelaySequence: true }))
+  assert.equal(badRelaySequence.verdict, 'FAIL')
+  assert.match(badRelaySequence.reason, /console relay did not forward exactly/)
+
+  const badByteOffset = evaluate(makeMachineEvidence({ tamperByteOffset: true }))
+  assert.equal(badByteOffset.verdict, 'FAIL')
+  assert.match(badByteOffset.reason, /missing, regressing, or incorrectly bound log\/relay offsets/)
+
+  const reusedRange = evaluate(makeMachineEvidence({ reuseResponseRange: true }))
+  assert.equal(reusedRange.verdict, 'FAIL')
+  assert.match(reusedRange.reason, /reused for more than one query|not monotonic|does not exactly bind/)
+
+  console.log(`PASS clean-run Leaf console capture (${queries.length} per-dimension gamerule queries, seed, monotonic offsets, relay sequence, output hashes, missing/mutating response refusals)`)
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true })
 }

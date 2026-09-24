@@ -27,8 +27,8 @@
 //     this tool, by construction - see the `no_destructive_operation` guard);
 //   * it never writes inside `world`, `world_nether`, `world_the_end` (the
 //     protected live worlds) - every planned path is checked before it is used;
-//   * it refuses a level name that already exists (unless this same descriptor
-//     staged it and the world was never generated), a reused seed, a
+//   * it refuses a level name that already exists (unless this exact descriptor,
+//     source SHA and launch identity staged it and the world was never generated), a reused seed,
 //     placeholder/absent source SHA, and any descriptor that is not CLEAN.
 //
 // `--dry-run` is the default: it prints exactly what it would do, including every
@@ -41,10 +41,10 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PROTECTED_LEVEL_NAMES, loadCleanEnvironment, validateCleanEnvironment, worldDataExists, worldDirNames } from './clean-run-environment.mjs'
-import { SERVER_PROPERTY_MAP } from './clean-run-server-config.mjs'
+import { deriveJavaRuntimePolicy, EXPECTED_JAVA_EXECUTABLE, expectedLeafLaunchIdentity, SERVER_PROPERTY_MAP } from './clean-run-server-config.mjs'
 
 export const RECORD = 'clean-run-prepare'
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 export const PLAN_LINE = 'CLEAN_RUN_PREPARE_ACTION'
 export const GUARD_LINE = 'CLEAN_RUN_PREPARE_GUARD'
 export const REFUSED_LINE = 'CLEAN_RUN_PREPARE_REFUSED'
@@ -291,6 +291,15 @@ export function planPrepare({
   // ---- resolve the descriptor (overrides + frozen SHA) ---------------------
   const resolvedDoc = JSON.parse(JSON.stringify(loaded.document))
   const overridesApplied = []
+  if (!Object.hasOwn(resolvedDoc.cleanRun ?? {}, 'runtimePolicy')) {
+    try {
+      resolvedDoc.cleanRun.runtimePolicy = deriveJavaRuntimePolicy()
+      overridesApplied.push(`cleanRun.runtimePolicy=derived from ${EXPECTED_JAVA_EXECUTABLE} -version`)
+    } catch (error) {
+      refusals.push({ reason: `java_runtime_policy_unavailable: ${error instanceof Error ? error.message : String(error)}` })
+      resolvedDoc.cleanRun.runtimePolicy = { javaExecutable: EXPECTED_JAVA_EXECUTABLE, javaVersion: '', paperIgnoreJavaVersion: true }
+    }
+  }
   if (typeof levelName === 'string' && levelName !== '') {
     resolvedDoc.values.levelName = levelName
     overridesApplied.push(`levelName=${levelName}`)
@@ -343,6 +352,9 @@ export function planPrepare({
     resolvedDoc.cleanRun.worldContainer = container
     overridesApplied.push(`worldContainer=${container}`)
   }
+  const resolvedForFile = { ...resolvedDoc, resolvedBy: { tool: 'tools/clean-run-prepare.mjs', from: loaded.path, fromSha256: loaded.sha256, overrides: overridesApplied, at: 'see manifest.json' } }
+  const resolvedDescriptorText = `${JSON.stringify(resolvedForFile, null, 2)}\n`
+  const resolvedDescriptorSha256 = sha256Text(resolvedDescriptorText)
   const check = validateCleanEnvironment(resolvedDoc, {
     descriptorPath: loaded.path,
     descriptorSha256: loaded.sha256,
@@ -388,13 +400,19 @@ export function planPrepare({
   const runDir = milestone === 'M2' ? runRootDir : join(runRootDir, `${targetSlug}-${targetFingerprint}`)
   const worldDir = join(resolve(container), levelName2)
   const propertiesPath = join(resolve(container), 'server.properties')
+  let launchIdentity = null
+  try {
+    launchIdentity = expectedLeafLaunchIdentity(resolvedDoc, resolve(container))
+  } catch (error) {
+    refusals.push({ reason: `leaf_runtime_identity_unavailable: ${error instanceof Error ? error.message : String(error)}` })
+  }
   const files = []
 
   // ---- guards --------------------------------------------------------------
   const protectedRoots = [...new Set([...PROTECTED_LEVEL_NAMES, ...(Array.isArray(resolvedDoc.cleanRun?.protectedWorldNames) ? resolvedDoc.cleanRun.protectedWorldNames : []), ...(resolvedDoc.cleanRun?.previousWorld?.levelName ? [resolvedDoc.cleanRun.previousWorld.levelName] : [])])]
   const attemptsPath = join(runRootDir, 'attempts.json')
   const manifestPath = join(runDir, 'manifest.json')
-  const plannedPaths = [worldDir, runRootDir, runDir, join(worldDir, datapackDir), join(runDir, 'server-console'), join(runDir, 'environment-resolved.json'), manifestPath, attemptsPath, join(runDir, 'server.properties.clean'), join(runDir, 'server-start-attestation.json'), join(runDir, 'server-console', 'server-console.fifo'), join(runDir, 'server-console', 'leaf-server.log'), join(runDir, 'server-console', 'commands.jsonl'), join(runDir, 'server-console', 'capture.json'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
+  const plannedPaths = [worldDir, runRootDir, runDir, join(worldDir, datapackDir), join(runDir, 'server-console'), join(runDir, 'environment-resolved.json'), manifestPath, attemptsPath, join(runDir, 'server.properties.clean'), join(runDir, 'server-start-attestation.json'), join(runDir, 'server-console', 'server-console.fifo'), join(runDir, 'server-console', 'leaf-server.log'), join(runDir, 'server-console', 'leaf-console-relay.jsonl'), join(runDir, 'server-console', 'commands.jsonl'), join(runDir, 'server-console', 'capture.json'), join(runDir, 'server-properties.diff.txt'), join(runDir, 'operator-commands.txt'), join(runDir, 'gamerule-verification.txt'), join(runDir, 'ACCEPTANCE-RECIPE.md')]
   const protectedHits = plannedPaths.filter((path) => protectedRoots.some((name) => path === join(resolve(container), name) || path.startsWith(join(resolve(container), name) + sep)))
   guards.push({
     id: 'protected_world_paths',
@@ -453,7 +471,15 @@ export function planPrepare({
     refusals.push({ reason: `world_already_generated: ${generated.map((entry) => `${entry.dir} (level.dat present)`).join(', ')} — a played world can never be a clean-run target; choose a NEW --level-name/--seed` })
   }
   const previousManifest = existsSync(manifestPath) ? safeJson(manifestPath) : null
-  const sameStagedTarget = previousManifest !== null && previousManifest?.target?.levelName === levelName2 && previousManifest?.target?.levelSeed === levelSeed && previousManifest?.descriptor?.sha256 === loaded.sha256
+  const sameStagedTarget = previousManifest !== null
+    && previousManifest?.target?.levelName === levelName2
+    && String(previousManifest?.target?.levelSeed) === levelSeed
+    && previousManifest?.target?.sourceSha === sourceShaForTarget
+    && previousManifest?.descriptor?.path === loaded.path
+    && previousManifest?.descriptor?.sha256 === loaded.sha256
+    && previousManifest?.resolved?.path === join(runDir, 'environment-resolved.json')
+    && previousManifest?.resolved?.sha256 === resolvedDescriptorSha256
+    && JSON.stringify(previousManifest?.serverLaunch ?? null) === JSON.stringify(launchIdentity ?? null)
   if (scanned.some((entry) => entry.exists) && !sameStagedTarget && generated.length === 0) {
     refusals.push({ reason: `target_level_name_exists: ${scanned.filter((entry) => entry.exists).map((entry) => entry.dir).join(', ')} already exists (not staged by this descriptor); the harness refuses to reuse or overwrite it` })
   }
@@ -461,14 +487,14 @@ export function planPrepare({
   // ---- the seed must not have been used by an earlier attempt --------------
   const attempts = existsSync(attemptsPath) ? safeJson(attemptsPath) : null
   const previousAttempts = Array.isArray(attempts?.attempts) ? attempts.attempts : []
-  const reused = previousAttempts.find((entry) => entry.levelName === levelName2 && String(entry.levelSeed) === levelSeed)
-  if (reused !== undefined && !(sameStagedTarget && reused.levelName === levelName2)) {
-    refusals.push({ reason: `seed_already_used: levelName=${levelName2} levelSeed=${levelSeed} was prepared at ${String(reused.preparedAt)}; a new attempt needs a NEW seed (--seed)` })
+  const reusedSeedEntries = previousAttempts.filter((entry) => String(entry.levelSeed) === levelSeed)
+  const reused = reusedSeedEntries[0]
+  const conflictingReservation = reusedSeedEntries.find((entry) => entry.levelName !== levelName2 || (entry.sourceSha != null && entry.sourceSha !== sourceShaForTarget))
+  if (reused !== undefined && (!sameStagedTarget || conflictingReservation !== undefined)) {
+    const reservation = conflictingReservation ?? reused
+    refusals.push({ reason: `seed_already_used: levelSeed=${levelSeed} was already reserved by levelName=${String(reservation.levelName)} at ${String(reservation.preparedAt)}; seed reservations apply across all ${milestone} target names, and a new attempt needs a NEW seed (--seed)` })
   }
-  if (reused !== undefined && sameStagedTarget) warnings.push(`this exact world/seed was prepared before at ${String(reused.preparedAt)}; the world has not been generated, so re-applying is an idempotent no-op (not a new attempt)`)
-  if (sameStagedTarget && previousManifest?.target?.sourceSha !== undefined && frozenSha !== null && previousManifest.target.sourceSha !== frozenSha) {
-    warnings.push(`the frozen sourceSha changed since this world was prepared (${String(previousManifest.target.sourceSha)} -> ${frozenSha}); the world has not been generated, so it is still clean, but every staged file is rewritten for the new SHA`)
-  }
+  if (reused !== undefined && sameStagedTarget) warnings.push(`this exact world/seed/source/descriptor/launch identity was prepared before at ${String(reused.preparedAt)}; the world has not been generated, so re-applying is an idempotent no-op (not a new attempt)`)
 
   // ---- the live properties we read (read-only) -----------------------------
   let propertiesChange = null
@@ -562,9 +588,6 @@ export function planPrepare({
       files.push({ path: join(worldDir, file.path), content: file.content, note: 'gamerule datapack (asserted on every world load, per dimension)' })
     }
   }
-  const resolvedForFile = { ...resolvedDoc, resolvedBy: { tool: 'tools/clean-run-prepare.mjs', from: loaded.path, fromSha256: loaded.sha256, overrides: overridesApplied, at: 'see manifest.json' } }
-  const resolvedDescriptorText = `${JSON.stringify(resolvedForFile, null, 2)}\n`
-  const resolvedDescriptorSha256 = sha256Text(resolvedDescriptorText)
   files.push({ path: join(runDir, 'environment-resolved.json'), content: resolvedDescriptorText, note: 'the descriptor the bundle and the clean-run gate must both consume' })
   const gameruleVerificationPath = join(runDir, 'gamerule-verification.txt')
   if (milestone === 'M3' && resolvedDoc.cleanRun?.gameruleMechanism?.primary === 'console') {
@@ -589,7 +612,7 @@ export function planPrepare({
     const diff = (propertiesChange?.changes ?? []).map((entry) => `${entry.key}: ${entry.from === null ? '(absent)' : entry.from} -> ${entry.to}`).join('\n')
     files.push({ path: join(runDir, 'server-properties.diff.txt'), content: `${diff}\n`, note: 'every key this proposal changes' })
   }
-  const operatorCommands = buildOperatorCommands({ container: resolve(container), runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, descriptorSha256: resolvedDescriptorSha256, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md'), milestone })
+  const operatorCommands = buildOperatorCommands({ container: resolve(container), runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, descriptorSha256: resolvedDescriptorSha256, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md'), milestone, serverImplementation: resolvedDoc.values.serverImplementation })
   files.push({ path: join(runDir, 'operator-commands.txt'), content: `${operatorCommands.join('\n')}\n`, note: 'the exact ordered commands for the clean attempt' })
   const recipeSource = milestone === 'M3' ? join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md') : null
   if (recipeSource !== null && existsSync(recipeSource)) files.push({ path: join(runDir, 'ACCEPTANCE-RECIPE.md'), content: readFileSync(recipeSource, 'utf8'), note: 'copy of the acceptance recipe, next to the run evidence' })
@@ -628,10 +651,12 @@ export function planPrepare({
     operatorCommands,
     resolved: resolvedDoc,
     resolvedForFile,
+    resolvedDescriptorSha256,
     check,
     loaded,
     overridesApplied,
     container: resolve(container),
+    launchIdentity,
     worldDir,
     runDir,
     runRootDir,
@@ -684,14 +709,14 @@ function shellQuote(value) {
 }
 
 /** The ordered operator commands. Nothing here is executed by this tool. */
-export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, descriptorSha256 = null, root = null, recipePath, milestone = 'M3' }) {
+export function buildOperatorCommands({ container, runDir, levelName, levelSeed, sourceSha, descriptorSha256 = null, root = null, recipePath, milestone = 'M3', serverImplementation = 'leaf-1.21.11-178.jar' }) {
   const tree = root === null || root === undefined ? REPO_ROOT : resolve(root)
   if (milestone === 'M2') {
     return [
       `# ==== M2 REPRODUCTION: ${levelName} (seed ${levelSeed}) on sourceSha ${String(sourceSha)} ====`,
       '# This plan never replaces the shared server.properties; the harness gives the server this staged file with --config.',
       `# Server configuration artifact: ${runDir}/server.properties.clean`,
-      `cd ${container} && java -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar leaf-1.21.11-178.jar --nogui --config ${runDir}/server.properties.clean --universe ${container} --level-name ${levelName}`,
+      `cd ${container} && ${EXPECTED_JAVA_EXECUTABLE} -Xmx1G -Xms1G -DPaper.IgnoreJavaVersion=true -jar ${serverImplementation} --nogui --config ${runDir}/server.properties.clean --universe ${container} --level-name ${levelName}`,
       `# Verify the generated seed is ${levelSeed}, the fresh world has no prior level.dat, and difficulty remains peaceful.`,
       `# Keep the run's BOOT source=${String(sourceSha)} and run-scoped M2 evidence with the campaign record.`,
       `# Driver checkout: ${tree}/buddy-driver`,
@@ -739,7 +764,7 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
       '--console-input', join(runDir, 'server-console', 'server-console.fifo'),
       '--stdout-log', join(runDir, 'server-console', 'leaf-server.log'),
       '--',
-      '/usr/lib/jvm/java-21-openjdk-amd64/bin/java',
+      EXPECTED_JAVA_EXECUTABLE,
       '-Xmx1G',
       '-Xms1G',
       '-DPaper.IgnoreJavaVersion=true',
@@ -751,7 +776,7 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
       '--level-name', levelName,
     ].map(shellQuote).join(' ') + ' &',
     `#    --config selects the staged seed/config; --universe and --level-name select the descriptor's world. Never pass --bonusChest.`,
-    `#    The wrapper keeps Leaf stdin attached to this run-private 0600 FIFO and captures stdout/stderr to a 0600 log under the 0700 server-console directory.`,
+    `#    The wrapper accepts only the generated read-only seed/gamerule query sequence from the private 0600 FIFO, relays it to Leaf stdin, and captures all attempts to a private journal. No other console command is forwarded; use SIGTERM on the Leaf PID as the emergency stop.`,
     `# 4. Configure the external provider environment file once, mode 0600, without committing it: ${environmentFile}`,
     `#    It must carry the currently authorized Jev/System2 provider settings and credentials; no model is selected here.`,
     `# 5. launch the exact resident process under a user-systemd transient service:`,
@@ -760,7 +785,7 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `#    The Leaf launcher records its observed --config argv, process identity, staged file SHA-256, and prepared-manifest binding. The HOST BUDDY_SERVER_PROPERTIES_PATH only supplies the acceptance-record seed read. BOOT must report source=${String(sourceSha)} and bind that attestation to this runId and descriptor SHA.`,
     `# 6. after the resident BOOT, machine-capture the live read-only console queries (seed + each declared gamerule in each declared dimension):`,
     `bun tools/clean-run-console-capture.mjs --environment ${runDir}/environment-resolved.json --attestation ${runDir}/server-start-attestation.json --resident-log ${driverDir}/buddy.log --run <RUN_ID>`,
-    `#    This creates the descriptor/run/PID-bound commands.jsonl, capture.json, and gamerule-verification.txt. Any missing or contradictory Leaf response exits UNKNOWN; the gate will not accept a pasted transcript.`,
+    `#    This creates the descriptor/run/PID-bound commands.jsonl, capture.json, and gamerule-verification.txt. The gate requires the relay journal to contain exactly this read-only sequence and remains invalid if console input changes afterward.`,
     `#    The command helper only sends read-only seed and gamerule queries. Review the actual responses in ${join(runDir, 'server-console', 'leaf-server.log')}.`,
     `# 7. continue the M3 attempt (Nether arrival + 12 eyes) and record the runId from BOOT.`,
     `# 8. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
@@ -849,10 +874,11 @@ export function applyPlan(plan, { now = () => new Date(), write = () => {} } = {
     generatedAt: nowIso,
     mode: 'apply',
     descriptor: { path: plan.loaded.path, sha256: plan.loaded.sha256 },
-    resolved: { path: join(plan.runDir, 'environment-resolved.json'), overrides: plan.overridesApplied },
+    resolved: { path: join(plan.runDir, 'environment-resolved.json'), sha256: plan.resolvedDescriptorSha256, overrides: plan.overridesApplied },
     target: { levelName: plan.levelName, levelSeed: plan.levelSeed, sourceSha: plan.sourceSha, worldDir: plan.worldDir, container: plan.container, levelDatPresentAtPrepare: false },
     attemptLedger: { path: attemptsPath, sha256: sha256Text(attemptsText) },
     serverProperties: plan.propertiesChange ?? null,
+    serverLaunch: plan.launchIdentity,
     guards: plan.guards,
     propertyChecks: plan.propertyChecks ?? [],
     files: fileHashes,
