@@ -962,9 +962,9 @@ const STONE_STEP: StepCut = {
 
 // ---------------------------------------------------------------------------
 // (d) a grounded leg that runs but cannot complete names ITS obstruction: the
-// offering layer held the tool (so the route was offered), the tool is gone at
-// execution time, so the marker carries the executed leg's own refusal instead
-// of a generic path code.
+// offering layer saw a clearable step, then the live block changed to bedrock
+// before execution. The stale offer must fail with the live leg's refusal rather
+// than claim a climb or return a generic path code.
 // ---------------------------------------------------------------------------
 {
   const grid = gateGrid()
@@ -975,17 +975,44 @@ const STONE_STEP: StepCut = {
   const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
   const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], { diamond_pickaxe: 1, cobblestone: 32 })
   const candidate = enterCandidate(fixture, state)
-  // the route was planned with the pickaxe; execution time has empty hands
-  fixture.inventoryItems.length = 0
+  // The live target changed after the candidate was grounded. Stone could be
+  // cleared by hand, so use bedrock to model a real mechanical refusal.
+  fixture.grid.set(key(STONE_STEP.cut), cell('bedrock'))
   const result = await runEntry(fixture, candidate, false)
   const blockedLine = result.messages.find((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED'))
   check(
-    '(d) a leg that cannot complete reports its own obstruction (dig_refused), not a generic path code',
+    '(d) a stale vertical offer whose live step became unbreakable reports that refusal, not a generic path code',
     result.status === 'failed' &&
       blockedLine !== undefined &&
       blockedLine.includes('reason=route_blocked') &&
-      blockedLine.includes('detail=dig_refused'),
+      blockedLine.includes('detail=dig_refused:not_diggable') &&
+      fixture.digs.length === 0,
     `status=${result.status} failure=${result.failure ?? 'none'} marker=[${blockedLine ?? 'none'}]`,
+  )
+}
+
+// A missing harvest tool does not make a mechanically diggable clearance
+// impossible. Route cuts do not need drops, so the same generic clearance rule
+// may choose a slower hand break and still complete the entry.
+{
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('26,66,8', cell('stone'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, false)
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], {})
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true)
+  const climb = result.messages.find((line) => line.startsWith('PORTAL_ENTRY_CLIMB')) ?? ''
+  check(
+    '(d2) a stone route cut remains clearable by hand when no harvest pickaxe is carried',
+    candidate.meta.vertical === 'staircase-up' &&
+      result.status === 'done' &&
+      result.verified === true &&
+      fixture.digs.includes('stone@26,66,8') &&
+      climb.includes('outcome=climbed'),
+    `vertical=${String(candidate.meta.vertical)} status=${result.status} verified=${result.verified} digs=[${fixture.digs.join(',')}] climb=[${climb}]`,
   )
 }
 
@@ -1222,7 +1249,7 @@ function trialPathFacts(fixture: FixtureBot, executor: Executor, alsoBlockEntry:
 
 // ---------------------------------------------------------------------------
 // (p) NO GROUNDED CLIMB: the typed refusal names the interior's height, the
-// climb that was available and the fact that failed - never a silent no-op.
+// missing climb and why the only sensor step is mechanically unbreakable.
 // ---------------------------------------------------------------------------
 {
   const grid = gateGrid()
@@ -1231,8 +1258,11 @@ function trialPathFacts(fixture: FixtureBot, executor: Executor, alsoBlockEntry:
   grid.set('26,65,8', cell('stone'))
   grid.set('26,66,8', cell('stone'))
   const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
-  // empty hands: no placeable, and the only step cut needs a pickaxe that is gone
-  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], {})
+  // Bedrock cannot be cleared even with a harvest tool; with no placeable block,
+  // the otherwise safe-shaped step cannot realize the climb.
+  fixture.grid.set(key(STONE_STEP.cut), cell('bedrock'))
+  const bedrockStep: StepCut = { ...STONE_STEP, name: 'bedrock' }
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [bedrockStep], {})
   const candidate = enterCandidate(fixture, state)
   const result = await runEntry(fixture, candidate, true, false, stubStuckPath(fixture))
   const refused = result.messages.find((line) => line.startsWith(PORTAL_ENTRY_CLIMB_REFUSED)) ?? ''
