@@ -28,7 +28,7 @@ import {
   uncompiledMercuryGoals,
 } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTransport } from './mercury-system2.ts'
-import { applyCompiledPlan, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, isOptionComplete, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { formatCompiledGoalRows, formatSystem2PlanApplied } from '../jev-agent/src/system2Authority.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { OptionCompilingSystem2 } from './option-brain.ts'
@@ -559,6 +559,57 @@ addCase('(v) a goal the Option compiler rejects is typed onto the plan, not sile
       out.provenance?.uncompiled?.[0]?.kind === 'option_compile_rejected' &&
       (out.provenance?.uncompiled?.[0]?.detail ?? '').includes('targetY'),
     detail: `goals=${out.goals.length} reason=${String(out.provenance?.noGoalsReason)} uncompiled=${JSON.stringify(out.provenance?.uncompiled ?? [])}`,
+  }
+})
+
+addCase('(v) a delayed System2 answer compiles against the body’s fresh post-MOVE snapshot', async () => {
+  let resolvePlan: (plan: System2Plan) => void = () => {}
+  const delayed: System2Brain = {
+    model: 'fixture-brain',
+    plan: () => new Promise<System2Plan>((resolve) => { resolvePlan = resolve }),
+  }
+  let bodyPosition = { x: 0, y: 64, z: 0 }
+  const observedPositions: Array<{ x: number; y: number; z: number }> = []
+  const brain = new OptionCompilingSystem2(delayed, {
+    log: () => {},
+    snapshot: () => {
+      observedPositions.push({ ...bodyPosition })
+      return makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:overworld', position: bodyPosition, health: 20, toolRank: 0 })
+    },
+    enabled: true,
+  })
+  const pending = brain.plan(measuredRequest())
+  bodyPosition = { x: 10, y: 64, z: 0 }
+  const gotoGoal = {
+    kind: 'goto' as const,
+    description: 'move to the grounded point',
+    targetItem: null,
+    requiredCount: 1,
+    targetPosition: { ...bodyPosition },
+    dimension: 'minecraft:overworld',
+  }
+  resolvePlan({
+    op: 'patch',
+    goals: [gotoGoal],
+    note: 'fixture delayed goto',
+    provenance: { intentSource: 'intent', intent: 'go to the selected point' },
+  })
+  const result = await pending
+  const compiled = result.goals[0]?.optionSpec
+  const freshSnapshot = makeOptionSnapshot({
+    inventory: {},
+    dimension: 'minecraft:overworld',
+    position: bodyPosition,
+    health: 20,
+    toolRank: 0,
+  })
+  return {
+    pass:
+      observedPositions.length === 1 &&
+      observedPositions[0]?.x === 10 &&
+      compiled !== undefined &&
+      isOptionComplete(compiled, freshSnapshot),
+    detail: `snapshotAtCompile=${JSON.stringify(observedPositions)} compiledSuccess=${JSON.stringify(compiled?.success ?? null)} completeAtFreshBody=${compiled === undefined ? false : isOptionComplete(compiled, freshSnapshot)}`,
   }
 })
 

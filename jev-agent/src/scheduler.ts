@@ -265,6 +265,7 @@ export const defaultSchedulerOptions: SchedulerOptions = {
  * reset the revision under which a scan result was cached.
  */
 let worldMutationCount = 0
+let worldBlockMutationCount = 0
 
 export class DecisionScheduler {
   private readonly bot: Bot
@@ -335,6 +336,17 @@ export class DecisionScheduler {
   get worldRevision(): number | null {
     if (!this.observesBlocks || !this.observesChunks || !this.started) return null
     return worldMutationCount
+  }
+
+  /**
+   * Exact observed block-state mutation revision, excluding chunk load/unload.
+   * Chunk residency can change solely because a body moved while an async plan
+   * was in flight; that is a new observation window, not a world edit. The
+   * separately sensed block facts still fence newly discovered semantics.
+   */
+  get blockRevision(): number | null {
+    if (!this.observesBlocks || !this.started) return null
+    return worldBlockMutationCount
   }
 
   onDecision(handler: (event: TriggerEvent) => void): void {
@@ -411,6 +423,7 @@ export class DecisionScheduler {
     // Counted before the trigger filter: the revision must witness every block
     // state change, not only the "block became air" ones this trigger wants.
     worldMutationCount += 1
+    worldBlockMutationCount += 1
     if (oldBlock === null || oldBlock.type === 0 || newBlock.type !== 0) return
     this.request('block_broken', {
       block: oldBlock.name,

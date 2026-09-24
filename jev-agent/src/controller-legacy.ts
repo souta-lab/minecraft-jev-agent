@@ -3169,7 +3169,12 @@ export class JevController {
       worldEpoch: this.options.worldEpoch,
       stateFingerprint: this.lastStateFingerprint || 'unobserved',
       semanticStateFingerprint,
-      authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+      ...this.system2ApplyIdentity(this.lastWorldState),
+      // Physical/search progress advances the general progress epoch, but does
+      // not by itself stale a long-horizon WHAT answer. Human intent and queue
+      // edits have their own fences; safety-critical triggers still advance this
+      // epoch and the sampled threat fingerprint below.
+      authorityEpoch: this.criticalStateVersion,
     }
     const request: System2PlanRequest = {
       reason: 'queue_empty',
@@ -8807,6 +8812,139 @@ export class JevController {
     )
   }
 
+  /**
+   * The semantic inputs that must still hold when an asynchronous System2 plan
+   * returns. Body position and body-relative reach are deliberately absent: a
+   * successful MOVE does not change WHAT authority. World topology, resource
+   * truth, inventory, objective, dimension and the safety envelope remain hard
+   * fences. OptionCompilingSystem2 recompiles returned goals against a fresh
+   * live snapshot before this controller can atomically apply them.
+   */
+  private system2ApplyIdentity(state: WorldState | null): Pick<
+    System2RequestContext,
+    | 'objectiveFingerprint'
+    | 'inventoryFingerprint'
+    | 'dimension'
+    | 'worldTopologyRevision'
+    | 'worldFactsFingerprint'
+    | 'threatFingerprint'
+    | 'survivalFingerprint'
+  > {
+    const world = state ?? this.lastWorldState
+    const counts = world?.inventory.counts ?? this.inventorySnapshot()
+    const inventoryFingerprint = Object.entries(counts)
+      .filter(([, count]) => count > 0)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([item, count]) => `${item}=${count}`)
+      .join(',')
+    const result: Pick<
+      System2RequestContext,
+      | 'objectiveFingerprint'
+      | 'inventoryFingerprint'
+      | 'dimension'
+      | 'worldTopologyRevision'
+      | 'worldFactsFingerprint'
+      | 'threatFingerprint'
+      | 'survivalFingerprint'
+    > = {
+      objectiveFingerprint: JSON.stringify(this.objectiveState()),
+      inventoryFingerprint,
+      dimension: this.bot.game?.dimension ?? world?.self.dimension ?? null,
+    }
+    const topologyRevision = this.scheduler.blockRevision
+    if (topologyRevision !== null) result.worldTopologyRevision = topologyRevision
+    if (world === null) return result
+
+    // Do not include distance, inReach, visible, adjacent-stand geometry or
+    // position. They are body-relative affordances and are recomputed by the
+    // live sensor / Option compiler when the answer is applied. Preserve the
+    // sensed resource identity and actual block truth so a changed/removed/new
+    // source cannot inherit an old plan.
+    const blocks = world.blocks
+      .map((block) => ({
+        kind: block.kind,
+        name: block.name,
+        at: [block.position.x, block.position.y, block.position.z],
+        diggable: block.diggable,
+        yield: block.yield ?? null,
+        harvestTool: block.harvestTool ?? null,
+        harvestTier: block.harvestTier ?? null,
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+    const resources = (world.signals.knownResources ?? [])
+      .map((resource) => ({
+        kind: resource.kind,
+        name: resource.name,
+        at: [resource.position.x, resource.position.y, resource.position.z],
+        dimension: resource.dimension ?? null,
+        worldEpoch: resource.worldEpoch ?? null,
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+    result.worldFactsFingerprint = JSON.stringify({
+      blocks,
+      resources,
+      stations: world.craftingTables
+        .map((station) => [station.x, station.y, station.z])
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+      furnaces: (world.furnaces ?? [])
+        .map((station) => [station.x, station.y, station.z])
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    })
+    const threat = world.signals.threat ?? null
+    const hazard = world.self.envHazard
+    result.threatFingerprint = JSON.stringify({
+      hostiles: world.entities
+        .filter((entity) => entity.hostile)
+        .map((entity) => ({
+          id: entity.id,
+          name: entity.name,
+          // Entity position is world-relative, unlike the `distance` derived
+          // from the player's position. A hostile moving during the request is
+          // a changed threat input; the player moving alone leaves this stable.
+          position: [entity.position.x, entity.position.y, entity.position.z],
+          heldItem: entity.heldItem ?? null,
+          activeItemUse: entity.activeItemUse ?? null,
+          health: entity.health ?? null,
+          attackedSelf: entity.attackedSelf === true,
+        }))
+        .sort((left, right) => left.id - right.id),
+      envelope: threat === null
+        ? null
+        : {
+            active: threat.active,
+            threatId: threat.threatId,
+            threatName: threat.threatName,
+            threatHeldItem: threat.threatHeldItem,
+            threatEngaged: threat.threatEngaged,
+            threatLineOfSight: threat.threatLineOfSight,
+            inContact: threat.inContact,
+            inDanger: threat.inDanger,
+            hostileCount: threat.hostileCount,
+          },
+    })
+    result.survivalFingerprint = JSON.stringify({
+      health: world.self.health,
+      food: world.self.food,
+      air: world.self.air ?? null,
+      heldItem: world.self.heldItem ?? null,
+      offhand: world.self.offhand ?? null,
+      armor: world.self.armor ?? null,
+      activeItemUse: world.self.activeItemUse ?? null,
+      hazard: hazard?.active === true
+        ? {
+            inFire: hazard.inFire,
+            inLava: hazard.inLava,
+            onFire: hazard.onFire,
+            drowning: hazard.drowning,
+            headInWater: hazard.headInWater,
+            adjacentLava: hazard.adjacentLava,
+            kinds: hazard.kinds,
+          }
+        : null,
+    })
+    return result
+  }
+
   private rememberSystem2PlanOutcome(input: {
     proposalId: string
     operation: 'continue' | 'patch' | 'replace' | 'abandon' | 'complete' | 'abort'
@@ -8966,10 +9104,12 @@ export class JevController {
       worldEpoch: this.options.worldEpoch,
       stateFingerprint: this.lastStateFingerprint || 'unobserved',
       semanticStateFingerprint,
-      // Local semantic progress and critical threat changes both invalidate an
-      // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
-      // events that are intentionally absent from the compact world fingerprint.
-      authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+      ...this.system2ApplyIdentity(this.lastWorldState),
+      // Search/body progress is not a WHAT change. Queue, objective, inventory,
+      // world and threat inputs are fenced independently above/below; this epoch
+      // catches safety-critical events even when the current sensor snapshot has
+      // not yet been rebuilt for the event.
+      authorityEpoch: this.criticalStateVersion,
     }
     const request: System2PlanRequest = {
       reason,
@@ -9047,10 +9187,8 @@ export class JevController {
           optionTemplateId: current.current?.semanticOptionTemplateId ?? current.current?.optionTemplateId ?? null,
           worldEpoch: this.options.worldEpoch,
           stateFingerprint: this.lastStateFingerprint || 'unobserved',
-          // Local semantic progress and critical threat changes both invalidate an
-          // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
-          // events that are intentionally absent from the compact world fingerprint.
-          authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+          ...this.system2ApplyIdentity(this.lastWorldState),
+          authorityEpoch: this.criticalStateVersion,
           actionInFlight: system2BodyOwned(this.executor.current?.kind ?? null),
         }
         const validity = evaluateSystem2Apply(requestContext, currentContext)
@@ -11981,6 +12119,26 @@ export class JevController {
 
   private logCandidates(candidates: readonly Candidate[], state: WorldState): void {
     const option = state.currentOption
+    const sensorBlocks = state.blocks
+      .filter((block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore')
+      .map((block) => ({
+        kind: block.kind,
+        name: block.name,
+        yield: block.yield ?? null,
+        position: block.position,
+        distance: block.distance,
+        diggable: block.diggable,
+        inReach: block.inReach,
+        visible: block.visible ?? null,
+        hasAdjacentStandable: block.hasAdjacentStandable,
+        adjacentStandable: block.adjacentStandable,
+      }))
+      .sort((left, right) =>
+        `${left.kind}|${left.name}|${left.position.x},${left.position.y},${left.position.z}`.localeCompare(
+          `${right.kind}|${right.name}|${right.position.x},${right.position.y},${right.position.z}`,
+        ),
+      )
+      .slice(0, 32)
     const signature = JSON.stringify({
       optionInstanceId: option?.instanceId ?? null,
       optionTemplateId: option?.templateId ?? null,
@@ -11992,6 +12150,7 @@ export class JevController {
         prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
         missingCapability: candidate.meta.missingCapability ?? null,
       })),
+      sensorBlocks,
     })
     if (signature === this.lastCandidateSignature) return
     this.lastCandidateSignature = signature
@@ -12019,18 +12178,7 @@ export class JevController {
           included: true,
           exclusionReason: null,
         })),
-        sensorBlocks: state.blocks
-          .filter((block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore')
-          .slice(0, 32)
-          .map((block) => ({
-            kind: block.kind,
-            name: block.name,
-            yield: block.yield ?? null,
-            position: block.position,
-            inReach: block.inReach,
-            hasAdjacentStandable: block.hasAdjacentStandable,
-            adjacentStandable: block.adjacentStandable,
-          })),
+        sensorBlocks,
       },
       this.tickCounter,
     )

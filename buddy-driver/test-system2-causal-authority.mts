@@ -34,20 +34,133 @@ const request = {
   optionTemplateId: 'explore:cave',
   worldEpoch: 4,
   stateFingerprint: 'fp-before',
+  objectiveFingerprint: 'objective:dragon',
+  inventoryFingerprint: 'oak_log=5',
+  dimension: 'minecraft:overworld',
+  worldTopologyRevision: 30,
+  worldFactsFingerprint: 'known-resources=oak_log@10,64,10',
+  threatFingerprint: 'clear',
+  survivalFingerprint: 'food=20;health=20;held=null',
   authorityEpoch: 11,
 }
-const stale = evaluateSystem2Apply(request, {
+const bodyMoved = evaluateSystem2Apply(request, {
   queueRevision: 7,
   optionInstanceId: 'instance-old',
   optionTemplateId: 'explore:cave',
   worldEpoch: 4,
+  // This fingerprint includes body position and is kept for diagnostics, but a
+  // successful MOVE alone does not revoke an otherwise-current System2 answer.
   stateFingerprint: 'fp-after-descend',
-  authorityEpoch: 12,
+  objectiveFingerprint: 'objective:dragon',
+  inventoryFingerprint: 'oak_log=5',
+  dimension: 'minecraft:overworld',
+  worldTopologyRevision: 30,
+  worldFactsFingerprint: 'known-resources=oak_log@10,64,10',
+  threatFingerprint: 'clear',
+  survivalFingerprint: 'food=20;health=20;held=null',
+  authorityEpoch: 11,
   actionInFlight: false,
 })
-assert.equal(stale.apply, false)
-assert.ok(stale.reasons.includes('state_fingerprint_changed'))
-assert.ok(stale.reasons.includes('authority_epoch_changed'))
+assert.equal(bodyMoved.apply, true, `body-only movement reasons=${bodyMoved.reasons.join(',')}`)
+assert.deepEqual(bodyMoved.reasons, [])
+const bodyMovedAgain = evaluateSystem2Apply(request, {
+  queueRevision: 7,
+  optionInstanceId: 'instance-old',
+  optionTemplateId: 'explore:cave',
+  worldEpoch: 4,
+  stateFingerprint: 'fp-after-multiple-search-moves',
+  objectiveFingerprint: 'objective:dragon',
+  inventoryFingerprint: 'oak_log=5',
+  dimension: 'minecraft:overworld',
+  // Chunk residency may change as the body moves; only an actual observed block
+  // edit advances this topology fence.
+  worldTopologyRevision: 30,
+  worldFactsFingerprint: 'known-resources=oak_log@10,64,10',
+  threatFingerprint: 'clear',
+  survivalFingerprint: 'food=20;health=20;held=null',
+  authorityEpoch: 11,
+  actionInFlight: false,
+})
+assert.equal(bodyMovedAgain.apply, true, `multiple body-only moves reasons=${bodyMovedAgain.reasons.join(',')}`)
+const changedWorldFacts = evaluateSystem2Apply(request, {
+  ...request,
+  worldFactsFingerprint: 'known-resources=oak_log@10,64,10;stone@12,64,10',
+  actionInFlight: false,
+})
+assert.equal(changedWorldFacts.apply, false)
+assert.ok(changedWorldFacts.reasons.includes('world_facts_changed'))
+const changedInventory = evaluateSystem2Apply(request, {
+  ...request,
+  inventoryFingerprint: 'oak_log=4',
+  actionInFlight: false,
+})
+assert.equal(changedInventory.apply, false)
+assert.ok(changedInventory.reasons.includes('inventory_changed'))
+const changedQueue = evaluateSystem2Apply(request, {
+  ...request,
+  queueRevision: request.queueRevision + 1,
+  actionInFlight: false,
+})
+assert.equal(changedQueue.apply, false)
+assert.ok(changedQueue.reasons.includes('queue_revision_changed'))
+const changedDimension = evaluateSystem2Apply(request, {
+  ...request,
+  dimension: 'minecraft:the_nether',
+  actionInFlight: false,
+})
+assert.equal(changedDimension.apply, false)
+assert.ok(changedDimension.reasons.includes('dimension_changed'))
+const changedTopology = evaluateSystem2Apply(request, {
+  ...request,
+  worldTopologyRevision: request.worldTopologyRevision + 1,
+  actionInFlight: false,
+})
+assert.equal(changedTopology.apply, false)
+assert.ok(changedTopology.reasons.includes('world_topology_changed'))
+const changedThreat = evaluateSystem2Apply(request, {
+  ...request,
+  threatFingerprint: 'zombie:in_contact',
+  actionInFlight: false,
+})
+assert.equal(changedThreat.apply, false)
+assert.ok(changedThreat.reasons.includes('threat_state_changed'))
+const changedSurvival = evaluateSystem2Apply(request, {
+  ...request,
+  survivalFingerprint: 'food=0;health=5;held=stone_pickaxe',
+  actionInFlight: false,
+})
+assert.equal(changedSurvival.apply, false)
+assert.ok(changedSurvival.reasons.includes('survival_state_changed'))
+const changedObjective = evaluateSystem2Apply(request, {
+  ...request,
+  objectiveFingerprint: 'objective:other',
+  actionInFlight: false,
+})
+assert.equal(changedObjective.apply, false)
+assert.ok(changedObjective.reasons.includes('objective_changed'))
+const criticalEvent = evaluateSystem2Apply(request, {
+  ...request,
+  authorityEpoch: request.authorityEpoch + 1,
+  actionInFlight: false,
+})
+assert.equal(criticalEvent.apply, false)
+assert.ok(criticalEvent.reasons.includes('authority_epoch_changed'))
+const legacyRequest = {
+  requestId: 'req-legacy',
+  queueRevision: 7,
+  optionInstanceId: null,
+  optionTemplateId: null,
+  worldEpoch: 4,
+  stateFingerprint: 'legacy-before',
+  authorityEpoch: 11,
+}
+const legacyStateFingerprintChange = evaluateSystem2Apply(legacyRequest, {
+  ...legacyRequest,
+  stateFingerprint: 'legacy-after',
+  actionInFlight: false,
+})
+assert.equal(legacyStateFingerprintChange.apply, false)
+assert.ok(legacyStateFingerprintChange.reasons.includes('state_fingerprint_changed'))
 assert.equal(
   evaluateSystem2Apply(request, {
     ...request,

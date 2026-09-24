@@ -71,6 +71,23 @@ export interface System2RequestContext {
   stateFingerprint: string
   /** World/blocker fingerprint used to compare System2 causal outcomes. */
   semanticStateFingerprint?: string
+  /**
+   * Semantic inputs that must remain stable while the asynchronous answer is in
+   * flight. Unlike `stateFingerprint`, this intentionally excludes body position
+   * and other movement-only facts; the response is recompiled against the live
+   * Option snapshot before the queue is mutated.
+   */
+  objectiveFingerprint?: string
+  inventoryFingerprint?: string
+  dimension?: string | null
+  /** Exact block-state mutation revision, omitted when the scheduler cannot prove it. */
+  worldTopologyRevision?: number
+  /** Stable sensed-world facts, excluding body-relative distance/reachability. */
+  worldFactsFingerprint?: string
+  /** Threat identities and safety state, excluding movement-only distance changes. */
+  threatFingerprint?: string
+  /** Hunger, health, equipment and active body capabilities not represented in inventory counts. */
+  survivalFingerprint?: string
   authorityEpoch: number
 }
 
@@ -80,6 +97,13 @@ export interface System2ApplyState {
   optionTemplateId: string | null
   worldEpoch: number
   stateFingerprint: string
+  objectiveFingerprint?: string
+  inventoryFingerprint?: string
+  dimension?: string | null
+  worldTopologyRevision?: number
+  worldFactsFingerprint?: string
+  threatFingerprint?: string
+  survivalFingerprint?: string
   authorityEpoch: number
   /** An in-flight physical action owns the body; a plan must not replace it. */
   actionInFlight: boolean
@@ -90,6 +114,13 @@ export type System2DiscardReason =
   | 'option_instance_changed'
   | 'option_template_changed'
   | 'world_epoch_changed'
+  | 'objective_changed'
+  | 'inventory_changed'
+  | 'dimension_changed'
+  | 'world_topology_changed'
+  | 'world_facts_changed'
+  | 'threat_state_changed'
+  | 'survival_state_changed'
   | 'state_fingerprint_changed'
   | 'authority_epoch_changed'
   | 'action_in_flight'
@@ -118,7 +149,45 @@ export function evaluateSystem2Apply(
   if (current.optionInstanceId !== request.optionInstanceId) reasons.push('option_instance_changed')
   if (current.optionTemplateId !== request.optionTemplateId) reasons.push('option_template_changed')
   if (current.worldEpoch !== request.worldEpoch) reasons.push('world_epoch_changed')
-  if (current.stateFingerprint !== request.stateFingerprint) reasons.push('state_fingerprint_changed')
+  if (
+    request.objectiveFingerprint !== undefined &&
+    current.objectiveFingerprint !== request.objectiveFingerprint
+  ) reasons.push('objective_changed')
+  if (
+    request.inventoryFingerprint !== undefined &&
+    current.inventoryFingerprint !== request.inventoryFingerprint
+  ) reasons.push('inventory_changed')
+  if (request.dimension !== undefined && current.dimension !== request.dimension) reasons.push('dimension_changed')
+  if (
+    request.worldTopologyRevision !== undefined &&
+    current.worldTopologyRevision !== request.worldTopologyRevision
+  ) reasons.push('world_topology_changed')
+  if (
+    request.worldFactsFingerprint !== undefined &&
+    current.worldFactsFingerprint !== request.worldFactsFingerprint
+  ) reasons.push('world_facts_changed')
+  if (
+    request.threatFingerprint !== undefined &&
+    current.threatFingerprint !== request.threatFingerprint
+  ) reasons.push('threat_state_changed')
+  if (
+    request.survivalFingerprint !== undefined &&
+    current.survivalFingerprint !== request.survivalFingerprint
+  ) reasons.push('survival_state_changed')
+  const hasGranularSemanticFence =
+    request.objectiveFingerprint !== undefined ||
+    request.inventoryFingerprint !== undefined ||
+    request.dimension !== undefined ||
+    request.worldTopologyRevision !== undefined ||
+    request.worldFactsFingerprint !== undefined ||
+    request.threatFingerprint !== undefined ||
+    request.survivalFingerprint !== undefined
+  // Older embedders have only the broad fingerprint. Keep their historical
+  // stale-result fence; production callers with explicit semantic identity use
+  // those fields so body-only movement does not invalidate a plan.
+  if (!hasGranularSemanticFence && current.stateFingerprint !== request.stateFingerprint) {
+    reasons.push('state_fingerprint_changed')
+  }
   if (current.authorityEpoch !== request.authorityEpoch) reasons.push('authority_epoch_changed')
   if (current.actionInFlight) reasons.push('action_in_flight')
   return { apply: reasons.length === 0, reasons }
