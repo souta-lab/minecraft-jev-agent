@@ -14,8 +14,8 @@ import type { SkillOutcomeLink } from './artifacts.ts'
 import type { StaleReason } from './identity.ts'
 
 /** The current #437 schema string and version (`JEV_PROJECTION_SCHEMA`/`JEV_PROJECTION_VERSION`). */
-export const LANDED_437_PROJECTION_ID = 'jev-semantic-projection/v5'
-export const LANDED_437_PROJECTION_VERSION = 5
+export const LANDED_437_PROJECTION_ID = 'jev-semantic-projection/v6'
+export const LANDED_437_PROJECTION_VERSION = 6
 
 /**
  * The landed #437 `SkillTerminalReason` value space. The harness's

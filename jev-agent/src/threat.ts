@@ -38,7 +38,7 @@
 //   - Jev owns WHICH grounded survival action (ATTACK / RETREAT / ESCALATE);
 //   - System2 owns WHAT NEXT when the local layer proves it cannot end the
 //     situation (the `THREAT_NO_ESCAPE` capability gap).
-import type { EntityState, LastDamageEvidence, Vec3Json } from './state.ts'
+import type { ActiveItemUseState, EntityState, LastDamageEvidence, Vec3Json } from './state.ts'
 
 /**
  * Hostile melee reach. A hostile inside this envelope is already hitting the
@@ -458,7 +458,7 @@ export function threatStandoffRange(name: string): number {
 /** The entity facts this module reads; a structural subset of `EntityState`. */
 export type ThreatEntityLike = Pick<
   EntityState,
-  'id' | 'name' | 'hostile' | 'distance' | 'position' | 'attackedSelf' | 'lineOfSight' | 'heldItem'
+  'id' | 'name' | 'hostile' | 'distance' | 'position' | 'attackedSelf' | 'lineOfSight' | 'heldItem' | 'activeItemUse'
 >
 
 export type ThreatEntryReason = 'contact' | 'danger' | 'engaged'
@@ -545,6 +545,8 @@ export interface ThreatStateEvidence {
   threatDistance: number | null
   /** that threat holds an item (a skeleton's bow, a zombie's sword), or null */
   threatHeldItem: string | null
+  /** server-observed active hand item use, or null when this version did not expose it */
+  threatActiveItemUse?: ActiveItemUseState | null
   /** the threat hit the body (Mineflayer attribution), or has line of sight after damage */
   threatEngaged: boolean
   threatLineOfSight: boolean | null
@@ -662,6 +664,7 @@ export class ThreatTracker {
       threatName: threat?.name ?? null,
       threatDistance: threat?.distance ?? null,
       threatHeldItem: threat?.heldItem ?? null,
+      threatActiveItemUse: threat?.activeItemUse ?? null,
       threatEngaged: threat?.attackedSelf === true,
       threatLineOfSight: typeof threat?.lineOfSight === 'boolean' ? threat.lineOfSight : null,
       inContact: threat !== null && threat.distance <= MELEE_THREAT_REACH,

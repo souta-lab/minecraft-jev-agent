@@ -108,7 +108,7 @@ export const PROJECTION_SCHEMAS: readonly ProjectionSchema[] = [
     version: LANDED_437_PROJECTION_VERSION,
     owner: 'jev-agent/src/jevSemanticProjection.ts',
     description:
-      '#437 jev-semantic-projection/v5 model view: banded/compacted semantic facts only, `counts` excluded as evidence.',
+      '#437 jev-semantic-projection/v6 model view: banded/compacted semantic facts only, `counts` excluded as evidence.',
     fields: LANDED_437_PROJECTION_MODEL_FIELDS,
   },
 ]

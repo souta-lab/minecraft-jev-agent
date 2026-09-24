@@ -230,6 +230,14 @@ export type ArmorState = Record<ArmorSlot, ArmorPieceState | null>
 /** The observed offhand slot, distinct from the selected main-hand item. */
 export type OffhandState = ArmorPieceState
 
+/** Server-observed active item use, decoded from the living entity flags. */
+export type ActiveItemUseState = {
+  active: boolean
+  hand: 'mainhand' | 'offhand' | null
+  /** item in the reported active hand; null when unknown or no hand is active */
+  item: string | null
+}
+
 /** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
 export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
 
@@ -277,6 +285,8 @@ export type SelfState = {
   heldItem: HeldItemState | null
   /** Offhand window slot 45; undefined means this client/version did not expose it. */
   offhand?: OffhandState | null
+  /** Server entity metadata's active-hand fact; null when this version did not expose it. */
+  activeItemUse?: ActiveItemUseState | null
   /**
    * Remaining breath (vanilla bubbles) and the two fluid cells that decide
    * whether the body is underwater. `null`/absent means the client did not
@@ -446,6 +456,8 @@ export type EntityState = {
    * becomes visible to the decision layer without inferring mob AI.
    */
   heldItem?: string | null
+  /** Server entity metadata's active-hand fact; null when this version did not expose it. */
+  activeItemUse?: ActiveItemUseState | null
   /**
    * Health reported by Mineflayer for this entity, or `null` when the version
    * does not expose mob health. Absent `null` is UNKNOWN, not full health.
@@ -1898,6 +1910,12 @@ function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazard
   const feetInWater = fluidAt(bot, feet)
   const eyesInWater = fluidAt(bot, eyes)
   const offhand = buildOffhand(bot)
+  const activeItemUse = readActiveItemUse(
+    bot,
+    bot.entity,
+    held?.name ?? null,
+    offhand?.name ?? null,
+  )
   const envHazardCells = buildEnvHazardRing(bot, feet)
   const self: SelfState = {
     username: bot.username,
@@ -1913,6 +1931,7 @@ function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazard
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
     ...(offhand === undefined ? {} : { offhand }),
+    activeItemUse,
     armor: buildArmor(bot),
     air,
     feetInWater,
@@ -1949,6 +1968,39 @@ function readOnFire(bot: Bot): boolean | null {
   const flags = metadata[0]
   if (typeof flags !== 'number' || !Number.isFinite(flags)) return null
   return (flags & 0x01) !== 0
+}
+
+/**
+ * Read Mineflayer's server-sent living-entity flags without baking a metadata
+ * index into the sensor. The registry names the `living_entity_flags` slot for
+ * each supported entity/version; bit 0 means a hand is active and bit 1 picks
+ * offhand versus mainhand. A missing registry row, metadata packet, or value is
+ * UNKNOWN (`null`), never a guessed inactive state.
+ */
+function readActiveItemUse(
+  bot: Bot,
+  entity: { name?: string; type?: string; metadata?: unknown },
+  mainhandItem: string | null,
+  offhandItem: string | null,
+): ActiveItemUseState | null {
+  const registry = bot.registry as unknown as {
+    entitiesByName?: Record<string, { metadataKeys?: unknown } | undefined>
+  } | null
+  const entityName = entity === bot.entity || entity.type === 'player' ? 'player' : entity.name
+  if (entityName === undefined || entityName === null) return null
+  const metadataKeys = registry?.entitiesByName?.[entityName]?.metadataKeys
+  if (!Array.isArray(metadataKeys)) return null
+  const index = metadataKeys.indexOf('living_entity_flags')
+  if (index < 0 || !Array.isArray(entity.metadata)) return null
+  const flags = entity.metadata[index]
+  if (typeof flags !== 'number' || !Number.isInteger(flags) || flags < 0 || flags > 0xff) return null
+  if ((flags & 0x01) === 0) return { active: false, hand: null, item: null }
+  const hand = (flags & 0x02) === 0 ? 'mainhand' : 'offhand'
+  return {
+    active: true,
+    hand,
+    item: hand === 'mainhand' ? mainhandItem : offhandItem,
+  }
 }
 
 /**
@@ -2234,6 +2286,9 @@ function buildEntities(
     const hostile = isHostile(name, entity.kind) || (attackerId !== null && entity.id === attackerId)
     if (distanceToBot > (hostile ? hostileRadius : options.entityRadius)) continue
     const dropped = droppedItemName(entity)
+    const mainhandItem = heldItemName(entity)
+    const equipment = (entity as { equipment?: ReadonlyArray<{ name?: string } | null> }).equipment
+    const offhandItem = equipment?.[1]?.name ?? null
     out.push({
       id: entity.id,
       name,
@@ -2243,7 +2298,8 @@ function buildEntities(
       distance: round2(distanceToBot),
       hostile,
       lineOfSight: canSeeEntity(bot, entity),
-      heldItem: heldItemName(entity),
+      heldItem: mainhandItem,
+      activeItemUse: readActiveItemUse(bot, entity, mainhandItem, offhandItem),
       health: typeof entity.health === 'number' && Number.isFinite(entity.health) ? entity.health : null,
       attackedSelf: attackerId !== null && entity.id === attackerId,
       // Only a real dropped item carries the key, so every other entity's shape

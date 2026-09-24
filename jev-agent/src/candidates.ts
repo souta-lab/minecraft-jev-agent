@@ -4396,6 +4396,13 @@ function generateRawCandidates(
         // (the zombie_villager shape) a legitimate target without a name list.
         ...(entity.attackedSelf === true ? { attackedSelf: true } : {}),
         ...(entity.heldItem === undefined || entity.heldItem === null ? {} : { targetHeldItem: entity.heldItem }),
+        ...(entity.activeItemUse == null
+          ? {}
+          : {
+              targetUsingItem: entity.activeItemUse.active,
+              targetUseHand: entity.activeItemUse.hand ?? 'none',
+              ...(entity.activeItemUse.item === null ? {} : { targetUseItem: entity.activeItemUse.item }),
+            }),
         ...(entity.health === undefined || entity.health === null ? {} : { targetHealth: entity.health }),
         ...(entity.lineOfSight === undefined ? {} : { targetLineOfSight: entity.lineOfSight }),
         ...(entity.kind === undefined ? {} : { targetKind: entity.kind }),

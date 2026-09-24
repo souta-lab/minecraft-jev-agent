@@ -258,6 +258,63 @@ addCase('the sensor projects sight, weapon and attacker attribution onto a sense
   }
 })
 
+addCase('server living-entity flags expose self shield use and a skeleton active hand to ATTACK context', () => {
+  const bot = fakeThreatBot() as unknown as Record<string, any>
+  const registry = require('minecraft-data')('1.21.11')
+  bot.registry = registry
+  const metadata = (entityName: string, flags: number): unknown[] => {
+    const keys = registry.entitiesByName[entityName]?.metadataKeys as string[] | undefined
+    const index = keys?.indexOf('living_entity_flags') ?? -1
+    const values: unknown[] = []
+    if (index >= 0) values[index] = flags
+    return values
+  }
+  bot.entity.metadata = metadata('player', 0x03) // using item + active offhand
+  const slots: Array<Record<string, unknown> | null> = new Array(46).fill(null)
+  slots[45] = { name: 'shield', count: 1, slot: 45, maxDurability: 336, durabilityUsed: 20 }
+  bot.inventory.slots = slots
+  bot.entities[42].metadata = metadata('skeleton', 0x01) // using item in mainhand (bow)
+  const input = {
+    tick: 6,
+    goal: goalState(),
+    goalQueue: queue(),
+    recentEvents: [],
+    signals: signals({ lastDamage: ATTACKED_DAMAGE }),
+  }
+  const active = buildWorldState(bot as unknown as Bot, input, defaultSensorOptions)
+  const activeSkeleton = active.entities.find((entity) => entity.id === 42)
+  const activeAttack = generateCandidates(active, defaultCandidateOptions).find(
+    (candidate) => candidate.kind === 'ATTACK' && candidate.targetEntityId === 42,
+  )
+  bot.entity.metadata = metadata('player', 0)
+  bot.entities[42].metadata = metadata('skeleton', 0)
+  const inactive = buildWorldState(bot as unknown as Bot, { ...input, tick: 7 }, defaultSensorOptions)
+  const inactiveSkeleton = inactive.entities.find((entity) => entity.id === 42)
+  const inactiveAttack = generateCandidates(inactive, defaultCandidateOptions).find(
+    (candidate) => candidate.kind === 'ATTACK' && candidate.targetEntityId === 42,
+  )
+  const pass =
+    active.self.activeItemUse?.active === true &&
+    active.self.activeItemUse.hand === 'offhand' &&
+    active.self.activeItemUse.item === 'shield' &&
+    activeSkeleton?.activeItemUse?.active === true &&
+    activeSkeleton.activeItemUse.hand === 'mainhand' &&
+    activeSkeleton.activeItemUse.item === 'bow' &&
+    activeAttack?.meta.targetUsingItem === true &&
+    activeAttack.meta.targetUseHand === 'mainhand' &&
+    activeAttack.meta.targetUseItem === 'bow' &&
+    inactive.self.activeItemUse?.active === false &&
+    inactiveSkeleton?.activeItemUse?.active === false &&
+    inactiveAttack?.meta.targetUsingItem === false
+  return {
+    pass,
+    detail:
+      `self=${JSON.stringify(active.self.activeItemUse)} skeleton=${JSON.stringify(activeSkeleton?.activeItemUse ?? null)} ` +
+      `attackUse=${String(activeAttack?.meta.targetUsingItem)}/${String(activeAttack?.meta.targetUseHand)}/${String(activeAttack?.meta.targetUseItem)} ` +
+      `inactive=${String(inactive.self.activeItemUse?.active)}/${String(inactiveSkeleton?.activeItemUse?.active)}`,
+  }
+})
+
 addCase('worn armor and offhand shield are distinguished from carried inventory in raw Jev state', () => {
   const bot = fakeThreatBot()
   const slots: Array<Record<string, unknown> | null> = new Array(46).fill(null)

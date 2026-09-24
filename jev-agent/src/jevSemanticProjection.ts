@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 5
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v5'
+export const JEV_PROJECTION_VERSION = 6
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v6'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -774,6 +774,14 @@ export interface SemanticCombatTarget {
   heldItem: string | null
   attackedSelf: boolean
   inMeleeReach: boolean
+  activeItemUse: SemanticItemUseFacts | null
+}
+
+/** The server-reported living-entity use flag and the item in its active hand. */
+export interface SemanticItemUseFacts {
+  active: boolean
+  hand: 'mainhand' | 'offhand' | null
+  item: string | null
 }
 
 export interface SemanticCombatEscape {
@@ -797,6 +805,7 @@ export interface SemanticCombatThreat {
   inContact: boolean
   inDanger: boolean
   hostileCount: number
+  activeItemUse: SemanticItemUseFacts | null
 }
 
 export interface SemanticCombatFacts {
@@ -805,6 +814,7 @@ export interface SemanticCombatFacts {
   bodyFoodBucket: number | null
   canRegenerate: boolean | null
   heldWeapon: string | null
+  activeItemUse: SemanticItemUseFacts | null
   effectiveWeapon: string | null
   effectiveDamage: number | null
   threat: SemanticCombatThreat | null
@@ -817,6 +827,7 @@ export interface SemanticCombatInput {
   food: number | null | undefined
   canRegenerate: boolean | null
   heldWeapon: string | null | undefined
+  activeItemUse?: SemanticItemUseFacts | null
   candidates: readonly Candidate[]
   threat?: {
     active: boolean
@@ -829,6 +840,7 @@ export interface SemanticCombatInput {
     inContact: boolean
     inDanger: boolean
     hostileCount: number
+    activeItemUse?: SemanticItemUseFacts | null
   } | null
 }
 
@@ -869,6 +881,25 @@ function readMetaString(candidate: Candidate, key: string): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
+function boundedItemUse(
+  active: boolean | null | undefined,
+  hand: unknown,
+  item: string | null | undefined,
+): SemanticItemUseFacts | null {
+  if (typeof active !== 'boolean') return null
+  if (!active) return { active: false, hand: null, item: null }
+  const normalizedHand = hand === 'mainhand' || hand === 'offhand' ? hand : null
+  return { active: true, hand: normalizedHand, item: combatText(item) }
+}
+
+function candidateItemUse(candidate: Candidate): SemanticItemUseFacts | null {
+  return boundedItemUse(
+    readMetaBoolean(candidate, 'targetUsingItem'),
+    candidate.meta.targetUseHand,
+    readMetaString(candidate, 'targetUseItem'),
+  )
+}
+
 /**
  * Build combat-specific cache evidence from the same grounded candidate set
  * given to π. This records facts only; it neither removes nor ranks ATTACK,
@@ -900,6 +931,7 @@ export function buildSemanticCombatFacts(input: SemanticCombatInput): SemanticCo
       heldItem: combatText(readMetaString(candidate, 'targetHeldItem')),
       attackedSelf: readMetaBoolean(candidate, 'attackedSelf') === true,
       inMeleeReach: candidate.inReach,
+      activeItemUse: candidateItemUse(candidate),
     })
   }
 
@@ -945,6 +977,9 @@ export function buildSemanticCombatFacts(input: SemanticCombatInput): SemanticCo
     bodyFoodBucket: combatBucket(input.food, 2, 10),
     canRegenerate: input.canRegenerate,
     heldWeapon: combatText(heldWeapon),
+    activeItemUse: input.activeItemUse == null
+      ? null
+      : boundedItemUse(input.activeItemUse.active, input.activeItemUse.hand, input.activeItemUse.item),
     effectiveWeapon: combatText(effectiveWeapon),
     effectiveDamage,
     threat:
@@ -964,6 +999,14 @@ export function buildSemanticCombatFacts(input: SemanticCombatInput): SemanticCo
               Number.isFinite(threat.hostileCount)
                 ? Math.min(MAX_COMBAT_HOSTILE_COUNT, Math.max(0, Math.floor(threat.hostileCount)))
                 : 0,
+            activeItemUse:
+              threat.activeItemUse == null
+                ? null
+                : boundedItemUse(
+                    threat.activeItemUse.active,
+                    threat.activeItemUse.hand,
+                    threat.activeItemUse.item,
+                  ),
           },
     targets: [...uniqueTargets.values()].slice(0, JEV_PROJECTION_LIMITS.candidates),
     escapes,

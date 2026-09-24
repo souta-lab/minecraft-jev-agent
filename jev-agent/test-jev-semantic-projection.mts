@@ -77,7 +77,7 @@ import type {
   SkillOutcomePacket,
 } from './src/jevSemanticProjection.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
-import { LOW_AIR_LEVEL, MAX_AIR } from './src/air.ts'
+import { LOW_AIR_LEVEL, MAX_AIR, observedAir } from './src/air.ts'
 
 interface Case {
   name: string
@@ -164,6 +164,9 @@ function combatProjection(overrides: {
   distance?: number
   targetHealth?: number
   lineOfSight?: boolean
+  selfItemUse?: { active: boolean; hand: 'mainhand' | 'offhand' | null; item: string | null }
+  targetItemUse?: { active: boolean; hand: 'mainhand' | 'offhand' | null; item: string | null }
+  threatItemUse?: { active: boolean; hand: 'mainhand' | 'offhand' | null; item: string | null }
   bodyHealth?: number
   food?: number
   canRegenerate?: boolean
@@ -188,6 +191,9 @@ function combatProjection(overrides: {
       distance: overrides.distance ?? 9.1,
       targetHealth: overrides.targetHealth ?? 20,
       targetLineOfSight: overrides.lineOfSight ?? true,
+      targetUsingItem: overrides.targetItemUse?.active ?? false,
+      targetUseHand: overrides.targetItemUse?.hand ?? 'mainhand',
+      targetUseItem: overrides.targetItemUse?.item ?? 'bow',
       hostile: true,
       attackedSelf: true,
       weaponItem: 'wooden_axe',
@@ -216,6 +222,7 @@ function combatProjection(overrides: {
     food: overrides.food ?? 18,
     canRegenerate: overrides.canRegenerate ?? true,
     heldWeapon: overrides.heldWeapon ?? 'wooden_axe',
+    activeItemUse: overrides.selfItemUse ?? { active: false, hand: null, item: null },
     candidates,
     threat: {
       active: true,
@@ -228,6 +235,7 @@ function combatProjection(overrides: {
       inContact: false,
       inDanger: false,
       hostileCount: 1,
+      activeItemUse: overrides.threatItemUse ?? null,
     },
   })
   return buildJevSemanticProjection(
@@ -260,10 +268,11 @@ function outcomePacket(
 
 const SRC_CONTROLLER = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 
-addCase('(0) air bands share the sensor scale and low-air safety boundary', () => {
+addCase('(0) air bands share the sensor scale, reject invalid readings, and use normalized state air', () => {
   const values = [0, LOW_AIR_LEVEL, LOW_AIR_LEVEL + 1, MAX_AIR]
   const bands = values.map((value) => airBand(value))
-  const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, MAX_AIR + 1, 300].map((value) => airBand(value))
+  const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, MAX_AIR + 1, 300]
+    .map((value) => airBand(observedAir(value)))
   const dryFull = buildJevSemanticProjection(projectionInput({
     safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
   }))
@@ -279,12 +288,13 @@ addCase('(0) air bands share the sensor scale and low-air safety boundary', () =
   const pass =
     JSON.stringify(bands) === JSON.stringify(['critical', 'critical', 'low', 'full']) &&
     unknown.every((band) => band === 'unknown') &&
+    SRC_CONTROLLER.includes('airBand(observedAir(state.self.air))') &&
     dryFull.safety.airBand === 'full' && dryFull.safety.submerged === false &&
     underwaterLow.safety.airBand === 'critical' && underwaterLow.safety.submerged === true &&
     new Set(bands).size === 3 &&
     boundaryHashes[0] === boundaryHashes[1] &&
     new Set(boundaryHashes).size === 3
-  return { pass, detail: `scale=0..${MAX_AIR} threshold=${LOW_AIR_LEVEL} bands=${JSON.stringify(bands)} unknown=${JSON.stringify(unknown)} boundaryHashes=${JSON.stringify(boundaryHashes)} dryFull=${dryFull.safety.airBand}/${dryFull.safety.submerged} underwaterLow=${underwaterLow.safety.airBand}/${underwaterLow.safety.submerged}` }
+  return { pass, detail: `scale=0..${MAX_AIR} threshold=${LOW_AIR_LEVEL} bands=${JSON.stringify(bands)} invalidNormalized=${JSON.stringify(unknown)} boundaryHashes=${JSON.stringify(boundaryHashes)} controllerNormalizes=${SRC_CONTROLLER.includes('airBand(observedAir(state.self.air))')} dryFull=${dryFull.safety.airBand}/${dryFull.safety.submerged} underwaterLow=${underwaterLow.safety.airBand}/${underwaterLow.safety.submerged}` }
 })
 
 // ---------------------------------------------------------------------------
@@ -466,7 +476,7 @@ addCase('(5b) a verified kill without its declared drop is a typed search bounda
   })
   const line = formatSkillOutcomePacket(partial)
   const pass =
-    JEV_PROJECTION_VERSION === 5 &&
+    JEV_PROJECTION_VERSION === 6 &&
     terminalReasonFor({ status: 'done', failure: 'drop_not_acquired', verified: true }) === 'drop_not_acquired' &&
     partial.terminalReason === 'drop_not_acquired' &&
     partial.verification.verified === false &&
@@ -610,6 +620,11 @@ addCase('combat choice facts open a semantic boundary only when bounded threat/c
     combatProjection({ separationGain: 2.1 }),
     combatProjection({ outsideReach: false }),
     combatProjection({ occluded: false }),
+    combatProjection({ selfItemUse: { active: true, hand: 'offhand', item: 'shield' } }),
+    combatProjection({ selfItemUse: { active: true, hand: 'mainhand', item: 'bow' } }),
+    combatProjection({ targetItemUse: { active: true, hand: 'mainhand', item: 'bow' } }),
+    combatProjection({ targetItemUse: { active: true, hand: 'offhand', item: 'shield' } }),
+    combatProjection({ threatItemUse: { active: true, hand: 'mainhand', item: 'bow' } }),
   ]
   const initialHash = projectionHash(initial)
   const active = {
@@ -669,7 +684,9 @@ addCase('combat choice facts open a semantic boundary only when bounded threat/c
     sameChoices &&
     choicesRemainWithJev &&
     SRC_CONTROLLER.includes('combat: buildSemanticCombatFacts({') &&
-    SRC_CONTROLLER.includes('heldWeapon: state.self.heldItem?.name ?? null')
+    SRC_CONTROLLER.includes('heldWeapon: state.self.heldItem?.name ?? null') &&
+    SRC_CONTROLLER.includes('activeItemUse: state.self.activeItemUse ?? null') &&
+    SRC_CONTROLLER.includes('activeItemUse: threat.threatActiveItemUse ?? null')
   return {
     pass,
     detail:

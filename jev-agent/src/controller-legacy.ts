@@ -6231,7 +6231,7 @@ export class JevController {
       safety: {
         healthBand: healthBand(state.self.health),
         foodBand: foodBand(state.self.food),
-        airBand: airBand(state.self.air ?? null),
+        airBand: airBand(observedAir(state.self.air)),
         submerged:
           state.self.feetInWater === undefined && state.self.eyesInWater === undefined
             ? null
@@ -6250,6 +6250,7 @@ export class JevController {
         food: state.self.food,
         canRegenerate: bodySurvivalFacts(state.self).regenerating,
         heldWeapon: state.self.heldItem?.name ?? null,
+        activeItemUse: state.self.activeItemUse ?? null,
         candidates,
         threat:
           threat === null
@@ -6260,6 +6261,7 @@ export class JevController {
                 threatName: threat.threatName,
                 threatDistance: threat.threatDistance,
                 threatHeldItem: threat.threatHeldItem,
+                activeItemUse: threat.threatActiveItemUse ?? null,
                 threatEngaged: threat.threatEngaged,
                 threatLineOfSight: threat.threatLineOfSight,
                 inContact: threat.inContact,

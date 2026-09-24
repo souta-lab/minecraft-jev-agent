@@ -15,7 +15,7 @@ import type { Bot } from 'mineflayer'
 import { defaultJevAgentOptions, JevController } from './controller.ts'
 import type { EscalationReason, JevAgentOptions, RunSummary } from './controller.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, toVec3 } from './state.ts'
-import type { AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'
+import type { ActiveItemUseState, AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'
 import { applyReachabilityGate, defaultCandidateOptions, formatExploreRouteBlocked, formatResourceSourceExclusion, generateCandidates, generateGroundedCandidates, resourceDimensionMatches, resourceDimensionRefusals, resourceDimensionVerdict, resourceSourceExclusions } from './candidates.ts'
 import type { Candidate, CandidateAffordance, CandidateKind, CandidateOptions, CandidateReachability, ExploreRouteBlocked, GroundedCandidatesResult, ReachabilityGateOptions, ResourceSourceExclusion } from './candidates.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -163,6 +163,7 @@ export type {
   EscalationReason,
   WorldState,
   SelfState,
+  ActiveItemUseState,
   GoalState,
   AgentSignals,
   BlockState,
