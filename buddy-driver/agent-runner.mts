@@ -2401,18 +2401,6 @@ function depVersion(pkg: string): string {
   }
 }
 
-function serverSeed(): string | null {
-  try {
-    // M2 reproducibility trials pass their exact staged config only to this
-    // child process. The default path remains the resident's historical source.
-    const propertiesPath = process.env.BUDDY_SERVER_PROPERTIES_PATH ?? '/home/s0u7a/mc-server/server.properties'
-    const match = /^level-seed=(.*)$/m.exec(readFileSync(propertiesPath, 'utf8'))
-    return match?.[1]?.trim() ?? null
-  } catch {
-    return null
-  }
-}
-
 function gitCommit(): string | null {
   try {
     return execSync('git rev-parse HEAD', { cwd: MC_AI, encoding: 'utf8' }).trim()
@@ -2429,7 +2417,6 @@ function writeAcceptance(): string {
     runId,
     bootSourceSha,
     observedLevelName: state.levelName,
-    observedSeed: serverSeed(),
   })
   const record: AcceptanceRecord = {
     record: 'acceptance',
