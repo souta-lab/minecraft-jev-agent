@@ -1797,7 +1797,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     })
   }
 
-  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
+  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
 }
 
 function bindProbeToSummary(summary, probe) {

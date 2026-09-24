@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 import assert from 'node:assert/strict'
-import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, parseBuddyLogLine, parseDetail, parseRunnerOutEvents } from './buddy-observer.mjs'
+import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents } from './buddy-observer.mjs'
+
+// Constructing the always-on service must remain safe when no active mission
+// source exists; repository milestone labels are not runtime mission evidence.
+const observerWithoutRun = createObserver({ runtimeDir: '/tmp/observer-without-live-run' })
+assert.equal(observerWithoutRun.mission, null)
 
 const detail = parseDetail('action=MINE:b1 abandon=0.37 decision=continue goals=["collect 3 x iron","smelt 3 x iron_ingot"] note="has spaces"')
 assert.equal(detail.action, 'MINE:b1')
