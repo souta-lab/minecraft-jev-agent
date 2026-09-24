@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-23T04:01Z",
+  "asOf": "2026-09-24T22:57Z",
   "policy": {
     "wipLimit": 3,
     "unclassified": "backlog",
@@ -8,7 +8,7 @@
     "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, unclassified BACKLOG, and every \"historical\" row are not normal coding work.",
     "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
     "foldRule": "A consolidation fold is NOT a fix. Fold only after copying the slice's acceptance into a checklist row on the umbrella, close the slice as a tracking fold, and record it under \"historical\" with a note naming the umbrella. The umbrella row stays open until its own acceptance is verified live or explicitly dropped.",
-    "basis": "Reconciled 2026-09-23 against GitHub: exactly ten open issues, all umbrellas (#11 #308 #365 #366 #416 #421 #436 #437 #439 #440). Round 2 folded 30 slices into root causes (25 rows onto #366, 1 onto #11 (#449), 3 onto #439 (#451/#454/#455), 1 onto #436 (#456)); earlier rounds folded the authority/audit/M3-critical rows into #11/#421/#366/#436/#308. Routing therefore points only at the umbrellas, and every closed row this file used to present as work is recorded under \"historical\" with how it closed."
+    "basis": "Reconciled 2026-09-23 against GitHub for the original ten umbrella issues (#11 #308 #365 #366 #416 #421 #436 #437 #439 #440); #479 was added on 2026-09-25 as a distinct RESEARCH boundary for server observation projection. Round 2 folded 30 slices into root causes (25 rows onto #366, 1 onto #11 (#449), 3 onto #439 (#451/#454/#455), 1 onto #436 (#456)); earlier rounds folded the authority/audit/M3-critical rows into #11/#421/#366/#436/#308. Routing therefore points only at the umbrellas, and every closed row this file used to present as work is recorded under \"historical\" with how it closed."
   },
   "now": [
     421,
@@ -26,7 +26,8 @@
   ],
   "research": [
     365,
-    308
+    308,
+    479
   ],
   "future": [],
   "referenceOnly": [],
@@ -69,20 +70,14 @@
       366,
       416,
       365
+    ],
+    "SERVER_OBSERVATION_PROJECTION": [
+      479
     ]
   },
   "notes": {
-    "421": "NOW M3 critical path + WIP cap. Umbrella, not finished work: it carries the folded M3-critical rows (#13/#41/#56/#80 from round 1 plus the round-2 live-acceptance child), all still open. Audit measurement 2026-09-23T04:01Z (not re-measured by this file): resident run-mudkuea9-124kk from source 494a92b, body in the overworld at 26.5/79.0/-3.5, portal interior at 26/67/9, entry withheld reason=needs_descend (descend_plan:no_support@25,78,-2:air) — the descent capability (#440) is the live critical path ahead of ender_eye acceptance.",
-    "440": "NOW movement/scaffold umbrella, promoted from NEXT because the measured live blocker is the descent: portal entry is withheld reason=needs_descend while the landing support is air. Umbrella, not finished work: the bridge half is live-verified (BRIDGE_END placed=3 verified=true reason=reached) and the walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival); descent/scaffold-down and the rest of the movement frontier are open rows.",
-    "11": "NOW architecture constitution (Grounded Option OS). Umbrella, not finished work: it carries the round-1 and round-2 absorbed rows (#107/#121/#128/#130/#296 authority map/config/taxonomy/status/docs, #415 human-intent authority, #449 config admission) and they are open checklist rows, not fixes.",
-    "437": "NEXT Jev state-hygiene umbrella, reopened 2026-09-22 from a current-main live audit because section 3 acceptance is still incomplete (sections 1-2 landed, markers observed in a real run). Open rows: semantic event compression, stable candidate identity, decision-epoch isolation. The 2026-09-22 closure is superseded history, not a fix.",
-    "439": "NEXT System2 typed-intent-harness umbrella, reopened 2026-09-22 after an exact-source audit ('skeleton landed; migration not started'). Carries the round-2 folded rows #451 (goto/goto_resource silently rewritten into collect), #454 (verify_portal lowering to a mutation-capable portal_lit) and #455 (Overworld fabrication while compileLiveDimension() is unused), all still open.",
-    "436": "NEXT deterministic Skill-closure umbrella. Landed Phase 1 plus the combat half (exact-identity KILL, honest outcomes, never-actionless survival); open Phase 2/3 (HOLD_ITEM/GUI/PICKUP) and Phase 6 reflex classification. Carries the folded rows #297 (round 1, System2 failure algebra) and #456 (round 2, P0 HUNT_DROP truth: a kill with no drop returned done/verified=true).",
-    "366": "WAITING_LIVE repo-wide audit umbrella (HOST lifecycle / snapshot / world identity / CI tooling). Umbrella, not finished work: it carries the 25 round-2 acceptance-inventory rows (24 slices plus the #394 addendum) and the HOST state-authority row #401. The 8 HOST P0 rows were CONSOLIDATED, not fixed — do not read the slice closures as fixes.",
-    "416": "WAITING_LIVE behaviour quality gate (no recurrent wandering, redundant station crafting, purposeless actions, unbounded idle). Carries the absorbed #418 typed causal purpose; four behaviour families are pinned only by separate fixtures and no executable umbrella gate exists yet, so it is open implementation-plus-live work.",
-    "365": "RESEARCH generalization gate: production is still an M2/M3 tech-tree machine rather than a benchmark-independent runtime. The operator named generalization the primary project criterion and M3 the current proving ground. Nothing implemented yet; it is an open umbrella, not a finished roadmap.",
-    "308": "RESEARCH convergence tracker: migrate production onto the #11 v3 Grounded Option OS (one canonical semantic state, one authority owner per decision class). Umbrella, not finished work: PR #309 (System2 causal authority) was its first integrated slice; the migration is incomplete.",
     "3": "historical: closed 2026-09-22 with evidence — restoreLedgerIntoController now runs unconditionally during generation construction, so the dynamic-planner GoalQueue ledger is restored. Not a fold.",
+    "11": "NOW architecture constitution (Grounded Option OS). Umbrella, not finished work: it carries the round-1 and round-2 absorbed rows (#107/#121/#128/#130/#296 authority map/config/taxonomy/status/docs, #415 human-intent authority, #449 config admission) and they are open checklist rows, not fixes.",
     "13": "historical: closed 2026-09-22 as a tracking fold into #421 (listener-leak soak closure row); the required changed-hash soak artifact lives on as an open #421 row.",
     "35": "historical: closed 2026-09-22 as absorbed by #308 (not planned) — the competing-planner root cause is owned by #308.",
     "37": "historical: closed 2026-09-22 as [SUPERSEDED] — the M3/M4 milestone route no longer defines production architecture under #11 v3.",
@@ -101,7 +96,17 @@
     "296": "historical: closed 2026-09-22 as a tracking fold into #11 (generated CURRENT-STATUS row; that generator now exists as tools/current-status.mjs).",
     "297": "historical: closed 2026-09-22 as a tracking fold into #436 (System2 failure algebra / post-selection grounding row).",
     "299": "historical: closed 2026-09-22 as a tracking fold into #366 (INFRA_UNKNOWN classification for never-started repo-invariants jobs); the CI gate in CURRENT-STATUS reports that condition instead of a code FAIL.",
+    "308": "RESEARCH convergence tracker: migrate production onto the #11 v3 Grounded Option OS (one canonical semantic state, one authority owner per decision class). Umbrella, not finished work: PR #309 (System2 causal authority) was its first integrated slice; the migration is incomplete.",
+    "365": "RESEARCH generalization gate: production is still an M2/M3 tech-tree machine rather than a benchmark-independent runtime. The operator named generalization the primary project criterion and M3 the current proving ground. Nothing implemented yet; it is an open umbrella, not a finished roadmap.",
+    "366": "WAITING_LIVE repo-wide audit umbrella (HOST lifecycle / snapshot / world identity / CI tooling). Umbrella, not finished work: it carries the 25 round-2 acceptance-inventory rows (24 slices plus the #394 addendum) and the HOST state-authority row #401. The 8 HOST P0 rows were CONSOLIDATED, not fixed — do not read the slice closures as fixes.",
     "401": "historical: closed 2026-09-23 as a tracking fold into #366; acceptance explicitly UNMET at current main — a superseded generation can still write class-A world memory after lease handoff. A fold, not a fix.",
-    "415": "historical: closed 2026-09-23 as a tracking fold into #11; acceptance explicitly unmet — any server player can inject protected WHAT or clear another operator's tasks. A fold, not a fix."
+    "415": "historical: closed 2026-09-23 as a tracking fold into #11; acceptance explicitly unmet — any server player can inject protected WHAT or clear another operator's tasks. A fold, not a fix.",
+    "416": "WAITING_LIVE behaviour quality gate (no recurrent wandering, redundant station crafting, purposeless actions, unbounded idle). Carries the absorbed #418 typed causal purpose; four behaviour families are pinned only by separate fixtures and no executable umbrella gate exists yet, so it is open implementation-plus-live work.",
+    "421": "NOW M3 critical path + WIP cap. Umbrella, not finished work: it carries the folded M3-critical rows (#13/#41/#56/#80 from round 1 plus the round-2 live-acceptance child), all still open. Audit measurement 2026-09-23T04:01Z (not re-measured by this file): resident run-mudkuea9-124kk from source 494a92b, body in the overworld at 26.5/79.0/-3.5, portal interior at 26/67/9, entry withheld reason=needs_descend (descend_plan:no_support@25,78,-2:air) — the descent capability (#440) is the live critical path ahead of ender_eye acceptance.",
+    "436": "NEXT deterministic Skill-closure umbrella. Landed Phase 1 plus the combat half (exact-identity KILL, honest outcomes, never-actionless survival); open Phase 2/3 (HOLD_ITEM/GUI/PICKUP) and Phase 6 reflex classification. Carries the folded rows #297 (round 1, System2 failure algebra) and #456 (round 2, P0 HUNT_DROP truth: a kill with no drop returned done/verified=true).",
+    "437": "NEXT Jev state-hygiene umbrella, reopened 2026-09-22 from a current-main live audit because section 3 acceptance is still incomplete (sections 1-2 landed, markers observed in a real run). Open rows: semantic event compression, stable candidate identity, decision-epoch isolation. The 2026-09-22 closure is superseded history, not a fix.",
+    "439": "NEXT System2 typed-intent-harness umbrella, reopened 2026-09-22 after an exact-source audit ('skeleton landed; migration not started'). Carries the round-2 folded rows #451 (goto/goto_resource silently rewritten into collect), #454 (verify_portal lowering to a mutation-capable portal_lit) and #455 (Overworld fabrication while compileLiveDimension() is unused), all still open.",
+    "440": "NOW movement/scaffold umbrella, promoted from NEXT because the measured live blocker is the descent: portal entry is withheld reason=needs_descend while the landing support is air. Umbrella, not finished work: the bridge half is live-verified (BRIDGE_END placed=3 verified=true reason=reached) and the walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival); descent/scaffold-down and the rest of the movement frontier are open rows.",
+    "479": "RESEARCH Per-Client Authoritative World Projection (PC-AWP): server-owned observer-specific world projection for client/network optimization, hidden-truth suppression and structural anti-cheat. Starts with measurement/leakage harness, then entity occlusion, block-entity redaction, block projection, query capabilities and spectator/permission transitions. Not normal coding work until M0 baseline + one vertical slice meet the issue exit criteria."
   }
 }
