@@ -16,6 +16,7 @@ import {
   terminateReachAsInfeasible,
   verifyReachEnsures,
   type ReachIdentity,
+  type ReachJson,
   type ReachObservation,
   type ReachPredicate,
   type ReachTransitionContract,
@@ -125,6 +126,8 @@ describe('pure VTR Reach contract and controller state machine', () => {
       target: { x: 120, y: 70, z: 44 },
       desiredPredicateIdentity: contract.desiredPredicateIdentity,
       evidenceId: 'world-observation:marker-east',
+      observedIdentity: identity,
+      observedAtMs: 1_000,
     }
     const started = startReachTransition(contract, observation(contract), { tactic: 'walk', witness: initialWitness })
     assert.equal(started.status, 'active')
@@ -149,6 +152,8 @@ describe('pure VTR Reach contract and controller state machine', () => {
       target: { x: 108, y: 70, z: 51 },
       desiredPredicateIdentity: contract.desiredPredicateIdentity,
       evidenceId: 'world-observation:marker-west',
+      observedIdentity: identity,
+      observedAtMs: 1_400,
     }, 1_400)
     assert.equal(substituted.status, 'active')
     assert.equal(substituted.state.witness?.witnessId, 'village-marker-west')
@@ -439,11 +444,79 @@ describe('pure VTR Reach contract and controller state machine', () => {
       target: { x: 3, y: 60, z: 90 },
       desiredPredicateIdentity: 'another-predicate-hash',
       evidenceId: 'observation:other-place',
+      observedIdentity: identity,
+      observedAtMs: 1_100,
     }, 1_100)
     assert.equal(invalidWitness.status, 'terminal')
     if (invalidWitness.status === 'terminal') {
       assert.equal(invalidWitness.outcome.kind, 'CONTRACT_VIOLATION')
       if (invalidWitness.outcome.kind === 'CONTRACT_VIOLATION') assert.equal(invalidWitness.outcome.violation, 'witness_not_grounded_for_desired_predicate')
+    }
+  })
+
+  it('rejects a witness observed under a different world or dimension identity before accepting substitution', () => {
+    const contract = makeContract()
+    const state = start(contract)
+    for (const observedIdentity of [
+      { ...identity, worldKey: 'world:another-server' },
+      { ...identity, dimension: 'minecraft:the_nether' },
+      { ...identity, worldEpoch: identity.worldEpoch + 1 },
+      { ...identity, generationId: 'another-generation' },
+      { ...identity, leaseId: 'another-lease' },
+    ]) {
+      const result = substituteReachWitness(contract, state, identity, {
+        witnessId: 'other-grounded-witness',
+        target: { x: 12, y: 70, z: 44 },
+        desiredPredicateIdentity: contract.desiredPredicateIdentity,
+        evidenceId: 'world-observation:foreign-world',
+        observedIdentity,
+        observedAtMs: 1_100,
+      }, 1_100)
+      assert.equal(result.status, 'terminal')
+      if (result.status === 'terminal') {
+        assert.equal(result.outcome.kind, 'CONTRACT_VIOLATION')
+        if (result.outcome.kind === 'CONTRACT_VIOLATION') {
+          assert.equal(result.outcome.violation, 'witness_not_grounded_for_desired_predicate')
+        }
+        assert.equal(result.state.witness, null)
+      }
+    }
+  })
+
+  it('rejects a stale or malformed replacement witness even when its world identity matches', () => {
+    const contract = makeContract()
+    const state = start(contract)
+    const makeWitness = (target: ReachJson, observedAtMs = 1_100) => ({
+      witnessId: 'same-world-witness',
+      target,
+      desiredPredicateIdentity: contract.desiredPredicateIdentity,
+      evidenceId: 'world-observation:same-world',
+      observedIdentity: identity,
+      observedAtMs,
+    })
+
+    const stale = substituteReachWitness(contract, state, identity, makeWitness({ x: 12, y: 70, z: 44 }), 1_200)
+    assert.equal(stale.status, 'terminal')
+    if (stale.status === 'terminal') {
+      assert.equal(stale.outcome.kind, 'CONTRACT_VIOLATION')
+      if (stale.outcome.kind === 'CONTRACT_VIOLATION') {
+        assert.equal(stale.outcome.violation, 'witness_not_grounded_for_desired_predicate')
+      }
+    }
+
+    const malformed = substituteReachWitness(
+      contract,
+      state,
+      identity,
+      makeWitness({ x: Number.NaN, y: 70, z: 44 }),
+      1_100,
+    )
+    assert.equal(malformed.status, 'terminal')
+    if (malformed.status === 'terminal') {
+      assert.equal(malformed.outcome.kind, 'CONTRACT_VIOLATION')
+      if (malformed.outcome.kind === 'CONTRACT_VIOLATION') {
+        assert.equal(malformed.outcome.violation, 'witness_not_grounded_for_desired_predicate')
+      }
     }
   })
 })

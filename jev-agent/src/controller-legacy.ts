@@ -1950,6 +1950,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'VTR_MECHANICAL_OUTCOME',
   'VTR_TRANSITION_OUTCOME',
   'VTR_LEGACY_REACH_MOVE_WITHHELD',
+  'VTR_LEGACY_REACH_HANDOFF',
+  'VTR_ORPHAN_ACTUATION_REVOKED',
   'VTR_SAFETY_TRIGGER_STALE',
 ])
 
@@ -4059,11 +4061,15 @@ export class JevController {
         block.position.x === x && block.position.y === y && block.position.z === z,
     )
     if (!sensed) return null
+    const observedIdentity = this.reachIdentity(state)
+    if (observedIdentity === null) return null
     return {
       witnessId: `${sourceName}@${x},${y},${z}`,
       target: position,
       desiredPredicateIdentity: contract.desiredPredicateIdentity,
       evidenceId: `sensor:block:${state.tick}:${sourceName}@${x},${y},${z}`,
+      observedIdentity,
+      observedAtMs: state.timestampMs,
     }
   }
 
@@ -4129,6 +4135,15 @@ export class JevController {
   }
 
   private async tickReachTransition(trigger: DecisionTrigger, detail: Record<string, unknown>): Promise<boolean> {
+    // Strangler boundary for the Reach slice. Authoritative side: the VTR Mission,
+    // immutable Reach contract, persistent transition state, actuation reservation,
+    // and deterministic VERIFY below. Compatibility side: JevController still
+    // adapts the legacy WorldState/candidate generator and Executor/Guard/Skill
+    // path; same-predicate legacy MOVE is withheld and an in-flight commitment is
+    // revoked before VTR admission. Delete this bridge and its legacy filters only
+    // after the backend-neutral observation and locomotion ports own this path and
+    // the production/no-double-authority plus exact-source live evidence tests pass
+    // through those ports.
     if (
       this.modelRecoveryStopping &&
       (this.modelRecoveryReachDrainTransitionId === null ||
@@ -4152,6 +4167,42 @@ export class JevController {
     }
 
     const state = this.buildReachWorldState(mission)
+    // Even before a Reach contract is admissible, the legacy policy must not
+    // select the same grounded resource-approach MOVE for this Mission. Other
+    // legacy work (for example mining once the source is in reach, or safety
+    // control) remains available as a distinct transition family.
+    this.vtrOwnsReachMoveThisTick = state.blocks.some((block) =>
+      this.isMissionSource(mission.item, block.name, block.yield),
+    )
+    if (this.reachTransition === null) {
+      const current = this.executor.current
+      if (current?.authority === 'vtr-reach') {
+        this.executor.cancelCurrent('VTR action has no active Reach contract')
+        this.logger.error(
+          'vtr',
+          `VTR_ORPHAN_ACTUATION_REVOKED action=${current.id} transition=${current.transitionId ?? 'missing'}`,
+          { actionId: current.id, transitionId: current.transitionId ?? null, reason: 'no-active-reach-contract' },
+          this.tickCounter,
+        )
+        return true
+      }
+      if (current !== null && this.isLegacyReachAction(current, mission.item, state.self.dimension, this.options.worldEpoch)) {
+        const cancelled = this.executor.cancelCurrent('VTR takes ownership of the Mission Reach predicate')
+        this.logger.info(
+          'vtr',
+          `VTR_LEGACY_REACH_HANDOFF mission=${mission.id} action=${current.id} cancelled=${cancelled}`,
+          {
+            mission,
+            actionId: current.id,
+            legacyCommitmentId: current.commitment?.commitmentId ?? null,
+            authority: 'vtr-transition-scheduler',
+            legacyAuthorityRevoked: cancelled,
+          },
+          this.tickCounter,
+        )
+        if (this.executor.current !== null) return true
+      }
+    }
     const identity = this.reachIdentity(state)
     if (identity === null) {
       const active = this.reachTransition
@@ -4422,7 +4473,7 @@ export class JevController {
         beforeMechanicalStep: (step) => this.authorizeReachMechanicalStep(runtime, identity, step),
         afterMechanicalStep: (step) => this.recordReachMechanicalOutcome(runtime, identity, step),
       })
-      if (!claim.kept) this.actionStart = this.bot.entity!.position.clone()
+      if (!claim.kept) this.actionStart = { ...state.self.position }
       this.lastReachActionFailure = null
       this.logger.info(
         'vtr',
@@ -4677,6 +4728,27 @@ export class JevController {
       typeof x === 'number' && typeof y === 'number' && typeof z === 'number' &&
       state.blocks.some((block) => block.name === name && block.position.x === x && block.position.y === y && block.position.z === z)
     )
+  }
+
+  /**
+   * Match only a still-current legacy walk commitment to this Mission's
+   * resource-source predicate. The commitment records the selected source name
+   * and world-scoped destination; neither body movement nor a generic MOVE is
+   * enough to be adopted by VTR.
+   */
+  private isLegacyReachAction(
+    action: NonNullable<Executor['current']>,
+    item: string,
+    dimension: string,
+    worldEpoch: number,
+  ): boolean {
+    const commitment = action.commitment
+    if (action.authority === 'vtr-reach' || action.kind !== 'MOVE' || commitment?.skillKind !== 'walk_to') return false
+    const sourceName = commitment.params.targetName
+    if (typeof sourceName !== 'string' || !this.isMissionSource(item, sourceName)) return false
+    return commitment.target.kind === 'position' &&
+      commitment.target.dimension === dimension &&
+      commitment.target.worldEpoch === worldEpoch
   }
 
   private sourcePositionForCandidate(candidate: Candidate): Vec3Json | null {

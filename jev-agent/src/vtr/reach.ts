@@ -110,6 +110,9 @@ export interface ReachWitness {
   /** Must match the committed desired predicate identity; coordinates/targets are not contract identity. */
   readonly desiredPredicateIdentity: string
   readonly evidenceId: string
+  /** Binds the sensor witness to the exact world/dimension/generation/lease that observed it. */
+  readonly observedIdentity: ReachIdentity
+  readonly observedAtMs: number
 }
 
 export interface ReachTemporaryWaypoint {
@@ -504,6 +507,9 @@ export function startReachTransition(
     })
     return terminal(empty, mismatch)
   }
+  if (!Number.isFinite(observation.observedAtMs) || observation.observedAtMs < 0) {
+    throw new Error('observation.observedAtMs must be non-negative and finite')
+  }
   const blockers = predicateBlockers(contract.requires, observation)
   if (blockers.length > 0) return { status: 'not_enabled', blockers }
   const invariantBlockers = predicateBlockers(contract.invariants, observation)
@@ -512,10 +518,9 @@ export function startReachTransition(
     return { status: 'not_enabled', blockers: [`tactic_not_admissible:${initial.tactic}`] }
   }
   const witness = initial.witness ?? null
-  if (witness !== null && (witness.desiredPredicateIdentity !== contract.desiredPredicateIdentity || !witness.evidenceId.trim())) {
+  if (witness !== null && !witnessGroundedForContract(contract, witness, observation.observedAtMs)) {
     return { status: 'not_enabled', blockers: ['initial_witness_not_grounded_for_desired_predicate'] }
   }
-  if (!Number.isFinite(observation.observedAtMs) || observation.observedAtMs < 0) throw new Error('observation.observedAtMs must be non-negative and finite')
   const state: ReachTransitionState = freezeDeep({
     contractHash: contract.contractHash,
     identity: contract.identity,
@@ -618,10 +623,51 @@ export function substituteReachWitness(
   if (!contract.controller.allowWitnessSubstitution) {
     return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'witness_substitution_not_admissible', detail: 'contract disallows witness substitution' })
   }
-  if (witness.desiredPredicateIdentity !== contract.desiredPredicateIdentity || !witness.witnessId.trim() || !witness.evidenceId.trim()) {
+  if (!witnessGroundedForContract(contract, witness, nowMs)) {
     return terminal(state, { kind: 'CONTRACT_VIOLATION', contractHash: contract.contractHash, violation: 'witness_not_grounded_for_desired_predicate', detail: 'replacement witness does not carry matching desired-predicate grounding evidence' })
   }
   return { status: 'active', state: freezeDeep({ ...state, witness: freezeDeep({ ...witness, target: normalizeJson(witness.target) }), controllerRevision: state.controllerRevision + 1, usage: { ...state.usage, elapsedMs: nowMs - state.startedAtMs } }) }
+}
+
+function witnessGroundedForContract(
+  contract: ReachTransitionContract,
+  witness: ReachWitness,
+  observationTimeMs: number,
+): boolean {
+  return typeof witness === 'object' && witness !== null &&
+    typeof witness.desiredPredicateIdentity === 'string' && witness.desiredPredicateIdentity === contract.desiredPredicateIdentity &&
+    typeof witness.witnessId === 'string' && witness.witnessId.trim() !== '' &&
+    typeof witness.evidenceId === 'string' && witness.evidenceId.trim() !== '' &&
+    Number.isFinite(observationTimeMs) &&
+    Number.isFinite(witness.observedAtMs) && witness.observedAtMs === observationTimeMs &&
+    isReachIdentity(witness.observedIdentity) &&
+    identityMismatch(contract, witness.observedIdentity) === null &&
+    isReachPosition(witness.target) && isFiniteJson(witness.target)
+}
+
+function isReachIdentity(identity: unknown): identity is ReachIdentity {
+  if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return false
+  const value = identity as Record<string, unknown>
+  return typeof value.worldKey === 'string' && value.worldKey.trim() !== '' &&
+    typeof value.dimension === 'string' && value.dimension.trim() !== '' &&
+    Number.isSafeInteger(value.worldEpoch) && Number(value.worldEpoch) >= 0 &&
+    typeof value.generationId === 'string' && value.generationId.trim() !== '' &&
+    typeof value.leaseId === 'string' && value.leaseId.trim() !== ''
+}
+
+function isReachPosition(value: ReachJson): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const position = value as Readonly<Record<string, ReachJson>>
+  return typeof position.x === 'number' && Number.isFinite(position.x) &&
+    typeof position.y === 'number' && Number.isFinite(position.y) &&
+    typeof position.z === 'number' && Number.isFinite(position.z)
+}
+
+function isFiniteJson(value: ReachJson): boolean {
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(isFiniteJson)
+  if (value !== null && typeof value === 'object') return Object.values(value).every(isFiniteJson)
+  return true
 }
 
 function validateDelta(delta: Readonly<Record<string, number>>): string | null {
