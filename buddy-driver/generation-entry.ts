@@ -16,8 +16,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
-import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
-import { modelFailureDisposition, stopGenerationForModelRecovery } from './model-recovery.ts'
+import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
+import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForModelRecovery } from './model-recovery.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
@@ -2713,6 +2713,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   let modelRecoveryStopReason: string | null = null
   const terminateResident = (error?: FatalModelError): never => {
     if (error !== undefined && controllerForRecovery !== null && modelFailureDisposition(error, true) === 'recover-generation') {
+      const authorityKind = modelFailureAuthorityKind(error)
+      const authority = authorityKind === 'system2'
+        ? controllerForRecovery.system2AuthorityStack
+        : { provider: controllerForRecovery.policyProvider, model: controllerForRecovery.policyModel }
       modelRecoveryStopReason = 'model-unavailable'
       ctx.log('MODEL_UNAVAILABLE', {
         code: 'MODEL_UNAVAILABLE',
@@ -2721,9 +2725,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         attempts: error.attempts,
         error: error.reason,
         retryable: true,
+        authorityKind,
         generationId: id,
-        provider: controllerForRecovery.policyProvider,
-        model: controllerForRecovery.policyModel,
+        sourceSha: ctx.sourceSha ?? null,
+        buildHash: ctx.buildHash ?? null,
+        provider: authority.provider,
+        model: authority.model,
       })
       const recovery = stopGenerationForModelRecovery(error, id, controllerForRecovery)
       if (recovery !== null) throw recovery
@@ -2768,6 +2775,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         cachePath: mercuryCachePath,
         sourceSha: ctx.sourceSha ?? null,
         buildHash: ctx.buildHash ?? null,
+        requireFreshProviderDecision: ctx.recoverySystem2Authority !== undefined && ctx.recoverySystem2Authority !== null,
         worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
         terminate: terminateResident,
         postDeathRecovery,
@@ -2967,6 +2975,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     },
     terminateOnModelFailure: terminateResident,
     recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null,
+    recoverySystem2Authority: ctx.recoverySystem2Authority ?? null,
+    recoverySourceSha: ctx.recoverySourceSha ?? null,
+    generationSourceSha: ctx.sourceSha ?? null,
+    rejectSystem2RecoveryPlan: (rejection) => {
+      modelRecoveryStopReason = 'model-unavailable'
+      ctx.log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
+        authorityKind: 'system2',
+        generationId: id,
+        ...rejection,
+      })
+      controllerForRecovery?.stopForModelRecovery()
+      throw new ModelRecoveryRequested('system2-authority', id)
+    },
     actuation: 'pathfinder',
     actuationPort,
     reach: 5,
@@ -3339,6 +3360,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     const current = controller.agent.current
     return {
       running: controller.isRunning,
+      sourceSha: ctx.sourceSha ?? null,
+      buildHash: ctx.buildHash ?? null,
       policyKind: controller.policyKind,
       policyProvider: controller.policyProvider,
       policyModel: controller.policyModel,

@@ -1,13 +1,15 @@
 import {
   ModelRecoveryRequested,
   modelAuthorityIdentityMismatch,
-  modelResponseAuthorityMismatch,
 } from '../jev-agent/src/modelFailure.ts'
 import type { ModelAuthorityIdentity, ModelAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
 import type { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 
 export const MODEL_RETRY_BASE_DELAY_MS = 5_000
 export const MODEL_RETRY_MAX_DELAY_MS = 5 * 60_000
+export const MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS = 1_000
+
+export type ModelAuthorityKind = 'jev' | 'system2'
 
 export type ModelAvailabilityState = 'unknown' | 'available' | 'degraded'
 
@@ -17,14 +19,19 @@ export interface ModelFailureRecord {
   context: string
   attempts: number
   error: string
+  authorityKind: ModelAuthorityKind
   authority: ModelAuthorityIdentity | null
+  sourceSha: string | null
 }
 
 export interface ModelRecoveryRejection {
   ts: string
+  authorityKind: ModelAuthorityKind
   reason: ModelAuthorityMismatch
   expected: ModelAuthorityIdentity | null
   actual: ModelAuthorityIdentity | null
+  expectedSourceSha: string | null
+  actualSourceSha: string | null
 }
 
 export interface ModelAvailabilitySnapshot {
@@ -34,13 +41,16 @@ export interface ModelAvailabilitySnapshot {
   lastFailure: ModelFailureRecord | null
   recoveredAt: string | null
   /** Exact Jev authority pinned before the current outage; cleared on recovery. */
+  recoveryAuthorityKind: ModelAuthorityKind | null
   recoveryAuthority: ModelAuthorityIdentity | null
+  /** Exact source SHA pinned before the current outage; cleared on recovery. */
+  recoverySourceSha: string | null
   lastRecoveryRejection: ModelRecoveryRejection | null
 }
 
 export type ModelAuthorityAdmission =
-  | { allowed: true; reason: 'ordinary-generation' | 'same-recovery-authority'; expected: ModelAuthorityIdentity | null }
-  | { allowed: false; reason: ModelAuthorityMismatch; expected: ModelAuthorityIdentity | null; actual: ModelAuthorityIdentity | null }
+  | { allowed: true; reason: 'ordinary-generation' | 'same-recovery-authority' | 'other-recovery-authority'; authorityKind: ModelAuthorityKind; expected: ModelAuthorityIdentity | null }
+  | { allowed: false; reason: ModelAuthorityMismatch; authorityKind: ModelAuthorityKind; expected: ModelAuthorityIdentity | null; actual: ModelAuthorityIdentity | null; expectedSourceSha?: string | null; actualSourceSha?: string | null }
 
 export interface ModelResponseAcceptance {
   accepted: boolean
@@ -51,6 +61,36 @@ export interface ModelResponseAcceptance {
 export type ModelRecoveryStartGate =
   | { allowed: true; reason: 'not-degraded' | 'retry-already-started' | 'retry-due'; delayMs: 0 }
   | { allowed: false; reason: 'retry-backoff' | 'invalid-retry-deadline'; delayMs: number }
+
+export type GenerationRestartStep = 'cancelled' | 'waiting-for-generation-stop' | 'started'
+
+export interface GenerationRestartEffects {
+  blocked(): boolean
+  generationActive(): boolean
+  waitForGenerationStop(delayMs: number): void
+  recordModelRetryStarted(): void
+  startGeneration(): void
+}
+
+/**
+ * Advance a scheduled restart without dropping it when the outgoing generation
+ * is still draining. The host supplies the timer and ownership operations so this
+ * decision is exercised directly in the recovery regression.
+ */
+export function runGenerationRestartStep(
+  reason: string,
+  activeGenerationPollMs: number,
+  effects: GenerationRestartEffects,
+): GenerationRestartStep {
+  if (effects.blocked()) return 'cancelled'
+  if (effects.generationActive()) {
+    effects.waitForGenerationStop(Math.max(1, Math.floor(activeGenerationPollMs)))
+    return 'waiting-for-generation-stop'
+  }
+  if (reason === 'model-unavailable') effects.recordModelRetryStarted()
+  effects.startGeneration()
+  return 'started'
+}
 
 /**
  * Central lifecycle callers must honor the host's current provider backoff.
@@ -98,9 +138,16 @@ export function modelFailureDisposition(
   error: Pick<FatalModelError, 'context' | 'retryable'>,
   controllerReady: boolean,
 ): 'recover-generation' | 'terminate-process' {
-  return error.context === 'jev-authority' && error.retryable && controllerReady
+  const semanticAuthorityFailure = error.context === 'jev-authority' || error.context === 'system2-authority'
+  return semanticAuthorityFailure && error.retryable && controllerReady
     ? 'recover-generation'
     : 'terminate-process'
+}
+
+export function modelFailureAuthorityKind(error: Pick<FatalModelError, 'context'>): ModelAuthorityKind | null {
+  if (error.context === 'jev-authority') return 'jev'
+  if (error.context === 'system2-authority') return 'system2'
+  return null
 }
 
 export interface ModelRecoveryController {
@@ -126,44 +173,101 @@ export class ModelAvailabilityTracker {
   private retryAt: string | null = null
   private lastFailure: ModelFailureRecord | null = null
   private recoveredAt: string | null = null
-  private activeAuthority: ModelAuthorityIdentity | null = null
+  private activeAuthorities: Record<ModelAuthorityKind, ModelAuthorityIdentity | null> = { jev: null, system2: null }
+  private activeSourceSha: string | null = null
+  private recoveryAuthorityKind: ModelAuthorityKind | null = null
   private recoveryAuthority: ModelAuthorityIdentity | null = null
+  private recoverySourceSha: string | null = null
   private lastRecoveryRejection: ModelRecoveryRejection | null = null
 
   /**
-   * Record a generation's effective Jev configuration before start/actuation.
+   * Record a generation's effective model configurations before start/actuation.
    * During recovery, the stored pre-outage identity is immutable until a real
    * response from that exact authority is observed.
    */
-  admitGenerationAuthority(actual: ModelAuthorityIdentity | null | undefined): ModelAuthorityAdmission {
+  admitGenerationAuthority(
+    actual: ModelAuthorityIdentity | null | undefined,
+    authorityKind: ModelAuthorityKind = 'jev',
+    sourceSha?: string | null,
+  ): ModelAuthorityAdmission {
+    const clonedActual = cloneAuthority(actual ?? null)
     if (this.state === 'degraded') {
+      if (authorityKind !== this.recoveryAuthorityKind) {
+        this.activeAuthorities[authorityKind] = clonedActual
+        return { allowed: true, reason: 'other-recovery-authority', authorityKind, expected: cloneAuthority(this.recoveryAuthority) }
+      }
       const reason = modelAuthorityIdentityMismatch(this.recoveryAuthority, actual)
       if (reason !== null) {
-        return { allowed: false, reason, expected: cloneAuthority(this.recoveryAuthority), actual: cloneAuthority(actual ?? null) }
+        return { allowed: false, reason, authorityKind, expected: cloneAuthority(this.recoveryAuthority), actual: clonedActual }
       }
-      this.activeAuthority = cloneAuthority(actual ?? null)
-      return { allowed: true, reason: 'same-recovery-authority', expected: cloneAuthority(this.recoveryAuthority) }
+      const normalizedSourceSha = normalizeSourceSha(sourceSha)
+      if (this.recoverySourceSha === null) {
+        return {
+          allowed: false,
+          reason: 'expected-source-missing',
+          authorityKind,
+          expected: cloneAuthority(this.recoveryAuthority),
+          actual: clonedActual,
+          expectedSourceSha: null,
+          actualSourceSha: normalizedSourceSha,
+        }
+      }
+      if (normalizedSourceSha === null) {
+        return {
+          allowed: false,
+          reason: 'actual-source-missing',
+          authorityKind,
+          expected: cloneAuthority(this.recoveryAuthority),
+          actual: clonedActual,
+          expectedSourceSha: this.recoverySourceSha,
+          actualSourceSha: null,
+        }
+      }
+      if (normalizedSourceSha !== this.recoverySourceSha) {
+        return {
+          allowed: false,
+          reason: 'source-mismatch',
+          authorityKind,
+          expected: cloneAuthority(this.recoveryAuthority),
+          actual: clonedActual,
+          expectedSourceSha: this.recoverySourceSha,
+          actualSourceSha: normalizedSourceSha,
+        }
+      }
+      this.activeAuthorities[authorityKind] = clonedActual
+      this.activeSourceSha = normalizedSourceSha
+      return { allowed: true, reason: 'same-recovery-authority', authorityKind, expected: cloneAuthority(this.recoveryAuthority) }
     }
 
-    const reason = modelAuthorityIdentityMismatch(actual, actual)
+    const reason = clonedActual === null && authorityKind === 'system2'
+      ? null // deterministic baseline generations do not require a System2 provider identity
+      : modelAuthorityIdentityMismatch(actual, actual)
     if (reason !== null) {
-      return { allowed: false, reason: 'actual-identity-missing', expected: cloneAuthority(actual ?? null), actual: cloneAuthority(actual ?? null) }
+      return { allowed: false, reason: 'actual-identity-missing', authorityKind, expected: clonedActual, actual: clonedActual }
     }
-    this.activeAuthority = cloneAuthority(actual ?? null)
-    return { allowed: true, reason: 'ordinary-generation', expected: cloneAuthority(this.activeAuthority) }
+    this.activeAuthorities[authorityKind] = clonedActual
+    this.activeSourceSha = normalizeSourceSha(sourceSha)
+    return { allowed: true, reason: 'ordinary-generation', authorityKind, expected: clonedActual }
   }
 
   recordUnavailable(
-    failure: Omit<ModelFailureRecord, 'ts' | 'authority'> & { ts?: string; authority?: ModelAuthorityIdentity | null },
+    failure: Omit<ModelFailureRecord, 'ts' | 'authority' | 'sourceSha'> & { ts?: string; authority?: ModelAuthorityIdentity | null; sourceSha?: string | null },
     nowMs = Date.now(),
   ): { attempt: number; delayMs: number; retryAt: string } {
     // Prefer the HOST's last admitted/observed authority. MODEL_UNAVAILABLE
     // metadata is retained as a fallback for older callers, never as a way to
     // replace the pre-failure identity being pinned.
-    const authority = cloneAuthority(this.activeAuthority) ?? cloneAuthority(failure.authority)
+    const authorityKind = failure.authorityKind
+    const authority = cloneAuthority(this.activeAuthorities[authorityKind]) ?? cloneAuthority(failure.authority)
     if (this.state !== 'degraded') {
+      this.recoveryAuthorityKind = authorityKind
       this.recoveryAuthority = authority
+      this.recoverySourceSha = this.activeSourceSha ?? normalizeSourceSha(failure.sourceSha)
       this.lastRecoveryRejection = null
+    } else if (this.recoveryAuthorityKind !== authorityKind) {
+      // A second authority failing during an existing outage cannot replace the
+      // original recovery fence. It is still recorded, but recovery continues
+      // to require the authority that first entered the typed degraded state.
     }
     this.state = 'degraded'
     this.consecutiveFailures += 1
@@ -177,7 +281,9 @@ export class ModelAvailabilityTracker {
       context: failure.context,
       attempts: failure.attempts,
       error: failure.error,
+      authorityKind,
       authority,
+      sourceSha: normalizeSourceSha(failure.sourceSha) ?? this.activeSourceSha,
     }
     return { attempt: this.consecutiveFailures, delayMs, retryAt }
   }
@@ -187,6 +293,7 @@ export class ModelAvailabilityTracker {
     reason: ModelAuthorityMismatch,
     actual: ModelAuthorityIdentity | null | undefined,
     nowMs = Date.now(),
+    actualSourceSha?: string | null,
   ): { attempt: number; delayMs: number; retryAt: string } | null {
     if (this.state !== 'degraded') return null
     this.consecutiveFailures += 1
@@ -196,9 +303,12 @@ export class ModelAvailabilityTracker {
     this.recoveredAt = null
     this.lastRecoveryRejection = {
       ts: new Date(nowMs).toISOString(),
+      authorityKind: this.recoveryAuthorityKind ?? 'jev',
       reason,
       expected: cloneAuthority(this.recoveryAuthority),
       actual: cloneAuthority(actual ?? null),
+      expectedSourceSha: this.recoverySourceSha,
+      actualSourceSha: normalizeSourceSha(actualSourceSha),
     }
     return { attempt: this.consecutiveFailures, delayMs, retryAt }
   }
@@ -211,22 +321,34 @@ export class ModelAvailabilityTracker {
     authority: ModelAuthorityIdentity | null | undefined,
     source: string | null | undefined,
     nowMs = Date.now(),
+    authorityKind: ModelAuthorityKind = 'jev',
   ): ModelResponseAcceptance {
-    const recovered = this.state === 'degraded'
+    const recoveringThisAuthority = this.state === 'degraded' && this.recoveryAuthorityKind === authorityKind
+    if (this.state === 'degraded' && !recoveringThisAuthority) {
+      const identityReason = modelAuthorityIdentityMismatch(authority, authority)
+      if (identityReason === null) this.activeAuthorities[authorityKind] = cloneAuthority(authority ?? null)
+      return { accepted: identityReason === null, recovered: false, reason: identityReason }
+    }
+    const recovered = recoveringThisAuthority
+    const expectedSource = authorityKind === 'jev' ? 'jev' : 'system2'
     const reason = recovered
-      ? modelResponseAuthorityMismatch(this.recoveryAuthority, authority, source)
-      : (source === 'jev' ? modelAuthorityIdentityMismatch(authority, authority) : 'response-source-mismatch')
+      ? (source === expectedSource ? modelAuthorityIdentityMismatch(this.recoveryAuthority, authority) : 'response-source-mismatch')
+      : (source === expectedSource ? modelAuthorityIdentityMismatch(authority, authority) : 'response-source-mismatch')
     if (reason !== null) {
       return { accepted: false, recovered: false, reason }
     }
 
-    this.activeAuthority = cloneAuthority(authority ?? null)
-    this.state = 'available'
-    this.consecutiveFailures = 0
-    this.retryAt = null
-    if (recovered) this.recoveredAt = new Date(nowMs).toISOString()
-    this.recoveryAuthority = null
-    this.lastRecoveryRejection = null
+    this.activeAuthorities[authorityKind] = cloneAuthority(authority ?? null)
+    if (this.state !== 'degraded' || recovered) {
+      this.state = 'available'
+      this.consecutiveFailures = 0
+      this.retryAt = null
+      if (recovered) this.recoveredAt = new Date(nowMs).toISOString()
+      this.recoveryAuthorityKind = null
+      this.recoveryAuthority = null
+      this.recoverySourceSha = null
+      this.lastRecoveryRejection = null
+    }
     return { accepted: true, recovered, reason: null }
   }
 
@@ -237,11 +359,15 @@ export class ModelAvailabilityTracker {
       retryAt: this.retryAt,
       lastFailure: this.lastFailure === null ? null : { ...this.lastFailure },
       recoveredAt: this.recoveredAt,
+      recoveryAuthorityKind: this.recoveryAuthorityKind,
       recoveryAuthority: cloneAuthority(this.recoveryAuthority),
+      recoverySourceSha: this.recoverySourceSha,
       lastRecoveryRejection: this.lastRecoveryRejection === null ? null : {
         ...this.lastRecoveryRejection,
         expected: cloneAuthority(this.lastRecoveryRejection.expected),
         actual: cloneAuthority(this.lastRecoveryRejection.actual),
+        expectedSourceSha: this.lastRecoveryRejection.expectedSourceSha,
+        actualSourceSha: this.lastRecoveryRejection.actualSourceSha,
       },
     }
   }
@@ -250,4 +376,10 @@ export class ModelAvailabilityTracker {
 function cloneAuthority(identity: ModelAuthorityIdentity | null | undefined): ModelAuthorityIdentity | null {
   if (identity === null || identity === undefined || typeof identity.provider !== 'string' || typeof identity.model !== 'string') return null
   return { provider: identity.provider, model: identity.model }
+}
+
+function normalizeSourceSha(sourceSha: string | null | undefined): string | null {
+  if (typeof sourceSha !== 'string') return null
+  const normalized = sourceSha.trim().toLowerCase()
+  return /^[a-f0-9]{40}$/.test(normalized) ? normalized : null
 }

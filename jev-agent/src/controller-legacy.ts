@@ -279,13 +279,14 @@ import {
   SYSTEM2_PAYLOAD_REFUSED,
 } from './system2Payload.ts'
 import {
+  applySystem2RecoveryFence,
   evaluateSystem2Apply,
   formatCompiledGoalRows,
   formatSystem2Discard,
   formatSystem2PlanApplied,
   system2BodyOwned,
 } from './system2Authority.ts'
-import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
+import type { System2ApplyState, System2RecoveryFenceRejection, System2RequestContext } from './system2Authority.ts'
 import {
   acceptedSystem2PlanGoals,
   createSystem2SemanticOutcome,
@@ -458,6 +459,14 @@ export interface JevAgentOptions {
    * must prove the exact pinned Jev provider/model before it can reach π/actuation.
    */
   recoveryPolicyAuthority?: ModelAuthorityIdentity | null
+  /** Host-pinned System2 authority; recovery plans are fenced before queue mutation. */
+  recoverySystem2Authority?: ModelAuthorityIdentity | null
+  /** Exact source SHA pinned alongside a System2 outage. */
+  recoverySourceSha?: string | null
+  /** Exact source SHA of this generation, checked again at the System2 commit point. */
+  generationSourceSha?: string | null
+  /** Host-owned backoff/restart transition for an unproven recovered System2 answer. */
+  rejectSystem2RecoveryPlan?: (rejection: System2RecoveryFenceRejection) => never
   /**
    * #22: `false` (default) keeps `abandon_option` shadow-only: it is recorded
    * as a `BETA_SHADOW` vote and can never, by itself, cause a replan/abandon.
@@ -9035,46 +9044,74 @@ export class JevController {
           !humanOwnsWhat &&
           plan.goals.length > 0 &&
           (plan.op === undefined || plan.op === 'patch' || plan.op === 'replace')
-        if (answersTheHead) {
-          const replaced = this.queue.replaceAnsweredHead({
-            headId: warrant.headId,
-            requestId: warrant.requestId,
-            reason: warrant.reason,
-            note: plan.note,
-            onReplaced: (line, detail) => this.logger.warn('queue', line, detail, this.tickCounter),
-          })
-          if (replaced !== null) {
-            this.recentEvents.push(
-              `head replaced by System2 answer: ${replaced.id} (${replaced.description}) reason=${warrant.reason} requestId=${warrant.requestId}`,
-            )
-            this.logger.warn(
-              'system2',
-              `PLAN_HEAD_REPLACEMENT_APPLIED requestId=${warrant.requestId} replaced=${replaced.id} goalQueueHead=${this.queue.current?.id ?? 'none'} op=${plan.op ?? 'replace'} goals=${plan.goals.length}`,
-              {
-                requestId: warrant.requestId,
-                replaced: replaced.id,
-                replacedKey: warrant.headKey,
-                reason: warrant.reason,
-                op: plan.op ?? 'replace',
-                goals: plan.goals.map((goal) => goal.description),
-                head: this.queue.current?.id ?? null,
-              },
-              this.tickCounter,
-            )
-          }
-        }
         const depthBefore = this.queue.state.depth
         const operation = plan.op ?? 'replace'
         const queueRevisionBeforeApply = this.queue.revision
         const currentBeforeApply = this.queue.state.current
-        const added = this.queue.applyPlan(plan.goals, 'llm', operation, {
-          reason: plan.note,
-          onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
-          onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
-          protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
-          verifyCurrentComplete: (goal) => this.verifyQueuedGoalComplete(goal),
-          onOperationRejected: (line) => this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter),
-        })
+        // Recovery provenance is checked at the actual commit point. Keep BOTH
+        // queue mutations (answering the current head and installing the plan)
+        // behind the host-owned fence so a cached/stale answer cannot mutate the
+        // ledger before a post-apply marker notices it.
+        const applyPlan = (): QueuedGoal[] => {
+          if (answersTheHead && warrant !== null) {
+            const replaced = this.queue.replaceAnsweredHead({
+              headId: warrant.headId,
+              requestId: warrant.requestId,
+              reason: warrant.reason,
+              note: plan.note,
+              onReplaced: (line, detail) => this.logger.warn('queue', line, detail, this.tickCounter),
+            })
+            if (replaced !== null) {
+              this.recentEvents.push(
+                `head replaced by System2 answer: ${replaced.id} (${replaced.description}) reason=${warrant.reason} requestId=${requestContext.requestId}`,
+              )
+              this.logger.warn(
+                'system2',
+                `PLAN_HEAD_REPLACEMENT_APPLIED requestId=${requestContext.requestId} replaced=${replaced.id} goalQueueHead=${this.queue.current?.id ?? 'none'} op=${plan.op ?? 'replace'} goals=${plan.goals.length}`,
+                {
+                  requestId: requestContext.requestId,
+                  replaced: replaced.id,
+                  replacedKey: warrant.headKey,
+                  reason: warrant.reason,
+                  op: plan.op ?? 'replace',
+                  goals: plan.goals.map((goal) => goal.description),
+                  head: this.queue.current?.id ?? null,
+                },
+                this.tickCounter,
+              )
+            }
+          }
+          return this.queue.applyPlan(plan.goals, 'llm', operation, {
+            reason: plan.note,
+            onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+            onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+            protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
+            verifyCurrentComplete: (goal) => this.verifyQueuedGoalComplete(goal),
+            onOperationRejected: (line) => this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter),
+          })
+        }
+        let added: QueuedGoal[]
+        if (this.options.recoverySystem2Authority !== undefined && this.options.recoverySystem2Authority !== null) {
+          const fenced = applySystem2RecoveryFence({
+            expectedAuthority: this.options.recoverySystem2Authority,
+            actualAuthority: this.system2AuthorityStack,
+            expectedSourceSha: this.options.recoverySourceSha ?? null,
+            actualSourceSha: this.options.generationSourceSha ?? null,
+            intentSource: plan.provenance?.intentSource ?? null,
+          }, applyPlan)
+          if (fenced.applied) {
+            added = fenced.value
+          } else {
+            this.llmInFlight = false
+            if (this.options.rejectSystem2RecoveryPlan === undefined) {
+              throw new FatalModelError('system2-authority', 1, `recovery plan rejected (${fenced.rejection.reason}); host recovery handler unavailable`, true)
+            }
+            this.options.rejectSystem2RecoveryPlan(fenced.rejection)
+            throw new FatalModelError('system2-authority', 1, 'host recovery handler returned without stopping the generation', true)
+          }
+        } else {
+          added = applyPlan()
+        }
         const acceptedGoals = acceptedSystem2PlanGoals({
           operation,
           added,
@@ -9146,6 +9183,8 @@ export class JevController {
           {
             requestId: requestContext.requestId,
             reason,
+            provider: this.system2Provider,
+            model: this.system2Model,
             op: planOp,
             applied: added.length,
             compiled: compiledRows,
@@ -9203,6 +9242,7 @@ export class JevController {
       .catch((error: unknown) => {
         if (this.headAnswerWarrant?.requestId === requestContext.requestId) this.headAnswerWarrant = null
         this.llmInFlight = false
+        if (error instanceof ModelRecoveryRequested) return
         if (!this.running) {
           this.logger.warn(
             'system2',

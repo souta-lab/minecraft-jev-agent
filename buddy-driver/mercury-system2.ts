@@ -1644,6 +1644,8 @@ export interface MercurySystem2Options {
   isCurrent?: () => boolean
   /** optional generation id for stale-discard audit lines. */
   generationId?: string
+  /** bypass durable cached plans during same-authority provider recovery. */
+  requireFreshProviderDecision?: boolean
   /** transport seam for tests; defaults to the AI SDK `generateText` tool call. */
   transport?: MercuryTransport
   /**
@@ -2023,6 +2025,37 @@ export function isTimeoutError(error: unknown, depth = 0): boolean {
   return Array.isArray(errors) && errors.some((entry) => isTimeoutError(entry, depth + 1))
 }
 
+/**
+ * Narrow host-recovery classifier for exhausted System2 transport failures.
+ * Provider retries are broader (they may include SDK-specific errors), but only
+ * explicit HTTP transient statuses, timeout/abort types, known socket/DNS codes,
+ * or an explicit gateway-unavailable type may ask HOST to recycle a generation.
+ * In particular, a generic APICallError, schema rejection, bad credential, or
+ * budget/configuration error is not sufficient evidence for recovery.
+ */
+export function isTransientSystem2ProviderFailure(error: unknown, depth = 0): boolean {
+  if (depth > 6 || error === null || typeof error !== 'object') return false
+  const record = error as Record<string, unknown>
+  const status = typeof record.statusCode === 'number'
+    ? record.statusCode
+    : typeof record.status === 'number'
+      ? record.status
+      : undefined
+  if (status === 408 || status === 429 || (status !== undefined && status >= 500 && status <= 599)) return true
+
+  const name = typeof record.name === 'string' ? record.name : ''
+  if (/^(AbortError|TimeoutError|GatewayInternalServerError|ServiceUnavailable|InternalServerError)$/.test(name)) return true
+  const code = typeof record.code === 'string' ? record.code.toUpperCase() : ''
+  if (/^(ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNABORTED)$/.test(code)) return true
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (/gateway.*service temporarily unavailable|service temporarily unavailable/i.test(message)) return true
+
+  if (isTransientSystem2ProviderFailure(record.cause, depth + 1)) return true
+  if (isTransientSystem2ProviderFailure(record.lastError, depth + 1)) return true
+  const errors = record.errors
+  return Array.isArray(errors) && errors.some((entry) => isTransientSystem2ProviderFailure(entry, depth + 1))
+}
+
 export function isRetryableModelError(error: unknown, depth = 0): boolean {
   if (isTimeoutError(error, depth) || isRateLimitError(error, depth)) return true
   if (depth > 4 || error === null || typeof error !== 'object') return false
@@ -2188,6 +2221,7 @@ export class MercurySystem2 implements System2Brain {
   private readonly generationId: string | null
   private readonly sourceSha: string | null
   private readonly buildHash: string | null
+  private readonly requireFreshProviderDecision: boolean
   private cache: MercuryCacheFile
   private callCounter = 0
   private calls = 0
@@ -2226,6 +2260,7 @@ export class MercurySystem2 implements System2Brain {
     this.generationId = options.generationId ?? null
     this.sourceSha = options.sourceSha ?? null
     this.buildHash = options.buildHash ?? null
+    this.requireFreshProviderDecision = options.requireFreshProviderDecision === true
     this.log = (event, detail) => options.log(event, {
       ...detail,
       generationId: this.generationId,
@@ -2390,8 +2425,18 @@ export class MercurySystem2 implements System2Brain {
       world: this.cacheIdentity.worldKey,
       epoch: this.cacheIdentity.worldEpoch,
       hit: cached !== undefined,
+      bypassed: cached !== undefined && this.requireFreshProviderDecision,
+      bypassReason: cached !== undefined && this.requireFreshProviderDecision ? 'same-authority-provider-recovery-requires-fresh-response' : null,
     })
-    if (cached !== undefined) {
+    if (cached !== undefined && this.requireFreshProviderDecision) {
+      this.log('MERCURY_CACHE_BYPASSED', {
+        source: this.provider,
+        model: this.model,
+        stateHash,
+        reason: 'same-authority-provider-recovery-requires-fresh-response',
+      })
+    }
+    if (cached !== undefined && !this.requireFreshProviderDecision) {
       const replays = cached.replays ?? 0
       const consecutive = this.cache.consecutiveStrategy === cached.strategy ? this.cache.consecutiveCount ?? 0 : 0
       const replayLimit = replays >= MAX_CACHE_REPLAYS
@@ -2921,7 +2966,15 @@ export class MercurySystem2 implements System2Brain {
             errorDetail: describeErrorFull(error),
           })
         }
-        return this.modelFailure(trigger, started, state, message, Date.now() - started)
+        return this.modelFailure(
+          trigger,
+          started,
+          state,
+          message,
+          Date.now() - started,
+          isTransientSystem2ProviderFailure(error),
+          attempts,
+        )
       }
       const success = attemptRun.result
       this.calls += 1
@@ -3243,6 +3296,8 @@ export class MercurySystem2 implements System2Brain {
     state: MercuryStateSummary,
     note: string,
     latencyMs = Date.now() - started,
+    retryableTransport = false,
+    attempts = this.maxAttempts,
   ): never {
     this.fallbacks += 1
     this.log('MERCURY_FAILURE_STATE', {
@@ -3252,7 +3307,12 @@ export class MercurySystem2 implements System2Brain {
       queueDepth: state.queue.depth,
       ms: latencyMs,
     })
-    const error = new FatalModelError(`mercury:${trigger}`, this.maxAttempts, note)
+    const error = new FatalModelError(
+      retryableTransport ? 'system2-authority' : `mercury:${trigger}`,
+      attempts,
+      note,
+      retryableTransport,
+    )
     return failLoud(error, this.log, this.terminate)
   }
 

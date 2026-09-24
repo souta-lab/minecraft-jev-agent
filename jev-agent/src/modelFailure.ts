@@ -29,6 +29,9 @@ export type ModelAuthorityMismatch =
   | 'actual-identity-missing'
   | 'provider-mismatch'
   | 'model-mismatch'
+  | 'expected-source-missing'
+  | 'actual-source-missing'
+  | 'source-mismatch'
   | 'response-source-mismatch'
 
 /**

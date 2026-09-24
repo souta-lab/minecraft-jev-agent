@@ -567,6 +567,80 @@ addCase('bounded attempts with the retryable predicate stop at maxAttempts on a 
   return { pass, detail: JSON.stringify({ result, calls }) }
 })
 
+addCase('an exhausted System2 5xx is host-retryable, while auth failures remain fatal', async () => {
+  const makeMercury = (statusCode: number, suffix: string): MercurySystem2 => {
+    const dir = mkdtempSync(join(tmpdir(), `mercury-recovery-${suffix}-`))
+    return new MercurySystem2({
+      summarize: () => mercurySummary(),
+      log: hostLog([]),
+      callsPath: join(dir, 'mercury-calls.jsonl'),
+      cachePath: join(dir, 'mercury-cache.json'),
+      retries: 0,
+      resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+      transport: async () => {
+        throw Object.assign(new Error(statusCode === 503 ? 'Service temporarily unavailable' : 'Invalid API key'), {
+          statusCode,
+        })
+      },
+    })
+  }
+
+  let transient: unknown = null
+  try {
+    await makeMercury(503, '503').tryRepair(planRequest(), 'no_candidate')
+  } catch (error) {
+    transient = error
+  }
+  let unauthorized: unknown = null
+  try {
+    await makeMercury(401, '401').tryRepair(planRequest(), 'no_candidate')
+  } catch (error) {
+    unauthorized = error
+  }
+  const pass =
+    transient instanceof FatalModelError && transient.context === 'system2-authority' && transient.retryable &&
+    unauthorized instanceof FatalModelError && unauthorized.context === 'mercury:no_candidate' && !unauthorized.retryable
+  return {
+    pass,
+    detail: `503=${transient instanceof FatalModelError ? `${transient.context}/${transient.retryable}/${transient.attempts}` : String(transient)} 401=${unauthorized instanceof FatalModelError ? `${unauthorized.context}/${unauthorized.retryable}/${unauthorized.attempts}` : String(unauthorized)}`,
+  }
+})
+
+addCase('same-authority System2 recovery bypasses the durable cached plan and asks the provider again', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-fresh-recovery-'))
+  const callsPath = join(dir, 'mercury-calls.jsonl')
+  const cachePath = join(dir, 'mercury-cache.json')
+  let providerCalls = 0
+  const transport = async () => {
+    providerCalls += 1
+    return {
+      toolCalls: [{ input: { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 1 }], reason: 'fresh recovery answer' } }],
+      usage: null,
+    }
+  }
+  const shared = {
+    summarize: () => mercurySummary(),
+    callsPath,
+    cachePath,
+    resolveKey: () => ({ key: 'test-key', origin: 'test' } as const),
+    transport,
+  }
+  const original = new MercurySystem2({ ...shared, log: () => undefined })
+  await original.tryRepair(planRequest(), 'no_candidate')
+  const logs: string[] = []
+  const recovery = new MercurySystem2({
+    ...shared,
+    log: hostLog(logs),
+    requireFreshProviderDecision: true,
+  })
+  const result = await recovery.tryRepair(planRequest(), 'no_candidate')
+  const bypass = logs.some((line) => line.startsWith('MERCURY_CACHE_BYPASSED'))
+  return {
+    pass: providerCalls === 2 && result?.cached === false && bypass,
+    detail: `providerCalls=${providerCalls} cached=${result?.cached ?? null} bypass=${bypass}`,
+  }
+})
+
 addCase('corrective retry: attempt 2 gets the validation error and its corrected plan succeeds', async () => {
   const basePrompt = '{"trigger":"no_progress"}'
   const prompts: string[] = []

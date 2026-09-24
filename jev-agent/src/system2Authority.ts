@@ -5,6 +5,63 @@
 // still current.  This module is deliberately pure so the request/apply race is
 // regression-tested without a Mineflayer connection or a model call.
 
+import { modelAuthorityIdentityMismatch } from './modelFailure.ts'
+import type { ModelAuthorityIdentity, ModelAuthorityMismatch } from './modelFailure.ts'
+
+export interface System2RecoveryFenceInput {
+  expectedAuthority: ModelAuthorityIdentity
+  actualAuthority: ModelAuthorityIdentity | null
+  expectedSourceSha: string | null
+  actualSourceSha: string | null
+  intentSource: string | null
+}
+
+export interface System2RecoveryFenceRejection {
+  reason: ModelAuthorityMismatch
+  expectedAuthority: ModelAuthorityIdentity
+  actualAuthority: ModelAuthorityIdentity | null
+  expectedSourceSha: string | null
+  actualSourceSha: string | null
+  intentSource: string | null
+}
+
+export type System2RecoveryFenceResult<T> =
+  | { applied: true; value: T }
+  | { applied: false; rejection: System2RecoveryFenceRejection }
+
+/**
+ * A recovered System2 generation must apply a fresh answer from the same
+ * configured provider/model and exact source. Cached plans carry semantic
+ * authority from an older call and are refused BEFORE any queue mutation.
+ */
+export function applySystem2RecoveryFence<T>(
+  input: System2RecoveryFenceInput,
+  apply: () => T,
+): System2RecoveryFenceResult<T> {
+  const identityMismatch = modelAuthorityIdentityMismatch(input.expectedAuthority, input.actualAuthority)
+  let reason = identityMismatch
+  if (reason === null) {
+    if (input.expectedSourceSha === null || !/^[a-f0-9]{40}$/i.test(input.expectedSourceSha)) reason = 'expected-source-missing'
+    else if (input.actualSourceSha === null || !/^[a-f0-9]{40}$/i.test(input.actualSourceSha)) reason = 'actual-source-missing'
+    else if (input.expectedSourceSha.toLowerCase() !== input.actualSourceSha.toLowerCase()) reason = 'source-mismatch'
+    else if (input.intentSource !== 'intent' && input.intentSource !== 'enrichment' && input.intentSource !== 'ungrounded') reason = 'response-source-mismatch'
+  }
+  if (reason !== null) {
+    return {
+      applied: false,
+      rejection: {
+        reason,
+        expectedAuthority: input.expectedAuthority,
+        actualAuthority: input.actualAuthority,
+        expectedSourceSha: input.expectedSourceSha,
+        actualSourceSha: input.actualSourceSha,
+        intentSource: input.intentSource,
+      },
+    }
+  }
+  return { applied: true, value: apply() }
+}
+
 export interface System2RequestContext {
   requestId: string
   queueRevision: number

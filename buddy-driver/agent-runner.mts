@@ -44,7 +44,13 @@ import type {
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { milestoneReport } from './milestone-report.ts'
 import { MilestonePredicateRecorder } from './milestone-predicates.ts'
-import { ModelAvailabilityTracker, modelRecoveryStartGate } from './model-recovery.ts'
+import {
+  MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
+  ModelAvailabilityTracker,
+  modelRecoveryStartGate,
+  runGenerationRestartStep,
+} from './model-recovery.ts'
+import type { ModelAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
 import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
@@ -137,6 +143,20 @@ const LISTENER_BASELINE_POLL_MS = 25
 const LISTENER_BASELINE_MAX_POLLS = 200
 const GOAL_ITEM = 'iron_ingot'
 const GOAL_COUNT = 3
+const MODEL_AUTHORITY_MISMATCHES: readonly ModelAuthorityMismatch[] = [
+  'expected-identity-missing',
+  'actual-identity-missing',
+  'provider-mismatch',
+  'model-mismatch',
+  'expected-source-missing',
+  'actual-source-missing',
+  'source-mismatch',
+  'response-source-mismatch',
+]
+
+function isModelAuthorityMismatch(value: unknown): value is ModelAuthorityMismatch {
+  return typeof value === 'string' && MODEL_AUTHORITY_MISMATCHES.includes(value as ModelAuthorityMismatch)
+}
 
 // The generation scheduler owns these bot listeners in the default resident
 // configuration.  The HOST must not capture its leak baseline until this set
@@ -812,7 +832,13 @@ function makeGenerationContext(
     sourceSha,
     buildHash,
     recoveryPolicyAuthority: availabilityAtCreate.state === 'degraded'
-      ? availabilityAtCreate.recoveryAuthority
+      ? availabilityAtCreate.recoveryAuthorityKind === 'jev' ? availabilityAtCreate.recoveryAuthority : null
+      : null,
+    recoverySystem2Authority: availabilityAtCreate.state === 'degraded'
+      ? availabilityAtCreate.recoveryAuthorityKind === 'system2' ? availabilityAtCreate.recoveryAuthority : null
+      : null,
+    recoverySourceSha: availabilityAtCreate.state === 'degraded'
+      ? availabilityAtCreate.recoverySourceSha
       : null,
     m2SnapshotDir: DATA,
     bot: b,
@@ -824,6 +850,8 @@ function makeGenerationContext(
           context: typeof detail.context === 'string' ? detail.context : 'unknown',
           attempts: typeof detail.attempts === 'number' ? detail.attempts : 0,
           error: typeof detail.error === 'string' ? detail.error : 'model authority unavailable',
+          authorityKind: detail.authorityKind === 'system2' ? 'system2' : 'jev',
+          sourceSha: typeof detail.sourceSha === 'string' ? detail.sourceSha : null,
           authority: typeof detail.provider === 'string' && typeof detail.model === 'string'
             ? { provider: detail.provider, model: detail.model }
             : null,
@@ -878,6 +906,75 @@ function makeGenerationContext(
         if (response.recovered || previousState === 'unknown') {
           log('MODEL_AVAILABILITY', { runId, generationId: detail.generationId ?? null, ...modelAvailability.snapshot() })
           try { writeAcceptance() } catch { /* success event remains durable */ }
+        }
+      } else if (event === 'MODEL_RECOVERY_AUTHORITY_REJECTED' &&
+        detail.authorityKind === 'system2' &&
+        modelAvailability.snapshot().state === 'degraded' &&
+        modelAvailability.snapshot().recoveryAuthorityKind === 'system2') {
+        const authority = typeof detail.actualAuthority === 'object' && detail.actualAuthority !== null &&
+          typeof (detail.actualAuthority as Record<string, unknown>).provider === 'string' &&
+          typeof (detail.actualAuthority as Record<string, unknown>).model === 'string'
+          ? {
+              provider: (detail.actualAuthority as Record<string, unknown>).provider as string,
+              model: (detail.actualAuthority as Record<string, unknown>).model as string,
+            }
+          : null
+        const reason = isModelAuthorityMismatch(detail.reason) ? detail.reason : 'response-source-mismatch'
+        const actualSourceSha = typeof detail.actualSourceSha === 'string' ? detail.actualSourceSha : null
+        const retry = modelAvailability.recordRecoveryRejected(reason, authority, Date.now(), actualSourceSha)
+        log('MODEL_AVAILABILITY', {
+          runId,
+          generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+          ...modelAvailability.snapshot(),
+          attempt: retry?.attempt ?? modelAvailability.snapshot().consecutiveFailures,
+          retryDelayMs: retry?.delayMs ?? null,
+        })
+        if (retry !== null) scheduleGenerationRestart('model-unavailable', retry.delayMs)
+        try { writeAcceptance() } catch { /* rejection and backoff remain in the resident log */ }
+      } else if (event === 'SYSTEM2_PLAN_APPLIED' &&
+        modelAvailability.snapshot().state === 'degraded' &&
+        modelAvailability.snapshot().recoveryAuthorityKind === 'system2') {
+        const intentSource = typeof detail.intentSource === 'string' ? detail.intentSource : null
+        const responseSource = intentSource === 'intent' || intentSource === 'enrichment' || intentSource === 'ungrounded'
+          ? 'system2'
+          : intentSource === 'cached' ? 'system2-cache' : null
+        const authority = typeof detail.provider === 'string' && typeof detail.model === 'string'
+          ? { provider: detail.provider, model: detail.model }
+          : null
+        const response = modelAvailability.recordPolicyResponse(authority, responseSource, Date.now(), 'system2')
+        if (!response.accepted && response.reason !== null) {
+          const retry = modelAvailability.recordRecoveryRejected(response.reason, authority)
+          log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
+            runId,
+            generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+            authorityKind: 'system2',
+            reason: response.reason,
+            expected: modelAvailability.snapshot().recoveryAuthority,
+            actual: authority,
+            responseSource,
+            retryAt: retry?.retryAt ?? modelAvailability.snapshot().retryAt,
+            retryDelayMs: retry?.delayMs ?? null,
+          })
+          if (retry !== null) scheduleGenerationRestart('model-unavailable', retry.delayMs)
+          try { writeAcceptance() } catch { /* rejected response evidence remains durable */ }
+          return
+        }
+        if (response.recovered) {
+          log('MODEL_RECOVERED', {
+            runId,
+            generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+            authorityKind: 'system2',
+            provider: authority?.provider ?? null,
+            model: authority?.model ?? null,
+            recoveredAt: modelAvailability.snapshot().recoveredAt,
+          })
+          if (deferredModelReloadTrigger !== null) {
+            const deferredTrigger = deferredModelReloadTrigger
+            deferredModelReloadTrigger = null
+            scheduleReload(`model-recovered:${deferredTrigger}`)
+          }
+          log('MODEL_AVAILABILITY', { runId, generationId: detail.generationId ?? null, ...modelAvailability.snapshot() })
+          try { writeAcceptance() } catch { /* recovered state remains durable */ }
         }
       }
     },
@@ -1084,17 +1181,30 @@ function inspectGenerationAuthority(gen: ResidentGeneration, trigger: string): {
 } {
   const status = gen.status()
   const authority = { provider: status.policyProvider, model: status.policyModel }
-  const admission = modelAvailability.admitGenerationAuthority(authority)
-  if (admission.allowed) {
+  const system2Authority = {
+    provider: status.system2AuthorityStack?.provider ?? status.system2Provider,
+    model: status.system2AuthorityStack?.model ?? status.system2Model,
+  }
+  const jevAdmission = modelAvailability.admitGenerationAuthority(authority, 'jev', status.sourceSha)
+  const system2Admission = modelAvailability.admitGenerationAuthority(system2Authority, 'system2', status.sourceSha)
+  const recoveryKind = modelAvailability.snapshot().recoveryAuthorityKind
+  const admission = recoveryKind === 'system2' ? system2Admission : jevAdmission
+  if (jevAdmission.allowed && system2Admission.allowed) {
     log('GENERATION_MODEL_AUTHORITY', {
       runId,
       generationId: gen.id,
       trigger,
       provider: authority.provider,
       model: authority.model,
+      system2Provider: system2Authority.provider,
+      system2Model: system2Authority.model,
+      sourceSha: status.sourceSha ?? null,
+      recoveryAuthorityKind: recoveryKind,
       recovery: admission.reason === 'same-recovery-authority',
     })
   }
+  if (!jevAdmission.allowed) return { authority, admission: jevAdmission }
+  if (!system2Admission.allowed) return { authority: system2Authority, admission: system2Admission }
   return { authority, admission }
 }
 
@@ -1107,15 +1217,18 @@ function logRejectedGenerationAuthority(
 ): number | null {
   const before = modelAvailability.snapshot()
   const retry = countRecoveryAttempt && before.state === 'degraded'
-    ? modelAvailability.recordRecoveryRejected(admission.reason, authority)
+    ? modelAvailability.recordRecoveryRejected(admission.reason, authority, Date.now(), admission.actualSourceSha)
     : null
   log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
     runId,
     generationId,
     trigger,
     reason: admission.reason,
+    authorityKind: admission.authorityKind,
     expected: admission.expected,
     actual: authority,
+    expectedSourceSha: admission.expectedSourceSha ?? before.recoverySourceSha,
+    actualSourceSha: admission.actualSourceSha ?? null,
     retryAt: retry?.retryAt ?? before.retryAt,
     retryDelayMs: retry?.delayMs ?? null,
     started: false,
@@ -1236,14 +1349,25 @@ function scheduleGenerationRestart(reason: string, delayMs = GEN_RESTART_MS): vo
   if (generationRestartTimer !== null || shuttingDown || frozen || deathResetPending) return
   generationRestartTimer = setTimeout(() => {
     generationRestartTimer = null
-    if (shuttingDown || frozen) return
-    if (generation !== null) return
-    if (reason === 'model-unavailable') {
-      modelAvailability.recordRetryStarted()
-      log('MODEL_RETRY_STARTED', { runId, ...modelAvailability.snapshot() })
-      try { writeAcceptance() } catch { /* retry event remains durable */ }
-    }
-    void startGeneration(`recovery:${reason}`)
+    runGenerationRestartStep(reason, MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS, {
+      blocked: () => shuttingDown || frozen || deathResetPending,
+      generationActive: () => generation !== null,
+      waitForGenerationStop: (pollDelayMs) => {
+        log('MODEL_RETRY_WAITING_FOR_GENERATION_STOP', {
+          runId,
+          reason,
+          generationId: generation?.id ?? null,
+          retryDelayMs: pollDelayMs,
+        })
+        scheduleGenerationRestart(reason, pollDelayMs)
+      },
+      recordModelRetryStarted: () => {
+        modelAvailability.recordRetryStarted()
+        log('MODEL_RETRY_STARTED', { runId, ...modelAvailability.snapshot() })
+        try { writeAcceptance() } catch { /* retry event remains durable */ }
+      },
+      startGeneration: () => { void startGeneration(`recovery:${reason}`) },
+    })
   }, delayMs)
 }
 

@@ -945,6 +945,9 @@ export interface ActuationLease {
 /** A read-only projection of the running generation, used by host logging/control. */
 export interface GenerationStatus {
   running: boolean
+  /** exact source revision this immutable generation bundle was built from */
+  sourceSha?: string | null
+  buildHash?: string | null
   policyKind: string
   policyProvider: string
   policyModel: string
@@ -1196,6 +1199,10 @@ export interface GenerationContext {
   goalCount: number
   /** Host-pinned Jev identity required only while recovering from provider outage. */
   recoveryPolicyAuthority?: { provider: string; model: string } | null
+  /** Host-pinned System2 identity required only while recovering from provider outage. */
+  recoverySystem2Authority?: { provider: string; model: string } | null
+  /** Source SHA pinned when System2 first became unavailable. */
+  recoverySourceSha?: string | null
   /** why this generation was created fresh (e.g. "death"); drives LADDER_RESET. */
   resetReason: string | null
   /** host-captured facts for the immediately preceding real death. */
