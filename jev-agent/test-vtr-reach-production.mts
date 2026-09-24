@@ -100,6 +100,25 @@ describe('VTR Reach production authority seam', () => {
     assert.ok(legacyRecovery > consume && queueAuthority > consume)
   })
 
+  it('makes the explicit Reach probe fail closed before any legacy recovery/model/Executor dispatch', () => {
+    const tickStart = controller.indexOf('private async tick(trigger: DecisionTrigger')
+    const tickEnd = controller.indexOf('private jevLog(', tickStart)
+    const tick = controller.slice(tickStart, tickEnd)
+    const dispatch = tick.indexOf('const handled = await this.tickReachTransition(trigger, detail)')
+    const probeHold = tick.indexOf("this.options.vtrReachProbe === true", dispatch)
+    const legacyRecovery = tick.indexOf('this.observeRetrievalStall()', dispatch)
+    assert.ok(dispatch >= 0 && probeHold > dispatch && legacyRecovery > probeHold)
+    assert.match(tick.slice(probeHold, legacyRecovery), /VTR_REACH_PROBE_HOLD/)
+    assert.match(tick.slice(probeHold, legacyRecovery), /cancelCurrent\('VTR Reach probe refused legacy scheduler fallback'\)/)
+    assert.match(tick.slice(probeHold, legacyRecovery), /return/)
+
+    const entry = generationEntry.slice(generationEntry.indexOf('const vtrReachProbe ='))
+    assert.match(entry, /const plannerMode = vtrReachProbe \? 'llm' : configuredPlannerMode/)
+    assert.match(entry, /if \(vtrReachProbe\) \{[\s\S]*?ledgerRestore: 'disabled'/)
+    assert.match(entry, /if \(vtrReachProbe\) \{[\s\S]*?restoredLegacyRows: 0/)
+    assert.match(entry, /productionPlanAuthority: vtrReachProbe \? 'vtr-reach-probe'/)
+  })
+
   it('binds every VTR body action to its transition and reserves/records each mechanical leg', () => {
     const claimStart = controller.indexOf("const claim = this.executor.claim(guard.candidate, {", controller.indexOf('private async tickReachTransition'))
     const claimEnd = controller.indexOf('})', claimStart)
@@ -144,6 +163,7 @@ describe('VTR Reach production authority seam', () => {
     const filterEnd = controller.indexOf('candidates = this.applyFurnacePrereq', ownerFilter)
     assert.ok(ownerFilter >= 0 && filterEnd > ownerFilter)
     assert.match(controller.slice(ownerFilter, filterEnd), /VTR_LEGACY_REACH_MOVE_WITHHELD/)
+    assert.match(controller.slice(ownerFilter, filterEnd), /reachMissionSourceCandidateShape/)
     assert.match(controller, /this\.vtrOwnsReachMoveThisTick = true/)
   })
 })

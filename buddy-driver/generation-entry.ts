@@ -2717,8 +2717,22 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   // The planner IS the env switch: deterministic keeps the original single-shot
   // contract, so every decision record truthfully reports `llm.called == false`.
-  // `llm` turns the controller's exception paths into bounded replans.
-  const plannerMode = resolvePlannerMode()
+  // `llm` turns the controller's exception paths into bounded replans. The
+  // explicit Reach probe selects the real production VTR scheduler directly;
+  // it leaves the compatibility ladder/ledger out of this run's WHAT path.
+  const vtrReachProbe = process.env.BUDDY_VTR_REACH_PROBE?.trim() === '1'
+  const configuredPlannerMode = resolvePlannerMode()
+  const plannerMode = vtrReachProbe ? 'llm' : configuredPlannerMode
+  if (vtrReachProbe) {
+    ctx.log('VTR_REACH_PROBE_CONFIGURED', {
+      mission: { kind: 'inventory_at_least', item: ctx.goalItem, count: ctx.goalCount },
+      compatibilityLadder: 'observer-only',
+      ledgerRestore: 'disabled',
+      plannerBootstrap: 'disabled',
+      system2Mode: process.env.BUDDY_SYSTEM2 ?? 'configuration-default',
+      jevPolicyMode: process.env.BUDDY_POLICY ?? 'configuration-default',
+    })
+  }
 
   // A retryable Jev provider outage stops this generation and lets HOST retry
   // under the same model authority. Construction/configuration failures and
@@ -2959,6 +2973,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       item: ctx.goalItem,
       count: ctx.goalCount,
     },
+    vtrReachProbe,
     // Every decision-time world read carries provenance: a cell whose column was
     // not loaded under the live dimension is refused (typed) instead of read.
     dimensionProvenance,
@@ -3097,7 +3112,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // a stale floor. `liveWorldKey` is the same key the durable-progress read above
   // already uses, so there is one spelling of it.
   const liveLedgerBasis: LedgerBasis = ledgerBasisForLiveFrontier(liveWorldKey, ladder)
-  restoreLedgerIntoController(controller, plannerMode, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
+  if (vtrReachProbe) {
+    ctx.log('VTR_REACH_PROBE_QUEUE_EMPTY', {
+      source: 'configured Mission',
+      restoredLegacyRows: 0,
+      authority: 'vtr-transition-scheduler',
+    })
+  } else {
+    restoreLedgerIntoController(controller, plannerMode, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
+  }
   const brain = new PlannerBrain({
     bot,
     world,
@@ -3140,7 +3163,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     buildHash: ctx.buildHash ?? null,
     rungIndex: ladder.rungIndex,
     rungId: ladder.rungId,
-    productionPlanAuthority: plannerMode === 'deterministic' ? 'deterministic' : 'system2',
+    productionPlanAuthority: vtrReachProbe ? 'vtr-reach-probe' : plannerMode === 'deterministic' ? 'deterministic' : 'system2',
     ...(plannerMode === 'deterministic' ? { goals: ladder.goals.map((goal) => goal.description) } : {}),
     policy: controller.policyKind,
     policyProvider: controller.policyProvider,

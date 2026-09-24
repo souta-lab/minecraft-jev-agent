@@ -464,6 +464,8 @@ export interface JevAgentOptions {
   goalCount: number
   /** Independent source of Mission truth for the V4 Reach/Navigation slice. */
   vtrMission?: VtrInventoryMission | null
+  /** Isolated no-LLM probe: VTR is the only semantic/locomotion owner until stopped. */
+  vtrReachProbe?: boolean
   /** maximum time between decisions while idle (the fallback heartbeat) */
   heartbeatMs: number
   /** which world events may request a decision */
@@ -687,6 +689,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   goalItem: 'oak_log',
   goalCount: 1,
   vtrMission: null,
+  vtrReachProbe: false,
   heartbeatMs: 3000,
   enabledTriggers: DECISION_TRIGGERS,
   schedulerCoalesceMs: 40,
@@ -1936,7 +1939,9 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'VTR_REACH_GUARD_REFUSED',
   'VTR_TRANSITION_ACTUATION',
   'VTR_ACTION_COMPLETION_HANDLER_FAILED',
+  'VTR_SCHEDULER_HOLDS_NO_ADMISSIBLE_ROUTE',
   'VTR_SCHEDULER_HOLDS_TERMINAL',
+  'VTR_REACH_PROBE_HOLD',
   'VTR_TRANSITION_COMMIT',
   'VTR_MECHANICAL_STEP_REFUSED',
   'VTR_MECHANICAL_STEP_RESERVED',
@@ -4321,6 +4326,7 @@ export class JevController {
       })
       if (progress.status === 'terminal') {
         this.closeReachTransition(progress.outcome, progress.state, 'typed-terminal')
+        if (current?.authority === 'vtr-reach') this.executor.cancelCurrent('VTR progress contract terminal')
         return true
       }
       runtime.state = progress.state
@@ -4433,12 +4439,46 @@ export class JevController {
       return true
     }
 
-    // No VTR transition may start over a legacy lease; drain it first, then this
-    // scheduler gets the next idle turn before Jev or System2 can act again.
-    if (this.executor.current !== null) return false
-    if (countMissionInventoryResource(state.inventory.counts, mission.item) >= mission.count) return false
+    // No VTR transition may start over a legacy lease. The explicit probe mode
+    // also revokes any pre-existing legacy action and never returns this slice to
+    // GoalQueue/Jev/System2; it exists to measure the production Reach owner in
+    // isolation, not to introduce a semantic fallback.
+    if (this.executor.current !== null) {
+      if (this.options.vtrReachProbe === true) {
+        this.executor.cancelCurrent('VTR Reach probe owns the configured Mission')
+        this.logger.info(
+          'vtr',
+          `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=legacy-action-revoked`,
+          { mission, reason: 'legacy-action-revoked', authority: 'vtr-transition-scheduler' },
+          this.tickCounter,
+        )
+        return true
+      }
+      return false
+    }
+    if (countMissionInventoryResource(state.inventory.counts, mission.item) >= mission.count) {
+      if (this.options.vtrReachProbe === true) {
+        this.logger.info(
+          'vtr',
+          `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=mission-already-satisfied`,
+          { mission, reason: 'mission-already-satisfied' },
+          this.tickCounter,
+        )
+        return true
+      }
+      return false
+    }
     if (this.missionSourceAlreadyReachable(state, mission.item)) {
       this.vtrOwnsReachMoveThisTick = true
+      if (this.options.vtrReachProbe === true) {
+        this.logger.info(
+          'vtr',
+          `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=ensure-already-true`,
+          { mission, reason: 'reach.resource-source-already-true' },
+          this.tickCounter,
+        )
+        return true
+      }
       return false
     }
     const grounding = this.reachCandidates(state, mission)
@@ -4451,7 +4491,66 @@ export class JevController {
       !bodyNeedsBreathEscape(state.self) &&
       state.self.envHazard?.active !== true &&
       state.signals.threat?.active !== true
-    if (!safe || potential.length === 0) return false
+    if (!safe) {
+      if (this.options.vtrReachProbe === true) {
+        this.logger.warn(
+          'vtr',
+          `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=body-not-safe`,
+          {
+            mission,
+            reason: 'body-not-safe',
+            safetyFacts: {
+              health: state.self.health,
+              needsBreathEscape: bodyNeedsBreathEscape(state.self),
+              environmentalHazard: state.self.envHazard?.active === true,
+              activeThreat: state.signals.threat?.active === true,
+            },
+            authority: 'vtr-transition-scheduler',
+          },
+          this.tickCounter,
+        )
+        return true
+      }
+      return false
+    }
+    if (potential.length === 0) {
+      const rejectedReachRoutes = grounding.grounded.candidates.filter(
+        (candidate) =>
+          this.reachMissionSourceCandidateShape(mission.item, candidate, state) &&
+          !reachMoveFitsLocomotionContract(candidate),
+      )
+      if (rejectedReachRoutes.length > 0) {
+        this.vtrOwnsReachMoveThisTick = true
+        this.logger.warn(
+          'vtr',
+          `VTR_SCHEDULER_HOLDS_NO_ADMISSIBLE_ROUTE mission=${mission.id} item=${mission.item} candidates=${rejectedReachRoutes.length}`,
+          {
+            mission,
+            reason: 'no-admissible-reach-route',
+            schedulerBoundary: {
+              kind: 'NO_ADMISSIBLE_REACH_ROUTE',
+              missionId: mission.id,
+              predicateId: 'reach.resource-source',
+              candidateIds: rejectedReachRoutes.map((candidate) => candidate.id),
+            },
+            rejectedCandidates: rejectedReachRoutes.map((candidate) => candidate.id),
+            authority: 'vtr-transition-scheduler',
+          },
+          this.tickCounter,
+        )
+        return true
+      }
+      if (this.options.vtrReachProbe === true) {
+        this.logger.info(
+          'vtr',
+          `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=no-grounded-reach-candidate`,
+          { mission, reason: 'no-grounded-reach-candidate', authority: 'vtr-transition-scheduler' },
+          this.tickCounter,
+        )
+        return true
+      }
+      return false
+    }
     const terminalHandoff = this.reachTerminalHandoff
     const sameTerminalScope = terminalHandoff !== null &&
       terminalHandoff.missionId === mission.id &&
@@ -4469,11 +4568,17 @@ export class JevController {
         { mission, terminalHandoff, groundedCandidates: potential.map(({ candidate }) => candidate.id), reason: 'same world/mission/witness facts; no automatic contract retry' },
         this.tickCounter,
       )
-      return false
+      return true
     }
     const chosen = eligible[0]!.candidate
     const source = this.sourcePositionForCandidate(chosen)
-    if (source === null) return false
+    if (source === null) {
+      if (this.options.vtrReachProbe === true) {
+        this.logger.warn('vtr', `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=missing-source-position`, { mission, candidate: chosen.id }, this.tickCounter)
+        return true
+      }
+      return false
+    }
     const desired: ReachPredicate = {
       id: 'reach.resource-source',
       proposition: {
@@ -4503,10 +4608,22 @@ export class JevController {
       identity,
     })
     const witness = this.reachWitnessForCandidate(contract, mission.item, chosen, state)
-    if (witness === null) return false
+    if (witness === null) {
+      if (this.options.vtrReachProbe === true) {
+        this.logger.warn('vtr', `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=missing-grounded-witness`, { mission, candidate: chosen.id }, this.tickCounter)
+        return true
+      }
+      return false
+    }
     const observation = this.reachObservation({ contract, mission }, state, identity, [chosen])
     const started = startReachTransition(contract, observation, { tactic: 'walk', witness })
-    if (started.status !== 'active') return false
+    if (started.status !== 'active') {
+      if (this.options.vtrReachProbe === true) {
+        this.logger.warn('vtr', `VTR_REACH_PROBE_HOLD mission=${mission.id} reason=contract-precondition-refused`, { mission, candidate: chosen.id, status: started.status }, this.tickCounter)
+        return true
+      }
+      return false
+    }
     this.reachTransition = {
       mission: { ...mission, count: Math.max(1, Math.floor(mission.count)) },
       contract,
@@ -4540,8 +4657,17 @@ export class JevController {
   }
 
   private reachWitnessForCandidateShape(item: string, candidate: Candidate, state: WorldState): boolean {
+    return this.reachMissionSourceCandidateShape(item, candidate, state) && reachMoveFitsLocomotionContract(candidate)
+  }
+
+  /**
+   * Identify a grounded Reach witness independently of whether this controller's
+   * current effect envelope admits the route. The legacy suppression boundary
+   * must still recognize same-Mission movement that VTR refuses (for example,
+   * a staircase route requiring an uncommitted terrain mutation).
+   */
+  private reachMissionSourceCandidateShape(item: string, candidate: Candidate, state: WorldState): boolean {
     if (candidate.kind !== 'MOVE' || candidate.target === null || candidate.meta.explore === true) return false
-    if (!reachMoveFitsLocomotionContract(candidate)) return false
     const name = typeof candidate.meta.targetBlockName === 'string' ? candidate.meta.targetBlockName : candidate.targetName
     const x = candidate.meta.targetBlockX
     const y = candidate.meta.targetBlockY
@@ -4777,6 +4903,25 @@ export class JevController {
         const handled = await this.tickReachTransition(trigger, detail)
         if (handled) return
       }
+      if (this.options.vtrReachProbe === true) {
+        const current = this.executor.current
+        if (current !== null && current.authority !== 'vtr-reach') {
+          this.executor.cancelCurrent('VTR Reach probe refused legacy scheduler fallback')
+        }
+        this.logger.warn(
+          'vtr',
+          `VTR_REACH_PROBE_HOLD trigger=${trigger} reason=${this.options.vtrMission === null || this.options.vtrMission === undefined ? 'mission-unavailable' : 'scheduler-declined-no-legacy-fallback'}`,
+          {
+            trigger,
+            reason: this.options.vtrMission === null || this.options.vtrMission === undefined ? 'mission-unavailable' : 'scheduler-declined-no-legacy-fallback',
+            activeActionId: current?.id ?? null,
+            activeAuthority: current?.authority ?? null,
+            authority: 'vtr-transition-scheduler',
+          },
+          this.tickCounter,
+        )
+        return
+      }
       if (this.modelRecoveryStopping) return
 
       // These legacy recovery observers may wake System2. Run them only after
@@ -4993,7 +5138,7 @@ export class JevController {
       const vtrMission = this.options.vtrMission
       if (this.vtrOwnsReachMoveThisTick && vtrMission !== null && vtrMission !== undefined) {
         const legacyReachMoves = candidates.filter((candidate) =>
-          this.reachWitnessForCandidateShape(vtrMission.item, candidate, state),
+          this.reachMissionSourceCandidateShape(vtrMission.item, candidate, state),
         )
         if (legacyReachMoves.length > 0) {
           candidates = candidates.filter((candidate) => !legacyReachMoves.includes(candidate))
