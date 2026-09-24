@@ -18,6 +18,7 @@ import {
 } from './planner-legacy.ts'
 import type { PlannerWorldKey } from './planner.ts'
 import {
+  MERCURY_CACHE_FILE_VERSION,
   MERCURY_CACHE_SCHEMA_VERSION,
   MercurySystem2,
   hashMercuryState,
@@ -436,7 +437,7 @@ addCase('#33: Mercury cache is world-namespaced (hit same world, miss on epoch b
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: MERCURY_CACHE_SCHEMA_VERSION,
+      version: MERCURY_CACHE_FILE_VERSION,
       worldKey: identity.worldKey,
       worldEpoch: identity.worldEpoch,
       schemaVersion: MERCURY_CACHE_SCHEMA_VERSION,

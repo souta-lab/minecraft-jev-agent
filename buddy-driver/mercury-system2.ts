@@ -62,6 +62,7 @@ import type {
   System2Outcome,
   System2Plan,
   System2PlanRequest,
+  System2SemanticOutcome,
   System2WithheldCandidate,
 } from '../jev-agent/src/system2.ts'
 import type { System2PayloadShape } from '../jev-agent/src/system2Payload.ts'
@@ -1120,6 +1121,7 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     objective: state.objective,
     wait: Math.min(state.consecutiveWait, 3),
     failures: state.recentFailures,
+    semanticOutcomes: state.recentSemanticOutcomes ?? [],
     deathHistory: state.deathHistory,
     deathHistoryTotal: state.deathHistoryTotal ?? state.deathHistory.length,
     postDeath: state.postDeath ?? null,
@@ -1266,6 +1268,8 @@ export interface MercuryStateSummary {
   portal?: { verified: boolean; knownSites: number }
   knownOres: string[]
   recentFailures: string[]
+  /** Bounded causal history linking earlier System2 WHAT choices to outcomes. */
+  recentSemanticOutcomes?: System2SemanticOutcome[]
   consecutiveWait: number
   queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
   /**
@@ -1397,7 +1401,7 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 
 /** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
 export const MERCURY_CACHE_SCHEMA_VERSION = 8
-const MERCURY_CACHE_FILE_VERSION = 8
+export const MERCURY_CACHE_FILE_VERSION = 8
 
 export interface MercuryWorldKey {
   serverId: string
@@ -1543,6 +1547,8 @@ export interface MercuryCallRecord {
   rawText?: string
   /** how the goals were obtained: structured enrichment, grounded prose, or none. */
   intentSource?: 'enrichment' | 'intent' | 'ungrounded' | 'cached'
+  /** Install-time executability evidence for a fresh provider proposal. */
+  executability?: MercuryPlanExecutabilityVerdict
   /**
    * The MODEL-CALL plane mirror of the summon payload's shape: what the compact
    * state actually carried, derived from the very object that was serialised
@@ -1944,6 +1950,14 @@ Plan operations:
 - abort: terminate the remaining plan as impossible; goals MUST be empty.
 The operation is typed lifecycle intent. The reason/note never overrides it;
 "switch" or "move on" must use replace or abandon, never patch.
+
+If recentSemanticOutcomes is present, use it as bounded causal evidence about
+earlier WHAT proposals: intent and accepted goals show what was installed;
+progress distinguishes body movement from search/goal progress; blocker and
+world fingerprints show whether the relevant state changed. A pending or
+unknown result is not proof of success or failure. Reassess the current state
+and blockers before deciding whether to continue, revise or replace that plan;
+history is context, not a fixed route or a ranking of future goals.
 
 Be concise. In the reason field write at most one short sentence.`
 
@@ -2965,13 +2979,6 @@ export class MercurySystem2 implements System2Brain {
       }
       const strategy = mercuryStrategyLabel(plan)
       const goals = plannedGoalsFromMercury(plan, state)
-      const executability = evaluateAndLogMercuryPlanExecutability(this.log, goals, state.blockers, {
-        intentSource: success.intentSource,
-        trigger,
-        strategy,
-        stateHash,
-        callId,
-      })
       // #system2-compile: a model goal whose lowering fails is typed here rather
       // than disappearing inside `plannedGoalsFromMercury`. Both the host log and
       // the plan provenance carry it, so "the model asked for X but no X row
@@ -2986,6 +2993,73 @@ export class MercurySystem2 implements System2Brain {
           goals: uncompiled,
           compiled: goals.map((goal) => goal.description),
         })
+      }
+      const executability = evaluateAndLogMercuryPlanExecutability(this.log, goals, state.blockers, {
+        intentSource: 'fresh',
+        trigger,
+        strategy,
+        stateHash,
+        callId,
+      })
+      if (executability.verdict === 'not_executable_now') {
+        // A valid fresh WHAT can still be unexecutable in the measured state.
+        // Preserve the model proposal and the typed refusal in evidence, but do
+        // not cache or install it: a later call must be able to reconsider the
+        // causal result instead of silently turning this refused answer into a
+        // replay authority.
+        this.writeCall({
+          record: 'mercury-call',
+          callId,
+          ts: new Date().toISOString(),
+          model: this.model,
+          stage: trigger,
+          latencyMs,
+          attempts,
+          failures,
+          retries: retriesUsed,
+          attempt: attempts,
+          outcome: 'plan_rejected',
+          state,
+          prompt: { system: SYSTEM_PROMPT, user: success.prompt },
+          response: plan,
+          usage: success.usage,
+          cost: Number(costUsd.toFixed(8)),
+          error: null,
+          intent: success.intent,
+          rawText: success.rawText,
+          intentSource: success.intentSource,
+          executability,
+        })
+        const note = `mercury ${strategy} refused: not executable here`
+        this.log('ADVISOR', {
+          source: this.provider,
+          reason: trigger,
+          strategy,
+          cost: Number(costUsd.toFixed(6)),
+          ms: latencyMs,
+          cached: false,
+          note,
+          intentSource: 'fresh',
+        })
+        return {
+          plan: {
+            op: 'patch',
+            goals: [],
+            note,
+            provenance: {
+              intentSource: success.intentSource,
+              intent: success.intent.slice(0, 400),
+              noGoalsReason: MERCURY_PLAN_NOT_EXECUTABLE_NO_GOALS_REASON,
+              ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
+            },
+          },
+          strategy,
+          op: 'patch',
+          goals: [],
+          costUsd,
+          ms: latencyMs,
+          cached: false,
+        }
       }
       this.cache.entries[stateHash] = {
         op: plan.op,
@@ -3036,43 +3110,32 @@ export class MercurySystem2 implements System2Brain {
         intentSource: success.intentSource,
       })
 
-      const refused = executability.verdict === 'not_executable_now'
-      const installedPlan: System2Plan = refused
-        ? {
-            op: 'patch',
-            goals: [],
-            note: `mercury ${strategy} refused: not executable here`,
-            provenance: {
-              intentSource: success.intentSource,
-              intent: success.intent.slice(0, 400),
-              noGoalsReason: MERCURY_PLAN_NOT_EXECUTABLE_NO_GOALS_REASON,
-              ...(uncompiled.length > 0 ? { uncompiled } : {}),
-              ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
-            },
-          }
-        : {
-            op: plan.op,
-            goals,
-            note: `mercury ${plan.op}: ${plan.reason}`,
-            provenance: {
-              intentSource: success.intentSource,
-              intent: success.intent.slice(0, 400),
-              ...(goals.length === 0
-                ? {
-                    noGoalsReason:
-                      plan.op === 'abort' || plan.op === 'complete' || plan.op === 'continue'
-                        ? 'lifecycle_op'
-                        : uncompiled.length > 0
-                          ? 'goals_not_compilable'
-                          : 'plan_carried_no_goals',
-                  }
-                : {}),
-              ...(uncompiled.length > 0 ? { uncompiled } : {}),
-              // A rejected structured block is evidence even when the prose grounded a
-              // plan: it names WHICH half of the answer the applied rows came from.
-              ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
-            },
-          }
+      // A typed refusal returned above, before cache insertion. Here only an
+      // executable or unknown verdict remains; unknown is preserved rather
+      // than guessed into either side.
+      const installedPlan: System2Plan = {
+        op: plan.op,
+        goals,
+        note: `mercury ${plan.op}: ${plan.reason}`,
+        provenance: {
+          intentSource: success.intentSource,
+          intent: success.intent.slice(0, 400),
+          ...(goals.length === 0
+            ? {
+                noGoalsReason:
+                  plan.op === 'abort' || plan.op === 'complete' || plan.op === 'continue'
+                    ? 'lifecycle_op'
+                    : uncompiled.length > 0
+                      ? 'goals_not_compilable'
+                      : 'plan_carried_no_goals',
+              }
+            : {}),
+          ...(uncompiled.length > 0 ? { uncompiled } : {}),
+          // A rejected structured block is evidence even when the prose grounded a
+          // plan: it names WHICH half of the answer the applied rows came from.
+          ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
+        },
+      }
 
       return {
         plan: installedPlan,

@@ -41,6 +41,7 @@ import {
 } from './mercury-system2.ts'
 import { MERCURY_DEATH_HISTORY_LIMIT } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
+import { SYSTEM2_SEMANTIC_HISTORY_LIMIT } from '../jev-agent/src/system2CausalHistory.ts'
 import {
   formatSystem2PayloadAbsentLine,
   formatSystem2PayloadLine,
@@ -1984,6 +1985,9 @@ export function buildMercurySummary(
       hasImpossible: request.goalQueueState.hasImpossible,
     },
     objective: activeObjective,
+    ...(request.recentSemanticOutcomes === undefined || request.recentSemanticOutcomes.length === 0
+      ? {}
+      : { recentSemanticOutcomes: request.recentSemanticOutcomes.slice(-SYSTEM2_SEMANTIC_HISTORY_LIMIT) }),
     // Newest-first and BOUNDED: the durable hazard memory is world-scoped and
     // grows for the life of the world, so carrying it whole made the payload a
     // log (measured live: 1098 of 3549 chars, 57 entries) and kept perturbing

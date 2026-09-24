@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  MERCURY_CACHE_FILE_VERSION,
   MERCURY_CACHE_SCHEMA_VERSION,
   MercurySystem2,
   groundMercuryPlan,
@@ -275,7 +276,7 @@ addCase('fixture cache replay applies a typed place plan with no network call', 
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: MERCURY_CACHE_SCHEMA_VERSION,
+      version: MERCURY_CACHE_FILE_VERSION,
       worldKey: 'local|unknown|0',
       worldEpoch: 0,
       schemaVersion: MERCURY_CACHE_SCHEMA_VERSION,

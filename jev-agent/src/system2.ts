@@ -70,6 +70,45 @@ export interface System2Outcome {
   control?: 'none' | 'wait' | 'escalate'
 }
 
+export interface System2SemanticAcceptedGoal {
+  goalId: string
+  optionId: string | null
+  optionInstanceId: string | null
+  description: string
+}
+
+export interface System2SemanticBlocker {
+  blockedBy: string | null
+  missing: readonly string[]
+  withheld: readonly { candidate: string; kind: string; reason: string; missing: readonly string[] }[]
+  offered: readonly { candidate: string; kind: string }[]
+  toolsUnmet: readonly { tool: string; requiredTier: number; heldTier: number; candidate: string }[]
+  truncated: boolean
+}
+
+/**
+ * One bounded WHAT-to-outcome record. It is evidence for System2 only; no field
+ * ranks, suppresses or chooses a future goal.
+ */
+export interface System2SemanticOutcome {
+  proposalId: string
+  semanticIntentKey: string
+  operation: PlanOp
+  intentSource: System2PlanProvenance['intentSource']
+  intent: string
+  acceptedGoals: readonly System2SemanticAcceptedGoal[]
+  acceptedGoalsTotal: number
+  requestedGoalsTotal: number
+  optionInstanceBefore: string | null
+  queueDoneBefore: number
+  stateFingerprintBefore: string
+  blockerBefore: System2SemanticBlocker | null
+  progress: { body: boolean; search: boolean; goal: boolean; option: boolean }
+  stateFingerprintAfter: string | null
+  blockerAfter: System2SemanticBlocker | null
+  outcome: 'pending' | 'blocked' | 'semantic_progress' | 'body_only' | 'no_progress' | 'unknown'
+}
+
 /**
  * A candidate the grounded layer REFUSED, as the code's own typed reachability
  * fact (`CandidateReachability` projected to plain data).
@@ -198,6 +237,8 @@ export interface System2PlanRequest {
   objective: System2Objective
   recentEvents: string[]
   recentOutcomes: System2Outcome[]
+  /** Recent causal outcomes at the System2/Option scale; bounded by the controller. */
+  recentSemanticOutcomes?: System2SemanticOutcome[]
   /** Identity of the semantic state read by this asynchronous request. */
   requestContext?: System2RequestContext
   /**

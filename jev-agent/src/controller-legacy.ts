@@ -264,7 +264,7 @@ import { formatLevelScanStep } from './levelScan.ts'
 import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
-import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2ToolGap, System2WithheldCandidate } from './system2.ts'
+import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2.ts'
 import {
   buildSystem2BlockerFacts,
   emptySystem2PayloadShape,
@@ -283,6 +283,14 @@ import {
   system2BodyOwned,
 } from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
+import {
+  createSystem2SemanticOutcome,
+  finalizeSystem2SemanticOutcomes,
+  recordSystem2SemanticAction,
+  system2SemanticBlocker,
+  system2SemanticFingerprint,
+  SYSTEM2_SEMANTIC_HISTORY_LIMIT,
+} from './system2CausalHistory.ts'
 import { submitSystem2Handoff } from './system2Handoff.ts'
 import {
   evaluateBetaTerminationBoundary,
@@ -2246,6 +2254,7 @@ export class JevController {
   private signals: AgentSignals = emptySignals()
   private recentEvents: string[] = []
   private recentOutcomes: System2Outcome[] = []
+  private recentSemanticOutcomes: System2SemanticOutcome[] = []
 
   private tickCounter = 0
   private jevCalls = 0
@@ -3115,14 +3124,29 @@ export class JevController {
   }
 
   private async bootstrapPlan(): Promise<void> {
+    const before = this.queue.state
+    const requestId = randomUUID()
+    const semanticStateFingerprint = this.semanticStateFingerprint()
+    const requestContext: System2RequestContext = {
+      requestId,
+      queueRevision: this.queue.revision,
+      optionInstanceId: before.current?.semanticOptionInstanceId ?? before.current?.optionInstanceId ?? null,
+      optionTemplateId: before.current?.semanticOptionTemplateId ?? before.current?.optionTemplateId ?? null,
+      worldEpoch: this.options.worldEpoch,
+      stateFingerprint: this.lastStateFingerprint || 'unobserved',
+      semanticStateFingerprint,
+      authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+    }
     const request: System2PlanRequest = {
       reason: 'queue_empty',
       detail: 'single-shot bootstrap: supply the long-horizon plan once',
       tick: this.tickCounter,
-      goalQueueState: this.queue.state,
+      goalQueueState: before,
       objective: this.objectiveState(),
       recentEvents: [],
       recentOutcomes: [],
+      recentSemanticOutcomes: this.recentSemanticOutcomes.slice(-SYSTEM2_SEMANTIC_HISTORY_LIMIT),
+      requestContext,
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
@@ -3137,6 +3161,18 @@ export class JevController {
       protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
     })
     this.logQueueDepthDelta(depthBefore, op, `bootstrap`)
+    this.rememberSystem2PlanOutcome({
+      proposalId: requestId,
+      operation: plan.op ?? op,
+      intentSource: plan.provenance?.intentSource ?? 'none',
+      intent: plan.provenance?.intent ?? plan.note,
+      requestedGoalsTotal: plan.goals.length,
+      acceptedGoals: added,
+      optionInstanceBefore: requestContext.optionInstanceId,
+      queueDoneBefore: before.done,
+      stateFingerprintBefore: semanticStateFingerprint,
+      blockersBefore: null,
+    })
     this.subgoalCount = Math.max(added.length, this.queue.size)
     if (restoredHead && op !== requestedOp) {
       this.logger.warn(
@@ -6668,6 +6704,12 @@ export class JevController {
     })
 
     const pending = this.pendingDecisions.get(result.epoch)
+    this.recentSemanticOutcomes = recordSystem2SemanticAction(
+      this.recentSemanticOutcomes,
+      pending?.record.goalQueueState.current?.id ?? null,
+      taxonomy.progressKinds,
+      this.queue.state.done,
+    )
     let completedOptionId: string | null = null
     let completedPlanId: string | null = null
     if (pending !== undefined) {
@@ -8650,6 +8692,43 @@ export class JevController {
     return built.facts
   }
 
+  private semanticStateFingerprint(): string {
+    return system2SemanticFingerprint(
+      this.lastStateFingerprint || 'unobserved',
+      this.bot.game?.dimension ?? null,
+      {
+        health: Number.isFinite(this.bot.health) ? Math.round(this.bot.health * 10) / 10 : null,
+        food: Number.isFinite(this.bot.food) ? this.bot.food : null,
+        ...this.objectiveState(),
+      },
+    )
+  }
+
+  private rememberSystem2PlanOutcome(input: {
+    proposalId: string
+    operation: 'continue' | 'patch' | 'replace' | 'abandon' | 'complete' | 'abort'
+    intentSource: System2SemanticOutcome['intentSource']
+    intent: string
+    requestedGoalsTotal: number
+    acceptedGoals: readonly QueuedGoal[]
+    optionInstanceBefore: string | null
+    queueDoneBefore: number
+    stateFingerprintBefore: string
+    blockersBefore: System2BlockerFacts | null
+  }): void {
+    const record = createSystem2SemanticOutcome({
+      ...input,
+      blockerBefore: system2SemanticBlocker(input.blockersBefore),
+    })
+    this.recentSemanticOutcomes = [...this.recentSemanticOutcomes, record].slice(-SYSTEM2_SEMANTIC_HISTORY_LIMIT)
+    this.logger.info(
+      'system2',
+      `SYSTEM2_CAUSAL_PROPOSAL id=${record.proposalId} intentKey=${record.semanticIntentKey} op=${record.operation} requested=${record.requestedGoalsTotal} accepted=${record.acceptedGoalsTotal}`,
+      { ...record },
+      this.tickCounter,
+    )
+  }
+
   private summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
     if (!this.running) return null
     if (this.queue.current?.origin === 'human') {
@@ -8767,6 +8846,12 @@ export class JevController {
         : detail
     const queueState = this.queue.state
     const currentOption = queueState.current
+    const blockers = this.system2BlockerFacts()
+    const semanticStateFingerprint = this.semanticStateFingerprint()
+    this.recentSemanticOutcomes = finalizeSystem2SemanticOutcomes(this.recentSemanticOutcomes, {
+      stateFingerprint: semanticStateFingerprint,
+      blocker: system2SemanticBlocker(blockers),
+    })
     const requestContext: System2RequestContext = {
       requestId: randomUUID(),
       queueRevision: this.queue.revision,
@@ -8774,6 +8859,7 @@ export class JevController {
       optionTemplateId: currentOption?.semanticOptionTemplateId ?? currentOption?.optionTemplateId ?? null,
       worldEpoch: this.options.worldEpoch,
       stateFingerprint: this.lastStateFingerprint || 'unobserved',
+      semanticStateFingerprint,
       // Local semantic progress and critical threat changes both invalidate an
       // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
       // events that are intentionally absent from the compact world fingerprint.
@@ -8787,12 +8873,16 @@ export class JevController {
       objective: this.objectiveState(),
       recentEvents: this.recentEvents.slice(-8),
       recentOutcomes: this.recentOutcomes.slice(-8),
+      recentSemanticOutcomes: this.recentSemanticOutcomes.slice(-SYSTEM2_SEMANTIC_HISTORY_LIMIT),
       requestContext,
-      ...(() => {
-        const blockers = this.system2BlockerFacts()
-        return blockers === null ? {} : { blockers }
-      })(),
+      ...(blockers === null ? {} : { blockers }),
     }
+    this.logger.info(
+      'system2',
+      `SYSTEM2_CAUSAL_HISTORY attached=${request.recentSemanticOutcomes?.length ?? 0} semanticState=${semanticStateFingerprint}`,
+      { requestId: requestContext.requestId, records: request.recentSemanticOutcomes ?? [] },
+      this.tickCounter,
+    )
     const resummon: DecisionLlmResummonLog = {
       triggered: true,
       reason,
@@ -8939,6 +9029,18 @@ export class JevController {
           onOperationRejected: (line) => this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter),
         })
         this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `summon:${reason}`)
+        this.rememberSystem2PlanOutcome({
+          proposalId: requestContext.requestId,
+          operation: plan.op ?? 'replace',
+          intentSource: plan.provenance?.intentSource ?? 'none',
+          intent: plan.provenance?.intent ?? plan.note,
+          requestedGoalsTotal: plan.goals.length,
+          acceptedGoals: added,
+          optionInstanceBefore: requestContext.optionInstanceId,
+          queueDoneBefore: queueState.done,
+          stateFingerprintBefore: requestContext.semanticStateFingerprint ?? 'unobserved',
+          blockersBefore: blockers,
+        })
         this.waitReplans = 0
         if (added.length > 0) {
           this.wedgeWindowId = null

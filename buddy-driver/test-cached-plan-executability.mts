@@ -199,22 +199,32 @@ interface ReplayRun {
   cachePath: string
 }
 
-async function runFresh(summary: MercuryStateSummary, plan: MercuryPlanJson): Promise<ReplayRun> {
+interface FreshRun extends ReplayRun {
+  call: Record<string, unknown> | null
+  transportCalls: number
+}
+
+async function runFresh(summary: MercuryStateSummary, plan: MercuryPlanJson): Promise<FreshRun> {
   const dir = mkdtempSync(join(tmpdir(), 'fresh-plan-exec-'))
   const cachePath = join(dir, 'mercury-cache.json')
+  const callsPath = join(dir, 'mercury-calls.jsonl')
   const logs: string[] = []
+  let transportCalls = 0
   const mercury = new MercurySystem2({
     summarize: () => summary,
     log: hostLog(logs),
-    callsPath: join(dir, 'mercury-calls.jsonl'),
+    callsPath,
     cachePath,
     maxPerHour: 1,
     resolveKey: () => ({ key: 'fixture-key', origin: 'fixture' }),
-    transport: async () => ({
-      toolCalls: [{ input: plan }],
-      text: 'Use the verified portal, subject to the live movement refusal.',
-      usage: { inputTokens: 1, outputTokens: 1 },
-    }),
+    transport: async () => {
+      transportCalls += 1
+      return {
+        toolCalls: [{ input: plan }],
+        text: 'Use the verified portal, subject to the live movement refusal.',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }
+    },
   })
   let result: MercuryRepairResult | null = null
   let thrown: unknown = null
@@ -227,9 +237,11 @@ async function runFresh(summary: MercuryStateSummary, plan: MercuryPlanJson): Pr
     result,
     thrown,
     logs,
-    callLog: existsSync(join(dir, 'mercury-calls.jsonl')) ? 'written' : 'absent',
+    callLog: existsSync(callsPath) ? 'written' : 'absent',
+    call: existsSync(callsPath) ? JSON.parse(readFileSync(callsPath, 'utf8').trim().split('\n')[0]!) as Record<string, unknown> : null,
     cacheAfter: JSON.parse(readFileSync(cachePath, 'utf8')),
     cachePath,
+    transportCalls,
   }
 }
 
@@ -442,20 +454,22 @@ function linesWith(logs: readonly string[], token: string): string[] {
   check(
     '(iii) the fresh verdict/refusal names the exact source and grounded blocker',
     freshVerdict.length === 1 && freshVerdict[0]!.includes('verdict=not_executable_now') &&
-      /intentSource=(enrichment|intent)/.test(freshVerdict[0]!) &&
+      freshVerdict[0]!.includes('intentSource=fresh') &&
       freshRefusal.length === 1 && freshRefusal[0]!.includes('candidateKind=ENTER_PORTAL') &&
       freshRefusal[0]!.includes('reason=needs_descend') &&
       freshRefusal[0]!.includes('missing=[descend_plan:no_support@27,78,-4:air]'),
     `verdict=${freshVerdict.join(' | ')} refusal=${freshRefusal.join(' | ')}`,
   )
   check(
-    '(iii) the model was called and its raw answer remains cached for the same tri-state check on replay',
-    fresh.callLog === 'written' &&
-      fresh.cacheAfter.entries[hashMercuryState(summary)]?.replays === 0 &&
-      JSON.stringify(fresh.cacheAfter.entries[hashMercuryState(summary)]?.goals) === JSON.stringify(CACHED_ENTER.goals),
-    `callLog=${fresh.callLog} cached=${JSON.stringify(fresh.cacheAfter.entries[hashMercuryState(summary)])}`,
+    '(iii) fresh unexecutable WHAT is recorded with the exact typed refusal and never cached',
+    fresh.transportCalls === 1 && fresh.callLog === 'written' &&
+      fresh.call?.outcome === 'plan_rejected' &&
+      (fresh.call?.executability as { verdict?: string } | undefined)?.verdict === 'not_executable_now' &&
+      (fresh.call?.response as { goals?: unknown[] } | undefined)?.goals?.length === 1 &&
+      fresh.call?.intentSource === 'enrichment' &&
+      Object.keys(fresh.cacheAfter.entries).length === 0,
+    `calls=${fresh.transportCalls} record=${JSON.stringify(fresh.call)} cache=${JSON.stringify(fresh.cacheAfter.entries)}`,
   )
-  const replay = await runReplay(summary, CACHED_ENTER, CACHED_ENTER_STRATEGY, 0, fresh.cachePath)
   const frozen = Object.freeze(
     plannedGoalsFromMercury(CACHED_ENTER, summary).map((goal) => Object.freeze({ ...goal })),
   ) as readonly PlannedGoal[]
@@ -466,15 +480,6 @@ function linesWith(logs: readonly string[], token: string): string[] {
     verdict.verdict === 'not_executable_now' && JSON.stringify(frozen) === before,
     `verdict=${verdict.verdict} before=${before} after=${JSON.stringify(frozen)}`,
   )
-  check(
-    '(iii) the fresh answer replayed from cache is refused by the same boundary without another model call',
-    replay.thrown === null && replay.result?.goals.length === 0 && replay.result.cached === true &&
-      replay.callLog === 'absent' &&
-      linesWith(replay.logs, MERCURY_PLAN_EXECUTABILITY_MARKER).length === 1 &&
-      linesWith(replay.logs, MERCURY_PLAN_EXECUTABILITY_MARKER)[0]!.includes('verdict=not_executable_now'),
-    `goals=${JSON.stringify(replay.result?.goals)} calls=${replay.callLog} verdict=${linesWith(replay.logs, MERCURY_PLAN_EXECUTABILITY_MARKER).join(' | ')}`,
-  )
-
   const unknownSummary = mercuryState({ blockers: unrelatedBlockers() })
   unknownSummary.allowedGoals.collect.push('stone')
   const unknownPlan: MercuryPlanJson = {

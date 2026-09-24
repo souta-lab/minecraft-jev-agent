@@ -12,6 +12,8 @@ export interface System2RequestContext {
   optionTemplateId: string | null
   worldEpoch: number
   stateFingerprint: string
+  /** World/blocker fingerprint used to compare System2 causal outcomes. */
+  semanticStateFingerprint?: string
   authorityEpoch: number
 }
 

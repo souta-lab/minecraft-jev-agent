@@ -7,6 +7,7 @@ import { Advisor, MAX_CACHE_REPLAYS, groundStrategy, hashAdvisorState } from './
 import type { AdvisorState, AdvisorStrategy } from './advisor.ts'
 import {
   MAX_CACHE_REPLAYS as MERCURY_MAX_REPLAYS,
+  MERCURY_CACHE_FILE_VERSION,
   MERCURY_CACHE_SCHEMA_VERSION,
   MercurySystem2,
   groundMercuryPlan,
@@ -271,7 +272,7 @@ addCase('mercury cache hit replays the cached plan instead of continue + empty g
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: MERCURY_CACHE_SCHEMA_VERSION,
+      version: MERCURY_CACHE_FILE_VERSION,
       worldKey: 'local|unknown|0',
       worldEpoch: 0,
       schemaVersion: MERCURY_CACHE_SCHEMA_VERSION,
@@ -321,7 +322,7 @@ addCase('mercury cache bypasses after MAX_CACHE_REPLAYS into a fatal, never a nu
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: MERCURY_CACHE_SCHEMA_VERSION,
+      version: MERCURY_CACHE_FILE_VERSION,
       worldKey: 'local|unknown|0',
       worldEpoch: 0,
       schemaVersion: MERCURY_CACHE_SCHEMA_VERSION,
