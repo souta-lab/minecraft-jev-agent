@@ -25,7 +25,18 @@ const MAX_RUN_BOUNDARY_SCAN_BYTES = 1024 * 1024
 const MAX_RUN_ARTIFACT_BYTES = 64 * 1024
 const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const MAX_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
+const DEFAULT_VTR_RUN_LOG_BYTES = 1024 * 1024
 const DEFAULT_CONTROL_TIMEOUT_MS = 5000
+
+const VTR_TRACE_EVENTS = new Set([
+  'VTR_REACH_PROBE_HOLD',
+  'VTR_TRANSITION_COMMIT',
+  'VTR_TRANSITION_PROGRESS',
+  'VTR_TRANSITION_ACTUATION',
+  'VTR_TRANSITION_VERIFY',
+  'VTR_TRANSITION_OUTCOME',
+  'VTR_ORPHAN_ACTION_OUTCOME',
+])
 
 const TRACE_EVENTS = new Set([
   'JEV_HEADS',
@@ -68,6 +79,7 @@ const TRACE_EVENTS = new Set([
   'BUILD',
   'FATAL',
   'ERROR',
+  ...VTR_TRACE_EVENTS,
 ])
 
 const SECRET_KEY = /(api.?key|authorization|cookie|password|secret|token)/i
@@ -310,25 +322,31 @@ function readRunMetadata(runtimeDir, runId) {
 }
 
 function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, runBoot = null) {
-  const sourceSha = metadata?.sourceSha
-  const validSourceSha = typeof sourceSha === 'string' && /^[0-9a-f]{40}$/i.test(sourceSha)
+  const validSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
   const bootSourceSha = runBoot?.detail?.source ?? runBoot?.detail?.sourceSha ?? null
   const readySourceSha = readyEvent?.detail?.source ?? readyEvent?.detail?.sourceSha ?? null
+  const artifactSourceCandidates = [metadata?.acceptance?.gitCommit, metadata?.predicates?.sourceSha]
+    .filter((value) => typeof value === 'string' && value.length > 0)
+  const artifactConflict = metadata?.sourceShaConflict === true
+    || artifactSourceCandidates.some((value) => !validSha(value))
+    || new Set(artifactSourceCandidates).size > 1
+  const eventSourceBound = validSha(bootSourceSha)
+    && validSha(readySourceSha)
+    && bootSourceSha === readySourceSha
+  const artifactMatchesEvents = artifactSourceCandidates.every((value) => value === bootSourceSha)
   return typeof runId === 'string'
-    && metadata?.runArtifactsMatched === true
-    && validSourceSha
-    && metadata.sourceShaConflict !== true
-    && metadata.acceptance?.runId === runId
-    && metadata.predicates?.runId === runId
-    && metadata.acceptance?.gitCommit === sourceSha
-    && metadata.predicates?.sourceSha === sourceSha
-    && (runBoot === null || (runBoot.event === 'BOOT' && runBoot.detail?.runId === runId))
-    && (bootSourceSha === null || bootSourceSha === sourceSha)
+    && generationId !== null
     && typeof generationId === 'string'
+    && !artifactConflict
+    && eventSourceBound
+    && artifactMatchesEvents
+    && (metadata?.acceptance?.runId === undefined || metadata.acceptance.runId === runId)
+    && (metadata?.predicates?.runId === undefined || metadata.predicates.runId === runId)
+    && (runBoot === null || (runBoot.event === 'BOOT' && runBoot.detail?.runId === runId))
+    && runBoot?.detail?.runId === runId
     && readyEvent?.event === 'GENERATION_READY'
     && readyEvent.detail?.id === generationId
-    && (readyEvent.detail?.runId === undefined || readyEvent.detail.runId === runId)
-    && (readySourceSha === null || readySourceSha === sourceSha)
+    && readyEvent.detail?.runId === runId
     && parseTimestamp(readyEvent.ts) !== null
 }
 
@@ -349,6 +367,7 @@ function eventBelongsToRunGeneration(entry, { runId, generationId, generationSta
   if (eventRunId !== undefined && eventRunId !== null && eventRunId !== runId) return false
   if (generationBound !== true || typeof generationId !== 'string') return false
   const eventGenerationId = entry.detail?.generationId
+    ?? entry.detail?.identity?.generationId
     ?? (entry.event === 'GENERATION_READY' ? entry.detail?.id : null)
   if (eventGenerationId !== null && eventGenerationId !== undefined) return eventGenerationId === generationId
   const eventAt = parseTimestamp(entry.ts)
@@ -365,6 +384,24 @@ export function readJsonlTail(logPath, maxBytes = 1024 * 1024) {
       return []
     }
   })
+}
+
+/** Parse only structured VTR lifecycle events from the resident run journal. */
+export function parseVtrRunJsonlEvents(records) {
+  return records.flatMap((record) => {
+    if (record?.record !== 'agent-event' || record?.source !== 'vtr'
+      || typeof record.message !== 'string' || parseTimestamp(record.ts) === null) return []
+    const event = /^(VTR_[A-Z0-9_]+)(?:\s|$)/.exec(record.message)?.[1] ?? null
+    if (event === null || !VTR_TRACE_EVENTS.has(event)) return []
+    const detail = record.detail !== null && typeof record.detail === 'object' && !Array.isArray(record.detail)
+      ? record.detail
+      : {}
+    return [{ ts: record.ts, event, source: record.source, detail: redactSecrets(detail), raw: redactSecrets(record.message) }]
+  })
+}
+
+export function readVtrRunJsonlEvents(logPath, maxBytes = DEFAULT_VTR_RUN_LOG_BYTES) {
+  return parseVtrRunJsonlEvents(readJsonlTail(logPath, maxBytes))
 }
 
 export function latestEvent(events, names) {
@@ -407,7 +444,15 @@ export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = 
 }
 
 function normalizeWorldKey(key) {
-  if (key === null || typeof key !== 'object') return null
+  if (typeof key === 'string') {
+    const parts = key.split('|')
+    if (parts.length !== 3 || parts[0] === '' || parts[1] === '') return null
+    const worldEpoch = Number(parts[2])
+    return Number.isSafeInteger(worldEpoch)
+      ? { serverId: parts[0], dimension: normalizeDimension(parts[1]), worldEpoch }
+      : null
+  }
+  if (key === null || typeof key !== 'object' || Array.isArray(key)) return null
   return {
     serverId: key.serverId ?? null,
     dimension: normalizeDimension(key.dimension),
@@ -716,14 +761,24 @@ function projectMission(mission, { runId, generationId, generationBound, sourceC
     : null
   const provenanceRunId = provenance?.runId ?? null
   const provenanceGenerationId = provenance?.generationId ?? null
+  const structuredPredicate = typeof mission?.kind === 'string'
+    && ((mission.kind === 'inventory_at_least'
+      && typeof mission.item === 'string' && mission.item.length > 0
+      && Number.isFinite(mission.count) && mission.count >= 0)
+      || (mission.kind !== 'inventory_at_least' && mission.predicate !== undefined))
+  const title = typeof mission?.title === 'string' && mission.title.trim() !== ''
+    ? mission.title
+    : mission?.kind === 'inventory_at_least' && typeof mission.item === 'string'
+      ? Number.isFinite(mission.count) ? `Acquire ${mission.count} ${mission.item}` : null
+      : null
   let reason = null
 
   if (runId === null) reason = 'mission_live_run_identity_unavailable'
   else if (generationId === null) reason = 'mission_current_generation_identity_unavailable'
   else if (generationBound !== true) reason = 'mission_current_generation_boundary_unavailable'
   else if (source === null) reason = 'mission_source_unavailable'
-  else if (typeof mission?.id !== 'string' || mission.id.trim() === ''
-    || typeof mission?.title !== 'string' || mission.title.trim() === '') reason = 'mission_identity_unavailable'
+  else if (!structuredPredicate && (typeof mission?.id !== 'string' || mission.id.trim() === ''
+    || title === null)) reason = 'mission_identity_unavailable'
   else if (provenanceRunId !== runId) reason = 'mission_source_run_mismatch'
   else if (provenanceGenerationId !== generationId) reason = 'mission_source_generation_mismatch'
 
@@ -744,8 +799,11 @@ function projectMission(mission, { runId, generationId, generationBound, sourceC
 
   return {
     status: 'observed',
-    id: mission.id,
-    title: mission.title,
+    id: typeof mission.id === 'string' ? mission.id : null,
+    title,
+    ...(structuredPredicate ? {
+      predicate: pickFields(mission, ['kind', 'item', 'count', 'predicate']),
+    } : {}),
     provenance: {
       status: 'run_generation_bound',
       source,
@@ -800,6 +858,177 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
+function worldKeyFromVtrDetail(detail) {
+  return normalizeWorldKey(detail?.worldKey ?? detail?.identity?.worldKey
+    ?? (typeof detail?.serverId === 'string' && typeof detail?.dimension === 'string'
+      ? { serverId: detail.serverId, dimension: detail.dimension, worldEpoch: detail.worldEpoch }
+      : null))
+}
+
+function vtrEventMatchesLiveFence(entry, { runId, generationId, sourceCommit, worldKey, generationStartedAt }) {
+  const detail = entry?.detail ?? {}
+  const identity = detail.identity ?? {}
+  const directRunId = detail.runId ?? identity.runId ?? null
+  const directGenerationId = detail.generationId ?? identity.generationId ?? null
+  const directSourceSha = detail.sourceSha ?? detail.sourceCommit ?? identity.sourceSha ?? null
+  const eventAt = parseTimestamp(entry?.ts)
+  const eventWorld = worldKeyFromVtrDetail(detail)
+  const expectedWorld = normalizeWorldKey(worldKey)
+  if (directRunId !== null && directRunId !== runId) return false
+  if (directGenerationId !== null && directGenerationId !== generationId) return false
+  if (directSourceSha !== null && directSourceSha !== sourceCommit) return false
+  if (eventAt === null || generationStartedAt === null || eventAt < generationStartedAt) return false
+  if (eventWorld !== null && completeWorldIdentity(eventWorld) !== completeWorldIdentity(expectedWorld)) return false
+  const declaredEpoch = detail.worldEpoch ?? identity.worldEpoch
+  if (eventWorld !== null && declaredEpoch !== undefined && Number(declaredEpoch) !== eventWorld.worldEpoch) return false
+  const declaredDimension = detail.dimension ?? identity.dimension
+  if (eventWorld !== null && declaredDimension !== undefined
+    && normalizeDimension(declaredDimension) !== eventWorld.dimension) return false
+  if (entry.event === 'VTR_TRANSITION_COMMIT') {
+    return directGenerationId === generationId
+      && eventWorld !== null
+      && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
+  }
+  if (entry.event === 'VTR_TRANSITION_VERIFY') {
+    return detail.runId === runId
+      && detail.generationId === generationId
+      && detail.sourceSha === sourceCommit
+      && eventWorld !== null
+      && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
+  }
+  return true
+}
+
+/** Build an exact-generation VTR journal view without presenting it as a Jev choice. */
+export function projectVtrTransitions({ events = [], runId = null, generationId = null, sourceCommit = null, worldKey = null, generationStartedAt = null }) {
+  if (typeof runId !== 'string' || typeof generationId !== 'string'
+    || typeof sourceCommit !== 'string' || completeWorldIdentity(normalizeWorldKey(worldKey)) === null
+    || generationStartedAt === null) {
+    return { status: 'unknown', binding: null, latest: null, transitions: [], events: [], unknown: ['vtr_run_generation_source_world_boundary_unavailable'] }
+  }
+
+  const scopedEvents = events
+    .filter((entry) => entry?.source === 'vtr' && VTR_TRACE_EVENTS.has(entry.event))
+    .filter((entry) => vtrEventMatchesLiveFence(entry, { runId, generationId, sourceCommit, worldKey, generationStartedAt }))
+  const commits = scopedEvents.filter((entry) => entry.event === 'VTR_TRANSITION_COMMIT'
+    && typeof entry.detail?.transitionId === 'string'
+    && typeof entry.detail?.contractHash === 'string')
+  const transitions = commits.map((commit) => {
+    const detail = commit.detail
+    const transitionId = detail.transitionId
+    const contractHash = detail.contractHash
+    const linked = scopedEvents.filter((entry) => entry.detail?.transitionId === transitionId
+      && (entry.detail?.contractHash === undefined || entry.detail.contractHash === contractHash))
+    const progressEvent = latestEvent(linked, ['VTR_TRANSITION_PROGRESS'])
+    const actuationEvent = latestEvent(linked, ['VTR_TRANSITION_ACTUATION'])
+    const verifyEvent = latestEvent(linked, ['VTR_TRANSITION_VERIFY'])
+    const outcomeEvent = latestEvent(linked, ['VTR_TRANSITION_OUTCOME'])
+    const verifyDetail = verifyEvent?.detail ?? null
+    const verification = verifyDetail === null ? null : {
+      truth: verifyDetail.truth ?? null,
+      predicates: verifyDetail.predicates ?? [],
+      evidenceIds: verifyDetail.evidenceIds ?? [],
+      verifiedAtMs: verifyDetail.verifiedAtMs ?? null,
+      identityMatches: verifyDetail.identityMatches === true,
+      predicatesVerified: verifyDetail.predicatesVerified === true,
+      verified: verifyDetail.identityMatches === true
+        && verifyDetail.predicatesVerified === true
+        && verifyDetail.truth === 'TRUE',
+      binding: {
+        runId: verifyDetail.runId ?? null,
+        generationId: verifyDetail.generationId ?? null,
+        sourceSha: verifyDetail.sourceSha ?? null,
+        worldKey: verifyDetail.worldKey ?? null,
+      },
+    }
+    const outcomeDetail = outcomeEvent?.detail ?? null
+    const terminalKind = outcomeDetail?.outcome?.kind ?? null
+    const verifiedSuccess = terminalKind === 'SUCCESS' && verification?.verified === true
+    const status = verifiedSuccess
+      ? 'verified_success'
+      : terminalKind === 'SUCCESS' ? 'success_without_verified_predicate'
+        : terminalKind !== null ? 'terminal'
+          : 'active_or_pending'
+    return {
+      transitionId,
+      contractHash,
+      status,
+      committedAt: commit.ts,
+      mission: detail.mission ?? null,
+      desiredPredicate: detail.desiredPredicate ?? null,
+      contract: {
+        requires: detail.requires ?? [],
+        ensures: detail.ensures ?? [],
+        invariants: detail.invariants ?? [],
+        admissibleEffects: detail.admissibleEffects ?? [],
+        budget: detail.budget ?? null,
+        identity: detail.identity ?? null,
+        witness: detail.witness ?? null,
+        initialRouteIds: detail.initialRouteIds ?? [],
+        routePolicy: detail.routePolicy ?? null,
+      },
+      progress: progressEvent?.detail?.progress ?? null,
+      progressEvent: traceProjection(progressEvent),
+      actuation: actuationEvent === null ? null : {
+        candidate: actuationEvent.detail?.candidate ?? null,
+        target: actuationEvent.detail?.target ?? null,
+        selectedBy: actuationEvent.detail?.selectedBy ?? null,
+        authority: actuationEvent.detail?.authority ?? null,
+        leaseEpoch: actuationEvent.detail?.leaseEpoch ?? null,
+        event: traceProjection(actuationEvent),
+      },
+      verification,
+      outcome: outcomeDetail === null ? null : {
+        kind: terminalKind,
+        boundary: outcomeDetail.boundary ?? null,
+        reason: outcomeDetail.outcome?.reason ?? null,
+        typed: outcomeDetail.outcome ?? null,
+        usage: outcomeDetail.usage ?? null,
+        metrics: outcomeDetail.metrics ?? null,
+        event: traceProjection(outcomeEvent),
+      },
+      binding: {
+        runId,
+        generationId,
+        sourceSha: sourceCommit,
+        worldKey: normalizeWorldKey(worldKey),
+        method: 'live-report+BOOT+GENERATION_READY+VTR-contract-identity',
+        confidence: 'direct',
+      },
+    }
+  })
+  const latest = transitions.at(-1) ?? null
+  const latestCommit = commits.at(-1) ?? null
+  return {
+    status: latest === null ? 'not_recorded' : 'observed',
+    binding: {
+      runId,
+      generationId,
+      sourceSha: sourceCommit,
+      worldKey: normalizeWorldKey(worldKey),
+      method: 'live-report+BOOT+GENERATION_READY+VTR-contract-identity',
+      confidence: 'direct',
+    },
+    latest,
+    latestDecision: latestCommit === null ? null : {
+      observedAt: latestCommit.ts,
+      actor: 'vtr',
+      event: latestCommit.event,
+      selected: {
+        transitionId: latestCommit.detail.transitionId,
+        contractHash: latestCommit.detail.contractHash,
+        ensures: latestCommit.detail.desiredPredicate?.id ?? latestCommit.detail.ensures?.[0]?.id ?? null,
+        mission: latestCommit.detail.mission ?? null,
+      },
+      reason: latestCommit.detail.routePolicy ?? 'grounded VTR transition admitted',
+      generationId,
+    },
+    transitions: transitions.slice(-12),
+    events: scopedEvents.slice(-24).reverse().map(traceProjection),
+    unknown: latest === null ? ['no_vtr_transition_commit_in_bounded_run_tail'] : [],
+  }
+}
+
 export function buildObserverSnapshot({ report, events, mission = null, runBoot = null, runBuild = null, runMetadata = null, runGenerationReady = null, jevCalls = [], now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
@@ -813,9 +1042,12 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       : runBoot?.detail?.runId === runId
         ? runBoot
         : null
+  const candidateGenerationReady = runGenerationReady ?? [...events].reverse().find((entry) => entry.event === 'GENERATION_READY'
+    && entry.detail?.id === generationId
+    && entry.detail?.runId === runId) ?? null
   const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
-  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, runGenerationReady, candidateBoot)
-  const generationStartedAt = generationBound ? parseTimestamp(runGenerationReady.ts) ?? NaN : NaN
+  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, candidateGenerationReady, candidateBoot)
+  const generationStartedAt = generationBound ? parseTimestamp(candidateGenerationReady.ts) ?? NaN : NaN
   const runEvents = runId === null ? [] : events.filter((entry) => eventBelongsToRunGeneration(entry, {
     runId,
     generationId,
@@ -823,6 +1055,7 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     generationBound,
   }))
   const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
+  const relevantVtrEvents = runEvents.filter((entry) => entry.source === 'vtr' && VTR_TRACE_EVENTS.has(entry.event))
   const boot = latestEvent(relevantEvents, ['BOOT'])
     ?? (runId !== null && runBoot?.detail?.runId === runId ? runBoot : null)
   const build = latestEvent(relevantEvents, ['BUILD'])
@@ -847,8 +1080,9 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
   const current = queue.current
   const worldKey = data?.worldKey ?? status?.worldKey ?? boot?.detail?.worldKey ?? null
   const eventSourceSha = boot?.detail?.source ?? null
+  const readySourceSha = candidateGenerationReady?.detail?.sourceSha ?? candidateGenerationReady?.detail?.source ?? null
   const artifactSourceSha = runMetadata?.sourceSha ?? null
-  const sourceCandidates = [eventSourceSha, artifactSourceSha]
+  const sourceCandidates = [eventSourceSha, readySourceSha, artifactSourceSha]
     .filter((value) => value !== null && value !== undefined && value !== '')
   const sourceCandidatesValid = sourceCandidates.every((value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value))
   const distinctSourceCandidates = [...new Set(sourceCandidates)]
@@ -860,10 +1094,32 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     : distinctSourceCandidates[0]
   const sourceCommitBinding = sourceCommit === null
     ? sourceCommitConflict ? 'conflict' : 'unknown'
-    : eventSourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+acceptance+predicate-artifacts'
-      : artifactSourceSha !== null ? 'run-acceptance+predicate-artifacts'
-        : 'run-BOOT-event'
-  const missionProjection = projectMission(mission, {
+    : eventSourceSha !== null && readySourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+GENERATION_READY+acceptance+predicate-artifacts'
+      : eventSourceSha !== null && readySourceSha !== null ? 'run-BOOT+GENERATION_READY'
+        : eventSourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+acceptance+predicate-artifacts'
+          : artifactSourceSha !== null ? 'run-acceptance+predicate-artifacts'
+            : 'run-BOOT-event'
+  const vtr = projectVtrTransitions({
+    events: relevantVtrEvents,
+    runId,
+    generationId,
+    sourceCommit,
+    worldKey,
+    generationStartedAt: Number.isFinite(generationStartedAt) ? generationStartedAt : null,
+  })
+  let runtimeMission = null
+  if (mission === null && vtr.latest?.mission !== null && vtr.latest?.mission !== undefined) {
+    runtimeMission = {
+      ...vtr.latest.mission,
+      provenance: { source: 'VTR_TRANSITION_COMMIT.detail.mission', runId, generationId },
+    }
+  } else if (mission === null && candidateBoot?.detail?.mission !== undefined) {
+    runtimeMission = {
+      ...candidateBoot.detail.mission,
+      provenance: { source: 'BOOT.detail.mission', runId, generationId },
+    }
+  }
+  const missionProjection = projectMission(mission ?? runtimeMission, {
     runId,
     generationId,
     generationBound,
@@ -910,8 +1166,8 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       generationBoundary: generationBound ? {
         event: 'GENERATION_READY',
         generationId,
-        observedAt: runGenerationReady.ts,
-        method: 'live-report+exact-run-source-artifacts+GENERATION_READY-id',
+        observedAt: candidateGenerationReady.ts,
+        method: 'live-report+BOOT-runId/sourceSha+GENERATION_READY-runId/generationId/sourceSha',
         artifactGenerations: {
           acceptance: generationArtifactStatus(runMetadata?.acceptance, generationId),
           predicates: generationArtifactStatus(runMetadata?.predicates, generationId),
@@ -960,7 +1216,15 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       mercury: traceProjection(mercury),
       action: traceProjection(latestActionEvent),
       death: traceProjection(latestDeath),
+      vtr: vtr.latest === null ? null : {
+        transitionId: vtr.latest.transitionId,
+        contractHash: vtr.latest.contractHash,
+        status: vtr.latest.status,
+        verification: vtr.latest.verification,
+        outcome: vtr.latest.outcome,
+      },
     },
+    vtr,
     runtimeFailure: traceProjection(runtimeFailure),
     events: relevantEvents.slice(-30).reverse().map(traceProjection),
   }
@@ -1651,7 +1915,8 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     : null
   const jev = projectChoice(jevEvent, 'jev')
   const system2 = projectChoice(system2Event, 'system2', system2Reason)
-  const latest = [jev, system2]
+  const vtrDecision = snapshot.vtr?.latestDecision ?? null
+  const latest = [jev, system2, vtrDecision]
     .filter((choice) => choice !== null)
     .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
   const actionEvent = latestProjectedEvent(snapshot, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
@@ -1706,10 +1971,17 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     ?? latest?.selected?.id
     ?? latest?.selected?.actionId
     ?? latest?.selected?.toolName
+    ?? (latest?.actor === 'vtr'
+      ? `Transition ${latest.selected?.transitionId ?? 'UNKNOWN'} ensures ${latest.selected?.ensures ?? 'UNKNOWN'}`
+      : null)
     ?? null
   const headline = latest === null
     ? 'No choice event has been observed.'
     : `${latest.actor} selected ${selection ?? 'UNKNOWN'}; explicit reason: ${latest.reason ?? 'not emitted'}.`
+  const vtrTerminalHeadline = snapshot.vtr?.latest?.outcome?.kind !== null
+    && snapshot.vtr?.latest?.outcome?.kind !== undefined
+    ? ` VTR outcome=${snapshot.vtr.latest.outcome.kind}; predicate verification=${snapshot.vtr.latest.verification?.verified === true ? 'TRUE' : snapshot.vtr.latest.verification?.truth ?? 'not recorded'}.`
+    : ''
   const failureHeadline = runtimeFailure?.detail?.code
     ? ` Runtime failure: ${runtimeFailure.detail.code}${runtimeFailure.detail.context ? ` (${runtimeFailure.detail.context})` : ''}.`
     : ''
@@ -1721,7 +1993,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-decision-summary',
-    headline: `${headline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
+    headline: `${headline}${vtrTerminalHeadline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
     observedAt: snapshot.observedAt,
     freshnessMs,
     run: {
@@ -1752,6 +2024,8 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     choices: {
       latest,
       jev,
+      jevStatus: jev === null ? 'not_recorded' : 'observed',
+      vtr: snapshot.vtr ?? null,
       jevEvidence,
       jevCombatDecision,
       system2: {
@@ -1768,6 +2042,8 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       selectedChoiceInterruption: jevEvidence?.outcome?.interruption ?? null,
       latestDeath: snapshot.decisionTrace?.death ?? null,
     },
+    transition: snapshot.vtr?.latest ?? null,
+    vtr: snapshot.vtr ?? null,
     worldProbe: {
       href: '/api/world-probe?radius=6&verticalRadius=3',
       method: 'GET',
@@ -1825,6 +2101,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   const socketPath = join(runtimeDir, 'data', 'resident', 'control.sock')
   const logPath = join(runtimeDir, 'buddy.log')
   const jevCallsPath = join(runtimeDir, 'logs', 'jev', 'jev-calls.jsonl')
+  const vtrRunLogPath = join(runtimeDir, 'logs', 'jev', 'run.jsonl')
   const runnerOutPath = join(runtimeDir, 'runner.out')
 
   // Summary requests also expose the on-demand live probe. Multiple readers
@@ -1865,7 +2142,8 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       callControlSocket(socketPath, 'report'),
       Promise.resolve(readLogTail(logPath)),
       Promise.resolve(readJsonlTail(jevCallsPath)),
-    ]).then(([report, events, jevCalls]) => {
+      Promise.resolve(readVtrRunJsonlEvents(vtrRunLogPath)),
+    ]).then(([report, events, jevCalls, vtrEvents]) => {
       const bootFromTail = latestEvent(events, ['BOOT'])
       const reportedRunId = report?.ok === true ? report.data?.runId : null
       const currentRunId = typeof reportedRunId === 'string' && reportedRunId.length > 0 ? reportedRunId : null
@@ -1883,8 +2161,13 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
       const runMetadata = currentRunId === null ? null : readRunMetadata(runtimeDir, currentRunId)
-      let candidateGenerationReady = latestEvent(events, ['GENERATION_READY'])
-      if (candidateGenerationReady === null) candidateGenerationReady = readLogEvent(logPath, 'GENERATION_READY')
+      let candidateGenerationReady = [...events].reverse().find((entry) => entry.event === 'GENERATION_READY'
+        && entry.detail?.runId === currentRunId
+        && entry.detail?.id === currentGenerationId) ?? null
+      if (candidateGenerationReady === null) {
+        candidateGenerationReady = readLogEvent(logPath, 'GENERATION_READY', currentRunId,
+          (detail) => detail.id === currentGenerationId)
+      }
       const runGenerationReady = runGenerationAnchorMatches(
         runMetadata,
         currentRunId,
@@ -1896,7 +2179,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       cachedGenerationId = currentGenerationId
       cachedGenerationReady = runGenerationReady
       const runnerEvents = readRunnerOutEvents(runnerOutPath, { runId: currentRunId, bootTs: cachedRunBoot?.ts ?? null })
-      const combinedEvents = [...events, ...runnerEvents].sort((left, right) => {
+      const combinedEvents = [...events, ...runnerEvents, ...vtrEvents].sort((left, right) => {
         const leftTs = Date.parse(left.ts ?? '')
         const rightTs = Date.parse(right.ts ?? '')
         return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0)
@@ -1904,9 +2187,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       return buildObserverSnapshot({
         report,
         events: combinedEvents,
-        // A repository milestone label is not evidence of the active mission.
-        // A future runtime source must bind its mission record to this run and
-        // generation before the observer can project it as observed.
+        // Mission is derived below only from run-bound structured runtime evidence.
         mission: null,
         runBoot: cachedRunBoot,
         runBuild: cachedRunBuild,
@@ -1975,7 +2256,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     })
   }
 
-  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
+  return { runtimeDir, socketPath, logPath, jevCallsPath, vtrRunLogPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
 }
 
 function bindProbeToSummary(summary, probe) {

@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 import assert from 'node:assert/strict'
-import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents } from './buddy-observer.mjs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, readVtrRunJsonlEvents } from './buddy-observer.mjs'
 
 // Constructing the always-on service must remain safe when no active mission
 // source exists; repository milestone labels are not runtime mission evidence.
@@ -90,7 +93,7 @@ const observerBoot = (runId = 'run-1', ts = '2026-09-21T11:59:59.000Z') => parse
   `[${ts}] BOOT pid=1 runId=${runId} source=${observerSourceSha}`,
 )
 const observerGenerationReady = (generationId = 'gen-7', ts = '2026-09-21T12:00:00.000Z') => parseBuddyLogLine(
-  `[${ts}] GENERATION_READY id=${generationId}`,
+  `[${ts}] GENERATION_READY runId=run-1 id=${generationId} generationId=${generationId} sourceSha=${observerSourceSha}`,
 )
 
 const events = [
@@ -187,7 +190,7 @@ assert.equal(crossRunMissionSnapshot.mission.provenance.reason, 'mission_source_
 
 const laggedGenerationEvents = [
   parseBuddyLogLine(`[2026-09-23T19:36:20.000Z] BOOT pid=1 runId=run-observer-1 source=${observerSourceSha}`),
-  parseBuddyLogLine('[2026-09-23T19:36:23.559Z] GENERATION_READY id=gen-current'),
+  parseBuddyLogLine(`[2026-09-23T19:36:23.559Z] GENERATION_READY runId=run-observer-1 id=gen-current generationId=gen-current sourceSha=${observerSourceSha}`),
   parseBuddyLogLine('[2026-09-23T19:36:28.302Z] JEV_HEADS action=MOVE:b99_67_79 generationId=gen-current'),
   parseBuddyLogLine('[2026-09-23T19:36:35.344Z] HEARTBEAT pos=99,67,79 generationId=gen-current'),
 ].filter((event) => event !== null)
@@ -235,6 +238,179 @@ assert.equal(unboundGenerationSnapshot.mission.status, 'unknown')
 assert.equal(unboundGenerationSnapshot.mission.id, null)
 assert.equal(unboundGenerationSnapshot.mission.title, null)
 assert.equal(unboundGenerationSnapshot.mission.provenance.reason, 'mission_current_generation_boundary_unavailable')
+
+// V4 live missions and Reach transitions are visible before HOST writes the
+// final acceptance artifact. The run/generation/source/world chain itself is
+// sufficient for read-only live projection.
+const vtrMission = { id: 'run-mission:oak_log:1', kind: 'inventory_at_least', item: 'oak_log', count: 1 }
+const vtrWorldKey = 'local|overworld|1'
+const vtrTransitionId = 'transition-live-1'
+const vtrContractHash = 'contract-live-1'
+const vtrIdentity = {
+  worldKey: vtrWorldKey,
+  dimension: 'overworld',
+  worldEpoch: 1,
+  generationId: 'gen-7',
+  leaseId: 'gen-7',
+}
+const vtrCommitRecord = {
+  record: 'agent-event',
+  ts: '2026-09-21T12:00:01.000Z',
+  tick: 3,
+  source: 'vtr',
+  level: 'info',
+  message: `VTR_TRANSITION_COMMIT id=${vtrTransitionId} ensures=reach.resource-source contractHash=${vtrContractHash}`,
+  detail: {
+    transitionId: vtrTransitionId,
+    contractHash: vtrContractHash,
+    mission: vtrMission,
+    desiredPredicate: { id: 'reach.resource-source', proposition: { kind: 'within-interaction-reach-of-resource-source', item: 'oak_log' }, expected: true },
+    requires: [{ id: 'mission.unsatisfied', expected: true }],
+    ensures: [{ id: 'reach.resource-source', expected: true }],
+    invariants: [{ id: 'body.alive', expected: true }],
+    admissibleEffects: [{ kind: 'locomotion', maxUses: null }],
+    budget: { maxMechanicalSteps: 24, maxElapsedMs: 120000, resources: {}, risk: { damage: 1 } },
+    identity: vtrIdentity,
+    witness: { witnessId: 'oak_log@6,63,489', target: { x: 6, y: 63, z: 489 } },
+    initialRouteIds: ['MOVE:b6_63_489'],
+    routePolicy: 'nearest grounded admissible route within the committed Reach predicate',
+  },
+}
+const vtrJournalEvents = parseVtrRunJsonlEvents([
+  vtrCommitRecord,
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:01.100Z', source: 'vtr',
+    message: `VTR_TRANSITION_ACTUATION id=${vtrTransitionId}`,
+    detail: { transitionId: vtrTransitionId, contractHash: vtrContractHash, candidate: 'MOVE:b6_63_489', target: { x: 5, y: 63, z: 490 }, selectedBy: 'vtr_transition_controller', authority: 'vtr-transition-controller', leaseEpoch: 1 },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:02.000Z', source: 'vtr',
+    message: `VTR_TRANSITION_VERIFY id=${vtrTransitionId} truth=TRUE`,
+    detail: {
+      transitionId: vtrTransitionId, contractHash: vtrContractHash, truth: 'TRUE',
+      predicates: [{ id: 'reach.resource-source', expected: true, truth: 'true', evidenceId: 'verify:3:oak_log@6,63,489' }],
+      evidenceIds: ['verify:3:oak_log@6,63,489'], verifiedAtMs: 1790000002000,
+      runId: 'run-1', generationId: 'gen-7', sourceSha: observerSourceSha,
+      worldKey: vtrWorldKey, worldEpoch: 1, dimension: 'overworld',
+      identityMatches: true, predicatesVerified: true,
+    },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:02.010Z', source: 'vtr',
+    message: `VTR_TRANSITION_OUTCOME id=${vtrTransitionId} outcome=SUCCESS`,
+    detail: {
+      transitionId: vtrTransitionId, contractHash: vtrContractHash,
+      outcome: { kind: 'SUCCESS', contractHash: vtrContractHash, evidenceIds: ['verify:3:oak_log@6,63,489'] },
+      boundary: 'mechanical-step-outcome',
+      usage: { mechanicalSteps: 1, elapsedMs: 1000, resources: {}, risk: {}, effects: { locomotion: 1 } },
+      metrics: { verifiedTransitionCompletion: 1, mechanicalStepsPerTransition: 1, jevCallsPerTransition: 0, modelCallsPerMechanicalStep: 0, typedTerminalOutcome: 'SUCCESS', duplicateAuthority: false },
+    },
+  },
+])
+assert.equal(vtrJournalEvents.length, 4)
+const vtrBoot = parseBuddyLogLine(`[2026-09-21T11:59:59.000Z] BOOT pid=1 runId=run-1 source=${observerSourceSha} mission={"kind":"inventory_at_least","item":"oak_log","count":1,"source":"BUDDY_MISSION_* or default"}`)
+const vtrReady = observerGenerationReady('gen-7', '2026-09-21T12:00:00.000Z')
+const liveVtrSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 } } },
+  events: [vtrBoot, vtrReady, ...vtrJournalEvents],
+  runBoot: vtrBoot,
+  runMetadata: {
+    runArtifactsMatched: false,
+    sourceSha: null,
+    sourceShaConflict: false,
+    acceptance: null,
+    predicates: { runId: 'run-1', sourceSha: observerSourceSha, generationId: 'gen-7' },
+  },
+  runGenerationReady: vtrReady,
+  now: Date.parse('2026-09-21T12:00:03.000Z'),
+})
+assert.equal(liveVtrSnapshot.resident.generationBoundary?.generationId, 'gen-7')
+assert.equal(liveVtrSnapshot.resident.sourceCommit, observerSourceSha)
+assert.equal(liveVtrSnapshot.resident.sourceCommitBinding, 'run-BOOT+GENERATION_READY')
+assert.equal(liveVtrSnapshot.mission.status, 'observed')
+assert.equal(liveVtrSnapshot.mission.provenance.source, 'VTR_TRANSITION_COMMIT.detail.mission')
+assert.deepEqual(liveVtrSnapshot.mission.predicate, { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
+assert.equal(liveVtrSnapshot.vtr.latest.transitionId, vtrTransitionId)
+assert.equal(liveVtrSnapshot.vtr.latest.status, 'verified_success')
+assert.equal(liveVtrSnapshot.vtr.latest.verification.verified, true)
+assert.equal(liveVtrSnapshot.vtr.latest.outcome.metrics.jevCallsPerTransition, 0)
+const liveVtrSummary = buildAiSummary(liveVtrSnapshot, { now: Date.parse('2026-09-21T12:00:03.000Z') })
+assert.equal(liveVtrSummary.choices.jev, null)
+assert.equal(liveVtrSummary.choices.jevStatus, 'not_recorded')
+assert.equal(liveVtrSummary.choices.vtr.latestDecision.actor, 'vtr')
+assert.equal(liveVtrSummary.choices.latest.actor, 'vtr')
+assert.equal(liveVtrSummary.transition.status, 'verified_success')
+assert.equal(liveVtrSummary.unknown.includes('no_choice_event_observed'), false)
+assert.match(liveVtrSummary.headline, /VTR outcome=SUCCESS; predicate verification=TRUE/)
+
+const bootMissionSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 } } },
+  events: [vtrBoot, vtrReady],
+  runBoot: vtrBoot,
+  runMetadata: { runArtifactsMatched: false, sourceSha: null, sourceShaConflict: false, acceptance: null, predicates: null },
+  runGenerationReady: vtrReady,
+})
+assert.equal(bootMissionSnapshot.mission.status, 'observed')
+assert.equal(bootMissionSnapshot.mission.id, null)
+assert.equal(bootMissionSnapshot.mission.title, 'Acquire 1 oak_log')
+assert.equal(bootMissionSnapshot.mission.provenance.source, 'BOOT.detail.mission')
+assert.deepEqual(bootMissionSnapshot.mission.predicate, { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
+
+// A later stale-source/world transition cannot displace the live transition;
+// a wrong-run VERIFY cannot close it either.
+const staleVtrEvents = parseVtrRunJsonlEvents([
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:02.100Z', source: 'vtr',
+    message: 'VTR_TRANSITION_COMMIT id=stale-source',
+    detail: {
+      transitionId: 'stale-source', contractHash: 'stale-contract', mission: { id: 'prior', kind: 'inventory_at_least', item: 'stone', count: 1 },
+      identity: { ...vtrIdentity, sourceSha: 'b'.repeat(40) },
+    },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:02.200Z', source: 'vtr',
+    message: `VTR_TRANSITION_COMMIT id=stale-world`,
+    detail: { transitionId: 'stale-world', contractHash: 'stale-world-contract', identity: { ...vtrIdentity, worldKey: 'other|overworld|1' } },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:02.250Z', source: 'vtr',
+    message: 'VTR_TRANSITION_COMMIT id=stale-generation',
+    detail: { transitionId: 'stale-generation', contractHash: 'stale-generation-contract', identity: { ...vtrIdentity, generationId: 'gen-prior' } },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:02.300Z', source: 'vtr',
+    message: `VTR_TRANSITION_VERIFY id=${vtrTransitionId} truth=FALSE`,
+    detail: {
+      transitionId: vtrTransitionId, contractHash: vtrContractHash, truth: 'FALSE', runId: 'run-prior',
+      generationId: 'gen-7', sourceSha: observerSourceSha, worldKey: vtrWorldKey,
+      identityMatches: true, predicatesVerified: true,
+    },
+  },
+])
+const staleIdentitySnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 } } },
+  events: [vtrBoot, vtrReady, ...vtrJournalEvents, ...staleVtrEvents],
+  runBoot: vtrBoot,
+  runMetadata: { runArtifactsMatched: false, sourceSha: null, sourceShaConflict: false, acceptance: null, predicates: { runId: 'run-1', sourceSha: observerSourceSha, generationId: 'gen-7' } },
+  runGenerationReady: vtrReady,
+})
+assert.equal(staleIdentitySnapshot.vtr.transitions.length, 1)
+assert.equal(staleIdentitySnapshot.vtr.latest.transitionId, vtrTransitionId)
+assert.equal(staleIdentitySnapshot.vtr.latest.status, 'verified_success')
+
+const boundedRunLogDir = mkdtempSync(join(tmpdir(), 'buddy-observer-vtr-'))
+try {
+  const runLogPath = join(boundedRunLogDir, 'run.jsonl')
+  const oversizedEarlierRecord = `${JSON.stringify({ ...vtrCommitRecord, detail: { filler: 'x'.repeat(2048) } })}\n`
+  const boundedLaterRecord = `${JSON.stringify({
+    record: 'agent-event', ts: '2026-09-21T12:00:02.400Z', source: 'vtr',
+    message: 'VTR_REACH_PROBE_HOLD', detail: { reason: 'bounded-tail' },
+  })}\n`
+  writeFileSync(runLogPath, oversizedEarlierRecord + boundedLaterRecord)
+  assert.deepEqual(readVtrRunJsonlEvents(runLogPath, Buffer.byteLength(boundedLaterRecord) + 1).map((entry) => entry.event), ['VTR_REACH_PROBE_HOLD'])
+} finally {
+  rmSync(boundedRunLogDir, { recursive: true, force: true })
+}
 
 const combatEvents = [
   observerBoot('run-1', '2026-09-21T12:00:00.000Z'),
