@@ -420,13 +420,23 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
     run.samples.forEach((sample, sampleIndex) => {
       logLines.push(`[${stamp(base + 2 + sampleIndex)}] INVENTORY items=${JSON.stringify(sample)} pos=10,64,20`)
     })
-    // M3 requires live proof of Nether arrival (`nether_reached`), so every modelled run records the
-    // dimension it observed. The default is the Nether because this fixture IS the M3 endgame scenario;
-    // a case that wants the "twelve eyes but never left the overworld" negative sets
-    // `dimension: 'minecraft:overworld'` on its run and must then expect UNKNOWN, not PASS.
-    logLines.push(
-      `[${stamp(base + 2 + run.samples.length)}] DIMENSION_OBSERVED dimension=${run.dimension ?? 'minecraft:the_nether'} runId=${run.runId}`,
-    )
+    // M3 needs an actual BODY transition, not an observation that happens to
+    // name the Nether. Model the positive endgame fixture as an overworld
+    // spawn followed by a live-world transition; the overworld-only negative
+    // records an overworld observation and deliberately has no Nether entry.
+    const observedDimension = run.dimension ?? 'minecraft:the_nether'
+    if (observedDimension === 'minecraft:the_nether') {
+      logLines.push(
+        `[${stamp(base + 1.25)}] DIMENSION_OBSERVED dimension=minecraft:overworld runId=${run.runId} reason=generation-start source=live-world`,
+      )
+      logLines.push(
+        `[${stamp(base + 2 + run.samples.length)}] DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether runId=${run.runId} reason=fixture-live-change source=live-world`,
+      )
+    } else {
+      logLines.push(
+        `[${stamp(base + 2 + run.samples.length)}] DIMENSION_OBSERVED dimension=${observedDimension} runId=${run.runId} reason=generation-start source=live-world`,
+      )
+    }
     if (includeAuthority) {
       const generationId = `fixture-${run.runId}`
       const system2Identity =
