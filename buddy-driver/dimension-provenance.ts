@@ -327,8 +327,25 @@ export interface DimensionProvenanceColumnDiagnostic {
 }
 
 export interface DimensionProvenanceDiagnostic extends DimensionProvenanceStats {
+  /** Which lifetime supplied this read-only snapshot. */
+  sourceScope?: 'generation' | 'host-bot'
   columns: DimensionProvenanceColumnDiagnostic[]
   columnsTruncated: boolean
+}
+
+export interface DimensionProvenanceProbe {
+  diagnostic: DimensionProvenanceDiagnostic | null
+  sourceScope: 'generation' | 'host-bot' | 'unavailable'
+  /** Explains a host-side read when the active generation could not provide it. */
+  fallbackReason: 'generation-unavailable' | 'generation-view-missing' | 'generation-view-error' | 'bot-provenance-store-unavailable' | null
+}
+
+/** A world cache read needs both loaded data and positive live-dimension attribution. */
+export function isProbeColumnReadable (
+  loaded: boolean,
+  kind: string | null | undefined,
+): boolean {
+  return loaded === true && kind === 'attributable'
 }
 
 export interface DimensionProvenanceView extends DimensionProvenance {
@@ -338,6 +355,128 @@ export interface DimensionProvenanceView extends DimensionProvenance {
   stats (): DimensionProvenanceStats
   /** Read-only requested-column attribution snapshot; does not sync or mutate the store. */
   diagnostic (columns: readonly { chunkX: number; chunkZ: number }[]): DimensionProvenanceDiagnostic
+}
+
+/**
+ * Read a probe snapshot from the bot-owned provenance store without depending on
+ * an active generation. This is intentionally read-only: unlike `syncStore`, it
+ * neither drops tags nor unloads Mineflayer columns. The live dimension comes
+ * from the bot at sample time, so a probe during a generation recovery cannot
+ * accidentally treat the last generation's dimension as current.
+ *
+ * A missing store is UNKNOWN. This function never creates one or adopts current
+ * cache columns, because doing so would invent load provenance after the fact.
+ */
+export function readOnlyBotDimensionProvenanceDiagnostic (
+  bot: Bot,
+  columns: readonly { chunkX: number; chunkZ: number }[],
+): DimensionProvenanceDiagnostic | null {
+  const stored = botProvenanceFields(bot)[STORE_KEY]
+  if (stored === undefined || stored === null || typeof stored !== 'object') return null
+  const store = stored as ProvenanceStore
+  if (!(store.columnDimension instanceof Map)) return null
+
+  const liveDimension = canonicalDimensionId(bot.game?.dimension)
+  const bounded = columns.slice(0, 128)
+  const unique = new Map<string, { chunkX: number; chunkZ: number }>()
+  for (const column of bounded) {
+    if (!Number.isFinite(column.chunkX) || !Number.isFinite(column.chunkZ)) continue
+    const chunkX = Math.floor(column.chunkX)
+    const chunkZ = Math.floor(column.chunkZ)
+    unique.set(chunkKey(chunkX, chunkZ), { chunkX, chunkZ })
+  }
+  const diagnostics = [...unique.values()].map(({ chunkX, chunkZ }) => {
+    const taggedDimension = store.columnDimension.get(chunkKey(chunkX, chunkZ))
+    if (liveDimension.length === 0) {
+      return {
+        chunkX,
+        chunkZ,
+        kind: 'unknown' as const,
+        dimension: taggedDimension ?? null,
+        liveDimension: null,
+        reason: 'unknown_live_dimension' as const,
+      }
+    }
+    if (taggedDimension === undefined) {
+      return {
+        chunkX,
+        chunkZ,
+        kind: 'unknown' as const,
+        dimension: null,
+        liveDimension,
+        reason: 'unknown_column' as const,
+      }
+    }
+    if (normalizeDimensionId(taggedDimension) !== normalizeDimensionId(liveDimension)) {
+      return {
+        chunkX,
+        chunkZ,
+        kind: 'foreign' as const,
+        dimension: taggedDimension,
+        liveDimension,
+        reason: 'foreign_column' as const,
+      }
+    }
+    return {
+      chunkX,
+      chunkZ,
+      kind: 'attributable' as const,
+      dimension: taggedDimension,
+      liveDimension,
+      reason: null,
+    }
+  })
+
+  return {
+    sourceScope: 'host-bot',
+    liveDimension,
+    taggedColumns: store.columnDimension.size,
+    loadsTagged: store.loadsTagged,
+    attachAdopted: store.attachAdopted,
+    refusals: store.refusals,
+    unloads: store.unloads,
+    loadEvents: store.loadEvents,
+    unloadEvents: store.unloadEvents,
+    lastColumnLoadAt: store.lastColumnLoadAt,
+    lastColumnUnloadAt: store.lastColumnUnloadAt,
+    lastLocalColumnUnloadAt: store.lastLocalColumnUnloadAt,
+    columns: diagnostics,
+    columnsTruncated: columns.length > bounded.length,
+  }
+}
+
+/**
+ * Prefer the active generation's view, but keep the read-only world probe alive
+ * while that generation is absent, missing the optional capability, or failing
+ * to answer. A host-bot result conveys block provenance only; it does not imply
+ * that any decision, Option, or milestone belongs to a generation.
+ */
+export function dimensionProvenanceForProbe (
+  bot: Bot,
+  generation: { worldProbeProvenance?: (columns: readonly { chunkX: number; chunkZ: number }[]) => DimensionProvenanceDiagnostic } | null,
+  columns: readonly { chunkX: number; chunkZ: number }[],
+): DimensionProvenanceProbe {
+  let fallbackReason: DimensionProvenanceProbe['fallbackReason'] = generation === null
+    ? 'generation-unavailable'
+    : typeof generation.worldProbeProvenance === 'function' ? null : 'generation-view-missing'
+  if (typeof generation?.worldProbeProvenance === 'function') {
+    try {
+      const diagnostic = generation.worldProbeProvenance(columns)
+      if (diagnostic === null || typeof diagnostic !== 'object') throw new Error('invalid-generation-provenance-view')
+      return {
+        diagnostic,
+        sourceScope: 'generation',
+        fallbackReason: null,
+      }
+    } catch {
+      fallbackReason = 'generation-view-error'
+    }
+  }
+
+  const diagnostic = readOnlyBotDimensionProvenanceDiagnostic(bot, columns)
+  return diagnostic === null
+    ? { diagnostic: null, sourceScope: 'unavailable', fallbackReason: 'bot-provenance-store-unavailable' }
+    : { diagnostic, sourceScope: 'host-bot', fallbackReason }
 }
 
 /**
@@ -455,6 +594,7 @@ export function createDimensionProvenanceView (
         }
       })
       return {
+        sourceScope: 'generation',
         ...this.stats(),
         columns: columnDiagnostics,
         columnsTruncated: columns.length > 128,

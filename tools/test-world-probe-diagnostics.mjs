@@ -180,6 +180,32 @@ assert.ok(unknownIdentity.unknown.includes('world_reads_unbound:generation-prove
 assert.ok(unknownIdentity.unknown.includes('world_cache_identity_or_timestamp_unknown'))
 assert.equal(unknownIdentity.status, 'partial')
 
+const generationlessRecovery = fixture({
+  reportGenerationId: null,
+  reportAfterGenerationId: null,
+  probeGenerationId: null,
+  cacheGenerationId: null,
+  worldReadability: {
+    status: 'all-requested-columns-attributable',
+    unboundReason: null,
+    requestedColumnCount: 1,
+    attributableColumnCount: 1,
+    refusedColumnCount: 0,
+    refusalByCause: { columnNotLoaded: 0, unknownProvenance: 0, foreignDimension: 0, attributable: 1 },
+    unknownIsNotAir: true,
+  },
+})
+assert.equal(generationlessRecovery.binding.sameRun, true)
+assert.equal(generationlessRecovery.binding.sameWorld, true)
+assert.equal(generationlessRecovery.binding.sameGeneration, null)
+assert.equal(generationlessRecovery.worldCacheReadability.status, 'all-requested-columns-attributable')
+assert.equal(generationlessRecovery.area.unknownBlocks, 0)
+assert.equal(generationlessRecovery.area.blockCounts.grass_block, 125)
+assert.equal(generationlessRecovery.dataComplete, false)
+assert.equal(generationlessRecovery.status, 'partial')
+assert.ok(generationlessRecovery.unknown.includes('report_state_generation_alignment_unknown'))
+assert.ok(!generationlessRecovery.unknown.includes('world_reads_unbound:generation-provenance-view-unavailable'))
+
 const outsideSupport = fixture({ support: { x: 110, y: 62, z: 90 } })
 assert.equal(outsideSupport.area.supportScopeStatus, 'outside-requested-sample')
 assert.notEqual(outsideSupport.status, 'known')

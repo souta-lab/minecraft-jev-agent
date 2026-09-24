@@ -45,6 +45,8 @@ import { generateCandidates, defaultCandidateOptions } from '../jev-agent/src/ca
 import {
   attachDimensionProvenance,
   createDimensionProvenanceView,
+  dimensionProvenanceForProbe,
+  isProbeColumnReadable,
   writeRefusal,
 } from './dimension-provenance.ts'
 import type { DimensionProvenanceView } from './dimension-provenance.ts'
@@ -386,6 +388,71 @@ addCase('(iii) a column re-loaded under the new dimension is attributable again'
     afterLoad.kind === 'attributable' &&
     afterLoad.dimension === 'minecraft:the_nether'
   return { pass, detail: `beforeLoad=${beforeLoad.kind}:${beforeLoad.reason} afterLoad=${afterLoad.kind}:${afterLoad.dimension}` }
+})
+
+addCase('(v) generationless recovery probes use only live-dimension tags and do not mutate Mineflayer cache', () => {
+  const loaded = new Set(['0,0', '2,0'])
+  const unloaded: string[] = []
+  const bot = eventBot({
+    columns: () => [...loaded],
+    onUnload: (key) => {
+      unloaded.push(key)
+      loaded.delete(key)
+    },
+  })
+  attachDimensionProvenance(bot)
+  const generationView = createDimensionProvenanceView(bot, () => {}, 'run-recovery-probe', 'generation-start')
+
+  // The active Jev generation is gone. The bot connection and its tagged column
+  // store survive, while its game dimension has changed but the next generation
+  // has not yet called syncLiveDimension().
+  ;(bot as unknown as { game: { dimension: string } }).game.dimension = 'the_nether'
+  loaded.add('1,0')
+  ;(bot as unknown as { emit: (event: string, ...args: unknown[]) => void }).emit(
+    'chunkColumnLoad',
+    new Vec3(16, 0, 0),
+  )
+  loaded.add('3,0') // loaded, but no observed load provenance
+  loaded.add('4,0')
+  ;(bot as unknown as { emit: (event: string, ...args: unknown[]) => void }).emit(
+    'chunkColumnLoad',
+    new Vec3(64, 0, 0),
+  )
+  loaded.delete('4,0') // a stale tag alone cannot make an unloaded column readable
+
+  const targets = [0, 1, 2, 3, 4].map((chunkX) => ({ chunkX, chunkZ: 0 }))
+  const beforeStats = generationView.stats()
+  const beforeLoaded = [...loaded].sort()
+  const probe = dimensionProvenanceForProbe(bot, null, targets)
+  const afterStats = generationView.stats()
+  const afterLoaded = [...loaded].sort()
+  const columns = new Map(probe.diagnostic?.columns.map((column) => [`${column.chunkX},${column.chunkZ}`, column]) ?? [])
+  const loadedKeys = new Set(afterLoaded)
+  const readable = targets.filter((column) => {
+    const key = `${column.chunkX},${column.chunkZ}`
+    return isProbeColumnReadable(loadedKeys.has(key), columns.get(key)?.kind)
+  }).map((column) => `${column.chunkX},${column.chunkZ}`)
+  const pass =
+    probe.sourceScope === 'host-bot' &&
+    probe.fallbackReason === 'generation-unavailable' &&
+    probe.diagnostic?.liveDimension === NETHER &&
+    columns.get('0,0')?.kind === 'foreign' &&
+    columns.get('2,0')?.kind === 'foreign' &&
+    columns.get('1,0')?.kind === 'attributable' &&
+    columns.get('3,0')?.kind === 'unknown' &&
+    columns.get('4,0')?.kind === 'attributable' &&
+    !loadedKeys.has('4,0') &&
+    !isProbeColumnReadable(false, columns.get('4,0')?.kind) &&
+    !isProbeColumnReadable(true, columns.get('0,0')?.kind) &&
+    !isProbeColumnReadable(true, columns.get('3,0')?.kind) &&
+    JSON.stringify(readable) === JSON.stringify(['1,0']) &&
+    JSON.stringify(beforeStats) === JSON.stringify(afterStats) &&
+    JSON.stringify(beforeLoaded) === JSON.stringify(afterLoaded) &&
+    unloaded.length === 0
+  return {
+    pass,
+    detail: `scope=${probe.sourceScope} fallback=${probe.fallbackReason} live=${probe.diagnostic?.liveDimension} kinds=${[...columns.entries()].map(([key, value]) => `${key}:${value?.kind}`).join(',')} readable=${readable.join(',')} cachePreserved=${JSON.stringify(beforeStats) === JSON.stringify(afterStats) && JSON.stringify(beforeLoaded) === JSON.stringify(afterLoaded) && unloaded.length === 0}`,
+  }
 })
 
 addCase('(iii) the same column written by a transfer is never readable, and the read is refused typed', () => {

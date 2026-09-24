@@ -30,10 +30,15 @@ The `worldCache` object reports the player's chunk, a bounded list/count of
 Mineflayer's loaded columns, which columns overlap the requested probe and
 whether each is loaded, plus the dimension-provenance classification and load /
 unload timestamps. `worldCacheBinding` checks that snapshot's run, world,
-generation and capture time against the enclosing state response. Unloaded,
-unattributed and foreign-dimension columns remain unknown; the diagnostic does
-not treat them as air or infer a route. `worldCacheReadability` distinguishes an
-unbound provenance view from unloaded columns and foreign / unknown provenance.
+generation and capture time against the enclosing state response. Its
+`provenanceSourceScope` is `generation` when the active generation supplied the
+view, or `host-bot` when a read-only snapshot used bot-owned column tags during
+generation recovery. `provenanceFallbackReason` says why the host view was used.
+A host-bot probe can expose current blocks while the generation ID and decision
+join remain unknown; it does not restore Jev or System2 authority. Unloaded,
+untagged and foreign-dimension columns remain unknown; the diagnostic does not
+treat them as air or infer a route. `worldCacheReadability` distinguishes an
+unavailable provenance store from unloaded columns and foreign / unknown provenance.
 `worldCacheCapturedAt` gives the exact cache-sample timestamp. `entityCache` and
 `entityCacheBinding` show the corresponding Mineflayer local entity-cache scope;
 an empty nearby list does not establish that the server has no nearby entities.

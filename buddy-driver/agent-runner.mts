@@ -54,6 +54,7 @@ import {
 } from './model-recovery.ts'
 import type { ModelAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
 import { normalizeStation } from './station-memory.ts'
+import { dimensionProvenanceForProbe, isProbeColumnReadable } from './dimension-provenance.ts'
 import {
   capturePreLossInventory,
   createPreLossInventoryTracker,
@@ -1518,6 +1519,8 @@ function liveWorldCacheSnapshot(
   verticalRadius: number,
   capturedAt: string,
   provenance: ReturnType<NonNullable<ResidentGeneration['worldProbeProvenance']>> | null,
+  provenanceSourceScope: 'generation' | 'host-bot' | 'unavailable',
+  provenanceFallbackReason: string | null,
 ): Record<string, unknown> {
   const position = b.entity === undefined ? null : b.entity.position
   const world = b.world as unknown as {
@@ -1601,15 +1604,15 @@ function liveWorldCacheSnapshot(
   }
   const refusedColumnCount = requested.length - requestedAttributable
   const unboundReason = provenance === null
-    ? 'generation-provenance-view-unavailable'
-    : binding.generationId === null
-      ? 'generation-identity-unavailable'
-      : null
+    ? provenanceFallbackReason ?? 'bot-provenance-store-unavailable'
+    : null
   return {
     schemaVersion: 1,
     kind: 'resident-world-cache-diagnostic',
     readOnly: true,
     capturedAt,
+    provenanceSourceScope,
+    provenanceFallbackReason,
     binding,
     readability: {
       status: unboundReason !== null
@@ -1645,6 +1648,7 @@ function liveWorldCacheSnapshot(
     },
     dimensionProvenance: provenance === null ? {
       status: 'unavailable',
+      sourceScope: provenanceSourceScope,
       liveDimension: null,
       taggedColumns: null,
       loadsTagged: null,
@@ -1658,6 +1662,7 @@ function liveWorldCacheSnapshot(
       lastLocalColumnUnloadAt: null,
     } : {
       status: 'observed',
+      sourceScope: provenance.sourceScope ?? provenanceSourceScope,
       liveDimension: provenance.liveDimension.length > 0 ? provenance.liveDimension : null,
       taggedColumns: provenance.taggedColumns,
       loadsTagged: provenance.loadsTagged,
@@ -1706,7 +1711,10 @@ function liveStateSnapshot(
     provenance: { kind?: string } | null
   }> } | undefined)?.columns ?? []
   const readableColumns = new Map(requestedColumns.map((column) => [chunkColumnKey(column),
-    column.loaded === true && column.provenance?.kind === 'attributable',
+    isProbeColumnReadable(
+      column.loaded,
+      column.provenance?.kind,
+    ),
   ]))
   const probeBlockAt = (x: number, y: number, z: number): string => {
     const column = { chunkX: Math.floor(x / 16), chunkZ: Math.floor(z / 16) }
@@ -2686,14 +2694,17 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     const verticalRadius = Number.isFinite(rawVerticalRadius) ? Math.max(1, Math.min(8, Math.floor(rawVerticalRadius))) : 4
     const status = generation === null ? null : generation.status()
     const targets = worldCacheDiagnosticTargets(bot, radius)
-    let provenance: ReturnType<NonNullable<ResidentGeneration['worldProbeProvenance']>> | null = null
-    try {
-      if (generation?.worldProbeProvenance !== undefined) provenance = generation.worldProbeProvenance(targets)
-    } catch {
-      provenance = null
-    }
+    const provenanceProbe = dimensionProvenanceForProbe(bot, generation, targets)
     const capturedAt = new Date().toISOString()
-    const cache = liveWorldCacheSnapshot(bot, radius, verticalRadius, capturedAt, provenance)
+    const cache = liveWorldCacheSnapshot(
+      bot,
+      radius,
+      verticalRadius,
+      capturedAt,
+      provenanceProbe.diagnostic,
+      provenanceProbe.sourceScope,
+      provenanceProbe.fallbackReason,
+    )
     controlReply(socket, request, true, liveStateSnapshot(bot, status, radius, verticalRadius, cache, capturedAt))
     return
   }
