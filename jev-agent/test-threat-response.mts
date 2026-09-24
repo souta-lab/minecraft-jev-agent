@@ -561,7 +561,7 @@ addCase('a skeleton shooting from 10m (beyond melee, inside bow range) gets a gr
   }
 })
 
-addCase('a completed stale goal does not reject a grounded RETREAT, while WAIT remains ALREADY_DONE', () => {
+addCase('a completed stale goal leaves grounded hostile ATTACK and RETREAT to Jev, while WAIT remains ALREADY_DONE', () => {
   const unfinished = goalState()
   const completed: GoalState = { ...unfinished, haveCount: 1, progress: 1, complete: true }
   const state: WorldState = {
@@ -570,7 +570,9 @@ addCase('a completed stale goal does not reject a grounded RETREAT, while WAIT r
   }
   const candidates = generateCandidates(state, defaultCandidateOptions)
   const retreat = candidates.find((candidate) => candidate.kind === 'RETREAT')
+  const attack = candidates.find((candidate) => candidate.kind === 'ATTACK' && candidate.targetEntityId === 42)
   const wait = candidates.find((candidate) => candidate.kind === 'WAIT')
+  const jevCandidates = authorityState(authorityRequest(state, candidates)).candidates as Array<{ id: string; kind: string }>
   const context = {
     phase: 'decision' as const,
     candidateIds: new Set(candidates.map((candidate) => candidate.id)),
@@ -580,22 +582,90 @@ addCase('a completed stale goal does not reject a grounded RETREAT, while WAIT r
     canComputePath: () => true,
   }
   const retreatResult = retreat === undefined ? null : guardCandidate(retreat, state, context)
+  const attackResult = attack === undefined ? null : guardCandidate(attack, state, context)
   const waitResult = wait === undefined ? null : guardCandidate(wait, state, context)
   const retreatBlockedByPath =
     retreat === undefined
       ? null
       : guardCandidate(retreat, state, { ...context, canComputePath: () => false })
+  const jevStillChooses =
+    attack !== undefined &&
+    retreat !== undefined &&
+    jevCandidates.some((candidate) => candidate.id === attack.id && candidate.kind === 'ATTACK') &&
+    jevCandidates.some((candidate) => candidate.id === retreat.id && candidate.kind === 'RETREAT')
+  const deadAttackResult =
+    attack === undefined
+      ? null
+      : guardCandidate(attack, { ...state, self: { ...state.self, health: 0 } }, context)
+  const breathlessAttackResult =
+    attack === undefined
+      ? null
+      : guardCandidate(
+          attack,
+          { ...state, self: { ...state.self, air: 3, feetInWater: true, eyesInWater: true } },
+          context,
+        )
+  const starvingAttackResult =
+    attack === undefined
+      ? null
+      : guardCandidate(attack, { ...state, self: { ...state.self, health: 1.33, food: 0 } }, context)
   const pass =
     state.goal.complete &&
     state.goalQueue.current?.status === 'active' &&
+    attackResult?.ok === true &&
     retreatResult?.ok === true &&
+    jevStillChooses &&
     waitResult?.ok === false &&
     waitResult.code === 'ALREADY_DONE' &&
     retreatBlockedByPath?.ok === false &&
-    retreatBlockedByPath.code === 'NO_PATH'
+    retreatBlockedByPath.code === 'NO_PATH' &&
+    deadAttackResult?.ok === false &&
+    deadAttackResult.code === 'ALREADY_DONE' &&
+    deadAttackResult.reason.includes('bot is dead') &&
+    breathlessAttackResult?.ok === false &&
+    breathlessAttackResult.code === 'SUBMERGED' &&
+    starvingAttackResult?.ok === false &&
+    starvingAttackResult.code === 'STARVING'
   return {
     pass,
-    detail: `staleQueue=${state.goalQueue.current?.status ?? 'none'} retreat=${retreatResult?.ok ? 'accepted' : retreatResult?.code ?? 'missing'} wait=${waitResult?.ok ? 'accepted' : waitResult?.code ?? 'missing'} badPath=${retreatBlockedByPath?.ok ? 'accepted' : retreatBlockedByPath?.code ?? 'missing'}`,
+    detail: `staleQueue=${state.goalQueue.current?.status ?? 'none'} JevChoices=${jevCandidates.filter((candidate) => candidate.kind === 'ATTACK' || candidate.kind === 'RETREAT').map((candidate) => candidate.id).join(',')} attack=${attackResult?.ok ? 'accepted' : attackResult?.code ?? 'missing'} retreat=${retreatResult?.ok ? 'accepted' : retreatResult?.code ?? 'missing'} wait=${waitResult?.ok ? 'accepted' : waitResult?.code ?? 'missing'} badPath=${retreatBlockedByPath?.ok ? 'accepted' : retreatBlockedByPath?.code ?? 'missing'} deadAttack=${deadAttackResult?.ok ? 'accepted' : deadAttackResult?.code ?? 'missing'} breathlessAttack=${breathlessAttackResult?.ok ? 'accepted' : breathlessAttackResult?.code ?? 'missing'} starvingAttack=${starvingAttackResult?.ok ? 'accepted' : starvingAttackResult?.code ?? 'missing'}`,
+  }
+})
+
+addCase('a completed goal still rejects an optional nonhostile ATTACK as ALREADY_DONE', () => {
+  const unfinished = goalState()
+  const completed: GoalState = { ...unfinished, haveCount: 1, progress: 1, complete: true }
+  const cow: EntityState = {
+    id: 55,
+    name: 'cow',
+    kind: 'passive',
+    username: null,
+    position: { x: 3.5, y: 10, z: 0.5 },
+    distance: 3,
+    hostile: false,
+    lineOfSight: true,
+    heldItem: null,
+    attackedSelf: false,
+  }
+  const state: WorldState = {
+    ...baseState([cow], null, selfState(SELF, { food: 10 })),
+    goal: completed,
+  }
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const attack = candidates.find((candidate) => candidate.kind === 'ATTACK' && candidate.targetEntityId === cow.id)
+  const result = attack === undefined
+    ? null
+    : guardCandidate(attack, state, {
+        phase: 'decision',
+        candidateIds: new Set(candidates.map((candidate) => candidate.id)),
+        inFlight: null,
+        reach: 4.5,
+        maxCandidateAgeTicks: 10,
+        canComputePath: () => true,
+      })
+  return {
+    pass: attack !== undefined && result?.ok === false && result.code === 'ALREADY_DONE',
+    detail: `optionalFoodAttack=${attack?.id ?? 'missing'} result=${result?.ok ? 'accepted' : result?.code ?? 'missing'}`,
   }
 })
 

@@ -21,6 +21,7 @@ import { isVerifiedWallEntry } from './wallEntry.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 import { containerObservationAt, observedItemCount } from './containerAccess.ts'
 import type { StationApproachProbe, StationKindName } from './reachability.ts'
+import { activeThreats } from './threat.ts'
 
 export type GuardPhase = 'decision' | 'dig'
 
@@ -149,10 +150,16 @@ export function guardCandidate(
     return deny(candidate.id, 'STALE_COORDS', `candidate is ${age} ticks old (limit ${context.maxCandidateAgeTicks})`)
   }
 
-  // A completed work goal does not make an already-grounded safety escape
-  // meaningless. RETREAT still passes through guardMove below, so its current
-  // standability, hazard, void-floor, and path checks remain authoritative.
-  if (state.goal.complete && candidate.kind !== 'RETREAT') {
+  // A completed work goal does not make an already-grounded hostile response
+  // meaningless. RETREAT still passes through guardMove below, and ATTACK still
+  // passes through guardAttack; only the active hostile's current grounded
+  // response affordance may cross this lifecycle guard. Ordinary post-goal work
+  // and optional hunts remain ALREADY_DONE.
+  if (
+    state.goal.complete &&
+    candidate.kind !== 'RETREAT' &&
+    !isGroundedHostileResponseAttack(candidate, state)
+  ) {
     return deny(candidate.id, 'ALREADY_DONE', `goal "${state.goal.description}" is already complete`)
   }
 
@@ -192,6 +199,32 @@ export function guardCandidate(
     case 'ESCALATE':
       return { ok: true, candidate }
   }
+}
+
+/** A completed goal may still answer a currently sensed, code-grounded threat. */
+function isGroundedHostileResponseAttack(candidate: Candidate, state: WorldState): boolean {
+  if (
+    candidate.kind !== 'ATTACK' ||
+    candidate.meta.attackable !== true ||
+    candidate.meta.targetHostile !== true ||
+    candidate.meta.hostile !== true ||
+    candidate.targetEntityId === null ||
+    candidate.meta.entityId !== candidate.targetEntityId
+  ) {
+    return false
+  }
+  const entity = state.entities.find((entry) => entry.id === candidate.targetEntityId)
+  if (
+    entity === undefined ||
+    entity.hostile !== true ||
+    candidate.targetName !== entity.name ||
+    candidate.target === null ||
+    !samePosition(candidate.target, entity.position) ||
+    candidate.meta.distance !== entity.distance
+  ) {
+    return false
+  }
+  return activeThreats(state.entities, state.signals.lastDamage, state.timestampMs).some((threat) => threat.id === entity.id)
 }
 
 function findBlock(state: WorldState, position: Vec3Json) {
