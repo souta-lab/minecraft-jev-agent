@@ -335,6 +335,63 @@ addCase('planner: repeat wait_limit does not reach Mercury; progress does', asyn
   }
 })
 
+addCase('recovery planner bypasses wait_limit cooldown and cached plan for a fresh authority response', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-recovery-wait-limit-'))
+  const logs: string[] = []
+  const callsPath = join(dir, 'mercury-calls.jsonl')
+  const cachePath = join(dir, 'mercury-cache.json')
+  let providerCalls = 0
+  const makeMercury = (requireFreshProviderDecision: boolean): MercurySystem2 => new MercurySystem2({
+    summarize: () => mercurySummary(),
+    log: hostLog(logs),
+    callsPath,
+    cachePath,
+    resolveKey: () => ({ key: 'fixture', origin: 'fixture' }),
+    requireFreshProviderDecision,
+    retries: 0,
+    transport: async () => {
+      providerCalls += 1
+      return VALID_PLAN
+    },
+  })
+  const ordinaryPlanner = new PlannerBrain({
+    bot: fakeBot,
+    world: emptyWorldMemory(),
+    log: hostLog(logs),
+    cachePath: join(dir, 'planner-cache.json'),
+    mode: 'llm',
+    mercury: makeMercury(false),
+    maxAttempts: 1,
+    resolveKey: () => null,
+  })
+  await ordinaryPlanner.plan(waitLimitRequest(0))
+  assert.equal(providerCalls, 1)
+
+  const recoveryPlanner = new PlannerBrain({
+    bot: fakeBot,
+    world: emptyWorldMemory(),
+    log: hostLog(logs),
+    cachePath: join(dir, 'recovery-planner-cache.json'),
+    mode: 'llm',
+    mercury: makeMercury(true),
+    maxAttempts: 1,
+    resolveKey: () => null,
+    requireFreshProviderDecision: true,
+  })
+  const recoveryLogStart = logs.length
+  const recovered = await recoveryPlanner.plan(waitLimitRequest(0))
+  const recoveryLogs = logs.slice(recoveryLogStart)
+  assert.equal(providerCalls, 2, 'recovery consults the same Mercury provider after the persisted wait-limit cooldown')
+  assert.notEqual(recovered.provenance?.intentSource, 'none')
+  assert.notEqual(recovered.provenance?.intentSource, 'cached')
+  assert.equal(recoveryLogs.some((line) => line.startsWith('SYSTEM2_WAIT_LIMIT_BYPASSED')), true)
+  assert.equal(recoveryLogs.some((line) => line.startsWith('MERCURY_CACHE_BYPASSED')), true)
+  return {
+    pass: providerCalls === 2 && recovered.provenance?.intentSource !== 'none' && recovered.provenance?.intentSource !== 'cached',
+    detail: `providerCalls=${providerCalls} intentSource=${recovered.provenance?.intentSource ?? null} waitBypass=${recoveryLogs.some((line) => line.startsWith('SYSTEM2_WAIT_LIMIT_BYPASSED'))} cacheBypass=${recoveryLogs.some((line) => line.startsWith('MERCURY_CACHE_BYPASSED'))}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // fail-loud budget contract is unchanged when a call is genuinely allowed
 // ---------------------------------------------------------------------------

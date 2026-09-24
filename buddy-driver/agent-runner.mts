@@ -48,6 +48,8 @@ import {
   MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
   ModelAvailabilityTracker,
   modelRecoveryStartGate,
+  recordSystem2PlanResponse,
+  recordSystem2RecoveryRejection,
   runGenerationRestartStep,
 } from './model-recovery.ts'
 import type { ModelAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
@@ -921,11 +923,16 @@ function makeGenerationContext(
           : null
         const reason = isModelAuthorityMismatch(detail.reason) ? detail.reason : 'response-source-mismatch'
         const actualSourceSha = typeof detail.actualSourceSha === 'string' ? detail.actualSourceSha : null
-        const retry = modelAvailability.recordRecoveryRejected(reason, authority, Date.now(), actualSourceSha)
+        const rejection = recordSystem2RecoveryRejection(modelAvailability, {
+          reason,
+          actualAuthority: authority,
+          actualSourceSha,
+        })
+        const retry = rejection.retry
         log('MODEL_AVAILABILITY', {
           runId,
           generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
-          ...modelAvailability.snapshot(),
+          ...rejection.availability,
           attempt: retry?.attempt ?? modelAvailability.snapshot().consecutiveFailures,
           retryDelayMs: retry?.delayMs ?? null,
         })
@@ -935,15 +942,17 @@ function makeGenerationContext(
         modelAvailability.snapshot().state === 'degraded' &&
         modelAvailability.snapshot().recoveryAuthorityKind === 'system2') {
         const intentSource = typeof detail.intentSource === 'string' ? detail.intentSource : null
-        const responseSource = intentSource === 'intent' || intentSource === 'enrichment' || intentSource === 'ungrounded'
-          ? 'system2'
-          : intentSource === 'cached' ? 'system2-cache' : null
         const authority = typeof detail.provider === 'string' && typeof detail.model === 'string'
           ? { provider: detail.provider, model: detail.model }
           : null
-        const response = modelAvailability.recordPolicyResponse(authority, responseSource, Date.now(), 'system2')
+        const response = recordSystem2PlanResponse(
+          modelAvailability,
+          authority,
+          intentSource,
+          typeof detail.sourceSha === 'string' ? detail.sourceSha : null,
+        )
         if (!response.accepted && response.reason !== null) {
-          const retry = modelAvailability.recordRecoveryRejected(response.reason, authority)
+          const retry = response.retry
           log('MODEL_RECOVERY_AUTHORITY_REJECTED', {
             runId,
             generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
@@ -951,7 +960,9 @@ function makeGenerationContext(
             reason: response.reason,
             expected: modelAvailability.snapshot().recoveryAuthority,
             actual: authority,
-            responseSource,
+            expectedSourceSha: modelAvailability.snapshot().recoverySourceSha,
+            actualSourceSha: typeof detail.sourceSha === 'string' ? detail.sourceSha : null,
+            responseSource: response.responseSource,
             retryAt: retry?.retryAt ?? modelAvailability.snapshot().retryAt,
             retryDelayMs: retry?.delayMs ?? null,
           })

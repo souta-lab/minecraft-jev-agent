@@ -58,6 +58,22 @@ export interface ModelResponseAcceptance {
   reason: ModelAuthorityMismatch | null
 }
 
+export interface System2PlanResponseAcceptance extends ModelResponseAcceptance {
+  responseSource: 'system2' | 'system2-cache' | null
+  retry: { attempt: number; delayMs: number; retryAt: string } | null
+}
+
+export interface System2RecoveryRejection {
+  reason: ModelAuthorityMismatch
+  actualAuthority: ModelAuthorityIdentity | null
+  actualSourceSha: string | null
+}
+
+export interface System2RecoveryRejectionTransition {
+  retry: { attempt: number; delayMs: number; retryAt: string } | null
+  availability: ModelAvailabilitySnapshot
+}
+
 export type ModelRecoveryStartGate =
   | { allowed: true; reason: 'not-degraded' | 'retry-already-started' | 'retry-due'; delayMs: 0 }
   | { allowed: false; reason: 'retry-backoff' | 'invalid-retry-deadline'; delayMs: number }
@@ -371,6 +387,60 @@ export class ModelAvailabilityTracker {
       },
     }
   }
+}
+
+/**
+ * Apply the host's typed SYSTEM2_PLAN_APPLIED recovery decision. The event must
+ * carry the same source and effective authority stack that passed the
+ * pre-commit fence; cached/unknown provenance can never restore authority.
+ */
+export function recordSystem2PlanResponse(
+  tracker: ModelAvailabilityTracker,
+  authority: ModelAuthorityIdentity | null,
+  intentSource: string | null,
+  sourceSha: string | null,
+  nowMs = Date.now(),
+): System2PlanResponseAcceptance {
+  const responseSource = intentSource === 'intent' || intentSource === 'enrichment' || intentSource === 'ungrounded'
+    ? 'system2'
+    : intentSource === 'cached' ? 'system2-cache' : null
+  const before = tracker.snapshot()
+  let response: ModelResponseAcceptance
+  if (before.state === 'degraded' && before.recoveryAuthorityKind === 'system2') {
+    const actualSource = normalizeSourceSha(sourceSha)
+    const sourceMismatch: ModelAuthorityMismatch | null = before.recoverySourceSha === null
+      ? 'expected-source-missing'
+      : actualSource === null
+        ? 'actual-source-missing'
+        : actualSource !== before.recoverySourceSha
+          ? 'source-mismatch'
+          : null
+    response = sourceMismatch === null
+      ? tracker.recordPolicyResponse(authority, responseSource, nowMs, 'system2')
+      : { accepted: false, recovered: false, reason: sourceMismatch }
+  } else {
+    response = tracker.recordPolicyResponse(authority, responseSource, nowMs, 'system2')
+  }
+  const retry = !response.accepted && response.reason !== null &&
+    tracker.snapshot().state === 'degraded' && tracker.snapshot().recoveryAuthorityKind === 'system2'
+    ? tracker.recordRecoveryRejected(response.reason, authority, nowMs, sourceSha)
+    : null
+  return { ...response, responseSource, retry }
+}
+
+/** Record a host-observed pre-commit recovery fence rejection and its backoff. */
+export function recordSystem2RecoveryRejection(
+  tracker: ModelAvailabilityTracker,
+  rejection: System2RecoveryRejection,
+  nowMs = Date.now(),
+): System2RecoveryRejectionTransition {
+  const retry = tracker.recordRecoveryRejected(
+    rejection.reason,
+    rejection.actualAuthority,
+    nowMs,
+    rejection.actualSourceSha,
+  )
+  return { retry, availability: tracker.snapshot() }
 }
 
 function cloneAuthority(identity: ModelAuthorityIdentity | null | undefined): ModelAuthorityIdentity | null {

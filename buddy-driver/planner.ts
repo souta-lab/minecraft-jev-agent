@@ -24,6 +24,8 @@ type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & {
   generationId?: string | null
   sourceSha?: string | null
   buildHash?: string | null
+  /** During same-authority outage recovery, force a fresh provider consultation. */
+  requireFreshProviderDecision?: boolean
 }
 
 /** Position-free, code-owned hunger truth for compact System2 state. */
@@ -126,6 +128,7 @@ export class PlannerBrain implements System2Brain {
   private readonly generationId: string | null
   private readonly sourceSha: string | null
   private readonly buildHash: string | null
+  private readonly requireFreshProviderDecision: boolean
   private lastAuthorityProvider: string
   private lastAuthorityModel: string
 
@@ -134,6 +137,7 @@ export class PlannerBrain implements System2Brain {
     this.generationId = options.generationId ?? null
     this.sourceSha = options.sourceSha ?? null
     this.buildHash = options.buildHash ?? null
+    this.requireFreshProviderDecision = options.requireFreshProviderDecision === true
     this.log = (event, detail) => options.log(event, {
       ...detail,
       generationId: this.generationId,
@@ -194,7 +198,7 @@ export class PlannerBrain implements System2Brain {
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
     const trigger = mercuryTriggerFor(request, this.mercury)
-    if (trigger === 'wait_limit' && this.mercury !== undefined) {
+    if (trigger === 'wait_limit' && this.mercury !== undefined && !this.requireFreshProviderDecision) {
       const gate = this.mercury.evaluateWaitLimitTrigger({
         request,
         stallKey: waitLimitStallKey(request),
@@ -217,6 +221,15 @@ export class PlannerBrain implements System2Brain {
           provenance: { intentSource: 'none', noGoalsReason: 'system2_wait_limit_backoff' },
         }
       }
+    } else if (trigger === 'wait_limit' && this.requireFreshProviderDecision) {
+      // Recovery must not inherit a stale wait-limit cooldown: a fresh decision
+      // from the pinned provider/model is the condition for restoring authority.
+      // Mercury separately bypasses its cached plan under the same host flag.
+      this.log('SYSTEM2_WAIT_LIMIT_BYPASSED', {
+        provider: this.authorityStack.provider,
+        model: this.authorityStack.model,
+        reason: 'same-authority-provider-recovery-requires-fresh-response',
+      })
     }
     return this.planWithMercuryAuthority(request, trigger)
   }

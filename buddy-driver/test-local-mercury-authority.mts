@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import type { System2PlanRequest } from '../jev-agent/src/system2.ts'
+import { ModelAvailabilityTracker, recordSystem2PlanResponse } from './model-recovery.ts'
 import { MercurySystem2 } from './mercury-system2.ts'
 import { PlannerBrain } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
@@ -121,6 +122,58 @@ assert.equal(externalPlannerKeyLookups, 0, 'local-mercury must never require the
 assert.equal(repaired.goals[0]?.targetItem, 'raw_iron')
 assert.equal(logs.some((entry) => entry.event === 'MERCURY_ATTEMPT'), true)
 assert.equal(logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_DECISION' && entry.detail.model === 'qwen3.5-9b-local'), true)
+
+// Recovery admission and the applied-plan marker must use the same full local
+// authority stack; `authorityModel` alone omits the `mercury:` stack prefix.
+const localRecoverySourceSha = 'c4698e51a98d2a484e43b94112ded3433bdea3f7'
+const localRecoveryAuthority = planner.authorityStack
+assert.deepEqual(localRecoveryAuthority, { provider: 'local-mercury', model: 'mercury:qwen3.5-9b-local' })
+const localRecoveryTracker = new ModelAvailabilityTracker()
+localRecoveryTracker.admitGenerationAuthority({ provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, 'jev', localRecoverySourceSha)
+localRecoveryTracker.admitGenerationAuthority(localRecoveryAuthority, 'system2', localRecoverySourceSha)
+localRecoveryTracker.recordUnavailable({
+  generationId: 'gen-local-old',
+  context: 'system2-authority',
+  attempts: 2,
+  error: 'local fixture transient failure',
+  authorityKind: 'system2',
+  authority: localRecoveryAuthority,
+  sourceSha: localRecoverySourceSha,
+})
+localRecoveryTracker.recordRetryStarted()
+const localRecoveryResponse = recordSystem2PlanResponse(
+  localRecoveryTracker,
+  localRecoveryAuthority,
+  'intent',
+  localRecoverySourceSha,
+)
+assert.equal(localRecoveryResponse.accepted, true)
+assert.equal(localRecoveryResponse.recovered, true)
+assert.equal(localRecoveryTracker.snapshot().state, 'available')
+
+const legacyAuthorityTracker = new ModelAvailabilityTracker()
+legacyAuthorityTracker.admitGenerationAuthority({ provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, 'jev', localRecoverySourceSha)
+legacyAuthorityTracker.admitGenerationAuthority(localRecoveryAuthority, 'system2', localRecoverySourceSha)
+legacyAuthorityTracker.recordUnavailable({
+  generationId: 'gen-local-old',
+  context: 'system2-authority',
+  attempts: 2,
+  error: 'local fixture transient failure',
+  authorityKind: 'system2',
+  authority: localRecoveryAuthority,
+  sourceSha: localRecoverySourceSha,
+})
+legacyAuthorityTracker.recordRetryStarted()
+const legacyAuthorityResponse = recordSystem2PlanResponse(
+  legacyAuthorityTracker,
+  { provider: planner.provider, model: planner.authorityModel },
+  'intent',
+  localRecoverySourceSha,
+)
+assert.equal(legacyAuthorityResponse.accepted, false, 'post-apply evidence must not use provider/model fields that omit authorityStack')
+assert.equal(legacyAuthorityResponse.reason, 'model-mismatch')
+assert.notEqual(localRecoveryTracker.snapshot().state, 'degraded')
+assert.equal(legacyAuthorityTracker.snapshot().state, 'degraded')
 
 let postDeathCalls = 0
 const postDeathMercury = new MercurySystem2({

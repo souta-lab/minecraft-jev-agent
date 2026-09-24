@@ -9164,6 +9164,7 @@ export class JevController {
         // "carry no goals".
         const planOp = plan.op ?? 'replace'
         const goalsExpected = planOp === 'patch' || planOp === 'replace'
+        const system2Authority = this.system2AuthorityStack
         // The MIRRORED half of the hand-off: one marker line naming the model's own
         // words, the executable meaning of every accepted row, and the outcome. It
         // is emitted in BOTH evidence planes (MIRRORED_MARKERS), or the host log
@@ -9183,8 +9184,8 @@ export class JevController {
           {
             requestId: requestContext.requestId,
             reason,
-            provider: this.system2Provider,
-            model: this.system2Model,
+            provider: system2Authority.provider,
+            model: system2Authority.model,
             op: planOp,
             applied: added.length,
             compiled: compiledRows,
@@ -9220,10 +9221,10 @@ export class JevController {
         }
         this.logger.info(
           'system2',
-          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} intentSource=${intentSource} uncompiled=${provenance?.uncompiled?.length ?? 0} compiled=[${compiledSummary}] :: ${plan.note}`,
+          `LLM plan applied provider=${system2Authority.provider} model=${system2Authority.model}: ${added.length} goal(s) depth=${this.queue.state.depth} intentSource=${intentSource} uncompiled=${provenance?.uncompiled?.length ?? 0} compiled=[${compiledSummary}] :: ${plan.note}`,
           {
-            provider: this.system2Provider,
-            model: this.system2Model,
+            provider: system2Authority.provider,
+            model: system2Authority.model,
             requestId: requestContext.requestId,
             requestContext,
             queueDepth: this.queue.state.depth,

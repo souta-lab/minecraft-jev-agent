@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Vec3 } from 'vec3'
 import { FatalModelError, ModelRecoveryRequested, assertRecoveryModelAuthority, modelAuthorityIdentityMismatch, modelResponseAuthorityMismatch } from '../jev-agent/src/modelFailure.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applySystem2RecoveryFence } from '../jev-agent/src/system2Authority.ts'
+import { JevController } from '../jev-agent/src/controller.ts'
+import type { Bot } from 'mineflayer'
+import type { System2Brain } from '../jev-agent/src/system2.ts'
 import {
   MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
   MODEL_RETRY_BASE_DELAY_MS,
@@ -11,6 +18,8 @@ import {
   modelFailureDisposition,
   modelRecoveryStartGate,
   modelRetryDelayMs,
+  recordSystem2PlanResponse,
+  recordSystem2RecoveryRejection,
   runGenerationRestartStep,
   stopGenerationForModelRecovery,
 } from './model-recovery.ts'
@@ -263,6 +272,175 @@ describe('model authority recovery host policy', () => {
     expect(controller.slice(fenceCall, controller.indexOf('added = fenced.value', fenceCall))).toContain('}, applyPlan)')
   })
 
+  test('controller rejection leaves the queue unchanged, stops its generation, and host retry starts fresh', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'system2-recovery-controller-'))
+    const expectedAuthority = { provider: 'local-mercury', model: 'mercury:qwen3.5-9b-local' }
+    const now = Date.parse('2026-09-24T12:00:00.000Z')
+    const tracker = new ModelAvailabilityTracker()
+    tracker.admitGenerationAuthority(expectedAuthority, 'system2', SOURCE_SHA)
+    tracker.recordUnavailable({
+      generationId: 'gen-before-recovery',
+      context: 'system2-authority',
+      attempts: 3,
+      error: 'transient provider 503',
+      authorityKind: 'system2',
+      authority: expectedAuthority,
+      sourceSha: SOURCE_SHA,
+    }, now)
+    tracker.recordRetryStarted()
+    expect(tracker.admitGenerationAuthority(expectedAuthority, 'system2', SOURCE_SHA)).toMatchObject({
+      allowed: true,
+      reason: 'same-recovery-authority',
+    })
+
+    const bot = Object.assign(new EventEmitter(), {
+      inventory: { items: () => [] },
+      entity: { position: new Vec3(0, 64, 0) },
+      game: { dimension: 'minecraft:overworld' },
+      health: 20,
+      food: 20,
+      registry: { itemsByName: {}, recipes: {}, materials: {}, blocksByName: {} },
+      findBlocks: () => [],
+    }) as unknown as Bot
+
+    let controller!: JevController
+    let generationActive = true
+    let generationStarts = 0
+    let retryStarts = 0
+    const rejectionReasons: string[] = []
+    const pollDelays: number[] = []
+    const restart = () => runGenerationRestartStep(
+      'model-unavailable',
+      MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
+      {
+        blocked: () => false,
+        generationActive: () => generationActive,
+        waitForGenerationStop: (delayMs) => { pollDelays.push(delayMs) },
+        recordModelRetryStarted: () => {
+          retryStarts += 1
+          tracker.recordRetryStarted()
+        },
+        startGeneration: () => { generationStarts += 1 },
+      },
+    )
+    controller = new JevController(bot, {
+      goalItem: 'ender_pearl',
+      goalCount: 12,
+      logDir: dir,
+      forceFallbackPolicy: true,
+      recoverySystem2Authority: expectedAuthority,
+      recoverySourceSha: SOURCE_SHA,
+      generationSourceSha: SOURCE_SHA,
+      rejectSystem2RecoveryPlan: (rejection) => {
+        rejectionReasons.push(rejection.reason)
+        const transition = recordSystem2RecoveryRejection(tracker, {
+          reason: rejection.reason,
+          actualAuthority: rejection.actualAuthority,
+          actualSourceSha: rejection.actualSourceSha,
+        }, now + 1_000)
+        expect(transition.retry).not.toBeNull()
+        expect(restart()).toBe('waiting-for-generation-stop')
+        controller.stopForModelRecovery()
+        generationActive = controller.isRunning
+        throw new ModelRecoveryRequested('system2-authority', 'gen-recovery-integration')
+      },
+    })
+    controller.setSystem2({
+      provider: expectedAuthority.provider,
+      model: 'qwen3.5-9b-local',
+      authorityModel: 'qwen3.5-9b-local',
+      authorityStack: expectedAuthority,
+      plan: async () => ({
+        op: 'replace',
+        goals: [{ kind: 'collect', description: 'collect stone', targetItem: 'stone', requiredCount: 2 }],
+        note: 'cached recovery fixture',
+        provenance: { intentSource: 'cached' },
+      }),
+    } satisfies System2Brain)
+
+    const internals = controller as unknown as {
+      running: boolean
+      queue: GoalQueue
+      summonLlm(reason: 'action_impossible', detail: string): unknown
+    }
+    internals.queue.applyPlan([
+      { kind: 'collect', description: 'collect oak log', targetItem: 'oak_log', requiredCount: 2 },
+    ], 'llm', 'replace')
+    const queueBefore = internals.queue.state
+    const revisionBefore = internals.queue.revision
+    internals.running = true
+
+    internals.summonLlm('action_impossible', 'current head is blocked')
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+    expect(rejectionReasons).toEqual(['response-source-mismatch'])
+    expect(internals.queue.revision).toBe(revisionBefore)
+    expect(internals.queue.state).toEqual(queueBefore)
+    expect(controller.isRunning).toBe(false)
+    expect(pollDelays).toEqual([MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS])
+    expect(restart()).toBe('started')
+    expect(retryStarts).toBe(1)
+    expect(generationStarts).toBe(1)
+    expect(tracker.snapshot()).toMatchObject({ state: 'degraded', retryAt: null })
+
+    const appliedMarkers: Record<string, unknown>[] = []
+    const appliedResponses: ReturnType<typeof recordSystem2PlanResponse>[] = []
+    const freshController = new JevController(bot, {
+      goalItem: 'ender_pearl',
+      goalCount: 12,
+      logDir: dir,
+      forceFallbackPolicy: true,
+      recoverySystem2Authority: expectedAuthority,
+      recoverySourceSha: SOURCE_SHA,
+      generationSourceSha: SOURCE_SHA,
+      eventSink: (event, detail) => {
+        if (event !== 'SYSTEM2_PLAN_APPLIED') return
+        appliedMarkers.push(detail)
+        const provider = typeof detail.provider === 'string' ? detail.provider : null
+        const model = typeof detail.model === 'string' ? detail.model : null
+        // The generation event adapter stamps its boot-bound source SHA before
+        // forwarding this marker into the resident host's recovery handler.
+        appliedResponses.push(recordSystem2PlanResponse(
+          tracker,
+          provider === null || model === null ? null : { provider, model },
+          typeof detail.intentSource === 'string' ? detail.intentSource : null,
+          SOURCE_SHA,
+          now + 2_000,
+        ))
+      },
+    })
+    freshController.setSystem2({
+      provider: expectedAuthority.provider,
+      model: 'qwen3.5-9b-local',
+      authorityModel: 'qwen3.5-9b-local',
+      authorityStack: expectedAuthority,
+      plan: async () => ({
+        op: 'replace',
+        goals: [{ kind: 'collect', description: 'collect stone', targetItem: 'stone', requiredCount: 2 }],
+        note: 'fresh local-mercury recovery answer',
+        provenance: { intentSource: 'intent', intent: 'collect stone using the present workspace' },
+      }),
+    } satisfies System2Brain)
+    const freshInternals = freshController as unknown as {
+      running: boolean
+      summonLlm(reason: 'action_impossible', detail: string): unknown
+    }
+    freshInternals.running = true
+    freshInternals.summonLlm('action_impossible', 'retry the current head with a fresh model response')
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    freshController.stop()
+
+    expect(appliedMarkers).toHaveLength(1)
+    expect(appliedMarkers[0]).toMatchObject({
+      provider: 'local-mercury',
+      model: 'mercury:qwen3.5-9b-local',
+      intentSource: 'intent',
+    })
+    expect(appliedResponses).toHaveLength(1)
+    expect(appliedResponses[0]).toMatchObject({ accepted: true, recovered: true, responseSource: 'system2' })
+    expect(tracker.snapshot()).toMatchObject({ state: 'available', recoveryAuthority: null, recoverySourceSha: null })
+  })
+
   test('scheduled recovery stays armed while a generation drains, then starts retry', () => {
     let generationActive = true
     let blocked = false
@@ -441,20 +619,21 @@ describe('model authority recovery host policy', () => {
     expect(context).toContain('availabilityAtCreate.recoveryAuthority')
     expect(context).toContain('recoverySystem2Authority: availabilityAtCreate.state === \'degraded\'')
     expect(context).toContain('modelAvailability.recordPolicyResponse(')
-    expect(context).toContain('modelAvailability.recordRecoveryRejected(response.reason, authority)')
-    expect(context).toContain("recordPolicyResponse(authority, responseSource, Date.now(), 'system2')")
+    expect(context).toContain('recordSystem2PlanResponse(')
+    expect(context).toContain('recordSystem2RecoveryRejection(')
     expect(context).toContain('authorityKind: detail.authorityKind === \'system2\' ? \'system2\' : \'jev\'')
 
     const generationEntry = readFileSync(new URL('./generation-entry.ts', import.meta.url), 'utf8')
     expect(generationEntry).toContain('recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null')
     expect(generationEntry).toContain('requireFreshProviderDecision: ctx.recoverySystem2Authority !== undefined && ctx.recoverySystem2Authority !== null')
+    expect(generationEntry.match(/requireFreshProviderDecision: ctx\.recoverySystem2Authority/g)?.length).toBe(2)
     expect(generationEntry).toContain('sourceSha: ctx.sourceSha ?? null')
     expect(runner).toContain("admitGenerationAuthority(system2Authority, 'system2', status.sourceSha)")
     expect(runner).toContain('recoverySourceSha')
     const mercury = readFileSync(new URL('./mercury-system2.ts', import.meta.url), 'utf8')
     expect(mercury).toContain('if (cached !== undefined && !this.requireFreshProviderDecision)')
     const controller = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
-    expect(controller).toContain('provider: this.system2Provider,\n            model: this.system2Model,')
+    expect(controller).toContain('provider: system2Authority.provider,\n            model: system2Authority.model,')
     const decisionStart = controller.indexOf('const result = await this.jev.decide({')
     const authorityCheck = controller.indexOf('assertRecoveryModelAuthority(', decisionStart)
     const recordDecision = controller.indexOf('this.lastDecision = result', decisionStart)

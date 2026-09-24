@@ -2994,7 +2994,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     scanRadius: 48,
     verbose: true,
     eventSink: (event, detail) => {
-      ctx.log(event, { ...detail, generationId: id })
+      ctx.log(event, { ...detail, generationId: id, sourceSha: ctx.sourceSha ?? null })
       m2Snapshot?.recordMarker(event, detail)
       const actionId = typeof detail.actionId === 'string' ? detail.actionId : null
       const verified = detail.verified === true
@@ -3077,6 +3077,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     generationId: id,
     sourceSha: ctx.sourceSha ?? null,
     buildHash: ctx.buildHash ?? null,
+    requireFreshProviderDecision: ctx.recoverySystem2Authority !== undefined && ctx.recoverySystem2Authority !== null,
     cachePath,
     worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
     mode: plannerMode,
