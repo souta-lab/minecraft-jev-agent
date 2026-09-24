@@ -77,9 +77,11 @@ function fixture({ sourceSha = SOURCE, outcomeKind = 'SUCCESS', verified = true,
     ensures: [ENSURE_REORDERED],
     identity: { worldKey: WORLD, dimension: 'overworld', worldEpoch: 4, generationId: GENERATION, leaseId: GENERATION },
   })
-  const actuation = row(5, `VTR_TRANSITION_ACTUATION transitionId=${TRANSITION} contractHash=${CONTRACT} authority=vtr_transition`, { transitionId: TRANSITION, intentId: 'intent-1', contractHash: CONTRACT, authority: 'vtr_transition' })
+  const actuation = row(5, `VTR_TRANSITION_ACTUATION transitionId=${TRANSITION} contractHash=${CONTRACT} authority=vtr_transition`, { transitionId: TRANSITION, intentId: 'intent-1', candidate: 'MOVE:oak#1', contractHash: CONTRACT, authority: 'vtr_transition' })
   const reserved = row(6, `VTR_MECHANICAL_STEP_RESERVED transitionId=${TRANSITION} intentId=intent-1 stepId=MOVE:oak#1:walk-leg-1`, { transitionId: TRANSITION, intentId: 'intent-1', stepId: 'MOVE:oak#1:walk-leg-1', usage: { mechanicalSteps: 1 } })
+  const skillStep = row(6, 'SKILL_STEP skill=walk_to step=move', { actionId: 'MOVE:oak#1', stepKind: 'move', count: 1 })
   const mechanical = row(7, `VTR_MECHANICAL_OUTCOME transitionId=${TRANSITION} contractHash=${CONTRACT} status=done verified=true`, { transitionId: TRANSITION, contractHash: CONTRACT, status: 'done', verified: true })
+  const movement = row(8, 'MOVE MOVE:oak#1 arrival start=(1,64,1) end=(2,65,2)', { actionId: 'MOVE:oak#1', start: { x: 1, y: 64, z: 1 }, end: { x: 2, y: 65, z: 2 } })
   const verify = row(8, `VTR_TRANSITION_VERIFY id=${TRANSITION} contractHash=${CONTRACT} truth=${verified ? 'TRUE' : 'FALSE'}`, {
     transitionId: TRANSITION,
     contractHash: CONTRACT,
@@ -115,7 +117,7 @@ function fixture({ sourceSha = SOURCE, outcomeKind = 'SUCCESS', verified = true,
       duplicateAuthorityConflicts: 0,
     },
   })
-  const runJournalText = [commit, actuation, reserved, mechanical, verify, outcome].map((entry) => JSON.stringify(entry)).join('\n') + '\n'
+  const runJournalText = [commit, actuation, reserved, skillStep, mechanical, movement, verify, outcome].map((entry) => JSON.stringify(entry)).join('\n') + '\n'
   const summary = {
     freshnessMs: 10,
     status: { available: true, connected: true, frozen: false },
@@ -155,6 +157,13 @@ assert.equal(successReport.acceptanceEligible, false)
 assert.equal(successReport.observed.transition.metrics.verifiedTransitionCompletion, 1)
 assert.equal(successReport.observed.transition.metrics.mechanicalStepsPerTransition, 1)
 assert.equal(successReport.observed.transition.metrics.mechanicalStepReservations, 1)
+assert.equal(successReport.observed.transition.metrics.skillStepEventRows, 1)
+assert.deepEqual(successReport.observed.transition.metrics.skillStepKindEventRows, { move: 1 })
+assert.equal(successReport.observed.transition.metrics.observedCommitToTerminalMs, 5)
+assert.deepEqual(successReport.observed.transition.executionTrace.movementCompletion, {
+  start: { x: 1, y: 64, z: 1 },
+  end: { x: 2, y: 65, z: 2 },
+})
 assert.equal(successReport.observed.transition.metrics.jevCallsPerTransition, 0)
 assert.equal(successReport.observed.transition.outcome.detail.outcome.kind, 'SUCCESS')
 

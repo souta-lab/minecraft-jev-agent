@@ -305,6 +305,22 @@ function worldKeyString(identity) {
   return `${serverId}|${dimension}|${worldEpoch}`
 }
 
+function parsePosition(value) {
+  if (typeof value !== 'string') return null
+  const match = /^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/u.exec(value)
+  return match === null ? null : { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) }
+}
+
+function positionFromMovementMessage(message) {
+  const match = /\bMOVE\s+\S+\s+arrival\s+start=\(([^)]+)\)\s+end=\(([^)]+)\)/u.exec(message ?? '')
+  if (match === null) return null
+  const parseTuple = (raw) => {
+    const values = raw.split(',').map(Number)
+    return values.length === 3 && values.every(Number.isFinite) ? { x: values[0], y: values[1], z: values[2] } : null
+  }
+  return { start: parseTuple(match[1]), end: parseTuple(match[2]) }
+}
+
 function check(id, status, observed, reason = null) {
   return { id, status, observed, ...(reason === null ? {} : { reason }) }
 }
@@ -446,6 +462,9 @@ export function evaluateCapture(input) {
     && (row.fields.runId === identity.runId)
     && (row.fields.generationId ?? row.fields.id) === identity.generationId)
   const ready = readyRows.at(-1) ?? null
+  const spawn = hostRows.find((row) => row.event === 'SPAWN' && row.ts !== null
+    && row.ts >= (boot?.ts ?? Number.NEGATIVE_INFINITY)
+    && row.ts <= (ready?.ts ?? Number.POSITIVE_INFINITY)) ?? null
   const readySourceSha = typeof ready?.fields.sourceSha === 'string' ? ready.fields.sourceSha.toLowerCase() : null
   const readyMatches = ready !== null && readySourceSha === expectedSourceSha
     && ready.fields.productionPlanAuthority === 'vtr-reach-probe'
@@ -556,6 +575,18 @@ export function evaluateCapture(input) {
     const actuationRows = captureRows.filter(({ event }) => event === 'VTR_TRANSITION_ACTUATION')
     const reservationRows = captureRows.filter(({ event }) => event === 'VTR_MECHANICAL_STEP_RESERVED')
     const mechanicalRows = captureRows.filter(({ event }) => event === 'VTR_MECHANICAL_OUTCOME')
+    const actionIds = new Set(actuationRows.map(({ row }) => row.detail?.candidate ?? row.detail?.actionId).filter((value) => typeof value === 'string'))
+    const skillStepRows = allRunRows.filter(({ row, event, ts }) => event === 'SKILL_STEP'
+      && ts !== null && commitTime !== null && commitTime <= ts && ts <= (terminalTime ?? Number.POSITIVE_INFINITY)
+      && actionIds.has(row.detail?.actionId))
+    const executionEventRows = allRunRows.filter(({ row, event, ts }) => ts !== null
+      && commitTime !== null && commitTime <= ts && ts <= (terminalTime ?? Number.POSITIVE_INFINITY)
+      && actionIds.has(row.detail?.actionId)
+      && (event === 'SKILL_STEP' || /\bMOVE\s+\S+\s+arrival\b/u.test(row.message ?? '')))
+    const skillStepKindCounts = Object.fromEntries([...new Set(skillStepRows.map(({ row }) => row.detail?.stepKind).filter((value) => typeof value === 'string'))]
+      .sort()
+      .map((kind) => [kind, skillStepRows.filter(({ row }) => row.detail?.stepKind === kind).length]))
+    const movementCompletion = executionEventRows.map(({ row }) => positionFromMovementMessage(row.message)).find((value) => value !== null) ?? null
     const metricsSteps = Number(metrics.mechanicalStepsPerTransition)
     const usageSteps = Number(usage.mechanicalSteps)
     const actuationIntentIds = new Set(actuationRows.map(({ row }) => row.detail?.intentId).filter((value) => typeof value === 'string'))
@@ -599,6 +630,9 @@ export function evaluateCapture(input) {
         mechanicalStepsPerTransition: metricsSteps,
         mechanicalStepReservations: reservationRows.length,
         observedMechanicalOutcomeRows: mechanicalRows.length,
+        skillStepEventRows: skillStepRows.length,
+        skillStepKindEventRows: skillStepKindCounts,
+        observedCommitToTerminalMs: commitTime === null || terminalTime === null ? null : terminalTime - commitTime,
         jevCallsPerTransition: metrics.jevCallsPerTransition ?? null,
         system2CallsPerTransition: metrics.system2CallsPerTransition ?? null,
         modelCallsPerMechanicalStep: metrics.modelCallsPerMechanicalStep ?? null,
@@ -609,6 +643,11 @@ export function evaluateCapture(input) {
       },
       verification: verifyRow,
       outcome: outcomeRow?.row ?? null,
+      executionTrace: {
+        actionIds: [...actionIds],
+        skillStepEvents: executionEventRows.map(({ row }) => ({ message: row.message, detail: row.detail })),
+        movementCompletion,
+      },
       verificationOk,
       typedOutcomeOk: outcomeOk,
       mechanicalReservationsMatchActuation: reservationsMatchActuation,
@@ -723,6 +762,13 @@ export function evaluateCapture(input) {
       worldIdentity: identity.worldKey,
       boot: boot === null ? null : { timestamp: boot.raw.slice(1, boot.raw.indexOf(']')), line: boot.line, mission: bootMission },
       generationReady: ready === null ? null : { timestamp: ready.raw.slice(1, ready.raw.indexOf(']')), line: ready.line, buildHash: ready.fields.buildHash ?? null },
+      spawn: spawn === null ? null : {
+        timestamp: spawn.raw.slice(1, spawn.raw.indexOf(']')),
+        line: spawn.line,
+        position: parsePosition(spawn.fields.pos),
+        dimension: spawn.fields.dimension ?? null,
+        worldEpoch: spawn.fields.worldEpoch ?? null,
+      },
       configuredNoLlmProbe: config === null ? null : {
         mission: configuredMission,
         BUDDY_POLICY: config.fields.jevPolicyMode ?? null,
