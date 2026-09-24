@@ -1719,9 +1719,17 @@ export function expandOptionDependencies(
 export interface QueuePrerequisiteRow {
   kind: GoalKind
   description: string
+  /** runtime row identity, when this is a queued ledger row */
+  id?: string
   targetItem?: string | null
   /** lifecycle status on a queued row; absent on a fresh `PlannedGoal`. */
   status?: string
+  /**
+   * Explicit semantic Option owner. The Option compiler stamps one owner on a
+   * prerequisite and the consumer it expanded for; absent means legacy or
+   * independent work with no proven causal edge.
+   */
+  semanticOptionInstanceId?: string
   protected?: boolean
   core?: boolean
   targetY?: number | null
@@ -1839,9 +1847,13 @@ export function dependentRows(
   row: QueuePrerequisiteRow,
   ledger: readonly QueuePrerequisiteRow[],
 ): QueuePrerequisiteRow[] {
-  if (typeof row.targetItem !== 'string' || row.targetItem.length === 0) return []
+  const causalOwner = row.semanticOptionInstanceId
+  if (typeof row.targetItem !== 'string' || row.targetItem.length === 0 || typeof causalOwner !== 'string' || causalOwner.length === 0) return []
   return ledger.filter(
-    (other) => other !== row && queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicateExactly(row, predicate)),
+    (other) =>
+      other !== row &&
+      other.semanticOptionInstanceId === causalOwner &&
+      queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicateExactly(row, predicate)),
   )
 }
 
@@ -1852,10 +1864,14 @@ export interface OrphanPrerequisiteDecision {
   reason: string
   /** number of resolved dependent rows that consumed this row's target */
   dependents: number
+  /** shared Option owner that proves the prerequisite and consumer are causal */
+  causalOwner: string | null
+  /** concrete ledger row identities for the consumers used in this decision */
+  dependentIds: string[]
 }
 
 function keepRow(reason: string): OrphanPrerequisiteDecision {
-  return { retire: false, reason, dependents: 0 }
+  return { retire: false, reason, dependents: 0, causalOwner: null, dependentIds: [] }
 }
 
 /**
@@ -1867,6 +1883,8 @@ function keepRow(reason: string): OrphanPrerequisiteDecision {
  *     (an EXACT item/station/tier edge - a bare resource-class match does not
  *     count, see `dependentRows`), otherwise it is not a prerequisite and
  *     retiring it would drop live work;
+ *   - producer and consumer carry the same explicit semantic Option owner,
+ *     proving this prerequisite came from the consumer's dependency expansion;
  *   - every consuming row is resolved (done/impossible), so no live row still
  *     requires the target.
  *
@@ -1877,9 +1895,11 @@ function keepRow(reason: string): OrphanPrerequisiteDecision {
  * retirement is not a silent drop (#55): the row stays in the durable ledger,
  * becomes `impossible` with a recording `detail`, and emits `PREREQ_RETIRED`.
  *
- * Deliberately conservative: a live consumer keeps the row, so a genuinely
- * required but unsatisfiable prerequisite still fails visibly instead of being
- * silently removed (issue #55 / AGENTS.md authority invariant).
+ * Deliberately conservative: a compatibility match without the shared causal
+ * owner is not a dependency edge. This prevents historical rows from deleting a
+ * fresh independent goal (#467). A live causal consumer keeps the row, so a
+ * genuinely required but unsatisfiable prerequisite still fails visibly instead
+ * of being silently removed (issue #55 / AGENTS.md authority invariant).
  */
 export function orphanedPrerequisiteDecision(
   row: QueuePrerequisiteRow,
@@ -1887,11 +1907,38 @@ export function orphanedPrerequisiteDecision(
 ): OrphanPrerequisiteDecision {
   const item = row.targetItem
   if (typeof item !== 'string' || item.length === 0) return keepRow('no_target_item')
+  if (typeof row.semanticOptionInstanceId !== 'string' || row.semanticOptionInstanceId.length === 0) {
+    return keepRow('missing_causal_option_owner')
+  }
   const dependents = dependentRows(row, ledger)
   if (dependents.length === 0) return keepRow('no_dependents')
+  const dependentIds = dependents.map((other) => other.id).filter((id): id is string => typeof id === 'string' && id.length > 0)
+  if (dependentIds.length !== dependents.length) {
+    return {
+      retire: false,
+      reason: 'missing_consumer_identity',
+      dependents: dependents.length,
+      causalOwner: row.semanticOptionInstanceId,
+      dependentIds,
+    }
+  }
   const live = dependents.filter((other) => other.status === 'pending' || other.status === 'active')
-  if (live.length > 0) return { retire: false, reason: 'dependent_unfinished', dependents: dependents.length }
-  return { retire: true, reason: 'all_dependents_resolved', dependents: dependents.length }
+  if (live.length > 0) {
+    return {
+      retire: false,
+      reason: 'dependent_unfinished',
+      dependents: dependents.length,
+      causalOwner: row.semanticOptionInstanceId,
+      dependentIds,
+    }
+  }
+  return {
+    retire: true,
+    reason: 'all_dependents_resolved',
+    dependents: dependents.length,
+    causalOwner: row.semanticOptionInstanceId,
+    dependentIds,
+  }
 }
 
 export interface PrerequisiteOrderResult<T> {

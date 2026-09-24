@@ -122,10 +122,11 @@ export interface DominatedPrerequisiteDecision {
   outcome?: readonly string[]
 }
 
-export function formatPrereqRetired(goal: QueuedGoal, dependents: number): string {
+export function formatPrereqRetired(goal: QueuedGoal, decision: { dependents: number; causalOwner: string | null; dependentIds: readonly string[] }): string {
+  const causal = ` causalOwner=${decision.causalOwner ?? 'unknown'} consumers=[${decision.dependentIds.join(',')}]`
   return (
     `${PREREQ_RETIRED} id=${goal.id} item=${goal.targetItem ?? 'none'} reason=all_dependents_resolved` +
-    ` dependents=${dependents} protected=${goal.protected === true} core=${goal.core === true}`
+    ` dependents=${decision.dependents}${causal} protected=${goal.protected === true} core=${goal.core === true}`
   )
 }
 
@@ -1542,10 +1543,12 @@ export class GoalQueue {
         const decision = orphanedPrerequisiteDecision(goal, this.goals)
         if (!decision.retire) continue
         goal.status = 'impossible'
-        goal.detail = `retired prerequisite: reason=${decision.reason} dependents=${decision.dependents}`
+        goal.detail =
+          `retired prerequisite: reason=${decision.reason} dependents=${decision.dependents}` +
+          ` causalOwner=${decision.causalOwner ?? 'unknown'} consumers=[${decision.dependentIds.join(',')}]`
         goal.updatedAt = now
         retired.push(goal)
-        sink(formatPrereqRetired(goal, decision.dependents))
+        sink(formatPrereqRetired(goal, decision))
         changed = true
       }
     }

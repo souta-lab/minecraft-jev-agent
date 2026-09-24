@@ -8,8 +8,13 @@
 // while the real M2 next step, `collect:obsidian`, waited behind it. Mercury
 // then patched the station rows in BEHIND the row that needed them.
 //
+// The fixture preserves the measured row/order shape but supplies the shared
+// semantic Option owner required by the current compiler to prove its causal
+// edge. The old ledger did not persist this fact, so its ownerless rows are now
+// intentionally insufficient proof for retirement.
+//
 // Cases:
-//   (a) the exact measured ledger -> the orphaned smelt is retired with
+//   (a) the measured ledger shape plus explicit causal owner -> the orphaned smelt is retired with
 //       `PREREQ_RETIRED ... reason=all_dependents_resolved`, the station rows it
 //       orphaned cascade, and the queue advances to `collect:obsidian`;
 //   (b) a still-required prerequisite (live dependent) is NOT retired;
@@ -22,6 +27,7 @@
 // Run: bun test ./test-prereq-orphan-retire.mts
 import { GoalQueue, PREREQ_REORDERED, PREREQ_RETIRED, setPrereqAuditSink } from './src/goalQueue.ts'
 import type { GoalKind, GoalStatus, QueuedGoal } from './src/goalQueue.ts'
+import { applyCompiledPlan, makeOptionSnapshot } from './src/optionSpec.ts'
 
 interface Case {
   name: string
@@ -32,6 +38,8 @@ const cases: Case[] = []
 const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
+
+const FLINT_AND_STEEL_OWNER = 'craft:flint_and_steel#instance'
 
 function row(
   partial: Partial<QueuedGoal> & {
@@ -64,16 +72,16 @@ function row(
 function liveLedger(): QueuedGoal[] {
   return [
     row({ id: 'g1:collect:raw_iron', kind: 'collect', targetItem: 'raw_iron', requiredCount: 1, status: 'done', haveCount: 3, protected: true, core: true }),
-    row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true }),
+    row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true, semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
     row({ id: 'g3:collect:flint', kind: 'collect', targetItem: 'flint', requiredCount: 1, status: 'done', haveCount: 1, protected: true, core: true }),
-    row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1, protected: true, core: true }),
+    row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1, protected: true, core: true, semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
     row({ id: 'g5:collect:obsidian', kind: 'collect', targetItem: 'obsidian', requiredCount: 10, status: 'active', protected: true, core: true }),
     row({ id: 'g6:place:obsidian', kind: 'place', targetItem: 'obsidian', requiredCount: 10, status: 'pending', protected: false, core: true }),
     row({ id: 'g7:place:nether_portal', kind: 'place', targetItem: 'nether_portal', requiredCount: 1, status: 'pending', protected: false, core: true }),
     row({ id: 'g44:craft:crafting_table', kind: 'craft', targetItem: 'crafting_table', requiredCount: 1, status: 'pending' }),
     row({ id: 'g45:place:crafting_table', kind: 'place', targetItem: 'crafting_table', requiredCount: 1, status: 'pending' }),
-    row({ id: 'g46:craft:furnace', kind: 'craft', targetItem: 'furnace', requiredCount: 1, status: 'pending' }),
-    row({ id: 'g47:place:furnace', kind: 'place', targetItem: 'furnace', requiredCount: 1, status: 'pending' }),
+    row({ id: 'g46:craft:furnace', kind: 'craft', targetItem: 'furnace', requiredCount: 1, status: 'pending', semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
+    row({ id: 'g47:place:furnace', kind: 'place', targetItem: 'furnace', requiredCount: 1, status: 'pending', semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
   ]
 }
 
@@ -102,6 +110,8 @@ addCase('(a) the exact live ledger retires the orphaned smelt and advances to co
     smeltLine?.includes('item=iron_ingot') === true &&
     smeltLine?.includes('reason=all_dependents_resolved') === true &&
     smeltLine?.includes('dependents=1') === true &&
+    smeltLine?.includes(`causalOwner=${FLINT_AND_STEEL_OWNER}`) === true &&
+    smeltLine?.includes('consumers=[g4:craft:flint_and_steel]') === true &&
     smeltLine?.includes('protected=true') === true &&
     smeltLine?.includes('core=true') === true &&
     // the station rows the smelt orphaned cascade behind it
@@ -126,8 +136,8 @@ addCase('(b) a still-required prerequisite is NOT retired', () => {
     goals: [
       row({ id: 'g1:collect:raw_iron', kind: 'collect', targetItem: 'raw_iron', requiredCount: 1, status: 'done', haveCount: 1 }),
       // smelt is live work: its consumer craft:flint_and_steel is still pending
-      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true }),
-      row({ id: 'g3:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'pending' }),
+      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true, semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
+      row({ id: 'g3:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'pending', semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
     ],
   })
   const smelt = queue.state.goals.find((goal) => goal.id === 'g2:smelt:iron_ingot')
@@ -317,8 +327,8 @@ addCase('(g) an EXACT done consumer still retires (the class fix does not disabl
   queue.restore({
     counter: 4,
     goals: [
-      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true }),
-      row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1 }),
+      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true, semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
+      row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1, semanticOptionInstanceId: FLINT_AND_STEEL_OWNER }),
       row({ id: 'g5:collect:obsidian', kind: 'collect', targetItem: 'obsidian', requiredCount: 10, status: 'pending', core: true }),
     ],
     revision: 3,
@@ -333,6 +343,109 @@ addCase('(g) an EXACT done consumer still retires (the class fix does not disabl
   return {
     pass,
     detail: `smelt=${smelt?.status}/${smelt?.detail ?? 'none'} current=${queue.current?.id ?? 'none'} retired=${retired.length}`,
+  }
+})
+
+addCase('(h) the measured fresh g210 stone_pickaxe goal survives the historical done raw_iron consumer', () => {
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const queue = new GoalQueue()
+  const fresh = row({
+    id: 'g210:craft:stone_pickaxe',
+    kind: 'craft',
+    targetItem: 'stone_pickaxe',
+    requiredCount: 1,
+    status: 'pending',
+    semanticOptionInstanceId: 'craft:stone_pickaxe#instance',
+  })
+  const historical = row({
+    id: 'g34:collect:raw_iron',
+    kind: 'collect',
+    targetItem: 'raw_iron',
+    requiredCount: 1,
+    status: 'done',
+    haveCount: 1,
+    semanticOptionInstanceId: 'collect:raw_iron#historical',
+  })
+  queue.restore({ counter: 210, revision: 244, goals: [historical, fresh] })
+  const queuedFresh = queue.state.goals.find((goal) => goal.id === fresh.id)
+  const pass =
+    queuedFresh?.status === 'active' &&
+    queuedFresh.detail === null &&
+    marker(lines, PREREQ_RETIRED).length === 0 &&
+    queue.current?.id === fresh.id
+  return {
+    pass,
+    detail: `fresh=${queuedFresh?.status} owner=${queuedFresh?.semanticOptionInstanceId ?? 'none'} current=${queue.current?.id ?? 'none'} retired=${marker(lines, PREREQ_RETIRED).length}`,
+  }
+})
+
+addCase('(h2) ownerless legacy consumers cannot prove an orphan edge', () => {
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const queue = new GoalQueue()
+  const historical = row({
+    id: 'g34:collect:raw_iron',
+    kind: 'collect',
+    targetItem: 'raw_iron',
+    requiredCount: 1,
+    status: 'done',
+    haveCount: 1,
+  })
+  const fresh = row({
+    id: 'g210:craft:stone_pickaxe',
+    kind: 'craft',
+    targetItem: 'stone_pickaxe',
+    requiredCount: 1,
+    status: 'pending',
+    semanticOptionInstanceId: 'craft:stone_pickaxe#instance',
+  })
+  queue.restore({ counter: 210, revision: 244, goals: [historical, fresh] })
+  const queuedFresh = queue.state.goals.find((goal) => goal.id === fresh.id)
+  const pass =
+    queuedFresh?.status === 'active' &&
+    marker(lines, PREREQ_RETIRED).length === 0 &&
+    queue.current?.id === fresh.id
+  return {
+    pass,
+    detail: `fresh=${queuedFresh?.status} historicalOwner=none current=${queue.current?.id ?? 'none'} retired=${marker(lines, PREREQ_RETIRED).length}`,
+  }
+})
+
+addCase('(i) an Option-expanded prerequisite retires against its own resolved consumer and logs the owner edge', () => {
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const compiled = applyCompiledPlan(
+    [{ kind: 'collect', description: 'collect 1 x raw_iron', targetItem: 'raw_iron', requiredCount: 1 }],
+    makeOptionSnapshot({ inventory: {}, toolRank: 0 }),
+    { enabled: true },
+  )
+  const producerPlan = compiled.goals.find((goal) => goal.kind === 'craft' && goal.targetItem === 'stone_pickaxe')
+  const consumerPlan = compiled.goals.find((goal) => goal.kind === 'collect' && goal.targetItem === 'raw_iron')
+  if (producerPlan === undefined || consumerPlan === undefined) {
+    return { pass: false, detail: `compiler did not produce stone_pickaxe/raw_iron: ${compiled.goals.map((goal) => `${goal.kind}:${goal.targetItem}`).join(',')}` }
+  }
+  const queue = new GoalQueue()
+  const added = queue.applyPlan(compiled.goals, 'llm', 'replace')
+  const producer = added.find((goal) => goal.targetItem === 'stone_pickaxe')
+  const consumer = added.find((goal) => goal.targetItem === 'raw_iron')
+  if (producer === undefined || consumer === undefined) {
+    return { pass: false, detail: `queue omitted producer/consumer: ${added.map((goal) => `${goal.id}:${goal.targetItem}`).join(',')}` }
+  }
+  consumer.status = 'done'
+  consumer.haveCount = consumer.requiredCount
+  queue.retireOrphanedPrerequisites()
+  const retired = marker(lines, PREREQ_RETIRED).find((line) => line.includes(`id=${producer.id}`)) ?? ''
+  const queuedProducer = queue.state.goals.find((goal) => goal.id === producer.id)
+  const pass =
+    producerPlan.semanticOptionInstanceId === consumerPlan.semanticOptionInstanceId &&
+    producer.semanticOptionInstanceId === consumer.semanticOptionInstanceId &&
+    queuedProducer?.status === 'impossible' &&
+    retired.includes(`causalOwner=${consumer.semanticOptionInstanceId}`) &&
+    retired.includes(`consumers=[${consumer.id}]`)
+  return {
+    pass,
+    detail: `producer=${queuedProducer?.status} owner=${producer.semanticOptionInstanceId ?? 'none'} consumer=${consumer.id}/${consumer.status} retired=${retired || 'none'}`,
   }
 })
 
