@@ -17,7 +17,11 @@ const SOURCE_SHA = 'c'.repeat(40)
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 2, fallbackCount: 0, otherCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
-  system2: { runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1 },
+  system2: {
+    runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1,
+    identityStatus: 'verified', identityReason: null,
+    effectiveProvider: 'fixture-model', effectiveModel: 'model-v1',
+  },
 }
 const FALLBACK_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 2, otherCount: 0 },

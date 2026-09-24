@@ -72,6 +72,9 @@ const WORLD_KEY = '{"serverId":"127.0.0.1:25565","dimension":"minecraft:overworl
 const RUN = 'run-clean-fixture'
 const CLEAN_LEVEL = 'm3clean-b1'
 const CLEAN_SEED = '-4187923615481'
+const SYSTEM2_GENERATION_ID = 'gen-test-1'
+const SYSTEM2_BUILD_HASH = 'e6be1812c804'
+const SYSTEM2_TRIGGER = 'queue_empty'
 
 rmSync(SCRATCH, { recursive: true, force: true })
 mkdirSync(SCRATCH, { recursive: true })
@@ -98,13 +101,15 @@ function runnerOut(runId, source = FIXTURE_SHA) {
       boot(0, runId, source),
       line(
         1,
-        'GENERATION_READY id=gen-test-1 rungIndex=13 rungId=nether_portal ' +
+        `GENERATION_READY id=${SYSTEM2_GENERATION_ID} generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} ` +
+          'system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev rungIndex=13 rungId=nether_portal ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
           'system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"} ' +
           'system2LastAuthority={"provider":"none","model":"none"} deterministicFallbackEnabled=false ' +
           'planner=llm plannerModel=typesafe-ai/jev',
       ),
-      line(2, 'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'),
+      line(1.5, `SYSTEM2_AUTHORITY_INPUT generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=${SYSTEM2_TRIGGER} provider=typesafe-ai model=typesafe-ai/jev`),
+      line(2, `SYSTEM2_AUTHORITY_DECISION generationId=${SYSTEM2_GENERATION_ID} sourceSha=${source} buildHash=${SYSTEM2_BUILD_HASH} configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=${SYSTEM2_TRIGGER} provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal`),
       line(3, `HOST_LOCK released runId=${runId}`),
     ].join('\n') + '\n'
   )

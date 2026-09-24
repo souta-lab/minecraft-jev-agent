@@ -34,6 +34,9 @@ export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 
 const TS_RE = /^\[([^\]]+)\]/
 const RUN_ID_RE_LINE = /\brunId=(run-[A-Za-z0-9-]+)/
+const SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
+const BUILD_HASH_RE = /^[0-9a-f]{12}$/i
+const NON_MODEL_AUTHORITY_RE = /(?:^|[^a-z0-9])(?:stub|fixture|unavailable|unknown|none|fallback|deterministic|mock|fake)(?:$|[^a-z0-9])/i
 
 function extractTimestampMs(line) {
   const match = TS_RE.exec(line)
@@ -64,11 +67,17 @@ export function parseGenerationLine(line) {
   const model = /\bpolicyModel=(\S+)/.exec(line)?.[1] ?? /\bmodel=(\S+)/.exec(line)?.[1] ?? null
   const plannerMode = /\bplanner=(\S+)/.exec(line)?.[1] ?? null
   const fallback = /\bdeterministicFallbackEnabled=(true|false)\b/.exec(line)?.[1] ?? null
+  const generationId = /\bgenerationId=(\S+)/.exec(line)?.[1] ?? /\bid=(\S+)/.exec(line)?.[1] ?? null
   return {
+    generationId,
+    sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
+    buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
     policyKind: kind,
     policyModel: model,
     plannerMode,
     deterministicFallbackEnabled: fallback === null ? null : fallback === 'true',
+    system2ConfiguredProvider: /\bsystem2ConfiguredProvider=(\S+)/.exec(line)?.[1] ?? null,
+    system2ConfiguredModel: /\bsystem2ConfiguredModel=(\S+)/.exec(line)?.[1] ?? null,
   }
 }
 
@@ -78,7 +87,39 @@ export function parseSystem2AuthorityLine(line) {
   const model = /\bmodel=(\S+)/.exec(line)?.[1] ?? null
   const chosen = /\bchosen=(\S+)/.exec(line)?.[1] ?? null
   const portalPlan = chosen === 'front_nether_portal' || /\bgoals=\[[^\n]*portal/i.test(line)
-  return { provider, model, chosen, portalPlan }
+  return {
+    generationId: /\bgenerationId=(\S+)/.exec(line)?.[1] ?? null,
+    sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
+    buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
+    provider,
+    model,
+    configuredProvider: /\bconfiguredProvider=(\S+)/.exec(line)?.[1] ?? null,
+    configuredModel: /\bconfiguredModel=(\S+)/.exec(line)?.[1] ?? null,
+    trigger: /\btrigger=(\S+)/.exec(line)?.[1] ?? null,
+    chosen,
+    portalPlan,
+  }
+}
+
+export function parseSystem2AuthorityInputLine(line) {
+  if (!/\bSYSTEM2_AUTHORITY_INPUT\b/.test(line)) return null
+  return {
+    generationId: /\bgenerationId=(\S+)/.exec(line)?.[1] ?? null,
+    sourceSha: /\bsourceSha=(\S+)/.exec(line)?.[1] ?? null,
+    buildHash: /\bbuildHash=(\S+)/.exec(line)?.[1] ?? null,
+    provider: /\bprovider=(\S+)/.exec(line)?.[1] ?? null,
+    model: /\bmodel=(\S+)/.exec(line)?.[1] ?? null,
+    configuredProvider: /\bconfiguredProvider=(\S+)/.exec(line)?.[1] ?? null,
+    configuredModel: /\bconfiguredModel=(\S+)/.exec(line)?.[1] ?? null,
+    trigger: /\btrigger=(\S+)/.exec(line)?.[1] ?? null,
+  }
+}
+
+export function isModelSystem2Decision(entry) {
+  const provider = typeof entry?.provider === 'string' ? entry.provider.trim() : ''
+  const model = typeof entry?.model === 'string' ? entry.model.trim() : ''
+  return provider.length > 0 && model.length > 0 &&
+    !NON_MODEL_AUTHORITY_RE.test(provider) && !NON_MODEL_AUTHORITY_RE.test(model)
 }
 
 /**
@@ -91,13 +132,15 @@ export async function scanRunnerOut(runnerOutPath) {
   const boots = []
   const releases = []
   const generations = []
+  const system2Inputs = []
   const system2Decisions = []
   const rl = createInterface({ input: createReadStream(runnerOutPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
     const tsMs = extractTimestampMs(line)
     if (isBootLine(line)) {
       const runId = extractRunId(line)
-      if (runId !== null && tsMs !== null) boots.push({ runId, tsMs })
+      const sourceSha = /\bsource=(\S+)/.exec(line)?.[1] ?? null
+      if (runId !== null && tsMs !== null) boots.push({ runId, tsMs, sourceSha })
       continue
     }
     if (isReleaseLine(line)) {
@@ -109,12 +152,17 @@ export async function scanRunnerOut(runnerOutPath) {
       generations.push({ tsMs, ...parsed })
       continue
     }
+    if (line.includes('SYSTEM2_AUTHORITY_INPUT') && tsMs !== null) {
+      const parsed = parseSystem2AuthorityInputLine(line)
+      if (parsed !== null) system2Inputs.push({ tsMs, ...parsed })
+      continue
+    }
     if (tsMs !== null) {
       const system2 = parseSystem2AuthorityLine(line)
       if (system2 !== null) system2Decisions.push({ tsMs, ...system2 })
     }
   }
-  return { boots, releases, generations, system2Decisions }
+  return { boots, releases, generations, system2Inputs, system2Decisions }
 }
 
 /** Bracket R's lifetime: [BOOT runId=R, next BOOT | HOST_LOCK released | now-live). */
@@ -129,6 +177,112 @@ export function resolveRunWindow(boots, releases, runId, { live = false, nowMs =
   let endMs = candidates.length > 0 ? Math.min(...candidates) : null
   if (endMs === null && live) endMs = nowMs
   return { startMs, endMs, bounded: endMs !== null }
+}
+
+function buildSystem2GenerationLineage({ generations, inputs, decisions, bootSourceSha }) {
+  const issues = []
+  const generationById = new Map()
+  const usedInputs = new Set()
+  const addIssue = (reason) => {
+    if (!issues.includes(reason)) issues.push(reason)
+  }
+
+  if (generations.length === 0) addIssue('generation_ready_missing')
+  if (typeof bootSourceSha !== 'string' || !SOURCE_SHA_RE.test(bootSourceSha)) addIssue('boot_source_sha_missing_or_invalid')
+
+  for (const generation of generations) {
+    if (typeof generation.generationId !== 'string' || generation.generationId.length === 0) {
+      addIssue(`generation_id_missing line=${generation.lineIndex ?? 'unknown'}`)
+      continue
+    }
+    const existing = generationById.get(generation.generationId)
+    if (existing !== undefined) {
+      addIssue(`generation_id_duplicate id=${generation.generationId}`)
+      continue
+    }
+    generationById.set(generation.generationId, generation)
+    if (typeof generation.sourceSha !== 'string' || !SOURCE_SHA_RE.test(generation.sourceSha)) {
+      addIssue(`generation_source_sha_missing_or_invalid id=${generation.generationId}`)
+    } else if (typeof bootSourceSha === 'string' && SOURCE_SHA_RE.test(bootSourceSha) && generation.sourceSha.toLowerCase() !== bootSourceSha.toLowerCase()) {
+      addIssue(`generation_source_sha_mismatch id=${generation.generationId} expected=${bootSourceSha} observed=${generation.sourceSha}`)
+    }
+    if (typeof generation.buildHash !== 'string' || !BUILD_HASH_RE.test(generation.buildHash)) {
+      addIssue(`generation_build_hash_missing_or_invalid id=${generation.generationId}`)
+    }
+    if (typeof generation.system2ConfiguredProvider !== 'string' || generation.system2ConfiguredProvider.length === 0) {
+      addIssue(`system2_configured_provider_missing id=${generation.generationId}`)
+    }
+    if (typeof generation.system2ConfiguredModel !== 'string' || generation.system2ConfiguredModel.length === 0) {
+      addIssue(`system2_configured_model_missing id=${generation.generationId}`)
+    }
+  }
+
+  const configuredAuthorities = new Set(generations
+    .filter((generation) => typeof generation.system2ConfiguredProvider === 'string' && typeof generation.system2ConfiguredModel === 'string')
+    .map((generation) => `${generation.system2ConfiguredProvider}\u0000${generation.system2ConfiguredModel}`))
+  if (configuredAuthorities.size > 1) addIssue(`system2_authority_changed_across_generations count=${configuredAuthorities.size}`)
+
+  for (const decision of decisions) {
+    const id = decision.generationId
+    if (typeof id !== 'string' || id.length === 0) {
+      addIssue('system2_decision_generation_id_missing')
+      continue
+    }
+    const generation = generationById.get(id)
+    if (generation === undefined) {
+      addIssue(`system2_decision_generation_unjoined id=${id}`)
+      continue
+    }
+    if (typeof decision.sourceSha !== 'string' || !SOURCE_SHA_RE.test(decision.sourceSha)) {
+      addIssue(`system2_decision_source_sha_missing_or_invalid id=${id}`)
+    } else if (decision.sourceSha.toLowerCase() !== String(generation.sourceSha ?? '').toLowerCase()) {
+      addIssue(`system2_decision_source_sha_mismatch id=${id}`)
+    }
+    if (typeof decision.buildHash !== 'string' || !BUILD_HASH_RE.test(decision.buildHash)) {
+      addIssue(`system2_decision_build_hash_missing_or_invalid id=${id}`)
+    } else if (decision.buildHash.toLowerCase() !== String(generation.buildHash ?? '').toLowerCase()) {
+      addIssue(`system2_decision_build_hash_mismatch id=${id}`)
+    }
+    if (decision.configuredProvider !== generation.system2ConfiguredProvider || decision.configuredModel !== generation.system2ConfiguredModel) {
+      addIssue(`system2_decision_config_mismatch id=${id}`)
+    }
+    if (!isModelSystem2Decision(decision)) addIssue(`system2_decision_non_model_authority id=${id}`)
+
+    const inputIndex = inputs.findIndex((input, index) =>
+      !usedInputs.has(index) && input.tsMs >= generation.tsMs && input.tsMs <= decision.tsMs &&
+      input.generationId === decision.generationId &&
+      input.sourceSha === decision.sourceSha && input.buildHash === decision.buildHash &&
+      input.provider === decision.provider && input.model === decision.model &&
+      input.configuredProvider === decision.configuredProvider && input.configuredModel === decision.configuredModel &&
+      input.trigger === decision.trigger,
+    )
+    if (inputIndex < 0) addIssue(`system2_decision_input_unjoined id=${id}`)
+    else usedInputs.add(inputIndex)
+  }
+
+  const decisionAuthorities = new Set(decisions
+    .filter((decision) => isModelSystem2Decision(decision))
+    .map((decision) => `${decision.provider}\u0000${decision.model}`))
+  if (decisionAuthorities.size > 1) addIssue(`system2_effective_authority_changed_across_generations count=${decisionAuthorities.size}`)
+  if (decisions.length === 0) addIssue('system2_model_decision_missing')
+
+  const onlyConfigured = [...configuredAuthorities][0] ?? null
+  const [configuredProvider, configuredModel] = onlyConfigured === null ? [null, null] : onlyConfigured.split('\u0000')
+  const onlyEffective = [...decisionAuthorities][0] ?? null
+  const [effectiveProvider, effectiveModel] = onlyEffective === null ? [null, null] : onlyEffective.split('\u0000')
+  return {
+    status: issues.length === 0 ? 'verified' : 'unknown',
+    reason: issues.length === 0 ? null : issues.join('; '),
+    issues,
+    generationCount: generations.length,
+    decisionCount: decisions.length,
+    configuredProvider,
+    configuredModel,
+    effectiveProvider,
+    effectiveModel,
+    sourceSha: typeof bootSourceSha === 'string' && SOURCE_SHA_RE.test(bootSourceSha) ? bootSourceSha.toLowerCase() : null,
+    generationIds: generations.map((generation) => generation.generationId).filter((id) => typeof id === 'string'),
+  }
 }
 
 /**
@@ -198,6 +352,8 @@ export async function loadPolicyEvidence({
   if (window === null) return { decisions: null, generation: null, reason: 'run_boot_boundary_missing' }
   if (!window.bounded) return { decisions: null, generation: null, reason: 'run_window_unbounded' }
 
+  const bootRecord = evidence.boots.find((entry) => entry.runId === runId && entry.tsMs === window.startMs) ?? null
+  const bootSourceSha = bootRecord?.sourceSha ?? null
   const inWindow = evidence.generations.filter((g) => g.tsMs >= window.startMs && g.tsMs <= window.endMs)
   const withPolicy = inWindow.filter((g) => typeof g.policyKind === 'string' && g.policyKind.length > 0)
   const chosen = withPolicy.at(-1) ?? inWindow.at(-1) ?? null
@@ -210,6 +366,11 @@ export async function loadPolicyEvidence({
       policyModel: socket.policyModel,
       plannerMode: chosen?.plannerMode ?? null,
       deterministicFallbackEnabled: chosen?.deterministicFallbackEnabled ?? null,
+      generationId: chosen?.generationId ?? null,
+      sourceSha: chosen?.sourceSha ?? null,
+      buildHash: chosen?.buildHash ?? null,
+      system2ConfiguredProvider: chosen?.system2ConfiguredProvider ?? null,
+      system2ConfiguredModel: chosen?.system2ConfiguredModel ?? null,
       tsMs: now(),
     }
   } else if (chosen !== null) {
@@ -220,6 +381,11 @@ export async function loadPolicyEvidence({
       policyModel: chosen.policyModel,
       plannerMode: chosen.plannerMode ?? null,
       deterministicFallbackEnabled: chosen.deterministicFallbackEnabled ?? null,
+      generationId: chosen.generationId ?? null,
+      sourceSha: chosen.sourceSha ?? null,
+      buildHash: chosen.buildHash ?? null,
+      system2ConfiguredProvider: chosen.system2ConfiguredProvider ?? null,
+      system2ConfiguredModel: chosen.system2ConfiguredModel ?? null,
       tsMs: chosen.tsMs,
     }
   }
@@ -227,16 +393,35 @@ export async function loadPolicyEvidence({
   const system2InWindow = (evidence.system2Decisions ?? []).filter(
     (entry) => entry.tsMs >= window.startMs && entry.tsMs <= window.endMs,
   )
+  const system2InputsInWindow = (evidence.system2Inputs ?? []).filter(
+    (entry) => entry.tsMs >= window.startMs && entry.tsMs <= window.endMs,
+  )
+  const system2Lineage = buildSystem2GenerationLineage({
+    generations: inWindow,
+    inputs: system2InputsInWindow,
+    decisions: system2InWindow,
+    bootSourceSha,
+  })
+  const modelDecisions = system2InWindow.filter(isModelSystem2Decision)
   const system2 = {
     runId,
     source: runnerOutPath,
     count: system2InWindow.length,
-    modelCount: system2InWindow.filter(
-      (entry) => typeof entry.provider === 'string' && entry.provider.length > 0 &&
-        entry.provider !== 'fallback' && entry.provider !== 'deterministic' &&
-        typeof entry.model === 'string' && entry.model.length > 0 && !/deterministic|fallback/i.test(entry.model),
-    ).length,
-    portalPlanCount: system2InWindow.filter((entry) => entry.portalPlan === true).length,
+    modelCount: modelDecisions.length,
+    ineligibleModelCount: system2InWindow.length - modelDecisions.length,
+    portalPlanCount: modelDecisions.filter((entry) => entry.portalPlan === true).length,
+    identityStatus: system2Lineage.status,
+    identityReason: system2Lineage.reason,
+    identityIssues: system2Lineage.issues,
+    effectiveProvider: system2Lineage.effectiveProvider,
+    effectiveModel: system2Lineage.effectiveModel,
+    configuredProvider: system2Lineage.configuredProvider,
+    configuredModel: system2Lineage.configuredModel,
+    sourceSha: system2Lineage.sourceSha,
+    generationIds: system2Lineage.generationIds,
+    generationCount: system2Lineage.generationCount,
+    inputCount: system2InputsInWindow.length,
+    inputs: system2InputsInWindow,
     decisions: system2InWindow,
   }
 
@@ -320,6 +505,12 @@ export function evaluateCurrentM2AuthorityEvidence({ expectedRunId = null, decis
     system2Source: system2?.source ?? null,
     system2Decisions: Number.isFinite(system2?.count) ? system2.count : null,
     system2ModelDecisions: Number.isFinite(system2?.modelCount) ? system2.modelCount : null,
+    system2IdentityStatus: system2?.identityStatus ?? null,
+    system2IdentityReason: system2?.identityReason ?? null,
+    system2EffectiveProvider: system2?.effectiveProvider ?? null,
+    system2EffectiveModel: system2?.effectiveModel ?? null,
+    system2ConfiguredProvider: system2?.configuredProvider ?? null,
+    system2ConfiguredModel: system2?.configuredModel ?? null,
     system2PortalPlans: Number.isFinite(system2?.portalPlanCount) ? system2.portalPlanCount : null,
   }
   if (base.code !== 0) return outcome(base.code, base.status, base.reason, facts)
@@ -334,6 +525,9 @@ export function evaluateCurrentM2AuthorityEvidence({ expectedRunId = null, decis
   }
   if (system2.runId !== expectedRunId) {
     return outcome(2, 'UNKNOWN', `system2_evidence_run_mismatch expected=${expectedRunId} observed=${system2.runId ?? 'unknown'}`, facts)
+  }
+  if (system2.identityStatus !== 'verified') {
+    return outcome(2, 'UNKNOWN', `system2_generation_identity_unverified reason=${system2.identityReason ?? 'missing'}`, facts)
   }
   if (!Number.isFinite(system2.modelCount) || system2.modelCount < 1) {
     return outcome(2, 'UNKNOWN', 'no_model_system2_authority_decision', facts)

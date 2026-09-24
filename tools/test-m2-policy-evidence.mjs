@@ -16,6 +16,7 @@ import {
   evaluatePolicyEvidence,
   evaluateCurrentM2AuthorityEvidence,
   loadPolicyEvidence,
+  parseSystem2AuthorityInputLine,
   parseGenerationLine,
   parseSystem2AuthorityLine,
   resolveRunWindow,
@@ -29,6 +30,30 @@ const ok = (label) => {
 }
 const line = (ts, body) => `[${ts}] ${body}`
 const decision = (ts, source) => JSON.stringify({ record: 'decision', ts, source })
+const SOURCE_SHA = 'a'.repeat(40)
+const BUILD_HASH = 'b'.repeat(12)
+const generation = (id, overrides = {}) => [
+  `id=${id}`,
+  `generationId=${id}`,
+  `sourceSha=${overrides.sourceSha ?? SOURCE_SHA}`,
+  `buildHash=${overrides.buildHash ?? BUILD_HASH}`,
+  `policy=${overrides.policy ?? 'typesafe'}`,
+  `model=${overrides.policyModel ?? 'typesafe-ai/jev'}`,
+  `planner=${overrides.planner ?? 'llm'}`,
+  `deterministicFallbackEnabled=${overrides.deterministicFallbackEnabled ?? 'false'}`,
+  `system2ConfiguredProvider=${overrides.system2Provider ?? 'model-provider'}`,
+  `system2ConfiguredModel=${overrides.system2Model ?? 'model-v1'}`,
+].join(' ')
+const system2Identity = (id, overrides = {}) => [
+  `generationId=${id}`,
+  `sourceSha=${overrides.sourceSha ?? SOURCE_SHA}`,
+  `buildHash=${overrides.buildHash ?? BUILD_HASH}`,
+  `provider=${overrides.provider ?? 'model-provider'}`,
+  `model=${overrides.model ?? 'model-v1'}`,
+  `configuredProvider=${overrides.configuredProvider ?? 'model-provider'}`,
+  `configuredModel=${overrides.configuredModel ?? 'model-v1'}`,
+  'trigger=queue_empty',
+].join(' ')
 
 const dir = mkdtempSync(join(tmpdir(), 'm2-policy-evidence-'))
 const runnerOut = join(dir, 'runner.out')
@@ -39,14 +64,20 @@ try {
   writeFileSync(
     runnerOut,
     [
-      line('2026-09-18T09:00:00.000Z', 'BOOT pid=1 runId=run-a bundle=a'),
-      line('2026-09-18T09:00:01.000Z', 'GENERATION_READY id=g-a policy=fallback model=deterministic-local-fallback+descend-aware'),
+      line('2026-09-18T09:00:00.000Z', `BOOT pid=1 runId=run-a bundle=a source=${SOURCE_SHA}`),
+      line('2026-09-18T09:00:01.000Z', `GENERATION_READY ${generation('g-a', { policy: 'fallback', policyModel: 'deterministic-local-fallback+descend-aware', planner: 'deterministic', deterministicFallbackEnabled: 'true', system2Provider: 'deterministic', system2Model: 'deterministic' })}`),
       line('2026-09-18T09:00:05.000Z', 'HOST_LOCK released pid=1'),
-      line('2026-09-18T09:10:00.000Z', 'BOOT pid=2 runId=run-b bundle=b'),
-      line('2026-09-18T09:10:01.000Z', 'GENERATION_READY id=g-b policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false'),
-      line('2026-09-18T09:10:02.000Z', 'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev reason=queue_empty chosen=front_nether_portal goals=["build portal","light portal"]'),
+      line('2026-09-18T09:10:00.000Z', `BOOT pid=2 runId=run-b bundle=b source=${SOURCE_SHA}`),
+      line('2026-09-18T09:10:01.000Z', `GENERATION_READY ${generation('g-b')}`),
+      line('2026-09-18T09:10:01.500Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('g-b')}`),
+      line('2026-09-18T09:10:02.000Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('g-b')} reason=queue_empty chosen=front_nether_portal goals=["build portal","light portal"]`),
       line('2026-09-18T09:10:05.000Z', 'HOST_LOCK released pid=2'),
-      line('2026-09-18T09:20:00.000Z', 'BOOT pid=3 runId=run-c bundle=c'),
+      line('2026-09-18T09:15:00.000Z', `BOOT pid=4 runId=run-d bundle=d source=${SOURCE_SHA}`),
+      line('2026-09-18T09:15:01.000Z', `GENERATION_READY ${generation('g-d', { system2Provider: 'stub', system2Model: 'stub-system2' })}`),
+      line('2026-09-18T09:15:01.500Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('g-d', { provider: 'stub', model: 'stub-system2', configuredProvider: 'stub', configuredModel: 'stub-system2' })}`),
+      line('2026-09-18T09:15:02.000Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('g-d', { provider: 'stub', model: 'stub-system2', configuredProvider: 'stub', configuredModel: 'stub-system2' })} reason=fixture chosen=front_nether_portal goals=["build portal","light portal"]`),
+      line('2026-09-18T09:15:05.000Z', 'HOST_LOCK released pid=4'),
+      line('2026-09-18T09:20:00.000Z', `BOOT pid=3 runId=run-c bundle=c source=${SOURCE_SHA}`),
       // Alternate structured spelling must be accepted as well.
       line('2026-09-18T09:20:01.000Z', 'GENERATION_READY id=g-c policyKind=typesafe policyModel=typesafe-ai/jev'),
     ].join('\n') + '\n',
@@ -58,6 +89,7 @@ try {
       decision('2026-09-18T09:00:03.000Z', 'fallback'),
       decision('2026-09-18T09:10:01.000Z', 'jev'),
       decision('2026-09-18T09:10:03.000Z', 'jev'),
+      decision('2026-09-18T09:15:02.000Z', 'jev'),
       decision('2026-09-18T09:20:02.000Z', 'jev'),
       // A non-decision record inside a window must not be counted.
       JSON.stringify({ record: 'other', ts: '2026-09-18T09:10:02.000Z', source: 'jev' }),
@@ -65,15 +97,28 @@ try {
   )
 
   {
-    const parsed = parseGenerationLine('GENERATION_READY id=g policyKind=typesafe policyModel=typesafe-ai/jev')
-    assert.deepEqual(parsed, { policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: null, deterministicFallbackEnabled: null })
+    const parsed = parseGenerationLine(`GENERATION_READY ${generation('g', { planner: 'unknown' })}`)
+    assert.deepEqual(parsed, {
+      generationId: 'g', sourceSha: SOURCE_SHA, buildHash: BUILD_HASH,
+      policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'unknown', deterministicFallbackEnabled: false,
+      system2ConfiguredProvider: 'model-provider', system2ConfiguredModel: 'model-v1',
+    })
     const fallback = parseGenerationLine('GENERATION_READY id=g policy=fallback model=deterministic-local-fallback')
-    assert.deepEqual(fallback, { policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: null, deterministicFallbackEnabled: null })
+    assert.deepEqual(fallback, {
+      generationId: 'g', sourceSha: null, buildHash: null,
+      policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: null, deterministicFallbackEnabled: null,
+      system2ConfiguredProvider: null, system2ConfiguredModel: null,
+    })
     const rich = parseGenerationLine('GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false')
     assert.equal(rich.plannerMode, 'llm')
     assert.equal(rich.deterministicFallbackEnabled, false)
-    const system2 = parseSystem2AuthorityLine('SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal goals=["build portal"]')
-    assert.deepEqual(system2, { provider: 'typesafe-ai', model: 'typesafe-ai/jev', chosen: 'front_nether_portal', portalPlan: true })
+    const system2 = parseSystem2AuthorityLine(`SYSTEM2_AUTHORITY_DECISION ${system2Identity('g')} chosen=front_nether_portal goals=["build portal"]`)
+    assert.deepEqual(system2, {
+      generationId: 'g', sourceSha: SOURCE_SHA, buildHash: BUILD_HASH,
+      provider: 'model-provider', model: 'model-v1', configuredProvider: 'model-provider', configuredModel: 'model-v1',
+      trigger: 'queue_empty', chosen: 'front_nether_portal', portalPlan: true,
+    })
+    assert.equal(parseSystem2AuthorityInputLine(`SYSTEM2_AUTHORITY_INPUT ${system2Identity('g')}`).generationId, 'g')
     ok('parseGenerationLine/System2 parser retain planner and authority facts')
   }
 
@@ -101,6 +146,9 @@ try {
     assert.equal(evidence.generation.plannerMode, 'llm')
     assert.equal(evidence.generation.deterministicFallbackEnabled, false)
     assert.equal(evidence.system2.modelCount, 1)
+    assert.equal(evidence.system2.identityStatus, 'verified')
+    assert.equal(evidence.system2.effectiveProvider, 'model-provider')
+    assert.equal(evidence.system2.effectiveModel, 'model-v1')
     assert.equal(evidence.system2.portalPlanCount, 1)
     const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
     assert.equal(verdict.code, 0)
@@ -109,7 +157,7 @@ try {
     const current = evaluateCurrentM2AuthorityEvidence({ expectedRunId: 'run-b', ...evidence })
     assert.equal(current.code, 0)
     assert.equal(current.reason, 'current_m2_authority_verified')
-    ok('run-b proves Jev plus model-authored System2 portal authority without borrowing run-a evidence')
+    ok('run-b joins each System2 decision and call input to its same-run source generation')
   }
 
   {
@@ -117,6 +165,89 @@ try {
     assert.equal(evidence.reason, 'run_window_unbounded')
     assert.equal(evidence.decisions, null)
     ok('an unbracketed (not live) run window is refused as UNKNOWN')
+  }
+
+  {
+    const evidence = await loadPolicyEvidence({ runId: 'run-d', decisionsPath: decisions, runnerOutPath: runnerOut })
+    assert.equal(evidence.decisions.jevCount, 1)
+    assert.equal(evidence.system2.modelCount, 0)
+    assert.equal(evidence.system2.identityStatus, 'unknown')
+    assert.match(evidence.system2.identityReason, /system2_decision_non_model_authority/)
+    const verdict = evaluateCurrentM2AuthorityEvidence({ expectedRunId: 'run-d', ...evidence })
+    assert.equal(verdict.code, 2)
+    assert.match(verdict.reason, /^system2_generation_identity_unverified/)
+    ok('stub System2 decision cannot verify same-run model authority')
+  }
+
+  {
+    const lineageOut = join(dir, 'lineage-runner.out')
+    const lineageDecisions = join(dir, 'lineage-decisions.jsonl')
+    const writeLineage = (runId, events, runSource = SOURCE_SHA) => {
+      const start = '2026-09-18T10:00:00.000Z'
+      writeFileSync(lineageOut, [
+        line(start, `BOOT pid=9 runId=${runId} source=${runSource}`),
+        ...events,
+        line('2026-09-18T10:01:00.000Z', 'HOST_LOCK released pid=9'),
+      ].join('\n') + '\n')
+      writeFileSync(lineageDecisions, decision('2026-09-18T10:00:02.000Z', 'jev') + '\n')
+    }
+    const loadLineage = (runId) => loadPolicyEvidence({ runId, decisionsPath: lineageDecisions, runnerOutPath: lineageOut })
+
+    writeLineage('run-model-drift', [
+      line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-1')}`),
+      line('2026-09-18T10:00:01.100Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-1')}`),
+      line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-1')}`),
+      line('2026-09-18T10:00:01.300Z', `GENERATION_READY ${generation('gen-2', { system2Model: 'model-v2' })}`),
+      line('2026-09-18T10:00:01.400Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-2', { model: 'model-v2', configuredModel: 'model-v2' })}`),
+      line('2026-09-18T10:00:01.500Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-2', { model: 'model-v2', configuredModel: 'model-v2' })}`),
+    ])
+    const drift = await loadLineage('run-model-drift')
+    assert.equal(drift.system2.identityStatus, 'unknown')
+    assert.match(drift.system2.identityReason, /system2_authority_changed_across_generations/)
+    assert.equal(evaluateCurrentM2AuthorityEvidence({ expectedRunId: 'run-model-drift', ...drift }).code, 2)
+
+    writeLineage('run-responder-drift', [
+      line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-1')}`),
+      line('2026-09-18T10:00:01.100Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-1')}`),
+      line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-1')}`),
+      line('2026-09-18T10:00:01.300Z', `GENERATION_READY ${generation('gen-2')}`),
+      line('2026-09-18T10:00:01.400Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-2', { model: 'model-v2' })}`),
+      line('2026-09-18T10:00:01.500Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-2', { model: 'model-v2' })}`),
+    ])
+    const responderDrift = await loadLineage('run-responder-drift')
+    assert.equal(responderDrift.system2.identityStatus, 'unknown')
+    assert.match(responderDrift.system2.identityReason, /system2_effective_authority_changed_across_generations/)
+
+    writeLineage('run-unjoined', [
+      line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-present')}`),
+      line('2026-09-18T10:00:01.100Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-missing')}`),
+      line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-missing')}`),
+    ])
+    const unjoined = await loadLineage('run-unjoined')
+    assert.match(unjoined.system2.identityReason, /system2_decision_generation_unjoined/)
+
+    writeLineage('run-source-mismatch', [
+      line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-source')}`),
+      line('2026-09-18T10:00:01.100Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-source', { sourceSha: 'c'.repeat(40) })}`),
+      line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-source', { sourceSha: 'c'.repeat(40) })}`),
+    ])
+    const sourceMismatch = await loadLineage('run-source-mismatch')
+    assert.match(sourceMismatch.system2.identityReason, /system2_decision_source_sha_mismatch/)
+
+    writeLineage('run-input-missing', [
+      line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-no-input')}`),
+      line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-no-input')}`),
+    ])
+    const inputMissing = await loadLineage('run-input-missing')
+    assert.match(inputMissing.system2.identityReason, /system2_decision_input_unjoined/)
+    writeLineage('run-input-before-ready', [
+      line('2026-09-18T10:00:01.000Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-order')}`),
+      line('2026-09-18T10:00:01.100Z', `GENERATION_READY ${generation('gen-order')}`),
+      line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-order')}`),
+    ])
+    const inputBeforeReady = await loadLineage('run-input-before-ready')
+    assert.match(inputBeforeReady.system2.identityReason, /system2_decision_input_unjoined/)
+    ok('System2 model drift, source mismatch, missing generation, and unpaired lifecycle events are UNKNOWN')
   }
 
   {
@@ -164,10 +295,11 @@ try {
 
   {
     const scanned = await scanRunnerOut(runnerOut)
-    assert.equal(scanned.boots.length, 3)
-    assert.equal(scanned.releases.length, 2)
-    assert.equal(scanned.generations.length, 3)
-    assert.equal(scanned.system2Decisions.length, 1)
+    assert.equal(scanned.boots.length, 4)
+    assert.equal(scanned.releases.length, 3)
+    assert.equal(scanned.generations.length, 4)
+    assert.equal(scanned.system2Inputs.length, 2)
+    assert.equal(scanned.system2Decisions.length, 2)
     const windowB = resolveRunWindow(scanned.boots, scanned.releases, 'run-b')
     assert.equal(windowB.startMs, Date.parse('2026-09-18T09:10:00.000Z'))
     assert.equal(windowB.endMs, Date.parse('2026-09-18T09:10:05.000Z'))
@@ -239,7 +371,11 @@ try {
         runId: 'run-current', source: 'fixture', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev',
         plannerMode: 'llm', deterministicFallbackEnabled: false,
       },
-      system2: { runId: 'run-current', source: 'fixture', count: 2, modelCount: 2, portalPlanCount: 1 },
+      system2: {
+        runId: 'run-current', source: 'fixture', count: 2, modelCount: 2, portalPlanCount: 1,
+        identityStatus: 'verified', identityReason: null,
+        effectiveProvider: 'model-provider', effectiveModel: 'model-v1',
+      },
     }
     const pass = evaluateCurrentM2AuthorityEvidence(base)
     assert.equal(pass.code, 0)

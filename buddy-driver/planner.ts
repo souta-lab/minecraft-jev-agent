@@ -19,7 +19,12 @@ import type { PlannerOptions as LegacyPlannerOptions } from './planner-legacy.ts
 
 export type PlannerMode = 'llm' | 'deterministic' | 'local-mercury'
 
-type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & { mode?: PlannerMode }
+type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & {
+  mode?: PlannerMode
+  generationId?: string | null
+  sourceSha?: string | null
+  buildHash?: string | null
+}
 
 /** Position-free, code-owned hunger truth for compact System2 state. */
 export function starvationFact(bot: Pick<Bot, 'food' | 'health'>): string | null {
@@ -118,12 +123,23 @@ export class PlannerBrain implements System2Brain {
   private readonly refreshLiveFacts: (() => void) | undefined
   private readonly legacy: LegacyPlannerBrain | null
   private readonly mercury: MercurySystem2 | undefined
+  private readonly generationId: string | null
+  private readonly sourceSha: string | null
+  private readonly buildHash: string | null
   private lastAuthorityProvider: string
   private lastAuthorityModel: string
 
   constructor(options: ModelPlannerOptions) {
     this.mode = options.mode ?? resolvePlannerMode()
-    this.log = options.log
+    this.generationId = options.generationId ?? null
+    this.sourceSha = options.sourceSha ?? null
+    this.buildHash = options.buildHash ?? null
+    this.log = (event, detail) => options.log(event, {
+      ...detail,
+      generationId: this.generationId,
+      sourceSha: this.sourceSha,
+      buildHash: this.buildHash,
+    })
     this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_PLANNER_MAX_ATTEMPTS ?? 5)
     this.terminate = options.terminate
     this.refreshLiveFacts = options.refreshLiveFacts
@@ -185,9 +201,12 @@ export class PlannerBrain implements System2Brain {
         authorityEpoch: request.requestContext?.authorityEpoch ?? null,
       })
       if (!gate.allow) {
+        const configured = this.authorityStack
         this.log('SYSTEM2_WAIT_LIMIT_HELD', {
           provider: this.mercury.provider,
           model: this.mercury.model,
+          configuredProvider: configured.provider,
+          configuredModel: configured.model,
           reason: gate.reason,
           currentOption: request.goalQueueState.current?.semanticOptionInstanceId ?? request.goalQueueState.current?.id ?? null,
         })
@@ -209,9 +228,12 @@ export class PlannerBrain implements System2Brain {
     if (this.mercury === undefined) return this.fatal('system2-unavailable', `no System2 provider configured for trigger=${trigger}`)
     this.lastAuthorityProvider = this.mode === 'local-mercury' ? 'local-mercury' : this.mercury.provider
     this.lastAuthorityModel = this.mercury.model
+    const configured = this.authorityStack
     this.log('SYSTEM2_AUTHORITY_INPUT', {
       provider: this.provider,
       model: this.authorityModel,
+      configuredProvider: configured.provider,
+      configuredModel: configured.model,
       source: this.provider,
       trigger,
       reason: request.reason,
@@ -225,6 +247,8 @@ export class PlannerBrain implements System2Brain {
         this.log('SYSTEM2_STALE_DISCARD', {
           provider: this.provider,
           model: this.authorityModel,
+          configuredProvider: configured.provider,
+          configuredModel: configured.model,
           trigger,
           reason: request.reason,
         })
@@ -240,6 +264,8 @@ export class PlannerBrain implements System2Brain {
     this.log('SYSTEM2_AUTHORITY_DECISION', {
       provider: this.provider,
       model: this.authorityModel,
+      configuredProvider: configured.provider,
+      configuredModel: configured.model,
       source: this.provider,
       trigger,
       op: repair.op,

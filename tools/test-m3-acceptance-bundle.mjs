@@ -57,6 +57,10 @@ const T0 = Date.parse('2026-09-22T10:00:00.000Z')
 const at = (sec) => new Date(T0 + sec * 1000).toISOString()
 const line = (sec, body) => `[${at(sec)}] ${body}`
 const SOURCE_SHA = 'cd7b38b70da61c2883b9a1dc14b34a70a732a88a'
+const GENERATION_ID = 'gen-test-1'
+const BUILD_HASH = 'e6be1812c804'
+const SYSTEM2_CONFIG = 'configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev'
+const SYSTEM2_IDENTITY = `generationId=${GENERATION_ID} sourceSha=${SOURCE_SHA} buildHash=${BUILD_HASH} ${SYSTEM2_CONFIG} trigger=queue_empty`
 const WORLD_KEY = '{"serverId":"127.0.0.1:25565","dimension":"minecraft:overworld","worldEpoch":1}'
 const RUN = 'run-fixture-bundle'
 
@@ -76,20 +80,29 @@ const PORTAL_CHAIN = [
 ]
 
 /** runner.out-shaped authority window; a release line brackets its decisions. */
-function runnerOut(runId, { decisions = ['SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'] } = {}) {
+function runnerOut(runId, { decisions = [`SYSTEM2_AUTHORITY_DECISION ${SYSTEM2_IDENTITY} provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal`] } = {}) {
+  const withInputs = decisions.flatMap((decision, index) => {
+    const fields = ['generationId', 'sourceSha', 'buildHash', 'configuredProvider', 'configuredModel', 'trigger', 'provider', 'model']
+      .map((key) => [key, new RegExp(`\\b${key}=(\\S+)`).exec(decision)?.[1] ?? null])
+      .filter(([, value]) => value !== null)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(' ')
+    return [line(1.5 + index * 0.2, `SYSTEM2_AUTHORITY_INPUT ${fields}`), line(2 + index * 0.2, decision)]
+  })
   return (
     [
       boot(0, runId),
       line(
         1,
-        'GENERATION_READY id=gen-test-1 rungIndex=13 rungId=nether_portal ' +
+        `GENERATION_READY id=${GENERATION_ID} generationId=${GENERATION_ID} sourceSha=${SOURCE_SHA} buildHash=${BUILD_HASH} ` +
+          'system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev rungIndex=13 rungId=nether_portal ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
           'system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"} ' +
           'system2LastAuthority={"provider":"none","model":"none"} deterministicFallbackEnabled=false ' +
           'planner=llm plannerModel=typesafe-ai/jev',
       ),
-      ...decisions.map((decision, index) => line(2 + index * 0.1, decision)),
-      line(3 + decisions.length * 0.1, `HOST_LOCK released runId=${runId}`),
+      ...withInputs,
+      line(3 + decisions.length * 0.2, `HOST_LOCK released runId=${runId}`),
     ].join('\n') + '\n'
   )
 }
@@ -305,8 +318,8 @@ function condition(bundle, id) {
     logLines: fullLog(RUN, { terminalEye: 12 }),
     runner: {
       decisions: [
-        'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal',
-        'SYSTEM2_AUTHORITY_DECISION provider=deterministic model=deterministic-baseline chosen=WAIT',
+        `SYSTEM2_AUTHORITY_DECISION ${SYSTEM2_IDENTITY} provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal`,
+        `SYSTEM2_AUTHORITY_DECISION ${SYSTEM2_IDENTITY} provider=deterministic model=deterministic-baseline chosen=WAIT`,
       ],
     },
   })

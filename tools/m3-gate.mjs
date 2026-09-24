@@ -198,12 +198,20 @@ function bindTerminalInventoryObservation(value, expectedRunId, runSourceSha) {
  * typesafe policy/model) and adds the planner/fallback facts. Every non-proof
  * path is UNKNOWN (code 2); PASS requires code 0.
  */
-export function evaluateM3AuthorityEvidence({ expectedRunId = null, decisions = null, generation = null } = {}) {
+export function evaluateM3AuthorityEvidence({ expectedRunId = null, decisions = null, generation = null, system2 = null } = {}) {
   const base = evaluatePolicyEvidence({ expectedRunId, decisions, generation })
   const facts = {
     ...base.facts,
     plannerMode: generation?.plannerMode ?? null,
     deterministicFallbackEnabled: generation?.deterministicFallbackEnabled ?? null,
+    system2IdentityStatus: system2?.identityStatus ?? null,
+    system2IdentityReason: system2?.identityReason ?? null,
+    system2EffectiveProvider: system2?.effectiveProvider ?? null,
+    system2EffectiveModel: system2?.effectiveModel ?? null,
+    system2ConfiguredProvider: system2?.configuredProvider ?? null,
+    system2ConfiguredModel: system2?.configuredModel ?? null,
+    system2Decisions: Number.isFinite(system2?.count) ? system2.count : null,
+    system2ModelDecisions: Number.isFinite(system2?.modelCount) ? system2.modelCount : null,
   }
   if (base.code !== 0) return { code: base.code, status: base.status, reason: base.reason, facts }
   if (generation?.plannerMode !== 'llm') {
@@ -216,6 +224,19 @@ export function evaluateM3AuthorityEvidence({ expectedRunId = null, decisions = 
       reason: `deterministic_fallback_not_disabled observed=${String(generation?.deterministicFallbackEnabled ?? 'unknown')}`,
       facts,
     }
+  }
+  if (system2 === null || system2.runId !== expectedRunId || system2.identityStatus !== 'verified') {
+    return {
+      code: 2,
+      status: 'UNKNOWN',
+      reason: `system2_generation_identity_unverified runId=${system2?.runId ?? 'unknown'} reason=${system2?.identityReason ?? 'missing'}`,
+      facts,
+    }
+  }
+  if (!Number.isFinite(system2.count) || system2.count < 1 || system2.modelCount !== system2.count ||
+      typeof system2.effectiveProvider !== 'string' || system2.effectiveProvider.length === 0 ||
+      typeof system2.effectiveModel !== 'string' || system2.effectiveModel.length === 0) {
+    return { code: 2, status: 'UNKNOWN', reason: 'system2_effective_model_authority_missing_or_incomplete', facts }
   }
   return { code: 0, status: 'VERIFIED', reason: 'm3_model_authority_verified', facts }
 }
@@ -606,8 +627,9 @@ export async function runM3Gate({
   const policy = scoped
     ? evaluateM3AuthorityEvidence({
         expectedRunId,
-        decisions: rawPolicy?.decisions ?? null,
-        generation: rawPolicy?.generation ?? null,
+      decisions: rawPolicy?.decisions ?? null,
+      generation: rawPolicy?.generation ?? null,
+      system2: rawPolicy?.system2 ?? null,
     })
     : null
   const scannedSourceExactness = scoped

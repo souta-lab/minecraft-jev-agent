@@ -555,6 +555,7 @@ let reconnectScheduledAt: number | null = null
 let disconnectReasonSeen: DisconnectReason | null = null
 let disconnectDetail: string | null = null
 let generationHash: string | null = null
+let generationSourceSha: string | null = null
 let listenerBaseline: Record<string, number> = {}
 let listenerHostBaseline: Record<string, number> = {}
 let baselineCaptured = false
@@ -728,16 +729,18 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const built = await buildGeneration()
+      const sourceSha = gitCommit()
       const mod = (await import(`${pathToFileURL(built.outfile).href}?v=${built.hash}`)) as GenerationModule
       const readinessError = generationModuleReadinessError(mod, CONTRACT_VERSION)
       if (readinessError !== null) throw new Error(readinessError)
       generationModule = mod
       currentBundle = built.outfile
       generationHash = built.hash
+      generationSourceSha = sourceSha
       // The bundle hash attests WHICH bundle; the git commit attests WHICH SOURCE it was built from.
       // Without this a hot-reloaded run could prove its bundle but not its commit, which is exactly what the
       // acceptance asks for (`exact source SHA`).
-      log('BUILD', { hash: built.hash, sourceSha: gitCommit(), bytes: built.bytes, ms: built.ms, outfile: built.outfile })
+      log('BUILD', { hash: built.hash, sourceSha, bytes: built.bytes, ms: built.ms, outfile: built.outfile })
       return mod
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -797,6 +800,7 @@ function makeGenerationContext(
   pending: PendingProposals,
   seed: GenerationSeed = { revision: state.revision },
   buildHash: string | null = generationHash,
+  sourceSha: string | null = generationSourceSha,
 ): GenerationContext {
   const generationWorldKey = currentWorldKey()
   const availabilityAtCreate = modelAvailability.snapshot()
@@ -804,6 +808,7 @@ function makeGenerationContext(
   return {
     runId,
     bootSourceSha,
+    sourceSha,
     buildHash,
     recoveryPolicyAuthority: availabilityAtCreate.state === 'degraded'
       ? availabilityAtCreate.recoveryAuthority
@@ -2333,7 +2338,8 @@ async function performReload(trigger: string): Promise<void> {
     const previousModule = generationModule
     const nextSeed: GenerationSeed = { revision: state.revision }
     const nextPending = newPendingProposals()
-    const ctx = makeGenerationContext(bot, nextPending, nextSeed, built.hash)
+    const candidateSourceSha = gitCommit()
+    const ctx = makeGenerationContext(bot, nextPending, nextSeed, built.hash, candidateSourceSha)
     candidate = mod.createGeneration(ctx)
     nextPending.generationId = candidate.id
     pendingByGeneration.set(candidate.id, nextPending)
@@ -2382,6 +2388,7 @@ async function performReload(trigger: string): Promise<void> {
       generationModule = mod
       currentBundle = built.outfile
       generationHash = built.hash
+      generationSourceSha = candidateSourceSha
       stats.reloadsChangedHash += 1
       log('RELOAD', { ok: true, trigger, deferred: 'frozen', ms: Date.now() - started, hash: built.hash, sourceSha: gitCommit(), contractVersion: mod.CONTRACT_VERSION })
       return
@@ -2434,6 +2441,7 @@ async function performReload(trigger: string): Promise<void> {
     generationModule = mod
     currentBundle = built.outfile
     generationHash = built.hash
+    generationSourceSha = candidateSourceSha
     lastActionId = null
     stats.reloadsChangedHash += 1
     commitStagedProposals(outcome.generationId, 'reload-commit')

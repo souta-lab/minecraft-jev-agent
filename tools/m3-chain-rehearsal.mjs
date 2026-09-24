@@ -71,6 +71,9 @@ export const M3_CHAIN_GATE_PATH = join(TOOLS_DIR, 'm3-gate.mjs')
 // synthetic run writes this same exact SHA; it is not presented as live-source
 // provenance.
 const FIXTURE_SOURCE_SHA = 'b'.repeat(40)
+const FIXTURE_BUILD_HASH = 'd'.repeat(12)
+const FIXTURE_SYSTEM2_PROVIDER = 'model-provider'
+const FIXTURE_SYSTEM2_MODEL = 'model-v1'
 
 // The real gate asks the HOST control socket for acceptance-time inventory.
 // This fixture-only process speaks its read-only report protocol over a
@@ -400,9 +403,18 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
     logLines.push(bootLine)
     runnerOutLines.push(bootLine)
     if (includeAuthority) {
+      const generationId = `fixture-${run.runId}`
+      const system2Identity =
+        `generationId=${generationId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
+        `configuredProvider=${FIXTURE_SYSTEM2_PROVIDER} configuredModel=${FIXTURE_SYSTEM2_MODEL} trigger=queue_empty`
       runnerOutLines.push(
-        `[${stamp(base + 1)}] GENERATION_READY generation=${index + 1} policy=typesafe model=typesafe-ai/jev ` +
+        `[${stamp(base + 1)}] GENERATION_READY id=${generationId} generationId=${generationId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
+          `system2ConfiguredProvider=${FIXTURE_SYSTEM2_PROVIDER} system2ConfiguredModel=${FIXTURE_SYSTEM2_MODEL} ` +
+          `generation=${index + 1} policy=typesafe model=typesafe-ai/jev ` +
           `planner=llm deterministicFallbackEnabled=false`,
+      )
+      runnerOutLines.push(
+        `[${stamp(base + 1.5)}] SYSTEM2_AUTHORITY_INPUT ${system2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL}`,
       )
     }
     run.samples.forEach((sample, sampleIndex) => {
@@ -416,6 +428,14 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
       `[${stamp(base + 2 + run.samples.length)}] DIMENSION_OBSERVED dimension=${run.dimension ?? 'minecraft:the_nether'} runId=${run.runId}`,
     )
     if (includeAuthority) {
+      const generationId = `fixture-${run.runId}`
+      const system2Identity =
+        `generationId=${generationId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
+        `configuredProvider=${FIXTURE_SYSTEM2_PROVIDER} configuredModel=${FIXTURE_SYSTEM2_MODEL} trigger=queue_empty`
+      runnerOutLines.push(
+        `[${stamp(base + 3)}] SYSTEM2_AUTHORITY_DECISION ${system2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL} chosen=craft` +
+          ` runId=${run.runId}`,
+      )
       decisionsLines.push(
         JSON.stringify({
           record: 'decision',

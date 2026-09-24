@@ -1516,7 +1516,11 @@ export interface MercuryCallRecord {
   record: 'mercury-call'
   callId: string
   ts: string
+  provider?: string
   model: string
+  generationId?: string | null
+  sourceSha?: string | null
+  buildHash?: string | null
   stage: MercuryTriggerReason
   latencyMs: number
   attempts: number
@@ -1629,6 +1633,9 @@ export interface MercurySystem2Options {
   maxOutputTokens?: number
   /** resident process terminator; absent in tests (the fatal error is thrown) */
   terminate?: () => never
+  /** exact git source/build identity for the generation owning these calls. */
+  sourceSha?: string | null
+  buildHash?: string | null
   /** key resolver seam for tests; defaults to `resolveJevApiKey` */
   resolveKey?: () => KeyResolution | null
   /** true when this generation was created fresh because the bot died. */
@@ -2179,6 +2186,8 @@ export class MercurySystem2 implements System2Brain {
   private readonly resolveKey: () => KeyResolution | null
   private readonly isCurrent: () => boolean
   private readonly generationId: string | null
+  private readonly sourceSha: string | null
+  private readonly buildHash: string | null
   private cache: MercuryCacheFile
   private callCounter = 0
   private calls = 0
@@ -2187,7 +2196,6 @@ export class MercurySystem2 implements System2Brain {
 
   constructor(options: MercurySystem2Options) {
     this.summarize = options.summarize
-    this.log = options.log
     this.callsPath = options.callsPath
     this.cachePath = options.cachePath
     this.model = options.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? SYSTEM2_MODEL_DEFAULT
@@ -2216,6 +2224,14 @@ export class MercurySystem2 implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.isCurrent = options.isCurrent ?? (() => true)
     this.generationId = options.generationId ?? null
+    this.sourceSha = options.sourceSha ?? null
+    this.buildHash = options.buildHash ?? null
+    this.log = (event, detail) => options.log(event, {
+      ...detail,
+      generationId: this.generationId,
+      sourceSha: this.sourceSha,
+      buildHash: this.buildHash,
+    })
     this.postDeathPending = options.postDeathRecovery === true
     this.cacheIdentity = mercuryCacheIdentity(options.worldKey)
     this.cache = this.loadCache()
@@ -3265,7 +3281,14 @@ export class MercurySystem2 implements System2Brain {
   private writeCall(record: MercuryCallRecord): void {
     try {
       mkdirSync(dirname(this.callsPath), { recursive: true })
-      appendFileSync(this.callsPath, `${JSON.stringify({ ...record, payloadShape: mercuryPayloadShape(record.state) })}\n`)
+      appendFileSync(this.callsPath, `${JSON.stringify({
+        ...record,
+        provider: this.provider,
+        generationId: this.generationId,
+        sourceSha: this.sourceSha,
+        buildHash: this.buildHash,
+        payloadShape: mercuryPayloadShape(record.state),
+      })}\n`)
     } catch (error) {
       this.log('ERROR', { where: 'mercury.writeCall', message: describeError(error) })
     }

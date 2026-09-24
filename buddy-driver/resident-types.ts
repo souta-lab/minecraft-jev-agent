@@ -1204,6 +1204,8 @@ export interface GenerationContext {
   runId?: string
   /** git commit the resident booted from (BOOT `source`). */
   bootSourceSha?: string | null
+  /** Exact git commit the currently loaded generation module was built from. */
+  sourceSha?: string | null
   /** generation bundle hash (BUILD `hash`) the running generation was loaded from. */
   buildHash?: string | null
   /** directory the resident writes run-scoped M2 evidence snapshots into. */

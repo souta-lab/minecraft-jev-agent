@@ -64,6 +64,10 @@ const VERIFIED_POLICY = {
     plannerMode: 'llm',
     deterministicFallbackEnabled: false,
   },
+  system2: {
+    runId: RUN, count: 1, modelCount: 1, identityStatus: 'verified', identityReason: null,
+    effectiveProvider: 'fixture-model', effectiveModel: 'model-v1',
+  },
 }
 const FALLBACK_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0 },
@@ -252,7 +256,13 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     generation: { ...VERIFIED_POLICY.generation, deterministicFallbackEnabled: true },
   })
   assert.match(badFallback.reason, /^deterministic_fallback_not_disabled/, badFallback.reason)
-  ok('M3 authority requires typesafe + planner=llm + deterministic fallback disabled')
+  const badSystem2Lineage = evaluateM3AuthorityEvidence({
+    expectedRunId: RUN,
+    ...VERIFIED_POLICY,
+    system2: { ...VERIFIED_POLICY.system2, identityStatus: 'unknown', identityReason: 'decision generation mismatch' },
+  })
+  assert.match(badSystem2Lineage.reason, /^system2_generation_identity_unverified/, badSystem2Lineage.reason)
+  ok('M3 authority requires typesafe + Jev, one run/source-consistent System2 generation, and no fallback')
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +539,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       ...VERIFIED_POLICY,
       decisions: { ...VERIFIED_POLICY.decisions, runId: OTHER_RUN },
       generation: { ...VERIFIED_POLICY.generation, runId: OTHER_RUN },
+      system2: { ...VERIFIED_POLICY.system2, runId: OTHER_RUN },
     },
   })
   assert.equal(asB.code, 0, asB.text)
@@ -673,6 +684,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       ...VERIFIED_POLICY,
       decisions: { ...VERIFIED_POLICY.decisions, runId: OTHER_RUN },
       generation: { ...VERIFIED_POLICY.generation, runId: OTHER_RUN },
+      system2: { ...VERIFIED_POLICY.system2, runId: OTHER_RUN },
     },
     write: out2.write,
   })
