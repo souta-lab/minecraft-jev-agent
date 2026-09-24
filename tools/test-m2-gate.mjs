@@ -131,6 +131,15 @@ ok('parseInventoryMarker reads the flat counts map and rejects prose')
 }
 
 {
+  const foreignTransition = `[2026-09-20T10:00:02.000Z] DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether runId=${OTHER_RUN} reason=live-change source=live-world`
+  const unscopedTransition = '[2026-09-20T10:00:03.000Z] DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether reason=live-change source=live-world'
+  const scanned = scanRunLines(RUN, [boot(RUN), foreignTransition, unscopedTransition])
+  assert.deepEqual(scanned.dimensionObservations, ['minecraft:the_nether'])
+  assert.deepEqual(scanned.foreignRuns, [OTHER_RUN])
+  ok('an explicit foreign runId marker is excluded while unscoped markers retain active-BOOT attribution')
+}
+
+{
   // A second BOOT closes run A: lines after it belong to B, never to A.
   const lines = [boot(RUN), inv({ diamond: 3 }), boot(OTHER_RUN), inv({ diamond: 0 }), ...PORTAL_CHAIN]
   const scannedA = scanRunLines(RUN, lines)
@@ -436,6 +445,24 @@ function chainLinksOf(text) {
   assert.match(out.text(), /m2_evidence: valid sources=snapshot/, out.text())
   assert.match(out.text(), /status=PASS/, out.text())
   ok('a run-scoped snapshot with markers + inventory samples passes')
+
+  for (const [label, snapshotSha] of [
+    ['missing', null],
+    ['mismatched', 'b'.repeat(40)],
+  ]) {
+    const unboundSnapshot = { ...snapshot }
+    if (snapshotSha === null) delete unboundSnapshot.bootSourceSha
+    else unboundSnapshot.bootSourceSha = snapshotSha
+    writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify(unboundSnapshot))
+    const evidence = await readRunScopedM2Evidence(RUN, { logPath: bootOnlyLogPath, snapshotDir: dir })
+    assert.equal(evidence.status, 'valid')
+    assert.equal(evidence.sourceShaReason, 'run_source_sha_snapshot_mismatch')
+    assert.equal(evidence.sourceShaMismatch?.observed, snapshotSha ?? 'missing')
+    const rejected = evaluateM2Gate({ expectedRunId: RUN, evidence })
+    assert.equal(rejected.code, 2, `${label} snapshot source SHA must remain UNKNOWN`)
+    assert.equal(rejected.reason, 'run_source_sha_mismatch')
+  }
+  ok('M2 rejects snapshot evidence whose source SHA is missing or differs from the same-run BOOT')
 
   // Same file, requested as another run: the snapshot is not attributable.
   const foreign = readM2Snapshot(OTHER_RUN, { snapshotDir: dir })

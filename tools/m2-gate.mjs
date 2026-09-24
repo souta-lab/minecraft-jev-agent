@@ -964,12 +964,18 @@ export function scanRunLines(runId, lines) {
       }
     }
     // A marker's own runId field is not a lifetime boundary. Only the real
-    // BOOT line may open R; otherwise a copied/stale marker can be attributed
-    // to a requested run without proof that R ever existed.
+    // BOOT line may open R; otherwise a copied/stale marker cannot prove R
+    // existed. Once R is active, however, an explicitly foreign marker still
+    // belongs to that other run and must not be borrowed by R.
     const owningRunId = activeRunId
     if (owningRunId !== runId) {
       const foreign = runIdOfLine(line) ?? owningRunId
       if (foreign !== null) foreignRuns.add(foreign)
+      continue
+    }
+    const markerRunId = runIdOfLine(line)
+    if (!isBootLine(line) && markerRunId !== null && markerRunId !== runId) {
+      foreignRuns.add(markerRunId)
       continue
     }
     const portal = parsePortalMarker(line)

@@ -347,6 +347,28 @@ export function evaluateM3Gate({
       facts: { sourceSha: exactSourceSha, sourceExactness },
     })
   }
+  // A run-scoped M2 snapshot can contribute inventory and dimension history to
+  // this gate. Its runId-bound filename is not enough to bind that history to
+  // the code that produced the run, so preserve and honor the reader's explicit
+  // snapshot/source mismatch even when the BOOT logs themselves agree exactly.
+  if (evidence.sourceShaReason != null || evidence.sourceShaMismatch != null) {
+    const reason = evidence.sourceShaReason ?? 'run_source_sha_mismatch'
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: `run_evidence_source_sha_unverified reason=${reason}`,
+      runId: expectedRunId,
+      sourceSha: exactSourceSha,
+      conditions: unknownConditions(),
+      evidence: evidence.status,
+      facts: {
+        sourceSha: runSourceSha,
+        sourceExactness,
+        sourceShaReason: evidence.sourceShaReason ?? null,
+        sourceShaMismatch: evidence.sourceShaMismatch ?? null,
+      },
+    })
+  }
   if (sourceSha !== null && normalizeSourceSha(sourceSha) !== runSourceSha) {
     return verdict({
       status: 'UNKNOWN',

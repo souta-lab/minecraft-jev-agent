@@ -556,7 +556,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
 }
 
 // ---------------------------------------------------------------------------
-// 7. RED: the run-scoped snapshot is a first-class source, bound to its runId
+// 7. RED: a run-scoped snapshot must be bound to both runId and BOOT source SHA
 // ---------------------------------------------------------------------------
 {
   const dir = mkdtempSync(join(tmpdir(), 'm3-gate-'))
@@ -599,7 +599,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   assert.match(out.text(), /m3_evidence: valid sources=snapshot/, out.text())
   assert.match(out.text(), new RegExp(`sourceSha: ${SOURCE_SHA}`), out.text())
   assert.match(out.text(), /status=UNKNOWN/, out.text())
-  assert.match(out.text(), /current_inventory_observation_missing/, out.text())
+  assert.match(out.text(), /run_evidence_source_sha_unverified reason=run_source_sha_snapshot_mismatch/, out.text())
 
   const terminalObservation = {
     record: 'current-inventory-observation',
@@ -623,8 +623,42 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     policySocket: { runId: RUN, currentInventoryObservation: terminalObservation },
     write: current.write,
   })
-  assert.equal(currentCode, 0, current.text())
-  assert.match(current.text(), /status=PASS/, current.text())
+  assert.equal(currentCode, 2, current.text())
+  assert.match(current.text(), /run_evidence_source_sha_unverified reason=run_source_sha_snapshot_mismatch/, current.text())
+  assert.doesNotMatch(current.text(), /status=PASS/)
+
+  // The same run and log SHA do not validate a snapshot copied from another
+  // source revision either; inventory and Nether evidence from it stay unusable.
+  writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify({ ...snapshot, bootSourceSha: OTHER_SOURCE_SHA }))
+  const mismatched = capture()
+  const mismatchedCode = await runM3Gate({
+    expectedRunId: RUN,
+    logPath: sourceLog,
+    runnerOutPath: sourceLog,
+    snapshotDir: dir,
+    policyEvidence: VERIFIED_POLICY,
+    policySocket: { runId: RUN, currentInventoryObservation: terminalObservation },
+    write: mismatched.write,
+  })
+  assert.equal(mismatchedCode, 2, mismatched.text())
+  assert.match(mismatched.text(), /run_evidence_source_sha_unverified reason=run_source_sha_snapshot_mismatch/, mismatched.text())
+  assert.doesNotMatch(mismatched.text(), /status=PASS/)
+
+  // Positive control: the exact same snapshot is acceptable once it attests to
+  // the source SHA independently observed in the BOOT log.
+  writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify({ ...snapshot, bootSourceSha: SOURCE_SHA }))
+  const bound = capture()
+  const boundCode = await runM3Gate({
+    expectedRunId: RUN,
+    logPath: sourceLog,
+    runnerOutPath: sourceLog,
+    snapshotDir: dir,
+    policyEvidence: VERIFIED_POLICY,
+    policySocket: { runId: RUN, currentInventoryObservation: terminalObservation },
+    write: bound.write,
+  })
+  assert.equal(boundCode, 0, bound.text())
+  assert.match(bound.text(), /status=PASS/, bound.text())
 
   // A file named for another run but carrying RUN's body is never attributed.
   writeFileSync(join(dir, `m2-snapshot-${OTHER_RUN}.json`), JSON.stringify({ ...snapshot, runId: RUN }))
@@ -854,6 +888,17 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const asPortal = await judge({ lines: portalInNetherOnly })
   assert.match(asPortal.text, /nether_reached: UNKNOWN/, asPortal.text)
 
+  const foreignTransitionOnly = [
+    boot(RUN),
+    inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 }),
+    dimensionTransition('minecraft:the_nether', OTHER_RUN),
+  ]
+  const asForeignTransition = await judge({ lines: foreignTransitionOnly })
+  assert.equal(asForeignTransition.code, 2, asForeignTransition.text)
+  assert.match(asForeignTransition.text, /nether_reached: UNKNOWN/, asForeignTransition.text)
+  assert.match(asForeignTransition.text, /m3_stages_incomplete:nether_reached/, asForeignTransition.text)
+  assert.doesNotMatch(asForeignTransition.text, /status=PASS/)
+
   // Positive control: SPAWN and DEATH report where the BODY is / died, so they do prove arrival.
   const spawnedInNether = [
     boot(RUN),
@@ -863,7 +908,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const asSpawn = await judge({ lines: spawnedInNether })
   assert.match(asSpawn.text, /nether_reached: PASS/, asSpawn.text)
   assert.equal(asSpawn.code, 0, asSpawn.text)
-  ok("nether_reached accepts only the body's own dimension markers (never a portal, a site or a route target)")
+  ok("nether_reached accepts only the requested run body's dimension markers (never a foreign run, portal, site or route target)")
 }
 
 console.log(`m3-gate-test ${checks}/${checks} PASS`)
