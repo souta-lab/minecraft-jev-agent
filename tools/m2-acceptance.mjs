@@ -396,7 +396,9 @@ export async function runAcceptance({
       write(`policy: required policyKind=${f.requiredPolicyKind} policyModel=${f.requiredPolicyModel}`)
       write(
         `policy decisions: source=${f.decisionsSource ?? 'unavailable'} runId=${f.decisionsRunId ?? 'unknown'} ` +
-          `source=jev count=${f.jevDecisions ?? 'unknown'} source=fallback count=${f.fallbackDecisions ?? 'unknown'}`,
+          `source=jev count=${f.jevDecisions ?? 'unknown'} source=fallback count=${f.fallbackDecisions ?? 'unknown'} ` +
+          `source=other count=${f.otherDecisions ?? 'unknown'} ` +
+          `unclassifiable=${f.unclassifiableDecisionRecords ?? 'unknown'}`,
       )
       write(
         `policy generation: source=${f.generationSource ?? 'unavailable'} runId=${f.generationRunId ?? 'unknown'} ` +

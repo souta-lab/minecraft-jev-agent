@@ -37,6 +37,7 @@ const RUN_ID_RE_LINE = /\brunId=(run-[A-Za-z0-9-]+)/
 const SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
 const BUILD_HASH_RE = /^[0-9a-f]{12}$/i
 const NON_MODEL_AUTHORITY_RE = /(?:^|[^a-z0-9])(?:stub|fixture|unavailable|unknown|none|fallback|deterministic|mock|fake)(?:$|[^a-z0-9])/i
+const KNOWN_NON_MODEL_DECISION_SOURCES = new Set(['reflex'])
 
 function extractTimestampMs(line) {
   const match = TS_RE.exec(line)
@@ -294,31 +295,47 @@ export async function countDecisionSources(decisionsPath, startMs, endMs) {
   let jevCount = 0
   let fallbackCount = 0
   let otherCount = 0
+  let unclassifiableCount = 0
   let firstJevTs = null
   let lastJevTs = null
   const rl = createInterface({ input: createReadStream(decisionsPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
-    if (!line.includes('"record":"decision"')) continue
+    if (!/\"record\"\s*:\s*\"decision\"/.test(line)) continue
     let record
     try {
       record = JSON.parse(line)
     } catch {
+      const rawTs = /\"ts\"\s*:\s*\"([^\"]+)\"/.exec(line)?.[1] ?? null
+      const tsMs = rawTs === null ? Number.NaN : Date.parse(rawTs)
+      // A malformed row without a trustworthy timestamp cannot be ruled out of
+      // the requested run's bracketed window. Keep the uncertainty explicit;
+      // silently dropping it could hide a fallback decision in that run.
+      if (!Number.isFinite(tsMs) || (tsMs >= startMs && tsMs <= endMs)) {
+        unclassifiableCount += 1
+      }
       continue
     }
     if (record?.record !== 'decision') continue
     const tsMs = typeof record.ts === 'string' ? Date.parse(record.ts) : Number.NaN
-    if (!Number.isFinite(tsMs) || tsMs < startMs || tsMs > endMs) continue
+    if (!Number.isFinite(tsMs)) {
+      unclassifiableCount += 1
+      continue
+    }
+    if (tsMs < startMs || tsMs > endMs) continue
     if (record.source === 'jev') {
       jevCount += 1
       if (firstJevTs === null) firstJevTs = record.ts
       lastJevTs = record.ts
     } else if (record.source === 'fallback') {
       fallbackCount += 1
+    } else if (KNOWN_NON_MODEL_DECISION_SOURCES.has(record.source)) {
+      otherCount += 1
     } else {
       otherCount += 1
+      unclassifiableCount += 1
     }
   }
-  return { jevCount, fallbackCount, otherCount, firstJevTs, lastJevTs }
+  return { jevCount, fallbackCount, otherCount, unclassifiableCount, firstJevTs, lastJevTs }
 }
 
 /**
@@ -453,6 +470,7 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
     jevDecisions: Number.isFinite(decisions?.jevCount) ? decisions.jevCount : null,
     fallbackDecisions: Number.isFinite(decisions?.fallbackCount) ? decisions.fallbackCount : null,
     otherDecisions: Number.isFinite(decisions?.otherCount) ? decisions.otherCount : null,
+    unclassifiableDecisionRecords: Number.isFinite(decisions?.unclassifiableCount) ? decisions.unclassifiableCount : null,
     firstJevTs: decisions?.firstJevTs ?? null,
     lastJevTs: decisions?.lastJevTs ?? null,
     generationRunId: generation?.runId ?? null,
@@ -470,6 +488,19 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
   if (decisions.runId !== expectedRunId) {
     return outcome(2, 'UNKNOWN', `decisions_evidence_run_mismatch expected=${expectedRunId} observed=${decisions.runId ?? 'unknown'}`, facts)
   }
+  if (!Number.isInteger(decisions.unclassifiableCount) || decisions.unclassifiableCount < 0) {
+    return outcome(2, 'UNKNOWN', 'decision_source_completeness_unavailable', facts)
+  }
+  if (decisions.unclassifiableCount > 0) {
+    return outcome(2, 'UNKNOWN', `decision_records_unclassifiable count=${decisions.unclassifiableCount}`, facts)
+  }
+  // Each source class must be explicitly counted. Missing fallback/other
+  // counts cannot be interpreted as zero; otherwise partial evidence could
+  // claim an all-Jev run while hiding a non-model decision.
+  const sourceCounts = [decisions.jevCount, decisions.fallbackCount, decisions.otherCount]
+  if (!sourceCounts.every((count) => Number.isInteger(count) && count >= 0)) {
+    return outcome(2, 'UNKNOWN', 'decision_source_counts_unavailable_or_invalid', facts)
+  }
   if (!Number.isFinite(decisions.jevCount) || decisions.jevCount < 1) {
     const reason = Number.isFinite(decisions.fallbackCount) && decisions.fallbackCount > 0
       ? 'decisions_fallback_only'
@@ -478,6 +509,9 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
   }
   if (Number.isFinite(decisions.fallbackCount) && decisions.fallbackCount > 0) {
     return outcome(2, 'UNKNOWN', 'fallback_decisions_present', facts)
+  }
+  if (decisions.otherCount > 0) {
+    return outcome(2, 'UNKNOWN', `unrecognized_decision_sources_present count=${decisions.otherCount}`, facts)
   }
   if (generation === null || typeof generation !== 'object') {
     return outcome(2, 'UNKNOWN', 'generation_status_unavailable', facts)

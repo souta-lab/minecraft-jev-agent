@@ -101,12 +101,34 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
   const transitions = Array.isArray(dimensions?.transitions) ? dimensions.transitions : []
   const predicateEntries = Array.isArray(predicates?.predicates) ? predicates.predicates : []
   const normalizedDimension = (value) => typeof value === 'string' ? value.replace(/^minecraft:/, '').toLowerCase() : null
-  const transitionToNether = transitions.some((transition) =>
-    normalizedDimension(transition?.to) === 'the_nether' && normalizedDimension(transition?.from) !== 'the_nether',
-  )
+  const isVerifiedNetherTransition = (transition) => {
+    const from = normalizedDimension(transition?.from)
+    const to = normalizedDimension(transition?.to)
+    const dimension = normalizedDimension(transition?.dimension)
+    return transition?.source === 'live-world' &&
+      Number.isFinite(transition?.atMs) &&
+      transition?.runId === expectedRunId &&
+      normalizeSourceSha(transition?.sourceSha) === sourceSha &&
+      from !== null && from !== 'unknown' && from !== 'the_nether' &&
+      to === 'the_nether' && dimension === to
+  }
+  const transitionToNether = transitions.find(isVerifiedNetherTransition) ?? null
+  const netherPredicate = predicateEntries.find((entry) => entry?.id === 'nether_reached')
+  const predicateTransition = netherPredicate?.evidence?.transition
+  const predicateLineageMatches = transitionToNether !== null &&
+    netherPredicate?.satisfied === true &&
+    netherPredicate.source === 'log:DIMENSION_TRANSITION:dimension' &&
+    netherPredicate.observedAtMs === transitionToNether.atMs &&
+    isVerifiedNetherTransition(predicateTransition) &&
+    predicateTransition.from === transitionToNether.from &&
+    predicateTransition.to === transitionToNether.to &&
+    predicateTransition.dimension === transitionToNether.dimension &&
+    predicateTransition.source === transitionToNether.source &&
+    predicateTransition.runId === transitionToNether.runId &&
+    normalizeSourceSha(predicateTransition.sourceSha) === normalizeSourceSha(transitionToNether.sourceSha)
   const predicateScopeMatches = predicates?.runId === expectedRunId
     && normalizeSourceSha(predicates?.sourceSha) === sourceSha
-    && predicateEntries.some((entry) => entry?.id === 'nether_reached' && entry.satisfied === true)
+    && predicateLineageMatches
   const terminalInventoryPresent = terminal?.status === 'PRESENT'
     && terminal?.runId === expectedRunId
     && normalizeSourceSha(terminal?.sourceSha) === sourceSha
@@ -119,6 +141,7 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
     && authority?.fallback?.deterministicFallbackEnabled === false
     && authority?.fallback?.fallbackCount === 0
     && authority?.fallback?.otherCount === 0
+    && authority?.fallback?.unclassifiableCount === 0
   const system2Decisions = authority?.system2?.decisions
   const system2AllModel = Number.isFinite(authority?.system2?.count)
     && authority.system2.count > 0
@@ -126,6 +149,7 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
     && authority.system2.modelCount === authority.system2.count
     && Array.isArray(system2Decisions)
     && authority.system2.disagreements?.length === 0
+  const system2IdentityVerified = authority?.system2?.identityStatus === 'verified'
   const checks = [
     { id: 'sourceSha', present: sourceSha !== null && artifact?.runId === expectedRunId },
     { id: 'minecraftVersion', present: typeof artifact?.run?.serverVersion === 'string' && artifact.run.serverVersion.length > 0 },
@@ -134,10 +158,11 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
     { id: 'environment.gamerules', present: artifact?.environment?.gamerules?.value !== undefined && artifact.environment.gamerules.value !== null },
     { id: 'inventory.initial', present: artifact?.inventory?.boot?.counts !== null && typeof artifact?.inventory?.boot?.counts === 'object' },
     { id: 'inventory.final', present: terminalInventoryPresent },
-    { id: 'dimensionTransition.toNether', present: transitionToNether },
+    { id: 'dimensionTransition.toNether', present: transitionToNether !== null },
     { id: 'milestonePredicates', present: predicateScopeMatches },
     { id: 'authority.jev', present: authority?.jev?.attested === true },
     { id: 'authority.system2', present: authority?.system2?.attested === true },
+    { id: 'authority.system2GenerationIdentity', present: system2IdentityVerified },
     { id: 'authority.system2NoFallback', present: system2AllModel },
     { id: 'authority.noHiddenFallback', present: fallbackAbsent },
   ]

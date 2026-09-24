@@ -39,7 +39,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildAcceptanceBundle } from './m3-acceptance-bundle.mjs'
+import { buildAcceptanceBundle, evaluateRequiredM3ArtifactEvidence } from './m3-acceptance-bundle.mjs'
 import { runM2Gate } from './m2-gate.mjs'
 import { runM3Gate } from './m3-gate.mjs'
 
@@ -232,6 +232,62 @@ function condition(bundle, id) {
   return bundle.conditions.find((entry) => entry.id === id) ?? null
 }
 
+// The delivered artifact is an independent acceptance boundary: it must retain
+// the exact BODY transition lineage used for the nether_reached predicate.
+{
+  const transition = {
+    from: 'minecraft:overworld',
+    to: 'minecraft:the_nether',
+    dimension: 'minecraft:the_nether',
+    at: at(19),
+    atMs: T0 + 19000,
+    source: 'live-world',
+    runId: RUN,
+    sourceSha: SOURCE_SHA,
+  }
+  const artifact = (dimensionTransition, predicateTransition = dimensionTransition, observedAtMs = transition.atMs) => ({
+    runId: RUN,
+    run: { boot: { sourceSha: SOURCE_SHA } },
+    environment: { dimensions: { transitions: [dimensionTransition] } },
+    milestonePredicates: {
+      runId: RUN,
+      sourceSha: SOURCE_SHA,
+      predicates: [{
+        id: 'nether_reached',
+        satisfied: true,
+        observedAtMs,
+        source: 'log:DIMENSION_TRANSITION:dimension',
+        evidence: { transition: predicateTransition },
+      }],
+    },
+  })
+  const verdictFor = (candidate) => evaluateRequiredM3ArtifactEvidence(candidate, RUN)
+  const valid = verdictFor(artifact(transition))
+  assert.equal(valid.checks.find((entry) => entry.id === 'dimensionTransition.toNether').present, true)
+  assert.equal(valid.checks.find((entry) => entry.id === 'milestonePredicates').present, true)
+
+  const portalSource = { ...transition, source: 'PORTAL_LIT' }
+  const portal = verdictFor(artifact(portalSource))
+  assert.equal(portal.checks.find((entry) => entry.id === 'dimensionTransition.toNether').present, false)
+  assert.equal(portal.checks.find((entry) => entry.id === 'milestonePredicates').present, false)
+
+  const mismatchedLineage = verdictFor(artifact(transition, { ...transition, from: 'minecraft:the_end' }))
+  assert.equal(mismatchedLineage.checks.find((entry) => entry.id === 'dimensionTransition.toNether').present, true)
+  assert.equal(mismatchedLineage.checks.find((entry) => entry.id === 'milestonePredicates').present, false)
+
+  const mismatchedTime = verdictFor(artifact(transition, transition, transition.atMs + 1))
+  assert.equal(mismatchedTime.checks.find((entry) => entry.id === 'milestonePredicates').present, false)
+
+  const wrongRun = verdictFor(artifact({ ...transition, runId: 'run-another-world' }))
+  assert.equal(wrongRun.checks.find((entry) => entry.id === 'dimensionTransition.toNether').present, false)
+  assert.equal(wrongRun.checks.find((entry) => entry.id === 'milestonePredicates').present, false)
+
+  const wrongSource = verdictFor(artifact({ ...transition, sourceSha: 'f'.repeat(40) }))
+  assert.equal(wrongSource.checks.find((entry) => entry.id === 'dimensionTransition.toNether').present, false)
+  assert.equal(wrongSource.checks.find((entry) => entry.id === 'milestonePredicates').present, false)
+  ok('artifact acceptance requires a timed live-world BODY transition and exact predicate lineage')
+}
+
 // ---------------------------------------------------------------------------
 // A. a synthetic PASS-shaped run: one verdict per condition, gate == artifact
 // ---------------------------------------------------------------------------
@@ -264,6 +320,12 @@ function condition(bundle, id) {
   assert.ok(bundle.consistency.find((entry) => entry.check === 'authority_evidence_bound').ok)
   assert.equal(bundle.artifact.status, 'PASS')
   assert.deepEqual(bundle.artifact.missingEvidence, [])
+  assert.equal(bundle.artifact.document.authority.system2.identityStatus, 'verified')
+  const unverifiedIdentityArtifact = JSON.parse(JSON.stringify(bundle.artifact.document))
+  unverifiedIdentityArtifact.authority.system2.identityStatus = 'unknown'
+  const identityEvidence = evaluateRequiredM3ArtifactEvidence(unverifiedIdentityArtifact, RUN)
+  assert.equal(identityEvidence.status, 'UNKNOWN')
+  assert.ok(identityEvidence.missing.includes('authority.system2GenerationIdentity'))
   assert.equal(condition(bundle, 'artifact.requiredEvidence').verdict, 'PASS')
   assert.equal(condition(bundle, 'metrics.skillClosure').verdict, 'PRESENT')
   assert.ok(bundle.metrics.report !== null)

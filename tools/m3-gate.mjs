@@ -253,6 +253,21 @@ function normalizeSourceSha(value) {
   return typeof value === 'string' && SOURCE_SHA_RE.test(value) ? value.toLowerCase() : null
 }
 
+function normalizeDimensionId(value) {
+  return typeof value === 'string' ? value.replace(/^minecraft:/, '').toLowerCase() : null
+}
+
+/** Only a live-world BODY transition from a known non-Nether dimension proves entry. */
+function isNetherEntryTransition(value) {
+  const from = normalizeDimensionId(value?.from)
+  const to = normalizeDimensionId(value?.to)
+  const dimension = normalizeDimensionId(value?.dimension)
+  return value?.source === 'live-world' &&
+    Number.isFinite(value?.atMs) &&
+    from !== null && from !== 'unknown' && from !== 'the_nether' &&
+    to === 'the_nether' && dimension === to
+}
+
 function verdict({ status, code, reason, runId, sourceSha = null, conditions, evidence = null, sources = null, facts = null }) {
   return { id: 'M3', status, code, reason, runId, sourceSha, conditions, evidence, sources, facts }
 }
@@ -410,6 +425,8 @@ export function evaluateM3Gate({
   const observedDimensions = Array.isArray(dimensions)
     ? dimensions
     : sources.flatMap((source) => (Array.isArray(source.dimensionObservations) ? source.dimensionObservations : []))
+  const observedDimensionTransitions = sources.flatMap((source) => (Array.isArray(source.dimensionTransitions) ? source.dimensionTransitions : []))
+  const netherEntryTransitions = observedDimensionTransitions.filter(isNetherEntryTransition)
   const dimension = observedDimensions.length > 0 ? observedDimensions.at(-1) : null
   const authorityPass = policy?.code === 0
 
@@ -424,9 +441,12 @@ export function evaluateM3Gate({
       runId: expectedRunId,
       runSourceSha,
       inventorySamples: samples.map((counts) => ({ counts, source: 'log' })),
-      dimensionObservations: observedDimensions.map((entry) => ({
-        dimension: typeof entry === 'string' ? entry : entry?.dimension,
-        source: typeof entry === 'object' && entry?.source ? entry.source : 'log',
+      dimensionObservations: netherEntryTransitions.map((entry) => ({
+        dimension: entry.to,
+        from: entry.from,
+        to: entry.to,
+        atMs: entry.atMs,
+        source: 'log:DIMENSION_TRANSITION',
       })),
       portalEvents: sources.flatMap((source) => (Array.isArray(source.portalEvents) ? source.portalEvents.map((event) => ({ ...event, source: source.name })) : [])),
       hostObservation,
@@ -443,22 +463,82 @@ export function evaluateM3Gate({
     predicateSection = deriveFromRunEvidence()
     predicateSection.mismatches.push(reason)
   }
-  const predicateTrue = (id) => predicateSection.predicates.some((predicate) => predicate.id === id && predicate.satisfied === true)
+  // The observe-loop predicate is a useful record, but a caller-supplied or
+  // pre-derived `nether_reached=true` is not itself the required transition
+  // evidence. Replace that row from the independently scanned BODY transition
+  // so its source and timestamp describe the proof the gate actually accepts.
+  const independentNetherSection = deriveMilestonePredicates({
+    runId: expectedRunId,
+    runSourceSha,
+    dimensionObservations: netherEntryTransitions.map((entry) => ({
+      dimension: entry.to,
+      from: entry.from,
+      to: entry.to,
+      atMs: entry.atMs,
+      source: 'log:DIMENSION_TRANSITION',
+    })),
+  })
+  const independentNetherPredicate = independentNetherSection.predicates.find((predicate) => predicate.id === 'nether_reached')
+  const suppliedPredicates = Array.isArray(predicateSection?.predicates)
+    ? predicateSection.predicates.filter((predicate) => predicate !== null && typeof predicate === 'object' && !Array.isArray(predicate))
+    : []
+  const suppliedNetherPredicate = suppliedPredicates.find((predicate) => predicate.id === 'nether_reached')
+  const ignoredPredicateClaim = suppliedNetherPredicate?.satisfied === true && independentNetherPredicate.satisfied !== true
+  let replacedNether = independentNetherPredicate
+  if (netherEntryTransitions.length > 0) {
+    const transition = netherEntryTransitions[0]
+    replacedNether = {
+      ...independentNetherPredicate,
+      evidence: {
+        ...(independentNetherPredicate.evidence ?? {}),
+        transition: {
+          from: transition.from,
+          to: transition.to,
+          dimension: transition.dimension,
+          atMs: transition.atMs,
+          source: transition.source,
+          runId: expectedRunId,
+          sourceSha: runSourceSha,
+        },
+      },
+    }
+  } else {
+    replacedNether = {
+      ...independentNetherPredicate,
+      evidence: { ...(independentNetherPredicate.evidence ?? {}), rejected: 'body_dimension_transition_missing' },
+    }
+  }
+  predicateSection = {
+    ...(predicateSection !== null && typeof predicateSection === 'object' ? predicateSection : {}),
+    observationSources: Array.isArray(predicateSection?.observationSources) ? predicateSection.observationSources : [],
+    mismatches: [
+      ...(Array.isArray(predicateSection?.mismatches) ? predicateSection.mismatches : []),
+      ...(ignoredPredicateClaim ? ['unverified_nether_predicate_source_ignored'] : []),
+    ],
+    missing: [
+      ...(Array.isArray(predicateSection?.missing) ? predicateSection.missing.filter((id) => id !== 'nether_reached') : []),
+      ...(replacedNether.satisfied === true ? [] : ['nether_reached']),
+    ],
+    predicates: (() => {
+      let replaced = false
+      const predicates = suppliedPredicates.map((predicate) => {
+        if (predicate.id !== 'nether_reached') return predicate
+        replaced = true
+        return replacedNether
+      })
+      if (!replaced) predicates.push(replacedNether)
+      return predicates
+    })(),
+  }
   // The sticky milestone predicate is historical progress. It cannot replace the
   // final inventory observation required by the M3 acceptance contract.
   const eyesReady = eyes.ready
   const materialsFail = terminalInventory.status === 'valid' && !eyesReady && eyes.materialInputsComplete
 
-  // M3 is "reach the Nether and prove twelve eyes", so Nether arrival is a REQUIRED condition,
-  // not a diagnostic: without it a run could claim M3 from the eyes alone while never having
-  // left the overworld. UNKNOWN (never FAIL) when the run simply has no Nether observation yet -
-  // the absence of a transition is not evidence of a failed one.
-  const netherObserved =
-    predicateTrue('nether_reached') ||
-    observedDimensions.some((entry) => {
-      const value = typeof entry === 'string' ? entry : String(entry?.dimension ?? '')
-      return value === 'minecraft:the_nether' || value === 'the_nether'
-    })
+  // M3 requires a same-run live BODY transition into the Nether. Portal
+  // dimensions, route targets, spawn-at-generation-start, and sticky predicates
+  // cannot substitute for an independently logged transition.
+  const netherObserved = netherEntryTransitions.length > 0
   const conditions = {
     exact_source: 'PASS',
     ender_eye_ready: eyesReady ? 'PASS' : materialsFail ? 'FAIL' : 'UNKNOWN',
@@ -470,6 +550,7 @@ export function evaluateM3Gate({
     path: source.path,
     inventorySamples: Array.isArray(source.inventorySamples) ? source.inventorySamples.length : 0,
     dimensionObservations: Array.isArray(source.dimensionObservations) ? source.dimensionObservations : [],
+    dimensionTransitions: Array.isArray(source.dimensionTransitions) ? source.dimensionTransitions : [],
   }))
   const facts = {
     sourceSha: runSourceSha,
@@ -482,6 +563,8 @@ export function evaluateM3Gate({
     },
     dimension,
     dimensions: [...new Set(observedDimensions.map((entry) => (typeof entry === 'string' ? entry : entry?.dimension ?? null)))],
+    dimensionTransitions: observedDimensionTransitions,
+    netherEntryTransitions,
     netherReached: netherObserved,
     authority: policy?.facts ?? null,
     milestonePredicates: {
@@ -651,7 +734,15 @@ export async function runM3Gate({
             (Array.isArray(source.inventorySamples) ? source.inventorySamples : []).map((counts) => ({ counts, source: 'log' })),
           ),
           dimensionObservations: (evidence?.sources ?? []).flatMap((source) =>
-            (Array.isArray(source.dimensionObservations) ? source.dimensionObservations : []).map((dimension) => ({ dimension, source: 'log' })),
+            (Array.isArray(source.dimensionTransitions) ? source.dimensionTransitions : [])
+              .filter(isNetherEntryTransition)
+              .map((transition) => ({
+                dimension: transition.to,
+                from: transition.from,
+                to: transition.to,
+                atMs: transition.atMs,
+                source: 'log:DIMENSION_TRANSITION',
+              })),
           ),
           portalEvents: (evidence?.sources ?? []).flatMap((source) =>
             (Array.isArray(source.portalEvents) ? source.portalEvents : []).map((event) => ({ ...event, source: source.name })),
@@ -709,6 +800,12 @@ export async function runM3Gate({
         `ender_eye_max_observed=${result.facts.eyes.maxObservedEnderEye} ` +
         `dimension=${result.facts.dimension ?? 'unknown'} dimensions=${result.facts.dimensions.join(',') || 'none'}`,
     )
+    for (const transition of result.facts.netherEntryTransitions ?? []) {
+      write(
+        `m3_dimension_transition from=${transition.from} to=${transition.to} at=${transition.ts ?? new Date(transition.atMs).toISOString()} ` +
+          `source=${transition.source} runId=${expectedRunId} sourceSha=${result.sourceSha}`,
+      )
+    }
     write(
       `m3_terminal_inventory: status=${result.facts.terminalInventory.status} ` +
         `reason=${result.facts.terminalInventory.reason ?? 'none'} ` +

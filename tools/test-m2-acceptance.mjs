@@ -42,6 +42,7 @@ const VERIFIED_POLICY = {
     jevCount: 15,
     fallbackCount: 0,
     otherCount: 0,
+    unclassifiableCount: 0,
     firstJevTs: '2026-09-18T00:00:00.000Z',
     lastJevTs: '2026-09-18T00:00:05.000Z',
   },
@@ -56,13 +57,13 @@ const VERIFIED_POLICY = {
 // (a) inventory is green but every decision in R came from the deterministic
 // fallback: the hiding pattern the owner forbade.
 const FALLBACK_DECISIONS_POLICY = {
-  decisions: { runId: 'run-fixture', source: '/tmp/decisions.jsonl', jevCount: 0, fallbackCount: 4, otherCount: 0 },
+  decisions: { runId: 'run-fixture', source: '/tmp/decisions.jsonl', jevCount: 0, fallbackCount: 4, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: 'run-fixture', source: 'socket_report', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
 }
 
 // (b) source=jev decisions exist but the generation reports the fallback policy.
 const FALLBACK_GENERATION_POLICY = {
-  decisions: { runId: 'run-fixture', source: '/tmp/decisions.jsonl', jevCount: 2, fallbackCount: 0, otherCount: 0 },
+  decisions: { runId: 'run-fixture', source: '/tmp/decisions.jsonl', jevCount: 2, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
   generation: {
     runId: 'run-fixture',
     source: 'runner.out',
@@ -73,7 +74,7 @@ const FALLBACK_GENERATION_POLICY = {
 
 // (d) the evidence is real but belongs to a different run; it must not satisfy R.
 const FOREIGN_RUN_POLICY = {
-  decisions: { runId: 'run-other', source: '/tmp/decisions.jsonl', jevCount: 9, fallbackCount: 0, otherCount: 0 },
+  decisions: { runId: 'run-other', source: '/tmp/decisions.jsonl', jevCount: 9, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: 'run-other', source: 'socket_report', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
 }
 

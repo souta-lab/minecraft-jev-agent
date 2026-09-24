@@ -416,6 +416,7 @@ function emptyAttribution(reason) {
     bootLines: [],
     inventorySamples: [],
     dimensionObservations: [],
+    dimensionTransitions: [],
     portalEvents: [],
     environmentObservations: [],
     serverObservations: [],
@@ -434,6 +435,7 @@ export function attributeRunLines(runId, lines) {
   const bootLines = []
   const inventorySamples = []
   const dimensionObservations = []
+  const dimensionTransitions = []
   const portalEvents = []
   const environmentObservations = []
   const serverObservations = []
@@ -462,6 +464,23 @@ export function attributeRunLines(runId, lines) {
     if (counts !== null) inventorySamples.push({ index, ts, counts })
     const dimension = BODY_DIMENSION_MARKER_RE.test(line) ? DIMENSION_RE.exec(line) : null
     if (dimension !== null) dimensionObservations.push({ index, ts, dimension: dimension[1] })
+    if (/\bDIMENSION_TRANSITION\b/.test(line)) {
+      const from = /(?:^|\s)from=(\S+)/.exec(line)?.[1] ?? null
+      const to = /(?:^|\s)to=(\S+)/.exec(line)?.[1] ?? null
+      const observedDimension = /(?:^|\s)dimension=(\S+)/.exec(line)?.[1] ?? null
+      const source = /(?:^|\s)source=(\S+)/.exec(line)?.[1] ?? null
+      const atMs = timestampMsOf(line)
+      if (
+        from !== null &&
+        to !== null &&
+        observedDimension !== null &&
+        source === 'live-world' &&
+        to.replace(/^minecraft:/, '').toLowerCase() === observedDimension.replace(/^minecraft:/, '').toLowerCase() &&
+        atMs !== null
+      ) {
+        dimensionTransitions.push({ index, ts, atMs, from, to, dimension: observedDimension, source })
+      }
+    }
     const portal = parsePortalMarker(line)
     if (portal !== null) portalEvents.push({ index, ts, source: 'log', ...portal })
     const environment = parseEnvironmentLine(line)
@@ -478,6 +497,7 @@ export function attributeRunLines(runId, lines) {
     bootLines,
     inventorySamples,
     dimensionObservations,
+    dimensionTransitions,
     portalEvents,
     environmentObservations,
     serverObservations,
@@ -1391,7 +1411,7 @@ export function readEnvironmentFile(path) {
   }
 }
 
-function composeEnvironment({ observations, dimensions, serverProperties, environmentFile = null, runId = null, sourceSha = null }) {
+function composeEnvironment({ observations, dimensions, dimensionTransitions = [], serverProperties, environmentFile = null, runId = null, sourceSha = null }) {
   const logFacts = { difficulty: null, mobSpawning: null, spawnAnimals: null, gamerules: null }
   for (const observation of Array.isArray(observations) ? observations : []) {
     for (const key of Object.keys(logFacts)) {
@@ -1414,21 +1434,25 @@ function composeEnvironment({ observations, dimensions, serverProperties, enviro
     return { value: coercePropertyValue(props[key]), source: serverProperties.path, runScoped: false, at: serverProperties.mtime }
   }
   const observedDimensions = [...new Set((dimensions ?? []).map((entry) => entry.dimension))]
-  // The ordered dimension history: `sequence` is every DISTINCT dimension in
-  // observation order (with the time it was first seen), `transitions` is the
-  // consecutive changes only. Both are derived from the run-scoped observations,
-  // so "the run went overworld -> the_nether at T" is answerable without
-  // re-reading the log.
+  // `sequence` records body-location observations; `transitions` records only
+  // explicit live-world body transition events. A different observed location
+  // (for example a Nether SPAWN) is not evidence that this run entered it.
   const sequence = []
-  const transitions = []
   for (const entry of Array.isArray(dimensions) ? dimensions : []) {
     const previous = sequence.at(-1) ?? null
     if (previous !== null && previous.dimension === entry.dimension) continue
     sequence.push({ dimension: entry.dimension, firstAt: entry.ts ?? null, source: entry.source ?? 'log' })
-    if (previous !== null) {
-      transitions.push({ from: previous.dimension, to: entry.dimension, at: entry.ts ?? null })
-    }
   }
+  const transitions = (Array.isArray(dimensionTransitions) ? dimensionTransitions : []).map((entry) => ({
+    from: entry.from,
+    to: entry.to,
+    dimension: entry.dimension,
+    at: entry.ts ?? null,
+    atMs: entry.atMs,
+    source: entry.source,
+    runId,
+    sourceSha,
+  }))
   return {
     difficulty: fromLog('difficulty') ?? fromEnv('difficulty') ?? fromProps('difficulty'),
     mobSpawning: fromLog('mobSpawning') ?? fromEnv('mobSpawning') ?? fromProps('spawn-monsters'),
@@ -1681,15 +1705,18 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
   // "No hidden deterministic fallback" is answered by two independent host
   // facts: the run-scoped flag and the run-window decision sources.
   const fallbackEnabled = generation?.deterministicFallbackEnabled ?? extra?.deterministicFallbackEnabled ?? null
-  const countsKnown = decisions !== null && Number.isFinite(decisions.jevCount) && Number.isFinite(decisions.fallbackCount) && Number.isFinite(decisions.otherCount)
+  const countsKnown = decisions !== null &&
+    [decisions.jevCount, decisions.fallbackCount, decisions.otherCount, decisions.unclassifiableCount]
+      .every((count) => Number.isInteger(count) && count >= 0)
   const fallbackDecisions = countsKnown ? decisions.fallbackCount : null
   const otherDecisions = countsKnown ? decisions.otherCount : null
+  const unclassifiableDecisions = countsKnown ? decisions.unclassifiableCount : null
   let hiddenFallback
   let fallbackReason
   if (fallbackEnabled === true || (fallbackDecisions !== null && fallbackDecisions > 0)) {
     hiddenFallback = 'observed'
     fallbackReason = fallbackEnabled === true ? 'deterministicFallbackEnabled=true' : `fallback_decisions=${fallbackDecisions}`
-  } else if (fallbackEnabled === false && countsKnown && fallbackDecisions === 0 && otherDecisions === 0) {
+  } else if (fallbackEnabled === false && countsKnown && fallbackDecisions === 0 && otherDecisions === 0 && unclassifiableDecisions === 0) {
     hiddenFallback = 'none_observed'
     fallbackReason = 'deterministicFallbackEnabled=false and every in-window decision carries source=jev'
   } else {
@@ -1699,6 +1726,8 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
         ? 'deterministicFallbackEnabled_unavailable'
         : !countsKnown
           ? 'decision_source_counts_unavailable'
+          : unclassifiableDecisions > 0
+            ? `decision_records_unclassifiable=${unclassifiableDecisions}`
           : otherDecisions > 0
             ? `decisions_with_other_source=${otherDecisions}`
             : 'insufficient_fallback_evidence'
@@ -1724,6 +1753,16 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
       provider: system2Resolution.provider,
       model: system2Resolution.model,
       attested: system2Resolution.provider !== null && system2Resolution.model !== null,
+      identityStatus: system2?.identityStatus ?? null,
+      identityReason: system2?.identityReason ?? null,
+      identityIssues: Array.isArray(system2?.identityIssues) ? system2.identityIssues : [],
+      effectiveProvider: system2?.effectiveProvider ?? null,
+      effectiveModel: system2?.effectiveModel ?? null,
+      configuredProvider: system2?.configuredProvider ?? null,
+      configuredModel: system2?.configuredModel ?? null,
+      sourceSha: system2?.sourceSha ?? null,
+      generationIds: Array.isArray(system2?.generationIds) ? system2.generationIds : [],
+      generationCount: Number.isFinite(system2?.generationCount) ? system2.generationCount : null,
       attestation: {
         kind: system2Resolution.kind,
         source: system2Resolution.source,
@@ -1751,6 +1790,7 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
       jevCount: countsKnown ? decisions.jevCount : null,
       fallbackCount: fallbackDecisions,
       otherCount: otherDecisions,
+      unclassifiableCount: unclassifiableDecisions,
       hiddenDeterministicFallback: hiddenFallback,
       reason: fallbackReason,
     },
@@ -1763,6 +1803,7 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
             jevCount: decisions.jevCount ?? null,
             fallbackCount: decisions.fallbackCount ?? null,
             otherCount: decisions.otherCount ?? null,
+            unclassifiableCount: decisions.unclassifiableCount ?? null,
             firstJevTs: decisions.firstJevTs ?? null,
             lastJevTs: decisions.lastJevTs ?? null,
           },
@@ -2076,7 +2117,7 @@ export async function buildRunArtifact({
   // ---- log: one read, then the canonical gate attribution + our timestamped one
   let lines = []
   let attribution = emptyAttribution(`log_unreadable runId=${runId}`)
-  let gateScan = { status: 'unknown', inventorySamples: [], dimensionObservations: [], reason: 'log_unavailable' }
+  let gateScan = { status: 'unknown', inventorySamples: [], dimensionObservations: [], dimensionTransitions: [], reason: 'log_unavailable' }
   if (existsSync(paths.logPath)) {
     let text = null
     try {
@@ -2096,11 +2137,13 @@ export async function buildRunArtifact({
   const gateAttributionConsistent =
     attribution.status === gateScan.status &&
     attribution.inventorySamples.length === (Array.isArray(gateScan.inventorySamples) ? gateScan.inventorySamples.length : 0) &&
-    attribution.dimensionObservations.length === (Array.isArray(gateScan.dimensionObservations) ? gateScan.dimensionObservations.length : 0)
+    attribution.dimensionObservations.length === (Array.isArray(gateScan.dimensionObservations) ? gateScan.dimensionObservations.length : 0) &&
+    JSON.stringify(attribution.dimensionTransitions.map(({ from, to, dimension, atMs, source }) => ({ from, to, dimension, atMs, source }))) ===
+      JSON.stringify((Array.isArray(gateScan.dimensionTransitions) ? gateScan.dimensionTransitions : []).map(({ from, to, dimension, atMs, source }) => ({ from, to, dimension, atMs, source })))
   if (!gateAttributionConsistent) {
     missing.add(
       'attribution:gate_cross_check',
-      `this reader and tools/m2-gate.mjs scanRunLines disagree (reader status=${attribution.status} inventory=${attribution.inventorySamples.length} dimensions=${attribution.dimensionObservations.length}; gate status=${gateScan.status} inventory=${Array.isArray(gateScan.inventorySamples) ? gateScan.inventorySamples.length : 'n/a'} dimensions=${Array.isArray(gateScan.dimensionObservations) ? gateScan.dimensionObservations.length : 'n/a'})`,
+      `this reader and tools/m2-gate.mjs scanRunLines disagree (reader status=${attribution.status} inventory=${attribution.inventorySamples.length} dimensions=${attribution.dimensionObservations.length} transitions=${attribution.dimensionTransitions.length}; gate status=${gateScan.status} inventory=${Array.isArray(gateScan.inventorySamples) ? gateScan.inventorySamples.length : 'n/a'} dimensions=${Array.isArray(gateScan.dimensionObservations) ? gateScan.dimensionObservations.length : 'n/a'} transitions=${Array.isArray(gateScan.dimensionTransitions) ? gateScan.dimensionTransitions.length : 'n/a'})`,
     )
   }
 
@@ -2143,6 +2186,7 @@ export async function buildRunArtifact({
   const environment = composeEnvironment({
     observations: attribution.environmentObservations,
     dimensions: attribution.dimensionObservations,
+    dimensionTransitions: gateScan.dimensionTransitions ?? [],
     serverProperties,
     environmentFile: readEnvironmentFile(paths.environment),
     runId,
@@ -2294,22 +2338,97 @@ export async function buildRunArtifact({
     const terminal = asCounts(snapshot.record?.terminal?.inventory)
     if (terminal !== null) snapshotSamples.push({ counts: terminal, atMs: snapshot.record?.terminal?.atMs, source: 'snapshot' })
   }
-  const milestonePredicates = deriveMilestonePredicates({
+  let milestonePredicates = deriveMilestonePredicates({
     runId,
     runSourceSha: boot?.sourceSha ?? null,
     inventorySamples: [
       ...attribution.inventorySamples.map((sample) => ({ counts: sample.counts, ts: sample.ts, source: 'log' })),
       ...snapshotSamples,
     ],
-    dimensionObservations: attribution.dimensionObservations.map((observation) => ({
-      dimension: observation.dimension,
-      ts: observation.ts,
-      source: 'log',
-    })),
+    dimensionObservations: gateScan.dimensionTransitions
+      .filter((transition) => {
+        const normalize = (value) => typeof value === 'string' ? value.replace(/^minecraft:/, '').toLowerCase() : null
+        const from = normalize(transition.from)
+        const to = normalize(transition.to)
+        return Number.isFinite(transition.atMs) &&
+          transition.source === 'live-world' &&
+          from !== null && from !== 'unknown' && from !== 'the_nether' &&
+          to === 'the_nether' && normalize(transition.dimension) === to
+      })
+      .map((transition) => ({
+        dimension: transition.to,
+        from: transition.from,
+        to: transition.to,
+        atMs: transition.atMs,
+        source: 'log:DIMENSION_TRANSITION',
+      })),
     portalEvents: [...attribution.portalEvents, ...snapshotPortalEvents],
     hostObservation,
     now,
   })
+  // The resident observe-loop file can contain sticky semantic projections, but
+  // its `nether_reached` row is not acceptance evidence on its own. Replace it
+  // with the exact BOOT-scoped live-world transition parsed from the log.
+  const normalizeDimension = (value) => typeof value === 'string' ? value.replace(/^minecraft:/, '').toLowerCase() : null
+  const bodyNetherTransitions = (gateScan.dimensionTransitions ?? []).filter((transition) => {
+    const from = normalizeDimension(transition.from)
+    const to = normalizeDimension(transition.to)
+    return Number.isFinite(transition.atMs) &&
+      transition.source === 'live-world' &&
+      from !== null && from !== 'unknown' && from !== 'the_nether' &&
+      to === 'the_nether' && normalizeDimension(transition.dimension) === to
+  })
+  const independentNether = deriveMilestonePredicates({
+    runId,
+    runSourceSha: boot?.sourceSha ?? null,
+    dimensionObservations: bodyNetherTransitions.map((transition) => ({
+      dimension: transition.to,
+      from: transition.from,
+      to: transition.to,
+      atMs: transition.atMs,
+      source: 'log:DIMENSION_TRANSITION',
+    })),
+  }).predicates.find((predicate) => predicate.id === 'nether_reached')
+  const suppliedNether = milestonePredicates.predicates.find((predicate) => predicate.id === 'nether_reached')
+  const rejectedNetherClaim = suppliedNether?.satisfied === true && independentNether.satisfied !== true
+  let netherPredicate = independentNether
+  if (bodyNetherTransitions.length > 0) {
+    const transition = bodyNetherTransitions[0]
+    netherPredicate = {
+      ...independentNether,
+      evidence: {
+        ...(independentNether.evidence ?? {}),
+        transition: {
+          from: transition.from,
+          to: transition.to,
+          dimension: transition.dimension,
+          atMs: transition.atMs,
+          source: transition.source,
+          runId,
+          sourceSha: boot?.sourceSha ?? null,
+        },
+      },
+    }
+  } else {
+    netherPredicate = {
+      ...independentNether,
+      evidence: { ...(independentNether.evidence ?? {}), rejected: 'body_dimension_transition_missing' },
+    }
+  }
+  milestonePredicates = {
+    ...milestonePredicates,
+    mismatches: [
+      ...milestonePredicates.mismatches,
+      ...(rejectedNetherClaim ? ['unverified_nether_predicate_source_ignored'] : []),
+    ],
+    missing: [
+      ...milestonePredicates.missing.filter((id) => id !== 'nether_reached'),
+      ...(netherPredicate.satisfied === true ? [] : ['nether_reached']),
+    ],
+    predicates: milestonePredicates.predicates.map((predicate) =>
+      predicate.id === 'nether_reached' ? netherPredicate : predicate,
+    ),
+  }
   // Unobserved predicates stay visible in `milestonePredicates.missing` with their
   // `satisfied: null` + evidence, but they do NOT by themselves make the artifact
   // "incomplete": an M3 run legitimately inherits its M2 portal, so `portal_built`

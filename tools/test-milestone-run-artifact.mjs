@@ -66,6 +66,7 @@ const T0 = Date.parse('2026-09-21T07:00:00.000Z')
 const at = (sec) => new Date(T0 + sec * 1000).toISOString()
 const line = (sec, body) => `[${at(sec)}] ${body}`
 const SOURCE_SHA = '7164b92586fec83c340f5ce874dd81416d4247b2'
+const SYSTEM2_BUILD_HASH = 'e6be1812c804'
 const WORLD_KEY = '{"serverId":"127.0.0.1:25565","dimension":"minecraft:overworld","worldEpoch":1}'
 
 const boot = (sec, runId, { generations = 0, reloads = 0, sourceSha = SOURCE_SHA } = {}) =>
@@ -120,6 +121,19 @@ function runnerOut(
   } = {},
 ) {
   const lines = [boot(offsetSec, runId, { generations: bootGenerations, reloads: bootReloads, sourceSha })]
+  let system2Configured = null
+  if (stack !== null) {
+    try {
+      const parsed = JSON.parse(stack)
+      if (typeof parsed?.provider === 'string' && typeof parsed?.model === 'string') system2Configured = parsed
+    } catch {
+      // Keep an invalid configured stack visible in the marker, but do not
+      // synthesize valid generation-lineage fields for it.
+    }
+  }
+  const configuredLineage = system2Configured === null
+    ? ''
+    : `system2ConfiguredProvider=${system2Configured.provider} system2ConfiguredModel=${system2Configured.model} `
   if (build !== null) {
     lines.push(line(offsetSec + 0.5, `BUILD hash=${build} bytes=6181238 ms=51 outfile=/fixture/data/resident/gen-${build}`))
   }
@@ -130,13 +144,26 @@ function runnerOut(
         'GENERATION_READY id=gen-test-1 rungIndex=13 rungId=nether_portal ' +
           'goals=["verify the lit nether_portal block in the overworld","enter the lit nether_portal"] ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
+          `generationId=gen-test-1 sourceSha=${sourceSha} buildHash=${SYSTEM2_BUILD_HASH} ` + configuredLineage +
           (stack === null ? '' : `system2AuthorityStack=${stack} `) +
           'system2LastAuthority={"provider":"none","model":"none"} deterministicFallbackEnabled=false ' +
           'planner=llm plannerModel=typesafe-ai/jev',
       ),
     )
   }
-  for (const [index, decision] of decisions.entries()) lines.push(line(offsetSec + 2 + index * 0.1, decision))
+  for (const [index, decision] of decisions.entries()) {
+    const provider = /\bprovider=(\S+)/.exec(decision)?.[1]
+    const model = /\bmodel=(\S+)/.exec(decision)?.[1]
+    if (provider !== undefined && model !== undefined && system2Configured !== null) {
+      const identity =
+        `generationId=gen-test-1 sourceSha=${sourceSha} buildHash=${SYSTEM2_BUILD_HASH} ` +
+        `configuredProvider=${system2Configured.provider} configuredModel=${system2Configured.model} trigger=run_artifact_fixture `
+      lines.push(line(offsetSec + 1.5 + index * 0.1, `SYSTEM2_AUTHORITY_INPUT provider=${provider} model=${model} ${identity}`))
+      lines.push(line(offsetSec + 2 + index * 0.1, `${decision} ${identity}`))
+    } else {
+      lines.push(line(offsetSec + 2 + index * 0.1, decision))
+    }
+  }
   if (released) lines.push(line(offsetSec + 3 + decisions.length * 0.1, `HOST_LOCK released runId=${runId}`))
   const extras = [
     ...resumes.map((resume) => ({ sec: resume.sec, body: `RESUME ok=${resume.ok === false ? 'false' : 'true'} reconnect=false` })),
@@ -292,6 +319,9 @@ assert.equal(passArtifact.verdicts.M2.status, 'PASS')
 assert.equal(passArtifact.verdicts.M3.status, 'PASS')
 assert.equal(passArtifact.run.runId, RUN_PASS)
 assert.equal(passArtifact.run.boot.sourceSha, SOURCE_SHA)
+assert.equal(passArtifact.authority.system2.identityStatus, 'verified')
+assert.equal(passArtifact.authority.system2.effectiveProvider, 'typesafe-ai')
+assert.equal(passArtifact.authority.system2.effectiveModel, 'typesafe-ai/jev')
 assert.equal(passArtifact.run.runtime, 'bun')
 assert.equal(passArtifact.run.runtimeVersion, '1.4.2')
 assert.equal(passArtifact.run.contractVersion, 3)
@@ -399,7 +429,16 @@ ok('12 historical eyes without a same-run acceptance-time HOST report stay UNKNO
     assert.equal(typeof predicate.observedAtMs, 'number')
   }
   assert.equal(byId('portal_built').source, 'log:PORTAL_FRAME_READY')
-  assert.equal(byId('nether_reached').source, 'log:dimension')
+  assert.equal(byId('nether_reached').source, 'log:DIMENSION_TRANSITION:dimension')
+  assert.deepEqual(byId('nether_reached').evidence.transition, {
+    from: 'minecraft:overworld',
+    to: 'minecraft:the_nether',
+    dimension: 'minecraft:the_nether',
+    atMs: T0 + 19000,
+    source: 'live-world',
+    runId: RUN_PASS,
+    sourceSha: SOURCE_SHA,
+  })
   assert.equal(byId('ender_eyes').source, 'log:INVENTORY')
 }
 ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
@@ -739,7 +778,7 @@ ok('server.properties reader whitelists facts and never echoes credentials')
   const nether = artifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'nether_reached')
   assert.equal(nether.satisfied, null, 'a run with no transition observation must not claim the predicate')
   assert.equal(nether.source, null)
-  assert.equal(nether.evidence.lastDimension, 'minecraft:overworld')
+  assert.equal(nether.evidence.rejected, 'body_dimension_transition_missing')
   assert.ok(artifact.milestonePredicates.missing.includes('nether_reached'))
   assert.equal(artifact.verdicts.M3.conditions.nether_reached, 'UNKNOWN')
   assert.equal(artifact.verdicts.M3.conditions.ender_eye_ready, 'PASS', 'the eyes are still proven')
@@ -747,6 +786,48 @@ ok('server.properties reader whitelists facts and never echoes credentials')
   assert.notEqual(result.code, 0)
 }
 ok('a run with 12 eyes but no Nether transition: nether_reached UNKNOWN, artifact not PASS')
+
+// A run/source-matching observe-loop predicate can still be stale or derived
+// from a portal projection; only the body transition line may populate this row.
+{
+  const runId = 'run-fixture-injected-nether'
+  const root = makeRoot('injected-nether')
+  const lines = fullLog(runId, { terminalEye: 0 }).filter((entry) => !entry.includes('DIMENSION_TRANSITION'))
+  writeFixture(root, runId, { logLines: lines })
+  writeFileSync(
+    join(root, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
+    JSON.stringify({
+      record: 'milestone-predicates',
+      schemaVersion: 1,
+      runId,
+      sourceSha: SOURCE_SHA,
+      generationId: 'gen-injected-nether',
+      observationCount: 1,
+      updatedAt: at(20),
+      predicates: [{
+        id: 'nether_reached',
+        satisfied: true,
+        observedAtMs: T0 + 19000,
+        observedAt: at(19),
+        source: 'host-observe:rung:enter_nether',
+        evidence: { dimension: 'minecraft:the_nether', source: 'PORTAL_LIT' },
+      }],
+    }),
+  )
+  const result = await cliWithReport(['--run', runId, '--root', root, '--json'], {
+    runId,
+    counts: { diamond: 3, diamond_pickaxe: 1, ender_eye: 12 },
+  })
+  const artifact = result.json()
+  const nether = artifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'nether_reached')
+  assert.equal(nether.satisfied, null)
+  assert.equal(nether.source, null)
+  assert.equal(nether.evidence.rejected, 'body_dimension_transition_missing')
+  assert.ok(artifact.milestonePredicates.mismatches.includes('unverified_nether_predicate_source_ignored'))
+  assert.equal(artifact.verdicts.M3.conditions.nether_reached, 'UNKNOWN')
+  assert.notEqual(artifact.status, 'PASS')
+}
+ok('an exact-run/source observe-loop PORTAL_LIT claim cannot manufacture a Nether BODY transition')
 
 // ---------------------------------------------------------------------------
 // J. operator decision: annotated when corroborated, never a silent gate flip
@@ -917,6 +998,7 @@ ok('a configured authority stack attests System2/Jev provider+model with no deci
   const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
   assert.equal(artifact.authority.system2.provider, null)
   assert.equal(artifact.authority.system2.model, null)
+  assert.equal(artifact.authority.system2.identityStatus, 'unknown')
   assert.equal(artifact.authority.system2.authorityStack, null)
   assert.ok(artifact.missingEvidence.includes('authority.system2'))
   const gap = artifact.missingEvidenceDetail.find((entry) => entry.field === 'authority.system2')
@@ -1081,6 +1163,7 @@ ok('an acceptance record never turns an incomplete milestone into PASS; its abse
   assert.equal(artifact.authority.fallback.deterministicFallbackEnabled, false)
   assert.equal(artifact.authority.fallback.fallbackCount, 0)
   assert.equal(artifact.authority.fallback.otherCount, 0)
+  assert.equal(artifact.authority.fallback.unclassifiableCount, 0)
   // acceptance record present and the milestone genuinely complete
   assert.equal(artifact.acceptance.present, true)
   assert.equal(artifact.milestoneAcceptance.status, 'COMPLETE')

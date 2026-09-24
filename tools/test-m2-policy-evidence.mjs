@@ -127,6 +127,7 @@ try {
     assert.equal(evidence.decisions.runId, 'run-a')
     assert.equal(evidence.decisions.jevCount, 0)
     assert.equal(evidence.decisions.fallbackCount, 2)
+    assert.equal(evidence.decisions.unclassifiableCount, 0)
     assert.equal(evidence.generation.runId, 'run-a')
     assert.equal(evidence.generation.policyKind, 'fallback')
     const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-a', ...evidence })
@@ -140,6 +141,8 @@ try {
     assert.equal(evidence.decisions.runId, 'run-b')
     assert.equal(evidence.decisions.jevCount, 2)
     assert.equal(evidence.decisions.fallbackCount, 0, 'run-a fallback decisions must not leak into run-b')
+    assert.equal(evidence.decisions.otherCount, 0)
+    assert.equal(evidence.decisions.unclassifiableCount, 0)
     assert.equal(evidence.generation.runId, 'run-b')
     assert.equal(evidence.generation.policyKind, 'typesafe')
     assert.equal(evidence.generation.source, runnerOut)
@@ -309,43 +312,83 @@ try {
   {
     const counts = await countDecisionSources(decisions, Date.parse('2026-09-18T09:10:00.000Z'), Date.parse('2026-09-18T09:10:05.000Z'))
     assert.deepEqual(
-      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount },
-      { jev: 2, fallback: 0, other: 0 },
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 2, fallback: 0, other: 0, unclassifiable: 0 },
     )
     ok('countDecisionSources counts only decision records inside the window')
+  }
+
+  {
+    const malformedDecisions = join(dir, 'malformed-decisions.jsonl')
+    writeFileSync(
+      malformedDecisions,
+      [
+        decision('2026-09-18T09:10:01.000Z', 'jev'),
+        '{"record":"decision","ts":"2026-09-18T09:10:04.000Z","source":"fallback",',
+      ].join('\n') + '\n',
+    )
+    const counts = await countDecisionSources(
+      malformedDecisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+    )
+    assert.deepEqual(
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 1, fallback: 0, other: 0, unclassifiable: 1 },
+    )
+    const evidence = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: malformedDecisions, runnerOutPath: runnerOut })
+    const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
+    assert.equal(verdict.status, 'UNKNOWN')
+    assert.equal(verdict.reason, 'decision_records_unclassifiable count=1')
+    ok('a malformed in-window row claiming record=decision cannot disappear beside a valid Jev row')
+  }
+
+  {
+    const unknownSourceDecisions = join(dir, 'unknown-source-decisions.jsonl')
+    writeFileSync(unknownSourceDecisions, `${decision('2026-09-18T09:10:01.000Z', 'unrecognized-provider')}\n`)
+    const counts = await countDecisionSources(
+      unknownSourceDecisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+    )
+    assert.deepEqual(
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 0, fallback: 0, other: 1, unclassifiable: 1 },
+    )
+    ok('unknown in-window decision sources are explicitly unclassifiable')
   }
 
   // Pure evaluator edges.
   {
     assert.equal(evaluatePolicyEvidence({}).reason, 'exact_run_scope_required')
     assert.ok(
-      evaluatePolicyEvidence({ expectedRunId: 'run-x', decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 }, generation: null }).reason.startsWith("generation_status_unavailable"),
+      evaluatePolicyEvidence({ expectedRunId: 'run-x', decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 }, generation: null }).reason.startsWith("generation_status_unavailable"),
     )
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'other-model' },
       }).reason.startsWith("policy_model_not_typesafe"),
     )
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason.startsWith("no_jev_decisions"),
     )
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-y', jevCount: 5, fallbackCount: 0 },
+        decisions: { runId: 'run-y', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-y', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason.startsWith("decisions_evidence_run_mismatch"),
     )
     assert.match(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 5, fallbackCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-y', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason,
       /^generation_run_mismatch/,
@@ -353,20 +396,76 @@ try {
     assert.equal(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 1 },
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 1, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason,
       'fallback_decisions_present',
     )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 1, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'unrecognized_decision_sources_present count=1',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_counts_unavailable_or_invalid',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_completeness_unavailable',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: 1 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_records_unclassifiable count=1',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, otherCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_counts_unavailable_or_invalid',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: Number.NaN },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_completeness_unavailable',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0.5, otherCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_counts_unavailable_or_invalid',
+    )
     assert.equal(REQUIRED_POLICY_KIND, 'typesafe')
     assert.equal(REQUIRED_POLICY_MODEL, 'typesafe-ai/jev')
-    ok('pure evaluator refuses missing, mismatched, mixed-fallback, and non-typesafe evidence')
+    ok('pure evaluator requires complete decision-source counts and refuses unknown/malformed/fallback evidence')
   }
 
   {
     const base = {
       expectedRunId: 'run-current',
-      decisions: { runId: 'run-current', source: 'fixture', jevCount: 5, fallbackCount: 0, otherCount: 0 },
+      decisions: { runId: 'run-current', source: 'fixture', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
       generation: {
         runId: 'run-current', source: 'fixture', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev',
         plannerMode: 'llm', deterministicFallbackEnabled: false,

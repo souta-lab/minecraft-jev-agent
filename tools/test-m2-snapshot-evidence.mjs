@@ -96,7 +96,7 @@ const BOOT_IDENTITY = { runId: RUN, bootSourceSha: BOOT_SHA, buildHash: BUILD_HA
 // also requires independent proof that the real Jev policy ran, so provide a
 // run-bound policy fixture rather than allowing the snapshot to bypass D2.
 const POLICY_EVIDENCE = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 1, fallbackCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
 }
 
