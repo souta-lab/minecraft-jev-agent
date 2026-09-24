@@ -29,9 +29,18 @@ const ok = (label) => {
   console.log(`  ok ${checks} - ${label}`)
 }
 const line = (ts, body) => `[${ts}] ${body}`
-const decision = (ts, source) => JSON.stringify({ record: 'decision', ts, source })
 const SOURCE_SHA = 'a'.repeat(40)
 const BUILD_HASH = 'b'.repeat(12)
+const decision = (ts, source, {
+  runId = 'run-b',
+  generationId = 'g-b',
+  sourceSha = SOURCE_SHA,
+} = {}) => JSON.stringify({ record: 'decision', ts, source, runId, generationId, sourceSha })
+const decisionScope = (runId = 'run-b', generationId = 'g-b') => ({
+  runId,
+  sourceSha: SOURCE_SHA,
+  generations: [{ generationId, sourceSha: SOURCE_SHA, tsMs: Date.parse('2026-09-18T09:10:01.000Z') }],
+})
 const generation = (id, overrides = {}) => [
   `id=${id}`,
   `generationId=${id}`,
@@ -79,18 +88,18 @@ try {
       line('2026-09-18T09:15:05.000Z', 'HOST_LOCK released pid=4'),
       line('2026-09-18T09:20:00.000Z', `BOOT pid=3 runId=run-c bundle=c source=${SOURCE_SHA}`),
       // Alternate structured spelling must be accepted as well.
-      line('2026-09-18T09:20:01.000Z', 'GENERATION_READY id=g-c policyKind=typesafe policyModel=typesafe-ai/jev'),
+      line('2026-09-18T09:20:01.000Z', `GENERATION_READY id=g-c generationId=g-c sourceSha=${SOURCE_SHA} policyKind=typesafe policyModel=typesafe-ai/jev`),
     ].join('\n') + '\n',
   )
   writeFileSync(
     decisions,
     [
-      decision('2026-09-18T09:00:01.000Z', 'fallback'),
-      decision('2026-09-18T09:00:03.000Z', 'fallback'),
+      decision('2026-09-18T09:00:01.000Z', 'fallback', { runId: 'run-a', generationId: 'g-a' }),
+      decision('2026-09-18T09:00:03.000Z', 'fallback', { runId: 'run-a', generationId: 'g-a' }),
       decision('2026-09-18T09:10:01.000Z', 'jev'),
       decision('2026-09-18T09:10:03.000Z', 'jev'),
-      decision('2026-09-18T09:15:02.000Z', 'jev'),
-      decision('2026-09-18T09:20:02.000Z', 'jev'),
+      decision('2026-09-18T09:15:02.000Z', 'jev', { runId: 'run-d', generationId: 'g-d' }),
+      decision('2026-09-18T09:20:02.000Z', 'jev', { runId: 'run-c', generationId: 'g-c' }),
       // A non-decision record inside a window must not be counted.
       JSON.stringify({ record: 'other', ts: '2026-09-18T09:10:02.000Z', source: 'jev' }),
     ].join('\n') + '\n',
@@ -127,6 +136,7 @@ try {
     assert.equal(evidence.decisions.runId, 'run-a')
     assert.equal(evidence.decisions.jevCount, 0)
     assert.equal(evidence.decisions.fallbackCount, 2)
+    assert.equal(evidence.decisions.unclassifiableCount, 0)
     assert.equal(evidence.generation.runId, 'run-a')
     assert.equal(evidence.generation.policyKind, 'fallback')
     const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-a', ...evidence })
@@ -140,6 +150,8 @@ try {
     assert.equal(evidence.decisions.runId, 'run-b')
     assert.equal(evidence.decisions.jevCount, 2)
     assert.equal(evidence.decisions.fallbackCount, 0, 'run-a fallback decisions must not leak into run-b')
+    assert.equal(evidence.decisions.otherCount, 0)
+    assert.equal(evidence.decisions.unclassifiableCount, 0)
     assert.equal(evidence.generation.runId, 'run-b')
     assert.equal(evidence.generation.policyKind, 'typesafe')
     assert.equal(evidence.generation.source, runnerOut)
@@ -182,14 +194,18 @@ try {
   {
     const lineageOut = join(dir, 'lineage-runner.out')
     const lineageDecisions = join(dir, 'lineage-decisions.jsonl')
-    const writeLineage = (runId, events, runSource = SOURCE_SHA) => {
+    const writeLineage = (runId, events, runSource = SOURCE_SHA, decisionGenerationId = 'gen-1') => {
       const start = '2026-09-18T10:00:00.000Z'
       writeFileSync(lineageOut, [
         line(start, `BOOT pid=9 runId=${runId} source=${runSource}`),
         ...events,
         line('2026-09-18T10:01:00.000Z', 'HOST_LOCK released pid=9'),
       ].join('\n') + '\n')
-      writeFileSync(lineageDecisions, decision('2026-09-18T10:00:02.000Z', 'jev') + '\n')
+      writeFileSync(lineageDecisions, decision('2026-09-18T10:00:02.000Z', 'jev', {
+        runId,
+        generationId: decisionGenerationId,
+        sourceSha: runSource,
+      }) + '\n')
     }
     const loadLineage = (runId) => loadPolicyEvidence({ runId, decisionsPath: lineageDecisions, runnerOutPath: lineageOut })
 
@@ -222,7 +238,7 @@ try {
       line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-present')}`),
       line('2026-09-18T10:00:01.100Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-missing')}`),
       line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-missing')}`),
-    ])
+    ], SOURCE_SHA, 'gen-present')
     const unjoined = await loadLineage('run-unjoined')
     assert.match(unjoined.system2.identityReason, /system2_decision_generation_unjoined/)
 
@@ -230,21 +246,21 @@ try {
       line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-source')}`),
       line('2026-09-18T10:00:01.100Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-source', { sourceSha: 'c'.repeat(40) })}`),
       line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-source', { sourceSha: 'c'.repeat(40) })}`),
-    ])
+    ], SOURCE_SHA, 'gen-source')
     const sourceMismatch = await loadLineage('run-source-mismatch')
     assert.match(sourceMismatch.system2.identityReason, /system2_decision_source_sha_mismatch/)
 
     writeLineage('run-input-missing', [
       line('2026-09-18T10:00:01.000Z', `GENERATION_READY ${generation('gen-no-input')}`),
       line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-no-input')}`),
-    ])
+    ], SOURCE_SHA, 'gen-no-input')
     const inputMissing = await loadLineage('run-input-missing')
     assert.match(inputMissing.system2.identityReason, /system2_decision_input_unjoined/)
     writeLineage('run-input-before-ready', [
       line('2026-09-18T10:00:01.000Z', `SYSTEM2_AUTHORITY_INPUT ${system2Identity('gen-order')}`),
       line('2026-09-18T10:00:01.100Z', `GENERATION_READY ${generation('gen-order')}`),
       line('2026-09-18T10:00:01.200Z', `SYSTEM2_AUTHORITY_DECISION ${system2Identity('gen-order')}`),
-    ])
+    ], SOURCE_SHA, 'gen-order')
     const inputBeforeReady = await loadLineage('run-input-before-ready')
     assert.match(inputBeforeReady.system2.identityReason, /system2_decision_input_unjoined/)
     ok('System2 model drift, source mismatch, missing generation, and unpaired lifecycle events are UNKNOWN')
@@ -307,45 +323,212 @@ try {
   }
 
   {
-    const counts = await countDecisionSources(decisions, Date.parse('2026-09-18T09:10:00.000Z'), Date.parse('2026-09-18T09:10:05.000Z'))
+    const counts = await countDecisionSources(
+      decisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+      decisionScope(),
+    )
     assert.deepEqual(
-      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount },
-      { jev: 2, fallback: 0, other: 0 },
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 2, fallback: 0, other: 0, unclassifiable: 0 },
     )
     ok('countDecisionSources counts only decision records inside the window')
+  }
+
+  {
+    const malformedDecisions = join(dir, 'malformed-decisions.jsonl')
+    writeFileSync(
+      malformedDecisions,
+      [
+        decision('2026-09-18T09:10:01.000Z', 'jev'),
+        '{"record":"decision","ts":"2026-09-18T09:10:04.000Z","source":"fallback",',
+      ].join('\n') + '\n',
+    )
+    const counts = await countDecisionSources(
+      malformedDecisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+      decisionScope(),
+    )
+    assert.deepEqual(
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 1, fallback: 0, other: 0, unclassifiable: 1 },
+    )
+    const evidence = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: malformedDecisions, runnerOutPath: runnerOut })
+    const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
+    assert.equal(verdict.status, 'UNKNOWN')
+    assert.equal(verdict.reason, 'decision_records_unclassifiable count=1')
+    ok('a malformed in-window row claiming record=decision cannot disappear beside a valid Jev row')
+  }
+
+  {
+    const escapedFallbackDecisions = join(dir, 'escaped-record-fallback-decisions.jsonl')
+    writeFileSync(
+      escapedFallbackDecisions,
+      [
+        decision('2026-09-18T09:10:01.000Z', 'jev'),
+        // This is valid JSON: JSON.parse decodes the escaped `o` in the key.
+        `{"rec\\u006frd":"decision","ts":"2026-09-18T09:10:04.000Z","source":"fallback","runId":"run-b","generationId":"g-b","sourceSha":"${SOURCE_SHA}"}`,
+      ].join('\n') + '\n',
+    )
+    const counts = await countDecisionSources(
+      escapedFallbackDecisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+      decisionScope(),
+    )
+    assert.deepEqual(
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 1, fallback: 1, other: 0, unclassifiable: 0 },
+    )
+    const evidence = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: escapedFallbackDecisions, runnerOutPath: runnerOut })
+    const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
+    assert.equal(verdict.status, 'UNKNOWN')
+    assert.equal(verdict.reason, 'fallback_decisions_present')
+    ok('an escaped JSON record key cannot hide an in-window fallback decision')
+  }
+
+  {
+    const escapedUnknownDecisions = join(dir, 'escaped-record-unknown-decisions.jsonl')
+    writeFileSync(
+      escapedUnknownDecisions,
+      [
+        decision('2026-09-18T09:10:01.000Z', 'jev'),
+        `{"rec\\u006frd":"decision","ts":"2026-09-18T09:10:04.000Z","source":"unclassified-policy","runId":"run-b","generationId":"g-b","sourceSha":"${SOURCE_SHA}"}`,
+      ].join('\n') + '\n',
+    )
+    const counts = await countDecisionSources(
+      escapedUnknownDecisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+      decisionScope(),
+    )
+    assert.deepEqual(
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 1, fallback: 0, other: 1, unclassifiable: 1 },
+    )
+    const evidence = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: escapedUnknownDecisions, runnerOutPath: runnerOut })
+    const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
+    assert.equal(verdict.status, 'UNKNOWN')
+    assert.equal(verdict.reason, 'decision_records_unclassifiable count=1')
+    ok('an escaped JSON record key cannot hide an unclassifiable decision source')
+  }
+
+  {
+    const unknownSourceDecisions = join(dir, 'unknown-source-decisions.jsonl')
+    writeFileSync(unknownSourceDecisions, `${decision('2026-09-18T09:10:01.000Z', 'unrecognized-provider')}\n`)
+    const counts = await countDecisionSources(
+      unknownSourceDecisions,
+      Date.parse('2026-09-18T09:10:00.000Z'),
+      Date.parse('2026-09-18T09:10:05.000Z'),
+      decisionScope(),
+    )
+    assert.deepEqual(
+      { jev: counts.jevCount, fallback: counts.fallbackCount, other: counts.otherCount, unclassifiable: counts.unclassifiableCount },
+      { jev: 0, fallback: 0, other: 1, unclassifiable: 1 },
+    )
+    ok('unknown in-window decision sources are explicitly unclassifiable')
+  }
+
+  {
+    const startMs = Date.parse('2026-09-18T09:10:00.000Z')
+    const endMs = Date.parse('2026-09-18T09:10:05.000Z')
+    const timestamp = '2026-09-18T09:10:02.000Z'
+    const rows = [
+      ['timestamp-only legacy row', { record: 'decision', ts: timestamp, source: 'jev' }],
+      ['missing runId', { record: 'decision', ts: timestamp, source: 'jev', generationId: 'g-b', sourceSha: SOURCE_SHA }],
+      ['malformed runId', { ...JSON.parse(decision(timestamp, 'jev')), runId: ['run-b'] }],
+      ['foreign runId', { ...JSON.parse(decision(timestamp, 'jev')), runId: 'run-a' }],
+      ['missing generationId', { record: 'decision', ts: timestamp, source: 'jev', runId: 'run-b', sourceSha: SOURCE_SHA }],
+      ['malformed generationId', { ...JSON.parse(decision(timestamp, 'jev')), generationId: 7 }],
+      ['generation absent from host window', { ...JSON.parse(decision(timestamp, 'jev')), generationId: 'g-foreign' }],
+      ['missing source SHA', { record: 'decision', ts: timestamp, source: 'jev', runId: 'run-b', generationId: 'g-b' }],
+      ['malformed source SHA', { ...JSON.parse(decision(timestamp, 'jev')), sourceSha: 'not-a-sha' }],
+      ['source SHA mismatch', { ...JSON.parse(decision(timestamp, 'jev')), sourceSha: 'c'.repeat(40) }],
+    ]
+    for (const [label, row] of rows) {
+      const path = join(dir, `invalid-provenance-${label.replaceAll(/[^a-z0-9]+/gi, '-')}.jsonl`)
+      writeFileSync(path, `${JSON.stringify(row)}\n`)
+      const counts = await countDecisionSources(path, startMs, endMs, decisionScope())
+      assert.equal(counts.jevCount, 0, `${label} cannot be counted as a Jev decision`)
+      assert.equal(counts.unclassifiableCount, 1, `${label} must remain explicit uncertainty`)
+      const evidence = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: path, runnerOutPath: runnerOut })
+      const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
+      assert.equal(verdict.status, 'UNKNOWN', `${label} must not satisfy the policy gate`)
+      assert.match(verdict.reason, /^decision_records_unclassifiable/)
+    }
+    const badGenerationScope = {
+      ...decisionScope(),
+      generations: [{ generationId: 'g-b', sourceSha: 'c'.repeat(40), tsMs: startMs + 1000 }],
+    }
+    const validDecisionPath = join(dir, 'wrong-host-generation-source.jsonl')
+    writeFileSync(validDecisionPath, `${decision(timestamp, 'jev')}\n`)
+    const badHostCounts = await countDecisionSources(validDecisionPath, startMs, endMs, badGenerationScope)
+    assert.equal(badHostCounts.jevCount, 0)
+    assert.equal(badHostCounts.unclassifiableCount, 1)
+    const conflictingGenerationScope = {
+      ...decisionScope(),
+      generations: [
+        { generationId: 'g-b', sourceSha: SOURCE_SHA, tsMs: startMs + 1000 },
+        { generationId: 'g-b', sourceSha: 'c'.repeat(40), tsMs: startMs + 1500 },
+      ],
+    }
+    const conflictingHostCounts = await countDecisionSources(validDecisionPath, startMs, endMs, conflictingGenerationScope)
+    assert.equal(conflictingHostCounts.jevCount, 0)
+    assert.equal(conflictingHostCounts.unclassifiableCount, 1, 'a duplicated/conflicting host generation id cannot join')
+    ok('decision runId, source SHA, and generationId must join exact BOOT and host generation provenance')
+  }
+
+  {
+    const duplicateKeyDecisions = join(dir, 'duplicate-record-key-decisions.jsonl')
+    writeFileSync(
+      duplicateKeyDecisions,
+      [
+        decision('2026-09-18T09:10:01.000Z', 'jev'),
+        `{"rec\\u006frd":"decision","record":"other","ts":"2026-09-18T09:10:04.000Z","source":"fallback","runId":"run-b","generationId":"g-b","sourceSha":"${SOURCE_SHA}"}`,
+        `{"record":"decision","ts":"2026-09-18T09:10:04.500Z","source":"jev","runId":"run-b","runId":"run-a","generationId":"g-b","sourceSha":"${SOURCE_SHA}"}`,
+      ].join('\n') + '\n',
+    )
+    const evidence = await loadPolicyEvidence({ runId: 'run-b', decisionsPath: duplicateKeyDecisions, runnerOutPath: runnerOut })
+    const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
+    assert.equal(evidence.decisions.unclassifiableCount, 2)
+    assert.equal(verdict.status, 'UNKNOWN')
+    assert.equal(verdict.reason, 'decision_records_unclassifiable count=2')
+    ok('duplicate escaped record or conflicting identity keys cannot hide a fallback or Jev row')
   }
 
   // Pure evaluator edges.
   {
     assert.equal(evaluatePolicyEvidence({}).reason, 'exact_run_scope_required')
     assert.ok(
-      evaluatePolicyEvidence({ expectedRunId: 'run-x', decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 }, generation: null }).reason.startsWith("generation_status_unavailable"),
+      evaluatePolicyEvidence({ expectedRunId: 'run-x', decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 }, generation: null }).reason.startsWith("generation_status_unavailable"),
     )
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'other-model' },
       }).reason.startsWith("policy_model_not_typesafe"),
     )
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason.startsWith("no_jev_decisions"),
     )
     assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-y', jevCount: 5, fallbackCount: 0 },
+        decisions: { runId: 'run-y', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-y', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason.startsWith("decisions_evidence_run_mismatch"),
     )
     assert.match(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 5, fallbackCount: 0 },
+        decisions: { runId: 'run-x', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-y', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason,
       /^generation_run_mismatch/,
@@ -353,20 +536,76 @@ try {
     assert.equal(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
-        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 1 },
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 1, otherCount: 0, unclassifiableCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason,
       'fallback_decisions_present',
     )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 1, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'unrecognized_decision_sources_present count=1',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_counts_unavailable_or_invalid',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_completeness_unavailable',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: 1 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_records_unclassifiable count=1',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, otherCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_counts_unavailable_or_invalid',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: Number.NaN },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_completeness_unavailable',
+    )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 0.5, otherCount: 0, unclassifiableCount: 0 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'decision_source_counts_unavailable_or_invalid',
+    )
     assert.equal(REQUIRED_POLICY_KIND, 'typesafe')
     assert.equal(REQUIRED_POLICY_MODEL, 'typesafe-ai/jev')
-    ok('pure evaluator refuses missing, mismatched, mixed-fallback, and non-typesafe evidence')
+    ok('pure evaluator requires complete decision-source counts and refuses unknown/malformed/fallback evidence')
   }
 
   {
     const base = {
       expectedRunId: 'run-current',
-      decisions: { runId: 'run-current', source: 'fixture', jevCount: 5, fallbackCount: 0, otherCount: 0 },
+      decisions: { runId: 'run-current', source: 'fixture', jevCount: 5, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
       generation: {
         runId: 'run-current', source: 'fixture', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev',
         plannerMode: 'llm', deterministicFallbackEnabled: false,

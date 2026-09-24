@@ -1894,7 +1894,11 @@ const writeSnapshot = (id, markerLines, offset) => {
 const writeDecisions = (id, count) => {
   const lines = []
   for (let i = 0; i < count; i += 1) {
-    lines.push(JSON.stringify({ record: 'decision', ts: stamp(3 + i), runId: id, source: 'jev', kind: 'place', reason: \`rehearsal:model_authored_jev_decision_\${i}\` }))
+    lines.push(JSON.stringify({
+      record: 'decision', ts: stamp(3 + i), runId: id,
+      generationId: \`gen-\${id}\`, sourceSha: source,
+      source: 'jev', kind: 'place', reason: \`rehearsal:model_authored_jev_decision_\${i}\`,
+    }))
   }
   writeFileSync(decisionsPath, lines.join('\\n') + '\\n')
 }

@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   INHERITED_PORTAL_REASON,
+  M2_GATE_SNAPSHOT_RECORD,
   M2_REQUIRED_STAGES,
   M2_RUN_CHAIN,
   M2_RUN_RESULT,
@@ -54,7 +55,7 @@ const OTHER_RUN = 'run-m2-b'
 const SOURCE_SHA = 'a'.repeat(40)
 
 const VERIFIED_POLICY = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
   system2: {
     runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1,
@@ -63,7 +64,7 @@ const VERIFIED_POLICY = {
   },
 }
 const FALLBACK_POLICY = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
 }
 
@@ -124,6 +125,25 @@ assert.equal(parseInventoryMarker('plain prose with no counts'), null)
 ok('parseInventoryMarker reads the flat counts map and rejects prose')
 
 {
+  const dir = mkdtempSync(join(tmpdir(), 'm2-snapshot-dimension-'))
+  const logPath = join(dir, 'buddy.log')
+  writeFileSync(logPath, `${boot(RUN)}\n`)
+  writeFileSync(join(dir, `${M2_GATE_SNAPSHOT_RECORD}-${RUN}.json`), JSON.stringify({
+    record: M2_GATE_SNAPSHOT_RECORD,
+    runId: RUN,
+    bootSourceSha: SOURCE_SHA,
+    markers: [{ name: 'PORTAL_VERIFIED', verified: true, dimension: 'minecraft:the_nether', atMs: 1000 }],
+    inventory: { ender_eye: 12 },
+  }))
+  const evidence = await readRunScopedM2Evidence(RUN, { logPath, snapshotDir: dir })
+  assert.equal(evidence.status, 'valid')
+  assert.equal(evidence.sources[0].portalEvents[0].dimension, 'minecraft:the_nether')
+  assert.deepEqual(evidence.sources[0].dimensionObservations, [])
+  assert.deepEqual(evidence.sources[0].dimensionTransitions, [])
+  ok('readRunScopedM2Evidence keeps Nether portal snapshot facts diagnostic-only, never BODY transitions')
+}
+
+{
   const lines = [boot(RUN), inv({ diamond: 3 }), '[2026-09-20T10:00:02.000Z] PORTAL_LIT pos=1,2,3 dimension=minecraft:overworld']
   const scanned = scanRunLines(RUN, lines)
   assert.equal(scanned.status, 'valid')
@@ -139,8 +159,26 @@ ok('parseInventoryMarker reads the flat counts map and rejects prose')
   const unscopedTransition = '[2026-09-20T10:00:03.000Z] DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether reason=live-change source=live-world'
   const scanned = scanRunLines(RUN, [boot(RUN), foreignTransition, unscopedTransition])
   assert.deepEqual(scanned.dimensionObservations, ['minecraft:the_nether'])
+  assert.equal(scanned.dimensionTransitions.length, 1)
+  assert.deepEqual(
+    { from: scanned.dimensionTransitions[0].from, to: scanned.dimensionTransitions[0].to, source: scanned.dimensionTransitions[0].source },
+    { from: 'minecraft:overworld', to: 'minecraft:the_nether', source: 'live-world' },
+  )
+  assert.ok(Number.isFinite(scanned.dimensionTransitions[0].atMs))
   assert.deepEqual(scanned.foreignRuns, [OTHER_RUN])
   ok('an explicit foreign runId marker is excluded while unscoped markers retain active-BOOT attribution')
+}
+
+{
+  const lines = [
+    boot(RUN),
+    '[2026-09-20T10:00:02.000Z] DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether source=host-observe',
+    '[2026-09-20T10:00:03.000Z] DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:overworld source=live-world',
+    'DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether source=live-world',
+  ]
+  const scanned = scanRunLines(RUN, lines)
+  assert.deepEqual(scanned.dimensionTransitions, [])
+  ok('non-live-world, internally inconsistent, or untimed dimension claims are not transition evidence')
 }
 
 {

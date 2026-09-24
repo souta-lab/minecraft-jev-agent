@@ -5,7 +5,9 @@
 // longer satisfy M2 even if its markers and inventory look green.
 //
 // Two independent facts are required, BOTH bound to the same run R:
-//   1. decisions: at least one decision in R's log window carries source=jev
+//   1. decisions: every in-window decision has HOST provenance (runId,
+//      sourceSha, generationId) that joins the requested BOOT and an exact
+//      in-window GENERATION_READY; at least one joined decision has source=jev
 //      (`buddy-driver/logs/jev/decisions.jsonl`; fallback entries carry
 //       source=fallback).
 //   2. generation: R's generation status reports policyKind=typesafe and
@@ -37,6 +39,7 @@ const RUN_ID_RE_LINE = /\brunId=(run-[A-Za-z0-9-]+)/
 const SOURCE_SHA_RE = /^[0-9a-f]{40}$/i
 const BUILD_HASH_RE = /^[0-9a-f]{12}$/i
 const NON_MODEL_AUTHORITY_RE = /(?:^|[^a-z0-9])(?:stub|fixture|unavailable|unknown|none|fallback|deterministic|mock|fake)(?:$|[^a-z0-9])/i
+const KNOWN_NON_MODEL_DECISION_SOURCES = new Set(['reflex'])
 
 function extractTimestampMs(line) {
   const match = TS_RE.exec(line)
@@ -285,47 +288,196 @@ function buildSystem2GenerationLineage({ generations, inputs, decisions, bootSou
   }
 }
 
+function duplicateTopLevelJsonKeys(jsonText) {
+  const duplicates = new Set()
+  let index = 0
+  const skipWhitespace = () => {
+    while (/\s/.test(jsonText[index] ?? '')) index += 1
+  }
+  const readStringEnd = (start) => {
+    let cursor = start + 1
+    while (cursor < jsonText.length) {
+      if (jsonText[cursor] === '\\') {
+        cursor += 2
+        continue
+      }
+      if (jsonText[cursor] === '"') return cursor + 1
+      cursor += 1
+    }
+    return cursor
+  }
+
+  skipWhitespace()
+  if (jsonText[index] !== '{') return duplicates
+  index += 1
+  const seen = new Set()
+  while (index < jsonText.length) {
+    skipWhitespace()
+    if (jsonText[index] === '}') return duplicates
+    if (jsonText[index] !== '"') return duplicates
+    const keyEnd = readStringEnd(index)
+    let key
+    try {
+      key = JSON.parse(jsonText.slice(index, keyEnd))
+    } catch {
+      return duplicates
+    }
+    index = keyEnd
+    skipWhitespace()
+    if (jsonText[index] !== ':') return duplicates
+    index += 1
+    if (seen.has(key)) duplicates.add(key)
+    seen.add(key)
+
+    skipWhitespace()
+    if (jsonText[index] === '"') {
+      index = readStringEnd(index)
+    } else if (jsonText[index] === '{' || jsonText[index] === '[') {
+      const stack = [jsonText[index] === '{' ? '}' : ']']
+      index += 1
+      while (index < jsonText.length && stack.length > 0) {
+        const character = jsonText[index]
+        if (character === '"') {
+          index = readStringEnd(index)
+          continue
+        }
+        if (character === '{') stack.push('}')
+        else if (character === '[') stack.push(']')
+        else if (character === '}' || character === ']') stack.pop()
+        index += 1
+      }
+    } else {
+      while (index < jsonText.length && jsonText[index] !== ',' && jsonText[index] !== '}') index += 1
+    }
+
+    skipWhitespace()
+    if (jsonText[index] === ',') {
+      index += 1
+      continue
+    }
+    return duplicates
+  }
+  return duplicates
+}
+
+function decisionGenerationIndex(generations, expectedSourceSha) {
+  const byId = new Map()
+  const expectedSha = typeof expectedSourceSha === 'string' && SOURCE_SHA_RE.test(expectedSourceSha)
+    ? expectedSourceSha.toLowerCase()
+    : null
+  for (const generation of generations) {
+    const id = generation?.generationId
+    if (typeof id !== 'string' || id.length === 0) continue
+    const entries = byId.get(id) ?? []
+    entries.push(generation)
+    byId.set(id, entries)
+  }
+  const eligible = new Map()
+  for (const [id, entries] of byId) {
+    if (entries.length !== 1 || expectedSha === null) continue
+    const [generation] = entries
+    const sourceSha = typeof generation.sourceSha === 'string' && SOURCE_SHA_RE.test(generation.sourceSha)
+      ? generation.sourceSha.toLowerCase()
+      : null
+    if (sourceSha !== expectedSha || !Number.isFinite(generation.tsMs)) continue
+    eligible.set(id, { tsMs: generation.tsMs, sourceSha })
+  }
+  return { eligible, expectedSha }
+}
+
 /**
- * Count decision sources inside R's window. Decisions carry no runId, so the
- * bracketed window IS the run binding; an unbounded window is refused upstream.
+ * Count only decision rows whose HOST provenance joins this exact BOOT run,
+ * source SHA, and an in-window GENERATION_READY record. Timestamp proximity
+ * alone is not identity: legacy rows with missing/null identity are UNKNOWN.
  */
-export async function countDecisionSources(decisionsPath, startMs, endMs) {
+export async function countDecisionSources(decisionsPath, startMs, endMs, {
+  runId = null,
+  sourceSha = null,
+  generations = [],
+} = {}) {
   if (!existsSync(decisionsPath)) return null
   let jevCount = 0
   let fallbackCount = 0
   let otherCount = 0
+  let unclassifiableCount = 0
   let firstJevTs = null
   let lastJevTs = null
+  const { eligible: eligibleGenerations, expectedSha } = decisionGenerationIndex(generations, sourceSha)
   const rl = createInterface({ input: createReadStream(decisionsPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
-    if (!line.includes('"record":"decision"')) continue
     let record
     try {
       record = JSON.parse(line)
     } catch {
+      const rawTs = /\"ts\"\s*:\s*\"([^\"]+)\"/.exec(line)?.[1] ?? null
+      const tsMs = rawTs === null ? Number.NaN : Date.parse(rawTs)
+      // A malformed row without a trustworthy timestamp cannot be ruled out of
+      // the requested run's bracketed window. Keep the uncertainty explicit;
+      // silently dropping it could hide a fallback decision in that run.
+      if (!Number.isFinite(tsMs) || (tsMs >= startMs && tsMs <= endMs)) {
+        unclassifiableCount += 1
+      }
       continue
     }
-    if (record?.record !== 'decision') continue
+    // JSON permits escaped characters in object keys. Parse the whole JSONL
+    // record before deciding whether it is a decision; a textual prefilter for
+    // `"record":"decision"` can miss `"rec\\u006frd":"decision"` and
+    // silently hide a fallback row from the authority gate.
+    const duplicateKeys = duplicateTopLevelJsonKeys(line)
+    const decisionCandidate = record?.record === 'decision' || duplicateKeys.has('record')
+    if (!decisionCandidate) continue
     const tsMs = typeof record.ts === 'string' ? Date.parse(record.ts) : Number.NaN
-    if (!Number.isFinite(tsMs) || tsMs < startMs || tsMs > endMs) continue
+    if (!Number.isFinite(tsMs)) {
+      unclassifiableCount += 1
+      continue
+    }
+    if (tsMs < startMs || tsMs > endMs) continue
+
+    // Duplicate JSON object keys make JSON.parse's winner implementation
+    // dependent. In particular, an earlier escaped `record` or identity key
+    // could be hidden by a later value, so preserve the uncertainty.
+    if (duplicateKeys.size > 0) {
+      unclassifiableCount += 1
+      continue
+    }
+    const generationId = record.generationId
+    const joinedGeneration = typeof generationId === 'string' ? eligibleGenerations.get(generationId) : null
+    const decisionSha = typeof record.sourceSha === 'string' && SOURCE_SHA_RE.test(record.sourceSha)
+      ? record.sourceSha.toLowerCase()
+      : null
+    const identityValid =
+      typeof runId === 'string' && record.runId === runId &&
+      expectedSha !== null && decisionSha === expectedSha &&
+      joinedGeneration !== null && joinedGeneration !== undefined &&
+      joinedGeneration.sourceSha === decisionSha && joinedGeneration.tsMs <= tsMs
+    if (!identityValid) {
+      unclassifiableCount += 1
+      continue
+    }
+
     if (record.source === 'jev') {
       jevCount += 1
       if (firstJevTs === null) firstJevTs = record.ts
       lastJevTs = record.ts
     } else if (record.source === 'fallback') {
       fallbackCount += 1
+    } else if (KNOWN_NON_MODEL_DECISION_SOURCES.has(record.source)) {
+      otherCount += 1
     } else {
       otherCount += 1
+      unclassifiableCount += 1
     }
   }
-  return { jevCount, fallbackCount, otherCount, firstJevTs, lastJevTs }
+  return { jevCount, fallbackCount, otherCount, unclassifiableCount, firstJevTs, lastJevTs }
 }
 
 /**
  * Load and run-bind the policy evidence for `runId`. `socket` is the optional
  * resident `report` status ({ runId, policyKind, policyModel }); it is the
- * strongest binding because it is keyed by the live runId. runner.out is the
- * file fallback, usable only inside R's bracketed window.
+ * strongest policy-status binding because it is keyed by the live runId.
+ * Decision rows also need explicit HOST provenance joined to the BOOT SHA and
+ * in-window GENERATION_READY records; runner.out is used only inside R's
+ * bracketed window.
  */
 export async function loadPolicyEvidence({
   runId,
@@ -425,7 +577,11 @@ export async function loadPolicyEvidence({
     decisions: system2InWindow,
   }
 
-  const counts = await countDecisionSources(decisionsPath, window.startMs, window.endMs)
+  const counts = await countDecisionSources(decisionsPath, window.startMs, window.endMs, {
+    runId,
+    sourceSha: bootSourceSha,
+    generations: inWindow,
+  })
   const decisions =
     counts === null
       ? null
@@ -453,6 +609,7 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
     jevDecisions: Number.isFinite(decisions?.jevCount) ? decisions.jevCount : null,
     fallbackDecisions: Number.isFinite(decisions?.fallbackCount) ? decisions.fallbackCount : null,
     otherDecisions: Number.isFinite(decisions?.otherCount) ? decisions.otherCount : null,
+    unclassifiableDecisionRecords: Number.isFinite(decisions?.unclassifiableCount) ? decisions.unclassifiableCount : null,
     firstJevTs: decisions?.firstJevTs ?? null,
     lastJevTs: decisions?.lastJevTs ?? null,
     generationRunId: generation?.runId ?? null,
@@ -470,6 +627,19 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
   if (decisions.runId !== expectedRunId) {
     return outcome(2, 'UNKNOWN', `decisions_evidence_run_mismatch expected=${expectedRunId} observed=${decisions.runId ?? 'unknown'}`, facts)
   }
+  if (!Number.isInteger(decisions.unclassifiableCount) || decisions.unclassifiableCount < 0) {
+    return outcome(2, 'UNKNOWN', 'decision_source_completeness_unavailable', facts)
+  }
+  if (decisions.unclassifiableCount > 0) {
+    return outcome(2, 'UNKNOWN', `decision_records_unclassifiable count=${decisions.unclassifiableCount}`, facts)
+  }
+  // Each source class must be explicitly counted. Missing fallback/other
+  // counts cannot be interpreted as zero; otherwise partial evidence could
+  // claim an all-Jev run while hiding a non-model decision.
+  const sourceCounts = [decisions.jevCount, decisions.fallbackCount, decisions.otherCount]
+  if (!sourceCounts.every((count) => Number.isInteger(count) && count >= 0)) {
+    return outcome(2, 'UNKNOWN', 'decision_source_counts_unavailable_or_invalid', facts)
+  }
   if (!Number.isFinite(decisions.jevCount) || decisions.jevCount < 1) {
     const reason = Number.isFinite(decisions.fallbackCount) && decisions.fallbackCount > 0
       ? 'decisions_fallback_only'
@@ -478,6 +648,9 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
   }
   if (Number.isFinite(decisions.fallbackCount) && decisions.fallbackCount > 0) {
     return outcome(2, 'UNKNOWN', 'fallback_decisions_present', facts)
+  }
+  if (decisions.otherCount > 0) {
+    return outcome(2, 'UNKNOWN', `unrecognized_decision_sources_present count=${decisions.otherCount}`, facts)
   }
   if (generation === null || typeof generation !== 'object') {
     return outcome(2, 'UNKNOWN', 'generation_status_unavailable', facts)

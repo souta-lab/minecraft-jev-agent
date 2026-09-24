@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { scanRunLines } from './m2-gate.mjs'
+import { M2_GATE_SNAPSHOT_RECORD, scanRunLines } from './m2-gate.mjs'
 import {
   M3_REQUIRED_CONDITIONS,
   M3_RUN_RESULT,
@@ -55,7 +55,7 @@ const exactSource = (runId = RUN, sourceSha = SOURCE_SHA) => ({
 })
 
 const VERIFIED_POLICY = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
   generation: {
     runId: RUN,
     source: 'fixture:generation',
@@ -70,7 +70,7 @@ const VERIFIED_POLICY = {
   },
 }
 const FALLBACK_POLICY = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0, unclassifiableCount: 0 },
   generation: {
     runId: RUN,
     source: 'fixture:generation',
@@ -137,6 +137,7 @@ function evidenceFrom(lines, runId = RUN) {
         portalEvents: scanned.portalEvents,
         inventorySamples: scanned.inventorySamples,
         dimensionObservations: scanned.dimensionObservations ?? [],
+        dimensionTransitions: scanned.dimensionTransitions ?? [],
       },
     ],
     mismatches: [],
@@ -262,7 +263,23 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     system2: { ...VERIFIED_POLICY.system2, identityStatus: 'unknown', identityReason: 'decision generation mismatch' },
   })
   assert.match(badSystem2Lineage.reason, /^system2_generation_identity_unverified/, badSystem2Lineage.reason)
-  ok('M3 authority requires typesafe + Jev, one run/source-consistent System2 generation, and no fallback')
+  const unknownSource = evaluateM3AuthorityEvidence({
+    expectedRunId: RUN,
+    decisions: { ...VERIFIED_POLICY.decisions, otherCount: 1 },
+    generation: VERIFIED_POLICY.generation,
+    system2: VERIFIED_POLICY.system2,
+  })
+  assert.equal(unknownSource.code, 2)
+  assert.match(unknownSource.reason, /^unrecognized_decision_sources_present/, unknownSource.reason)
+  const missingCounts = evaluateM3AuthorityEvidence({
+    expectedRunId: RUN,
+    decisions: { runId: RUN, jevCount: 1, fallbackCount: 0, unclassifiableCount: 0 },
+    generation: VERIFIED_POLICY.generation,
+    system2: VERIFIED_POLICY.system2,
+  })
+  assert.equal(missingCounts.code, 2)
+  assert.equal(missingCounts.reason, 'decision_source_counts_unavailable_or_invalid')
+  ok('M3 authority requires complete clean decision counts, consistent System2 lineage, and fallback disabled')
 }
 
 // ---------------------------------------------------------------------------
@@ -372,13 +389,16 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     const runLog = [boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 0 })]
     const runnerLog = [
       boot(RUN),
-      '[2026-09-20T10:00:00.100Z] GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false',
+      `[2026-09-20T10:00:00.100Z] GENERATION_READY id=gen-test generationId=gen-test sourceSha=${SOURCE_SHA} buildHash=1234567890ab system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false`,
       '[2026-09-20T10:01:00.000Z] HOST_LOCK released reason=fixture',
     ]
-    const decisionLines = [JSON.stringify({ record: 'decision', ts: '2026-09-20T10:00:01.000Z', source: 'jev' })]
+    const decisionLines = [JSON.stringify({
+      record: 'decision', ts: '2026-09-20T10:00:01.000Z', source: 'jev', runId: RUN,
+      generationId: 'gen-test', sourceSha: SOURCE_SHA,
+    })]
     const observedPredicates = [
       { id: 'ender_eyes', satisfied: true, observedAtMs: 1, observedAt: new Date(1).toISOString(), source: 'host-observe:rung:ender_eyes', evidence: {} },
-      { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
+      { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'log:PORTAL_LIT', evidence: { dimension: 'minecraft:the_nether' } },
     ]
     writeFileSync(logPath, `${runLog.join('\n')}\n`)
     writeFileSync(runnerOutPath, `${runnerLog.join('\n')}\n`)
@@ -400,7 +420,8 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     assert.equal(text.code, 2, `${text.stderr}\n${text.stdout}`)
     assert.match(text.stdout, new RegExp(`sourceSha: ${SOURCE_SHA}`), text.stdout)
     assert.match(text.stdout, new RegExp(`m3_predicates: runId=${RUN} sourceSha=${SOURCE_SHA}`), text.stdout)
-    assert.match(text.stdout, /mismatches=none/, text.stdout)
+    assert.match(text.stdout, /mismatches=unverified_nether_predicate_source_ignored/, text.stdout)
+    assert.match(text.stdout, /nether_reached: UNKNOWN/, text.stdout)
     assert.match(text.stdout, /current_inventory_observation_missing/, text.stdout)
 
     const json = runGateCli([...commonArgs, '--json'])
@@ -523,10 +544,9 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
 // 6. RED: mixed-run evidence can never be joined into a PASS
 // ---------------------------------------------------------------------------
 {
-  // Run A has only 4 pearls; run B proves the full 12 eyes.
-  // M3 also requires live proof of Nether arrival, so each run in this fixture records the dimension
-  // it observed; the cross-run negative below is about run binding, not about the Nether.
-  const mixed = [boot(RUN), inv({ ender_pearl: 4 }), boot(OTHER_RUN), dimensionObserved('minecraft:the_nether', OTHER_RUN), EYES_READY]
+  // Run A has only 4 pearls; run B proves the full 12 eyes and independently
+  // logs its body transition. The cross-run negative below is about run binding.
+  const mixed = [boot(RUN), inv({ ender_pearl: 4 }), boot(OTHER_RUN), dimensionTransition('minecraft:the_nether', OTHER_RUN), EYES_READY]
   const asA = await judge({ lines: mixed, expectedRunId: RUN })
   assert.equal(asA.code, 2, asA.text)
   assert.match(asA.text, /ender_eye_ready: UNKNOWN/, asA.text)
@@ -566,6 +586,25 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   ok('an injected evidence bundle naming another run cannot PASS')
 }
 
+{
+  // A missing scope is just as unsafe as a different scope: otherwise a
+  // caller-provided bundle can borrow this run's source SHA and terminal report
+  // while supplying another run's inventory and BODY transition.
+  const unscopedEvidence = evidenceFrom([boot(RUN), dimensionTransition('minecraft:the_nether'), EYES_READY])
+  delete unscopedEvidence.runId
+  const result = evaluateM3Gate({
+    expectedRunId: RUN,
+    evidence: unscopedEvidence,
+    policy: { code: 0, status: 'VERIFIED', reason: 'fixture-policy-pass' },
+    currentInventoryObservation: currentObservation({ ender_eye: 12 }),
+    sourceExactness: exactSource(),
+  })
+  assert.equal(result.status, 'UNKNOWN')
+  assert.equal(result.reason, `evidence_run_mismatch expected=${RUN} observed=unknown`)
+  assert.notEqual(result.status, 'PASS')
+  ok('an injected evidence bundle with missing runId cannot PASS')
+}
+
 // ---------------------------------------------------------------------------
 // 7. RED: a run-scoped snapshot must be bound to both runId and BOOT source SHA
 // ---------------------------------------------------------------------------
@@ -573,7 +612,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const dir = mkdtempSync(join(tmpdir(), 'm3-gate-'))
   const snapshot = {
     schemaVersion: 1,
-    record: 'm2-snapshot',
+    record: M2_GATE_SNAPSHOT_RECORD,
     runId: RUN,
     atMs: 1,
     at: '2026-09-20T10:00:07.000Z',
@@ -624,6 +663,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     dimension: 'minecraft:the_nether',
     counts: { ender_eye: 12 },
   }
+  writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify({ ...snapshot, bootSourceSha: SOURCE_SHA }))
   const current = capture()
   const currentCode = await runM3Gate({
     expectedRunId: RUN,
@@ -635,7 +675,8 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     write: current.write,
   })
   assert.equal(currentCode, 2, current.text())
-  assert.match(current.text(), /run_evidence_source_sha_unverified reason=run_source_sha_snapshot_mismatch/, current.text())
+  assert.match(current.text(), /nether_reached: UNKNOWN/, current.text())
+  assert.match(current.text(), /m3_stages_incomplete:nether_reached/, current.text())
   assert.doesNotMatch(current.text(), /status=PASS/)
 
   // The same run and log SHA do not validate a snapshot copied from another
@@ -659,6 +700,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   // the source SHA independently observed in the BOOT log.
   writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify({ ...snapshot, bootSourceSha: SOURCE_SHA }))
   const bound = capture()
+  writeFileSync(sourceLog, `${boot(RUN)}\n${dimensionTransition('minecraft:the_nether')}\n`)
   const boundCode = await runM3Gate({
     expectedRunId: RUN,
     logPath: sourceLog,
@@ -690,7 +732,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   })
   assert.equal(code2, 2, out2.text())
   assert.doesNotMatch(out2.text(), /status=PASS/)
-  ok('a run-scoped snapshot proves historical progress only; current HOST inventory is required for PASS and cannot be borrowed across runs')
+  ok('a portal dimension in the same-source snapshot cannot prove Nether arrival; a logged live body transition can')
 }
 
 // ---------------------------------------------------------------------------
@@ -787,11 +829,32 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
       { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
     ],
   }
-  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: section, currentInventoryObservation: terminal, sourceExactness: exactSource() })
+  const unbackedUpgrade = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, dimensions: ['minecraft:the_nether'], milestonePredicates: section, currentInventoryObservation: terminal, sourceExactness: exactSource() })
+  assert.equal(unbackedUpgrade.status, 'UNKNOWN', 'a sticky predicate cannot replace the required body transition')
+  assert.equal(unbackedUpgrade.conditions.nether_reached, 'UNKNOWN')
+  assert.equal(unbackedUpgrade.facts.milestonePredicates.predicates.find((p) => p.id === 'nether_reached').satisfied, null)
+  assert.ok(unbackedUpgrade.facts.milestonePredicates.mismatches.includes('unverified_nether_predicate_source_ignored'))
+  const injectedTransition = evaluateM3Gate({
+    expectedRunId: RUN,
+    evidence,
+    policy,
+    dimensionTransitions: [
+      { from: 'minecraft:overworld', to: 'minecraft:the_nether', dimension: 'minecraft:the_nether', atMs: 2, source: 'live-world' },
+    ],
+    currentInventoryObservation: terminal,
+    sourceExactness: exactSource(),
+  })
+  assert.equal(injectedTransition.conditions.nether_reached, 'UNKNOWN', 'the pure verdict consumes transitions from its run-scoped evidence source only')
+  const evidenceWithTransition = evidenceFrom([
+    boot(RUN),
+    dimensionTransition('minecraft:the_nether'),
+    inv({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 0 }),
+  ])
+  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence: evidenceWithTransition, policy, milestonePredicates: section, currentInventoryObservation: terminal, sourceExactness: exactSource() })
   assert.equal(upgraded.status, 'PASS', 'a truly observed predicate is sufficient proof')
   assert.equal(upgraded.conditions.ender_eye_ready, 'PASS')
   assert.equal(upgraded.conditions.nether_reached, 'PASS')
-  ok('a truly observed predicate upgrades the condition to PASS')
+  ok('a same-run body transition plus a bound true predicate upgrades nether_reached')
 
   const falseSection = {
     ...section,
@@ -820,7 +883,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   const dir = mkdtempSync(join(tmpdir(), 'm3-predicates-'))
   try {
     const sourceLog = join(dir, 'source.log')
-    writeFileSync(sourceLog, `${boot(RUN)}\n`)
+    writeFileSync(sourceLog, `${boot(RUN)}\n${dimensionTransition('minecraft:the_nether')}\n`)
     writeFileSync(
       join(dir, `milestone-predicates-${RUN}.json`),
       JSON.stringify({
@@ -840,7 +903,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     const out = capture()
     const code = await runM3Gate({
       expectedRunId: RUN,
-      readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
+      readEvidence: async () => evidenceFrom([boot(RUN), dimensionTransition('minecraft:the_nether'), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
       policyEvidence: VERIFIED_POLICY,
       policySocket: { runId: RUN, currentInventoryObservation: currentObservation({ ender_eye: 12 }) },
       logPath: sourceLog,
@@ -856,7 +919,7 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
     const foreign = capture()
     const foreignCode = await runM3Gate({
       expectedRunId: RUN,
-      readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
+      readEvidence: async () => evidenceFrom([boot(RUN), dimensionTransition('minecraft:the_nether'), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
       policyEvidence: VERIFIED_POLICY,
       logPath: sourceLog,
       runnerOutPath: sourceLog,
@@ -911,16 +974,18 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   assert.match(asForeignTransition.text, /m3_stages_incomplete:nether_reached/, asForeignTransition.text)
   assert.doesNotMatch(asForeignTransition.text, /status=PASS/)
 
-  // Positive control: SPAWN and DEATH report where the BODY is / died, so they do prove arrival.
+  // A generation that starts in the Nether has only a current-location
+  // observation, not an observed transition into the dimension.
   const spawnedInNether = [
     boot(RUN),
     inv({ ender_pearl: 12, blaze_rod: 7, blaze_powder: 14, ender_eye: 12 }),
     '[2026-09-20T10:00:04.000Z] SPAWN pos=2.5,65.0,0.5 health=20 username=AI_Buddy dimension=minecraft:the_nether worldEpoch=1',
   ]
   const asSpawn = await judge({ lines: spawnedInNether })
-  assert.match(asSpawn.text, /nether_reached: PASS/, asSpawn.text)
-  assert.equal(asSpawn.code, 0, asSpawn.text)
-  ok("nether_reached accepts only the requested run body's dimension markers (never a foreign run, portal, site or route target)")
+  assert.match(asSpawn.text, /nether_reached: UNKNOWN/, asSpawn.text)
+  assert.equal(asSpawn.code, 2, asSpawn.text)
+  assert.doesNotMatch(asSpawn.text, /status=PASS/, asSpawn.text)
+  ok('Nether location-only evidence cannot replace an independently logged body transition')
 }
 
 console.log(`m3-gate-test ${checks}/${checks} PASS`)

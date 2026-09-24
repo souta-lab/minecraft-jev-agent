@@ -517,6 +517,32 @@ function normalizeDimension(dimension) {
   return typeof dimension === 'string' ? dimension.replace(/^minecraft:/, '').toLowerCase() : null
 }
 
+/** Parse only the resident's explicit body-dimension transition event. */
+function parseBodyDimensionTransition(line) {
+  const markerIndex = line.indexOf('DIMENSION_TRANSITION')
+  if (markerIndex === -1) return null
+  const fields = line.slice(markerIndex)
+  const field = (name) => new RegExp(`(?:^|\\s)${name}=(\\S+)`).exec(fields)?.[1] ?? null
+  const from = field('from')
+  const to = field('to')
+  const dimension = field('dimension')
+  const source = field('source')
+  if (from === null || to === null || dimension === null || source !== 'live-world') return null
+  if (normalizeDimension(to) !== normalizeDimension(dimension)) return null
+  const timestamp = /^\[([^\]]+)\]/.exec(line)?.[1] ?? null
+  const atMs = timestamp === null ? null : Date.parse(timestamp)
+  if (!Number.isFinite(atMs)) return null
+  return {
+    from,
+    to,
+    dimension,
+    source,
+    reason: field('reason'),
+    atMs,
+    ...(timestamp === null ? {} : { ts: timestamp }),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ordered chain + known failures
 // ---------------------------------------------------------------------------
@@ -950,6 +976,7 @@ export function scanRunLines(runId, lines) {
   const portalEvents = []
   const inventorySamples = []
   const dimensionObservations = []
+  const dimensionTransitions = []
   const foreignRuns = new Set()
   const bootSources = []
   let activeRunId = null
@@ -984,6 +1011,10 @@ export function scanRunLines(runId, lines) {
     if (inventory !== null) inventorySamples.push(inventory)
     const dimension = BODY_DIMENSION_MARKER_RE.test(line) ? DIMENSION_RE.exec(line) : null
     if (dimension !== null) dimensionObservations.push(dimension[1])
+    if (/\bDIMENSION_TRANSITION\b/.test(line)) {
+      const transition = parseBodyDimensionTransition(line)
+      if (transition !== null) dimensionTransitions.push(transition)
+    }
   }
   if (!bootSeen) {
     return {
@@ -992,6 +1023,7 @@ export function scanRunLines(runId, lines) {
       portalEvents: [],
       inventorySamples: [],
       dimensionObservations: [],
+      dimensionTransitions: [],
       sourceSha: null,
       sourceShaReason: 'run_boot_boundary_missing',
     }
@@ -1001,6 +1033,7 @@ export function scanRunLines(runId, lines) {
     portalEvents,
     inventorySamples,
     dimensionObservations,
+    dimensionTransitions,
     foreignRuns: [...foreignRuns],
     ...resolveBootSourceSha(bootSources),
   }
@@ -1014,6 +1047,8 @@ export async function readM2Log(runId, { logPath = M2_GATE_LOG } = {}) {
       path: logPath,
       portalEvents: [],
       inventorySamples: [],
+      dimensionObservations: [],
+      dimensionTransitions: [],
       sourceSha: null,
       sourceShaReason: 'run_log_unavailable',
     }
@@ -1130,9 +1165,11 @@ export async function readRunScopedM2Evidence(
         path: snapshot.path,
         portalEvents: snapshot.portalEvents,
         inventorySamples: snapshot.inventorySamples,
-        // Dimension is only recorded on portal markers; the M3 gate reports it as
-        // an intermediate fact without requiring a portal chain.
-        dimensionObservations: snapshot.portalEvents.map((event) => event.dimension).filter((value) => typeof value === 'string'),
+        // M2 snapshots record portal facts, whose `dimension` describes the portal
+        // event. They do not contain body-dimension transitions and cannot prove
+        // that the resident entered the Nether.
+        dimensionObservations: [],
+        dimensionTransitions: [],
       })
       snapshotTaken = true
       selectedSnapshot = snapshot
@@ -1148,13 +1185,14 @@ export async function readRunScopedM2Evidence(
     seenLogs.add(candidate)
     const log = await readM2Log(runId, { logPath: candidate })
     if (log.status === 'valid') bootSourceRecords.push({ sourceSha: log.sourceSha ?? null, sourceShaReason: log.sourceShaReason ?? 'run_source_sha_unavailable' })
-    if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0)) {
+    if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0 || log.dimensionTransitions.length > 0)) {
       sources.push({
         name: 'log',
         path: log.path,
         portalEvents: log.portalEvents,
         inventorySamples: log.inventorySamples,
         dimensionObservations: log.dimensionObservations ?? [],
+        dimensionTransitions: log.dimensionTransitions ?? [],
       })
       break
     }

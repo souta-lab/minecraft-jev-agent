@@ -15,7 +15,7 @@ const RUN = 'run-m2-live'
 const OTHER = 'run-m2-other'
 const SOURCE_SHA = 'c'.repeat(40)
 const VERIFIED_POLICY = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 2, fallbackCount: 0, otherCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 2, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
   system2: {
     runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1,
@@ -24,7 +24,7 @@ const VERIFIED_POLICY = {
   },
 }
 const FALLBACK_POLICY = {
-  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 2, otherCount: 0 },
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 2, otherCount: 0, unclassifiableCount: 0 },
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
 }
 const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=${SOURCE_SHA} worldEpoch=1`
