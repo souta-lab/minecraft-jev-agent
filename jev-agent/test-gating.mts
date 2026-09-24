@@ -9,7 +9,7 @@ import type { Candidate } from './src/candidates.ts'
 import { decisionIdFrom } from './src/jev.ts'
 import type { JevAnswer, JevResult } from './src/jev.ts'
 import { gateDanger, DANGER_CONFIDENCE_THRESHOLD } from './src/gating.ts'
-import { shouldInterruptAttackLease } from './src/scheduler.ts'
+import { shouldPreemptActiveActionLease } from './src/scheduler.ts'
 
 function dangerAnswer(value: number | null, confidence: number | null): JevAnswer {
   return {
@@ -92,8 +92,15 @@ test('a low-confidence danger score remains visible as unqualified evidence', ()
 })
 
 test('exact code-owned low-health safety still interrupts ATTACK and narrows work choices', () => {
-  assert.equal(shouldInterruptAttackLease('hp_changed', CRITICAL_COMBAT_HEALTH, CRITICAL_COMBAT_HEALTH), true)
-  assert.equal(shouldInterruptAttackLease('hp_changed', CRITICAL_COMBAT_HEALTH + 0.01, CRITICAL_COMBAT_HEALTH), false)
+  assert.equal(
+    shouldPreemptActiveActionLease('hp_changed', 'ATTACK', CRITICAL_COMBAT_HEALTH, CRITICAL_COMBAT_HEALTH),
+    true,
+  )
+  assert.equal(
+    shouldPreemptActiveActionLease('hp_changed', 'ATTACK', CRITICAL_COMBAT_HEALTH + 0.01, CRITICAL_COMBAT_HEALTH),
+    false,
+  )
+  assert.equal(shouldPreemptActiveActionLease('action_completed', 'ATTACK', 1, CRITICAL_COMBAT_HEALTH), false)
   const work = candidate('MINE:b1', 'MINE')
   const criticalChoices = restrictCandidatesAtCriticalHealth(
     {
@@ -103,6 +110,4 @@ test('exact code-owned low-health safety still interrupts ATTACK and narrows wor
     [attack, retreat, work],
   )
   assert.deepEqual(criticalChoices.map(({ id }) => id), ['ATTACK:e7', 'RETREAT:p1'])
-  const controllerSource = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
-  assert.match(controllerSource, /shouldInterruptAttackLease\(trigger, this\.bot\.health, CRITICAL_COMBAT_HEALTH, air\)/)
 })
