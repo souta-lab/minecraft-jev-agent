@@ -236,7 +236,9 @@ test('Reach contract uses configured Mission when ladder root and GoalQueue head
     assert.equal(fixture.reachCandidateCalls[0]?.missionItem, configuredMission.item)
     assert.equal(fixture.reachCandidateCalls[0]?.worldGoalItem, configuredMission.item)
     assert.deepEqual(fixture.claimed, ['MOVE:oak_log@8,64,0'])
-    assert.ok(fixture.events.some(({ line }) => line.includes('VTR_TRANSITION_COMMIT')))
+    const commitEvent = fixture.events.find(({ line }) => line.includes('VTR_TRANSITION_COMMIT'))
+    assert.ok(commitEvent)
+    assert.equal(commitEvent.detail.contractHash, active.contract.contractHash)
     assert.equal(fixture.requestedDecisions.length, 0)
     assert.equal(fixture.events.some(({ line }) => line.includes('VTR_LEGACY_REACH_MOVE_WITHHELD')), false)
   }

@@ -4797,6 +4797,7 @@ export class JevController {
       `VTR_TRANSITION_COMMIT id=${contract.transitionId} mission=${mission.id} ensures=${desired.id} contractHash=${contract.contractHash}`,
       {
         transitionId: contract.transitionId,
+        contractHash: contract.contractHash,
         mission,
         desiredPredicate: desired,
         requires: contract.requires,
