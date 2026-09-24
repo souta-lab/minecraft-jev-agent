@@ -408,6 +408,109 @@ const unboundProviderFailureSnapshot = buildObserverSnapshot({
 })
 assert.deepEqual(unboundProviderFailureSnapshot.authority.jevRecentFailures, [])
 
+const recoveryBoot = observerBoot('run-1', '2026-09-21T12:00:00.000Z')
+recoveryBoot.detail.worldKey = { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 }
+const failedGeneration = 'gen-failed'
+const recoveryModelAvailability = {
+  state: 'degraded',
+  consecutiveFailures: 1,
+  retryAt: '2026-09-21T12:00:29.000Z',
+  lastFailure: {
+    ts: '2026-09-21T12:00:09.500Z',
+    generationId: failedGeneration,
+    context: 'jev-authority',
+    attempts: 1,
+    error: 'GatewayInternalServerError: Service temporarily unavailable.',
+    authorityKind: 'jev',
+    authority: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' },
+    sourceSha: observerSourceSha,
+  },
+  recoveredAt: null,
+}
+const { generationId: _discardedGeneration, worldKey: _discardedWorld, ...recoveryReportData } = report.data
+const recoveryReport = {
+  ok: true,
+  data: {
+    ...recoveryReportData,
+    runId: 'run-1',
+    modelAvailability: recoveryModelAvailability,
+  },
+}
+const recoveryCall = {
+  ...gatewayFailure,
+  callId: 'recovery-run-window-call',
+  ts: '2026-09-21T12:00:09.100Z',
+  state: {
+    semantic: {
+      world: { dimension: 'overworld', worldEpoch: 1, generationId: null },
+    },
+  },
+}
+const recoverySnapshot = buildObserverSnapshot({
+  report: recoveryReport,
+  events: [],
+  runBoot: recoveryBoot,
+  runMetadata: observerRunMetadata('run-1', failedGeneration),
+  runGenerationReady: null,
+  jevCalls: [
+    { ...recoveryCall, callId: 'prior-run-call', ts: '2026-09-21T11:59:59.000Z' },
+    recoveryCall,
+    { ...recoveryCall, callId: 'prior-world-call', state: { semantic: { world: { dimension: 'nether', worldEpoch: 2, generationId: null } } } },
+    { ...recoveryCall, callId: 'wrong-generation-call', generationId: 'gen-other' },
+  ],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+})
+const recoverySummary = buildAiSummary(recoverySnapshot, { now: Date.parse('2026-09-21T12:00:12.000Z') })
+assert.equal(recoverySnapshot.resident.generationId, null)
+assert.equal(recoverySnapshot.resident.generationBoundary, null)
+assert.equal(recoverySummary.status.availabilityReason, 'MODEL_UNAVAILABLE')
+assert.equal(recoverySummary.authority.jevRecentFailures.length, 1)
+assert.equal(recoverySummary.authority.jevRecentFailures[0].callId, 'recovery-run-window-call')
+assert.equal(recoverySummary.authority.jevRecentFailures[0].binding.failedGenerationId, failedGeneration)
+assert.equal(recoverySummary.authority.jevRecentFailures[0].binding.confidence, 'run-window-inferred')
+assert.equal(recoverySummary.authority.jevRecentFailures[0].binding.method, 'BOOT-runId+sourceSha+lastFailure+run-window+world-epoch+dimension-when-observed')
+const exactGenerationSnapshot = buildObserverSnapshot({
+  report: recoveryReport,
+  events: [],
+  runBoot: recoveryBoot,
+  runMetadata: observerRunMetadata('run-1', failedGeneration),
+  runGenerationReady: null,
+  jevCalls: [{ ...recoveryCall, callId: 'exact-failed-generation-call', generationId: failedGeneration }],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+})
+assert.equal(exactGenerationSnapshot.authority.jevRecentFailures[0].binding.confidence, 'direct')
+
+const sourceMismatchBoot = { ...recoveryBoot, detail: { ...recoveryBoot.detail, source: 'b'.repeat(40) } }
+const sourceMismatchSnapshot = buildObserverSnapshot({
+  report: recoveryReport,
+  events: [],
+  runBoot: sourceMismatchBoot,
+  runMetadata: observerRunMetadata('run-1', failedGeneration),
+  runGenerationReady: null,
+  jevCalls: [recoveryCall],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+})
+assert.deepEqual(sourceMismatchSnapshot.authority.jevRecentFailures, [])
+const failureSourceMismatchSnapshot = buildObserverSnapshot({
+  report: {
+    ...recoveryReport,
+    data: {
+      ...recoveryReport.data,
+      modelAvailability: {
+        ...recoveryModelAvailability,
+        lastFailure: { ...recoveryModelAvailability.lastFailure, sourceSha: 'b'.repeat(40) },
+      },
+    },
+  },
+  events: [],
+  runBoot: recoveryBoot,
+  runMetadata: observerRunMetadata('run-1', failedGeneration),
+  runGenerationReady: null,
+  jevCalls: [recoveryCall],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+})
+assert.deepEqual(failureSourceMismatchSnapshot.authority.jevRecentFailures, [])
+
 const toolChoiceEvents = [
   observerBoot('run-1', '2026-09-21T12:01:00.000Z'),
   parseBuddyLogLine('[2026-09-21T12:01:10.000Z] TOOL_CHOICE actionId=MINE:b1 toolName=mine tier=wood generationId=gen-7'),

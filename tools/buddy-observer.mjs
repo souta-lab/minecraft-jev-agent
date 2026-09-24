@@ -885,6 +885,10 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     worldKey,
     generationId,
     generationBound,
+    boot,
+    sourceCommit,
+    sourceCommitConflict,
+    modelAvailability: data?.modelAvailability ?? status?.modelAvailability ?? null,
     observedAt: now,
   })
 
@@ -895,7 +899,7 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       available: data !== null,
       connected: data?.connected ?? false,
       frozen: data?.frozen ?? null,
-      modelAvailability: data?.modelAvailability ?? null,
+      modelAvailability: data?.modelAvailability ?? status?.modelAvailability ?? null,
       runId,
       generationId,
       generationHash: data?.generationHash ?? build?.detail?.hash ?? null,
@@ -1481,32 +1485,68 @@ function projectProviderDiagnostics(value) {
 
 /**
  * Surface bounded transport failures to the observer without reading prompts,
- * request bodies, or arbitrary provider headers. Jev JSONL has no direct runId;
- * bind it to the active run/generation only by its exact start-time window and
- * matching world epoch/dimension. Older call records may lack generationId, so
- * those joins are explicitly marked as time-window inferences.
+ * request bodies, or arbitrary provider headers. Jev JSONL has no direct runId.
+ * Prefer the active generation boundary; while the host is in model-recovery
+ * backoff and has no active generation, permit only a run-window join bound by
+ * the current BOOT runId/source plus the host's Jev lastFailure record.
  */
 export function projectJevProviderFailures({
   jevCalls = [], runId = null, runStartedAt = NaN, worldKey = null, generationId = null,
-  generationBound = false, observedAt = Date.now(),
+  generationBound = false, boot = null, sourceCommit = null, sourceCommitConflict = false,
+  modelAvailability = null, observedAt = Date.now(),
 } = {}) {
-  if (generationBound !== true || typeof generationId !== 'string' || generationId.length === 0) return []
   const startAt = Number.isFinite(runStartedAt) ? runStartedAt : null
   if (startAt === null) return []
+  const activeGenerationBound = generationBound === true && typeof generationId === 'string' && generationId.length > 0
+  const failed = modelAvailability?.lastFailure ?? null
+  const bootSourceSha = boot?.detail?.source ?? boot?.detail?.sourceSha ?? null
+  const runWindowBound = !activeGenerationBound
+    && modelAvailability?.state === 'degraded'
+    && typeof runId === 'string'
+    && boot?.event === 'BOOT'
+    && boot.detail?.runId === runId
+    && typeof sourceCommit === 'string'
+    && /^[0-9a-f]{40}$/i.test(sourceCommit)
+    && sourceCommitConflict !== true
+    && bootSourceSha === sourceCommit
+    && failed !== null
+    && (failed.authorityKind === 'jev' || failed.context === 'jev-authority')
+    && (failed.sourceSha === null || failed.sourceSha === undefined || failed.sourceSha === sourceCommit)
+  if (!activeGenerationBound && !runWindowBound) return []
+
   const expectedDimension = normalizeDimension(worldKey?.dimension)
   const expectedEpoch = worldKey?.worldEpoch ?? null
+  const failedGenerationId = typeof failed?.generationId === 'string' && failed.generationId.length > 0
+    ? failed.generationId
+    : null
+  const failureAt = parseTimestamp(failed?.ts)
+  if (runWindowBound && failed.authority?.provider !== undefined && failed.authority.provider !== 'typesafe-ai') return []
+  if (runWindowBound && failedGenerationId === null && failureAt === null) return []
   return jevCalls
     .filter((call) => {
       if (call?.record !== 'jev-call' || typeof call.error !== 'string' || call.error.length === 0) return false
       const at = parseTimestamp(call.ts)
       if (at === null || at < startAt || at > observedAt) return false
       const callWorld = call.state?.semantic?.world ?? call.state?.world ?? {}
-      if (expectedEpoch !== null && callWorld.worldEpoch !== expectedEpoch) return false
-      if (expectedDimension !== null && normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension) !== expectedDimension) return false
       const callGenerationId = call.generationId ?? callWorld.generationId ?? null
-      if (callGenerationId !== null && callGenerationId !== generationId) return false
+      if (activeGenerationBound) {
+        if (expectedEpoch !== null && callWorld.worldEpoch !== expectedEpoch) return false
+        if (expectedDimension !== null && normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension) !== expectedDimension) return false
+        if (callGenerationId !== null && callGenerationId !== generationId) return false
+      } else {
+        // Old Jev records can lack generationId. If one is present it must name
+        // the generation HOST recorded as failed; the host timestamp bounds the
+        // call to the outage window when older records lack generationId.
+        if (callGenerationId !== null && failedGenerationId !== null && callGenerationId !== failedGenerationId) return false
+        if (failureAt !== null && (at > failureAt + 5_000 || failureAt - at > 120_000)) return false
+        if (typeof failed.authority?.model === 'string' && call.model !== failed.authority.model) return false
+        if (expectedEpoch !== null && callWorld.worldEpoch !== undefined && callWorld.worldEpoch !== expectedEpoch) return false
+        const callDimension = normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension)
+        if (expectedDimension !== null && callDimension !== null && callDimension !== expectedDimension) return false
+      }
       return true
     })
+    .sort((left, right) => (parseTimestamp(left.ts) ?? 0) - (parseTimestamp(right.ts) ?? 0))
     .slice(-5)
     .map((call) => {
       const callWorld = call.state?.semantic?.world ?? call.state?.world ?? {}
@@ -1525,11 +1565,16 @@ export function projectJevProviderFailures({
         binding: {
           runId,
           generationId,
+          failedGenerationId: activeGenerationBound ? null : failedGenerationId,
           callGenerationId,
           worldEpoch: callWorld.worldEpoch ?? null,
           dimension: normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension),
-          confidence: callGenerationId === generationId ? 'direct' : 'generation-window-inferred',
-          method: 'GENERATION_READY-window+world-epoch+dimension',
+          confidence: callGenerationId !== null && callGenerationId === (activeGenerationBound ? generationId : failedGenerationId)
+            ? 'direct'
+            : activeGenerationBound ? 'generation-window-inferred' : 'run-window-inferred',
+          method: activeGenerationBound
+            ? 'GENERATION_READY-window+world-epoch+dimension'
+            : 'BOOT-runId+sourceSha+lastFailure+run-window+world-epoch+dimension-when-observed',
         },
       })
     })
