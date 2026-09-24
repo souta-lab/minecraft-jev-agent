@@ -3398,7 +3398,7 @@ function armorCraftOfferEvidence(offered: readonly Candidate[]): ArmorCraftOffer
  * (`armorCraft` meta), so it is excluded exactly like a clearance MINE.
  */
 function hasAdvancingGoalRoute(candidate: Candidate): boolean {
-  if (candidate.meta.clearance === true) return false
+  if (isClearanceOnlyMine(candidate)) return false
   if (candidate.meta.armorCraft === true) return false
   switch (candidate.kind) {
     case 'WAIT':
@@ -3424,6 +3424,15 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
     default:
       return true
   }
+}
+
+/**
+ * A clearance MINE only removes an unrelated block. A STEP also uses clearance
+ * dig mechanics (its drop is irrelevant), but its purpose is to open a grounded
+ * route, so it must remain a route candidate alongside an obstructed MOVE.
+ */
+function isClearanceOnlyMine(candidate: Candidate): boolean {
+  return candidate.kind === 'MINE' && candidate.meta.clearance === true
 }
 
 /** Cap on edible recipe results examined per tick, so a large recipe table stays bounded. */
@@ -4635,10 +4644,12 @@ function generateRawCandidates(
   // Clearance MINEs are route-opening safety affordances, not semantic goal
   // actions. Once the active goal has another grounded route (for example a
   // remembered raw_iron RETRIEVE), keep the dirt/stone clearance from becoming
-  // an unrelated action Jev can select. A clearance-only pocket is unchanged.
+  // an unrelated action Jev can select. STEP is also dug in clearance mode so
+  // it does not require its drop, but it changes route topology and must remain
+  // available beside the MOVE whose path it can open.
   const hasGoalRoute = candidates.some(
     (candidate) =>
-      candidate.meta.clearance !== true &&
+      !isClearanceOnlyMine(candidate) &&
       candidate.kind !== 'WAIT' &&
       candidate.kind !== 'ESCALATE' &&
       (candidate.kind !== 'ATTACK' || candidate.meta.goalDrop === focusItem) &&
@@ -4646,7 +4657,7 @@ function generateRawCandidates(
       candidate.kind !== 'EAT' &&
       candidate.kind !== 'EQUIP',
   )
-  if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
+  if (hasGoalRoute) candidates = candidates.filter((candidate) => !isClearanceOnlyMine(candidate))
 
   // A collect focus can name a DECLARED PRODUCER (a name-scanned block source,
   // or a mob whose drop is the item) while the tick offers no grounded route at
@@ -12915,7 +12926,7 @@ export function applyReachabilityGate(
       candidate.kind !== 'EAT' &&
       candidate.kind !== 'EQUIP' &&
       candidate.meta.capabilityAcquisition !== true &&
-      candidate.meta.clearance !== true,
+      !isClearanceOnlyMine(candidate),
   )
   if (hasGroundedGoalRoute) {
     presented = presented.filter(
