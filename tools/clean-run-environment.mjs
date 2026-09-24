@@ -1177,7 +1177,15 @@ export function parseDeathLines(text) {
  * Nothing here is a milestone verdict: these conditions only ask whether the run
  * contradicts the clean-world premise.
  */
-export function checkRunEvidence({ descriptor, artifact, logText = null, runId = null, descriptorPath = null, descriptorSha256 = null }) {
+export function checkRunEvidence({
+  descriptor,
+  artifact,
+  logText = null,
+  runId = null,
+  descriptorPath = null,
+  descriptorSha256 = null,
+  consoleCaptureCondition = null,
+}) {
   const conditions = []
   const values = isPlainObject(descriptor?.values) ? descriptor.values : {}
   const cleanRun = isPlainObject(descriptor?.cleanRun) ? descriptor.cleanRun : {}
@@ -1309,6 +1317,39 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   // 2. the HOST acceptance record is the only attestation of level name + seed
   const acceptance = isPlainObject(document.acceptance) ? document.acceptance : {}
   const record = isPlainObject(acceptance.record) ? acceptance.record : null
+  const bootRecord = isPlainObject(document?.run?.boot) ? document.run.boot : null
+  const startupWorldProof = isPlainObject(bootRecord?.cleanRunServerConfig)
+    ? bootRecord.cleanRunServerConfig
+    : null
+  const acceptanceBootSourceSha = bootRecord?.sourceSha ?? null
+  const startupWorldBound = startupWorldProof?.status === 'verified' &&
+    startupWorldProof.runId === runId &&
+    startupWorldProof.bootSourceSha === acceptanceBootSourceSha &&
+    startupWorldProof.bootSourceSha === values.sourceSha &&
+    startupWorldProof.world?.levelName === values.levelName &&
+    String(startupWorldProof.world?.levelSeed ?? '') === String(values.levelSeed) &&
+    startupWorldProof.process?.levelNameArg === values.levelName
+  const acceptanceLineageMatches = record !== null &&
+    record.runId === runId &&
+    record.gitCommit === acceptanceBootSourceSha &&
+    acceptanceBootSourceSha === values.sourceSha
+  const identityEvidence = isPlainObject(record?.worldIdentityEvidence) ? record.worldIdentityEvidence : null
+  const levelNameEvidence = isPlainObject(identityEvidence?.levelName) ? identityEvidence.levelName : null
+  const seedEvidence = isPlainObject(identityEvidence?.seed) ? identityEvidence.seed : null
+  const levelNameEvidenceMatches = startupWorldBound && acceptanceLineageMatches &&
+    levelNameEvidence?.source === 'verified-leaf-argv' &&
+    levelNameEvidence.runId === runId &&
+    levelNameEvidence.bootSourceSha === acceptanceBootSourceSha &&
+    levelNameEvidence.processLevelNameArg === values.levelName &&
+    record?.levelName === values.levelName
+  const seedEvidenceMatches = startupWorldBound && acceptanceLineageMatches &&
+    seedEvidence?.source === 'verified-leaf-startup-descriptor' &&
+    seedEvidence.runId === runId &&
+    seedEvidence.bootSourceSha === acceptanceBootSourceSha &&
+    String(seedEvidence.seed ?? '') === String(values.levelSeed) &&
+    seedEvidence.runtimeConfirmationRequired === 'clean-run-console-capture' &&
+    consoleCaptureCondition?.verdict === 'PASS' &&
+    String(record?.seed ?? '') === String(values.levelSeed)
   conditions.push(
     condition({
       id: 'run.acceptanceRecord',
@@ -1323,27 +1364,59 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   conditions.push(
     condition({
       id: 'run.levelNameAttested',
-      verdict: record === null ? 'UNKNOWN' : record.levelName === values.levelName ? 'PASS' : 'FAIL',
+      verdict: record === null || record.levelName == null
+        ? 'UNKNOWN'
+        : record.levelName !== values.levelName || !acceptanceLineageMatches
+          ? 'FAIL'
+          : levelNameEvidenceMatches ? 'PASS' : 'UNKNOWN',
       reason:
-        record === null
-          ? 'no acceptance record, so the run world name is unattested'
-          : record.levelName === values.levelName
-            ? `acceptance.levelName=${String(record.levelName)} equals the descriptor's new world`
-            : `acceptance.levelName=${String(record.levelName)} != descriptor levelName=${String(values.levelName)}: the run did not happen in the clean world`,
-      detail: { attested: record?.levelName ?? null, descriptor: values.levelName ?? null },
+        record === null || record.levelName == null
+          ? 'no HOST world-name observation or verified Leaf argv binding is available'
+          : record.levelName !== values.levelName
+            ? `acceptance.levelName=${String(record.levelName)} != descriptor levelName=${String(values.levelName)}: the run did not happen in the clean world`
+            : !acceptanceLineageMatches
+              ? 'acceptance level name is not bound to the requested runId and exact BOOT source SHA'
+              : levelNameEvidenceMatches
+                ? `HOST acceptance levelName=${String(record.levelName)} is bound to the verified Leaf --level-name argv for this run`
+                : 'matching acceptance.levelName has no same-run verified Leaf startup argv evidence',
+      detail: {
+        attested: record?.levelName ?? null,
+        descriptor: values.levelName ?? null,
+        evidence: levelNameEvidence,
+        acceptanceLineageMatches,
+        startupWorldBound,
+      },
     }),
   )
   conditions.push(
     condition({
       id: 'run.seedAttested',
-      verdict: record === null ? 'UNKNOWN' : String(record.seed) === String(values.levelSeed) ? 'PASS' : 'FAIL',
+      verdict: record === null || record.seed == null
+        ? 'UNKNOWN'
+        : String(record.seed) !== String(values.levelSeed) || !acceptanceLineageMatches
+          ? 'FAIL'
+          : seedEvidenceMatches ? 'PASS' : 'UNKNOWN',
       reason:
-        record === null
-          ? 'no acceptance record, so the run seed is unattested'
-          : String(record.seed) === String(values.levelSeed)
-            ? `acceptance.seed=${String(record.seed)} equals the descriptor's new seed`
-            : `acceptance.seed=${String(record.seed)} != descriptor levelSeed=${String(values.levelSeed)}: the run did not happen in the new-seed world (NOTE: serverSeed() in agent-runner.mts reads the seed from the hard-coded path <server-root>/server.properties, so a clean world served from a DIFFERENT root would be reported with the wrong seed - keep the same root)`,
-      detail: { attested: record?.seed ?? null, descriptor: values.levelSeed ?? null },
+        record === null || record.seed == null
+          ? 'no HOST seed observation or verified Leaf startup descriptor binding is available'
+          : String(record.seed) !== String(values.levelSeed)
+            ? `acceptance.seed=${String(record.seed)} != descriptor levelSeed=${String(values.levelSeed)}: the run did not happen in the new-seed world`
+            : !acceptanceLineageMatches
+              ? 'acceptance seed is not bound to the requested runId and exact BOOT source SHA'
+              : seedEvidenceMatches
+                ? `HOST acceptance seed=${String(record.seed)} is bound to the verified Leaf startup descriptor and the exact run-scoped Leaf console capture`
+                : consoleCaptureCondition?.verdict === 'FAIL'
+                  ? `the run-scoped Leaf console capture failed verification (${String(consoleCaptureCondition.reason ?? 'capture_invalid')}); seed PASS is withheld`
+                  : 'matching acceptance.seed has no same-run verified Leaf console capture proving Leaf returned the descriptor seed',
+      detail: {
+        attested: record?.seed ?? null,
+        descriptor: values.levelSeed ?? null,
+        evidence: seedEvidence,
+        acceptanceLineageMatches,
+        startupWorldBound,
+        consoleCaptureVerdict: consoleCaptureCondition?.verdict ?? 'UNKNOWN',
+        consoleCaptureReason: consoleCaptureCondition?.reason ?? 'capture evidence was not supplied',
+      },
     }),
   )
   const bootWorldKey = isPlainObject(document?.run?.boot?.worldKey) ? document.run.boot.worldKey : null
@@ -1485,11 +1558,21 @@ export function checkRunEvidence({ descriptor, artifact, logText = null, runId =
   const bootCounts = isPlainObject(boot?.counts) ? boot.counts : null
   const bootEvidence = isPlainObject(document.inventory?.bootEvidence) ? document.inventory.bootEvidence : null
   const bootSourceSha = document?.run?.boot?.sourceSha ?? null
+  const bootGenerationBound = typeof boot?.generationId === 'string' && boot.generationId.length > 0 &&
+    typeof boot?.buildHash === 'string' && boot.buildHash.length > 0 &&
+    typeof boot?.worldKey === 'string' && boot.worldKey.length > 0 &&
+    Number.isFinite(boot?.worldEpoch) &&
+    boot?.runId === runId
   const bootEvidenceBound = boot?.source === 'snapshot' &&
+    bootGenerationBound &&
     bootEvidence?.status === 'verified' &&
     bootEvidence?.runId === runId &&
     bootEvidence?.bootSourceSha === bootSourceSha &&
-    bootEvidence?.snapshotBootSourceSha === bootSourceSha
+    bootEvidence?.snapshotBootSourceSha === bootSourceSha &&
+    bootEvidence?.generationId === boot.generationId &&
+    bootEvidence?.buildHash === boot.buildHash &&
+    bootEvidence?.worldEpoch === boot.worldEpoch &&
+    bootEvidence?.worldKey === boot.worldKey
   const nonZero = bootCounts === null ? [] : Object.entries(bootCounts).filter(([, count]) => typeof count === 'number' && count > 0)
   conditions.push(
     condition({

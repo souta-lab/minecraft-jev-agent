@@ -229,9 +229,31 @@ function writeFixture(root, runId, { logLines, acceptance = true, runner = {}, i
     const scoped = attributeRunLines(runId, logLines)
     const bootSourceSha = /\bsource=([a-f0-9]{40})/i.exec(scoped.bootLines[0]?.line ?? '')?.[1] ?? null
     const initialInventory = scoped.inventorySamples[0]?.counts ?? {}
+    const buildHash = runner.build ?? SYSTEM2_BUILD_HASH
     writeFileSync(
       join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
-      JSON.stringify({ record: 'm2-snapshot', runId, bootSourceSha, initialInventory, inventory: initialInventory, markers: [] }),
+      JSON.stringify({
+        record: 'm2-snapshot',
+        runId,
+        generationId: 'gen-test-1',
+        bootSourceSha,
+        buildHash,
+        worldEpoch: 1,
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        initialInventory,
+        initialInventoryObservation: {
+          runId,
+          atMs: Date.parse(at(0)),
+          at: at(0),
+          generationId: 'gen-test-1',
+          bootSourceSha,
+          buildHash,
+          worldEpoch: 1,
+          worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        },
+        inventory: initialInventory,
+        markers: [],
+      }),
       'utf8',
     )
   }
@@ -436,7 +458,17 @@ for (const [label, snapshotSource] of [['foreign', 'f'.repeat(40)], ['missing', 
     line(20, 'INVENTORY items={} pos=0.5,64.0,0.5'),
   ]
   writeFixture(root, runId, { logLines: logs })
-  const snapshot = { record: 'm2-snapshot', runId, initialInventory: {}, inventory: {} }
+  const snapshot = {
+    record: 'm2-snapshot', runId,
+    generationId: 'gen-test-1', buildHash: SYSTEM2_BUILD_HASH, worldEpoch: 1,
+    worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+    initialInventory: {}, inventory: {},
+    initialInventoryObservation: {
+      runId, atMs: Date.parse(at(0)), at: at(0), generationId: 'gen-test-1',
+      bootSourceSha: snapshotSource, buildHash: SYSTEM2_BUILD_HASH, worldEpoch: 1,
+      worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+    },
+  }
   if (snapshotSource !== null) snapshot.bootSourceSha = snapshotSource
   writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`), JSON.stringify(snapshot), 'utf8')
   const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()

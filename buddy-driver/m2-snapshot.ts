@@ -119,6 +119,17 @@ export interface M2SnapshotChain {
   observed: readonly string[]
 }
 
+export interface M2InitialInventoryObservation {
+  runId: string
+  atMs: number
+  at: string
+  generationId: string | null
+  bootSourceSha: string | null
+  buildHash: string | null
+  worldEpoch: number | null
+  worldKey: string | null
+}
+
 export interface M2Snapshot {
   schemaVersion: number
   record: typeof M2_SNAPSHOT_RECORD
@@ -132,6 +143,8 @@ export interface M2Snapshot {
   at: string
   /** Inventory captured when this resident run first initialized. */
   initialInventory?: Counts
+  /** Exact HOST generation and world identity for the first inventory sample. */
+  initialInventoryObservation?: M2InitialInventoryObservation
   markers: M2SnapshotMarker[]
   sequence: string[]
   chain: M2SnapshotChain
@@ -234,6 +247,9 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
     atMs: candidate.atMs,
     at: candidate.at,
     ...(isCounts(candidate.initialInventory) ? { initialInventory: { ...candidate.initialInventory } } : {}),
+    ...(isInitialInventoryObservation(candidate.initialInventoryObservation)
+      ? { initialInventoryObservation: { ...candidate.initialInventoryObservation } }
+      : {}),
     markers: candidate.markers.map((marker) => ({ ...marker, inventory: { ...marker.inventory } })),
     sequence: [...candidate.sequence],
     chain,
@@ -241,6 +257,21 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
     inventory: { ...candidate.inventory },
     terminal: isSnapshotTerminal(candidate.terminal) ? { ...candidate.terminal, inventory: { ...candidate.terminal.inventory } } : null,
   }
+}
+
+function isInitialInventoryObservation(value: unknown): value is M2InitialInventoryObservation {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Partial<M2InitialInventoryObservation>
+  return (
+    typeof candidate.runId === 'string' && candidate.runId.length > 0 &&
+    typeof candidate.atMs === 'number' && Number.isFinite(candidate.atMs) &&
+    typeof candidate.at === 'string' &&
+    (candidate.generationId === null || typeof candidate.generationId === 'string') &&
+    (candidate.bootSourceSha === null || typeof candidate.bootSourceSha === 'string') &&
+    (candidate.buildHash === null || typeof candidate.buildHash === 'string') &&
+    (candidate.worldEpoch === null || typeof candidate.worldEpoch === 'number') &&
+    (candidate.worldKey === null || typeof candidate.worldKey === 'string')
+  )
 }
 
 /** Read a snapshot file; null when missing, unreadable, malformed, or out of run scope. */
@@ -295,6 +326,9 @@ export class M2SnapshotRecorder {
     this.options = options
     this.path = m2SnapshotPath(options.runId, options.dir)
     const existing = readM2SnapshotFile(options.runId, options.dir)
+    const initialCapturedAtMs =
+      existing === null && options.initialInventory !== undefined ? (options.now ?? Date.now)() : 0
+    const initialCapturedAt = new Date(initialCapturedAtMs).toISOString()
     this.snapshot =
       existing === null
         ? {
@@ -306,9 +340,23 @@ export class M2SnapshotRecorder {
             buildHash: options.buildHash,
             worldEpoch: options.worldEpoch,
             worldKey: options.worldKey,
-            atMs: 0,
-            at: new Date(0).toISOString(),
+            atMs: initialCapturedAtMs,
+            at: initialCapturedAt,
             ...(options.initialInventory === undefined ? {} : { initialInventory: { ...options.initialInventory } }),
+            ...(options.initialInventory === undefined
+              ? {}
+              : {
+                  initialInventoryObservation: {
+                    runId: options.runId,
+                    atMs: initialCapturedAtMs,
+                    at: initialCapturedAt,
+                    generationId: options.generationId,
+                    bootSourceSha: options.bootSourceSha,
+                    buildHash: options.buildHash,
+                    worldEpoch: options.worldEpoch,
+                    worldKey: options.worldKey,
+                  },
+                }),
             markers: [],
             sequence: [],
             chain: orderedM2Chain([]),
@@ -317,6 +365,28 @@ export class M2SnapshotRecorder {
             terminal: null,
           }
         : existing
+    if (existing === null && options.initialInventory !== undefined) {
+      // Persist the sample at generation entry, not on the first later marker.
+      try {
+        writeM2SnapshotAtomic(this.path, this.snapshot)
+        this.options.log?.('M2_SNAPSHOT_INITIAL', {
+          path: this.path,
+          runId: options.runId,
+          generationId: options.generationId,
+          bootSourceSha: options.bootSourceSha,
+          buildHash: options.buildHash,
+          worldEpoch: options.worldEpoch,
+          worldKey: options.worldKey,
+          inventory: this.snapshot.initialInventory,
+        })
+      } catch (error) {
+        this.options.log?.('ERROR', {
+          where: 'm2-snapshot-initial',
+          path: this.path,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
   }
 
   /** The current in-memory snapshot (a defensive copy). */
@@ -324,6 +394,9 @@ export class M2SnapshotRecorder {
     return {
       ...this.snapshot,
       ...(this.snapshot.initialInventory === undefined ? {} : { initialInventory: { ...this.snapshot.initialInventory } }),
+      ...(this.snapshot.initialInventoryObservation === undefined
+        ? {}
+        : { initialInventoryObservation: { ...this.snapshot.initialInventoryObservation } }),
       markers: this.snapshot.markers.map((marker) => ({ ...marker, inventory: { ...marker.inventory } })),
       sequence: [...this.snapshot.sequence],
       chain: { ...this.snapshot.chain, required: [...this.snapshot.chain.required], observed: [...this.snapshot.chain.observed] },

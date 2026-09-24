@@ -1367,25 +1367,53 @@ function operatorDecisionAnnotation({ selection, decisionsPath, gateVerdict }) {
 function composeInventory({ attribution, snapshot, bootSourceSha, runId }) {
   const samples = attribution.inventorySamples.map((sample) => ({ source: 'log', ts: sample.ts, counts: sample.counts }))
   const snapshotInitial = asCounts(snapshot?.record?.initialInventory)
-  const snapshotLatest = asCounts(snapshot?.record?.terminal?.inventory) ?? asCounts(snapshot?.record?.inventory)
-  const snapshotBootSourceSha = typeof snapshot?.record?.bootSourceSha === 'string' ? snapshot.record.bootSourceSha : null
+  const snapshotHasCurrentInventory =
+    (Array.isArray(snapshot?.record?.markers) && snapshot.record.markers.length > 0) ||
+    snapshot?.record?.terminal !== null && snapshot?.record?.terminal !== undefined
+  const snapshotLatest = asCounts(snapshot?.record?.terminal?.inventory) ??
+    (snapshotHasCurrentInventory ? asCounts(snapshot?.record?.inventory) : null)
+  const initialObservation = isPlainObject(snapshot?.record?.initialInventoryObservation)
+    ? snapshot.record.initialInventoryObservation
+    : null
+  const snapshotBootSourceSha = typeof initialObservation?.bootSourceSha === 'string'
+    ? initialObservation.bootSourceSha
+    : null
   let bootReason = null
   let boot = null
   if (!snapshot?.present || snapshot?.status !== 'valid' || snapshot?.record?.runId !== runId) {
     bootReason = 'run_scoped_initial_inventory_snapshot_unavailable'
   } else if (snapshotInitial === null) {
     bootReason = 'snapshot_initial_inventory_missing'
+  } else if (initialObservation === null) {
+    bootReason = 'snapshot_initial_inventory_observation_missing'
+  } else if (initialObservation.runId !== runId) {
+    bootReason = `snapshot_initial_inventory_run_id_mismatch expected=${runId} observed=${initialObservation.runId ?? 'unknown'}`
   } else if (bootSourceSha === null || bootSourceSha === undefined) {
     bootReason = 'run_boot_source_sha_missing'
   } else if (snapshotBootSourceSha === null) {
     bootReason = 'snapshot_boot_source_sha_missing'
   } else if (snapshotBootSourceSha !== bootSourceSha) {
     bootReason = `snapshot_boot_source_sha_mismatch expected=${bootSourceSha} observed=${snapshotBootSourceSha}`
+  } else if (typeof initialObservation.generationId !== 'string' || initialObservation.generationId.length === 0) {
+    bootReason = 'snapshot_initial_inventory_generation_id_missing'
+  } else if (typeof initialObservation.buildHash !== 'string' || initialObservation.buildHash.length === 0) {
+    bootReason = 'snapshot_initial_inventory_build_hash_missing'
+  } else if (!Number.isFinite(initialObservation.worldEpoch) || typeof initialObservation.worldKey !== 'string' || initialObservation.worldKey.length === 0) {
+    bootReason = 'snapshot_initial_inventory_world_identity_missing'
   } else {
     // Generation-entry initialInventory is the only boot-time sample. Periodic
     // INVENTORY lines can describe an already-changed inventory and never
     // substitute for this source, even when they happen to be the first log row.
-    boot = { source: 'snapshot', ts: snapshot?.record?.at ?? null, counts: snapshotInitial }
+    boot = {
+      runId: initialObservation.runId,
+      source: 'snapshot',
+      ts: typeof initialObservation?.at === 'string' ? initialObservation.at : snapshot?.record?.at ?? null,
+      counts: snapshotInitial,
+      generationId: initialObservation?.generationId ?? snapshot?.record?.generationId ?? null,
+      buildHash: initialObservation?.buildHash ?? snapshot?.record?.buildHash ?? null,
+      worldEpoch: initialObservation?.worldEpoch ?? snapshot?.record?.worldEpoch ?? null,
+      worldKey: initialObservation?.worldKey ?? snapshot?.record?.worldKey ?? null,
+    }
   }
   let latest = samples.at(-1) ?? null
   if (latest === null && snapshotLatest !== null) {
@@ -1434,7 +1462,18 @@ function composeInventory({ attribution, snapshot, bootSourceSha, runId }) {
     source: samples.length > 0 ? 'log' : boot === null && latest === null ? 'none' : 'snapshot',
     observationCount: samples.length,
     boot,
-    bootEvidence: { status: boot === null ? 'unknown' : 'verified', reason: bootReason, runId, bootSourceSha: bootSourceSha ?? null, snapshotBootSourceSha },
+    initial: boot,
+    bootEvidence: {
+      status: boot === null ? 'unknown' : 'verified',
+      reason: bootReason,
+      runId,
+      bootSourceSha: bootSourceSha ?? null,
+      snapshotBootSourceSha,
+      generationId: initialObservation?.generationId ?? snapshot?.record?.generationId ?? null,
+      buildHash: initialObservation?.buildHash ?? snapshot?.record?.buildHash ?? null,
+      worldEpoch: initialObservation?.worldEpoch ?? snapshot?.record?.worldEpoch ?? null,
+      worldKey: initialObservation?.worldKey ?? snapshot?.record?.worldKey ?? null,
+    },
     latest,
     final: null,
     milestoneItems,
@@ -2485,7 +2524,10 @@ export async function buildRunArtifact({
       const counts = asCounts(marker?.inventory)
       if (counts !== null) snapshotSamples.push({ counts, ts: marker.at, atMs: marker.atMs, source: 'snapshot' })
     }
-    const latest = asCounts(snapshot.record?.inventory)
+    const snapshotHasCurrentInventory =
+      (Array.isArray(snapshot.record?.markers) && snapshot.record.markers.length > 0) ||
+      snapshot.record?.terminal !== null && snapshot.record?.terminal !== undefined
+    const latest = snapshotHasCurrentInventory ? asCounts(snapshot.record?.inventory) : null
     if (latest !== null) snapshotSamples.push({ counts: latest, atMs: snapshot.record?.atMs, source: 'snapshot' })
     const terminal = asCounts(snapshot.record?.terminal?.inventory)
     if (terminal !== null) snapshotSamples.push({ counts: terminal, atMs: snapshot.record?.terminal?.atMs, source: 'snapshot' })

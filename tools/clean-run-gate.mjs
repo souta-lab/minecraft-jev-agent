@@ -593,24 +593,14 @@ export async function runCleanRunGate({
   }
   const log = artifact === null ? { path: null, text: null, reason: 'no artifact was supplied' } : readRunLog(artifact, root, runId)
 
-  const runConditions =
-    artifact === null
-      ? [
-          condition({
-            id: 'run.evidence',
-            verdict: 'UNKNOWN',
-            required: false,
-            reason: bundleError ?? 'no --bundle-dir/--artifact was supplied, so only the descriptor premise was judged',
-          }),
-        ]
-      : checkRunEvidence({
-          descriptor,
-          artifact,
-          logText: log.text,
-          runId,
-          descriptorPath,
-          descriptorSha256: loaded.sha256,
-        })
+  const runConditions = artifact === null
+    ? [condition({
+        id: 'run.evidence',
+        verdict: 'UNKNOWN',
+        required: false,
+        reason: bundleError ?? 'no --bundle-dir/--artifact was supplied, so only the descriptor premise was judged',
+      })]
+    : []
   runConditions.push(preparationFreshnessCondition({
     descriptor,
     descriptorPath,
@@ -651,8 +641,7 @@ export async function runCleanRunGate({
   const consoleRelayJournalRead = artifact !== null && descriptor?.cleanRun?.gameruleMechanism?.primary === 'console' && consoleRelayJournalPath !== null
     ? readText(consoleRelayJournalPath)
     : { path: consoleRelayJournalPath, text: null, sha256: null, error: artifact === null ? 'no_run_artifact' : null }
-  runConditions.push(
-    checkConsoleGameruleEvidence({
+  const consoleCaptureCondition = checkConsoleGameruleEvidence({
       descriptor,
       artifact,
       runId,
@@ -667,8 +656,19 @@ export async function runCleanRunGate({
       commandJournalText: consoleJournalRead.text,
       serverLogBuffer: consoleServerLogRead.bytes,
       relayJournalText: consoleRelayJournalRead.text,
-    }),
-  )
+    })
+  runConditions.push(consoleCaptureCondition)
+  if (artifact !== null) {
+    runConditions.push(...checkRunEvidence({
+      descriptor,
+      artifact,
+      logText: log.text,
+      runId,
+      descriptorPath,
+      descriptorSha256: loaded.sha256,
+      consoleCaptureCondition,
+    }))
+  }
   if (log.reason !== null && artifact !== null) {
     runConditions.push(condition({ id: 'run.logReadable', verdict: 'UNKNOWN', required: false, reason: `death/keep-inventory behaviour not checked: ${log.reason}`, detail: { path: log.path } }))
   }

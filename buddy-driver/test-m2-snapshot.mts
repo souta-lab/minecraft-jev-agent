@@ -71,6 +71,55 @@ addCase('a marker writes one run-scoped file, atomically, with no temp residue',
   }),
 )
 
+addCase('generation entry eagerly persists exact empty initial inventory with run/source/build/world lineage', () =>
+  withTempDir((dir) => {
+    const recorder = recorders(dir, RUN_A, () => ({ oak_log: 4 }), 'gen-spawn', {})
+    const path = join(dir, m2SnapshotFileName(RUN_A))
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    const initial = snapshot?.initialInventoryObservation
+    return {
+      pass:
+        existsSync(path) &&
+        snapshot?.runId === RUN_A &&
+        snapshot?.initialInventory !== undefined &&
+        Object.keys(snapshot.initialInventory).length === 0 &&
+        snapshot?.markers.length === 0 &&
+        snapshot?.sequence.length === 0 &&
+        snapshot?.inventory !== undefined &&
+        Object.keys(snapshot.inventory).length === 0 &&
+        snapshot?.terminal === null &&
+        initial?.runId === RUN_A &&
+        initial?.generationId === 'gen-spawn' &&
+        initial?.bootSourceSha === 'a'.repeat(40) &&
+        initial?.buildHash === 'buildhash0001' &&
+        initial?.worldEpoch === 3 &&
+        initial?.worldKey === '127.0.0.1:25565|minecraft:overworld|3' &&
+        initial?.atMs === snapshot?.atMs &&
+        recorder.current().initialInventoryObservation?.at === initial?.at,
+      detail: `path=${existsSync(path)} initial=${JSON.stringify(snapshot?.initialInventory)} provenance=${JSON.stringify(initial)} markers=${snapshot?.markers.length} currentInventory=${JSON.stringify(snapshot?.inventory)}`,
+    }
+  }),
+)
+
+addCase('a later generation marker preserves the first run-scoped initial inventory observation', () =>
+  withTempDir((dir) => {
+    recorders(dir, RUN_A, () => ({ oak_log: 0 }), 'gen-spawn', {})
+    const first = readM2SnapshotFile(RUN_A, dir)?.initialInventoryObservation
+    const later = recorders(dir, RUN_A, () => ({ oak_log: 5 }), 'gen-reload', { oak_log: 5 })
+    later.recordMarker('PORTAL_BLOCK_PLACED', { dimension: 'minecraft:overworld' })
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    return {
+      pass:
+        first !== undefined &&
+        JSON.stringify(snapshot?.initialInventory) === JSON.stringify({}) &&
+        JSON.stringify(snapshot?.initialInventoryObservation) === JSON.stringify(first) &&
+        snapshot?.generationId === 'gen-reload' &&
+        snapshot?.inventory.oak_log === 5,
+      detail: `initial=${JSON.stringify(snapshot?.initialInventory)} initialProvenance=${JSON.stringify(snapshot?.initialInventoryObservation)} current=${JSON.stringify(snapshot?.inventory)}`,
+    }
+  }),
+)
+
 addCase('the ordered chain PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE is VALID', () =>
   withTempDir((dir) => {
     const recorder = recorders(dir, RUN_A, () => ({ charcoal: 1, iron_ingot: 3, iron_pickaxe: 1 }))

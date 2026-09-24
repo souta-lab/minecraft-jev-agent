@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cleanRunServerConfigAtBoot } from '../buddy-driver/clean-run-server-config.ts'
+import { cleanRunAcceptanceWorldIdentity, cleanRunServerConfigAtBoot } from '../buddy-driver/clean-run-server-config.ts'
 import { checkRunEvidence } from './clean-run-environment.mjs'
 import { buildLeafStartupAttestation } from './clean-run-server-launch.mjs'
 import { expectedLeafLaunchIdentity, expectedRuntimeServerProperties, inspectJavaRuntime, parseServerProperties, sha256Text } from './clean-run-server-config.mjs'
@@ -151,6 +151,43 @@ try {
   assert.equal(bound.descriptorSha256, descriptorSha256)
   assert.equal(bound.config.sha256, propertiesSha256)
   assert.equal(bound.preparedManifest.stagedPropertiesSha256, propertiesSha256)
+  const acceptanceWorld = cleanRunAcceptanceWorldIdentity({
+    attestation: bound,
+    runId: RUN_ID,
+    bootSourceSha: SOURCE_SHA,
+    observedLevelName: null,
+    observedSeed: null,
+  })
+  assert.equal(acceptanceWorld.levelName, descriptor.values.levelName, 'verified Leaf --level-name binds a missing Mineflayer game levelName')
+  assert.equal(acceptanceWorld.seed, String(descriptor.values.levelSeed), 'same-run verified descriptor binds the exact seed')
+  assert.equal(acceptanceWorld.levelNameEvidence?.source, 'verified-leaf-argv')
+  assert.equal(acceptanceWorld.seedEvidence?.source, 'verified-leaf-startup-descriptor')
+  assert.equal(acceptanceWorld.seedEvidence?.runtimeConfirmationRequired, 'clean-run-console-capture')
+  const wrongRunWorld = cleanRunAcceptanceWorldIdentity({
+    attestation: bound,
+    runId: 'run-other',
+    bootSourceSha: SOURCE_SHA,
+    observedLevelName: null,
+    observedSeed: null,
+  })
+  assert.equal(wrongRunWorld.levelName, null, 'a verified startup proof from another run cannot be reused')
+  const wrongSourceWorld = cleanRunAcceptanceWorldIdentity({
+    attestation: bound,
+    runId: RUN_ID,
+    bootSourceSha: 'f'.repeat(40),
+    observedLevelName: null,
+    observedSeed: null,
+  })
+  assert.equal(wrongSourceWorld.seed, null, 'a verified startup proof from another source cannot be reused')
+  const conflictWorld = cleanRunAcceptanceWorldIdentity({
+    attestation: bound,
+    runId: RUN_ID,
+    bootSourceSha: SOURCE_SHA,
+    observedLevelName: 'wrong-world',
+    observedSeed: null,
+  })
+  assert.equal(conflictWorld.levelName, null, 'conflicting observed game world name invalidates the acceptance identity')
+  assert.equal(conflictWorld.seed, null)
 
   const artifact = {
     record: 'milestone-run-artifact',
@@ -178,6 +215,42 @@ try {
   assert.equal(row('run.serverConfigAttestation')?.verdict, 'PASS', row('run.serverConfigAttestation')?.reason)
   assert.equal(row('run.difficultyNotContradicted')?.verdict, 'PASS')
   assert.equal(row('run.mobSpawningNotContradicted')?.verdict, 'PASS')
+
+  const acceptanceWorldArtifact = structuredClone(artifact)
+  acceptanceWorldArtifact.acceptance = {
+    present: true,
+    path: join(runDir, `acceptance-${RUN_ID}.json`),
+    record: {
+      runId: RUN_ID,
+      gitCommit: SOURCE_SHA,
+      serverId: '127.0.0.1:25565',
+      levelName: acceptanceWorld.levelName,
+      seed: acceptanceWorld.seed,
+      worldIdentityEvidence: {
+        levelName: acceptanceWorld.levelNameEvidence,
+        seed: acceptanceWorld.seedEvidence,
+      },
+    },
+  }
+  const acceptanceWorldConditions = checkRunEvidence({
+    descriptor,
+    artifact: acceptanceWorldArtifact,
+    runId: RUN_ID,
+    descriptorPath,
+    descriptorSha256,
+  })
+  assert.equal(acceptanceWorldConditions.find((entry) => entry.id === 'run.levelNameAttested')?.verdict, 'PASS', 'verified Leaf argv supplies missing Mineflayer levelName')
+  assert.equal(acceptanceWorldConditions.find((entry) => entry.id === 'run.seedAttested')?.verdict, 'UNKNOWN', 'descriptor seed alone cannot claim the live Leaf seed response')
+  const foreignAcceptanceEvidence = structuredClone(acceptanceWorldArtifact)
+  foreignAcceptanceEvidence.acceptance.record.worldIdentityEvidence.levelName.runId = 'run-foreign'
+  const foreignEvidenceConditions = checkRunEvidence({
+    descriptor,
+    artifact: foreignAcceptanceEvidence,
+    runId: RUN_ID,
+    descriptorPath,
+    descriptorSha256,
+  })
+  assert.equal(foreignEvidenceConditions.find((entry) => entry.id === 'run.levelNameAttested')?.verdict, 'UNKNOWN', 'same text without exact provenance cannot attest the world')
 
   const alteredRuntime = structuredClone(artifact)
   alteredRuntime.run.boot.cleanRunServerConfig.runtime.java.version = '21.99.0'

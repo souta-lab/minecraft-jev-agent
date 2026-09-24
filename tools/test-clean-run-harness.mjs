@@ -125,7 +125,22 @@ const decisionsFor = (runId, source = FIXTURE_SHA) => `${JSON.stringify({
   jev: { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }, action: 'GOTO:nether_portal',
 })}\n`
 
-function acceptanceRecord(runId, { levelName = CLEAN_LEVEL, seed = CLEAN_SEED, gitCommit = FIXTURE_SHA } = {}) {
+function acceptanceRecord(runId, { levelName = CLEAN_LEVEL, seed = CLEAN_SEED, gitCommit = FIXTURE_SHA, startupMarker = null } = {}) {
+  const worldIdentityEvidence = startupMarker === null ? null : {
+    levelName: {
+      source: 'verified-leaf-argv',
+      runId,
+      bootSourceSha: startupMarker.bootSourceSha,
+      processLevelNameArg: startupMarker.process?.levelNameArg ?? null,
+    },
+    seed: {
+      source: 'verified-leaf-startup-descriptor',
+      runId,
+      bootSourceSha: startupMarker.bootSourceSha,
+      seed: String(startupMarker.world?.levelSeed ?? ''),
+      runtimeConfirmationRequired: 'clean-run-console-capture',
+    },
+  }
   return JSON.stringify({
     record: 'acceptance',
     runId,
@@ -139,6 +154,7 @@ function acceptanceRecord(runId, { levelName = CLEAN_LEVEL, seed = CLEAN_SEED, g
     dimension: 'minecraft:overworld',
     levelName,
     seed,
+    worldIdentityEvidence,
     mode: 'llm',
   })
 }
@@ -220,13 +236,33 @@ function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance 
   const firstInventory = logLines.map((entry) => /\bINVENTORY items=(\{.*\})/.exec(entry)?.[1] ?? null).find((entry) => entry !== null)
   writeFileSync(
     join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
-    JSON.stringify({ record: 'm2-snapshot', runId, bootSourceSha: source, initialInventory: firstInventory === null ? {} : JSON.parse(firstInventory), markers: [] }),
+    JSON.stringify({
+      record: 'm2-snapshot',
+      runId,
+      generationId: SYSTEM2_GENERATION_ID,
+      bootSourceSha: source,
+      buildHash: SYSTEM2_BUILD_HASH,
+      worldEpoch: 1,
+      worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+      initialInventory: firstInventory === null ? {} : JSON.parse(firstInventory),
+      initialInventoryObservation: {
+        runId,
+        atMs: Date.parse(at(0)),
+        at: at(0),
+        generationId: SYSTEM2_GENERATION_ID,
+        bootSourceSha: source,
+        buildHash: SYSTEM2_BUILD_HASH,
+        worldEpoch: 1,
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+      },
+      markers: [],
+    }),
     'utf8',
   )
   if (acceptance) {
     writeFileSync(
       join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`),
-      acceptanceRecord(runId, { gitCommit: source, ...acceptanceOptions }),
+      acceptanceRecord(runId, { gitCommit: source, ...acceptanceOptions, startupMarker }),
       'utf8',
     )
   }
@@ -358,6 +394,10 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     status: 'verified',
     runId,
     bootSourceSha,
+    world: {
+      levelName: descriptor.document.values.levelName,
+      levelSeed: String(descriptor.document.values.levelSeed),
+    },
     descriptorPath: descriptor.path,
     descriptorSha256: loaded.sha256,
     attestationPath: startupPath,
@@ -826,6 +866,7 @@ const runCondition = (verdict, id) => condition(verdict, id)
   const noCaptureAcceptance = await runCleanRunGate({ environment: descriptor.path, bundleDir: outDir, runId: RUN })
   assert.notEqual(noCaptureAcceptance.acceptanceStatus, 'ACCEPTED')
   assert.equal(runCondition(noCaptureAcceptance, 'run.consoleGamerulesVerified')?.verdict, 'UNKNOWN')
+  assert.equal(runCondition(noCaptureAcceptance, 'run.seedAttested')?.verdict, 'UNKNOWN', 'a descriptor seed cannot PASS without the same-run Leaf console capture')
   writeFileSync(capturePath, captureText, { encoding: 'utf8', mode: 0o600 })
 
   const nonConsoleGamerules = checkConsoleGameruleEvidence({

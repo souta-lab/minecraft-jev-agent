@@ -1092,6 +1092,11 @@ export interface AcceptanceRecord {
   levelName: string | null
   worldEpoch: number
   seed: string | null
+  /** HOST proof for the clean-run world identity fields above. */
+  worldIdentityEvidence?: {
+    levelName: Record<string, unknown> | null
+    seed: Record<string, unknown> | null
+  }
   botUsername: string
   startPosition: Vec3Json | null
   mode: string

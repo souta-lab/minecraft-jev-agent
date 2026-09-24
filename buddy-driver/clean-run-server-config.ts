@@ -205,6 +205,10 @@ export function cleanRunServerConfigAtBoot({
       status: 'verified',
       runId,
       bootSourceSha,
+      world: {
+        levelName: values.levelName,
+        levelSeed: String(values.levelSeed ?? ''),
+      },
       descriptorPath: resolvedDescriptor,
       descriptorSha256,
       attestationPath: resolvedAttestation,
@@ -248,5 +252,95 @@ export function cleanRunServerConfigAtBoot({
     }
   } catch {
     return unavailable('leaf_startup_attestation_unreadable_or_invalid')
+  }
+}
+
+/**
+ * HOST acceptance fields for a clean run. `Bot.game.levelName` is absent on
+ * some Mineflayer/Leaf versions, so the exact already-verified Leaf `--level-name`
+ * argument is the source of truth. A BOOT-bound descriptor also supplies the
+ * expected seed; the clean-run console evidence separately proves that the live
+ * Leaf `seed` response equals it.
+ */
+export function cleanRunAcceptanceWorldIdentity({
+  attestation,
+  runId,
+  bootSourceSha,
+  observedLevelName = null,
+  observedSeed = null,
+}: {
+  attestation: unknown
+  runId: string
+  bootSourceSha: string | null
+  observedLevelName?: string | null
+  observedSeed?: string | null
+}): {
+  levelName: string | null
+  seed: string | null
+  levelNameEvidence: Plain | null
+  seedEvidence: Plain | null
+} {
+  const baseLevelName = typeof observedLevelName === 'string' && observedLevelName.length > 0 ? observedLevelName : null
+  const baseSeed = typeof observedSeed === 'string' && observedSeed.length > 0 ? observedSeed : null
+  const base = {
+    levelName: baseLevelName,
+    seed: baseSeed,
+    levelNameEvidence: baseLevelName === null ? null : { source: 'mineflayer-game.levelName' },
+    seedEvidence: baseSeed === null ? null : { source: 'server-properties' },
+  }
+  const proof = asObject(attestation)
+  const world = asObject(proof?.world)
+  const process = asObject(proof?.process)
+  const attestedLevelName = typeof process?.levelNameArg === 'string' ? process.levelNameArg : null
+  const descriptorLevelName = typeof world?.levelName === 'string' ? world.levelName : null
+  const descriptorSeed = typeof world?.levelSeed === 'string' && world.levelSeed.length > 0 ? world.levelSeed : null
+  if (
+    proof?.status !== 'verified' ||
+    proof.runId !== runId ||
+    proof.bootSourceSha !== bootSourceSha ||
+    typeof bootSourceSha !== 'string' ||
+    !/^[a-f0-9]{40}$/i.test(bootSourceSha) ||
+    attestedLevelName === null ||
+    descriptorLevelName === null ||
+    attestedLevelName !== descriptorLevelName ||
+    descriptorSeed === null
+  ) return base
+  if (baseLevelName !== null && baseLevelName !== attestedLevelName) {
+    return {
+      levelName: null,
+      seed: null,
+      levelNameEvidence: {
+        source: 'verified-leaf-argv-conflict',
+        runId,
+        bootSourceSha,
+        descriptorLevelName,
+        processLevelNameArg: attestedLevelName,
+        observedGameLevelName: baseLevelName,
+      },
+      seedEvidence: null,
+    }
+  }
+  return {
+    levelName: attestedLevelName,
+    seed: descriptorSeed,
+    levelNameEvidence: {
+      source: 'verified-leaf-argv',
+      runId,
+      bootSourceSha,
+      descriptorPath: proof.descriptorPath ?? null,
+      descriptorSha256: proof.descriptorSha256 ?? null,
+      processPid: process?.pid ?? null,
+      commandLineSha256: process?.commandLineSha256 ?? null,
+      processLevelNameArg: attestedLevelName,
+    },
+    seedEvidence: {
+      source: 'verified-leaf-startup-descriptor',
+      runId,
+      bootSourceSha,
+      descriptorPath: proof.descriptorPath ?? null,
+      descriptorSha256: proof.descriptorSha256 ?? null,
+      seed: descriptorSeed,
+      runtimeConfirmationRequired: 'clean-run-console-capture',
+    },
   }
 }

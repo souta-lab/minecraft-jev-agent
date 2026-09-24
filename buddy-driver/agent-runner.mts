@@ -615,9 +615,10 @@ const generationStopWatch = new Map<string, NodeJS.Timeout>()
 
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
 import { acceptanceProvenance } from './acceptance-provenance.ts'
-import { cleanRunServerConfigAtBoot } from './clean-run-server-config.ts'
+import { cleanRunAcceptanceWorldIdentity, cleanRunServerConfigAtBoot } from './clean-run-server-config.ts'
 
 const bootSourceSha = gitCommit()
+const bootCleanRunServerConfig = cleanRunServerConfigAtBoot({ runId, bootSourceSha })
 const stats = {
   reconnects: 0,
   reconnectsLastHour: 0,
@@ -2394,6 +2395,13 @@ function gitCommit(): string | null {
 function writeAcceptance(): string {
   const counts = listenerCounts()
   const expected = expectedListenerCounts()
+  const worldIdentity = cleanRunAcceptanceWorldIdentity({
+    attestation: bootCleanRunServerConfig,
+    runId,
+    bootSourceSha,
+    observedLevelName: state.levelName,
+    observedSeed: serverSeed(),
+  })
   const record: AcceptanceRecord = {
     record: 'acceptance',
     runId,
@@ -2415,9 +2423,13 @@ function writeAcceptance(): string {
     },
     serverId: state.serverId,
     dimension: state.dimension,
-    levelName: state.levelName,
+    levelName: worldIdentity.levelName,
     worldEpoch: state.worldEpoch,
-    seed: serverSeed(),
+    seed: worldIdentity.seed,
+    worldIdentityEvidence: {
+      levelName: worldIdentity.levelNameEvidence,
+      seed: worldIdentity.seedEvidence,
+    },
     botUsername: USERNAME,
     startPosition,
     mode: lastStatus?.policyKind === 'typesafe' ? 'llm' : 'deterministic',
@@ -3117,7 +3129,7 @@ log('BOOT', {
   revision: state.revision,
   worldEpoch: state.worldEpoch,
   worldKey: currentWorldKey(),
-  cleanRunServerConfig: cleanRunServerConfigAtBoot({ runId, bootSourceSha }),
+  cleanRunServerConfig: bootCleanRunServerConfig,
   frozen,
 })
 startControlServer()

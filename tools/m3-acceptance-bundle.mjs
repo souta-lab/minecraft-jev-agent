@@ -133,10 +133,19 @@ export function evaluateRequiredM3ArtifactEvidence(artifact, expectedRunId) {
   const bootInventoryEvidence = artifact?.inventory?.bootEvidence
   const bootInventoryBound = bootInventory?.source === 'snapshot' &&
     bootInventory?.counts !== null && typeof bootInventory.counts === 'object' && !Array.isArray(bootInventory.counts) &&
+    bootInventory?.runId === expectedRunId &&
+    typeof bootInventory?.generationId === 'string' && bootInventory.generationId.length > 0 &&
+    typeof bootInventory?.buildHash === 'string' && bootInventory.buildHash.length > 0 &&
+    Number.isFinite(bootInventory?.worldEpoch) &&
+    typeof bootInventory?.worldKey === 'string' && bootInventory.worldKey.length > 0 &&
     bootInventoryEvidence?.status === 'verified' &&
     bootInventoryEvidence?.runId === expectedRunId &&
     normalizeSourceSha(bootInventoryEvidence?.bootSourceSha) === sourceSha &&
-    normalizeSourceSha(bootInventoryEvidence?.snapshotBootSourceSha) === sourceSha
+    normalizeSourceSha(bootInventoryEvidence?.snapshotBootSourceSha) === sourceSha &&
+    bootInventoryEvidence?.generationId === bootInventory.generationId &&
+    bootInventoryEvidence?.buildHash === bootInventory.buildHash &&
+    bootInventoryEvidence?.worldEpoch === bootInventory.worldEpoch &&
+    bootInventoryEvidence?.worldKey === bootInventory.worldKey
   const terminalInventoryPresent = terminal?.status === 'PRESENT'
     && terminal?.runId === expectedRunId
     && normalizeSourceSha(terminal?.sourceSha) === sourceSha
