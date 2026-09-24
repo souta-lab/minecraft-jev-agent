@@ -10,8 +10,12 @@ const supportPosition = { x: 107, y: 62, z: 90 }
 
 function fixture({
   reportGenerationId = generationId,
+  reportAfterGenerationId = reportGenerationId,
   probeGenerationId = generationId,
   cacheGenerationId = generationId,
+  reportAfterRunId = runId,
+  reportAfterWorldKey = worldKey,
+  includeReportAfter = true,
   support = supportPosition,
   supportPlayer = playerPosition,
   supportCapturedAt = capturedAt,
@@ -61,6 +65,14 @@ function fixture({
         worldKey,
       },
     },
+    reportAfter: includeReportAfter ? {
+      ok: true,
+      data: {
+        runId: reportAfterRunId,
+        ...(reportAfterGenerationId === null ? {} : { generationId: reportAfterGenerationId }),
+        worldKey: reportAfterWorldKey,
+      },
+    } : null,
     state: {
       ok: true,
       data: {
@@ -107,6 +119,44 @@ assert.equal(direct.worldCacheBinding.capturedAt, 'aligned')
 assert.equal(direct.worldCacheCapturedAt, capturedAt)
 assert.equal(direct.area.supportScopeStatus, 'verified-current-player-footing')
 assert.equal(direct.dataComplete, true)
+assert.equal(direct.identityAligned, true)
+assert.equal(direct.status, 'known')
+
+const generationChangedAfterSample = fixture({ reportAfterGenerationId: 'gen-after-probe' })
+assert.equal(generationChangedAfterSample.binding.sameGeneration, false)
+assert.equal(generationChangedAfterSample.identityAligned, false)
+assert.equal(generationChangedAfterSample.status, 'partial')
+assert.ok(generationChangedAfterSample.unknown.includes('report_after_generation_mismatch'))
+
+const runChangedAfterSample = fixture({ reportAfterRunId: 'run-after-probe' })
+assert.equal(runChangedAfterSample.binding.sameRun, false)
+assert.equal(runChangedAfterSample.identityAligned, false)
+assert.equal(runChangedAfterSample.status, 'partial')
+assert.ok(runChangedAfterSample.unknown.includes('report_after_run_mismatch'))
+
+const worldEpochChangedAfterSample = fixture({
+  reportAfterWorldKey: { ...worldKey, worldEpoch: worldKey.worldEpoch + 1 },
+})
+assert.equal(worldEpochChangedAfterSample.binding.sameWorld, false)
+assert.equal(worldEpochChangedAfterSample.identityAligned, false)
+assert.equal(worldEpochChangedAfterSample.status, 'partial')
+assert.ok(worldEpochChangedAfterSample.unknown.includes('report_after_world_mismatch'))
+
+const dimensionChangedAfterSample = fixture({
+  reportAfterWorldKey: { ...worldKey, dimension: 'minecraft:the_nether', worldEpoch: worldKey.worldEpoch + 1 },
+})
+assert.equal(dimensionChangedAfterSample.binding.sameWorld, false)
+assert.equal(dimensionChangedAfterSample.identityAligned, false)
+assert.equal(dimensionChangedAfterSample.status, 'partial')
+assert.ok(dimensionChangedAfterSample.unknown.includes('report_after_world_mismatch'))
+
+const missingAfterReport = fixture({ includeReportAfter: false })
+assert.equal(missingAfterReport.binding.sameRun, null)
+assert.equal(missingAfterReport.binding.sameWorld, null)
+assert.equal(missingAfterReport.binding.sameGeneration, null)
+assert.equal(missingAfterReport.identityAligned, false)
+assert.equal(missingAfterReport.status, 'partial')
+assert.ok(missingAfterReport.unknown.includes('after_report_identity_unavailable'))
 
 const unknownIdentity = fixture({
   reportGenerationId: null,

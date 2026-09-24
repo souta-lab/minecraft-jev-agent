@@ -450,6 +450,14 @@ const worldProbe = buildWorldProbe({
       },
     },
   },
+  reportAfter: {
+    ok: true,
+    data: {
+      runId: 'run-1',
+      generationId: 'gen-7',
+      worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 },
+    },
+  },
   state: {
     ok: true,
     data: {
@@ -487,6 +495,7 @@ assert.ok(worldProbe.unknown.includes('some_scanned_blocks_unloaded_or_unknown')
 
 const completeWorldProbe = buildWorldProbe({
   report: { ok: true, data: { runId: 'run-1', generationId: 'gen-7', worldKey: { serverId: 'local', dimension: 'overworld', worldEpoch: 1 } } },
+  reportAfter: { ok: true, data: { runId: 'run-1', generationId: 'gen-7', worldKey: { serverId: 'local', dimension: 'overworld', worldEpoch: 1 } } },
   state: { ok: true, data: { runId: 'run-1', generationId: 'gen-7', worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 }, area: { blocks: { unknown: 0, counts: {}, hazards: [], portals: [] }, entities: [] } } },
 })
 assert.equal(completeWorldProbe.status, 'partial')

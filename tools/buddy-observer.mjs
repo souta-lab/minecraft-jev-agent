@@ -415,6 +415,20 @@ function normalizeWorldKey(key) {
   }
 }
 
+function completeWorldIdentity(key) {
+  if (key === null
+    || typeof key.serverId !== 'string' || key.serverId.length === 0
+    || typeof key.dimension !== 'string' || key.dimension.length === 0
+    || !Number.isSafeInteger(key.worldEpoch)) return null
+  return JSON.stringify([key.serverId, key.dimension, key.worldEpoch])
+}
+
+function sameBoundIdentity(values) {
+  const known = values.filter((value) => value !== null && value !== undefined)
+  if (new Set(known).size > 1) return false
+  return values.every((value) => typeof value === 'string' && value.length > 0) ? true : null
+}
+
 function probeHostility(entity) {
   const name = typeof entity?.name === 'string' ? entity.name.toLowerCase() : ''
   const kind = typeof entity?.kind === 'string' ? entity.kind : ''
@@ -442,38 +456,38 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
 
   const reportWorld = normalizeWorldKey(reportData?.worldKey)
   const probeWorld = normalizeWorldKey(stateData.worldKey)
-  const sameWorld = reportWorld !== null && probeWorld !== null
-    && reportWorld.serverId === probeWorld.serverId
-    && reportWorld.dimension === probeWorld.dimension
-    && reportWorld.worldEpoch === probeWorld.worldEpoch
-  const sameRun = reportData?.runId !== null && reportData?.runId !== undefined
-    && reportData.runId === stateData.runId
+  const afterWorld = normalizeWorldKey(reportAfterData?.worldKey)
+  const reportRunId = reportData?.runId ?? null
+  const probeRunId = stateData.runId ?? null
+  const reportAfterRunId = reportAfterData?.runId ?? null
+  const reportWorldId = completeWorldIdentity(reportWorld)
+  const probeWorldId = completeWorldIdentity(probeWorld)
+  const reportAfterWorldId = completeWorldIdentity(afterWorld)
+  const sameRun = sameBoundIdentity([reportRunId, probeRunId, reportAfterRunId])
+  const sameWorld = sameBoundIdentity([reportWorldId, probeWorldId, reportAfterWorldId])
   const reportGeneration = reportData?.generationId ?? null
   const probeGeneration = stateData.generationId ?? null
-  const afterWorld = normalizeWorldKey(reportAfterData?.worldKey)
-  const reportsBracketSameGeneration = reportData?.runId != null
-    && reportData.runId === reportAfterData?.runId
-    && reportGeneration !== null
-    && reportGeneration === (reportAfterData?.generationId ?? null)
-    && reportWorld !== null
-    && afterWorld !== null
-    && reportWorld.serverId === afterWorld.serverId
-    && reportWorld.dimension === afterWorld.dimension
-    && reportWorld.worldEpoch === afterWorld.worldEpoch
-  const bracketContainsProbe = reportsBracketSameGeneration
-    && reportData.runId === stateData.runId
-    && probeWorld !== null
-    && reportWorld.serverId === probeWorld.serverId
-    && reportWorld.dimension === probeWorld.dimension
-    && reportWorld.worldEpoch === probeWorld.worldEpoch
-  const sameGeneration = reportGeneration !== null && probeGeneration !== null
-    ? reportGeneration === probeGeneration
-    : bracketContainsProbe && probeGeneration === null
-      ? true
-      : null
+  const reportAfterGeneration = reportAfterData?.generationId ?? null
+  const observedGenerations = [reportGeneration, probeGeneration, reportAfterGeneration]
+    .filter((value) => typeof value === 'string' && value.length > 0)
+  const generationMismatch = new Set(observedGenerations).size > 1
+  const allGenerationsDirect = observedGenerations.length === 3
+  // A direct state generation is only current across the whole sample when both
+  // surrounding reports name that same generation. If the state reply omits its
+  // generation, infer it only from a stable, fully bound report bracket.
+  const stableReportBracket = typeof reportGeneration === 'string' && reportGeneration.length > 0
+    && reportGeneration === reportAfterGeneration
+    && sameRun === true
+    && sameWorld === true
+  const sameGeneration = generationMismatch ? false
+    : allGenerationsDirect ? true
+      : probeGeneration === null && stableReportBracket ? true
+        : null
   const generationJoin = reportGeneration !== null && probeGeneration !== null
-    ? sameGeneration ? 'direct' : 'mismatch'
-    : sameGeneration === true ? 'stable-report-bracket' : 'unknown'
+    && reportAfterGeneration !== null
+    ? sameGeneration === true ? 'direct' : sameGeneration === false ? 'mismatch' : 'unknown'
+    : sameGeneration === false ? 'mismatch'
+      : sameGeneration === true ? 'stable-report-bracket' : 'unknown'
   const area = stateData.area ?? null
   const blocks = area?.blocks ?? null
   const entityCache = area?.entityCache ?? null
@@ -571,10 +585,17 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
   const scannedBlocks = (2 * radius + 1) ** 2 * (2 * verticalRadius + 1)
   const unknownBlocks = typeof blocks?.unknown === 'number' ? blocks.unknown : null
   const unknown = []
-  if (!sameRun) unknown.push('report_state_run_mismatch_or_unknown')
-  if (!sameWorld) unknown.push('report_state_world_mismatch_or_unknown')
+  if (sameRun !== true) unknown.push('report_state_run_mismatch_or_unknown')
+  if (sameWorld !== true) unknown.push('report_state_world_mismatch_or_unknown')
+  if (reportAfterData === null) unknown.push('after_report_identity_unavailable')
+  if (reportAfterData !== null && reportAfterRunId === null) unknown.push('report_after_run_identity_unknown')
+  else if (reportAfterRunId !== null && reportRunId !== null && reportAfterRunId !== reportRunId) unknown.push('report_after_run_mismatch')
+  if (reportAfterData !== null && reportAfterWorldId === null) unknown.push('report_after_world_identity_unknown')
+  else if (reportAfterWorldId !== null && reportWorldId !== null && reportAfterWorldId !== reportWorldId) unknown.push('report_after_world_mismatch')
   if (sameGeneration === false) unknown.push('report_state_generation_mismatch')
   else if (sameGeneration === null) unknown.push('report_state_generation_alignment_unknown')
+  if (reportAfterData !== null && (typeof reportAfterGeneration !== 'string' || reportAfterGeneration.length === 0)) unknown.push('report_after_generation_identity_unknown')
+  else if (reportAfterGeneration !== null && reportGeneration !== null && reportAfterGeneration !== reportGeneration) unknown.push('report_after_generation_mismatch')
   if (unknownBlocks === null) unknown.push('scanned_block_coverage_unknown')
   else if (unknownBlocks > 0) unknown.push('some_scanned_blocks_unloaded_or_unknown')
   if (worldCache === null || typeof worldCache !== 'object') unknown.push('world_cache_diagnostic_unavailable')
@@ -613,7 +634,7 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
     ? milestonePredicateProjection(reportStatus?.milestonePredicates)
     : { status: 'not_joined', entries: [] }
   if (milestonePredicates.status !== 'observed') unknown.push('milestone_predicates_not_joined_to_probe')
-  const identityAligned = sameWorld && sameRun
+  const identityAligned = sameWorld === true && sameRun === true && sameGeneration === true
   const dataComplete = unknownBlocks === 0 && unclassifiedEntities === 0 && sameGeneration === true
     && (worldCacheBinding.status === 'aligned' || worldCacheBinding.status === 'inferred')
     && (entityCacheBinding.status === 'aligned' || entityCacheBinding.status === 'inferred')
@@ -630,13 +651,16 @@ export function buildWorldProbe({ report, reportAfter = null, state, radius = 6,
     binding: {
       reportRunId: reportData?.runId ?? null,
       probeRunId: stateData.runId ?? null,
+      reportAfterRunId,
       sameRun,
       sameWorld,
       sameGeneration,
       reportWorld,
       probeWorld,
+      reportAfterWorld: afterWorld,
       reportGenerationId: reportGeneration,
       probeGenerationId: probeGeneration,
+      reportAfterGenerationId: reportAfterGeneration,
       generationJoin,
       generationJoinConfidence: generationJoin === 'direct' ? 'direct' : generationJoin === 'stable-report-bracket' ? 'inferred' : 'unknown',
       worldCache: worldCacheBinding,
