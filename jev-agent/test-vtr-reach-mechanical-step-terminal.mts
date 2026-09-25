@@ -195,7 +195,13 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
   }).authorizeReachMechanicalStep
   Object.assign(controller as unknown as Record<string, any>, {
     reachVtrCells: createVtrReachTestCells({ tickCounter: 1 }),
-    options: { actuationPort: { assertLease: () => undefined } },
+    // `closeReachTransition` journals host lineage on every terminal result.
+    // Keep the Object.create adapter's options shape production-compatible while
+    // making this standalone fixture explicitly unbound to a live run.
+    options: {
+      actuationPort: { assertLease: () => undefined },
+      decisionProvenance: { runId: null, generationId: null, sourceSha: null },
+    },
     reachRuntime,
     reachRunMetadata: {
       mission,

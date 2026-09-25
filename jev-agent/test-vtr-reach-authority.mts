@@ -250,6 +250,10 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
     const adapterFields = adapter as unknown as Record<string, any>
     Object.assign(adapter as unknown as Record<string, unknown>, {
       reachVtrCells: createVtrReachTestCells({ tickCounter: 7 }),
+      // `closeReachTransition` journals host lineage on every terminal result.
+      // This Object.create fixture must carry the same options shape as a
+      // configured controller; standalone tests intentionally use null lineage.
+      options: { decisionProvenance: { runId: null, generationId: null, sourceSha: null } },
       reachRunMetadata: {
         mission,
         transitionId: contract.transitionId,
