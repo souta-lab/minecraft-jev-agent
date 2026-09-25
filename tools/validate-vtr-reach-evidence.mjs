@@ -10,12 +10,34 @@ import { basename, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { parse as parseNbt } from 'prismarine-nbt'
+import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
 import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
+import { inspectFreshWorldAttestation } from './vtr-fresh-world-attestation.mjs'
 
 const EXIT = Object.freeze({ PASS: 0, FAIL: 1, INCOMPLETE: 2, USAGE: 64 })
 const CHECK_STATUS = Object.freeze({ PASS: 'PASS', FAIL: 'FAIL', INCOMPLETE: 'INCOMPLETE' })
 const SHA_RE = /^[0-9a-f]{40}$/i
 const RUN_ID_RE = /^run-[a-z0-9]+-[a-z0-9]+$/i
+
+class EvidenceAssessmentError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.name = 'EvidenceAssessmentError'
+    this.status = status
+  }
+}
+
+function incompleteEvidence(message, details = {}) {
+  const error = new EvidenceAssessmentError(CHECK_STATUS.INCOMPLETE, message)
+  error.details = details
+  return error
+}
+
+function failEvidence(message, details = {}) {
+  const error = new EvidenceAssessmentError(CHECK_STATUS.FAIL, message)
+  error.details = details
+  return error
+}
 
 const HELP = `Usage: bun tools/validate-vtr-reach-evidence.mjs --archive <directory> [--repo <exact-source-checkout>]
 
@@ -35,14 +57,33 @@ run-scoped legacy-vs-VTR comparison. Expected supplemental paths:
   proofs/no-double-authority.json
   comparison/legacy-baseline.json
 
-Raw no-LLM journals must also be archived, including empty files when no call
-occurred:
+Raw no-LLM evidence must include a v2 continuous provider-activity capture
+and all four source journals. Non-empty decision journals are permitted only
+when their separately classified provider-attempt counters establish zero:
   runner/jev-calls.jsonl
   runner/jev-decisions.jsonl
   runner/system2.jsonl
+  runner/mercury-calls.jsonl
+  runner/provider-activity-capture.json
 The v2 comparator output reports structured alignment only and remains
 INCOMPLETE as migration evidence. The v3 comparator can qualify only when its
-run-scoped raw files and identities validate independently.
+run-scoped raw files and identities validate independently. The archive must
+also include runner/no-llm-egress-audit.json from the preload guard; it proves
+USERSPACE_ONLY libc-interposition coverage and makes no kernel isolation claim.
+
+The Reach slice additionally requires the exact-source legacy-claim refusal
+fixture report at proofs/no-double-authority-fixture.json and the hashed test
+source bytes at runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts.
+The fixture's conflict count is separate from the live run's zero-conflict
+metric.
+
+Fresh-world identity is established by server/fresh-world-attestation.json:
+an exact-source/run/PID/port/level-bound pre-start absence observation for the
+actual --universe/--level-name world root (including absent level.dat and
+level.dat_old), same-child stdout receipt rows with PID/UTC timestamps for the
+exact Preparing/Done Leaf lines, and rehashed post-stop level.dat, UUID-bound
+playerdata, and witness MCA bytes. A freshWorld boolean or startup phrase is
+not evidence.
 `
 
 function parseArgs(argv) {
@@ -235,13 +276,238 @@ function eventActionId(row) {
   return row?.detail?.actionId ?? null
 }
 
-function providerCapture(files, expectedIdentity, probe) {
-  const capture = JSON.parse(exactRawFile(files, 'runner/provider-activity-capture.json', 'VTR').text)
-  if (capture.schema !== 'vtr-provider-activity-capture/v1' || capture.status !== 'OBSERVED' ||
-      capture.window?.coverageComplete !== true || capture.capture?.observedNonEmptyJournal !== false ||
-      !Array.isArray(capture.capture?.problems) || capture.capture.problems.length !== 0) {
-    throw new Error('VTR provider activity capture is not a complete clean observation')
+export function inspectLifecycleCapture(files, capture, expectedIdentity, probe, events) {
+  const lifecyclePath = 'runner/host-lifecycle.jsonl'
+  const raw = files.get(lifecyclePath)
+  if (!raw) throw incompleteEvidence('VTR HOST lifecycle transcript is missing', { path: lifecyclePath })
+  const bytes = Buffer.from(raw.contentBase64, 'base64')
+  let rows
+  try { rows = parsedJsonLines(raw.text, lifecyclePath) }
+  catch (error) { throw incompleteEvidence(`VTR HOST lifecycle transcript is malformed: ${error.message}`) }
+  const observed = capture?.lifecycle
+  if (!observed || !Number.isSafeInteger(observed.bytes) || typeof observed.sha256 !== 'string' ||
+      !Number.isSafeInteger(observed.rows) || !Number.isSafeInteger(observed.malformedRows)) {
+    throw incompleteEvidence('VTR capture omits the lifecycle transcript byte/hash snapshot')
   }
+  if (observed.bytes !== bytes.length || observed.sha256.toLowerCase() !== sha256(bytes)) {
+    throw failEvidence('VTR lifecycle transcript bytes/hash differ from the continuously captured snapshot')
+  }
+  if (observed.rows !== rows.length || observed.malformedRows !== 0 || observed.status !== 'OBSERVED' ||
+      !Array.isArray(observed.problems) || observed.problems.length !== 0) {
+    throw incompleteEvidence('VTR lifecycle transcript is malformed, unknown, or not classified as observed')
+  }
+  const byEvent = Object.fromEntries(['terminal-consumed', 'resident-stopped', 'server-stopped'].map((name) => [
+    name, rows.filter((row) => row?.event === name),
+  ]))
+  if (Object.values(byEvent).some((entries) => entries.length !== 1) || rows.some((row) => row?.schema !== 'vtr-reach-probe-lifecycle/v1')) {
+    throw incompleteEvidence('VTR lifecycle transcript lacks exactly one recognized row for each lifecycle boundary')
+  }
+  const terminalConsumed = byEvent['terminal-consumed'][0]
+  const residentStopped = byEvent['resident-stopped'][0]
+  const serverStopped = byEvent['server-stopped'][0]
+  const worldKey = probe?.record === 'vtr-reach-live-probe' ? probe.transition?.commit?.identity?.worldKey : probe?.run?.worldKey
+  const lifeRows = [terminalConsumed, residentStopped, serverStopped]
+  for (const row of lifeRows) {
+    if (row.actor !== 'probe-harness' || row.sourceSha?.toLowerCase?.() !== expectedIdentity.sourceSha ||
+        row.runId !== expectedIdentity.runId || row.generationId !== expectedIdentity.generationId || row.worldKey !== worldKey) {
+      throw failEvidence('VTR lifecycle transcript contradicts the exact source/run/generation/world identity')
+    }
+    if (!Number.isFinite(Date.parse(row.ts ?? ''))) throw incompleteEvidence('VTR lifecycle event timestamp is unavailable')
+  }
+  const transition = probe?.transition ?? {}
+  const terminalOutcome = transition.terminalOutcome?.outcome ?? transition.terminal?.outcome ?? transition.terminalOutcome ?? transition.terminal ?? {}
+  const transitionId = expectedIdentity.transitionId
+  const contractHash = expectedIdentity.contractHash
+  if (terminalConsumed.transitionId !== transitionId || terminalConsumed.contractHash !== contractHash ||
+      terminalConsumed.outcomeKind !== 'SUCCESS' || !Array.isArray(terminalConsumed.evidenceIds) ||
+      !isDeepStrictEqual(terminalConsumed.evidenceIds, terminalOutcome.evidenceIds)) {
+    throw failEvidence('HOST terminal-consumed event does not bind the verified Reach SUCCESS and contract')
+  }
+  for (const row of [residentStopped, serverStopped]) {
+    if (!Number.isSafeInteger(row.pid) || row.pid <= 0 || !['stopped', 'exited'].includes(row.status) || !Number.isSafeInteger(row.exitCode)) {
+      throw incompleteEvidence(`HOST ${row.event} record lacks process stop evidence`)
+    }
+    if (Date.parse(row.stoppedAt ?? '') !== Date.parse(row.ts)) throw failEvidence(`HOST ${row.event} stoppedAt disagrees with its event timestamp`)
+    const observation = row.processExitObservation
+    const observedAt = Date.parse(observation?.observedAt ?? '')
+    if (observation?.schema !== 'vtr-process-exit-observation/v1' || observation.source !== 'child-close-event' ||
+        observation.state !== 'exited' || observation.pid !== row.pid || observation.exitCode !== row.exitCode ||
+        !Number.isFinite(observedAt) || observedAt > Date.parse(row.stoppedAt)) {
+      throw incompleteEvidence(`HOST ${row.event} lacks a matching observed child-close process-exit record`)
+    }
+  }
+  const worldIdentity = parseWorldKey(worldKey)
+  const expectedServerPort = /^127\.0\.0\.1:(\d{1,5})$/u.exec(worldIdentity?.serverId ?? '')
+  const serverPort = expectedServerPort ? Number(expectedServerPort[1]) : null
+  const serverExitAt = Date.parse(serverStopped.processExitObservation?.observedAt ?? '')
+  const listener = serverStopped.listenerClosureObservation
+  const listenerAt = Date.parse(listener?.observedAt ?? '')
+  if (!Number.isInteger(serverPort) || serverPort < 1 || serverPort > 65535 ||
+      listener?.schema !== 'vtr-listener-closure-observation/v1' || listener.source !== 'tcp-connect-probe' ||
+      listener.state !== 'closed' || listener.host !== '127.0.0.1' || listener.port !== serverPort ||
+      listener.result !== 'connection-refused' || !Number.isFinite(serverExitAt) ||
+      !Number.isFinite(listenerAt) || listenerAt < serverExitAt || listenerAt !== Date.parse(serverStopped.stoppedAt)) {
+    throw incompleteEvidence('HOST server stop lacks exact loopback TCP connection-refused listener-closure evidence after process exit')
+  }
+  const terminalRows = eventNamed(events, 'VTR_TRANSITION_OUTCOME', (row) => (row.detail?.transitionId ?? token(row.message, 'id')) === transitionId)
+  if (terminalRows.length !== 1) throw incompleteEvidence('raw run journal does not uniquely bind the terminal before lifecycle consume')
+  const terminalAt = Date.parse(terminalRows[0].ts ?? terminalRows[0].timestamp ?? '')
+  const consumeAt = Date.parse(terminalConsumed.ts)
+  const residentAt = Date.parse(residentStopped.stoppedAt)
+  const serverAt = Date.parse(serverStopped.stoppedAt)
+  const shutdownAt = Date.parse(capture?.window?.shutdownAt ?? '')
+  const captureEnd = Date.parse(capture?.window?.endedAt ?? '')
+  if (![terminalAt, consumeAt, residentAt, serverAt, shutdownAt, captureEnd].every(Number.isFinite)) {
+    throw incompleteEvidence('VTR lifecycle capture lacks terminal, HOST shutdown, process stop, or capture-close time')
+  }
+  if (!(terminalAt <= consumeAt && consumeAt <= shutdownAt && shutdownAt <= residentAt && residentAt <= serverAt && serverAt <= captureEnd)) {
+    throw failEvidence('VTR terminal consume, HOST shutdown, resident/server stop, and capture close are not causally ordered')
+  }
+  const hostLines = fileText(files, 'runner/buddy.log').split(/\r?\n/u)
+  const shutdownLines = hostLines.filter((line) => hostEventToken(line) === 'SHUTDOWN')
+  if (shutdownLines.length !== 1 || logTimestamp(shutdownLines[0]) !== shutdownAt) {
+    throw incompleteEvidence('HOST lifecycle transcript is not corroborated by exactly one raw resident SHUTDOWN line')
+  }
+  if (capture?.window?.lifecycleComplete !== true || capture?.window?.serverStoppedAt !== serverStopped.stoppedAt || captureEnd < serverAt) {
+    throw incompleteEvidence('provider capture did not remain open through HOST terminal consume and server stop')
+  }
+  const observedEvents = observed.events
+  if (!observedEvents || !isDeepStrictEqual(observedEvents.terminalConsumed, terminalConsumed) ||
+      !isDeepStrictEqual(observedEvents.residentStopped, residentStopped) ||
+      !isDeepStrictEqual(observedEvents.serverStopped, serverStopped)) {
+    throw failEvidence('provider capture lifecycle projection disagrees with the preserved lifecycle transcript')
+  }
+  const startAt = Date.parse(capture?.window?.startedAt ?? '')
+  const readyAt = Date.parse(capture?.window?.generationReadyAt ?? '')
+  const firstObservedAt = Date.parse(observed.firstObservedAt ?? '')
+  const closedAt = Date.parse(observed.closedAt ?? '')
+  if (![startAt, readyAt, firstObservedAt, closedAt].every(Number.isFinite) ||
+      firstObservedAt > Date.parse(capture?.window?.bootAt ?? '') || closedAt < serverAt || closedAt > captureEnd) {
+    throw incompleteEvidence('HOST lifecycle transcript was not continuously captured before BOOT through server stop')
+  }
+}
+
+function inspectNoLlmEgressAudit(files, capture, expectedIdentity, probe) {
+  const raw = files.get('runner/no-llm-egress-audit.json')
+  if (!raw) throw incompleteEvidence('LD_PRELOAD no-LLM egress audit is missing')
+  const binding = probe?.egressAudit
+  if (!binding || binding.schema !== 'vtr-no-llm-egress-binding/v1') {
+    throw incompleteEvidence('VTR probe omits the source/run/window binding for the LD_PRELOAD audit')
+  }
+  let rows
+  try { rows = parsedJsonLines(raw.text, 'runner/no-llm-egress-audit.json') }
+  catch (error) { throw incompleteEvidence(`LD_PRELOAD egress audit is malformed JSONL: ${error.message}`) }
+  const bytes = Buffer.from(raw.contentBase64, 'base64')
+  const rawHash = sha256(bytes)
+  const worldKey = probe?.record === 'vtr-reach-live-probe'
+    ? probe.transition?.commit?.identity?.worldKey
+    : probe?.run?.worldKey
+  if (binding.status !== 'OBSERVED_ZERO' || binding.sourceSha !== expectedIdentity.sourceSha ||
+      binding.runId !== expectedIdentity.runId || binding.generationId !== expectedIdentity.generationId ||
+      binding.worldKey !== worldKey || binding.rawArtifact?.path !== 'runner/no-llm-egress-audit.json' ||
+      binding.rawArtifact?.bytes !== bytes.length || binding.rawArtifact?.sha256?.toLowerCase?.() !== rawHash) {
+    throw failEvidence('LD_PRELOAD egress binding contradicts the exact raw audit/source/run identity')
+  }
+  if (binding.coverageClass !== 'user-space-libc-interposition' || binding.coverageStatus !== 'USERSPACE_ONLY_CLOSED' ||
+      !Array.isArray(binding.limitations) || !binding.limitations.some((value) => String(value).includes('USERSPACE_ONLY')) ||
+      !binding.limitations.some((value) => String(value).includes('no kernel isolation claim'))) {
+    throw incompleteEvidence('LD_PRELOAD audit does not preserve the USERSPACE_ONLY coverage limitation')
+  }
+  if (rows.length === 0 || rows.some((row) => row?.schema !== 'vtr-no-llm-egress-audit/v1' ||
+      !['guard_loaded', 'blocked_egress', 'guard_wrapper_closed'].includes(row.event))) {
+    throw incompleteEvidence('LD_PRELOAD egress audit has no records or contains unknown schema/events')
+  }
+  const loaded = rows.filter((row) => row.event === 'guard_loaded')
+  const blocked = rows.filter((row) => row.event === 'blocked_egress')
+  const closed = rows.filter((row) => row.event === 'guard_wrapper_closed')
+  if (closed.length !== 1 || loaded.length === 0) throw incompleteEvidence('LD_PRELOAD audit requires guard_loaded and exactly one guard_wrapper_closed row')
+  const close = closed[0]
+  const lifecycleBytes = exactRawFile(files, 'runner/host-lifecycle.jsonl', 'VTR lifecycle').text
+  const lifecycleRows = parsedJsonLines(lifecycleBytes, 'runner/host-lifecycle.jsonl')
+  const residentRows = lifecycleRows.filter((row) => row.event === 'resident-stopped')
+  if (residentRows.length !== 1) throw incompleteEvidence('LD_PRELOAD audit cannot bind to exactly one HOST resident-stopped row')
+  const resident = residentRows[0]
+  const hashes = ['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256']
+  if (hashes.some((key) => typeof close[key] !== 'string' || !/^[0-9a-f]{64}$/i.test(close[key])) ||
+      loaded.some((row) => row.pid !== close.childPid || row.reason !== 'preload-active' || hashes.some((key) => row[key] !== close[key]))) {
+    throw failEvidence('LD_PRELOAD audit does not prove guard activation for the resident PID with consistent artifact hashes')
+  }
+  if (close.childPid !== resident.pid || close.childExitCode !== resident.exitCode ||
+      close.preloadVerified !== true || close.processGroupGone !== true ||
+      close.coverageClass !== 'user-space-libc-interposition' || close.coverageStatus !== 'USERSPACE_ONLY_CLOSED' ||
+      close.externalDeniedAttempts !== blocked.length || !String(close.coverage ?? '').includes('syscall-bypass-not-covered')) {
+    throw incompleteEvidence('LD_PRELOAD wrapper did not close the resident process group with USERSPACE_ONLY_CLOSED evidence')
+  }
+  const startAt = Date.parse(capture?.window?.startedAt ?? '')
+  const readyAt = Date.parse(capture?.window?.generationReadyAt ?? '')
+  const shutdownAt = Date.parse(capture?.window?.shutdownAt ?? '')
+  const residentStoppedAt = Date.parse(capture?.window?.residentStoppedAt ?? '')
+  const serverStoppedAt = Date.parse(capture?.window?.serverStoppedAt ?? '')
+  const endAt = Date.parse(capture?.window?.endedAt ?? '')
+  const loadedTimes = loaded.map((row) => Date.parse(row.utc ?? ''))
+  const closedAt = Date.parse(close.utc ?? '')
+  if (![startAt, readyAt, shutdownAt, residentStoppedAt, serverStoppedAt, endAt, closedAt, ...loadedTimes].every(Number.isFinite) ||
+      loadedTimes.some((at) => at < startAt || at > readyAt) || shutdownAt > closedAt ||
+      closedAt < Date.parse(resident.processExitObservation?.observedAt ?? '') ||
+      closedAt > Date.parse(lifecycleRows.find((row) => row.event === 'server-stopped')?.listenerClosureObservation?.observedAt ?? '') ||
+      closedAt > serverStoppedAt || serverStoppedAt > endAt || closedAt > endAt ||
+      Date.parse(binding.window?.startedAt ?? '') !== startAt ||
+      Date.parse(binding.window?.generationReadyAt ?? '') !== readyAt ||
+      Date.parse(binding.window?.shutdownAt ?? '') !== shutdownAt ||
+      Date.parse(binding.window?.residentStoppedAt ?? '') !== residentStoppedAt ||
+      Date.parse(binding.window?.serverStoppedAt ?? '') !== serverStoppedAt ||
+      Date.parse(binding.window?.endedAt ?? '') !== endAt) {
+    throw incompleteEvidence('LD_PRELOAD audit timestamps are not bound to the continuous provider capture window')
+  }
+  if (blocked.length > 0) throw failEvidence('LD_PRELOAD audit recorded a denied external network attempt during the no-LLM probe', { blockedAttempts: blocked.length })
+  if (binding.externalDeniedAttempts !== 0 || binding.guardLoadedRows !== loaded.length) {
+    throw failEvidence('LD_PRELOAD egress binding counters disagree with the raw audit rows')
+  }
+  return {
+    status: 'PASS',
+    coverageStatus: close.coverageStatus,
+    externalDeniedAttempts: blocked.length,
+    rawArtifact: { path: 'runner/no-llm-egress-audit.json', bytes: bytes.length, sha256: rawHash },
+    limitations: binding.limitations,
+  }
+}
+
+function providerCapture(files, expectedIdentity, probe, events = []) {
+  const journalPaths = {
+    'jev-calls': 'runner/jev-calls.jsonl',
+    'jev-decisions': 'runner/jev-decisions.jsonl',
+    'system2-journal': 'runner/system2.jsonl',
+    'mercury-calls': 'runner/mercury-calls.jsonl',
+  }
+  const recordsByJournal = {}
+  const rawByName = {}
+  for (const [name, path] of Object.entries(journalPaths)) {
+    const raw = files.get(path)
+    rawByName[name] = raw ?? null
+    if (!raw) {
+      recordsByJournal[name] = null
+      continue
+    }
+    try { recordsByJournal[name] = parsedJsonLines(raw.text, path) }
+    catch { recordsByJournal[name] = null }
+  }
+  const classified = classifyProviderActivity(recordsByJournal)
+  if (classified.positiveProviderActivityObserved === true ||
+      classified.providers.jevEvaluateAttempts > 0 || classified.providers.system2EvaluateAttempts > 0 ||
+      classified.providers.networkModelCalls > 0) {
+    throw failEvidence('preserved Jev/Mercury provider journals show one or more provider evaluation attempts')
+  }
+  const captureFile = files.get('runner/provider-activity-capture.json')
+  if (!captureFile) throw incompleteEvidence('VTR provider activity capture is missing')
+  let capture
+  try { capture = JSON.parse(captureFile.text) } catch (error) {
+    throw incompleteEvidence(`VTR provider activity capture is malformed JSON: ${error.message}`)
+  }
+  if (capture.schema !== 'vtr-provider-activity-capture/v2') {
+    throw incompleteEvidence(`VTR provider activity capture schema is unsupported: ${String(capture.schema ?? 'missing')}`)
+  }
+  if (!Array.isArray(capture.capture?.problems)) throw incompleteEvidence('VTR provider activity capture does not report its coverage problems')
+  if (capture.status === 'FAIL') throw failEvidence('VTR provider activity capture reports a failed observation')
   const worldKey = probe?.record === 'vtr-reach-live-probe'
     ? probe.transition?.commit?.identity?.worldKey
     : probe?.run?.worldKey
@@ -251,52 +517,147 @@ function providerCapture(files, expectedIdentity, probe) {
     generationId: expectedIdentity.generationId,
     worldKey,
   })) {
-    if (typeof expected !== 'string' || capture.identity?.[key] !== expected) throw new Error(`VTR provider capture ${key} does not match the raw run`)
+    if (typeof expected !== 'string' || capture.identity?.[key] !== expected) throw failEvidence(`VTR provider capture ${key} does not match the raw run`)
   }
+  inspectLifecycleCapture(files, capture, expectedIdentity, probe, events)
+  const egressAudit = inspectNoLlmEgressAudit(files, capture, expectedIdentity, probe)
   const readyAt = Date.parse(capture.window?.generationReadyAt ?? '')
   const terminalAt = Date.parse(capture.window?.terminalAt ?? '')
+  const serverStoppedAt = Date.parse(capture.window?.serverStoppedAt ?? '')
   const startAt = Date.parse(capture.window?.startedAt ?? '')
   const endAt = Date.parse(capture.window?.endedAt ?? '')
-  if (![startAt, readyAt, terminalAt, endAt].every(Number.isFinite) || !(startAt <= readyAt && readyAt <= terminalAt && terminalAt <= endAt)) {
-    throw new Error('VTR provider capture does not cover the complete boot-to-terminal execution window')
+  if (![startAt, readyAt, terminalAt, serverStoppedAt, endAt].every(Number.isFinite)) {
+    throw incompleteEvidence('VTR provider capture is missing one or more run/server-stop coverage boundaries')
   }
-  if (!Number.isFinite(capture.window?.maxPollGapMs) || !Number.isFinite(capture.window?.maxObservedPollGapMs) ||
-      capture.window.maxObservedPollGapMs > capture.window.maxPollGapMs) throw new Error('VTR provider capture polling coverage is outside its declared bound')
-  const journalPaths = {
-    'jev-calls': 'runner/jev-calls.jsonl',
-    'jev-decisions': 'runner/jev-decisions.jsonl',
-    'system2-journal': 'runner/system2.jsonl',
+  if (!(startAt <= readyAt && readyAt <= terminalAt && terminalAt <= endAt)) {
+    throw failEvidence('VTR provider capture has contradictory boot/readiness/terminal boundary ordering')
+  }
+  if (!Number.isFinite(capture.window?.maxPollGapMs) || !Number.isFinite(capture.window?.maxObservedPollGapMs)) {
+    throw incompleteEvidence('VTR provider capture is missing polling-gap evidence')
+  }
+  if (capture.window.maxObservedPollGapMs > capture.window.maxPollGapMs) {
+    throw incompleteEvidence('VTR provider capture polling coverage exceeds its declared bound')
   }
   for (const [name, path] of Object.entries(journalPaths)) {
-    const raw = exactRawFile(files, path, 'VTR')
+    const raw = rawByName[name]
+    if (!raw) continue
     const bytes = Buffer.from(raw.contentBase64, 'base64')
     const snapshot = capture.journals?.[name]
-    if (!snapshot || snapshot.bytes !== bytes.length || snapshot.sha256 !== sha256(bytes) ||
-        !Number.isFinite(Date.parse(snapshot.closedAt ?? '')) || bytes.length !== 0) {
-      throw new Error(`VTR provider journal ${name} is not an observed empty file with matching bytes/hash`)
+    if (!snapshot || !Number.isSafeInteger(snapshot.bytes) || typeof snapshot.sha256 !== 'string' ||
+        !/^[0-9a-f]{64}$/i.test(snapshot.sha256)) {
+      throw incompleteEvidence(`VTR provider journal ${name} has no complete capture snapshot`)
     }
-    if (parsedJsonLines(raw.text, path).length !== 0) throw new Error(`VTR provider journal ${name} contains activity`)
+    if (snapshot.bytes !== bytes.length || snapshot.sha256.toLowerCase() !== sha256(bytes)) {
+      throw failEvidence(`VTR provider journal ${name} bytes/hash differ from the continuously captured snapshot`)
+    }
     const firstObservedAt = Date.parse(snapshot.firstObservedAt ?? snapshot.initializedAt ?? '')
     const closedAt = Date.parse(snapshot.closedAt ?? '')
-    if (!Number.isFinite(firstObservedAt) || firstObservedAt > readyAt || !Number.isFinite(closedAt) || closedAt < terminalAt || closedAt > endAt) {
-      throw new Error(`VTR provider journal ${name} was not observed before GENERATION_READY through terminal capture`)
+    if (!Number.isFinite(firstObservedAt) || !Number.isFinite(closedAt) ||
+        !Number.isSafeInteger(snapshot.rows) || !Number.isSafeInteger(snapshot.malformedRows)) {
+      throw incompleteEvidence(`VTR provider journal ${name} is missing row-count or observation-window evidence`)
+    }
+    if (firstObservedAt > readyAt || closedAt < terminalAt || closedAt < serverStoppedAt || closedAt > endAt) {
+      throw incompleteEvidence(`VTR provider journal ${name} was not continuously observed from before GENERATION_READY through HOST server stop`)
+    }
+    const rows = recordsByJournal[name]
+    if (rows === null) throw incompleteEvidence(`VTR provider journal ${name} is malformed: ${path}`)
+    if (rows.length !== snapshot.rows || snapshot.malformedRows !== 0) {
+      throw incompleteEvidence(`VTR provider journal ${name} has malformed or unaccounted rows`)
     }
   }
-  for (const key of ['networkModelCalls', 'jevDecisionCalls', 'system2DecisionCalls']) {
-    if (capture.activity?.[key] !== 0) throw new Error(`VTR provider capture ${key} is not zero`)
+  if (capture.status !== 'OBSERVED' || capture.window?.coverageComplete !== true || capture.capture.problems.length !== 0) {
+    throw incompleteEvidence('VTR provider activity capture does not establish continuous boot-to-terminal coverage')
+  }
+  if (classified.providers.jevEvaluateAttempts > 0 || classified.providers.system2EvaluateAttempts > 0 ||
+      classified.providers.networkModelCalls > 0 || capture.activityClassification?.providers?.jevEvaluateAttempts > 0 ||
+      capture.activityClassification?.providers?.system2EvaluateAttempts > 0 || capture.activity?.jevEvaluateAttempts > 0 ||
+      capture.activity?.system2EvaluateAttempts > 0 || capture.activity?.networkModelCalls > 0) {
+    throw failEvidence('VTR provider journals or counters show one or more provider evaluation attempts')
+  }
+  if (classified.unknown.length > 0) {
+    throw incompleteEvidence('VTR provider activity is unclassified', { unknown: classified.unknown })
+  }
+  const flattened = { ...classified.decisions, ...classified.providers }
+  if (!capture.activity || !capture.activityClassification ||
+      Object.values(flattened).some((value) => !Number.isSafeInteger(value))) {
+    throw incompleteEvidence('VTR provider capture omits one or more independently countable activity fields')
+  }
+  if (!isDeepStrictEqual(capture.activityClassification, classified) || !isDeepStrictEqual(capture.activity, flattened)) {
+    throw failEvidence('VTR provider activity counters/classification disagree with the preserved raw journals')
   }
   const acceptance = JSON.parse(exactRawFile(files, 'runner/acceptance.json', 'VTR').text)
   if (acceptance.record !== 'acceptance' || acceptance.runId !== expectedIdentity.runId ||
       acceptance.gitCommit !== expectedIdentity.sourceSha || acceptance.checkoutHead !== expectedIdentity.sourceSha ||
       acceptance.generationHash !== expectedIdentity.buildHash) {
-    throw new Error('VTR acceptance record does not bind the raw source/run/build identity')
+    throw failEvidence('VTR acceptance record does not bind the raw source/run/build identity')
   }
   const [serverId, dimension, epoch] = worldKey.split('|')
   if (acceptance.serverId !== serverId || acceptance.worldEpoch !== Number(epoch) ||
       String(acceptance.dimension).replace(/^minecraft:/, '') !== String(dimension).replace(/^minecraft:/, '')) {
-    throw new Error('VTR acceptance record does not bind the committed world/dimension/epoch')
+    throw failEvidence('VTR acceptance record does not bind the committed world/dimension/epoch')
   }
-  return { capture, acceptance, activity: capture.activity }
+  const reportedNetworkCalls = probe?.configuredNoLlmProbe?.networkModelCalls ?? probe?.configuration?.networkModelCalls
+  if (reportedNetworkCalls !== flattened.networkModelCalls) {
+    throw failEvidence('VTR probe networkModelCalls does not match captured Jev/System2 provider attempts')
+  }
+  const policy = probe?.configuredNoLlmProbe
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw incompleteEvidence('VTR probe does not project captured decision and provider counters separately')
+  }
+  const projected = {
+    jevDecisionCalls: policy.effectiveJev?.decisionCalls,
+    system2DecisionCalls: policy.effectiveSystem2?.decisionCalls,
+    jevProviderEvaluateAttempts: policy.effectiveJev?.providerEvaluateAttempts,
+    system2ProviderEvaluateAttempts: policy.effectiveSystem2?.providerEvaluateAttempts,
+  }
+  if (Object.values(projected).some((value) => !Number.isSafeInteger(value))) {
+    throw incompleteEvidence('VTR probe omits projected Jev/System2 decision or provider-attempt counts')
+  }
+  if (projected.jevDecisionCalls !== flattened.jevDecisionFrames ||
+      projected.system2DecisionCalls !== flattened.system2DecisionInvocations ||
+      projected.jevProviderEvaluateAttempts !== flattened.jevEvaluateAttempts ||
+      projected.system2ProviderEvaluateAttempts !== flattened.system2EvaluateAttempts) {
+    throw failEvidence('VTR probe decision/provider projections disagree with the preserved raw journals')
+  }
+  const mechanicalSteps = Number(probe.transition?.metrics?.mechanicalStepsPerTransition)
+  const expectedAttemptsPerStep = Number.isSafeInteger(mechanicalSteps) && mechanicalSteps > 0
+    ? flattened.networkModelCalls / mechanicalSteps : null
+  if (policy.providerEvaluateAttemptsPerMechanicalStep !== expectedAttemptsPerStep) {
+    throw failEvidence('VTR probe provider-attempts-per-mechanical-step metric disagrees with the captured provider journals')
+  }
+  return { capture, acceptance, activity: flattened, egressAudit }
+}
+
+function providerCaptureFromArchive(archive, expectedIdentity, probe) {
+  const paths = [
+    'runner/provider-activity-capture.json',
+    'runner/jev-calls.jsonl',
+    'runner/jev-decisions.jsonl',
+    'runner/system2.jsonl',
+    'runner/mercury-calls.jsonl',
+    'runner/provider-activity-capture.json',
+    'runner/host-lifecycle.jsonl',
+    'runner/no-llm-egress-audit.json',
+    'runner/mercury-calls.jsonl',
+    'runner/host-lifecycle.jsonl',
+    'runner/no-llm-egress-audit.json',
+    'runner/jev-run.jsonl',
+    'runner/run.jsonl',
+    'runner/acceptance.json',
+  ]
+  const files = new Map()
+  for (const path of paths) {
+    const absolute = join(archive, path)
+    if (!existsSync(absolute)) continue
+    const stat = lstatSync(absolute)
+    if (stat.isSymbolicLink() || !stat.isFile()) throw failEvidence(`provider archive entry is not a regular file: ${path}`)
+    const bytes = readFileSync(absolute)
+    files.set(path, { contentBase64: bytes.toString('base64'), text: bytes.toString('utf8') })
+  }
+  const runPath = ['runner/jev-run.jsonl', 'runner/run.jsonl'].find((path) => files.has(path))
+  const events = runPath ? parsedJsonLines(files.get(runPath).text, runPath)
+    .filter((row) => row && typeof row === 'object' && row.record === 'agent-event' && typeof row.message === 'string') : []
+  return providerCapture(files, expectedIdentity, probe, events)
 }
 
 function inspectRawLegacySide(side, expectedIdentity) {
@@ -490,8 +851,7 @@ function inspectRawVtrSide(side, expectedIdentity) {
   exactRawFile(files, 'runner/buddy.log', 'VTR')
   const eventPath = oneRawJournal(files, ['runner/run.jsonl', 'runner/jev-run.jsonl', 'runner/jev-run-source.jsonl'], 'VTR')
   const rows = agentEvents(files, eventPath, 'VTR')
-  for (const path of ['runner/jev-calls.jsonl', 'runner/jev-decisions.jsonl', 'runner/system2.jsonl', 'runner/acceptance.json',
-    'runner/provider-activity-capture.json', 'server/fixture-commands.jsonl']) {
+  for (const path of ['runner/acceptance.json', 'runner/provider-activity-capture.json', 'runner/host-lifecycle.jsonl', 'server/fixture-commands.jsonl']) {
     exactRawFile(files, path, 'VTR')
   }
   const probeCommit = probe?.record === 'vtr-reach-live-probe'
@@ -576,6 +936,25 @@ function inspectRawVtrSide(side, expectedIdentity) {
   if (!finalStep || finalStep.detail?.status !== 'terminal' || finalStep.detail?.outcome !== 'SUCCESS' || finalStep.detail?.verified !== true) {
     throw new Error('last VTR mechanical leg did not carry the verified terminal SUCCESS outcome')
   }
+  const selectedSkillStart = eventNamed(rows, 'SKILL_START', (row) => eventActionId(row) === selectedActionId)[0]
+  const commitmentId = selectedSkillStart?.detail?.commitmentId ?? token(selectedSkillStart?.message ?? '', 'commitmentId')
+  const commitAtForLegs = Date.parse(commitRow.ts ?? '')
+  const terminalAtForLegs = Date.parse(outcomes[0].ts ?? '')
+  const walkLegRows = eventNamed(rows, 'SKILL_STEP', (row) => token(row.message, 'step') === 'walk_leg').filter((row) => {
+    const at = Date.parse(row.ts ?? '')
+    return Number.isFinite(at) && at >= commitAtForLegs && at <= terminalAtForLegs
+  })
+  const walkLegProof = inspectLiveWalkLegOwnership({
+    walkLegRows,
+    actionId: selectedActionId,
+    commitmentId,
+    transitionId,
+    contractHash: expectedIdentity.contractHash,
+    reservations,
+    stepOutcomes,
+    events: rows,
+  })
+  if (walkLegProof.status !== 'PASS') throw new Error(`VTR live proof has fewer than three successful settled correlated walk_leg rows or violates ownership: ${walkLegProof.reason}`)
   if (Number(terminalDetail.usage?.mechanicalSteps) !== reservations.length ||
       Number(terminalMetrics.mechanicalStepsPerTransition) !== reservations.length ||
       terminalMetrics.verifiedTransitionCompletion !== 1 || terminalMetrics.typedTerminalOutcome !== 'SUCCESS' ||
@@ -600,7 +979,19 @@ function inspectRawVtrSide(side, expectedIdentity) {
       noDouble.vtrActuationCount !== vtrMoveStarts.length || noDouble.duplicateAuthority !== false || noDouble.duplicateAuthorityConflicts !== 0) {
     throw new Error('VTR no-double-authority artifact does not match independently recomputed production events')
   }
-  const provider = providerCapture(files, expectedIdentity, probe)
+  const provider = providerCapture(files, expectedIdentity, probe, rows)
+  if (terminalMetrics.jevCallsPerTransition !== provider.activity.jevDecisionFrames ||
+      terminalMetrics.system2CallsPerTransition !== provider.activity.system2DecisionInvocations) {
+    throw failEvidence('VTR terminal decision-call metrics disagree with the captured Jev/System2 decision journals')
+  }
+  if (terminalMetrics.decisionFrameInvocations !== undefined &&
+      terminalMetrics.decisionFrameInvocations !== provider.activity.jevDecisionFrames) {
+    throw failEvidence('VTR terminal Jev decision-frame metric disagrees with the captured Jev call journal')
+  }
+  if (terminalMetrics.providerEvaluateAttempts !== undefined &&
+      terminalMetrics.providerEvaluateAttempts !== provider.activity.networkModelCalls) {
+    throw failEvidence('VTR terminal provider-attempt metric disagrees with captured Jev/Mercury journals')
+  }
   const rawConfiguration = probe.configuration ?? {
     BUDDY_POLICY: probe.configuredNoLlmProbe?.effectiveJev?.configuredPolicy,
     BUDDY_SYSTEM2: probe.configuredNoLlmProbe?.effectiveSystem2?.configuredMode,
@@ -649,9 +1040,6 @@ function inspectRawVtrSide(side, expectedIdentity) {
       throw new Error(`VTR raw terminal metrics omit a finite nonnegative ${key}`)
     }
   }
-  if (terminalMetrics.modelCallsPerMechanicalStep !== 0) {
-    throw new Error('no-LLM Reach proof reports nonzero model calls per mechanical step')
-  }
   const host = fileText(files, 'runner/buddy.log')
   const hostLines = host.split(/\r?\n/)
   const hostMatch = (marker, predicate) => hostLines.filter((line) => line.includes(marker) && predicate(line))
@@ -687,10 +1075,20 @@ function inspectRawVtrSide(side, expectedIdentity) {
     measured: {
       verifiedTransitionCompletionCount: terminalMetrics.verifiedTransitionCompletion,
       mechanicalStepsPerTransition: reservations.length,
+      successfulWalkLegRows: walkLegProof.successfulWalkLegs,
+      excludedFailedWalkLegRows: walkLegProof.excludedFailedWalkLegs,
       typedTerminalOutcome: terminalOutcome.kind,
       legacyJevCallsPerTransition: terminalMetrics.jevCallsPerTransition,
       system2CallsPerTransition: terminalMetrics.system2CallsPerTransition,
       modelCallsPerMechanicalStep: terminalMetrics.modelCallsPerMechanicalStep,
+      decisionFrameInvocationsPerTransition: provider.activity.jevDecisionFrames,
+      jevProviderEvaluateAttemptsIncludingRetriesPerTransition: provider.activity.jevEvaluateAttempts,
+      jevProviderEvaluateAttemptsPerMechanicalStep: reservations.length > 0
+        ? provider.activity.jevEvaluateAttempts / reservations.length : null,
+      system2ProviderEvaluateAttemptsPerTransition: provider.activity.system2EvaluateAttempts,
+      providerEvaluateAttemptsPerTransition: provider.activity.networkModelCalls,
+      providerEvaluateAttemptsPerMechanicalStep: reservations.length > 0
+        ? provider.activity.networkModelCalls / reservations.length : null,
       duplicateAuthority: legacyMoveStarts.length === 0 && vtrMoveStarts.length === 1,
       duplicateAuthorityConflicts: terminalMetrics.duplicateAuthorityConflicts,
       concurrentLegacyActuations: legacyMoveStarts.length,
@@ -931,6 +1329,9 @@ export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expect
       [proof.metrics?.policyAndModels?.vtr?.system2CallsPerTransition, vtrRaw.measured.system2CallsPerTransition, 'VTR System2 calls'],
       [proof.metrics?.policyAndModels?.vtr?.deprecatedModelCallsPerMechanicalStep, vtrRaw.measured.modelCallsPerMechanicalStep, 'VTR model calls per mechanical step'],
       [proof.metrics?.policyAndModels?.vtr?.actualNetworkCalls, vtrRaw.configuration.networkModelCalls, 'VTR configured network model calls'],
+      [proof.metrics?.policyAndModels?.vtr?.decisionFrameInvocationsPerTransition, vtrRaw.measured.decisionFrameInvocationsPerTransition, 'VTR Jev decision frames per Transition'],
+      [proof.metrics?.policyAndModels?.vtr?.jevProviderEvaluateAttemptsIncludingRetriesPerTransition, vtrRaw.measured.jevProviderEvaluateAttemptsIncludingRetriesPerTransition, 'VTR Jev provider attempts per Transition'],
+      [proof.metrics?.policyAndModels?.vtr?.jevProviderEvaluateAttemptsPerMechanicalStep, vtrRaw.measured.jevProviderEvaluateAttemptsPerMechanicalStep, 'VTR Jev provider attempts per mechanical step'],
       [proof.metrics?.policyAndModels?.vtr?.jevProvider, vtrRaw.configuration.effectiveJevProvider, 'VTR effective Jev provider'],
       [proof.metrics?.policyAndModels?.vtr?.jevModel, vtrRaw.configuration.effectiveJevModel, 'VTR effective Jev model'],
       [proof.metrics?.policyAndModels?.vtr?.jevPolicy, vtrRaw.configuration.BUDDY_POLICY, 'VTR configured Jev policy'],
@@ -945,14 +1346,21 @@ export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expect
       if (reported !== measured) throw new Error(`${label} report differs from recomputed raw event evidence`)
     }
     const policy = proof.metrics?.policyAndModels?.vtr ?? {}
-    for (const key of ['decisionFrameInvocationsPerTransition', 'jevProviderEvaluateAttemptsIncludingRetriesPerTransition', 'jevProviderEvaluateAttemptsPerMechanicalStep']) {
-      if (policy[key] !== null && policy[key] !== undefined && policy[key] !== 0) throw new Error(`no-LLM VTR raw journals contradict reported ${key}`)
+    if (policy.decisionFrameInvocationsPerTransition !== vtrRaw.measured.decisionFrameInvocationsPerTransition) {
+      throw new Error('VTR decision-frame count does not match the provider capture decision journal')
+    }
+    for (const key of ['jevProviderEvaluateAttemptsIncludingRetriesPerTransition', 'jevProviderEvaluateAttemptsPerMechanicalStep']) {
+      if (policy[key] !== vtrRaw.measured[key]) throw new Error(`VTR provider-attempt metric does not match captured raw evidence: ${key}`)
+      if (policy[key] !== 0) throw new Error(`no-LLM VTR raw journals show provider activity: ${key}`)
     }
     if (policy.modelMetricsStatus === 'PASS' &&
-        (policy.decisionFrameInvocationsPerTransition !== 0 || policy.jevProviderEvaluateAttemptsIncludingRetriesPerTransition !== 0)) {
-      throw new Error('VTR model metric PASS is not supported by the zero-activity provider capture')
+        (policy.jevProviderEvaluateAttemptsIncludingRetriesPerTransition !== 0 || policy.actualNetworkCalls !== 0)) {
+      throw new Error('VTR model metric PASS is not supported by the zero-provider-attempt capture')
     }
   } catch (error) {
+    if (error instanceof EvidenceAssessmentError && error.status === CHECK_STATUS.INCOMPLETE) {
+      return incomplete(error.message, error.details ?? {})
+    }
     return fail(error.message)
   }
   if (proof.acceptanceEligible !== true || proof.acceptanceStatus !== 'ASSESSED_RAW_RUN_COMPARISON' || proof.evidenceClass !== 'run-scoped-raw-events') {
@@ -1062,6 +1470,144 @@ export function inspectLiveSkillOwnership({
   }
   if (Array.isArray(events) && (events.indexOf(start) !== skillStartIndex || events.indexOf(start) >= outcomeIndex)) return fail('SKILL_START event does not occupy the expected unique journal position')
   return { status: 'PASS', actionId, mechanicalSteps, proof: 'all observed live legs share one VTR-selected Skill/action owner' }
+}
+
+/**
+ * Proves that >=3 actual walkSkill walk_leg emissions correspond one-to-one to
+ * successful, settled locomotion reservations under the same VTR action and
+ * commitment. A failed/refused leg remains evidence but never contributes to the
+ * minimum. The terminal leg is independently required to close with VERIFY/SUCCESS.
+ */
+export function inspectLiveWalkLegOwnership({
+  walkLegRows, actionId, commitmentId, transitionId, contractHash,
+  reservations, stepOutcomes, events,
+}) {
+  const fail = (reason, details = {}) => ({ status: 'FAIL', reason, ...details })
+  const incomplete = (reason, details = {}) => ({ status: 'INCOMPLETE', reason, ...details })
+  if (!Array.isArray(walkLegRows) || !Array.isArray(reservations) || !Array.isArray(stepOutcomes) || !Array.isArray(events)) {
+    return incomplete('raw walk-leg/reservation/settlement evidence is unavailable')
+  }
+  if (walkLegRows.length === 0) return incomplete('no raw SKILL_STEP step=walk_leg rows were archived')
+  if (typeof actionId !== 'string' || !actionId || typeof commitmentId !== 'string' || !commitmentId ||
+      typeof transitionId !== 'string' || !transitionId || typeof contractHash !== 'string' || !contractHash) {
+    return incomplete('walk-leg evidence lacks its action, commitment, Transition, or contract identity')
+  }
+  const reservationByLeg = new Map()
+  const outcomeByStepId = new Map()
+  for (const row of reservations) {
+    const stepId = row?.detail?.stepId
+    const match = typeof stepId === 'string' ? /:walk-leg-(\d+)$/u.exec(stepId) : null
+    if (!match) continue
+    const leg = Number(match[1])
+    if (reservationByLeg.has(leg)) return fail('multiple mechanical reservations claim one walk-leg ordinal', { leg })
+    reservationByLeg.set(leg, row)
+  }
+  for (const row of stepOutcomes) {
+    const stepId = row?.detail?.stepId
+    if (typeof stepId !== 'string') continue
+    if (outcomeByStepId.has(stepId)) return fail('multiple mechanical settlements claim one stepId', { stepId })
+    outcomeByStepId.set(stepId, row)
+  }
+  const seenLegs = new Set()
+  const seenStepIds = new Set()
+  const successful = []
+  const excludedFailures = []
+  for (const row of walkLegRows) {
+    const message = String(row?.message ?? '')
+    const detail = row?.detail ?? {}
+    const messageLeg = Number(token(message, 'count'))
+    const leg = detail.leg
+    const action = eventActionId(row)
+    const commitment = detail.commitmentId ?? token(message, 'commitmentId')
+    if (!Number.isSafeInteger(messageLeg) || messageLeg < 1 || leg !== messageLeg) {
+      return fail('raw walk_leg message count and structured leg ordinal disagree', { message: messageLeg, detail: leg })
+    }
+    if (seenLegs.has(leg)) return fail('duplicate raw walk_leg ordinal under one movement', { leg })
+    seenLegs.add(leg)
+    if (action !== actionId || commitment !== commitmentId || token(message, 'commitmentId') !== commitmentId ||
+        token(message, 'authority') !== 'MECHANICAL_CONTINUATION') {
+      return fail('raw walk_leg changed VTR action/commitment or is not a mechanical continuation', { leg, actionId: action, commitmentId: commitment, authority: token(message, 'authority') })
+    }
+    const reservation = reservationByLeg.get(leg)
+    if (!reservation) return fail('raw walk_leg has no matching reserved VTR mechanical step', { leg })
+    const stepId = reservation.detail.stepId
+    if (seenStepIds.has(stepId)) return fail('multiple raw walk_leg rows claim one VTR stepId', { leg, stepId })
+    seenStepIds.add(stepId)
+    const outcomes = stepOutcomes.filter((candidate) => candidate?.detail?.stepId === stepId)
+    if (outcomes.length !== 1) return fail('raw walk_leg does not have exactly one settled VTR step outcome', { leg, stepId, settlements: outcomes.length })
+    const settled = outcomes[0]
+    if (reservation.detail.transitionId !== transitionId || settled.detail.transitionId !== transitionId ||
+        reservation.detail.contractHash !== contractHash || settled.detail.contractHash !== contractHash ||
+        reservation.detail.actionId !== actionId || settled.detail.actionId !== actionId ||
+        reservation.detail.effectKind !== 'locomotion' || reservation.detail.intentId !== settled.detail.intentId) {
+      return fail('walk_leg settlement changed Transition, contract, effect, intent, or action ownership', { leg, stepId })
+    }
+    // Production formatWalkLeg currently carries actionId + commitmentId + count
+    // (ordinal) but not the host-owned Transition/contract/step ids. When those
+    // optional fields are present in a richer raw logger, require them to agree;
+    // otherwise bind them through the unique VTR reservation and settlement rows.
+    const explicitStepId = detail.stepId ?? token(message, 'stepId')
+    const explicitTransitionId = detail.transitionId ?? token(message, 'transitionId')
+    const explicitContractHash = detail.contractHash ?? token(message, 'contractHash')
+    const explicitLeg = detail.ordinal ?? token(message, 'ordinal')
+    if ((explicitStepId !== undefined && explicitStepId !== null && explicitStepId !== stepId) ||
+        (explicitTransitionId !== undefined && explicitTransitionId !== null && explicitTransitionId !== transitionId) ||
+        (explicitContractHash !== undefined && explicitContractHash !== null && explicitContractHash !== contractHash) ||
+        (explicitLeg !== undefined && explicitLeg !== null && Number(explicitLeg) !== leg) ||
+        (reservation.detail.commitmentId !== undefined && reservation.detail.commitmentId !== commitmentId) ||
+        (settled.detail.commitmentId !== undefined && settled.detail.commitmentId !== commitmentId) ||
+        (reservation.detail.leg !== undefined && reservation.detail.leg !== leg) ||
+        (settled.detail.leg !== undefined && settled.detail.leg !== leg)) {
+      return fail('raw walk_leg identity fields disagree with its unique VTR step reservation/settlement join', {
+        leg, stepId, explicitStepId: explicitStepId ?? null,
+        explicitTransitionId: explicitTransitionId ?? null,
+        explicitContractHash: explicitContractHash ?? null,
+      })
+    }
+    const start = events.indexOf(reservation)
+    const end = events.indexOf(settled)
+    const walk = events.indexOf(row)
+    const nextReservation = reservationByLeg.get(leg + 1)
+    const next = nextReservation ? events.indexOf(nextReservation) : Number.POSITIVE_INFINITY
+    if (start < 0 || end < 0 || walk < 0 || !(start < end && end < walk && walk < next)) {
+      return fail('walk_leg is not emitted after its mechanical settlement and before the next leg', { leg, stepId, indices: { reserve: start, outcome: end, walk, next } })
+    }
+    const failed = (detail.failure !== undefined && detail.failure !== null && detail.failure !== '') ||
+      token(message, 'retry') !== null || /\bcontinuedAfter=/u.test(message)
+    const goodOutcome = (settled.detail.status === 'active' && settled.detail.outcome === 'CONTINUING' && settled.detail.verified === false) ||
+      (settled.detail.status === 'terminal' && settled.detail.outcome === 'SUCCESS' && settled.detail.verified === true)
+    if (failed || !goodOutcome) {
+      excludedFailures.push({ leg, stepId, failure: detail.failure ?? null, status: settled.detail.status, outcome: settled.detail.outcome })
+      continue
+    }
+    successful.push({
+      leg,
+      ordinal: leg,
+      stepId,
+      actionId,
+      commitmentId,
+      transitionId,
+      contractHash,
+      status: settled.detail.status,
+      correlation: 'raw SKILL_STEP actionId+commitmentId+ordinal joined to unique VTR reservation/outcome stepId+transitionId+contractHash',
+    })
+  }
+  const ordinals = [...seenLegs].sort((left, right) => left - right)
+  if (!isDeepStrictEqual(ordinals, Array.from({ length: ordinals.length }, (_unused, index) => index + 1))) {
+    return fail('raw walk_leg rows are not distinct sequential mechanical ordinals', { observedLegs: ordinals })
+  }
+  if (successful.length < 3) return fail('fewer than three successful settled raw walk_leg rows remain after excluding failed/refused legs', { successfulWalkLegs: successful.length, excludedFailedWalkLegs: excludedFailures.length })
+  return {
+    status: 'PASS',
+    successfulWalkLegs: successful.length,
+    excludedFailedWalkLegs: excludedFailures.length,
+    commitmentId,
+    actionId,
+    transitionId,
+    contractHash,
+    evidence: successful,
+    excluded: excludedFailures,
+  }
 }
 
 function logTimestamp(line) {
@@ -1379,7 +1925,70 @@ function gitCommitExists(repo, commit) {
   }
 }
 
-async function validate(archive, repo) {
+export function summarizeValidationStatuses(checks) {
+  const all = Array.isArray(checks) ? checks : []
+  const probeChecks = all.filter((check) => !String(check?.id ?? '').startsWith('milestone:'))
+  const statusFor = (entries) => entries.some((check) => check.status === CHECK_STATUS.FAIL)
+    ? 'FAIL'
+    : entries.some((check) => check.status === CHECK_STATUS.INCOMPLETE) ? 'INCOMPLETE' : 'PASS'
+  const counts = Object.fromEntries(Object.values(CHECK_STATUS).map((value) => [
+    value.toLowerCase(), all.filter((check) => check.status === value).length,
+  ]))
+  const overallStatus = statusFor(all)
+  const probeStatus = statusFor(probeChecks)
+  return {
+    status: probeStatus,
+    probeStatus,
+    migrationMilestoneStatus: overallStatus,
+    overallStatus,
+    counts,
+  }
+}
+
+export function validationExitCode(report) {
+  return EXIT[report?.status] ?? EXIT.FAIL
+}
+
+export function inspectNoDoubleAuthorityFixtureProof({ report, reportBytes, testSourceBytes, expectedSourceSha, binding }) {
+  const incomplete = (reason) => ({ status: 'INCOMPLETE', reason })
+  const fail = (reason) => ({ status: 'FAIL', reason })
+  if (!report || typeof report !== 'object' || Array.isArray(report) || !Buffer.isBuffer(reportBytes) || !Buffer.isBuffer(testSourceBytes)) {
+    return incomplete('fixture proof report or exact test source bytes are missing')
+  }
+  const reportDigest = sha256(reportBytes)
+  const sourceDigest = sha256(testSourceBytes)
+  if (!binding || binding.schema !== 'vtr-reach-no-double-authority-fixture/v1' || binding.status !== 'PASS' ||
+      binding.sourceSha !== expectedSourceSha || binding.rawReport?.path !== 'proofs/no-double-authority-fixture.json' ||
+      binding.rawReport?.bytes !== reportBytes.length || binding.rawReport?.sha256?.toLowerCase?.() !== reportDigest ||
+      binding.testSource?.path !== 'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts' ||
+      binding.testSource?.bytes !== testSourceBytes.length || binding.testSource?.sha256?.toLowerCase?.() !== sourceDigest) {
+    return fail('probe fixture-proof binding does not re-hash to the preserved report/source bytes and exact run identity')
+  }
+  if (report.schema !== 'vtr-reach-no-double-authority-fixture/v1' || report.result !== 'PASS' ||
+      report.sourceSha?.toLowerCase?.() !== expectedSourceSha ||
+      report.test?.path !== 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts' ||
+      report.test?.name !== 'production Reach dispatch and legacy Executor claim cannot overlap body authority' ||
+      report.test?.sourceSha256?.toLowerCase?.() !== sourceDigest) {
+    return fail('fixture report does not bind the required exact-source legacy claim refusal test')
+  }
+  const fixture = report.fixture
+  const required = ['legacyClaimRejected', 'legacyClaimError', 'vtrOwnerRetained', 'transitionId', 'contractHash',
+    'pathfinderStartsBeforeLegacyClaim', 'pathfinderStartsAfterLegacyClaim', 'pathfinderStartDelta', 'authorityConflictCount', 'maxConcurrentActions']
+  const missing = required.filter((key) => fixture?.[key] === undefined || fixture?.[key] === null)
+  if (missing.length) return incomplete(`fixture report omits observed fields: ${missing.join(', ')}`)
+  const before = fixture.pathfinderStartsBeforeLegacyClaim
+  const after = fixture.pathfinderStartsAfterLegacyClaim
+  if (fixture.legacyClaimRejected !== true || fixture.legacyClaimError !== 'ExecutionAuthorityConflict' ||
+      fixture.vtrOwnerRetained !== true || typeof fixture.transitionId !== 'string' || fixture.transitionId.length === 0 ||
+      typeof fixture.contractHash !== 'string' || !/^[0-9a-f]{64}$/iu.test(fixture.contractHash) ||
+      !Number.isSafeInteger(before) || !Number.isSafeInteger(after) || fixture.pathfinderStartDelta !== after - before ||
+      fixture.pathfinderStartDelta !== 0 || fixture.authorityConflictCount !== 1 || fixture.maxConcurrentActions !== 1) {
+    return fail('fixture did not retain the VTR owner/contract while refusing legacy claim without another Pathfinder start')
+  }
+  return { status: 'PASS', reason: 'exact-source legacy claim refusal and no-second-Pathfinder-start fixture independently rehashed' }
+}
+
+export async function validateEvidenceArchive(archive, repo = null) {
   const checks = []
   const add = (id, status, detail = {}) => checks.push({ id, status, ...detail })
   const incomplete = (id, reason, detail = {}) => add(id, CHECK_STATUS.INCOMPLETE, { reason, ...detail })
@@ -1398,9 +2007,13 @@ async function validate(archive, repo) {
     'runner/milestone-predicates.json',
     'server/fixture-commands.jsonl',
     'server/leaf-latest.log',
+    'server/leaf-stdout-events.jsonl',
     'server/server-start.json',
+    'server/fresh-world-attestation.json',
     'server/world/level.dat',
-    'server/world/playerdata.dat',
+    'runner/provider-activity-capture.json',
+    'runner/host-lifecycle.jsonl',
+    'runner/no-llm-egress-audit.json',
   ]
   const present = new Set()
   for (const path of required) {
@@ -1419,12 +2032,19 @@ async function validate(archive, repo) {
   }
 
   let validJsonCount = 0
-  for (const path of listing.files.filter((name) => name.endsWith('.json'))) {
-    try { readJson(archive, path); validJsonCount += 1 } catch (error) { fail(`json:${path}`, error.message) }
+  for (const path of listing.files.filter((name) => name.endsWith('.json') && name !== 'runner/no-llm-egress-audit.json')) {
+    try { readJson(archive, path); validJsonCount += 1 } catch (error) {
+      if (path === 'runner/provider-activity-capture.json') incomplete(`json:${path}`, error.message)
+      else fail(`json:${path}`, error.message)
+    }
   }
   let validJsonlCount = 0
-  for (const path of listing.files.filter((name) => name.endsWith('.jsonl'))) {
-    try { parseJsonl(archive, path); validJsonlCount += 1 } catch (error) { fail(`jsonl:${path}`, error.message) }
+  for (const path of listing.files.filter((name) => name.endsWith('.jsonl') || name === 'runner/no-llm-egress-audit.json')) {
+    try { parseJsonl(archive, path); validJsonlCount += 1 } catch (error) {
+      if (['runner/jev-calls.jsonl', 'runner/jev-decisions.jsonl', 'runner/system2.jsonl', 'runner/mercury-calls.jsonl', 'runner/no-llm-egress-audit.json'].includes(path)) {
+        incomplete(`jsonl:${path}`, error.message)
+      } else fail(`jsonl:${path}`, error.message)
+    }
   }
   if (validJsonCount > 0) pass('archive:json-valid', { files: validJsonCount })
   if (validJsonlCount > 0) pass('archive:jsonl-valid', { files: validJsonlCount })
@@ -1474,6 +2094,44 @@ async function validate(archive, repo) {
     const runId = run.runId
     const generationId = run.generationId
     const sourceSha = source.commit
+
+    const botUuid = String(run.botUuid ?? '').toLowerCase()
+    const playerDataPath = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(botUuid)
+      ? `server/world/playerdata/${botUuid}.dat`
+      : null
+    if (!playerDataPath) incomplete('required:world-playerdata', 'run metadata has no canonical bot UUID for exact playerdata path')
+    else if (listing.files.includes(playerDataPath)) {
+      present.add(playerDataPath)
+      pass('required:world-playerdata', { path: playerDataPath })
+    } else incomplete('required:world-playerdata', 'UUID-bound Minecraft playerdata file is absent', { path: playerDataPath })
+
+    let lifecycleRowsForFreshWorld = []
+    try {
+      if (listing.files.includes('runner/host-lifecycle.jsonl')) lifecycleRowsForFreshWorld = parseJsonl(archive, 'runner/host-lifecycle.jsonl')
+    } catch { /* lifecycle parser reports malformed bytes in the provider-capture check */ }
+    const stoppedServerRow = lifecycleRowsForFreshWorld.find((row) => row.event === 'server-stopped') ?? null
+    const worldIdentity = parseWorldKey(run.worldKey)
+    const freshWorldFiles = new Map()
+    for (const path of listing.files) {
+      if (path === 'server/fresh-world-attestation.json' || path === 'server/server-start.json' ||
+          path === 'server/server.properties.launch' || path === 'server/server.properties.clean' ||
+          path === 'server/server.properties.effective-after-boot' || path === 'server/leaf-latest.log' ||
+          path === 'server/leaf-stdout-events.jsonl' ||
+          path.startsWith('server/world/')) {
+        try { freshWorldFiles.set(path, { bytes: readFileSync(join(archive, path)) }) } catch { /* reported as missing below */ }
+      }
+    }
+    const freshWorld = inspectFreshWorldAttestation({
+      copiedSources: freshWorldFiles,
+      identity: { sourceSha, runId, generationId, worldKey: run.worldKey, worldIdentity },
+      run,
+      serverStart,
+      expectedWitnessRegionPath: witnessRegionRelativePath(transition.witness?.target),
+      lifecycle: { events: { serverStopped: stoppedServerRow } },
+    })
+    if (freshWorld.status === 'PASS') pass('server:fresh-world-attestation', { identity: freshWorld.identity, artifacts: freshWorld.artifacts })
+    else if (freshWorld.status === 'FAIL') fail('server:fresh-world-attestation', freshWorld.reason ?? 'fresh-world attestation contradicts raw archive bytes')
+    else incomplete('server:fresh-world-attestation', freshWorld.reason ?? 'fresh-world attestation is incomplete')
 
     if (source.repository === 'souta-lab/minecraft-jev-agent' && SHA_RE.test(sourceSha ?? '')) pass('probe-source-identity', { sourceSha, branch: source.branch })
     else fail('probe-source-identity', 'repository or exact source SHA is invalid', { repository: source.repository ?? null, sourceSha: sourceSha ?? null })
@@ -1574,8 +2232,6 @@ async function validate(archive, repo) {
       checkBound('server:data-version', 'server-start.dataVersion', serverStart.dataVersion, run.dataVersion)
       checkBound('server:difficulty', 'server-start.difficulty', serverStart.difficulty, run.difficulty)
       checkBound('server:world-epoch', 'server-start.worldEpoch', serverStart.worldEpoch, run.worldEpoch)
-      if (serverStart.freshWorld === true && /No existing world data, creating new world/i.test(serverStart.bootLog ?? '')) pass('server:fresh-world-attestation', { bootLog: serverStart.bootLog })
-      else incomplete('server:fresh-world-attestation', 'server-start does not attest both freshWorld and the exact no-prior-world boot message')
 
       const launchCandidates = ['server/server.properties.launch', 'server/server.properties.clean']
       const launchPath = launchCandidates.find((path) => listing.files.includes(path) && sha256(readFileSync(join(archive, path))) === serverStart.serverPropertiesSha256)
@@ -1618,7 +2274,6 @@ async function validate(archive, repo) {
       const leaf = readText(archive, leafPath)
       const checks = [
         ['version', new RegExp(`Starting minecraft server version ${String(run.minecraftVersion).replaceAll('.', '\\.')}`)],
-        ['fresh', /No existing world data, creating new world/i],
         ['level', new RegExp(`Preparing level ["']${String(run.levelName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`)],
         ['username', new RegExp(`UUID of player ${String(run.botUsername).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is ${String(run.botUuid).replaceAll('-', '\\-')}`)],
       ]
@@ -1642,9 +2297,9 @@ async function validate(archive, repo) {
       } catch (error) { incomplete('world:level-dat', `cannot parse level.dat: ${error.message}`) }
     }
 
-    if (present.has('server/world/playerdata.dat')) {
+    if (playerDataPath && present.has(playerDataPath)) {
       try {
-        const player = await parsePlayerDat(join(archive, 'server/world/playerdata.dat'))
+        const player = await parsePlayerDat(join(archive, playerDataPath))
         const expectedPos = run.finalPosition ?? probe.mission?.finalPosition
         const posMatches = Array.isArray(player.position) && expectedPos && closeNumber(player.position[0], expectedPos.x) && closeNumber(player.position[1], expectedPos.y) && closeNumber(player.position[2], expectedPos.z)
         const dimMatches = dimCanonical(player.dimension) === dimCanonical(run.dimension)
@@ -2137,28 +2792,53 @@ async function validate(archive, repo) {
     const policy = probe.configuredNoLlmProbe ?? {}
     const jev = policy.effectiveJev ?? {}
     const system2 = policy.effectiveSystem2 ?? {}
-    const zeroValues = {
-      networkModelCalls: policy.networkModelCalls,
+    const terminalJevCalls = outcomeEvent?.jevCalls ?? Number(/jevCalls=(\d+)/.exec(outcomes[0]?.message ?? '')?.[1])
+    const terminalSystem2Calls = outcomeEvent?.system2Calls ?? Number(/system2Calls=(\d+)/.exec(outcomes[0]?.message ?? '')?.[1])
+    let capturedProviders = null
+    let providerCaptureError = null
+    try {
+      capturedProviders = providerCaptureFromArchive(archive, { sourceSha, runId, generationId, buildHash: source.buildHash }, probe)
+    } catch (error) {
+      providerCaptureError = error
+    }
+    if (capturedProviders?.egressAudit?.status === 'PASS') {
+      pass('policy:no-llm-egress-audit', {
+        coverageStatus: capturedProviders.egressAudit.coverageStatus,
+        externalDeniedAttempts: capturedProviders.egressAudit.externalDeniedAttempts,
+        rawArtifact: capturedProviders.egressAudit.rawArtifact,
+        limitations: capturedProviders.egressAudit.limitations,
+      })
+    } else if (providerCaptureError instanceof EvidenceAssessmentError && providerCaptureError.status === CHECK_STATUS.FAIL &&
+      /egress|LD_PRELOAD/iu.test(providerCaptureError.message)) {
+      fail('policy:no-llm-egress-audit', providerCaptureError.message, providerCaptureError.details ?? {})
+    } else if (providerCaptureError && /egress|LD_PRELOAD/iu.test(providerCaptureError.message ?? '')) {
+      incomplete('policy:no-llm-egress-audit', providerCaptureError.message)
+    } else {
+      incomplete('policy:no-llm-egress-audit', 'LD_PRELOAD egress audit was not independently classified')
+    }
+    const capturedActivity = capturedProviders?.activity ?? null
+    const decisionValues = {
       jevDecisionCalls: jev.decisionCalls,
       system2DecisionCalls: system2.decisionCalls,
-      terminalJevCalls: outcomeEvent?.jevCalls ?? Number(/jevCalls=(\d+)/.exec(outcomes[0]?.message ?? '')?.[1]),
-      terminalSystem2Calls: outcomeEvent?.system2Calls ?? Number(/system2Calls=(\d+)/.exec(outcomes[0]?.message ?? '')?.[1]),
+      terminalJevCalls,
+      terminalSystem2Calls,
     }
-    const modelActivityPattern = /JEV_DECISION(?:_EPOCH_START|_FRAME)?|SYSTEM2_(?:PLAN|DECISION|PROVIDER|LLM)|(?:JEV|SYSTEM2)_MODEL_(?:CALL|REQUEST|RETRY|FAILURE)|(?:MODEL|PROVIDER)_(?:CALL|REQUEST|RETRY|FAILURE|UNAVAILABLE|FALLBACK)|FALLBACK_AFTER_PROVIDER_FAILURE|GatewayInternalServerError|Service temporarily unavailable|MODEL_UNAVAILABLE|HTTP 5\d\d/iu
+    const providerValues = {
+      networkModelCalls: policy.networkModelCalls,
+      jevProviderEvaluateAttempts: jev.providerEvaluateAttempts,
+      system2ProviderEvaluateAttempts: system2.providerEvaluateAttempts,
+      providerEvaluateAttemptsPerMechanicalStep: policy.providerEvaluateAttemptsPerMechanicalStep,
+    }
+    const modelActivityPattern = /(?:JEV|SYSTEM2)_MODEL_(?:CALL|REQUEST|RETRY|FAILURE)|(?:MODEL|PROVIDER)_(?:CALL|REQUEST|RETRY|FAILURE|UNAVAILABLE|FALLBACK)|MERCURY_(?:ATTEMPT|RETRY|FAILURE_STATE)|FALLBACK_AFTER_PROVIDER_FAILURE|GatewayInternalServerError|Service temporarily unavailable|MODEL_UNAVAILABLE|HTTP 5\d\d/iu
     const modelActivityRows = events.filter((row) => modelActivityPattern.test(String(row?.message ?? '')))
     const modelActivityLogLines = botLog.split(/\r?\n/).filter((line) => modelActivityPattern.test(line))
-    const anyModelDecision = modelActivityRows.length > 0 || modelActivityLogLines.length > 0
-    const modelJournals = ['runner/jev-calls.jsonl', 'runner/jev-decisions.jsonl', 'runner/system2.jsonl'].map((path) => {
+    const anyProviderActivityLog = modelActivityRows.length > 0 || modelActivityLogLines.length > 0
+    const modelJournals = ['runner/jev-calls.jsonl', 'runner/jev-decisions.jsonl', 'runner/system2.jsonl', 'runner/mercury-calls.jsonl'].map((path) => {
       if (!present.has(path)) return { path, status: 'missing', records: null }
-      try {
-        const rows = parseJsonl(archive, path)
-        return { path, status: rows.length === 0 ? 'empty' : 'non-empty', records: rows.length }
-      } catch (error) {
-        return { path, status: 'invalid', error: error.message, records: null }
-      }
+      try { return { path, status: 'valid', records: parseJsonl(archive, path).length } }
+      catch (error) { return { path, status: 'malformed', error: error.message, records: null } }
     })
-    const missingModelJournals = modelJournals.filter((entry) => entry.status === 'missing' || entry.status === 'invalid')
-    const nonEmptyModelJournals = modelJournals.filter((entry) => entry.status === 'non-empty')
+    const missingModelJournals = modelJournals.filter((entry) => entry.status === 'missing' || entry.status === 'malformed')
     const fallbackFlags = policy.fallback ?? {}
     const offlineBindings = {
       BUDDY_POLICY: policy.BUDDY_POLICY,
@@ -2202,19 +2882,60 @@ async function validate(archive, repo) {
       && explicitRuntimeFlags.readyPolicy === 'fallback'
       && explicitRuntimeFlags.readyPolicyProvider === 'deterministic'
       && explicitRuntimeFlags.readySystem2Provider === 'none'
-    const missingCounters = Object.entries(zeroValues).filter(([, value]) => typeof value !== 'number' || !Number.isFinite(value) || value < 0).map(([key]) => key)
-    const nonzeroCounters = Object.entries(zeroValues).filter(([, value]) => Number(value) !== 0).map(([key, value]) => ({ key, value }))
+    const missingDecisionCounters = Object.entries(decisionValues).filter(([, value]) => typeof value !== 'number' || !Number.isFinite(value) || value < 0).map(([key]) => key)
+    const missingProviderCounters = Object.entries(providerValues).filter(([, value]) => typeof value !== 'number' || !Number.isFinite(value) || value < 0).map(([key]) => key)
+    const nonzeroProviderCounters = Object.entries(providerValues).filter(([, value]) => Number(value) !== 0).map(([key, value]) => ({ key, value }))
     if (missingOfflineBindings.length) incomplete('policy:offline-profile', 'required offline-policy/fallback evidence fields are absent', { missing: missingOfflineBindings, observed: offlineBindings })
     else if (!explicitlyOffline) fail('policy:offline-profile', 'no-LLM configuration conflicts with the required explicit offline policy and no-silent-fallback boundary', { observed: offlineBindings })
     else if (!runtimeFlagsMatch && missingRuntimeFlags.length) incomplete('policy:offline-profile', 'runtime VTR probe/configuration markers do not provide explicit no-LLM and empty-queue provenance', { missing: missingRuntimeFlags, observed: explicitRuntimeFlags })
     else if (!runtimeFlagsMatch) fail('policy:offline-profile', 'runtime VTR probe/configuration markers conflict with the manifest no-LLM policy', { expected: { BUDDY_POLICY: policy.BUDDY_POLICY, BUDDY_SYSTEM2: policy.BUDDY_SYSTEM2 }, observed: explicitRuntimeFlags })
     else pass('policy:offline-profile', { configuredPolicy: policy.BUDDY_POLICY, effectiveJev: jev, effectiveSystem2: system2, runtime: explicitRuntimeFlags })
-    if (missingModelJournals.length) incomplete('policy:provider-journals', 'raw Jev/System2 call and decision journals are missing or invalid', { journals: modelJournals })
-    else if (nonEmptyModelJournals.length) fail('policy:provider-journals', 'Jev/System2 call or decision journals contain records during a no-LLM probe', { journals: nonEmptyModelJournals })
-    else pass('policy:provider-journals', { journals: modelJournals })
-    if (missingCounters.length || missingModelJournals.length) incomplete('policy:zero-call-counters', 'no-LLM counters or raw provider journals are absent/incomplete', { missingCounters, missingJournals: missingModelJournals.map((entry) => entry.path) })
-    else if (nonzeroCounters.length || anyModelDecision || nonEmptyModelJournals.length) fail('policy:zero-call-counters', 'model/provider activity or nonzero call counters occurred during no-LLM probe', { nonzero: nonzeroCounters, modelActivityRows: modelActivityRows.map((row) => row.message), modelActivityLogLines, journals: nonEmptyModelJournals })
-    else pass('policy:zero-call-counters', { counters: zeroValues, scannedEventRows: events.length, scannedRunnerLogLines: botLog.split(/\r?\n/).length, emptyModelJournals: modelJournals.map((entry) => entry.path) })
+    if (providerCaptureError instanceof EvidenceAssessmentError && providerCaptureError.status === CHECK_STATUS.FAIL) {
+      fail('policy:provider-journals', providerCaptureError.message, providerCaptureError.details ?? {})
+    } else if (providerCaptureError || missingModelJournals.length) {
+      incomplete('policy:provider-journals', providerCaptureError?.message ?? 'provider activity capture or a raw provider journal is missing/malformed', { journals: modelJournals, ...(providerCaptureError?.details ?? {}) })
+    } else pass('policy:provider-journals', { journals: modelJournals, activity: capturedActivity })
+
+    if (missingDecisionCounters.length || missingProviderCounters.length || missingModelJournals.length || providerCaptureError) {
+      const status = providerCaptureError instanceof EvidenceAssessmentError && providerCaptureError.status === CHECK_STATUS.FAIL ? 'FAIL' : 'INCOMPLETE'
+      const detail = { missingDecisionCounters, missingProviderCounters, journals: modelJournals, captureError: providerCaptureError?.message ?? null, ...(providerCaptureError?.details ?? {}) }
+      if (status === 'FAIL') fail('policy:zero-call-counters', 'provider capture contradicts the no-network claim', detail)
+      else incomplete('policy:zero-call-counters', 'provider/decision counters or continuous raw evidence are incomplete', detail)
+    } else if (capturedActivity && (
+      decisionValues.jevDecisionCalls !== capturedActivity.jevDecisionFrames ||
+      decisionValues.system2DecisionCalls !== capturedActivity.system2DecisionInvocations ||
+      terminalJevCalls !== capturedActivity.jevDecisionFrames ||
+      terminalSystem2Calls !== capturedActivity.system2DecisionInvocations
+    )) {
+      fail('policy:zero-call-counters', 'reported Jev/System2 decision invocations disagree with independently captured journals', {
+        reported: decisionValues,
+        captured: capturedActivity,
+      })
+    } else if (capturedActivity && (
+      policy.networkModelCalls !== capturedActivity.networkModelCalls ||
+      jev.providerEvaluateAttempts !== capturedActivity.jevEvaluateAttempts ||
+      system2.providerEvaluateAttempts !== capturedActivity.system2EvaluateAttempts ||
+      policy.providerEvaluateAttemptsPerMechanicalStep !== (transition.metrics?.mechanicalStepsPerTransition > 0
+        ? capturedActivity.networkModelCalls / transition.metrics.mechanicalStepsPerTransition : null)
+    )) {
+      fail('policy:zero-call-counters', 'reported provider-attempt counters disagree with independent raw capture', {
+        reported: providerValues,
+        captured: capturedActivity,
+      })
+    } else if (nonzeroProviderCounters.length || capturedActivity?.networkModelCalls !== 0 || anyProviderActivityLog) {
+      fail('policy:zero-call-counters', 'actual provider/network activity occurred during no-LLM probe', {
+        nonzero: nonzeroProviderCounters,
+        captured: capturedActivity,
+        modelActivityRows: modelActivityRows.map((row) => row.message),
+        modelActivityLogLines,
+      })
+    } else pass('policy:zero-call-counters', {
+      decisionInvocations: decisionValues,
+      providerAttempts: providerValues,
+      capturedActivity,
+      scannedEventRows: events.length,
+      scannedRunnerLogLines: botLog.split(/\r?\n/).length,
+    })
 
     const allRunMessages = `${events.map((row) => String(row?.message ?? '')).join('\n')}\n${botLog}`
     const ladderAuthorityPattern = /SYSTEM2_PLAN_APPLIED|ROOT_GOAL_PROJECTED|LADDER_[A-Z0-9_]*(?:APPLIED|SELECTED|PROJECTED)|RUNGS?_[A-Z0-9_]*(?:APPLIED|SELECTED|PROJECTED)|productionPlanAuthority=(?:legacy|ladder|system2)/i
@@ -2277,6 +2998,35 @@ async function validate(archive, repo) {
     }
   }
 
+  const fixtureProofPath = 'proofs/no-double-authority-fixture.json'
+  const fixtureSourcePath = 'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts'
+  if (!listing.files.includes(fixtureProofPath) || !listing.files.includes(fixtureSourcePath)) {
+    incomplete('proof:no-double-authority-fixture', 'exact-source legacy claim refusal report or its test source bytes are absent', {
+      reportPresent: listing.files.includes(fixtureProofPath), testSourcePresent: listing.files.includes(fixtureSourcePath),
+    })
+  } else {
+    try {
+      const fixtureReportBytes = readFileSync(join(archive, fixtureProofPath))
+      const fixtureReport = JSON.parse(fixtureReportBytes.toString('utf8'))
+      const fixtureSourceBytes = readFileSync(join(archive, fixtureSourcePath))
+      const fixtureAssessment = inspectNoDoubleAuthorityFixtureProof({
+        report: fixtureReport,
+        reportBytes: fixtureReportBytes,
+        testSourceBytes: fixtureSourceBytes,
+        expectedSourceSha: probe?.source?.commit?.toLowerCase?.() ?? null,
+        binding: probe?.noDoubleAuthorityFixture,
+      })
+      if (fixtureAssessment.status === 'PASS') pass('proof:no-double-authority-fixture', {
+        sourceSha: fixtureReport.sourceSha, testSourceSha256: sha256(fixtureSourceBytes),
+        transitionId: fixtureReport.fixture.transitionId, contractHash: fixtureReport.fixture.contractHash,
+        pathfinderStartDelta: fixtureReport.fixture.pathfinderStartDelta,
+        reason: fixtureAssessment.reason,
+      })
+      else if (fixtureAssessment.status === 'FAIL') fail('proof:no-double-authority-fixture', fixtureAssessment.reason)
+      else incomplete('proof:no-double-authority-fixture', fixtureAssessment.reason)
+    } catch (error) { fail('proof:no-double-authority-fixture', error.message) }
+  }
+
   // Capability evidence is not the entire migration milestone. These two
   // run-scoped proofs are intentionally separate from a no-LLM mechanics probe.
   const fullMilestoneFiles = ['proofs/no-double-authority.json', 'comparison/legacy-baseline.json']
@@ -2309,18 +3059,12 @@ async function validate(archive, repo) {
     }
   }
 
-  const failed = checks.some((check) => check.status === CHECK_STATUS.FAIL)
-  const missing = checks.some((check) => check.status === CHECK_STATUS.INCOMPLETE)
-  const status = failed ? 'FAIL' : missing ? 'INCOMPLETE' : 'PASS'
-  const counts = Object.fromEntries(Object.values(CHECK_STATUS).map((value) => [value.toLowerCase(), checks.filter((check) => check.status === value).length]))
+  const summary = summarizeValidationStatuses(checks)
   return {
     schema: 'vtr-reach-evidence-validation/v1',
-    status,
+    ...summary,
     archive,
     exactSourceCheckout: repo,
-    probeStatus: failed ? 'FAIL' : missing ? 'INCOMPLETE' : 'PASS',
-    migrationMilestoneStatus: status,
-    counts,
     checks,
   }
 }
@@ -2351,9 +3095,9 @@ async function main() {
     console.error(`repo directory does not exist: ${repo}`)
     process.exit(EXIT.USAGE)
   }
-  const report = await validate(archive, repo)
+  const report = await validateEvidenceArchive(archive, repo)
   console.log(JSON.stringify(report, null, 2))
-  process.exit(EXIT[report.status] ?? EXIT.FAIL)
+  process.exit(validationExitCode(report))
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main()

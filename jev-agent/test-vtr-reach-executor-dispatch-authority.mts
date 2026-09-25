@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { Vec3 } from 'vec3'
 import type { Bot } from 'mineflayer'
 import { test } from 'bun:test'
@@ -237,6 +238,12 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     claimResults.push(result)
     return result
   }) as Executor['claim']
+  let legacyClaimRejected = false
+  let pathfinderStartsBeforeLegacyClaim = 0
+  let pathfinderStartsAfterLegacyClaim = 0
+  let vtrOwnerRetainedAfterLegacyClaim = false
+  let fixtureTransitionId: string | null = null
+  let fixtureContractHash: string | null = null
 
   Object.assign(fields, {
     options: {
@@ -320,6 +327,9 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     const waypoint = vtrAction.resolveVtrReachMechanicalWaypoint?.(vtrCandidate.target!)
     assert.deepEqual(waypoint?.target, { x: 2, y: 64, z: 0 })
     assert.equal(fixture.goalStarts(), 1, 'resolving a path checkpoint does not actuate or create a second owner')
+    fixtureTransitionId = activeTransition.contract.transitionId
+    fixtureContractHash = activeTransition.contract.contractHash
+    assert.ok(fixtureContractHash)
     assert.deepEqual(claimCalls, [{
       candidateId: vtrCandidate.id,
       authority: 'vtr-reach',
@@ -327,10 +337,18 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
       transitionContractHash: activeTransition.contract.contractHash,
     }])
 
-    assert.throws(
-      () => executor.claim(legacyCandidate, { authority: 'legacy' }),
-      (error: unknown) => error instanceof ExecutionAuthorityConflict,
-    )
+    pathfinderStartsBeforeLegacyClaim = fixture.goalStarts()
+    let legacyRefusal: unknown = null
+    try { executor.claim(legacyCandidate, { authority: 'legacy' }) }
+    catch (error) { legacyRefusal = error }
+    legacyClaimRejected = legacyRefusal instanceof ExecutionAuthorityConflict
+    pathfinderStartsAfterLegacyClaim = fixture.goalStarts()
+    vtrOwnerRetainedAfterLegacyClaim = executor.current === vtrAction &&
+      reachRuntime.current?.contract.transitionId === fixtureTransitionId &&
+      reachRuntime.current?.contract.contractHash === fixtureContractHash
+    assert.equal(legacyClaimRejected, true)
+    assert.equal(pathfinderStartsAfterLegacyClaim - pathfinderStartsBeforeLegacyClaim, 0)
+    assert.equal(vtrOwnerRetainedAfterLegacyClaim, true)
 
     assert.equal(executor.current, vtrAction, 'the committed VTR owner retains the body after the legacy refusal')
     assert.equal(vtrAction.status, 'running')
@@ -387,6 +405,39 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     assert.equal(outcome.detail.metrics.duplicateAuthority, true)
     assert.equal(outcome.detail.metrics.duplicateAuthorityConflicts, 1)
     assert.equal(outcome.detail.metrics.typedTerminalOutcome, 'CONTRACT_SUPERSEDED')
+
+    const reportPath = process.env.VTR_REACH_AUTHORITY_FIXTURE_REPORT
+    if (reportPath) {
+      const sourceSha = process.env.VTR_REACH_SOURCE_SHA?.toLowerCase() ?? ''
+      assert.match(sourceSha, /^[0-9a-f]{40}$/u, 'fixture report requires the exact live source SHA')
+      if (fixtureTransitionId === null || fixtureContractHash === null) throw new Error('the observed VTR fixture contract identity was lost')
+      const testSource = readFileSync(new URL(import.meta.url))
+      const report = {
+        schema: 'vtr-reach-no-double-authority-fixture/v1',
+        result: 'PASS',
+        sourceSha,
+        test: {
+          path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
+          name: 'production Reach dispatch and legacy Executor claim cannot overlap body authority',
+          sourceSha256: createHash('sha256').update(testSource).digest('hex'),
+        },
+        fixture: {
+          legacyClaimRejected,
+          legacyClaimError: 'ExecutionAuthorityConflict',
+          vtrOwnerRetained: vtrOwnerRetainedAfterLegacyClaim,
+          transitionId: fixtureTransitionId,
+          contractHash: fixtureContractHash,
+          pathfinderStartsBeforeLegacyClaim,
+          pathfinderStartsAfterLegacyClaim,
+          pathfinderStartDelta: pathfinderStartsAfterLegacyClaim - pathfinderStartsBeforeLegacyClaim,
+          authorityConflictCount: executor.authorityConflictCount,
+          maxConcurrentActions: executor.maxConcurrentActions,
+        },
+      }
+      const output = resolve(reportPath)
+      mkdirSync(dirname(output), { recursive: true })
+      writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    }
   } finally {
     const running = executor.current
     if (running !== null) {

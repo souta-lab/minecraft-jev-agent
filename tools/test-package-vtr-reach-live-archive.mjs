@@ -5,6 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { packageVtrReachArchive } from './package-vtr-reach-live-archive.mjs'
+import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
+import { validateEvidenceArchive } from './validate-vtr-reach-evidence.mjs'
 
 const SOURCE = 'a'.repeat(40)
 const RUN = 'run-vtrabc123-archive'
@@ -17,8 +19,8 @@ const START = Date.parse('2026-09-25T04:00:00.000Z')
 const iso = (offset) => new Date(START + offset).toISOString()
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
-function event(offset, name, detail) {
-  return { record: 'agent-event', ts: iso(offset), source: 'vtr', message: `${name} transitionId=${TRANSITION}`, detail }
+function event(offset, name, detail, message = `${name} transitionId=${TRANSITION}`) {
+  return { record: 'agent-event', ts: iso(offset), source: 'vtr', message, detail }
 }
 
 function regionPathForWitness(position) {
@@ -29,11 +31,10 @@ function regionPathForWitness(position) {
   return `server/world/r.${regionX}.${regionZ}.mca`
 }
 
-function makeFixture(root, { omitProvider = null, addCapture = true, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
+function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecycle = false, omitEgress = false, omitFixtureSource = false, omitFreshAttestation = false, staleFreshAttestation = false, oldFreshPhraseOnly = false, tamperFreshArtifactHash = false, externalAttempt = false, tamperEgress = false, egressCloseOffset = 49, tamperFixtureSourceHash = false, badFixtureObservation = false, badLifecycleObservation = false, omitStopObservations = false, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, localFallbackDecision = false, deprecatedModelCallsPerMechanicalStep = 0, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
   const inputDir = join(root, 'captured')
   const extraDir = join(root, 'extra')
   const archive = join(root, 'archive')
-  const emptySha = digest(Buffer.alloc(0))
   const bundle = Buffer.from('generation-bundle fixture bytes\n')
   const buildHash = digest(bundle).slice(0, 12)
   const worldObject = { serverId: '127.0.0.1:25565', dimension: 'minecraft:overworld', worldEpoch: 4 }
@@ -58,39 +59,67 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
     progressDefinition: { kind: 'verified-distance-reduction' },
     witness: { target: witnessPosition, witnessId: 'oak-log-witness' },
   })
-  const verify = event(30, 'VTR_TRANSITION_VERIFY', {
+  const actionId = 'MOVE:b4_64_4'
+  const commitmentId = 'commitment-archive-reach'
+  const verify = event(40, 'VTR_TRANSITION_VERIFY', {
     transitionId: TRANSITION,
     contractHash: CONTRACT,
     verification: {
-      truth: 'TRUE', evidenceIds: ['verify:30:oak-log'], verifiedAtMs: START + 30,
-      observedAtMs: START + 30, runId: RUN, generationId: GENERATION, leaseId: GENERATION,
+      truth: 'TRUE', evidenceIds: ['verify:40:oak_log'], verifiedAtMs: START + 40,
+      observedAtMs: START + 40, runId: RUN, generationId: GENERATION, leaseId: GENERATION,
       sourceSha: SOURCE, worldKey: WORLD, worldEpoch: 4, dimension: 'overworld',
     },
   })
-  const terminal = event(31, 'VTR_TRANSITION_OUTCOME', {
-    transitionId: TRANSITION,
-    outcome: { kind: 'SUCCESS', contractHash: CONTRACT, evidenceIds: ['verify:30:oak-log'], desiredPredicateIdentity: 'predicate:reach.oak-log', verifiedAtMs: START + 30 },
+  const terminal = event(41, 'VTR_TRANSITION_OUTCOME', {
+    transitionId: TRANSITION, contractHash: CONTRACT,
+    outcome: { kind: 'SUCCESS', contractHash: CONTRACT, evidenceIds: ['verify:40:oak_log'], desiredPredicateIdentity: 'predicate:reach.oak-log', verifiedAtMs: START + 40 },
     boundary: 'verified-terminal',
-    usage: { mechanicalSteps: 1, elapsedMs: 200, resources: {}, risk: {}, effects: {} },
-    jevCalls: 0,
+    usage: { mechanicalSteps: 4, elapsedMs: 400, resources: {}, risk: {}, effects: {} },
+    jevCalls: localFallbackDecision ? 1 : 0,
     system2Calls: 0,
-    metrics: { typedTerminalOutcome: 'SUCCESS', mechanicalStepsPerTransition: 1, duplicateAuthority: false, duplicateAuthorityConflicts: 0, concurrentLegacyActuations: 0 },
+    metrics: { typedTerminalOutcome: 'SUCCESS', mechanicalStepsPerTransition: 4, jevCallsPerTransition: localFallbackDecision ? 1 : 0,
+      system2CallsPerTransition: 0, modelCallsPerMechanicalStep: deprecatedModelCallsPerMechanicalStep,
+      duplicateAuthority: false, duplicateAuthorityConflicts: 0, concurrentLegacyActuations: 0 },
   })
-  const events = [commit, event(15, 'VTR_TRANSITION_ACTUATION', { transitionId: TRANSITION, authority: 'vtr_transition', contractHash: CONTRACT }),
-    event(16, 'VTR_MECHANICAL_STEP_RESERVED', { transitionId: TRANSITION, contractHash: CONTRACT }),
-    event(20, 'VTR_MECHANICAL_STEP_OUTCOME', { transitionId: TRANSITION, contractHash: CONTRACT }), verify, terminal]
+  const events = [commit,
+    event(11, 'VTR_TRANSITION_ACTUATION', { transitionId: TRANSITION, authority: 'vtr_transition', contractHash: CONTRACT, actionId }),
+    event(12, 'SKILL_START', { actionId, commitmentId, selectedBy: 'vtr-transition' }, `SKILL_START actionId=${actionId} commitmentId=${commitmentId} selectedBy=vtr-transition`)]
+  for (let leg = 1; leg <= 4; leg += 1) {
+    const stepId = `${actionId}#17:walk-leg-${leg}`
+    const reserveAt = 12 + (leg - 1) * 5
+    const outcomeAt = reserveAt + 2
+    events.push(event(reserveAt, 'VTR_MECHANICAL_STEP_RESERVED', {
+      transitionId: TRANSITION, contractHash: CONTRACT, stepId, actionId, commitmentId, leg,
+      intentId: 'intent-archive-reach', effectKind: 'locomotion',
+    }))
+    events.push(event(outcomeAt, 'VTR_MECHANICAL_STEP_OUTCOME', {
+      transitionId: TRANSITION, contractHash: CONTRACT, stepId, actionId, commitmentId, leg,
+      intentId: 'intent-archive-reach', status: leg === 4 ? 'terminal' : 'active',
+      outcome: leg === 4 ? 'SUCCESS' : 'CONTINUING', verified: leg === 4,
+    }))
+    if (leg < 4) events.push(event(outcomeAt + 1, 'SKILL_STEP', {
+      actionId, commitmentId, leg, failure: null,
+    }, `SKILL_STEP skill=walk step=walk_leg authority=MECHANICAL_CONTINUATION evidence=path worldDelta=closing commitmentId=${commitmentId} decisionEpoch=17 count=${leg}`))
+  }
+  events.push(event(39, 'SKILL_END', { actionId }, `SKILL_END actionId=${actionId} execution=success verification=verified outcome=SUCCESS`), verify, terminal)
   const journalSources = {
-    'host-log': '[2026-09-25T04:00:00.000Z] BOOT runId=run-vtrabc123-archive source=' + SOURCE + '\n',
+    'host-log': `[${iso(0)}] BOOT runId=${RUN} source=${SOURCE} worldKey=${JSON.stringify(worldObject)}\n[${iso(5)}] GENERATION_READY runId=${RUN} generationId=${GENERATION} sourceSha=${SOURCE} buildHash=${buildHash}\n[${iso(48)}] SHUTDOWN runId=${RUN} generationId=${GENERATION} sourceSha=${SOURCE}\n`,
     'run-journal': events.map((row) => JSON.stringify(row)).join('\n') + '\n',
-    'jev-calls': '',
-    'jev-decisions': '',
+    'jev-calls': nonzeroActivity
+      ? `${JSON.stringify({ record: 'jev-call', callId: 'call-live', policy: 'typesafe', providerAttempts: 1 })}\n`
+      : localFallbackDecision
+        ? `${JSON.stringify({ record: 'jev-call', callId: 'call-local', policy: 'fallback', model: 'deterministic-local-fallback', providerAttempts: 0 })}\n`
+        : '',
+    'jev-decisions': localFallbackDecision ? `${JSON.stringify({ decisionId: 'decision-local', callId: 'call-local' })}\n` : '',
     'system2-journal': '',
+    'mercury-calls': '',
   }
   writeFixtureFile(inputDir, 'host.log', journalSources['host-log'])
   writeFixtureFile(inputDir, 'run.jsonl', journalSources['run-journal'])
   writeFixtureFile(inputDir, 'jev-calls.jsonl', journalSources['jev-calls'])
   writeFixtureFile(inputDir, 'jev-decisions.jsonl', journalSources['jev-decisions'])
   writeFixtureFile(inputDir, 'system2.jsonl', journalSources['system2-journal'])
+  writeFixtureFile(inputDir, 'mercury-calls.jsonl', journalSources['mercury-calls'])
 
   const inputNames = {
     'host-log': 'host.log',
@@ -98,6 +127,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
     'jev-calls': 'jev-calls.jsonl',
     'jev-decisions': 'jev-decisions.jsonl',
     'system2-journal': 'system2.jsonl',
+    'mercury-calls': 'mercury-calls.jsonl',
   }
   const inputs = Object.entries(inputNames).map(([name, file]) => {
     const path = join(inputDir, file)
@@ -108,7 +138,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
   const collectorReport = {
     schema: 'vtr-reach-live-collector/v1',
     status: 'PASS',
-    capturedAt: iso(40),
+    capturedAt: iso(42),
     expected: { sourceSha: SOURCE, mission: MISSION },
     observed: {
       sourceSha: SOURCE,
@@ -123,10 +153,13 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
         transitionId: TRANSITION,
         contractHash: CONTRACT,
         sourceEventRows: events,
-        metrics: { jevCallsPerTransition: 0, system2CallsPerTransition: 0, modelCallsPerMechanicalStep: 0, duplicateAuthority: false, duplicateAuthorityConflicts: 0 },
+        metrics: { jevCallsPerTransition: localFallbackDecision ? 1 : 0, system2CallsPerTransition: 0,
+          providerEvaluateAttemptsIncludingRetries: nonzeroActivity ? 1 : 0,
+          mechanicalStepsPerTransition: 4, modelCallsPerMechanicalStep: deprecatedModelCallsPerMechanicalStep,
+          duplicateAuthority: false, duplicateAuthorityConflicts: 0 },
       },
     },
-    captureWindow: { startedAt: iso(5), endedAt: iso(35), sampleCount: 2 },
+    captureWindow: { startedAt: iso(-5), endedAt: iso(55), sampleCount: 12 },
     inputs,
     checks: [
       { id: 'policy:no-model-activity-during-probe', status: 'PASS' },
@@ -143,7 +176,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
       runId: RUN, generationId: GENERATION, serverId: '127.0.0.1:25565', worldEpoch: 4, worldKey: WORLD,
       dimension: 'overworld', levelName: 'vtr-reach-live', seed: '4312', minecraftVersion: '1.21.4', dataVersion: 4189,
       difficulty: 'normal', gameMode: 'survival', botUsername: 'AI_Buddy', botUuid: '00000000-0000-0000-0000-000000000001',
-      startedAt: iso(0), generationReadyAt: iso(5), shutdownAt: iso(50),
+      startedAt: iso(0), generationReadyAt: iso(5), shutdownAt: iso(48),
       finalPosition: { x: 1.5, y: 64, z: 1.5 },
     },
     mission: { ...MISSION, initialInventory: {}, finalInventory: {}, initialPosition: { x: 0.5, y: 64, z: 0.5 }, finalPosition: { x: 1.5, y: 64, z: 1.5 } },
@@ -154,11 +187,111 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
   }
   const launchProperties = 'server-ip=127.0.0.1\nserver-port=25565\nlevel-name=vtr-reach-live\ngamemode=survival\ndifficulty=normal\nlevel-seed=\n'
   const effectiveProperties = launchProperties
+  const serverSpawnedAt = iso(-1)
+  const attemptRootAbsolute = join(extraDir, 'attempt', RUN)
+  const worldRootAbsolute = join(attemptRootAbsolute, 'vtr-reach-live')
+  const actualServerArgv = ['java', '-jar', '/nonexistent/server.jar', '--universe', attemptRootAbsolute, '--level-name', 'vtr-reach-live']
   const serverStart = {
     runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldKey: wrongServerIdentity ? '127.0.0.1:25566|overworld|4' : WORLD,
     levelName: 'vtr-reach-live', minecraftVersion: '1.21.4', dataVersion: 4189, difficulty: 'normal', worldEpoch: 4,
-    freshWorld: true, bootLog: 'No existing world data, creating new world', serverPropertiesSha256: digest(Buffer.from(launchProperties)),
+    pid: 502, serverId: '127.0.0.1:25565', port: 25565, spawnedAt: serverSpawnedAt,
+    process: { pid: 502, startedAt: serverSpawnedAt, cwd: extraDir, universeArg: attemptRootAbsolute,
+      levelNameArg: 'vtr-reach-live', argv: actualServerArgv, commandLineSha256: digest(Buffer.from(actualServerArgv.join('\0'))) },
+    serverPropertiesSha256: digest(Buffer.from(launchProperties)),
     serverPropertiesEffectiveSha256: digest(Buffer.from(effectiveProperties)), serverJar: '/nonexistent/server.jar', serverJarSha256: 'd'.repeat(64),
+  }
+  const lifecycleRows = [
+    { schema: 'vtr-reach-probe-lifecycle/v1', event: 'terminal-consumed', ts: iso(42), actor: 'probe-harness',
+      sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey: WORLD,
+      transitionId: TRANSITION, contractHash: CONTRACT, outcomeKind: 'SUCCESS', evidenceIds: ['verify:40:oak_log'] },
+    { schema: 'vtr-reach-probe-lifecycle/v1', event: 'resident-stopped', ts: iso(49), stoppedAt: iso(49), actor: 'probe-harness',
+      sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey: WORLD, pid: 501, status: 'stopped', exitCode: 0,
+      ...(!omitStopObservations ? { processExitObservation: { schema: 'vtr-process-exit-observation/v1', source: 'child-close-event', state: 'exited', pid: 501, exitCode: 0, observedAt: iso(49) } } : {}) },
+    { schema: 'vtr-reach-probe-lifecycle/v1', event: 'server-stopped', ts: iso(50), stoppedAt: iso(50), actor: 'probe-harness',
+      sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey: WORLD, pid: 502, status: 'stopped', exitCode: 0,
+      ...(!omitStopObservations ? {
+        processExitObservation: { schema: 'vtr-process-exit-observation/v1', source: 'child-close-event', state: 'exited', pid: 502, exitCode: 0, observedAt: iso(49.5) },
+        listenerClosureObservation: { schema: 'vtr-listener-closure-observation/v1', source: 'tcp-connect-probe', state: 'closed', host: badLifecycleObservation ? '0.0.0.0' : '127.0.0.1', port: 25565, result: 'connection-refused', observedAt: iso(50) },
+      } : {}) },
+  ]
+  const lifecycleText = lifecycleRows.map((row) => JSON.stringify(row)).join('\n') + '\n'
+  const playerDataArchivePath = `server/world/playerdata/${runMetadata.run.botUuid}.dat`
+  const worldArtifactBytes = {
+    'server/world/level.dat': Buffer.from('level fixture bytes'),
+    [playerDataArchivePath]: Buffer.from('player fixture bytes'),
+    [regionPathForWitness(witnessPosition)]: Buffer.from('region fixture bytes'),
+  }
+  const preparingLine = '[21:50:53 INFO]: Preparing level "vtr-reach-live"'
+  const doneLine = '[21:51:02 INFO]: Done (5.0s)! For help, type "help"'
+  const stdoutReceipt = (sequence, receivedAt, line) => ({ schema: 'vtr-server-stdout-observation/v1', sourceSha: SOURCE,
+    runId: RUN, serverId: '127.0.0.1:25565', serverPid: 502, port: 25565, levelName: 'vtr-reach-live', sequence,
+    receivedAt, monotonicNs: String(BigInt(sequence) * 1000000n), lineSha256: digest(Buffer.from(line)),
+    streamSource: 'spawned-server-stdout', line })
+  const stdoutRows = oldFreshPhraseOnly ? [
+    stdoutReceipt(1, iso(1), 'No existing world data, creating new world'),
+  ] : [
+    stdoutReceipt(1, iso(1), preparingLine),
+    stdoutReceipt(2, iso(2), doneLine),
+  ]
+  const freshWorldAttestation = {
+    schema: 'vtr-fresh-world-attestation/v1',
+    sourceSha: SOURCE, runId: RUN, serverId: '127.0.0.1:25565', port: 25565, levelName: 'vtr-reach-live',
+    server: { pid: 502, spawnedAt: serverSpawnedAt, serverId: '127.0.0.1:25565', port: 25565,
+      levelName: 'vtr-reach-live', minecraftVersion: '1.21.4', dataVersion: 4189,
+      jarPath: '/nonexistent/server.jar', jarSha256: 'd'.repeat(64) },
+    worldRoot: { absolute: worldRootAbsolute, attemptRoot: attemptRootAbsolute, archivePath: 'server/world', uniqueForRun: RUN },
+    preStartObservation: { sourceSha: SOURCE, runId: RUN, serverPid: 502, serverId: '127.0.0.1:25565', port: 25565,
+      levelName: 'vtr-reach-live', observedAt: iso(-2), state: 'absent', entries: [], path: worldRootAbsolute,
+      levelDat: { state: 'absent', path: join(worldRootAbsolute, 'level.dat') },
+      levelDatOld: { state: 'absent', path: join(worldRootAbsolute, 'level.dat_old') } },
+    configuration: { launchPropertiesSha256: digest(Buffer.from(launchProperties)), effectivePropertiesSha256: digest(Buffer.from(effectiveProperties)) },
+    startupLog: { pid: 502, streamSource: 'spawned-server-stdout',
+      preparing: { line: preparingLine, sequence: 1, ts: iso(1), lineSha256: digest(Buffer.from(preparingLine)) },
+      done: { line: doneLine, sequence: 2, ts: iso(2), lineSha256: digest(Buffer.from(doneLine)) } },
+    postRunObservation: { observedAt: iso(51), files: Object.entries(worldArtifactBytes).map(([archivePath, bytes]) => ({
+      archivePath, sourcePath: join(worldRootAbsolute, archivePath.slice('server/world/'.length)), bytes: bytes.length,
+      sha256: tamperFreshArtifactHash && archivePath.endsWith('level.dat') ? 'f'.repeat(64) : digest(bytes),
+    })) },
+  }
+  if (staleFreshAttestation) freshWorldAttestation.preStartObservation.levelDat.state = 'present'
+  if (oldFreshPhraseOnly) freshWorldAttestation.startupLog.done.line = 'No existing world data, creating new world'
+  const egressHashes = { toolSha256: '1'.repeat(64), sourceSha256: '2'.repeat(64), librarySha256: '3'.repeat(64), policySha256: '4'.repeat(64) }
+  const egressRows = [
+    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: iso(1), monotonicClock: 'process.hrtime.relative',
+      monotonicNs: '1000000', pid: tamperEgress ? 599 : 501, reason: 'preload-active', ...egressHashes },
+  ]
+  if (externalAttempt) egressRows.push({ schema: 'vtr-no-llm-egress-audit/v1', event: 'blocked_egress', utc: iso(20),
+    monotonicClock: 'process.hrtime.relative', monotonicNs: '20000000', pid: 501, tid: 501,
+    operation: 'connect', family: 'AF_INET', address: '203.0.113.7', port: 443, errno: 'EACCES' })
+  egressRows.push({ schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_wrapper_closed', utc: iso(egressCloseOffset),
+    monotonicClock: 'process.hrtime.relative', monotonicNs: `${Math.trunc(egressCloseOffset * 1000000)}`, pid: 500, childPid: 501, commandName: 'bun',
+    childExitCode: 0, childSignal: null, preloadVerified: true, processGroupGone: true,
+    coverageClass: 'user-space-libc-interposition', coverageStatus: 'USERSPACE_ONLY_CLOSED',
+    externalDeniedAttempts: externalAttempt ? 1 : 0, ...egressHashes,
+    coverage: 'root-process-load-verified; process-group-signaled-at-close; syscall-bypass-not-covered' })
+  const egressText = egressRows.map((row) => JSON.stringify(row)).join('\n') + '\n'
+  const authorityFixtureSourceBytes = Buffer.from('actual exact-source authority fixture test bytes\n')
+  const authorityFixtureReport = {
+    schema: 'vtr-reach-no-double-authority-fixture/v1',
+    result: 'PASS',
+    sourceSha: SOURCE,
+    test: {
+      path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
+      name: 'production Reach dispatch and legacy Executor claim cannot overlap body authority',
+      sourceSha256: tamperFixtureSourceHash ? 'f'.repeat(64) : digest(authorityFixtureSourceBytes),
+    },
+    fixture: {
+      legacyClaimRejected: true,
+      legacyClaimError: 'ExecutionAuthorityConflict',
+      vtrOwnerRetained: !badFixtureObservation,
+      transitionId: 'fixture-transition-1',
+      contractHash: 'e'.repeat(64),
+      pathfinderStartsBeforeLegacyClaim: 1,
+      pathfinderStartsAfterLegacyClaim: badFixtureObservation ? 2 : 1,
+      pathfinderStartDelta: badFixtureObservation ? 1 : 0,
+      authorityConflictCount: 1,
+      maxConcurrentActions: 1,
+    },
   }
   const files = {
     'runner/run-metadata.json': writeJson(join(extraDir, 'run-metadata.json'), runMetadata),
@@ -167,33 +300,70 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
     'runner/initial-snapshot.json': writeJson(join(extraDir, 'initial-snapshot.json'), { runId: RUN, generationId: GENERATION, bootSourceSha: SOURCE, buildHash, worldEpoch: 4, initialInventory: {} }),
     'runner/final-snapshot.json': writeJson(join(extraDir, 'final-snapshot.json'), { runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldEpoch: 4, finalInventory: {} }),
     'runner/milestone-predicates.json': writeJson(join(extraDir, 'milestone-predicates.json'), { runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldEpoch: 4 }),
+    'runner/mercury-calls.jsonl': writeFixtureFile(extraDir, 'mercury-calls.jsonl', journalSources['mercury-calls']),
+    'runner/host-lifecycle.jsonl': writeFixtureFile(extraDir, 'host-lifecycle.jsonl', lifecycleText),
+    'runner/no-llm-egress-audit.json': writeFixtureFile(extraDir, 'no-llm-egress-audit.json', egressText),
+    'proofs/no-double-authority-fixture.json': writeJson(join(extraDir, 'no-double-authority-fixture.json'), authorityFixtureReport),
+    'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts': writeFixtureFile(extraDir, 'test-vtr-reach-executor-dispatch-authority.mts', authorityFixtureSourceBytes),
     'server/fixture-commands.jsonl': writeFixtureFile(extraDir, 'fixture-commands.jsonl', JSON.stringify({ runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldEpoch: 4, command: 'setblock' }) + '\n'),
-    'server/leaf-latest.log': writeFixtureFile(extraDir, 'leaf.log', 'Starting minecraft server version 1.21.4\nNo existing world data, creating new world\nPreparing level "vtr-reach-live"\nUUID of player AI_Buddy is 00000000-0000-0000-0000-000000000001\n'),
+    'server/leaf-latest.log': writeFixtureFile(extraDir, 'leaf.log', oldFreshPhraseOnly
+      ? 'Starting minecraft server version 1.21.4\nNo existing world data, creating new world\nUUID of player AI_Buddy is 00000000-0000-0000-0000-000000000001\n'
+      : `Starting minecraft server version 1.21.4\n${preparingLine}\n${doneLine}\nUUID of player AI_Buddy is 00000000-0000-0000-0000-000000000001\n`),
+    'server/leaf-stdout-events.jsonl': writeFixtureFile(extraDir, 'leaf-stdout-events.jsonl', `${stdoutRows.map((row) => JSON.stringify(row)).join('\n')}\n`),
     'server/server-start.json': writeJson(join(extraDir, 'server-start.json'), serverStart),
     'server/server.properties.launch': writeFixtureFile(extraDir, 'server.properties.launch', launchProperties),
     'server/server.properties.effective-after-boot': writeFixtureFile(extraDir, 'server.properties.effective-after-boot', effectiveProperties),
-    'server/world/level.dat': writeFixtureFile(extraDir, 'level.dat', Buffer.from('level fixture bytes')),
-    'server/world/playerdata.dat': writeFixtureFile(extraDir, 'playerdata.dat', Buffer.from('player fixture bytes')),
-    [regionPathForWitness(witnessPosition)]: writeFixtureFile(extraDir, 'witness-region.mca', Buffer.from('region fixture bytes')),
+    'server/fresh-world-attestation.json': writeJson(join(extraDir, 'fresh-world-attestation.json'), freshWorldAttestation),
+    'server/world/level.dat': writeFixtureFile(extraDir, 'level.dat', worldArtifactBytes['server/world/level.dat']),
+    [playerDataArchivePath]: writeFixtureFile(extraDir, 'playerdata.dat', worldArtifactBytes[playerDataArchivePath]),
+    [regionPathForWitness(witnessPosition)]: writeFixtureFile(extraDir, 'witness-region.mca', worldArtifactBytes[regionPathForWitness(witnessPosition)]),
   }
 
   if (addCapture) {
+    const providerJournalRows = {
+      'jev-calls': journalSources['jev-calls'].trim() === '' ? [] : [JSON.parse(journalSources['jev-calls'].trim())],
+      'jev-decisions': journalSources['jev-decisions'].trim() === '' ? [] : [JSON.parse(journalSources['jev-decisions'].trim())],
+      'system2-journal': [],
+      'mercury-calls': [],
+    }
+    const activityClassification = classifyProviderActivity(providerJournalRows)
     const capture = {
-      schema: 'vtr-provider-activity-capture/v1', status: 'OBSERVED',
+      schema: 'vtr-provider-activity-capture/v2', status: nonzeroActivity ? 'FAIL' : 'OBSERVED',
       identity: { sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey: worldObject },
-      window: { startedAt: iso(captureStartsLate ? 6 : 4), endedAt: iso(35), coverageComplete: true },
-      activity: { networkModelCalls: nonzeroActivity ? 1 : 0, jevDecisionCalls: 0, system2DecisionCalls: 0 },
-      journals: Object.fromEntries(PROVIDER_JOURNALS.map((name) => [name, { bytes: 0, sha256: emptySha, initializedAt: iso(4), closedAt: iso(35) }])),
+      window: { startedAt: iso(captureStartsLate ? 6 : -5), bootAt: iso(0), generationReadyAt: iso(5), terminalAt: iso(41),
+        terminalConsumedAt: iso(42), shutdownAt: iso(48), residentStoppedAt: iso(49), serverStoppedAt: iso(50),
+        endedAt: iso(55), coverageComplete: true, lifecycleComplete: true },
+      activity: {
+        ...activityClassification.decisions,
+        ...activityClassification.providers,
+      },
+      activityClassification,
+      capture: { observedNonEmptyJournal: Object.values(journalSources).some((value) => value.length > 0), observedProviderActivity: nonzeroActivity, problems: [] },
+      journals: Object.fromEntries(PROVIDER_JOURNALS.map((name) => {
+        const source = journalSources[name]
+        return [name, {
+          bytes: Buffer.byteLength(source), sha256: digest(Buffer.from(source)),
+          rows: providerJournalRows[name].length, malformedRows: 0,
+          initializedAt: iso(-5), firstObservedAt: iso(captureStartsLate ? 6 : -5), closedAt: iso(55),
+        }]
+      })),
+      lifecycle: { status: 'OBSERVED', bytes: Buffer.byteLength(lifecycleText), sha256: digest(Buffer.from(lifecycleText)),
+        rows: lifecycleRows.length, malformedRows: 0, problems: [], firstObservedAt: iso(captureStartsLate ? 6 : -5), closedAt: iso(55),
+        events: { terminalConsumed: lifecycleRows[0], residentStopped: lifecycleRows[1], serverStopped: lifecycleRows[2] } },
     }
     files['runner/provider-activity-capture.json'] = writeJson(join(extraDir, 'provider-activity-capture.json'), capture)
   }
+  if (omitLifecycle) delete files['runner/host-lifecycle.jsonl']
+  if (omitEgress) delete files['runner/no-llm-egress-audit.json']
+  if (omitFixtureSource) delete files['runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts']
+  if (omitFreshAttestation) delete files['server/fresh-world-attestation.json']
   for (const [archivePath, sourcePath] of Object.entries(files)) files[archivePath] = sourcePath
   const manifestPath = join(root, 'manifest.json')
   writeJson(manifestPath, { schema: 'vtr-reach-live-archive-input/v1', files })
   return { collectorPath, manifestPath, archive, collectorReport, files, witnessRegionPath: regionPathForWitness(witnessPosition) }
 }
 
-const PROVIDER_JOURNALS = ['jev-calls', 'jev-decisions', 'system2-journal']
+const PROVIDER_JOURNALS = ['jev-calls', 'jev-decisions', 'system2-journal', 'mercury-calls']
 
 function writeFixtureFile(root, name, contents) {
   const path = join(root, name)
@@ -207,6 +377,37 @@ function writeJson(path, value) {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
   return path
+}
+
+function rehashArchiveFile(archive, relativePath) {
+  const sumsPath = join(archive, 'SHA256SUMS')
+  const rows = readFileSync(sumsPath, 'utf8').trim().split('\n')
+  const nextHash = digest(readFileSync(join(archive, relativePath)))
+  let found = false
+  const next = rows.map((row) => {
+    const suffix = `  ${relativePath}`
+    if (!row.endsWith(suffix)) return row
+    found = true
+    return `${nextHash}${suffix}`
+  })
+  assert.equal(found, true, `SHA256SUMS binds ${relativePath}`)
+  writeFileSync(sumsPath, `${next.join('\n')}\n`)
+}
+
+function mutateMappedJson(fixture, archivePath, mutate) {
+  const sourcePath = fixture.files[archivePath]
+  assert.equal(typeof sourcePath, 'string', `mapped source exists for ${archivePath}`)
+  const document = JSON.parse(readFileSync(sourcePath, 'utf8'))
+  mutate(document)
+  writeJson(sourcePath, document)
+}
+
+function mutateMappedJsonl(fixture, archivePath, mutate) {
+  const sourcePath = fixture.files[archivePath]
+  assert.equal(typeof sourcePath, 'string', `mapped source exists for ${archivePath}`)
+  const rows = readFileSync(sourcePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  mutate(rows)
+  writeFileSync(sourcePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
 }
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'vtr-reach-archive-test-'))
@@ -228,16 +429,113 @@ try {
   assert.equal(complete.witnessRegionPath, 'server/world/r.0.0.mca')
   assert.equal(existsSync(join(complete.archive, 'server/world/r.-1.0.mca')), false, 'a positive witness does not require the former fixed negative-region path')
   assert.equal(packagedProbe.configuredNoLlmProbe.networkModelCalls, 0)
-  for (const [name, filename] of [['jev-calls', 'jev-calls.jsonl'], ['jev-decisions', 'jev-decisions.jsonl'], ['system2-journal', 'system2.jsonl']]) {
+  assert.equal(packagedProbe.egressAudit.status, 'OBSERVED_ZERO')
+  assert.equal(packagedProbe.egressAudit.coverageStatus, 'USERSPACE_ONLY_CLOSED')
+  assert.ok(packagedProbe.egressAudit.limitations.some((limitation) => limitation.includes('no kernel isolation claim')))
+  assert.equal(completeResult.report.freshWorld.status, 'PASS')
+  assert.equal(packagedProbe.noDoubleAuthorityFixture.status, 'PASS')
+  assert.equal(packagedProbe.noDoubleAuthorityFixture.fixture.pathfinderStartDelta, 0)
+  assert.equal(packagedProbe.noDoubleAuthorityFixture.fixture.authorityConflictCount, 1,
+    'fixture refusal conflict remains separate from the live run duplicate-authority zero')
+  const noDoubleAuthority = JSON.parse(readFileSync(join(complete.archive, 'proofs/no-double-authority.json'), 'utf8'))
+  assert.equal(noDoubleAuthority.result, 'PASS')
+  assert.equal(noDoubleAuthority.vtrActuationCount, 1)
+  assert.equal(noDoubleAuthority.legacyActuationCount, 0)
+  assert.equal(noDoubleAuthority.duplicateAuthority, false)
+  for (const [name, filename] of [['jev-calls', 'jev-calls.jsonl'], ['jev-decisions', 'jev-decisions.jsonl'], ['system2-journal', 'system2.jsonl'], ['mercury-calls', 'mercury-calls.jsonl']]) {
     assert.equal(readFileSync(join(complete.archive, `runner/${filename}`), 'utf8'), '', `empty captured journal ${name} is preserved`)
   }
   const hashLines = readFileSync(join(complete.archive, 'SHA256SUMS'), 'utf8').trim().split('\n')
   assert.ok(hashLines.some((line) => line.endsWith('  probe.json')))
   assert.ok(hashLines.some((line) => line.endsWith('  packaging-report.json')))
+  assert.ok(hashLines.some((line) => line.endsWith('  runner/mercury-calls.jsonl')))
+
+  const localFallback = makeFixture(join(tempRoot, 'local-fallback'), { localFallbackDecision: true, deprecatedModelCallsPerMechanicalStep: 1 })
+  const localFallbackResult = packageVtrReachArchive({ collectorReportPath: localFallback.collectorPath, manifestPath: localFallback.manifestPath, archivePath: localFallback.archive })
+  assert.equal(localFallbackResult.report.packageStatus, 'READY_FOR_VALIDATION', JSON.stringify(localFallbackResult.report.checks, null, 2))
+  assert.equal(localFallbackResult.report.providerActivity.status, 'OBSERVED_ZERO')
+  const localFallbackProbe = JSON.parse(readFileSync(join(localFallback.archive, 'probe.json'), 'utf8'))
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.networkModelCalls, 0)
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.effectiveJev.decisionCalls, 1)
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.effectiveJev.providerEvaluateAttempts, 0)
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.providerEvaluateAttemptsPerMechanicalStep, 0)
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.deprecatedModelCallsPerMechanicalStep, 1,
+    'deprecated movement metric is preserved and not treated as provider evidence')
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.policyActivity.jevDecisionFrames, 1)
+  assert.equal(localFallbackProbe.configuredNoLlmProbe.policyActivity.jevEvaluateAttempts, 0)
+  const archivedFallbackCall = readFileSync(join(localFallback.archive, 'runner/jev-calls.jsonl'), 'utf8')
+  assert.match(archivedFallbackCall, /"providerAttempts":0/u, 'classified local decision raw bytes remain archived')
 
   const noAttestation = makeFixture(join(tempRoot, 'no-attestation'), { addCapture: false })
   const noAttestationResult = packageVtrReachArchive({ collectorReportPath: noAttestation.collectorPath, manifestPath: noAttestation.manifestPath, archivePath: noAttestation.archive })
   assert.equal(noAttestationResult.report.packageStatus, 'INCOMPLETE')
+
+  const staleFreshMessage = makeFixture(join(tempRoot, 'stale-fresh-message'), { oldFreshPhraseOnly: true })
+  const staleFreshMessageResult = packageVtrReachArchive({ collectorReportPath: staleFreshMessage.collectorPath, manifestPath: staleFreshMessage.manifestPath, archivePath: staleFreshMessage.archive })
+  assert.equal(staleFreshMessageResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'the old Leaf phrase cannot stand in for pre-start absence and same-PID Preparing/Done proof')
+
+  const staleWorld = makeFixture(join(tempRoot, 'stale-world'), { staleFreshAttestation: true })
+  const staleWorldResult = packageVtrReachArchive({ collectorReportPath: staleWorld.collectorPath, manifestPath: staleWorld.manifestPath, archivePath: staleWorld.archive })
+  assert.equal(staleWorldResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL')
+
+  const changedFreshArtifact = makeFixture(join(tempRoot, 'changed-fresh-artifact'), { tamperFreshArtifactHash: true })
+  const changedFreshArtifactResult = packageVtrReachArchive({ collectorReportPath: changedFreshArtifact.collectorPath, manifestPath: changedFreshArtifact.manifestPath, archivePath: changedFreshArtifact.archive })
+  assert.equal(changedFreshArtifactResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL')
+
+  for (const [name, mutate] of [
+    ['pid', (document) => { document.server.pid = 777; document.preStartObservation.serverPid = 777 }],
+    ['port', (document) => { document.server.port = 25566 }],
+    ['level', (document) => { document.server.levelName = 'stale-world' }],
+    ['source-path', (document) => { document.postRunObservation.files[0].sourcePath = join(dirname(document.worldRoot.absolute), 'old-world', 'level.dat') }],
+    ['stdout-time', (document) => { document.startupLog.preparing.ts = iso(4) }],
+    ['before-server-stop', (document) => { document.postRunObservation.observedAt = iso(49) }],
+  ]) {
+    const tampered = makeFixture(join(tempRoot, `fresh-${name}-tamper`))
+    mutateMappedJson(tampered, 'server/fresh-world-attestation.json', mutate)
+    const tamperedResult = packageVtrReachArchive({ collectorReportPath: tampered.collectorPath, manifestPath: tampered.manifestPath, archivePath: tampered.archive })
+    assert.equal(tamperedResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL', `${name} tamper is rejected`)
+  }
+
+  const wrongUniverse = makeFixture(join(tempRoot, 'fresh-wrong-universe'))
+  mutateMappedJson(wrongUniverse, 'server/server-start.json', (document) => {
+    document.process.universeArg = join(dirname(document.process.universeArg), 'other-run-world')
+    const index = document.process.argv.indexOf('--universe')
+    document.process.argv[index + 1] = document.process.universeArg
+    document.process.commandLineSha256 = digest(Buffer.from(document.process.argv.join('\0')))
+  })
+  const wrongUniverseResult = packageVtrReachArchive({ collectorReportPath: wrongUniverse.collectorPath, manifestPath: wrongUniverse.manifestPath, archivePath: wrongUniverse.archive })
+  assert.equal(wrongUniverseResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'worldRoot must resolve from the actual server --universe and --level-name argv')
+
+  for (const [name, mutate] of [
+    ['sourceSha', (document) => { document.sourceSha = 'f'.repeat(40) }],
+    ['runId', (document) => { document.runId = 'run-stale-identity' }],
+    ['generationId', (document) => { document.generationId = 'gen-stale-identity' }],
+    ['worldKey', (document) => { document.worldKey = '127.0.0.1:25566|overworld|4' }],
+  ]) {
+    const wrongServerStartIdentity = makeFixture(join(tempRoot, `server-start-${name}-tamper`))
+    mutateMappedJson(wrongServerStartIdentity, 'server/server-start.json', mutate)
+    const wrongIdentityResult = packageVtrReachArchive({ collectorReportPath: wrongServerStartIdentity.collectorPath, manifestPath: wrongServerStartIdentity.manifestPath, archivePath: wrongServerStartIdentity.archive })
+    assert.equal(wrongIdentityResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL', `server-start ${name} mismatch is rejected`)
+  }
+
+  const tamperedStdoutReceipt = makeFixture(join(tempRoot, 'tampered-stdout-receipt'))
+  mutateMappedJsonl(tamperedStdoutReceipt, 'server/leaf-stdout-events.jsonl', (rows) => { rows[1].lineSha256 = 'f'.repeat(64) })
+  const tamperedStdoutResult = packageVtrReachArchive({ collectorReportPath: tamperedStdoutReceipt.collectorPath, manifestPath: tamperedStdoutReceipt.manifestPath, archivePath: tamperedStdoutReceipt.archive })
+  assert.equal(tamperedStdoutResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'stdout receipt line hashes are rechecked rather than trusted')
+
+  const rehashedTamper = makeFixture(join(tempRoot, 'rehashed-fresh-tamper'))
+  packageVtrReachArchive({ collectorReportPath: rehashedTamper.collectorPath, manifestPath: rehashedTamper.manifestPath, archivePath: rehashedTamper.archive })
+  const attestationPath = join(rehashedTamper.archive, 'server/fresh-world-attestation.json')
+  const tamperedAttestation = JSON.parse(readFileSync(attestationPath, 'utf8'))
+  tamperedAttestation.preStartObservation.levelDat.state = 'present'
+  writeJson(attestationPath, tamperedAttestation)
+  rehashArchiveFile(rehashedTamper.archive, 'server/fresh-world-attestation.json')
+  const rehashedValidation = await validateEvidenceArchive(rehashedTamper.archive)
+  assert.equal(rehashedValidation.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'rehashing SHA256SUMS cannot make a stale-world attestation pass semantic validation')
   assert.equal(noAttestationResult.report.providerActivity.status, 'INCOMPLETE')
   const noAttestationProbe = JSON.parse(readFileSync(join(noAttestation.archive, 'probe.json'), 'utf8'))
   assert.equal(noAttestationProbe.configuredNoLlmProbe.networkModelCalls, null)
@@ -249,10 +547,74 @@ try {
   assert.equal(existsSync(join(missingJournal.archive, 'runner/jev-calls.jsonl')), false, 'adapter must not fabricate an empty journal')
   assert.equal(missingJournalResult.report.providerActivity.status, 'INCOMPLETE')
 
+  const missingMercury = makeFixture(join(tempRoot, 'missing-mercury'), { omitProvider: 'mercury-calls' })
+  const missingMercuryManifest = JSON.parse(readFileSync(missingMercury.manifestPath, 'utf8'))
+  delete missingMercuryManifest.files['runner/mercury-calls.jsonl']
+  writeJson(missingMercury.manifestPath, missingMercuryManifest)
+  const missingMercuryResult = packageVtrReachArchive({ collectorReportPath: missingMercury.collectorPath, manifestPath: missingMercury.manifestPath, archivePath: missingMercury.archive })
+  assert.equal(missingMercuryResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(missingMercuryResult.report.providerActivity.status, 'INCOMPLETE', 'missing System2 provider attempt evidence cannot be inferred as zero')
+
   const lateCapture = makeFixture(join(tempRoot, 'late-capture'), { captureStartsLate: true })
   const lateCaptureResult = packageVtrReachArchive({ collectorReportPath: lateCapture.collectorPath, manifestPath: lateCapture.manifestPath, archivePath: lateCapture.archive })
   assert.equal(lateCaptureResult.report.packageStatus, 'INCOMPLETE')
   assert.equal(lateCaptureResult.report.providerActivity.status, 'INCOMPLETE', 'existing empty post-run journals do not prove zero activity over the live window')
+
+  const missingLifecycle = makeFixture(join(tempRoot, 'missing-lifecycle'), { omitLifecycle: true })
+  const missingLifecycleResult = packageVtrReachArchive({ collectorReportPath: missingLifecycle.collectorPath, manifestPath: missingLifecycle.manifestPath, archivePath: missingLifecycle.archive })
+  assert.equal(missingLifecycleResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(missingLifecycleResult.report.providerActivity.status, 'INCOMPLETE')
+  assert.equal(missingLifecycleResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'INCOMPLETE')
+
+  const missingStopObservation = makeFixture(join(tempRoot, 'missing-stop-observation'), { omitStopObservations: true })
+  const missingStopObservationResult = packageVtrReachArchive({ collectorReportPath: missingStopObservation.collectorPath, manifestPath: missingStopObservation.manifestPath, archivePath: missingStopObservation.archive })
+  assert.equal(missingStopObservationResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(missingStopObservationResult.report.checks.find((entry) => entry.id === 'provider-activity-zero')?.status, 'INCOMPLETE', 'pid/status rows without observed process/listener closure do not prove shutdown')
+
+  const wrongListenerClosure = makeFixture(join(tempRoot, 'wrong-listener-closure'), { badLifecycleObservation: true })
+  const wrongListenerClosureResult = packageVtrReachArchive({ collectorReportPath: wrongListenerClosure.collectorPath, manifestPath: wrongListenerClosure.manifestPath, archivePath: wrongListenerClosure.archive })
+  assert.equal(wrongListenerClosureResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(wrongListenerClosureResult.report.checks.find((entry) => entry.id === 'provider-activity-zero')?.status, 'INCOMPLETE', 'server stop needs connection-refused from exact loopback host/port')
+
+  const missingEgress = makeFixture(join(tempRoot, 'missing-egress'), { omitEgress: true })
+  const missingEgressResult = packageVtrReachArchive({ collectorReportPath: missingEgress.collectorPath, manifestPath: missingEgress.manifestPath, archivePath: missingEgress.archive })
+  assert.equal(missingEgressResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(missingEgressResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'INCOMPLETE')
+
+  const tamperedEgress = makeFixture(join(tempRoot, 'tampered-egress'), { tamperEgress: true })
+  const tamperedEgressResult = packageVtrReachArchive({ collectorReportPath: tamperedEgress.collectorPath, manifestPath: tamperedEgress.manifestPath, archivePath: tamperedEgress.archive })
+  assert.equal(tamperedEgressResult.report.packageStatus, 'FAIL')
+  assert.equal(tamperedEgressResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'FAIL')
+
+  const externalAttempt = makeFixture(join(tempRoot, 'external-egress'), { externalAttempt: true })
+  const externalAttemptResult = packageVtrReachArchive({ collectorReportPath: externalAttempt.collectorPath, manifestPath: externalAttempt.manifestPath, archivePath: externalAttempt.archive })
+  assert.equal(externalAttemptResult.report.packageStatus, 'FAIL')
+  assert.equal(externalAttemptResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'FAIL')
+
+  const egressBeforeResidentExit = makeFixture(join(tempRoot, 'egress-before-resident-exit'), { egressCloseOffset: 48 })
+  const egressBeforeResidentExitResult = packageVtrReachArchive({ collectorReportPath: egressBeforeResidentExit.collectorPath, manifestPath: egressBeforeResidentExit.manifestPath, archivePath: egressBeforeResidentExit.archive })
+  assert.equal(egressBeforeResidentExitResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(egressBeforeResidentExitResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'INCOMPLETE', 'the preload guard must close after the resident child exit is observed')
+
+  const egressAfterServerStop = makeFixture(join(tempRoot, 'egress-after-server-stop'), { egressCloseOffset: 51 })
+  const egressAfterServerStopResult = packageVtrReachArchive({ collectorReportPath: egressAfterServerStop.collectorPath, manifestPath: egressAfterServerStop.manifestPath, archivePath: egressAfterServerStop.archive })
+  assert.equal(egressAfterServerStopResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(egressAfterServerStopResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'INCOMPLETE', 'the wrapper capture must close before isolated server stop')
+
+  const missingFixtureSource = makeFixture(join(tempRoot, 'missing-fixture-source'), { omitFixtureSource: true })
+  const missingFixtureSourceResult = packageVtrReachArchive({ collectorReportPath: missingFixtureSource.collectorPath, manifestPath: missingFixtureSource.manifestPath, archivePath: missingFixtureSource.archive })
+  assert.equal(missingFixtureSourceResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(missingFixtureSourceResult.report.checks.find((entry) => entry.id === 'proof:no-double-authority-fixture')?.status, 'INCOMPLETE')
+
+  const tamperedFixtureHash = makeFixture(join(tempRoot, 'tampered-fixture-hash'), { tamperFixtureSourceHash: true })
+  const tamperedFixtureHashResult = packageVtrReachArchive({ collectorReportPath: tamperedFixtureHash.collectorPath, manifestPath: tamperedFixtureHash.manifestPath, archivePath: tamperedFixtureHash.archive })
+  assert.equal(tamperedFixtureHashResult.report.packageStatus, 'FAIL')
+  assert.equal(tamperedFixtureHashResult.report.checks.find((entry) => entry.id === 'proof:no-double-authority-fixture')?.status, 'FAIL')
+
+  const badFixtureObservation = makeFixture(join(tempRoot, 'bad-fixture-observation'), { badFixtureObservation: true })
+  const badFixtureObservationResult = packageVtrReachArchive({ collectorReportPath: badFixtureObservation.collectorPath, manifestPath: badFixtureObservation.manifestPath, archivePath: badFixtureObservation.archive })
+  assert.equal(badFixtureObservationResult.report.packageStatus, 'FAIL')
+  assert.equal(badFixtureObservationResult.report.checks.find((entry) => entry.id === 'proof:no-double-authority-fixture')?.status, 'FAIL')
 
   const observedModelCall = makeFixture(join(tempRoot, 'observed-model-call'), { nonzeroActivity: true })
   const observedModelCallResult = packageVtrReachArchive({ collectorReportPath: observedModelCall.collectorPath, manifestPath: observedModelCall.manifestPath, archivePath: observedModelCall.archive })
@@ -294,4 +656,4 @@ try {
   rmSync(tempRoot, { recursive: true, force: true })
 }
 
-process.stdout.write('VTR Reach archive packaging tests passed (9 cases)\n')
+process.stdout.write('VTR Reach archive packaging tests passed\n')
