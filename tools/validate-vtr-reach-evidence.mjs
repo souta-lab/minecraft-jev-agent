@@ -8,8 +8,9 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { gunzipSync, inflateSync } from 'node:zlib'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 import { parse as parseNbt } from 'prismarine-nbt'
-import { eventMessage, persistentActionIdentity, persistentSkillStartProof } from './vtr-reach-evidence-events.mjs'
+import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
 
 const EXIT = Object.freeze({ PASS: 0, FAIL: 1, INCOMPLETE: 2, USAGE: 64 })
 const CHECK_STATUS = Object.freeze({ PASS: 'PASS', FAIL: 'FAIL', INCOMPLETE: 'INCOMPLETE' })
@@ -39,8 +40,9 @@ occurred:
   runner/jev-calls.jsonl
   runner/jev-decisions.jsonl
   runner/system2.jsonl
-The v2 comparator output reports structured alignment only. Its summary-only
-output is never full migration acceptance evidence.
+The v2 comparator output reports structured alignment only and remains
+INCOMPLETE as migration evidence. The v3 comparator can qualify only when its
+run-scoped raw files and identities validate independently.
 `
 
 function parseArgs(argv) {
@@ -156,6 +158,883 @@ function readProperties(text) {
 function eventTimestamp(row) {
   const value = Date.parse(row?.ts)
   return Number.isFinite(value) ? value : null
+}
+
+function canonicalMission(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+      typeof value.kind !== 'string' || value.kind.trim() === '' ||
+      typeof value.item !== 'string' || value.item.trim() === '' ||
+      !Number.isSafeInteger(value.count) || value.count < 1) return null
+  return { kind: value.kind, item: value.item, count: value.count }
+}
+
+function sameCanonicalMission(left, right) {
+  const a = canonicalMission(left)
+  const b = canonicalMission(right)
+  return a !== null && b !== null && a.kind === b.kind && a.item === b.item && a.count === b.count
+}
+
+function parsedJsonLines(text, label) {
+  const rows = []
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    if (line.trim() === '') continue
+    try { rows.push(JSON.parse(line)) } catch (error) { throw new Error(`${label}:${index + 1}: invalid JSONL (${error.message})`) }
+  }
+  return rows
+}
+
+function fileText(files, path) {
+  const entry = files.get(path)
+  return entry === undefined ? null : entry.text
+}
+
+function rawFileMap(side, label) {
+  if (!side || !Array.isArray(side.files)) throw new Error(`${label} raw file list is missing`)
+  const files = new Map()
+  for (const entry of side.files) {
+    if (!entry || typeof entry.path !== 'string' || entry.path.length === 0 ||
+        entry.path.startsWith('/') || entry.path.includes('\\') ||
+        entry.path.split('/').some((part) => part === '' || part === '.' || part === '..')) {
+      throw new Error(`${label} raw file path is unsafe or malformed`)
+    }
+    if (files.has(entry.path)) throw new Error(`${label} raw file path is duplicated: ${entry.path}`)
+    if (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 || entry.sizeBytes > 5 * 1024 * 1024 ||
+        typeof entry.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(entry.sha256) ||
+        typeof entry.contentBase64 !== 'string') throw new Error(`${label} raw file integrity metadata is malformed: ${entry.path}`)
+    const bytes = Buffer.from(entry.contentBase64, 'base64')
+    if (bytes.toString('base64') !== entry.contentBase64 || bytes.length !== entry.sizeBytes || sha256(bytes) !== entry.sha256.toLowerCase()) {
+      throw new Error(`${label} raw file bytes/hash do not match: ${entry.path}`)
+    }
+    files.set(entry.path, { ...entry, text: bytes.toString('utf8') })
+  }
+  return files
+}
+
+function exactRawFile(files, path, label) {
+  const entry = files.get(path)
+  if (!entry) throw new Error(`${label} raw archive is missing ${path}`)
+  return entry
+}
+
+function oneRawJournal(files, candidates, label) {
+  const matches = candidates.filter((path) => files.has(path))
+  if (matches.length !== 1) throw new Error(`${label} must contain exactly one source event journal (${candidates.join(', ')})`)
+  return matches[0]
+}
+
+function agentEvents(files, path, label) {
+  return parsedJsonLines(exactRawFile(files, path, label).text, path)
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row) && row.record === 'agent-event' && typeof row.message === 'string')
+}
+
+function eventNamed(rows, name, identity = null) {
+  return rows.filter((row) => row.message.startsWith(`${name} `) && (identity === null || identity(row)))
+}
+
+function eventActionId(row) {
+  return row?.detail?.actionId ?? null
+}
+
+function providerCapture(files, expectedIdentity, probe) {
+  const capture = JSON.parse(exactRawFile(files, 'runner/provider-activity-capture.json', 'VTR').text)
+  if (capture.schema !== 'vtr-provider-activity-capture/v1' || capture.status !== 'OBSERVED' ||
+      capture.window?.coverageComplete !== true || capture.capture?.observedNonEmptyJournal !== false ||
+      !Array.isArray(capture.capture?.problems) || capture.capture.problems.length !== 0) {
+    throw new Error('VTR provider activity capture is not a complete clean observation')
+  }
+  const worldKey = probe?.record === 'vtr-reach-live-probe'
+    ? probe.transition?.commit?.identity?.worldKey
+    : probe?.run?.worldKey
+  for (const [key, expected] of Object.entries({
+    sourceSha: expectedIdentity.sourceSha,
+    runId: expectedIdentity.runId,
+    generationId: expectedIdentity.generationId,
+    worldKey,
+  })) {
+    if (typeof expected !== 'string' || capture.identity?.[key] !== expected) throw new Error(`VTR provider capture ${key} does not match the raw run`)
+  }
+  const readyAt = Date.parse(capture.window?.generationReadyAt ?? '')
+  const terminalAt = Date.parse(capture.window?.terminalAt ?? '')
+  const startAt = Date.parse(capture.window?.startedAt ?? '')
+  const endAt = Date.parse(capture.window?.endedAt ?? '')
+  if (![startAt, readyAt, terminalAt, endAt].every(Number.isFinite) || !(startAt <= readyAt && readyAt <= terminalAt && terminalAt <= endAt)) {
+    throw new Error('VTR provider capture does not cover the complete boot-to-terminal execution window')
+  }
+  if (!Number.isFinite(capture.window?.maxPollGapMs) || !Number.isFinite(capture.window?.maxObservedPollGapMs) ||
+      capture.window.maxObservedPollGapMs > capture.window.maxPollGapMs) throw new Error('VTR provider capture polling coverage is outside its declared bound')
+  const journalPaths = {
+    'jev-calls': 'runner/jev-calls.jsonl',
+    'jev-decisions': 'runner/jev-decisions.jsonl',
+    'system2-journal': 'runner/system2.jsonl',
+  }
+  for (const [name, path] of Object.entries(journalPaths)) {
+    const raw = exactRawFile(files, path, 'VTR')
+    const bytes = Buffer.from(raw.contentBase64, 'base64')
+    const snapshot = capture.journals?.[name]
+    if (!snapshot || snapshot.bytes !== bytes.length || snapshot.sha256 !== sha256(bytes) ||
+        !Number.isFinite(Date.parse(snapshot.closedAt ?? '')) || bytes.length !== 0) {
+      throw new Error(`VTR provider journal ${name} is not an observed empty file with matching bytes/hash`)
+    }
+    if (parsedJsonLines(raw.text, path).length !== 0) throw new Error(`VTR provider journal ${name} contains activity`)
+    const firstObservedAt = Date.parse(snapshot.firstObservedAt ?? snapshot.initializedAt ?? '')
+    const closedAt = Date.parse(snapshot.closedAt ?? '')
+    if (!Number.isFinite(firstObservedAt) || firstObservedAt > readyAt || !Number.isFinite(closedAt) || closedAt < terminalAt || closedAt > endAt) {
+      throw new Error(`VTR provider journal ${name} was not observed before GENERATION_READY through terminal capture`)
+    }
+  }
+  for (const key of ['networkModelCalls', 'jevDecisionCalls', 'system2DecisionCalls']) {
+    if (capture.activity?.[key] !== 0) throw new Error(`VTR provider capture ${key} is not zero`)
+  }
+  const acceptance = JSON.parse(exactRawFile(files, 'runner/acceptance.json', 'VTR').text)
+  if (acceptance.record !== 'acceptance' || acceptance.runId !== expectedIdentity.runId ||
+      acceptance.gitCommit !== expectedIdentity.sourceSha || acceptance.checkoutHead !== expectedIdentity.sourceSha ||
+      acceptance.generationHash !== expectedIdentity.buildHash) {
+    throw new Error('VTR acceptance record does not bind the raw source/run/build identity')
+  }
+  const [serverId, dimension, epoch] = worldKey.split('|')
+  if (acceptance.serverId !== serverId || acceptance.worldEpoch !== Number(epoch) ||
+      String(acceptance.dimension).replace(/^minecraft:/, '') !== String(dimension).replace(/^minecraft:/, '')) {
+    throw new Error('VTR acceptance record does not bind the committed world/dimension/epoch')
+  }
+  return { capture, acceptance, activity: capture.activity }
+}
+
+function inspectRawLegacySide(side, expectedIdentity) {
+  const files = rawFileMap(side, 'legacy')
+  exactRawFile(files, 'runner/runtime/buddy.log', 'legacy')
+  const runPath = 'runner/runtime/logs/jev/run.jsonl'
+  const runRows = agentEvents(files, runPath, 'legacy')
+  const summary = JSON.parse(exactRawFile(files, 'runner/reach-slice-evidence.json', 'legacy').text)
+  for (const [key, value] of Object.entries(expectedIdentity)) {
+    if (summary[key] !== value) throw new Error(`legacy raw summary ${key} does not match comparison lineage`)
+  }
+  const mission = canonicalMission(summary.missionInput)
+  if (!mission) throw new Error('legacy raw summary does not serialize a canonical Mission')
+  const actualMissionInput = exactRawFile(files, 'runner/human-task-input.jsonl', 'legacy').text
+  const missionRows = parsedJsonLines(actualMissionInput, 'runner/human-task-input.jsonl')
+  const missionEvents = missionRows.filter((row) => row.event === 'chat_sent_after_intent_listener_ready' && typeof row.command === 'string')
+  if (missionEvents.length !== 1) throw new Error('legacy raw human-task journal must contain exactly one submitted Mission command')
+  const command = missionEvents[0].command.trim()
+  const commandMatch = /^agent\s+\S+\s+collect\s+(.+?)\s+(\d+)$/i.exec(command)
+  if (!commandMatch || Number(commandMatch[2]) !== mission.count) throw new Error('legacy raw Mission command does not agree with its canonical count')
+  const commandItem = commandMatch[1].toLowerCase()
+  const canonicalItem = mission.item.toLowerCase()
+  if (commandItem !== canonicalItem && !(canonicalItem === 'log' && commandItem.endsWith('_log'))) {
+    throw new Error('legacy raw Mission command does not agree with its canonical item')
+  }
+  const decisionsPath = 'runner/runtime/logs/jev/decisions.jsonl'
+  const decisions = parsedJsonLines(exactRawFile(files, decisionsPath, 'legacy').text, decisionsPath)
+  const first = summary.events?.firstDecision
+  const next = summary.events?.nextDecisionInRange
+  const moveEnd = summary.events?.moveActionEnd
+  if (!first?.decisionId || !next?.decisionId || !moveEnd?.actionId) throw new Error('legacy raw summary lacks the MOVE-to-inReach decision chain')
+  const firstRows = decisions.filter((row) => row.decisionId === first.decisionId)
+  const nextRows = decisions.filter((row) => row.decisionId === next.decisionId)
+  if (firstRows.length !== 1 || nextRows.length !== 1) throw new Error('legacy decision journal does not uniquely bind first and next decisions')
+  for (const row of [firstRows[0], nextRows[0]]) {
+    if (row.runId !== expectedIdentity.runId || row.generationId !== expectedIdentity.generationId || row.sourceSha !== expectedIdentity.sourceSha) {
+      throw new Error('legacy raw decision event has a different run/source/generation identity')
+    }
+  }
+  const firstSelected = firstRows[0].chosenAction ?? firstRows[0].jev?.answers?.action?.value ?? null
+  if (firstSelected !== moveEnd.actionId || !String(firstSelected).startsWith('MOVE:')) throw new Error('legacy first decision did not choose its recorded MOVE action')
+  const nextSelected = nextRows[0].chosenAction ?? nextRows[0].jev?.answers?.action?.value ?? null
+  const nextCandidate = nextRows[0].candidates?.find((candidate) => candidate.id === nextSelected)
+  if (!nextCandidate || nextCandidate.inReach !== true || nextCandidate.id !== next.selected) throw new Error('legacy next decision does not establish an inReach candidate')
+  const callPath = 'runner/runtime/logs/jev/jev-calls.jsonl'
+  const calls = parsedJsonLines(exactRawFile(files, callPath, 'legacy').text, callPath)
+  const callIds = [firstRows[0].jev?.callId, nextRows[0].jev?.callId]
+  if (callIds.some((callId) => typeof callId !== 'string' || !callId)) throw new Error('legacy raw decisions do not bind Jev call ids')
+  const boundCalls = callIds.map((callId) => calls.filter((row) => row.record === 'jev-call' && row.callId === callId))
+  if (boundCalls.some((rows) => rows.length !== 1)) throw new Error('legacy raw provider journal does not uniquely bind both decision frames')
+  const callRows = boundCalls.map((rows) => rows[0])
+  if (callRows.some((row) => row.policy !== 'fallback' || !/^deterministic(?:-|$)/i.test(String(row.model ?? '')) ||
+      !Number.isFinite(row.latencyMs) || row.latencyMs !== 0 || row.usage?.totalTokens !== 0)) {
+    throw new Error('legacy raw Jev calls do not prove the declared deterministic no-network policy')
+  }
+  const allCalls = calls.filter((row) => row.record === 'jev-call')
+  if (allCalls.some((row) => row.policy !== 'fallback' || !/^deterministic(?:-|$)/i.test(String(row.model ?? '')) ||
+      row.latencyMs !== 0 || row.usage?.totalTokens !== 0)) {
+    throw new Error('legacy raw Jev journal contains provider activity outside the declared deterministic no-network policy')
+  }
+  const startEvents = runRows.filter((row) => row.source === 'agent' && row.message.startsWith('jev-agent started '))
+  if (startEvents.length !== 1 || startEvents[0].detail?.policy !== 'fallback' ||
+      startEvents[0].detail?.system2Provider !== 'deterministic' || startEvents[0].detail?.system2Model !== 'unavailable') {
+    throw new Error('legacy raw run journal does not bind the Jev fallback and System2 unavailable policy at startup')
+  }
+  const system2Events = runRows.filter((row) => row.source === 'system2')
+  if (system2Events.some((row) => {
+    const provider = row.detail?.provider ?? row.detail?.system2Provider
+    const model = row.detail?.model ?? row.detail?.system2Model
+    return (provider !== undefined && provider !== 'deterministic') || (model !== undefined && model !== 'unavailable')
+  }) || summary.sliceMetrics?.system2LlmCalls !== 0 || summary.sliceMetrics?.networkModelCalls !== 0) {
+    throw new Error('legacy raw System2/provider events contradict the summary no-network counters')
+  }
+  const questionCalls = [firstRows[0], nextRows[0]].reduce((sum, row) => sum + Object.keys(row.jev?.answers ?? {}).length, 0)
+  const moveStartRows = eventNamed(runRows, 'SKILL_START', (row) => eventActionId(row) === moveEnd.actionId)
+  const moveStepRows = eventNamed(runRows, 'SKILL_STEP', (row) => eventActionId(row) === moveEnd.actionId && Number.isSafeInteger(row.detail?.leg))
+  const moveEndRows = eventNamed(runRows, 'SKILL_END', (row) => eventActionId(row) === moveEnd.actionId)
+  if (moveStartRows.length !== 1 || moveEndRows.length !== 1) throw new Error('legacy run journal must contain exactly one matching MOVE start/end')
+  if (!/\bexecution=success\b/.test(moveEndRows[0].message) || !/\bverification=verified\b/.test(moveEndRows[0].message) ||
+      !/\boutcome=SUCCESS\b/.test(moveEndRows[0].message) || !/\bfailureCode=none\b/.test(moveEndRows[0].message)) {
+    throw new Error('legacy MOVE SKILL_END is not a verified SUCCESS')
+  }
+  if (!Number.isSafeInteger(moveEnd.movementStepCount) || moveEnd.movementStepCount < 1 ||
+      !Number.isSafeInteger(moveEnd.pathLegs) || moveEnd.pathLegs < 1 || moveStepRows.length !== moveEnd.pathLegs ||
+      moveEnd.movementStepCount !== moveEnd.pathLegs) {
+    throw new Error('legacy raw movement legs do not match the summarized movement-step counts')
+  }
+  const witnessRows = parsedJsonLines(exactRawFile(files, 'runner/block-read-run2.jsonl', 'legacy').text, 'runner/block-read-run2.jsonl')
+  const witness = witnessRows.filter((row) => row.tag === 'target' && row.name === summary.fixture?.block &&
+    ['x', 'y', 'z'].every((key) => row.position?.[key] === summary.fixture?.position?.[key]))
+  if (witness.length === 0) throw new Error('legacy raw witness journal lacks the summarized target observation')
+  const host = fileText(files, 'runner/runtime/buddy.log')
+  const hostRows = (marker) => host.split(/\r?\n/).filter((line) => line.includes(marker) && line.includes(`actionId=${moveEnd.actionId}`) &&
+    line.includes(`runId=${expectedIdentity.runId}`) && line.includes(`generationId=${expectedIdentity.generationId}`) &&
+    line.includes(`sourceSha=${expectedIdentity.sourceSha}`))
+  if (hostRows('SKILL_START').length !== 1 || hostRows('SKILL_END').length !== 1) throw new Error('legacy HOST log does not uniquely bind the MOVE start/end to the raw run identity')
+  if (hostRows('SKILL_END').some((line) => !/\boutcome=SUCCESS\b/.test(line) || !/\bfailure=null\b/.test(line))) {
+    throw new Error('legacy HOST SKILL_END does not corroborate the verified successful MOVE')
+  }
+  const completedPath = host.split(/\r?\n/).filter((line) => line.includes('PATH_CALLBACK phase=completed') &&
+    line.includes(`actionId=${moveEnd.actionId}`) && line.includes(`runId=${expectedIdentity.runId}`) &&
+    line.includes(`generationId=${expectedIdentity.generationId}`) && line.includes(`sourceSha=${expectedIdentity.sourceSha}`))
+  if (completedPath.length !== 1 || summary.events?.moveActionEnd?.pathCallback !== 'completed' ||
+      summary.events?.moveActionEnd?.skillEnd !== 'SUCCESS' || summary.events?.moveActionEnd?.verification !== 'verified') {
+    throw new Error('legacy raw path callback and verified Skill outcome do not corroborate the movement summary')
+  }
+  return {
+    files,
+    summary,
+    mission,
+    measured: {
+      movementOperationsToInRange: moveStepRows.length,
+      moveActionsToInRange: moveStartRows.length,
+      decisionFramesToInRange: new Set([first.decisionId, next.decisionId]).size,
+      questionCallsToInRange: questionCalls,
+      jevProviderModelCalls: 0,
+      system2ModelCalls: 0,
+      networkModelCalls: 0,
+      modelCallsPerMovementStep: 0,
+    },
+  }
+}
+
+function readVtrProbe(files) {
+  const probes = [...files.values()].filter((entry) => entry.label === 'probe input')
+  if (probes.length !== 1) throw new Error('VTR raw archive must contain exactly one labeled probe input')
+  return JSON.parse(probes[0].text)
+}
+
+function vtrRawIdentity(probe) {
+  if (probe?.schema === 'vtr-reach-live-probe/v1') {
+    return {
+      sourceSha: probe.source?.commit,
+      buildHash: probe.source?.buildHash,
+      runId: probe.run?.runId,
+      generationId: probe.run?.generationId,
+      transitionId: probe.transition?.transitionId,
+      contractHash: probe.transition?.contractHash,
+      mission: canonicalMission(probe.mission),
+    }
+  }
+  if (probe?.record === 'vtr-reach-live-probe') {
+    return {
+      sourceSha: probe.sourceSha,
+      buildHash: probe.generationHash,
+      runId: probe.runId,
+      generationId: probe.generationId,
+      transitionId: probe.transition?.commit?.transitionId,
+      contractHash: probe.transition?.terminalOutcome?.contractHash,
+      mission: canonicalMission(probe.mission),
+    }
+  }
+  throw new Error('VTR raw probe input has an unsupported schema')
+}
+
+function inspectRawVtrSide(side, expectedIdentity) {
+  const files = rawFileMap(side, 'VTR')
+  const probe = readVtrProbe(files)
+  const identity = vtrRawIdentity(probe)
+  for (const key of ['sourceSha', 'buildHash', 'runId', 'generationId', 'transitionId', 'contractHash']) {
+    if (identity[key] !== expectedIdentity[key]) throw new Error(`VTR raw probe ${key} does not match comparison lineage`)
+  }
+  if (!identity.mission) throw new Error('VTR raw probe does not serialize a canonical Mission')
+  exactRawFile(files, 'runner/buddy.log', 'VTR')
+  const eventPath = oneRawJournal(files, ['runner/run.jsonl', 'runner/jev-run.jsonl', 'runner/jev-run-source.jsonl'], 'VTR')
+  const rows = agentEvents(files, eventPath, 'VTR')
+  for (const path of ['runner/jev-calls.jsonl', 'runner/jev-decisions.jsonl', 'runner/system2.jsonl', 'runner/acceptance.json',
+    'runner/provider-activity-capture.json', 'server/fixture-commands.jsonl']) {
+    exactRawFile(files, path, 'VTR')
+  }
+  const probeCommit = probe?.record === 'vtr-reach-live-probe'
+    ? probe.transition?.commit
+    : probe.transition?.commit ?? null
+  const probeVerify = probe?.record === 'vtr-reach-live-probe'
+    ? probe.transition?.verify
+    : probe.transition?.verify ?? probe.transition?.terminal?.verify ?? null
+  const probeTerminal = probe?.record === 'vtr-reach-live-probe'
+    ? probe.transition?.terminalOutcome
+    : probe.transition?.terminalOutcome ?? probe.transition?.terminal ?? null
+  if (!probeCommit || !probeVerify || !probeTerminal) throw new Error('VTR probe does not serialize the committed contract, deterministic VERIFY, and terminal outcome')
+  if (canonicalMission(probeCommit.mission) === null || !sameCanonicalMission(probeCommit.mission, probe.mission)) {
+    throw new Error('VTR committed Mission differs from its run-scoped probe Mission')
+  }
+  const contractFields = ['mission', 'desiredPredicate', 'requires', 'ensures', 'invariants', 'admissibleEffects', 'budget', 'identity', 'witness']
+  const transitionId = expectedIdentity.transitionId
+  const commits = eventNamed(rows, 'VTR_TRANSITION_COMMIT', (row) => (row.detail?.transitionId ?? token(row.message, 'id')) === transitionId)
+  const verifies = eventNamed(rows, 'VTR_TRANSITION_VERIFY', (row) => (row.detail?.transitionId ?? token(row.message, 'id')) === transitionId)
+  const outcomes = eventNamed(rows, 'VTR_TRANSITION_OUTCOME', (row) => (row.detail?.transitionId ?? token(row.message, 'id')) === transitionId)
+  if (commits.length !== 1 || verifies.length !== 1 || outcomes.length !== 1) throw new Error('VTR source journal does not uniquely bind commit, VERIFY, and terminal outcome')
+  const commitRow = commits[0]
+  const commitDetail = commitRow.detail ?? {}
+  if (token(commitRow.message, 'contractHash') !== expectedIdentity.contractHash) throw new Error('VTR commit event contractHash differs from the run-scoped probe')
+  for (const field of contractFields) {
+    if (!isDeepStrictEqual(commitDetail[field], probeCommit[field])) throw new Error(`VTR raw commit ${field} differs from the committed probe contract`)
+  }
+  const contractIdentity = probeCommit.identity ?? {}
+  const expectedWorldKey = probe?.record === 'vtr-reach-live-probe' ? contractIdentity.worldKey : probe.run?.worldKey
+  if (contractIdentity.generationId !== expectedIdentity.generationId || contractIdentity.leaseId !== expectedIdentity.generationId ||
+      typeof expectedWorldKey !== 'string' || !expectedWorldKey ||
+      (probe?.record === 'vtr-reach-live-probe' && probe.server?.worldEpoch !== contractIdentity.worldEpoch)) {
+    throw new Error('VTR committed contract identity is not bound to generation/world epoch')
+  }
+  const verifyDetail = verifies[0].detail ?? {}
+  const expectedVerify = probeVerify.detail ?? probeVerify
+  const terminalDetail = outcomes[0].detail ?? {}
+  const terminalOutcome = terminalDetail.outcome ?? probeTerminal.outcome
+  const terminalMetrics = terminalDetail.metrics ?? probeTerminal.metrics ?? {}
+  if (verifyDetail.truth !== 'TRUE' || verifyDetail.identityMatches !== true || verifyDetail.predicatesVerified !== true ||
+      verifyDetail.transitionId !== transitionId || verifyDetail.contractHash !== expectedIdentity.contractHash ||
+      verifyDetail.runId !== expectedIdentity.runId || verifyDetail.generationId !== expectedIdentity.generationId ||
+      verifyDetail.sourceSha !== expectedIdentity.sourceSha || verifyDetail.worldKey !== expectedWorldKey ||
+      !Number.isSafeInteger(verifyDetail.verifiedAtMs) || verifyDetail.verifiedAtMs !== verifyDetail.observedAtMs ||
+      !Array.isArray(verifyDetail.evidenceIds) || !verifyDetail.evidenceIds.length ||
+      !isDeepStrictEqual(verifyDetail.evidenceIds, expectedVerify.evidenceIds ?? probeTerminal.outcome?.evidenceIds) ||
+      verifyDetail.desiredPredicateIdentity !== (expectedVerify.desiredPredicateIdentity ?? probeTerminal.outcome?.desiredPredicateIdentity)) {
+    throw new Error('VTR raw VERIFY does not deterministically match the probe identity, predicate evidence, and timestamps')
+  }
+  if (!terminalOutcome || terminalOutcome.kind !== 'SUCCESS' || terminalOutcome.contractHash !== expectedIdentity.contractHash ||
+      terminalOutcome.desiredPredicateIdentity !== verifyDetail.desiredPredicateIdentity || terminalOutcome.verifiedAtMs !== verifyDetail.verifiedAtMs ||
+      !isDeepStrictEqual(terminalOutcome.evidenceIds, verifyDetail.evidenceIds) ||
+      terminalDetail.boundary !== (probeTerminal.boundary ?? terminalDetail.boundary) ||
+      !['verified-terminal', 'mechanical-step-outcome'].includes(terminalDetail.boundary)) {
+    throw new Error('VTR terminal outcome does not exactly close the matching deterministic VERIFY')
+  }
+  const reservations = eventNamed(rows, 'VTR_MECHANICAL_STEP_RESERVED', (row) => row.detail?.transitionId === transitionId)
+  const stepOutcomes = eventNamed(rows, 'VTR_MECHANICAL_STEP_OUTCOME', (row) => row.detail?.transitionId === transitionId)
+  if (reservations.length < 3 || reservations.length !== stepOutcomes.length) {
+    throw new Error('VTR live evidence must prove at least three reserved and settled mechanical legs under one Transition')
+  }
+  const reservationIds = reservations.map((row) => row.detail?.stepId)
+  const outcomeIds = stepOutcomes.map((row) => row.detail?.stepId)
+  if (reservationIds.some((id) => typeof id !== 'string') || new Set(reservationIds).size !== reservations.length ||
+      !isDeepStrictEqual([...reservationIds].sort(), [...outcomeIds].sort()) ||
+      reservations.some((row) => row.detail?.effectKind !== 'locomotion' || row.detail?.intentId === undefined)) {
+    throw new Error('VTR mechanical outcomes do not settle each unique locomotion reservation')
+  }
+  const finalStep = stepOutcomes.find((row) => row.detail?.stepId === reservationIds.at(-1))
+  const selectedActionId = vtrMoveActionId(rows, transitionId)
+  for (const reservation of reservations) {
+    const settled = stepOutcomes.filter((row) => row.detail?.stepId === reservation.detail.stepId)
+    if (settled.length !== 1 || settled[0].detail?.transitionId !== transitionId ||
+        reservation.detail?.contractHash !== expectedIdentity.contractHash ||
+        settled[0].detail?.contractHash !== expectedIdentity.contractHash ||
+        settled[0].detail?.intentId !== reservation.detail.intentId ||
+        typeof reservation.detail.actionId !== 'string' || reservation.detail.actionId !== selectedActionId ||
+        settled[0].detail?.actionId !== reservation.detail.actionId) {
+      throw new Error('VTR mechanical settlement changed transition/intent/action ownership')
+    }
+  }
+  if (!finalStep || finalStep.detail?.status !== 'terminal' || finalStep.detail?.outcome !== 'SUCCESS' || finalStep.detail?.verified !== true) {
+    throw new Error('last VTR mechanical leg did not carry the verified terminal SUCCESS outcome')
+  }
+  if (Number(terminalDetail.usage?.mechanicalSteps) !== reservations.length ||
+      Number(terminalMetrics.mechanicalStepsPerTransition) !== reservations.length ||
+      terminalMetrics.verifiedTransitionCompletion !== 1 || terminalMetrics.typedTerminalOutcome !== 'SUCCESS' ||
+      terminalMetrics.duplicateAuthority !== false || terminalMetrics.duplicateAuthorityConflicts !== 0) {
+    throw new Error('VTR raw terminal metrics disagree with reserved/settled mechanical legs or SUCCESS/authority evidence')
+  }
+  const selectedSkillStarts = eventNamed(rows, 'SKILL_START').filter((row) => /\bselectedBy=vtr-transition(?:\s|$)/.test(row.message))
+  const allMoveStarts = eventNamed(rows, 'SKILL_START').filter((row) => String(eventActionId(row) ?? '').startsWith('MOVE:'))
+  const vtrMoveStarts = selectedSkillStarts.filter((row) => String(eventActionId(row) ?? '').startsWith('MOVE:'))
+  const legacyMoveStarts = allMoveStarts.filter((row) => !/\bselectedBy=vtr-transition(?:\s|$)/.test(row.message))
+  const vtrMoveEnds = vtrMoveStarts.length === 1
+    ? eventNamed(rows, 'SKILL_END', (row) => eventActionId(row) === eventActionId(vtrMoveStarts[0]))
+    : []
+  if (vtrMoveStarts.length !== 1 || legacyMoveStarts.length !== 0 || selectedSkillStarts.length !== 1 ||
+      vtrMoveEnds.length !== 1 || !/\bexecution=success\b/.test(vtrMoveEnds[0]?.message ?? '') ||
+      !/\bverification=verified\b/.test(vtrMoveEnds[0]?.message ?? '') || !/\boutcome=SUCCESS\b/.test(vtrMoveEnds[0]?.message ?? '')) {
+    throw new Error('VTR and legacy movement actuation are not uniquely separated by the production run journal')
+  }
+  const noDouble = JSON.parse(exactRawFile(files, 'proofs/no-double-authority.json', 'VTR').text)
+  if (noDouble.result !== 'PASS' || noDouble.sourceSha !== expectedIdentity.sourceSha || noDouble.runId !== expectedIdentity.runId ||
+      noDouble.generationId !== expectedIdentity.generationId || noDouble.legacyActuationCount !== legacyMoveStarts.length ||
+      noDouble.vtrActuationCount !== vtrMoveStarts.length || noDouble.duplicateAuthority !== false || noDouble.duplicateAuthorityConflicts !== 0) {
+    throw new Error('VTR no-double-authority artifact does not match independently recomputed production events')
+  }
+  const provider = providerCapture(files, expectedIdentity, probe)
+  const rawConfiguration = probe.configuration ?? {
+    BUDDY_POLICY: probe.configuredNoLlmProbe?.effectiveJev?.configuredPolicy,
+    BUDDY_SYSTEM2: probe.configuredNoLlmProbe?.effectiveSystem2?.configuredMode,
+    effectiveJevProvider: probe.configuredNoLlmProbe?.effectiveJev?.provider,
+    effectiveJevModel: probe.configuredNoLlmProbe?.effectiveJev?.model,
+    effectiveSystem2Provider: probe.configuredNoLlmProbe?.effectiveSystem2?.provider,
+    effectiveSystem2Model: probe.configuredNoLlmProbe?.effectiveSystem2?.model,
+    networkModelCalls: probe.configuredNoLlmProbe?.networkModelCalls,
+  }
+  if (!rawConfiguration || typeof rawConfiguration.BUDDY_POLICY !== 'string' || typeof rawConfiguration.BUDDY_SYSTEM2 !== 'string' ||
+      typeof rawConfiguration.effectiveJevProvider !== 'string' || typeof rawConfiguration.effectiveJevModel !== 'string' ||
+      typeof rawConfiguration.effectiveSystem2Provider !== 'string' || typeof rawConfiguration.effectiveSystem2Model !== 'string' ||
+      rawConfiguration.networkModelCalls !== 0) {
+    throw new Error('VTR raw probe does not record the effective Jev/System2 policy and zero network model calls')
+  }
+  const commitAt = Date.parse(commitRow.ts ?? '')
+  const verifyAt = Date.parse(verifies[0].ts ?? '')
+  const terminalAt = Date.parse(outcomes[0].ts ?? '')
+  const reservationTimes = reservations.map((row) => Date.parse(row.ts ?? ''))
+  const outcomeTimes = stepOutcomes.map((row) => Date.parse(row.ts ?? ''))
+  if (![commitAt, verifyAt, terminalAt, ...reservationTimes, ...outcomeTimes].every(Number.isFinite) ||
+      reservationTimes.some((value) => value < commitAt || value >= verifyAt) ||
+      outcomeTimes.some((value) => value < commitAt || value >= verifyAt) || verifyAt > terminalAt) {
+    throw new Error('VTR commit/mechanical/VERIFY/terminal records are not time-ordered')
+  }
+  const skillStartAt = Date.parse(eventNamed(rows, 'SKILL_START', (row) => row.detail?.actionId === selectedActionId)[0]?.ts ?? '')
+  const reservationsById = new Map(reservations.map((row) => [row.detail.stepId, row]))
+  if (!Number.isFinite(skillStartAt) || skillStartAt < commitAt || reservationTimes.some((value) => value < skillStartAt) ||
+      stepOutcomes.some((row) => {
+        const reservedAt = Date.parse(reservationsById.get(row.detail.stepId)?.ts ?? '')
+        const settledAt = Date.parse(row.ts ?? '')
+        return !Number.isFinite(reservedAt) || !Number.isFinite(settledAt) || settledAt < reservedAt
+      })) {
+    throw new Error('VTR Skill ownership or mechanical reserve/settlement timestamps are not causally ordered')
+  }
+  const transitionWindowSkillStarts = eventNamed(rows, 'SKILL_START').filter((row) => {
+    const at = Date.parse(row.ts ?? '')
+    return Number.isFinite(at) && at >= commitAt && at <= terminalAt
+  })
+  if (transitionWindowSkillStarts.length !== 1 || eventActionId(transitionWindowSkillStarts[0]) !== selectedActionId ||
+      !/\bselectedBy=vtr-transition(?:\s|$)/.test(transitionWindowSkillStarts[0]?.message ?? '')) {
+    throw new Error('active Reach Transition has another or unowned Skill start inside its commit-to-terminal window')
+  }
+  for (const key of ['jevCallsPerTransition', 'system2CallsPerTransition', 'modelCallsPerMechanicalStep']) {
+    if (!Number.isFinite(terminalMetrics[key]) || terminalMetrics[key] < 0) {
+      throw new Error(`VTR raw terminal metrics omit a finite nonnegative ${key}`)
+    }
+  }
+  if (terminalMetrics.modelCallsPerMechanicalStep !== 0) {
+    throw new Error('no-LLM Reach proof reports nonzero model calls per mechanical step')
+  }
+  const host = fileText(files, 'runner/buddy.log')
+  const hostLines = host.split(/\r?\n/)
+  const hostMatch = (marker, predicate) => hostLines.filter((line) => line.includes(marker) && predicate(line))
+  const bootRows = hostMatch('BOOT ', (line) => token(line, 'runId') === expectedIdentity.runId &&
+    (token(line, 'sourceSha') ?? token(line, 'source')) === expectedIdentity.sourceSha)
+  const readyRows = hostMatch('GENERATION_READY ', (line) => token(line, 'runId') === expectedIdentity.runId &&
+    (token(line, 'generationId') ?? token(line, 'id')) === expectedIdentity.generationId &&
+    token(line, 'sourceSha') === expectedIdentity.sourceSha && token(line, 'buildHash') === expectedIdentity.buildHash)
+  const commitHostRows = hostMatch('VTR_TRANSITION_COMMIT ', (line) => token(line, 'transitionId') === transitionId &&
+    token(line, 'runId') === expectedIdentity.runId && token(line, 'generationId') === expectedIdentity.generationId &&
+    token(line, 'sourceSha') === expectedIdentity.sourceSha && token(line, 'contractHash') === expectedIdentity.contractHash)
+  const verifyHostRows = hostMatch('VTR_TRANSITION_VERIFY ', (line) => token(line, 'transitionId') === transitionId &&
+    token(line, 'runId') === expectedIdentity.runId && token(line, 'generationId') === expectedIdentity.generationId &&
+    token(line, 'sourceSha') === expectedIdentity.sourceSha && token(line, 'contractHash') === expectedIdentity.contractHash &&
+    token(line, 'truth') === 'TRUE')
+  const terminalHostRows = hostMatch('VTR_TRANSITION_OUTCOME ', (line) => token(line, 'transitionId') === transitionId &&
+    token(line, 'runId') === expectedIdentity.runId && token(line, 'generationId') === expectedIdentity.generationId &&
+    token(line, 'sourceSha') === expectedIdentity.sourceSha && token(line, 'contractHash') === expectedIdentity.contractHash &&
+    /\boutcome=\{"kind":"SUCCESS"/.test(line))
+  if (bootRows.length !== 1 || readyRows.length !== 1 || commitHostRows.length !== 1 || verifyHostRows.length !== 1 || terminalHostRows.length !== 1) {
+    throw new Error('VTR HOST log does not uniquely bind BOOT, GENERATION_READY, commit, VERIFY, and SUCCESS to the raw run')
+  }
+  const hostTimes = [bootRows[0], readyRows[0], commitHostRows[0], verifyHostRows[0], terminalHostRows[0]].map(logTimestamp)
+  if (!hostTimes.every(Number.isFinite) || hostTimes.some((value, index) => index > 0 && hostTimes[index - 1] > value)) {
+    throw new Error('VTR HOST run/generation/Transition identity markers are not time ordered')
+  }
+  return {
+    files,
+    probe,
+    identity,
+    mission: identity.mission,
+    configuration: rawConfiguration,
+    measured: {
+      verifiedTransitionCompletionCount: terminalMetrics.verifiedTransitionCompletion,
+      mechanicalStepsPerTransition: reservations.length,
+      typedTerminalOutcome: terminalOutcome.kind,
+      legacyJevCallsPerTransition: terminalMetrics.jevCallsPerTransition,
+      system2CallsPerTransition: terminalMetrics.system2CallsPerTransition,
+      modelCallsPerMechanicalStep: terminalMetrics.modelCallsPerMechanicalStep,
+      duplicateAuthority: legacyMoveStarts.length === 0 && vtrMoveStarts.length === 1,
+      duplicateAuthorityConflicts: terminalMetrics.duplicateAuthorityConflicts,
+      concurrentLegacyActuations: legacyMoveStarts.length,
+      providerActivity: provider.activity,
+    },
+  }
+}
+
+function vtrMoveActionId(rows, transitionId) {
+  const selectedStarts = eventNamed(rows, 'SKILL_START').filter((row) =>
+    /\bselectedBy=vtr-transition(?:\s|$)/.test(row.message) && String(eventActionId(row) ?? '').startsWith('MOVE:'))
+  if (selectedStarts.length !== 1) throw new Error(`VTR transition ${transitionId} must have exactly one VTR-selected MOVE owner`)
+  return eventActionId(selectedStarts[0])
+}
+
+function coordinateVector(target, player, blockRelative = false) {
+  if (!target || !player || !['x', 'y', 'z'].every((key) => Number.isFinite(target[key]) && Number.isFinite(player[key]))) return null
+  return Object.fromEntries(['x', 'y', 'z'].map((key) => [key, target[key] - (blockRelative ? Math.floor(player[key]) : player[key])]))
+}
+
+function vectorsMatch(left, right) {
+  return left !== null && right !== null && ['x', 'y', 'z'].every((key) => closeNumber(left[key], right[key]))
+}
+
+function normalizedDimension(value) {
+  return typeof value === 'string' ? value.replace(/^minecraft:/, '') : null
+}
+
+function assertReportedMatch(actual, reported, label) {
+  if (actual !== reported) throw new Error(`reported ${label}=${String(reported)} does not match raw evidence (${String(actual)})`)
+}
+
+function inspectReportedAlignment(legacyRaw, vtrRaw, proof, claimsAcceptance) {
+  const legacy = legacyRaw.summary
+  const vtrIdentity = vtrRaw.identity
+  const legacyRun = legacy.run ?? {}
+  const legacyFixture = legacy.fixture ?? {}
+  const probe = vtrRaw.probe
+  const server = probe.server ?? {}
+  const run = probe.run ?? {}
+  const rawVtrFixture = probe.fixture ?? {}
+  const witness = rawVtrFixture.relativeResourceSource ?? rawVtrFixture.witness ?? probe.transition?.commit?.witness ?? {}
+  const legacyPosition = legacyFixture.position
+  const legacyStart = legacyFixture.initialPlayerPosition
+  const vtrPosition = witness.position ?? witness.target ?? witness.blockPosition
+  const vtrStart = rawVtrFixture.transitionStartPosition ?? rawVtrFixture.initialPlayerPosition ?? run.initialPosition ?? probe.mission?.initialPosition
+  const legacyExact = coordinateVector(legacyPosition, legacyStart)
+  const vtrExact = coordinateVector(vtrPosition, vtrStart)
+  const legacyRelative = coordinateVector(legacyPosition, legacyStart, true)
+  const vtrRelative = coordinateVector(vtrPosition, vtrStart, true)
+  const legacyDeclared = legacyFixture.sourceOffsetFromInitialPlayer ?? legacyFixture.offset ?? null
+  const vtrDeclared = rawVtrFixture.sourceOffsetFromInitialPlayer ?? rawVtrFixture.offset ?? null
+  const declaredOffsetsMatch = [
+    [legacyDeclared, legacyFixture.sourceOffsetFromInitialPlayer !== undefined ? legacyRelative : legacyExact],
+    [vtrDeclared, rawVtrFixture.sourceOffsetFromInitialPlayer !== undefined ? vtrRelative : vtrExact],
+  ].every(([declared, derived]) => declared === null || vectorsMatch(declared, derived))
+  const sameResource = typeof legacyFixture.block === 'string' && typeof witness.block === 'string' &&
+    legacyFixture.block.replace(/^minecraft:/, '') === witness.block.replace(/^minecraft:/, '')
+  const sameExact = vectorsMatch(legacyExact, vtrExact)
+  const sameRelative = vectorsMatch(legacyRelative, vtrRelative)
+  const legacyFlat = legacyFixture.flatSolidGround
+  const vtrFlat = rawVtrFixture.flatSolidGround
+  const sameFlat = typeof legacyFlat === 'boolean' && typeof vtrFlat === 'boolean' && legacyFlat === true && vtrFlat === true
+  const sensorBound = rawVtrFixture.witnessChosenByProductionSensor === true
+  const alignment = proof.alignment ?? {}
+  const reported = proof.fixtureAlignment ?? {}
+  if (alignment.fixture === 'PASS' || claimsAcceptance) {
+    assertReportedMatch(sameResource, reported.sameTargetResourceKind, 'sameTargetResourceKind')
+    assertReportedMatch(sameExact, reported.sameExactCartesianDelta, 'sameExactCartesianDelta')
+    assertReportedMatch(sameRelative, reported.sameRelativeBlockOffset, 'sameRelativeBlockOffset')
+    assertReportedMatch(sameResource && sameExact && sameRelative && declaredOffsetsMatch, reported.sameRelativeFixture, 'sameRelativeFixture')
+    assertReportedMatch(sameFlat, reported.sameFlatGround, 'sameFlatGround')
+    assertReportedMatch(sensorBound, reported.vtrWitnessSensorBound, 'vtrWitnessSensorBound')
+    const legacyReported = reported.legacyFixtureStructured
+    const vtrReported = reported.vtrFixture
+    if (!legacyReported || !vtrReported ||
+        legacyReported.block !== legacyFixture.block || vtrReported.block !== witness.block ||
+        !isDeepStrictEqual(legacyReported.position, legacyPosition) || !isDeepStrictEqual(legacyReported.initialPlayerPosition, legacyStart) ||
+        !isDeepStrictEqual(vtrReported.sourcePosition, vtrPosition) || !isDeepStrictEqual(vtrReported.initialPlayerPosition, vtrStart) ||
+        !vectorsMatch(legacyReported.exactCartesianDelta, legacyExact) || !vectorsMatch(legacyReported.relativeBlockOffset, legacyRelative) ||
+        !vectorsMatch(vtrReported.exactCartesianDelta, vtrExact) || !vectorsMatch(vtrReported.relativeBlockOffset, vtrRelative) ||
+        legacyReported.flatSolidGround !== legacyFlat || vtrReported.flatSolidGround !== vtrFlat ||
+        vtrReported.witnessChosenByProductionSensor !== rawVtrFixture.witnessChosenByProductionSensor) {
+      throw new Error('reported fixture geometry/source differs from run-bound raw target and player positions')
+    }
+    if (!(sameResource && sameExact && sameRelative && declaredOffsetsMatch && sameFlat && sensorBound)) {
+      throw new Error('comparison claims aligned fixture but run-bound target, geometry, ground, or sensor evidence does not align')
+    }
+  }
+
+  const legacyWorldKey = legacyRun.worldKey
+  const legacyWorld = typeof legacyWorldKey === 'string' ? parseWorldKey(legacyWorldKey) : null
+  const vtrWorldKey = run.worldKey ?? `${server.serverId ?? ''}|${server.dimension ?? run.dimension ?? ''}|${server.worldEpoch ?? run.worldEpoch ?? ''}`
+  const vtrWorld = typeof vtrWorldKey === 'string' ? parseWorldKey(vtrWorldKey) : null
+  const rawEnvironment = {
+    minecraftVersion: legacyRun.minecraftVersion === undefined || legacyRun.minecraftVersion === null || legacyRun.minecraftVersion === 'not recorded'
+      ? 'unknown' : legacyRun.minecraftVersion === (run.minecraftVersion ?? server.minecraftVersion) ? true : false,
+    gameMode: legacyRun.gameMode === undefined || legacyRun.gameMode === null || legacyRun.gameMode === 'not recorded'
+      ? 'unknown' : legacyRun.gameMode === (run.gameMode ?? server.gameMode ?? server.gamemode) ? true : false,
+    difficulty: legacyRun.difficulty === undefined || legacyRun.difficulty === null || legacyRun.difficulty === 'not recorded'
+      ? 'unknown' : legacyRun.difficulty === (run.difficulty ?? server.difficulty) ? true : false,
+    dimension: legacyWorld === null || vtrWorld === null ? 'unknown' : legacyWorld.dimension === vtrWorld.dimension,
+  }
+  const legacySeed = legacyRun.seed
+  const vtrSeed = run.seed ?? server.worldSeedFromLevelDat ?? server.seed
+  rawEnvironment.seed = legacySeed === undefined || legacySeed === null || legacySeed === 'not recorded' || vtrSeed === undefined || vtrSeed === null || vtrSeed === 'not recorded'
+    ? 'unknown' : String(legacySeed) === String(vtrSeed)
+  const seedAssessment = run.seedAssessment ?? server.seedAssessment ?? probe.identity?.seedAssessment
+  if (typeof seedAssessment === 'string') rawEnvironment.seedProvenance = /disagree|mismatch|conflict/i.test(seedAssessment) ? false : true
+  const allEnvironmentMatched = Object.values(rawEnvironment).every((value) => value === true)
+  if (alignment.environment === 'PASS' || claimsAcceptance) {
+    if (!isDeepStrictEqual(reported.environmentMatch, rawEnvironment)) throw new Error('reported environmentMatch does not match run-bound legacy/VTR world and configuration fields')
+    if (!allEnvironmentMatched) throw new Error('comparison claims aligned environment but run-bound world/version/mode/difficulty/seed evidence does not align')
+  }
+
+  const lineage = proof.lineage ?? {}
+  const legacyLineage = lineage.legacy ?? {}
+  const vtrLineage = lineage.vtr ?? {}
+  const rawDimension = legacyWorld?.dimension ?? null
+  for (const [field, expected] of Object.entries({
+    sourceSha: legacy.sourceSha,
+    buildHash: legacy.buildHash,
+    runId: legacy.runId,
+    generationId: legacy.generationId,
+    worldKey: legacyRun.worldKey ?? null,
+    worldEpoch: legacyRun.worldEpoch ?? null,
+    dimension: rawDimension,
+    minecraftVersion: legacyRun.minecraftVersion ?? null,
+    gameMode: legacyRun.gameMode ?? null,
+    difficulty: legacyRun.difficulty ?? null,
+    seed: legacyRun.seed === undefined ? null : String(legacyRun.seed),
+  })) assertReportedMatch(expected, legacyLineage[field] ?? null, `legacy lineage ${field}`)
+  const vtrDimension = run.dimension ?? server.dimension ?? null
+  for (const [field, expected] of Object.entries({
+    sourceSha: vtrIdentity.sourceSha ?? probe.sourceSha ?? probe.source?.commit,
+    buildHash: vtrIdentity.buildHash ?? probe.generationHash ?? probe.source?.buildHash,
+    runId: vtrIdentity.runId ?? probe.runId ?? run.runId,
+    generationId: vtrIdentity.generationId ?? probe.generationId ?? run.generationId,
+    worldKey: run.worldKey ?? vtrWorldKey,
+    worldEpoch: run.worldEpoch ?? server.worldEpoch,
+    dimension: vtrDimension,
+    minecraftVersion: run.minecraftVersion ?? server.minecraftVersion ?? null,
+    gameMode: run.gameMode ?? server.gameMode ?? server.gamemode ?? null,
+    difficulty: run.difficulty ?? server.difficulty ?? null,
+    seed: (run.seed ?? server.worldSeedFromLevelDat ?? server.seed) === undefined ? null : String(run.seed ?? server.worldSeedFromLevelDat ?? server.seed),
+    seedAssessment: run.seedAssessment ?? server.seedAssessment ?? probe.identity?.seedAssessment ?? null,
+  })) assertReportedMatch(expected, vtrLineage[field] ?? null, `VTR lineage ${field}`)
+}
+
+/** Independently checks a comparator artifact and its embedded raw run evidence. */
+export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha = null) {
+  const incomplete = (reason, details = {}) => ({ status: 'INCOMPLETE', reason, ...details })
+  const fail = (reason, details = {}) => ({ status: 'FAIL', reason, ...details })
+  if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return fail('comparison artifact is not an object')
+  if (proof.schema === 'vtr-reach-fixture-comparison/v2') {
+    if (proof.evidenceClass !== 'summary-only' || proof.acceptanceEligible !== false || proof.acceptanceStatus !== 'NOT_ASSESSED_SUMMARY_ONLY') {
+      return fail('v2 comparison misrepresents summary-only input as raw or acceptance evidence')
+    }
+    return incomplete('v2 comparison is summary-only and cannot qualify as migration acceptance')
+  }
+  if (proof.schema !== 'vtr-reach-fixture-comparison/v3') return incomplete('comparison artifact schema is not supported', { schema: proof.schema ?? null })
+
+  const legacy = proof.lineage?.legacy
+  const vtr = proof.lineage?.vtr
+  if (typeof legacy?.sourceSha !== 'string' || !SHA_RE.test(legacy.sourceSha) || typeof legacy.runId !== 'string' ||
+      typeof legacy.generationId !== 'string' || typeof legacy.buildHash !== 'string') return incomplete('legacy comparison lineage is not fully source/run/generation/build bound')
+  if (typeof vtr?.sourceSha !== 'string' || !SHA_RE.test(vtr.sourceSha) || typeof vtr.runId !== 'string' ||
+      typeof vtr.generationId !== 'string' || typeof vtr.buildHash !== 'string') {
+    return incomplete('VTR comparison lineage is not fully source/run/generation/build/Transition bound')
+  }
+  if (typeof expectedLiveSourceSha !== 'string' || !SHA_RE.test(expectedLiveSourceSha)) return incomplete('live Transition source SHA is unavailable for comparison binding')
+  if (vtr.sourceSha.toLowerCase() !== expectedLiveSourceSha.toLowerCase()) return fail('comparison VTR source SHA differs from the live Transition source', { expectedSourceSha: expectedLiveSourceSha, observedSourceSha: vtr.sourceSha })
+  if (typeof expectedLegacyOriginMainSha !== 'string' || !SHA_RE.test(expectedLegacyOriginMainSha)) return incomplete('current origin/main SHA is unavailable for legacy baseline binding')
+  if (legacy.runId === vtr.runId || legacy.generationId === vtr.generationId) return fail('legacy and VTR comparison sides reuse one run or generation identity')
+  const aligned = proof.alignment?.missionInput === 'PASS' && proof.alignment?.fixture === 'PASS' && proof.alignment?.environment === 'PASS'
+  if (proof.comparisonStatus === 'PASS' && !aligned) return fail('comparison reports PASS while one or more alignment dimensions are not PASS', { alignment: proof.alignment ?? null })
+  const raw = proof.rawComparisonEvidence
+  const claimsAcceptance = proof.comparisonStatus === 'PASS' || proof.acceptanceEligible === true
+  const claimsRaw = proof.evidenceClass === 'run-scoped-raw-events' || raw?.status === 'PASS' || raw?.evidenceClass === 'run-scoped-raw-events'
+  if (!claimsRaw) {
+    if (claimsAcceptance) return fail('comparison claims acceptance without run-scoped raw evidence')
+    return incomplete('comparison has no run-scoped raw evidence')
+  }
+  if (proof.evidenceClass !== 'run-scoped-raw-events' || proof.acceptanceStatus !== 'ASSESSED_RAW_RUN_COMPARISON') {
+    if (claimsAcceptance) return fail('comparison claims acceptance with inconsistent evidence classification')
+  }
+  if (raw?.schema !== 'vtr-reach-run-comparison-evidence/v1' || raw.status !== 'PASS' || raw.evidenceClass !== 'run-scoped-raw-events') {
+    if (claimsAcceptance) return fail('acceptance-eligible comparison lacks a PASS run-scoped raw-evidence bundle')
+    return incomplete('raw comparison capture is incomplete', { rawStatus: raw?.status ?? null })
+  }
+  if (proof.evidenceClass !== 'run-scoped-raw-events') return fail('raw comparison bundle is PASS but top-level evidenceClass denies or mislabels it')
+  try {
+    if (typeof legacy.recordedOriginMainSha !== 'string' || !SHA_RE.test(legacy.recordedOriginMainSha)) {
+      throw new Error('legacy baseline does not record a full origin/main source SHA')
+    }
+    if (legacy.recordedOriginMainSha.toLowerCase() !== legacy.sourceSha.toLowerCase() ||
+        legacy.recordedOriginMainSha.toLowerCase() !== expectedLegacyOriginMainSha.toLowerCase()) {
+      throw new Error('legacy source SHA differs from the current origin/main baseline SHA')
+    }
+    const legacyExpected = { sourceSha: legacy.sourceSha, buildHash: legacy.buildHash, runId: legacy.runId, generationId: legacy.generationId }
+    const vtrExpected = { sourceSha: vtr.sourceSha, buildHash: vtr.buildHash, runId: vtr.runId, generationId: vtr.generationId,
+      transitionId: proof.metrics?.reachBoundary?.vtr?.transitionId, contractHash: proof.metrics?.reachBoundary?.vtr?.contractHash }
+    for (const [key, expected] of Object.entries(legacyExpected)) if (raw.legacy?.identity?.[key] !== expected) throw new Error(`legacy raw identity ${key} does not match lineage`)
+    for (const [key, expected] of Object.entries(vtrExpected)) if (typeof expected !== 'string' || raw.vtr?.identity?.[key] !== expected) throw new Error(`VTR raw identity ${key} does not match lineage`)
+    if (raw.legacy.status !== 'PASS' || raw.vtr.status !== 'PASS' || raw.legacy.events?.status !== 'PASS' || raw.vtr.events?.status !== 'PASS') {
+      throw new Error('raw evidence side or event binding is not PASS')
+    }
+    const legacyRaw = inspectRawLegacySide(raw.legacy, legacyExpected)
+    const vtrRaw = inspectRawVtrSide(raw.vtr, vtrExpected)
+    inspectReportedAlignment(legacyRaw, vtrRaw, proof, claimsAcceptance)
+    if (!sameCanonicalMission(raw.legacy.mission, legacyRaw.mission) || !sameCanonicalMission(raw.vtr.mission, vtrRaw.mission)) {
+      throw new Error('serialized comparison Mission differs from the actual run artifacts')
+    }
+    const rawMissionsEqual = sameCanonicalMission(legacyRaw.mission, vtrRaw.mission)
+    const reportedMissionsEqual = sameCanonicalMission(proof.fixtureAlignment?.legacyMissionInput, proof.fixtureAlignment?.vtrMission) &&
+      sameCanonicalMission(legacyRaw.mission, proof.fixtureAlignment?.legacyMissionInput)
+    if (!rawMissionsEqual || !reportedMissionsEqual || proof.fixtureAlignment?.sameMissionInput !== true) {
+      if (proof.alignment?.missionInput === 'PASS' || claimsAcceptance) throw new Error('comparison claims same Mission although the raw canonical kind/item/count artifacts differ')
+      return incomplete('the raw legacy and VTR Mission artifacts differ; this comparison is not same-Mission evidence')
+    }
+    if (raw.legacy.events?.eventIds?.firstDecision !== legacyRaw.summary.events?.firstDecision?.decisionId ||
+        raw.legacy.events?.eventIds?.nextDecision !== legacyRaw.summary.events?.nextDecisionInRange?.decisionId ||
+        raw.vtr.events?.transitionId !== vtrExpected.transitionId || raw.vtr.events?.outcome !== 'SUCCESS') {
+      throw new Error('raw event summary disagrees with independently parsed run artifacts')
+    }
+    const metricPairs = [
+      [proof.metrics?.reachBoundary?.legacy?.movementOperationsToInRangeEvidence, legacyRaw.measured.movementOperationsToInRange, 'legacy movement operations'],
+      [proof.metrics?.reachBoundary?.legacy?.moveActionsToInRangeEvidence, legacyRaw.measured.moveActionsToInRange, 'legacy MOVE actions'],
+      [proof.metrics?.reachBoundary?.legacy?.policyDecisionFramesToInRangeEvidence, legacyRaw.measured.decisionFramesToInRange, 'legacy Jev decision frames'],
+      [proof.metrics?.reachBoundary?.legacy?.policyQuestionCallsToInRangeEvidence, legacyRaw.measured.questionCallsToInRange, 'legacy typed question calls'],
+      [proof.metrics?.policyAndModels?.legacy?.jevProviderModelCalls, legacyRaw.measured.jevProviderModelCalls, 'legacy Jev provider calls'],
+      [proof.metrics?.policyAndModels?.legacy?.system2LlmCalls, legacyRaw.measured.system2ModelCalls, 'legacy System2 calls'],
+      [proof.metrics?.policyAndModels?.legacy?.networkModelCalls, legacyRaw.measured.networkModelCalls, 'legacy network model calls'],
+      [proof.metrics?.reachBoundary?.vtr?.verifiedTransitionCompletionCount, vtrRaw.measured.verifiedTransitionCompletionCount, 'VTR verified Transition completion'],
+      [proof.metrics?.reachBoundary?.vtr?.mechanicalStepsPerTransition, vtrRaw.measured.mechanicalStepsPerTransition, 'VTR mechanical steps per Transition'],
+      [proof.metrics?.reachBoundary?.vtr?.typedTerminalOutcome, vtrRaw.measured.typedTerminalOutcome, 'VTR typed terminal outcome'],
+      [proof.metrics?.policyAndModels?.vtr?.legacyJevCallsPerTransition, vtrRaw.measured.legacyJevCallsPerTransition, 'VTR Jev policy calls'],
+      [proof.metrics?.policyAndModels?.vtr?.system2CallsPerTransition, vtrRaw.measured.system2CallsPerTransition, 'VTR System2 calls'],
+      [proof.metrics?.policyAndModels?.vtr?.deprecatedModelCallsPerMechanicalStep, vtrRaw.measured.modelCallsPerMechanicalStep, 'VTR model calls per mechanical step'],
+      [proof.metrics?.policyAndModels?.vtr?.actualNetworkCalls, vtrRaw.configuration.networkModelCalls, 'VTR configured network model calls'],
+      [proof.metrics?.policyAndModels?.vtr?.jevProvider, vtrRaw.configuration.effectiveJevProvider, 'VTR effective Jev provider'],
+      [proof.metrics?.policyAndModels?.vtr?.jevModel, vtrRaw.configuration.effectiveJevModel, 'VTR effective Jev model'],
+      [proof.metrics?.policyAndModels?.vtr?.jevPolicy, vtrRaw.configuration.BUDDY_POLICY, 'VTR configured Jev policy'],
+      [proof.metrics?.policyAndModels?.vtr?.system2Provider, vtrRaw.configuration.effectiveSystem2Provider, 'VTR effective System2 provider'],
+      [proof.metrics?.policyAndModels?.vtr?.system2Model, vtrRaw.configuration.effectiveSystem2Model, 'VTR effective System2 model'],
+      [proof.metrics?.policyAndModels?.vtr?.system2Mode, vtrRaw.configuration.BUDDY_SYSTEM2, 'VTR configured System2 mode'],
+      [proof.metrics?.authority?.vtr?.duplicateAuthority, vtrRaw.measured.duplicateAuthority, 'VTR duplicate-authority metric'],
+      [proof.metrics?.authority?.vtr?.duplicateAuthorityConflicts, vtrRaw.measured.duplicateAuthorityConflicts, 'VTR authority conflict count'],
+      [proof.metrics?.authority?.vtr?.concurrentLegacyActuations, vtrRaw.measured.concurrentLegacyActuations, 'VTR legacy actuation count'],
+    ]
+    for (const [reported, measured, label] of metricPairs) {
+      if (reported !== measured) throw new Error(`${label} report differs from recomputed raw event evidence`)
+    }
+    const policy = proof.metrics?.policyAndModels?.vtr ?? {}
+    for (const key of ['decisionFrameInvocationsPerTransition', 'jevProviderEvaluateAttemptsIncludingRetriesPerTransition', 'jevProviderEvaluateAttemptsPerMechanicalStep']) {
+      if (policy[key] !== null && policy[key] !== undefined && policy[key] !== 0) throw new Error(`no-LLM VTR raw journals contradict reported ${key}`)
+    }
+    if (policy.modelMetricsStatus === 'PASS' &&
+        (policy.decisionFrameInvocationsPerTransition !== 0 || policy.jevProviderEvaluateAttemptsIncludingRetriesPerTransition !== 0)) {
+      throw new Error('VTR model metric PASS is not supported by the zero-activity provider capture')
+    }
+  } catch (error) {
+    return fail(error.message)
+  }
+  if (proof.acceptanceEligible !== true || proof.acceptanceStatus !== 'ASSESSED_RAW_RUN_COMPARISON' || proof.evidenceClass !== 'run-scoped-raw-events') {
+    return incomplete('comparison raw capture is valid but it is not marked acceptance-eligible')
+  }
+  if (proof.comparisonStatus !== 'PASS' || !aligned) return incomplete('comparison Mission, fixture, or environment is not fully aligned', { comparisonStatus: proof.comparisonStatus ?? null, alignment: proof.alignment ?? null })
+  if (proof.noNetworkProfile?.status !== 'PASS') return fail('acceptance-eligible comparison lacks a PASS no-network profile', { status: proof.noNetworkProfile?.status ?? null })
+  return { status: 'PASS', reason: 'source-bound raw comparison evidence independently validates both aligned run artifacts' }
+}
+
+/** Evidence gate for source-emitted mechanical SUCCESS boundaries. */
+export function inspectOutcomeBoundaryEvidence({
+  boundary, outcome, verifyRows, transitionId, contractHash, expectedIdentity, terminalRow, events, lastMechanicalRow,
+}) {
+  if (boundary === 'verified-terminal') return { status: 'PASS', reason: 'verified-terminal boundary; detailed VERIFY checks still apply' }
+  if (boundary !== 'mechanical-step-outcome') return { status: 'FAIL', reason: `unsupported SUCCESS boundary ${String(boundary)}` }
+  if (!Array.isArray(verifyRows) || verifyRows.length === 0) return { status: 'INCOMPLETE', reason: 'mechanical-step SUCCESS has no independent structured VERIFY evidence' }
+  if (verifyRows.length !== 1) return { status: 'FAIL', reason: 'mechanical-step SUCCESS has ambiguous duplicate structured VERIFY evidence', count: verifyRows.length }
+  const verify = verifyRows[0]
+  const detail = verify?.detail?.verification ?? verify?.detail ?? {}
+  const identity = detail.worldIdentity ?? detail.identity ?? detail
+  const evidenceIds = Array.isArray(detail.evidenceIds) ? detail.evidenceIds : [detail.evidenceId].filter((value) => typeof value === 'string')
+  const truth = detail.truth ?? detail.result
+  const problems = []
+  const missing = []
+  const expected = {
+    transitionId,
+    contractHash,
+    desiredPredicateIdentity: outcome?.desiredPredicateIdentity,
+    runId: expectedIdentity?.runId,
+    generationId: expectedIdentity?.generationId,
+    sourceSha: expectedIdentity?.sourceSha,
+  }
+  for (const [key, wanted] of Object.entries(expected)) {
+    const observed = detail[key] ?? identity[key]
+    if (typeof wanted !== 'string' || wanted.length === 0 || observed === undefined || observed === null || observed === '') missing.push(key)
+    else if (observed !== wanted) problems.push({ key, expected: wanted, observed })
+  }
+  const observedWorldKey = detail.worldKey ?? identity.worldKey ?? identity.worldIdentity?.worldKey
+  const expectedWorldKey = expectedIdentity?.worldKey
+  if (observedWorldKey === undefined || observedWorldKey === null) missing.push('worldKey')
+  else if (observedWorldKey !== expectedWorldKey) problems.push({ key: 'worldKey', expected: expectedWorldKey, observed: observedWorldKey })
+  const observedWorldEpoch = detail.worldEpoch ?? identity.worldEpoch ?? identity.worldIdentity?.worldEpoch
+  if (observedWorldEpoch === undefined || observedWorldEpoch === null) missing.push('worldEpoch')
+  else if (observedWorldEpoch !== expectedIdentity?.worldEpoch) problems.push({ key: 'worldEpoch', expected: expectedIdentity?.worldEpoch, observed: observedWorldEpoch })
+  const observedDimension = dimCanonical(detail.dimension ?? identity.dimension ?? identity.worldIdentity?.dimension)
+  const expectedDimension = dimCanonical(expectedIdentity?.dimension)
+  if (observedDimension === null) missing.push('dimension')
+  else if (observedDimension !== expectedDimension) problems.push({ key: 'dimension', expected: expectedDimension, observed: observedDimension })
+  if (truth === undefined || truth === null) missing.push('truth')
+  else if (truth !== true && truth !== 'TRUE') problems.push({ key: 'truth', expected: 'TRUE', observed: truth })
+  if (detail.identityMatches !== true) {
+    if (detail.identityMatches === undefined) missing.push('identityMatches')
+    else problems.push({ key: 'identityMatches', expected: true, observed: detail.identityMatches })
+  }
+  if (detail.predicatesVerified !== true) {
+    if (detail.predicatesVerified === undefined) missing.push('predicatesVerified')
+    else problems.push({ key: 'predicatesVerified', expected: true, observed: detail.predicatesVerified })
+  }
+  if (!Array.isArray(outcome?.evidenceIds) || outcome.evidenceIds.length === 0) missing.push('terminal evidenceIds')
+  else if (!evidenceIds.length) missing.push('VERIFY evidenceIds')
+  else if (!outcome.evidenceIds.some((id) => evidenceIds.includes(id))) problems.push({ key: 'evidenceIds', expected: outcome.evidenceIds, observed: evidenceIds })
+  const verifyAt = eventTimestamp(verify)
+  const terminalAt = eventTimestamp(terminalRow)
+  const observedAtMs = Number(detail.observedAtMs ?? detail.verifiedAtMs)
+  const verifiedAtMs = Number(detail.verifiedAtMs)
+  if (!Number.isFinite(outcome?.verifiedAtMs)) missing.push('terminal verifiedAtMs')
+  if (!Number.isFinite(observedAtMs) || !Number.isFinite(verifiedAtMs)) missing.push('VERIFY timestamp')
+  else if (observedAtMs !== verifiedAtMs || verifiedAtMs !== outcome.verifiedAtMs) problems.push({ key: 'verification timestamp', expected: outcome.verifiedAtMs, observedAtMs, verifiedAtMs })
+  if (verifyAt === null || terminalAt === null) missing.push('VERIFY/terminal event timestamp')
+  else if (verifyAt > terminalAt) problems.push({ key: 'event timestamp order', expected: 'VERIFY <= terminal', verifyAt, terminalAt })
+  if (Array.isArray(events) && events.indexOf(verify) >= events.indexOf(terminalRow)) problems.push({ key: 'event journal order', expected: 'VERIFY before terminal outcome' })
+  if (lastMechanicalRow && Array.isArray(events) && events.indexOf(verify) <= events.indexOf(lastMechanicalRow)) problems.push({ key: 'mechanical event order', expected: 'last mechanical outcome < VERIFY' })
+  if (problems.length) return { status: 'FAIL', reason: 'mechanical-step SUCCESS is not backed by a matching deterministic VERIFY', problems, missing }
+  if (missing.length) return { status: 'INCOMPLETE', reason: 'mechanical-step SUCCESS has incomplete VERIFY binding', missing }
+  return { status: 'PASS', reason: 'mechanical-step SUCCESS is backed by an identity-bound TRUE VERIFY before the terminal' }
+}
+
+/** Checks same-owner live provenance without inventing a minimum traversal length. */
+export function inspectLiveSkillOwnership({
+  skillStartRows, selectedSkillCount, actionId, reservations, stepOutcomes, actuations,
+  mechanicalSteps, commitIndex, skillStartIndex, firstReservationIndex, outcomeIndex, events,
+}) {
+  const fail = (reason, details = {}) => ({ status: 'FAIL', reason, ...details })
+  const incomplete = (reason, details = {}) => ({ status: 'INCOMPLETE', reason, ...details })
+  if (!Array.isArray(skillStartRows) || skillStartRows.length === 0) return incomplete('no raw executor SKILL_START event was archived')
+  if (skillStartRows.length !== 1 || selectedSkillCount !== 1) return fail('one VTR-owned Transition must have exactly one VTR-selected SKILL_START', { starts: skillStartRows.length, selected: selectedSkillCount })
+  const start = skillStartRows[0]
+  if (!/\bselectedBy=vtr-transition(?:\s|$)/.test(String(start.message ?? ''))) return fail('SKILL_START was not selected by the VTR Transition controller')
+  const startActionId = start.detail?.actionId
+  if (typeof startActionId !== 'string' || startActionId.length === 0 || typeof actionId !== 'string' || actionId.length === 0) {
+    return incomplete('SKILL_START and mechanical rows do not expose one Executor actionId', { startActionId: startActionId ?? null, actionId: actionId ?? null })
+  }
+  if (startActionId !== actionId) return fail('SKILL_START actionId differs from the Transition mechanical owner', { expectedActionId: actionId, observedActionId: startActionId })
+  if (!Number.isSafeInteger(mechanicalSteps) || mechanicalSteps < 1) return incomplete('live Transition has no measurable mechanical legs', { mechanicalSteps })
+  if (!Array.isArray(reservations) || !Array.isArray(stepOutcomes) || !Array.isArray(actuations)) return incomplete('raw reservation, step outcome, or actuation rows are unavailable')
+  if (reservations.length !== mechanicalSteps || stepOutcomes.length !== mechanicalSteps || actuations.length !== 1) {
+    return fail('live mechanical legs do not all have one reservation, outcome, and unique Transition actuation', {
+      mechanicalSteps, reservations: reservations.length, stepOutcomes: stepOutcomes.length, actuations: actuations.length,
+    })
+  }
+  const owners = [...reservations, ...stepOutcomes, ...actuations].map((row) => row?.detail?.actionId)
+  if (owners.some((owner) => owner !== actionId)) return fail('a live reservation, outcome, or actuation has a different action owner', { expectedActionId: actionId, observedActionIds: [...new Set(owners)] })
+  if (![commitIndex, skillStartIndex, firstReservationIndex, outcomeIndex].every(Number.isInteger)) return incomplete('live event indices are unavailable for Transition/Skill/leg ordering')
+  if (!(commitIndex < skillStartIndex && skillStartIndex < firstReservationIndex && skillStartIndex < outcomeIndex)) {
+    return fail('SKILL_START must follow the Transition commit and precede mechanical legs and terminal outcome', { commitIndex, skillStartIndex, firstReservationIndex, outcomeIndex })
+  }
+  if (Array.isArray(events) && (events.indexOf(start) !== skillStartIndex || events.indexOf(start) >= outcomeIndex)) return fail('SKILL_START event does not occupy the expected unique journal position')
+  return { status: 'PASS', actionId, mechanicalSteps, proof: 'all observed live legs share one VTR-selected Skill/action owner' }
 }
 
 function logTimestamp(line) {
@@ -1044,7 +1923,30 @@ async function validate(archive, repo) {
     }
 
     let verifyHostCheck = null
-    if (outcome?.kind === 'SUCCESS' && outcomeEvent?.boundary === 'verified-terminal' && Array.isArray(outcome.evidenceIds) && outcome.evidenceIds.some((id) => /^verify:/.test(id)) && outcome.desiredPredicateIdentity) {
+    const boundaryEvidence = outcome?.kind === 'SUCCESS'
+      ? inspectOutcomeBoundaryEvidence({
+          boundary: outcomeEvent?.boundary,
+          outcome,
+          verifyRows,
+          transitionId: transition.transitionId,
+          contractHash,
+          expectedIdentity: {
+            runId,
+            generationId,
+            sourceSha,
+            worldKey: run.worldKey,
+            worldEpoch: run.worldEpoch,
+            dimension: run.dimension,
+          },
+          terminalRow: outcomes[0],
+          events,
+          lastMechanicalRow: mechanicalStepOutcomes.at(-1),
+        })
+      : { status: 'FAIL', reason: 'terminal outcome is not SUCCESS' }
+    if (outcome?.kind === 'SUCCESS' && outcomeEvent?.boundary === 'mechanical-step-outcome' && boundaryEvidence.status !== 'PASS') {
+      if (boundaryEvidence.status === 'INCOMPLETE') incomplete('transition:verified-success', boundaryEvidence.reason, boundaryEvidence)
+      else fail('transition:verified-success', boundaryEvidence.reason, boundaryEvidence)
+    } else if (outcome?.kind === 'SUCCESS' && ['verified-terminal', 'mechanical-step-outcome'].includes(outcomeEvent?.boundary) && Array.isArray(outcome.evidenceIds) && outcome.evidenceIds.some((id) => /^verify:/.test(id)) && outcome.desiredPredicateIdentity) {
       const reportedVerifyMs = Date.parse(transition.outcome?.verifiedAt ?? '')
       if (!Number.isFinite(outcome.verifiedAtMs) || reportedVerifyMs !== outcome.verifiedAtMs) {
         fail('transition:verified-success', 'probe and terminal disagree on the deterministic VERIFY timestamp', { eventVerifiedAtMs: outcome.verifiedAtMs ?? null, probeVerifiedAt: transition.outcome?.verifiedAt ?? null, probeVerifiedAtMs: reportedVerifyMs })
@@ -1183,16 +2085,21 @@ async function validate(archive, repo) {
         .filter((value) => typeof value === 'string' && value.length > 0),
     )]
     const expectedActionId = legAndActuationActionIds.length === 1 ? legAndActuationActionIds[0] : null
-    const skillStartProof = persistentSkillStartProof({
+    const skillStartProof = inspectLiveSkillOwnership({
       skillStartRows,
+      selectedSkillCount: vtrSelectedSkills,
       actionId: expectedActionId,
+      reservations,
+      stepOutcomes: mechanicalStepOutcomes,
+      actuations,
       mechanicalSteps: transitionExpectedMechanicalSteps,
       commitIndex,
       skillStartIndex: skillStartIndices[0],
       firstReservationIndex,
       outcomeIndex,
+      events,
     })
-    if (skillStartProof.status === 'PASS' && vtrSelectedSkills === 1) pass('authority:single-skill-owner', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, selectedBy: 'vtr-transition', actionId: expectedActionId, proof: 'one VTR-selected skill owns at least three mechanical legs under one Transition' })
+    if (skillStartProof.status === 'PASS') pass('authority:single-skill-owner', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, selectedBy: 'vtr-transition', actionId: expectedActionId, proof: skillStartProof.proof })
     else if (skillStartProof.status === 'INCOMPLETE') incomplete('authority:single-skill-owner', 'SKILL_START identity/order is not fully bound to the persistent per-leg action', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, firstReservationIndex, commitIndex, outcomeIndex, actionIds: legAndActuationActionIds, proof: skillStartProof })
     else fail('authority:single-skill-owner', skillStartProof.reason ?? 'persistent Reach proof does not establish one VTR-selected action across multiple mechanical legs', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, firstReservationIndex, commitIndex, outcomeIndex, actionIds: legAndActuationActionIds, proof: skillStartProof })
     const legacyActuationSource = '(?:selectedBy=(?:jev|legacy|option|goalqueue)|LEGACY_ACTUATION|legacyActuation=true|authority=(?:legacy|option|goalqueue)|(?:GOAL_QUEUE|OPTION)_ACTUATION)'
@@ -1358,19 +2265,19 @@ async function validate(archive, repo) {
           else if (proof.sourceSha.toLowerCase() !== expectedLiveSourceSha.toLowerCase()) fail(`milestone:${path}`, 'no-double-authority proof source SHA differs from the live Transition source', { expectedSourceSha: expectedLiveSourceSha, observedSourceSha: proof.sourceSha })
           else if (proof.result === 'PASS' && proof.legacyActuationCount === 0 && proof.vtrActuationCount > 0) pass(`milestone:${path}`, { sourceSha: proof.sourceSha, vtrActuationCount: proof.vtrActuationCount })
           else fail(`milestone:${path}`, 'no-double-authority proof is malformed or failed', { result: proof.result ?? null })
-        } else if (proof.schema === 'vtr-reach-fixture-comparison/v2') {
-          const legacySha = proof.lineage?.legacy?.sourceSha
-          const vtrSha = proof.lineage?.vtr?.sourceSha
-          if (typeof vtrSha !== 'string' || !SHA_RE.test(vtrSha)) incomplete(`milestone:${path}`, 'comparison artifact does not bind a full VTR source SHA')
-          else if (typeof expectedLiveSourceSha !== 'string' || !SHA_RE.test(expectedLiveSourceSha)) incomplete(`milestone:${path}`, 'live Transition source SHA is unavailable for binding the comparison artifact')
-          else if (vtrSha.toLowerCase() !== expectedLiveSourceSha.toLowerCase()) fail(`milestone:${path}`, 'comparison artifact VTR source SHA differs from the live Transition source', { expectedSourceSha: expectedLiveSourceSha, observedSourceSha: vtrSha })
-          else if (typeof legacySha !== 'string' || !SHA_RE.test(legacySha)) incomplete(`milestone:${path}`, 'comparison artifact does not bind a full baseline source SHA')
-          else if (proof.comparisonStatus === 'PASS' && (proof.alignment?.missionInput !== 'PASS' || proof.alignment?.fixture !== 'PASS' || proof.alignment?.environment !== 'PASS')) fail(`milestone:${path}`, 'comparison reports PASS while one or more structured alignment dimensions are not PASS', { alignment: proof.alignment ?? null })
-          else if (proof.comparisonStatus === 'NOT_COMPARABLE') incomplete(`milestone:${path}`, 'comparison reports mission or fixture mismatch', { comparisonStatus: proof.comparisonStatus, alignment: proof.alignment ?? null })
-          else if (proof.comparisonStatus !== 'PASS' || proof.alignment?.missionInput !== 'PASS' || proof.alignment?.fixture !== 'PASS' || proof.alignment?.environment !== 'PASS') incomplete(`milestone:${path}`, 'comparison does not establish exact structured Mission, fixture, and environment alignment', { comparisonStatus: proof.comparisonStatus ?? null, alignment: proof.alignment ?? null })
-          else if (proof.evidenceClass !== 'summary-only' || proof.acceptanceEligible !== false || proof.acceptanceStatus !== 'NOT_ASSESSED_SUMMARY_ONLY') fail(`milestone:${path}`, 'comparator artifact misrepresents its summary-only input as raw/acceptance evidence', { evidenceClass: proof.evidenceClass ?? null, acceptanceEligible: proof.acceptanceEligible ?? null, acceptanceStatus: proof.acceptanceStatus ?? null })
-          else incomplete(`milestone:${path}`, 'comparator schema reports structured alignment only; it does not archive raw comparison events and cannot qualify as migration acceptance', { comparisonStatus: proof.comparisonStatus, alignment: proof.alignment, legacySourceSha: legacySha, vtrSourceSha: vtrSha })
-        } else incomplete(`milestone:${path}`, 'comparison artifact does not use vtr-reach-fixture-comparison/v2; old wrapper schemas are not acceptance evidence', { schema: proof.schema ?? null })
+        } else {
+          let expectedLegacyOriginMainSha = null
+          if (repo !== null) {
+            try {
+              const observed = gitOutput(repo, ['rev-parse', '--verify', 'origin/main'])
+              if (SHA_RE.test(observed)) expectedLegacyOriginMainSha = observed
+            } catch {}
+          }
+          const comparisonCheck = inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha)
+          if (comparisonCheck.status === 'PASS') pass(`milestone:${path}`, { reason: comparisonCheck.reason })
+          else if (comparisonCheck.status === 'FAIL') fail(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
+          else incomplete(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
+        }
       } catch (error) { fail(`milestone:${path}`, error.message) }
     }
   }

@@ -10,14 +10,28 @@
 // Supported VTR input:
 //   - vtr-reach-live-probe/v1
 //
-// This tool only reads the two JSON inputs and writes a JSON report to stdout.
-// PASS means structured Mission + fixture + environment alignment only; it is
-// not migration acceptance because these inputs are summaries, not raw evidence.
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+// This tool only reads its inputs/archive evidence and writes a JSON report to
+// stdout. Summary-only reports remain INCOMPLETE; PASS requires aligned runs
+// and an integrity-bound archive of the relevant raw events from both paths.
+import { createHash } from 'node:crypto'
+import { existsSync, lstatSync, readFileSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { execFileSync } from 'node:child_process'
+import { inspectReachComparisonProof } from './validate-vtr-reach-evidence.mjs'
 
 const SHA_RE = /^[0-9a-f]{40}$/i
+
+function resolveOriginMainSha() {
+  try {
+    const sha = execFileSync('git', ['rev-parse', '--verify', 'origin/main'], { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return SHA_RE.test(sha) ? sha.toLowerCase() : null
+  } catch {
+    return null
+  }
+}
+
+const CURRENT_ORIGIN_MAIN_SHA = resolveOriginMainSha()
 
 function usage() {
   console.error('usage: bun tools/compare-vtr-reach.mjs <legacy-artifact.json> <vtr-probe.json>')
@@ -36,7 +50,7 @@ function readJson(path, label) {
     throw new Error(`${label}: cannot read ${path}: ${error.message}`)
   }
   try {
-    return { value: JSON.parse(text), sourceText: text }
+    return { value: JSON.parse(text), sourceText: text, sourceBytes: Buffer.from(text, 'utf8') }
   } catch (error) {
     throw new Error(`${label}: invalid JSON in ${path}: ${error.message}`)
   }
@@ -220,29 +234,75 @@ function readOptionalJson(path, label) {
   return readJson(path, label).value
 }
 
-function findArchiveRoot(inputPath, requiredRelativePath) {
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function archiveAncestors(inputPath) {
+  const roots = []
   let current = dirname(resolve(inputPath))
   while (true) {
-    if (existsSync(join(current, requiredRelativePath))) return current
+    roots.push(current)
     const parent = dirname(current)
-    if (parent === current) return null
+    if (parent === current) return roots
     current = parent
   }
 }
 
-function legacyFixtureFromArchive(archiveRoot, expected) {
-  const path = join(archiveRoot, 'runner', 'reach-slice-evidence.json')
-  const evidence = readOptionalJson(path, 'legacy Reach slice evidence')
-  if (evidence === null) return { evidence: null, path: null, fixture: null }
-  for (const [key, wanted] of Object.entries(expected)) {
-    if (evidence[key] !== wanted) {
-      throw new Error(`legacy Reach slice evidence ${key}=${String(evidence[key])} does not match summary ${String(wanted)}`)
+function legacyEvidenceMatches(evidence, expected) {
+  return evidence !== null && Object.entries(expected).every(([key, wanted]) => evidence[key] === wanted)
+}
+
+function findLegacyArchive(inputPath, expected) {
+  const mismatches = []
+  for (const root of archiveAncestors(inputPath)) {
+    const evidencePath = join(root, 'runner', 'reach-slice-evidence.json')
+    if (!existsSync(evidencePath)) continue
+    const evidence = readOptionalJson(evidencePath, 'legacy Reach slice evidence')
+    if (legacyEvidenceMatches(evidence, expected)) return { root, evidence }
+    mismatches.push({ root, observed: Object.fromEntries(Object.keys(expected).map((key) => [key, evidence?.[key] ?? null])) })
+  }
+  if (mismatches.length) {
+    throw new Error(`no legacy archive ancestor has run-bound reach-slice-evidence.json matching ${JSON.stringify(expected)}; candidates=${JSON.stringify(mismatches)}`)
+  }
+  return null
+}
+
+function findVtrArchive(inputPath, raw) {
+  const expected = raw?.record === 'vtr-reach-live-probe'
+    ? { runId: raw.runId, generationId: raw.generationId, sourceSha: raw.sourceSha }
+    : raw?.schema === 'vtr-reach-live-probe/v1'
+      ? { runId: raw.run?.runId, generationId: raw.run?.generationId, sourceSha: raw.source?.commit }
+      : null
+  if (expected === null || Object.values(expected).some((value) => typeof value !== 'string' || value.length === 0)) return null
+  for (const root of archiveAncestors(inputPath)) {
+    const probeRelativePath = relative(root, resolve(inputPath))
+    if (probeRelativePath === '..' || probeRelativePath.startsWith(`..${sep}`)) continue
+    const probePath = join(root, probeRelativePath)
+    if (!existsSync(join(root, 'runner', 'buddy.log')) || !existsSync(probePath)) continue
+    const probe = readOptionalJson(probePath, 'VTR run-scoped probe')
+    const observed = probe?.record === 'vtr-reach-live-probe'
+      ? { runId: probe.runId, generationId: probe.generationId, sourceSha: probe.sourceSha }
+      : probe?.schema === 'vtr-reach-live-probe/v1'
+        ? { runId: probe.run?.runId, generationId: probe.run?.generationId, sourceSha: probe.source?.commit }
+        : null
+    if (observed && Object.keys(expected).every((key) => observed[key] === expected[key])) {
+      return { root, probePath: probeRelativePath.split(sep).join('/') }
     }
   }
+  return null
+}
 
-  const fixtureCommandsPath = join(archiveRoot, 'server', 'fixture-commands.jsonl')
+function legacyFixtureFromArchive(archiveRoot, expected, evidence) {
+  if (evidence === null) return { evidence: null, path: null, fixture: null }
+  if (!legacyEvidenceMatches(evidence, expected)) throw new Error('legacy archive evidence identity does not match its baseline run')
+  const fixtureCommandsPath = [
+    join(archiveRoot, 'server', 'fixture-commands.jsonl'),
+    join(archiveRoot, 'runner', 'fixture-commands.jsonl'),
+    join(archiveRoot, 'server', 'console-commands.jsonl'),
+  ].find(existsSync) ?? null
   let flatSolidGround = null
-  if (existsSync(fixtureCommandsPath)) {
+  if (fixtureCommandsPath !== null) {
     const rows = readFileSync(fixtureCommandsPath, 'utf8').split(/\r?\n/).filter((line) => line.trim() !== '').map((line, index) => {
       try { return JSON.parse(line) } catch (error) { throw new Error(`${fixtureCommandsPath}:${index + 1}: invalid JSONL (${error.message})`) }
     })
@@ -272,10 +332,224 @@ function legacyFixtureFromArchive(archiveRoot, expected) {
 
   return {
     evidence,
-    path: existsSync(path) ? 'runner/reach-slice-evidence.json' : null,
+    path: 'runner/reach-slice-evidence.json',
     fixture: evidence.fixture && flatSolidGround !== null
       ? { ...evidence.fixture, flatSolidGround }
       : evidence.fixture ?? null,
+  }
+}
+
+const RAW_FILE_LIMIT_BYTES = 5 * 1024 * 1024
+
+function captureRawFile(root, relativePath) {
+  const path = join(root, relativePath)
+  if (!existsSync(path)) return { missing: relativePath }
+  let stat
+  try { stat = lstatSync(path) } catch (error) { return { invalid: { path: relativePath, reason: error.message } } }
+  if (!stat.isFile() || stat.isSymbolicLink()) return { invalid: { path: relativePath, reason: 'source is not a regular non-symlink file' } }
+  if (stat.size > RAW_FILE_LIMIT_BYTES) return { invalid: { path: relativePath, reason: `source exceeds ${RAW_FILE_LIMIT_BYTES} byte limit`, sizeBytes: stat.size } }
+  const bytes = readFileSync(path)
+  return { file: { path: relativePath, sizeBytes: bytes.length, sha256: sha256(bytes), contentBase64: bytes.toString('base64') } }
+}
+
+function captureRawSide(root, identity, requirements) {
+  const files = []
+  const missing = []
+  const invalid = []
+  for (const requirement of requirements) {
+    const alternatives = Array.isArray(requirement) ? requirement : [requirement]
+    let found = null
+    for (const relativePath of alternatives) {
+      const result = captureRawFile(root, relativePath)
+      if (result.file) { found = result.file; break }
+      if (result.invalid) invalid.push(result.invalid)
+    }
+    if (found) files.push(found)
+    else if (alternatives.every((path) => !existsSync(join(root, path)))) missing.push(alternatives)
+  }
+  return { identity, files, missing, invalid, status: missing.length === 0 && invalid.length === 0 ? 'PASS' : 'INCOMPLETE' }
+}
+
+function capturedText(side, path) {
+  const file = side.files.find((entry) => entry.path === path)
+  return file === undefined ? null : Buffer.from(file.contentBase64, 'base64').toString('utf8')
+}
+
+function rawJsonl(textValue, pathLabel) {
+  return textValue.split(/\r?\n/).filter((line) => line.trim() !== '').map((line, index) => {
+    try { return JSON.parse(line) } catch (error) { throw new Error(`${pathLabel}:${index + 1}: invalid raw JSONL (${error.message})`) }
+  })
+}
+
+function bindLegacyRawEvents(side, evidence, expected) {
+  const summaryText = capturedText(side, 'runner/reach-slice-evidence.json')
+  const decisionPath = side.files.find((file) => file.path.endsWith('/decisions.jsonl'))?.path
+  const runPath = side.files.find((file) => file.path.endsWith('/run.jsonl'))?.path
+  const hostPath = side.files.find((file) => file.path.endsWith('/buddy.log'))?.path
+  const missionPath = 'runner/human-task-input.jsonl'
+  const witnessPath = 'runner/block-read-run2.jsonl'
+  if (!summaryText || !decisionPath || !runPath || !hostPath || !capturedText(side, missionPath) || !capturedText(side, witnessPath)) {
+    return { status: 'INCOMPLETE', reason: 'legacy source archive is missing a run, decision, movement, Mission-input, or witness-observation file' }
+  }
+  let rawSummary
+  try { rawSummary = JSON.parse(summaryText) } catch (error) { return { status: 'FAIL', reason: `legacy run evidence JSON is invalid: ${error.message}` } }
+  if (!legacyEvidenceMatches(rawSummary, expected)) return { status: 'FAIL', reason: 'legacy run evidence identity differs from the compared source/run/generation/build' }
+  const first = rawSummary.events?.firstDecision
+  const next = rawSummary.events?.nextDecisionInRange
+  const moveEnd = rawSummary.events?.moveActionEnd
+  if (![first?.decisionId, next?.decisionId, moveEnd?.actionId].every((value) => typeof value === 'string' && value.length > 0)) {
+    return { status: 'INCOMPLETE', reason: 'legacy run evidence lacks first/next decisions or MOVE action identity' }
+  }
+  let decisions
+  let humanTask
+  let witnessRows
+  try {
+    decisions = rawJsonl(capturedText(side, decisionPath), decisionPath)
+    humanTask = rawJsonl(capturedText(side, missionPath), missionPath)
+    witnessRows = rawJsonl(capturedText(side, witnessPath), witnessPath)
+  } catch (error) { return { status: 'FAIL', reason: error.message } }
+  const firstMatches = decisions.filter((row) => row.decisionId === first.decisionId)
+  const nextMatches = decisions.filter((row) => row.decisionId === next.decisionId)
+  if (firstMatches.length !== 1 || nextMatches.length !== 1) return { status: 'INCOMPLETE', reason: 'raw decision journal does not contain exactly one first and next decision' }
+  const identityMatches = [firstMatches[0], nextMatches[0]].every((row) => row.runId === expected.runId && row.generationId === expected.generationId && row.sourceSha === expected.sourceSha)
+  if (!identityMatches) return { status: 'FAIL', reason: 'raw decision journal contains a decision from another run/source/generation' }
+  const firstRow = firstMatches[0]
+  const nextRow = nextMatches[0]
+  const selected = firstRow.chosenAction ?? firstRow.jev?.answers?.action?.value ?? null
+  const moveActionId = moveEnd.actionId
+  if (selected !== moveActionId || !String(selected).startsWith('MOVE:')) return { status: 'FAIL', reason: 'raw first decision does not select the summarized legacy MOVE action' }
+  const nextSelected = nextRow.chosenAction ?? nextRow.jev?.answers?.action?.value ?? null
+  const nextCandidate = nextRow.candidates?.find((candidate) => candidate.id === nextSelected)
+  if (nextCandidate?.inReach !== true || nextCandidate.id !== next.selected) return { status: 'FAIL', reason: 'raw next decision does not establish the summarized inReach candidate' }
+  const hostText = capturedText(side, hostPath)
+  const matchingHostRows = (marker) => hostText.split(/\r?\n/).filter((line) => line.includes(marker) &&
+    line.includes(`actionId=${moveActionId}`) && line.includes(`runId=${expected.runId}`) &&
+    line.includes(`generationId=${expected.generationId}`) && line.includes(`sourceSha=${expected.sourceSha}`))
+  const startLines = matchingHostRows('SKILL_START')
+  const endLines = matchingHostRows('SKILL_END')
+  if (startLines.length !== 1 || endLines.length !== 1) return { status: 'INCOMPLETE', reason: 'raw HOST log does not uniquely bind legacy MOVE start/end to the source run' }
+  const missionEvent = humanTask.find((row) => typeof row.command === 'string' && /^agent\s+/i.test(row.command))
+  const sourcePosition = rawSummary.fixture?.position
+  const witnessRow = witnessRows.find((row) => row.tag === 'target' && row.name === rawSummary.fixture?.block &&
+    ['x', 'y', 'z'].every((key) => row.position?.[key] === sourcePosition?.[key]))
+  if (!missionEvent || !witnessRow) return { status: 'INCOMPLETE', reason: 'raw operator Mission or pre-action witness observation is missing' }
+  return {
+    status: 'PASS',
+    sourcePaths: { summary: 'runner/reach-slice-evidence.json', decisions: decisionPath, host: hostPath, missionInput: missionPath, witnessObservation: witnessPath, runJournal: runPath },
+    eventIds: { firstDecision: first.decisionId, nextDecision: next.decisionId, moveActionId },
+    missionCommand: missionEvent.command,
+    witnessObservation: { at: witnessRow.at, position: witnessRow.position, block: witnessRow.name },
+    movementSteps: moveEnd.movementStepCount,
+  }
+}
+
+function bindVtrRawEvents(side, expected) {
+  const hostText = capturedText(side, 'runner/buddy.log')
+  const noDoubleText = capturedText(side, 'proofs/no-double-authority.json')
+  if (hostText === null || noDoubleText === null) return { status: 'INCOMPLETE', reason: 'VTR raw host log or no-double-authority proof is missing' }
+  let noDouble
+  try { noDouble = JSON.parse(noDoubleText) } catch (error) { return { status: 'FAIL', reason: `VTR no-double-authority JSON is invalid: ${error.message}` } }
+  if (noDouble.result !== 'PASS' || noDouble.runId !== expected.runId || noDouble.sourceSha !== expected.sourceSha ||
+      noDouble.generationId !== expected.generationId || noDouble.legacyActuationCount !== 0 || !(noDouble.vtrActuationCount > 0)) {
+    return { status: 'FAIL', reason: 'VTR no-double-authority proof is not PASS and bound to the exact source/run/generation' }
+  }
+  const markers = ['VTR_TRANSITION_COMMIT', 'VTR_TRANSITION_VERIFY', 'VTR_TRANSITION_OUTCOME']
+  const eventLines = Object.fromEntries(markers.map((marker) => [marker, hostText.split(/\r?\n/).filter((line) =>
+    line.includes(marker) && line.includes(`transitionId=${expected.transitionId}`) && line.includes(`runId=${expected.runId}`) &&
+    line.includes(`generationId=${expected.generationId}`) && line.includes(`sourceSha=${expected.sourceSha}`))]))
+  if (Object.values(eventLines).some((matches) => matches.length !== 1)) return { status: 'INCOMPLETE', reason: 'VTR raw HOST log does not uniquely bind commit/VERIFY/outcome to this Transition' }
+  const verifyLine = eventLines.VTR_TRANSITION_VERIFY[0]
+  const outcomeLine = eventLines.VTR_TRANSITION_OUTCOME[0]
+  if (!verifyLine.includes('truth=TRUE') || !outcomeLine.includes('outcome={"kind":"SUCCESS"') ||
+      !(outcomeLine.includes('boundary=mechanical-step-outcome') || outcomeLine.includes('boundary=verified-terminal'))) {
+    return { status: 'FAIL', reason: 'VTR raw event sequence does not show deterministic TRUE VERIFY before typed SUCCESS' }
+  }
+  const timeOf = (line) => Date.parse(/^\[([^\]]+)\]/.exec(line)?.[1] ?? '')
+  const times = markers.map((marker) => timeOf(eventLines[marker][0]))
+  if (!times.every(Number.isFinite) || !(times[0] <= times[1] && times[1] <= times[2])) return { status: 'FAIL', reason: 'VTR raw commit/VERIFY/outcome timestamps are missing or out of order' }
+  return {
+    status: 'PASS',
+    sourcePaths: { host: 'runner/buddy.log', noDoubleAuthority: 'proofs/no-double-authority.json' },
+    transitionId: expected.transitionId,
+    outcome: 'SUCCESS',
+    eventOrder: { commitAt: new Date(times[0]).toISOString(), verifyAt: new Date(times[1]).toISOString(), outcomeAt: new Date(times[2]).toISOString() },
+    noDoubleAuthority: { legacyActuationCount: noDouble.legacyActuationCount, vtrActuationCount: noDouble.vtrActuationCount },
+  }
+}
+
+const LEGACY_RAW_REQUIREMENTS = [
+  'runner/reach-slice-evidence.json',
+  'runner/runtime/buddy.log',
+  'runner/runtime/logs/jev/decisions.jsonl',
+  'runner/runtime/logs/jev/jev-calls.jsonl',
+  'runner/runtime/logs/jev/run.jsonl',
+  'runner/human-task-input.jsonl',
+  'runner/block-read-run2.jsonl',
+]
+
+const VTR_RAW_REQUIREMENTS = [
+  'runner/buddy.log',
+  ['runner/run.jsonl', 'runner/jev-run.jsonl', 'runner/jev-run-source.jsonl'],
+  'runner/jev-calls.jsonl',
+  'runner/jev-decisions.jsonl',
+  'runner/system2.jsonl',
+  'runner/provider-activity-capture.json',
+  'runner/acceptance.json',
+  'server/fixture-commands.jsonl',
+  'proofs/no-double-authority.json',
+]
+
+function captureRawComparisonEvidence({ legacy, vtr, vtrArchive, vtrInputPath }) {
+  const legacyIdentity = {
+    sourceSha: legacy.sourceSha,
+    buildHash: legacy.buildHash,
+    runId: legacy.runId,
+    generationId: legacy.generationId,
+  }
+  const vtrIdentity = {
+    sourceSha: vtr.sourceSha,
+    buildHash: vtr.buildHash,
+    runId: vtr.runId,
+    generationId: vtr.generationId,
+    transitionId: vtr.transition.transitionId,
+    contractHash: vtr.transition.contractHash,
+  }
+  const legacyArchive = legacy.archiveRoot === null
+    ? null
+    : { root: legacy.archiveRoot, evidence: legacy.archiveEvidence }
+  const legacySide = legacyArchive === null
+    ? { identity: legacyIdentity, files: [], missing: LEGACY_RAW_REQUIREMENTS, invalid: [], status: 'INCOMPLETE' }
+    : captureRawSide(legacyArchive.root, legacyIdentity, LEGACY_RAW_REQUIREMENTS)
+  const probePath = vtrArchive?.probePath ?? relative(dirname(resolve(vtrInputPath)), resolve(vtrInputPath)).split(sep).join('/')
+  let vtrSide
+  if (vtrArchive === null) {
+    vtrSide = { identity: vtrIdentity, files: [], missing: [probePath, ...VTR_RAW_REQUIREMENTS], invalid: [], status: 'INCOMPLETE' }
+  } else {
+    vtrSide = captureRawSide(vtrArchive.root, vtrIdentity, [probePath, ...VTR_RAW_REQUIREMENTS])
+    const probeFile = vtrSide.files.find((file) => file.path === probePath)
+    if (probeFile) probeFile.label = 'probe input'
+  }
+  const legacyEvents = legacyArchive?.evidence === null || legacyArchive === null
+    ? { status: 'INCOMPLETE', reason: 'no run-matched legacy Reach source archive was found' }
+    : bindLegacyRawEvents(legacySide, legacyArchive.evidence, {
+        runId: legacy.runId,
+        generationId: legacy.generationId,
+        sourceSha: legacy.sourceSha,
+        buildHash: legacy.buildHash,
+      })
+  const vtrEvents = vtrArchive === null
+    ? { status: 'INCOMPLETE', reason: 'no run-matched VTR source archive was found' }
+    : bindVtrRawEvents(vtrSide, vtrIdentity)
+  const status = legacySide.status === 'PASS' && vtrSide.status === 'PASS' && legacyEvents.status === 'PASS' && vtrEvents.status === 'PASS'
+    ? 'PASS'
+    : 'INCOMPLETE'
+  return {
+    schema: 'vtr-reach-run-comparison-evidence/v1',
+    status,
+    evidenceClass: status === 'PASS' ? 'run-scoped-raw-events' : 'summary-only-or-incomplete-raw',
+    legacy: { ...legacySide, mission: legacy.missionInput, events: legacyEvents },
+    vtr: { ...vtrSide, mission: { kind: vtr.mission.kind, item: vtr.mission.item, count: vtr.mission.count }, events: vtrEvents },
+    note: 'Raw source bytes are included base64-encoded and SHA-256 bound. This attestation proves what each separate run recorded; it does not turn different Missions/worlds into a controlled same-world experiment.',
   }
 }
 
@@ -295,18 +569,21 @@ function parseLegacy(raw, sourceText, legacyPath) {
     const effectiveJev = record(baseline.effectiveJev, 'legacy.baseline.effectiveJev')
     const effectiveSystem2 = record(baseline.effectiveSystem2, 'legacy.baseline.effectiveSystem2')
     const comparison = record(input.comparison, 'legacy.comparison')
-    const archiveRoot = findArchiveRoot(legacyPath, join('runner', 'reach-slice-evidence.json')) ?? dirname(legacyPath)
-    const archiveFixture = legacyFixtureFromArchive(archiveRoot, {
+    const expectedIdentity = {
       runId: baseline.runId,
       generationId: baseline.generationId,
       sourceSha: baseline.commit,
       buildHash: baseline.buildHash,
-    })
+    }
+    const legacyArchive = findLegacyArchive(legacyPath, expectedIdentity)
+    const archiveFixture = legacyFixtureFromArchive(legacyArchive?.root ?? dirname(legacyPath), expectedIdentity, legacyArchive?.evidence ?? null)
     const fixtureRaw = comparison.fixture ?? archiveFixture.fixture ?? baseline.fixture ?? input.fixture
     return {
       schema: input.schema,
       sourceSha: text(baseline.commit, 'legacy.baseline.commit'),
-      expectedSourceSha: typeof baseline.originMainAtCheckout === 'string' ? baseline.originMainAtCheckout : null,
+      expectedSourceSha: typeof baseline.originMainAtCheckout === 'string'
+        ? baseline.originMainAtCheckout
+        : baseline.commit === CURRENT_ORIGIN_MAIN_SHA ? CURRENT_ORIGIN_MAIN_SHA : null,
       buildHash: text(baseline.buildHash, 'legacy.baseline.buildHash'),
       runId: text(baseline.runId, 'legacy.baseline.runId'),
       generationId: text(baseline.generationId, 'legacy.baseline.generationId'),
@@ -324,7 +601,13 @@ function parseLegacy(raw, sourceText, legacyPath) {
       fixtureDescription: typeof comparison.target === 'string' ? comparison.target : 'not recorded',
       fixture: structuredFixture(fixtureRaw),
       fixtureEvidencePath: archiveFixture.path,
-      missionInput: structuredMission(input.missionInput ?? input.legacyMissionInput ?? baseline.missionInput ?? baseline.mission ?? comparison.missionInput),
+      // The top-level `missionInput` in this historical wrapper describes the
+      // requested comparison target. Prefer the legacy run's own evidence and
+      // never let a target-side duplicate overwrite the observed legacy Mission.
+      missionInput: structuredMission(
+        archiveFixture.evidence?.missionInput ?? baseline.missionInput ?? baseline.actualMissionInput ??
+        input.legacyMissionInput ?? input.actualMissionInput ?? input.mission ?? input.missionInput ?? comparison.missionInput,
+      ),
       sameMissionClaim: comparison.sameMissionInput === true ? true : comparison.sameMissionInput === false ? false : null,
       metrics: {
         movementOperationsToInRange: count(metrics.mechanicalMovementSteps, 'legacy.baseline.metrics.mechanicalMovementSteps'),
@@ -342,7 +625,9 @@ function parseLegacy(raw, sourceText, legacyPath) {
       },
       actualSystem2Calls: count(effectiveSystem2.actualSystem2LlmCalls, 'legacy.baseline.effectiveSystem2.actualSystem2LlmCalls'),
       effectiveJevNetworkCalls: count(effectiveJev.networkCalls, 'legacy.baseline.effectiveJev.networkCalls'),
-      missionDescription: typeof input.comparison.reason === 'string' ? input.comparison.reason : 'mission equivalence not specified',
+      missionDescription: typeof comparison.reason === 'string' ? comparison.reason : 'mission equivalence not specified',
+      archiveRoot: legacyArchive?.root ?? null,
+      archiveEvidence: archiveFixture.evidence,
       raw: { baseline, comparison },
     }
   }
@@ -360,10 +645,15 @@ function parseLegacy(raw, sourceText, legacyPath) {
     const system2Calls = count(metrics.system2LlmCalls, 'legacy.sliceMetrics.system2LlmCalls')
     const jevCalls = count(metrics.jevProviderModelCalls, 'legacy.sliceMetrics.jevProviderModelCalls')
     const run = input.run === undefined || input.run === null ? {} : record(input.run, 'legacy.run')
+    const expectedIdentity = { sourceSha, buildHash: text(input.buildHash, 'legacy.buildHash'), runId,
+      generationId: text(input.generationId, 'legacy.generationId') }
+    const legacyArchive = findLegacyArchive(legacyPath, expectedIdentity)
     return {
       schema: input.schema,
       sourceSha,
-      expectedSourceSha: null,
+      // The raw comparator result can qualify only while the captured source
+      // itself is the exact origin/main commit visible to this comparison run.
+      expectedSourceSha: sourceSha === CURRENT_ORIGIN_MAIN_SHA ? CURRENT_ORIGIN_MAIN_SHA : null,
       buildHash: text(input.buildHash, 'legacy.buildHash'),
       runId,
       generationId: text(input.generationId, 'legacy.generationId'),
@@ -381,9 +671,9 @@ function parseLegacy(raw, sourceText, legacyPath) {
       missionInputComparable: false,
       fixtureClassComparable: fixture.block === 'oak_log',
       fixtureDescription: `${fixture.block} at ${fixture.position?.x},${fixture.position?.y},${fixture.position?.z}; offset=${JSON.stringify(fixture.offset)}`,
-      fixture: structuredFixture(fixture),
-      fixtureEvidencePath: null,
-      missionInput: structuredMission(input.missionInput ?? input.legacyMissionInput ?? input.mission ?? oldPlan.missionInput ?? oldPlan.mission),
+      fixture: structuredFixture(legacyArchive?.evidence?.fixture ?? fixture),
+      fixtureEvidencePath: legacyArchive === null ? null : 'runner/reach-slice-evidence.json',
+      missionInput: structuredMission(legacyArchive?.evidence?.missionInput ?? input.missionInput ?? input.legacyMissionInput ?? input.mission ?? oldPlan.missionInput ?? oldPlan.mission),
       sameMissionClaim: typeof input.sameMissionInput === 'boolean' ? input.sameMissionInput : null,
       metrics: {
         movementOperationsToInRange: count(metrics.mechanicalMovementSteps, 'legacy.sliceMetrics.mechanicalMovementSteps'),
@@ -402,6 +692,8 @@ function parseLegacy(raw, sourceText, legacyPath) {
       actualSystem2Calls: system2Calls,
       effectiveJevNetworkCalls: jevCalls,
       missionDescription: text(oldPlan.goal, 'legacy.legacyPlan.goal'),
+      archiveRoot: legacyArchive?.root ?? null,
+      archiveEvidence: legacyArchive?.evidence ?? null,
       raw: { fixture, first, next, moveEnd },
     }
   }
@@ -877,7 +1169,8 @@ function checkLegacy(legacy) {
 const legacyInput = readJson(legacyPath, 'legacy')
 const vtrInput = readJson(vtrPath, 'VTR')
 const legacy = checkLegacy(parseLegacy(legacyInput.value, legacyInput.sourceText, legacyPath))
-const vtr = parseVtr(adaptArchivedVtrProbe(vtrInput.value, dirname(vtrPath)))
+const vtrArchive = findVtrArchive(vtrPath, vtrInput.value)
+const vtr = parseVtr(adaptArchivedVtrProbe(vtrInput.value, vtrArchive?.root ?? dirname(vtrPath)))
 
 if (legacy.runId === vtr.runId || legacy.generationId === vtr.generationId) {
   throw new Error('legacy and VTR inputs must be distinct runs and generations')
@@ -888,11 +1181,11 @@ if ((legacyWorld !== null && legacyWorld.epoch !== legacy.worldEpoch) || vtrWorl
   throw new Error('worldKey epoch does not match the recorded worldEpoch')
 }
 
-const missionInputMatch = legacy.missionInput !== null
+const missionInputMatch = legacy.sameMissionClaim === false
+  ? false
+  : legacy.missionInput !== null
   ? legacy.missionInput.kind === vtr.mission.kind && legacy.missionInput.item === vtr.mission.item && legacy.missionInput.count === vtr.mission.count
-  : legacy.sameMissionClaim === false
-    ? false
-    : null
+  : null
 const sameTargetResourceKind = legacy.fixture === null ? null : legacy.fixture.block === vtr.fixture.block
 const sameExactCartesianDelta = legacy.fixture === null || legacy.fixture.exactCartesianDelta === null || vtr.fixture.exactCartesianDelta === null
   ? null
@@ -931,6 +1224,9 @@ const environmentMatch = Object.fromEntries(['minecraftVersion', 'gameMode', 'di
     ? 'unknown'
     : legacy[field] === vtr[field],
 ]))
+environmentMatch.seed = legacy.seed === 'not recorded' || legacy.seed === undefined || legacy.seed === null || vtr.seed === 'not recorded'
+  ? 'unknown'
+  : String(legacy.seed) === String(vtr.seed)
 if (vtr.seedAssessment !== null) {
   environmentMatch.seedProvenance = /disagree|mismatch|conflict/i.test(vtr.seedAssessment) ? false : true
 }
@@ -957,24 +1253,28 @@ if (legacy.metrics.networkModelCalls !== 0) {
 const noNetworkProfileStatus = noNetworkProfileIssues.length > 0
   ? 'FAIL'
   : vtr.metrics.modelMetricsStatus === 'UNKNOWN' ? 'UNKNOWN' : 'PASS'
+const rawComparisonEvidence = captureRawComparisonEvidence({ legacy, vtr, vtrArchive, vtrInputPath: vtrPath })
 const comparisonStatus = noNetworkProfileStatus === 'FAIL'
   ? 'INVALID_NO_LLM_PROFILE'
-  : noNetworkProfileStatus === 'UNKNOWN' && alignedStatus === 'PASS'
+  : alignedStatus === 'PASS' && (noNetworkProfileStatus !== 'PASS' || rawComparisonEvidence.status !== 'PASS')
     ? 'INCOMPLETE'
     : alignedStatus
 const output = {
-  schema: 'vtr-reach-fixture-comparison/v2',
+  schema: 'vtr-reach-fixture-comparison/v3',
   comparisonStatus,
   classification: comparisonStatus === 'PASS'
-    ? 'structured Mission/fixture/environment alignment; summary comparison only'
+    ? 'exact Mission/fixture/environment alignment backed by run-scoped raw events from both executions'
     : comparisonStatus === 'INVALID_NO_LLM_PROFILE'
       ? 'invalid no-network measurement profile; provider activity is present or metrics conflict'
     : comparisonStatus === 'NOT_COMPARABLE'
       ? 'inputs contain a known Mission/fixture/environment mismatch'
-      : 'alignment cannot be established from the available structured summary fields',
-  evidenceClass: 'summary-only',
-  acceptanceEligible: false,
-  acceptanceStatus: 'NOT_ASSESSED_SUMMARY_ONLY',
+      : 'alignment or exact run-scoped raw comparison evidence is incomplete',
+  evidenceClass: rawComparisonEvidence.status === 'PASS' ? 'run-scoped-raw-events' : 'summary-only',
+  acceptanceEligible: comparisonStatus === 'PASS' && rawComparisonEvidence.status === 'PASS',
+  acceptanceStatus: comparisonStatus === 'PASS' && rawComparisonEvidence.status === 'PASS'
+    ? 'ASSESSED_RAW_RUN_COMPARISON'
+    : rawComparisonEvidence.status === 'PASS' ? 'RAW_CAPTURED_ALIGNMENT_INCOMPLETE' : 'RAW_EVIDENCE_INCOMPLETE',
+  rawComparisonEvidence,
   alignment,
   noNetworkProfile: {
     status: noNetworkProfileStatus,
@@ -1114,11 +1414,32 @@ const output = {
   limitations: [
     'These artifacts have distinct run identities; the comparator does not replay or align an identical world state, so this is not a same-world A/B experiment.',
     'Fixture coordinates are reported as both exact body-position deltas and block offsets from floor(initial body position); fixture equivalence does not make different top-level Mission inputs comparable.',
-    'A PASS means only that structured Mission/fixture/environment fields align. A summary-only PASS is not a VTR migration acceptance result.',
+    'Mission equivalence is read from the legacy run-scoped artifact before comparison-request fields; an explicit sameMissionInput=false claim always vetoes equality.',
+    'Raw comparison evidence binds the selected logger/journal bytes by SHA-256. Different runs remain different worlds; this is not a same-world A/B replay.',
+    'Summary-only evidence, missing model metrics, missing raw artifacts, or any Mission/fixture/environment mismatch remains INCOMPLETE or NOT_COMPARABLE.',
     'The no-network comparison profile is checked independently from model-metric availability. A missing VTR_TRANSITION_MODEL_METRICS event leaves Decision Frame and provider-attempt counts UNKNOWN.',
     'Legacy MOVE action SUCCESS/verified and the next-frame inReach candidate are not a Reach-specific deterministic terminal. Only the VTR artifact records a Reach Contract SUCCESS with verifier evidence.',
     'The VTR probe establishes the Reach predicate only; its oak_log inventory Mission remains incomplete. Neither artifact proves autonomous long-horizon composition or M2/M3.',
   ],
+}
+
+// The event binder produces a convenient first-pass comparison bundle. Before
+// exposing any acceptance PASS, independently reparse every raw byte through
+// the archive acceptance validator. A self-reported summary/counter is never
+// sufficient to upgrade this report.
+const rawAcceptanceCheck = inspectReachComparisonProof(output, vtr.sourceSha, CURRENT_ORIGIN_MAIN_SHA)
+output.rawAcceptanceValidation = rawAcceptanceCheck
+if (rawAcceptanceCheck.status !== 'PASS') {
+  output.rawComparisonEvidence.status = rawAcceptanceCheck.status
+  output.rawComparisonEvidence.evidenceClass = 'summary-only-or-incomplete-raw'
+  output.rawComparisonEvidence.validation = rawAcceptanceCheck
+  output.evidenceClass = 'summary-only'
+}
+if (output.acceptanceEligible && rawAcceptanceCheck.status !== 'PASS') {
+  output.comparisonStatus = 'INCOMPLETE'
+  output.classification = 'raw event evidence failed the independent acceptance parser'
+  output.acceptanceEligible = false
+  output.acceptanceStatus = 'RAW_EVIDENCE_INCOMPLETE'
 }
 
 console.log(JSON.stringify(output, null, 2))
