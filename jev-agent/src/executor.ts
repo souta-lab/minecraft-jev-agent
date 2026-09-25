@@ -476,8 +476,8 @@ export interface CurrentAction {
   transitionId?: string
   /** Contract reservation hook run immediately before each physical walk leg. */
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
-  /** Record observed effects/risk after a leg, before any terminal verification. */
-  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
+  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean | 'verified-terminal'
   /** Reserve and account for candidate-declared internal dig/place/equip calls. */
   internalEffectCallbacks?: InternalEffectCallbacks
 }
@@ -519,8 +519,8 @@ export interface ExecutionClaimContext {
   transitionId?: string
   /** Reserve the VTR transition's per-leg budget before any physical movement. */
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
-  /** Record observed effects/risk after a leg, before any terminal verification. */
-  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
+  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean | 'verified-terminal'
   /** Optional paired hooks for candidate-declared internal dig/place/equip effects. */
   internalEffectCallbacks?: InternalEffectCallbacks
 }
@@ -3540,12 +3540,32 @@ export class Executor {
       } finally {
         bound.cleanup()
       }
-      if (
-        activeAction?.epoch === epoch &&
-        activeAction.afterMechanicalStep !== undefined &&
-        !activeAction.afterMechanicalStep(mechanicalStep)
-      ) {
+      const mechanicalOutcome =
+        activeAction?.epoch === epoch && activeAction.afterMechanicalStep !== undefined
+          ? activeAction.afterMechanicalStep(mechanicalStep)
+          : true
+      if (mechanicalOutcome === false) {
         throw new ActionCancelled(`VTR rejected observed effects after walk leg ${legs}`)
+      }
+      if (mechanicalOutcome === 'verified-terminal') {
+        if (settled?.status === 'done' && settled.verified) return settled
+        return this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'done',
+          'verified_transition',
+          `VTR verified the Reach Transition predicate after walk leg ${legs}`,
+          null,
+          {
+            verified: true,
+            blockRemoved: false,
+            dropObserved: false,
+            itemsGained: 0,
+            goalItemCount: this.countGoalItem(),
+            progressed: settled?.progressed ?? false,
+          },
+        )
       }
       // A fail-closed envelope refusal is a statement about the COMMITMENT, not a
       // transient leg failure: the commitment cannot perform a step it needs, so

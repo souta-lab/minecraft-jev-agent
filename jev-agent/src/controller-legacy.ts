@@ -438,6 +438,13 @@ interface ReachRunMetadata {
   lastHealth: number
 }
 
+interface ReachTerminalActionCorrelation {
+  readonly transitionId: string
+  readonly intentId: string
+  readonly actionId: string
+  readonly outcomeKind: ReachTerminalOutcome['kind']
+}
+
 interface ActiveReachTransition {
   readonly mission: VtrInventoryMission
   readonly contract: ReachTransitionContract
@@ -2414,6 +2421,8 @@ export class JevController {
     this.reachVtrCells.lastRouteDecision.value = decision
   }
   private reachRunMetadata: ReachRunMetadata | null = null
+  /** Correlates a per-step terminal with the executor result that settles that same lease. */
+  private pendingReachTerminalAction: ReachTerminalActionCorrelation | null = null
   private lastReachActionFailure: string | null = null
   private vtrOwnsReachMoveThisTick = false
 
@@ -4910,7 +4919,7 @@ export class JevController {
     intentId: string,
     identity: ReachIdentity,
     step: { stepId: string; leg: number; effectKind: 'locomotion' },
-  ): boolean {
+  ): boolean | 'verified-terminal' {
     const active = this.reachRuntime.current
     const metadata = this.reachRunMetadata
     if (active === null || metadata === null || active.intent?.intentId !== intentId) return false
@@ -4926,9 +4935,14 @@ export class JevController {
     })
     if (result.status === 'terminal') {
       if (result.outcome.kind === 'SUCCESS') this.logReachVerification(result.outcome, snapshot)
-      this.closeReachTransition(result.outcome, result.state, 'mechanical-step-outcome', result.cancelIntentId)
-      if (result.cancelIntentId !== null) this.executor.cancelCurrent('VTR mechanical step outcome terminal')
-      return false
+      const current = this.executor.current
+      const actionCorrelation =
+        current?.authority === 'vtr-reach' && current.transitionId === active.contract.transitionId
+          ? { intentId, actionId: current.id }
+          : undefined
+      const closed = this.closeReachTransition(result.outcome, result.state, 'mechanical-step-outcome', result.cancelIntentId, actionCorrelation)
+      if (result.cancelIntentId !== null && !closed) this.executor.cancelCurrent('VTR mechanical step outcome terminal')
+      return result.outcome.kind === 'SUCCESS' && closed && actionCorrelation !== undefined ? 'verified-terminal' : false
     }
     if (result.status === 'refused') {
       this.logger.warn('vtr', `VTR_MECHANICAL_OUTCOME_REFUSED transition=${active.contract.transitionId} step=${step.stepId} reason=${result.reason}`, { transitionId: active.contract.transitionId, intentId, stepId: step.stepId, reason: result.reason }, this.tickCounter)
@@ -4952,6 +4966,44 @@ export class JevController {
     transitionId: string,
     intentId: string,
   ): Promise<void> {
+    const terminalAction = this.pendingReachTerminalAction
+    if (
+      terminalAction != null &&
+      terminalAction.transitionId === transitionId &&
+      terminalAction.intentId === intentId &&
+      terminalAction.actionId === result.actionId
+    ) {
+      this.pendingReachTerminalAction = null
+      const verifiedSettlement = terminalAction.outcomeKind === 'SUCCESS' && result.status === 'done' && result.verified
+      this.logger.info(
+        'vtr',
+        `VTR_TERMINAL_ACTION_CORRELATED transition=${transitionId} intent=${intentId} action=${result.actionId} outcome=${terminalAction.outcomeKind} status=${result.status} verified=${result.verified}`,
+        { transitionId, intentId, actionId: result.actionId, outcome: terminalAction.outcomeKind, status: result.status, verified: result.verified, verifiedSettlement },
+        this.tickCounter,
+      )
+      if (terminalAction.outcomeKind === 'SUCCESS' && !verifiedSettlement) {
+        this.logger.warn(
+          'vtr',
+          `VTR_TERMINAL_ACTION_SETTLEMENT_MISMATCH transition=${transitionId} intent=${intentId} action=${result.actionId} expected=done/verified actual=${result.status}/${result.verified}`,
+          { transitionId, intentId, actionId: result.actionId, outcome: terminalAction.outcomeKind, status: result.status, verified: result.verified },
+          this.tickCounter,
+        )
+      }
+      if (this.modelRecoveryReachDrainTransitionId === transitionId) {
+        void this.advanceModelRecoveryReachDrain(transitionId, 'action-completed')
+      } else {
+        const deferred = this.deferredTrigger
+        this.deferredTrigger = null
+        const handoff: TriggerEvent = {
+          trigger: 'action_completed',
+          detail: { actionId: result.actionId, transitionId, intentId, typedOutcome: terminalAction.outcomeKind, schedulerHandoff: true },
+          ts: Date.now(),
+        }
+        const next = deferred === null ? handoff : pickHigherPriority(deferred, handoff)
+        this.requestDecision(next.trigger, next.detail)
+      }
+      return
+    }
     const active = this.reachRuntime.current
     const metadata = this.reachRunMetadata
     if (active === null || metadata === null || active.contract.transitionId !== transitionId || active.intent?.intentId !== intentId) {
@@ -4999,9 +5051,10 @@ export class JevController {
     reportedState: ReachTransitionState,
     boundary: string,
     cancelIntentId: string | null = null,
-  ): void {
+    action: { readonly intentId: string; readonly actionId: string } | undefined = undefined,
+  ): boolean {
     const metadata = this.reachRunMetadata
-    if (metadata === null) return
+    if (metadata === null) return false
     const handoff = this.reachRuntime.takeTerminalHandoff()
     if (
       handoff === null ||
@@ -5024,7 +5077,7 @@ export class JevController {
         this.tickCounter,
       )
       this.reachRunMetadata = null
-      return
+      return false
     }
     const outcome = handoff.outcome
     const state = handoff.state
@@ -5032,7 +5085,31 @@ export class JevController {
     // runtime callback observed it. The validator and downstream journal use
     // this boundary to distinguish verified closure from an action/step result.
     const terminalBoundary = outcome.kind === 'SUCCESS' ? 'verified-terminal' : boundary
-    if (cancelIntentId !== null) {
+    if (action !== undefined) {
+      const current = this.executor.current
+      if (
+        current?.authority === 'vtr-reach' &&
+        current.transitionId === metadata.transitionId &&
+        current.id === action.actionId &&
+        action.intentId.length > 0
+      ) {
+        this.pendingReachTerminalAction = {
+          transitionId: metadata.transitionId,
+          intentId: action.intentId,
+          actionId: action.actionId,
+          outcomeKind: outcome.kind,
+        }
+      } else {
+        this.logger.error(
+          'vtr',
+          `VTR_TERMINAL_ACTION_CORRELATION_REFUSED transition=${metadata.transitionId} reason=active-lease-mismatch`,
+          { transitionId: metadata.transitionId, intentId: action.intentId, actionId: action.actionId, currentActionId: current?.id ?? null, currentAuthority: current?.authority ?? null },
+          this.tickCounter,
+        )
+      }
+    }
+    const cancelAfterWake = cancelIntentId !== null && action !== undefined
+    if (cancelIntentId !== null && !cancelAfterWake) {
       const current = this.executor.current
       if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
         this.executor.cancelCurrent(`VTR terminal ${outcome.kind}`)
@@ -5073,6 +5150,17 @@ export class JevController {
       schedulerHandoff: true,
       boundary: terminalBoundary,
     })
+    // For a per-step terminal, queue the handoff while the current lease is
+    // still visible so requestDecision defers it until the correlated executor
+    // settlement. Cancelling first would schedule now and the completion
+    // callback would schedule a second, duplicate wake.
+    if (cancelAfterWake) {
+      const current = this.executor.current
+      if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
+        this.executor.cancelCurrent(`VTR terminal ${outcome.kind}`)
+      }
+    }
+    return true
   }
 
   /** Journal the exact fresh fact observation that authorized deterministic SUCCESS. */
