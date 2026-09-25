@@ -248,9 +248,14 @@ describe('Reach live probe caller pure contracts', () => {
       { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:01.000Z', line: 'Starting minecraft server version 1.21.11' },
       { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:02.000Z', line: 'Preparing level "vtrreach-a1b2c3d4-11223344"' },
       { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:03.000Z', line: 'Done preparing level "vtrreach-a1b2c3d4-11223344"' },
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:04.000Z', line: 'Done (14.079s)! For help, type "help"' },
     ]
     expect(startRowFromLog(rows, 'vtrreach-a1b2c3d4-11223344')?.minecraftVersion).toBe('1.21.11')
     expect(startRowFromLog(rows.filter((row) => row.stream !== 'spawned-child-stdout'), 'vtrreach-a1b2c3d4-11223344')).toBeNull()
+    expect(() => startRowFromLog([
+      ...rows,
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:05.000Z', line: 'Done preparing level "vtrreach-a1b2c3d4-11223344"' },
+    ], 'vtrreach-a1b2c3d4-11223344')).toThrow(/duplicate startup completion/iu)
   })
 
   test('target child process-group closure is required and distinct from guard-wrapper closure', async () => {

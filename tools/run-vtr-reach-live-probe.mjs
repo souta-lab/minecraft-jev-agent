@@ -1599,7 +1599,7 @@ export function startRowFromLog(serverLogLines, levelName) {
   const stdoutRows = serverLogLines.filter(({ stream }) => stream === 'spawned-child-stdout')
   const versionLine = stdoutRows.find(({ line }) => /Starting minecraft server version\s+\S+/iu.test(line)) ?? null
   const preparingRows = stdoutRows.filter(({ line }) => line.includes(`Preparing level "${levelName}"`) || line.includes(`Preparing level '${levelName}'`))
-  const doneRows = stdoutRows.filter(({ line }) => /Done preparing level|Done \([^\n]*\)!/iu.test(line))
+  const doneRows = stdoutRows.filter(({ line }) => line.includes(`Done preparing level "${levelName}"`) || line.includes(`Done preparing level '${levelName}'`))
   if (!versionLine) return null
   if (preparingRows.length > 1) throw new Error(`Leaf emitted duplicate Preparing level lines for ${levelName}`)
   if (doneRows.length > 1) throw new Error('Leaf emitted duplicate startup completion lines')
