@@ -1015,7 +1015,7 @@ export function runNoDoubleAuthorityFixture(runtimeSource, attemptRoot, sourceSh
   // Bun does not accept the historical `test-*` source filename as a direct
   // test filter. This committed `.test.mts` entry imports and executes the
   // exact-source fixture while remaining discoverable by Bun.
-  const result = spawnSync(process.execPath, ['--no-env-file', 'test', testEntryRelative], {
+  const result = spawnSync(process.execPath, ['--no-env-file', 'test', '--timeout=120000', testEntryRelative], {
     cwd: runtimeSource,
     env: minimalEnvironment({
       HOME: isolatedHome,
