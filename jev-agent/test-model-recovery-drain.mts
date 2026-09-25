@@ -363,6 +363,7 @@ async function makeReachRecoveryFixture(): Promise<{
         status: active.status,
         authority: active.authority,
         transitionId: active.transitionId,
+        transitionContractHash: active.transitionContractHash,
       },
       cancelCurrent: () => {
         if (active?.status !== 'running') return false
@@ -383,10 +384,13 @@ async function makeReachRecoveryFixture(): Promise<{
         active = null
         return true
       },
-      claim: (candidate: Candidate, context: { authority?: string; transitionId?: string }) => {
-        if (context.authority !== 'vtr-reach' || context.transitionId !== transitionId) {
+      claim: (candidate: Candidate, context: { authority?: string; transitionId?: string; transitionContractHash?: string }) => {
+        if (
+          context.authority !== 'vtr-reach' || context.transitionId !== transitionId ||
+          context.transitionContractHash !== contract.contractHash
+        ) {
           metrics.legacyActuations += 1
-          throw new Error('model-recovery drain attempted a non-VTR action')
+          throw new Error('model-recovery drain attempted an action outside its committed VTR contract')
         }
         const index = actions.length + 1
         let resolveAction: (result: ExecutionResult) => void = () => undefined
@@ -402,6 +406,7 @@ async function makeReachRecoveryFixture(): Promise<{
           completion,
           authority: 'vtr-reach',
           transitionId: context.transitionId,
+          transitionContractHash: context.transitionContractHash,
         }
         actions.push(action)
         resolvers.push(resolveAction)
@@ -435,6 +440,7 @@ async function makeReachRecoveryFixture(): Promise<{
       const claim = (this as unknown as Record<string, any>).executor.claim(candidate, {
         authority: 'vtr-reach',
         transitionId,
+        transitionContractHash: contract.contractHash,
       })
       void claim.completion.then((completion: ExecutionResult) => {
         void (this as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string, intentId: string): Promise<void> })
@@ -446,7 +452,11 @@ async function makeReachRecoveryFixture(): Promise<{
 
   const claimInitial = (controller as unknown as Record<string, any>).executor.claim
   const initialCandidate = candidateFor(0)
-  const initial = claimInitial(initialCandidate, { authority: 'vtr-reach', transitionId })
+  const initial = claimInitial(initialCandidate, {
+    authority: 'vtr-reach',
+    transitionId,
+    transitionContractHash: contract.contractHash,
+  })
   void initial.completion.then((result: ExecutionResult) => {
     void (controller as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string, intentId: string): Promise<void> })
       .onReachActionComplete(result, initialCandidate, transitionId, initialIntentId)

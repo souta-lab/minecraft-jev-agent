@@ -62,6 +62,7 @@ export function installVtrReachTestRuntimePorts(controller: object): void {
           liveStructureMembers: request.liveStructureMembers,
           authority: 'vtr-reach',
           transitionId: intent.transitionId,
+          transitionContractHash: intent.contractHash,
           beforeMechanicalStep: request.beforeMechanicalStep,
           afterMechanicalStep: request.afterMechanicalStep,
         })

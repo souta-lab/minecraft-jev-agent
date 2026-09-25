@@ -306,6 +306,7 @@ test('a running legacy walk for the configured Reach predicate is revoked before
           id: selected.id, kind: selected.kind, epoch: 9, startedAt: world.timestampMs,
           phase: 'pathing', status: 'running', detail: '', completion: new Promise(() => undefined),
           authority: 'vtr-reach', transitionId: String(context.transitionId),
+          transitionContractHash: String(context.transitionContractHash),
         }
         return { kept: false, epoch: 9, completion: new Promise(() => undefined) }
       },
@@ -342,8 +343,16 @@ test('a running legacy walk for the configured Reach predicate is revoked before
   expect(handled).toBe(true)
   expect(legacyCancellations).toBe(1)
   expect(vtrClaims).toBe(1)
-  expect(vtrClaimContext).toMatchObject({ authority: 'vtr-reach' })
-  expect(currentAction).toMatchObject({ authority: 'vtr-reach', transitionId: expect.any(String) })
+  expect(vtrClaimContext).toMatchObject({
+    authority: 'vtr-reach',
+    transitionId: expect.any(String),
+    transitionContractHash: expect.any(String),
+  })
+  expect(currentAction).toMatchObject({
+    authority: 'vtr-reach',
+    transitionId: expect.any(String),
+    transitionContractHash: expect.any(String),
+  })
   expect(events.some((line) => line.includes('VTR_LEGACY_REACH_HANDOFF'))).toBe(true)
   expect(legacyDecisionRequests).toBe(0)
   expect((controller as unknown as Record<string, any>).reachTransition.contract.ensures[0].id).toBe('reach.resource-source')

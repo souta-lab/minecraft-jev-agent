@@ -263,6 +263,7 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
   const claim = executor.claim(candidate, {
     authority: 'vtr-reach',
     transitionId,
+    transitionContractHash: contractHash,
     beforeMechanicalStep: (step) => authorizeReachMechanicalStep.call(controller, intentId, identity, step),
     afterMechanicalStep: (step) => recordReachMechanicalOutcome.call(controller, intentId, identity, step),
   })

@@ -515,15 +515,9 @@ export interface InternalEffectCallbacks {
   after: (settlement: InternalEffectReservation & { readonly outcome: InternalEffectActuationOutcome }) => void
 }
 
-export interface ExecutionClaimContext {
+interface ExecutionClaimContextFields {
   /** currently validated members from the fresh, merged world observation */
   liveStructureMembers?: readonly LiveStructureMember[]
-  /** VTR is the authority for this mechanical action; legacy policy did not select it. */
-  authority?: 'legacy' | 'vtr-reach'
-  /** stable parent Transition identity for correlated evidence */
-  transitionId?: string
-  /** exact committed Reach contract; a new contract cannot reuse this action's mechanics */
-  transitionContractHash?: string
   /** Reserve the VTR transition's per-leg budget before any physical movement. */
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
   /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
@@ -533,6 +527,23 @@ export interface ExecutionClaimContext {
   /** Optional paired hooks for candidate-declared internal dig/place/equip effects. */
   internalEffectCallbacks?: InternalEffectCallbacks
 }
+
+export type ExecutionClaimContext = ExecutionClaimContextFields & (
+  | {
+      /** VTR is the authority for this mechanical action; legacy policy did not select it. */
+      authority: 'vtr-reach'
+      /** stable parent Transition identity for correlated evidence */
+      transitionId: string
+      /** exact committed Reach contract; a new contract cannot reuse this action's mechanics */
+      transitionContractHash: string
+    }
+  | {
+      /** absent means a legacy action claim */
+      authority?: 'legacy'
+      transitionId?: string
+      transitionContractHash?: string
+    }
+)
 
 export interface ClaimResult {
   /** true when the same action is already running and ownership was retained */
@@ -2238,15 +2249,19 @@ export class Executor {
     this.ensureMovements()
     const running = this.action
     const requestedAuthority = context.authority ?? 'legacy'
-    if (requestedAuthority === 'vtr-reach' && (context.transitionId === undefined || context.transitionId.length === 0)) {
+    if (requestedAuthority === 'vtr-reach' &&
+      (typeof context.transitionId !== 'string' || context.transitionId.trim().length === 0)) {
       throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionId')
+    }
+    if (requestedAuthority === 'vtr-reach' &&
+      (typeof context.transitionContractHash !== 'string' || context.transitionContractHash.trim().length === 0)) {
+      throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionContractHash')
     }
     if (
       running !== null && running.status === 'running' &&
       (running.authority !== requestedAuthority ||
         (requestedAuthority === 'vtr-reach' && running.transitionId !== context.transitionId) ||
-        (requestedAuthority === 'vtr-reach' && context.transitionContractHash !== undefined &&
-          running.transitionContractHash !== context.transitionContractHash))
+        (requestedAuthority === 'vtr-reach' && running.transitionContractHash !== context.transitionContractHash))
     ) {
       this.authorityConflicts += 1
       const message =

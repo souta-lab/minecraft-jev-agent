@@ -141,6 +141,7 @@ test('Executor serializes legacy and VTR MOVE authority across cancellation and 
     const vtr = executor.claim(moveCandidate('MOVE:vtr-transition', 30), {
       authority: 'vtr-reach',
       transitionId,
+      transitionContractHash: 'contract:reach-authority-fixture',
     })
     await waitFor(() => fixture.goalStarts() === 2, 'the VTR-owned MOVE to reach pathfinder')
     const vtrAction = currentAction(executor)

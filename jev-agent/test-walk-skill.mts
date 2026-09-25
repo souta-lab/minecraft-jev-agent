@@ -667,6 +667,20 @@ async function runWalk(
   })
   fixture.executorRef.current = executor
   const candidate = moveCandidate({ x: 12, y: 64, z: 0 })
+  let missingInitialContractHashRejected = false
+  try {
+    executor.claim(candidate, {
+      authority: 'vtr-reach',
+      transitionId: 'transition:reach-test',
+    } as unknown as Parameters<Executor['claim']>[1])
+  } catch (error) {
+    missingInitialContractHashRejected = error instanceof ExecutionAuthorityConflict
+  }
+  check(
+    '(vtr) a new VTR action cannot start without its committed contract hash',
+    missingInitialContractHashRejected && executor.current === null,
+    `rejected=${missingInitialContractHashRejected} active=${executor.current?.id ?? 'none'}`,
+  )
   const vtr = executor.claim(candidate, {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-test',
@@ -697,9 +711,24 @@ async function runWalk(
     sameCandidateRejected && competingActionRejected && executor.current?.authority === 'vtr-reach',
     `sameIdRejected=${sameCandidateRejected} competingRejected=${competingActionRejected} still=${executor.current?.authority ?? 'none'}`,
   )
+  let missingReattachContractHashRejected = false
+  try {
+    executor.claim(candidate, {
+      authority: 'vtr-reach',
+      transitionId: 'transition:reach-test',
+    } as unknown as Parameters<Executor['claim']>[1])
+  } catch (error) {
+    missingReattachContractHashRejected = error instanceof ExecutionAuthorityConflict
+  }
+  check(
+    '(vtr) a running action cannot be reattached without repeating its contract hash',
+    missingReattachContractHashRejected && executor.current?.transitionContractHash === 'contract:reach-test',
+    `rejected=${missingReattachContractHashRejected} retained=${executor.current?.transitionContractHash ?? 'none'}`,
+  )
   const sameTransition = executor.claim(candidate, {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-test',
+    transitionContractHash: 'contract:reach-test',
   })
   check(
     '(vtr) the same transition can reattach to its already-running mechanical action',

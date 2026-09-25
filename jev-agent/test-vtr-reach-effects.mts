@@ -224,6 +224,7 @@ test('VTR internal effect callbacks reserve and settle a real declared equip mut
   const claimed = executor.claim(candidate(), {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-effect-fixture',
+    transitionContractHash: 'contract:reach-effect-fixture',
     internalEffectCallbacks: callbacks(
       (reservation) => {
         events.push('reserve')
@@ -267,6 +268,7 @@ test('place callbacks carry the exact declared block and cell around the real pl
   const claimed = executor.claim(placeCandidate(), {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-place-fixture',
+    transitionContractHash: 'contract:reach-place-fixture',
     internalEffectCallbacks: callbacks(
       (reservation) => {
         events.push('reserve')
@@ -301,6 +303,7 @@ test('dig callbacks reserve the exact block cell at the actual dig mutation', as
   const claimed = executor.claim(mineClearanceCandidate(), {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-dig-fixture',
+    transitionContractHash: 'contract:reach-dig-fixture',
     internalEffectCallbacks: callbacks(
       (reservation) => {
         events.push('reserve')
@@ -337,6 +340,7 @@ test('a reservation refusal aborts before the Bot mutation', async () => {
   const claimed = executor.claim(candidate(), {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-reservation-refused',
+    transitionContractHash: 'contract:reach-reservation-refused',
     internalEffectCallbacks: callbacks(() => false, () => { afterCalls += 1 }),
   })
   const result = await claimed.completion
@@ -359,6 +363,7 @@ test('an actuator rejection is reported as rejected, never as settled success', 
   const claimed = executor.claim(candidate(), {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-effect-failed',
+    transitionContractHash: 'contract:reach-effect-failed',
     internalEffectCallbacks: callbacks(
       () => {
         events.push('reserve')
@@ -393,6 +398,7 @@ test('the candidate effect envelope still rejects an undeclared mutation before 
   const claimed = executor.claim(candidate(), {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-undeclared-effect',
+    transitionContractHash: 'contract:reach-undeclared-effect',
     internalEffectCallbacks: callbacks(
       () => {
         beforeCalls += 1

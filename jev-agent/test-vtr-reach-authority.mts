@@ -226,6 +226,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
     const claim = executor.claim(moveCandidate(intent.target as { x: number; y: number; z: number }), {
       authority: 'vtr-reach',
       transitionId: intent.transitionId,
+      transitionContractHash: intent.contractHash,
     })
     await waitFor(() => fixture.goalStarts() === 1, 'the authorized Reach MOVE to reach pathfinder')
     const currentAction: CurrentAction | null = executor.current

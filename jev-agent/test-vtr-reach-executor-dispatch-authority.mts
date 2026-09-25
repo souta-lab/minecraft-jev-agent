@@ -208,7 +208,12 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
   const observedWorld = world()
   const vtrCandidate = oakMove('MOVE:oak-log-vtr')
   const legacyCandidate = oakMove('MOVE:oak-log-legacy')
-  const claimCalls: Array<{ readonly candidateId: string; readonly authority: string; readonly transitionId: string | null }> = []
+  const claimCalls: Array<{
+    readonly candidateId: string
+    readonly authority: string
+    readonly transitionId: string | null
+    readonly transitionContractHash: string | null
+  }> = []
   const claimResults: Array<ReturnType<Executor['claim']>> = []
   const completionEvidence: Array<{
     readonly actionId: unknown
@@ -226,6 +231,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
       candidateId: candidate.id,
       authority: context.authority ?? 'legacy',
       transitionId: context.transitionId ?? null,
+      transitionContractHash: context.transitionContractHash ?? null,
     })
     const result = realClaim(candidate, context)
     claimResults.push(result)
@@ -318,6 +324,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
       candidateId: vtrCandidate.id,
       authority: 'vtr-reach',
       transitionId: activeTransition.contract.transitionId,
+      transitionContractHash: activeTransition.contract.contractHash,
     }])
 
     assert.throws(
