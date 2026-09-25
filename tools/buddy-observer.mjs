@@ -13,6 +13,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } fr
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildVtrObserverReadModel, renderVtrObserverHtml } from './vtr-observer-read-model.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
@@ -1326,6 +1327,14 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
   const scopedEvents = events
     .filter((entry) => entry?.source === 'vtr' && VTR_TRACE_EVENTS.has(entry.event))
     .filter((entry) => vtrEventMatchesLiveFence(entry, { runId, generationId, sourceCommit, worldKey, generationStartedAt }))
+    .map((entry, index) => ({ entry, index, time: parseTimestamp(entry.ts) }))
+    .sort((left, right) => {
+      if (left.time === null && right.time === null) return left.index - right.index
+      if (left.time === null) return 1
+      if (right.time === null) return -1
+      return left.time - right.time || left.index - right.index
+    })
+    .map(({ entry }) => entry)
   const commits = scopedEvents.filter((entry) => entry.event === 'VTR_TRANSITION_COMMIT'
     && typeof entry.detail?.transitionId === 'string'
     && typeof entry.detail?.contractHash === 'string')
@@ -1335,7 +1344,8 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
     const contractHash = detail.contractHash
     const linked = scopedEvents.filter((entry) => entry.detail?.transitionId === transitionId
       && (entry.detail?.contractHash === undefined || entry.detail.contractHash === contractHash))
-    const progressEvent = latestEvent(linked, ['VTR_TRANSITION_PROGRESS'])
+    const progressEvents = linked.filter((entry) => entry.event === 'VTR_TRANSITION_PROGRESS')
+    const progressEvent = progressEvents.at(-1) ?? null
     const actuationEvent = latestEvent(linked, ['VTR_TRANSITION_ACTUATION'])
     const routeDecisionEvent = latestEvent(linked, ['VTR_REACH_ROUTE_DECISION'])
     const verifyEvent = latestEvent(linked, ['VTR_TRANSITION_VERIFY'])
@@ -1393,11 +1403,22 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
         budget: detail.budget ?? null,
         identity: detail.identity ?? null,
         witness: detail.witness ?? null,
+        progressDefinition: detail.progressDefinition ?? null,
         initialRouteIds: detail.initialRouteIds ?? [],
         routePolicy: detail.routePolicy ?? null,
       },
       progress: progressEvent?.detail?.progress ?? null,
       progressEvent: traceProjection(progressEvent),
+      progressHistory: progressEvents.slice(-64).map((entry) => ({
+        observedAt: entry.ts,
+        sequence: entry.detail?.progress?.observationSequence ?? null,
+        latestPredicateDistance: entry.detail?.progress?.latestPredicateDistance ?? null,
+        bestPredicateDistance: entry.detail?.progress?.bestPredicateDistance ?? null,
+        reachability: entry.detail?.progress?.reachability ?? null,
+        frontierId: entry.detail?.progress?.frontierId ?? null,
+        evidenceId: entry.detail?.progress?.evidenceId ?? null,
+      })),
+      progressHistoryTruncated: progressEvents.length > 64,
       mechanical,
       modelMetrics,
       modelMetricsEventCount: modelMetricsEvents.length,
@@ -2768,164 +2789,14 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   return { runtimeDir, socketPath, logPath, jevCallsPath, vtrRunLogPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
 }
 
-function bindProbeToSummary(summary, probe) {
-  const probeBinding = probe?.binding ?? null
-  const summaryWorld = normalizeWorldKey(summary?.run?.worldKey)
-  const probeWorld = normalizeWorldKey(probeBinding?.probeWorld)
-  const sameRun = typeof summary?.run?.id === 'string' && typeof probeBinding?.probeRunId === 'string'
-    ? summary.run.id === probeBinding.probeRunId
-    : null
-  const sameWorld = summaryWorld !== null && probeWorld !== null
-    ? summaryWorld.serverId === probeWorld.serverId
-      && summaryWorld.dimension === probeWorld.dimension
-      && summaryWorld.worldEpoch === probeWorld.worldEpoch
-    : null
-  const sameGeneration = typeof summary?.run?.generationId === 'string' && typeof probeBinding?.probeGenerationId === 'string'
-    ? summary.run.generationId === probeBinding.probeGenerationId
-    : null
-  const status = sameRun === true && sameWorld === true && sameGeneration === true
-    ? 'aligned'
-    : [sameRun, sameWorld, sameGeneration].includes(false) ? 'mismatch' : 'unknown'
-  return {
-    ...probe,
-    summaryBinding: {
-      status,
-      sameRun,
-      sameWorld,
-      sameGeneration,
-      summary: {
-        runId: summary?.run?.id ?? null,
-        generationId: summary?.run?.generationId ?? null,
-        worldKey: summaryWorld,
-      },
-      probe: {
-        runId: probeBinding?.probeRunId ?? null,
-        generationId: probeBinding?.probeGenerationId ?? null,
-        worldKey: probeWorld,
-      },
-    },
-  }
-}
-
-function htmlPage() {
-  return String.raw`<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Buddy Observer</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #0b0e13; color: #e7edf5; }
-    header { position: sticky; top: 0; z-index: 2; display:flex; gap:16px; align-items:center; justify-content:space-between; padding:16px 22px; background:#10151dcc; backdrop-filter: blur(12px); border-bottom:1px solid #263041; }
-    h1 { font-size:18px; margin:0; letter-spacing:.02em; }
-    .status { display:flex; gap:10px; align-items:center; color:#9fafc2; font-size:13px; }
-    .dot { width:9px; height:9px; border-radius:999px; background:#687587; box-shadow:0 0 0 4px #68758722; }
-    .dot.online { background:#50d890; box-shadow:0 0 0 4px #50d89022; }
-    main { max-width:1400px; margin:0 auto; padding:22px; }
-    .flow { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:14px; }
-    .flow-card,.card { background:#121821; border:1px solid #263041; border-radius:14px; padding:14px; min-width:0; }
-    .flow-card .eyebrow,.eyebrow { font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:#73839a; margin-bottom:8px; }
-    .flow-card .primary { font-size:16px; font-weight:650; overflow-wrap:anywhere; }
-    .flow-card .secondary { margin-top:7px; color:#9fafc2; font-size:12px; overflow-wrap:anywhere; }
-    .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:14px; }
-    .card { grid-column:span 4; }
-    .card.wide { grid-column:span 8; }
-    .card.full { grid-column:1/-1; }
-    h2 { margin:0 0 12px; font-size:15px; }
-    dl { display:grid; grid-template-columns:minmax(110px,.8fr) 2fr; gap:7px 12px; margin:0; font-size:13px; }
-    dt { color:#73839a; }
-    dd { margin:0; overflow-wrap:anywhere; }
-    code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
-    .trace { display:grid; gap:9px; }
-    .trace-row { border-left:2px solid #39485d; padding:8px 10px; background:#0e131a; border-radius:0 8px 8px 0; }
-    .trace-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; }
-    .trace-event { font-weight:650; font-size:12px; }
-    .trace-time { color:#65748a; font-size:11px; white-space:nowrap; }
-    .trace-detail { color:#afbdcf; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .empty { color:#65748a; font-size:13px; }
-    .note { color:#7f8da1; font-size:12px; margin:0 0 14px; }
-    @media (max-width: 900px) { .flow { grid-template-columns:1fr 1fr; } .card,.card.wide { grid-column:1/-1; } }
-    @media (max-width: 560px) { main { padding:12px; } header { padding:13px 14px; } .flow { grid-template-columns:1fr; } }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>AI Buddy Observer</h1>
-    <div class="status"><span id="dot" class="dot"></span><span id="resident">resident unavailable</span><span id="updated">--:--:--</span></div>
-  </header>
-  <main>
-    <p class="note">Decision Trace は resident が実際に記録した Goal / Option / Jev / System2 / Action の監査情報です。</p>
-    <section class="flow">
-      <div class="flow-card"><div class="eyebrow">Goal</div><div id="flow-goal" class="primary">—</div><div id="flow-goal-sub" class="secondary"></div></div>
-      <div class="flow-card"><div class="eyebrow">Option</div><div id="flow-option" class="primary">—</div><div id="flow-option-sub" class="secondary"></div></div>
-      <div class="flow-card"><div class="eyebrow">Decision</div><div id="flow-decision" class="primary">—</div><div id="flow-decision-sub" class="secondary"></div></div>
-      <div class="flow-card"><div class="eyebrow">Action</div><div id="flow-action" class="primary">—</div><div id="flow-action-sub" class="secondary"></div></div>
-    </section>
-    <section class="grid">
-      <article class="card"><h2>Mission / Goal</h2><dl id="goal"></dl></article>
-      <article class="card"><h2>Jev authority</h2><dl id="jev"></dl></article>
-      <article class="card"><h2>System2 / Mercury</h2><dl id="system2"></dl></article>
-      <article class="card wide"><h2>Decision Trace</h2><div id="trace" class="trace"></div></article>
-      <article class="card"><h2>World truth</h2><dl id="truth"></dl></article>
-      <article class="card full"><h2>Recent audit events</h2><div id="events" class="trace"></div></article>
-    </section>
-  </main>
-  <script>
-    const $ = (id) => document.getElementById(id)
-    const text = (value, fallback='—') => value === null || value === undefined || value === '' ? fallback : String(value)
-    const compact = (value) => value === null || value === undefined ? '—' : typeof value === 'string' ? value : JSON.stringify(value)
-    const rows = (target, entries) => { target.innerHTML = entries.map(([k,v]) => '<dt>'+escapeHtml(k)+'</dt><dd>'+escapeHtml(compact(v))+'</dd>').join('') }
-    const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-    const eventRow = (entry) => {
-      if (!entry) return '<div class="empty">No observed decision yet.</div>'
-      const time = entry.ts ? new Date(entry.ts).toLocaleTimeString() : ''
-      return '<div class="trace-row"><div class="trace-head"><span class="trace-event">'+escapeHtml(entry.event)+'</span><span class="trace-time">'+escapeHtml(time)+'</span></div><div class="trace-detail">'+escapeHtml(JSON.stringify(entry.detail, null, 2))+'</div></div>'
-    }
-    function render(s) {
-      $('dot').className = 'dot' + (s.resident.available && s.resident.connected ? ' online' : '')
-      $('resident').textContent = s.resident.available ? (s.resident.connected ? 'connected' : 'resident online / bot disconnected') : 'resident unavailable'
-      $('updated').textContent = new Date(s.observedAt).toLocaleTimeString()
-      const current = s.goal.queue.current
-      const j = s.decisionTrace.jev
-      $('flow-goal').textContent = text(current?.description, text(s.goal.frontier))
-      $('flow-goal-sub').textContent = 'frontier=' + text(s.goal.frontier) + ' · depth=' + text(s.goal.queue.depth)
-      $('flow-option').textContent = text(s.option?.intent)
-      $('flow-option-sub').textContent = text(s.option?.templateId)
-      $('flow-decision').textContent = text(j?.detail?.action, text(s.decisionTrace.system2Decision?.detail?.chosen, text(s.decisionTrace.system2Decision?.detail?.strategy)))
-      $('flow-decision-sub').textContent = j ? 'Jev · ' + text(j.detail.decision) : s.decisionTrace.system2Decision ? 'System2 · ' + text(s.decisionTrace.system2Decision.detail.provider) : '—'
-      $('flow-action').textContent = text(s.action?.kind, text(s.decisionTrace.action?.detail?.kind))
-      $('flow-action-sub').textContent = s.action ? text(s.action.phase) + ' · ' + text(s.action.id) : text(s.decisionTrace.action?.detail?.id)
-      rows($('goal'), [
-        ['mission', s.mission.status === 'observed' ? s.mission.id + ': ' + s.mission.title : 'unknown'], ['mission provenance', s.mission.provenance?.source ?? s.mission.provenance?.reason], ['frontier', s.goal.frontier], ['current', current?.description], ['progress', current ? text(current.haveCount) + '/' + text(current.requiredCount) : null], ['queue depth', s.goal.queue.depth], ['queue revision', s.goal.queue.revision], ['option', s.option?.intent], ['option id', s.option?.templateId]
-      ])
-      rows($('jev'), [
-        ['provider', s.authority.policy?.provider], ['model', s.authority.policy?.model], ['policy', s.authority.policy?.kind], ['selected action', j?.detail?.action], ['abandon p', j?.detail?.abandon], ['beta decision', j?.detail?.decision], ['beta authority', j?.detail?.betaAuthority]
-      ])
-      rows($('system2'), [
-        ['configured', s.authority.system2?.configured], ['last authority', s.authority.system2?.last], ['trigger', s.decisionTrace.system2Input?.detail?.trigger ?? s.decisionTrace.system2Input?.detail?.reason], ['candidate options', s.decisionTrace.system2Input?.detail?.optionIds], ['selected', s.decisionTrace.system2Decision?.detail?.chosen ?? s.decisionTrace.system2Decision?.detail?.strategy], ['goals', s.decisionTrace.system2Decision?.detail?.goals], ['Mercury state', s.decisionTrace.mercury?.event]
-      ])
-      rows($('truth'), [
-        ['position', s.truth?.position], ['dimension', s.truth?.dimension], ['health', s.truth?.health], ['food', s.truth?.food], ['on ground', s.truth?.onGround], ['inventory', s.truth?.inventory], ['generation', s.resident.generationId], ['run', s.resident.runId]
-      ])
-      $('trace').innerHTML = [s.decisionTrace.jev, s.decisionTrace.system2Input, s.decisionTrace.system2Decision, s.decisionTrace.mercury, s.decisionTrace.action].filter(Boolean).map(eventRow).join('') || '<div class="empty">No observed decision yet.</div>'
-      $('events').innerHTML = s.events.map(eventRow).join('') || '<div class="empty">No audit events in the current log tail.</div>'
-    }
-    async function fallback() { try { render(await fetch('/api/snapshot', {cache:'no-store'}).then(r => r.json())) } catch {} }
-    const stream = new EventSource('/events')
-    stream.onmessage = (event) => { try { render(JSON.parse(event.data)) } catch {} }
-    stream.onerror = fallback
-    fallback()
-  </script>
-</body>
-</html>`
-}
-
 export function startObserverServer(options = {}) {
   const observer = createObserver(options)
   const hostname = options.hostname ?? DEFAULT_HOST
   const port = options.port ?? DEFAULT_PORT
+  const readModel = async ({ currentWorldProbe = null } = {}) => buildVtrObserverReadModel(
+    await observer.snapshot(),
+    { now: Date.now(), currentWorldProbe },
+  )
 
   const server = Bun.serve({
     hostname,
@@ -2934,22 +2805,25 @@ export function startObserverServer(options = {}) {
       const url = new URL(request.url)
       if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 })
       if (url.pathname === '/') {
-        return new Response(htmlPage(), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+        return new Response(renderVtrObserverHtml(), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
       }
+      // Retained for compatibility/debugging. The dashboard and AI endpoint
+      // use the VTR-native read model below.
       if (url.pathname === '/api/snapshot') {
         return Response.json(await observer.snapshot(), { headers: { 'cache-control': 'no-store' } })
+      }
+      if (url.pathname === '/api/vtr-view') {
+        return Response.json(await readModel(), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/ai-summary') {
         const [snapshot, probe] = await Promise.all([
           observer.snapshot(),
           observer.worldProbe({ radius: 6, verticalRadius: 3 }),
         ])
-        const summary = buildAiSummary(snapshot)
-        return Response.json({
-          ...summary,
-          currentWorldProbe: bindProbeToSummary(summary, probe),
-          recentChoiceOutcomes: await observer.recentChoiceOutcomes(),
-        }, { headers: { 'cache-control': 'no-store' } })
+        return Response.json(buildVtrObserverReadModel(snapshot, {
+          now: Date.now(),
+          currentWorldProbe: probe,
+        }), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/world-probe') {
         const radiusValue = Number(url.searchParams.get('radius') ?? 6)
@@ -2964,7 +2838,7 @@ export function startObserverServer(options = {}) {
           start(controller) {
             const emit = async () => {
               try {
-                const current = await observer.snapshot()
+                const current = await readModel()
                 controller.enqueue(`data: ${JSON.stringify(current)}\n\n`)
               } catch (error) {
                 controller.enqueue(`event: observer-error\ndata: ${JSON.stringify({ message: error instanceof Error ? error.message : String(error) })}\n\n`)

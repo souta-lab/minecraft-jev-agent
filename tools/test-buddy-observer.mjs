@@ -4,7 +4,8 @@ import { createServer } from 'node:net'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, projectVtrTransitions, readVtrRunJsonlEvents } from './buddy-observer.mjs'
+import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, projectVtrTransitions, readVtrRunJsonlEvents, startObserverServer } from './buddy-observer.mjs'
+import { buildVtrObserverReadModel, renderVtrObserverHtml } from './vtr-observer-read-model.mjs'
 
 // Constructing the always-on service must remain safe when no active mission
 // source exists; repository milestone labels are not runtime mission evidence.
@@ -159,6 +160,15 @@ assert.deepEqual(unavailableMissionSnapshot.mission, {
   },
 })
 assert.ok(buildAiSummary(unavailableMissionSnapshot).unknown.includes('mission_live_run_identity_unavailable'))
+const unknownVtrReadModel = buildVtrObserverReadModel(unavailableMissionSnapshot, { now: Date.parse('2026-09-21T12:00:03.000Z') })
+assert.equal(unknownVtrReadModel.schema, 'ai-buddy-vtr-observer/v1')
+assert.equal(unknownVtrReadModel.mission.status, 'unknown')
+assert.equal(unknownVtrReadModel.transition, null)
+assert.equal(unknownVtrReadModel.status.available, false)
+assert.ok(unknownVtrReadModel.unknown.includes('live_run_identity_unavailable'))
+assert.equal(Object.hasOwn(unknownVtrReadModel, 'goal'), false)
+assert.equal(Object.hasOwn(unknownVtrReadModel, 'option'), false)
+assert.equal(Object.hasOwn(unknownVtrReadModel, 'choices'), false)
 
 const missionWithoutSourceSnapshot = buildObserverSnapshot({
   report,
@@ -272,6 +282,7 @@ const vtrCommitRecord = {
     invariants: [{ id: 'body.alive', expected: true }],
     admissibleEffects: [{ kind: 'locomotion', maxUses: null }],
     budget: { maxMechanicalSteps: 24, maxElapsedMs: 120000, resources: {}, risk: { damage: 1 } },
+    progressDefinition: { measure: 'predicate_distance', predicateId: 'reach.resource-source', evidenceBasis: 'grounded_world_observation', bodyMotionOnlyCredit: false },
     identity: vtrIdentity,
     witness: { witnessId: 'oak_log@6,63,489', target: { x: 6, y: 63, z: 489 } },
     initialRouteIds: ['MOVE:b6_63_489'],
@@ -280,6 +291,21 @@ const vtrCommitRecord = {
 }
 const vtrJournalEvents = parseVtrRunJsonlEvents([
   vtrCommitRecord,
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:01.250Z', source: 'vtr',
+    message: `VTR_TRANSITION_PROGRESS id=${vtrTransitionId}`,
+    detail: { transitionId: vtrTransitionId, contractHash: vtrContractHash, progress: { latestPredicateDistance: 9, bestPredicateDistance: 8, reachability: 'reachable', observationSequence: 3, frontierId: 'frontier-3', evidenceId: 'world-observation-3' } },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:01.050Z', source: 'vtr',
+    message: `VTR_TRANSITION_PROGRESS id=${vtrTransitionId}`,
+    detail: { transitionId: vtrTransitionId, contractHash: vtrContractHash, progress: { latestPredicateDistance: 12, bestPredicateDistance: 12, reachability: 'reachable', observationSequence: 1, frontierId: 'frontier-1', evidenceId: 'world-observation-1' } },
+  },
+  {
+    record: 'agent-event', ts: '2026-09-21T12:00:01.150Z', source: 'vtr',
+    message: `VTR_TRANSITION_PROGRESS id=${vtrTransitionId}`,
+    detail: { transitionId: vtrTransitionId, contractHash: vtrContractHash, progress: { latestPredicateDistance: 8, bestPredicateDistance: 8, reachability: 'reachable', observationSequence: 2, frontierId: 'frontier-2', evidenceId: 'world-observation-2' } },
+  },
   {
     record: 'agent-event', ts: '2026-09-21T12:00:01.100Z', source: 'vtr',
     message: `VTR_TRANSITION_ACTUATION id=${vtrTransitionId}`,
@@ -309,7 +335,7 @@ const vtrJournalEvents = parseVtrRunJsonlEvents([
     },
   },
 ])
-assert.equal(vtrJournalEvents.length, 4)
+assert.equal(vtrJournalEvents.length, 7)
 const vtrBoot = parseBuddyLogLine(`[2026-09-21T11:59:59.000Z] BOOT pid=1 runId=run-1 source=${observerSourceSha} worldKey=${JSON.stringify(observerWorldKey)} mission={"kind":"inventory_at_least","item":"oak_log","count":1,"source":"BUDDY_MISSION_* or default"}`)
 const vtrReady = observerGenerationReady('gen-7', '2026-09-21T12:00:00.000Z')
 const liveVtrSnapshot = buildObserverSnapshot({
@@ -342,6 +368,32 @@ assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsEventCount, 0)
 assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsConsistency.status, 'UNKNOWN')
 assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsConsistency.mechanicalSteps.status, 'UNKNOWN')
 assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsConsistency.typedTerminalOutcome.status, 'UNKNOWN')
+assert.equal(liveVtrSnapshot.vtr.latest.progressHistory.length, 3)
+assert.equal(liveVtrSnapshot.vtr.latest.contract.progressDefinition.bodyMotionOnlyCredit, false)
+const liveVtrReadModel = buildVtrObserverReadModel(liveVtrSnapshot, { now: Date.parse('2026-09-21T12:00:03.000Z') })
+assert.equal(liveVtrReadModel.schema, 'ai-buddy-vtr-observer/v1')
+assert.equal(liveVtrReadModel.readOnly, true)
+assert.equal(liveVtrReadModel.run.id, 'run-1')
+assert.equal(liveVtrReadModel.run.sourceCommit, observerSourceSha)
+assert.equal(liveVtrReadModel.run.generationId, 'gen-7')
+assert.equal(liveVtrReadModel.transition.id, vtrTransitionId)
+assert.equal(liveVtrReadModel.transition.contractHash, vtrContractHash)
+assert.equal(liveVtrReadModel.transition.owner.authority, 'VTR')
+assert.equal(liveVtrReadModel.transition.progress.latest.latestPredicateDistance, 9)
+assert.equal(liveVtrReadModel.transition.progress.bestPredicateDistance, 8)
+assert.equal(liveVtrReadModel.transition.progress.observationSequence, 3)
+assert.equal(liveVtrReadModel.transition.progress.reachability, 'reachable')
+assert.equal(liveVtrReadModel.transition.progress.evidenceId, 'world-observation-3')
+assert.equal(liveVtrReadModel.transition.progress.trendStatus, 'no_new_best_observed')
+assert.equal(liveVtrReadModel.transition.progress.lastBestChangeAt, '2026-09-21T12:00:01.150Z')
+assert.equal(liveVtrReadModel.transition.progress.unchangedAgeMs, 1850)
+assert.equal(liveVtrReadModel.transition.verification.truth, 'TRUE')
+assert.equal(liveVtrReadModel.transition.verification.verified, true)
+assert.equal(liveVtrReadModel.transition.outcome.kind, 'SUCCESS')
+assert.equal(liveVtrReadModel.transition.outcome.evidenceIds[0], 'verify:3:oak_log@6,63,489')
+for (const legacyKey of ['goal', 'option', 'choices', 'authority', 'recentChoiceOutcomes']) {
+  assert.equal(Object.hasOwn(liveVtrReadModel, legacyKey), false, `primary VTR read model excludes legacy ${legacyKey}`)
+}
 const liveVtrSummary = buildAiSummary(liveVtrSnapshot, { now: Date.parse('2026-09-21T12:00:03.000Z') })
 assert.equal(liveVtrSummary.choices.jev, null)
 assert.equal(liveVtrSummary.choices.jevStatus, 'not_recorded')
@@ -793,6 +845,19 @@ try {
     'reach:oak-log:walk': 0.28,
     'reach:oak-log:jump': 0.72,
   })
+  const ingressVtrReadModel = buildVtrObserverReadModel(ingressSnapshot, {
+    now: Date.parse('2026-09-21T13:00:03.000Z'),
+  })
+  assert.deepEqual(ingressVtrReadModel.transition.routingDecision.offeredRouteIds, [
+    'reach:oak-log:walk', 'reach:oak-log:jump',
+  ])
+  assert.equal(ingressVtrReadModel.transition.routingDecision.routeId, 'reach:oak-log:jump')
+  assert.deepEqual(ingressVtrReadModel.transition.routingDecision.probabilities, {
+    'reach:oak-log:walk': 0.28,
+    'reach:oak-log:jump': 0.72,
+  })
+  assert.equal(ingressVtrReadModel.transition.routingDecision.selectedProbability, 0.72)
+  assert.equal(ingressVtrReadModel.transition.owner.authority, 'VTR')
   assert.equal(ingressSnapshot.vtr.latest.verification.truth, 'TRUE')
   assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
   assert.equal(ingressSnapshot.vtr.latest.modelMetricsEventCount, 1)
@@ -1494,5 +1559,52 @@ const mismatchedWorldProbe = buildWorldProbe({
 assert.equal(mismatchedWorldProbe.status, 'partial')
 assert.equal(mismatchedWorldProbe.milestones.status, 'not_joined')
 assert.ok(mismatchedWorldProbe.unknown.includes('report_state_world_mismatch_or_unknown'))
+
+// Exercise the actual HTTP surface with an isolated empty runtime directory.
+// This starts only an in-process observer fixture; it does not launch a resident
+// or Minecraft server, and a live run is never inferred from a server process.
+const httpObserverRuntimeDir = mkdtempSync(join(tmpdir(), 'buddy-observer-vtr-http-'))
+const { server: httpObserverServer, url: httpObserverUrl } = startObserverServer({
+  runtimeDir: httpObserverRuntimeDir,
+  hostname: '127.0.0.1',
+  port: 0,
+})
+try {
+  const pageResponse = await fetch(`${httpObserverUrl}/`)
+  assert.equal(pageResponse.status, 200)
+  const page = await pageResponse.text()
+  assert.match(page, /AI Buddy · 検証済み遷移/)
+  assert.match(page, /ミッション/)
+  assert.match(page, /遷移契約/)
+  assert.match(page, /決定的検証 \/ 型付き結果/)
+  assert.match(page, /new EventSource\('\/events'\)/)
+  assert.doesNotMatch(page, /s\.goal|s\.option|betaAuthority|GoalQueue|OptionLedger/)
+
+  const apiResponse = await fetch(`${httpObserverUrl}/api/ai-summary`)
+  assert.equal(apiResponse.status, 200)
+  const api = await apiResponse.json()
+  assert.equal(api.schema, 'ai-buddy-vtr-observer/v1')
+  assert.equal(api.status.available, false)
+  assert.equal(api.run.id, null)
+  assert.equal(api.run.sourceCommit, null)
+  assert.equal(api.run.generationId, null)
+  assert.equal(api.transition, null)
+  assert.equal(api.worldObservation, null)
+  assert.equal(api.vtr.status, 'unknown')
+  assert.ok(api.unknown.includes('live_run_identity_unavailable'))
+  assert.equal(Object.hasOwn(api, 'goal'), false)
+  assert.equal(Object.hasOwn(api, 'option'), false)
+  assert.equal(Object.hasOwn(api, 'choices'), false)
+
+  const fallbackResponse = await fetch(`${httpObserverUrl}/api/vtr-view`)
+  const fallback = await fallbackResponse.json()
+  assert.equal(fallback.schema, api.schema)
+  assert.equal(fallback.status.available, api.status.available)
+  assert.equal(fallback.run.id, api.run.id)
+  assert.equal(fallback.transition, api.transition)
+} finally {
+  await httpObserverServer.stop(true)
+  rmSync(httpObserverRuntimeDir, { recursive: true, force: true })
+}
 
 console.log('buddy-observer: PASS')
