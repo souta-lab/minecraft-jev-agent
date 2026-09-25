@@ -1298,8 +1298,10 @@ export function parseLeafIdentity(logText, expectedLevelName = null) {
   const uuidMatch = /^\[?[^\n]*?UUID of player AI_Buddy is ([0-9a-f-]{36})/imu.exec(logText)
   const lines = logText.split(/\r?\n/u)
   const preparingLines = lines.filter((line) => /Preparing level ["'].*["']/iu.test(line)
+    && !/Done preparing level/iu.test(line)
     && (expectedLevelName === null || line.includes(`"${expectedLevelName}"`) || line.includes(`'${expectedLevelName}'`)))
-  const completeLines = lines.filter((line) => /Done preparing level|Done \([^\n]*\)!/iu.test(line))
+  const completeLines = lines.filter((line) => /Done preparing level ["']/iu.test(line)
+    && (expectedLevelName === null || line.includes(`"${expectedLevelName}"`) || line.includes(`'${expectedLevelName}'`)))
   const prepared = preparingLines[0] ?? null
   const complete = completeLines[0] ?? null
   if (!uuidMatch) throw new Error('Leaf log does not contain the joined AI_Buddy UUID')

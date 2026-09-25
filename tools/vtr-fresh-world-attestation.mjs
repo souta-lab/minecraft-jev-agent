@@ -253,8 +253,8 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
   const quotedLevel = String(run.levelName).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
   const preparingPattern = new RegExp(`Preparing level ["']${quotedLevel}["']`, 'u')
   const donePattern = new RegExp(`(?:Done \\([^)]*\\)!|Done preparing level ["']${quotedLevel}["'])`, 'u')
-  const preparingReceipt = stdoutRows.filter((row) => preparingPattern.test(row.line))
-  const doneReceipt = stdoutRows.filter((row) => donePattern.test(row.line))
+  const preparingReceipt = stdoutRows.filter((row) => row.line === preparing?.line)
+  const doneReceipt = stdoutRows.filter((row) => row.line === done?.line)
   if (attestation.startupLog?.pid !== server.pid || attestation.startupLog?.streamSource !== 'spawned-server-stdout' ||
       typeof preparing?.line !== 'string' || typeof done?.line !== 'string' || !preparingPattern.test(preparing.line) ||
       !donePattern.test(done.line) || logLines.filter((line) => line === preparing.line).length !== 1 ||
