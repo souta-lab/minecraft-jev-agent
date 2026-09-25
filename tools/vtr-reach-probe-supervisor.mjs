@@ -992,7 +992,7 @@ export async function runVtrReachProbeSupervisor({
     while (now() < deadline) {
       pollWatch()
       try {
-        const result = await read()
+        const result = await withWatchPolling(() => read())
         if (result?.status === 'READY' || result?.status === 'TERMINAL') return result
         last = result
       } catch (error) {
