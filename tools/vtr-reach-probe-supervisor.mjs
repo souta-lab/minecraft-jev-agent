@@ -72,11 +72,26 @@ function whitelist(source, fields) {
 }
 
 function safeResidentStop(value) {
-  return whitelist(value, ['pid', 'serverId', 'status', 'controlSocketReleased', 'hostLockReleased', 'exitCode', 'signal', 'stoppedAt'])
+  return {
+    ...whitelist(value, ['pid', 'serverId', 'status', 'controlSocketReleased', 'hostLockReleased', 'exitCode', 'signal', 'stoppedAt']),
+    ...(value?.processExitObservation === undefined ? {} : { processExitObservation: safeProcessExitObservation(value.processExitObservation) }),
+  }
 }
 
 function safeLeafStop(value) {
-  return whitelist(value, ['status', 'port', 'serverId', 'pid', 'exitCode', 'signal', 'stoppedAt'])
+  return {
+    ...whitelist(value, ['status', 'port', 'serverId', 'pid', 'exitCode', 'signal', 'stoppedAt']),
+    ...(value?.processExitObservation === undefined ? {} : { processExitObservation: safeProcessExitObservation(value.processExitObservation) }),
+    ...(value?.listenerClosureObservation === undefined ? {} : { listenerClosureObservation: safeListenerClosureObservation(value.listenerClosureObservation) }),
+  }
+}
+
+function safeProcessExitObservation(value) {
+  return whitelist(value, ['schema', 'source', 'state', 'pid', 'exitCode', 'observedAt'])
+}
+
+function safeListenerClosureObservation(value) {
+  return whitelist(value, ['schema', 'source', 'state', 'host', 'port', 'result', 'observedAt'])
 }
 
 function safeArtifactDescriptor(value) {
@@ -370,6 +385,14 @@ function terminalForRunJournal(runJournalPath, identity) {
     fail('VTR_TRANSITION_OUTCOME lacks a typed detail.outcome.kind')
   }
   if (typedOutcome.contractHash !== undefined && typedOutcome.contractHash !== hash) fail('typed outcome contractHash differs from commit')
+  const outcomeIdentity = outcome.detail?.identity
+  if (!isPlainObject(outcomeIdentity)
+    || jsonWorldKey(outcomeIdentity.worldKey) !== identity.worldKey
+    || outcomeIdentity.generationId !== identity.generationId
+    || outcome.detail?.runId !== identity.runId
+    || String(outcome.detail?.sourceSha ?? '').toLowerCase() !== identity.sourceSha) {
+    fail('VTR Transition outcome is not bound to this source/run/generation/world identity')
+  }
   return {
     status: 'TERMINAL',
     terminal: {
@@ -638,6 +661,12 @@ function evaluateHostLifecycleTranscript(path, { sourceSha, identity, terminal, 
     && Date.parse(residentRow.stoppedAt) === Date.parse(residentRow.ts)
     && Date.parse(residentRow.ts) >= terminalConsumedAt
     && residentRow?.serverId === expectedIdentity.serverId
+    && validProcessExitObservation(residentRow?.processExitObservation, {
+      pid: resident?.pid,
+      exitCode: residentStop?.exitCode,
+      notBefore: resident?.startedAt,
+    })
+    && JSON.stringify(residentRow?.processExitObservation) === JSON.stringify(safeProcessExitObservation(residentStop?.processExitObservation))
   checks.push({ id: 'host-lifecycle:resident-stop', status: residentMatches ? 'PASS' : terminal === null || terminalRow === undefined || residentStop === null || residentRow === undefined ? 'INCOMPLETE' : 'FAIL' })
   const serverRow = rows.find((row) => row.event === 'server-stopped')
   const expectedServerId = isolatedLeaf?.worldKey?.split('|', 1)[0] ?? null
@@ -650,6 +679,19 @@ function evaluateHostLifecycleTranscript(path, { sourceSha, identity, terminal, 
     && Date.parse(serverRow?.stoppedAt ?? '') >= 0
     && Number.isFinite(Date.parse(serverRow?.ts ?? '')) && Date.parse(serverRow.stoppedAt) === Date.parse(serverRow.ts)
     && Date.parse(serverRow.ts) >= Date.parse(residentRow?.ts ?? '')
+    && validProcessExitObservation(serverRow?.processExitObservation, {
+      pid: isolatedLeaf?.pid,
+      exitCode: leafStop?.exitCode,
+      notBefore: isolatedLeaf?.startedAt,
+    })
+    && JSON.stringify(serverRow?.processExitObservation) === JSON.stringify(safeProcessExitObservation(leafStop?.processExitObservation))
+    && validListenerClosureObservation(serverRow?.listenerClosureObservation, {
+      host: isolatedLeaf?.host,
+      port: isolatedLeaf?.port,
+      notBefore: leafStop?.processExitObservation?.observedAt,
+    })
+    && JSON.stringify(serverRow?.listenerClosureObservation) === JSON.stringify(safeListenerClosureObservation(leafStop?.listenerClosureObservation))
+    && Date.parse(serverRow?.stoppedAt ?? '') === Date.parse(leafStop?.listenerClosureObservation?.observedAt ?? '')
   checks.push({ id: 'host-lifecycle:server-stop', status: serverMatches ? 'PASS' : leafStop === null || serverRow === undefined ? 'INCOMPLETE' : 'FAIL' })
   const failures = checks.some((entry) => entry.status === 'FAIL')
   const incomplete = checks.some((entry) => entry.status === 'INCOMPLETE')
@@ -726,6 +768,34 @@ function hostLifecycleIdentity(sourceSha, identity) {
   }
 }
 
+function validProcessExitObservation(value, { pid, exitCode, notBefore }) {
+  const observedAt = Date.parse(value?.observedAt ?? '')
+  return isPlainObject(value)
+    && value.schema === 'vtr-process-exit-observation/v1'
+    && value.source === 'child-close-event'
+    && value.state === 'exited'
+    && value.pid === pid
+    && value.exitCode === exitCode
+    && Number.isSafeInteger(exitCode)
+    && Number.isFinite(observedAt)
+    && Number.isFinite(Date.parse(notBefore ?? ''))
+    && observedAt >= Date.parse(notBefore)
+}
+
+function validListenerClosureObservation(value, { host, port, notBefore }) {
+  const observedAt = Date.parse(value?.observedAt ?? '')
+  return isPlainObject(value)
+    && value.schema === 'vtr-listener-closure-observation/v1'
+    && value.source === 'tcp-connect-probe'
+    && value.state === 'closed'
+    && value.host === host
+    && value.port === port
+    && value.result === 'connection-refused'
+    && Number.isFinite(observedAt)
+    && Number.isFinite(Date.parse(notBefore ?? ''))
+    && observedAt >= Date.parse(notBefore)
+}
+
 function verifyFixtureTranscriptDescriptor(value, attemptRoot) {
   if (!isPlainObject(value) || value.status !== 'READY'
     || typeof value.path !== 'string' || typeof value.sha256 !== 'string' || !SHA256_RE.test(value.sha256)) {
@@ -758,8 +828,8 @@ function verifyFixtureTranscriptDescriptor(value, attemptRoot) {
  * - startResidentFrozen({sourceSha, attemptRoot, paths}) -> {frozen:true, pid, handle}
  * - prepareFixture({handle, identity, serverAttestation, attemptRoot, paths}) -> {status:'READY', path, sha256}
  * - resumeResident({handle, identity}) -> {started:true}
- * - stopResident({handle, identity, pid}) -> {status:'STOPPED', pid, serverId, exitCode, stoppedAt}
- * - stopIsolatedLeaf({attestation, identity}) -> {status:'STOPPED', port, pid, serverId, exitCode, stoppedAt}
+ * - stopResident({handle, identity, pid}) -> {status:'STOPPED', pid, serverId, exitCode, stoppedAt, processExitObservation}
+ * - stopIsolatedLeaf({attestation, identity}) -> {status:'STOPPED', port, pid, serverId, exitCode, stoppedAt, processExitObservation, listenerClosureObservation}
  * - collect({identity, terminal, fixtureTranscript, observerUrl, paths, poll}) -> collector report descriptor
  * - sealArchive({identity, terminal, capture, collector, lifecycle, hostLifecycleTranscript, fixtureTranscript}) -> archive descriptor
  * - validateArchive({identity, archive, hostLifecycleTranscript, fixtureTranscript}) -> validator descriptor
@@ -767,6 +837,11 @@ function verifyFixtureTranscriptDescriptor(value, attemptRoot) {
  * The isolated server attestation may contain runtime-specific details, but
  * this supervisor retains only loopback, port, PID, start time, world root and
  * worldKey. It never reads process argv/environment or contacts protected ports.
+ * The HOST adapter must wait for the actual child close event and return a
+ * `vtr-process-exit-observation/v1` record. The Leaf adapter must additionally
+ * make a post-exit TCP connect probe and report `connection-refused` in a
+ * `vtr-listener-closure-observation/v1` record. The supervisor validates and
+ * journals those observations; it does not use process APIs or probe ports.
  */
 export async function runVtrReachProbeSupervisor({
   attemptRoot,
@@ -963,8 +1038,8 @@ export async function runVtrReachProbeSupervisor({
       fail('resident adapter must attest frozen:true before process handoff')
     }
     if (!Number.isSafeInteger(startResult.pid) || startResult.pid < 1) fail('resident adapter must attest its started process PID')
-    resident = { handle: startResult.handle, pid: startResult.pid }
     residentStartedAt = new Date(now()).toISOString()
+    resident = { handle: startResult.handle, pid: startResult.pid, startedAt: residentStartedAt }
     events.push({ event: 'resident-started-frozen', at: residentStartedAt })
     const boot = await waitUntil('run-scoped BOOT', () => {
       const rows = parseHostEvents(sinkPaths['host-log'])
@@ -1056,11 +1131,17 @@ export async function runVtrReachProbeSupervisor({
         { strict: false },
       )
       if (!isPlainObject(residentStop) || residentStop.status !== 'STOPPED') fail('resident stop adapter did not attest STOPPED')
-        if (!Number.isSafeInteger(residentStop.pid) || residentStop.pid !== resident.pid
-          || !Number.isSafeInteger(residentStop.exitCode)
-          || residentStop.serverId !== hostLifecycleIdentity(sourceSha, identity ?? bootIdentity).serverId
-          || typeof residentStop.stoppedAt !== 'string' || !Number.isFinite(Date.parse(residentStop.stoppedAt))) {
-        fail('resident stop evidence must bind the started PID, exit code and stoppedAt')
+      if (!Number.isSafeInteger(residentStop.pid) || residentStop.pid !== resident.pid
+        || !Number.isSafeInteger(residentStop.exitCode)
+        || residentStop.serverId !== hostLifecycleIdentity(sourceSha, identity ?? bootIdentity).serverId
+        || typeof residentStop.stoppedAt !== 'string' || !Number.isFinite(Date.parse(residentStop.stoppedAt))
+        || !validProcessExitObservation(residentStop.processExitObservation, {
+          pid: resident.pid,
+          exitCode: residentStop.exitCode,
+          notBefore: resident.startedAt,
+        })
+        || Date.parse(residentStop.processExitObservation.observedAt) !== Date.parse(residentStop.stoppedAt)) {
+        fail('resident stop evidence must include the observed child close event for the started PID')
       }
       appendHostLifecycleRow(hostLifecyclePath, {
         schema: HOST_LIFECYCLE_TRANSCRIPT_SCHEMA,
@@ -1072,6 +1153,7 @@ export async function runVtrReachProbeSupervisor({
         status: 'stopped',
         exitCode: residentStop.exitCode,
         stoppedAt: residentStop.stoppedAt,
+        processExitObservation: safeProcessExitObservation(residentStop.processExitObservation),
       })
       events.push({ event: 'resident-stopped', at: new Date(now()).toISOString(), evidence: safeResidentStop(residentStop) })
       } catch (error) {
@@ -1090,8 +1172,19 @@ export async function runVtrReachProbeSupervisor({
       }
       if (!Number.isSafeInteger(leafStop.exitCode)
         || leafStop.serverId !== isolatedLeaf.worldKey.split('|', 1)[0]
-        || typeof leafStop.stoppedAt !== 'string' || !Number.isFinite(Date.parse(leafStop.stoppedAt))) {
-        fail('isolated Leaf stop evidence must include exitCode and stoppedAt')
+        || typeof leafStop.stoppedAt !== 'string' || !Number.isFinite(Date.parse(leafStop.stoppedAt))
+        || !validProcessExitObservation(leafStop.processExitObservation, {
+          pid: isolatedLeaf.pid,
+          exitCode: leafStop.exitCode,
+          notBefore: isolatedLeaf.startedAt,
+        })
+        || !validListenerClosureObservation(leafStop.listenerClosureObservation, {
+          host: isolatedLeaf.host,
+          port: isolatedLeaf.port,
+          notBefore: leafStop.processExitObservation?.observedAt,
+        })
+        || Date.parse(leafStop.stoppedAt) !== Date.parse(leafStop.listenerClosureObservation.observedAt)) {
+        fail('isolated Leaf stop evidence must include the child close and observed TCP listener closure')
       }
       appendHostLifecycleRow(hostLifecyclePath, {
         schema: HOST_LIFECYCLE_TRANSCRIPT_SCHEMA,
@@ -1104,6 +1197,8 @@ export async function runVtrReachProbeSupervisor({
         status: 'stopped',
         exitCode: leafStop.exitCode,
         stoppedAt: leafStop.stoppedAt,
+        processExitObservation: safeProcessExitObservation(leafStop.processExitObservation),
+        listenerClosureObservation: safeListenerClosureObservation(leafStop.listenerClosureObservation),
       })
       events.push({ event: 'isolated-leaf-stopped', at: new Date(now()).toISOString(), evidence: safeLeafStop(leafStop) })
     } catch (error) {

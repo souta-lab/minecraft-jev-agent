@@ -4811,6 +4811,9 @@ export class JevController {
       {
         transitionId: metadata.transitionId,
         contractHash: metadata.contractHash,
+        identity: metadata.identity,
+        runId: this.options.decisionProvenance.runId,
+        sourceSha: this.options.decisionProvenance.sourceSha,
         outcome,
         boundary: terminalBoundary,
         progress: state.progress,

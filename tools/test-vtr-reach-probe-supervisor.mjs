@@ -123,7 +123,7 @@ function event(at, name, detail, extra = {}) {
   }
 }
 
-function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutcome = false, localDecision = false, now = () => Date.parse(t(10)), targetServerId = SERVER_ID }) {
+function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutcome = false, wrongOutcomeIdentity = false, localDecision = false, now = () => Date.parse(t(10)), targetServerId = SERVER_ID }) {
   const stopTimestamp = () => new Date(now()).toISOString()
   const targetWorldKey = `${targetServerId}|overworld|7`
   const terminalRows = [
@@ -141,6 +141,12 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
     event(t(3), 'VTR_TRANSITION_OUTCOME', {
       transitionId: wrongOutcome ? 'other-transition' : TRANSITION,
       contractHash: CONTRACT,
+      runId: RUN,
+      sourceSha: SOURCE,
+      identity: {
+        worldKey: wrongOutcomeIdentity ? `${targetServerId}|nether|8` : targetWorldKey,
+        generationId: wrongOutcomeIdentity ? 'stale-generation' : GENERATION,
+      },
       outcome: { kind: outcomeKind, contractHash: CONTRACT, evidenceIds: ['verify:reach-probe'] },
     }),
   ]
@@ -198,11 +204,30 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
       calls.push('stop-resident')
       const stoppedAt = stopTimestamp()
       appendFileSync(paths['host-log'], hostLine(stoppedAt, 'SHUTDOWN', { reason: 'control-quit' }))
-      return { status: 'STOPPED', pid: RESIDENT_PID, serverId: targetServerId, exitCode: 0, stoppedAt, controlSocketReleased: true, hostLockReleased: true }
+      return {
+        status: 'STOPPED', pid: RESIDENT_PID, serverId: targetServerId, exitCode: 0, stoppedAt,
+        controlSocketReleased: true, hostLockReleased: true,
+        processExitObservation: {
+          schema: 'vtr-process-exit-observation/v1', source: 'child-close-event', state: 'exited',
+          pid: RESIDENT_PID, exitCode: 0, observedAt: stoppedAt,
+        },
+      }
     },
     stopIsolatedLeaf: async ({ attestation }) => {
       calls.push('stop-leaf')
-      return { status: 'STOPPED', port: attestation.port, serverId: targetServerId, pid: attestation.pid, exitCode: 0, stoppedAt: stopTimestamp() }
+      const processExitedAt = stopTimestamp()
+      const listenerClosedAt = stopTimestamp()
+      return {
+        status: 'STOPPED', port: attestation.port, serverId: targetServerId, pid: attestation.pid, exitCode: 0, stoppedAt: listenerClosedAt,
+        processExitObservation: {
+          schema: 'vtr-process-exit-observation/v1', source: 'child-close-event', state: 'exited',
+          pid: attestation.pid, exitCode: 0, observedAt: processExitedAt,
+        },
+        listenerClosureObservation: {
+          schema: 'vtr-listener-closure-observation/v1', source: 'tcp-connect-probe', state: 'closed',
+          host: '127.0.0.1', port: attestation.port, result: 'connection-refused', observedAt: listenerClosedAt,
+        },
+      }
     },
     collect: async ({ identity, terminal }) => {
       calls.push('collect')
@@ -410,6 +435,9 @@ try {
     assert.equal(lifecycleRows[1].pid, RESIDENT_PID)
     assert.equal(lifecycleRows[2].pid, serverAttestation.pid)
     assert.equal(lifecycleRows[2].serverId, serverId(port))
+    assert.equal(lifecycleRows[1].processExitObservation.state, 'exited')
+    assert.equal(lifecycleRows[2].processExitObservation.state, 'exited')
+    assert.equal(lifecycleRows[2].listenerClosureObservation.result, 'connection-refused')
   }
 
   {
@@ -547,6 +575,111 @@ try {
     assert.match(result.failure, /typed Reach Transition terminal outcome/u)
     assert.equal(calls.includes('collect'), false, 'mismatched Transition id never reaches collector')
     assert.equal(calls.indexOf('stop-resident') < calls.indexOf('stop-leaf'), true)
+  }
+
+  {
+    const root = join(temporary, 'resident-stop-lies-alive')
+    const { paths, serverAttestation } = setup(root)
+    const calls = []
+    let clock = Date.parse(t(10))
+    const now = () => { clock += 100; return clock }
+    const adapters = createAdapters({ calls, paths, leaf: root, now })
+    const stopResident = adapters.stopResident
+    adapters.stopResident = async (args) => {
+      const stopped = await stopResident(args)
+      return {
+        ...stopped,
+        // The adapter claims STOPPED but its explicit child observation says
+        // that the resident process is still alive.
+        processExitObservation: { ...stopped.processExitObservation, state: 'running' },
+      }
+    }
+    const result = await runVtrReachProbeSupervisor({
+      attemptRoot: root,
+      runtimeDir: join(root, 'runtime'),
+      sourceSha: SOURCE,
+      paths,
+      expectedCaptureSchema: 'vtr-provider-activity-capture/v2',
+      expectedCaptureStatus: 'OBSERVED',
+      serverAttestation,
+      watchFactory: watchFactory(calls, captureFixture()),
+      observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
+      adapters,
+      outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
+      now,
+      timeoutMs: 3000,
+      sleep: async () => {},
+    })
+    assert.equal(result.status, 'FAIL', JSON.stringify(result, null, 2))
+    assert.equal(calls.includes('stop-leaf'), true, 'Leaf is still stopped after resident stop attestation fails')
+    assert.equal(calls.includes('finish'), true, 'capture closes after best-effort teardown')
+    assert.equal(calls.includes('seal'), false, 'archive cannot seal while the resident exit was not observed')
+  }
+
+  {
+    const root = join(temporary, 'leaf-listener-lies-open')
+    const { paths, serverAttestation } = setup(root)
+    const calls = []
+    let clock = Date.parse(t(10))
+    const now = () => { clock += 100; return clock }
+    const adapters = createAdapters({ calls, paths, leaf: root, now })
+    const stopLeaf = adapters.stopIsolatedLeaf
+    adapters.stopIsolatedLeaf = async (args) => {
+      const stopped = await stopLeaf(args)
+      return {
+        ...stopped,
+        // The adapter claims STOPPED while a TCP probe still sees a listener.
+        listenerClosureObservation: { ...stopped.listenerClosureObservation, state: 'open', result: 'connection-accepted' },
+      }
+    }
+    const result = await runVtrReachProbeSupervisor({
+      attemptRoot: root,
+      runtimeDir: join(root, 'runtime'),
+      sourceSha: SOURCE,
+      paths,
+      expectedCaptureSchema: 'vtr-provider-activity-capture/v2',
+      expectedCaptureStatus: 'OBSERVED',
+      serverAttestation,
+      watchFactory: watchFactory(calls, captureFixture()),
+      observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
+      adapters,
+      outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
+      now,
+      timeoutMs: 3000,
+      sleep: async () => {},
+    })
+    assert.equal(result.status, 'FAIL', JSON.stringify(result, null, 2))
+    assert.equal(calls.includes('stop-resident'), true)
+    assert.equal(calls.includes('finish'), true, 'capture closes after best-effort teardown')
+    assert.equal(calls.includes('seal'), false, 'archive cannot seal while the Leaf listener remains open')
+  }
+
+  {
+    const root = join(temporary, 'outcome-identity-mismatch')
+    const { paths, serverAttestation } = setup(root)
+    const calls = []
+    let clock = Date.parse(t(0))
+    const result = await runVtrReachProbeSupervisor({
+      attemptRoot: root,
+      runtimeDir: join(root, 'runtime'),
+      sourceSha: SOURCE,
+      paths,
+      expectedCaptureSchema: 'vtr-provider-activity-capture/v2',
+      expectedCaptureStatus: 'OBSERVED',
+      serverAttestation,
+      watchFactory: watchFactory(calls, captureFixture()),
+      observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
+      adapters: createAdapters({ calls, paths, leaf: root, wrongOutcomeIdentity: true, now: () => Date.parse(t(10)) }),
+      outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
+      now: () => { clock += 10; return clock },
+      timeoutMs: 1000,
+      pollMs: 25,
+      sleep: async () => {},
+    })
+    assert.equal(result.status, 'FAIL', JSON.stringify(result, null, 2))
+    assert.match(result.failure ?? '', /outcome is not bound/u)
+    assert.equal(calls.includes('collect'), false, 'outcome from another generation/world never reaches collector')
+    assert.equal(calls.includes('seal'), false)
   }
 } finally {
   rmSync(temporary, { recursive: true, force: true })
