@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
-import { authorityState, buildAuthorityQuestions } from './src/jev-authority.ts'
+import { AuthorityJevPolicy, authorityState, buildAuthorityQuestions } from './src/jev-authority.ts'
 import { JevReachRouteDecisionPolicy } from './src/jev-reach-route-policy.ts'
-import type { JevAnswer, JevPolicy, JevRequest, JevResult } from './src/jev-legacy.ts'
+import type { JevAnswer, JevPolicy, JevPolicyOptions, JevRequest, JevResult } from './src/jev-legacy.ts'
 import { createReachTransitionContract } from './src/vtr/reach.ts'
 import type { ReachIdentity } from './src/vtr/reach.ts'
 import type { ReachRoute, ReachRouteDecisionInput } from './src/vtr/reach-controller.ts'
@@ -146,6 +146,67 @@ test('route choice asks Jev over grounded routes with the complete VTR contract 
   assert.deepEqual((payload.goal as { context: unknown }).context, frame?.context)
   const questions = buildAuthorityQuestions(calls[0]!.candidates, ['action'], frame?.instructions)
   assert.equal(questions.action?.instructions, frame?.instructions)
+})
+
+test('VTR route frame journal records bounded Jev policy input without generic pi or beta authority', async () => {
+  const records: unknown[] = []
+  const observedResults: JevResult[] = []
+  const evaluateStub = async (args: { questions: Record<string, unknown> }) => {
+    assert.deepEqual(Object.keys(args.questions), ['action'])
+    return {
+      answers: {
+        action: { choice: 'MOVE:oak-b', probabilities: { 'MOVE:oak-a': 0.15, 'MOVE:oak-b': 0.85 } },
+      },
+      providerMetadata: {},
+      usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+    } as unknown as Awaited<ReturnType<typeof import('ai').experimental_evaluate>>
+  }
+  const policy = new AuthorityJevPolicy(
+    {
+      writer: { path: 'fixture', write(record: unknown) { records.push(record) } },
+      model: 'test-primary-jev',
+      timeoutMs: 1_000,
+      maxRetries: 0,
+      rateLimitRetries: 0,
+      rateLimitBaseDelayMs: 1,
+    } as unknown as JevPolicyOptions,
+    { key: 'fixture-only', origin: 'test' },
+    {
+      evaluate: evaluateStub as unknown as NonNullable<ConstructorParameters<typeof AuthorityJevPolicy>[2]>['evaluate'],
+    },
+  )
+  const adapter = new JevReachRouteDecisionPolicy({
+    policy: () => policy,
+    worldState: () => worldState(),
+    onCallStart: () => undefined,
+    onResult: (_request, result) => { observedResults.push(result) },
+    onFailure: (_request, reason) => assert.fail(reason),
+  })
+
+  assert.deepEqual(await adapter.chooseRoute(input), { status: 'selected', routeId: 'MOVE:oak-b' })
+  assert.equal(observedResults[0]?.source, 'jev', 'route selection remains production Jev policy input')
+  assert.equal(observedResults[0]?.answers.action?.value, 'MOVE:oak-b', 'the verified result retains Jev’s grounded choice')
+
+  const call = records.find((record) => (record as { record?: string }).record === 'jev-call') as {
+    policy: string
+    model: string
+    authority: Record<string, unknown>
+    response: { answers: Record<string, JevAnswer> }
+  }
+  assert.equal(call.policy, 'typesafe', 'the route frame still uses the configured production Jev policy')
+  assert.equal(call.model, 'test-primary-jev')
+  assert.deepEqual(call.authority.decisionFrame, {
+    kind: 'vtr-reach-route',
+    policy: 'jev',
+    questionAuthorities: { action: 'jev-policy-input' },
+  })
+  assert.equal(call.authority.pi, undefined)
+  assert.equal(call.authority.beta, undefined)
+  assert.equal(call.authority.code, 'grounding+safety+truth')
+  assert.equal(call.response.answers.action?.note, 'jev-reach-route-policy-input')
+  const decision = call.authority.decision as { betaProbability: number | null; betaAdopt: boolean }
+  assert.equal(decision.betaProbability, null, 'route-frame logging must not manufacture a beta vote')
+  assert.equal(decision.betaAdopt, false)
 })
 
 test('an unoffered Jev route is refused without deterministic substitution', async () => {

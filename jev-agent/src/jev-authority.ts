@@ -151,7 +151,7 @@ function calibratedConfidence(metadata: unknown, name: string): number | null {
   return typeof confidence === 'number' && Number.isFinite(confidence) ? confidence : null
 }
 
-function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnswer {
+function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown, routeFrame = false): JevAnswer {
   const confidence = calibratedConfidence(metadata, name)
   if (name === 'action') {
     const choice = member(raw, 'choice')
@@ -165,7 +165,7 @@ function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnsw
       confidence,
       probabilities,
       legend: null,
-      note: 'model-authoritative-pi',
+      note: routeFrame ? 'jev-reach-route-policy-input' : 'model-authoritative-pi',
     }
   }
   if (name === 'danger') {
@@ -195,6 +195,35 @@ function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnsw
     probabilities: { true: probability, false: 1 - probability },
     legend: null,
     note: name === 'abandon_option' ? 'model-authoritative-beta' : 'model-safety-estimate',
+  }
+}
+
+/**
+ * Describe the authority that participated in this evaluate() call. Legacy
+ * callers retain their historical pi/beta record; a VTR route frame is a
+ * bounded Jev policy input and must not be journaled as universal pi/beta.
+ */
+function authorityJournal(
+  request: JevRequest,
+  fields: { decision?: AuthorityDecisionMeta; failure?: string } = {},
+): Record<string, unknown> {
+  if (request.decisionFrame?.kind === 'vtr-reach-route') {
+    const requested = request.questionNames ?? QUESTION_NAMES
+    return {
+      decisionFrame: {
+        kind: request.decisionFrame.kind,
+        policy: 'jev',
+        questionAuthorities: Object.fromEntries(requested.map((name) => [name, 'jev-policy-input'])),
+      },
+      code: 'grounding+safety+truth',
+      ...fields,
+    }
+  }
+  return {
+    pi: 'model',
+    beta: 'model',
+    code: 'grounding+safety+truth',
+    ...fields,
   }
 }
 
@@ -782,7 +811,10 @@ export class AuthorityJevPolicy implements JevPolicy {
           abortSignal,
         })
         const answers: Record<string, JevAnswer> = {}
-        for (const name of requested) answers[name] = mapAnswer(name, response.answers[name], response.providerMetadata)
+        const isReachRouteFrame = request.decisionFrame?.kind === 'vtr-reach-route'
+        for (const name of requested) {
+          answers[name] = mapAnswer(name, response.answers[name], response.providerMetadata, isReachRouteFrame)
+        }
 
         const action = answers.action
         if (action !== undefined) {
@@ -811,12 +843,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           questions,
           response: { model: this.model, usage, answers },
           error: null,
-          authority: {
-            pi: 'model',
-            beta: 'model',
-            code: 'grounding+safety+truth',
-            decision: authorityDecision,
-          },
+          authority: authorityJournal(request, { decision: authorityDecision }),
         })
         const result = {
           callId,
@@ -842,7 +869,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
             transientRetries: transientRetryCount, transientWaitMs,
             state: modelState, questions, response: null, error: message,
-            authority: { pi: 'model', beta: 'model', failure: 'cancelled' },
+            authority: authorityJournal(request, { failure: 'cancelled' }),
             ...providerDiagnosticsField,
           })
           throw new FatalModelError('jev-authority', generalAttempt, message)
@@ -887,7 +914,7 @@ export class AuthorityJevPolicy implements JevPolicy {
               rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
               transientRetries: transientRetryCount, transientWaitMs,
               state: modelState, questions, response: null, error: message,
-              authority: { pi: 'model', beta: 'model', failure: 'transient-provider-retry' },
+              authority: authorityJournal(request, { failure: 'transient-provider-retry' }),
               retryScheduled: true,
               ...providerDiagnosticsField,
             })
@@ -916,7 +943,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
             transientRetries: transientRetryCount, transientWaitMs, state: modelState,
             questions, response: null, error: message,
-            authority: { pi: 'model', beta: 'model', failure: 'transient-provider-unavailable' },
+            authority: authorityJournal(request, { failure: 'transient-provider-unavailable' }),
             retryable: true,
             ...providerDiagnosticsField,
           })
@@ -936,7 +963,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
           transientRetries: transientRetryCount, transientWaitMs, state: modelState,
           questions, response: null, error: message,
-          authority: { pi: 'model', beta: 'model', failure: 'fatal-no-fallback' },
+          authority: authorityJournal(request, { failure: 'fatal-no-fallback' }),
           ...providerDiagnosticsField,
         })
         throw new FatalModelError('jev-authority', generalAttempt, message)
