@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import assert from 'node:assert/strict'
 import { createServer } from 'node:net'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, projectVtrTransitions, readVtrRunJsonlEvents } from './buddy-observer.mjs'
@@ -83,6 +83,7 @@ const report = {
 }
 
 const observerSourceSha = 'a'.repeat(40)
+const observerWorldKey = { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 }
 const observerRunMetadata = (runId = 'run-1', generationId = 'gen-7') => ({
   runArtifactsMatched: true,
   sourceSha: observerSourceSha,
@@ -90,8 +91,8 @@ const observerRunMetadata = (runId = 'run-1', generationId = 'gen-7') => ({
   acceptance: { runId, gitCommit: observerSourceSha, generationId },
   predicates: { runId, sourceSha: observerSourceSha, generationId },
 })
-const observerBoot = (runId = 'run-1', ts = '2026-09-21T11:59:59.000Z') => parseBuddyLogLine(
-  `[${ts}] BOOT pid=1 runId=${runId} source=${observerSourceSha}`,
+const observerBoot = (runId = 'run-1', ts = '2026-09-21T11:59:59.000Z', worldKey = observerWorldKey) => parseBuddyLogLine(
+  `[${ts}] BOOT pid=1 runId=${runId} source=${observerSourceSha} worldKey=${JSON.stringify(worldKey)}`,
 )
 const observerGenerationReady = (generationId = 'gen-7', ts = '2026-09-21T12:00:00.000Z') => parseBuddyLogLine(
   `[${ts}] GENERATION_READY runId=run-1 id=${generationId} generationId=${generationId} sourceSha=${observerSourceSha}`,
@@ -190,7 +191,7 @@ assert.equal(crossRunMissionSnapshot.mission.title, null)
 assert.equal(crossRunMissionSnapshot.mission.provenance.reason, 'mission_source_run_mismatch')
 
 const laggedGenerationEvents = [
-  parseBuddyLogLine(`[2026-09-23T19:36:20.000Z] BOOT pid=1 runId=run-observer-1 source=${observerSourceSha}`),
+  parseBuddyLogLine(`[2026-09-23T19:36:20.000Z] BOOT pid=1 runId=run-observer-1 source=${observerSourceSha} worldKey=${JSON.stringify(observerWorldKey)}`),
   parseBuddyLogLine(`[2026-09-23T19:36:23.559Z] GENERATION_READY runId=run-observer-1 id=gen-current generationId=gen-current sourceSha=${observerSourceSha}`),
   parseBuddyLogLine('[2026-09-23T19:36:28.302Z] JEV_HEADS action=MOVE:b99_67_79 generationId=gen-current'),
   parseBuddyLogLine('[2026-09-23T19:36:35.344Z] HEARTBEAT pos=99,67,79 generationId=gen-current'),
@@ -309,7 +310,7 @@ const vtrJournalEvents = parseVtrRunJsonlEvents([
   },
 ])
 assert.equal(vtrJournalEvents.length, 4)
-const vtrBoot = parseBuddyLogLine(`[2026-09-21T11:59:59.000Z] BOOT pid=1 runId=run-1 source=${observerSourceSha} mission={"kind":"inventory_at_least","item":"oak_log","count":1,"source":"BUDDY_MISSION_* or default"}`)
+const vtrBoot = parseBuddyLogLine(`[2026-09-21T11:59:59.000Z] BOOT pid=1 runId=run-1 source=${observerSourceSha} worldKey=${JSON.stringify(observerWorldKey)} mission={"kind":"inventory_at_least","item":"oak_log","count":1,"source":"BUDDY_MISSION_* or default"}`)
 const vtrReady = observerGenerationReady('gen-7', '2026-09-21T12:00:00.000Z')
 const liveVtrSnapshot = buildObserverSnapshot({
   report: { ...report, data: { ...report.data, worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 } } },
@@ -349,6 +350,57 @@ assert.equal(liveVtrSummary.choices.latest.actor, 'vtr')
 assert.equal(liveVtrSummary.transition.status, 'verified_success')
 assert.equal(liveVtrSummary.unknown.includes('no_choice_event_observed'), false)
 assert.match(liveVtrSummary.headline, /VTR outcome=SUCCESS; predicate verification=TRUE/)
+
+const unacceptedLiveRunSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, worldKey: observerWorldKey } },
+  events: [vtrBoot, vtrReady, ...vtrJournalEvents],
+  runBoot: vtrBoot,
+  runMetadata: {
+    runArtifactsMatched: false,
+    sourceSha: null,
+    sourceShaConflict: false,
+    acceptance: null,
+    predicates: { record: 'milestone-predicates', runId: 'run-1', sourceSha: observerSourceSha, generationId: 'gen-7' },
+  },
+  runGenerationReady: vtrReady,
+})
+assert.equal(unacceptedLiveRunSnapshot.resident.generationBoundary?.generationId, 'gen-7')
+assert.equal(unacceptedLiveRunSnapshot.resident.sourceCommit, observerSourceSha)
+assert.equal(unacceptedLiveRunSnapshot.mission.status, 'observed')
+assert.equal(unacceptedLiveRunSnapshot.vtr.latest.status, 'verified_success')
+
+const mismatchedBootWorld = observerBoot('run-1', '2026-09-21T11:59:59.000Z', {
+  serverId: 'other-server', dimension: 'minecraft:overworld', worldEpoch: 1,
+})
+const mismatchedBootWorldSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, worldKey: observerWorldKey } },
+  events: [mismatchedBootWorld, vtrReady, ...vtrJournalEvents],
+  runBoot: mismatchedBootWorld,
+  runMetadata: {
+    runArtifactsMatched: false,
+    sourceSha: null,
+    sourceShaConflict: false,
+    acceptance: null,
+    predicates: { record: 'milestone-predicates', runId: 'run-1', sourceSha: observerSourceSha, generationId: 'gen-7' },
+  },
+  runGenerationReady: vtrReady,
+})
+assert.equal(mismatchedBootWorldSnapshot.resident.generationBoundary, null)
+assert.equal(mismatchedBootWorldSnapshot.vtr.status, 'unknown')
+assert.equal(mismatchedBootWorldSnapshot.mission.status, 'unknown')
+
+const mismatchedReadyWorld = parseBuddyLogLine(
+  `[2026-09-21T12:00:00.000Z] GENERATION_READY runId=run-1 id=gen-7 generationId=gen-7 sourceSha=${observerSourceSha} worldKey={"serverId":"other-server","dimension":"minecraft:overworld","worldEpoch":1}`,
+)
+const mismatchedReadyWorldSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, worldKey: observerWorldKey } },
+  events: [vtrBoot, mismatchedReadyWorld, ...vtrJournalEvents],
+  runBoot: vtrBoot,
+  runMetadata: { runArtifactsMatched: false, sourceSha: null, sourceShaConflict: false, acceptance: null, predicates: null },
+  runGenerationReady: mismatchedReadyWorld,
+})
+assert.equal(mismatchedReadyWorldSnapshot.resident.generationBoundary, null)
+assert.equal(mismatchedReadyWorldSnapshot.vtr.status, 'unknown')
 
 const bootMissionSnapshot = buildObserverSnapshot({
   report: { ...report, data: { ...report.data, worldKey: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 1 } } },
@@ -688,10 +740,14 @@ const ingressRecords = [
 mkdirSync(join(ingressRuntimeDir, 'data', 'resident'), { recursive: true })
 mkdirSync(join(ingressRuntimeDir, 'logs', 'jev'), { recursive: true })
 writeFileSync(join(ingressRuntimeDir, 'buddy.log'), [
-  `[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha}`,
+  `[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha} worldKey=${JSON.stringify(ingressWorld)}`,
   `[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`,
   ingressRouteMirrorLine,
 ].join('\n') + '\n')
+writeFileSync(join(ingressRuntimeDir, 'data', 'resident', `milestone-predicates-${ingressRunId}.json`), JSON.stringify({
+  record: 'milestone-predicates', runId: ingressRunId, generationId: ingressGenerationId, sourceSha: ingressSourceSha,
+}))
+assert.equal(existsSync(join(ingressRuntimeDir, 'data', 'resident', `acceptance-${ingressRunId}.json`)), false)
 writeFileSync(join(ingressRuntimeDir, 'logs', 'jev', 'run.jsonl'), ingressRecords.map((record) => JSON.stringify(record)).join('\n') + '\n')
 const ingressSocketPath = join(ingressRuntimeDir, 'data', 'resident', 'control.sock')
 const ingressReportData = {
@@ -948,7 +1004,7 @@ const fallbackRouteRecord = {
     probabilities: { 'reach:oak-log:walk': 1 },
   },
 }
-const fallbackBoot = parseBuddyLogLine(`[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha}`)
+const fallbackBoot = parseBuddyLogLine(`[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha} worldKey=${JSON.stringify(ingressWorld)}`)
 const fallbackReady = parseBuddyLogLine(`[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`)
 const fallbackRouteSnapshot = buildObserverSnapshot({
   report: { ...report, data: { ...report.data, runId: ingressRunId, generationId: ingressGenerationId, worldKey: ingressWorld } },

@@ -351,15 +351,32 @@ function readRunMetadata(runtimeDir, runId) {
   }
 }
 
-function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, runBoot = null) {
+function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, runBoot = null, reportedWorldKey = null) {
   const validSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
   const bootSourceSha = runBoot?.detail?.source ?? runBoot?.detail?.sourceSha ?? null
   const readySourceSha = readyEvent?.detail?.source ?? readyEvent?.detail?.sourceSha ?? null
+  const reportedWorld = normalizeWorldKey(reportedWorldKey)
+  const bootWorld = normalizeWorldKey(runBoot?.detail?.worldKey ?? runBoot?.detail?.identity?.worldKey)
+  const readyWorldValue = readyEvent?.detail?.worldKey ?? readyEvent?.detail?.identity?.worldKey
+  const readyWorld = readyWorldValue === undefined || readyWorldValue === null
+    ? null
+    : normalizeWorldKey(readyWorldValue)
+  const reportedWorldId = completeWorldIdentity(reportedWorld)
+  const bootWorldId = completeWorldIdentity(bootWorld)
+  const readyWorldId = readyWorld === null ? null : completeWorldIdentity(readyWorld)
   const artifactSourceCandidates = [metadata?.acceptance?.gitCommit, metadata?.predicates?.sourceSha]
     .filter((value) => typeof value === 'string' && value.length > 0)
+  const artifactWorldCandidates = [
+    metadata?.acceptance?.worldKey ?? metadata?.acceptance?.identity?.worldKey,
+    metadata?.predicates?.worldKey ?? metadata?.predicates?.identity?.worldKey,
+  ].filter((value) => value !== undefined && value !== null)
   const artifactConflict = metadata?.sourceShaConflict === true
     || artifactSourceCandidates.some((value) => !validSha(value))
     || new Set(artifactSourceCandidates).size > 1
+  const artifactWorldConflict = artifactWorldCandidates.some((value) => {
+    const identity = completeWorldIdentity(normalizeWorldKey(value))
+    return identity === null || identity !== reportedWorldId
+  })
   const eventSourceBound = validSha(bootSourceSha)
     && validSha(readySourceSha)
     && bootSourceSha === readySourceSha
@@ -368,8 +385,12 @@ function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, r
     && generationId !== null
     && typeof generationId === 'string'
     && !artifactConflict
+    && !artifactWorldConflict
     && eventSourceBound
     && artifactMatchesEvents
+    && reportedWorldId !== null
+    && bootWorldId === reportedWorldId
+    && (readyWorldValue === undefined || readyWorldValue === null || readyWorldId === reportedWorldId)
     && (metadata?.acceptance?.runId === undefined || metadata.acceptance.runId === runId)
     && (metadata?.predicates?.runId === undefined || metadata.predicates.runId === runId)
     && (runBoot === null || (runBoot.event === 'BOOT' && runBoot.detail?.runId === runId))
@@ -1500,7 +1521,15 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     && entry.detail?.id === generationId
     && entry.detail?.runId === runId) ?? null
   const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
-  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, candidateGenerationReady, candidateBoot)
+  const reportedWorldKey = data?.worldKey ?? status?.worldKey ?? null
+  const generationBound = runGenerationAnchorMatches(
+    runMetadata,
+    runId,
+    generationId,
+    candidateGenerationReady,
+    candidateBoot,
+    reportedWorldKey,
+  )
   const generationStartedAt = generationBound ? parseTimestamp(candidateGenerationReady.ts) ?? NaN : NaN
   const runEvents = runId === null ? [] : events.filter((entry) => eventBelongsToRunGeneration(entry, {
     runId,
@@ -1628,7 +1657,7 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
         event: 'GENERATION_READY',
         generationId,
         observedAt: candidateGenerationReady.ts,
-        method: 'live-report+BOOT-runId/sourceSha+GENERATION_READY-runId/generationId/sourceSha',
+        method: 'live-report+worldKey+BOOT-runId/sourceSha/worldKey+GENERATION_READY-runId/generationId/sourceSha',
         artifactGenerations: {
           acceptance: generationArtifactStatus(runMetadata?.acceptance, generationId),
           predicates: generationArtifactStatus(runMetadata?.predicates, generationId),
@@ -2609,6 +2638,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   let cachedRunMetadata = null
   let cachedGenerationId = null
   let cachedGenerationReady = null
+  let cachedWorldKey = null
   const snapshot = async () => {
     if (snapshotInFlight !== null) return await snapshotInFlight
     snapshotInFlight = Promise.all([
@@ -2622,10 +2652,14 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       const currentRunId = typeof reportedRunId === 'string' && reportedRunId.length > 0 ? reportedRunId : null
       const reportedGenerationId = report?.ok === true ? report.data?.generationId : null
       const currentGenerationId = typeof reportedGenerationId === 'string' && reportedGenerationId.length > 0 ? reportedGenerationId : null
+      const currentWorldKey = report?.ok === true
+        ? report.data?.worldKey ?? report.data?.status?.worldKey ?? null
+        : null
       if (currentRunId === null) {
         cachedRunId = null
         cachedRunBoot = null
         cachedRunBuild = null
+        cachedWorldKey = null
       } else if (currentRunId !== cachedRunId) {
         cachedRunId = currentRunId
         cachedRunBoot = bootFromTail?.detail?.runId === currentRunId
@@ -2647,10 +2681,12 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         currentGenerationId,
         candidateGenerationReady,
         cachedRunBoot,
+        currentWorldKey,
       ) ? candidateGenerationReady : null
       cachedRunMetadata = runMetadata
       cachedGenerationId = currentGenerationId
       cachedGenerationReady = runGenerationReady
+      cachedWorldKey = currentWorldKey
       const runnerEvents = readRunnerOutEvents(runnerOutPath, { runId: currentRunId, bootTs: cachedRunBoot?.ts ?? null })
       const combinedEvents = [...events, ...runnerEvents, ...vtrEvents].sort((left, right) => {
         const leftTs = Date.parse(left.ts ?? '')
@@ -2678,7 +2714,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     const generationId = cachedGenerationId
     const generationReady = cachedGenerationReady
     const generationStartedAt = parseTimestamp(generationReady?.ts)
-    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady, cachedRunBoot)
+    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady, cachedRunBoot, cachedWorldKey)
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.floor(limit))) : 12
     const boundedMaxBytes = Number.isFinite(maxBytes)
       ? Math.max(1, Math.min(MAX_RECENT_CHOICE_LOG_BYTES, Math.floor(maxBytes)))
