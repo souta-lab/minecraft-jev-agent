@@ -194,14 +194,24 @@ export function parseJavaMajor(output) {
   return Number.isSafeInteger(major) ? major : null
 }
 
+export function parseJavaRuntime(output) {
+  const text = String(output)
+  const version = /version\s+"?([^\s"]+)/iu.exec(text)?.[1] ?? null
+  return {
+    major: parseJavaMajor(text),
+    version,
+    earlyAccess: /\b(?:ea|early[ -]access)\b/iu.test(text),
+  }
+}
+
 function javaVersion(javaExecutable) {
   const result = spawnSync(javaExecutable, ['-version'], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000,
     env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C' },
   })
-  if (result.error) return { major: null, reason: result.error.code ?? result.error.name }
+  if (result.error) return { major: null, version: null, earlyAccess: null, reason: result.error.code ?? result.error.name }
   const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-  return { major: parseJavaMajor(combined), exitCode: result.status }
+  return { ...parseJavaRuntime(combined), exitCode: result.status }
 }
 
 export async function preflightProbe(options) {
@@ -273,8 +283,10 @@ export async function preflightProbe(options) {
 
   await check('java-runtime', () => {
     const result = javaVersion(options.java)
-    if (result.major === null || result.major < 21 || result.exitCode !== 0) throw new Error(`Java 21 or newer is required; observed major=${result.major ?? 'unknown'}`)
-    return { executable: options.java, major: result.major, versionOutputStream: 'stdout+stderr' }
+    if (result.major === null || result.major < 21 || result.earlyAccess !== false || result.exitCode !== 0) {
+      throw new Error(`a generally available Java 21 or newer runtime is required; observed version=${result.version ?? result.major ?? 'unknown'} earlyAccess=${result.earlyAccess ?? 'unknown'}`)
+    }
+    return { executable: options.java, major: result.major, version: result.version, earlyAccess: false, versionOutputStream: 'stdout+stderr' }
   })
 
   await check('host-platform-and-compiler', () => {

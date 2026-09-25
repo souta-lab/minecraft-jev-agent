@@ -7,6 +7,7 @@ import {
   main,
   parseCliArgs,
   parseJavaMajor,
+  parseJavaRuntime,
   propertiesObject,
   renderProbeServerProperties,
   residentTerminationProblems,
@@ -54,6 +55,16 @@ describe('Reach live probe caller pure contracts', () => {
     expect(parseJavaMajor('openjdk version "21.0.4" 2026-07-15')).toBe(21)
     expect(parseJavaMajor('java version "1.8.0_402"')).toBe(8)
     expect(parseJavaMajor('not a Java version')).toBeNull()
+    expect(parseJavaRuntime('openjdk version "21.0.4" 2026-07-15')).toEqual({
+      major: 21, version: '21.0.4', earlyAccess: false,
+    })
+  })
+
+  test('Java preflight distinguishes unsupported early-access builds from general-availability builds', () => {
+    expect(parseJavaRuntime('openjdk version "25.0.5-ea" 2026-10-20')).toEqual({
+      major: 25, version: '25.0.5-ea', earlyAccess: true,
+    })
+    expect(parseJavaRuntime('openjdk version "25-ea" 2026-10-20')).toMatchObject({ major: 25, earlyAccess: true })
   })
 
   test('exact-source install accepts an unused declared workspace without a Bun link', () => {
