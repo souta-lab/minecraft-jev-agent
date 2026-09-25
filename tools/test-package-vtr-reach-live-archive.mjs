@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { packageVtrReachArchive } from './package-vtr-reach-live-archive.mjs'
 import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
 import { validateEvidenceArchive } from './validate-vtr-reach-evidence.mjs'
@@ -28,7 +28,7 @@ function regionPathForWitness(position) {
   const chunkZ = Math.floor(position.z / 16)
   const regionX = Math.floor(chunkX / 32)
   const regionZ = Math.floor(chunkZ / 32)
-  return `server/world/r.${regionX}.${regionZ}.mca`
+  return `server/world/region/r.${regionX}.${regionZ}.mca`
 }
 
 function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecycle = false, omitEgress = false, omitFixtureSource = false, omitFreshAttestation = false, staleFreshAttestation = false, oldFreshPhraseOnly = false, tamperFreshArtifactHash = false, externalAttempt = false, tamperEgress = false, egressCloseOffset = 49, tamperFixtureSourceHash = false, badFixtureObservation = false, badLifecycleObservation = false, omitStopObservations = false, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, localFallbackDecision = false, deprecatedModelCallsPerMechanicalStep = 0, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
@@ -190,15 +190,30 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
   const serverSpawnedAt = iso(-1)
   const attemptRootAbsolute = join(extraDir, 'attempt', RUN)
   const worldRootAbsolute = join(attemptRootAbsolute, 'vtr-reach-live')
-  const actualServerArgv = ['java', '-jar', '/nonexistent/server.jar', '--universe', attemptRootAbsolute, '--level-name', 'vtr-reach-live']
+  const serverConfigPath = join(extraDir, 'server.properties.launch')
+  const serverConfigArg = 'server.properties.launch'
+  const serverJarBytes = Buffer.from('Leaf jar fixture bytes')
+  const serverJarPath = join(extraDir, 'server.jar')
+  writeFixtureFile(extraDir, 'server.jar', serverJarBytes)
+  const actualServerArgv = ['java', '-jar', serverJarPath, '--nogui', '--config', serverConfigArg,
+    '--universe', attemptRootAbsolute, '--level-name', 'vtr-reach-live']
   const serverStart = {
     runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldKey: wrongServerIdentity ? '127.0.0.1:25566|overworld|4' : WORLD,
     levelName: 'vtr-reach-live', minecraftVersion: '1.21.4', dataVersion: 4189, difficulty: 'normal', worldEpoch: 4,
     pid: 502, serverId: '127.0.0.1:25565', port: 25565, spawnedAt: serverSpawnedAt,
     process: { pid: 502, startedAt: serverSpawnedAt, cwd: extraDir, universeArg: attemptRootAbsolute,
-      levelNameArg: 'vtr-reach-live', argv: actualServerArgv, commandLineSha256: digest(Buffer.from(actualServerArgv.join('\0'))) },
+      levelNameArg: 'vtr-reach-live', configArg: serverConfigArg, jarArg: serverJarPath,
+      argv: actualServerArgv, commandLineSha256: digest(Buffer.from(actualServerArgv.join('\0'))) },
+    serverPropertiesPath: serverConfigPath,
     serverPropertiesSha256: digest(Buffer.from(launchProperties)),
-    serverPropertiesEffectiveSha256: digest(Buffer.from(effectiveProperties)), serverJar: '/nonexistent/server.jar', serverJarSha256: 'd'.repeat(64),
+    serverPropertiesEffectiveSha256: digest(Buffer.from(effectiveProperties)), serverJar: serverJarPath, serverJarSha256: digest(serverJarBytes),
+    spawnObservation: {
+      schema: 'vtr-server-spawn-observation/v1', sourceSha: SOURCE, runId: RUN, generationId: GENERATION,
+      worldKey: WORLD, serverId: '127.0.0.1:25565', port: 25565, levelName: 'vtr-reach-live',
+      pid: 502, spawnedAt: serverSpawnedAt, cwd: extraDir, argv: [...actualServerArgv],
+      commandLineSha256: digest(Buffer.from(actualServerArgv.join('\0'))), configPath: serverConfigPath,
+      configSha256: digest(Buffer.from(launchProperties)), jarPath: serverJarPath, jarSha256: digest(serverJarBytes),
+    },
   }
   const lifecycleRows = [
     { schema: 'vtr-reach-probe-lifecycle/v1', event: 'terminal-consumed', ts: iso(42), actor: 'probe-harness',
@@ -221,6 +236,17 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     [playerDataArchivePath]: Buffer.from('player fixture bytes'),
     [regionPathForWitness(witnessPosition)]: Buffer.from('region fixture bytes'),
   }
+  const worldPathChain = (sourcePath) => {
+    const chain = [{ path: attemptRootAbsolute, realPath: attemptRootAbsolute, kind: 'directory', symlink: false }]
+    let current = attemptRootAbsolute
+    const parts = relative(attemptRootAbsolute, sourcePath).split('/').filter(Boolean)
+    for (const [index, part] of parts.entries()) {
+      current = join(current, part)
+      const final = index === parts.length - 1
+      chain.push({ path: current, realPath: current, kind: final ? 'file' : 'directory', symlink: false })
+    }
+    return chain
+  }
   const preparingLine = '[21:50:53 INFO]: Preparing level "vtr-reach-live"'
   const doneLine = '[21:51:02 INFO]: Done (5.0s)! For help, type "help"'
   const stdoutReceipt = (sequence, receivedAt, line) => ({ schema: 'vtr-server-stdout-observation/v1', sourceSha: SOURCE,
@@ -238,7 +264,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     sourceSha: SOURCE, runId: RUN, serverId: '127.0.0.1:25565', port: 25565, levelName: 'vtr-reach-live',
     server: { pid: 502, spawnedAt: serverSpawnedAt, serverId: '127.0.0.1:25565', port: 25565,
       levelName: 'vtr-reach-live', minecraftVersion: '1.21.4', dataVersion: 4189,
-      jarPath: '/nonexistent/server.jar', jarSha256: 'd'.repeat(64) },
+      jarPath: serverJarPath, jarSha256: digest(serverJarBytes) },
     worldRoot: { absolute: worldRootAbsolute, attemptRoot: attemptRootAbsolute, archivePath: 'server/world', uniqueForRun: RUN },
     preStartObservation: { sourceSha: SOURCE, runId: RUN, serverPid: 502, serverId: '127.0.0.1:25565', port: 25565,
       levelName: 'vtr-reach-live', observedAt: iso(-2), state: 'absent', entries: [], path: worldRootAbsolute,
@@ -248,10 +274,16 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     startupLog: { pid: 502, streamSource: 'spawned-server-stdout',
       preparing: { line: preparingLine, sequence: 1, ts: iso(1), lineSha256: digest(Buffer.from(preparingLine)) },
       done: { line: doneLine, sequence: 2, ts: iso(2), lineSha256: digest(Buffer.from(doneLine)) } },
-    postRunObservation: { observedAt: iso(51), files: Object.entries(worldArtifactBytes).map(([archivePath, bytes]) => ({
-      archivePath, sourcePath: join(worldRootAbsolute, archivePath.slice('server/world/'.length)), bytes: bytes.length,
+    postRunObservation: { observedAt: iso(51), files: Object.entries(worldArtifactBytes).map(([archivePath, bytes]) => {
+      const sourcePath = join(worldRootAbsolute, archivePath.slice('server/world/'.length))
+      return {
+      archivePath, sourcePath, realPath: sourcePath, capturedAt: iso(51),
+      sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey: WORLD,
+      serverId: '127.0.0.1:25565', serverPid: 502, port: 25565, levelName: 'vtr-reach-live',
+      pathChain: worldPathChain(sourcePath), bytes: bytes.length,
       sha256: tamperFreshArtifactHash && archivePath.endsWith('level.dat') ? 'f'.repeat(64) : digest(bytes),
-    })) },
+      }
+    }) },
   }
   if (staleFreshAttestation) freshWorldAttestation.preStartObservation.levelDat.state = 'present'
   if (oldFreshPhraseOnly) freshWorldAttestation.startupLog.done.line = 'No existing world data, creating new world'
@@ -314,9 +346,9 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     'server/server.properties.launch': writeFixtureFile(extraDir, 'server.properties.launch', launchProperties),
     'server/server.properties.effective-after-boot': writeFixtureFile(extraDir, 'server.properties.effective-after-boot', effectiveProperties),
     'server/fresh-world-attestation.json': writeJson(join(extraDir, 'fresh-world-attestation.json'), freshWorldAttestation),
-    'server/world/level.dat': writeFixtureFile(extraDir, 'level.dat', worldArtifactBytes['server/world/level.dat']),
-    [playerDataArchivePath]: writeFixtureFile(extraDir, 'playerdata.dat', worldArtifactBytes[playerDataArchivePath]),
-    [regionPathForWitness(witnessPosition)]: writeFixtureFile(extraDir, 'witness-region.mca', worldArtifactBytes[regionPathForWitness(witnessPosition)]),
+    'server/world/level.dat': writeFixtureFile(worldRootAbsolute, 'level.dat', worldArtifactBytes['server/world/level.dat']),
+    [playerDataArchivePath]: writeFixtureFile(join(worldRootAbsolute, 'playerdata'), `${runMetadata.run.botUuid}.dat`, worldArtifactBytes[playerDataArchivePath]),
+    [regionPathForWitness(witnessPosition)]: writeFixtureFile(join(worldRootAbsolute, 'region'), regionPathForWitness(witnessPosition).split('/').at(-1), worldArtifactBytes[regionPathForWitness(witnessPosition)]),
   }
 
   if (addCapture) {
@@ -426,8 +458,8 @@ try {
   assert.equal(completeResult.report.requiredWitnessRegionPath, complete.witnessRegionPath)
   assert.ok(completeResult.report.requiredValidatorPaths.includes(complete.witnessRegionPath))
   assert.equal(completeResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'PASS')
-  assert.equal(complete.witnessRegionPath, 'server/world/r.0.0.mca')
-  assert.equal(existsSync(join(complete.archive, 'server/world/r.-1.0.mca')), false, 'a positive witness does not require the former fixed negative-region path')
+  assert.equal(complete.witnessRegionPath, 'server/world/region/r.0.0.mca')
+  assert.equal(existsSync(join(complete.archive, 'server/world/region/r.-1.0.mca')), false, 'a positive witness does not require the former fixed negative-region path')
   assert.equal(packagedProbe.configuredNoLlmProbe.networkModelCalls, 0)
   assert.equal(packagedProbe.egressAudit.status, 'OBSERVED_ZERO')
   assert.equal(packagedProbe.egressAudit.coverageStatus, 'USERSPACE_ONLY_CLOSED')
@@ -483,11 +515,43 @@ try {
   const changedFreshArtifactResult = packageVtrReachArchive({ collectorReportPath: changedFreshArtifact.collectorPath, manifestPath: changedFreshArtifact.manifestPath, archivePath: changedFreshArtifact.archive })
   assert.equal(changedFreshArtifactResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL')
 
+  const oldWorldSource = makeFixture(join(tempRoot, 'old-world-source'))
+  const oldWorldPath = writeFixtureFile(join(dirname(oldWorldSource.collectorPath), 'extra', 'old-world'), 'level.dat',
+    readFileSync(oldWorldSource.files['server/world/level.dat']))
+  const oldWorldManifest = JSON.parse(readFileSync(oldWorldSource.manifestPath, 'utf8'))
+  oldWorldManifest.files['server/world/level.dat'] = oldWorldPath
+  writeJson(oldWorldSource.manifestPath, oldWorldManifest)
+  const oldWorldSourceResult = packageVtrReachArchive({ collectorReportPath: oldWorldSource.collectorPath, manifestPath: oldWorldSource.manifestPath, archivePath: oldWorldSource.archive })
+  assert.equal(oldWorldSourceResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'an old-world manifest source cannot be legitimized by the attestation claiming the fresh world path')
+
+  const symlinkedWorldRoot = makeFixture(join(tempRoot, 'symlinked-world-root'))
+  const worldRootPath = dirname(symlinkedWorldRoot.files['server/world/level.dat'])
+  const realWorldRootPath = `${worldRootPath}-real`
+  renameSync(worldRootPath, realWorldRootPath)
+  symlinkSync(realWorldRootPath, worldRootPath, 'dir')
+  const symlinkedWorldRootResult = packageVtrReachArchive({ collectorReportPath: symlinkedWorldRoot.collectorPath, manifestPath: symlinkedWorldRoot.manifestPath, archivePath: symlinkedWorldRoot.archive })
+  assert.equal(symlinkedWorldRootResult.report.checks.find((entry) => entry.id === 'server:world-source-filesystem')?.status, 'FAIL',
+    'a symlinked world root is rejected even when source and attested lexical paths match')
+
+  for (const component of ['playerdata', 'region']) {
+    const symlinkedWorldChild = makeFixture(join(tempRoot, `symlinked-world-${component}`))
+    const childPath = join(dirname(symlinkedWorldChild.files['server/world/level.dat']), component)
+    const realChildPath = `${childPath}-real`
+    renameSync(childPath, realChildPath)
+    symlinkSync(realChildPath, childPath, 'dir')
+    const symlinkedWorldChildResult = packageVtrReachArchive({ collectorReportPath: symlinkedWorldChild.collectorPath, manifestPath: symlinkedWorldChild.manifestPath, archivePath: symlinkedWorldChild.archive })
+    assert.equal(symlinkedWorldChildResult.report.checks.find((entry) => entry.id === 'server:world-source-filesystem')?.status, 'FAIL',
+      `a symlinked ${component} parent is rejected even when the final file itself is regular`)
+  }
+
   for (const [name, mutate] of [
     ['pid', (document) => { document.server.pid = 777; document.preStartObservation.serverPid = 777 }],
     ['port', (document) => { document.server.port = 25566 }],
     ['level', (document) => { document.server.levelName = 'stale-world' }],
     ['source-path', (document) => { document.postRunObservation.files[0].sourcePath = join(dirname(document.worldRoot.absolute), 'old-world', 'level.dat') }],
+    ['per-file-pre-stop', (document) => { document.postRunObservation.files[0].capturedAt = iso(49) }],
+    ['per-file-symlink-claim', (document) => { document.postRunObservation.files[0].pathChain[1].symlink = true }],
     ['stdout-time', (document) => { document.startupLog.preparing.ts = iso(4) }],
     ['before-server-stop', (document) => { document.postRunObservation.observedAt = iso(49) }],
   ]) {
@@ -503,6 +567,8 @@ try {
     const index = document.process.argv.indexOf('--universe')
     document.process.argv[index + 1] = document.process.universeArg
     document.process.commandLineSha256 = digest(Buffer.from(document.process.argv.join('\0')))
+    document.spawnObservation.argv = [...document.process.argv]
+    document.spawnObservation.commandLineSha256 = document.process.commandLineSha256
   })
   const wrongUniverseResult = packageVtrReachArchive({ collectorReportPath: wrongUniverse.collectorPath, manifestPath: wrongUniverse.manifestPath, archivePath: wrongUniverse.archive })
   assert.equal(wrongUniverseResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
@@ -513,12 +579,61 @@ try {
     ['runId', (document) => { document.runId = 'run-stale-identity' }],
     ['generationId', (document) => { document.generationId = 'gen-stale-identity' }],
     ['worldKey', (document) => { document.worldKey = '127.0.0.1:25566|overworld|4' }],
+    ['spawn-pid', (document) => { document.spawnObservation.pid = 999 }],
+    ['spawn-world', (document) => { document.spawnObservation.worldKey = '127.0.0.1:25566|overworld|4' }],
   ]) {
     const wrongServerStartIdentity = makeFixture(join(tempRoot, `server-start-${name}-tamper`))
     mutateMappedJson(wrongServerStartIdentity, 'server/server-start.json', mutate)
     const wrongIdentityResult = packageVtrReachArchive({ collectorReportPath: wrongServerStartIdentity.collectorPath, manifestPath: wrongServerStartIdentity.manifestPath, archivePath: wrongServerStartIdentity.archive })
     assert.equal(wrongIdentityResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL', `server-start ${name} mismatch is rejected`)
   }
+
+  for (const [name, option] of [['universe', '--universe'], ['level-name', '--level-name'], ['config', '--config'], ['jar', '-jar']]) {
+    const duplicateArg = makeFixture(join(tempRoot, `server-start-duplicate-${name}`))
+    mutateMappedJson(duplicateArg, 'server/server-start.json', (document) => {
+      const index = document.process.argv.indexOf(option)
+      document.process.argv.splice(index + 2, 0, option, document.process.argv[index + 1])
+      document.process.commandLineSha256 = digest(Buffer.from(document.process.argv.join('\0')))
+      document.spawnObservation.argv = [...document.process.argv]
+      document.spawnObservation.commandLineSha256 = document.process.commandLineSha256
+    })
+    const duplicateArgResult = packageVtrReachArchive({ collectorReportPath: duplicateArg.collectorPath, manifestPath: duplicateArg.manifestPath, archivePath: duplicateArg.archive })
+    assert.equal(duplicateArgResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+      `duplicate actual ${option} argv is rejected`)
+  }
+
+  const alternateConfig = makeFixture(join(tempRoot, 'server-start-alternate-config'))
+  mutateMappedJson(alternateConfig, 'server/server-start.json', (document) => {
+    document.process.configArg = 'other.properties'
+    document.process.argv[document.process.argv.indexOf('--config') + 1] = document.process.configArg
+    document.process.commandLineSha256 = digest(Buffer.from(document.process.argv.join('\0')))
+    document.spawnObservation.argv = [...document.process.argv]
+    document.spawnObservation.commandLineSha256 = document.process.commandLineSha256
+    document.spawnObservation.configPath = join(document.process.cwd, document.process.configArg)
+  })
+  const alternateConfigResult = packageVtrReachArchive({ collectorReportPath: alternateConfig.collectorPath, manifestPath: alternateConfig.manifestPath, archivePath: alternateConfig.archive })
+  assert.equal(alternateConfigResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'alternate --config path with a recomputed argv hash is rejected')
+
+  const alternateJar = makeFixture(join(tempRoot, 'server-start-alternate-jar'))
+  mutateMappedJson(alternateJar, 'server/server-start.json', (document) => {
+    document.process.jarArg = '/other/server.jar'
+    document.process.argv[document.process.argv.indexOf('-jar') + 1] = document.process.jarArg
+    document.process.commandLineSha256 = digest(Buffer.from(document.process.argv.join('\0')))
+    document.spawnObservation.argv = [...document.process.argv]
+    document.spawnObservation.commandLineSha256 = document.process.commandLineSha256
+    document.spawnObservation.jarPath = document.process.jarArg
+  })
+  const alternateJarResult = packageVtrReachArchive({ collectorReportPath: alternateJar.collectorPath, manifestPath: alternateJar.manifestPath, archivePath: alternateJar.archive })
+  assert.equal(alternateJarResult.report.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'alternate -jar path with a recomputed argv hash is rejected')
+
+  const changedJarBytes = makeFixture(join(tempRoot, 'changed-jar-bytes'))
+  const changedJarServerStart = JSON.parse(readFileSync(changedJarBytes.files['server/server-start.json'], 'utf8'))
+  writeFileSync(changedJarServerStart.serverJar, Buffer.from('different Leaf jar bytes'))
+  const changedJarResult = packageVtrReachArchive({ collectorReportPath: changedJarBytes.collectorPath, manifestPath: changedJarBytes.manifestPath, archivePath: changedJarBytes.archive })
+  assert.equal(changedJarResult.report.checks.find((entry) => entry.id === 'server:spawned-artifacts')?.status, 'FAIL',
+    'server JAR bytes are rehashed at package time instead of trusting the startup SHA claim')
 
   const tamperedStdoutReceipt = makeFixture(join(tempRoot, 'tampered-stdout-receipt'))
   mutateMappedJsonl(tamperedStdoutReceipt, 'server/leaf-stdout-events.jsonl', (rows) => { rows[1].lineSha256 = 'f'.repeat(64) })
@@ -536,6 +651,67 @@ try {
   const rehashedValidation = await validateEvidenceArchive(rehashedTamper.archive)
   assert.equal(rehashedValidation.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
     'rehashing SHA256SUMS cannot make a stale-world attestation pass semantic validation')
+
+  const rehashedOldOrigin = makeFixture(join(tempRoot, 'rehashed-old-origin'))
+  packageVtrReachArchive({ collectorReportPath: rehashedOldOrigin.collectorPath, manifestPath: rehashedOldOrigin.manifestPath, archivePath: rehashedOldOrigin.archive })
+  const packageReportPath = join(rehashedOldOrigin.archive, 'packaging-report.json')
+  const tamperedPackageReport = JSON.parse(readFileSync(packageReportPath, 'utf8'))
+  const levelOrigin = tamperedPackageReport.sourceOrigins.entries.find((entry) => entry.archivePath === 'server/world/level.dat')
+  assert.ok(levelOrigin, 'packager preserves actual world source origin in the archived report')
+  levelOrigin.sourcePath = join(dirname(rehashedOldOrigin.collectorPath), 'extra', 'old-world', 'level.dat')
+  levelOrigin.realPath = levelOrigin.sourcePath
+  writeJson(packageReportPath, tamperedPackageReport)
+  rehashArchiveFile(rehashedOldOrigin.archive, 'packaging-report.json')
+  const rehashedOldOriginValidation = await validateEvidenceArchive(rehashedOldOrigin.archive)
+  assert.equal(rehashedOldOriginValidation.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'rehashing the archive manifest cannot make an old-world source origin match the fresh worldRoot claim')
+  assert.ok(rehashedOldOriginValidation.checks.some((entry) => entry.id === 'sha256:packaging-report.json' && entry.status === 'PASS'),
+    'tampered package provenance is tested with a fully rehashed archive, so rejection is semantic')
+
+  const rehashedJarOrigin = makeFixture(join(tempRoot, 'rehashed-jar-origin'))
+  packageVtrReachArchive({ collectorReportPath: rehashedJarOrigin.collectorPath, manifestPath: rehashedJarOrigin.manifestPath, archivePath: rehashedJarOrigin.archive })
+  const rehashedJarReportPath = join(rehashedJarOrigin.archive, 'packaging-report.json')
+  const rehashedJarReport = JSON.parse(readFileSync(rehashedJarReportPath, 'utf8'))
+  rehashedJarReport.serverJarSource.sha256 = 'f'.repeat(64)
+  writeJson(rehashedJarReportPath, rehashedJarReport)
+  rehashArchiveFile(rehashedJarOrigin.archive, 'packaging-report.json')
+  const rehashedJarValidation = await validateEvidenceArchive(rehashedJarOrigin.archive)
+  assert.equal(rehashedJarValidation.checks.find((entry) => entry.id === 'server:spawned-artifacts')?.status, 'FAIL',
+    'offline validation binds the actual JAR source hash back to the exact spawned argv record')
+
+  const rehashedPreStopRead = makeFixture(join(tempRoot, 'rehashed-pre-stop-read'))
+  packageVtrReachArchive({ collectorReportPath: rehashedPreStopRead.collectorPath, manifestPath: rehashedPreStopRead.manifestPath, archivePath: rehashedPreStopRead.archive })
+  const preStopAttestationPath = join(rehashedPreStopRead.archive, 'server/fresh-world-attestation.json')
+  const preStopAttestation = JSON.parse(readFileSync(preStopAttestationPath, 'utf8'))
+  preStopAttestation.postRunObservation.files[0].capturedAt = iso(49)
+  writeJson(preStopAttestationPath, preStopAttestation)
+  const preStopPackageReportPath = join(rehashedPreStopRead.archive, 'packaging-report.json')
+  const preStopPackageReport = JSON.parse(readFileSync(preStopPackageReportPath, 'utf8'))
+  const preStopOrigin = preStopPackageReport.sourceOrigins.entries.find((entry) => entry.archivePath === 'server/world/level.dat')
+  preStopOrigin.capturedAt = iso(49)
+  writeJson(preStopPackageReportPath, preStopPackageReport)
+  rehashArchiveFile(rehashedPreStopRead.archive, 'server/fresh-world-attestation.json')
+  rehashArchiveFile(rehashedPreStopRead.archive, 'packaging-report.json')
+  const rehashedPreStopValidation = await validateEvidenceArchive(rehashedPreStopRead.archive)
+  assert.equal(rehashedPreStopValidation.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'same-path bytes relabeled as post-run cannot pass with a pre-stop per-file read receipt, even after archive rehash')
+
+  const rehashedSymlinkClaim = makeFixture(join(tempRoot, 'rehashed-symlink-claim'))
+  packageVtrReachArchive({ collectorReportPath: rehashedSymlinkClaim.collectorPath, manifestPath: rehashedSymlinkClaim.manifestPath, archivePath: rehashedSymlinkClaim.archive })
+  const symlinkAttestationPath = join(rehashedSymlinkClaim.archive, 'server/fresh-world-attestation.json')
+  const symlinkAttestation = JSON.parse(readFileSync(symlinkAttestationPath, 'utf8'))
+  symlinkAttestation.postRunObservation.files[0].pathChain[1].symlink = true
+  writeJson(symlinkAttestationPath, symlinkAttestation)
+  const symlinkPackageReportPath = join(rehashedSymlinkClaim.archive, 'packaging-report.json')
+  const symlinkPackageReport = JSON.parse(readFileSync(symlinkPackageReportPath, 'utf8'))
+  const symlinkOrigin = symlinkPackageReport.sourceOrigins.entries.find((entry) => entry.archivePath === 'server/world/level.dat')
+  symlinkOrigin.pathChain[1].symlink = true
+  writeJson(symlinkPackageReportPath, symlinkPackageReport)
+  rehashArchiveFile(rehashedSymlinkClaim.archive, 'server/fresh-world-attestation.json')
+  rehashArchiveFile(rehashedSymlinkClaim.archive, 'packaging-report.json')
+  const rehashedSymlinkValidation = await validateEvidenceArchive(rehashedSymlinkClaim.archive)
+  assert.equal(rehashedSymlinkValidation.checks.find((entry) => entry.id === 'server:fresh-world-attestation')?.status, 'FAIL',
+    'a rehashed path-chain receipt cannot claim symlink-free world provenance when it records a symlink')
   assert.equal(noAttestationResult.report.providerActivity.status, 'INCOMPLETE')
   const noAttestationProbe = JSON.parse(readFileSync(join(noAttestation.archive, 'probe.json'), 'utf8'))
   assert.equal(noAttestationProbe.configuredNoLlmProbe.networkModelCalls, null)
@@ -628,7 +804,7 @@ try {
 
   const positiveRegion = makeFixture(join(tempRoot, 'positive-region'), { witnessPosition: { x: 513, y: 64, z: 515 } })
   const positiveRegionResult = packageVtrReachArchive({ collectorReportPath: positiveRegion.collectorPath, manifestPath: positiveRegion.manifestPath, archivePath: positiveRegion.archive })
-  assert.equal(positiveRegion.witnessRegionPath, 'server/world/r.1.1.mca')
+  assert.equal(positiveRegion.witnessRegionPath, 'server/world/region/r.1.1.mca')
   assert.equal(positiveRegionResult.report.requiredWitnessRegionPath, positiveRegion.witnessRegionPath)
   assert.ok(positiveRegionResult.report.requiredValidatorPaths.includes(positiveRegion.witnessRegionPath))
   assert.equal(positiveRegionResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'PASS')
@@ -636,7 +812,7 @@ try {
 
   const negativeRegion = makeFixture(join(tempRoot, 'negative-region'), { witnessPosition: { x: -513, y: 64, z: -515 } })
   const negativeRegionResult = packageVtrReachArchive({ collectorReportPath: negativeRegion.collectorPath, manifestPath: negativeRegion.manifestPath, archivePath: negativeRegion.archive })
-  assert.equal(negativeRegion.witnessRegionPath, 'server/world/r.-2.-2.mca')
+  assert.equal(negativeRegion.witnessRegionPath, 'server/world/region/r.-2.-2.mca')
   assert.equal(negativeRegionResult.report.requiredWitnessRegionPath, negativeRegion.witnessRegionPath)
   assert.ok(negativeRegionResult.report.requiredValidatorPaths.includes(negativeRegion.witnessRegionPath))
   assert.equal(negativeRegionResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'PASS')
@@ -647,7 +823,7 @@ try {
   delete manifestWithoutWitness.files[missingWitnessRegion.witnessRegionPath]
   writeJson(missingWitnessRegion.manifestPath, manifestWithoutWitness)
   const missingWitnessResult = packageVtrReachArchive({ collectorReportPath: missingWitnessRegion.collectorPath, manifestPath: missingWitnessRegion.manifestPath, archivePath: missingWitnessRegion.archive })
-  assert.equal(missingWitnessRegion.witnessRegionPath, 'server/world/r.0.0.mca')
+  assert.equal(missingWitnessRegion.witnessRegionPath, 'server/world/region/r.0.0.mca')
   assert.equal(missingWitnessResult.report.requiredWitnessRegionPath, missingWitnessRegion.witnessRegionPath)
   assert.ok(missingWitnessResult.report.requiredValidatorPaths.includes(missingWitnessRegion.witnessRegionPath))
   assert.equal(missingWitnessResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'INCOMPLETE')

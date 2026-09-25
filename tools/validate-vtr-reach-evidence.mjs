@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { gunzipSync, inflateSync } from 'node:zlib'
-import { basename, join, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { parse as parseNbt } from 'prismarine-nbt'
@@ -78,12 +78,14 @@ The fixture's conflict count is separate from the live run's zero-conflict
 metric.
 
 Fresh-world identity is established by server/fresh-world-attestation.json:
-an exact-source/run/PID/port/level-bound pre-start absence observation for the
-actual --universe/--level-name world root (including absent level.dat and
-level.dat_old), same-child stdout receipt rows with PID/UTC timestamps for the
-exact Preparing/Done Leaf lines, and rehashed post-stop level.dat, UUID-bound
-playerdata, and witness MCA bytes. A freshWorld boolean or startup phrase is
-not evidence.
+an exact-source/run/PID/port/level-bound spawn observation for the actual child
+argv/CWD, with unique --universe/--level-name/--config/-jar args and hashes; a
+pre-start absence observation for that world root (including absent level.dat
+and level.dat_old); same-child stdout receipt rows with PID/UTC timestamps for
+Preparing/Done; and per-file post-stop read receipts after process exit and
+listener refusal. Receipts bind every world-file path, realPath and no-symlink
+pathChain, with source origins preserved in packaging-report.json. A
+freshWorld boolean or startup phrase is not evidence.
 `
 
 function parseArgs(argv) {
@@ -1770,7 +1772,7 @@ export function witnessRegionRelativePath(target) {
   const chunkZ = Math.floor(target.z / 16)
   const regionX = Math.floor(chunkX / 32)
   const regionZ = Math.floor(chunkZ / 32)
-  return `server/world/r.${regionX}.${regionZ}.mca`
+  return `server/world/region/r.${regionX}.${regionZ}.mca`
 }
 
 async function readBlockName(regionPath, x, y, z) {
@@ -1996,6 +1998,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
   const pass = (id, detail = {}) => add(id, CHECK_STATUS.PASS, detail)
   const required = [
     'probe.json',
+    'packaging-report.json',
     'runner/acceptance.json',
     'runner/buddy.log',
     'runner/generation-bundle.mjs',
@@ -2071,7 +2074,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
   }
 
   const docs = {}
-  for (const path of ['probe.json', 'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/milestone-predicates.json', 'server/server-start.json']) {
+  for (const path of ['probe.json', 'packaging-report.json', 'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/milestone-predicates.json', 'server/server-start.json']) {
     if (!present.has(path)) continue
     try { docs[path] = readJson(archive, path) } catch { /* parse error is already reported above */ }
   }
@@ -2111,6 +2114,68 @@ export async function validateEvidenceArchive(archive, repo = null) {
     } catch { /* lifecycle parser reports malformed bytes in the provider-capture check */ }
     const stoppedServerRow = lifecycleRowsForFreshWorld.find((row) => row.event === 'server-stopped') ?? null
     const worldIdentity = parseWorldKey(run.worldKey)
+    const packagingReport = docs['packaging-report.json']
+    const sourceOrigins = packagingReport?.sourceOrigins
+    const worldSourcePaths = new Map()
+    const worldSourceReceipts = new Map()
+    let launchPropertiesSourcePath = null
+    if (!sourceOrigins || sourceOrigins.schema !== 'vtr-reach-source-origin-manifest/v1' ||
+        sourceOrigins.sourceSha?.toLowerCase?.() !== String(sourceSha ?? '').toLowerCase() ||
+        sourceOrigins.runId !== runId || sourceOrigins.generationId !== generationId ||
+        sourceOrigins.worldKey !== run.worldKey || !Array.isArray(sourceOrigins.entries)) {
+      fail('server:world-source-manifest', 'packaging report lacks an exact-source/run/world-bound world-source origin map')
+    } else {
+      let originInvalid = false
+      for (const entry of sourceOrigins.entries) {
+        if (!entry || typeof entry.archivePath !== 'string' || !entry.archivePath.startsWith('server/world/') ||
+            entry.archivePath.split('/').some((part) => part === '' || part === '.' || part === '..') ||
+            typeof entry.sourcePath !== 'string' || !isAbsolute(entry.sourcePath) ||
+            typeof entry.realPath !== 'string' || resolve(entry.realPath) !== resolve(entry.sourcePath) ||
+            !Number.isFinite(Date.parse(entry.capturedAt ?? '')) ||
+            entry.sourceSha?.toLowerCase?.() !== String(sourceSha ?? '').toLowerCase() || entry.runId !== runId ||
+            entry.generationId !== generationId || entry.worldKey !== run.worldKey ||
+            entry.serverId !== run.serverId || entry.serverPid !== serverStart?.pid || entry.port !== worldIdentity?.serverId?.match(/^127\.0\.0\.1:(\d+)$/u)?.[1] * 1 ||
+            entry.levelName !== run.levelName || !Array.isArray(entry.pathChain) ||
+            !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !/^[0-9a-f]{64}$/iu.test(String(entry.sha256 ?? '')) ||
+            worldSourcePaths.has(entry.archivePath)) {
+          originInvalid = true
+          break
+        }
+        const archivedPath = join(archive, entry.archivePath)
+        const bytes = existsSync(archivedPath) ? readFileSync(archivedPath) : null
+        if (bytes === null || bytes.length !== entry.bytes || sha256(bytes) !== entry.sha256.toLowerCase()) {
+          originInvalid = true
+          break
+        }
+        worldSourcePaths.set(entry.archivePath, entry.sourcePath)
+        worldSourceReceipts.set(entry.archivePath, entry)
+      }
+      const launchOrigin = sourceOrigins.launchConfig
+      const launchPath = 'server/server.properties.launch'
+      const launchBytes = listing.files.includes(launchPath) ? readFileSync(join(archive, launchPath)) : null
+      if (!launchOrigin || launchOrigin.archivePath !== launchPath || typeof launchOrigin.sourcePath !== 'string' ||
+          !isAbsolute(launchOrigin.sourcePath) || launchBytes === null || launchOrigin.bytes !== launchBytes.length ||
+          launchOrigin.sha256?.toLowerCase?.() !== sha256(launchBytes) || serverStart?.serverPropertiesPath !== launchOrigin.sourcePath ||
+          serverStart?.serverPropertiesSha256?.toLowerCase?.() !== sha256(launchBytes) ||
+          serverStart?.spawnObservation?.configPath !== launchOrigin.sourcePath ||
+          serverStart?.spawnObservation?.configSha256?.toLowerCase?.() !== sha256(launchBytes)) {
+        originInvalid = true
+      } else launchPropertiesSourcePath = launchOrigin.sourcePath
+      const archivedWorldPaths = listing.files.filter((path) => path.startsWith('server/world/')).sort()
+      const originPaths = [...worldSourcePaths.keys()].sort()
+      if (!isDeepStrictEqual(archivedWorldPaths, originPaths)) originInvalid = true
+      if (originInvalid) fail('server:world-source-manifest', 'world-source origin map is duplicate, incomplete, unsafe, or disagrees with archived world bytes')
+      else pass('server:world-source-manifest', { entries: worldSourcePaths.size })
+    }
+    const jarSource = packagingReport?.serverJarSource
+    const jarPath = serverStart?.serverJar
+    const jarSha = serverStart?.serverJarSha256?.toLowerCase?.()
+    const spawn = serverStart?.spawnObservation
+    if (!jarSource || typeof jarPath !== 'string' || !isAbsolute(jarPath) || !/^[0-9a-f]{64}$/iu.test(String(jarSha ?? '')) ||
+        jarSource.sourcePath !== jarPath || !Number.isSafeInteger(jarSource.bytes) || jarSource.bytes < 1 ||
+        jarSource.sha256?.toLowerCase?.() !== jarSha || spawn?.jarPath !== jarPath || spawn?.jarSha256?.toLowerCase?.() !== jarSha) {
+      fail('server:spawned-artifacts', 'packaging report does not rebind actual JAR path/hash to the spawned child observation')
+    } else pass('server:spawned-artifacts', { jarPath, bytes: jarSource.bytes, sha256: jarSha })
     const freshWorldFiles = new Map()
     for (const path of listing.files) {
       if (path === 'server/fresh-world-attestation.json' || path === 'server/server-start.json' ||
@@ -2118,7 +2183,16 @@ export async function validateEvidenceArchive(archive, repo = null) {
           path === 'server/server.properties.effective-after-boot' || path === 'server/leaf-latest.log' ||
           path === 'server/leaf-stdout-events.jsonl' ||
           path.startsWith('server/world/')) {
-        try { freshWorldFiles.set(path, { bytes: readFileSync(join(archive, path)) }) } catch { /* reported as missing below */ }
+        try {
+          freshWorldFiles.set(path, {
+            bytes: readFileSync(join(archive, path)),
+            ...(path === 'server/server.properties.launch' && launchPropertiesSourcePath ? { path: launchPropertiesSourcePath } : {}),
+            ...(worldSourcePaths.has(path) ? {
+              path: worldSourcePaths.get(path),
+              readReceipt: worldSourceReceipts.get(path),
+            } : {}),
+          })
+        } catch { /* reported as missing below */ }
       }
     }
     const freshWorld = inspectFreshWorldAttestation({

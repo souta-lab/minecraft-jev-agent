@@ -53,7 +53,7 @@ try {
   mkdirSync(archive)
 
   const positiveWitness = { x: 520, y: 65, z: -10 }
-  const positiveRegion = 'server/world/r.1.-1.mca'
+  const positiveRegion = 'server/world/region/r.1.-1.mca'
   assert.equal(witnessRegionRelativePath(positiveWitness), positiveRegion)
   putRegion(archive, positiveRegion, positiveWitness, 'deepslate_copper_ore')
   const positivePlane = await inspectWitnessPlane(archive, [positiveRegion], positiveWitness)
@@ -65,14 +65,14 @@ try {
   }, 'validator must still parse independent raw MCA block state at witness and support coordinates')
 
   const negativeWitness = { x: -33, y: 12, z: 1025 }
-  const negativeRegion = 'server/world/r.-1.2.mca'
+  const negativeRegion = 'server/world/region/r.-1.2.mca'
   assert.equal(witnessRegionRelativePath(negativeWitness), negativeRegion)
   putRegion(archive, negativeRegion, negativeWitness, 'emerald_ore')
   const negativePlane = await inspectWitnessPlane(archive, [negativeRegion], negativeWitness)
   assert.equal(negativePlane.witnessBlock, 'emerald_ore')
   assert.equal(negativePlane.relativePath, negativeRegion)
 
-  const misplacedOnly = 'server/world/r.-1.0.mca'
+  const misplacedOnly = 'server/world/region/r.-1.0.mca'
   putRegion(archive, misplacedOnly, negativeWitness, 'emerald_ore')
   const missingCoordinateRegion = await inspectWitnessPlane(archive, [misplacedOnly], negativeWitness)
   assert.equal(missingCoordinateRegion.status, 'INCOMPLETE')

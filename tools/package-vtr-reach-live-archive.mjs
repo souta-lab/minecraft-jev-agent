@@ -4,8 +4,9 @@
 // manufactures absent input files.
 
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
 import { inspectFreshWorldAttestation } from './vtr-fresh-world-attestation.mjs'
@@ -74,6 +75,13 @@ fixture command journal, world files (including the bot UUID-bound playerdata
 file and the MCA region containing the committed witness coordinates), acceptance record, and milestone snapshot to
 their canonical paths in files. Collector logs/journals are copied from
 the paths and hashes in the collector report; do not duplicate those mappings.
+server-start.json must contain the run-bound spawnObservation captured from its
+own child PID (/proc argv and cwd), with exactly one --universe, --level-name,
+--config, and -jar argument plus matching config/JAR paths and hashes. Each
+post-run world file receipt must be captured after child exit and loopback
+connection refusal, bind the exact run/PID, and include a realPath/pathChain
+showing no symlinked worldRoot or parent directory. packaging-report.json
+preserves those source origins for offline revalidation.
 
 To claim observed zero provider activity, also supply
 runner/provider-activity-capture.json with schema vtr-provider-activity-capture/v2,
@@ -154,6 +162,104 @@ function regularFileBytes(path) {
   }
 }
 
+function inspectActualNonSymlinkPath(path) {
+  if (typeof path !== 'string' || !isAbsolute(path)) return { status: 'INCOMPLETE', reason: 'source path is not absolute' }
+  const absolute = resolve(path)
+  const parts = absolute.split('/').filter(Boolean)
+  let current = '/'
+  try {
+    for (const [index, part] of parts.entries()) {
+      current = join(current, part)
+      const stat = lstatSync(current)
+      if (stat.isSymbolicLink()) return { status: 'FAIL', reason: `source component is a symlink: ${current}` }
+      const final = index === parts.length - 1
+      if (final ? !stat.isFile() : !stat.isDirectory()) {
+        return { status: 'FAIL', reason: `source path component has unexpected kind: ${current}` }
+      }
+      if (resolve(realpathSync(current)) !== current) return { status: 'FAIL', reason: `source component resolves through an alias: ${current}` }
+    }
+  } catch (error) {
+    return { status: 'INCOMPLETE', reason: `source path component cannot be observed: ${error.message}` }
+  }
+  return { status: 'PASS', realPath: absolute }
+}
+
+function inspectActualWorldSources(copiedSources) {
+  const attestationSource = copiedSources.get('server/fresh-world-attestation.json')
+  if (!attestationSource) return { status: 'INCOMPLETE', reason: 'fresh-world attestation is absent' }
+  let attestation
+  try { attestation = JSON.parse(attestationSource.bytes.toString('utf8')) }
+  catch (error) { return { status: 'FAIL', reason: `fresh-world attestation is malformed: ${error.message}` } }
+  const worldRoot = attestation?.worldRoot?.absolute
+  const rows = attestation?.postRunObservation?.files
+  if (typeof worldRoot !== 'string' || !isAbsolute(worldRoot) || !Array.isArray(rows)) {
+    return { status: 'INCOMPLETE', reason: 'attestation omits absolute worldRoot or per-file post-stop rows' }
+  }
+  const attestedPaths = rows.map((row) => row?.archivePath).sort()
+  const actualWorldPaths = [...copiedSources.keys()].filter((path) => path.startsWith('server/world/')).sort()
+  if (new Set(attestedPaths).size !== attestedPaths.length || actualWorldPaths.some((path) => !attestedPaths.includes(path))) {
+    return { status: 'FAIL', reason: 'post-stop per-file observations must uniquely cover every archived world artifact' }
+  }
+  if (attestedPaths.some((path) => !actualWorldPaths.includes(path))) {
+    return { status: 'INCOMPLETE', reason: 'one or more post-stop observed world artifacts were not supplied to the package' }
+  }
+  for (const row of rows) {
+    const archivePath = row?.archivePath
+    if (typeof archivePath !== 'string' || !archivePath.startsWith('server/world/')) {
+      return { status: 'FAIL', reason: 'attestation contains an unsafe world artifact archive path' }
+    }
+    const actual = copiedSources.get(archivePath)
+    const expectedPath = join(worldRoot, archivePath.slice('server/world/'.length).split('/').join('/'))
+    if (!actual || typeof actual.path !== 'string' || !isAbsolute(actual.path)) {
+      return { status: 'INCOMPLETE', reason: `actual world source path is absent: ${archivePath}` }
+    }
+    if (resolve(actual.path) !== resolve(expectedPath) || resolve(row.sourcePath ?? '') !== resolve(expectedPath)) {
+      return { status: 'FAIL', reason: `actual package source, attested sourcePath, and exact worldRoot differ: ${archivePath}` }
+    }
+    const pathCheck = inspectActualNonSymlinkPath(actual.path)
+    if (pathCheck.status !== 'PASS') return { status: pathCheck.status, reason: `${archivePath}: ${pathCheck.reason}` }
+    if (resolve(row.realPath ?? '') !== pathCheck.realPath) {
+      return { status: 'FAIL', reason: `attested realPath does not match the actual non-symlink path: ${archivePath}` }
+    }
+    actual.readReceipt = row
+  }
+  return { status: 'PASS', count: rows.length }
+}
+
+function inspectActualServerArtifacts(copiedSources, serverStart) {
+  const launch = copiedSources.get('server/server.properties.launch')
+  if (!serverStart || !launch || typeof launch.path !== 'string') {
+    return { status: 'INCOMPLETE', reason: 'server-start or actual launch-properties source is absent', artifacts: null }
+  }
+  if (typeof serverStart.serverPropertiesPath !== 'string' || !isAbsolute(serverStart.serverPropertiesPath) ||
+      resolve(serverStart.serverPropertiesPath) !== resolve(launch.path)) {
+    return { status: 'FAIL', reason: 'actual --config path differs from the mapped launch-properties source', artifacts: null }
+  }
+  const configPathCheck = inspectActualNonSymlinkPath(launch.path)
+  if (configPathCheck.status !== 'PASS') return { status: configPathCheck.status, reason: `launch properties: ${configPathCheck.reason}`, artifacts: null }
+  const launchSha = sha256(launch.bytes)
+  if (typeof serverStart.serverPropertiesSha256 !== 'string' || serverStart.serverPropertiesSha256.toLowerCase() !== launchSha) {
+    return { status: 'FAIL', reason: 'actual --config properties hash differs from the archived launch-properties bytes', artifacts: null }
+  }
+  if (typeof serverStart.serverJar !== 'string' || !isAbsolute(serverStart.serverJar) ||
+      typeof serverStart.serverJarSha256 !== 'string' || !/^[0-9a-f]{64}$/iu.test(serverStart.serverJarSha256)) {
+    return { status: 'INCOMPLETE', reason: 'server-start omits an absolute JAR path or SHA-256', artifacts: null }
+  }
+  const jarPathCheck = inspectActualNonSymlinkPath(serverStart.serverJar)
+  if (jarPathCheck.status !== 'PASS') return { status: jarPathCheck.status, reason: `server JAR: ${jarPathCheck.reason}`, artifacts: null }
+  const jarBytes = regularFileBytes(serverStart.serverJar)
+  if (jarBytes === null) return { status: 'INCOMPLETE', reason: 'actual server JAR bytes are not readable at the captured path', artifacts: null }
+  const jarSha = sha256(jarBytes)
+  if (jarSha !== serverStart.serverJarSha256.toLowerCase()) return { status: 'FAIL', reason: 'actual server JAR bytes differ from the spawned JAR SHA-256', artifacts: null }
+  return {
+    status: 'PASS',
+    artifacts: {
+      launchConfig: { archivePath: 'server/server.properties.launch', sourcePath: launch.path, bytes: launch.bytes.length, sha256: launchSha },
+      serverJar: { sourcePath: serverStart.serverJar, bytes: jarBytes.length, sha256: jarSha },
+    },
+  }
+}
+
 function worldKeyString(value) {
   if (typeof value === 'string') {
     const parts = value.split('|')
@@ -193,7 +299,7 @@ function witnessRegionArchivePath(target) {
   const chunkZ = Math.floor(target.z / 16)
   const regionX = Math.floor(chunkX / 32)
   const regionZ = Math.floor(chunkZ / 32)
-  return `server/world/r.${regionX}.${regionZ}.mca`
+  return `server/world/region/r.${regionX}.${regionZ}.mca`
 }
 
 function eventName(row) {
@@ -1041,7 +1147,11 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
     writeFile(outputRoot, archiveRelative, bytes)
     archiveFiles.add(archiveRelative)
     copiedSources.set(archiveRelative, { bytes, path: source })
-    check(statuses, 'PASS', `manifest-file:${archiveRelative}`, { bytes: bytes.length, sha256: sha256(bytes) })
+    check(statuses, 'PASS', `manifest-file:${archiveRelative}`, {
+      bytes: bytes.length,
+      sha256: sha256(bytes),
+      ...(archiveRelative.startsWith('server/world/') ? { sourcePath: source } : {}),
+    })
 
     if (archiveRelative.endsWith('.json') && archiveRelative !== 'runner/no-llm-egress-audit.json') {
       try {
@@ -1165,6 +1275,7 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   }
   const serverStartBytes = copiedSources.get('server/server-start.json')?.bytes ?? null
   let serverStart = null
+  let actualServerArtifacts = null
   if (serverStartBytes !== null) {
     try {
       serverStart = JSON.parse(serverStartBytes.toString('utf8'))
@@ -1180,6 +1291,12 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
       check(statuses, 'FAIL', 'server-start-json', { reason: error.message })
     }
   }
+  actualServerArtifacts = inspectActualServerArtifacts(copiedSources, serverStart)
+  if (actualServerArtifacts.status === 'PASS') check(statuses, 'PASS', 'server:spawned-artifacts', actualServerArtifacts.artifacts)
+  else check(statuses, actualServerArtifacts.status, 'server:spawned-artifacts', { reason: actualServerArtifacts.reason })
+  const worldSourcePathResult = inspectActualWorldSources(copiedSources)
+  if (worldSourcePathResult.status === 'PASS') check(statuses, 'PASS', 'server:world-source-filesystem', { artifacts: worldSourcePathResult.count })
+  else check(statuses, worldSourcePathResult.status, 'server:world-source-filesystem', { reason: worldSourcePathResult.reason })
   const freshWorldResult = inspectFreshWorldAttestation({
     copiedSources,
     identity,
@@ -1230,6 +1347,25 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
       ...(requiredWitnessRegionPath === null ? [] : [requiredWitnessRegionPath]),
       ...(requiredPlayerDataPath === null ? [] : [requiredPlayerDataPath])],
     requiredWitnessRegionPath,
+    sourceOrigins: {
+      schema: 'vtr-reach-source-origin-manifest/v1',
+      sourceSha: identity.sourceSha,
+      runId: identity.runId,
+      generationId: identity.generationId,
+      worldKey: worldKeyString(identity.worldKey),
+      launchConfig: actualServerArtifacts.artifacts?.launchConfig ?? null,
+      entries: [...copiedSources.entries()]
+        .filter(([archivePath, source]) => archivePath.startsWith('server/world/') && source.path !== null)
+        .map(([archivePath, source]) => ({
+          ...(source.readReceipt ?? {}),
+          archivePath,
+          sourcePath: source.path,
+          bytes: source.bytes.length,
+          sha256: sha256(source.bytes),
+        }))
+        .sort((left, right) => left.archivePath.localeCompare(right.archivePath)),
+    },
+    serverJarSource: actualServerArtifacts.artifacts?.serverJar ?? null,
     fullMigrationArtifactsMissing: fullMilestoneMissing,
     checks: statuses,
     files: [...archiveFiles].sort(),

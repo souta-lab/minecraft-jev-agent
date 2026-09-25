@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex') }
 function timestamp(value) {
@@ -83,6 +84,28 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
   if (server.pid !== serverStart.pid || server.pid !== serverStopped.pid) {
     return fail('fresh-world server PID differs from server-start and observed server-stopped PID')
   }
+  const stoppedAt = timestamp(serverStopped.stoppedAt ?? serverStopped.ts)
+  const processExitAt = timestamp(serverStopped.processExitObservation?.observedAt)
+  const listener = serverStopped.listenerClosureObservation
+  const listenerAt = timestamp(listener?.observedAt)
+  if (serverStopped.schema !== 'vtr-reach-probe-lifecycle/v1' || serverStopped.event !== 'server-stopped' ||
+      serverStopped.actor !== 'probe-harness' || serverStopped.sourceSha?.toLowerCase?.() !== identity.sourceSha ||
+      serverStopped.runId !== identity.runId || serverStopped.generationId !== identity.generationId ||
+      worldKeyString(serverStopped.worldKey) !== expectedWorldKey) {
+    return fail('fresh-world post-stop observation is not bound to the exact run/source/generation/world lifecycle row')
+  }
+  if (!Number.isSafeInteger(serverStopped.exitCode) || serverStopped.status !== 'stopped' && serverStopped.status !== 'exited' ||
+      serverStopped.processExitObservation?.schema !== 'vtr-process-exit-observation/v1' ||
+      serverStopped.processExitObservation?.source !== 'child-close-event' || serverStopped.processExitObservation?.state !== 'exited' ||
+      serverStopped.processExitObservation?.pid !== server.pid || serverStopped.processExitObservation?.exitCode !== serverStopped.exitCode ||
+      processExitAt === null || stoppedAt === null || processExitAt > stoppedAt) {
+    return incomplete('fresh-world post-stop observation lacks matching identity-bound child-close evidence')
+  }
+  if (listener?.schema !== 'vtr-listener-closure-observation/v1' || listener.source !== 'tcp-connect-probe' ||
+      listener.state !== 'closed' || listener.host !== '127.0.0.1' || listener.port !== expectedPort ||
+      listener.result !== 'connection-refused' || listenerAt === null || listenerAt < processExitAt || listenerAt !== stoppedAt) {
+    return incomplete('fresh-world post-stop observation lacks loopback connection-refused evidence after server process exit')
+  }
   for (const [key, expected] of Object.entries({ serverId: expectedServerId, port: expectedPort, levelName: run.levelName,
     minecraftVersion: run.minecraftVersion, dataVersion: run.dataVersion })) {
     if (server[key] === undefined || server[key] === null) return incomplete(`fresh-world server ${key} is missing`)
@@ -109,15 +132,58 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
   if (process.pid !== server.pid || process.levelNameArg !== run.levelName || process.startedAt !== server.spawnedAt) {
     return fail('server-start process PID/start/level does not match fresh-world identity')
   }
-  const argvUniverseIndex = process.argv.findIndex((arg, index) => arg === '--universe' && process.argv[index + 1] === process.universeArg)
-  const argvLevelIndex = process.argv.findIndex((arg, index) => arg === '--level-name' && process.argv[index + 1] === process.levelNameArg)
+  const spawnObservation = serverStart.spawnObservation
+  if (!spawnObservation || spawnObservation.schema !== 'vtr-server-spawn-observation/v1') {
+    return incomplete('server-start lacks the run-bound actual server spawn observation')
+  }
+  const spawnFields = {
+    sourceSha: identity.sourceSha,
+    runId: identity.runId,
+    generationId: identity.generationId,
+    worldKey: expectedWorldKey,
+    serverId: expectedServerId,
+    port: expectedPort,
+    levelName: run.levelName,
+    pid: server.pid,
+    spawnedAt: server.spawnedAt,
+    cwd: process.cwd,
+    commandLineSha256: process.commandLineSha256,
+    configPath: serverStart.serverPropertiesPath,
+    configSha256: serverStart.serverPropertiesSha256,
+    jarPath: serverStart.serverJar,
+    jarSha256: serverStart.serverJarSha256,
+  }
+  for (const [key, expected] of Object.entries(spawnFields)) {
+    if (spawnObservation[key] === undefined || spawnObservation[key] === null) return incomplete(`actual server spawn observation omits ${key}`)
+    const observed = key === 'sourceSha' ? String(spawnObservation[key]).toLowerCase() : spawnObservation[key]
+    if (observed !== expected) return fail(`actual server spawn observation ${key} differs from process/run identity`)
+  }
+  if (!Array.isArray(spawnObservation.argv) || !Array.isArray(process.argv) ||
+      !isDeepStrictEqual(spawnObservation.argv, process.argv)) {
+    return fail('actual server spawn observation argv differs from the observed child process argv')
+  }
+  const optionValues = (argv, option) => argv.flatMap((arg, index) => arg === option ? [argv[index + 1] ?? null] : [])
+  const universeValues = optionValues(process.argv, '--universe')
+  const levelValues = optionValues(process.argv, '--level-name')
+  const configValues = optionValues(process.argv, '--config')
+  const jarValues = optionValues(process.argv, '-jar')
   const argvSha = sha256(Buffer.from(process.argv.join('\0')))
-  if (argvUniverseIndex < 0 || argvLevelIndex < 0 || process.commandLineSha256.toLowerCase() !== argvSha) {
-    return fail('server-start actual argv does not bind its declared --universe/--level-name values')
+  if (universeValues.length !== 1 || universeValues[0] !== process.universeArg ||
+      levelValues.length !== 1 || levelValues[0] !== process.levelNameArg ||
+      configValues.length !== 1 || typeof process.configArg !== 'string' || configValues[0] !== process.configArg ||
+      jarValues.length !== 1 || typeof process.jarArg !== 'string' || jarValues[0] !== process.jarArg ||
+      process.commandLineSha256.toLowerCase() !== argvSha) {
+    return fail('server-start actual argv must bind exactly one --universe/--level-name/--config/-jar value')
   }
   const actualWorldRoot = resolve(process.cwd, process.universeArg, process.levelNameArg)
   if (resolve(worldRoot.absolute) !== actualWorldRoot) {
     return fail('fresh-world absolute root differs from the server process --universe/--level-name world path')
+  }
+  const actualConfigPath = resolve(process.cwd, process.configArg)
+  const launchPath = serverStart.serverPropertiesPath
+  if (typeof launchPath !== 'string' || !isAbsolute(launchPath) || resolve(launchPath) !== actualConfigPath ||
+      resolve(process.cwd, process.jarArg) !== resolve(serverStart.serverJar)) {
+    return fail('server-start actual --config/-jar argv does not match the attested config/JAR paths')
   }
   if (!['absent', 'empty-directory'].includes(preStart.state) || !Array.isArray(preStart.entries) || preStart.entries.length !== 0 ||
       preStart.levelDat?.state !== 'absent' || preStart.levelDat?.path !== join(worldRoot.absolute, 'level.dat') ||
@@ -129,14 +195,24 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
   if (preStartAt === null || spawnedAt === null || preStartAt >= spawnedAt) return fail('pre-start world snapshot does not precede the spawned Java PID')
 
   const configuration = attestation.configuration
-  const launch = copiedSources.get('server/server.properties.launch')?.bytes ?? copiedSources.get('server/server.properties.clean')?.bytes ?? null
+  const launchSource = copiedSources.get('server/server.properties.launch') ?? copiedSources.get('server/server.properties.clean') ?? null
+  const launch = launchSource?.bytes ?? null
   const effective = copiedSources.get('server/server.properties.effective-after-boot')?.bytes ?? copiedSources.get('server/server.properties.clean')?.bytes ?? null
   if (!configuration || launch === null || effective === null) return incomplete('fresh-world launch/effective config or archived bytes are absent')
+  if (typeof launchSource.path !== 'string' || !isAbsolute(launchSource.path) ||
+      typeof serverStart.serverPropertiesPath !== 'string' || !isAbsolute(serverStart.serverPropertiesPath) ||
+      resolve(launchSource.path) !== resolve(serverStart.serverPropertiesPath)) {
+    return fail('server --config path does not resolve to the actual manifest-mapped launch-properties source')
+  }
   const launchSha = sha256(launch)
   const effectiveSha = sha256(effective)
   if (configuration.launchPropertiesSha256 !== launchSha || configuration.launchPropertiesSha256 !== serverStart.serverPropertiesSha256 ||
       configuration.effectivePropertiesSha256 !== effectiveSha || configuration.effectivePropertiesSha256 !== serverStart.serverPropertiesEffectiveSha256) {
     return fail('fresh-world configuration hashes differ from archived launch/effective properties')
+  }
+  if (spawnObservation.configSha256 !== launchSha || typeof spawnObservation.jarSha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/iu.test(spawnObservation.jarSha256)) {
+    return fail('actual server spawn observation config/JAR hashes are invalid or do not bind the archived launch config')
   }
 
   const logBytes = copiedSources.get('server/leaf-latest.log')?.bytes
@@ -164,7 +240,7 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
         row.sourceSha?.toLowerCase?.() !== identity.sourceSha || row.runId !== identity.runId ||
         row.serverId !== expectedServerId || row.serverPid !== server.pid || row.port !== expectedPort ||
         row.levelName !== run.levelName || !Number.isSafeInteger(row.sequence) || row.sequence !== lastSequence + 1 ||
-        rowAt === null || rowAt < lastObservedAt || monotonicNs === null || monotonicNs <= lastMonotonicNs ||
+        rowAt === null || rowAt < spawnedAt || rowAt < lastObservedAt || monotonicNs === null || monotonicNs <= lastMonotonicNs ||
         typeof row.line !== 'string' || row.line.length === 0 || row.lineSha256?.toLowerCase?.() !== sha256(Buffer.from(row.line))) {
       return fail('spawned Leaf stdout receipt rows are malformed, unordered, or not bound to the exact PID/run/world')
     }
@@ -189,17 +265,21 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
       preparingReceipt[0]?.lineSha256 !== preparing.lineSha256 || doneReceipt[0]?.lineSha256 !== done.lineSha256) {
     return fail('same-PID Preparing/Done startup lines are not the unique exact raw Leaf log rows for this level')
   }
+  const fileRows = attestation.postRunObservation?.files
+  if (!Array.isArray(fileRows) || fileRows.length < 3) return incomplete('post-run observation does not list level.dat, playerdata, and MCA artifacts')
   const preparingAt = timestamp(preparing.ts)
   const doneAt = timestamp(done.ts)
   const postRunAt = timestamp(attestation.postRunObservation?.observedAt)
-  const serverStoppedAt = timestamp(serverStopped.stoppedAt ?? serverStopped.ts)
+  const serverStoppedAt = stoppedAt
+  const latestArtifactReadAt = Array.isArray(fileRows)
+    ? Math.max(...fileRows.map((entry) => timestamp(entry?.capturedAt) ?? Number.NEGATIVE_INFINITY))
+    : Number.NEGATIVE_INFINITY
   if (preparingAt === null || doneAt === null || postRunAt === null || serverStoppedAt === null ||
-      !(spawnedAt <= preparingAt && preparingAt < doneAt && doneAt <= serverStoppedAt && serverStoppedAt <= postRunAt)) {
+      !(spawnedAt <= preparingAt && preparingAt < doneAt && doneAt <= serverStoppedAt &&
+        serverStoppedAt <= latestArtifactReadAt && latestArtifactReadAt <= postRunAt)) {
     return fail('child stdout receipt, Leaf spawn, Preparing/Done, and post-stop artifact times are not causally ordered')
   }
 
-  const fileRows = attestation.postRunObservation?.files
-  if (!Array.isArray(fileRows) || fileRows.length < 3) return incomplete('post-run observation does not list level.dat, playerdata, and MCA artifacts')
   const paths = fileRows.map((entry) => entry?.archivePath)
   if (new Set(paths).size !== paths.length) return fail('post-run world artifact list contains duplicate paths')
   const playerUuid = String(run.botUuid ?? '').toLowerCase()
@@ -214,11 +294,38 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
     if (typeof entry.sourcePath !== 'string' || !isAbsolute(entry.sourcePath) || resolve(entry.sourcePath) !== resolve(expectedSourcePath)) {
       return fail(`post-run artifact sourcePath is outside the exact observed worldRoot: ${artifactPath}`)
     }
+    const capturedAt = timestamp(entry.capturedAt)
+    if (entry.sourceSha?.toLowerCase?.() !== identity.sourceSha || entry.runId !== identity.runId ||
+        entry.serverId !== expectedServerId || entry.serverPid !== server.pid || entry.port !== expectedPort ||
+        entry.levelName !== run.levelName || capturedAt === null || capturedAt < listenerAt) {
+      return fail(`post-run artifact read receipt is not identity-bound after child-close and listener refusal: ${artifactPath}`)
+    }
+    if (typeof entry.realPath !== 'string' || !isAbsolute(entry.realPath) || resolve(entry.realPath) !== resolve(expectedSourcePath)) {
+      return fail(`post-run artifact realPath differs from its exact run world path: ${artifactPath}`)
+    }
+    const pathRelativeToAttempt = relative(resolve(worldRoot.attemptRoot), resolve(expectedSourcePath))
+    const expectedChainPaths = [resolve(worldRoot.attemptRoot)]
+    for (const part of pathRelativeToAttempt.split(sep).filter(Boolean)) expectedChainPaths.push(join(expectedChainPaths.at(-1), part))
+    const pathChain = entry.pathChain
+    if (!Array.isArray(pathChain) || pathChain.length !== expectedChainPaths.length ||
+        pathChain.some((part, index) => part?.path !== expectedChainPaths[index] || part.realPath !== expectedChainPaths[index] ||
+          part.symlink !== false || part.kind !== (index === expectedChainPaths.length - 1 ? 'file' : 'directory'))) {
+      return fail(`post-run artifact path-chain receipt contains missing, redirected, or symlinked components: ${artifactPath}`)
+    }
     const archived = copiedSources.get(artifactPath)
     if (!archived) return incomplete(`post-run world artifact is not archived: ${artifactPath}`)
+    if (typeof archived.path !== 'string' || !isAbsolute(archived.path)) {
+      return incomplete(`post-run world artifact archive omits its actual package-manifest source path: ${artifactPath}`)
+    }
+    if (resolve(archived.path) !== resolve(expectedSourcePath)) {
+      return fail(`post-run archived source path differs from the exact worldRoot origin: ${artifactPath}`)
+    }
+    if (!archived.readReceipt) return incomplete(`post-run world artifact lacks its independently captured read receipt: ${artifactPath}`)
+    if (!isDeepStrictEqual(archived.readReceipt, entry)) return fail(`post-run source-origin receipt differs from the fresh-world attestation: ${artifactPath}`)
     if (!Number.isSafeInteger(entry.bytes) || entry.bytes !== archived.bytes.length || typeof entry.sha256 !== 'string' ||
         entry.sha256.toLowerCase() !== sha256(archived.bytes)) return fail(`post-run artifact size/hash differs from archived bytes: ${artifactPath}`)
-    result.artifacts.push({ path: artifactPath, bytes: entry.bytes, sha256: entry.sha256.toLowerCase() })
+    result.artifacts.push({ path: artifactPath, bytes: entry.bytes, sha256: entry.sha256.toLowerCase(),
+      sourcePath: entry.sourcePath, realPath: entry.realPath, capturedAt: entry.capturedAt, pathChain: entry.pathChain })
   }
   if (!fileRows.some((entry) => entry.archivePath.endsWith('.mca'))) return incomplete('post-run observation contains no MCA region file')
   result.status = 'PASS'
