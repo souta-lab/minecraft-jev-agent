@@ -336,7 +336,11 @@ assert.equal(liveVtrSnapshot.vtr.latest.status, 'verified_success')
 assert.equal(liveVtrSnapshot.vtr.latest.verification.verified, true)
 assert.equal(liveVtrSnapshot.vtr.latest.outcome.metrics.jevCallsPerTransition, 0)
 assert.equal(liveVtrSnapshot.vtr.latest.modelMetrics, null, 'legacy outcome call totals must not fabricate a model-metrics event')
+assert.equal(liveVtrSnapshot.vtr.latest.modelMetrics?.jevModelProviderEvaluateAttempts ?? null, null, 'provider attempts are unknown without their event')
 assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsEventCount, 0)
+assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsConsistency.status, 'UNKNOWN')
+assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsConsistency.mechanicalSteps.status, 'UNKNOWN')
+assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsConsistency.typedTerminalOutcome.status, 'UNKNOWN')
 const liveVtrSummary = buildAiSummary(liveVtrSnapshot, { now: Date.parse('2026-09-21T12:00:03.000Z') })
 assert.equal(liveVtrSummary.choices.jev, null)
 assert.equal(liveVtrSummary.choices.jevStatus, 'not_recorded')
@@ -534,7 +538,7 @@ const ingressOutcome = {
     contractHash: ingressContractHash,
     outcome: { kind: 'SUCCESS', contractHash: ingressContractHash, evidenceIds: ['verify:observer-vtr-ingress'] },
     usage: { mechanicalSteps: 2, elapsedMs: 1000, resources: {}, risk: {}, effects: { locomotion: 2 } },
-    metrics: { verifiedTransitionCompletion: 1, mechanicalStepsPerTransition: 2, jevCallsPerTransition: 0, duplicateAuthority: false },
+    metrics: { verifiedTransitionCompletion: 1, mechanicalStepsPerTransition: 2, jevCallsPerTransition: 0, typedTerminalOutcome: 'SUCCESS', duplicateAuthority: false },
   },
 }
 const ingressStepEvent = (ts, event, detail, message) => ({
@@ -736,6 +740,22 @@ try {
   assert.equal(ingressSnapshot.vtr.latest.verification.truth, 'TRUE')
   assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
   assert.equal(ingressSnapshot.vtr.latest.modelMetricsEventCount, 1)
+  assert.equal(ingressSnapshot.vtr.latest.modelMetricsConsistency.status, 'CONSISTENT')
+  assert.equal(ingressSnapshot.vtr.latest.modelMetricsConsistency.mechanicalSteps.status, 'CONSISTENT')
+  assert.deepEqual(ingressSnapshot.vtr.latest.modelMetricsConsistency.mechanicalSteps.sources, {
+    modelMetrics: 2,
+    transitionUsage: 2,
+    transitionMetric: 2,
+    reservations: 2,
+    stepOutcomes: 2,
+  })
+  assert.equal(ingressSnapshot.vtr.latest.modelMetricsConsistency.typedTerminalOutcome.status, 'CONSISTENT')
+  assert.deepEqual(ingressSnapshot.vtr.latest.modelMetricsConsistency.typedTerminalOutcome.sources, {
+    modelMetrics: 'SUCCESS',
+    transitionOutcome: 'SUCCESS',
+    transitionMetric: 'SUCCESS',
+    terminalStepOutcome: 'SUCCESS',
+  })
   assert.deepEqual(ingressSnapshot.vtr.latest.modelMetrics, {
     transitionId: ingressTransitionId,
     contractHash: ingressContractHash,
@@ -837,19 +857,50 @@ try {
       traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_STEP_OUTCOME', 'VTR_MECHANICAL_OUTCOME'],
     },
   ])
-  const withoutLegTwoStepOutcome = projectVtrTransitions({
+  const withoutLegTwoStepOutcomeProjection = projectVtrTransitions({
     events: parseVtrRunJsonlEvents(ingressRecords).filter((event) => !(event.event === 'VTR_MECHANICAL_STEP_OUTCOME' && event.detail.stepId === 'step-leg-2')),
     runId: ingressRunId,
     generationId: ingressGenerationId,
     sourceCommit: ingressSourceSha,
     worldKey: ingressWorld,
     generationStartedAt: Date.parse(ingressReadyTs),
-  }).latest.mechanical.steps.find((step) => step.stepId === 'step-leg-2')
+  }).latest
+  const withoutLegTwoStepOutcome = withoutLegTwoStepOutcomeProjection.mechanical.steps.find((step) => step.stepId === 'step-leg-2')
   assert.equal(withoutLegTwoStepOutcome.stepOutcome, null, 'intent-level action outcomes must not be promoted into step outcomes')
   assert.equal(withoutLegTwoStepOutcome.outcome, null, 'missing exact step marker must remain unobserved')
   assert.equal(withoutLegTwoStepOutcome.intentOutcome.event, 'VTR_MECHANICAL_OUTCOME')
   assert.equal(withoutLegTwoStepOutcome.status, 'intent_outcome_only')
   assert.equal(withoutLegTwoStepOutcome.correlation.outcome, 'intent-id-only')
+  assert.equal(withoutLegTwoStepOutcomeProjection.modelMetricsConsistency.mechanicalSteps.status, 'UNKNOWN', 'a missing per-step outcome is incomplete evidence, not an inferred completion')
+  assert.deepEqual(withoutLegTwoStepOutcomeProjection.modelMetricsConsistency.mechanicalSteps.missingStepOutcomeIds, ['step-leg-2'])
+  assert.equal(withoutLegTwoStepOutcomeProjection.modelMetricsConsistency.typedTerminalOutcome.terminalStepAgreement, 'UNKNOWN')
+  assert.equal(withoutLegTwoStepOutcomeProjection.modelMetricsConsistency.status, 'UNKNOWN')
+
+  const inconsistentMetrics = projectVtrTransitions({
+    events: parseVtrRunJsonlEvents(ingressRecords).map((event) => event.event === 'VTR_TRANSITION_MODEL_METRICS'
+      ? { ...event, detail: { ...event.detail, mechanicalSteps: 3, typedTerminalOutcome: 'BUDGET_EXHAUSTED' } }
+      : event),
+    runId: ingressRunId,
+    generationId: ingressGenerationId,
+    sourceCommit: ingressSourceSha,
+    worldKey: ingressWorld,
+    generationStartedAt: Date.parse(ingressReadyTs),
+  }).latest
+  assert.equal(inconsistentMetrics.modelMetricsConsistency.status, 'MISMATCH')
+  assert.equal(inconsistentMetrics.modelMetricsConsistency.mechanicalSteps.status, 'MISMATCH')
+  assert.equal(inconsistentMetrics.modelMetricsConsistency.typedTerminalOutcome.status, 'MISMATCH')
+
+  const withoutOutcome = projectVtrTransitions({
+    events: parseVtrRunJsonlEvents(ingressRecords).filter((event) => event.event !== 'VTR_TRANSITION_OUTCOME'),
+    runId: ingressRunId,
+    generationId: ingressGenerationId,
+    sourceCommit: ingressSourceSha,
+    worldKey: ingressWorld,
+    generationStartedAt: Date.parse(ingressReadyTs),
+  }).latest
+  assert.equal(withoutOutcome.modelMetricsConsistency.status, 'UNKNOWN', 'missing terminal source must remain unknown')
+  assert.equal(withoutOutcome.modelMetricsConsistency.typedTerminalOutcome.status, 'UNKNOWN')
+  assert.equal(withoutOutcome.modelMetrics.jevModelProviderEvaluateAttempts, 5, 'provider attempts remain the direct event count, not a terminal fallback')
   assert.equal(ingressSummary.vtr.latest.outcomeConsistency.status, 'contradiction')
   assert.equal(ingressSummary.vtr.latest.outcomeConsistency.contradictions[0].kind, 'orphan_action_after_success')
   assert.equal(ingressSummary.vtr.latest.outcomeConsistency.contradictions[0].actionStatus, 'cancelled')

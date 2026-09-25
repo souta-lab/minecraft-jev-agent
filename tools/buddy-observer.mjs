@@ -1018,6 +1018,140 @@ function mechanicalStepProjection(linked) {
   }
 }
 
+function observedInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function observedLabel(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function compareObservedSources(sources) {
+  const observed = Object.values(sources).filter((value) => value !== null)
+  const distinct = new Set(observed)
+  if (distinct.size > 1) return 'MISMATCH'
+  if (observed.length !== Object.keys(sources).length) return 'UNKNOWN'
+  return 'CONSISTENT'
+}
+
+function combineConsistencyStatuses(statuses) {
+  if (statuses.includes('MISMATCH')) return 'MISMATCH'
+  if (statuses.includes('UNKNOWN')) return 'UNKNOWN'
+  return 'CONSISTENT'
+}
+
+function projectVtrMetricsConsistency({ modelMetrics, modelMetricsEventCount, outcomeDetail, linked }) {
+  const reservations = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_RESERVED')
+  const stepOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_OUTCOME')
+  const reservationIds = reservations.map(mechanicalStepId)
+  const stepOutcomeIds = stepOutcomes.map(mechanicalStepId)
+  const reservationIdCounts = new Map()
+  const stepOutcomeIdCounts = new Map()
+  for (const id of reservationIds) if (id !== null) reservationIdCounts.set(id, (reservationIdCounts.get(id) ?? 0) + 1)
+  for (const id of stepOutcomeIds) if (id !== null) stepOutcomeIdCounts.set(id, (stepOutcomeIdCounts.get(id) ?? 0) + 1)
+  const duplicatedReservationIds = [...reservationIdCounts].filter(([, count]) => count > 1).map(([id]) => id)
+  const duplicatedStepOutcomeIds = [...stepOutcomeIdCounts].filter(([, count]) => count > 1).map(([id]) => id)
+  const reservationIdSet = new Set(reservationIds.filter((id) => id !== null))
+  const stepOutcomeIdSet = new Set(stepOutcomeIds.filter((id) => id !== null))
+  const unreservedStepOutcomeIds = [...stepOutcomeIdSet].filter((id) => !reservationIdSet.has(id))
+  const missingStepOutcomeIds = [...reservationIdSet].filter((id) => !stepOutcomeIdSet.has(id))
+  const stepIdentityStatus = duplicatedReservationIds.length > 0
+    || duplicatedStepOutcomeIds.length > 0
+    || unreservedStepOutcomeIds.length > 0
+    ? 'MISMATCH'
+    : reservations.length === 0 || stepOutcomes.length === 0
+      || reservationIds.some((id) => id === null) || stepOutcomeIds.some((id) => id === null)
+      || missingStepOutcomeIds.length > 0
+      ? 'UNKNOWN'
+      : 'CONSISTENT'
+
+  const mechanicalStepSources = {
+    modelMetrics: observedInteger(modelMetrics?.mechanicalSteps),
+    transitionUsage: observedInteger(outcomeDetail?.usage?.mechanicalSteps),
+    transitionMetric: observedInteger(outcomeDetail?.metrics?.mechanicalStepsPerTransition),
+    reservations: reservations.length === 0 ? null : reservations.length,
+    stepOutcomes: stepOutcomes.length === 0 ? null : stepOutcomes.length,
+  }
+  const declaredCounts = [mechanicalStepSources.modelMetrics, mechanicalStepSources.transitionUsage, mechanicalStepSources.transitionMetric]
+    .filter((value) => value !== null)
+  const expectedMechanicalSteps = declaredCounts.length === 0 || new Set(declaredCounts).size > 1
+    ? null
+    : declaredCounts[0]
+  const overReportedMechanicalSteps = expectedMechanicalSteps !== null
+    && ((mechanicalStepSources.reservations ?? 0) > expectedMechanicalSteps
+      || (mechanicalStepSources.stepOutcomes ?? 0) > expectedMechanicalSteps)
+  const mechanicalEventCountStatus = expectedMechanicalSteps === null
+    ? 'UNKNOWN'
+    : overReportedMechanicalSteps
+      ? 'MISMATCH'
+      : mechanicalStepSources.reservations !== expectedMechanicalSteps || mechanicalStepSources.stepOutcomes !== expectedMechanicalSteps
+        ? 'UNKNOWN'
+        : 'CONSISTENT'
+  const mechanicalStepsStatus = combineConsistencyStatuses([
+    compareObservedSources({
+      modelMetrics: mechanicalStepSources.modelMetrics,
+      transitionUsage: mechanicalStepSources.transitionUsage,
+      transitionMetric: mechanicalStepSources.transitionMetric,
+    }),
+    mechanicalEventCountStatus,
+    stepIdentityStatus,
+    modelMetricsEventCount === 1 ? 'CONSISTENT' : modelMetricsEventCount === 0 ? 'UNKNOWN' : 'MISMATCH',
+  ])
+
+  const terminalStepOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_OUTCOME'
+    && entry.detail?.status === 'terminal')
+  const terminalStepOutcomeValues = terminalStepOutcomes.map((entry) => observedLabel(entry.detail?.outcome))
+  const typedTerminalOutcomeSources = {
+    modelMetrics: observedLabel(modelMetrics?.typedTerminalOutcome),
+    transitionOutcome: observedLabel(outcomeDetail?.outcome?.kind),
+    transitionMetric: observedLabel(outcomeDetail?.metrics?.typedTerminalOutcome),
+    terminalStepOutcome: terminalStepOutcomes.length === 1 ? terminalStepOutcomeValues[0] : null,
+  }
+  const terminalStepAgreement = terminalStepOutcomes.length === 0
+    ? 'UNKNOWN'
+    : terminalStepOutcomes.length > 1
+      ? 'MISMATCH'
+      : compareObservedSources({
+        transitionOutcome: typedTerminalOutcomeSources.transitionOutcome,
+        terminalStepOutcome: typedTerminalOutcomeSources.terminalStepOutcome,
+      })
+  const typedTerminalOutcomeStatus = combineConsistencyStatuses([
+    compareObservedSources({
+      modelMetrics: typedTerminalOutcomeSources.modelMetrics,
+      transitionOutcome: typedTerminalOutcomeSources.transitionOutcome,
+      transitionMetric: typedTerminalOutcomeSources.transitionMetric,
+    }),
+    terminalStepAgreement,
+    modelMetricsEventCount === 1 ? 'CONSISTENT' : modelMetricsEventCount === 0 ? 'UNKNOWN' : 'MISMATCH',
+  ])
+  const typedTerminalOutcome = {
+    status: typedTerminalOutcomeStatus,
+    sources: typedTerminalOutcomeSources,
+    terminalStepEventCount: terminalStepOutcomes.length,
+    terminalStepAgreement,
+  }
+  const mechanicalSteps = {
+    status: mechanicalStepsStatus,
+    sources: mechanicalStepSources,
+    expected: expectedMechanicalSteps,
+    eventCountStatus: mechanicalEventCountStatus,
+    stepIdentityStatus,
+    reservationStepIds: reservationIds,
+    stepOutcomeIds,
+    missingStepOutcomeIds,
+    unreservedStepOutcomeIds,
+    duplicatedReservationIds,
+    duplicatedStepOutcomeIds,
+  }
+  const status = combineConsistencyStatuses([mechanicalSteps.status, typedTerminalOutcome.status])
+  return {
+    status,
+    modelMetricsEventCount,
+    mechanicalSteps,
+    typedTerminalOutcome,
+  }
+}
+
 function projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification) {
   const orphanEvents = linked.filter((entry) => entry.event === 'VTR_ORPHAN_ACTION_OUTCOME')
   const terminalIndex = linked.indexOf(outcomeEvent)
@@ -1209,6 +1343,13 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
     const terminalKind = outcomeDetail?.outcome?.kind ?? null
     const verifiedSuccess = terminalKind === 'SUCCESS' && verification?.verified === true
     const mechanical = mechanicalStepProjection(linked)
+    const modelMetrics = transitionModelMetricsProjection(modelMetricsEvent)
+    const modelMetricsConsistency = projectVtrMetricsConsistency({
+      modelMetrics,
+      modelMetricsEventCount: modelMetricsEvents.length,
+      outcomeDetail,
+      linked,
+    })
     const outcomeConsistency = projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification)
     const lifecycleEvents = linked.filter((entry) => /(?:REFUSED|FENCE|ORPHAN|HANDOFF|STALE|FAILED|REQUIRED|REVOKED|WITHHELD|REJECTED|HOLDS|TERMINAL_ACTION_CORRELATED|TERMINAL_ACTION_SETTLEMENT_MISMATCH)/.test(entry.event))
     const status = verifiedSuccess
@@ -1237,8 +1378,9 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
       progress: progressEvent?.detail?.progress ?? null,
       progressEvent: traceProjection(progressEvent),
       mechanical,
-      modelMetrics: transitionModelMetricsProjection(modelMetricsEvent),
+      modelMetrics,
       modelMetricsEventCount: modelMetricsEvents.length,
+      modelMetricsConsistency,
       lifecycleEvents: lifecycleEvents.slice(-64).map(traceProjection),
       routeDecision: projectVtrReachRouteDecision(routeDecisionEvent),
       actuation: actuationEvent === null ? null : {
