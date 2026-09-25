@@ -43,6 +43,8 @@ export function installVtrReachTestRuntimePorts(controller: object): void {
     observeWorldState: () => { throw new Error('semantic fixture must provide buildReachWorldState') },
     inventoryCounts: () => ({}),
     containerContents: () => [],
+    bodyAvailable: () => true,
+    currentHealth: () => fields.bot?.health ?? 0,
     currentDimension: () => fields.bot?.game?.dimension ?? 'minecraft:overworld',
     reachabilityGateOptions: (tick, memory) => fields.reachabilityGateOptions?.(tick, memory) ?? {
       memory,

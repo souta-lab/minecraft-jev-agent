@@ -72,6 +72,19 @@ function makeBot(): Bot {
     time: { isDay: true },
     registry,
     entities: {},
+    // Exercise the production MineflayerReachRuntimeAdapter's real path-probe
+    // boundary. The adapter converts this grounded path to the typed CAN fact;
+    // the test does not inject ReachRoute or reachability evidence directly.
+    pathfinder: {
+      movements: {},
+      getPathTo: (_movements: unknown, goal: { x: number; y: number; z: number }) => ({
+        status: 'success',
+        path: [
+          { x: origin.x, y: origin.y, z: origin.z },
+          { x: goal.x, y: goal.y, z: goal.z },
+        ],
+      }),
+    },
     inventory: { items: () => [], count: () => 0 },
     blockAt,
     canSeeBlock: () => true,

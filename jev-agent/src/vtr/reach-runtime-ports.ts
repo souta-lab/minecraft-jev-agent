@@ -41,6 +41,8 @@ export interface ReachRuntimePorts {
   observeWorldState(input: SensorInput, options: SensorOptions): WorldState
   inventoryCounts(): Record<string, number>
   containerContents(): readonly ContainerObservation[]
+  bodyAvailable(): boolean
+  currentHealth(): number
   currentDimension(): string
   reachabilityGateOptions(tick: number, memory: StateFingerprintMemory): ReachabilityGateOptions
   dispatch(request: ReachActuationRequest): ReachActuationResult

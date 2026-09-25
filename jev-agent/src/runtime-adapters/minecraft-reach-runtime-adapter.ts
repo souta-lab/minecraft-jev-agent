@@ -59,6 +59,16 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
     return this.executor.containerContents()
   }
 
+  /** Typed readiness fact; the live Entity object stays inside this adapter. */
+  bodyAvailable(): boolean {
+    return this.bot.entity !== undefined
+  }
+
+  /** Plain health sample for safety/event projection; no Mineflayer value escapes. */
+  currentHealth(): number {
+    return this.bot.health ?? 0
+  }
+
   /** Live identity fact sampled from the Mineflayer client and returned as a string. */
   currentDimension(): string {
     return this.bot.game === undefined ? 'overworld' : this.bot.game.dimension

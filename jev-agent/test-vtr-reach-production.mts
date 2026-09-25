@@ -170,6 +170,47 @@ describe('VTR Reach production authority seam', () => {
     assert.doesNotMatch(reachMissionRuntime, /from ['"]mineflayer['"]|\bBot\b/)
   })
 
+  it('keeps the complete VTR tick prelude and Reach sensing helpers behind typed runtime facts', () => {
+    const tickStart = controller.indexOf('private async tick(trigger: DecisionTrigger')
+    const tickEnd = controller.indexOf('private jevLog(', tickStart)
+    const reachDispatch = controller.indexOf('await this.tickReachTransition(trigger, detail)', tickStart)
+    assert.ok(tickStart >= 0 && tickEnd > tickStart && reachDispatch > tickStart)
+    const prelude = controller.slice(tickStart, reachDispatch)
+    assert.doesNotMatch(prelude, /this\.bot|this\.currentDimension\(\)/)
+    assert.match(prelude, /this\.reachRuntimeAdapter\.currentDimension\(\)/)
+    assert.match(prelude, /this\.reachRuntimeAdapter\.currentHealth\(\)/)
+    assert.match(prelude, /this\.reachRuntimeAdapter\.bodyAvailable\(\)/)
+
+    const method = (name: string): string => {
+      const start = controller.indexOf(`private ${name}(`)
+      const end = controller.indexOf('\n  private ', start + 1)
+      assert.ok(start >= 0 && end > start, `expected private helper ${name}`)
+      return controller.slice(start, end)
+    }
+    const typedObservationHelpers = [
+      'buildReachWorldState',
+      'mergeRememberedPortalFrame',
+      'syncTerrainSignals',
+      'observeThreat',
+      'observeThreatState',
+      'observeUnansweredRangedThreat',
+      'observeEnvHazard',
+      'reachCandidates',
+      'reachIdentity',
+      'liveReachIdentity',
+      'reachObservation',
+      'reachRuntimeSnapshot',
+      'reachWitnessForCandidate',
+    ]
+    for (const name of typedObservationHelpers) {
+      assert.doesNotMatch(method(name), /this\.bot|this\.currentDimension\(\)/, `${name} must consume typed observations only`)
+    }
+    assert.match(method('syncTerrainSignals'), /this\.bindDigMemoryScope\(state\.self\.dimension\)/)
+    assert.doesNotMatch(method('syncTerrainSignals'), /this\.digMemory(?:\.|\s)/)
+    assert.match(runtimeAdapter, /bodyAvailable\(\): boolean\s*\{\s*return this\.bot\.entity !== undefined/)
+    assert.match(runtimeAdapter, /currentHealth\(\): number\s*\{\s*return this\.bot\.health \?\? 0/)
+  })
+
   it('does not journal an admitted Transition when its initial Jev route choice is unresolved', () => {
     const start = controller.indexOf('const plan = this.reachRuntime.deriveInventoryReachTransition({')
     const decisionRequired = controller.indexOf("if (started.status === 'decision_required')", start)

@@ -5298,13 +5298,13 @@ export class JevController {
       this.signals.failedCandidates = this.failureSnapshot()
       this.signals.zeroProgressRoutes = this.zeroProgressRoutes
       this.signals.knownResources = filterKnownResources(
-        this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.currentDimension())),
+        this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.reachRuntimeAdapter.currentDimension())),
         this.unreachableResources,
       )
       this.updateStallSignal()
-      this.observeThreat(trigger, detail)
+      this.observeThreat(trigger, detail, this.reachRuntimeAdapter.currentHealth())
 
-      if (this.bot.entity === undefined) return
+      if (!this.reachRuntimeAdapter.bodyAvailable()) return
 
       // V4's Reach controller runs before GoalQueue reconciliation and before
       // either model authority. While a contract is active, the legacy semantic
@@ -8887,6 +8887,10 @@ export class JevController {
   }
 
   private syncTerrainSignals(state: WorldState): void {
+    // Use the same typed observation that produced this snapshot when scoping
+    // coordinate memory. Going back through the legacy `digMemory` getter here
+    // would resample Mineflayer's live dimension during VTR fact construction.
+    this.bindDigMemoryScope(state.self.dimension)
     const feetY = Math.floor(state.self.position.y)
     let deepest: number | null = null
     for (const block of state.blocks) {
@@ -8894,8 +8898,8 @@ export class JevController {
       if (block.position.y >= feetY) continue
       if (deepest === null || block.position.y < deepest) deepest = block.position.y
     }
-    if (deepest !== null) this.digMemory.observeStoneY(deepest)
-    const memory = this.digMemory.snapshot()
+    if (deepest !== null) this.digMemoryState.observeStoneY(deepest)
+    const memory = this.digMemoryState.snapshot()
     this.signals.digDir = memory.digDir
     this.signals.digMode = memory.digMode
     this.signals.digDirCount = memory.digDirCount
@@ -11596,7 +11600,7 @@ export class JevController {
    * unattributed, never an invented source). A negative `hp_changed` without a
    * fresh attributed event keeps attribution only inside the same hit burst.
    */
-  private observeThreat(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
+  private observeThreat(trigger: DecisionTrigger, detail: Record<string, unknown>, currentHealth: number): void {
     const now = Date.now()
     if (trigger === 'damage_taken') {
       const sourceId =
@@ -11605,7 +11609,7 @@ export class JevController {
       const sourcePosition = damageOrigin(detail.attackerPosition)
       this.signals.lastDamage = {
         atMs: now,
-        health: this.bot.health ?? 0,
+        health: currentHealth,
         sourceId,
         sourceName,
         // The server-stated damage ORIGIN (the scheduler reads it off the
@@ -11624,7 +11628,7 @@ export class JevController {
     const sameBurst = previous !== null && now - previous.atMs <= 1500
     this.signals.lastDamage = {
       atMs: now,
-      health: typeof detail.health === 'number' ? detail.health : this.bot.health ?? 0,
+      health: typeof detail.health === 'number' ? detail.health : currentHealth,
       sourceId: sameBurst ? previous.sourceId : null,
       sourceName: sameBurst ? previous.sourceName : null,
       // Attribution follows the same-burst rule as identity: a negative health
