@@ -52,8 +52,11 @@ const VTR_TRACE_EVENTS = new Set([
   'VTR_SCHEDULER_HOLDS_TERMINAL',
   'VTR_MECHANICAL_STEP_REFUSED',
   'VTR_MECHANICAL_STEP_RESERVED',
+  'VTR_MECHANICAL_STEP_OUTCOME',
   'VTR_MECHANICAL_OUTCOME_REJECTED',
   'VTR_MECHANICAL_OUTCOME',
+  'VTR_TERMINAL_ACTION_CORRELATED',
+  'VTR_TERMINAL_ACTION_SETTLEMENT_MISMATCH',
   'VTR_REACH_ROUTE_DECISION',
   'VTR_TRANSITION_VERIFY',
   'VTR_TRANSITION_OUTCOME',
@@ -899,7 +902,8 @@ function mechanicalIntentId(entry) {
 function mechanicalStepProjection(linked) {
   const reservations = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_RESERVED')
   const actuations = linked.filter((entry) => entry.event === 'VTR_TRANSITION_ACTUATION')
-  const outcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_OUTCOME')
+  const stepOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_OUTCOME')
+  const actionOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_OUTCOME')
   const controlNames = new Set([
     'VTR_DUAL_AUTHORITY_FENCE',
     'VTR_REACH_GUARD_REFUSED',
@@ -920,9 +924,8 @@ function mechanicalStepProjection(linked) {
       if (actuationStepId !== null) return stepId !== null && actuationStepId === stepId
       return intentId !== null && mechanicalIntentId(entry) === intentId
     })
-    const stepOutcomes = outcomes.filter((entry) => stepId !== null && mechanicalStepId(entry) === stepId)
-    const intentOutcomes = outcomes.filter((entry) => mechanicalStepId(entry) === null
-      && intentId !== null && mechanicalIntentId(entry) === intentId)
+    const stepOutcomeEvents = stepOutcomes.filter((entry) => stepId !== null && mechanicalStepId(entry) === stepId)
+    const intentOutcomeEvents = actionOutcomes.filter((entry) => intentId !== null && mechanicalIntentId(entry) === intentId)
     const stepControls = controls.filter((entry) => {
       const controlStepId = mechanicalStepId(entry)
       const controlIntentId = mechanicalIntentId(entry)
@@ -933,8 +936,9 @@ function mechanicalStepProjection(linked) {
       scope: mechanicalStepId(entry) === stepId && stepId !== null ? 'step' : 'intent',
       event: traceProjection(entry),
     }))
-    const outcome = stepOutcomes.at(-1) ?? null
-    const intentOutcome = intentOutcomes.at(-1) ?? null
+    const outcome = stepOutcomeEvents.at(-1) ?? null
+    const intentOutcome = intentOutcomeEvents.at(-1) ?? null
+    const outcomeDetail = outcome?.detail ?? null
     const reservedDetail = reservation.detail ?? {}
     return {
       stepId,
@@ -949,6 +953,20 @@ function mechanicalStepProjection(linked) {
       reserved: traceProjection(reservation),
       actuations: actuationBinding,
       outcome: traceProjection(outcome),
+      stepOutcome: outcomeDetail === null ? null : {
+        event: outcome.event,
+        stepId: mechanicalStepId(outcome),
+        leg: outcomeDetail.leg ?? null,
+        status: outcomeDetail.status ?? null,
+        outcome: outcomeDetail.outcome ?? null,
+        verified: typeof outcomeDetail.verified === 'boolean' ? outcomeDetail.verified : null,
+        reason: outcomeDetail.reason ?? null,
+        contractHash: outcomeDetail.contractHash ?? null,
+        identity: outcomeDetail.identity ?? null,
+        observedAtMs: outcomeDetail.observedAtMs ?? null,
+        usage: outcomeDetail.usage ?? null,
+        observedAt: outcome.ts,
+      },
       intentOutcome: traceProjection(intentOutcome),
       controlEvents: stepControls.map(traceProjection),
       correlation: {
@@ -968,9 +986,12 @@ function mechanicalStepProjection(linked) {
     truncated: steps.length > 256,
     reservationCount: reservations.length,
     actuationEventCount: actuations.length,
-    mechanicalOutcomeEventCount: outcomes.length,
+    stepOutcomeEventCount: stepOutcomes.length,
+    actionOutcomeEventCount: actionOutcomes.length,
+    mechanicalOutcomeEventCount: stepOutcomes.length + actionOutcomes.length,
     controlEventCount: controls.length,
-    actionOutcomes: outcomes.filter((entry) => mechanicalStepId(entry) === null).slice(-64).map(traceProjection),
+    stepOutcomeEvents: stepOutcomes.slice(-256).map(traceProjection),
+    actionOutcomes: actionOutcomes.slice(-64).map(traceProjection),
     controlEvents: controls.slice(-64).map(traceProjection),
   }
 }
@@ -1165,7 +1186,7 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
     const verifiedSuccess = terminalKind === 'SUCCESS' && verification?.verified === true
     const mechanical = mechanicalStepProjection(linked)
     const outcomeConsistency = projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification)
-    const lifecycleEvents = linked.filter((entry) => /(?:REFUSED|FENCE|ORPHAN|HANDOFF|STALE|FAILED|REQUIRED|REVOKED|WITHHELD|REJECTED|HOLDS)/.test(entry.event))
+    const lifecycleEvents = linked.filter((entry) => /(?:REFUSED|FENCE|ORPHAN|HANDOFF|STALE|FAILED|REQUIRED|REVOKED|WITHHELD|REJECTED|HOLDS|TERMINAL_ACTION_CORRELATED|TERMINAL_ACTION_SETTLEMENT_MISMATCH)/.test(entry.event))
     const status = verifiedSuccess
       ? 'verified_success'
       : terminalKind === 'SUCCESS' ? 'success_without_verified_predicate'

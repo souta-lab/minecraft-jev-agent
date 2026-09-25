@@ -4,7 +4,7 @@ import { createServer } from 'node:net'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, readVtrRunJsonlEvents } from './buddy-observer.mjs'
+import { buildAiSummary, buildObserverSnapshot, buildWorldProbe, createObserver, parseBuddyLogLine, parseDetail, parseRunnerOutEvents, parseVtrRunJsonlEvents, projectVtrTransitions, readVtrRunJsonlEvents } from './buddy-observer.mjs'
 
 // Constructing the always-on service must remain safe when no active mission
 // source exists; repository milestone labels are not runtime mission evidence.
@@ -568,9 +568,13 @@ const ingressMechanicalRecords = [
   ),
   ingressStepEvent(
     ingressLegOneOutcomeTs,
-    'VTR_MECHANICAL_OUTCOME',
-    { intentId: 'intent-leg-1', stepId: 'step-leg-1', leg: 1, status: 'completed', verified: true, usage: { mechanicalSteps: 1 } },
-    `VTR_MECHANICAL_OUTCOME transition=${ingressTransitionId} step=step-leg-1 status=completed`,
+    'VTR_MECHANICAL_STEP_OUTCOME',
+    {
+      intentId: 'intent-leg-1', stepId: 'step-leg-1', leg: 1, status: 'active', outcome: 'CONTINUING',
+      verified: false, contractHash: ingressContractHash, identity: ingressContractIdentity,
+      observedAtMs: Date.parse(ingressLegOneOutcomeTs), usage: { mechanicalSteps: 1 },
+    },
+    `VTR_MECHANICAL_STEP_OUTCOME transition=${ingressTransitionId} step=step-leg-1 leg=1 status=active outcome=CONTINUING verified=false`,
   ),
   ingressStepEvent(
     ingressLegTwoReserveTs,
@@ -586,9 +590,19 @@ const ingressMechanicalRecords = [
   ),
   ingressStepEvent(
     ingressLegTwoOutcomeTs,
+    'VTR_MECHANICAL_STEP_OUTCOME',
+    {
+      intentId: 'intent-leg-2', stepId: 'step-leg-2', leg: 2, status: 'terminal', outcome: 'SUCCESS',
+      verified: true, contractHash: ingressContractHash, identity: ingressContractIdentity,
+      observedAtMs: Date.parse(ingressLegTwoOutcomeTs), usage: { mechanicalSteps: 2 },
+    },
+    `VTR_MECHANICAL_STEP_OUTCOME transition=${ingressTransitionId} step=step-leg-2 leg=2 status=terminal outcome=SUCCESS verified=true`,
+  ),
+  ingressStepEvent(
+    '2026-09-21T13:00:01.091Z',
     'VTR_MECHANICAL_OUTCOME',
-    { intentId: 'intent-leg-2', stepId: 'step-leg-2', leg: 2, status: 'completed', verified: true, usage: { mechanicalSteps: 2 } },
-    `VTR_MECHANICAL_OUTCOME transition=${ingressTransitionId} step=step-leg-2 status=completed`,
+    { intentId: 'intent-leg-2', result: { actionId: 'MOVE:oak-2', status: 'completed', verified: true } },
+    `VTR_MECHANICAL_OUTCOME transition=${ingressTransitionId} intent=intent-leg-2 status=completed`,
   ),
 ]
 const ingressOrphanActionOutcome = ingressStepEvent(
@@ -702,7 +716,9 @@ try {
   assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
   assert.equal(ingressSnapshot.vtr.latest.mechanical.reservationCount, 2)
   assert.equal(ingressSnapshot.vtr.latest.mechanical.actuationEventCount, 2)
-  assert.equal(ingressSnapshot.vtr.latest.mechanical.mechanicalOutcomeEventCount, 2)
+  assert.equal(ingressSnapshot.vtr.latest.mechanical.stepOutcomeEventCount, 2)
+  assert.equal(ingressSnapshot.vtr.latest.mechanical.actionOutcomeEventCount, 1)
+  assert.equal(ingressSnapshot.vtr.latest.mechanical.mechanicalOutcomeEventCount, 3)
   assert.deepEqual(ingressSnapshot.vtr.latest.lifecycleEvents.map((event) => event.event), [
     'VTR_RUNTIME_INTENT_REFUSED',
     'VTR_ORPHAN_ACTUATION_REVOKED',
@@ -712,6 +728,7 @@ try {
     stepId: step.stepId,
     leg: step.leg,
     status: step.status,
+    stepOutcome: step.stepOutcome,
     correlation: step.correlation,
     traceEvents: step.trace.map((event) => event.event),
   })), [
@@ -719,17 +736,58 @@ try {
       stepId: 'step-leg-1',
       leg: 1,
       status: 'mechanical_outcome_observed',
+      stepOutcome: {
+        event: 'VTR_MECHANICAL_STEP_OUTCOME',
+        stepId: 'step-leg-1',
+        leg: 1,
+        status: 'active',
+        outcome: 'CONTINUING',
+        verified: false,
+        reason: null,
+        contractHash: ingressContractHash,
+        identity: ingressContractIdentity,
+        observedAtMs: Date.parse(ingressLegOneOutcomeTs),
+        usage: { mechanicalSteps: 1 },
+        observedAt: ingressLegOneOutcomeTs,
+      },
       correlation: { reservation: 'step-id', actuation: 'step-id', outcome: 'step-id' },
-      traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_OUTCOME'],
+      traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_STEP_OUTCOME'],
     },
     {
       stepId: 'step-leg-2',
       leg: 2,
       status: 'mechanical_outcome_observed',
+      stepOutcome: {
+        event: 'VTR_MECHANICAL_STEP_OUTCOME',
+        stepId: 'step-leg-2',
+        leg: 2,
+        status: 'terminal',
+        outcome: 'SUCCESS',
+        verified: true,
+        reason: null,
+        contractHash: ingressContractHash,
+        identity: ingressContractIdentity,
+        observedAtMs: Date.parse(ingressLegTwoOutcomeTs),
+        usage: { mechanicalSteps: 2 },
+        observedAt: ingressLegTwoOutcomeTs,
+      },
       correlation: { reservation: 'step-id', actuation: 'step-id', outcome: 'step-id' },
-      traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_OUTCOME'],
+      traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_STEP_OUTCOME', 'VTR_MECHANICAL_OUTCOME'],
     },
   ])
+  const withoutLegTwoStepOutcome = projectVtrTransitions({
+    events: parseVtrRunJsonlEvents(ingressRecords).filter((event) => !(event.event === 'VTR_MECHANICAL_STEP_OUTCOME' && event.detail.stepId === 'step-leg-2')),
+    runId: ingressRunId,
+    generationId: ingressGenerationId,
+    sourceCommit: ingressSourceSha,
+    worldKey: ingressWorld,
+    generationStartedAt: Date.parse(ingressReadyTs),
+  }).latest.mechanical.steps.find((step) => step.stepId === 'step-leg-2')
+  assert.equal(withoutLegTwoStepOutcome.stepOutcome, null, 'intent-level action outcomes must not be promoted into step outcomes')
+  assert.equal(withoutLegTwoStepOutcome.outcome, null, 'missing exact step marker must remain unobserved')
+  assert.equal(withoutLegTwoStepOutcome.intentOutcome.event, 'VTR_MECHANICAL_OUTCOME')
+  assert.equal(withoutLegTwoStepOutcome.status, 'intent_outcome_only')
+  assert.equal(withoutLegTwoStepOutcome.correlation.outcome, 'intent-id-only')
   assert.equal(ingressSummary.vtr.latest.outcomeConsistency.status, 'contradiction')
   assert.equal(ingressSummary.vtr.latest.outcomeConsistency.contradictions[0].kind, 'orphan_action_after_success')
   assert.equal(ingressSummary.vtr.latest.outcomeConsistency.contradictions[0].actionStatus, 'cancelled')
