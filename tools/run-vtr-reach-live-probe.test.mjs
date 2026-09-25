@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { PassThrough } from 'node:stream'
 import { join } from 'node:path'
 import {
   main,
@@ -21,6 +22,7 @@ import {
   runNoDoubleAuthorityFixture,
   validateExactSourceWorkspaceInstall,
   inspectNodeModulesLinkContainment,
+  issueLeafCommand,
   validatePortPolicy,
   writeSetupFailureArtifact,
 } from './run-vtr-reach-live-probe.mjs'
@@ -40,6 +42,40 @@ function writeWorkspaceFixture(root, { linkTarget = null } = {}) {
 }
 
 describe('Reach live probe caller pure contracts', () => {
+  test('Leaf fixture response timeout records identity-bound console diagnostics and a typed cause', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-timeout-'))
+    const attemptRoot = join(parent, 'attempt')
+    const stdin = new PassThrough()
+    const server = {
+      handle: { child: { stdin, exitCode: null, signalCode: null } },
+      serverLogLines: [],
+      serverStart: { pid: 12345 },
+    }
+    const identity = { sourceSha: 'a'.repeat(40), runId: 'run-fixture-timeout', generationId: null, worldKey: '127.0.0.1:25577|overworld|1' }
+    try {
+      await expect(issueLeafCommand(server, 'time query daytime', /\bThe time is \d+\b/iu, {
+        timeoutMs: 0,
+        phase: 'fixture.console-smoke',
+        identity,
+        attemptRoot,
+      })).rejects.toMatchObject({
+        name: 'LeafFixtureProbeError',
+        code: 'LEAF_FIXTURE_CONSOLE_SMOKE_RESPONSE_TIMEOUT',
+        phase: 'fixture.console-smoke',
+      })
+      const attemptsPath = join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl')
+      const rows = readFileSync(attemptsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.map((row) => row.event)).toEqual(['dispatch-started', 'stdin-write-acknowledged', 'response-timeout'])
+      expect(rows.every((row) => row.sourceSha === identity.sourceSha && row.runId === identity.runId && row.worldKey === identity.worldKey)).toBe(true)
+      expect(rows.at(-1)).toMatchObject({ phase: 'fixture.console-smoke', outputRowCount: 0, stdinDestroyed: false })
+      expect(rows[0].commandSha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(JSON.stringify(rows)).not.toContain('time query daytime')
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
   test('help parsing does not require a live server configuration', () => {
     expect(parseCliArgs(['--help']).help).toBe(true)
     expect(() => parseCliArgs(['--run', '--port', '25576'])).toThrow(/protected/iu)

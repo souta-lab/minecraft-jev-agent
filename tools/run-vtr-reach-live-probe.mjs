@@ -822,6 +822,7 @@ function runtimeFailureEvidenceCandidates(attemptRoot, preflightPath = null) {
       'runner/host-lifecycle.jsonl', 'runner/supervisor-capture.json', 'runner/supervisor-lifecycle.json',
       'runner/supervisor-result.json', 'runner/collector-report.json', 'runner/acceptance.json',
       'runner/initial-snapshot.json', 'runner/final-snapshot.json', 'runner/terminal-snapshot.json',
+      'runner/fixture-command-attempts.jsonl',
       'runner/no-llm-egress-audit.json', 'runner/no-llm-egress-provenance.json',
       'runner/resident-process-group-closure.json', 'runner/package-report.json',
       'runner/validation-report.json', 'runner/caller-result.json', 'runner/fixture-transcript.json',
@@ -1318,9 +1319,28 @@ async function fetchJson(url) {
   return await response.json()
 }
 
-function writeLineToChild(handle, line) {
+async function writeLineToChild(handle, line, { timeoutMs = 5000 } = {}) {
   if (!handle?.child?.stdin || handle.child.stdin.destroyed || handle.child.exitCode !== null) throw new Error('server stdin is unavailable')
-  handle.child.stdin.write(`${line}\n`)
+  const stdin = handle.child.stdin
+  return await new Promise((resolvePromise, reject) => {
+    let settled = false
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      stdin.off('error', onError)
+      if (error) reject(error)
+      else resolvePromise({ acknowledgedAt: isoNow() })
+    }
+    const onError = (error) => finish(new Error(`server stdin write failed (${error?.code ?? error?.name ?? 'UNKNOWN'})`))
+    const timer = setTimeout(() => finish(new Error('server stdin write acknowledgement timed out')), timeoutMs)
+    stdin.once('error', onError)
+    try {
+      stdin.write(`${line}\n`, (error) => finish(error ? new Error(`server stdin write failed (${error.code ?? error.name ?? 'UNKNOWN'})`) : null))
+    } catch (error) {
+      finish(new Error(`server stdin write failed (${error?.code ?? error?.name ?? 'UNKNOWN'})`))
+    }
+  })
 }
 
 function isChildRunning(handle) {
@@ -1862,7 +1882,7 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
   const worldSaveFromIndex = serverLogLines.length
   const worldSaveCommand = 'save-all flush'
   const worldSaveIssuedAt = isoNow()
-  writeLineToChild(handle, worldSaveCommand)
+  await writeLineToChild(handle, worldSaveCommand)
   const initialWorldSave = await waitFor(() => {
     if (!isChildRunning(handle)) throw new Error('isolated Leaf exited before its initial world save')
     const response = parseConsoleLines(serverLogLines, worldSaveFromIndex, /Saved the game/iu)
@@ -2054,15 +2074,106 @@ function parseConsoleLines(lines, fromIndex, pattern) {
   return found[0] ?? null
 }
 
-async function issueLeafCommand(server, command, expectedResponse, { timeoutMs = 15_000 } = {}) {
+class LeafFixtureProbeError extends Error {
+  constructor(code, phase) {
+    super(`${phase} did not receive its required Leaf console acknowledgement`)
+    this.name = 'LeafFixtureProbeError'
+    this.code = code
+    this.phase = phase
+  }
+}
+
+function fixtureCommandAttemptsPath(attemptRoot) {
+  return join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl')
+}
+
+function appendFixtureCommandAttempt(attemptRoot, row) {
+  appendJsonl(fixtureCommandAttemptsPath(attemptRoot), {
+    schema: 'vtr-fixture-console-attempt/v1',
+    ...row,
+  })
+}
+
+export async function issueLeafCommand(server, command, expectedResponse, {
+  timeoutMs = 15_000,
+  phase,
+  identity,
+  sourceSha,
+  attemptRoot,
+} = {}) {
+  if (!['fixture.console-smoke', 'fixture.fill', 'fixture.setblock'].includes(phase)) throw new Error('Leaf fixture command phase is required and must be allowlisted')
   if (!isChildRunning(server.handle)) throw new Error('isolated Leaf exited before fixture command')
   const fromIndex = server.serverLogLines.length
   const issuedAt = isoNow()
-  writeLineToChild(server.handle, command)
-  const response = await waitFor(() => parseConsoleLines(server.serverLogLines, fromIndex, expectedResponse), {
-    timeoutMs, label: `Leaf console response to ${command.split(' ', 3).join(' ')}`,
-  })
-  return { issuedAt, command, serverOutput: response.line, observedAt: response.ts, responsePid: server.serverStart.pid }
+  const kind = phase.slice('fixture.'.length)
+  const identityFields = {
+    sourceSha: sourceSha ?? identity?.sourceSha ?? null,
+    runId: identity?.runId ?? null,
+    generationId: identity?.generationId ?? null,
+    worldKey: identity?.worldKey ?? null,
+  }
+  const commandSha256 = sha256(Buffer.from(command, 'utf8'))
+  const attemptBase = {
+    ...identityFields,
+    phase,
+    kind,
+    serverPid: server.serverStart.pid,
+    issuedAt,
+    commandSha256,
+    serverLogStartSequence: fromIndex,
+  }
+  appendFixtureCommandAttempt(attemptRoot, { ...attemptBase, event: 'dispatch-started' })
+  let writeAcknowledgement
+  try {
+    writeAcknowledgement = await writeLineToChild(server.handle, command)
+    appendFixtureCommandAttempt(attemptRoot, { ...attemptBase, event: 'stdin-write-acknowledged', ...writeAcknowledgement })
+  } catch (error) {
+    appendFixtureCommandAttempt(attemptRoot, {
+      ...attemptBase,
+      event: 'stdin-write-failed',
+      errorCode: /^[A-Z0-9_]{1,64}$/u.test(String(error?.code ?? '')) ? error.code : 'STDIN_WRITE_FAILED',
+      stdinDestroyed: server.handle.child.stdin.destroyed,
+      childExitCode: server.handle.child.exitCode,
+    })
+    throw new LeafFixtureProbeError('LEAF_FIXTURE_STDIN_WRITE_FAILED', phase)
+  }
+
+  try {
+    const response = await waitFor(() => parseConsoleLines(server.serverLogLines, fromIndex, expectedResponse), {
+      timeoutMs, label: `Leaf console response to ${kind}`,
+    })
+    appendFixtureCommandAttempt(attemptRoot, {
+      ...attemptBase,
+      event: 'response-observed',
+      responseAt: response.ts,
+      responseSha256: sha256(Buffer.from(response.line, 'utf8')),
+      responseLine: redactOperationalText(response.line).slice(0, 500),
+    })
+    return { issuedAt, command, commandSha256, stdinAcknowledgedAt: writeAcknowledgement.acknowledgedAt, serverOutput: response.line, observedAt: response.ts, responsePid: server.serverStart.pid }
+  } catch (error) {
+    const outputRows = server.serverLogLines.slice(fromIndex).map(({ line, ts, stream }) => ({
+      ts,
+      stream,
+      line: redactOperationalText(line).slice(0, 500),
+    }))
+    const outputBytes = Buffer.from(JSON.stringify(outputRows), 'utf8')
+    appendFixtureCommandAttempt(attemptRoot, {
+      ...attemptBase,
+      event: 'response-timeout',
+      stdinAcknowledgedAt: writeAcknowledgement.acknowledgedAt,
+      timedOutAt: isoNow(),
+      outputRowCount: outputRows.length,
+      outputSha256: sha256(outputBytes),
+      outputTail: outputRows.slice(-30),
+      stdinDestroyed: server.handle.child.stdin.destroyed,
+      childExitCode: server.handle.child.exitCode,
+      childSignalCode: server.handle.child.signalCode,
+    })
+    const code = phase === 'fixture.console-smoke' ? 'LEAF_FIXTURE_CONSOLE_SMOKE_RESPONSE_TIMEOUT'
+      : phase === 'fixture.fill' ? 'LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT'
+        : 'LEAF_FIXTURE_SETBLOCK_RESPONSE_TIMEOUT'
+    throw new LeafFixtureProbeError(code, phase)
+  }
 }
 
 async function prepareFixtureContext({ server, runtimeDir, attemptRoot, identity, sourceSha, startSnapshot }) {
@@ -2115,9 +2226,16 @@ async function prepareFixtureContext({ server, runtimeDir, attemptRoot, identity
   if (startSnapshot) startSnapshot.value = initial
 
   const fixtureRows = []
-  const fill = await issueLeafCommand(server, 'execute at AI_Buddy run fill ~1 ~-1 ~-3 ~24 ~-1 ~3 minecraft:stone replace air', /(?:Successfully filled|blocks? (?:were )?filled|filled \d+ block)/iu)
+  await issueLeafCommand(server, 'time query daytime', /\bThe time is \d+\b/iu, {
+    phase: 'fixture.console-smoke', identity, sourceSha, attemptRoot,
+  })
+  const fill = await issueLeafCommand(server, 'execute at AI_Buddy run fill ~1 ~-1 ~-3 ~24 ~-1 ~3 minecraft:stone replace air', /(?:Successfully filled|blocks? (?:were )?filled|filled \d+ block)/iu, {
+    phase: 'fixture.fill', identity, sourceSha, attemptRoot,
+  })
   fixtureRows.push({ schema: 'vtr-reach-fixture-command/v1', sourceSha, runId: identity.runId, generationId: null, worldKey: identity.worldKey, phase: 'resident-frozen-before-generation-ready', ...fill })
-  const setblock = await issueLeafCommand(server, 'execute at AI_Buddy run setblock ~16 ~0 ~2 minecraft:oak_log', /\bChanged(?: the)? block at\b/iu)
+  const setblock = await issueLeafCommand(server, 'execute at AI_Buddy run setblock ~16 ~0 ~2 minecraft:oak_log', /\bChanged(?: the)? block at\b/iu, {
+    phase: 'fixture.setblock', identity, sourceSha, attemptRoot,
+  })
   fixtureRows.push({ schema: 'vtr-reach-fixture-command/v1', sourceSha, runId: identity.runId, generationId: null, worldKey: identity.worldKey, phase: 'resident-frozen-before-generation-ready', ...setblock })
   const transcriptPath = join(attemptRoot, 'server', 'fixture-commands.jsonl')
   mkdirSync(dirname(transcriptPath), { recursive: true, mode: 0o700 })
@@ -2386,7 +2504,7 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
 
 async function stopLeaf({ attestation, attemptRoot, server }) {
   if (isChildRunning(server.handle)) {
-    try { writeLineToChild(server.handle, 'stop') } catch {}
+    try { await writeLineToChild(server.handle, 'stop') } catch {}
   }
   let result = await Promise.race([server.handle.closed, delay(90_000).then(() => null)])
   let forced = false
@@ -2870,7 +2988,7 @@ async function cleanupPartialAttempt({ tracked, server, observer, resident, opti
     } catch (error) { results.push({ component: 'leaf', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }) }
   } else if (!server && tracked.leaf?.child && isChildRunning(tracked.leaf)) {
     try {
-      if (tracked.leaf.child.stdin && !tracked.leaf.child.stdin.destroyed) writeLineToChild(tracked.leaf, 'stop')
+      if (tracked.leaf.child.stdin && !tracked.leaf.child.stdin.destroyed) await writeLineToChild(tracked.leaf, 'stop')
       const stopped = await stopPartialChild(tracked.leaf, { label: 'partially-started-Leaf', port: options.port, timeoutMs: 5000 })
       results.push({ component: 'leaf', ...stopped })
     } catch (error) { results.push({ component: 'leaf', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }) }
@@ -2998,7 +3116,7 @@ export function persistRunPreflightFailure(options, report) {
 }
 
 export function writeSetupFailureArtifact(attemptRoot, {
-  sourceSha, stage, error, preflightPath = null,
+  sourceSha, stage, error, preflightPath = null, failureCode = null, failurePhase = null,
   cleanup = { status: 'NOT_REQUIRED', attempted: false, results: [] },
   components = { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
   evidenceCandidates = setupEvidenceCandidates(attemptRoot, preflightPath),
@@ -3012,6 +3130,8 @@ export function writeSetupFailureArtifact(attemptRoot, {
     phase: stage,
     failureStage: stage,
     reason: redactOperationalText(safeErrorDescription(error)),
+    ...(typeof failureCode === 'string' && /^[A-Z0-9_]{1,64}$/u.test(failureCode) ? { failureCode } : {}),
+    ...(typeof failurePhase === 'string' && /^[a-z][a-z0-9.-]{0,63}$/u.test(failurePhase) ? { failurePhase } : {}),
     cleanup,
     components,
     evidence,
@@ -3237,6 +3357,49 @@ async function executeRun(options, preflight) {
     failurePhase = 'caller-result'
     const runnerResultPath = join(options.attemptRoot, 'runner', 'caller-result.json')
     writeJsonExclusive(runnerResultPath, { schema: 'vtr-reach-live-caller-result/v1', preflightPath, attemptRoot: options.attemptRoot, sourceSha, result })
+    if (result?.status !== 'PASS') {
+      const runnerFailurePath = join(options.attemptRoot, 'runner', 'runner-failure.json')
+      if (!existsSync(runnerFailurePath)) {
+        const detail = isPlainObject(result?.failureDetails) ? result.failureDetails : null
+        const detailPhase = typeof detail?.phase === 'string' && /^[a-z][a-z0-9.-]{0,63}$/u.test(detail.phase) ? detail.phase : null
+        const detailCode = typeof detail?.code === 'string' && /^[A-Z0-9_]{1,64}$/u.test(detail.code) ? detail.code : null
+        const phase = detailPhase ?? 'supervisor-lifecycle'
+        const residentStopped = result?.events?.some((row) => row.event === 'resident-stopped') === true
+        const serverStopped = result?.events?.some((row) => row.event === 'isolated-leaf-stopped') === true
+        const residentRunning = isChildRunning(resident?.handle?.process ?? tracked.resident?.process)
+        const leafRunning = isChildRunning(server?.handle ?? tracked.leaf)
+        const observerLeftBound = observer !== null && isChildRunning(observer.handle)
+        const components = {
+          leafServer: serverStopped || !leafRunning ? 'STOPPED' : 'STOP_INCOMPLETE',
+          observer: observerLeftBound ? 'LEFT_BOUND' : 'STOPPED',
+          resident: residentStopped || !residentRunning ? 'STOPPED' : 'STOP_INCOMPLETE',
+        }
+        const failureCleanup = {
+          status: Object.values(components).includes('STOP_INCOMPLETE') || lateCleanup.some((row) => row.status === 'INCOMPLETE') ? 'INCOMPLETE' : 'COMPLETE',
+          attempted: true,
+          observerPolicy: 'leave-bound',
+          results: [
+            { component: 'resident', status: components.resident },
+            { component: 'leaf', status: components.leafServer },
+            { component: 'observer', status: components.observer },
+            ...lateCleanup.map(({ component, status, pid, exitCode, reason }) => ({ component, status, ...(pid === undefined ? {} : { pid }), ...(exitCode === undefined ? {} : { exitCode }), ...(reason === undefined ? {} : { reason }) })),
+          ],
+        }
+        try {
+          writeSetupFailureArtifact(options.attemptRoot, {
+            sourceSha,
+            stage: phase,
+            error: new Error(result.failure ?? `supervisor returned ${result.status ?? 'unknown'}`),
+            failureCode: detailCode,
+            failurePhase: detailPhase,
+            preflightPath,
+            cleanup: failureCleanup,
+            components,
+            evidenceCandidates: runtimeFailureEvidenceCandidates(options.attemptRoot, preflightPath),
+          })
+        } catch {}
+      }
+    }
     return result
   } catch (error) {
     let cleanup = []

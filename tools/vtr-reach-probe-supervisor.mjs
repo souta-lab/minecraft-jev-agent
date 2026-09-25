@@ -45,6 +45,17 @@ const SHA40_RE = /^[0-9a-f]{40}$/iu
 const SHA256_RE = /^[0-9a-f]{64}$/iu
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0
+const SAFE_FIXTURE_FAILURE_CODES = new Set([
+  'LEAF_FIXTURE_CONSOLE_SMOKE_RESPONSE_TIMEOUT',
+  'LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT',
+  'LEAF_FIXTURE_SETBLOCK_RESPONSE_TIMEOUT',
+  'LEAF_FIXTURE_STDIN_WRITE_FAILED',
+])
+const SAFE_FIXTURE_FAILURE_PHASES = new Set([
+  'fixture.console-smoke',
+  'fixture.fill',
+  'fixture.setblock',
+])
 
 class ProbeSupervisorError extends Error {
   constructor(message, code = 'PROBE_SUPERVISOR_ERROR') {
@@ -66,7 +77,18 @@ function safeErrorDescription(error) {
   if (error instanceof ProbeSupervisorError) return error.message
   const name = error instanceof Error ? error.name : 'Error'
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/u.test(error.code) ? error.code : null
+  const phase = SAFE_FIXTURE_FAILURE_PHASES.has(error?.phase) ? error.phase : null
+  if (code !== null && SAFE_FIXTURE_FAILURE_CODES.has(code) && phase !== null) {
+    return `adapter failure (${name}, ${code}, ${phase})`
+  }
   return code === null ? `adapter/system failure (${name})` : `adapter/system failure (${name}, ${code})`
+}
+
+function safeErrorDetails(error) {
+  const name = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.name) ? error.name : 'Error'
+  const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/u.test(error.code) ? error.code : null
+  const phase = SAFE_FIXTURE_FAILURE_PHASES.has(error?.phase) ? error.phase : null
+  return { name, code, phase }
 }
 
 function whitelist(source, fields) {
@@ -945,6 +967,7 @@ export async function runVtrReachProbeSupervisor({
   let archive = null
   let validation = null
   let failure = null
+  let failureDetails = null
   let failureStatus = null
   let residentStop = null
   let leafStop = null
@@ -1124,8 +1147,9 @@ export async function runVtrReachProbeSupervisor({
     events.push({ event: 'collector-complete', at: new Date(now()).toISOString(), status: collector.status ?? null, reportPath: collector.path ?? null, sha256: collector.sha256 ?? null })
   } catch (error) {
     failure = safeErrorDescription(error)
+    failureDetails = safeErrorDetails(error)
     failureStatus = error?.code === 'PROBE_WAIT_TIMEOUT' ? 'INCOMPLETE' : 'FAIL'
-    events.push({ event: 'supervisor-error', at: new Date(now()).toISOString(), reason: failure })
+    events.push({ event: 'supervisor-error', at: new Date(now()).toISOString(), reason: failure, ...failureDetails })
   } finally {
     if (resident !== null) {
       try {
@@ -1299,6 +1323,7 @@ export async function runVtrReachProbeSupervisor({
     },
     events,
     failure,
+    failureDetails,
   }
   if (capture !== null) {
     try { lifecycle.captureArtifact = writeExclusiveJson(outputPaths.capture, capture, root) } catch (error) {
@@ -1379,6 +1404,7 @@ export async function runVtrReachProbeSupervisor({
     lifecycleArtifact,
     events,
     failure,
+    failureDetails,
   }
   let resultArtifact = null
   try { resultArtifact = writeExclusiveJson(outputPaths.result, result, root) } catch (error) {

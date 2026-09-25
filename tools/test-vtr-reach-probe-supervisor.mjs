@@ -477,6 +477,48 @@ try {
   }
 
   {
+    const root = join(temporary, 'typed-fixture-adapter-failure')
+    const { paths, serverAttestation } = setup(root)
+    const calls = []
+    const adapters = createAdapters({ calls, paths, leaf: root, now: () => Date.parse(t(10)) })
+    adapters.prepareFixture = async () => {
+      calls.push('prepare-fixture')
+      const error = new Error('console failure secret=must-not-be-persisted')
+      error.name = 'LeafFixtureProbeError'
+      error.code = 'LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT'
+      error.phase = 'fixture.fill'
+      throw error
+    }
+    const result = await runVtrReachProbeSupervisor({
+      attemptRoot: root,
+      runtimeDir: join(root, 'runtime'),
+      sourceSha: SOURCE,
+      paths,
+      expectedCaptureSchema: 'vtr-provider-activity-capture/v2',
+      expectedCaptureStatus: 'OBSERVED',
+      serverAttestation,
+      watchFactory: watchFactory(calls, captureFixture()),
+      observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
+      adapters,
+      outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
+      now: () => Date.parse(t(10)),
+      sleep: async () => {},
+    })
+    assert.equal(result.status, 'FAIL')
+    assert.equal(result.failure, 'adapter failure (LeafFixtureProbeError, LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT, fixture.fill)')
+    assert.deepEqual(result.failureDetails, { name: 'LeafFixtureProbeError', code: 'LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT', phase: 'fixture.fill' })
+    assert.equal(JSON.stringify(result).includes('must-not-be-persisted'), false)
+    assert.equal(calls.includes('resume'), false, 'fixture failure remains fail-closed before generation resume')
+    assert.equal(calls.includes('collect'), false, 'fixture failure cannot reach gameplay collection')
+    assert.ok(calls.indexOf('stop-resident') < calls.indexOf('stop-leaf'), 'fixture failure still shuts down resident before Leaf')
+    const lifecycle = JSON.parse(readFileSync(result.lifecycleArtifact.path, 'utf8'))
+    assert.deepEqual(lifecycle.events.find((row) => row.event === 'supervisor-error'), {
+      event: 'supervisor-error', at: lifecycle.events.find((row) => row.event === 'supervisor-error').at,
+      reason: result.failure, name: 'LeafFixtureProbeError', code: 'LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT', phase: 'fixture.fill',
+    })
+  }
+
+  {
     const root = join(temporary, 'bad-capture-status')
     const { paths, serverAttestation } = setup(root)
     const calls = []
