@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
 import type { Candidate } from './src/candidates.ts'
-import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
+import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 
 const identity = {
   worldKey: '127.0.0.1:25565|minecraft:overworld|1',
@@ -111,6 +111,7 @@ function fixture() {
       error: (_source: string, line: string, detail: Record<string, unknown> = {}) => events.push({ line, detail }),
     },
   })
+  installVtrReachTestRuntimePorts(controller)
   return { controller, fields, events, decisions, terminalState, reachRuntime }
 }
 

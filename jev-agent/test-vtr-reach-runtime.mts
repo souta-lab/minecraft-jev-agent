@@ -4,7 +4,7 @@ import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
-import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
+import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 
 const mission = { id: 'runtime-reach-oak', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
 const identity = {
@@ -157,6 +157,7 @@ test('production Reach uses injected VTR authority through same-contract continu
         },
       },
     })
+    installVtrReachTestRuntimePorts(controller)
     expect(controllerFields.reachRuntime).toBe(reachRuntime)
 
     const tickReachTransition = (JevController.prototype as unknown as {

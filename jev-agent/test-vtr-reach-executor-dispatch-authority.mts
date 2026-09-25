@@ -15,6 +15,8 @@ import type { WorldState } from './src/state.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import type { ReachIdentity, ReachTerminalOutcome, ReachTransitionState } from './src/vtr/reach.ts'
+import { MineflayerReachRuntimeAdapter } from './src/runtime-adapters/minecraft-reach-runtime-adapter.ts'
+import { StateFingerprintMemory } from './src/moveFailMemory.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -55,7 +57,7 @@ function makeBot(): MovementBotFixture {
       // the test attempt a second owner while the first still holds the body.
     },
     stop(): void { pathStops += 1 },
-    getPathTo: () => ({ status: 'noPath', path: [] }),
+    getPathTo: () => ({ status: 'success', path: [{ x: standPosition.x, y: standPosition.y, z: standPosition.z }] }),
   }
   const bot = {
     registry,
@@ -186,6 +188,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     actuation: 'pathfinder',
     pathTimeoutMs: 10_000,
   })
+  const reachRuntimeAdapter = new MineflayerReachRuntimeAdapter(fixture.bot, executor)
   const reachRuntime = new ReachMissionRuntime({
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),
@@ -239,6 +242,8 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     runtimeLlmCalls: 0,
     planCalls: 0,
     executor,
+    reachRuntimeAdapter,
+    reachabilityProofs: new StateFingerprintMemory(),
     logger,
     actionStart: null,
     requestDecision: () => undefined,
@@ -246,7 +251,6 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     buildReachWorldState: () => observedWorld,
     reachIdentity: () => identity,
     reachCandidates: () => ({ candidates: [vtrCandidate], grounded: { candidates: [vtrCandidate] } }),
-    reachabilityGateOptions: () => ({ pathProbe: () => 'reachable', stationApproach: null }),
   })
 
   try {

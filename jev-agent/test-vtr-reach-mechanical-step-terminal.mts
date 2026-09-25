@@ -8,7 +8,7 @@ import type { Candidate } from './src/candidates.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import type { ReachIdentity, ReachTerminalOutcome } from './src/vtr/reach.ts'
-import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
+import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -254,6 +254,7 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
       ): Promise<void>
     }).onReachActionComplete,
   })
+  installVtrReachTestRuntimePorts(controller)
   const claim = executor.claim(candidate, {
     authority: 'vtr-reach',
     transitionId,

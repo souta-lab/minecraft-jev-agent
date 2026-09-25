@@ -7,7 +7,7 @@ import type { WorldState } from './src/state.ts'
 import { envelopeForCandidate } from './src/skillCommitment.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
+import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 
 function newReachRuntime(): ReachMissionRuntime {
   return new ReachMissionRuntime({
@@ -130,6 +130,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
     reachIdentity: () => identity,
     reachCandidates: () => ({ candidates: [], grounded: { candidates: [candidate] } }),
   })
+  installVtrReachTestRuntimePorts(controller)
 
   expect(controllerState.reachTransition).toBeNull()
   expect(controllerState.executor.current).toBeNull()
@@ -193,6 +194,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
     reachIdentity: () => identity,
     reachCandidates: () => ({ candidates: [candidate], grounded: { candidates: [candidate] } }),
   })
+  installVtrReachTestRuntimePorts(probeController)
   expect(await tickReachTransition.call(probeController, 'damage_taken', {})).toBe(true)
   expect(probeEvents.find((event) => event.line.includes('VTR_REACH_PROBE_HOLD'))?.detail).toMatchObject({
     reason: 'body-not-safe',
@@ -297,6 +299,7 @@ test('a running legacy walk for the configured Reach predicate is revoked before
     reachabilityGateOptions: () => ({ pathProbe: () => 'reachable' }),
     reachCandidates: () => ({ candidates: [candidate], grounded: { candidates: [candidate] } }),
   })
+  installVtrReachTestRuntimePorts(controller)
 
 
   const tickReachTransition = (JevController.prototype as unknown as {
