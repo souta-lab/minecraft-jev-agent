@@ -1765,7 +1765,6 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
     if (!isChildRunning(handle)) throw new Error('isolated Leaf exited before startup completed')
     const lines = startRowFromLog(serverLogLines, levelName)
     if (lines === null) return null
-    if (!existsSync(join(worldRoot, 'level.dat'))) return null
     return lines
   }, { timeoutMs: options.timeoutMs, label: 'same-child Leaf version, fresh level, and completion log' })
   const listener = await waitForPortOpen(options.port, handle, Math.min(options.timeoutMs, 60_000), 'isolated Leaf')
@@ -1775,6 +1774,16 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
   }
   const realWorldRoot = realpathSync(worldRoot)
   if (realWorldRoot !== worldRoot || !ensureInside(realpathSync(attemptRoot), realWorldRoot)) throw new Error('Leaf world root escaped the unique attempt directory')
+  const worldSaveFromIndex = serverLogLines.length
+  const worldSaveCommand = 'save-all flush'
+  const worldSaveIssuedAt = isoNow()
+  writeLineToChild(handle, worldSaveCommand)
+  const initialWorldSave = await waitFor(() => {
+    if (!isChildRunning(handle)) throw new Error('isolated Leaf exited before its initial world save')
+    const response = parseConsoleLines(serverLogLines, worldSaveFromIndex, /Saved the game/iu)
+    if (!response || !existsSync(join(worldRoot, 'level.dat'))) return null
+    return { command: worldSaveCommand, issuedAt: worldSaveIssuedAt, serverOutput: response.line, observedAt: response.ts, responsePid: spawned.pid }
+  }, { timeoutMs: Math.min(options.timeoutMs, 60_000), label: 'Leaf initial world save and fresh level.dat' })
   const level = await parseLevelDat(join(worldRoot, 'level.dat'))
   if (level.levelName !== levelName || level.dataVersion === null || level.seed === null || level.difficultyCode !== 0 || level.gameTypeCode !== 0) {
     throw new Error('fresh level.dat does not attest the requested name, actual seed, peaceful difficulty, survival mode, and data version')
@@ -1806,6 +1815,7 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
     serverPropertiesSha256: sha256(Buffer.from(launchProperties)),
     serverPropertiesEffectiveSha256: sha256(Buffer.from(effectiveText)),
     eulaAcceptance: eulaAttestation,
+    initialWorldSave,
     startedAt: spawned.at,
     spawnedAt: spawned.at,
     process: {
