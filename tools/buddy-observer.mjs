@@ -60,6 +60,7 @@ const VTR_TRACE_EVENTS = new Set([
   'VTR_REACH_ROUTE_DECISION',
   'VTR_TRANSITION_VERIFY',
   'VTR_TRANSITION_OUTCOME',
+  'VTR_TRANSITION_MODEL_METRICS',
   'VTR_ORPHAN_ACTION_OUTCOME',
   'VTR_LEGACY_REACH_MOVE_WITHHELD',
   'VTR_LEGACY_REACH_HANDOFF',
@@ -887,6 +888,27 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
+function transitionModelMetricsProjection(entry) {
+  if (entry === null) return null
+  const detail = entry.detail ?? {}
+  return {
+    transitionId: detail.transitionId ?? null,
+    contractHash: detail.contractHash ?? null,
+    typedTerminalOutcome: detail.typedTerminalOutcome ?? null,
+    mechanicalSteps: detail.mechanicalSteps ?? null,
+    jevDecisionFrameInvocations: detail.jevDecisionFrameInvocations ?? null,
+    jevDecisionFramesPerMechanicalStep: detail.jevDecisionFramesPerMechanicalStep ?? null,
+    jevModelProviderEvaluateAttempts: detail.jevModelProviderEvaluateAttempts ?? null,
+    jevModelProviderEvaluateAttemptsPerMechanicalStep: detail.jevModelProviderEvaluateAttemptsPerMechanicalStep ?? null,
+    policy: detail.policy ?? null,
+    model: detail.model ?? null,
+    provider: detail.provider ?? null,
+    identity: detail.identity ?? null,
+    observedAt: entry.ts,
+    event: traceProjection(entry),
+  }
+}
+
 function mechanicalStepId(entry) {
   const detail = entry?.detail ?? {}
   const value = detail.stepId ?? detail.mechanicalStepId ?? detail.step?.stepId
@@ -1163,6 +1185,8 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
     const routeDecisionEvent = latestEvent(linked, ['VTR_REACH_ROUTE_DECISION'])
     const verifyEvent = latestEvent(linked, ['VTR_TRANSITION_VERIFY'])
     const outcomeEvent = latestEvent(linked, ['VTR_TRANSITION_OUTCOME'])
+    const modelMetricsEvents = linked.filter((entry) => entry.event === 'VTR_TRANSITION_MODEL_METRICS')
+    const modelMetricsEvent = modelMetricsEvents.at(-1) ?? null
     const verifyDetail = verifyEvent?.detail ?? null
     const verification = verifyDetail === null ? null : {
       truth: verifyDetail.truth ?? null,
@@ -1213,6 +1237,8 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
       progress: progressEvent?.detail?.progress ?? null,
       progressEvent: traceProjection(progressEvent),
       mechanical,
+      modelMetrics: transitionModelMetricsProjection(modelMetricsEvent),
+      modelMetricsEventCount: modelMetricsEvents.length,
       lifecycleEvents: lifecycleEvents.slice(-64).map(traceProjection),
       routeDecision: projectVtrReachRouteDecision(routeDecisionEvent),
       actuation: actuationEvent === null ? null : {
@@ -1515,6 +1541,7 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
         status: vtr.latest.status,
         verification: vtr.latest.verification,
         outcome: vtr.latest.outcome,
+        modelMetrics: vtr.latest.modelMetrics,
       },
     },
     vtr,

@@ -335,6 +335,8 @@ assert.equal(liveVtrSnapshot.vtr.latest.transitionId, vtrTransitionId)
 assert.equal(liveVtrSnapshot.vtr.latest.status, 'verified_success')
 assert.equal(liveVtrSnapshot.vtr.latest.verification.verified, true)
 assert.equal(liveVtrSnapshot.vtr.latest.outcome.metrics.jevCallsPerTransition, 0)
+assert.equal(liveVtrSnapshot.vtr.latest.modelMetrics, null, 'legacy outcome call totals must not fabricate a model-metrics event')
+assert.equal(liveVtrSnapshot.vtr.latest.modelMetricsEventCount, 0)
 const liveVtrSummary = buildAiSummary(liveVtrSnapshot, { now: Date.parse('2026-09-21T12:00:03.000Z') })
 assert.equal(liveVtrSummary.choices.jev, null)
 assert.equal(liveVtrSummary.choices.jevStatus, 'not_recorded')
@@ -425,6 +427,7 @@ const ingressLegTwoActuationTs = '2026-09-21T13:00:01.085Z'
 const ingressLegTwoOutcomeTs = '2026-09-21T13:00:01.090Z'
 const ingressVerifyTs = '2026-09-21T13:00:02.000Z'
 const ingressOutcomeTs = '2026-09-21T13:00:02.010Z'
+const ingressModelMetricsTs = '2026-09-21T13:00:02.015Z'
 const ingressOrphanTs = '2026-09-21T13:00:02.020Z'
 const ingressWorld = {
   serverId: 'observer-local',
@@ -553,6 +556,23 @@ const ingressLegacyActuationRevoked = ingressStepEvent(
   { actionId: 'MOVE:legacy', authority: 'legacy', reason: 'vtr-transition-owns-body' },
   `VTR_ORPHAN_ACTUATION_REVOKED transition=${ingressTransitionId} action=MOVE:legacy`,
 )
+const ingressModelMetrics = ingressStepEvent(
+  ingressModelMetricsTs,
+  'VTR_TRANSITION_MODEL_METRICS',
+  {
+    typedTerminalOutcome: 'SUCCESS',
+    mechanicalSteps: 2,
+    jevDecisionFrameInvocations: 2,
+    jevDecisionFramesPerMechanicalStep: 1,
+    jevModelProviderEvaluateAttempts: 5,
+    jevModelProviderEvaluateAttemptsPerMechanicalStep: 2.5,
+    policy: 'jev-reach-route',
+    model: 'model-as-recorded',
+    provider: 'provider-as-recorded',
+    identity: ingressContractIdentity,
+  },
+  `VTR_TRANSITION_MODEL_METRICS transitionId=${ingressTransitionId} contractHash=${ingressContractHash} outcome=SUCCESS mechanicalSteps=2 decisionFrameInvocations=2 providerEvaluateAttempts=5`,
+)
 const ingressMechanicalRecords = [
   ingressStepEvent(
     ingressLegOneReserveTs,
@@ -648,6 +668,7 @@ const ingressRecords = [
   ...ingressMechanicalRecords,
   ingressVerify,
   ingressOutcome,
+  ingressModelMetrics,
   ingressOrphanActionOutcome,
   wrongRouteBoundaryRecord('2026-09-21T13:00:02.100Z', { runId: 'run-prior' }),
   wrongRouteBoundaryRecord('2026-09-21T13:00:02.200Z', { generationId: 'gen-prior' }),
@@ -714,6 +735,47 @@ try {
   })
   assert.equal(ingressSnapshot.vtr.latest.verification.truth, 'TRUE')
   assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
+  assert.equal(ingressSnapshot.vtr.latest.modelMetricsEventCount, 1)
+  assert.deepEqual(ingressSnapshot.vtr.latest.modelMetrics, {
+    transitionId: ingressTransitionId,
+    contractHash: ingressContractHash,
+    typedTerminalOutcome: 'SUCCESS',
+    mechanicalSteps: 2,
+    jevDecisionFrameInvocations: 2,
+    jevDecisionFramesPerMechanicalStep: 1,
+    jevModelProviderEvaluateAttempts: 5,
+    jevModelProviderEvaluateAttemptsPerMechanicalStep: 2.5,
+    policy: 'jev-reach-route',
+    model: 'model-as-recorded',
+    provider: 'provider-as-recorded',
+    identity: ingressContractIdentity,
+    observedAt: ingressModelMetricsTs,
+    event: {
+      ts: ingressModelMetricsTs,
+      event: 'VTR_TRANSITION_MODEL_METRICS',
+      detail: {
+        ...ingressContractIdentity,
+        transitionId: ingressTransitionId,
+        contractHash: ingressContractHash,
+        identity: ingressContractIdentity,
+        typedTerminalOutcome: 'SUCCESS',
+        mechanicalSteps: 2,
+        jevDecisionFrameInvocations: 2,
+        jevDecisionFramesPerMechanicalStep: 1,
+        jevModelProviderEvaluateAttempts: 5,
+        jevModelProviderEvaluateAttemptsPerMechanicalStep: 2.5,
+        policy: 'jev-reach-route',
+        model: 'model-as-recorded',
+        provider: 'provider-as-recorded',
+      },
+    },
+  })
+  assert.notEqual(
+    ingressSnapshot.vtr.latest.modelMetrics.jevDecisionFrameInvocations,
+    ingressSnapshot.vtr.latest.modelMetrics.jevModelProviderEvaluateAttempts,
+    'frame invocations must remain distinct from provider evaluate attempts, which include retries',
+  )
+  assert.equal(ingressSnapshot.vtr.latestRouteDecision.model, 'typesafe-ai/jev', 'metric model/provider labels stay as emitted')
   assert.equal(ingressSnapshot.vtr.latest.mechanical.reservationCount, 2)
   assert.equal(ingressSnapshot.vtr.latest.mechanical.actuationEventCount, 2)
   assert.equal(ingressSnapshot.vtr.latest.mechanical.stepOutcomeEventCount, 2)
@@ -800,6 +862,7 @@ try {
   assert.equal(ingressSnapshot.mission.provenance.source, 'VTR_TRANSITION_COMMIT.detail.mission')
   assert.deepEqual(ingressSnapshot.mission.predicate, { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
   assert.equal(ingressSummary.transition.status, 'verified_success')
+  assert.deepEqual(ingressSummary.transition.modelMetrics, ingressSnapshot.vtr.latest.modelMetrics)
   assert.equal(ingressSummary.transition.routeDecision.source, 'jev')
   assert.equal(ingressSummary.choices.vtr.latestDecision.actor, 'jev')
   assert.equal(ingressSummary.choices.vtr.latestDecision.event, 'VTR_REACH_ROUTE_DECISION')
