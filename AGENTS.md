@@ -147,3 +147,149 @@ Classify active work into exactly one bucket:
 - **D. DEFER** — cosmetic cleanup, unrelated mechanics, speculative features, legacy perfection.
 
 Prefer A/B/C. Record why when evidence reorders the migration plan.
+
+## 11. Testing and proof hierarchy
+
+For each migrated Transition family require, as applicable:
+
+1. pure contract/state-machine tests
+2. deterministic mechanical fixture
+3. no-LLM live probe for CAN/HOW/DONE
+4. integration test through the real VTR scheduler/runtime
+5. legacy-vs-VTR double-authority exclusion
+6. stale world/epoch/lease/generation-fencing tests
+7. target/witness substitution tests
+8. progress and budget exhaustion tests
+9. provider-outage test when model independence is claimed
+10. fresh exact-source live evidence
+
+A capability probe PASS proves mechanics only. It does not prove autonomous composition.
+A benchmark PASS proves an end-to-end outcome only. It does not prove architectural generality.
+A green shadow journal proves observation coverage only. It does not grant authority.
+
+## 12. Live loop
+
+For migration work, prefer this loop:
+
+```text
+exact origin/main SHA
+-> inspect current kernel/legacy ownership boundary
+-> tests/typecheck/probes
+-> run the smallest causal experiment that can distinguish hypotheses
+-> identify the first contract/fact/controller failure
+-> implement the generic V4.1.2-conformant fix
+-> regression + no-double-authority tests
+-> integrate
+-> fresh exact-source run/probe
+-> compare world-state progress, model-call rate, controller closure and typed outcomes
+-> remove superseded compatibility authority when evidence is sufficient
+```
+
+Do not treat "the bot moved" as progress. Ask which verified predicate changed and which Transition owned it.
+Do not shotgun speculative fixes into one run.
+
+## 13. Runtime evidence to inspect
+
+At minimum, make it possible to answer:
+
+- active Mission predicate frontier
+- active Transition type / instance / contract hash
+- `requires` and `ensures`
+- controller-local progress
+- temporary target/witness changes
+- resource/risk budget consumption
+- viability interruptions and resume/re-evaluation
+- deterministic postcondition verification
+- terminal outcome and reason
+- world/dimension/epoch/generation identity
+- model calls and why they were necessary
+- any legacy Option/GoalQueue/Jev π/β authority participation, separately from kernel-admitted Jev decision frames
+- whether two authority paths could actuate simultaneously
+- shadow counters: `mutationsObserved`, `mutationsMapped`, `mutationsAttributedToTransition`, `mutationsUnguarded`, `kernelDenied`, blockers, `coverageComplete`
+
+Model calls per verified Transition and mechanical steps per model call are important measurements.
+
+## 14. Parallel work / subagents
+
+Use subagents and independent worktrees aggressively when available for large migration tasks.
+
+Rules:
+
+- one mutation owner per subsystem/blocker;
+- do not give multiple agents the same implementation;
+- parallelize audits, tests, probes, history analysis, contract design and independent controller families;
+- while subagents run, continue a separate useful lane yourself;
+- review and integrate subagent results yourself;
+- never reset/overwrite concurrent worktrees or another lane's unmerged work;
+- retire superseded worktrees instead of accumulating them indefinitely.
+
+Good parallel lanes for V4.1.2 Phase-1 → cutover:
+
+- A. live conformance proof harness and kernel-shadow instrumentation
+- B. host control-plane mutation authority model (`bot.chat`/`/tell` class)
+- C. verified world-model / fact-frontier audit
+- D. no-LLM probe harness and fixtures
+- E. legacy authority/double-actuation audit
+- F. viability runtime design/evidence
+- G. tests and property/invariant checks
+- H. live metrics / exact-run evidence
+- I. issue/history reconciliation
+- J. deletion map for superseded Option/Jev/GoalQueue/legacy-Reach authority
+
+## 15. Issues and PRs
+
+Do not create one issue/PR per tiny symptom.
+Create or reuse an issue when there is a distinct causal boundary, migration invariant, durable acceptance criterion, or live-evidenced failure.
+
+Migration issues should describe:
+
+- old authority being replaced
+- new kernel/contract owner
+- compatibility period
+- proof required before deletion
+- deletion/retirement condition
+
+Historical #11-era issues should be relabeled/reframed/superseded when their requested direction conflicts with V4.1.2. Do not blindly finish them because they are open.
+
+## 16. M3 and generality under V4.1.2
+
+M3 remains `ender_eye >= 12` under the canonical run-scoped gate unless the milestone contract itself changes.
+Use M3 as an integration proof that migrated Transition families compose across long-horizon acquisition, crafting/stations, survival, navigation/search, Nether transition, hostile-mob drops, and durable recovery.
+
+Do not optimize the architecture around the expected M3 route.
+A fresh M3 PASS is valuable only if production intent remains benchmark-independent and kernel-admitted authority is visible in the run artifact.
+
+After a credible V4.1.2 path reaches M3, test changed seeds, partial-start states, benchmark-absent missions and unsupported predicates before calling the architecture general.
+
+## 17. Explicit anti-goals
+
+Do NOT solve migration by:
+
+- renaming Option to Transition while keeping the same per-action control loop;
+- wrapping GoalQueue in another canonical ledger;
+- making β smarter instead of removing generic model-owned termination;
+- ending/recommitting the active Transition and bouncing every tactical recovery to a new Jev authority epoch merely because it is "semantic" — bounded Jev consultation inside the same controller contract is allowed;
+- creating a giant deterministic benchmark planner;
+- moving the legacy mega-controller into smaller files without changing causal ownership;
+- increasing candidate count/model context as a substitute for controller closure;
+- adding unbounded retries or arbitrary N-failure policy switches;
+- weakening Guard/VERIFY/evidence to get a green run;
+- treating shadow-observer replay as live authority;
+- keeping both old and new authority indefinitely.
+
+## 18. Turn/work-session discipline and autonomy
+
+At the start of a substantial task, form concrete TODOs covering as many of audit, implementation, tests, probes/live validation, integration and deletion as the task allows.
+Do not end merely because a plan was written, an issue was filed, a subagent was launched, one interface was added, or one local test passed. A status report is not completion. If the requested goal is still unmet and useful work is available, continue.
+
+Work autonomously toward the requested goal. Do not wait for step-by-step permission for ordinary investigation, code edits, tests, live runs, log/evidence audits, issue triage, branch/worktree maintenance, necessary restarts/configuration changes, or other reversible engineering work that is causally useful to the goal. Preserve concurrent work and do not overwrite another lane's unmerged changes.
+
+Also pursue indirect but useful work when it materially increases the probability or speed of reaching the goal: observability/probe tooling, generic refactors that unblock the slice, repository/GitHub hygiene, workspace cleanup, evidence tooling, model/policy investigation, and disk-space/ENOSPC recovery are legitimate work. Do not use "indirect progress" as an excuse for unrelated cleanup while a clearer causal blocker is available.
+
+Architecture autonomy is narrower: the V4.1.2 authority constitution is frozen by default. Routine implementation and policy evolution may proceed autonomously inside it, but changing the contract/ownership/verification constitution itself requires runtime evidence, not taste, novelty, or convenience.
+
+Continue until the current requested milestone is actually proven, or until an external blocker makes further useful work impossible. If blocked, leave exact evidence and the next falsifiable experiment.
+
+The current milestone is **live V4.1.2 conformance proof** (shadow counters in §7 on a real Reach run), then Phase-0 archive re-validation, then authority cutover — not "finish #11" and not "M3 at any cost".
+
+When a migrated slice is proven and cutover conditions are met, remove or disable the semantic authority it replaces instead of leaving a permanent dual-control architecture.
