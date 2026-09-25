@@ -2409,6 +2409,44 @@ function gitCommit(): string | null {
   }
 }
 
+/**
+ * Probe runs cannot use the full clean-run prepare/launch attestation chain, so
+ * the supervisor supplies the bound world identity through a run-scoped file
+ * (BUDDY_WORLD_IDENTITY_PATH). Values are consumed read-only only when the file
+ * binds this exact runId + boot source; provenance stays labeled as
+ * `run-scoped-world-identity` rather than the verified-leaf-argv path.
+ */
+function runScopedWorldIdentity(): { levelName: string | null; seed: string | null; evidence: Record<string, unknown> } | null {
+  const path = (process.env.BUDDY_WORLD_IDENTITY_PATH ?? '').trim()
+  if (path.length === 0) return null
+  try {
+    const text = readFileSync(path, 'utf8')
+    const row = JSON.parse(text) as Record<string, unknown>
+    if (row?.schema !== 'vtr-run-scoped-world-identity/v1'
+      || row.runId !== runId
+      || row.sourceSha !== bootSourceSha
+      || typeof bootSourceSha !== 'string') return null
+    const levelName = typeof row.levelName === 'string' && row.levelName.length > 0 ? row.levelName : null
+    const seed = typeof row.seed === 'string' && row.seed.length > 0 ? row.seed : null
+    if (levelName === null || seed === null) return null
+    return {
+      levelName,
+      seed,
+      evidence: {
+        source: 'run-scoped-world-identity',
+        runId,
+        bootSourceSha,
+        path,
+        sha256: createHash('sha256').update(text).digest('hex'),
+        levelNameSource: (row.evidence as Record<string, unknown> | undefined)?.levelName ?? null,
+        seedSource: (row.evidence as Record<string, unknown> | undefined)?.seed ?? null,
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
 function writeAcceptance(): string {
   const counts = listenerCounts()
   const expected = expectedListenerCounts()
@@ -2418,6 +2456,11 @@ function writeAcceptance(): string {
     bootSourceSha,
     observedLevelName: state.levelName,
   })
+  const runScoped = runScopedWorldIdentity()
+  const levelName = worldIdentity.levelName ?? runScoped?.levelName ?? null
+  const seed = worldIdentity.seed ?? runScoped?.seed ?? null
+  const levelNameEvidence = worldIdentity.levelNameEvidence ?? runScoped?.evidence ?? null
+  const seedEvidence = worldIdentity.seedEvidence ?? runScoped?.evidence ?? null
   const record: AcceptanceRecord = {
     record: 'acceptance',
     runId,
@@ -2439,12 +2482,12 @@ function writeAcceptance(): string {
     },
     serverId: state.serverId,
     dimension: state.dimension,
-    levelName: worldIdentity.levelName,
+    levelName,
     worldEpoch: state.worldEpoch,
-    seed: worldIdentity.seed,
+    seed,
     worldIdentityEvidence: {
-      levelName: worldIdentity.levelNameEvidence,
-      seed: worldIdentity.seedEvidence,
+      levelName: levelNameEvidence,
+      seed: seedEvidence,
     },
     botUsername: USERNAME,
     startPosition,

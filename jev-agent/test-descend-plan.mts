@@ -13,6 +13,7 @@ import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts
 import type { Candidate } from './src/candidates.ts'
 import { JevController } from './src/controller.ts'
 import { DIG_PATH_CAP, DigMemory } from './src/worldMemory.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, DescentOption, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -288,6 +289,7 @@ addCase('a successful policy-selected recovery starts its own bounded Skill cont
     info: (_channel, message) => lines.push(message),
     warn: (_channel, message) => lines.push(message),
   }
+  ;(runtime as unknown as { reachVtrCells: unknown }).reachVtrCells = createVtrReachTestCells({ tickCounter: 1 })
   runtime.tickCounter = 1
   runtime.digOscillationReported = false
   runtime.descendHaveBaseline = 0
@@ -460,6 +462,7 @@ addCase('a verified move after the capped tunnel opens a fresh bounded path', ()
   runtime.options = { serverId: 'local', worldEpoch: 1 }
   runtime.bot = { game: { dimension: 'minecraft:overworld' } }
   runtime.logger = { info: (_channel, message) => lines.push(message) }
+  ;(runtime as unknown as { reachVtrCells: unknown }).reachVtrCells = createVtrReachTestCells({ tickCounter: 1 })
   runtime.tickCounter = 1
 
   runtime.resetDescendBudgetAfterWorldChange('MINE:b8_55_0', 'verified_mine')

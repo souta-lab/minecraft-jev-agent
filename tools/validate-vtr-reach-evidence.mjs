@@ -2792,6 +2792,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
         else pass('source:repo-clean')
         const branch = gitOutput(repo, ['branch', '--show-current'])
         if (source.branch && branch && branch !== source.branch) fail('source:repo-branch', 'checkout branch differs from recorded run branch', { expected: source.branch, observed: branch })
+        else if (!branch && source.branch === 'detached-exact-source') pass('source:repo-branch', { branch: 'detached-exact-source', note: 'detached exact-source checkout is the required pristine configuration; commit identity is checked separately' })
         else if (!branch) incomplete('source:repo-branch', 'checkout is detached; commit identity is still checked')
         else pass('source:repo-branch', { branch })
       } catch (error) {
@@ -3430,7 +3431,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
     const modelActivityLogLines = botLog.split(/\r?\n/).filter((line) => modelActivityPattern.test(line))
     const anyProviderActivityLog = modelActivityRows.length > 0 || modelActivityLogLines.length > 0
     const modelJournals = ['runner/jev-calls.jsonl', 'runner/jev-decisions.jsonl', 'runner/system2.jsonl', 'runner/mercury-calls.jsonl'].map((path) => {
-      if (!present.has(path)) return { path, status: 'missing', records: null }
+      if (!existsSync(join(archive, path))) return { path, status: 'missing', records: null }
       try { return { path, status: 'valid', records: parseJsonl(archive, path).length } }
       catch (error) { return { path, status: 'malformed', error: error.message, records: null } }
     })

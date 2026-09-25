@@ -81,6 +81,10 @@ export function installVtrReachTestRuntimePorts(controller: object): void {
       const count = fields.executor?.authorityConflictCount
       return typeof count === 'function' ? count.call(fields.executor) : Number(count ?? 0)
     },
+    nonVtrActuationCount: () => {
+      const count = fields.executor?.nonVtrActuationCount
+      return typeof count === 'function' ? count.call(fields.executor) : Number(count ?? 0)
+    },
   }
   fields.reachRuntimeAdapter = ports
 }

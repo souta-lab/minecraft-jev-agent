@@ -31,6 +31,7 @@ export interface ReachMissionRuntimeSession {
   readonly jevCallsAtStart: number
   readonly system2CallsAtStart: number
   readonly authorityConflictsAtStart: number
+  readonly nonVtrActuationsAtStart: number
   duplicateAuthorityObserved: boolean
   lastHealth: number
 }
@@ -59,6 +60,7 @@ export interface ReachMissionRuntimeFrame {
     readonly jevCalls: number
     readonly system2Calls: number
     readonly authorityConflicts: number
+    readonly nonVtrActuations: number
   }
 }
 
@@ -374,6 +376,7 @@ export class ReachMissionRuntime {
       jevCallsAtStart: frame.counters.jevCalls,
       system2CallsAtStart: frame.counters.system2Calls,
       authorityConflictsAtStart: frame.counters.authorityConflicts,
+      nonVtrActuationsAtStart: frame.counters.nonVtrActuations,
       duplicateAuthorityObserved: false,
       lastHealth: frame.observedHealth,
     }

@@ -268,7 +268,7 @@ async function makeReachRecoveryFixture(): Promise<{
     activeActionMatchesMissionReach: false,
     safeToStart: true,
     observedHealth: 20,
-    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0 },
+    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0, nonVtrActuations: 0 },
   })
   if (committed.kind !== 'transition') {
     throw new Error(`Reach fixture failed to commit: ${JSON.stringify(committed)}`)
@@ -319,11 +319,13 @@ async function makeReachRecoveryFixture(): Promise<{
       jevCallsAtStart: 0,
       system2CallsAtStart: 0,
       authorityConflictsAtStart: 0,
+      nonVtrActuationsAtStart: 0,
       duplicateAuthorityObserved: false,
       lastHealth: 20,
     },
     ticking: false,
     tickCounter: 1,
+    options: { decisionProvenance: { runId: 'fixture-run', generationId: 'fixture-gen', sourceSha: 'fixture-sha' } },
     watchdog: null,
     completion: runCompletion,
     resolveCompletion: resolveRun,
@@ -373,6 +375,7 @@ async function makeReachRecoveryFixture(): Promise<{
         return true
       },
       authorityConflictCount: () => 0,
+      nonVtrActuationCount: () => 0,
     },
     executor: {
       get current() { return active },

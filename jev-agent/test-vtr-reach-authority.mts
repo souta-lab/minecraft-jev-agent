@@ -262,6 +262,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
         jevCallsAtStart: 0,
         system2CallsAtStart: 0,
         authorityConflictsAtStart: executor.authorityConflictCount,
+        nonVtrActuationsAtStart: 0,
         duplicateAuthorityObserved: false,
       },
       reachTerminalHandoff: null,

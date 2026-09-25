@@ -527,6 +527,13 @@ interface ExecutionClaimContextFields {
   resolveVtrReachMechanicalWaypoint?: (destination: Vec3Json) => ReachMechanicalWaypoint | null
   /** Optional paired hooks for candidate-declared internal dig/place/equip effects. */
   internalEffectCallbacks?: InternalEffectCallbacks
+  /**
+   * Invoked synchronously after the action record/lease is established and
+   * immediately before the action body dispatches its first mechanical step.
+   * Lets the owning authority journal actuation in causal order (dispatch
+   * precedes the first leg it realizes) without deferring the run body.
+   */
+  onBeforeRunStart?: (started: { id: string; epoch: number }) => void
 }
 
 export type ExecutionClaimContext = ExecutionClaimContextFields & (
@@ -2113,6 +2120,7 @@ export class Executor {
   private owned = 0
   private maxConcurrent = 0
   private authorityConflicts = 0
+  private nonVtrActuations = 0
   private movementsReady = false
   private lastResultValue: ExecutionResult | null = null
   /** issue #436 section 4: the commitment of the running action, or null */
@@ -2207,6 +2215,16 @@ export class Executor {
 
   get authorityConflictCount(): number {
     return this.authorityConflicts
+  }
+
+  /**
+   * Count of actions actually claimed under non-VTR authority. The Reach
+   * runtime adapter samples this at Transition start and terminal; the delta
+   * is the number of legacy actuations that ran concurrently with the
+   * Transition window. Conflict-rejected claims never reach this counter.
+   */
+  get nonVtrActuationCount(): number {
+    return this.nonVtrActuations
   }
 
   /**
@@ -2356,6 +2374,7 @@ export class Executor {
     this.activeCommitment = commitment
     this.internalEffectSequence = 0
     this.stepLog.clear()
+    if (requestedAuthority !== 'vtr-reach') this.nonVtrActuations += 1
     // Movement pinning mutates pathfinder state and must happen under the
     // action's own authority, so it runs after `this.action` is established
     // and still before the first dispatch in runAction. A failure here must
@@ -2381,6 +2400,18 @@ export class Executor {
       { epoch, kind: candidate.kind, cancelledPrevious: cancelled, maxConcurrent: this.maxConcurrent },
     )
 
+    // Actuation journaling happens synchronously before the body dispatches:
+    // dispatch/actuation causally precedes the first mechanical leg it
+    // realizes, so the owning authority's journal row must be written here,
+    // not after claim() returns. A hook failure must not orphan the action
+    // record: release it before rethrowing.
+    try {
+      context.onBeforeRunStart?.({ id: action.id, epoch })
+    } catch (error) {
+      this.action = null
+      this.activeCommitment = null
+      throw error
+    }
     void this.runAction(candidate, epoch, controller.signal, startedAt)
       .then((finalResult) => {
         action.status = finalResult.status

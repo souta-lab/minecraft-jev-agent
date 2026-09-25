@@ -125,6 +125,12 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
         beforeMechanicalStep: request.beforeMechanicalStep,
         afterMechanicalStep: request.afterMechanicalStep,
         resolveVtrReachMechanicalWaypoint: (destination) => this.resolveVtrReachMechanicalWaypoint(destination),
+        ...(request.onBeforeRunStart === undefined
+          ? {}
+          : {
+              onBeforeRunStart: (started: { id: string; epoch: number }) =>
+                request.onBeforeRunStart!({ ...started, candidate: guard.candidate }),
+            }),
       })
       return {
         status: 'claimed',
@@ -153,6 +159,11 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
 
   authorityConflictCount(): number {
     return this.executor.authorityConflictCount
+  }
+
+  /** Non-VTR claims that actually started an action (not conflict-rejected attempts). */
+  nonVtrActuationCount(): number {
+    return this.executor.nonVtrActuationCount
   }
 
   private projectAction(action: CurrentAction): ReachRuntimeActionSnapshot {

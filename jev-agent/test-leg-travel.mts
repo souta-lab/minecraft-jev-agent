@@ -345,7 +345,9 @@ addCase('a leg that makes no positional progress fails typed and is never report
 addCase('runRetrieve drives the same committed leg and keeps "target reached" separate from "leg walked"', () => {
   const source = readFileSync(fileURLToPath(new URL('./src/executor.ts', import.meta.url)), 'utf8')
   const retrieveLeg = /if \(approachError !== null\) \{\s*const leg = await this\.runTravelLeg\(/.test(source)
-  const moveLeg = /if \(pathError !== null\) \{\s*const leg = await this\.runTravelLeg\(/.test(source)
+  // A VTR waypoint segment supersedes the leg path; the committed leg still
+  // owns far-MOVE progress when no waypoint is available.
+  const moveLeg = /if \(pathError !== null && waypoint === null\) \{\s*const leg = await this\.runTravelLeg\(/.test(source)
   const helper = source.includes('private async runTravelLeg(')
   const goalNearLeg = /await this\.pathToNear\(target, LEG_TRAVEL_RADIUS, epoch, signal/.test(source)
   // The RETRIEVE arrival post-condition is still owned by classifyRetrieveApproach

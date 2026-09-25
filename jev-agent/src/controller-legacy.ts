@@ -182,7 +182,7 @@ import {
 } from './runtime-adapters/minecraft-reach-mission-projection.ts'
 import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
-import type { ReachControllerResult, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
+import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
 import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
 import type { KernelShadowSink, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
@@ -4193,6 +4193,7 @@ export class JevController {
   ): Promise<boolean> {
     if (result.status !== 'active' || result.phase !== 'actuate' || result.intent === undefined) return false
     const intent = result.intent
+    let actuationJournaled = false
     const candidate = candidates.find((entry) => entry.id === intent.routeId)
     if (candidate === undefined || candidate.target === null || JSON.stringify(candidate.target) !== JSON.stringify(intent.target)) {
       this.logger.warn(
@@ -4213,6 +4214,10 @@ export class JevController {
       liveStructureMembers: state.liveStructureMembers ?? [],
       beforeMechanicalStep: (step) => this.authorizeReachMechanicalStep(intent.intentId, identity, step),
       afterMechanicalStep: (step) => this.recordReachMechanicalOutcome(intent.intentId, identity, step),
+      onBeforeRunStart: (started) => {
+        actuationJournaled = true
+        this.logReachActuation(intent, started.id, started.epoch, candidate.id, started.candidate)
+      },
     })
     if (dispatched.status === 'route-refused') {
       this.logger.warn(
@@ -4253,12 +4258,11 @@ export class JevController {
     const { claim, candidate: guardedCandidate, actionId } = dispatched
     if (!claim.kept) this.actionStart = { ...state.self.position }
     this.lastReachActionFailure = null
-    this.logger.info(
-      'vtr',
-      `VTR_TRANSITION_ACTUATION id=${intent.transitionId} intent=${intent.intentId} action=${actionId ?? 'missing'} candidate=${candidate.id} target=${JSON.stringify(guardedCandidate.target)} selectedBy=vtr_transition_controller`,
-      { transitionId: intent.transitionId, intentId: intent.intentId, actionId, contractHash: intent.contractHash, candidate: candidate.id, target: guardedCandidate.target, authority: 'vtr-transition-controller', leaseEpoch: claim.epoch },
-      this.tickCounter,
-    )
+    // Fresh claims through the production adapter journaled actuation inside the
+    // executor claim, ahead of the first mechanical leg (causal order). Adapters
+    // that do not fire the claim hook — and `kept` re-dispatches that never
+    // re-enter it — still journal the same single row after dispatch returns.
+    if (!actuationJournaled) this.logReachActuation(intent, actionId, claim.epoch, candidate.id, guardedCandidate)
     void claim.completion
       .then((execution) => this.onReachActionComplete(execution, guardedCandidate, intent.transitionId, intent.intentId))
       .catch((error: unknown) => {
@@ -4266,6 +4270,21 @@ export class JevController {
         this.logger.error('vtr', `VTR_ACTION_COMPLETION_HANDLER_FAILED transition=${intent.transitionId}: ${message}`, { transitionId: intent.transitionId, intentId: intent.intentId }, this.tickCounter)
       })
     return true
+  }
+
+  private logReachActuation(
+    intent: ReachMechanicalIntent,
+    actionId: string | null,
+    epoch: number,
+    candidateId: string,
+    guardedCandidate: Candidate,
+  ): void {
+    this.logger.info(
+      'vtr',
+      `VTR_TRANSITION_ACTUATION id=${intent.transitionId} intent=${intent.intentId} action=${actionId ?? 'missing'} candidate=${candidateId} target=${JSON.stringify(guardedCandidate.target)} selectedBy=vtr_transition_controller`,
+      { transitionId: intent.transitionId, intentId: intent.intentId, actionId, contractHash: intent.contractHash, candidate: candidateId, target: guardedCandidate.target, authority: 'vtr-transition-controller', leaseEpoch: epoch },
+      this.tickCounter,
+    )
   }
 
   private async releaseUnstartedReachIntent(intentId: string, transitionId: string, evidence: string): Promise<void> {
@@ -4422,6 +4441,7 @@ export class JevController {
         jevCalls: this.jevCalls,
         system2Calls: this.runtimeLlmCalls + this.planCalls,
         authorityConflicts: this.reachRuntimeAdapter.authorityConflictCount(),
+        nonVtrActuations: this.reachRuntimeAdapter.nonVtrActuationCount(),
       },
     })
 
@@ -4846,6 +4866,7 @@ export class JevController {
     const system2Calls = Math.max(0, this.runtimeLlmCalls + this.planCalls - metadata.system2CallsAtStart)
     const duplicateAuthorityConflicts = Math.max(0, this.reachRuntimeAdapter.authorityConflictCount() - metadata.authorityConflictsAtStart)
     const duplicateAuthority = metadata.duplicateAuthorityObserved || duplicateAuthorityConflicts > 0
+    const concurrentLegacyActuations = Math.max(0, this.reachRuntimeAdapter.nonVtrActuationCount() - metadata.nonVtrActuationsAtStart)
     this.logger.info(
       'vtr',
       `VTR_TRANSITION_OUTCOME id=${metadata.transitionId} outcome=${outcome.kind} boundary=${terminalBoundary} mechanicalSteps=${state.usage.mechanicalSteps} jevCalls=${jevCalls} system2Calls=${system2Calls}`,
@@ -4868,6 +4889,7 @@ export class JevController {
           typedTerminalOutcome: outcome.kind,
           duplicateAuthority,
           duplicateAuthorityConflicts,
+          concurrentLegacyActuations,
         },
       },
       this.tickCounter,

@@ -327,7 +327,7 @@ function driveFrame(
     activeActionMatchesMissionReach: false,
     safeToStart: true,
     observedHealth: 20,
-    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0 },
+    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0, nonVtrActuations: 0 },
     ...overrides,
   }
 }

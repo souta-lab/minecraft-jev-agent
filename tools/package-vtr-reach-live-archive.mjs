@@ -591,7 +591,14 @@ function deriveNoDoubleAuthorityProof({ identity, transitionRows, transition, co
   const legacyMovementStarts = movementStarts.filter(({ row }) => !vtrSelector(row))
   const actionIdOf = (row) => row.detail?.actionId ?? messageField(row.message, 'actionId') ?? messageField(row.message, 'action')
   const vtrAction = vtrStarts.length === 1 ? actionIdOf(vtrStarts[0].row) : null
-  const vtrEnds = vtrAction === null ? [] : inInterval.filter(({ row }) => eventName(row) === 'SKILL_END' && actionIdOf(row) === vtrAction)
+  // The correlated SKILL_END settles the same action AFTER the terminal row is
+  // journaled (verified terminal -> skill settlement callback ~1ms later), so
+  // scan past `terminal.index` for that action's single end row rather than
+  // requiring it inside the commit..terminal window. Uniqueness still holds:
+  // a second SKILL_END for this actionId anywhere in the journal fails below.
+  const vtrEnds = vtrAction === null ? [] : rows.map((row, index) => ({ row, index }))
+    .filter(({ index }) => index >= commit.index)
+    .filter(({ row }) => eventName(row) === 'SKILL_END' && actionIdOf(row) === vtrAction)
   const actuationRows = inInterval.filter(({ row }) => eventName(row) === 'VTR_TRANSITION_ACTUATION' &&
     (row.detail?.transitionId ?? messageField(row.message, 'id') ?? messageField(row.message, 'transitionId')) === proof.transitionId &&
     (row.detail?.contractHash ?? messageField(row.message, 'contractHash') ?? proof.contractHash) === proof.contractHash &&
@@ -974,6 +981,12 @@ function projectTransition(report) {
   if (terminalDetail.metrics && typeof terminalDetail.metrics === 'object') Object.assign(projected.metrics, structuredClone(terminalDetail.metrics))
   const rawOutcome = terminalDetail.outcome
   projected.outcome = rawOutcome && typeof rawOutcome === 'object' ? structuredClone(rawOutcome) : null
+  // Canonical probe alias consumed by the comparator and validators:
+  // transition.terminalOutcome.outcome + .boundary.
+  projected.terminalOutcome = {
+    outcome: projected.outcome === null ? null : structuredClone(projected.outcome),
+    boundary: terminalDetail.boundary ?? null,
+  }
   if (projected.outcome && verifies.length === 1) {
     const verifyDetail = verifies[0].detail?.verification ?? verifies[0].detail ?? {}
     const verifiedAtMs = Number(projected.outcome.verifiedAtMs ?? verifyDetail.verifiedAtMs)
@@ -1179,9 +1192,20 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
       continue
     }
     const digest = sha256(bytes)
-    if (bytes.length !== recorded.bytes || digest !== String(recorded.sha256 ?? '').toLowerCase()) {
+    // HOST-owned journals (buddy.log, the VTR run journal) keep appending after
+    // the collector hashes them at terminal time — the SHUTDOWN row, stop rows,
+    // and correlated settlements all land between capture and packaging. For
+    // those inputs the archived bytes may be a strict superset: the captured
+    // prefix must remain byte-identical, later rows are examined by validators.
+    const mayGrow = name === 'host-log' || name === 'run-journal'
+    const prefixDigest = mayGrow && bytes.length >= (recorded.bytes ?? 0)
+      ? sha256(bytes.subarray(0, recorded.bytes))
+      : null
+    if (!mayGrow && (bytes.length !== recorded.bytes || digest !== String(recorded.sha256 ?? '').toLowerCase())) {
       check(statuses, 'FAIL', `collector-input:${name}`, { reason: 'source no longer matches the bytes/hash captured in the collector report', expectedBytes: recorded.bytes ?? null, observedBytes: bytes.length, expectedSha256: recorded.sha256 ?? null, observedSha256: digest })
-    } else check(statuses, 'PASS', `collector-input:${name}`, { archivePath: archiveRelative, bytes: bytes.length, sha256: digest })
+    } else if (mayGrow && (bytes.length < (recorded.bytes ?? 0) || prefixDigest !== String(recorded.sha256 ?? '').toLowerCase())) {
+      check(statuses, 'FAIL', `collector-input:${name}`, { reason: 'captured journal prefix no longer matches the bytes/hash recorded in the collector report', expectedBytes: recorded.bytes ?? null, observedBytes: bytes.length, expectedSha256: recorded.sha256 ?? null, observedPrefixSha256: prefixDigest })
+    } else check(statuses, 'PASS', `collector-input:${name}`, { archivePath: archiveRelative, bytes: bytes.length, sha256: digest, ...(prefixDigest !== null && bytes.length > recorded.bytes ? { capturedPrefixBytes: recorded.bytes, capturedPrefixSha256: prefixDigest } : {}) })
     writeFile(outputRoot, archiveRelative, bytes)
     archiveFiles.add(archiveRelative)
     copiedSources.set(archiveRelative, { bytes, path })

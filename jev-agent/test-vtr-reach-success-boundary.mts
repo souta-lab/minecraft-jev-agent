@@ -87,6 +87,7 @@ function fixture() {
       jevCallsAtStart: 0,
       system2CallsAtStart: 0,
       authorityConflictsAtStart: 0,
+      nonVtrActuationsAtStart: 0,
       duplicateAuthorityObserved: false,
       lastHealth: 20,
     },

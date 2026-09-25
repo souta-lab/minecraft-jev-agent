@@ -50,6 +50,8 @@ export interface ReachRuntimePorts {
   currentAction(): ReachRuntimeActionSnapshot | null
   cancelCurrent(reason: string): boolean
   authorityConflictCount(): number
+  /** Non-VTR claims that actually started an action (not conflict-rejected attempts). */
+  nonVtrActuationCount(): number
 }
 
 export interface ReachMechanicalStep {
@@ -68,6 +70,12 @@ export interface ReachActuationRequest {
   readonly liveStructureMembers: NonNullable<WorldState['liveStructureMembers']>
   readonly beforeMechanicalStep: (step: ReachMechanicalStep) => boolean
   readonly afterMechanicalStep: (step: ReachMechanicalStep) => boolean | 'verified-terminal'
+  /**
+   * Optional synchronous hook fired after the action lease is established and
+   * before the first mechanical leg dispatches; lets the owning authority
+   * journal actuation in causal order ahead of leg reservations.
+   */
+  readonly onBeforeRunStart?: (started: { id: string; epoch: number; candidate: Candidate }) => void
 }
 
 export type ReachActuationResult =

@@ -1612,6 +1612,8 @@ function capturePostStopWorldFile({ sourcePath, archivePath, attemptRoot, worldR
     capturedAt,
     sourceSha: identity.sourceSha,
     runId: identity.runId,
+    generationId: identity.generationId,
+    worldKey: identity.worldKey,
     serverId: worldKeyParts(identity.worldKey).serverId,
     serverPid: server.serverStart.pid,
     port: server.serverStart.port,
@@ -1657,6 +1659,14 @@ function buildRunMetadata({ runtimeSource, identity, collectorReport, terminal, 
     && row.fields.mission?.item === mission.item
     && row.fields.mission?.count === mission.count)
   if (!readyRow || !configRow) throw new Error('run metadata requires exact GENERATION_READY and VTR probe configuration rows')
+  // `run.shutdownAt` is the HOST's own recorded shutdown boundary (the single
+  // SHUTDOWN log line), not the later process-exit observation. The provider
+  // capture window binds the same line, so both must report one instant.
+  const shutdownRows = rows.filter((row) => row.event === 'SHUTDOWN')
+  const shutdownAt = shutdownRows.length === 1 && shutdownRows[0].ts !== null
+    ? shutdownRows[0].ts
+    : null
+  if (shutdownAt === null) throw new Error('run metadata requires exactly one HOST SHUTDOWN log line')
   const activity = capture?.activity
   const noProviderAttemptEvidence = isPlainObject(activity)
     && activity.networkModelCalls === 0 && activity.jevEvaluateAttempts === 0 && activity.system2EvaluateAttempts === 0
@@ -1693,7 +1703,7 @@ function buildRunMetadata({ runtimeSource, identity, collectorReport, terminal, 
       botUuid: server.botUuid ?? null,
       startedAt: new Date(Number(identity.bootAt ?? Date.parse(collectorReport?.observed?.boot?.at ?? server.spawnedAt))).toISOString(),
       generationReadyAt: identity.generationReadyAt,
-      shutdownAt: stopAt,
+      shutdownAt,
       finalPosition,
       initialPosition,
     },
@@ -2386,6 +2396,10 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
     BUDDY_SYSTEM2: 'off',
     VTR_REACH_SOURCE_SHA: sourceSha,
     VTR_REACH_AUTHORITY_FIXTURE_REPORT: join(attemptRoot, 'runner', 'no-double-authority-fixture.json'),
+    // Run-scoped world-identity record written by the supervisor at terminal
+    // collection; the resident's acceptance report consumes it read-only so
+    // levelName/seed carry real bound values instead of null.
+    BUDDY_WORLD_IDENTITY_PATH: join(attemptRoot, 'runner', 'world-identity.json'),
   })
   const residentHandle = {
     process: null,
@@ -2791,6 +2805,7 @@ function archiveInputManifest({ attemptRoot, runtimeSource, server, observer, pa
   }
   for (const path of [
     'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/fixture-anchor-snapshot.json', 'runner/final-snapshot.json',
+    'runner/world-identity.json',
     'runner/milestone-predicates.json', 'runner/run-metadata.json', 'runner/provider-activity-capture.json',
     'runner/host-lifecycle.jsonl', 'runner/dependency-install.json', 'runner/source-bun.lock',
     'runner/no-double-authority-fixture.json', 'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts',
@@ -2863,6 +2878,7 @@ async function captureAndPackage({
     ?? JSON.parse(readFileSync(join(attemptRoot, 'runner', 'initial-snapshot.json'), 'utf8'))
   initial.generationId = identity.generationId
   initial.capturedAt = initial.capturedAt ?? identity.generationReadyAt
+  initial.buildHash = initial.buildHash ?? buildHash
   writeJsonAtomic(join(attemptRoot, 'runner', 'initial-snapshot.json'), initial)
   const finalSnapshotPath = join(attemptRoot, 'runner', 'final-snapshot.json')
   if (!existsSync(finalSnapshotPath)) throw new Error('terminal-time resident world/inventory snapshot is absent')
@@ -3379,6 +3395,25 @@ async function executeRun(options, preflight) {
         async collect({ identity, terminal, observerUrl }) {
           failurePhase = 'terminal-collection'
           identityRef = identity
+          // The resident cannot learn the world seed from the Mineflayer
+          // client (the server never sends it), so the supervisor writes a
+          // run-scoped world-identity record the resident's acceptance report
+          // reads via BUDDY_WORLD_IDENTITY_PATH. It binds the exact launch
+          // level-name and the level.dat seed already verified above.
+          writeJsonExclusive(join(options.attemptRoot, 'runner', 'world-identity.json'), {
+            schema: 'vtr-run-scoped-world-identity/v1',
+            sourceSha: identity.sourceSha,
+            runId: identity.runId,
+            generationId: identity.generationId,
+            worldKey: identity.worldKey,
+            levelName: server.serverStart.levelName,
+            seed: String(server.serverStart.seed ?? ''),
+            evidence: {
+              levelName: 'leaf --level-name spawn argument',
+              seed: 'server/world/level.dat parsed post-boot and rebound post-stop',
+            },
+            capturedAt: isoNow(),
+          })
           acceptanceRef = await captureAcceptanceWhileResidentAlive({ runtimeDir, attemptRoot: options.attemptRoot, identity })
           const state = await controlRequest(findControlSocket(runtimeDir), 'state', { radius: 8, verticalRadius: 4 }, 15_000)
           const finalSnapshot = normalizedControlSnapshot({ state, identity, phase: 'terminal' })

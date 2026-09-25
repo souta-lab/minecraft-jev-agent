@@ -33,6 +33,7 @@ import { defaultCandidateOptions, generateGroundedCandidates } from './src/candi
 import type { Candidate } from './src/candidates.ts'
 import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
 import { JevDecisionEpochs } from './src/jevSemanticProjection.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import type { SkillOutcomePacket } from './src/jevSemanticProjection.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import type { JsonlWriter } from './src/jev-legacy.ts'
@@ -443,6 +444,7 @@ interface GuardRejectRuntime {
   conflictDeferrals: number
   guardRejections: number
   recentEvents: string[]
+  reachVtrCells: ReturnType<typeof createVtrReachTestCells>
   tickCounter: number
   // Issue #437: state the guard-reject path now touches when it emits the packet.
   actionEpochByLease: Map<number, { epoch: number; commitmentId: string; identity: string }>
@@ -490,6 +492,7 @@ addCase('a guard-dropped selection emits ACTION_REJECTED with its code and reaso
   controller.conflictDeferrals = 0
   controller.guardRejections = 0
   controller.recentEvents = []
+  controller.reachVtrCells = createVtrReachTestCells({ tickCounter: 1 })
   controller.tickCounter = 1
   // Issue #437: the guard-reject path also emits the typed SkillOutcomePacket, so
   // this prototype stub must carry the epoch/packet state the real controller owns.
