@@ -32,7 +32,7 @@ function regionPathForWitness(position) {
   return `server/world/region/r.${regionX}.${regionZ}.mca`
 }
 
-function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecycle = false, omitEgress = false, omitFixtureSource = false, omitFreshAttestation = false, staleFreshAttestation = false, oldFreshPhraseOnly = false, tamperFreshArtifactHash = false, externalAttempt = false, tamperEgress = false, egressCloseOffset = 49, tamperFixtureSourceHash = false, badFixtureObservation = false, badLifecycleObservation = false, omitStopObservations = false, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, localFallbackDecision = false, deprecatedModelCallsPerMechanicalStep = 0, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
+function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecycle = false, omitEgress = false, omitFixtureSource = false, omitFreshAttestation = false, staleFreshAttestation = false, oldFreshPhraseOnly = false, tamperFreshArtifactHash = false, externalAttempt = false, tamperEgress = false, duplicateGuardProcess = false, egressCloseOffset = 49, tamperFixtureSourceHash = false, badFixtureObservation = false, badLifecycleObservation = false, omitStopObservations = false, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, localFallbackDecision = false, deprecatedModelCallsPerMechanicalStep = 0, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
   const inputDir = join(root, 'captured')
   const extraDir = join(root, 'extra')
   const archive = join(root, 'archive')
@@ -290,18 +290,22 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
   if (oldFreshPhraseOnly) freshWorldAttestation.startupLog.done.line = 'No existing world data, creating new world'
   const egressHashes = { toolSha256: '1'.repeat(64), sourceSha256: '2'.repeat(64), librarySha256: '3'.repeat(64), policySha256: '4'.repeat(64) }
   const egressRows = [
-    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: iso(1), monotonicClock: 'process.hrtime.relative',
-      monotonicNs: '1000000', pid: tamperEgress ? 599 : 501, reason: 'preload-active', ...egressHashes },
+    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: iso(1), monotonicClock: 'CLOCK_MONOTONIC',
+      monotonicNs: '1000000', pid: tamperEgress ? 599 : 501, processStartTicks: 1001, processGroupId: 501, reason: 'preload-active', ...egressHashes },
+    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: iso(6), monotonicClock: 'CLOCK_MONOTONIC',
+      monotonicNs: '6000000', pid: duplicateGuardProcess ? 501 : 503,
+      processStartTicks: duplicateGuardProcess ? 1001 : 1003, processGroupId: 501, reason: 'preload-active', ...egressHashes },
   ]
   if (externalAttempt) egressRows.push({ schema: 'vtr-no-llm-egress-audit/v1', event: 'blocked_egress', utc: iso(20),
-    monotonicClock: 'process.hrtime.relative', monotonicNs: '20000000', pid: 501, tid: 501,
+    monotonicClock: 'CLOCK_MONOTONIC', monotonicNs: '20000000', pid: 503, processStartTicks: 1003, processGroupId: 501, tid: 501,
     operation: 'connect', family: 'AF_INET', address: '203.0.113.7', port: 443, errno: 'EACCES' })
   egressRows.push({ schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_wrapper_closed', utc: iso(egressCloseOffset),
-    monotonicClock: 'process.hrtime.relative', monotonicNs: `${Math.trunc(egressCloseOffset * 1000000)}`, pid: 500, childPid: 501, commandName: 'bun',
+    monotonicClock: 'process.hrtime.relative', monotonicNs: `${Math.trunc(egressCloseOffset * 1000000)}`, pid: 500, childPid: 501, processGroupId: 501, commandName: 'bun',
     childExitCode: 0, childSignal: null, preloadVerified: true, processGroupGone: true,
     coverageClass: 'user-space-libc-interposition', coverageStatus: 'USERSPACE_ONLY_CLOSED',
-    externalDeniedAttempts: externalAttempt ? 1 : 0, ...egressHashes,
-    coverage: 'root-process-load-verified; process-group-signaled-at-close; syscall-bypass-not-covered' })
+    externalDeniedAttempts: externalAttempt ? 1 : 0, guardLoadedRows: 2, ...egressHashes,
+    auditPathIdentityVerified: true, auditDevice: '1', auditInode: '99',
+    coverage: 'root-process-load-verified; observed-exec-descendants-reopened-same-audit-inode; process-group-signaled-at-close; syscall-bypass-not-covered' })
   const egressText = egressRows.map((row) => JSON.stringify(row)).join('\n') + '\n'
   const authorityFixtureSourceBytes = Buffer.from('actual exact-source authority fixture test bytes\n')
   const authorityFixtureReport = {
@@ -478,6 +482,7 @@ try {
   assert.equal(packagedProbe.configuredNoLlmProbe.networkModelCalls, 0)
   assert.equal(packagedProbe.egressAudit.status, 'OBSERVED_ZERO')
   assert.equal(packagedProbe.egressAudit.coverageStatus, 'USERSPACE_ONLY_CLOSED')
+  assert.equal(packagedProbe.egressAudit.guardLoadedRows, 2, 'descendant guard activity remains bound after GENERATION_READY')
   assert.ok(packagedProbe.egressAudit.limitations.some((limitation) => limitation.includes('no kernel isolation claim')))
   assert.equal(completeResult.report.freshWorld.status, 'PASS')
   assert.equal(packagedProbe.noDoubleAuthorityFixture.status, 'PASS')
@@ -810,6 +815,12 @@ try {
   const tamperedEgressResult = packageVtrReachArchive({ collectorReportPath: tamperedEgress.collectorPath, manifestPath: tamperedEgress.manifestPath, archivePath: tamperedEgress.archive })
   assert.equal(tamperedEgressResult.report.packageStatus, 'FAIL')
   assert.equal(tamperedEgressResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'FAIL')
+
+  const duplicateGuardProcess = makeFixture(join(tempRoot, 'duplicate-egress-process'), { duplicateGuardProcess: true })
+  const duplicateGuardProcessResult = packageVtrReachArchive({ collectorReportPath: duplicateGuardProcess.collectorPath, manifestPath: duplicateGuardProcess.manifestPath, archivePath: duplicateGuardProcess.archive })
+  assert.equal(duplicateGuardProcessResult.report.packageStatus, 'FAIL')
+  assert.equal(duplicateGuardProcessResult.report.checks.find((entry) => entry.id === 'policy:no-llm-egress-audit')?.status, 'FAIL',
+    'duplicate guard_loaded rows for one process start must not impersonate descendant coverage')
 
   const externalAttempt = makeFixture(join(tempRoot, 'external-egress'), { externalAttempt: true })
   const externalAttemptResult = packageVtrReachArchive({ collectorReportPath: externalAttempt.collectorPath, manifestPath: externalAttempt.manifestPath, archivePath: externalAttempt.archive })

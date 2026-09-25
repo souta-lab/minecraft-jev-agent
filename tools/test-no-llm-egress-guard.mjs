@@ -183,17 +183,33 @@ function auditRows(auditPath) {
 
 function assertAudit(auditPath, expectedDenials) {
   const rows = auditRows(auditPath);
-  const loaded = rows.find((row) => row.event === 'guard_loaded');
+  const loaded = rows.filter((row) => row.event === 'guard_loaded');
   const closed = rows.find((row) => row.event === 'guard_wrapper_closed');
-  assert.ok(loaded, 'preload constructor did not produce a loaded record');
-  assert.equal(loaded.reason, 'preload-active');
+  assert.ok(loaded.length > 0, 'preload constructor did not produce a loaded record');
   assert.ok(closed?.preloadVerified, 'wrapper did not verify the target PID preload');
-  for (const key of ['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256']) {
-    assert.match(loaded[key], /^[a-f0-9]{64}$/);
-  assert.equal(closed[key], loaded[key]);
+  const rootLoaded = loaded.filter((row) => row.pid === closed.childPid);
+  assert.equal(rootLoaded.length, 1, 'root target must have exactly one guard_loaded record');
+  assert.equal(new Set(loaded.map((row) => `${row.pid}:${row.processStartTicks}`)).size, loaded.length,
+    'each observed process start identity must have exactly one guard_loaded record');
+  for (const row of loaded) {
+    assert.ok(Number.isInteger(row.pid) && row.pid > 0, 'guard_loaded row has invalid process identity');
+    assert.ok(Number.isSafeInteger(row.processStartTicks) && row.processStartTicks > 0, 'guard_loaded row has no stable process start identity');
+    assert.equal(row.processGroupId, closed.childPid, 'guarded process escaped the owned process group');
+    assert.equal(row.reason, 'preload-active');
+    for (const key of ['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256']) {
+      assert.match(row[key], /^[a-f0-9]{64}$/);
+      assert.equal(closed[key], row[key]);
+    }
   }
   assert.equal(closed.coverageStatus, 'USERSPACE_ONLY_CLOSED');
+  assert.equal(closed.auditPathIdentityVerified, true, 'wrapper did not retain the original audit file identity');
+  assert.match(closed.auditDevice, /^\d+$/u);
+  assert.match(closed.auditInode, /^\d+$/u);
   assert.equal(closed.processGroupGone, true);
+  assert.equal(rows.at(-1), closed, 'wrapper close record must be the final raw audit row');
+  const monotonic = rows.filter((row) => row.event !== 'guard_wrapper_closed').map((row) => BigInt(row.monotonicNs));
+  assert.ok(monotonic.every((value, index) => index === 0 || value >= monotonic[index - 1]), 'audit rows must be monotonic-clock ordered');
+  assert.equal(closed.guardLoadedRows, loaded.length, 'wrapper close must count every root and descendant preload event');
   const denied = rows.filter((row) => row.event === 'blocked_egress');
   assert.equal(denied.length, expectedDenials.length);
   assert.deepEqual(denied.map((row) => row.operation), expectedDenials);
@@ -201,10 +217,8 @@ function assertAudit(auditPath, expectedDenials) {
     assert.match(row.utc, /^\d{4}-\d\d-\d\dT.*Z$/);
     assert.match(row.monotonicNs, /^\d+$/);
     assert.ok(Number.isInteger(row.pid));
-    assert.equal(row.pid, loaded.pid);
-    assert.equal(row.toolSha256, loaded.toolSha256);
-    assert.equal(row.librarySha256, loaded.librarySha256);
-    assert.equal(row.policySha256, loaded.policySha256);
+    assert.ok(loaded.some((entry) => entry.pid === row.pid), 'blocked egress came from a process without guard_loaded');
+    for (const key of ['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256']) assert.equal(row[key], closed[key]);
     assert.ok(row.endpoint.length > 0);
   }
   return rows;
@@ -221,6 +235,7 @@ try {
   const fixtureAudit = join(tempRoot, 'fixture.jsonl');
   const fixture = await guarded(fixtureAudit, fixturePath, [String(ipv4.port), unixPath]);
   assert.equal(fixture.status, 0, `fixture failed: ${fixture.stderr || fixture.stdout}`);
+  assert.doesNotMatch(fixture.stderr, /audit write failed/u);
   assert.match(fixture.stdout, /connect\/sendto\/sendmsg blocked; IPv4 loopback and AF_UNIX allowed/);
   const fixtureRows = assertAudit(fixtureAudit, ['connect', 'sendto', 'sendmsg']);
   assert.match(fixtureRows.find((row) => row.operation === 'connect').endpoint, /^203\.0\.113\.7:80$/);
@@ -234,6 +249,7 @@ try {
     const fetchScript = `const r = await fetch('http://127.0.0.1:${ipv4.port}/'); const t = await r.text(); if (t !== 'vtr-egress-ok') process.exit(7); console.log('fetch-loopback-ok');`;
     const fetchRun = await guarded(fetchAudit, fetchRuntime, ['-e', fetchScript]);
     assert.equal(fetchRun.status, 0, `${basename(fetchRuntime)} fetch loopback failed: ${fetchRun.stderr || fetchRun.stdout}`);
+    assert.doesNotMatch(fetchRun.stderr, /audit write failed/u);
     assert.match(fetchRun.stdout, /fetch-loopback-ok/);
     assertAudit(fetchAudit, []);
 
@@ -241,9 +257,25 @@ try {
     const externalFetch = `try { await fetch('http://203.0.113.11:8080/', { signal: AbortSignal.timeout(2500) }); process.exit(8); } catch { console.log('fetch-external-blocked'); }`;
     const externalFetchRun = await guarded(externalFetchAudit, fetchRuntime, ['-e', externalFetch]);
     assert.equal(externalFetchRun.status, 0, `${basename(fetchRuntime)} external fetch did not fail safely: ${externalFetchRun.stderr || externalFetchRun.stdout}`);
+    assert.doesNotMatch(externalFetchRun.stderr, /audit write failed/u);
     assert.match(externalFetchRun.stdout, /fetch-external-blocked/);
     assertAudit(externalFetchAudit, ['connect']);
   }
+
+  const nestedRuntime = fetchRuntimes.find((runtime) => basename(runtime) === 'bun') ?? process.execPath;
+  const nestedAudit = join(tempRoot, 'nested-children.jsonl');
+  const nestedExternal = `const net = require('node:net'); const socket = new net.Socket(); socket.once('error', (error) => process.exit(error.code === 'EACCES' ? 0 : 23)); socket.connect(443, '203.0.113.19');`;
+  const nestedScript = `const { execFileSync, execSync } = require('node:child_process'); const sha = execSync('git rev-parse HEAD', { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit', 3] }).trim(); if (!/^[0-9a-f]{40}$/u.test(sha)) process.exit(21); execFileSync(process.execPath, ['-e', ${JSON.stringify(nestedExternal)}], { stdio: ['ignore', 'pipe', 'pipe'] }); console.log('nested-source-query-and-denial-captured');`;
+  const nestedRun = await guarded(nestedAudit, nestedRuntime, ['-e', nestedScript]);
+  assert.equal(nestedRun.status, 0, `guarded nested subprocesses failed: ${nestedRun.stderr || nestedRun.stdout}`);
+  assert.doesNotMatch(nestedRun.stderr, /audit write failed/u);
+  assert.match(nestedRun.stdout, /nested-source-query-and-denial-captured/u);
+  const nestedRows = assertAudit(nestedAudit, ['connect']);
+  const nestedLoaded = nestedRows.filter((row) => row.event === 'guard_loaded');
+  const nestedClosed = nestedRows.find((row) => row.event === 'guard_wrapper_closed');
+  assert.ok(nestedLoaded.length >= 3, 'root runtime, nested shell/git, and nested network child must all append guard_loaded rows');
+  const denial = nestedRows.find((row) => row.event === 'blocked_egress');
+  assert.notEqual(denial.pid, nestedClosed.childPid, 'external denial must come from a descendant whose fd 3 was not explicitly inherited');
 
   let ipv6Server;
   try {
@@ -263,6 +295,18 @@ try {
   const missingRows = auditRows(missingAudit);
   assert.equal(missingRows.some((row) => row.event === 'guard_loaded'), false);
   assert.equal(missingRows.at(-1).coverageStatus, 'INCOMPLETE');
+
+  const replacedAudit = join(tempRoot, 'replaced-audit.jsonl');
+  const retainedOriginal = `${replacedAudit}.retained`;
+  const replacementScript = `const fs = require('node:fs'); fs.renameSync(${JSON.stringify(replacedAudit)}, ${JSON.stringify(retainedOriginal)}); fs.writeFileSync(${JSON.stringify(replacedAudit)}, 'replacement\\n', { flag: 'wx', mode: 0o600 }); console.log('audit-path-replaced');`;
+  const replacedRun = await guarded(replacedAudit, process.execPath, ['-e', replacementScript]);
+  assert.equal(replacedRun.status, 125, 'replacing the audit pathname must fail closed');
+  assert.match(replacedRun.stdout, /audit-path-replaced/u);
+  const retainedRows = auditRows(retainedOriginal);
+  assert.equal(retainedRows.at(-1).event, 'guard_wrapper_closed', 'wrapper should finalize only the retained original inode');
+  assert.equal(retainedRows.at(-1).coverageStatus, 'INCOMPLETE');
+  assert.equal(retainedRows.at(-1).auditPathIdentityVerified, false);
+  assert.equal(readFileSync(replacedAudit, 'utf8'), 'replacement\n', 'wrapper must never read or append to a replacement path');
 
   process.stdout.write(`egress guard tests passed: verified preload, allowed AF_UNIX/IPv4+IPv6 loopback, denied connect/sendto/sendmsg, fetch loopback+external denial (${[...new Set(fetchRuntimes)].join(', ')})\n`);
 } finally {

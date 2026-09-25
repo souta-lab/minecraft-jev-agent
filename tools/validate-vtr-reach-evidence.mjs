@@ -611,14 +611,25 @@ function inspectNoLlmEgressAudit(files, capture, expectedIdentity, probe) {
   if (residentRows.length !== 1) throw incompleteEvidence('LD_PRELOAD audit cannot bind to exactly one HOST resident-stopped row')
   const resident = residentRows[0]
   const hashes = ['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256']
+  const rootLoaded = loaded.filter((row) => row.pid === close.childPid)
   if (hashes.some((key) => typeof close[key] !== 'string' || !/^[0-9a-f]{64}$/i.test(close[key])) ||
-      loaded.some((row) => row.pid !== close.childPid || row.reason !== 'preload-active' || hashes.some((key) => row[key] !== close[key]))) {
-    throw failEvidence('LD_PRELOAD audit does not prove guard activation for the resident PID with consistent artifact hashes')
+      rootLoaded.length !== 1 || new Set(loaded.map((row) => `${row.pid}:${row.processStartTicks}`)).size !== loaded.length ||
+      loaded.some((row) => !Number.isSafeInteger(row.pid) || row.pid < 1 ||
+        !Number.isSafeInteger(row.processStartTicks) || row.processStartTicks < 1 ||
+        !Number.isSafeInteger(row.processGroupId) || row.processGroupId !== close.childPid ||
+        row.reason !== 'preload-active' || hashes.some((key) => row[key] !== close[key])) ||
+      blocked.some((row) => !Number.isSafeInteger(row.processStartTicks) ||
+        !Number.isSafeInteger(row.processGroupId) || row.processGroupId !== close.childPid ||
+        loaded.filter((entry) => entry.pid === row.pid && entry.processStartTicks === row.processStartTicks).length !== 1 ||
+        hashes.some((key) => row[key] !== close[key]))) {
+    throw failEvidence('LD_PRELOAD audit does not prove root and descendant guard activation with consistent artifact hashes')
   }
   if (close.childPid !== resident.pid || close.childExitCode !== resident.exitCode ||
       close.preloadVerified !== true || close.processGroupGone !== true ||
       close.coverageClass !== 'user-space-libc-interposition' || close.coverageStatus !== 'USERSPACE_ONLY_CLOSED' ||
-      close.externalDeniedAttempts !== blocked.length || !String(close.coverage ?? '').includes('syscall-bypass-not-covered')) {
+      close.externalDeniedAttempts !== blocked.length || close.guardLoadedRows !== loaded.length ||
+      close.auditPathIdentityVerified !== true || !/^\d+$/u.test(String(close.auditDevice ?? '')) || !/^\d+$/u.test(String(close.auditInode ?? '')) ||
+      !String(close.coverage ?? '').includes('syscall-bypass-not-covered')) {
     throw incompleteEvidence('LD_PRELOAD wrapper did not close the resident process group with USERSPACE_ONLY_CLOSED evidence')
   }
   const startAt = Date.parse(capture?.window?.startedAt ?? '')
@@ -627,10 +638,14 @@ function inspectNoLlmEgressAudit(files, capture, expectedIdentity, probe) {
   const residentStoppedAt = Date.parse(capture?.window?.residentStoppedAt ?? '')
   const serverStoppedAt = Date.parse(capture?.window?.serverStoppedAt ?? '')
   const endAt = Date.parse(capture?.window?.endedAt ?? '')
-  const loadedTimes = loaded.map((row) => Date.parse(row.utc ?? ''))
+  const eventTimes = rows.map((row) => Date.parse(row.utc ?? ''))
+  const cRows = rows.filter((row) => row.event !== 'guard_wrapper_closed')
+  const monotonicValues = cRows.map((row) => /^\d+$/u.test(String(row.monotonicNs ?? '')) ? BigInt(row.monotonicNs) : null)
   const closedAt = Date.parse(close.utc ?? '')
-  if (![startAt, readyAt, shutdownAt, residentStoppedAt, serverStoppedAt, endAt, closedAt, ...loadedTimes].every(Number.isFinite) ||
-      loadedTimes.some((at) => at < startAt || at > readyAt) || shutdownAt > closedAt ||
+  if (rows.at(-1) !== close || cRows.some((row) => row.monotonicClock !== 'CLOCK_MONOTONIC') || close.monotonicClock !== 'process.hrtime.relative' ||
+      monotonicValues.some((value, index) => value === null || index > 0 && value < monotonicValues[index - 1]) ||
+      ![startAt, readyAt, shutdownAt, residentStoppedAt, serverStoppedAt, endAt, closedAt, ...eventTimes].every(Number.isFinite) ||
+      eventTimes.some((at) => at < startAt || at > closedAt) || shutdownAt > closedAt ||
       closedAt < Date.parse(resident.processExitObservation?.observedAt ?? '') ||
       closedAt > Date.parse(lifecycleRows.find((row) => row.event === 'server-stopped')?.listenerClosureObservation?.observedAt ?? '') ||
       closedAt > serverStoppedAt || serverStoppedAt > endAt || closedAt > endAt ||

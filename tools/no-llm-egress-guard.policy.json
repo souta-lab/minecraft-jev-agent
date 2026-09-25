@@ -6,5 +6,5 @@
     "AF_INET6 loopback (::1)"
   ],
   "deny": "all other socket destinations at intercepted libc egress calls",
-  "audit": "append-only JSONL on inherited descriptor"
+  "audit": "append-only JSONL on a verified run-scoped file identity; descendants may reopen the same inode"
 }

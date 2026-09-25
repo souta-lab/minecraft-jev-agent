@@ -583,6 +583,66 @@ const WORKSPACE_PATHS = Object.freeze([
   'mcbot/movement-test/variants/A', 'companion', 'system2-harness',
 ])
 
+/**
+ * Bun's isolated install may materialize package links under root or nested
+ * node_modules directories. Every such link must resolve inside this exact
+ * source worktree; resolving the two production entrypoints is checked
+ * separately by runRuntimeResolutionSmoke().
+ */
+export function inspectNodeModulesLinkContainment(runtimeSource) {
+  const root = realpathSync(runtimeSource)
+  const pending = [{ path: root, underNodeModules: false }]
+  const visitedDirectories = new Set()
+  const links = []
+
+  while (pending.length > 0) {
+    const current = pending.pop()
+    const directory = realpathSync(current.path)
+    if (!ensureInside(root, directory)) throw new Error('node_modules traversal escaped the exact-source tree')
+    if (visitedDirectories.has(directory)) continue
+    visitedDirectories.add(directory)
+    const entries = readdirSync(directory, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!current.underNodeModules && entry.name === '.git') continue
+      const path = join(directory, entry.name)
+      const isNodeModulesEntry = entry.name === 'node_modules'
+      if (entry.isSymbolicLink()) {
+        if (!current.underNodeModules && !isNodeModulesEntry) continue
+        let target
+        try { target = realpathSync(path) } catch {
+          throw new Error(`dependency symlink is dangling inside exact-source node_modules: ${relative(root, path).split(sep).join('/')}`)
+        }
+        if (!ensureInside(root, target) || target === root) {
+          throw new Error(`dependency symlink resolves outside the exact-source tree: ${relative(root, path).split(sep).join('/')}`)
+        }
+        const targetStat = statSync(target)
+        links.push({
+          path: relative(root, path).split(sep).join('/'),
+          target: relative(root, target).split(sep).join('/'),
+          targetKind: targetStat.isDirectory() ? 'directory' : targetStat.isFile() ? 'file' : 'other',
+        })
+        if (targetStat.isDirectory()) pending.push({ path: target, underNodeModules: true })
+        continue
+      }
+      if (entry.isDirectory()) {
+        pending.push({ path, underNodeModules: current.underNodeModules || isNodeModulesEntry })
+      }
+    }
+  }
+
+  links.sort((left, right) => left.path.localeCompare(right.path) || left.target.localeCompare(right.target))
+  const manifest = JSON.stringify(links)
+  return {
+    schema: 'vtr-exact-source-node-modules-containment/v1',
+    status: 'PASS',
+    exactSourceRoot: root,
+    symlinkCount: links.length,
+    externalSymlinkCount: 0,
+    danglingSymlinkCount: 0,
+    symlinkManifestSha256: sha256(manifest),
+  }
+}
+
 function readBunLock(lockPath) {
   const text = readFileSync(lockPath, 'utf8')
   if (!globalThis.Bun?.JSONC?.parse) throw new Error('Bun JSONC parser is unavailable for exact-source lock validation')
@@ -623,6 +683,7 @@ export function validateExactSourceWorkspaceInstall(runtimeSource, workspacePath
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
   }
+  const dependencyLinkContainment = inspectNodeModulesLinkContainment(root)
 
   const workspaces = {}
   const names = new Set()
@@ -685,11 +746,13 @@ export function validateExactSourceWorkspaceInstall(runtimeSource, workspacePath
     bunLockSha256: sha256(lockBytes),
     workspaceLinks: workspaces,
     noExternalWorkspaceLinks: true,
+    dependencyLinkContainment,
     workspaceValidation: {
       status: 'PASS',
       manifestSource: 'exact-source package.json + bun.lock',
       absentUnusedLinksAllowed: true,
       installedLinksChecked: true,
+      dependencySymlinksContainedWithinExactSource: true,
     },
   }
 }
@@ -868,12 +931,22 @@ const RUNTIME_RESOLUTION_ENTRYPOINTS = Object.freeze([
 export function runRuntimeResolutionSmoke(runtimeSource, { mode = 'full', attemptRoot = null } = {}) {
   if (!['full', 'source-graph'].includes(mode)) throw new Error(`unsupported runtime resolution smoke mode: ${mode}`)
   const script = [
+    'const { createHash } = require("node:crypto");',
+    'const { realpathSync } = require("node:fs");',
+    'const { isAbsolute, relative, resolve, sep } = require("node:path");',
     'const entrypoints = ' + JSON.stringify(RUNTIME_RESOLUTION_ENTRYPOINTS) + ';',
     `const mode = ${JSON.stringify(mode)};`,
-    'const result = await Bun.build({ entrypoints, target: "bun", write: false, external: mode === "source-graph" ? ["*"] : [] });',
+    'const root = realpathSync(process.cwd());',
+    'const result = await Bun.build({ entrypoints, target: "bun", write: false, metafile: true, external: mode === "source-graph" ? ["*"] : [] });',
     'const errors = result.logs.filter((row) => row.level === "error").map((row) => String(row.message ?? row));',
-    'console.log(JSON.stringify({ schema: "vtr-runtime-entrypoint-resolution-smoke/v1", success: result.success, mode, resolver: "Bun.build(target=bun,write=false)", entrypoints, outputCount: result.outputs.length, errors }));',
+    'const inputs = Object.keys(result.metafile?.inputs ?? {}).sort();',
+    'const resolvedInputs = [];',
+    'for (const input of inputs) { try { const path = resolve(root, input); const real = realpathSync(path); const rel = relative(root, real); if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) errors.push(`runtime input escapes exact-source tree: ${input}`); else resolvedInputs.push({ input, resolved: rel.split(sep).join("/") }); } catch { errors.push(`runtime input is absent or unresolved in exact-source tree: ${input}`); } }',
+    'const inputManifest = JSON.stringify(resolvedInputs);',
+    'const resolutionContainment = { status: inputs.length > 0 && errors.length === 0 ? "PASS" : "INCOMPLETE", inputCount: inputs.length, outsideCount: errors.filter((value) => value.includes("escapes exact-source tree")).length, inputManifestSha256: createHash("sha256").update(inputManifest).digest("hex"), inputs: resolvedInputs };',
+    'console.log(JSON.stringify({ schema: "vtr-runtime-entrypoint-resolution-smoke/v2", success: result.success, mode, resolver: "Bun.build(target=bun,write=false,metafile=true)", entrypoints, outputCount: result.outputs.length, resolutionContainment, errors }));',
     'if (!result.success) process.exitCode = 1;',
+    'if (resolutionContainment.status !== "PASS") process.exitCode = 1;',
   ].join('\n')
   const home = attemptRoot ? join(attemptRoot, 'home', `runtime-smoke-${mode}`) : '/nonexistent'
   const tmp = attemptRoot ? join(attemptRoot, 'tmp', `runtime-smoke-${mode}`) : '/tmp'
@@ -897,8 +970,12 @@ export function runRuntimeResolutionSmoke(runtimeSource, { mode = 'full', attemp
   const output = safeStdout.trim().split(/\r?\n/u).at(-1)
   let report
   try { report = JSON.parse(output) } catch { throw new Error('Bun runtime resolution smoke did not emit its JSON result') }
-  if (report.schema !== 'vtr-runtime-entrypoint-resolution-smoke/v1' || report.success !== true || report.mode !== mode
-    || report.outputCount !== RUNTIME_RESOLUTION_ENTRYPOINTS.length || !Array.isArray(report.errors) || report.errors.length !== 0) {
+  if (report.schema !== 'vtr-runtime-entrypoint-resolution-smoke/v2' || report.success !== true || report.mode !== mode
+    || report.outputCount !== RUNTIME_RESOLUTION_ENTRYPOINTS.length || !Array.isArray(report.errors) || report.errors.length !== 0
+    || report.resolutionContainment?.status !== 'PASS' || !Number.isSafeInteger(report.resolutionContainment.inputCount)
+    || report.resolutionContainment.inputCount < 1 || report.resolutionContainment.outsideCount !== 0
+    || !SHA256.test(String(report.resolutionContainment.inputManifestSha256 ?? ''))
+    || !Array.isArray(report.resolutionContainment.inputs) || report.resolutionContainment.inputs.length !== report.resolutionContainment.inputCount) {
     throw new Error(`Bun ${mode} runtime import-resolution smoke returned an invalid result${logPath ? '; see ' + relative(attemptRoot, logPath).split(sep).join('/') : ''}`)
   }
   return { ...report, status: 'PASS', logPath: logPath ? relative(attemptRoot, logPath).split(sep).join('/') : null }
@@ -2083,6 +2160,7 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
   mkdirSync(home, { recursive: true, mode: 0o700 })
   mkdirSync(tmp, { recursive: true, mode: 0o700 })
   const auditPath = join(attemptRoot, 'runner', 'no-llm-egress-audit.json')
+  const guardLogPath = join(attemptRoot, 'runner', 'resident-guard.log')
   const guardScript = join(runtimeSource, 'tools', 'with-no-llm-egress-guard.mjs')
   const residentScript = join(runtimeSource, 'buddy-driver', 'agent-runner.mts')
   const env = minimalEnvironment({
@@ -2107,6 +2185,7 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
     wrapperPid: null,
     residentPid: null,
     auditPath,
+    guardLogPath,
     runtimeDir,
     paths,
     sourceSha,
@@ -2117,7 +2196,7 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
   const handle = spawnCaptured('node', [guardScript, '--audit', auditPath, '--', process.execPath, '--no-env-file', residentScript], {
     cwd: runtimeSource,
     env,
-    logPath: join(attemptRoot, 'runner', 'resident-guard.log'),
+    logPath: guardLogPath,
     stdin: 'ignore',
     detached: false,
   })
@@ -2130,7 +2209,6 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
   residentHandle.wrapperPid = spawned.pid
   const loadedRows = await waitFor(() => {
     const rows = currentEvidenceRows(auditPath).filter((row) => row.event === 'guard_loaded')
-    if (rows.length > 1) throw new Error('egress guard emitted duplicate guard_loaded events')
     return rows[0] ?? null
   }, { timeoutMs: 30_000, label: 'guard_loaded for the resident child process' })
   if (!Number.isSafeInteger(loadedRows.pid) || loadedRows.pid < 1 || loadedRows.pid === spawned.pid) {
@@ -2169,8 +2247,8 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
   // killing the only supervisor while leaving the resident orphaned.
   let audit = currentEvidenceRows(handle.auditPath)
   const loadedBeforeClose = audit.filter((row) => row.event === 'guard_loaded')
-  if (loadedBeforeClose.length > 1) throw new Error('egress guard emitted duplicate guard_loaded events')
-  const auditPid = loadedBeforeClose[0]?.pid
+  const rootLoadedBeforeClose = loadedBeforeClose[0] ?? null
+  const auditPid = rootLoadedBeforeClose?.pid
   const residentPid = handle.residentPid ?? pid ?? auditPid ?? null
   let processGroupClosure = residentPid
     ? await terminateOwnedProcessGroup(residentPid, {
@@ -2201,15 +2279,16 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
   if (!Number.isSafeInteger(result.code)) throw new Error('resident egress-guard wrapper close event had no numeric exit status')
   audit = currentEvidenceRows(handle.auditPath)
   const loaded = audit.filter((row) => row.event === 'guard_loaded')
+  const rootLoaded = loaded[0] ?? null
   const closed = audit.filter((row) => row.event === 'guard_wrapper_closed')
   const blocked = audit.filter((row) => row.event === 'blocked_egress')
-  if (loaded.length === 1 && !residentPid) {
-    processGroupClosure = await terminateOwnedProcessGroup(loaded[0].pid, { termTimeoutMs: 0, killTimeoutMs: 5000 })
+  if (rootLoaded && !residentPid) {
+    processGroupClosure = await terminateOwnedProcessGroup(rootLoaded.pid, { termTimeoutMs: 0, killTimeoutMs: 5000 })
   }
-  if (loaded.length === 1 && processGroupClosure.state !== 'gone') {
+  if (rootLoaded && processGroupClosure.state !== 'gone') {
     // The target is already known to the wrapper. Never silently treat a
     // wrapper close as proof that this separate child process group vanished.
-    processGroupClosure = await terminateOwnedProcessGroup(loaded[0].pid, { termTimeoutMs: 0, killTimeoutMs: 5000 })
+    processGroupClosure = await terminateOwnedProcessGroup(rootLoaded.pid, { termTimeoutMs: 0, killTimeoutMs: 5000 })
   }
   if (processGroupClosure.signals?.length > 0) forced.value = true
   const groupClosedRow = {
@@ -2218,9 +2297,9 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
     runId: identity?.runId ?? null,
     generationId: identity?.generationId ?? null,
     wrapperPid: handle.wrapperPid ?? processHandle.child.pid ?? null,
-    residentPid: loaded[0]?.pid ?? residentPid,
+    residentPid: rootLoaded?.pid ?? residentPid,
     groupClosure: processGroupClosure,
-    guardLoaded: loaded[0] ? { pid: loaded[0].pid, utc: loaded[0].utc } : null,
+    guardLoaded: rootLoaded ? { pid: rootLoaded.pid, utc: rootLoaded.utc } : null,
     guardWrapperClosed: closed[0] ? {
       childPid: closed[0].childPid,
       childExitCode: closed[0].childExitCode,
@@ -2232,17 +2311,36 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
   if (!existsSync(join(attemptRoot, 'runner', 'resident-process-group-closure.json'))) {
     writeJsonExclusive(join(attemptRoot, 'runner', 'resident-process-group-closure.json'), groupClosedRow)
   }
-  const expectedPid = pid ?? handle.residentPid ?? loaded[0]?.pid ?? null
+  const expectedPid = pid ?? handle.residentPid ?? rootLoaded?.pid ?? null
   const wrapperPid = handle.wrapperPid ?? processHandle.child.pid
+  const guardAuditWarnings = existsSync(handle.guardLogPath)
+    ? readFileSync(handle.guardLogPath, 'utf8').match(/vtr-egress-guard:\s+audit write failed/giu) ?? []
+    : []
+  const closeHashes = closed[0] ?? {}
+  const hashFields = ['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256']
+  const rootLoadedRows = loaded.filter((row) => row.pid === (handle.residentPid ?? residentPid))
+  const processKeys = loaded.map((row) => `${row.pid}:${row.processStartTicks}`)
+  const invalidLoadedRows = rootLoadedRows.length !== 1 || new Set(processKeys).size !== loaded.length
+    || loaded.some((row) => row.reason !== 'preload-active'
+    || !Number.isSafeInteger(row.pid) || row.pid < 1
+    || !Number.isSafeInteger(row.processStartTicks) || row.processStartTicks < 1
+    || !Number.isSafeInteger(row.processGroupId) || row.processGroupId !== (handle.residentPid ?? residentPid)
+    || hashFields.some((key) => row[key] !== closeHashes[key]))
+    || blocked.some((row) => !loaded.some((entry) => entry.pid === row.pid && entry.processStartTicks === row.processStartTicks)
+      || row.processGroupId !== (handle.residentPid ?? residentPid))
   const terminationProblems = residentTerminationProblems({
-    guardLoaded: loaded[0], guardClosed: closed[0], blockedRows: blocked,
+    guardLoaded: rootLoaded, guardClosed: closed[0], blockedRows: blocked,
     wrapperPid, residentPid: expectedPid,
     wrapperClose: { pid: wrapperPid, exitCode: result.code, signal: result.signal ?? null },
     processGroupClosure, forced: forced.value,
   })
-  if (loaded.length !== 1 || closed.length !== 1
+  if (guardAuditWarnings.length > 0) terminationProblems.push('guard-audit-write-failed')
+  if (invalidLoadedRows) terminationProblems.push('guard-loaded-row-invalid-or-unbound')
+  if (loaded.length < 1 || closed.length !== 1
     || closed[0].coverageStatus !== 'USERSPACE_ONLY_CLOSED'
     || closed[0].preloadVerified !== true
+    || closed[0].guardLoadedRows !== loaded.length
+    || closed[0].auditPathIdentityVerified !== true
     || closed[0].externalDeniedAttempts !== 0
     || terminationProblems.length > 0) {
     throw new Error(`no-LLM egress audit is incomplete or unsafe (${terminationProblems.join(',') || 'capture-contract-mismatch'})`)
@@ -2254,7 +2352,8 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
     generationId: identity?.generationId ?? null,
     guardAuditPath: handle.auditPath,
     guardAuditSha256: sha256(readFileSync(handle.auditPath)),
-    childPid: loaded[0].pid,
+    childPid: rootLoaded.pid,
+    guardLoadedRows: loaded.length,
     processGroupClosurePath: 'runner/resident-process-group-closure.json',
     processGroupClosureSha256: sha256(readFileSync(join(attemptRoot, 'runner', 'resident-process-group-closure.json'))),
     guardWrapperPid: handle.wrapperPid,
@@ -2265,12 +2364,12 @@ async function stopResident({ handle, identity, pid, attemptRoot, gracefulTimeou
     guardSourceSha256: closed[0].sourceSha256,
     guardLibrarySha256: closed[0].librarySha256,
     guardPolicySha256: closed[0].policySha256,
-    openedAt: loaded[0].utc,
+    openedAt: rootLoaded.utc,
     closedAt: closed[0].utc,
     processGroupGone: closed[0].processGroupGone,
   }
   writeJsonExclusive(join(attemptRoot, 'runner', 'no-llm-egress-provenance.json'), provenance)
-  if (loaded[0].pid !== expectedPid || handle.residentPid && handle.residentPid !== expectedPid) throw new Error('egress audit resident PID differs from the supervisor-owned PID')
+  if (rootLoaded.pid !== expectedPid || handle.residentPid && handle.residentPid !== expectedPid) throw new Error('egress audit resident PID differs from the supervisor-owned PID')
   const observedAt = closed[0].utc
   if (!Number.isFinite(Date.parse(observedAt))) throw new Error('egress wrapper closure row lacks a valid UTC close timestamp')
   return {

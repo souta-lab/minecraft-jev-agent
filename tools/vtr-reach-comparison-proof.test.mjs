@@ -318,20 +318,23 @@ function vtrSide() {
     policySha256: '4'.repeat(64),
   }
   const egressRows = [
-    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: tOffset(0.5), monotonicClock: 'process.hrtime.relative',
-      monotonicNs: '1000', pid: 43101, reason: 'preload-active', ...egressHashes },
+    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: tOffset(0.5), monotonicClock: 'CLOCK_MONOTONIC',
+      monotonicNs: '1000', pid: 43101, processStartTicks: 10001, processGroupId: 43101, reason: 'preload-active', ...egressHashes },
+    { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_loaded', utc: tOffset(2), monotonicClock: 'CLOCK_MONOTONIC',
+      monotonicNs: '2000000000', pid: 43103, processStartTicks: 10003, processGroupId: 43101, reason: 'preload-active', ...egressHashes },
     { schema: 'vtr-no-llm-egress-audit/v1', event: 'guard_wrapper_closed', utc: tOffset(14.35), monotonicClock: 'process.hrtime.relative',
       monotonicNs: '14350000000', pid: 43100, childPid: 43101, commandName: 'bun', childExitCode: 0, childSignal: null,
+      processGroupId: 43101, auditPathIdentityVerified: true, auditDevice: '1', auditInode: '9876',
       preloadVerified: true, processGroupGone: true, coverageClass: 'user-space-libc-interposition', coverageStatus: 'USERSPACE_ONLY_CLOSED',
-      externalDeniedAttempts: 0, ...egressHashes,
-      coverage: 'root-process-load-verified; process-group-signaled-at-close; syscall-bypass-not-covered' },
+      externalDeniedAttempts: 0, guardLoadedRows: 2, ...egressHashes,
+      coverage: 'root-process-load-verified; observed-exec-descendants-reopened-same-audit-inode; process-group-signaled-at-close; syscall-bypass-not-covered' },
   ]
   const egressText = eventFile(egressRows)
   probe.egressAudit = {
     schema: 'vtr-no-llm-egress-binding/v1', status: 'OBSERVED_ZERO', sourceSha: VTR.sourceSha, runId: VTR.runId,
     generationId: VTR.generationId, worldKey,
     coverageClass: 'user-space-libc-interposition', coverageStatus: 'USERSPACE_ONLY_CLOSED', externalDeniedAttempts: 0,
-    guardLoadedRows: 1, rawArtifact: { path: 'runner/no-llm-egress-audit.json', bytes: Buffer.byteLength(egressText), sha256: sha256(egressText) },
+    guardLoadedRows: 2, rawArtifact: { path: 'runner/no-llm-egress-audit.json', bytes: Buffer.byteLength(egressText), sha256: sha256(egressText) },
     window: { startedAt: t(0), generationReadyAt: t(1), shutdownAt: tOffset(14.2), residentStoppedAt: tOffset(14.3),
       serverStoppedAt: tOffset(14.4), endedAt: tOffset(14.5) },
     limitations: ['USERSPACE_ONLY: LD_PRELOAD libc interception only; raw syscall bypass is not covered; no kernel isolation claim.'],
@@ -474,13 +477,29 @@ test('requires a source/run/window-bound USERSPACE_ONLY egress guard audit', () 
   assert.equal(wrongWindowResult.status, 'INCOMPLETE')
   assert.match(wrongWindowResult.reason, /timestamps are not bound to the continuous provider capture window/u)
 
+  const duplicateGuard = rawProof()
+  const duplicateSide = duplicateGuard.rawComparisonEvidence.vtr
+  const duplicateRows = readText(duplicateSide, 'runner/no-llm-egress-audit.json').trim().split('\n').map((line) => JSON.parse(line))
+  duplicateRows[1].pid = duplicateRows[0].pid
+  duplicateRows[1].processStartTicks = duplicateRows[0].processStartTicks
+  const duplicateText = eventFile(duplicateRows)
+  replaceText(duplicateSide, 'runner/no-llm-egress-audit.json', duplicateText)
+  const duplicateProbe = JSON.parse(readText(duplicateSide, 'runner/probe.json'))
+  duplicateProbe.egressAudit.rawArtifact.bytes = Buffer.byteLength(duplicateText)
+  duplicateProbe.egressAudit.rawArtifact.sha256 = sha256(duplicateText)
+  replaceText(duplicateSide, 'runner/probe.json', JSON.stringify(duplicateProbe))
+  const duplicateResult = inspectReachComparisonProof(duplicateGuard, VTR.sourceSha, LEGACY.sourceSha)
+  assert.equal(duplicateResult.status, 'FAIL')
+  assert.match(duplicateResult.reason, /guard activation/u)
+
   const externalAttempt = rawProof()
   const externalSide = externalAttempt.rawComparisonEvidence.vtr
   const auditRows = readText(externalSide, 'runner/no-llm-egress-audit.json').trim().split('\n').map((line) => JSON.parse(line))
-  auditRows.splice(1, 0, {
-    schema: 'vtr-no-llm-egress-audit/v1', event: 'blocked_egress', utc: t(3), monotonicClock: 'process.hrtime.relative',
-    monotonicNs: '3000000000', pid: 43101, tid: 43101, operation: 'connect', family: 'AF_INET',
-    address: '203.0.113.5', port: 443, errno: 'EACCES',
+  const auditHashes = Object.fromEntries(['toolSha256', 'sourceSha256', 'librarySha256', 'policySha256'].map((key) => [key, auditRows[0][key]]))
+  auditRows.splice(2, 0, {
+    schema: 'vtr-no-llm-egress-audit/v1', event: 'blocked_egress', utc: t(3), monotonicClock: 'CLOCK_MONOTONIC',
+    monotonicNs: '3000000000', pid: 43103, processStartTicks: 10003, processGroupId: 43101, tid: 43103, operation: 'connect', family: 'AF_INET',
+    address: '203.0.113.5', port: 443, errno: 'EACCES', ...auditHashes,
   })
   auditRows.at(-1).externalDeniedAttempts = 1
   const externalText = eventFile(auditRows)
@@ -491,7 +510,7 @@ test('requires a source/run/window-bound USERSPACE_ONLY egress guard audit', () 
   probe.egressAudit.rawArtifact.sha256 = sha256(externalText)
   replaceText(externalSide, 'runner/probe.json', JSON.stringify(probe))
   const externalResult = inspectReachComparisonProof(externalAttempt, VTR.sourceSha, LEGACY.sourceSha)
-  assert.equal(externalResult.status, 'FAIL')
+  assert.equal(externalResult.status, 'FAIL', externalResult.reason)
   assert.match(externalResult.reason, /denied external network attempt/u)
 })
 

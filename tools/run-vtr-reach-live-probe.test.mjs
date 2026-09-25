@@ -20,6 +20,7 @@ import {
   inspectLeafEula,
   runNoDoubleAuthorityFixture,
   validateExactSourceWorkspaceInstall,
+  inspectNodeModulesLinkContainment,
   validatePortPolicy,
   writeSetupFailureArtifact,
 } from './run-vtr-reach-live-probe.mjs'
@@ -129,6 +130,63 @@ describe('Reach live probe caller pure contracts', () => {
     }
   })
 
+  test('exact-source install rejects external links inside nested workspace node_modules', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-nested-dependency-link-'))
+    const root = join(parent, 'source')
+    const external = join(parent, 'outside-package')
+    mkdirSync(root)
+    mkdirSync(external)
+    try {
+      writeWorkspaceFixture(root)
+      const nestedModules = join(root, 'unused-workspace', 'node_modules')
+      mkdirSync(nestedModules)
+      symlinkSync(external, join(nestedModules, 'outside-package'), 'dir')
+      expect(() => validateExactSourceWorkspaceInstall(root, ['unused-workspace']))
+        .toThrow(/dependency symlink resolves outside the exact-source tree/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install rejects dangling links inside node_modules', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-dangling-dependency-link-'))
+    const root = join(parent, 'source')
+    mkdirSync(root)
+    try {
+      writeWorkspaceFixture(root)
+      const nestedModules = join(root, 'unused-workspace', 'node_modules')
+      mkdirSync(nestedModules)
+      symlinkSync(join(parent, 'missing-package'), join(nestedModules, 'missing-package'), 'dir')
+      expect(() => inspectNodeModulesLinkContainment(root))
+        .toThrow(/dependency symlink is dangling inside exact-source node_modules/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install accepts nested dependency links that resolve within the source', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-contained-dependency-link-'))
+    const root = join(parent, 'source')
+    mkdirSync(root)
+    try {
+      writeWorkspaceFixture(root)
+      const packageRoot = join(root, 'vendor-package')
+      mkdirSync(packageRoot)
+      writeFileSync(join(packageRoot, 'index.js'), 'export const ok = true\n')
+      const nestedModules = join(root, 'unused-workspace', 'node_modules')
+      mkdirSync(nestedModules)
+      symlinkSync(packageRoot, join(nestedModules, 'vendor-package'), 'dir')
+      const report = validateExactSourceWorkspaceInstall(root, ['unused-workspace'])
+      expect(report.dependencyLinkContainment).toMatchObject({
+        schema: 'vtr-exact-source-node-modules-containment/v1',
+        status: 'PASS', symlinkCount: 1, externalSymlinkCount: 0, danglingSymlinkCount: 0,
+      })
+      expect(report.workspaceValidation.dependencySymlinksContainedWithinExactSource).toBe(true)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
   test('preflight and frozen install share bun.lock, manifest, config, and workspace-link readiness', () => {
     const readiness = inspectExactSourceDependencyReadiness(process.cwd())
     expect(readiness.lockSha256).toMatch(/^[a-f0-9]{64}$/u)
@@ -141,13 +199,17 @@ describe('Reach live probe caller pure contracts', () => {
     const mode = installedDependencies ? 'full' : 'source-graph'
     const smoke = runRuntimeResolutionSmoke(process.cwd(), { mode })
     expect(smoke).toMatchObject({
-      schema: 'vtr-runtime-entrypoint-resolution-smoke/v1',
+      schema: 'vtr-runtime-entrypoint-resolution-smoke/v2',
       status: 'PASS',
-      resolver: 'Bun.build(target=bun,write=false)',
+      resolver: 'Bun.build(target=bun,write=false,metafile=true)',
       entrypoints: ['buddy-driver/agent-runner.mts', 'buddy-driver/generation-entry.ts'],
       mode,
       outputCount: 2,
+      resolutionContainment: { status: 'PASS', outsideCount: 0 },
     })
+    expect(smoke.resolutionContainment.inputCount).toBeGreaterThanOrEqual(2)
+    expect(smoke.resolutionContainment.inputs).toHaveLength(smoke.resolutionContainment.inputCount)
+    expect(smoke.resolutionContainment.inputManifestSha256).toMatch(/^[a-f0-9]{64}$/u)
     expect(smoke.errors).toEqual([])
   })
 

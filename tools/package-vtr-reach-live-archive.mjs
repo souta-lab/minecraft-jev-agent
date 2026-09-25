@@ -694,9 +694,18 @@ function inspectNoLlmEgressAudit({ copiedSources, identity, run, capture, lifecy
     result.reasons.push('guard wrapper close lacks complete SHA-256 provenance')
     return result
   }
-  if (loadedRows.some((row) => row.reason !== 'preload-active' || row.pid !== close.childPid ||
-      hashes.some((key) => row[key] !== close[key]))) {
-    result.reasons.push('guard_loaded evidence does not prove the exact resident PID with matching guard artifact hashes')
+  const rootLoadedRows = loadedRows.filter((row) => row.pid === close.childPid)
+  const processKeys = loadedRows.map((row) => `${row.pid}:${row.processStartTicks}`)
+  const loadedProcessKeys = new Set(processKeys)
+  const loadedFor = (row) => loadedRows.filter((entry) => entry.pid === row.pid && entry.processStartTicks === row.processStartTicks)
+  if (rootLoadedRows.length !== 1 || loadedProcessKeys.size !== loadedRows.length || loadedRows.some((row) => !Number.isSafeInteger(row.pid) || row.pid < 1 ||
+      !Number.isSafeInteger(row.processStartTicks) || row.processStartTicks < 1 ||
+      !Number.isSafeInteger(row.processGroupId) || row.processGroupId !== close.childPid ||
+      row.reason !== 'preload-active' || hashes.some((key) => row[key] !== close[key])) ||
+      blockedRows.some((row) => !Number.isSafeInteger(row.processStartTicks) ||
+        !Number.isSafeInteger(row.processGroupId) || row.processGroupId !== close.childPid ||
+        loadedFor(row).length !== 1 || hashes.some((key) => row[key] !== close[key]))) {
+    result.reasons.push('guard_loaded evidence does not prove root and observed descendants with matching guard artifact hashes')
     result.status = 'FAIL'
     result.coverageStatus = close.coverageStatus ?? null
     return result
@@ -704,7 +713,8 @@ function inspectNoLlmEgressAudit({ copiedSources, identity, run, capture, lifecy
   if (close.childPid !== resident.pid || close.childExitCode !== resident.exitCode ||
       close.preloadVerified !== true || close.processGroupGone !== true ||
       close.coverageClass !== 'user-space-libc-interposition' || close.coverageStatus !== 'USERSPACE_ONLY_CLOSED' ||
-      close.externalDeniedAttempts !== blockedRows.length ||
+      close.externalDeniedAttempts !== blockedRows.length || close.guardLoadedRows !== loadedRows.length ||
+      close.auditPathIdentityVerified !== true || !/^\d+$/u.test(String(close.auditDevice ?? '')) || !/^\d+$/u.test(String(close.auditInode ?? '')) ||
       !String(close.coverage ?? '').includes('syscall-bypass-not-covered')) {
     result.reasons.push('guard closure does not bind the stopped resident or does not attest USERSPACE_ONLY_CLOSED coverage')
     result.coverageStatus = close.coverageStatus ?? null
@@ -717,10 +727,14 @@ function inspectNoLlmEgressAudit({ copiedSources, identity, run, capture, lifecy
   const residentStoppedAt = timestamp(result.window.residentStoppedAt)
   const endAt = timestamp(result.window.endedAt)
   const serverStopAt = timestamp(result.window.serverStoppedAt)
-  const loadedAt = loadedRows.map((row) => timestamp(row.utc))
+  const eventTimes = rows.map((row) => timestamp(row.utc))
+  const cRows = rows.filter((row) => row.event !== 'guard_wrapper_closed')
+  const monotonicValues = cRows.map((row) => /^\d+$/u.test(String(row.monotonicNs ?? '')) ? BigInt(row.monotonicNs) : null)
   const closedAt = timestamp(close.utc)
-  if (![windowStart, readyAt, shutdownAt, residentStoppedAt, endAt, serverStopAt, closedAt, ...loadedAt].every(Number.isFinite) ||
-      loadedAt.some((at) => at < windowStart || at > readyAt) || shutdownAt > closedAt ||
+  if (rows.at(-1) !== close || cRows.some((row) => row.monotonicClock !== 'CLOCK_MONOTONIC') || close.monotonicClock !== 'process.hrtime.relative' ||
+      monotonicValues.some((value, index) => value === null || index > 0 && value < monotonicValues[index - 1]) ||
+      ![windowStart, readyAt, shutdownAt, residentStoppedAt, endAt, serverStopAt, closedAt, ...eventTimes].every(Number.isFinite) ||
+      eventTimes.some((at) => at < windowStart || at > closedAt) || shutdownAt > closedAt ||
       closedAt < timestamp(resident.processExitObservation?.observedAt) || closedAt > serverStopAt || serverStopAt > endAt || closedAt > endAt) {
     result.reasons.push('guard audit timestamps are outside the continuous identity-bound run window')
     return result

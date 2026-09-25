@@ -46,6 +46,79 @@ static const char *tool_sha;
 static const char *source_sha;
 static const char *library_sha;
 static const char *policy_sha;
+static uint64_t audit_device;
+static uint64_t audit_inode;
+static uint64_t process_start_ticks_value;
+
+static int parse_uint64_env(const char *name, uint64_t *value_out) {
+  const char *text = getenv(name);
+  if (text == NULL || *text == '\0') return 0;
+  errno = 0;
+  char *end = NULL;
+  unsigned long long parsed = strtoull(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0') return 0;
+  *value_out = (uint64_t)parsed;
+  return 1;
+}
+
+static int audit_descriptor_matches(int fd) {
+  int flags = fcntl(fd, F_GETFL);
+  struct stat statbuf;
+  return flags >= 0 && (flags & O_APPEND) != 0 && (flags & O_ACCMODE) != O_RDONLY
+      && fstat(fd, &statbuf) == 0 && S_ISREG(statbuf.st_mode)
+      && (uint64_t)statbuf.st_dev == audit_device
+      && (uint64_t)statbuf.st_ino == audit_inode
+      && statbuf.st_uid == geteuid() && (statbuf.st_mode & 0077) == 0;
+}
+
+static int open_verified_audit_path(void) {
+  const char *path = getenv("VTR_EGRESS_AUDIT_PATH");
+  if (path == NULL || *path == '\0') return -1;
+  int flags = O_WRONLY | O_APPEND | O_CLOEXEC;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+  int fd = open(path, flags);
+  if (fd < 0) return -1;
+  if (!audit_descriptor_matches(fd)) {
+    (void)syscall(SYS_close, fd);
+    return -1;
+  }
+  return fd;
+}
+
+static uint64_t read_process_start_ticks(void) {
+  FILE *file = fopen("/proc/self/stat", "r");
+  if (file == NULL) return 0;
+  char line[4096];
+  if (fgets(line, sizeof(line), file) == NULL) {
+    (void)fclose(file);
+    return 0;
+  }
+  (void)fclose(file);
+  /* comm is parenthesized and may itself contain spaces or closing parens. */
+  char *cursor = strrchr(line, ')');
+  if (cursor == NULL) return 0;
+  cursor++;
+  char *save = NULL;
+  char *token = strtok_r(cursor, " ", &save); /* field 3: state */
+  for (int field = 3; field < 22 && token != NULL; ++field)
+    token = strtok_r(NULL, " ", &save);
+  if (token == NULL) return 0;
+  errno = 0;
+  char *end = NULL;
+  unsigned long long value = strtoull(token, &end, 10);
+  if (errno != 0 || end == token || (*end != '\0' && *end != '\n')) return 0;
+  return (uint64_t)value;
+}
+
+static int ensure_audit_descriptor(void) {
+  if (audit_fd >= 0 && audit_descriptor_matches(audit_fd)) return 1;
+  const int verified = open_verified_audit_path();
+  if (verified < 0) return 0;
+  audit_fd = verified;
+  return 1;
+}
 
 static uint64_t monotonic_ns(void) {
   struct timespec ts;
@@ -92,7 +165,7 @@ static void fail_stop(void) {
 
 static int audit_line(const char *event, const char *operation, int family,
                       const char *endpoint, const char *reason) {
-  if (audit_fd < 0) return 0;
+  if (!ensure_audit_descriptor()) return 0;
   char utc[32];
   char endpoint_json[512];
   char reason_json[256];
@@ -103,8 +176,10 @@ static int audit_line(const char *event, const char *operation, int family,
   char row[2048];
   int length = snprintf(
       row, sizeof(row),
-      "{\"schema\":\"vtr-no-llm-egress-audit/v1\",\"event\":\"%s\",\"utc\":\"%s\",\"monotonicClock\":\"CLOCK_MONOTONIC\",\"monotonicNs\":\"%llu\",\"pid\":%ld,\"tid\":%ld,\"operation\":\"%s\",\"family\":%d,\"endpoint\":%s,\"reason\":%s,\"toolSha256\":\"%s\",\"sourceSha256\":\"%s\",\"librarySha256\":\"%s\",\"policySha256\":\"%s\"}\n",
+      "{\"schema\":\"vtr-no-llm-egress-audit/v1\",\"event\":\"%s\",\"utc\":\"%s\",\"monotonicClock\":\"CLOCK_MONOTONIC\",\"monotonicNs\":\"%llu\",\"pid\":%ld,\"processStartTicks\":%llu,\"processGroupId\":%ld,\"tid\":%ld,\"operation\":\"%s\",\"family\":%d,\"endpoint\":%s,\"reason\":%s,\"toolSha256\":\"%s\",\"sourceSha256\":\"%s\",\"librarySha256\":\"%s\",\"policySha256\":\"%s\"}\n",
       event, utc, (unsigned long long)monotonic_ns(), (long)getpid(),
+      (unsigned long long)process_start_ticks_value,
+      (long)getpgrp(),
       (long)syscall(SYS_gettid), operation != NULL ? operation : "startup",
       family, endpoint_json, reason_json, tool_sha != NULL ? tool_sha : "unknown",
       source_sha != NULL ? source_sha : "unknown",
@@ -207,18 +282,19 @@ __attribute__((constructor)) static void guard_init(void) {
   next_getsockopt = (getsockopt_fn)dlsym(RTLD_NEXT, "getsockopt");
   next_sendmmsg = (sendmmsg_fn)dlsym(RTLD_NEXT, "sendmmsg");
 
+  const int audit_identity_present = parse_uint64_env("VTR_EGRESS_AUDIT_DEV", &audit_device)
+      && parse_uint64_env("VTR_EGRESS_AUDIT_INO", &audit_inode);
+  process_start_ticks_value = read_process_start_ticks();
   const char *fd_text = getenv("VTR_EGRESS_AUDIT_FD");
-  if (fd_text != NULL) {
+  if (audit_identity_present && fd_text != NULL) {
     char *end = NULL;
     long parsed = strtol(fd_text, &end, 10);
     if (end != fd_text && *end == '\0' && parsed >= 0 && parsed <= INT32_MAX) {
-      int flags = fcntl((int)parsed, F_GETFL);
-      struct stat statbuf;
-      if (flags >= 0 && (flags & O_APPEND) != 0 && (flags & O_ACCMODE) != O_RDONLY
-          && fstat((int)parsed, &statbuf) == 0 && S_ISREG(statbuf.st_mode))
+      if (audit_descriptor_matches((int)parsed))
         audit_fd = (int)parsed;
     }
   }
+  if (audit_fd < 0 && audit_identity_present) audit_fd = open_verified_audit_path();
   tool_sha = getenv("VTR_EGRESS_TOOL_SHA256");
   source_sha = getenv("VTR_EGRESS_SOURCE_SHA256");
   library_sha = getenv("VTR_EGRESS_LIBRARY_SHA256");
@@ -228,7 +304,7 @@ __attribute__((constructor)) static void guard_init(void) {
       && next_getpeername != NULL && next_getsockopt != NULL && next_sendmmsg != NULL;
   const char *load_reason = audit_fd < 0 ? "audit-fd-unavailable"
       : (hooks_ready ? "preload-active" : "hook-resolution-failed");
-  if (!audit_line("guard_loaded", "startup", -1, "", load_reason)) fail_stop();
+  if (process_start_ticks_value == 0 || !audit_line("guard_loaded", "startup", -1, "", load_reason)) fail_stop();
   if (!hooks_ready) fail_stop();
 }
 

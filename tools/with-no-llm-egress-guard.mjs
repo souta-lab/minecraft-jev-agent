@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { constants, closeSync, fdatasyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, resolve, basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,7 +17,7 @@ const EXPECTED_POLICY = {
     'AF_INET6 loopback (::1)',
   ],
   deny: 'all other socket destinations at intercepted libc egress calls',
-  audit: 'append-only JSONL on inherited descriptor',
+  audit: 'append-only JSONL on a verified run-scoped file identity; descendants may reopen the same inode',
 };
 
 function fail(message) {
@@ -97,6 +97,47 @@ function processGroupExists(pgid) {
   }
 }
 
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function assertAuditDescriptor(fd, expected = null) {
+  const current = fstatSync(fd, { bigint: true });
+  if (!current.isFile() || current.nlink !== 1n || current.uid !== BigInt(process.getuid()) || (current.mode & 0o077n) !== 0n
+    || expected !== null && !sameFileIdentity(current, expected)) {
+    throw new Error('audit descriptor identity or private-file checks failed');
+  }
+  return current;
+}
+
+function auditPathMatchesDescriptor(path, fd, expected) {
+  try {
+    const descriptor = assertAuditDescriptor(fd, expected);
+    const named = lstatSync(path, { bigint: true });
+    return !named.isSymbolicLink() && named.isFile() && sameFileIdentity(named, descriptor);
+  } catch {
+    return false;
+  }
+}
+
+function readAuditDescriptor(fd, expected) {
+  const before = assertAuditDescriptor(fd, expected);
+  if (before.size > BigInt(Number.MAX_SAFE_INTEGER) || before.size > 256n * 1024n * 1024n) {
+    throw new Error('audit descriptor exceeds the bounded read limit');
+  }
+  const size = Number(before.size);
+  const bytes = Buffer.allocUnsafe(size);
+  let offset = 0;
+  while (offset < size) {
+    const read = readSync(fd, bytes, offset, size - offset, offset);
+    if (read <= 0) throw new Error('audit descriptor changed or ended during positional read');
+    offset += read;
+  }
+  const after = assertAuditDescriptor(fd, expected);
+  if (after.size !== before.size) throw new Error('audit descriptor size changed during positional read');
+  return bytes.toString('utf8');
+}
+
 async function main() {
   if (process.platform !== 'linux') fail('Linux is required');
   for (const key of ['LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH']) {
@@ -125,31 +166,47 @@ async function main() {
   await buildLibrary(sourceSnapshotPath, libraryPath).catch((error) => fail(`shared-library build failed: ${error.message}`));
   const librarySha256 = fileSha256(libraryPath);
 
-  const auditFd = openSync(auditPath, 'ax', 0o600);
-  const auditStat = statSync(auditPath);
-  if (!auditStat.isFile()) fail('audit path is not a regular file');
+  const auditFd = openSync(auditPath,
+    constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_APPEND | constants.O_CLOEXEC | constants.O_NOFOLLOW,
+    0o600);
+  let auditIdentity;
+  try {
+    auditIdentity = assertAuditDescriptor(auditFd);
+    if (!auditPathMatchesDescriptor(auditPath, auditFd, auditIdentity)) throw new Error('audit pathname does not identify the newly opened descriptor');
+  } catch {
+    closeSync(auditFd);
+    fail('audit path failed its initial descriptor identity check');
+  }
   const env = {
     ...process.env,
     LD_PRELOAD: libraryPath,
     VTR_EGRESS_AUDIT_FD: '3',
+    VTR_EGRESS_AUDIT_PATH: auditPath,
+    VTR_EGRESS_AUDIT_DEV: auditIdentity.dev.toString(),
+    VTR_EGRESS_AUDIT_INO: auditIdentity.ino.toString(),
     VTR_EGRESS_TOOL_SHA256: toolSha256,
     VTR_EGRESS_SOURCE_SHA256: sourceSha256,
     VTR_EGRESS_LIBRARY_SHA256: librarySha256,
     VTR_EGRESS_POLICY_SHA256: policySha256,
   };
 
+  let childAuditFd;
   let child;
   try {
+    childAuditFd = openSync(`/proc/self/fd/${auditFd}`,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CLOEXEC);
+    assertAuditDescriptor(childAuditFd, auditIdentity);
     child = spawn(command, commandArgs, {
       env,
       detached: true,
-      stdio: ['inherit', 'inherit', 'inherit', auditFd],
+      stdio: ['inherit', 'inherit', 'inherit', childAuditFd],
     });
   } catch (error) {
+    if (childAuditFd !== undefined) closeSync(childAuditFd);
     closeSync(auditFd);
     fail(`could not start command: ${error.message}`);
   }
-  closeSync(auditFd);
+  closeSync(childAuditFd);
 
   const forwardSignal = (signal) => {
     if (child.pid) {
@@ -179,10 +236,12 @@ async function main() {
   process.removeListener('SIGTERM', onSigterm);
 
   let rows = [];
+  let auditReadError = null;
   try {
-    rows = readFileSync(auditPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
-  } catch {
+    rows = readAuditDescriptor(auditFd, auditIdentity).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
     // Report below as a preload/audit initialization failure without echoing file contents.
+    auditReadError = error;
   }
   const loaded = rows.some((row) => row.event === 'guard_loaded'
     && row.pid === child.pid
@@ -192,30 +251,54 @@ async function main() {
     processGroupGone = !processGroupExists(child.pid);
   }
 
-  const closeFd = openSync(auditPath, 'a');
-  writeSync(closeFd, timestampRow('guard_wrapper_closed', {
+  const pathBoundBeforeClose = auditPathMatchesDescriptor(auditPath, auditFd, auditIdentity);
+  const closeText = timestampRow('guard_wrapper_closed', {
     childPid: child.pid ?? null,
+    processGroupId: child.pid ?? null,
     commandName: basename(command),
     childExitCode: result.code,
     childSignal: result.signal,
     preloadVerified: loaded,
     processGroupGone,
     coverageClass: 'user-space-libc-interposition',
-    coverageStatus: loaded && processGroupGone ? 'USERSPACE_ONLY_CLOSED' : 'INCOMPLETE',
+    coverageStatus: loaded && processGroupGone && pathBoundBeforeClose ? 'USERSPACE_ONLY_CLOSED' : 'INCOMPLETE',
     externalDeniedAttempts: rows.filter((row) => row.event === 'blocked_egress').length,
     toolSha256,
     sourceSha256,
     librarySha256,
     policySha256,
     libraryPath,
-    coverage: 'root-process-load-verified; process-group-signaled-at-close; syscall-bypass-not-covered',
-  }));
-  closeSync(closeFd);
+    coverage: 'root-process-load-verified; observed-exec-descendants-reopened-same-audit-inode; process-group-signaled-at-close; syscall-bypass-not-covered',
+    guardLoadedRows: rows.filter((row) => row.event === 'guard_loaded').length,
+    auditDevice: auditIdentity.dev.toString(),
+    auditInode: auditIdentity.ino.toString(),
+    auditPathIdentityVerified: pathBoundBeforeClose,
+  });
+  let closeWriteComplete = false;
+  try {
+    const bytes = Buffer.from(closeText, 'utf8');
+    closeWriteComplete = writeSync(auditFd, bytes) === bytes.length;
+    if (closeWriteComplete) fdatasyncSync(auditFd);
+  } catch {
+    closeWriteComplete = false;
+  }
+  const pathBoundAfterClose = auditPathMatchesDescriptor(auditPath, auditFd, auditIdentity);
+  try {
+    if (!closeWriteComplete) throw new Error('close record was not durably appended');
+    rows = readAuditDescriptor(auditFd, auditIdentity).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
+    auditReadError ??= error;
+  }
+  const finalClose = rows.filter((row) => row.event === 'guard_wrapper_closed');
+  const auditFinalized = auditReadError === null && closeWriteComplete && pathBoundBeforeClose && pathBoundAfterClose
+    && finalClose.length === 1 && finalClose[0].pid === process.pid
+    && finalClose[0].auditPathIdentityVerified === true;
+  closeSync(auditFd);
 
   if (result.error) {
     process.stderr.write(`egress-guard: command launch failed: ${result.error.message}\n`);
     process.exitCode = 125;
-  } else if (!loaded || processGroupGone !== true) {
+  } else if (!loaded || processGroupGone !== true || !auditFinalized) {
     process.stderr.write(`egress-guard: preload verification or process-group closure is incomplete for pid ${child.pid ?? 'unknown'}; see audit status\n`);
     process.exitCode = 125;
   } else if (result.signal) {
