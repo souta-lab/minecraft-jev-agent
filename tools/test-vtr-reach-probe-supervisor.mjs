@@ -20,11 +20,13 @@ import { parseHostLog } from './collect-vtr-reach-live.mjs'
 const SOURCE = 'a'.repeat(40)
 const RUN = 'run-supervisor-01'
 const GENERATION = 'gen-supervisor-01'
-const WORLD_KEY = '127.0.0.1:25576|overworld|7'
 const TRANSITION = 'reach-transition-01'
 const CONTRACT = 'contract-supervisor-01'
 const RESIDENT_PID = 9444
 const SERVER_ID = `127.0.0.1:${ISOLATED_PROBE_SERVER_PORT}`
+const WORLD_KEY = `${SERVER_ID}|overworld|7`
+assert.ok(PROTECTED_SERVER_PORTS.includes(25576), 'the reserved diagnostic Leaf listener is protected from probe reuse')
+assert.equal(ISOLATED_PROBE_SERVER_PORT, 25577, 'generic isolated probes default to the separate listener')
 const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
 const t = (second) => new Date(Date.parse('2026-09-25T07:00:00.000Z') + second * 1000).toISOString()
 

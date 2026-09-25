@@ -21,8 +21,11 @@ import { parseHostLog, parseJsonl } from './collect-vtr-reach-live.mjs'
 
 export const VTR_REACH_PROBE_SUPERVISOR_SCHEMA = 'vtr-reach-probe-supervisor/v1'
 export const HOST_LIFECYCLE_TRANSCRIPT_SCHEMA = 'vtr-reach-probe-lifecycle/v1'
-export const ISOLATED_PROBE_SERVER_PORT = 25576
-export const PROTECTED_SERVER_PORTS = Object.freeze([25565, 25570, 25572])
+// 25576 is reserved by the local diagnostic Leaf service in this workspace.
+// Keep the generic isolated-probe default on the separate 25577 port and fail
+// closed if a caller tries to target the reserved diagnostic listener.
+export const ISOLATED_PROBE_SERVER_PORT = 25577
+export const PROTECTED_SERVER_PORTS = Object.freeze([25565, 25570, 25572, 25576])
 export const REQUIRED_ATTEMPT_SINKS = Object.freeze([
   'host-log',
   'run-journal',
