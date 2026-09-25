@@ -2315,7 +2315,7 @@ async function prepareFixtureContext({ server, runtimeDir, attemptRoot, identity
   await issueLeafCommand(server, 'time query daytime', /\bThe time is \d+\b/iu, {
     phase: 'fixture.console-smoke', identity, sourceSha, attemptRoot,
   })
-  const fill = await issueLeafCommand(server, geometry.fillCommand, new RegExp(`\\bSuccessfully filled ${geometry.fillBlockCount} blocks\\b`, 'iu'), {
+  const fill = await issueLeafCommand(server, geometry.fillCommand, new RegExp(`\\bSuccessfully filled ${geometry.fillBlockCount} block(?:s|\\(s\\))?\\b`, 'iu'), {
     phase: 'fixture.fill', identity, sourceSha, attemptRoot,
   })
   fixtureRows.push({ schema: 'vtr-reach-fixture-command/v2', kind: 'fill', sourceSha, runId: identity.runId, generationId: null, leaseId: null, worldKey: identity.worldKey, serverId, serverPid: server.serverStart.pid, phase: 'resident-frozen-before-generation-ready', fixtureAnchor, ...fill })

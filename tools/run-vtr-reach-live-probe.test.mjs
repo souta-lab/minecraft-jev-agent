@@ -146,15 +146,15 @@ describe('Reach live probe caller pure contracts', () => {
     const attemptRoot = join(parent, 'attempt')
     const { stdin, server } = leafFixtureServer()
     try {
-      const pending = issueLeafCommand(server, 'fill 3 -61 4 26 -61 10 minecraft:stone', /\bSuccessfully filled 168 blocks\b/iu, {
+      const pending = issueLeafCommand(server, 'fill 3 -61 4 26 -61 10 minecraft:stone', /\bSuccessfully filled 168 block(?:s|\(s\))?\b/iu, {
         timeoutMs: 10_000,
         phase: 'fixture.fill',
         identity: FIXTURE_IDENTITY,
         attemptRoot,
       })
-      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Successfully filled 168 blocks'), 20)
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Successfully filled 168 block(s)'), 20)
       const result = await pending
-      expect(result.serverOutput).toBe('[00:00:01 INFO]: Successfully filled 168 blocks')
+      expect(result.serverOutput).toBe('[00:00:01 INFO]: Successfully filled 168 block(s)')
       expect(result.responseSequence).toBe(1)
       expect(result.responsePid).toBe(4321)
       expect(Date.parse(result.observedAt)).not.toBeNaN()

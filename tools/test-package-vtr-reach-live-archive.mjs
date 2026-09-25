@@ -56,7 +56,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
   }
   const fillCommand = `fill ${fillFrom.x} ${fillFrom.y} ${fillFrom.z} ${fillTo.x} ${fillTo.y} ${fillTo.z} minecraft:stone`
   const setblockCommand = `setblock ${witnessPosition.x} ${witnessPosition.y} ${witnessPosition.z} minecraft:oak_log`
-  const fillOutput = `[03:00:03 INFO]: Successfully filled ${fillBlockCount} blocks`
+  const fillOutput = `[03:00:03 INFO]: Successfully filled ${fillBlockCount} block(s)`
   const setblockOutput = `[03:00:04 INFO]: Changed the block at ${witnessPosition.x}, ${witnessPosition.y}, ${witnessPosition.z}`
   const fixtureCommandRow = (kind, command, serverOutput, issuedAt, acknowledgedAt, observedAt, responseSequence) => ({
     schema: 'vtr-reach-fixture-command/v2', kind, sourceSha: SOURCE, runId: RUN,

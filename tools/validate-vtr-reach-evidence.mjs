@@ -2379,7 +2379,7 @@ export function inspectFixtureWitnessSetup({
   if (fillRow.command !== expectedFillCommand) {
     problems.push({ row: 'fill', field: 'command', expected: expectedFillCommand, observed: fillRow.command ?? null })
   }
-  const fillResponse = /\bSuccessfully filled\s+(\d+)\s+blocks\b/iu.exec(String(fillRow.serverOutput ?? ''))
+  const fillResponse = /\bSuccessfully filled\s+(\d+)\s+block(?:s|\(s\))?\b/iu.exec(String(fillRow.serverOutput ?? ''))
   if (fillResponse === null || Number(fillResponse[1]) !== expectedFillCount) {
     problems.push({ row: 'fill', field: 'serverOutput', expected: `Successfully filled ${expectedFillCount} blocks`, observed: fillRow.serverOutput ?? null })
   }

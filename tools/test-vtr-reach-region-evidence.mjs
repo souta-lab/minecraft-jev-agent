@@ -123,7 +123,7 @@ try {
     }
     const fillCommand = `fill ${fillFrom.x} ${fillFrom.y} ${fillFrom.z} ${fillTo.x} ${fillTo.y} ${fillTo.z} minecraft:stone`
     const setblockCommand = `setblock ${witnessPosition.x} ${witnessPosition.y} ${witnessPosition.z} ${witnessBlock}`
-    const fillOutput = `[00:00:10 INFO]: Successfully filled ${fillCount} blocks`
+    const fillOutput = `[00:00:10 INFO]: Successfully filled ${fillCount} block(s)`
     const setblockOutput = `[00:00:11 INFO]: Changed the block at ${witnessPosition.x}, ${witnessPosition.y}, ${witnessPosition.z}`
     const stdoutRow = (sequence, line, receivedAt) => ({
       schema: 'vtr-server-stdout-observation/v1', sourceSha: SOURCE_SHA, runId: FIXTURE_RUN,
