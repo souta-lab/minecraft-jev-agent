@@ -18,16 +18,16 @@ Current work is selected from repository-root `ISSUE-ROUTING.json` only. Before 
 
 `AGENT-TODO.md` is a pointer only and must not duplicate the queue.
 
-## 2. Authority invariant — current reset
+## 2. Authority invariant
 
-Until #221 is closed with fresh live proof:
+The canonical authority model is the root `AGENTS.md` V4.1.2 constitution: `KernelCommand -> applyKernelCommand() -> KernelState + KernelEvent[]` is the only runtime authority state transition path. The legacy Jev π/β/Option split below survives only as incident context (#221), never as an authority grant:
 
 ```text
-Code      = CAN / TRUE / SAFE / DONE
-Jev pi    = WHICH grounded local action/Skill
-Jev beta  = WHETHER the current Option should end
-System2   = WHAT intent/Option comes next (sparse / exception-driven)
-Skill     = HOW the selected action is mechanically executed
+Kernel    = sole runtime authority (lifecycle / leases / effects / facts / revisions)
+Code      = CAN / TRUE / SAFE / DONE (deterministic truth, verification, mechanics)
+Jev       = semantic/tactical decision only (no truth, SUCCESS, lease, or effect authority)
+System2   = sparse synthesis/repair/decomposition (exception-driven, no motor commands)
+Skill/Adapter = HOW — actuation crosses the Runtime Adapter / ActuationPort boundary only
 HOST      = durable state / lifecycle / actuation lease
 ```
 
