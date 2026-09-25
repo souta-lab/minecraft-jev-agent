@@ -413,6 +413,19 @@ interface WalkRun {
   elapsedMs: number
   pathCalls: number
   grid: Grid
+  mechanicalReservations: MechanicalOwnershipObservation[]
+  mechanicalOutcomes: MechanicalOwnershipObservation[]
+}
+
+interface MechanicalOwnershipObservation {
+  stepId: string
+  leg: number
+  effectKind: 'locomotion'
+  actionId: string | null
+  authority: string | null
+  transitionId: string | null
+  commitmentId: string | null
+  decisionEpoch: number | null
 }
 
 interface RunOptions {
@@ -442,7 +455,36 @@ async function runWalk(
   })
   fixture.executorRef.current = executor
   const startedAt = Date.now()
-  const claim = executor.claim(candidate, options.claimContext)
+  const mechanicalReservations: MechanicalOwnershipObservation[] = []
+  const mechanicalOutcomes: MechanicalOwnershipObservation[] = []
+  const originalClaimContext = options.claimContext
+  const observeOwnership = (
+    step: { stepId: string; leg: number; effectKind: 'locomotion' },
+  ): MechanicalOwnershipObservation => {
+    const current = executor.current
+    return {
+      ...step,
+      actionId: current?.id ?? null,
+      authority: current?.authority ?? null,
+      transitionId: current?.transitionId ?? null,
+      commitmentId: current?.commitment?.commitmentId ?? null,
+      decisionEpoch: current?.commitment?.decisionEpoch ?? null,
+    }
+  }
+  const claimContext = originalClaimContext === undefined
+    ? undefined
+    : {
+        ...originalClaimContext,
+        beforeMechanicalStep: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => {
+          mechanicalReservations.push(observeOwnership(step))
+          return originalClaimContext.beforeMechanicalStep?.(step) ?? true
+        },
+        afterMechanicalStep: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => {
+          mechanicalOutcomes.push(observeOwnership(step))
+          return originalClaimContext.afterMechanicalStep?.(step) ?? true
+        },
+      }
+  const claim = executor.claim(candidate, claimContext)
   const selectedBy = executor.current?.commitment?.selectedBy ?? null
   const result = await claim.completion
   const elapsedMs = Date.now() - startedAt
@@ -466,6 +508,8 @@ async function runWalk(
     elapsedMs,
     pathCalls: fixture.pathCalls(),
     grid,
+    mechanicalReservations,
+    mechanicalOutcomes,
   }
 }
 
@@ -549,11 +593,54 @@ async function runWalk(
       },
     },
   })
+  const start = run.starts[0] ?? ''
+  const commitmentId = /(?:^|\s)commitmentId=([^\s]+)/.exec(start)?.[1] ?? null
+  const decisionEpoch = /(?:^|\s)decisionEpoch=([^\s]+)/.exec(start)?.[1] ?? null
+  const markerValue = (line: string, key: string): string | null =>
+    new RegExp(`(?:^|\\s)${key}=([^\\s]+)`).exec(line)?.[1] ?? null
+  const reservationKeys = run.mechanicalReservations.map(({ stepId, leg }) => `${leg}:${stepId}`)
+  const outcomeKeys = run.mechanicalOutcomes.map(({ stepId, leg }) => `${leg}:${stepId}`)
+  const expectedStepKeys = run.legs.map((_, index) => `${index + 1}:MOVE:16_64_0#${run.result.epoch}:walk-leg-${index + 1}`)
+  const sameMechanicalOwner = (rows: readonly MechanicalOwnershipObservation[]): boolean =>
+    rows.length >= 3 && rows.every((row) =>
+      row.actionId === 'MOVE:16_64_0' &&
+      row.authority === 'vtr-reach' &&
+      row.transitionId === 'transition:reach-walk-fixture' &&
+      row.commitmentId === commitmentId &&
+      row.decisionEpoch === Number(decisionEpoch),
+    )
+  const legsHaveSameCommitment = commitmentId !== null && decisionEpoch !== null && run.legs.every((line, index) =>
+    markerValue(line, 'commitmentId') === commitmentId &&
+    markerValue(line, 'decisionEpoch') === decisionEpoch &&
+    markerValue(line, 'authority') === 'MECHANICAL_CONTINUATION' &&
+    markerValue(line, 'count') === String(index + 1),
+  )
   check(
     '(vtr) walkSkill preserves VTR provenance and reserves every leg before movement',
     run.result.status === 'done' && reservations >= 3 && reservations === run.legs.length && outcomes === run.legs.length &&
       run.selectedBy === 'vtr_transition',
     `status=${run.result.status} selectedBy=${run.selectedBy} reservations=${reservations} outcomes=${outcomes} legs=${run.legs.length}`,
+  )
+  check(
+    '(vtr) one VTR-selected SKILL_START/commitment/Transition owns every reserved mechanical leg through verified SUCCESS',
+    run.starts.length === 1 &&
+      start.includes('selectedBy=vtr-transition') &&
+      commitmentId !== null && decisionEpoch !== null &&
+      run.legs.length >= 3 && legsHaveSameCommitment &&
+      sameMechanicalOwner(run.mechanicalReservations) && sameMechanicalOwner(run.mechanicalOutcomes) &&
+      reservationKeys.length === run.legs.length && outcomeKeys.length === run.legs.length &&
+      reservationKeys.every((key, index) => key === outcomeKeys[index] && key === expectedStepKeys[index]) &&
+      run.ends.length === 1 &&
+      run.ends[0]?.includes('outcome=SUCCESS') === true &&
+      run.ends[0]?.includes(`commitmentId=${commitmentId}`) === true &&
+      run.ends[0]?.includes(`decisionEpoch=${decisionEpoch}`) === true &&
+      markerValue(start, 'candidateId') === 'MOVE:16_64_0' &&
+      run.result.status === 'done' && run.result.verified,
+    `starts=${run.starts.length} selected=${start.includes('selectedBy=vtr-transition')} commitment=${commitmentId ?? 'missing'} ` +
+      `reservations=${run.mechanicalReservations.length} outcomes=${run.mechanicalOutcomes.length} legs=${run.legs.length} ` +
+      `sameOwner=${sameMechanicalOwner(run.mechanicalReservations) && sameMechanicalOwner(run.mechanicalOutcomes)} ` +
+      `stepJoin=${reservationKeys.every((key, index) => key === outcomeKeys[index] && key === expectedStepKeys[index])} ` +
+      `verified=${run.result.verified} end=${run.ends[0] ?? 'missing'}`,
   )
 }
 
