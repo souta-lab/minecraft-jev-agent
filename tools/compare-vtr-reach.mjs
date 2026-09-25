@@ -19,6 +19,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { execFileSync } from 'node:child_process'
 import { inspectReachComparisonProof } from './validate-vtr-reach-evidence.mjs'
+import { normalizeLegacyCollectMissionCommand } from './vtr-reach-legacy-baseline.mjs'
 
 const SHA_RE = /^[0-9a-f]{40}$/i
 
@@ -251,6 +252,18 @@ function archiveAncestors(inputPath) {
 
 function legacyEvidenceMatches(evidence, expected) {
   return evidence !== null && Object.entries(expected).every(([key, wanted]) => evidence[key] === wanted)
+}
+
+function normalizedMissionFromLegacyArchive(root, evidence) {
+  if (!root || !evidence?.fixture?.block) return null
+  const path = join(root, 'runner/human-task-input.jsonl')
+  if (!existsSync(path)) return null
+  const rows = readFileSync(path, 'utf8').split(/\r?\n/).filter((line) => line.trim() !== '').map((line, index) => {
+    try { return JSON.parse(line) } catch (error) { throw new Error(`${path}:${index + 1}: invalid JSONL (${error.message})`) }
+  })
+  const submitted = rows.filter((row) => row.event === 'chat_sent_after_intent_listener_ready' && typeof row.command === 'string')
+  if (submitted.length !== 1) return null
+  return normalizeLegacyCollectMissionCommand(submitted[0].command, evidence.fixture.block)?.mission ?? null
 }
 
 function findLegacyArchive(inputPath, expected) {
@@ -512,6 +525,7 @@ const LEGACY_RAW_REQUIREMENTS = [
   'runner/human-task-input.jsonl',
   'runner/block-read-run2.jsonl',
 ]
+const LEGACY_RAW_OPTIONAL_REQUIREMENTS = ['runner/runtime/logs/jev/system2.jsonl']
 
 const VTR_RAW_REQUIREMENTS = [
   'runner/buddy.log',
@@ -543,9 +557,13 @@ function captureRawComparisonEvidence({ legacy, vtr, vtrArchive, vtrInputPath })
   const legacyArchive = legacy.archiveRoot === null
     ? null
     : { root: legacy.archiveRoot, evidence: legacy.archiveEvidence }
+  const legacyRequirements = legacyArchive === null ? LEGACY_RAW_REQUIREMENTS : [
+    ...LEGACY_RAW_REQUIREMENTS,
+    ...LEGACY_RAW_OPTIONAL_REQUIREMENTS.filter((path) => existsSync(join(legacyArchive.root, path))),
+  ]
   const legacySide = legacyArchive === null
     ? { identity: legacyIdentity, files: [], missing: LEGACY_RAW_REQUIREMENTS, invalid: [], status: 'INCOMPLETE' }
-    : captureRawSide(legacyArchive.root, legacyIdentity, LEGACY_RAW_REQUIREMENTS)
+    : captureRawSide(legacyArchive.root, legacyIdentity, legacyRequirements)
   const probePath = vtrArchive?.probePath ?? relative(dirname(resolve(vtrInputPath)), resolve(vtrInputPath)).split(sep).join('/')
   let vtrSide
   if (vtrArchive === null) {
@@ -603,6 +621,7 @@ function parseLegacy(raw, sourceText, legacyPath) {
     }
     const legacyArchive = findLegacyArchive(legacyPath, expectedIdentity)
     const archiveFixture = legacyFixtureFromArchive(legacyArchive?.root ?? dirname(legacyPath), expectedIdentity, legacyArchive?.evidence ?? null)
+    const rawCommandMission = normalizedMissionFromLegacyArchive(legacyArchive?.root, legacyArchive?.evidence)
     const fixtureRaw = comparison.fixture ?? archiveFixture.fixture ?? baseline.fixture ?? input.fixture
     return {
       schema: input.schema,
@@ -631,10 +650,10 @@ function parseLegacy(raw, sourceText, legacyPath) {
       // requested comparison target. Prefer the legacy run's own evidence and
       // never let a target-side duplicate overwrite the observed legacy Mission.
       missionInput: structuredMission(
-        archiveFixture.evidence?.missionInput ?? baseline.missionInput ?? baseline.actualMissionInput ??
+        rawCommandMission ?? archiveFixture.evidence?.missionInput ?? baseline.missionInput ?? baseline.actualMissionInput ??
         input.legacyMissionInput ?? input.actualMissionInput ?? input.mission ?? input.missionInput ?? comparison.missionInput,
       ),
-      sameMissionClaim: comparison.sameMissionInput === true ? true : comparison.sameMissionInput === false ? false : null,
+      sameMissionClaim: rawCommandMission !== null ? true : comparison.sameMissionInput === true ? true : comparison.sameMissionInput === false ? false : null,
       metrics: {
         movementOperationsToInRange: count(metrics.mechanicalMovementSteps, 'legacy.baseline.metrics.mechanicalMovementSteps'),
         moveActionsToInRange: count(metrics.legacyMoveActionsToInRangeEvidence, 'legacy.baseline.metrics.legacyMoveActionsToInRangeEvidence'),
@@ -674,6 +693,7 @@ function parseLegacy(raw, sourceText, legacyPath) {
     const expectedIdentity = { sourceSha, buildHash: text(input.buildHash, 'legacy.buildHash'), runId,
       generationId: text(input.generationId, 'legacy.generationId') }
     const legacyArchive = findLegacyArchive(legacyPath, expectedIdentity)
+    const rawCommandMission = normalizedMissionFromLegacyArchive(legacyArchive?.root, legacyArchive?.evidence)
     return {
       schema: input.schema,
       sourceSha,
@@ -699,8 +719,8 @@ function parseLegacy(raw, sourceText, legacyPath) {
       fixtureDescription: `${fixture.block} at ${fixture.position?.x},${fixture.position?.y},${fixture.position?.z}; offset=${JSON.stringify(fixture.offset)}`,
       fixture: structuredFixture(legacyArchive?.evidence?.fixture ?? fixture),
       fixtureEvidencePath: legacyArchive === null ? null : 'runner/reach-slice-evidence.json',
-      missionInput: structuredMission(legacyArchive?.evidence?.missionInput ?? input.missionInput ?? input.legacyMissionInput ?? input.mission ?? oldPlan.missionInput ?? oldPlan.mission),
-      sameMissionClaim: typeof input.sameMissionInput === 'boolean' ? input.sameMissionInput : null,
+      missionInput: structuredMission(rawCommandMission ?? legacyArchive?.evidence?.missionInput ?? input.missionInput ?? input.legacyMissionInput ?? input.mission ?? oldPlan.missionInput ?? oldPlan.mission),
+      sameMissionClaim: rawCommandMission !== null ? true : typeof input.sameMissionInput === 'boolean' ? input.sameMissionInput : null,
       metrics: {
         movementOperationsToInRange: count(metrics.mechanicalMovementSteps, 'legacy.sliceMetrics.mechanicalMovementSteps'),
         moveActionsToInRange: count(metrics.legacyMoveActionsToInRangeEvidence, 'legacy.sliceMetrics.legacyMoveActionsToInRangeEvidence'),
@@ -1273,9 +1293,6 @@ const alignedStatus = alignmentStates.includes('NOT_COMPARABLE')
     ? 'INCOMPLETE'
     : 'PASS'
 const noNetworkProfileIssues = [...vtr.noNetworkProfile.issues]
-if (legacy.metrics.networkModelCalls !== 0) {
-  noNetworkProfileIssues.push(`legacy.networkModelCalls=${legacy.metrics.networkModelCalls}`)
-}
 const noNetworkProfileStatus = noNetworkProfileIssues.length > 0
   ? 'FAIL'
   : vtr.metrics.modelMetricsStatus === 'UNKNOWN' ? 'UNKNOWN' : 'PASS'
@@ -1291,7 +1308,7 @@ const output = {
   classification: comparisonStatus === 'PASS'
     ? 'exact Mission/fixture/environment alignment backed by run-scoped raw events from both executions'
     : comparisonStatus === 'INVALID_NO_LLM_PROFILE'
-      ? 'invalid no-network measurement profile; provider activity is present or metrics conflict'
+      ? 'invalid VTR no-LLM probe profile; provider activity is present or its metrics conflict'
     : comparisonStatus === 'NOT_COMPARABLE'
       ? 'inputs contain a known Mission/fixture/environment mismatch'
       : 'alignment or exact run-scoped raw comparison evidence is incomplete',
@@ -1304,6 +1321,7 @@ const output = {
   alignment,
   noNetworkProfile: {
     status: noNetworkProfileStatus,
+    appliesTo: 'VTR no-LLM capability probe only; legacy provider calls are measured as a comparison metric',
     issues: noNetworkProfileIssues,
     modelMetrics: {
       status: vtr.metrics.modelMetricsStatus,
@@ -1410,6 +1428,7 @@ const output = {
         system2LlmCalls: legacy.metrics.system2ModelCalls,
         networkModelCalls: legacy.metrics.networkModelCalls,
         networkModelCallsPerMovementStep: legacy.metrics.modelCallsPerMechanicalStep,
+        providerActivity: legacy.metrics.networkModelCalls === 0 ? 'raw journals show zero provider attempts' : 'raw journals show provider attempts; permitted for the legacy baseline',
       },
       vtr: {
         ...vtr.configuredNoLlm,
@@ -1425,7 +1444,7 @@ const output = {
         deprecatedModelCallsPerMechanicalStep: vtr.metrics.deprecatedModelCallsPerMechanicalStep,
         precommitUnknownSourceHolds: vtr.metrics.precommitUnknownSourceHolds,
       },
-      interpretation: 'The legacy Jev counter is shown only as a compatibility policy-call count. VTR Decision Frame invocations and provider evaluate attempts are separate; provider attempts include retries. The no-network profile fails if any provider attempt is observed and remains UNKNOWN when the authoritative metrics event is missing.',
+      interpretation: 'Legacy Jev/System2 provider activity is independently measured from its raw journals and may be nonzero. The zero-network requirement applies only to the VTR no-LLM probe. VTR Decision Frame invocations and provider evaluate attempts are separate; provider attempts include retries.',
     },
     authority: {
       legacy: { status: 'not-applicable: baseline source has no VTR authority to compare against', duplicateAuthority: null },
@@ -1443,7 +1462,7 @@ const output = {
     'Mission equivalence is read from the legacy run-scoped artifact before comparison-request fields; an explicit sameMissionInput=false claim always vetoes equality.',
     'Raw comparison evidence binds the selected logger/journal bytes by SHA-256. Different runs remain different worlds; this is not a same-world A/B replay.',
     'Summary-only evidence, missing model metrics, missing raw artifacts, or any Mission/fixture/environment mismatch remains INCOMPLETE or NOT_COMPARABLE.',
-    'The no-network comparison profile is checked independently from model-metric availability. A missing VTR_TRANSITION_MODEL_METRICS event leaves Decision Frame and provider-attempt counts UNKNOWN.',
+    'The VTR no-network probe profile is checked independently from legacy provider activity. Legacy model calls may be nonzero and are reported as measured; a missing VTR_TRANSITION_MODEL_METRICS event leaves Decision Frame and provider-attempt counts UNKNOWN.',
     'Legacy MOVE action SUCCESS/verified and the next-frame inReach candidate are not a Reach-specific deterministic terminal. Only the VTR artifact records a Reach Contract SUCCESS with verifier evidence.',
     'The VTR probe establishes the Reach predicate only; its oak_log inventory Mission remains incomplete. Neither artifact proves autonomous long-horizon composition or M2/M3.',
   ],

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -411,6 +412,20 @@ function writeJson(path, value) {
   return path
 }
 
+function makeOriginMainRepo(root) {
+  const repo = join(root, 'origin-main-repo')
+  mkdirSync(repo, { recursive: true })
+  execFileSync('git', ['init', '-q', repo])
+  execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid'])
+  execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test'])
+  writeFileSync(join(repo, 'source.txt'), 'baseline pin\n')
+  execFileSync('git', ['-C', repo, 'add', 'source.txt'])
+  execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'baseline pin'])
+  const head = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  execFileSync('git', ['-C', repo, 'update-ref', 'refs/remotes/origin/main', head])
+  return { repo, head }
+}
+
 function rehashArchiveFile(archive, relativePath) {
   const sumsPath = join(archive, 'SHA256SUMS')
   const rows = readFileSync(sumsPath, 'utf8').trim().split('\n')
@@ -477,6 +492,40 @@ try {
   for (const [name, filename] of [['jev-calls', 'jev-calls.jsonl'], ['jev-decisions', 'jev-decisions.jsonl'], ['system2-journal', 'system2.jsonl'], ['mercury-calls', 'mercury-calls.jsonl']]) {
     assert.equal(readFileSync(join(complete.archive, `runner/${filename}`), 'utf8'), '', `empty captured journal ${name} is preserved`)
   }
+
+  const crossRun = makeFixture(join(tempRoot, 'cross-run-comparison'))
+  const origin = makeOriginMainRepo(join(tempRoot, 'cross-run-comparison'))
+  const foreignComparison = {
+    schema: 'vtr-reach-fixture-comparison/v3',
+    comparisonStatus: 'INCOMPLETE', acceptanceEligible: false, acceptanceStatus: 'RAW_EVIDENCE_INCOMPLETE',
+    evidenceClass: 'summary-only',
+    alignment: { missionInput: 'INCOMPLETE', fixture: 'INCOMPLETE', environment: 'INCOMPLETE' },
+    lineage: {
+      legacy: { sourceSha: origin.head, recordedOriginMainSha: origin.head, runId: 'run-old-a1', generationId: 'gen-old-a1', buildHash: 'old-build' },
+      vtr: { sourceSha: SOURCE, runId: RUN, generationId: GENERATION, buildHash: crossRun.collectorReport.observed.generationReady.buildHash, worldKey: WORLD },
+    },
+    rawComparisonEvidence: { status: 'INCOMPLETE' },
+  }
+  const comparisonSource = writeJson(join(tempRoot, 'cross-run-comparison', 'comparison.json'), foreignComparison)
+  const crossRunManifest = JSON.parse(readFileSync(crossRun.manifestPath, 'utf8'))
+  crossRunManifest.files['comparison/legacy-baseline.json'] = comparisonSource
+  writeJson(crossRun.manifestPath, crossRunManifest)
+  const crossRunResult = packageVtrReachArchive({ collectorReportPath: crossRun.collectorPath, manifestPath: crossRun.manifestPath,
+    archivePath: crossRun.archive, repoPath: origin.repo })
+  assert.equal(crossRunResult.report.packageStatus, 'INCOMPLETE')
+  assert.equal(crossRunResult.report.legacyBaselineComparison.status, 'INCOMPLETE')
+  assert.ok(crossRunResult.report.checks.some((entry) => entry.id === 'comparison:legacy-baseline' && entry.status === 'INCOMPLETE'))
+  assert.equal(crossRunResult.report.checks.some((entry) => entry.id === 'identity:comparison/legacy-baseline.json'), false,
+    'only the validated cross-run comparison path bypasses single-run identity matching')
+
+  const arbitraryCrossRun = makeFixture(join(tempRoot, 'arbitrary-cross-run'))
+  const arbitraryManifest = JSON.parse(readFileSync(arbitraryCrossRun.manifestPath, 'utf8'))
+  arbitraryManifest.files['comparison/other.json'] = comparisonSource
+  writeJson(arbitraryCrossRun.manifestPath, arbitraryManifest)
+  const arbitraryResult = packageVtrReachArchive({ collectorReportPath: arbitraryCrossRun.collectorPath, manifestPath: arbitraryCrossRun.manifestPath, archivePath: arbitraryCrossRun.archive })
+  assert.equal(arbitraryResult.report.packageStatus, 'FAIL')
+  assert.ok(arbitraryResult.report.checks.some((entry) => entry.id === 'identity:comparison/other.json' && entry.status === 'FAIL'),
+    'foreign run identities remain forbidden everywhere else')
   const hashLines = readFileSync(join(complete.archive, 'SHA256SUMS'), 'utf8').trim().split('\n')
   assert.ok(hashLines.some((line) => line.endsWith('  probe.json')))
   assert.ok(hashLines.some((line) => line.endsWith('  packaging-report.json')))

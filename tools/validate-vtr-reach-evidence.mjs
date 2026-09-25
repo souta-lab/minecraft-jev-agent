@@ -13,6 +13,7 @@ import { parse as parseNbt } from 'prismarine-nbt'
 import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
 import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
 import { inspectFreshWorldAttestation } from './vtr-fresh-world-attestation.mjs'
+import { normalizeLegacyCollectMissionCommand, positionVector, relativeBlockOffset, samePosition } from './vtr-reach-legacy-baseline.mjs'
 
 const EXIT = Object.freeze({ PASS: 0, FAIL: 1, INCOMPLETE: 2, USAGE: 64 })
 const CHECK_STATUS = Object.freeze({ PASS: 'PASS', FAIL: 'FAIL', INCOMPLETE: 'INCOMPLETE' })
@@ -31,6 +32,186 @@ function incompleteEvidence(message, details = {}) {
   const error = new EvidenceAssessmentError(CHECK_STATUS.INCOMPLETE, message)
   error.details = details
   return error
+}
+
+function finiteCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function explicitProviderAttempts(row) {
+  for (const value of [row?.providerAttempts, row?.providerEvaluateAttempts, row?.detail?.providerAttempts, row?.detail?.providerEvaluateAttempts]) {
+    if (value !== undefined) return finiteCount(value)
+  }
+  return null
+}
+
+function jevRowShowsProviderActivity(row) {
+  const responseModel = row.response?.model
+  return (row.error == null && row.response !== null && row.response !== undefined &&
+      typeof responseModel === 'string' && responseModel.length > 0) ||
+    (typeof row.error === 'string' &&
+      /gateway|provider|rate.?limit|http\s*[45]\d\d|\b(?:429|500|502|503|504)\b/i.test(row.error))
+}
+
+function legacyJevProviderAttempts(rows) {
+  const calls = new Map()
+  const retries = new Map()
+  const outcomes = new Map()
+  for (const row of rows) {
+    if (row.record === 'jev-call') {
+      if (typeof row.callId !== 'string' || row.callId.length === 0) throw new Error('legacy Jev call record has no callId')
+      if (!calls.has(row.callId)) calls.set(row.callId, [])
+      calls.get(row.callId).push(row)
+      continue
+    }
+    if (row.record === 'jev-retry') {
+      if (typeof row.callId !== 'string' || row.callId.length === 0 || !Number.isSafeInteger(row.attempt) || row.attempt < 1) {
+        throw new Error('legacy Jev retry record lacks a callId or positive attempt number')
+      }
+      if (!retries.has(row.callId)) retries.set(row.callId, [])
+      retries.get(row.callId).push(row)
+      continue
+    }
+    if (row.record === 'jev-outcome') {
+      if (typeof row.callId !== 'string' || row.callId.length === 0) throw new Error('legacy Jev outcome record has no callId')
+      outcomes.set(row.callId, (outcomes.get(row.callId) ?? 0) + 1)
+      continue
+    }
+    throw new Error(`legacy Jev provider journal contains an unrecognized record: ${String(row.record ?? 'missing-record')}`)
+  }
+
+  let totalAttempts = 0
+  const classifiedCalls = new Set()
+  for (const [callId, callRows] of calls) {
+    const retryRows = retries.get(callId) ?? []
+    const row = callRows.at(-1)
+    if (callRows.length !== 1) {
+      // The pinned old-path logger writes one terminal call row per callId.
+      // Newer multi-row schemas need an explicit cumulative provider counter.
+      const explicit = callRows.map(explicitProviderAttempts)
+      if (explicit.some((value) => value === null)) throw new Error(`legacy Jev call ${callId} has multiple rows without explicit provider-attempt counters`)
+      for (let index = 1; index < explicit.length; index += 1) {
+        if (explicit[index] < explicit[index - 1]) throw new Error(`legacy Jev call ${callId} provider-attempt counter regressed between journal rows`)
+      }
+      const attempts = explicit.at(-1)
+      if (attempts === 0 && callRows.some(jevRowShowsProviderActivity)) {
+        throw new Error(`legacy Jev call ${callId} reports zero provider attempts despite a raw provider response/error`)
+      }
+      totalAttempts += attempts
+      classifiedCalls.add(callId)
+      continue
+    }
+
+    const explicit = explicitProviderAttempts(row)
+    if (explicit !== null) {
+      if (explicit === 0 && (retryRows.length > 0 || jevRowShowsProviderActivity(row))) {
+        throw new Error(`legacy Jev call ${callId} reports zero provider attempts despite raw provider activity`)
+      }
+      totalAttempts += explicit
+      classifiedCalls.add(callId)
+      continue
+    }
+    if ([row.providerAttempts, row.providerEvaluateAttempts, row.detail?.providerAttempts, row.detail?.providerEvaluateAttempts]
+      .some((value) => value !== undefined)) {
+      throw new Error(`legacy Jev call ${callId} has a malformed provider-attempt counter`)
+    }
+
+    const policy = String(row.policy ?? '').toLowerCase()
+    const model = String(row.model ?? '')
+    if (policy === 'fallback' || policy === 'reflex' || /^deterministic(?:-|$)/i.test(model)) {
+      if (retryRows.length > 0) throw new Error(`deterministic Jev call ${callId} unexpectedly has provider retries`)
+      if (finiteCount(row.response?.usage?.totalTokens) > 0) throw new Error(`deterministic Jev call ${callId} reports nonzero token usage`)
+      classifiedCalls.add(callId)
+      continue
+    }
+
+    const retryCount = retryRows.length
+    for (const counterName of ['rateLimitRetries', 'transientRetries']) {
+      if (row[counterName] !== undefined && finiteCount(row[counterName]) === null) {
+        throw new Error(`legacy Jev call ${callId} has a malformed ${counterName} counter`)
+      }
+    }
+    const usageAttempts = finiteCount(row.rateLimitRetries) ?? 0
+    const transientAttempts = finiteCount(row.transientRetries) ?? 0
+    const counterRetries = Math.max(usageAttempts + transientAttempts, retryCount)
+    const responseModel = row.response?.model
+    const successfulProviderResponse = row.error == null && row.response !== null && row.response !== undefined &&
+      typeof responseModel === 'string' && responseModel.length > 0
+    const providerFailure = typeof row.error === 'string' &&
+      /gateway|provider|rate.?limit|http\s*[45]\d\d|\b(?:429|500|502|503|504)\b/i.test(row.error)
+    const explicitAbortBeforeCall = typeof row.error === 'string' && /aborted before (?:model call|attempt)/i.test(row.error)
+
+    if (successfulProviderResponse || providerFailure || retryCount > 0) {
+      totalAttempts += counterRetries + 1
+      classifiedCalls.add(callId)
+      continue
+    }
+    if (explicitAbortBeforeCall && retryCount === 0) {
+      classifiedCalls.add(callId)
+      continue
+    }
+    throw new Error(`legacy Jev call ${callId} does not establish whether a provider request occurred`)
+  }
+  for (const callId of retries.keys()) {
+    if (!calls.has(callId)) throw new Error(`legacy Jev retry ${callId} is not bound to a terminal Jev call row`)
+  }
+  for (const [callId, count] of outcomes) {
+    if (!calls.has(callId) || count !== 1) throw new Error(`legacy Jev outcome ${callId} is duplicate or unbound to a call row`)
+  }
+  if (classifiedCalls.size !== calls.size) throw new Error('legacy Jev provider activity contains an unclassified call')
+  return totalAttempts
+}
+
+function legacySystem2ModelCalls(files, summary, runRows) {
+  const path = 'runner/runtime/logs/jev/system2.jsonl'
+  const entry = files.get(path)
+  const startup = runRows.filter((row) => row.source === 'agent' && row.message.startsWith('jev-agent started '))
+  if (startup.length !== 1) throw new Error('legacy run journal does not uniquely bind effective System2 configuration at startup')
+  const configuredProvider = startup[0].detail?.system2Provider
+  const configuredModel = startup[0].detail?.system2Model
+  if (!entry) {
+    if (configuredProvider === 'deterministic' && configuredModel === 'unavailable' && summary.sliceMetrics?.system2LlmCalls === 0) return 0
+    throw new Error('legacy System2 model activity is unknown: raw system2.jsonl is absent and startup does not prove an unavailable deterministic provider')
+  }
+
+  const rows = parsedJsonLines(entry.text, path)
+  let modelCalls = 0
+  for (const row of rows) {
+    if (row.record !== 'system2-plan') throw new Error(`legacy System2 journal contains an unrecognized record: ${String(row.record ?? 'missing-record')}`)
+    const provider = String(row.provider ?? '').toLowerCase()
+    const model = String(row.model ?? '').toLowerCase()
+    const deterministicProvider = ['stub', 'deterministic', 'local'].includes(provider)
+    const providerNamedAsModel = /(?:gpt|claude|gemini|llama|jev|mercury)/i.test(model)
+    const attempts = explicitProviderAttempts(row)
+    if ([row.providerAttempts, row.providerEvaluateAttempts, row.detail?.providerAttempts, row.detail?.providerEvaluateAttempts]
+      .some((value) => value !== undefined) && attempts === null) throw new Error('legacy System2 plan has a malformed provider-attempt counter')
+    if (attempts !== null) {
+      if (attempts === 0 && (providerNamedAsModel || (typeof row.provider === 'string' && row.provider && !deterministicProvider) ||
+          (Array.isArray(row.returnedGoals) && Number.isFinite(Date.parse(row.ts ?? ''))))) {
+        throw new Error('legacy System2 plan reports zero provider attempts despite raw provider/model response evidence')
+      }
+      if (attempts > 0 && (configuredProvider !== row.provider || configuredModel !== row.model)) {
+        throw new Error('legacy System2 provider/model activity differs from its run-bound startup configuration')
+      }
+      modelCalls += attempts
+      continue
+    }
+    if (row.stub === true || deterministicProvider) {
+      if (providerNamedAsModel || (row.stub === true && provider && !deterministicProvider)) {
+        throw new Error('legacy System2 plan is marked stub/deterministic but names a model provider response')
+      }
+      continue
+    }
+    if (typeof row.provider !== 'string' || !row.provider || typeof row.model !== 'string' || !row.model) {
+      throw new Error('legacy System2 plan does not establish provider/model identity')
+    }
+    if (configuredProvider !== row.provider || configuredModel !== row.model) {
+      throw new Error('legacy System2 provider/model activity differs from its run-bound startup configuration')
+    }
+    if (Array.isArray(row.returnedGoals) && Number.isFinite(Date.parse(row.ts ?? ''))) modelCalls += 1
+    else throw new Error('legacy System2 non-stub plan lacks raw successful-provider evidence')
+  }
+  return modelCalls
 }
 
 function failEvidence(message, details = {}) {
@@ -671,20 +852,15 @@ function inspectRawLegacySide(side, expectedIdentity) {
   for (const [key, value] of Object.entries(expectedIdentity)) {
     if (summary[key] !== value) throw new Error(`legacy raw summary ${key} does not match comparison lineage`)
   }
-  const mission = canonicalMission(summary.missionInput)
-  if (!mission) throw new Error('legacy raw summary does not serialize a canonical Mission')
+  const reportedMission = canonicalMission(summary.missionInput)
+  if (!reportedMission) throw new Error('legacy raw summary does not serialize its original task intent')
   const actualMissionInput = exactRawFile(files, 'runner/human-task-input.jsonl', 'legacy').text
   const missionRows = parsedJsonLines(actualMissionInput, 'runner/human-task-input.jsonl')
   const missionEvents = missionRows.filter((row) => row.event === 'chat_sent_after_intent_listener_ready' && typeof row.command === 'string')
   if (missionEvents.length !== 1) throw new Error('legacy raw human-task journal must contain exactly one submitted Mission command')
   const command = missionEvents[0].command.trim()
   const commandMatch = /^agent\s+\S+\s+collect\s+(.+?)\s+(\d+)$/i.exec(command)
-  if (!commandMatch || Number(commandMatch[2]) !== mission.count) throw new Error('legacy raw Mission command does not agree with its canonical count')
-  const commandItem = commandMatch[1].toLowerCase()
-  const canonicalItem = mission.item.toLowerCase()
-  if (commandItem !== canonicalItem && !(canonicalItem === 'log' && commandItem.endsWith('_log'))) {
-    throw new Error('legacy raw Mission command does not agree with its canonical item')
-  }
+  if (!commandMatch || Number(commandMatch[2]) !== reportedMission.count) throw new Error('legacy raw Mission command does not agree with its reported task count')
   const decisionsPath = 'runner/runtime/logs/jev/decisions.jsonl'
   const decisions = parsedJsonLines(exactRawFile(files, decisionsPath, 'legacy').text, decisionsPath)
   const first = summary.events?.firstDecision
@@ -706,6 +882,22 @@ function inspectRawLegacySide(side, expectedIdentity) {
   if (!target || !['x', 'y', 'z'].every((key) => Number.isSafeInteger(target[key])) || typeof targetBlock !== 'string') {
     throw new Error('legacy summary does not bind an integer resource witness')
   }
+  const normalizedTask = normalizeLegacyCollectMissionCommand(command, targetBlock)
+  if (!normalizedTask) throw new Error('legacy Mission command does not name the exact raw resource witness; species/generic aliases are not normalized')
+  const mission = normalizedTask.mission
+  if (reportedMission.kind === 'inventory_at_least') {
+    if (reportedMission.item.toLowerCase().replace(/^minecraft:/, '') !== mission.item || reportedMission.count !== mission.count) {
+      throw new Error('legacy canonical Mission summary differs from the raw command-derived Mission')
+    }
+  } else if (reportedMission.kind === 'human_intent_collect') {
+    const summaryItem = reportedMission.item.toLowerCase().replace(/^minecraft:/, '')
+    const genericLogAlias = summaryItem === 'log' && targetBlock.toLowerCase().replace(/^minecraft:/, '').endsWith('_log')
+    if ((!genericLogAlias && summaryItem !== mission.item) || reportedMission.count !== mission.count) {
+      throw new Error('legacy compatibility intent cannot be reconciled with the raw command-derived Mission')
+    }
+  } else {
+    throw new Error(`unsupported legacy mission summary kind for raw normalization: ${reportedMission.kind}`)
+  }
   const blockSuffix = `b${target.x}_${target.y}_${target.z}`
   const firstCandidate = firstRows[0].candidates?.find((candidate) => candidate.id === firstSelected)
   if (!firstCandidate || firstCandidate.kind !== 'MOVE' || firstCandidate.targetName !== targetBlock || firstSelected !== `MOVE:${blockSuffix}`) {
@@ -724,33 +916,49 @@ function inspectRawLegacySide(side, expectedIdentity) {
   const boundCalls = callIds.map((callId) => calls.filter((row) => row.record === 'jev-call' && row.callId === callId))
   if (boundCalls.some((rows) => rows.length !== 1)) throw new Error('legacy raw provider journal does not uniquely bind both decision frames')
   const callRows = boundCalls.map((rows) => rows[0])
-  if (callRows.some((row) => row.policy !== 'fallback' || !/^deterministic(?:-|$)/i.test(String(row.model ?? '')) ||
-      !Number.isFinite(row.latencyMs) || row.latencyMs !== 0 || row.usage?.totalTokens !== 0)) {
-    throw new Error('legacy raw Jev calls do not prove the declared deterministic no-network policy')
+  if (callRows.some((row) => !Number.isFinite(row.latencyMs) || row.latencyMs < 0)) {
+    throw new Error('legacy first/next Jev call rows have invalid latency measurements')
   }
-  const allCalls = calls.filter((row) => row.record === 'jev-call')
-  if (allCalls.some((row) => row.policy !== 'fallback' || !/^deterministic(?:-|$)/i.test(String(row.model ?? '')) ||
-      row.latencyMs !== 0 || row.usage?.totalTokens !== 0)) {
-    throw new Error('legacy raw Jev journal contains provider activity outside the declared deterministic no-network policy')
-  }
+  const jevProviderAttempts = legacyJevProviderAttempts(calls)
   const startEvents = runRows.filter((row) => row.source === 'agent' && row.message.startsWith('jev-agent started '))
-  if (startEvents.length !== 1 || startEvents[0].detail?.policy !== 'fallback' ||
-      startEvents[0].detail?.system2Provider !== 'deterministic' || startEvents[0].detail?.system2Model !== 'unavailable') {
-    throw new Error('legacy raw run journal does not bind the Jev fallback and System2 unavailable policy at startup')
+  if (startEvents.length !== 1 || typeof startEvents[0].detail?.policy !== 'string') {
+    throw new Error('legacy raw run journal does not bind effective Jev policy at startup')
   }
   const system2Events = runRows.filter((row) => row.source === 'system2')
+  const system2ModelCalls = legacySystem2ModelCalls(files, summary, runRows)
   if (system2Events.some((row) => {
     const provider = row.detail?.provider ?? row.detail?.system2Provider
     const model = row.detail?.model ?? row.detail?.system2Model
-    return (provider !== undefined && provider !== 'deterministic') || (model !== undefined && model !== 'unavailable')
-  }) || summary.sliceMetrics?.system2LlmCalls !== 0 || summary.sliceMetrics?.networkModelCalls !== 0) {
-    throw new Error('legacy raw System2/provider events contradict the summary no-network counters')
+    return (provider !== undefined && !['stub', 'deterministic', 'local'].includes(String(provider).toLowerCase())) ||
+      (model !== undefined && model !== 'unavailable' && /(?:gpt|claude|gemini|llama|jev|mercury)/i.test(String(model)))
+  })) {
+    throw new Error('legacy run journal has System2 provider/model activity inconsistent with its archived model-call records')
   }
   const questionCalls = [firstRows[0], nextRows[0]].reduce((sum, row) => sum + Object.keys(row.jev?.answers ?? {}).length, 0)
   const moveStartRows = eventNamed(runRows, 'SKILL_START', (row) => eventActionId(row) === moveEnd.actionId)
+  const moveStepStartRows = runRows.filter((row) => row.source === 'executor' && eventActionId(row) === moveEnd.actionId &&
+    /\bSKILL_STEP\b/.test(row.message) && /\bstep=move\b/.test(row.message) && /\bworldDelta=pos=/.test(row.message))
+  const moveArrivalRows = runRows.filter((row) => row.source === 'executor' && eventActionId(row) === moveEnd.actionId &&
+    row.message.startsWith(`MOVE ${moveEnd.actionId} arrival `))
   const moveStepRows = eventNamed(runRows, 'SKILL_STEP', (row) => eventActionId(row) === moveEnd.actionId && Number.isSafeInteger(row.detail?.leg))
   const moveEndRows = eventNamed(runRows, 'SKILL_END', (row) => eventActionId(row) === moveEnd.actionId)
   if (moveStartRows.length !== 1 || moveEndRows.length !== 1) throw new Error('legacy run journal must contain exactly one matching MOVE start/end')
+  if (moveStepStartRows.length === 0 || moveArrivalRows.length !== 1) throw new Error('legacy run journal lacks raw MOVE start-position evidence')
+  const firstMoveStep = [...moveStepStartRows].sort((left, right) => Date.parse(left.ts ?? '') - Date.parse(right.ts ?? ''))[0]
+  const stepStartMatch = /\bworldDelta=pos=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/.exec(firstMoveStep.message)
+  const rawStart = positionVector(moveArrivalRows[0].detail?.start)
+  const arrivalEnd = positionVector(moveArrivalRows[0].detail?.end)
+  const stepStart = stepStartMatch === null ? null : { x: Number(stepStartMatch[1]), y: Number(stepStartMatch[2]), z: Number(stepStartMatch[3]) }
+  if (!rawStart || !arrivalEnd || !samePosition(rawStart, stepStart)) {
+    throw new Error('legacy MOVE start position is not corroborated by the raw first movement-step observation')
+  }
+  if (!samePosition(summary.fixture?.initialPlayerPosition, rawStart)) {
+    throw new Error('legacy summary fixture start differs from the raw MOVE start position')
+  }
+  const derivedOffset = relativeBlockOffset(target, rawStart)
+  if (!derivedOffset || !isDeepStrictEqual(summary.fixture?.sourceOffsetFromInitialPlayer, derivedOffset)) {
+    throw new Error('legacy summary relative fixture offset differs from the raw target and MOVE start position')
+  }
   if (!/\bexecution=success\b/.test(moveEndRows[0].message) || !/\bverification=verified\b/.test(moveEndRows[0].message) ||
       !/\boutcome=SUCCESS\b/.test(moveEndRows[0].message) || !/\bfailureCode=none\b/.test(moveEndRows[0].message)) {
     throw new Error('legacy MOVE SKILL_END is not a verified SUCCESS')
@@ -764,6 +972,21 @@ function inspectRawLegacySide(side, expectedIdentity) {
   const witness = witnessRows.filter((row) => row.tag === 'target' && row.name === summary.fixture?.block &&
     ['x', 'y', 'z'].every((key) => row.position?.[key] === summary.fixture?.position?.[key]))
   if (witness.length === 0) throw new Error('legacy raw witness journal lacks the summarized target observation')
+  const networkModelCalls = jevProviderAttempts + system2ModelCalls
+  const reportedMetrics = summary.sliceMetrics ?? {}
+  for (const [key, observed] of [
+    ['jevProviderModelCalls', jevProviderAttempts],
+    ['system2LlmCalls', system2ModelCalls],
+    ['networkModelCalls', networkModelCalls],
+  ]) {
+    if (reportedMetrics[key] !== undefined && reportedMetrics[key] !== observed) {
+      throw new Error(`legacy raw provider journals derive ${key}=${observed}, contradicting the run summary ${reportedMetrics[key]}`)
+    }
+  }
+  const modelCallsPerMechanicalStep = moveStepRows.length > 0 ? networkModelCalls / moveStepRows.length : null
+  if (reportedMetrics.modelCallsPerMechanicalStep !== undefined && reportedMetrics.modelCallsPerMechanicalStep !== modelCallsPerMechanicalStep) {
+    throw new Error('legacy raw provider journals and movement records disagree with modelCallsPerMechanicalStep')
+  }
   const host = fileText(files, 'runner/runtime/buddy.log')
   const hostRows = (marker) => host.split(/\r?\n/).filter((line) => line.includes(marker) && line.includes(`actionId=${moveEnd.actionId}`) &&
     line.includes(`runId=${expectedIdentity.runId}`) && line.includes(`generationId=${expectedIdentity.generationId}`) &&
@@ -802,12 +1025,52 @@ function inspectRawLegacySide(side, expectedIdentity) {
       moveActionsToInRange: moveStartRows.length,
       decisionFramesToInRange: new Set([first.decisionId, next.decisionId]).size,
       questionCallsToInRange: questionCalls,
-      jevProviderModelCalls: 0,
-      system2ModelCalls: 0,
-      networkModelCalls: 0,
-      modelCallsPerMovementStep: 0,
+      jevProviderModelCalls: jevProviderAttempts,
+      system2ModelCalls,
+      networkModelCalls,
+      modelCallsPerMovementStep: modelCallsPerMechanicalStep,
+      jevProviderEvaluateAttempts: jevProviderAttempts,
+      initialPlayerPosition: rawStart,
     },
+    missionProvenance: normalizedTask.provenance,
   }
+}
+
+/** Read-only raw Reach baseline inspection used by the source-pinned collector. */
+export function inspectLegacyReachArchive(archiveRoot) {
+  const required = [
+    'runner/reach-slice-evidence.json',
+    'runner/runtime/buddy.log',
+    'runner/runtime/logs/jev/run.jsonl',
+    'runner/runtime/logs/jev/decisions.jsonl',
+    'runner/runtime/logs/jev/jev-calls.jsonl',
+    'runner/human-task-input.jsonl',
+    'runner/block-read-run2.jsonl',
+  ]
+  const optional = ['runner/runtime/logs/jev/system2.jsonl']
+  const files = []
+  for (const path of [...required, ...optional.filter((path) => existsSync(join(archiveRoot, path)))]) {
+    const absolute = join(archiveRoot, path)
+    if (!existsSync(absolute)) throw new Error(`legacy baseline archive is missing ${path}`)
+    const stat = lstatSync(absolute)
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`legacy baseline source is not a regular file: ${path}`)
+    if (stat.size > 5 * 1024 * 1024) throw new Error(`legacy baseline source exceeds 5 MiB: ${path}`)
+    const bytes = readFileSync(absolute)
+    files.push({ path, sizeBytes: bytes.length, sha256: sha256(bytes), contentBase64: bytes.toString('base64') })
+  }
+  const summary = JSON.parse(files.find((entry) => entry.path === 'runner/reach-slice-evidence.json').contentBase64
+    ? Buffer.from(files.find((entry) => entry.path === 'runner/reach-slice-evidence.json').contentBase64, 'base64').toString('utf8')
+    : '{}')
+  const expectedIdentity = {
+    sourceSha: summary.sourceSha,
+    buildHash: summary.buildHash,
+    runId: summary.runId,
+    generationId: summary.generationId,
+  }
+  if (!SHA_RE.test(String(expectedIdentity.sourceSha ?? '')) || Object.values(expectedIdentity).some((value) => typeof value !== 'string' || value.length === 0)) {
+    throw new Error('legacy raw summary does not bind complete source/build/run/generation identity')
+  }
+  return inspectRawLegacySide({ files }, expectedIdentity)
 }
 
 function readVtrProbe(files) {

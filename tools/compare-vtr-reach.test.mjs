@@ -188,6 +188,23 @@ test('reports a deterministic Jev Decision Frame separately from zero provider e
   assert.equal(vtrPolicy.legacyJevCallsPerTransition, 1)
 })
 
+test('allows measured legacy provider calls while requiring zero calls only from the VTR no-LLM probe', () => {
+  const legacy = legacyArtifact()
+  legacy.sliceMetrics.jevProviderModelCalls = 2
+  legacy.sliceMetrics.networkModelCalls = 2
+  legacy.sliceMetrics.modelCallsPerMechanicalStep = 2
+  const vtr = vtrArtifact()
+  vtr.transition.eventSequence = [
+    'VTR_TRANSITION_MODEL_METRICS transitionId=transition-1 contractHash=contract-hash outcome=SUCCESS mechanicalSteps=1 decisionFrameInvocations=0 providerEvaluateAttempts=0',
+  ]
+  const report = compare(legacy, vtr)
+  assert.equal(report.noNetworkProfile.status, 'PASS')
+  assert.equal(report.noNetworkProfile.appliesTo, 'VTR no-LLM capability probe only; legacy provider calls are measured as a comparison metric')
+  assert.equal(report.metrics.policyAndModels.legacy.jevProviderModelCalls, 2)
+  assert.equal(report.metrics.policyAndModels.legacy.networkModelCalls, 2)
+  assert.match(report.metrics.policyAndModels.legacy.providerActivity, /permitted for the legacy baseline/)
+})
+
 test('keeps absent Transition model metrics UNKNOWN instead of deriving provider calls from Jev calls', () => {
   const vtr = vtrArtifact()
   vtr.transition.metrics.jevCallsPerTransition = 2

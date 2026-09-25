@@ -7,9 +7,11 @@ import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
 import { inspectFreshWorldAttestation } from './vtr-fresh-world-attestation.mjs'
+import { inspectReachComparisonProof } from './validate-vtr-reach-evidence.mjs'
 
 const SHA40_RE = /^[0-9a-f]{40}$/i
 const RUN_ID_RE = /^run-[a-z0-9]+-[a-z0-9]+$/i
@@ -61,7 +63,7 @@ const REQUIRED_ARCHIVE_PATHS = Object.freeze([
 ])
 
 const HELP = `Usage: bun tools/package-vtr-reach-live-archive.mjs \
-  --collector-report <capture.json> --manifest <inputs.json> --archive <new-directory>
+  --collector-report <capture.json> --manifest <inputs.json> --archive <new-directory> [--repo <git-checkout>]
 
 Manifest schema: vtr-reach-live-archive-input/v1
   { "files": { "runner/run-metadata.json": "./run-metadata.json", ... } }
@@ -82,6 +84,11 @@ post-run world file receipt must be captured after child exit and loopback
 connection refusal, bind the exact run/PID, and include a realPath/pathChain
 showing no symlinked worldRoot or parent directory. packaging-report.json
 preserves those source origins for offline revalidation.
+
+If the manifest supplies comparison/legacy-baseline.json, also pass --repo.
+Only that path may contain a distinct legacy run identity; it must validate as
+a raw v3 comparison, bind the legacy source to origin/main, and bind the VTR
+side to this package's exact run and Transition.
 
 To claim observed zero provider activity, also supply
 runner/provider-activity-capture.json with schema vtr-provider-activity-capture/v2,
@@ -117,14 +124,14 @@ function sha256(bytes) {
 }
 
 function parseArgs(argv) {
-  const out = { collectorReport: null, manifest: null, archive: null, help: false }
+  const out = { collectorReport: null, manifest: null, archive: null, repo: null, help: false }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--help' || argument === '-h') {
       out.help = true
       continue
     }
-    if (!['--collector-report', '--manifest', '--archive'].includes(argument)) throw new Error(`unknown argument: ${argument}`)
+    if (!['--collector-report', '--manifest', '--archive', '--repo'].includes(argument)) throw new Error(`unknown argument: ${argument}`)
     const value = argv[index + 1]
     if (!value || value.startsWith('--')) throw new Error(`${argument} requires a path`)
     out[argument.slice(2).replace(/-([a-z])/g, (_all, letter) => letter.toUpperCase())] = value
@@ -317,9 +324,48 @@ function identityFromCollector(report) {
     sourceSha: typeof observed.sourceSha === 'string' ? observed.sourceSha.toLowerCase() : null,
     runId: typeof observed.runId === 'string' ? observed.runId : null,
     generationId: typeof observed.generationId === 'string' ? observed.generationId : null,
+    buildHash: typeof observed.generationReady?.buildHash === 'string' ? observed.generationReady.buildHash : null,
     worldKey: observed.worldKey ?? null,
     worldIdentity: observed.worldIdentity ?? null,
   }
+}
+
+function inspectLegacyBaselineArtifact(bytes, { identity, transition, repoPath }) {
+  if (repoPath === null) return { status: 'INCOMPLETE', reason: 'comparison validation requires --repo to resolve the current origin/main source pin' }
+  let originMainSha
+  try {
+    originMainSha = execFileSync('git', ['-C', repoPath, 'rev-parse', '--verify', 'origin/main'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().toLowerCase()
+  } catch {
+    return { status: 'INCOMPLETE', reason: 'comparison validation cannot resolve origin/main from --repo' }
+  }
+  if (!SHA40_RE.test(originMainSha)) return { status: 'INCOMPLETE', reason: 'comparison validation resolved no full origin/main SHA' }
+  let proof
+  try { proof = JSON.parse(bytes.toString('utf8')) }
+  catch (error) { return { status: 'FAIL', reason: `comparison artifact is invalid JSON: ${error.message}` } }
+  const assessment = inspectReachComparisonProof(proof, identity.sourceSha, originMainSha)
+  if (assessment.status !== 'PASS') return assessment
+
+  const vtr = proof.lineage?.vtr ?? {}
+  const expectedWorldKey = worldKeyString(identity.worldKey)
+  const expectedTransitionId = transition?.transitionId
+  const expectedContractHash = transition?.contractHash
+  const observedTransition = proof.metrics?.reachBoundary?.vtr ?? {}
+  for (const [field, expected] of Object.entries({
+    sourceSha: identity.sourceSha,
+    runId: identity.runId,
+    generationId: identity.generationId,
+    buildHash: identity.buildHash,
+    worldKey: expectedWorldKey,
+  })) {
+    if (typeof expected !== 'string' || vtr[field] !== expected) {
+      return { status: 'FAIL', reason: `comparison VTR ${field} does not match the packaged live probe` }
+    }
+  }
+  if (typeof expectedTransitionId !== 'string' || observedTransition.transitionId !== expectedTransitionId ||
+      typeof expectedContractHash !== 'string' || observedTransition.contractHash !== expectedContractHash) {
+    return { status: 'FAIL', reason: 'comparison Transition id/contract hash does not match the packaged live probe' }
+  }
+  return { status: 'PASS', reason: assessment.reason, originMainSha }
 }
 
 function findCollectorInput(report, name) {
@@ -1062,10 +1108,11 @@ function writeFile(outputRoot, relativePath, bytes) {
   writeFileSync(target, bytes, { flag: 'wx', mode: 0o600 })
 }
 
-export function packageVtrReachArchive({ collectorReportPath, manifestPath, archivePath }) {
+export function packageVtrReachArchive({ collectorReportPath, manifestPath, archivePath, repoPath = null }) {
   const collectorReportFile = resolve(collectorReportPath)
   const manifestFile = resolve(manifestPath)
   const outputRoot = resolve(archivePath)
+  const comparisonRepo = typeof repoPath === 'string' && repoPath.trim() !== '' ? resolve(repoPath) : null
   if (existsSync(outputRoot)) throw new Error(`archive destination already exists: ${outputRoot}`)
   const report = readJson(collectorReportFile, 'collector report')
   const manifest = readJson(manifestFile, 'input manifest')
@@ -1076,6 +1123,7 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   const statuses = []
   const archiveFiles = new Set()
   const copiedSources = new Map()
+  let legacyBaselineComparison = { status: 'INCOMPLETE', reason: 'comparison artifact is absent' }
   const manifestDir = dirname(manifestFile)
   const collectorDir = dirname(collectorReportFile)
   const identity = identityFromCollector(report)
@@ -1153,7 +1201,12 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
       ...(archiveRelative.startsWith('server/world/') ? { sourcePath: source } : {}),
     })
 
-    if (archiveRelative.endsWith('.json') && archiveRelative !== 'runner/no-llm-egress-audit.json') {
+    if (archiveRelative === 'comparison/legacy-baseline.json') {
+      legacyBaselineComparison = inspectLegacyBaselineArtifact(bytes, { identity, transition, repoPath: comparisonRepo })
+      if (legacyBaselineComparison.status === 'PASS') check(statuses, 'PASS', 'comparison:legacy-baseline', { originMainSha: legacyBaselineComparison.originMainSha })
+      else if (legacyBaselineComparison.status === 'FAIL') check(statuses, 'FAIL', 'comparison:legacy-baseline', { reason: legacyBaselineComparison.reason })
+      else check(statuses, 'INCOMPLETE', 'comparison:legacy-baseline', { reason: legacyBaselineComparison.reason })
+    } else if (archiveRelative.endsWith('.json') && archiveRelative !== 'runner/no-llm-egress-audit.json') {
       try {
         const document = JSON.parse(bytes.toString('utf8'))
         const conflicts = collectIdentityConflicts(document, identity)
@@ -1338,10 +1391,11 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
     acceptanceEligible: false,
     readOnly: true,
     collectorReport: { schema: report.schema ?? null, status: report.status ?? null, capturedAt: report.capturedAt ?? null },
-    identity: { sourceSha: identity.sourceSha, runId: identity.runId, generationId: identity.generationId, worldKey: identity.worldKey },
+    identity: { sourceSha: identity.sourceSha, runId: identity.runId, generationId: identity.generationId, buildHash: identity.buildHash, worldKey: identity.worldKey },
     providerActivity: providerCaptureResult,
     egressAudit: egressAuditResult,
     noDoubleAuthorityFixture: authorityFixtureResult,
+    legacyBaselineComparison,
     freshWorld: freshWorldResult,
     requiredValidatorPaths: [...REQUIRED_ARCHIVE_PATHS,
       ...(requiredWitnessRegionPath === null ? [] : [requiredWitnessRegionPath]),

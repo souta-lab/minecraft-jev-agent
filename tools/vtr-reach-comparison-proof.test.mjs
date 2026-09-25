@@ -97,11 +97,15 @@ function legacySide() {
     event('jev-agent started policy=fallback provider=deterministic model=deterministic-local-fallback system2Provider=deterministic system2=unavailable',
       { policy: 'fallback', system2Provider: 'deterministic', system2Model: 'unavailable' }, 1),
     event(`SKILL_START actionId=${actionId}`, { actionId }, 3),
+    event(`SKILL_STEP skill=walk_to step=move evidence=move worldDelta=pos=${startPosition.x},${startPosition.y},${startPosition.z}`, { actionId, stepKind: 'move', count: 1 }, 3.5),
     event(`SKILL_STEP actionId=${actionId} leg=1`, { actionId, leg: 1 }, 4),
     event(`SKILL_STEP actionId=${actionId} leg=2`, { actionId, leg: 2 }, 5),
+    event(`MOVE ${actionId} arrival start=(${startPosition.x},${startPosition.y},${startPosition.z}) end=(5.5,63,490.5)`,
+      { actionId, start: startPosition, end: { x: 5.5, y: 63, z: 490.5 } }, 5.5),
     event(`SKILL_END actionId=${actionId} execution=success verification=verified outcome=SUCCESS failureCode=none`, { actionId }, 6),
   ]
   skillRows[0].source = 'agent'
+  for (const row of skillRows.slice(1, 6)) row.source = 'executor'
   const host = [
     `[${t(3)}] SKILL_START actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha} buildHash=${LEGACY.buildHash}`,
     `[${t(6)}] SKILL_END actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha} buildHash=${LEGACY.buildHash} outcome=SUCCESS failure=null`,
@@ -580,6 +584,27 @@ test('rejects a legacy inReach decision that predates the completed MOVE', () =>
   const result = inspectReachComparisonProof(proof, VTR.sourceSha, LEGACY.sourceSha)
   assert.equal(result.status, 'FAIL')
   assert.match(result.reason, /legacy witness, MOVE execution, and next inReach decision are not in causal order/)
+})
+
+test('requires the legacy fixture start to match raw first-step and MOVE-arrival positions', () => {
+  const proof = rawProof()
+  const side = proof.rawComparisonEvidence.legacy
+  const rows = readText(side, 'runner/runtime/logs/jev/run.jsonl').trim().split('\n').map((line) => JSON.parse(line))
+  const arrival = rows.find((row) => row.message.startsWith(`MOVE ${actionId} arrival`))
+  arrival.detail.start = { ...startPosition, z: startPosition.z + 1 }
+  replaceText(side, 'runner/runtime/logs/jev/run.jsonl', eventFile(rows))
+  const result = inspectReachComparisonProof(proof, VTR.sourceSha, LEGACY.sourceSha)
+  assert.equal(result.status, 'FAIL')
+  assert.match(result.reason, /MOVE start position is not corroborated/)
+
+  const missing = rawProof()
+  const missingSide = missing.rawComparisonEvidence.legacy
+  const withoutArrival = readText(missingSide, 'runner/runtime/logs/jev/run.jsonl').trim().split('\n')
+    .map((line) => JSON.parse(line)).filter((row) => !row.message.startsWith(`MOVE ${actionId} arrival`))
+  replaceText(missingSide, 'runner/runtime/logs/jev/run.jsonl', eventFile(withoutArrival))
+  const missingResult = inspectReachComparisonProof(missing, VTR.sourceSha, LEGACY.sourceSha)
+  assert.equal(missingResult.status, 'FAIL')
+  assert.match(missingResult.reason, /raw MOVE start-position evidence/)
 })
 
 test('requires the Reach ownership proof to contain at least three legs under one Skill', () => {
