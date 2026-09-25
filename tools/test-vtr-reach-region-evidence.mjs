@@ -93,6 +93,33 @@ try {
   assert.equal(genericFixture.observedBlock, 'deepslate_copper_ore')
   assert.ok(genericFixture.committedSources.includes('copper_ore'))
 
+  // Current fixture-commands.jsonl rows retain exact server console output in
+  // `serverOutput`; this is the literal Leaf 1.21.11 response spelling.
+  const leafFixtureOutput = 'Changed the block at 6, 63, -1'
+  const leafFixture = inspectFixtureWitnessSetup({
+    ...resourceMission,
+    fixtureCommands: [{
+      runId: 'run-fixture-output',
+      generationId: 'gen-fixture-output',
+      sourceSha: 'a'.repeat(40),
+      worldEpoch: 1,
+      command: 'execute at AI_Buddy run setblock ~6 ~-1 ~0 minecraft:deepslate_copper_ore replace',
+      serverOutput: leafFixtureOutput,
+    }],
+  })
+  assert.equal(leafFixture.status, 'PASS', 'the captured Leaf response spelling must prove successful fixture setup')
+  assert.equal(leafFixture.result, leafFixtureOutput, 'reported result must preserve the exact captured server text')
+
+  const legacyFixture = inspectFixtureWitnessSetup({
+    ...resourceMission,
+    fixtureCommands: [{
+      command: 'execute at AI_Buddy run setblock ~6 ~-1 ~0 minecraft:deepslate_copper_ore replace',
+      result: 'Changed block at 6, 63, -1',
+    }],
+  })
+  assert.equal(legacyFixture.status, 'PASS', 'older result-field journals remain readable')
+  assert.equal(legacyFixture.result, 'Changed block at 6, 63, -1')
+
   const mismatchedFixture = inspectFixtureWitnessSetup({
     ...resourceMission,
     fixtureCommands: [{
@@ -115,4 +142,4 @@ try {
   rmSync(tempRoot, { recursive: true, force: true })
 }
 
-process.stdout.write('VTR Reach region evidence tests passed (7 cases)\n')
+process.stdout.write('VTR Reach region evidence tests passed (9 cases)\n')

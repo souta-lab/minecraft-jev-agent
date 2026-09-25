@@ -396,6 +396,17 @@ function blockFromSetblockCommand(command) {
   return match ? normalizedBlockName(match[1]) : null
 }
 
+/**
+ * Read the captured server response from a fixture-command JSONL row.
+ * Current collectors write `serverOutput`; older archives used `result`.
+ * Keep the original string byte-for-byte because this is source evidence.
+ */
+function fixtureCommandOutput(row) {
+  if (typeof row?.serverOutput === 'string') return row.serverOutput
+  if (typeof row?.result === 'string') return row.result
+  return ''
+}
+
 /** Correlate a successful post-join fixture setblock with this Mission's committed Reach sources. */
 export function inspectFixtureWitnessSetup({ fixtureCommands, missionItem, desiredPredicate, witness }) {
   const missionBlock = normalizedBlockName(missionItem)
@@ -405,8 +416,11 @@ export function inspectFixtureWitnessSetup({ fixtureCommands, missionItem, desir
   const committedSources = sourceNames.length > 0 ? sourceNames : [predicateItem].filter(Boolean)
   const matchingMission = missionBlock !== null && predicateItem !== null && missionBlock === predicateItem
   const setupAfterJoin = fixtureCommands.filter((row) => /execute\s+at\s+AI_Buddy\s+run\s+setblock\b/iu.test(String(row?.command ?? '')))
-  const changed = setupAfterJoin.filter((row) => /Changed block at/i.test(String(row?.result ?? '')))
-  const observedBlocks = changed.map((row) => ({ block: blockFromSetblockCommand(row.command), command: row.command, result: row.result }))
+  // Leaf/Paper command responses vary between "Changed block at" and
+  // "Changed the block at". fixture-commands.jsonl stores the exact console
+  // text in `serverOutput` (legacy archives may call that field `result`).
+  const changed = setupAfterJoin.filter((row) => /\bChanged(?: the)? block at\b/i.test(fixtureCommandOutput(row)))
+  const observedBlocks = changed.map((row) => ({ block: blockFromSetblockCommand(row.command), command: row.command, result: fixtureCommandOutput(row) }))
   const witnessCoordinatesValid = witness && Number.isSafeInteger(witness.x) && Number.isSafeInteger(witness.y) && Number.isSafeInteger(witness.z)
   if (missionBlock === null || predicateItem === null || committedSources.length === 0) {
     return { status: 'INCOMPLETE', reason: 'Mission item or committed Reach source names are absent', missionBlock, predicateItem, committedSources, observedBlocks }
@@ -1324,7 +1338,7 @@ async function validate(archive, repo) {
       if (fixtureSetup.status === 'PASS') pass('fixture:relative-witness-setup', { witness: transition.witness.witnessId, ...fixtureSetup })
       else if (fixtureSetup.status === 'FAIL') fail('fixture:relative-witness-setup', fixtureSetup.reason, fixtureSetup)
       else incomplete('fixture:relative-witness-setup', fixtureSetup.reason, fixtureSetup)
-      const rejectedCommands = fixtureCommands.filter((row) => /Rejected:/i.test(row.result ?? '')).length
+      const rejectedCommands = fixtureCommands.filter((row) => /Rejected:/i.test(fixtureCommandOutput(row))).length
       pass('fixture:operator-command-journal', { recordedCommands: fixtureCommands.length, rejectedNoMutationAttempts: rejectedCommands })
     }
   }
