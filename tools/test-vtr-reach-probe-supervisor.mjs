@@ -13,6 +13,7 @@ import {
   prepareZeroByteAttemptSinks,
   runVtrReachProbeSupervisor,
   runtimeAttemptSinkPaths,
+  validateIsolatedLeafAttestation,
 } from './vtr-reach-probe-supervisor.mjs'
 import { parseHostLog } from './collect-vtr-reach-live.mjs'
 
@@ -27,7 +28,7 @@ const SERVER_ID = `127.0.0.1:${ISOLATED_PROBE_SERVER_PORT}`
 const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
 const t = (second) => new Date(Date.parse('2026-09-25T07:00:00.000Z') + second * 1000).toISOString()
 
-function setup(root) {
+function setup(root, port = ISOLATED_PROBE_SERVER_PORT) {
   mkdirSync(root, { recursive: true })
   const runtimeDir = join(root, 'runtime')
   const paths = runtimeAttemptSinkPaths(runtimeDir)
@@ -37,11 +38,11 @@ function setup(root) {
     schema: 'vtr-reach-isolated-leaf/v1',
     sourceSha: SOURCE,
     host: '127.0.0.1',
-    port: ISOLATED_PROBE_SERVER_PORT,
+    port,
     pid: 9123,
     startedAt: t(0),
     worldRoot,
-    worldKey: WORLD_KEY,
+    worldKey: `${serverId(port)}|overworld|7`,
     levelName: 'reach-probe-world',
     minecraftVersion: '1.21.11',
     serverPropertiesSha256: 'b'.repeat(64),
@@ -51,7 +52,11 @@ function setup(root) {
   return { runtimeDir, paths, worldRoot, serverAttestation }
 }
 
-function captureFixture({ schema = 'vtr-provider-activity-capture/v2', status = 'OBSERVED', localDecision = false } = {}) {
+function serverId(port = ISOLATED_PROBE_SERVER_PORT) {
+  return `127.0.0.1:${port}`
+}
+
+function captureFixture({ schema = 'vtr-provider-activity-capture/v2', status = 'OBSERVED', localDecision = false, worldKey = WORLD_KEY } = {}) {
   const startedAt = t(0)
   const endedAt = t(100)
   const jevRecord = localDecision
@@ -67,7 +72,7 @@ function captureFixture({ schema = 'vtr-provider-activity-capture/v2', status = 
   return {
     schema,
     status,
-    identity: { sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey: WORLD_KEY },
+    identity: { sourceSha: SOURCE, runId: RUN, generationId: GENERATION, worldKey },
     window: { startedAt, generationReadyAt: t(2), terminalAt: t(3), endedAt, coverageComplete: true },
     activity: {
       jevDecisionFrames: localDecision ? 1 : 0,
@@ -118,7 +123,9 @@ function event(at, name, detail, extra = {}) {
   }
 }
 
-function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutcome = false, localDecision = false }) {
+function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutcome = false, localDecision = false, now = () => Date.parse(t(10)), targetServerId = SERVER_ID }) {
+  const stopTimestamp = () => new Date(now()).toISOString()
+  const targetWorldKey = `${targetServerId}|overworld|7`
   const terminalRows = [
     event(t(2.5), 'VTR_TRANSITION_COMMIT', {
       transitionId: TRANSITION,
@@ -129,7 +136,7 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
         proposition: { kind: 'within-interaction-reach-of-resource-source', item: 'amethyst_block' },
         expected: true,
       },
-      identity: { worldKey: WORLD_KEY, generationId: GENERATION },
+      identity: { worldKey: targetWorldKey, generationId: GENERATION },
     }),
     event(t(3), 'VTR_TRANSITION_OUTCOME', {
       transitionId: wrongOutcome ? 'other-transition' : TRANSITION,
@@ -144,10 +151,18 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
         runId: RUN,
         source: SOURCE,
         mission: { kind: 'inventory_at_least', item: 'amethyst_block', count: 1 },
-        worldKey: { serverId: '127.0.0.1:25576', dimension: 'minecraft:overworld', worldEpoch: 7 },
+        worldKey: { serverId: targetServerId, dimension: 'minecraft:overworld', worldEpoch: 7 },
       }))
       assert.equal(parseHostLog(readFileSync(paths['host-log'], 'utf8')).length, 1, 'fixture writes a parseable BOOT')
       return { frozen: true, pid: RESIDENT_PID, handle: { resident: 'test' } }
+    },
+    prepareFixture: async ({ attemptRoot }) => {
+      calls.push('prepare-fixture')
+      const path = join(attemptRoot, 'runner', 'fixture-commands.jsonl')
+      mkdirSync(join(attemptRoot, 'runner'), { recursive: true })
+      const bytes = Buffer.from(`${JSON.stringify({ command: 'setblock', status: 'recorded' })}\n`)
+      writeFileSync(path, bytes, { flag: 'wx' })
+      return { status: 'READY', path, sha256: createHash('sha256').update(bytes).digest('hex') }
     },
     resumeResident: async () => {
       calls.push('resume')
@@ -181,11 +196,13 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
     },
     stopResident: async () => {
       calls.push('stop-resident')
-      return { status: 'STOPPED', pid: RESIDENT_PID, serverId: SERVER_ID, exitCode: 0, stoppedAt: t(1.18), controlSocketReleased: true, hostLockReleased: true }
+      const stoppedAt = stopTimestamp()
+      appendFileSync(paths['host-log'], hostLine(stoppedAt, 'SHUTDOWN', { reason: 'control-quit' }))
+      return { status: 'STOPPED', pid: RESIDENT_PID, serverId: targetServerId, exitCode: 0, stoppedAt, controlSocketReleased: true, hostLockReleased: true }
     },
     stopIsolatedLeaf: async ({ attestation }) => {
       calls.push('stop-leaf')
-      return { status: 'STOPPED', port: attestation.port, serverId: SERVER_ID, pid: attestation.pid, exitCode: 0, stoppedAt: t(1.19) }
+      return { status: 'STOPPED', port: attestation.port, serverId: targetServerId, pid: attestation.pid, exitCode: 0, stoppedAt: stopTimestamp() }
     },
     collect: async ({ identity, terminal }) => {
       calls.push('collect')
@@ -193,7 +210,7 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
       assert.equal(terminal.transitionId, TRANSITION)
       return { status: 'PASS', path: join(leaf, 'collector-report.json'), sha256: 'b'.repeat(64) }
     },
-    sealArchive: async ({ identity, terminal, capture, collector, lifecycle, hostLifecycleTranscript }) => {
+    sealArchive: async ({ identity, terminal, capture, collector, lifecycle, hostLifecycleTranscript, fixtureTranscript }) => {
       calls.push('seal')
       assert.equal(identity.sourceSha, SOURCE)
       assert.equal(terminal.outcomeKind, outcomeKind)
@@ -201,12 +218,15 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
       assert.equal(collector.status, 'PASS')
       assert.equal(existsSync(lifecycle.path), true)
       assert.equal(readFileSync(hostLifecycleTranscript, 'utf8').trim().split('\n').length, 3, 'archive is sealed only after all lifecycle stages were recorded')
+      assert.equal(fixtureTranscript.status, 'READY')
+      assert.equal(fixtureTranscript.sha256.length, 64)
       return { status: 'READY_FOR_VALIDATION', path: join(leaf, 'archive') }
     },
-    validateArchive: async ({ archive, hostLifecycleTranscript }) => {
+    validateArchive: async ({ archive, hostLifecycleTranscript, fixtureTranscript }) => {
       calls.push('validate')
       assert.equal(archive.status, 'READY_FOR_VALIDATION')
       assert.equal(readFileSync(hostLifecycleTranscript, 'utf8').trim().split('\n').length, 3)
+      assert.equal(fixtureTranscript.status, 'READY')
       return { status: 'PASS', path: join(leaf, 'validation.json') }
     },
   }
@@ -252,14 +272,55 @@ function watchFactory(calls, capture) {
       calls.push('arm')
       assert.equal(args.expectedSchema, 'vtr-provider-activity-capture/v2')
       assert.deepEqual(Object.keys(args.journals).sort(), REQUIRED_PROVIDER_JOURNALS.slice().sort())
-      assert.equal(args.lifecycleTranscript.endsWith('/runner/host-lifecycle.jsonl'), true)
-      assert.equal(statSync(args.lifecycleTranscript).size, 0, 'lifecycle transcript is a real empty file before capture arm')
+      const lifecyclePath = args.lifecycleLog ?? args.lifecycleTranscript
+      assert.equal(lifecyclePath.endsWith('/runner/host-lifecycle.jsonl'), true)
+      assert.equal(statSync(lifecyclePath).size, 0, 'lifecycle transcript is a real empty file before capture arm')
       return {
         poll() { calls.push('poll') },
         async finish(reason) {
           calls.push('finish')
           assert.match(reason, /orderly-teardown|incomplete/u)
-          return capture
+          const rawLifecycle = readFileSync(lifecyclePath)
+          const rows = rawLifecycle.toString('utf8').trim().split('\n').map((line) => JSON.parse(line))
+          const lifecycleComplete = rows.length === 3
+          const lifecycleEvents = {
+            terminalConsumed: rows.find((row) => row.event === 'terminal-consumed'),
+            residentStopped: rows.find((row) => row.event === 'resident-stopped'),
+            serverStopped: rows.find((row) => row.event === 'server-stopped'),
+          }
+          const hostLog = readFileSync(args.hostLog, 'utf8')
+          const shutdownLine = hostLog.split(/\r?\n/u).find((line) => /\] SHUTDOWN\b/u.test(line))
+          const shutdownAt = /^\[([^\]]+)\]/u.exec(shutdownLine ?? '')?.[1] ?? null
+          const endedAt = t(100)
+          const lifecycle = {
+            path: lifecyclePath,
+            bytes: rawLifecycle.length,
+            sha256: createHash('sha256').update(rawLifecycle).digest('hex'),
+            rows: rows.length,
+            malformedRows: 0,
+            initializedAt: capture.window.startedAt,
+            firstObservedAt: capture.window.startedAt,
+            lastObservedAt: endedAt,
+            closedAt: endedAt,
+            status: lifecycleComplete ? 'OBSERVED' : 'INCOMPLETE',
+            problems: lifecycleComplete ? [] : ['lifecycle-row-count-incomplete'],
+            events: lifecycleEvents,
+          }
+          return {
+            ...capture,
+            status: lifecycleComplete ? capture.status : 'INCOMPLETE',
+            window: {
+              ...capture.window,
+              shutdownAt,
+              terminalConsumedAt: lifecycleEvents.terminalConsumed?.ts ?? null,
+              residentStoppedAt: lifecycleEvents.residentStopped?.stoppedAt ?? null,
+              serverStoppedAt: lifecycleEvents.serverStopped?.stoppedAt ?? null,
+              lifecycleComplete,
+              coverageComplete: capture.window.coverageComplete && lifecycleComplete,
+            },
+            lifecycle,
+            capture: { ...capture.capture, finishedAt: endedAt },
+          }
         },
       }
     },
@@ -286,10 +347,11 @@ try {
 
   {
     const root = join(temporary, 'successful-lifecycle')
-    const { paths, serverAttestation } = setup(root)
     const calls = []
-    const adapters = createAdapters({ calls, paths, leaf: root, localDecision: true })
-    let clock = Date.parse(t(0))
+    let clock = Date.parse(t(10))
+    const now = () => { clock += 100; return clock }
+    const port = ISOLATED_PROBE_SERVER_PORT + 1
+    const { paths, serverAttestation } = setup(root, port)
     const result = await runVtrReachProbeSupervisor({
       attemptRoot: root,
       runtimeDir: join(root, 'runtime'),
@@ -298,15 +360,16 @@ try {
       expectedCaptureSchema: 'vtr-provider-activity-capture/v2',
       expectedCaptureStatus: 'OBSERVED',
       serverAttestation,
-      watchFactory: watchFactory(calls, captureFixture({ localDecision: true })),
+      isolatedPort: port,
+      watchFactory: watchFactory(calls, captureFixture({ localDecision: true, worldKey: `${serverId(port)}|overworld|7` })),
       observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
-      adapters,
+      adapters: createAdapters({ calls, paths, leaf: root, localDecision: true, now, targetServerId: serverId(port) }),
       outputPaths: {
         capture: join(root, 'evidence', 'provider-capture.json'),
         lifecycle: join(root, 'evidence', 'lifecycle.json'),
         result: join(root, 'evidence', 'result.json'),
       },
-      now: () => { clock += 100; return clock },
+      now,
       timeoutMs: 3000,
       sleep: async () => {},
     })
@@ -315,11 +378,12 @@ try {
     assert.equal(result.terminal.outcomeKind, 'SUCCESS')
     assert.equal(result.captureGate.checks.find((check) => check.id === 'capture:zero-networkModelCalls')?.status, 'PASS')
     assert.equal(result.captureGate.checks.find((check) => check.id === 'capture:journal-byte-observation')?.status, 'PASS')
-    assert.deepEqual(calls.filter((name) => ['observer-bind', 'arm', 'start', 'resume', 'observer-read:generation-ready', 'observer-read:terminal', 'collect', 'stop-resident', 'stop-leaf', 'finish', 'seal', 'validate', 'observer-restore'].includes(name)), [
-      'observer-bind', 'arm', 'start', 'resume', 'observer-read:generation-ready', 'observer-read:terminal', 'collect', 'stop-resident', 'stop-leaf', 'finish', 'seal', 'validate', 'observer-restore',
+    assert.deepEqual(calls.filter((name) => ['observer-bind', 'arm', 'start', 'prepare-fixture', 'resume', 'observer-read:generation-ready', 'observer-read:terminal', 'collect', 'stop-resident', 'stop-leaf', 'finish', 'seal', 'validate', 'observer-restore'].includes(name)), [
+      'observer-bind', 'arm', 'start', 'prepare-fixture', 'resume', 'observer-read:generation-ready', 'observer-read:terminal', 'collect', 'stop-resident', 'stop-leaf', 'finish', 'seal', 'validate', 'observer-restore',
     ])
     assert.ok(calls.indexOf('observer-bind') < calls.indexOf('arm'), 'observer is bound to exact runtime before capture')
     assert.ok(calls.indexOf('arm') < calls.indexOf('start'), 'capture arms before resident process start')
+    assert.ok(calls.indexOf('start') < calls.indexOf('prepare-fixture') && calls.indexOf('prepare-fixture') < calls.indexOf('resume'), 'generic fixture is prepared while resident is frozen after exact BOOT')
     assert.ok(calls.indexOf('stop-resident') < calls.indexOf('stop-leaf'), 'resident stops before isolated Leaf')
     assert.ok(calls.indexOf('stop-leaf') < calls.indexOf('finish'), 'capture closes after both processes stop')
     assert.equal(readFileSync(join(root, 'evidence', 'provider-capture.json'), 'utf8').includes('mercury-calls'), true)
@@ -331,6 +395,8 @@ try {
     assert.equal(lifecycle.sourceSha, SOURCE)
     assert.equal(lifecycle.identity.runId, RUN)
     assert.equal(lifecycle.terminal.outcomeKind, 'SUCCESS')
+    assert.equal(lifecycle.fixtureTranscript.sha256, result.fixtureTranscript.sha256, 'fixture digest is bound in the lifecycle artifact')
+    assert.equal(lifecycle.isolatedLeaf.port, port, 'caller-selected loopback port is retained in the run evidence')
     assert.equal(lifecycle.observerSnapshots.length, 2)
     assert.equal(lifecycle.isolatedLeaf.configuration.serverPropertiesSha256, 'b'.repeat(64))
     const finalResult = JSON.parse(readFileSync(join(root, 'evidence', 'result.json'), 'utf8'))
@@ -339,11 +405,45 @@ try {
     const lifecycleRows = readFileSync(join(root, 'runner/host-lifecycle.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     assert.deepEqual(lifecycleRows.map((row) => row.event), ['terminal-consumed', 'resident-stopped', 'server-stopped'])
     assert.ok(lifecycleRows.every((row) => row.schema === HOST_LIFECYCLE_TRANSCRIPT_SCHEMA && row.actor === 'probe-harness'))
-    assert.ok(lifecycleRows.every((row) => row.sourceSha === SOURCE && row.runId === RUN && row.generationId === GENERATION && row.worldKey === WORLD_KEY))
+    assert.ok(lifecycleRows.every((row) => row.sourceSha === SOURCE && row.runId === RUN && row.generationId === GENERATION && row.worldKey === `${serverId(port)}|overworld|7`))
     assert.deepEqual(lifecycleRows[0].evidenceIds, ['verify:reach-probe'])
     assert.equal(lifecycleRows[1].pid, RESIDENT_PID)
     assert.equal(lifecycleRows[2].pid, serverAttestation.pid)
-    assert.equal(lifecycleRows[2].serverId, SERVER_ID)
+    assert.equal(lifecycleRows[2].serverId, serverId(port))
+  }
+
+  {
+    const root = join(temporary, 'invalid-fixture-path')
+    const { paths, serverAttestation } = setup(root)
+    const calls = []
+    const outsidePath = join(temporary, 'fixture-outside-attempt.jsonl')
+    const outsideBytes = Buffer.from('{"command":"setblock"}\n')
+    writeFileSync(outsidePath, outsideBytes)
+    const adapters = createAdapters({ calls, paths, leaf: root, now: () => Date.parse(t(10)) })
+    adapters.prepareFixture = async () => {
+      calls.push('prepare-fixture')
+      return { status: 'READY', path: outsidePath, sha256: createHash('sha256').update(outsideBytes).digest('hex') }
+    }
+    const result = await runVtrReachProbeSupervisor({
+      attemptRoot: root,
+      runtimeDir: join(root, 'runtime'),
+      sourceSha: SOURCE,
+      paths,
+      expectedCaptureSchema: 'vtr-provider-activity-capture/v2',
+      expectedCaptureStatus: 'OBSERVED',
+      serverAttestation,
+      watchFactory: watchFactory(calls, captureFixture()),
+      observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
+      adapters,
+      outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
+      now: () => Date.parse(t(10)),
+      sleep: async () => {},
+    })
+    assert.equal(result.status, 'FAIL')
+    assert.match(result.failure ?? '', /inside the run-scoped attempt root/u)
+    assert.equal(calls.includes('resume'), false, 'fixture path validation fails closed before the resident resumes')
+    assert.equal(calls.includes('collect'), false)
+    assert.ok(calls.indexOf('stop-resident') < calls.indexOf('stop-leaf'), 'fixture failure still shuts the resident down before Leaf')
   }
 
   {
@@ -360,7 +460,7 @@ try {
       serverAttestation,
       watchFactory: watchFactory(calls, captureFixture({ status: 'INCOMPLETE' })),
       observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
-      adapters: createAdapters({ calls, paths, leaf: root }),
+      adapters: createAdapters({ calls, paths, leaf: root, now: () => Date.parse(t(10)) }),
       outputPaths: {
         capture: join(root, 'evidence', 'provider-capture.json'),
         lifecycle: join(root, 'evidence', 'lifecycle.json'),
@@ -381,6 +481,7 @@ try {
     const calls = []
     const protectedPort = { ...serverAttestation, port: PROTECTED_SERVER_PORTS[0] }
     await assert.rejects(runVtrReachProbeSupervisor({
+      isolatedPort: PROTECTED_SERVER_PORTS[0],
       attemptRoot: root,
       runtimeDir: join(root, 'runtime'),
       sourceSha: SOURCE,
@@ -403,6 +504,7 @@ try {
     let started = false
     const calls = []
     await assert.rejects(runVtrReachProbeSupervisor({
+      isolatedPort: ISOLATED_PROBE_SERVER_PORT,
       attemptRoot: root,
       runtimeDir: join(root, 'runtime'),
       sourceSha: SOURCE,
@@ -414,7 +516,7 @@ try {
       observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
       adapters: { ...createAdapters({ calls, paths, leaf: root }), startResidentFrozen: async () => { started = true; return { frozen: true, pid: RESIDENT_PID, handle: {} } } },
       outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
-    }), new RegExp(`must use port ${ISOLATED_PROBE_SERVER_PORT}`, 'u'))
+    }), new RegExp(`must match requested isolated port ${ISOLATED_PROBE_SERVER_PORT}`, 'u'))
     assert.equal(started, false, 'noncanonical isolated port is rejected before resident start')
     assert.equal(calls.includes('arm'), false, 'noncanonical isolated port is rejected before capture arm')
   }
@@ -434,7 +536,7 @@ try {
       serverAttestation,
       watchFactory: watchFactory(calls, captureFixture()),
       observerAdapter: createObserverAdapter(calls, join(root, 'runtime')),
-      adapters: createAdapters({ calls, paths, leaf: root, wrongOutcome: true }),
+      adapters: createAdapters({ calls, paths, leaf: root, wrongOutcome: true, now: () => Date.parse(t(10)) }),
       outputPaths: { capture: join(root, 'evidence/capture.json'), lifecycle: join(root, 'evidence/lifecycle.json'), result: join(root, 'evidence/result.json') },
       now: () => { clock += 10; return clock },
       timeoutMs: 1000,

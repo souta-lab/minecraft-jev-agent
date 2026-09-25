@@ -384,15 +384,17 @@ function terminalForRunJournal(runJournalPath, identity) {
   }
 }
 
-function validateIsolatedLeafAttestation(attestation, { attemptRoot, sourceSha }) {
+export function validateIsolatedLeafAttestation(attestation, { attemptRoot, sourceSha, isolatedPort = ISOLATED_PROBE_SERVER_PORT }) {
   if (!isPlainObject(attestation)) fail('isolated Leaf server attestation is required before resident start')
   if (attestation.schema !== 'vtr-reach-isolated-leaf/v1') fail('isolated Leaf server attestation schema is not recognized')
   if (String(attestation.sourceSha ?? '').toLowerCase() !== sourceSha.toLowerCase()) fail('isolated Leaf server source SHA differs from exact probe source')
   if (!LOOPBACK_HOSTS.has(String(attestation.host ?? '').toLowerCase())) fail('isolated Leaf server must bind to loopback')
+  if (!Number.isSafeInteger(isolatedPort) || isolatedPort < 1 || isolatedPort > 65535) fail('isolatedPort must be a valid TCP port')
+  if (PROTECTED_SERVER_PORTS.includes(isolatedPort)) fail(`refusing protected server port ${isolatedPort}`)
   const port = Number(attestation.port)
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('isolated Leaf server port is invalid')
   if (PROTECTED_SERVER_PORTS.includes(port)) fail(`refusing protected server port ${port}`)
-  if (port !== ISOLATED_PROBE_SERVER_PORT) fail(`isolated Reach probe must use port ${ISOLATED_PROBE_SERVER_PORT}`)
+  if (port !== isolatedPort) fail(`isolated Leaf port must match requested isolated port ${isolatedPort}`)
   if (!Number.isSafeInteger(attestation.pid) || attestation.pid < 1) fail('isolated Leaf PID attestation is missing')
   if (typeof attestation.startedAt !== 'string' || !Number.isFinite(Date.parse(attestation.startedAt))) fail('isolated Leaf process start time is missing')
   if (typeof attestation.worldRoot !== 'string' || attestation.worldRoot.length === 0) fail('isolated Leaf world root is missing')
@@ -501,6 +503,48 @@ function evaluateCaptureEnvelope(capture, {
   const serverStoppedAt = Date.parse(serverStoppedAtExpected ?? '')
   const closedAfterServer = Number.isFinite(finishedAt) && Number.isFinite(serverStoppedAt) && finishedAt >= serverStoppedAt
   add('capture:closed-after-server-stop', closedAfterServer ? 'PASS' : 'INCOMPLETE', closedAfterServer ? null : 'capture finishedAt must follow the isolated server-stopped lifecycle row')
+  const lifecycleSnapshot = capture.lifecycle ?? {}
+  let lifecycleBytes = null
+  let lifecycleDigest = null
+  let lifecycleRows = null
+  try {
+    const raw = readFileSync(lifecycleSnapshot.path)
+    lifecycleBytes = raw.length
+    lifecycleDigest = sha256(raw)
+    const parsed = parseJsonl(raw.toString('utf8'), lifecycleSnapshot.path)
+    if (parsed.errors.length === 0) lifecycleRows = parsed.rows
+  } catch {
+    // Missing lifecycle evidence is incomplete; this gate never creates it.
+  }
+  const captureLifecycleObserved = lifecycleSnapshot.status === 'OBSERVED'
+    && Array.isArray(lifecycleSnapshot.problems) && lifecycleSnapshot.problems.length === 0
+    && Number.isSafeInteger(lifecycleSnapshot.bytes) && lifecycleSnapshot.bytes === lifecycleBytes
+    && lifecycleSnapshot.sha256 === lifecycleDigest
+    && Number.isSafeInteger(lifecycleSnapshot.rows) && lifecycleSnapshot.rows === lifecycleRows?.length
+    && lifecycleSnapshot.malformedRows === 0
+    && Number.isFinite(Date.parse(lifecycleSnapshot.initializedAt ?? ''))
+    && Number.isFinite(Date.parse(lifecycleSnapshot.firstObservedAt ?? ''))
+    && Number.isFinite(Date.parse(lifecycleSnapshot.closedAt ?? ''))
+    && Date.parse(lifecycleSnapshot.initializedAt) <= Date.parse(window.generationReadyAt ?? '')
+    && Date.parse(lifecycleSnapshot.firstObservedAt) <= Date.parse(window.generationReadyAt ?? '')
+    && Date.parse(lifecycleSnapshot.closedAt) >= finishedAt
+    && lifecycleRows?.length === 3
+    && lifecycleRows[0]?.event === 'terminal-consumed'
+    && lifecycleRows[1]?.event === 'resident-stopped'
+    && lifecycleRows[2]?.event === 'server-stopped'
+    && JSON.stringify(lifecycleSnapshot.events?.terminalConsumed) === JSON.stringify(lifecycleRows[0])
+    && JSON.stringify(lifecycleSnapshot.events?.residentStopped) === JSON.stringify(lifecycleRows[1])
+    && JSON.stringify(lifecycleSnapshot.events?.serverStopped) === JSON.stringify(lifecycleRows[2])
+    && capture.window?.terminalConsumedAt === lifecycleRows[0]?.ts
+    && capture.window?.residentStoppedAt === lifecycleRows[1]?.stoppedAt
+    && capture.window?.serverStoppedAt === lifecycleRows[2]?.stoppedAt
+    && capture.window?.lifecycleComplete === true
+    && Date.parse(capture.window?.shutdownAt ?? '') >= Date.parse(lifecycleRows[0]?.ts ?? '')
+    && Date.parse(capture.window?.shutdownAt ?? '') <= Date.parse(lifecycleRows[1]?.stoppedAt ?? '')
+    && Date.parse(lifecycleRows[1]?.stoppedAt ?? '') <= Date.parse(lifecycleRows[2]?.stoppedAt ?? '')
+  const lifecycleGateStatus = captureLifecycleObserved ? 'PASS'
+    : lifecycleBytes === null || lifecycleSnapshot.status === undefined || lifecycleSnapshot.status === 'INCOMPLETE' ? 'INCOMPLETE' : 'FAIL'
+  add('capture:lifecycle-journal', lifecycleGateStatus, captureLifecycleObserved ? null : 'capture must bind the continuously observed, hashed lifecycle transcript and all ordered shutdown boundaries')
   const journals = capture.journals ?? {}
   let actualNonEmptyJournal = false
   let allJournalsReadable = true
@@ -581,30 +625,43 @@ function evaluateHostLifecycleTranscript(path, { sourceSha, identity, terminal, 
     && (terminal?.outcomeKind !== 'SUCCESS' || terminalRow.evidenceIds.length > 0)
   checks.push({ id: 'host-lifecycle:terminal-binding', status: terminalMatches ? 'PASS' : terminal === null || terminalRow === undefined ? 'INCOMPLETE' : 'FAIL' })
   const residentRow = rows.find((row) => row.event === 'resident-stopped')
+  const terminalConsumedAt = Date.parse(terminalRow?.ts ?? '')
+  const terminalAt = Date.parse(terminal?.at ?? '')
+  const terminalTimeValid = Number.isFinite(terminalConsumedAt) && Number.isFinite(terminalAt) && terminalConsumedAt >= terminalAt
+  checks.push({ id: 'host-lifecycle:terminal-consumed-after-outcome', status: terminalTimeValid ? 'PASS' : terminal === null || terminalRow === undefined ? 'INCOMPLETE' : 'FAIL' })
   const residentMatches = residentRow?.pid === resident?.pid
     && residentRow?.pid === residentStop?.pid
-    && residentRow?.status === 'STOPPED'
+    && residentRow?.status === 'stopped'
     && residentRow?.exitCode === residentStop?.exitCode
     && Date.parse(residentRow?.stoppedAt ?? '') >= 0
     && Number.isFinite(Date.parse(residentRow?.ts ?? ''))
-    && Date.parse(residentRow.stoppedAt) <= Date.parse(residentRow.ts)
+    && Date.parse(residentRow.stoppedAt) === Date.parse(residentRow.ts)
+    && Date.parse(residentRow.ts) >= terminalConsumedAt
     && residentRow?.serverId === expectedIdentity.serverId
-  checks.push({ id: 'host-lifecycle:resident-stop', status: residentMatches ? 'PASS' : residentStop === null || residentRow === undefined ? 'INCOMPLETE' : 'FAIL' })
+  checks.push({ id: 'host-lifecycle:resident-stop', status: residentMatches ? 'PASS' : terminal === null || terminalRow === undefined || residentStop === null || residentRow === undefined ? 'INCOMPLETE' : 'FAIL' })
   const serverRow = rows.find((row) => row.event === 'server-stopped')
   const expectedServerId = isolatedLeaf?.worldKey?.split('|', 1)[0] ?? null
   const serverMatches = serverRow?.pid === isolatedLeaf?.pid
     && serverRow?.pid === leafStop?.pid
-    && serverRow?.status === 'STOPPED'
+    && serverRow?.status === 'stopped'
     && serverRow?.exitCode === leafStop?.exitCode
     && serverRow?.serverId === expectedServerId
     && expectedServerId === expectedIdentity.serverId
     && Date.parse(serverRow?.stoppedAt ?? '') >= 0
-    && Number.isFinite(Date.parse(serverRow?.ts ?? '')) && Date.parse(serverRow.stoppedAt) <= Date.parse(serverRow.ts)
+    && Number.isFinite(Date.parse(serverRow?.ts ?? '')) && Date.parse(serverRow.stoppedAt) === Date.parse(serverRow.ts)
+    && Date.parse(serverRow.ts) >= Date.parse(residentRow?.ts ?? '')
   checks.push({ id: 'host-lifecycle:server-stop', status: serverMatches ? 'PASS' : leafStop === null || serverRow === undefined ? 'INCOMPLETE' : 'FAIL' })
   const failures = checks.some((entry) => entry.status === 'FAIL')
   const incomplete = checks.some((entry) => entry.status === 'INCOMPLETE')
   const serverStoppedTime = Date.parse(serverRow?.ts ?? '')
-  return { status: failures ? 'FAIL' : incomplete ? 'INCOMPLETE' : 'PASS', rows: rows.length, serverStoppedAt: Number.isFinite(serverStoppedTime) ? new Date(serverStoppedTime).toISOString() : null, checks }
+  return {
+    status: failures ? 'FAIL' : incomplete ? 'INCOMPLETE' : 'PASS',
+    rows: rows.length,
+    terminalConsumedAt: Number.isFinite(terminalConsumedAt) ? new Date(terminalConsumedAt).toISOString() : null,
+    residentStoppedAt: Date.parse(residentRow?.stoppedAt ?? '') >= 0 ? new Date(Date.parse(residentRow.stoppedAt)).toISOString() : null,
+    serverStoppedAt: Number.isFinite(serverStoppedTime) ? new Date(serverStoppedTime).toISOString() : null,
+    checks,
+  }
 }
 
 function writeExclusiveJson(path, value, attemptRoot) {
@@ -669,6 +726,24 @@ function hostLifecycleIdentity(sourceSha, identity) {
   }
 }
 
+function verifyFixtureTranscriptDescriptor(value, attemptRoot) {
+  if (!isPlainObject(value) || value.status !== 'READY'
+    || typeof value.path !== 'string' || typeof value.sha256 !== 'string' || !SHA256_RE.test(value.sha256)) {
+    fail('fixture adapter must return {status:READY,path,sha256}')
+  }
+  const root = realpathSync(resolve(attemptRoot))
+  const fixturePath = resolve(value.path)
+  if (!inside(root, fixturePath) || fixturePath === root) fail('fixture transcript path must remain inside the run-scoped attempt root')
+  let stat
+  try { stat = lstatSync(fixturePath) } catch (error) { fail(`fixture transcript is unavailable (${error?.code ?? 'read-error'})`) }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) fail('fixture transcript must be a nonempty regular file')
+  if (realpathSync(fixturePath) !== fixturePath) fail('fixture transcript must not traverse a symlink')
+  const bytes = readFileSync(fixturePath)
+  const digest = sha256(bytes)
+  if (digest !== value.sha256.toLowerCase()) fail('fixture transcript SHA-256 differs from the adapter attestation')
+  return { status: 'READY', path: fixturePath, sha256: digest, bytes: bytes.length }
+}
+
 /**
  * Run the HOST lifecycle around one existing isolated Leaf world.
  *
@@ -681,12 +756,13 @@ function hostLifecycleIdentity(sourceSha, identity) {
  *
  * `adapters` owns runtime process details:
  * - startResidentFrozen({sourceSha, attemptRoot, paths}) -> {frozen:true, pid, handle}
+ * - prepareFixture({handle, identity, serverAttestation, attemptRoot, paths}) -> {status:'READY', path, sha256}
  * - resumeResident({handle, identity}) -> {started:true}
  * - stopResident({handle, identity, pid}) -> {status:'STOPPED', pid, serverId, exitCode, stoppedAt}
  * - stopIsolatedLeaf({attestation, identity}) -> {status:'STOPPED', port, pid, serverId, exitCode, stoppedAt}
- * - collect({identity, terminal, paths, poll}) -> collector report descriptor
- * - sealArchive({identity, terminal, capture, collector, lifecycle, hostLifecycleTranscript}) -> archive descriptor
- * - validateArchive({identity, archive, hostLifecycleTranscript}) -> validator descriptor
+ * - collect({identity, terminal, fixtureTranscript, observerUrl, paths, poll}) -> collector report descriptor
+ * - sealArchive({identity, terminal, capture, collector, lifecycle, hostLifecycleTranscript, fixtureTranscript}) -> archive descriptor
+ * - validateArchive({identity, archive, hostLifecycleTranscript, fixtureTranscript}) -> validator descriptor
  *
  * The isolated server attestation may contain runtime-specific details, but
  * this supervisor retains only loopback, port, PID, start time, world root and
@@ -701,6 +777,7 @@ export async function runVtrReachProbeSupervisor({
   expectedCaptureStatus,
   captureJournalNames,
   serverAttestation,
+  isolatedPort = ISOLATED_PROBE_SERVER_PORT,
   watchFactory,
   observerAdapter,
   observerPolicy = 'restore',
@@ -713,6 +790,8 @@ export async function runVtrReachProbeSupervisor({
   timeoutMs = 150_000,
 }) {
   if (!SHA40_RE.test(String(sourceSha ?? ''))) fail('sourceSha must be a full 40-character exact source SHA')
+  if (!Number.isSafeInteger(isolatedPort) || isolatedPort < 1 || isolatedPort > 65535) fail('isolatedPort must be a valid TCP port')
+  if (PROTECTED_SERVER_PORTS.includes(isolatedPort)) fail(`refusing protected server port ${isolatedPort}`)
   if (typeof expectedCaptureSchema !== 'string' || expectedCaptureSchema.length === 0) fail('expectedCaptureSchema is required')
   if (typeof expectedCaptureStatus !== 'string' || expectedCaptureStatus.length === 0) fail('expectedCaptureStatus is required')
   if (expectedCaptureSchema !== 'vtr-provider-activity-capture/v2' || expectedCaptureStatus !== 'OBSERVED') {
@@ -722,7 +801,7 @@ export async function runVtrReachProbeSupervisor({
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 600_000) fail('timeoutMs must be 1000..600000')
   if (!Number.isInteger(maxObserverFreshnessMs) || maxObserverFreshnessMs < 1000 || maxObserverFreshnessMs > 60_000) fail('maxObserverFreshnessMs must be 1000..60000')
   if (!['restore', 'leave-bound'].includes(observerPolicy)) fail('observerPolicy must be restore or leave-bound')
-  for (const name of ['startResidentFrozen', 'resumeResident', 'stopResident', 'stopIsolatedLeaf', 'collect', 'sealArchive', 'validateArchive']) {
+  for (const name of ['startResidentFrozen', 'prepareFixture', 'resumeResident', 'stopResident', 'stopIsolatedLeaf', 'collect', 'sealArchive', 'validateArchive']) {
     if (typeof adapters?.[name] !== 'function') fail(`lifecycle adapter is required: ${name}`)
   }
   if (typeof watchFactory?.arm !== 'function') fail('watchFactory.arm is required')
@@ -732,7 +811,7 @@ export async function runVtrReachProbeSupervisor({
   const root = resolve(attemptRoot)
   assertRealDirectory(root, 'attemptRoot')
   const rootReal = realpathSync(root)
-  const isolatedLeaf = validateIsolatedLeafAttestation(serverAttestation, { attemptRoot: root, sourceSha })
+  const isolatedLeaf = validateIsolatedLeafAttestation(serverAttestation, { attemptRoot: root, sourceSha, isolatedPort })
   const prepared = await (async () => {
     try {
       if (!isPlainObject(outputPaths)) fail('outputPaths must contain capture and lifecycle artifact paths')
@@ -778,6 +857,7 @@ export async function runVtrReachProbeSupervisor({
   let watcher = null
   let resident = null
   let bootIdentity = null
+  let fixtureTranscript = null
   let identity = null
   let terminal = null
   let collector = null
@@ -864,6 +944,7 @@ export async function runVtrReachProbeSupervisor({
     watcher = await watchFactory.arm({
       hostLog: sinkPaths['host-log'],
       journals: journalPathsForWatcher,
+      lifecycleLog: hostLifecyclePath,
       lifecycleTranscript: hostLifecyclePath,
       expectedSchema: expectedCaptureSchema,
       expectedStatus: expectedCaptureStatus,
@@ -893,6 +974,16 @@ export async function runVtrReachProbeSupervisor({
     bootIdentity = { sourceSha: boot.sourceSha, runId: boot.runId, worldKey: boot.worldKey, bootAt: boot.bootAt }
     if (isolatedLeaf.worldKey !== bootIdentity.worldKey) fail('isolated Leaf worldKey differs from exact run BOOT')
     events.push({ event: 'boot-bound', at: new Date(now()).toISOString(), identity: bootIdentity })
+
+    const fixtureResult = await withWatchPolling(() => adapters.prepareFixture({
+      handle: resident.handle,
+      identity: bootIdentity,
+      serverAttestation: isolatedLeaf,
+      attemptRoot: root,
+      paths: allPaths,
+    }))
+    fixtureTranscript = verifyFixtureTranscriptDescriptor(fixtureResult, root)
+    events.push({ event: 'fixture-prepared-while-resident-frozen', at: new Date(now()).toISOString(), fixtureTranscript })
 
     const resumeResult = await withWatchPolling(() => adapters.resumeResident({ handle: resident.handle, identity: bootIdentity }))
     if (!isPlainObject(resumeResult) || resumeResult.started !== true) fail('resident resume was not explicitly acknowledged')
@@ -950,7 +1041,7 @@ export async function runVtrReachProbeSupervisor({
     events.push({ event: 'observer-terminal-identity-verified', at: new Date(now()).toISOString(), summary: terminalObserver.summary })
 
     pollWatch()
-    collector = await withWatchPolling(() => adapters.collect({ identity, terminal, observerUrl: observerBinding.observerUrl, runtimeDir: runtimeDirectory, paths: allPaths, poll: pollWatch }))
+    collector = await withWatchPolling(() => adapters.collect({ identity, terminal, fixtureTranscript, observerUrl: observerBinding.observerUrl, runtimeDir: runtimeDirectory, paths: allPaths, poll: pollWatch }))
     if (!isPlainObject(collector)) fail('collector adapter must return an explicit report descriptor')
     events.push({ event: 'collector-complete', at: new Date(now()).toISOString(), status: collector.status ?? null, reportPath: collector.path ?? null, sha256: collector.sha256 ?? null })
   } catch (error) {
@@ -974,11 +1065,11 @@ export async function runVtrReachProbeSupervisor({
       appendHostLifecycleRow(hostLifecyclePath, {
         schema: HOST_LIFECYCLE_TRANSCRIPT_SCHEMA,
         event: 'resident-stopped',
-        ts: new Date(now()).toISOString(),
+        ts: residentStop.stoppedAt,
         actor: 'probe-harness',
         ...hostLifecycleIdentity(sourceSha, identity ?? bootIdentity),
         pid: residentStop.pid,
-        status: residentStop.status,
+        status: 'stopped',
         exitCode: residentStop.exitCode,
         stoppedAt: residentStop.stoppedAt,
       })
@@ -1005,12 +1096,12 @@ export async function runVtrReachProbeSupervisor({
       appendHostLifecycleRow(hostLifecyclePath, {
         schema: HOST_LIFECYCLE_TRANSCRIPT_SCHEMA,
         event: 'server-stopped',
-        ts: new Date(now()).toISOString(),
+        ts: leafStop.stoppedAt,
         actor: 'probe-harness',
         ...hostLifecycleIdentity(sourceSha, identity ?? bootIdentity),
         pid: leafStop.pid,
         serverId: isolatedLeaf.worldKey.split('|', 1)[0],
-        status: leafStop.status,
+        status: 'stopped',
         exitCode: leafStop.exitCode,
         stoppedAt: leafStop.stoppedAt,
       })
@@ -1092,6 +1183,7 @@ export async function runVtrReachProbeSupervisor({
     observerBinding,
     observerSnapshots,
     identity,
+    fixtureTranscript,
     isolatedLeaf,
     terminal: terminal === null ? null : {
       transitionId: terminal.transitionId,
@@ -1132,10 +1224,10 @@ export async function runVtrReachProbeSupervisor({
   if (failure === null && identity !== null && terminal !== null && collector !== null
     && captureGate.status === 'PASS' && hostLifecycleGate.status === 'PASS' && teardownComplete && lifecycleArtifact !== null) {
     try {
-      archive = await adapters.sealArchive({ identity, terminal, capture, collector, lifecycle: lifecycleArtifact, hostLifecycleTranscript: hostLifecyclePath, observerBinding, observerSnapshots, paths: allPaths })
+      archive = await adapters.sealArchive({ identity, terminal, capture, collector, lifecycle: lifecycleArtifact, hostLifecycleTranscript: hostLifecyclePath, fixtureTranscript, observerBinding, observerSnapshots, paths: allPaths })
       if (!isPlainObject(archive)) fail('archive adapter must return an explicit archive descriptor')
       events.push({ event: 'archive-sealed', at: new Date(now()).toISOString(), status: archive.status ?? null, path: archive.path ?? null })
-      validation = await adapters.validateArchive({ identity, archive, hostLifecycleTranscript: hostLifecyclePath })
+      validation = await adapters.validateArchive({ identity, archive, hostLifecycleTranscript: hostLifecyclePath, fixtureTranscript })
       if (!isPlainObject(validation)) fail('validator adapter must return an explicit result')
       events.push({ event: 'archive-validated', at: new Date(now()).toISOString(), status: validation.status ?? null, reportPath: validation.path ?? null })
     } catch (error) {
@@ -1175,6 +1267,7 @@ export async function runVtrReachProbeSupervisor({
     observerSnapshots,
     observerRestore,
     identity,
+    fixtureTranscript,
     terminal: terminal === null ? null : { transitionId: terminal.transitionId, contractHash: terminal.contractHash, outcomeKind: terminal.outcomeKind, at: terminal.at },
     captureGate,
     hostLifecycleTranscript: {
