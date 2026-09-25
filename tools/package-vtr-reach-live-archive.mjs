@@ -39,6 +39,7 @@ const REQUIRED_ARCHIVE_PATHS = Object.freeze([
   'runner/buddy.log',
   'runner/generation-bundle.mjs',
   'runner/initial-snapshot.json',
+  'runner/fixture-anchor-snapshot.json',
   'runner/final-snapshot.json',
   'runner/jev-run.jsonl',
   'runner/jev-calls.jsonl',
@@ -72,7 +73,7 @@ The supplied run-metadata.json must record source {repository, branch, commit},
 the complete validator run identity/timestamps, mission inventories/positions,
 and fixture facts. Map the actual server-start/config and exact
 server/fresh-world-attestation.json and PID-bound server/leaf-stdout-events.jsonl,
-initial/final snapshots,
+initial/final snapshots, the preserved pre-generation runner/fixture-anchor-snapshot.json,
 fixture command journal, world files (including the bot UUID-bound playerdata
 file and the MCA region containing the committed witness coordinates), acceptance record, and milestone snapshot to
 their canonical paths in files. Collector logs/journals are copied from

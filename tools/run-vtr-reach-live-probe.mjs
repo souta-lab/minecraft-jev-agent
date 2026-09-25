@@ -822,7 +822,7 @@ function runtimeFailureEvidenceCandidates(attemptRoot, preflightPath = null) {
       'runner/host-lifecycle.jsonl', 'runner/supervisor-capture.json', 'runner/supervisor-lifecycle.json',
       'runner/supervisor-result.json', 'runner/collector-report.json', 'runner/acceptance.json',
       'runner/initial-snapshot.json', 'runner/final-snapshot.json', 'runner/terminal-snapshot.json',
-      'runner/fixture-command-attempts.jsonl',
+      'runner/fixture-anchor-snapshot.json', 'runner/fixture-command-attempts.jsonl',
       'runner/no-llm-egress-audit.json', 'runner/no-llm-egress-provenance.json',
       'runner/resident-process-group-closure.json', 'runner/package-report.json',
       'runner/validation-report.json', 'runner/caller-result.json', 'runner/fixture-transcript.json',
@@ -1173,6 +1173,42 @@ function positionValue(snapshot) {
   const position = snapshot?.truth?.position
   if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return null
   return { x: position.x, y: position.y, z: position.z }
+}
+
+const REACH_FIXTURE_OFFSETS = Object.freeze({
+  fillFrom: Object.freeze({ x: 1, y: -1, z: -3 }),
+  fillTo: Object.freeze({ x: 24, y: -1, z: 3 }),
+  witness: Object.freeze({ x: 16, y: 0, z: 2 }),
+})
+
+function offsetBlockPosition(position, offset) {
+  if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) {
+    throw new Error('Reach fixture needs a finite exact-source frozen player position')
+  }
+  const result = {
+    x: Math.floor(position.x + offset.x),
+    y: Math.floor(position.y + offset.y),
+    z: Math.floor(position.z + offset.z),
+  }
+  if (!Object.values(result).every(Number.isSafeInteger)) throw new Error('Reach fixture produced an unsafe absolute block coordinate')
+  return result
+}
+
+export function buildReachFixtureGeometry(position) {
+  const from = offsetBlockPosition(position, REACH_FIXTURE_OFFSETS.fillFrom)
+  const to = offsetBlockPosition(position, REACH_FIXTURE_OFFSETS.fillTo)
+  const witness = offsetBlockPosition(position, REACH_FIXTURE_OFFSETS.witness)
+  const fillBlockCount = (Math.abs(to.x - from.x) + 1) * (Math.abs(to.y - from.y) + 1) * (Math.abs(to.z - from.z) + 1)
+  return {
+    coordinateRule: 'floor(position + integer offset)',
+    offsets: REACH_FIXTURE_OFFSETS,
+    fillFrom: from,
+    fillTo: to,
+    fillBlockCount,
+    witness,
+    fillCommand: `fill ${from.x} ${from.y} ${from.z} ${to.x} ${to.y} ${to.z} minecraft:stone`,
+    setblockCommand: `setblock ${witness.x} ${witness.y} ${witness.z} minecraft:oak_log`,
+  }
 }
 
 function inventoryValue(snapshot) {
@@ -1721,6 +1757,8 @@ function leafStdoutRow({ sourceSha, identity, server, receipt }) {
     schema: 'vtr-server-stdout-observation/v1',
     sourceSha,
     runId: identity.runId,
+    generationId: identity.generationId ?? null,
+    worldKey: identity.worldKey,
     serverId: server.serverId,
     serverPid: server.pid,
     port: server.port,
@@ -1740,6 +1778,8 @@ function bindLeafStdoutIdentity(server, identity) {
   const binding = {
     sourceSha: identity.sourceSha,
     runId: identity.runId,
+    generationId: identity.generationId ?? null,
+    worldKey: identity.worldKey,
     serverId: worldKeyParts(identity.worldKey).serverId,
     pid: server.serverStart.pid,
     port: server.options.port,
@@ -2111,6 +2151,8 @@ export async function issueLeafCommand(server, command, expectedResponse, {
     runId: identity?.runId ?? null,
     generationId: identity?.generationId ?? null,
     worldKey: identity?.worldKey ?? null,
+    serverId: identity?.worldKey ? worldKeyParts(identity.worldKey).serverId : null,
+    leaseId: null,
   }
   const commandSha256 = sha256(Buffer.from(command, 'utf8'))
   const attemptBase = {
@@ -2138,18 +2180,11 @@ export async function issueLeafCommand(server, command, expectedResponse, {
     throw new LeafFixtureProbeError('LEAF_FIXTURE_STDIN_WRITE_FAILED', phase)
   }
 
+  let response
   try {
-    const response = await waitFor(() => parseConsoleLines(server.serverLogLines, fromIndex, expectedResponse), {
+    response = await waitFor(() => parseConsoleLines(server.serverLogLines, fromIndex, expectedResponse), {
       timeoutMs, label: `Leaf console response to ${kind}`,
     })
-    appendFixtureCommandAttempt(attemptRoot, {
-      ...attemptBase,
-      event: 'response-observed',
-      responseAt: response.ts,
-      responseSha256: sha256(Buffer.from(response.line, 'utf8')),
-      responseLine: redactOperationalText(response.line).slice(0, 500),
-    })
-    return { issuedAt, command, commandSha256, stdinAcknowledgedAt: writeAcknowledgement.acknowledgedAt, serverOutput: response.line, observedAt: response.ts, responsePid: server.serverStart.pid }
   } catch (error) {
     const outputRows = server.serverLogLines.slice(fromIndex).map(({ line, ts, stream }) => ({
       ts,
@@ -2173,6 +2208,37 @@ export async function issueLeafCommand(server, command, expectedResponse, {
       : phase === 'fixture.fill' ? 'LEAF_FIXTURE_FILL_RESPONSE_TIMEOUT'
         : 'LEAF_FIXTURE_SETBLOCK_RESPONSE_TIMEOUT'
     throw new LeafFixtureProbeError(code, phase)
+  }
+  const receipts = server.stdoutReceipts.filter((entry) => entry.ts === response.ts && entry.line === response.line)
+  if (response.stream !== 'spawned-child-stdout' || receipts.length !== 1) {
+    appendFixtureCommandAttempt(attemptRoot, {
+      ...attemptBase,
+      event: 'response-unreceipted',
+      responseAt: response.ts,
+      responseSha256: sha256(Buffer.from(response.line, 'utf8')),
+      matchingStdoutReceipts: receipts.length,
+      responseStream: response.stream,
+    })
+    throw new LeafFixtureProbeError('LEAF_FIXTURE_RESPONSE_RECEIPT_MISSING', phase)
+  }
+  const responseReceipt = receipts[0]
+  appendFixtureCommandAttempt(attemptRoot, {
+    ...attemptBase,
+    event: 'response-observed',
+    responseAt: response.ts,
+    responseSequence: responseReceipt.sequence,
+    responseSha256: sha256(Buffer.from(response.line, 'utf8')),
+    responseLine: redactOperationalText(response.line).slice(0, 500),
+  })
+  return {
+    issuedAt,
+    command,
+    commandSha256,
+    stdinAcknowledgedAt: writeAcknowledgement.acknowledgedAt,
+    serverOutput: response.line,
+    observedAt: response.ts,
+    responsePid: server.serverStart.pid,
+    responseSequence: responseReceipt.sequence,
   }
 }
 
@@ -2225,18 +2291,38 @@ async function prepareFixtureContext({ server, runtimeDir, attemptRoot, identity
   const initial = await readInitialResidentSnapshot(runtimeDir, identity, attemptRoot)
   if (startSnapshot) startSnapshot.value = initial
 
+  const initialPosition = initial.normalized.initialPosition
+  const geometry = buildReachFixtureGeometry(initialPosition)
+  const anchorSnapshotPath = join(attemptRoot, 'runner', 'fixture-anchor-snapshot.json')
+  writeJsonExclusive(anchorSnapshotPath, initial.normalized)
+  const fixtureAnchor = {
+    schema: 'vtr-reach-fixture-anchor/v1',
+    sourceSha,
+    runId: identity.runId,
+    generationId: null,
+    leaseId: null,
+    worldKey: identity.worldKey,
+    worldEpoch: worldKeyParts(identity.worldKey).worldEpoch,
+    snapshotPath: 'runner/fixture-anchor-snapshot.json',
+    snapshotSha256: sha256(readFileSync(anchorSnapshotPath)),
+    positionSource: 'runner/fixture-anchor-snapshot.json.initialPosition',
+    initialPosition,
+    coordinateRule: geometry.coordinateRule,
+    offsets: geometry.offsets,
+  }
+
   const fixtureRows = []
   await issueLeafCommand(server, 'time query daytime', /\bThe time is \d+\b/iu, {
     phase: 'fixture.console-smoke', identity, sourceSha, attemptRoot,
   })
-  const fill = await issueLeafCommand(server, 'execute at AI_Buddy run fill ~1 ~-1 ~-3 ~24 ~-1 ~3 minecraft:stone replace air', /(?:Successfully filled|blocks? (?:were )?filled|filled \d+ block)/iu, {
+  const fill = await issueLeafCommand(server, geometry.fillCommand, new RegExp(`\\bSuccessfully filled ${geometry.fillBlockCount} blocks\\b`, 'iu'), {
     phase: 'fixture.fill', identity, sourceSha, attemptRoot,
   })
-  fixtureRows.push({ schema: 'vtr-reach-fixture-command/v1', sourceSha, runId: identity.runId, generationId: null, worldKey: identity.worldKey, phase: 'resident-frozen-before-generation-ready', ...fill })
-  const setblock = await issueLeafCommand(server, 'execute at AI_Buddy run setblock ~16 ~0 ~2 minecraft:oak_log', /\bChanged(?: the)? block at\b/iu, {
+  fixtureRows.push({ schema: 'vtr-reach-fixture-command/v2', kind: 'fill', sourceSha, runId: identity.runId, generationId: null, leaseId: null, worldKey: identity.worldKey, serverId, serverPid: server.serverStart.pid, phase: 'resident-frozen-before-generation-ready', fixtureAnchor, ...fill })
+  const setblock = await issueLeafCommand(server, geometry.setblockCommand, /\bChanged(?: the)? block at\s+-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\b/iu, {
     phase: 'fixture.setblock', identity, sourceSha, attemptRoot,
   })
-  fixtureRows.push({ schema: 'vtr-reach-fixture-command/v1', sourceSha, runId: identity.runId, generationId: null, worldKey: identity.worldKey, phase: 'resident-frozen-before-generation-ready', ...setblock })
+  fixtureRows.push({ schema: 'vtr-reach-fixture-command/v2', kind: 'setblock', sourceSha, runId: identity.runId, generationId: null, leaseId: null, worldKey: identity.worldKey, serverId, serverPid: server.serverStart.pid, phase: 'resident-frozen-before-generation-ready', fixtureAnchor, ...setblock })
   const transcriptPath = join(attemptRoot, 'server', 'fixture-commands.jsonl')
   mkdirSync(dirname(transcriptPath), { recursive: true, mode: 0o700 })
   writeFileSync(transcriptPath, `${fixtureRows.map((row) => JSON.stringify(row)).join('\n')}\n`, { flag: 'wx', mode: 0o600 })
@@ -2269,6 +2355,7 @@ async function waitAndBindGenerationReady(server, runtimeDir, runId, timeoutMs) 
   writeJsonAtomic(server.serverStartPath, next)
   server.serverStart = next
   server.identity = { ...identity, generationId, generationReadyAt: new Date(row.ts).toISOString() }
+  if (server.stdoutState?.identity) server.stdoutState.identity = { ...server.stdoutState.identity, generationId }
   return server.identity
 }
 
@@ -2700,7 +2787,7 @@ function archiveInputManifest({ attemptRoot, runtimeSource, server, observer, pa
     if (typeof sourcePath === 'string' && existsSync(sourcePath)) files[archivePath] = sourcePath
   }
   for (const path of [
-    'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/final-snapshot.json',
+    'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/fixture-anchor-snapshot.json', 'runner/final-snapshot.json',
     'runner/milestone-predicates.json', 'runner/run-metadata.json', 'runner/provider-activity-capture.json',
     'runner/host-lifecycle.jsonl', 'runner/dependency-install.json', 'runner/source-bun.lock',
     'runner/no-double-authority-fixture.json', 'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts',

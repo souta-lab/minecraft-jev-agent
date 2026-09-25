@@ -2139,38 +2139,278 @@ function fixtureCommandOutput(row) {
   return ''
 }
 
-/** Correlate a successful post-join fixture setblock with this Mission's committed Reach sources. */
-export function inspectFixtureWitnessSetup({ fixtureCommands, missionItem, desiredPredicate, witness }) {
+/**
+ * The pinned spawn-relative fixture contract, independently restated here so the
+ * validator never trusts the runner's own constants. The committed journal must
+ * contain exactly one absolute `fill` and one absolute `setblock` v2 row issued
+ * while the resident is frozen before GENERATION_READY; relative (`~`),
+ * selector (`@`), `execute`, or `replace` command forms are rejected outright.
+ */
+const REACH_FIXTURE_CONTRACT = Object.freeze({
+  commandSchema: 'vtr-reach-fixture-command/v2',
+  anchorSchema: 'vtr-reach-fixture-anchor/v1',
+  anchorSnapshotSchema: 'vtr-reach-initial-snapshot/v1',
+  anchorSnapshotPath: 'runner/fixture-anchor-snapshot.json',
+  anchorPositionSource: 'runner/fixture-anchor-snapshot.json.initialPosition',
+  phase: 'resident-frozen-before-generation-ready',
+  coordinateRule: 'floor(position + integer offset)',
+  offsets: {
+    fillFrom: { x: 1, y: -1, z: -3 },
+    fillTo: { x: 24, y: -1, z: 3 },
+    witness: { x: 16, y: 0, z: 2 },
+  },
+  fillBlock: 'minecraft:stone',
+})
+
+const FIXTURE_LEGACY_OR_RELATIVE_RE = /[~@]|\bexecute\b|\breplace\b/iu
+
+function fixtureDerivedBlock(position, offset) {
+  const value = {
+    x: Math.floor(position.x + offset.x),
+    y: Math.floor(position.y + offset.y),
+    z: Math.floor(position.z + offset.z),
+  }
+  return Object.values(value).every(Number.isSafeInteger) ? value : null
+}
+
+function fixtureCommandBindingProblems(row, { sourceSha, run, serverStart }) {
+  const problems = []
+  const requireField = (field, expected, { nullExpected = false } = {}) => {
+    const observed = row?.[field]
+    if (nullExpected ? observed !== null : observed !== expected) problems.push({ field, expected, observed: observed ?? null })
+  }
+  requireField('schema', REACH_FIXTURE_CONTRACT.commandSchema)
+  requireField('sourceSha', sourceSha)
+  requireField('runId', run?.runId)
+  requireField('worldKey', run?.worldKey)
+  requireField('generationId', null, { nullExpected: true })
+  requireField('leaseId', null, { nullExpected: true })
+  requireField('phase', REACH_FIXTURE_CONTRACT.phase)
+  requireField('serverId', serverStart?.serverId)
+  requireField('serverPid', serverStart?.pid)
+  requireField('responsePid', serverStart?.pid)
+  if (typeof row?.command !== 'string' || row.command === '') problems.push({ field: 'command', expected: 'absolute non-empty command', observed: row?.command ?? null })
+  else if (sha256(Buffer.from(row.command, 'utf8')) !== row.commandSha256) problems.push({ field: 'commandSha256', expected: 'sha256(command)', observed: row.commandSha256 ?? null })
+  if (!Number.isSafeInteger(row?.responseSequence) || row.responseSequence < 1) problems.push({ field: 'responseSequence', expected: 'positive integer', observed: row?.responseSequence ?? null })
+  const times = ['issuedAt', 'stdinAcknowledgedAt', 'observedAt'].map((key) => Date.parse(row?.[key] ?? ''))
+  const startedAt = Date.parse(run?.startedAt ?? '')
+  const readyAt = Date.parse(run?.generationReadyAt ?? '')
+  if (![...times, startedAt, readyAt].every(Number.isFinite) ||
+      !(startedAt <= times[0] && times[0] <= times[1] && times[1] <= times[2] && times[2] <= readyAt)) {
+    problems.push({ field: 'commandWindow', expected: `${run?.startedAt ?? '?'} <= issuedAt <= stdinAcknowledgedAt <= observedAt <= ${run?.generationReadyAt ?? '?'}`, observed: { issuedAt: row?.issuedAt ?? null, stdinAcknowledgedAt: row?.stdinAcknowledgedAt ?? null, observedAt: row?.observedAt ?? null } })
+  }
+  return problems
+}
+
+function fixtureAnchorProblems(anchor, { sourceSha, run, anchorSha256, snapshotPosition }) {
+  if (!anchor || typeof anchor !== 'object' || Array.isArray(anchor)) return [{ field: 'fixtureAnchor', expected: 'bound anchor object', observed: null }]
+  const problems = []
+  const requireField = (field, expected, { nullExpected = false } = {}) => {
+    const observed = anchor[field]
+    if (nullExpected ? observed !== null : observed !== expected) problems.push({ field: `fixtureAnchor.${field}`, expected, observed: observed ?? null })
+  }
+  requireField('schema', REACH_FIXTURE_CONTRACT.anchorSchema)
+  requireField('sourceSha', sourceSha)
+  requireField('runId', run?.runId)
+  requireField('generationId', null, { nullExpected: true })
+  requireField('leaseId', null, { nullExpected: true })
+  requireField('worldKey', run?.worldKey)
+  requireField('worldEpoch', run?.worldEpoch)
+  requireField('snapshotPath', REACH_FIXTURE_CONTRACT.anchorSnapshotPath)
+  requireField('snapshotSha256', anchorSha256)
+  requireField('positionSource', REACH_FIXTURE_CONTRACT.anchorPositionSource)
+  requireField('coordinateRule', REACH_FIXTURE_CONTRACT.coordinateRule)
+  if (!isDeepStrictEqual(anchor.offsets, REACH_FIXTURE_CONTRACT.offsets)) problems.push({ field: 'fixtureAnchor.offsets', expected: REACH_FIXTURE_CONTRACT.offsets, observed: anchor.offsets ?? null })
+  if (!samePosition(anchor.initialPosition, snapshotPosition)) problems.push({ field: 'fixtureAnchor.initialPosition', expected: snapshotPosition, observed: anchor.initialPosition ?? null })
+  return problems
+}
+
+function fixtureAnchorDocumentProblems(anchor, { sourceSha, run, readyAt }) {
+  if (!anchor || typeof anchor !== 'object' || Array.isArray(anchor)) return [{ field: 'anchorSnapshot', expected: 'parsed anchor snapshot', observed: null }]
+  const problems = []
+  const requireField = (field, expected, { nullExpected = false } = {}) => {
+    const observed = anchor[field]
+    if (nullExpected ? observed !== null : observed !== expected) problems.push({ field: `anchorSnapshot.${field}`, expected, observed: observed ?? null })
+  }
+  requireField('schema', REACH_FIXTURE_CONTRACT.anchorSnapshotSchema)
+  requireField('sourceSha', sourceSha)
+  requireField('bootSourceSha', sourceSha)
+  requireField('runId', run?.runId)
+  requireField('generationId', null, { nullExpected: true })
+  requireField('worldKey', run?.worldKey)
+  requireField('worldEpoch', run?.worldEpoch)
+  if (positionVector(anchor.initialPosition) === null) problems.push({ field: 'anchorSnapshot.initialPosition', expected: 'finite x/y/z', observed: anchor.initialPosition ?? null })
+  const capturedAt = Date.parse(anchor.capturedAt ?? '')
+  if (!Number.isFinite(capturedAt) || (Number.isFinite(readyAt) && capturedAt > readyAt)) {
+    problems.push({ field: 'anchorSnapshot.capturedAt', expected: `finite and <= ${run?.generationReadyAt ?? '?'}`, observed: anchor.capturedAt ?? null })
+  }
+  return problems
+}
+
+function fixtureReceiptProblems(row, receipt, { sourceSha, run, serverStart }) {
+  const problems = []
+  const requireField = (field, expected, { nullExpected = false } = {}) => {
+    const observed = receipt?.[field]
+    if (nullExpected ? observed !== null : observed !== expected) problems.push({ field: `stdout.${field}`, expected, observed: observed ?? null })
+  }
+  requireField('schema', 'vtr-server-stdout-observation/v1')
+  requireField('sourceSha', sourceSha)
+  requireField('runId', run?.runId)
+  requireField('generationId', null, { nullExpected: true })
+  requireField('worldKey', run?.worldKey)
+  requireField('serverId', serverStart?.serverId)
+  requireField('serverPid', serverStart?.pid)
+  requireField('port', serverStart?.port)
+  requireField('levelName', serverStart?.levelName)
+  requireField('streamSource', 'spawned-server-stdout')
+  requireField('sequence', row?.responseSequence)
+  requireField('line', row?.serverOutput)
+  requireField('receivedAt', row?.observedAt)
+  if (typeof row?.serverOutput === 'string' && sha256(Buffer.from(row.serverOutput, 'utf8')) !== receipt?.lineSha256) {
+    problems.push({ field: 'stdout.lineSha256', expected: 'sha256(serverOutput)', observed: receipt?.lineSha256 ?? null })
+  }
+  return problems
+}
+
+/**
+ * Verify the run-scoped fixture evidence: exactly one absolute v2 fill and one
+ * absolute v2 setblock anchored to the preserved frozen spawn snapshot, with
+ * run/world/generation-window identity and unique spawned-stdout receipts.
+ */
+export function inspectFixtureWitnessSetup({
+  fixtureCommands, missionItem, desiredPredicate, witness,
+  sourceSha, run, serverStart, anchor, anchorBytes, initialSnapshot, stdoutEvents,
+}) {
   const missionBlock = normalizedBlockName(missionItem)
   const predicateItem = normalizedBlockName(desiredPredicate?.proposition?.item)
   const rawSources = desiredPredicate?.proposition?.sourceNames
   const sourceNames = Array.isArray(rawSources) ? [...new Set(rawSources.map(normalizedBlockName).filter(Boolean))] : []
   const committedSources = sourceNames.length > 0 ? sourceNames : [predicateItem].filter(Boolean)
-  const matchingMission = missionBlock !== null && predicateItem !== null && missionBlock === predicateItem
-  const setupAfterJoin = fixtureCommands.filter((row) => /execute\s+at\s+AI_Buddy\s+run\s+setblock\b/iu.test(String(row?.command ?? '')))
-  // Leaf/Paper command responses vary between "Changed block at" and
-  // "Changed the block at". fixture-commands.jsonl stores the exact console
-  // text in `serverOutput` (legacy archives may call that field `result`).
-  const changed = setupAfterJoin.filter((row) => /\bChanged(?: the)? block at\b/i.test(fixtureCommandOutput(row)))
-  const observedBlocks = changed.map((row) => ({ block: blockFromSetblockCommand(row.command), command: row.command, result: fixtureCommandOutput(row) }))
-  const witnessCoordinatesValid = witness && Number.isSafeInteger(witness.x) && Number.isSafeInteger(witness.y) && Number.isSafeInteger(witness.z)
+  const detail = { missionBlock, predicateItem, committedSources }
+  const incomplete = (reason, extra = {}) => ({ status: 'INCOMPLETE', reason, ...detail, ...extra })
+  const fail = (reason, extra = {}) => ({ status: 'FAIL', reason, ...detail, ...extra })
+
   if (missionBlock === null || predicateItem === null || committedSources.length === 0) {
-    return { status: 'INCOMPLETE', reason: 'Mission item or committed Reach source names are absent', missionBlock, predicateItem, committedSources, observedBlocks }
+    return incomplete('Mission item or committed Reach source names are absent')
   }
-  if (!matchingMission) {
-    return { status: 'FAIL', reason: 'Mission item and committed Reach predicate item disagree', missionBlock, predicateItem, committedSources, observedBlocks }
+  if (missionBlock !== predicateItem) return fail('Mission item and committed Reach predicate item disagree')
+  if (!witness || !Number.isSafeInteger(witness.x) || !Number.isSafeInteger(witness.y) || !Number.isSafeInteger(witness.z)) {
+    return incomplete('committed witness has no integer block coordinates')
   }
-  if (!witnessCoordinatesValid) {
-    return { status: 'INCOMPLETE', reason: 'committed witness has no integer block coordinates', missionBlock, predicateItem, committedSources, observedBlocks }
+
+  const commands = Array.isArray(fixtureCommands) ? fixtureCommands : []
+  const nonV2 = commands.filter((row) => row?.schema !== REACH_FIXTURE_CONTRACT.commandSchema)
+  const legacyOrRelative = commands.filter((row) => FIXTURE_LEGACY_OR_RELATIVE_RE.test(String(row?.command ?? '')))
+  const fills = commands.filter((row) => row?.schema === REACH_FIXTURE_CONTRACT.commandSchema && row?.kind === 'fill')
+  const setblocks = commands.filter((row) => row?.schema === REACH_FIXTURE_CONTRACT.commandSchema && row?.kind === 'setblock')
+  const foreignKinds = commands.filter((row) => row?.schema === REACH_FIXTURE_CONTRACT.commandSchema && !['fill', 'setblock'].includes(row?.kind))
+  if (commands.length === 0) return incomplete('fixture command journal is empty')
+  if (nonV2.length > 0 || foreignKinds.length > 0 || legacyOrRelative.length > 0) {
+    return fail('fixture journal contains legacy, relative, selector, or foreign-schema commands', {
+      nonV2Rows: nonV2.length, foreignKindRows: foreignKinds.length, legacyOrRelativeRows: legacyOrRelative.length,
+      offending: [...nonV2, ...foreignKinds, ...legacyOrRelative].map((row) => ({ schema: row?.schema ?? null, kind: row?.kind ?? null, commandSha256: row?.commandSha256 ?? null })),
+    })
   }
-  if (changed.length === 0) {
-    return { status: 'INCOMPLETE', reason: 'no successful post-join setblock source is recorded', missionBlock, predicateItem, committedSources, observedBlocks }
+  if (fills.length !== 1 || setblocks.length !== 1 || commands.length !== 2) {
+    return fail('fixture journal must contain exactly one v2 fill and one v2 setblock', { fillRows: fills.length, setblockRows: setblocks.length, totalRows: commands.length })
   }
-  const matched = observedBlocks.find((entry) => entry.block !== null && committedSources.includes(entry.block))
-  if (!matched) {
-    return { status: 'INCOMPLETE', reason: 'successful post-join setblock source does not match a committed Reach source name', missionBlock, predicateItem, committedSources, observedBlocks }
+
+  const anchorSha256 = Buffer.isBuffer(anchorBytes) ? sha256(anchorBytes) : null
+  const readyAt = Date.parse(run?.generationReadyAt ?? '')
+  const contextProblems = []
+  if (typeof sourceSha !== 'string' || !SHA_RE.test(sourceSha)) contextProblems.push('probe source commit is absent or malformed')
+  if (typeof run?.runId !== 'string' || !RUN_ID_RE.test(run.runId)) contextProblems.push('probe runId is absent or malformed')
+  if (typeof run?.worldKey !== 'string' || parseWorldKey(run.worldKey) === null) contextProblems.push('probe run worldKey is absent or malformed')
+  if (typeof run?.generationId !== 'string' || run.generationId.length === 0) contextProblems.push('probe generationId is absent')
+  if (!Number.isFinite(Date.parse(run?.startedAt ?? '')) || !Number.isFinite(readyAt)) contextProblems.push('probe run startedAt/generationReadyAt window is absent or malformed')
+  if (typeof serverStart?.pid !== 'number' || !Number.isSafeInteger(serverStart.pid) || typeof serverStart?.serverId !== 'string' ||
+      !Number.isSafeInteger(serverStart?.port) || typeof serverStart?.levelName !== 'string' || !Number.isFinite(Date.parse(serverStart?.spawnedAt ?? ''))) {
+    contextProblems.push('server-start identity fields are absent or malformed')
   }
-  return { status: 'PASS', missionBlock, predicateItem, committedSources, observedBlock: matched.block, command: matched.command, result: matched.result, witness }
+  if (anchor === null || anchor === undefined || !Buffer.isBuffer(anchorBytes)) contextProblems.push('frozen fixture anchor snapshot is absent')
+  if (initialSnapshot === null || initialSnapshot === undefined) contextProblems.push('runner initial snapshot is absent')
+  if (!Array.isArray(stdoutEvents)) contextProblems.push('spawned-stdout event journal is absent')
+  if (contextProblems.length > 0) return incomplete('run-scoped fixture binding inputs are unavailable', { problems: contextProblems })
+
+  const anchorDocProblems = fixtureAnchorDocumentProblems(anchor, { sourceSha, run, readyAt })
+  if (anchorDocProblems.length > 0) return fail('preserved frozen anchor snapshot contradicts run identity', { problems: anchorDocProblems })
+  const spawnPosition = positionVector(anchor.initialPosition)
+  if (!samePosition(initialSnapshot?.initialPosition, spawnPosition)) {
+    return fail('final initial snapshot does not retain the exact fixture anchor position', { anchorPosition: spawnPosition, initialSnapshotPosition: initialSnapshot?.initialPosition ?? null })
+  }
+  if (parseWorldKey(run.worldKey).serverId !== serverStart.serverId) {
+    return fail('server identity disagrees with the run world key', { runServerId: parseWorldKey(run.worldKey).serverId, serverStartServerId: serverStart.serverId })
+  }
+
+  const expected = {
+    fillFrom: fixtureDerivedBlock(spawnPosition, REACH_FIXTURE_CONTRACT.offsets.fillFrom),
+    fillTo: fixtureDerivedBlock(spawnPosition, REACH_FIXTURE_CONTRACT.offsets.fillTo),
+    witness: fixtureDerivedBlock(spawnPosition, REACH_FIXTURE_CONTRACT.offsets.witness),
+  }
+  if (expected.fillFrom === null || expected.fillTo === null || expected.witness === null) {
+    return fail('pinned fixture offsets produce unsafe block coordinates from the anchor position', { spawnPosition })
+  }
+  const expectedFillCount = (Math.abs(expected.fillTo.x - expected.fillFrom.x) + 1)
+    * (Math.abs(expected.fillTo.y - expected.fillFrom.y) + 1)
+    * (Math.abs(expected.fillTo.z - expected.fillFrom.z) + 1)
+  const expectedFillCommand = `fill ${expected.fillFrom.x} ${expected.fillFrom.y} ${expected.fillFrom.z} ${expected.fillTo.x} ${expected.fillTo.y} ${expected.fillTo.z} ${REACH_FIXTURE_CONTRACT.fillBlock}`
+  const expectedSetblockRe = /^setblock\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)$/iu
+  if (!samePosition(expected.witness, witness)) {
+    return fail('committed witness differs from the pinned fixture witness derived from the frozen anchor', { committedWitness: witness, expectedWitness: expected.witness, spawnPosition })
+  }
+
+  const fillRow = fills[0]
+  const setblockRow = setblocks[0]
+  const context = { sourceSha, run, serverStart }
+  const problems = []
+  for (const [label, row] of [['fill', fillRow], ['setblock', setblockRow]]) {
+    for (const problem of fixtureCommandBindingProblems(row, context)) problems.push({ row: label, ...problem })
+    for (const problem of fixtureAnchorProblems(row?.fixtureAnchor, { ...context, anchorSha256, snapshotPosition: spawnPosition })) problems.push({ row: label, ...problem })
+    const receipts = stdoutEvents.filter((entry) => entry?.sequence === row?.responseSequence)
+    if (receipts.length !== 1) {
+      problems.push({ row: label, field: 'stdout.sequence', expected: 'exactly one matching spawned-stdout receipt', observed: receipts.length })
+    } else {
+      for (const problem of fixtureReceiptProblems(row, receipts[0], context)) problems.push({ row: label, ...problem })
+    }
+  }
+  if (!isDeepStrictEqual(fillRow.fixtureAnchor, setblockRow.fixtureAnchor)) {
+    problems.push({ field: 'fixtureAnchor', expected: 'fill and setblock rows share one identical anchor binding', observed: 'rows differ' })
+  }
+  if (fillRow.command !== expectedFillCommand) {
+    problems.push({ row: 'fill', field: 'command', expected: expectedFillCommand, observed: fillRow.command ?? null })
+  }
+  const fillResponse = /\bSuccessfully filled\s+(\d+)\s+blocks\b/iu.exec(String(fillRow.serverOutput ?? ''))
+  if (fillResponse === null || Number(fillResponse[1]) !== expectedFillCount) {
+    problems.push({ row: 'fill', field: 'serverOutput', expected: `Successfully filled ${expectedFillCount} blocks`, observed: fillRow.serverOutput ?? null })
+  }
+  const setblockMatch = expectedSetblockRe.exec(String(setblockRow.command ?? ''))
+  const setblockPosition = setblockMatch === null ? null : { x: Number(setblockMatch[1]), y: Number(setblockMatch[2]), z: Number(setblockMatch[3]) }
+  const setblockBlock = setblockMatch === null ? null : normalizedBlockName(setblockMatch[4])
+  if (setblockPosition === null || !samePosition(setblockPosition, expected.witness)) {
+    problems.push({ row: 'setblock', field: 'command', expected: `setblock ${expected.witness.x} ${expected.witness.y} ${expected.witness.z} <committed-source>`, observed: setblockRow.command ?? null })
+  } else if (setblockBlock === null || !committedSources.includes(setblockBlock)) {
+    problems.push({ row: 'setblock', field: 'command', expected: `block in committed sources ${JSON.stringify(committedSources)}`, observed: setblockMatch?.[4] ?? null })
+  }
+  const setblockResponse = /\bChanged(?: the)? block at\s+(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\b/iu.exec(String(setblockRow.serverOutput ?? ''))
+  const responsePosition = setblockResponse === null ? null : { x: Number(setblockResponse[1]), y: Number(setblockResponse[2]), z: Number(setblockResponse[3]) }
+  if (responsePosition === null || !samePosition(responsePosition, expected.witness)) {
+    problems.push({ row: 'setblock', field: 'serverOutput', expected: `Changed the block at ${expected.witness.x}, ${expected.witness.y}, ${expected.witness.z}`, observed: setblockRow.serverOutput ?? null })
+  }
+  if (problems.length > 0) return fail('v2 fixture command rows contradict run identity, anchor, window, command, or receipt evidence', { problems })
+
+  return {
+    status: 'PASS',
+    ...detail,
+    observedBlock: setblockBlock,
+    command: setblockRow.command,
+    result: setblockRow.serverOutput,
+    fillCommand: fillRow.command,
+    fillResult: fillRow.serverOutput,
+    fillBlocks: expectedFillCount,
+    witness,
+    anchor: { path: REACH_FIXTURE_CONTRACT.anchorSnapshotPath, sha256: anchorSha256, position: spawnPosition },
+    receipts: { fill: fillRow.responseSequence, setblock: setblockRow.responseSequence },
+  }
 }
 
 function inventoriesEqual(left, right) {
@@ -2281,6 +2521,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
     'runner/buddy.log',
     'runner/generation-bundle.mjs',
     'runner/initial-snapshot.json',
+    'runner/fixture-anchor-snapshot.json',
     'runner/jev-run.jsonl',
     'runner/jev-calls.jsonl',
     'runner/jev-decisions.jsonl',
@@ -2352,17 +2593,20 @@ export async function validateEvidenceArchive(archive, repo = null) {
   }
 
   const docs = {}
-  for (const path of ['probe.json', 'packaging-report.json', 'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/milestone-predicates.json', 'server/server-start.json']) {
+  for (const path of ['probe.json', 'packaging-report.json', 'runner/acceptance.json', 'runner/initial-snapshot.json', 'runner/fixture-anchor-snapshot.json', 'runner/milestone-predicates.json', 'server/server-start.json']) {
     if (!present.has(path)) continue
     try { docs[path] = readJson(archive, path) } catch { /* parse error is already reported above */ }
   }
   let events = []
   let fixtureCommands = []
+  let stdoutEvents = []
   try { if (present.has('runner/jev-run.jsonl')) events = parseJsonl(archive, 'runner/jev-run.jsonl') } catch { /* reported above */ }
   try { if (present.has('server/fixture-commands.jsonl')) fixtureCommands = parseJsonl(archive, 'server/fixture-commands.jsonl') } catch { /* reported above */ }
+  try { if (present.has('server/leaf-stdout-events.jsonl')) stdoutEvents = parseJsonl(archive, 'server/leaf-stdout-events.jsonl') } catch { /* reported above */ }
   const probe = docs['probe.json']
   const acceptance = docs['runner/acceptance.json']
   const snapshot = docs['runner/initial-snapshot.json']
+  const anchorSnapshot = docs['runner/fixture-anchor-snapshot.json']
   const predicates = docs['runner/milestone-predicates.json']
   const serverStart = docs['server/server-start.json']
 
@@ -3336,15 +3580,23 @@ export async function validateEvidenceArchive(archive, repo = null) {
     if (!RUN_ID_RE.test(String(runId)) || !fixtureCommands.length) incomplete('fixture:run-scoped', 'fixture command log is empty or runId is invalid')
     else {
       const witness = transition.witness?.target
+      const anchorPath = 'runner/fixture-anchor-snapshot.json'
       const fixtureSetup = inspectFixtureWitnessSetup({
         fixtureCommands,
         missionItem: probe.mission?.item,
         desiredPredicate: transition.desiredPredicate,
         witness,
+        sourceSha,
+        run,
+        serverStart,
+        anchor: anchorSnapshot ?? null,
+        anchorBytes: listing.files.includes(anchorPath) ? readFileSync(join(archive, anchorPath)) : null,
+        initialSnapshot: snapshot ?? null,
+        stdoutEvents,
       })
-      if (fixtureSetup.status === 'PASS') pass('fixture:relative-witness-setup', { witness: transition.witness.witnessId, ...fixtureSetup })
-      else if (fixtureSetup.status === 'FAIL') fail('fixture:relative-witness-setup', fixtureSetup.reason, fixtureSetup)
-      else incomplete('fixture:relative-witness-setup', fixtureSetup.reason, fixtureSetup)
+      if (fixtureSetup.status === 'PASS') pass('fixture:anchored-witness-setup', { witness: transition.witness.witnessId, ...fixtureSetup })
+      else if (fixtureSetup.status === 'FAIL') fail('fixture:anchored-witness-setup', fixtureSetup.reason, fixtureSetup)
+      else incomplete('fixture:anchored-witness-setup', fixtureSetup.reason, fixtureSetup)
       const rejectedCommands = fixtureCommands.filter((row) => /Rejected:/i.test(fixtureCommandOutput(row))).length
       pass('fixture:operator-command-journal', { recordedCommands: fixtureCommands.length, rejectedNoMutationAttempts: rejectedCommands })
     }

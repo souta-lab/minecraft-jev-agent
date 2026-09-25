@@ -33,6 +33,43 @@ function regionPathForWitness(position) {
 }
 
 function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecycle = false, omitEgress = false, omitFixtureSource = false, omitFreshAttestation = false, staleFreshAttestation = false, oldFreshPhraseOnly = false, tamperFreshArtifactHash = false, externalAttempt = false, tamperEgress = false, duplicateGuardProcess = false, egressCloseOffset = 49, tamperFixtureSourceHash = false, badFixtureObservation = false, badLifecycleObservation = false, omitStopObservations = false, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, localFallbackDecision = false, deprecatedModelCallsPerMechanicalStep = 0, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
+  // The runner derives the committed witness as floor(anchorPosition + {16,0,2}),
+  // so synthesize the frozen spawn that produces the requested witness block.
+  const spawn = { x: witnessPosition.x - 15.5, y: witnessPosition.y, z: witnessPosition.z - 1.5 }
+  const derivedBlock = (offset) => ({ x: Math.floor(spawn.x + offset.x), y: Math.floor(spawn.y + offset.y), z: Math.floor(spawn.z + offset.z) })
+  const fillFrom = derivedBlock({ x: 1, y: -1, z: -3 })
+  const fillTo = derivedBlock({ x: 24, y: -1, z: 3 })
+  const fillBlockCount = (fillTo.x - fillFrom.x + 1) * (fillTo.y - fillFrom.y + 1) * (fillTo.z - fillFrom.z + 1)
+  const anchorSnapshot = {
+    schema: 'vtr-reach-initial-snapshot/v1', sourceSha: SOURCE, bootSourceSha: SOURCE,
+    runId: RUN, generationId: null, worldKey: WORLD, worldEpoch: 4,
+    capturedAt: iso(3), initialInventory: {}, initialPosition: spawn,
+  }
+  const anchorBytes = Buffer.from(`${JSON.stringify(anchorSnapshot, null, 2)}\n`)
+  const fixtureAnchor = {
+    schema: 'vtr-reach-fixture-anchor/v1', sourceSha: SOURCE, runId: RUN,
+    generationId: null, leaseId: null, worldKey: WORLD, worldEpoch: 4,
+    snapshotPath: 'runner/fixture-anchor-snapshot.json', snapshotSha256: digest(anchorBytes),
+    positionSource: 'runner/fixture-anchor-snapshot.json.initialPosition', initialPosition: spawn,
+    coordinateRule: 'floor(position + integer offset)',
+    offsets: { fillFrom: { x: 1, y: -1, z: -3 }, fillTo: { x: 24, y: -1, z: 3 }, witness: { x: 16, y: 0, z: 2 } },
+  }
+  const fillCommand = `fill ${fillFrom.x} ${fillFrom.y} ${fillFrom.z} ${fillTo.x} ${fillTo.y} ${fillTo.z} minecraft:stone`
+  const setblockCommand = `setblock ${witnessPosition.x} ${witnessPosition.y} ${witnessPosition.z} minecraft:oak_log`
+  const fillOutput = `[03:00:03 INFO]: Successfully filled ${fillBlockCount} blocks`
+  const setblockOutput = `[03:00:04 INFO]: Changed the block at ${witnessPosition.x}, ${witnessPosition.y}, ${witnessPosition.z}`
+  const fixtureCommandRow = (kind, command, serverOutput, issuedAt, acknowledgedAt, observedAt, responseSequence) => ({
+    schema: 'vtr-reach-fixture-command/v2', kind, sourceSha: SOURCE, runId: RUN,
+    generationId: null, leaseId: null, worldKey: WORLD, serverId: '127.0.0.1:25565',
+    serverPid: 502, phase: 'resident-frozen-before-generation-ready', fixtureAnchor,
+    issuedAt, stdinAcknowledgedAt: acknowledgedAt, command,
+    commandSha256: digest(Buffer.from(command)), serverOutput, observedAt,
+    responsePid: 502, responseSequence,
+  })
+  const fixtureCommandRows = [
+    fixtureCommandRow('fill', fillCommand, fillOutput, iso(3), iso(3.1), iso(3.2), 3),
+    fixtureCommandRow('setblock', setblockCommand, setblockOutput, iso(3.5), iso(3.6), iso(3.7), 4),
+  ]
   const inputDir = join(root, 'captured')
   const extraDir = join(root, 'extra')
   const archive = join(root, 'archive')
@@ -178,10 +215,10 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
       dimension: 'overworld', levelName: 'vtr-reach-live', seed: '4312', minecraftVersion: '1.21.4', dataVersion: 4189,
       difficulty: 'normal', gameMode: 'survival', botUsername: 'AI_Buddy', botUuid: '00000000-0000-0000-0000-000000000001',
       startedAt: iso(0), generationReadyAt: iso(5), shutdownAt: iso(48),
-      finalPosition: { x: 1.5, y: 64, z: 1.5 },
+      finalPosition: { x: spawn.x + 1, y: spawn.y, z: spawn.z + 1 },
     },
-    mission: { ...MISSION, initialInventory: {}, finalInventory: {}, initialPosition: { x: 0.5, y: 64, z: 0.5 }, finalPosition: { x: 1.5, y: 64, z: 1.5 } },
-    fixture: { block: 'oak_log', position: witnessPosition, transitionStartPosition: { x: 0.5, y: 64, z: 0.5 } },
+    mission: { ...MISSION, initialInventory: {}, finalInventory: {}, initialPosition: spawn, finalPosition: { x: spawn.x + 1, y: spawn.y, z: spawn.z + 1 } },
+    fixture: { block: 'oak_log', position: witnessPosition, transitionStartPosition: spawn },
     configuredNoLlmProbe: {
       fallback: { fallbackPolicyWasExplicitlyConfigured: true, silentFallbackOnProviderFailure: false, JevDecisionInvoked: false },
     },
@@ -251,14 +288,17 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
   const preparingLine = '[21:50:53 INFO]: Preparing level "vtr-reach-live"'
   const doneLine = '[21:51:02 INFO]: Done (5.0s)! For help, type "help"'
   const stdoutReceipt = (sequence, receivedAt, line) => ({ schema: 'vtr-server-stdout-observation/v1', sourceSha: SOURCE,
-    runId: RUN, serverId: '127.0.0.1:25565', serverPid: 502, port: 25565, levelName: 'vtr-reach-live', sequence,
+    runId: RUN, generationId: null, worldKey: WORLD, serverId: '127.0.0.1:25565', serverPid: 502, port: 25565, levelName: 'vtr-reach-live', sequence,
     receivedAt, monotonicNs: String(BigInt(sequence) * 1000000n), lineSha256: digest(Buffer.from(line)),
+    rawLineSha256: digest(Buffer.from(line)),
     streamSource: 'spawned-server-stdout', line })
   const stdoutRows = oldFreshPhraseOnly ? [
     stdoutReceipt(1, iso(1), 'No existing world data, creating new world'),
   ] : [
     stdoutReceipt(1, iso(1), preparingLine),
     stdoutReceipt(2, iso(2), doneLine),
+    stdoutReceipt(3, iso(3.2), fillOutput),
+    stdoutReceipt(4, iso(3.7), setblockOutput),
   ]
   const freshWorldAttestation = {
     schema: 'vtr-fresh-world-attestation/v1',
@@ -334,7 +374,8 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     'runner/run-metadata.json': writeJson(join(extraDir, 'run-metadata.json'), runMetadata),
     'runner/acceptance.json': writeJson(join(extraDir, 'acceptance.json'), { gitCommit: SOURCE, checkoutHead: SOURCE, runId: RUN, generationId: GENERATION, worldEpoch: 4, levelName: 'vtr-reach-live', seed: '4312' }),
     'runner/generation-bundle.mjs': writeFixtureFile(extraDir, 'bundle.mjs', bundle),
-    'runner/initial-snapshot.json': writeJson(join(extraDir, 'initial-snapshot.json'), { runId: RUN, generationId: GENERATION, bootSourceSha: SOURCE, buildHash, worldEpoch: 4, initialInventory: {} }),
+    'runner/initial-snapshot.json': writeJson(join(extraDir, 'initial-snapshot.json'), { ...anchorSnapshot, generationId: GENERATION, buildHash }),
+    'runner/fixture-anchor-snapshot.json': writeFixtureFile(extraDir, 'fixture-anchor-snapshot.json', anchorBytes),
     'runner/final-snapshot.json': writeJson(join(extraDir, 'final-snapshot.json'), { runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldEpoch: 4, finalInventory: {} }),
     'runner/milestone-predicates.json': writeJson(join(extraDir, 'milestone-predicates.json'), { runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldEpoch: 4 }),
     'runner/mercury-calls.jsonl': writeFixtureFile(extraDir, 'mercury-calls.jsonl', journalSources['mercury-calls']),
@@ -342,7 +383,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     'runner/no-llm-egress-audit.json': writeFixtureFile(extraDir, 'no-llm-egress-audit.json', egressText),
     'proofs/no-double-authority-fixture.json': writeJson(join(extraDir, 'no-double-authority-fixture.json'), authorityFixtureReport),
     'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts': writeFixtureFile(extraDir, 'test-vtr-reach-executor-dispatch-authority.mts', authorityFixtureSourceBytes),
-    'server/fixture-commands.jsonl': writeFixtureFile(extraDir, 'fixture-commands.jsonl', JSON.stringify({ runId: RUN, generationId: GENERATION, sourceSha: SOURCE, worldEpoch: 4, command: 'setblock' }) + '\n'),
+    'server/fixture-commands.jsonl': writeFixtureFile(extraDir, 'fixture-commands.jsonl', `${fixtureCommandRows.map((row) => JSON.stringify(row)).join('\n')}\n`),
     'server/leaf-latest.log': writeFixtureFile(extraDir, 'leaf.log', oldFreshPhraseOnly
       ? 'Starting minecraft server version 1.21.4\nNo existing world data, creating new world\nUUID of player AI_Buddy is 00000000-0000-0000-0000-000000000001\n'
       : `Starting minecraft server version 1.21.4\n${preparingLine}\n${doneLine}\nUUID of player AI_Buddy is 00000000-0000-0000-0000-000000000001\n`),

@@ -23,6 +23,7 @@ import {
   validateExactSourceWorkspaceInstall,
   inspectNodeModulesLinkContainment,
   issueLeafCommand,
+  buildReachFixtureGeometry,
   validatePortPolicy,
   writeSetupFailureArtifact,
 } from './run-vtr-reach-live-probe.mjs'
@@ -70,6 +71,159 @@ describe('Reach live probe caller pure contracts', () => {
       expect(rows.at(-1)).toMatchObject({ phase: 'fixture.console-smoke', outputRowCount: 0, stdinDestroyed: false })
       expect(rows[0].commandSha256).toMatch(/^[a-f0-9]{64}$/u)
       expect(JSON.stringify(rows)).not.toContain('time query daytime')
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Reach fixture geometry derives pinned absolute commands from the frozen spawn anchor', () => {
+    const geometry = buildReachFixtureGeometry({ x: 2.5, y: -60, z: 7.5 })
+    expect(geometry).toEqual({
+      coordinateRule: 'floor(position + integer offset)',
+      offsets: {
+        fillFrom: { x: 1, y: -1, z: -3 },
+        fillTo: { x: 24, y: -1, z: 3 },
+        witness: { x: 16, y: 0, z: 2 },
+      },
+      fillFrom: { x: 3, y: -61, z: 4 },
+      fillTo: { x: 26, y: -61, z: 10 },
+      fillBlockCount: 168,
+      witness: { x: 18, y: -60, z: 9 },
+      fillCommand: 'fill 3 -61 4 26 -61 10 minecraft:stone',
+      setblockCommand: 'setblock 18 -60 9 minecraft:oak_log',
+    })
+  })
+
+  test('Reach fixture geometry floors fractional and negative spawn coordinates', () => {
+    const geometry = buildReachFixtureGeometry({ x: -0.5, y: 63.9, z: -10.1 })
+    expect(geometry.fillFrom).toEqual({ x: 0, y: 62, z: -14 })
+    expect(geometry.fillTo).toEqual({ x: 23, y: 62, z: -8 })
+    expect(geometry.witness).toEqual({ x: 15, y: 63, z: -9 })
+    expect(geometry.fillBlockCount).toBe(168)
+    expect(geometry.fillCommand).toBe('fill 0 62 -14 23 62 -8 minecraft:stone')
+    expect(geometry.setblockCommand).toBe('setblock 15 63 -9 minecraft:oak_log')
+  })
+
+  test('Reach fixture geometry rejects non-finite or unsafe spawn anchors', () => {
+    expect(() => buildReachFixtureGeometry(null)).toThrow(/finite exact-source frozen player position/iu)
+    expect(() => buildReachFixtureGeometry({ x: 0, y: 64 })).toThrow(/finite exact-source frozen player position/iu)
+    expect(() => buildReachFixtureGeometry({ x: NaN, y: 0, z: 0 })).toThrow(/finite/iu)
+    expect(() => buildReachFixtureGeometry({ x: Infinity, y: 0, z: 0 })).toThrow(/finite/iu)
+    expect(() => buildReachFixtureGeometry({ x: Number.MAX_SAFE_INTEGER, y: 0, z: 0 })).toThrow(/unsafe absolute block coordinate/iu)
+  })
+
+  function leafFixtureServer() {
+    const stdin = new PassThrough()
+    const server = {
+      handle: { child: { stdin, exitCode: null, signalCode: null } },
+      serverLogLines: [],
+      stdoutReceipts: [],
+      serverStart: { pid: 4321 },
+    }
+    return { stdin, server }
+  }
+
+  const FIXTURE_IDENTITY = { sourceSha: 'b'.repeat(40), runId: 'run-fixture-receipt', generationId: null, worldKey: '127.0.0.1:25577|overworld|1' }
+
+  function emitLeafResponse(server, line, { stream = 'spawned-child-stdout', receiptCopies = 1 } = {}) {
+    const ts = new Date().toISOString()
+    server.serverLogLines.push({ line, ts, stream })
+    for (let index = 0; index < receiptCopies; index += 1) {
+      server.stdoutReceipts.push({
+        line,
+        ts,
+        sequence: server.stdoutReceipts.length + 1,
+        monotonicNs: '1',
+        lineSha256: 'f'.repeat(64),
+        rawLineSha256: 'f'.repeat(64),
+      })
+    }
+  }
+
+  test('Leaf fixture response binds its unique spawned-stdout receipt', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-receipt-'))
+    const attemptRoot = join(parent, 'attempt')
+    const { stdin, server } = leafFixtureServer()
+    try {
+      const pending = issueLeafCommand(server, 'fill 3 -61 4 26 -61 10 minecraft:stone', /\bSuccessfully filled 168 blocks\b/iu, {
+        timeoutMs: 10_000,
+        phase: 'fixture.fill',
+        identity: FIXTURE_IDENTITY,
+        attemptRoot,
+      })
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Successfully filled 168 blocks'), 20)
+      const result = await pending
+      expect(result.serverOutput).toBe('[00:00:01 INFO]: Successfully filled 168 blocks')
+      expect(result.responseSequence).toBe(1)
+      expect(result.responsePid).toBe(4321)
+      expect(Date.parse(result.observedAt)).not.toBeNaN()
+      const rows = readFileSync(join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl'), 'utf8')
+        .trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.map((row) => row.event)).toEqual(['dispatch-started', 'stdin-write-acknowledged', 'response-observed'])
+      expect(rows.at(-1)).toMatchObject({
+        phase: 'fixture.fill',
+        kind: 'fill',
+        responseSequence: 1,
+        serverId: '127.0.0.1:25577',
+        serverPid: 4321,
+        leaseId: null,
+      })
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Leaf fixture response without a spawned-stdout receipt is refused', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-unreceipted-'))
+    const attemptRoot = join(parent, 'attempt')
+    const { stdin, server } = leafFixtureServer()
+    try {
+      const pending = issueLeafCommand(server, 'setblock 18 -60 9 minecraft:oak_log', /\bChanged the block at\b/iu, {
+        timeoutMs: 10_000,
+        phase: 'fixture.setblock',
+        identity: FIXTURE_IDENTITY,
+        attemptRoot,
+      })
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Changed the block at 18, -60, 9', { stream: 'spawned-child-stderr', receiptCopies: 0 }), 20)
+      await expect(pending).rejects.toMatchObject({
+        name: 'LeafFixtureProbeError',
+        code: 'LEAF_FIXTURE_RESPONSE_RECEIPT_MISSING',
+        phase: 'fixture.setblock',
+      })
+      const rows = readFileSync(join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl'), 'utf8')
+        .trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.at(-1)).toMatchObject({
+        event: 'response-unreceipted',
+        matchingStdoutReceipts: 0,
+        responseStream: 'spawned-child-stderr',
+      })
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Leaf fixture response with duplicate stdout receipts is refused', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-dupe-receipt-'))
+    const attemptRoot = join(parent, 'attempt')
+    const { stdin, server } = leafFixtureServer()
+    try {
+      const pending = issueLeafCommand(server, 'setblock 18 -60 9 minecraft:oak_log', /\bChanged the block at\b/iu, {
+        timeoutMs: 10_000,
+        phase: 'fixture.setblock',
+        identity: FIXTURE_IDENTITY,
+        attemptRoot,
+      })
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Changed the block at 18, -60, 9', { receiptCopies: 2 }), 20)
+      await expect(pending).rejects.toMatchObject({
+        name: 'LeafFixtureProbeError',
+        code: 'LEAF_FIXTURE_RESPONSE_RECEIPT_MISSING',
+      })
+      const rows = readFileSync(join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl'), 'utf8')
+        .trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.at(-1)).toMatchObject({ event: 'response-unreceipted', matchingStdoutReceipts: 2 })
     } finally {
       stdin.destroy()
       rmSync(parent, { recursive: true, force: true })
