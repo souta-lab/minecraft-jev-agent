@@ -200,6 +200,16 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
   const legacyCandidate = oakMove('MOVE:oak-log-legacy')
   const claimCalls: Array<{ readonly candidateId: string; readonly authority: string; readonly transitionId: string | null }> = []
   const claimResults: Array<ReturnType<Executor['claim']>> = []
+  const completionEvidence: Array<{
+    readonly actionId: unknown
+    readonly status: unknown
+    readonly failure: unknown
+    readonly verified: unknown
+    readonly progressed: unknown
+    readonly blockRemoved: unknown
+    readonly goalItemCount: unknown
+    readonly ms: unknown
+  }> = []
   const realClaim = executor.claim.bind(executor)
   executor.claim = ((candidate: Candidate, context: Parameters<Executor['claim']>[1] = {}) => {
     claimCalls.push({
@@ -247,7 +257,18 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     logger,
     actionStart: null,
     requestDecision: () => undefined,
-    onReachActionComplete: async () => undefined,
+    onReachActionComplete: async (execution: Record<string, unknown>) => {
+      completionEvidence.push({
+        actionId: execution.actionId,
+        status: execution.status,
+        failure: execution.failure,
+        verified: execution.verified,
+        progressed: execution.progressed,
+        blockRemoved: execution.blockRemoved,
+        goalItemCount: execution.goalItemCount,
+        ms: execution.ms,
+      })
+    },
     buildReachWorldState: () => observedWorld,
     reachIdentity: () => identity,
     reachCandidates: () => ({ candidates: [vtrCandidate], grounded: { candidates: [vtrCandidate] } }),
@@ -302,6 +323,15 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     closeReachTransition.call(controller, ended.outcome, ended.state, 'authority-fixture', ended.cancelIntentId)
     await waitFor(() => executor.current === null && fixture.goalClears() === 1, 'terminal cancellation to release the real VTR Executor lease')
     await Promise.all(claimResults.map(({ completion }) => completion))
+    assert.equal(completionEvidence.length, 1)
+    assert.equal(completionEvidence[0]?.actionId, 'MOVE:oak-log-vtr')
+    assert.equal(completionEvidence[0]?.status, 'cancelled')
+    assert.equal(completionEvidence[0]?.failure, 'cancelled')
+    assert.equal(completionEvidence[0]?.verified, false)
+    assert.equal(completionEvidence[0]?.progressed, false)
+    assert.equal(completionEvidence[0]?.blockRemoved, false)
+    assert.equal(typeof completionEvidence[0]?.goalItemCount, 'number')
+    assert.equal(typeof completionEvidence[0]?.ms, 'number')
 
     const records = readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as {
       source: string

@@ -180,7 +180,7 @@ import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
 import type { ReachControllerResult, ReachRuntimeSnapshot, ReachRoute } from './vtr/reach-controller.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
-import type { ReachRuntimeActionSnapshot, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
+import type { ReachMechanicalActionOutcome, ReachRuntimeActionSnapshot, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
 import { assessReachViability } from './vtr/reach-safety.ts'
 import { createJevReachVtrComposition } from './jev-reach-vtr-composition.ts'
 import type { JevReachRouteDecisionRecord } from './jev-reach-vtr-composition.ts'
@@ -5005,7 +5005,7 @@ export class JevController {
   }
 
   private async onReachActionComplete(
-    result: ExecutionResult,
+    result: ReachMechanicalActionOutcome,
     candidate: Candidate,
     transitionId: string,
     intentId: string,

@@ -232,6 +232,23 @@ describe('VTR Reach production authority seam', () => {
     assert.match(conflictGate, /throw new ExecutionAuthorityConflict/)
   })
 
+  it('passes the typed mechanical outcome through without rebuilding or casting away runtime evidence', () => {
+    const dispatchStart = controller.indexOf('private async dispatchReachIntent(')
+    const dispatchEnd = controller.indexOf('private async releaseUnstartedReachIntent(', dispatchStart)
+    const dispatch = controller.slice(dispatchStart, dispatchEnd)
+    const outcomeStart = controller.indexOf('private async onReachActionComplete(')
+    const outcomeEnd = controller.indexOf('private closeReachTransition(', outcomeStart)
+    const outcomeHandler = controller.slice(outcomeStart, outcomeEnd)
+    assert.match(runtimePortsSource, /completion: Promise<ReachMechanicalActionOutcome>/)
+    assert.match(runtimePortsSource, /readonly (actionId|status|failure|verified|progressed):/)
+    assert.match(runtimeAdapter, /claim,\s*actionId: this\.executor\.current\?\.id/)
+    assert.match(dispatch, /\.then\(\(execution\) => this\.onReachActionComplete\(execution, guardedCandidate, intent\.transitionId, intent\.intentId\)\)/)
+    assert.doesNotMatch(dispatch, /as ExecutionResult|Pick<ExecutionResult/)
+    assert.match(outcomeHandler, /result: ReachMechanicalActionOutcome/)
+    assert.match(outcomeHandler, /VTR_ORPHAN_ACTION_OUTCOME[\s\S]*?result \}, this\.tickCounter\)/)
+    assert.match(outcomeHandler, /result\.failure[\s\S]*?result\.verified[\s\S]*?result\.progressed/)
+  })
+
   it('reserves each mechanical leg before actuation, accounts its outcome, and never treats action success as Reach success', () => {
     const authorizeStart = controller.indexOf('private authorizeReachMechanicalStep(')
     const outcomeStart = controller.indexOf('private recordReachMechanicalOutcome(', authorizeStart)

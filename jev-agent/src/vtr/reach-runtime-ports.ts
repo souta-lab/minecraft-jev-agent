@@ -17,7 +17,12 @@ export interface ReachRuntimeActionSnapshot {
   readonly commitment?: SkillCommitment
 }
 
-/** Backend-neutral completion facts needed by the Reach scheduler bridge. */
+/**
+ * Backend-neutral completion facts needed by the Reach scheduler bridge.
+ * Adapters pass the original completion object through unchanged: this is the
+ * controller's typed view, while richer mechanical evidence remains on that
+ * same object for diagnostic journaling.
+ */
 export interface ReachMechanicalActionOutcome {
   readonly actionId: string
   readonly status: 'done' | 'failed' | 'cancelled'
