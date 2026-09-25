@@ -4762,6 +4762,7 @@ export class JevController {
     // runtime callback observed it. The validator and downstream journal use
     // this boundary to distinguish verified closure from an action/step result.
     const terminalBoundary = outcome.kind === 'SUCCESS' ? 'verified-terminal' : boundary
+    let settleVerifiedAction = false
     if (action !== undefined) {
       const current = this.reachRuntimeAdapter.currentAction()
       if (
@@ -4776,6 +4777,7 @@ export class JevController {
           actionId: action.actionId,
           outcomeKind: outcome.kind,
         }
+        settleVerifiedAction = outcome.kind === 'SUCCESS'
       } else {
         this.logger.error(
           'vtr',
@@ -4785,8 +4787,15 @@ export class JevController {
         )
       }
     }
-    const cancelAfterWake = cancelIntentId !== null && action !== undefined
-    if (cancelIntentId !== null && !cancelAfterWake) {
+    // A terminal Reach result returned by afterMechanicalStep is immediately
+    // converted into a verified `done` result by runWalkSkill. Keep that
+    // selected action's lease alive long enough for the skill to settle; aborting
+    // it here turns a verified SUCCESS into LEASE_REVOKED and leaves the
+    // mechanical reservation without its outcome record. Terminals observed
+    // outside that correlated callback still cancel the live action below.
+    const shouldCancelAction = cancelIntentId !== null && !settleVerifiedAction
+    const cancelAfterWake = shouldCancelAction && action !== undefined
+    if (shouldCancelAction && !cancelAfterWake) {
       const current = this.reachRuntimeAdapter.currentAction()
       if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
         this.reachRuntimeAdapter.cancelCurrent(`VTR terminal ${outcome.kind}`)
@@ -4829,8 +4838,9 @@ export class JevController {
     })
     // For a per-step terminal, queue the handoff while the current lease is
     // still visible so requestDecision defers it until the correlated executor
-    // settlement. Cancelling first would schedule now and the completion
-    // callback would schedule a second, duplicate wake.
+    // settlement. A verified action settles naturally; cancelling first would
+    // turn SUCCESS into LEASE_REVOKED. Non-success terminals are cancelled only
+    // after queuing, so the completion callback cannot schedule a duplicate wake.
     if (cancelAfterWake) {
       const current = this.reachRuntimeAdapter.currentAction()
       if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {

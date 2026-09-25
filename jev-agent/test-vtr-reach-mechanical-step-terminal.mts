@@ -144,7 +144,10 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
         status: 'terminal',
         outcome: terminalOutcome,
         state: terminalState,
-        cancelIntentId: terminalOutcome.kind === 'SUCCESS' ? null : intentId,
+        // Production ReachController closes the in-flight intent even when its
+        // post-step predicate verifies. The selected Skill must settle that
+        // verified boundary without revoking its own actuation lease.
+        cancelIntentId: intentId,
       }
     },
     takeTerminalHandoff: () => {
@@ -294,6 +297,7 @@ test('verified SUCCESS after the reserved walk leg lets the arrived skill settle
   expect(fixture.trace.indexOf('reserved')).toBeLessThan(fixture.trace.indexOf('dispatch'))
   expect(fixture.trace.indexOf('arrive')).toBeLessThan(fixture.trace.indexOf('verified-outcome'))
   expect(fixture.goals).toHaveLength(1)
+  expect(fixture.pathStops()).toBe(0)
   expect(result.status).toBe('done')
   expect(result.verified).toBe(true)
   expect(fixture.logs.some((line) => line.includes('VTR_TERMINAL_ACTION_CORRELATED') && line.includes('outcome=SUCCESS') && line.includes('status=done verified=true'))).toBe(true)
