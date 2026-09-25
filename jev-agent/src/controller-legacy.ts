@@ -184,6 +184,7 @@ import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
 import type { ReachControllerResult, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
 import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
+import type { KernelShadowSink, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
 import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
 import { assessReachViability } from './vtr/reach-safety.ts'
@@ -450,6 +451,12 @@ export interface JevAgentOptions {
   vtrMission?: VtrInventoryMission | null
   /** Isolated no-LLM probe: VTR is the only semantic/locomotion owner until stopped. */
   vtrReachProbe?: boolean
+  /**
+   * V4.1.2 Phase-1 shadow sink owned by the resident host. The Reach runtime
+   * mirrors observation/commit/step/terminal facts into it; the shadow never
+   * returns authority or gates a production decision.
+   */
+  kernelShadow?: KernelShadowSink
   /** maximum time between decisions while idle (the fallback heartbeat) */
   heartbeatMs: number
   /** which world events may request a decision */
@@ -3059,7 +3066,26 @@ export class JevController {
       counters: this.reachVtrCells.counters,
       lastRouteDecision: this.reachVtrCells.lastRouteDecision,
       logger: this.logger,
+      kernelShadow: this.options.kernelShadow,
     }).runtime
+  }
+
+  /**
+   * V4.1.2 Phase-1 shadow projection: the executor's current actuation
+   * authority at the moment a mutation dispatch was observed. Returns null
+   * when no action is in flight; the host-side shadow treats unattributed
+   * mutations as migration blockers, not as silent evidence.
+   */
+  currentActuationAuthority(): ShadowMutationContext | null {
+    const action = this.executor.current
+    if (action === null) return null
+    return {
+      actionId: action.id,
+      epoch: action.epoch,
+      authority: action.authority ?? 'legacy',
+      transitionId: action.transitionId ?? null,
+      transitionContractHash: action.transitionContractHash ?? null,
+    }
   }
 
   // -------------------------------------------------------------------------

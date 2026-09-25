@@ -9,6 +9,7 @@ import type {
   ReachRouteDecisionInput,
 } from './vtr/reach-controller.ts'
 import type { ReachIdentity } from './vtr/reach.ts'
+import type { KernelShadowSink } from './vtr/kernel-shadow-map.ts'
 
 export interface JevReachMutableCell<T> {
   value: T
@@ -54,6 +55,12 @@ export interface JevReachVtrCompositionContext {
   }
   readonly lastRouteDecision: JevReachMutableCell<JevReachRouteDecisionRecord | null>
   readonly logger: JevReachTelemetryLogger
+  /**
+   * V4.1.2 Phase-1 shadow sink owned by the resident host. When present the
+   * runtime mirrors observation/commit/step/terminal facts into the kernel
+   * shadow; the shadow never returns authority or gates production decisions.
+   */
+  readonly kernelShadow?: KernelShadowSink
 }
 
 export interface JevReachVtrComposition {
@@ -241,6 +248,7 @@ export function createJevReachVtrComposition(
   const runtime = new ReachMissionRuntime({
     routePolicy,
     commitFreshnessFence,
+    kernelShadow: context.kernelShadow,
     onTransitionNotCommitted: (transitionId) => { transitionMetrics.delete(transitionId) },
     onTerminalHandoff: ({ transitionId, contractHash, state, outcome }) => {
       const routeMetrics = transitionMetrics.get(transitionId)

@@ -20,6 +20,7 @@ import type {
   ReachTransitionState,
 } from './reach.ts'
 import type { ReachRuntimeActionSnapshot } from './reach-runtime-ports.ts'
+import type { KernelShadowSink } from './kernel-shadow-map.ts'
 
 export interface ReachMissionRuntimeSession {
   readonly mission: InventoryReachTransitionInput['mission']
@@ -89,6 +90,12 @@ export interface ReachMissionRuntimeDependencies {
   }) => void
   /** Drop telemetry for a route proposal that never acquired a committed Transition. */
   readonly onTransitionNotCommitted?: (transitionId: string) => void
+  /**
+   * V4.1.2 Phase-1 shadow sink. The host-owned kernel shadow receives
+   * observation/commit/step/terminal inputs here; it never returns authority
+   * or gates production decisions.
+   */
+  readonly kernelShadow?: KernelShadowSink
 }
 
 export interface ReachTerminalHandoff {
@@ -189,6 +196,7 @@ export class ReachMissionRuntime {
   private readonly controller: ReachController
   private readonly onTerminalHandoff: ReachMissionRuntimeDependencies['onTerminalHandoff']
   private readonly onTransitionNotCommitted: ReachMissionRuntimeDependencies['onTransitionNotCommitted']
+  private readonly kernelShadow: KernelShadowSink | undefined
   private terminalWitnessExclusion: TerminalWitnessExclusion | null = null
   private activeContractScope: ActiveContractScope | null = null
   private session: ReachMissionRuntimeSession | null = null
@@ -197,6 +205,17 @@ export class ReachMissionRuntime {
     this.controller = new ReachController(dependencies.routePolicy, dependencies.commitFreshnessFence)
     this.onTerminalHandoff = dependencies.onTerminalHandoff
     this.onTransitionNotCommitted = dependencies.onTransitionNotCommitted
+    this.kernelShadow = dependencies.kernelShadow
+  }
+
+  /** Fire-and-forget shadow input. A throwing sink is contained: the shadow never affects VTR authority. */
+  private shadow(input: Parameters<KernelShadowSink>[0]): void {
+    if (this.kernelShadow === undefined) return
+    try {
+      this.kernelShadow(input)
+    } catch {
+      // Observation must never break the production runtime.
+    }
   }
 
   get current(): ReachControllerCurrent | null {
@@ -224,6 +243,11 @@ export class ReachMissionRuntime {
     const current = this.controller.current
     const session = this.session
     const mission = frame.mission
+    this.shadow({
+      type: 'world-observation',
+      observedAtMs: frame.snapshot.observation.observedAtMs,
+      predicates: frame.snapshot.observation.predicates,
+    })
     if (mission.id.trim() === '' || mission.item.trim() === '' || !Number.isSafeInteger(mission.count) || mission.count < 1) {
       return { kind: 'declined', reason: 'invalid-mission' }
     }
@@ -385,6 +409,12 @@ export class ReachMissionRuntime {
     const result = await this.controller.commit(contract, scopedSnapshot)
     if (result.status === 'active' || result.status === 'terminal') {
       this.activeContractScope = { transitionId: contract.transitionId, contractHash: contract.contractHash, scope: missionScope(contract) }
+      this.shadow({
+        type: 'transition-committed',
+        contract,
+        witness: result.state.witness,
+        lifecycle: result.status,
+      })
     } else {
       try {
         this.onTransitionNotCommitted?.(contract.transitionId)
@@ -406,7 +436,17 @@ export class ReachMissionRuntime {
     identity: ReachIdentity,
     step: ReachMechanicalStepRequest,
   ): ReachStepAuthorization {
-    return this.controller.authorizeMechanicalStep(intentId, identity, step)
+    const result = this.controller.authorizeMechanicalStep(intentId, identity, step)
+    if (result.status === 'authorized') {
+      this.shadow({
+        type: 'mechanical-step-issued',
+        transitionId: result.transitionId,
+        intentId,
+        stepId: step.stepId,
+        effectKind: step.effectKind,
+      })
+    }
+    return result
   }
 
   /** Settle executor evidence without allowing an action return to imply SUCCESS. */
@@ -415,7 +455,23 @@ export class ReachMissionRuntime {
     stepId: string,
     input: { readonly snapshot: ReachRuntimeSnapshot; readonly observedRisk?: Readonly<Record<string, number>> },
   ): ReachControllerResult {
-    return this.controller.recordMechanicalStepOutcome(intentId, stepId, input)
+    const result = this.controller.recordMechanicalStepOutcome(intentId, stepId, input)
+    const transitionId = this.session?.transitionId ?? this.controller.current?.contract.transitionId ?? 'unknown'
+    this.shadow({
+      type: 'world-observation',
+      observedAtMs: input.snapshot.observation.observedAtMs,
+      predicates: input.snapshot.observation.predicates,
+    })
+    this.shadow({
+      type: 'mechanical-step-settled',
+      transitionId,
+      intentId,
+      stepId,
+      status: result.status,
+      verified: result.status === 'terminal' && result.outcome.kind === 'SUCCESS',
+      progressed: result.status === 'active',
+    })
+    return result
   }
 
   complete(
@@ -469,6 +525,12 @@ export class ReachMissionRuntime {
       this.terminalWitnessExclusion = { ...scope.scope, witnessId: state.witness.witnessId }
     }
     if (scope !== null && scope.contractHash === state.contractHash) {
+      this.shadow({
+        type: 'transition-terminal',
+        transitionId: scope.transitionId,
+        contractHash: state.contractHash,
+        outcome,
+      })
       try {
         this.onTerminalHandoff?.({
           transitionId: scope.transitionId,

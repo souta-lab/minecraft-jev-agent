@@ -52,6 +52,8 @@ import {
 import type { System2RouteMemoryInput } from '../jev-agent/src/system2Payload.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
+import { createKernelShadowSession } from './kernel-shadow-session.ts'
+import type { ShadowMutationContext } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import { isContainerBlockName, normalizeBlockName } from '../jev-agent/src/containerAccess.ts'
 import { NETHER_PORTAL, PORTAL_VERIFIED, portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
@@ -2298,11 +2300,30 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   syncPortalSiteMemory('generation-start')
   // Same for a Nether-structure site already in scan range at generation start.
   syncStructureSiteMemory('generation-start')
-  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
+  // V4.1.2 Phase-1 SHADOW ONLY: the host replays every observed mutation
+  // dispatch and the Reach Transition lifecycle through the V4.1.2 kernel as an
+  // observer. Kernel authority is OFF here: nothing the shadow decides can
+  // block, reroute, or authorize production actuation. Unmapped or
+  // transition-unattributed mutations are journaled as migration blockers.
+  const kernelShadow = createKernelShadowSession({
+    world: {
+      serverId: ctx.worldKey.serverId,
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
+    },
+    generationId: id,
+    journalPath: join(ctx.logDir, 'kernel-shadow.jsonl'),
+  })
+  // Late-bound: the controller (and its executor projection) exists only after
+  // the leased bot is built. The resolver reads the CURRENT claim at mutation
+  // time, so dispatches are attributed to whichever authority holds the body.
+  let actuationAuthoritySource: { currentActuationAuthority(): ShadowMutationContext | null } | null = null
+  kernelShadow.bindActuationContext(() => actuationAuthoritySource?.currentActuationAuthority() ?? null)
+  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log, kernelShadow.observeMutation)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
   // surface check proves the nested capabilities are guarded, not raw.
-  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log)
+  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log, kernelShadow.observeMutation)
   const surface = assertActuationSurfaceCovered(bot, ctx.log)
   ctx.log('ACTUATION_PORT_READY', {
     id,
@@ -3029,6 +3050,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     },
     actuation: 'pathfinder',
     actuationPort,
+    kernelShadow: kernelShadow.observe,
     reach: 5,
     scanRadius: 48,
     verbose: true,
@@ -3103,6 +3125,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   const controller = new JevController(bot, options)
   controllerForRecovery = controller
+  actuationAuthoritySource = controller
+  ctx.log('KERNEL_SHADOW_READY', {
+    id,
+    journal: join(ctx.logDir, 'kernel-shadow.jsonl'),
+    world: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+    kernelAuthority: 'off',
+    phase: 'shadow-only',
+  })
   // The stock fallback has no DESCEND branch; without this wrapper a stalled
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
@@ -3327,6 +3357,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           subgoalCount: result.subgoalCount,
           jevCalls: result.jevCalls,
         })
+        const shadowSummary = kernelShadow.summary()
+        ctx.log('KERNEL_SHADOW_SUMMARY', {
+          id,
+          mutationsObserved: shadowSummary.mutationsObserved,
+          mutationsMapped: shadowSummary.mutationsMapped,
+          mutationsDeniedByLease: shadowSummary.mutationsDeniedByLease,
+          mutationsAttributedToTransition: shadowSummary.mutationsAttributedToTransition,
+          mutationsUnguarded: shadowSummary.mutationsUnguarded,
+          lifecycleCommands: shadowSummary.lifecycleCommands,
+          kernelDenied: shadowSummary.kernelDenied,
+          blockers: shadowSummary.blockers.length,
+          coverageComplete: shadowSummary.coverageComplete,
+        })
         proposeLedger()
       })
       .catch((error: unknown) => {
@@ -3521,6 +3564,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       } catch {
         // best effort
       }
+      const shadowSummary = kernelShadow.summary()
+      ctx.log('KERNEL_SHADOW_SUMMARY', {
+        id,
+        mutationsObserved: shadowSummary.mutationsObserved,
+        mutationsMapped: shadowSummary.mutationsMapped,
+        mutationsDeniedByLease: shadowSummary.mutationsDeniedByLease,
+        mutationsAttributedToTransition: shadowSummary.mutationsAttributedToTransition,
+        mutationsUnguarded: shadowSummary.mutationsUnguarded,
+        lifecycleCommands: shadowSummary.lifecycleCommands,
+        kernelDenied: shadowSummary.kernelDenied,
+        blockers: shadowSummary.blockers.length,
+        coverageComplete: shadowSummary.coverageComplete,
+      })
     },
     status,
     worldProbeProvenance: (columns) => dimensionProvenance.diagnostic(columns),
