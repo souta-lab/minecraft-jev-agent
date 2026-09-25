@@ -60,6 +60,7 @@ import {
   formatRoutePlaceDeclared,
 } from './routePlaceDeclaration.ts'
 import type { BodySubmersion } from './state.ts'
+import type { ReachMechanicalWaypoint } from './vtr/reach-mechanical-waypoint.ts'
 import {
   armorFallMitigation,
   classifyStepLanding,
@@ -474,10 +475,14 @@ export interface CurrentAction {
   authority?: 'legacy' | 'vtr-reach'
   /** Active Reach Transition that authorized this subordinate mechanical action. */
   transitionId?: string
+  /** Immutable contract identity paired with `transitionId` for VTR-owned mechanics. */
+  transitionContractHash?: string
   /** Contract reservation hook run immediately before each physical walk leg. */
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
   /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
   afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean | 'verified-terminal'
+  /** Resolve a short pathfinder-grounded checkpoint for the active Reach contract. */
+  resolveVtrReachMechanicalWaypoint?: (destination: Vec3Json) => ReachMechanicalWaypoint | null
   /** Reserve and account for candidate-declared internal dig/place/equip calls. */
   internalEffectCallbacks?: InternalEffectCallbacks
 }
@@ -517,10 +522,14 @@ export interface ExecutionClaimContext {
   authority?: 'legacy' | 'vtr-reach'
   /** stable parent Transition identity for correlated evidence */
   transitionId?: string
+  /** exact committed Reach contract; a new contract cannot reuse this action's mechanics */
+  transitionContractHash?: string
   /** Reserve the VTR transition's per-leg budget before any physical movement. */
   beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
   /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
   afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean | 'verified-terminal'
+  /** Runtime-adapter route segmenter; its value is a temporary mechanical target, never SUCCESS evidence. */
+  resolveVtrReachMechanicalWaypoint?: (destination: Vec3Json) => ReachMechanicalWaypoint | null
   /** Optional paired hooks for candidate-declared internal dig/place/equip effects. */
   internalEffectCallbacks?: InternalEffectCallbacks
 }
@@ -2235,19 +2244,23 @@ export class Executor {
     if (
       running !== null && running.status === 'running' &&
       (running.authority !== requestedAuthority ||
-        (requestedAuthority === 'vtr-reach' && running.transitionId !== context.transitionId))
+        (requestedAuthority === 'vtr-reach' && running.transitionId !== context.transitionId) ||
+        (requestedAuthority === 'vtr-reach' && context.transitionContractHash !== undefined &&
+          running.transitionContractHash !== context.transitionContractHash))
     ) {
       this.authorityConflicts += 1
       const message =
         `actuation authority conflict: running=${running.authority ?? 'legacy'}:${running.transitionId ?? running.id} ` +
-        `requested=${requestedAuthority}:${context.transitionId ?? candidate.id}`
+        `requested=${requestedAuthority}:${context.transitionId ?? candidate.id}:${context.transitionContractHash ?? 'hash-unspecified'}`
       this.logger.error('executor', `ACTUATION_AUTHORITY_CONFLICT ${message}`, {
         runningActionId: running.id,
         runningAuthority: running.authority ?? 'legacy',
         runningTransitionId: running.transitionId ?? null,
+        runningTransitionContractHash: running.transitionContractHash ?? null,
         requestedActionId: candidate.id,
         requestedAuthority,
         requestedTransitionId: context.transitionId ?? null,
+        requestedTransitionContractHash: context.transitionContractHash ?? null,
       })
       throw new ExecutionAuthorityConflict(message)
     }
@@ -2294,8 +2307,10 @@ export class Executor {
       commitment,
       authority: context.authority ?? 'legacy',
       ...(context.transitionId === undefined ? {} : { transitionId: context.transitionId }),
+      ...(context.transitionContractHash === undefined ? {} : { transitionContractHash: context.transitionContractHash }),
       ...(context.beforeMechanicalStep === undefined ? {} : { beforeMechanicalStep: context.beforeMechanicalStep }),
       ...(context.afterMechanicalStep === undefined ? {} : { afterMechanicalStep: context.afterMechanicalStep }),
+      ...(context.resolveVtrReachMechanicalWaypoint === undefined ? {} : { resolveVtrReachMechanicalWaypoint: context.resolveVtrReachMechanicalWaypoint }),
       ...(context.internalEffectCallbacks === undefined ? {} : { internalEffectCallbacks: context.internalEffectCallbacks }),
       liveStructureMembers,
     }
@@ -3540,10 +3555,66 @@ export class Executor {
       } finally {
         bound.cleanup()
       }
-      const mechanicalOutcome =
-        activeAction?.epoch === epoch && activeAction.afterMechanicalStep !== undefined
-          ? activeAction.afterMechanicalStep(mechanicalStep)
-          : true
+      let mechanicalOutcome: boolean | 'verified-terminal' = true
+      let outcomeHookFailed = false
+      let outcomeHookError: unknown = null
+      if (activeAction?.epoch === epoch && activeAction.afterMechanicalStep !== undefined) {
+        try {
+          mechanicalOutcome = activeAction.afterMechanicalStep(mechanicalStep)
+        } catch (error) {
+          // Outcome accounting can fail independently of physical leg settlement.
+          // Preserve the completed mechanical-leg evidence before propagating the
+          // callback failure so a reservation is never silently absent from logs.
+          outcomeHookFailed = true
+          outcomeHookError = error
+        }
+      }
+      // Settle the executor-side leg ledger before any typed terminal early
+      // return. The final physical leg is still a real, reserved mechanical leg
+      // and must keep its unique id/ordinal in the same evidence as prior legs.
+      const after = this.distanceToFeet(target)
+      remaining = after
+      // Durable mechanical progress: distance actually closed toward the committed
+      // target. A leg that failed mechanically but still closed distance is
+      // progress (section 5: body motion is progress, never completion).
+      stalledLegs = before - after >= WALK_SKILL_MIN_PROGRESS ? 0 : stalledLegs + 1
+      const walkLegMessage = formatWalkLeg({
+        skill,
+        commitment,
+        leg: legs,
+        evidence: walkLegEvidence({ leg: legs, from: before, to: after, failureCode: legFailure?.code ?? null, phase }),
+        worldDelta: this.bodyDelta(),
+        failure: legFailure?.code ?? null,
+      })
+      this.logger.info(
+        'executor',
+        `${walkLegMessage} actionId=${candidate.id} transitionId=${activeAction?.transitionId ?? 'none'} ` +
+          `contractHash=${activeAction?.transitionContractHash ?? 'none'} stepId=${mechanicalStep.stepId}`,
+        {
+          actionId: candidate.id,
+          commitmentId: commitment.commitmentId,
+          step: 'walk_leg',
+          count: legs,
+          transitionId: activeAction?.transitionId ?? null,
+          contractHash: activeAction?.transitionContractHash ?? null,
+          stepId: mechanicalStep.stepId,
+          leg: legs,
+          failure: legFailure?.code ?? null,
+          remaining: round2(after),
+          mechanicalOutcome: outcomeHookFailed
+            ? 'outcome-hook-error'
+            : mechanicalOutcome === false
+              ? 'refused'
+              : mechanicalOutcome === 'verified-terminal'
+                ? 'verified-terminal'
+                : 'settled',
+          outcomeHookError: outcomeHookFailed
+            ? outcomeHookError instanceof Error ? outcomeHookError.message : String(outcomeHookError)
+            : null,
+          transitionTerminal: mechanicalOutcome === 'verified-terminal',
+        },
+      )
+      if (outcomeHookFailed) throw outcomeHookError
       if (mechanicalOutcome === false) {
         throw new ActionCancelled(`VTR rejected observed effects after walk leg ${legs}`)
       }
@@ -3596,30 +3667,6 @@ export class Executor {
           startDistance - remaining,
         )
       }
-      const after = this.distanceToFeet(target)
-      remaining = after
-      // Durable mechanical progress: distance actually closed toward the committed
-      // target. A leg that failed mechanically but still closed distance is
-      // progress (section 5: body motion is progress, never completion).
-      stalledLegs = before - after >= WALK_SKILL_MIN_PROGRESS ? 0 : stalledLegs + 1
-      this.logger.info(
-        'executor',
-        formatWalkLeg({
-          skill,
-          commitment,
-          leg: legs,
-          evidence: walkLegEvidence({ leg: legs, from: before, to: after, failureCode: legFailure?.code ?? null, phase }),
-          worldDelta: this.bodyDelta(),
-          failure: legFailure?.code ?? null,
-        }),
-        {
-          actionId: candidate.id,
-          commitmentId: commitment.commitmentId,
-          leg: legs,
-          failure: legFailure?.code ?? null,
-          remaining: round2(after),
-        },
-      )
       const decision = walkBoundaryAfterLeg({
         legs,
         stalledLegs,
@@ -3789,12 +3836,12 @@ export class Executor {
       classifyTravelLeg({ remainingBefore: this.distanceToFeet(target), remainingAfter: this.distanceToFeet(target) })
         .warranted,
     )
-    const anchor = this.anchorBlock(candidate)
+    const declaredAnchor = this.anchorBlock(candidate)
     this.setPhase(candidate, epoch, 'pathing')
     const before = this.distanceToFeet(target)
     const startPosition = this.bot.entity.position.clone()
     const startY = startPosition.y
-    const anchorBefore = anchor === null ? null : this.distanceToEyes(anchor)
+    const anchorBefore = declaredAnchor === null ? null : this.distanceToEyes(declaredAnchor)
 
     // A visible resource may be above the current floor.  MINE/MOVE candidates
     // carry the same vertical contract as RETRIEVE candidates so navigation
@@ -3866,6 +3913,29 @@ export class Executor {
         }
       }
     }
+    const activeAction = this.action
+    const waypointResolver = this.options.actuation === 'pathfinder' &&
+      activeAction?.epoch === epoch &&
+      activeAction.authority === 'vtr-reach'
+      ? activeAction.resolveVtrReachMechanicalWaypoint
+      : null
+    const waypoint = waypointResolver?.(target) ?? null
+    const mechanicalTarget = waypoint?.target ?? target
+    // A witness anchor belongs to the declared destination. Applying it to an
+    // intermediate path node could incorrectly turn checkpoint arrival into
+    // semantic arrival, so only the final segment may use that anchor.
+    const anchor = waypoint === null ? declaredAnchor : null
+    if (waypoint !== null) {
+      this.logger.info(
+        'vtr',
+        `VTR_REACH_MECHANICAL_WAYPOINT transition=${activeAction?.transitionId ?? 'missing'} ` +
+          `contractHash=${activeAction?.transitionContractHash ?? 'missing'} action=${candidate.id} ` +
+          `target=${waypoint.target.x},${waypoint.target.y},${waypoint.target.z} ` +
+          `pathDistance=${round2(waypoint.pathDistance)} remainingDistance=${round2(waypoint.remainingDistance)} ` +
+          `evidence=${waypoint.planEvidence}`,
+        { transitionId: activeAction?.transitionId ?? null, contractHash: activeAction?.transitionContractHash ?? null, actionId: candidate.id, ...waypoint },
+      )
+    }
     let pathError: unknown = null
     try {
       // STOCK-FIRST: `pathTo` drives the stock pathfinder (`setGoal`) as the
@@ -3874,7 +3944,7 @@ export class Executor {
       // block is NOT the arrival goal here: a MOVE exists to walk to the
       // standable spot, and `anchorIsGoal` is deliberately omitted so the
       // fallback tests the FEET distance to the spot.
-      await this.pathTo(target, epoch, signal, 'GoalBlock', {
+      await this.pathTo(mechanicalTarget, epoch, signal, 'GoalBlock', {
         anchor,
         requireLevel: true,
         budgetMs: stageMs,
@@ -3899,7 +3969,7 @@ export class Executor {
     // that closes less than `LEG_TRAVEL_MIN_PROGRESS` keeps the original typed
     // failure (no false progress, bounded by the move-failure memory).
     let legProgressed = false
-    if (pathError !== null) {
+    if (pathError !== null && waypoint === null) {
       const leg = await this.runTravelLeg(
         candidate,
         target,
@@ -3927,21 +3997,32 @@ export class Executor {
     // proof the server accepted the move (see classifyMoveArrival).
     const arrival = classifyMoveArrival({
       end: { x: endPosition.x, y: endPosition.y, z: endPosition.z },
-      target,
+      target: mechanicalTarget,
       anchor,
       anchorBefore,
       anchorDistance,
       reach: this.options.reach,
       pinned: stuck,
     })
-    const verified = arrival.verified
+    // An intermediate pathfinder node is a reobservation boundary only. It can
+    // never claim the committed predicate, even when the waypoint itself was
+    // deterministically reached; the Reach callback verifies the original
+    // contract after this mechanical step.
+    const verified = waypoint === null && arrival.verified
 
     this.logger.info(
       'executor',
       `${candidate.kind} ${candidate.id} arrival start=(${round2(startPosition.x)},${round2(startPosition.y)},${round2(startPosition.z)}) ` +
         `end=(${round2(endPosition.x)},${round2(endPosition.y)},${round2(endPosition.z)}) moved=${round2(startPosition.distanceTo(endPosition))}m ` +
         `targetDistance=${round2(before)}m->${round2(after)}m anchorEyeDistance=${round2(anchorDistance)}m`,
-      { target, actionId: candidate.id, start: { x: startPosition.x, y: startPosition.y, z: startPosition.z }, end: { x: endPosition.x, y: endPosition.y, z: endPosition.z } },
+      {
+        target: mechanicalTarget,
+        committedTarget: target,
+        mechanicalWaypoint: waypoint,
+        actionId: candidate.id,
+        start: { x: startPosition.x, y: startPosition.y, z: startPosition.z },
+        end: { x: endPosition.x, y: endPosition.y, z: endPosition.z },
+      },
     )
     if (pathError !== null && !verified) throw pathError
     if (pathError !== null) {
@@ -3960,10 +4041,12 @@ export class Executor {
         epoch,
         startedAt,
         'done',
-        legProgressed && !verified ? 'leg' : 'arrived',
-        legProgressed && !verified
-          ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
-          : `moved from ${round2(before)}m to ${round2(after)}m`,
+        waypoint !== null || (legProgressed && !verified) ? 'leg' : 'arrived',
+        waypoint !== null
+          ? `reached pathfinder-grounded mechanical waypoint (${mechanicalTarget.x},${mechanicalTarget.y},${mechanicalTarget.z}); committed Reach predicate remains open (${round2(after)}m away)`
+          : legProgressed && !verified
+            ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
+            : `moved from ${round2(before)}m to ${round2(after)}m`,
         null,
         {
           verified,
@@ -3971,7 +4054,7 @@ export class Executor {
           dropObserved: false,
           itemsGained: 0,
           goalItemCount: this.countGoalItem(),
-          progressed: legProgressed,
+          progressed: legProgressed || (waypoint !== null && before - after >= WALK_SKILL_MIN_PROGRESS),
         },
       ),
     }

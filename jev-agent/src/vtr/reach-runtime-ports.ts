@@ -14,6 +14,7 @@ export interface ReachRuntimeActionSnapshot {
   readonly status: 'running' | 'done' | 'failed' | 'cancelled'
   readonly authority?: 'legacy' | 'vtr-reach'
   readonly transitionId?: string
+  readonly transitionContractHash?: string
   readonly commitment?: SkillCommitment
 }
 

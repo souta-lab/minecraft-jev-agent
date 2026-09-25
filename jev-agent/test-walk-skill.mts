@@ -37,11 +37,13 @@
 // Run: bun test ./test-walk-skill.mts
 
 import { mkdtempSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vec3 } from 'vec3'
 import type { Bot } from 'mineflayer'
+import pathfinderModule from 'mineflayer-pathfinder'
 import type { Candidate, CandidateKind } from './src/candidates.ts'
 import { ExecutionAuthorityConflict, Executor, defaultExecutorOptions } from './src/executor.ts'
 import type { ExecutionResult } from './src/executor.ts'
@@ -67,9 +69,12 @@ import {
 } from './src/walkSkill.ts'
 import type { WalkStop } from './src/walkSkill.ts'
 import type { Vec3Json } from './src/state.ts'
+import { selectReachMechanicalWaypoint } from './src/vtr/reach-mechanical-waypoint.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
+const PrismarineBlock = require('prismarine-block')
+const { goals } = pathfinderModule
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -174,6 +179,46 @@ const num = (value: number): string => String(Math.round(value * 100) / 100)
     walkSkillIdFor('MOVE') === 'WALK_TO(destination)' && walkSkillIdFor('RETRIEVE') === 'RETRIEVE_TO(resource)',
     `move=${walkSkillIdFor('MOVE')} retrieve=${walkSkillIdFor('RETRIEVE')}`,
   )
+  const pathNodes = Array.from({ length: 13 }, (_, index) => ({ x: index + 1, y: 64, z: 0 }))
+  const checkpoint = selectReachMechanicalWaypoint({
+    current: { x: 0.5, y: 64, z: 0.5 },
+    destination: { x: 13, y: 64, z: 0 },
+    path: pathNodes,
+  })
+  check(
+    '(route) segmentation selects an actual successful-path node and preserves the original destination',
+    checkpoint?.target.x === 2 && checkpoint.target.y === 64 && checkpoint.target.z === 0 &&
+      checkpoint.remainingDistance > 0 && checkpoint.planEvidence.startsWith('pathfinder-success:'),
+    `checkpoint=${JSON.stringify(checkpoint)}`,
+  )
+  const shortNaturalRouteNodes = Array.from({ length: 5 }, (_, index) => ({ x: index + 1, y: 64, z: 0 }))
+  const firstShortRouteLeg = selectReachMechanicalWaypoint({
+    current: { x: 0, y: 64, z: 0 },
+    destination: { x: 5, y: 64, z: 0 },
+    path: shortNaturalRouteNodes,
+  })
+  const secondShortRouteLeg = selectReachMechanicalWaypoint({
+    current: firstShortRouteLeg?.target ?? { x: 0, y: 64, z: 0 },
+    destination: { x: 5, y: 64, z: 0 },
+    path: shortNaturalRouteNodes.slice(2),
+  })
+  const finalShortRouteLeg = selectReachMechanicalWaypoint({
+    current: secondShortRouteLeg?.target ?? { x: 0, y: 64, z: 0 },
+    destination: { x: 5, y: 64, z: 0 },
+    path: shortNaturalRouteNodes.slice(4),
+  })
+  check(
+    '(route) a natural 5-block path yields two grounded checkpoints and a final goal leg',
+    firstShortRouteLeg?.target.x === 2 && secondShortRouteLeg?.target.x === 4 && finalShortRouteLeg === null,
+    `first=${JSON.stringify(firstShortRouteLeg?.target)} second=${JSON.stringify(secondShortRouteLeg?.target)} finalCheckpoint=${String(finalShortRouteLeg !== null)}`,
+  )
+  check(
+    '(route) short, malformed, and unbounded single-edge plans fail closed to the original goal',
+    selectReachMechanicalWaypoint({ current: { x: 0.5, y: 64, z: 0.5 }, destination: { x: 3, y: 64, z: 0 }, path: [{ x: 3, y: 64, z: 0 }] }) === null &&
+      selectReachMechanicalWaypoint({ current: { x: 0.5, y: 64, z: 0.5 }, destination: { x: 13, y: 64, z: 0 }, path: [{ x: Number.NaN, y: 64, z: 0 }] }) === null &&
+      selectReachMechanicalWaypoint({ current: { x: 0.5, y: 64, z: 0.5 }, destination: { x: 13, y: 64, z: 0 }, path: [{ x: 13, y: 64, z: 0 }] }) === null,
+    'short route, invalid node, and long indivisible pathfinder edge do not invent a checkpoint',
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +257,9 @@ interface WalkFixture {
   trace: string[]
   grid: Grid
   pathCalls: () => number
+  pathStatuses: () => string[]
   writes: () => number
+  packetWrites: () => number
   /** filled by `runWalk` right after the Executor exists, so a hook can cancel it */
   executorRef: { current: Executor | null }
 }
@@ -227,19 +274,27 @@ function makeBot(
   feet: Vec3Json,
   grid: Grid,
   hook?: (writes: number, bot: Bot, executor: Executor | null) => void,
+  pathfinderPhysics = false,
 ): WalkFixture {
   const position = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
   const trace: string[] = []
   const executorRef: { current: Executor | null } = { current: null }
   let pathCalls = 0
+  const pathStatuses: string[] = []
   let writes = 0
+  let packetWrites = 0
   let heading = { x: 0, z: 0 }
-  const listeners = new Map<string, Set<(arg?: unknown) => void>>()
-  const emit = (event: string, arg?: unknown): void => {
-    for (const listener of listeners.get(event) ?? []) listener(arg)
-  }
+  const events = new EventEmitter()
+  const emit = (event: string, arg?: unknown): void => { events.emit(event, arg) }
+  const Block = pathfinderPhysics ? PrismarineBlock(registry) : null
   const blockAt = (v: { x: number; y: number; z: number }) => {
     const found = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
+    if (pathfinderPhysics) {
+      const name = found?.name ?? 'air'
+      const block = Block.fromStateId(registry.blocksByName[name].minStateId, 0)
+      block.position = new Vec3(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z))
+      return block
+    }
     if (found === undefined) return null
     return {
       name: found.name,
@@ -251,7 +306,7 @@ function makeBot(
   const open = (x: number, y: number, z: number): boolean => at(grid, x, y, z).boundingBox === 'empty'
   const bot = {
     registry,
-    game: { dimension: 'minecraft:overworld' as string },
+    game: { dimension: 'minecraft:overworld' as string, minY: 0 },
     physicsEnabled: true,
     entity: {
       position,
@@ -261,29 +316,28 @@ function makeBot(
       width: 0.6,
       height: 1.8,
       velocity: new Vec3(0, 0, 0),
+      effects: {},
       offset: (x: number, y: number, z: number) => position.offset(x, y, z),
       clone: () => position.clone(),
       distanceTo: (other: { x: number; y: number; z: number }) => position.distanceTo(other as Vec3),
     },
     _client: {
       write: () => {
+        packetWrites += 1
         writes += 1
         hook?.(writes, bot as unknown as Bot, executorRef.current)
         return true
       },
     },
     entities: {},
+    controlState: {},
     inventory: { items: () => [], count: () => 0 },
     heldItem: null,
     blockAt,
-    on: (event: string, listener: (arg?: unknown) => void) => {
-      const set = listeners.get(event) ?? new Set<(arg?: unknown) => void>()
-      set.add(listener)
-      listeners.set(event, set)
-    },
-    removeListener: (event: string, listener: (arg?: unknown) => void) => {
-      listeners.get(event)?.delete(listener)
-    },
+    on: events.on.bind(events),
+    removeListener: events.removeListener.bind(events),
+    removeAllListeners: events.removeAllListeners.bind(events),
+    emit: events.emit.bind(events),
     setControlState: (control: string, value: boolean) => {
       if (!value) return
       trace.push(control)
@@ -342,17 +396,52 @@ function makeBot(
         bot.pathfinder.movements = movements
       },
       setGoal: () => {
-        // the measured stock pathfinder's own refusal: canDig=false has no route,
-        // which is what hands the leg to the control walker
-        emit('path_update', { status: 'noPath' })
+        // Non-VTR fixtures use the legacy noPath fallback path. The segmented VTR
+        // case replaces this test double with the real pathfinder plugin below.
+        if (!pathfinderPhysics) emit('path_update', { status: 'noPath' })
       },
       stop: () => undefined,
       getPathTo: () => {
         pathCalls += 1
+        pathStatuses.push('noPath')
         return { status: 'noPath', path: [] }
       },
     },
-    emit,
+  }
+  if (pathfinderPhysics) {
+    const runtimeBot = bot as unknown as Bot
+    pathfinderModule.pathfinder(runtimeBot)
+    const pathfinder = runtimeBot.pathfinder!
+    const pathfinderGetPathTo = pathfinder.getPathTo.bind(pathfinder)
+    pathfinder.getPathTo = ((movements, goal, timeout) => {
+      pathCalls += 1
+      const result = pathfinderGetPathTo(movements, goal, timeout)
+      pathStatuses.push(result.status)
+      return result
+    }) as typeof pathfinder.getPathTo
+    // The route planner is the real mineflayer-pathfinder A* implementation. The
+    // fixture only supplies deterministic body/control-state physics for settling
+    // each accepted GoalBlock; it never fabricates a path result or packet move.
+    pathfinder.setGoal = ((goal: { x: number; y: number; z: number } | null) => {
+      if (goal === null) return
+      void (async () => {
+        const target = { x: Math.floor(goal.x), y: Math.floor(goal.y), z: Math.floor(goal.z) }
+        await bot.lookAt({ x: target.x + 0.5, z: target.z + 0.5 })
+        for (let step = 0; step < 2_000; step += 1) {
+          if (
+            Math.floor(position.x) === target.x &&
+            Math.floor(position.y) === target.y &&
+            Math.floor(position.z) === target.z
+          ) {
+            emit('goal_reached')
+            return
+          }
+          bot.setControlState('forward', true)
+        }
+        emit('path_reset', 'stuck')
+      })()
+    }) as typeof pathfinder.setGoal
+    pathfinder.stop = (() => undefined) as typeof pathfinder.stop
   }
   return {
     bot: bot as unknown as Bot,
@@ -360,7 +449,9 @@ function makeBot(
     trace,
     grid,
     pathCalls: () => pathCalls,
+    pathStatuses: () => [...pathStatuses],
     writes: () => writes,
+    packetWrites: () => packetWrites,
     executorRef,
   }
 }
@@ -407,11 +498,15 @@ interface WalkRun {
   messages: string[]
   starts: string[]
   legs: string[]
+  walkLegRows: Array<{ message: string; detail: Record<string, unknown> }>
   ends: string[]
   boundaries: string[]
   stops: string[]
   elapsedMs: number
   pathCalls: number
+  pathStatuses: string[]
+  packetWrites: number
+  mechanicalWaypoints: Vec3Json[]
   grid: Grid
   mechanicalReservations: MechanicalOwnershipObservation[]
   mechanicalOutcomes: MechanicalOwnershipObservation[]
@@ -424,6 +519,7 @@ interface MechanicalOwnershipObservation {
   actionId: string | null
   authority: string | null
   transitionId: string | null
+  transitionContractHash: string | null
   commitmentId: string | null
   decisionEpoch: number | null
 }
@@ -434,6 +530,9 @@ interface RunOptions {
   packetStepMs?: number
   pathTimeoutMs?: number
   claimContext?: Parameters<Executor['claim']>[1]
+  pathfinderPhysics?: boolean
+  vtrPathSegmentation?: boolean
+  verifyReachAtCandidate?: boolean
   hook?: (writes: number, bot: Bot, executor: Executor | null) => void
 }
 
@@ -444,7 +543,7 @@ async function runWalk(
   options: RunOptions = {},
 ): Promise<WalkRun> {
   const dir = mkdtempSync(join(tmpdir(), 'walk-skill-'))
-  const fixture = makeBot(feet, grid, options.hook)
+  const fixture = makeBot(feet, grid, options.hook, options.pathfinderPhysics === true)
   const logger = new EventLogger(new JsonlWriter(join(dir, 'agent.jsonl')), false)
   const executor = new Executor(fixture.bot, logger, {
     ...defaultExecutorOptions,
@@ -457,6 +556,7 @@ async function runWalk(
   const startedAt = Date.now()
   const mechanicalReservations: MechanicalOwnershipObservation[] = []
   const mechanicalOutcomes: MechanicalOwnershipObservation[] = []
+  const mechanicalWaypoints: Vec3Json[] = []
   const originalClaimContext = options.claimContext
   const observeOwnership = (
     step: { stepId: string; leg: number; effectKind: 'locomotion' },
@@ -467,33 +567,66 @@ async function runWalk(
       actionId: current?.id ?? null,
       authority: current?.authority ?? null,
       transitionId: current?.transitionId ?? null,
+      transitionContractHash: current?.transitionContractHash ?? null,
       commitmentId: current?.commitment?.commitmentId ?? null,
       decisionEpoch: current?.commitment?.decisionEpoch ?? null,
     }
   }
-  const claimContext = originalClaimContext === undefined
+  const segmentResolver = options.vtrPathSegmentation
+    ? (destination: Vec3Json) => {
+        const goal = new goals.GoalBlock(destination.x, destination.y, destination.z)
+        const plan = fixture.bot.pathfinder!.getPathTo(fixture.bot.pathfinder!.movements, goal, 1_500)
+        if (plan.status !== 'success') return null
+        const waypoint = selectReachMechanicalWaypoint({
+          current: { x: fixture.position.x, y: fixture.position.y, z: fixture.position.z },
+          destination,
+          path: plan.path,
+        })
+        if (waypoint !== null) mechanicalWaypoints.push(waypoint.target)
+        return waypoint
+      }
+    : undefined
+  const claimContext = originalClaimContext === undefined && segmentResolver === undefined
     ? undefined
     : {
-        ...originalClaimContext,
-        beforeMechanicalStep: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => {
-          mechanicalReservations.push(observeOwnership(step))
-          return originalClaimContext.beforeMechanicalStep?.(step) ?? true
-        },
-        afterMechanicalStep: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => {
-          mechanicalOutcomes.push(observeOwnership(step))
-          return originalClaimContext.afterMechanicalStep?.(step) ?? true
-        },
+        ...(originalClaimContext ?? {}),
+        ...(segmentResolver === undefined ? {} : { resolveVtrReachMechanicalWaypoint: segmentResolver }),
+        ...(originalClaimContext?.beforeMechanicalStep === undefined ? {} : {
+          beforeMechanicalStep: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => {
+            mechanicalReservations.push(observeOwnership(step))
+            return originalClaimContext.beforeMechanicalStep?.(step) ?? true
+          },
+        }),
+        ...(originalClaimContext?.afterMechanicalStep === undefined ? {} : {
+          afterMechanicalStep: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => {
+            mechanicalOutcomes.push(observeOwnership(step))
+            const outcome = originalClaimContext.afterMechanicalStep?.(step) ?? true
+            if (outcome === false) return false
+            const goal = candidate.target
+            if (
+              options.verifyReachAtCandidate && goal !== null &&
+              Math.floor(fixture.position.x) === Math.floor(goal.x) &&
+              Math.floor(fixture.position.y) === Math.floor(goal.y) &&
+              Math.floor(fixture.position.z) === Math.floor(goal.z)
+            ) return 'verified-terminal'
+            return outcome
+          },
+        }),
       }
   const claim = executor.claim(candidate, claimContext)
   const selectedBy = executor.current?.commitment?.selectedBy ?? null
   const result = await claim.completion
   const elapsedMs = Date.now() - startedAt
-  const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
+  const rows = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
     .filter((line) => line.trim().length > 0)
-    .map((line) => (JSON.parse(line) as { message?: string }).message ?? '')
+    .map((line) => JSON.parse(line) as { message?: string; detail?: Record<string, unknown> })
+  const messages = rows.map(({ message }) => message ?? '')
   const pick = (prefix: string, contains?: string): string[] =>
     messages.filter((line) => line.startsWith(prefix) && (contains === undefined || line.includes(contains)))
+  const walkLegRows = rows
+    .filter(({ message }) => message?.startsWith(SKILL_STEP) === true && /(?:^|\s)step=walk_leg(?:\s|$)/u.test(message))
+    .map(({ message, detail }) => ({ message: message ?? '', detail: detail ?? {} }))
   return {
     result,
     selectedBy,
@@ -502,11 +635,15 @@ async function runWalk(
     messages,
     starts: pick(SKILL_START),
     legs: pick(SKILL_STEP, 'step=walk_leg'),
+    walkLegRows,
     ends: pick(SKILL_END),
     boundaries: pick(SKILL_POLICY_BOUNDARY),
     stops: pick(MOVE_LEG_STOPPED),
     elapsedMs,
     pathCalls: fixture.pathCalls(),
+    pathStatuses: fixture.pathStatuses(),
+    packetWrites: fixture.packetWrites(),
+    mechanicalWaypoints,
     grid,
     mechanicalReservations,
     mechanicalOutcomes,
@@ -533,12 +670,15 @@ async function runWalk(
   const vtr = executor.claim(candidate, {
     authority: 'vtr-reach',
     transitionId: 'transition:reach-test',
+    transitionContractHash: 'contract:reach-test',
     beforeMechanicalStep: () => true,
   })
   check(
     '(vtr) one active executor lease records the VTR transition owner',
-    executor.current?.authority === 'vtr-reach' && executor.current.transitionId === 'transition:reach-test',
-    `authority=${executor.current?.authority ?? 'none'} transition=${executor.current?.transitionId ?? 'none'}`,
+    executor.current?.authority === 'vtr-reach' && executor.current.transitionId === 'transition:reach-test' &&
+      executor.current.transitionContractHash === 'contract:reach-test',
+    `authority=${executor.current?.authority ?? 'none'} transition=${executor.current?.transitionId ?? 'none'} ` +
+      `contractHash=${executor.current?.transitionContractHash ?? 'none'}`,
   )
   let sameCandidateRejected = false
   try {
@@ -566,23 +706,41 @@ async function runWalk(
     sameTransition.kept && sameTransition.epoch === vtr.epoch,
     `kept=${sameTransition.kept} epoch=${sameTransition.epoch}/${vtr.epoch}`,
   )
+  let changedContractRejected = false
+  try {
+    executor.claim(candidate, {
+      authority: 'vtr-reach',
+      transitionId: 'transition:reach-test',
+      transitionContractHash: 'contract:other',
+    })
+  } catch (error) {
+    changedContractRejected = error instanceof ExecutionAuthorityConflict
+  }
+  check(
+    '(vtr) an active mechanical action cannot be reattached under a different contractHash',
+    changedContractRejected && executor.current?.transitionContractHash === 'contract:reach-test',
+    `rejected=${changedContractRejected} retained=${executor.current?.transitionContractHash ?? 'none'}`,
+  )
   executor.cancelCurrent('authority fixture complete')
   await vtr.completion
 }
 
 {
   const grid: Grid = new Map()
-  fill(grid, 0, 20, 63, 63, -1, 1, 'stone')
-  fill(grid, 0, 20, 64, 68, -1, 1, 'air')
-  fill(grid, 8, 9, 64, 64, -1, 1, 'stone')
-  fill(grid, 8, 9, 65, 68, -1, 1, 'air')
+  fill(grid, 0, 24, 63, 63, -1, 1, 'stone')
+  fill(grid, 0, 24, 64, 68, -1, 1, 'air')
   let reservations = 0
   let outcomes = 0
-  const run = await runWalk({ x: 0, y: 64, z: 0 }, grid, moveCandidate({ x: 16, y: 64, z: 0 }), {
+  const run = await runWalk({ x: 0, y: 64, z: 0 }, grid, moveCandidate({ x: 5, y: 64, z: 0 }), {
+    actuation: 'pathfinder',
+    pathfinderPhysics: true,
+    vtrPathSegmentation: true,
+    verifyReachAtCandidate: true,
     maxStepsPerWaypoint: 12,
     claimContext: {
       authority: 'vtr-reach',
       transitionId: 'transition:reach-walk-fixture',
+      transitionContractHash: 'contract:reach-walk-fixture',
       beforeMechanicalStep: () => {
         reservations += 1
         return true
@@ -600,12 +758,28 @@ async function runWalk(
     new RegExp(`(?:^|\\s)${key}=([^\\s]+)`).exec(line)?.[1] ?? null
   const reservationKeys = run.mechanicalReservations.map(({ stepId, leg }) => `${leg}:${stepId}`)
   const outcomeKeys = run.mechanicalOutcomes.map(({ stepId, leg }) => `${leg}:${stepId}`)
-  const expectedStepKeys = run.legs.map((_, index) => `${index + 1}:MOVE:16_64_0#${run.result.epoch}:walk-leg-${index + 1}`)
+  const expectedStepKeys = run.legs.map((_, index) => `${index + 1}:MOVE:5_64_0#${run.result.epoch}:walk-leg-${index + 1}`)
+  const walkRowsMatchSettledLegs = run.walkLegRows.length === run.mechanicalOutcomes.length &&
+    run.walkLegRows.every(({ message, detail }, index) => {
+      const expectedStepId = `MOVE:5_64_0#${run.result.epoch}:walk-leg-${index + 1}`
+      return detail.actionId === 'MOVE:5_64_0' &&
+        detail.commitmentId === commitmentId &&
+        detail.step === 'walk_leg' &&
+        detail.count === index + 1 &&
+        detail.transitionId === 'transition:reach-walk-fixture' &&
+        detail.contractHash === 'contract:reach-walk-fixture' &&
+        detail.stepId === expectedStepId &&
+        detail.leg === index + 1 &&
+        detail.transitionTerminal === (index === run.walkLegRows.length - 1) &&
+        markerValue(message, 'count') === String(index + 1) &&
+        markerValue(message, 'stepId') === expectedStepId
+    })
   const sameMechanicalOwner = (rows: readonly MechanicalOwnershipObservation[]): boolean =>
     rows.length >= 3 && rows.every((row) =>
-      row.actionId === 'MOVE:16_64_0' &&
+      row.actionId === 'MOVE:5_64_0' &&
       row.authority === 'vtr-reach' &&
       row.transitionId === 'transition:reach-walk-fixture' &&
+      row.transitionContractHash === 'contract:reach-walk-fixture' &&
       row.commitmentId === commitmentId &&
       row.decisionEpoch === Number(decisionEpoch),
     )
@@ -617,16 +791,19 @@ async function runWalk(
   )
   check(
     '(vtr) walkSkill preserves VTR provenance and reserves every leg before movement',
-    run.result.status === 'done' && reservations >= 3 && reservations === run.legs.length && outcomes === run.legs.length &&
-      run.selectedBy === 'vtr_transition',
-    `status=${run.result.status} selectedBy=${run.selectedBy} reservations=${reservations} outcomes=${outcomes} legs=${run.legs.length}`,
+    run.result.status === 'done' && reservations >= 3 && reservations <= 24 && reservations === run.legs.length && outcomes === run.legs.length &&
+      run.selectedBy === 'vtr_transition' && run.packetWrites === 0 && run.trace.length > 0 && run.mechanicalWaypoints.length >= 2,
+      `status=${run.result.status} selectedBy=${run.selectedBy} reservations=${reservations} outcomes=${outcomes} legs=${run.legs.length} ` +
+      `waypoints=${JSON.stringify(run.mechanicalWaypoints)} controlSteps=${run.trace.length} packetWrites=${run.packetWrites}`,
   )
   check(
     '(vtr) one VTR-selected SKILL_START/commitment/Transition owns every reserved mechanical leg through verified SUCCESS',
     run.starts.length === 1 &&
       start.includes('selectedBy=vtr-transition') &&
       commitmentId !== null && decisionEpoch !== null &&
+      run.pathStatuses.length > 0 && run.pathStatuses.every((status) => status === 'success') &&
       run.legs.length >= 3 && legsHaveSameCommitment &&
+      walkRowsMatchSettledLegs &&
       sameMechanicalOwner(run.mechanicalReservations) && sameMechanicalOwner(run.mechanicalOutcomes) &&
       reservationKeys.length === run.legs.length && outcomeKeys.length === run.legs.length &&
       reservationKeys.every((key, index) => key === outcomeKeys[index] && key === expectedStepKeys[index]) &&
@@ -634,10 +811,12 @@ async function runWalk(
       run.ends[0]?.includes('outcome=SUCCESS') === true &&
       run.ends[0]?.includes(`commitmentId=${commitmentId}`) === true &&
       run.ends[0]?.includes(`decisionEpoch=${decisionEpoch}`) === true &&
-      markerValue(start, 'candidateId') === 'MOVE:16_64_0' &&
-      run.result.status === 'done' && run.result.verified,
-    `starts=${run.starts.length} selected=${start.includes('selectedBy=vtr-transition')} commitment=${commitmentId ?? 'missing'} ` +
+      markerValue(start, 'candidateId') === 'MOVE:5_64_0' &&
+      run.result.status === 'done' && run.result.verified && run.packetWrites === 0,
+      `starts=${run.starts.length} selected=${start.includes('selectedBy=vtr-transition')} commitment=${commitmentId ?? 'missing'} ` +
       `reservations=${run.mechanicalReservations.length} outcomes=${run.mechanicalOutcomes.length} legs=${run.legs.length} ` +
+      `pathfinderStatuses=${JSON.stringify(run.pathStatuses)} ` +
+      `walkRows=${run.walkLegRows.length} correlated=${walkRowsMatchSettledLegs} terminal=${String(run.walkLegRows.at(-1)?.detail.transitionTerminal)} ` +
       `sameOwner=${sameMechanicalOwner(run.mechanicalReservations) && sameMechanicalOwner(run.mechanicalOutcomes)} ` +
       `stepJoin=${reservationKeys.every((key, index) => key === outcomeKeys[index] && key === expectedStepKeys[index])} ` +
       `verified=${run.result.verified} end=${run.ends[0] ?? 'missing'}`,

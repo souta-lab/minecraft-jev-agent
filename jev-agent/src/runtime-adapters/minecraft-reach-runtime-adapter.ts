@@ -10,6 +10,7 @@ import { createPositionFactCache } from '../positionFactCache.ts'
 import type { StateFingerprintMemory } from '../moveFailMemory.ts'
 import { buildWorldState } from '../state.ts'
 import type { SensorInput, SensorOptions, Vec3Json, WorldState } from '../state.ts'
+import { selectReachMechanicalWaypoint } from '../vtr/reach-mechanical-waypoint.ts'
 import type {
   ReachActuationRequest,
   ReachActuationResult,
@@ -21,6 +22,7 @@ const { goals } = pathfinderModule
 
 /** Bounded synchronous path query used by the existing Reach affordance gate. */
 const REACH_PATH_PROBE_TIMEOUT_MS = 750
+const REACH_PATH_SEGMENT_TIMEOUT_MS = 750
 
 /**
  * Narrow Mineflayer compatibility adapter for the first production Reach slice.
@@ -119,8 +121,10 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
         liveStructureMembers: request.liveStructureMembers,
         authority: 'vtr-reach',
         transitionId: intent.transitionId,
+        transitionContractHash: intent.contractHash,
         beforeMechanicalStep: request.beforeMechanicalStep,
         afterMechanicalStep: request.afterMechanicalStep,
+        resolveVtrReachMechanicalWaypoint: (destination) => this.resolveVtrReachMechanicalWaypoint(destination),
       })
       return {
         status: 'claimed',
@@ -159,6 +163,7 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
       status: action.status,
       authority: action.authority,
       transitionId: action.transitionId,
+      transitionContractHash: action.transitionContractHash,
       commitment: action.commitment,
     }
   }
@@ -176,6 +181,32 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
       return { probe: 'reachable', transfer: this.routeCrossesDimensionTransfer(plan.path) }
     } catch {
       return { probe: 'no_path', transfer: 'unknown' }
+    }
+  }
+
+  /**
+   * Turn a successful, current-dimension Mineflayer path into one short typed
+   * checkpoint. The Executor still drives the stock pathfinder; this adapter
+   * only supplies the next path node, so intermediate arrival cannot verify the
+   * committed Reach predicate.
+   */
+  private resolveVtrReachMechanicalWaypoint(destination: Vec3Json) {
+    const pathfinder = this.bot.pathfinder
+    const entity = this.bot.entity
+    if (pathfinder === undefined || entity === undefined) return null
+    try {
+      const goal = new goals.GoalBlock(destination.x, destination.y, destination.z)
+      const plan = pathfinder.getPathTo(pathfinder.movements, goal, REACH_PATH_SEGMENT_TIMEOUT_MS)
+      if (plan.status !== 'success' || this.routeCrossesDimensionTransfer(plan.path) === 'crosses') return null
+      return selectReachMechanicalWaypoint({
+        current: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+        destination,
+        path: plan.path,
+      })
+    } catch {
+      // Segmentation is an optimization for bounded re-observation, never a
+      // reason to substitute an ungrounded waypoint or to claim arrival.
+      return null
     }
   }
 

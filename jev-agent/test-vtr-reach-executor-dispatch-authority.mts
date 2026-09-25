@@ -58,7 +58,16 @@ function makeBot(): MovementBotFixture {
       // the test attempt a second owner while the first still holds the body.
     },
     stop(): void { pathStops += 1 },
-    getPathTo: () => ({ status: 'success', path: [{ x: standPosition.x, y: standPosition.y, z: standPosition.z }] }),
+    getPathTo: (_movements: unknown, goal: { x: number; y: number; z: number }) => {
+      const target = { x: Math.floor(goal.x), y: Math.floor(goal.y), z: Math.floor(goal.z) }
+      const path: Array<{ x: number; y: number; z: number }> = []
+      let x = Math.floor(position.x)
+      while (x < target.x) {
+        x += 1
+        path.push({ x, y: target.y, z: target.z })
+      }
+      return { status: 'success', path }
+    },
   }
   const bot = {
     registry,
@@ -301,6 +310,10 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     assert.equal(vtrAction.status, 'running')
     assert.equal(vtrAction.authority, 'vtr-reach')
     assert.equal(vtrAction.transitionId, activeTransition.contract.transitionId)
+    assert.equal(vtrAction.transitionContractHash, activeTransition.contract.contractHash)
+    const waypoint = vtrAction.resolveVtrReachMechanicalWaypoint?.(vtrCandidate.target!)
+    assert.deepEqual(waypoint?.target, { x: 2, y: 64, z: 0 })
+    assert.equal(fixture.goalStarts(), 1, 'resolving a path checkpoint does not actuate or create a second owner')
     assert.deepEqual(claimCalls, [{
       candidateId: vtrCandidate.id,
       authority: 'vtr-reach',
