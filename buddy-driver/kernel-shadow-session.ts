@@ -81,6 +81,12 @@ export interface ShadowCoverageSummary {
   readonly mutationsMapped: number
   readonly mutationsDeniedByLease: number
   readonly mutationsAttributedToTransition: number
+  /**
+   * Mutations declared under a typed host control-plane / adapter-lifecycle
+   * scope (for example the bootstrap movement pin). Counted on a separate
+   * denominator from transition-attributed mutations.
+   */
+  readonly mutationsHostScoped: number
   readonly mutationsUnguarded: number
   readonly lifecycleCommands: number
   readonly kernelDenied: number
@@ -169,6 +175,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   let mutationsMapped = 0
   let mutationsDeniedByLease = 0
   let mutationsAttributed = 0
+  let mutationsHostScoped = 0
   let mutationsUnguarded = 0
   let lifecycleCommands = 0
   let kernelDenied = 0
@@ -606,9 +613,15 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         })
       }
       const transitionId = context?.authority === 'vtr-reach' ? context.transitionId ?? null : null
+      const hostScope = context?.hostScope ?? null
       let authorityState: string
       if (mapped === null) {
         authorityState = 'unmapped'
+      } else if (transitionId === null && hostScope !== null) {
+        // Declared host control-plane / adapter-lifecycle mutation: typed
+        // authority category, counted on its own denominator, never a blocker.
+        authorityState = 'host-scoped'
+        mutationsHostScoped += 1
       } else if (transitionId === null) {
         authorityState = 'unattributed'
         block('mutation-without-transition-authority', `surface ${record.surface} fired outside a VTR transition context`, {
@@ -650,6 +663,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         argsSignature: record.argsSignature,
         instanceHint,
         context,
+        ...(hostScope === null ? {} : { hostScope }),
         authorityState,
         ...(mapped === null ? {} : {
           resources: mapped.resources.map(resourceKey),
@@ -709,6 +723,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         mutationsMapped,
         mutationsDeniedByLease,
         mutationsAttributedToTransition: mutationsAttributed,
+        mutationsHostScoped,
         mutationsUnguarded,
         lifecycleCommands,
         kernelDenied,

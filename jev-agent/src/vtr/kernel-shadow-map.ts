@@ -375,6 +375,13 @@ export interface ShadowMutationContext {
   readonly authority: string | null
   readonly transitionId: string | null
   readonly transitionContractHash: string | null
+  /**
+   * Typed host control-plane / adapter-lifecycle scope declared by the caller
+   * for mutations that are not transition effects (for example the
+   * bootstrap movement-policy pin). Counted separately from
+   * transition-attributed mutations; never silently ignored.
+   */
+  readonly hostScope?: { readonly category: string; readonly label: string }
 }
 
 export type KernelShadowInput =

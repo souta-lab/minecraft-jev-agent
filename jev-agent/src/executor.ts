@@ -20,6 +20,7 @@ import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
+import type { ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
 import { bodySubmersion, buildArmor, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
@@ -2175,6 +2176,29 @@ export class Executor {
 
   get current(): CurrentAction | null {
     return this.action
+  }
+
+  /**
+   * Explicitly-declared authority scope for a mutation the caller makes
+   * outside a claimed action (for example the bootstrap movement-policy pin).
+   * Set for the synchronous duration of `withAuthorityScope` so the shadow
+   * observer can classify the mutation under its true typed category instead
+   * of losing it as unattributed.
+   */
+  private authorityScope: ShadowMutationContext | null = null
+
+  get currentAuthorityScope(): ShadowMutationContext | null {
+    return this.authorityScope
+  }
+
+  withAuthorityScope<T>(scope: ShadowMutationContext, fn: () => T): T {
+    const previous = this.authorityScope
+    this.authorityScope = scope
+    try {
+      return fn()
+    } finally {
+      this.authorityScope = previous
+    }
   }
 
   get maxConcurrentActions(): number {

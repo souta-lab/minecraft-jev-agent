@@ -341,6 +341,30 @@ addCase('mutation with no in-flight action is a hard blocker', () => {
   return { pass: found.length === 1, detail: `blockers=${blockers().map((b) => b.kind).join(',')}` }
 })
 
+addCase('declared host adapter-config scope is typed and separately counted', () => {
+  const hostScope = { category: 'adapter-config', label: 'bootstrap-movement-pin' }
+  const { session, blockers } = makeSession(() => ({
+    actionId: null,
+    epoch: null,
+    authority: 'host-adapter-config',
+    transitionId: null,
+    transitionContractHash: null,
+    hostScope,
+  }))
+  session.observeMutation({ surface: 'pathfinder.setMovements', guarded: true, leaseOutcome: 'granted', argsSignature: ['object'], instanceHint: null })
+  const summary = session.summary()
+  const authorityBlockers = blockers().filter((b) => b.kind === 'mutation-without-transition-authority')
+  return {
+    pass: summary.mutationsObserved === 1 &&
+      summary.mutationsHostScoped === 1 &&
+      summary.mutationsAttributedToTransition === 0 &&
+      summary.mutationsMapped === 1 &&
+      authorityBlockers.length === 0 &&
+      summary.coverageComplete,
+    detail: `observed=${summary.mutationsObserved} hostScoped=${summary.mutationsHostScoped} attributed=${summary.mutationsAttributedToTransition} blockers=${authorityBlockers.length} coverageComplete=${summary.coverageComplete}`,
+  }
+})
+
 addCase('lease-denied dispatch is counted and still observed', () => {
   const { session } = makeSession()
   session.observeMutation({ surface: 'bot.dig', guarded: true, leaseOutcome: 'denied', argsSignature: ['block:oak_log@1,64,2'], instanceHint: '1,64,2' })

@@ -3077,6 +3077,8 @@ export class JevController {
    * mutations as migration blockers, not as silent evidence.
    */
   currentActuationAuthority(): ShadowMutationContext | null {
+    const scoped = this.executor.currentAuthorityScope
+    if (scoped !== null) return scoped
     const action = this.executor.current
     if (action === null) return null
     return {
@@ -3312,7 +3314,20 @@ export class JevController {
 
   start(): void {
     if (this.running) return
-    this.executor.ensureMovements()
+    // V4.1.2: pinning the movement policy mutates pathfinder state outside any
+    // Transition, so it is declared under a typed host adapter-config scope
+    // rather than left unattributed or fake-attributed to a later Transition.
+    this.executor.withAuthorityScope(
+      {
+        actionId: null,
+        epoch: null,
+        authority: 'host-adapter-config',
+        transitionId: null,
+        transitionContractHash: null,
+        hostScope: { category: 'adapter-config', label: 'bootstrap-movement-pin' },
+      },
+      () => this.executor.ensureMovements(),
+    )
     this.running = true
     this.startedAt = Date.now()
     this.lastProgressAt = Date.now()
