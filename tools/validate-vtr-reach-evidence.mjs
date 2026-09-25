@@ -841,6 +841,7 @@ function providerCaptureFromArchive(archive, expectedIdentity, probe) {
     'runner/no-llm-egress-audit.json',
     'runner/jev-run.jsonl',
     'runner/run.jsonl',
+    'runner/buddy.log',
     'runner/acceptance.json',
   ]
   const files = new Map()
@@ -3394,7 +3395,10 @@ export async function validateEvidenceArchive(archive, repo = null) {
     let capturedProviders = null
     let providerCaptureError = null
     try {
-      capturedProviders = providerCaptureFromArchive(archive, { sourceSha, runId, generationId, buildHash: source.buildHash }, probe)
+      capturedProviders = providerCaptureFromArchive(archive, {
+        sourceSha, runId, generationId, buildHash: source.buildHash,
+        transitionId: transition.transitionId, contractHash,
+      }, probe)
     } catch (error) {
       providerCaptureError = error
     }

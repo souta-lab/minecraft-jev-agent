@@ -370,7 +370,9 @@ function inspectLegacyBaselineArtifact(bytes, { identity, transition, repoPath }
 }
 
 function findCollectorInput(report, name) {
-  return Array.isArray(report?.inputs) ? report.inputs.find((input) => input?.name === name) ?? null : null
+  const inputs = Array.isArray(report?.observed?.inputs) ? report.observed.inputs
+    : Array.isArray(report?.inputs) ? report.inputs : []
+  return inputs.find((input) => input?.name === name) ?? null
 }
 
 function recordsInJournal(bytes, label) {
@@ -919,9 +921,11 @@ function inspectProviderCapture({ capture, identity, copiedSources, collectorRep
     ...rawClassification.providers,
   }
   const captureActivityMatches = JSON.stringify(actualActivity) === JSON.stringify(counters)
+  // The collector attests journal capture in observed.inputs (verified above by
+  // hash) and the offline policy in this check id; no other collector check id
+  // exists for provider journals.
   const collectorPolicyPass = Array.isArray(collectorReport?.checks)
     && collectorReport.checks.some((entry) => entry.id === 'policy:no-model-activity-during-probe' && entry.status === 'PASS')
-    && collectorReport.checks.some((entry) => entry.id === 'policy:provider-journals' && entry.status === 'PASS')
   const collectorMetrics = collectorReport?.observed?.transition?.metrics ?? {}
   const collectorCountersZero = Number(collectorMetrics.providerEvaluateAttemptsIncludingRetries) === 0
     && Number(collectorMetrics.system2CallsPerTransition) === 0
