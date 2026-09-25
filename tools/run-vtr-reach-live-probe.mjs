@@ -1268,7 +1268,7 @@ function nbtUuid(value) {
 async function parsePlayerDat(playerPath) {
   const root = await parseNbtFile(playerPath)
   if (!isPlainObject(root)) throw new Error('playerdata has no compound root')
-  const pos = unwrapNbt(root.Pos)
+  const pos = unwrapNbt(unwrapNbt(root.Pos))
   const rawInventory = unwrapNbt(root.Inventory)
   const stacks = Array.isArray(rawInventory) ? rawInventory : rawInventory?.value
   const inventory = {}
