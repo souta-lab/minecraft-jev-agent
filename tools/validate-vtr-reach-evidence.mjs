@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { gunzipSync, inflateSync } from 'node:zlib'
 import { basename, join, relative, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { parse as parseNbt } from 'prismarine-nbt'
 import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
 
@@ -305,6 +306,21 @@ async function parsePlayerDat(path) {
   }
 }
 
+function normalizedBlockName(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  return value.trim().toLowerCase().replace(/^minecraft:/u, '')
+}
+
+/** Resolve the MCA region that contains an integer world block coordinate. */
+export function witnessRegionRelativePath(target) {
+  if (!target || !Number.isSafeInteger(target.x) || !Number.isSafeInteger(target.y) || !Number.isSafeInteger(target.z)) return null
+  const chunkX = Math.floor(target.x / 16)
+  const chunkZ = Math.floor(target.z / 16)
+  const regionX = Math.floor(chunkX / 32)
+  const regionZ = Math.floor(chunkZ / 32)
+  return `server/world/r.${regionX}.${regionZ}.mca`
+}
+
 async function readBlockName(regionPath, x, y, z) {
   const chunkX = Math.floor(x / 16)
   const chunkZ = Math.floor(z / 16)
@@ -354,6 +370,61 @@ async function readBlockName(regionPath, x, y, z) {
   const word = BigInt.asUintN(64, BigInt(packed[longIndex]))
   const mask = (1n << BigInt(bits)) - 1n
   return names[Number((word >> shift) & mask)] ?? null
+}
+
+/** Independently read the committed witness and its support from its MCA region. */
+export async function inspectWitnessPlane(archive, archivedFiles, target) {
+  const relativePath = witnessRegionRelativePath(target)
+  if (relativePath === null) return { status: 'INCOMPLETE', relativePath: null, reason: 'committed witness does not contain integer block coordinates' }
+  if (!archivedFiles.includes(relativePath)) return { status: 'INCOMPLETE', relativePath, reason: 'coordinate-derived region file is absent' }
+  try {
+    const path = join(archive, relativePath)
+    return {
+      status: 'READ',
+      relativePath,
+      witnessBlock: await readBlockName(path, target.x, target.y, target.z),
+      supportBlock: await readBlockName(path, target.x, target.y - 1, target.z),
+    }
+  } catch (error) {
+    return { status: 'INCOMPLETE', relativePath, reason: `cannot inspect MCA witness/support facts: ${error.message}` }
+  }
+}
+
+function blockFromSetblockCommand(command) {
+  if (typeof command !== 'string') return null
+  const match = /(?:^|\s)setblock\s+\S+\s+\S+\s+\S+\s+([a-z0-9_.:-]+)/iu.exec(command)
+  return match ? normalizedBlockName(match[1]) : null
+}
+
+/** Correlate a successful post-join fixture setblock with this Mission's committed Reach sources. */
+export function inspectFixtureWitnessSetup({ fixtureCommands, missionItem, desiredPredicate, witness }) {
+  const missionBlock = normalizedBlockName(missionItem)
+  const predicateItem = normalizedBlockName(desiredPredicate?.proposition?.item)
+  const rawSources = desiredPredicate?.proposition?.sourceNames
+  const sourceNames = Array.isArray(rawSources) ? [...new Set(rawSources.map(normalizedBlockName).filter(Boolean))] : []
+  const committedSources = sourceNames.length > 0 ? sourceNames : [predicateItem].filter(Boolean)
+  const matchingMission = missionBlock !== null && predicateItem !== null && missionBlock === predicateItem
+  const setupAfterJoin = fixtureCommands.filter((row) => /execute\s+at\s+AI_Buddy\s+run\s+setblock\b/iu.test(String(row?.command ?? '')))
+  const changed = setupAfterJoin.filter((row) => /Changed block at/i.test(String(row?.result ?? '')))
+  const observedBlocks = changed.map((row) => ({ block: blockFromSetblockCommand(row.command), command: row.command, result: row.result }))
+  const witnessCoordinatesValid = witness && Number.isSafeInteger(witness.x) && Number.isSafeInteger(witness.y) && Number.isSafeInteger(witness.z)
+  if (missionBlock === null || predicateItem === null || committedSources.length === 0) {
+    return { status: 'INCOMPLETE', reason: 'Mission item or committed Reach source names are absent', missionBlock, predicateItem, committedSources, observedBlocks }
+  }
+  if (!matchingMission) {
+    return { status: 'FAIL', reason: 'Mission item and committed Reach predicate item disagree', missionBlock, predicateItem, committedSources, observedBlocks }
+  }
+  if (!witnessCoordinatesValid) {
+    return { status: 'INCOMPLETE', reason: 'committed witness has no integer block coordinates', missionBlock, predicateItem, committedSources, observedBlocks }
+  }
+  if (changed.length === 0) {
+    return { status: 'INCOMPLETE', reason: 'no successful post-join setblock source is recorded', missionBlock, predicateItem, committedSources, observedBlocks }
+  }
+  const matched = observedBlocks.find((entry) => entry.block !== null && committedSources.includes(entry.block))
+  if (!matched) {
+    return { status: 'INCOMPLETE', reason: 'successful post-join setblock source does not match a committed Reach source name', missionBlock, predicateItem, committedSources, observedBlocks }
+  }
+  return { status: 'PASS', missionBlock, predicateItem, committedSources, observedBlock: matched.block, command: matched.command, result: matched.result, witness }
 }
 
 function inventoriesEqual(left, right) {
@@ -1198,32 +1269,50 @@ async function validate(archive, repo) {
     else fail('run:terminal-before-shutdown', 'terminal outcome is absent, invalidly timed, or after shutdown')
 
     const worldTarget = transition.witness?.target
-    if (worldTarget && listing.files.includes('server/world/r.-1.0.mca')) {
-      try {
-        const regionPath = join(archive, 'server/world/r.-1.0.mca')
-        const witnessBlock = await readBlockName(regionPath, Number(worldTarget.x), Number(worldTarget.y), Number(worldTarget.z))
-        const supportBlock = await readBlockName(regionPath, Number(worldTarget.x), Number(worldTarget.y) - 1, Number(worldTarget.z))
-        const expected = transition.desiredPredicate?.proposition?.sourceNames?.[0] ?? transition.desiredPredicate?.proposition?.item
-        if (witnessBlock !== expected) fail('world:witness-block', 'saved world does not contain the committed witness block', { expected, observed: witnessBlock, target: worldTarget })
-        else pass('world:witness-block', { block: witnessBlock, target: worldTarget })
-        if (!supportBlock || ['air', 'cave_air', 'void_air'].includes(supportBlock)) fail('world:witness-support', 'saved world lacks a solid support block beneath the witness', { observed: supportBlock, target: worldTarget })
-        else pass('world:witness-support', { block: supportBlock, position: { x: worldTarget.x, y: Number(worldTarget.y) - 1, z: worldTarget.z } })
-      } catch (error) { incomplete('world:witness-plane', `cannot inspect MCA witness/support facts: ${error.message}`) }
-    } else incomplete('world:witness-plane', 'committed witness or archived region MCA is absent')
+    const witnessRegionPath = witnessRegionRelativePath(worldTarget)
+    if (witnessRegionPath === null) {
+      incomplete('world:witness-plane', 'committed witness is absent or does not contain integer block coordinates')
+      incomplete('required:world-witness-region', 'cannot derive the coordinate-specific MCA region without committed integer witness coordinates')
+    } else {
+      if (listing.files.includes(witnessRegionPath)) pass('required:world-witness-region', { path: witnessRegionPath })
+      else incomplete(`required:${witnessRegionPath}`, 'MCA region containing the committed witness/support coordinates is absent', { witness: worldTarget })
+
+      const plane = await inspectWitnessPlane(archive, listing.files, worldTarget)
+      if (plane.status === 'INCOMPLETE') incomplete('world:witness-plane', plane.reason, { expectedRegion: plane.relativePath, witness: worldTarget })
+      else {
+        const rawSourceNames = transition.desiredPredicate?.proposition?.sourceNames
+        const sourceNames = Array.isArray(rawSourceNames) ? [...new Set(rawSourceNames.map(normalizedBlockName).filter(Boolean))] : []
+        const predicateItem = normalizedBlockName(transition.desiredPredicate?.proposition?.item)
+        const missionItem = normalizedBlockName(probe.mission?.item)
+        const expectedBlocks = sourceNames.length > 0 ? sourceNames : [predicateItem].filter(Boolean)
+        if (missionItem === null || predicateItem === null) incomplete('world:witness-resource-binding', 'Mission or committed Reach predicate item is absent', { missionItem, predicateItem, sourceNames: expectedBlocks })
+        else if (missionItem !== predicateItem) fail('world:witness-resource-binding', 'Mission item differs from the committed Reach predicate item', { missionItem, predicateItem, sourceNames: expectedBlocks })
+        else pass('world:witness-resource-binding', { missionItem, predicateItem, sourceNames: expectedBlocks })
+
+        const witnessBlock = normalizedBlockName(plane.witnessBlock)
+        if (!expectedBlocks.includes(witnessBlock)) fail('world:witness-block', 'saved world does not contain a committed source name at the witness coordinates', { expected: expectedBlocks, observed: plane.witnessBlock, target: worldTarget, region: plane.relativePath })
+        else pass('world:witness-block', { block: plane.witnessBlock, target: worldTarget, region: plane.relativePath })
+        if (!plane.supportBlock || ['air', 'cave_air', 'void_air'].includes(normalizedBlockName(plane.supportBlock))) fail('world:witness-support', 'saved world lacks a solid support block beneath the witness', { observed: plane.supportBlock, position: { x: worldTarget.x, y: worldTarget.y - 1, z: worldTarget.z }, region: plane.relativePath })
+        else pass('world:witness-support', { block: plane.supportBlock, position: { x: worldTarget.x, y: worldTarget.y - 1, z: worldTarget.z }, region: plane.relativePath })
+      }
+    }
 
     if (!RUN_ID_RE.test(String(runId)) || !fixtureCommands.length) incomplete('fixture:run-scoped', 'fixture command log is empty or runId is invalid')
     else {
       const witness = transition.witness?.target
-      const setBlock = fixtureCommands.find((row) => /setblock/i.test(row.command ?? '') && /oak_log/i.test(row.command ?? '') && /Changed block at/i.test(row.result ?? ''))
-      const setupAfterJoin = fixtureCommands.some((row) => /execute at AI_Buddy run setblock/i.test(row.command ?? ''))
-      if (setBlock && setupAfterJoin && witness && Number.isInteger(witness.x) && Number.isInteger(witness.y) && Number.isInteger(witness.z)) pass('fixture:relative-witness-setup', { witness: transition.witness.witnessId, setupAfterJoin, result: setBlock.result })
-      else incomplete('fixture:relative-witness-setup', 'fixture journal does not bind post-join target setup to the committed witness coordinates')
+      const fixtureSetup = inspectFixtureWitnessSetup({
+        fixtureCommands,
+        missionItem: probe.mission?.item,
+        desiredPredicate: transition.desiredPredicate,
+        witness,
+      })
+      if (fixtureSetup.status === 'PASS') pass('fixture:relative-witness-setup', { witness: transition.witness.witnessId, ...fixtureSetup })
+      else if (fixtureSetup.status === 'FAIL') fail('fixture:relative-witness-setup', fixtureSetup.reason, fixtureSetup)
+      else incomplete('fixture:relative-witness-setup', fixtureSetup.reason, fixtureSetup)
       const rejectedCommands = fixtureCommands.filter((row) => /Rejected:/i.test(row.result ?? '')).length
       pass('fixture:operator-command-journal', { recordedCommands: fixtureCommands.length, rejectedNoMutationAttempts: rejectedCommands })
     }
   }
-
-  if (!listing.files.includes('server/world/r.-1.0.mca')) incomplete('required:server/world/r.-1.0.mca', 'world region data needed to independently ground the witness is absent')
 
   // Capability evidence is not the entire migration milestone. These two
   // run-scoped proofs are intentionally separate from a no-LLM mechanics probe.
@@ -1304,4 +1393,4 @@ async function main() {
   process.exit(EXIT[report.status] ?? EXIT.FAIL)
 }
 
-await main()
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main()
