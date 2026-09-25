@@ -29,7 +29,7 @@
 //     which is exactly what the decision log in `decisionlog.ts` records
 //     (predicted confidence vs observed action result) for a reliability diagram.
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
@@ -148,6 +148,10 @@ export class JsonlWriter {
   constructor(path: string) {
     this.path = path
     mkdirSync(dirname(path), { recursive: true })
+    // Materialize an empty journal immediately so no-call runs still have a
+    // real, hashable artifact covering the writer's lifetime. Append mode
+    // preserves existing bytes if a caller deliberately reopens a sink.
+    closeSync(openSync(path, 'a'))
   }
 
   write(record: unknown): void {
