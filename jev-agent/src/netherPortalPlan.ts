@@ -1568,7 +1568,7 @@ export type SkillPolicyBoundaryReason =
 export const PORTAL_ENTER_SKILL = 'ENTER_PORTAL(portalSite)'
 
 /** Who selected the target this Skill executes (never a per-tick motor choice). */
-export type SkillSelectionSource = 'jev' | 'system2-derived' | 'hard-safety'
+export type SkillSelectionSource = 'jev' | 'system2-derived' | 'hard-safety' | 'vtr-transition'
 
 export function formatSkillStart(
   skill: string,

@@ -101,13 +101,14 @@ export type AuthorityTaggedJevResult = JevResult & { authorityDecision: Authorit
 export function buildAuthorityQuestions(
   candidates: readonly Candidate[],
   names: readonly QuestionName[] = QUESTION_NAMES,
+  actionInstructions = AUTHORITY_PRIMARY_INSTRUCTIONS,
 ): Questions {
   const requested = new Set(names)
   const out: Questions = {}
   if (requested.has('action')) {
     const criteria: Record<string, string> = {}
     for (const candidate of candidates) criteria[candidate.id] = candidateCriteria(candidate)
-    out.action = { type: 'choice', instructions: AUTHORITY_PRIMARY_INSTRUCTIONS, criteria }
+    out.action = { type: 'choice', instructions: actionInstructions, criteria }
   }
   if (requested.has('abandon_option')) {
     out.abandon_option = {
@@ -150,7 +151,7 @@ function calibratedConfidence(metadata: unknown, name: string): number | null {
   return typeof confidence === 'number' && Number.isFinite(confidence) ? confidence : null
 }
 
-function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnswer {
+function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown, routeFrame = false): JevAnswer {
   const confidence = calibratedConfidence(metadata, name)
   if (name === 'action') {
     const choice = member(raw, 'choice')
@@ -164,7 +165,7 @@ function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnsw
       confidence,
       probabilities,
       legend: null,
-      note: 'model-authoritative-pi',
+      note: routeFrame ? 'jev-reach-route-policy-input' : 'model-authoritative-pi',
     }
   }
   if (name === 'danger') {
@@ -194,6 +195,35 @@ function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnsw
     probabilities: { true: probability, false: 1 - probability },
     legend: null,
     note: name === 'abandon_option' ? 'model-authoritative-beta' : 'model-safety-estimate',
+  }
+}
+
+/**
+ * Describe the authority that participated in this evaluate() call. Legacy
+ * callers retain their historical pi/beta record; a VTR route frame is a
+ * bounded Jev policy input and must not be journaled as universal pi/beta.
+ */
+function authorityJournal(
+  request: JevRequest,
+  fields: { decision?: AuthorityDecisionMeta; failure?: string } = {},
+): Record<string, unknown> {
+  if (request.decisionFrame?.kind === 'vtr-reach-route') {
+    const requested = request.questionNames ?? QUESTION_NAMES
+    return {
+      decisionFrame: {
+        kind: request.decisionFrame.kind,
+        policy: 'jev',
+        questionAuthorities: Object.fromEntries(requested.map((name) => [name, 'jev-policy-input'])),
+      },
+      code: 'grounding+safety+truth',
+      ...fields,
+    }
+  }
+  return {
+    pi: 'model',
+    beta: 'model',
+    code: 'grounding+safety+truth',
+    ...fields,
   }
 }
 
@@ -247,6 +277,7 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
 export function authorityState(request: JevRequest): Record<string, unknown> {
   const state = request.state
   const projection = request.semanticProjection ?? null
+  const reachRouteFrame = request.decisionFrame?.kind === 'vtr-reach-route' ? request.decisionFrame : null
   const self = {
     position: state.self.position,
     health: state.self.health,
@@ -286,13 +317,12 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
   }
   const shared = {
     inventory: state.inventory.counts,
-    goal: state.goal,
-    goalQueue: {
-      depth: state.goalQueue.depth,
-      empty: state.goalQueue.empty,
-      current: state.goalQueue.current,
-    },
-    currentOption: state.currentOption ?? null,
+    goal: reachRouteFrame === null ? state.goal : { authority: 'vtr-reach-route', context: reachRouteFrame.context },
+    goalQueue: reachRouteFrame === null
+      ? { depth: state.goalQueue.depth, empty: state.goalQueue.empty, current: state.goalQueue.current }
+      : { depth: 0, empty: true, current: null },
+    currentOption: reachRouteFrame === null ? state.currentOption ?? null : null,
+    ...(reachRouteFrame === null ? {} : { decisionFrame: reachRouteFrame }),
     recentOutcomes: (state.recentOutcomes ?? []).slice(-8),
     candidates: request.candidates.map((candidate) => ({
       id: candidate.id,
@@ -753,10 +783,15 @@ export class AuthorityJevPolicy implements JevPolicy {
   async decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult> {
     const callId = randomUUID()
     const requested = request.questionNames ?? QUESTION_NAMES
-    const questions = buildAuthorityQuestions(request.candidates, requested)
+    const questions = buildAuthorityQuestions(
+      request.candidates,
+      requested,
+      request.decisionFrame?.instructions ?? AUTHORITY_PRIMARY_INSTRUCTIONS,
+    )
     const modelState = authorityState(request) as Parameters<typeof evaluate>[0]['state']
     const maxGeneralAttempts = Math.max(1, this.options.maxRetries + 1)
     let generalAttempt = 0
+    let providerAttempts = 0
     let rateAttempt = 0
     let rateWaitMs = 0
     let transientRetryCount = 0
@@ -769,6 +804,12 @@ export class AuthorityJevPolicy implements JevPolicy {
       const timeout = AbortSignal.timeout(this.options.timeoutMs)
       const abortSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
       try {
+        providerAttempts += 1
+        try {
+          request.onProviderAttempt?.()
+        } catch {
+          // Telemetry must not prevent the provider call whose attempt it measures.
+        }
         const response = await this.requestEvaluation({
           model: this.model,
           state: modelState,
@@ -777,7 +818,10 @@ export class AuthorityJevPolicy implements JevPolicy {
           abortSignal,
         })
         const answers: Record<string, JevAnswer> = {}
-        for (const name of requested) answers[name] = mapAnswer(name, response.answers[name], response.providerMetadata)
+        const isReachRouteFrame = request.decisionFrame?.kind === 'vtr-reach-route'
+        for (const name of requested) {
+          answers[name] = mapAnswer(name, response.answers[name], response.providerMetadata, isReachRouteFrame)
+        }
 
         const action = answers.action
         if (action !== undefined) {
@@ -785,9 +829,14 @@ export class AuthorityJevPolicy implements JevPolicy {
           if (!grounded) throw new Error(`Jev invented non-grounded action id ${JSON.stringify(action.value)}`)
         }
 
-        const authorityDecision = authorityDecisionMeta(request, answers)
+        // Reach route frames are scoped policy inputs owned by VTR. They do not
+        // participate in the legacy Option/β authority contract, so neither the
+        // journal nor the returned Jev result may carry Option identity or β
+        // threshold/adoption metadata for this call.
+        const authorityDecision = isReachRouteFrame ? undefined : authorityDecisionMeta(request, answers)
         const usage = readUsage(response.usage)
         const latencyMs = Date.now() - started
+        const decisionJournal = authorityDecision === undefined ? {} : { decision: authorityDecision }
         this.options.writer.write({
           record: 'jev-call',
           callId,
@@ -795,6 +844,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           policy: this.kind,
           model: this.model,
           stage: request.stage,
+          providerAttempts,
           latencyMs,
           rateLimitRetries: rateAttempt,
           rateLimitWaitMs: rateWaitMs,
@@ -806,12 +856,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           questions,
           response: { model: this.model, usage, answers },
           error: null,
-          authority: {
-            pi: 'model',
-            beta: 'model',
-            code: 'grounding+safety+truth',
-            decision: authorityDecision,
-          },
+          authority: authorityJournal(request, decisionJournal),
         })
         const result = {
           callId,
@@ -821,7 +866,8 @@ export class AuthorityJevPolicy implements JevPolicy {
           latencyMs,
           usage,
           answers,
-          authorityDecision,
+          providerAttempts,
+          ...(authorityDecision === undefined ? {} : { authorityDecision }),
         }
         return result
       } catch (error) {
@@ -836,8 +882,8 @@ export class AuthorityJevPolicy implements JevPolicy {
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
             transientRetries: transientRetryCount, transientWaitMs,
-            state: modelState, questions, response: null, error: message,
-            authority: { pi: 'model', beta: 'model', failure: 'cancelled' },
+            state: modelState, questions, response: null, error: message, providerAttempts,
+            authority: authorityJournal(request, { failure: 'cancelled' }),
             ...providerDiagnosticsField,
           })
           throw new FatalModelError('jev-authority', generalAttempt, message)
@@ -854,6 +900,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: rateAttempt,
             delayMs, totalWaitMs: rateWaitMs, error: message,
+            providerAttempts,
             ...providerDiagnosticsField,
           })
           try {
@@ -881,15 +928,15 @@ export class AuthorityJevPolicy implements JevPolicy {
               model: this.model, stage: request.stage, latencyMs: Date.now() - started,
               rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
               transientRetries: transientRetryCount, transientWaitMs,
-              state: modelState, questions, response: null, error: message,
-              authority: { pi: 'model', beta: 'model', failure: 'transient-provider-retry' },
+              state: modelState, questions, response: null, error: message, providerAttempts,
+              authority: authorityJournal(request, { failure: 'transient-provider-retry' }),
               retryScheduled: true,
               ...providerDiagnosticsField,
             })
             this.options.writer.write({
               record: 'jev-retry', callId, ts: new Date().toISOString(),
               attempt: generalAttempt, delayMs: retryDelayMs, totalWaitMs: rateWaitMs + transientWaitMs,
-              retryClass: 'transient-provider', error: message,
+              retryClass: 'transient-provider', error: message, providerAttempts,
               ...providerDiagnosticsField,
             })
             try {
@@ -909,9 +956,9 @@ export class AuthorityJevPolicy implements JevPolicy {
             record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
-            transientRetries: transientRetryCount, transientWaitMs, state: modelState,
+            transientRetries: transientRetryCount, transientWaitMs, state: modelState, providerAttempts,
             questions, response: null, error: message,
-            authority: { pi: 'model', beta: 'model', failure: 'transient-provider-unavailable' },
+            authority: authorityJournal(request, { failure: 'transient-provider-unavailable' }),
             retryable: true,
             ...providerDiagnosticsField,
           })
@@ -921,6 +968,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: generalAttempt,
             delayMs: 0, totalWaitMs: rateWaitMs, error: message,
+            providerAttempts,
             ...providerDiagnosticsField,
           })
           continue
@@ -929,9 +977,9 @@ export class AuthorityJevPolicy implements JevPolicy {
           record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
           model: this.model, stage: request.stage, latencyMs: Date.now() - started,
           rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
-          transientRetries: transientRetryCount, transientWaitMs, state: modelState,
+          transientRetries: transientRetryCount, transientWaitMs, state: modelState, providerAttempts,
           questions, response: null, error: message,
-          authority: { pi: 'model', beta: 'model', failure: 'fatal-no-fallback' },
+          authority: authorityJournal(request, { failure: 'fatal-no-fallback' }),
           ...providerDiagnosticsField,
         })
         throw new FatalModelError('jev-authority', generalAttempt, message)

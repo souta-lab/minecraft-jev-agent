@@ -29,7 +29,7 @@
 //     which is exactly what the decision log in `decisionlog.ts` records
 //     (predicted confidence vs observed action result) for a reliability diagram.
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
@@ -96,12 +96,22 @@ export interface JevResult {
   latencyMs: number
   usage: JevUsage | null
   answers: Record<string, JevAnswer>
+  /** Number of actual model-provider evaluate attempts; absent for legacy/offline policies. */
+  providerAttempts?: number
 }
 
 export interface JevRequest {
   stage: string
   state: WorldState
   candidates: readonly Candidate[]
+  /** Internal telemetry hook called immediately before each model-provider evaluate attempt. */
+  onProviderAttempt?: () => void
+  /** Bounded V4 authority frame for a non-Option choice such as grounded Reach routing. */
+  decisionFrame?: {
+    readonly kind: 'vtr-reach-route'
+    readonly instructions: string
+    readonly context: Readonly<Record<string, unknown>>
+  }
   /** CORE + trigger-specific set to send; defaults to the full set. */
   questionNames?: readonly QuestionName[]
   /**
@@ -138,6 +148,10 @@ export class JsonlWriter {
   constructor(path: string) {
     this.path = path
     mkdirSync(dirname(path), { recursive: true })
+    // Materialize an empty journal immediately so no-call runs still have a
+    // real, hashable artifact covering the writer's lifetime. Append mode
+    // preserves existing bytes if a caller deliberately reopens a sink.
+    closeSync(openSync(path, 'a'))
   }
 
   write(record: unknown): void {
@@ -152,6 +166,8 @@ export interface JevCallRecord {
   policy: JevPolicyKind
   model: string
   stage: string
+  /** Cumulative number of entered provider evaluate calls in this decision; absent in older/offline records. */
+  providerAttempts?: number
   latencyMs: number
   /** rate-limit retries already consumed before this successful attempt */
   rateLimitRetries: number
@@ -172,6 +188,8 @@ export interface JevRetryRecord {
   delayMs: number
   totalWaitMs: number
   error: string
+  /** Cumulative entered provider evaluate calls; a scheduled retry is not itself an attempt. */
+  providerAttempts?: number
 }
 
 export interface JevOutcomeRecord {

@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
+import { bindSelfAirMetadataProjection } from '../jev-agent/src/air.ts'
 import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelFailure.ts'
 import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForModelRecovery } from './model-recovery.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
@@ -51,6 +52,8 @@ import {
 import type { System2RouteMemoryInput } from '../jev-agent/src/system2Payload.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
+import { createKernelShadowSession } from './kernel-shadow-session.ts'
+import type { ShadowMutationContext } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import { isContainerBlockName, normalizeBlockName } from '../jev-agent/src/containerAccess.ts'
 import { NETHER_PORTAL, PORTAL_VERIFIED, portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
@@ -2036,6 +2039,11 @@ export function buildMercurySummary(
 }
 
 export function createGeneration(ctx: GenerationContext): ResidentGeneration {
+  const selfAirBinding = bindSelfAirMetadataProjection(ctx.bot)
+  ctx.log('AIR_SENSOR_BINDING', { binding: selfAirBinding })
+  if (selfAirBinding === 'unavailable-nonconfigurable-property' || selfAirBinding === 'unavailable-self-air-metadata-key') {
+    throw new Error(`Cannot bind the self-entity air sensor over Mineflayer oxygenLevel: ${selfAirBinding}`)
+  }
   const startedAt = Date.now()
   const now = startedAt
   const counts = inventoryCounts(ctx.bot)
@@ -2292,11 +2300,30 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   syncPortalSiteMemory('generation-start')
   // Same for a Nether-structure site already in scan range at generation start.
   syncStructureSiteMemory('generation-start')
-  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
+  // V4.1.2 Phase-1 SHADOW ONLY: the host replays every observed mutation
+  // dispatch and the Reach Transition lifecycle through the V4.1.2 kernel as an
+  // observer. Kernel authority is OFF here: nothing the shadow decides can
+  // block, reroute, or authorize production actuation. Unmapped or
+  // transition-unattributed mutations are journaled as migration blockers.
+  const kernelShadow = createKernelShadowSession({
+    world: {
+      serverId: ctx.worldKey.serverId,
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
+    },
+    generationId: id,
+    journalPath: join(ctx.logDir, 'kernel-shadow.jsonl'),
+  })
+  // Late-bound: the controller (and its executor projection) exists only after
+  // the leased bot is built. The resolver reads the CURRENT claim at mutation
+  // time, so dispatches are attributed to whichever authority holds the body.
+  let actuationAuthoritySource: { currentActuationAuthority(): ShadowMutationContext | null } | null = null
+  kernelShadow.bindActuationContext(() => actuationAuthoritySource?.currentActuationAuthority() ?? null)
+  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log, kernelShadow.observeMutation)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
   // surface check proves the nested capabilities are guarded, not raw.
-  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log)
+  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log, kernelShadow.observeMutation)
   const surface = assertActuationSurfaceCovered(bot, ctx.log)
   ctx.log('ACTUATION_PORT_READY', {
     id,
@@ -2711,8 +2738,22 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   // The planner IS the env switch: deterministic keeps the original single-shot
   // contract, so every decision record truthfully reports `llm.called == false`.
-  // `llm` turns the controller's exception paths into bounded replans.
-  const plannerMode = resolvePlannerMode()
+  // `llm` turns the controller's exception paths into bounded replans. The
+  // explicit Reach probe selects the real production VTR scheduler directly;
+  // it leaves the compatibility ladder/ledger out of this run's WHAT path.
+  const vtrReachProbe = process.env.BUDDY_VTR_REACH_PROBE?.trim() === '1'
+  const configuredPlannerMode = resolvePlannerMode()
+  const plannerMode = vtrReachProbe ? 'llm' : configuredPlannerMode
+  if (vtrReachProbe) {
+    ctx.log('VTR_REACH_PROBE_CONFIGURED', {
+      mission: { kind: 'inventory_at_least', item: ctx.goalItem, count: ctx.goalCount },
+      compatibilityLadder: 'observer-only',
+      ledgerRestore: 'disabled',
+      plannerBootstrap: 'disabled',
+      system2Mode: process.env.BUDDY_SYSTEM2 ?? 'configuration-default',
+      jevPolicyMode: process.env.BUDDY_POLICY ?? 'configuration-default',
+    })
+  }
 
   // A retryable Jev provider outage stops this generation and lets HOST retry
   // under the same model authority. Construction/configuration failures and
@@ -2944,6 +2985,16 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const options: Partial<JevAgentOptions> = {
     goalItem: rootGoal.goalItem,
     goalCount: rootGoal.goalCount,
+    // V4 Mission truth is the run's configured objective, never the deterministic
+    // benchmark ladder's compatibility projection. The Reach scheduler reads
+    // this separately before GoalQueue/System2/π dispatch.
+    vtrMission: {
+      id: `run-mission:${ctx.goalItem}:${ctx.goalCount}`,
+      kind: 'inventory_at_least',
+      item: ctx.goalItem,
+      count: ctx.goalCount,
+    },
+    vtrReachProbe,
     // Every decision-time world read carries provenance: a cell whose column was
     // not loaded under the live dimension is refused (typed) instead of read.
     dimensionProvenance,
@@ -2980,6 +3031,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       runId: ctx.runId ?? null,
       generationId: id,
       sourceSha: ctx.sourceSha ?? null,
+      buildHash: ctx.buildHash ?? null,
     },
     terminateOnModelFailure: terminateResident,
     recoveryPolicyAuthority: ctx.recoveryPolicyAuthority ?? null,
@@ -2998,6 +3050,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     },
     actuation: 'pathfinder',
     actuationPort,
+    kernelShadow: kernelShadow.observe,
     reach: 5,
     scanRadius: 48,
     verbose: true,
@@ -3072,6 +3125,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   const controller = new JevController(bot, options)
   controllerForRecovery = controller
+  actuationAuthoritySource = controller
+  ctx.log('KERNEL_SHADOW_READY', {
+    id,
+    journal: join(ctx.logDir, 'kernel-shadow.jsonl'),
+    world: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+    kernelAuthority: 'off',
+    phase: 'shadow-only',
+  })
   // The stock fallback has no DESCEND branch; without this wrapper a stalled
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
@@ -3082,7 +3143,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // a stale floor. `liveWorldKey` is the same key the durable-progress read above
   // already uses, so there is one spelling of it.
   const liveLedgerBasis: LedgerBasis = ledgerBasisForLiveFrontier(liveWorldKey, ladder)
-  restoreLedgerIntoController(controller, plannerMode, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
+  if (vtrReachProbe) {
+    ctx.log('VTR_REACH_PROBE_QUEUE_EMPTY', {
+      source: 'configured Mission',
+      restoredLegacyRows: 0,
+      authority: 'vtr-transition-scheduler',
+    })
+  } else {
+    restoreLedgerIntoController(controller, plannerMode, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
+  }
   const brain = new PlannerBrain({
     bot,
     world,
@@ -3125,7 +3194,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     buildHash: ctx.buildHash ?? null,
     rungIndex: ladder.rungIndex,
     rungId: ladder.rungId,
-    productionPlanAuthority: plannerMode === 'deterministic' ? 'deterministic' : 'system2',
+    productionPlanAuthority: vtrReachProbe ? 'vtr-reach-probe' : plannerMode === 'deterministic' ? 'deterministic' : 'system2',
     ...(plannerMode === 'deterministic' ? { goals: ladder.goals.map((goal) => goal.description) } : {}),
     policy: controller.policyKind,
     policyProvider: controller.policyProvider,
@@ -3287,6 +3356,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           subgoalsDone: result.subgoalsDone,
           subgoalCount: result.subgoalCount,
           jevCalls: result.jevCalls,
+        })
+        const shadowSummary = kernelShadow.summary()
+        ctx.log('KERNEL_SHADOW_SUMMARY', {
+          id,
+          mutationsObserved: shadowSummary.mutationsObserved,
+          mutationsMapped: shadowSummary.mutationsMapped,
+          mutationsDeniedByLease: shadowSummary.mutationsDeniedByLease,
+          mutationsAttributedToTransition: shadowSummary.mutationsAttributedToTransition,
+          mutationsUnguarded: shadowSummary.mutationsUnguarded,
+          lifecycleCommands: shadowSummary.lifecycleCommands,
+          kernelDenied: shadowSummary.kernelDenied,
+          blockers: shadowSummary.blockers.length,
+          coverageComplete: shadowSummary.coverageComplete,
         })
         proposeLedger()
       })
@@ -3482,6 +3564,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       } catch {
         // best effort
       }
+      const shadowSummary = kernelShadow.summary()
+      ctx.log('KERNEL_SHADOW_SUMMARY', {
+        id,
+        mutationsObserved: shadowSummary.mutationsObserved,
+        mutationsMapped: shadowSummary.mutationsMapped,
+        mutationsDeniedByLease: shadowSummary.mutationsDeniedByLease,
+        mutationsAttributedToTransition: shadowSummary.mutationsAttributedToTransition,
+        mutationsUnguarded: shadowSummary.mutationsUnguarded,
+        lifecycleCommands: shadowSummary.lifecycleCommands,
+        kernelDenied: shadowSummary.kernelDenied,
+        blockers: shadowSummary.blockers.length,
+        coverageComplete: shadowSummary.coverageComplete,
+      })
     },
     status,
     worldProbeProvenance: (columns) => dimensionProvenance.diagnostic(columns),

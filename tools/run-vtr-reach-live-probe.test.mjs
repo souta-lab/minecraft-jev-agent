@@ -1,0 +1,595 @@
+import { describe, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { PassThrough } from 'node:stream'
+import { join } from 'node:path'
+import {
+  main,
+  parseListenerOwnerOutput,
+  parseCliArgs,
+  parseJavaMajor,
+  parseJavaRuntime,
+  propertiesObject,
+  renderProbeServerProperties,
+  residentTerminationProblems,
+  persistRunPreflightFailure,
+  runRuntimeResolutionSmoke,
+  startRowFromLog,
+  terminateOwnedProcessGroup,
+  inspectExactSourceDependencyReadiness,
+  inspectLeafEula,
+  runNoDoubleAuthorityFixture,
+  validateExactSourceWorkspaceInstall,
+  inspectNodeModulesLinkContainment,
+  issueLeafCommand,
+  buildReachFixtureGeometry,
+  validatePortPolicy,
+  writeSetupFailureArtifact,
+} from './run-vtr-reach-live-probe.mjs'
+
+function writeWorkspaceFixture(root, { linkTarget = null } = {}) {
+  mkdirSync(join(root, 'unused-workspace'), { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture-root', workspaces: ['unused-workspace'], dependencies: {} }))
+  writeFileSync(join(root, 'bun.lock'), JSON.stringify({ workspaces: {
+    '': { name: 'fixture-root' },
+    'unused-workspace': { name: 'unused-workspace', version: '1.0.0' },
+  } }))
+  writeFileSync(join(root, 'unused-workspace', 'package.json'), JSON.stringify({ name: 'unused-workspace', version: '1.0.0', dependencies: {} }))
+  if (linkTarget) {
+    mkdirSync(join(root, 'node_modules'), { recursive: true })
+    symlinkSync(linkTarget, join(root, 'node_modules', 'unused-workspace'), 'dir')
+  }
+}
+
+describe('Reach live probe caller pure contracts', () => {
+  test('Leaf fixture response timeout records identity-bound console diagnostics and a typed cause', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-timeout-'))
+    const attemptRoot = join(parent, 'attempt')
+    const stdin = new PassThrough()
+    const server = {
+      handle: { child: { stdin, exitCode: null, signalCode: null } },
+      serverLogLines: [],
+      serverStart: { pid: 12345 },
+    }
+    const identity = { sourceSha: 'a'.repeat(40), runId: 'run-fixture-timeout', generationId: null, worldKey: '127.0.0.1:25577|overworld|1' }
+    try {
+      await expect(issueLeafCommand(server, 'time query daytime', /\bThe time is \d+\b/iu, {
+        timeoutMs: 0,
+        phase: 'fixture.console-smoke',
+        identity,
+        attemptRoot,
+      })).rejects.toMatchObject({
+        name: 'LeafFixtureProbeError',
+        code: 'LEAF_FIXTURE_CONSOLE_SMOKE_RESPONSE_TIMEOUT',
+        phase: 'fixture.console-smoke',
+      })
+      const attemptsPath = join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl')
+      const rows = readFileSync(attemptsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.map((row) => row.event)).toEqual(['dispatch-started', 'stdin-write-acknowledged', 'response-timeout'])
+      expect(rows.every((row) => row.sourceSha === identity.sourceSha && row.runId === identity.runId && row.worldKey === identity.worldKey)).toBe(true)
+      expect(rows.at(-1)).toMatchObject({ phase: 'fixture.console-smoke', outputRowCount: 0, stdinDestroyed: false })
+      expect(rows[0].commandSha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(JSON.stringify(rows)).not.toContain('time query daytime')
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Reach fixture geometry derives pinned absolute commands from the frozen spawn anchor', () => {
+    const geometry = buildReachFixtureGeometry({ x: 2.5, y: -60, z: 7.5 })
+    expect(geometry).toEqual({
+      coordinateRule: 'floor(position + integer offset)',
+      offsets: {
+        fillFrom: { x: 1, y: -1, z: -3 },
+        fillTo: { x: 24, y: -1, z: 3 },
+        witness: { x: 16, y: 0, z: 2 },
+      },
+      fillFrom: { x: 3, y: -61, z: 4 },
+      fillTo: { x: 26, y: -61, z: 10 },
+      fillBlockCount: 168,
+      witness: { x: 18, y: -60, z: 9 },
+      fillCommand: 'fill 3 -61 4 26 -61 10 minecraft:stone',
+      setblockCommand: 'setblock 18 -60 9 minecraft:oak_log',
+    })
+  })
+
+  test('Reach fixture geometry floors fractional and negative spawn coordinates', () => {
+    const geometry = buildReachFixtureGeometry({ x: -0.5, y: 63.9, z: -10.1 })
+    expect(geometry.fillFrom).toEqual({ x: 0, y: 62, z: -14 })
+    expect(geometry.fillTo).toEqual({ x: 23, y: 62, z: -8 })
+    expect(geometry.witness).toEqual({ x: 15, y: 63, z: -9 })
+    expect(geometry.fillBlockCount).toBe(168)
+    expect(geometry.fillCommand).toBe('fill 0 62 -14 23 62 -8 minecraft:stone')
+    expect(geometry.setblockCommand).toBe('setblock 15 63 -9 minecraft:oak_log')
+  })
+
+  test('Reach fixture geometry rejects non-finite or unsafe spawn anchors', () => {
+    expect(() => buildReachFixtureGeometry(null)).toThrow(/finite exact-source frozen player position/iu)
+    expect(() => buildReachFixtureGeometry({ x: 0, y: 64 })).toThrow(/finite exact-source frozen player position/iu)
+    expect(() => buildReachFixtureGeometry({ x: NaN, y: 0, z: 0 })).toThrow(/finite/iu)
+    expect(() => buildReachFixtureGeometry({ x: Infinity, y: 0, z: 0 })).toThrow(/finite/iu)
+    expect(() => buildReachFixtureGeometry({ x: Number.MAX_SAFE_INTEGER, y: 0, z: 0 })).toThrow(/unsafe absolute block coordinate/iu)
+  })
+
+  function leafFixtureServer() {
+    const stdin = new PassThrough()
+    const server = {
+      handle: { child: { stdin, exitCode: null, signalCode: null } },
+      serverLogLines: [],
+      stdoutReceipts: [],
+      serverStart: { pid: 4321 },
+    }
+    return { stdin, server }
+  }
+
+  const FIXTURE_IDENTITY = { sourceSha: 'b'.repeat(40), runId: 'run-fixture-receipt', generationId: null, worldKey: '127.0.0.1:25577|overworld|1' }
+
+  function emitLeafResponse(server, line, { stream = 'spawned-child-stdout', receiptCopies = 1 } = {}) {
+    const ts = new Date().toISOString()
+    server.serverLogLines.push({ line, ts, stream })
+    for (let index = 0; index < receiptCopies; index += 1) {
+      server.stdoutReceipts.push({
+        line,
+        ts,
+        sequence: server.stdoutReceipts.length + 1,
+        monotonicNs: '1',
+        lineSha256: 'f'.repeat(64),
+        rawLineSha256: 'f'.repeat(64),
+      })
+    }
+  }
+
+  test('Leaf fixture response binds its unique spawned-stdout receipt', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-receipt-'))
+    const attemptRoot = join(parent, 'attempt')
+    const { stdin, server } = leafFixtureServer()
+    try {
+      const pending = issueLeafCommand(server, 'fill 3 -61 4 26 -61 10 minecraft:stone', /\bSuccessfully filled 168 block(?:s|\(s\))?\b/iu, {
+        timeoutMs: 10_000,
+        phase: 'fixture.fill',
+        identity: FIXTURE_IDENTITY,
+        attemptRoot,
+      })
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Successfully filled 168 block(s)'), 20)
+      const result = await pending
+      expect(result.serverOutput).toBe('[00:00:01 INFO]: Successfully filled 168 block(s)')
+      expect(result.responseSequence).toBe(1)
+      expect(result.responsePid).toBe(4321)
+      expect(Date.parse(result.observedAt)).not.toBeNaN()
+      const rows = readFileSync(join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl'), 'utf8')
+        .trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.map((row) => row.event)).toEqual(['dispatch-started', 'stdin-write-acknowledged', 'response-observed'])
+      expect(rows.at(-1)).toMatchObject({
+        phase: 'fixture.fill',
+        kind: 'fill',
+        responseSequence: 1,
+        serverId: '127.0.0.1:25577',
+        serverPid: 4321,
+        leaseId: null,
+      })
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Leaf fixture response without a spawned-stdout receipt is refused', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-unreceipted-'))
+    const attemptRoot = join(parent, 'attempt')
+    const { stdin, server } = leafFixtureServer()
+    try {
+      const pending = issueLeafCommand(server, 'setblock 18 -60 9 minecraft:oak_log', /\bChanged the block at\b/iu, {
+        timeoutMs: 10_000,
+        phase: 'fixture.setblock',
+        identity: FIXTURE_IDENTITY,
+        attemptRoot,
+      })
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Changed the block at 18, -60, 9', { stream: 'spawned-child-stderr', receiptCopies: 0 }), 20)
+      await expect(pending).rejects.toMatchObject({
+        name: 'LeafFixtureProbeError',
+        code: 'LEAF_FIXTURE_RESPONSE_RECEIPT_MISSING',
+        phase: 'fixture.setblock',
+      })
+      const rows = readFileSync(join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl'), 'utf8')
+        .trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.at(-1)).toMatchObject({
+        event: 'response-unreceipted',
+        matchingStdoutReceipts: 0,
+        responseStream: 'spawned-child-stderr',
+      })
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Leaf fixture response with duplicate stdout receipts is refused', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-fixture-dupe-receipt-'))
+    const attemptRoot = join(parent, 'attempt')
+    const { stdin, server } = leafFixtureServer()
+    try {
+      const pending = issueLeafCommand(server, 'setblock 18 -60 9 minecraft:oak_log', /\bChanged the block at\b/iu, {
+        timeoutMs: 10_000,
+        phase: 'fixture.setblock',
+        identity: FIXTURE_IDENTITY,
+        attemptRoot,
+      })
+      setTimeout(() => emitLeafResponse(server, '[00:00:01 INFO]: Changed the block at 18, -60, 9', { receiptCopies: 2 }), 20)
+      await expect(pending).rejects.toMatchObject({
+        name: 'LeafFixtureProbeError',
+        code: 'LEAF_FIXTURE_RESPONSE_RECEIPT_MISSING',
+      })
+      const rows = readFileSync(join(attemptRoot, 'runner', 'fixture-command-attempts.jsonl'), 'utf8')
+        .trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows.at(-1)).toMatchObject({ event: 'response-unreceipted', matchingStdoutReceipts: 2 })
+    } finally {
+      stdin.destroy()
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('help parsing does not require a live server configuration', () => {
+    expect(parseCliArgs(['--help']).help).toBe(true)
+    expect(() => parseCliArgs(['--run', '--port', '25576'])).toThrow(/protected/iu)
+    expect(() => validatePortPolicy(25577, 4173)).toThrow(/protected/iu)
+    expect(validatePortPolicy(25577, 4175)).toBe(true)
+  })
+
+  test('Java properties parser honors escaped separators in flat-world config', () => {
+    const properties = propertiesObject('level-type=minecraft\\:flat\nserver-port=25577\n')
+    expect(properties['level-type']).toBe('minecraft:flat')
+    expect(properties['server-port']).toBe('25577')
+    expect(propertiesObject(renderProbeServerProperties({ port: 25577, levelName: 'vtrreach-a1b2c3d4-11223344' }))['level-type']).toBe('minecraft:flat')
+  })
+
+  test('Java version parser accepts version text emitted on stderr', () => {
+    expect(parseJavaMajor('openjdk version "21.0.4" 2026-07-15')).toBe(21)
+    expect(parseJavaMajor('java version "1.8.0_402"')).toBe(8)
+    expect(parseJavaMajor('not a Java version')).toBeNull()
+    expect(parseJavaRuntime('openjdk version "21.0.4" 2026-07-15')).toEqual({
+      major: 21, version: '21.0.4', earlyAccess: false,
+    })
+  })
+
+  test('Java preflight distinguishes unsupported early-access builds from general-availability builds', () => {
+    expect(parseJavaRuntime('openjdk version "25.0.5-ea" 2026-10-20')).toEqual({
+      major: 25, version: '25.0.5-ea', earlyAccess: true,
+    })
+    expect(parseJavaRuntime('openjdk version "25-ea" 2026-10-20')).toMatchObject({ major: 25, earlyAccess: true })
+  })
+
+  test('Leaf listener attestation accepts exact IPv4 and IPv4-mapped loopback only', () => {
+    const ipv4 = parseListenerOwnerOutput(25577, 'LISTEN 0 4096 127.0.0.1:25577 *:* users:(("java",pid=1234,fd=8))')
+    const mapped = parseListenerOwnerOutput(25577, 'LISTEN 0 4096 [::ffff:127.0.0.1]:25577 *:* users:(("java",pid=1234,fd=8))')
+    const wildcard = parseListenerOwnerOutput(25577, 'LISTEN 0 4096 0.0.0.0:25577 *:* users:(("java",pid=1234,fd=8))')
+    expect(ipv4).toMatchObject({ status: 'OBSERVED', host: '127.0.0.1', pid: 1234, comm: 'java' })
+    expect(mapped).toMatchObject({ status: 'OBSERVED', host: '127.0.0.1', pid: 1234, comm: 'java' })
+    expect(wildcard).toMatchObject({ status: 'INCOMPLETE', reason: 'expected-one-exact-loopback-listener' })
+  })
+
+  test('fresh Leaf attempts require and preserve the existing EULA acceptance', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-eula-'))
+    const leafJar = join(parent, 'leaf.jar')
+    writeFileSync(leafJar, 'fixture jar')
+    writeFileSync(join(parent, 'eula.txt'), '# existing acceptance\neula=true\n')
+    try {
+      expect(inspectLeafEula(leafJar)).toMatchObject({
+        sourcePath: join(parent, 'eula.txt'),
+        contents: '# existing acceptance\neula=true\n',
+      })
+      writeFileSync(join(parent, 'eula.txt'), 'eula=false\n')
+      expect(() => inspectLeafEula(leafJar)).toThrow(/eula=true.*required/iu)
+      writeFileSync(join(parent, 'eula.txt'), 'eula=true\neula=false\n')
+      expect(() => inspectLeafEula(leafJar)).toThrow(/eula=true.*required/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install accepts an unused declared workspace without a Bun link', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-workspace-install-'))
+    const root = join(parent, 'source')
+    mkdirSync(root)
+    try {
+      writeWorkspaceFixture(root)
+      const report = validateExactSourceWorkspaceInstall(root, ['unused-workspace'])
+      expect(report.workspaceLinks['unused-workspace'].installedLink.status).toBe('NOT_LINKED')
+      expect(report.workspaceLinks['unused-workspace'].bunLockWorkspace).toEqual({
+        path: 'unused-workspace', name: 'unused-workspace', version: '1.0.0',
+      })
+      expect(report.workspaceValidation).toMatchObject({ status: 'PASS', absentUnusedLinksAllowed: true, installedLinksChecked: true })
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install rejects a present workspace link that escapes the checkout', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-workspace-link-'))
+    const root = join(parent, 'source')
+    const external = join(parent, 'outside-workspace')
+    mkdirSync(root)
+    mkdirSync(external)
+    try {
+      writeWorkspaceFixture(root, { linkTarget: external })
+      expect(() => validateExactSourceWorkspaceInstall(root, ['unused-workspace']))
+        .toThrow(/resolves outside the exact-source tree/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install rejects external links inside nested workspace node_modules', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-nested-dependency-link-'))
+    const root = join(parent, 'source')
+    const external = join(parent, 'outside-package')
+    mkdirSync(root)
+    mkdirSync(external)
+    try {
+      writeWorkspaceFixture(root)
+      const nestedModules = join(root, 'unused-workspace', 'node_modules')
+      mkdirSync(nestedModules)
+      symlinkSync(external, join(nestedModules, 'outside-package'), 'dir')
+      expect(() => validateExactSourceWorkspaceInstall(root, ['unused-workspace']))
+        .toThrow(/dependency symlink resolves outside the exact-source tree/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install rejects dangling links inside node_modules', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-dangling-dependency-link-'))
+    const root = join(parent, 'source')
+    mkdirSync(root)
+    try {
+      writeWorkspaceFixture(root)
+      const nestedModules = join(root, 'unused-workspace', 'node_modules')
+      mkdirSync(nestedModules)
+      symlinkSync(join(parent, 'missing-package'), join(nestedModules, 'missing-package'), 'dir')
+      expect(() => inspectNodeModulesLinkContainment(root))
+        .toThrow(/dependency symlink is dangling inside exact-source node_modules/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install accepts nested dependency links that resolve within the source', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-contained-dependency-link-'))
+    const root = join(parent, 'source')
+    mkdirSync(root)
+    try {
+      writeWorkspaceFixture(root)
+      const packageRoot = join(root, 'vendor-package')
+      mkdirSync(packageRoot)
+      writeFileSync(join(packageRoot, 'index.js'), 'export const ok = true\n')
+      const nestedModules = join(root, 'unused-workspace', 'node_modules')
+      mkdirSync(nestedModules)
+      symlinkSync(packageRoot, join(nestedModules, 'vendor-package'), 'dir')
+      const report = validateExactSourceWorkspaceInstall(root, ['unused-workspace'])
+      expect(report.dependencyLinkContainment).toMatchObject({
+        schema: 'vtr-exact-source-node-modules-containment/v1',
+        status: 'PASS', symlinkCount: 1, externalSymlinkCount: 0, danglingSymlinkCount: 0,
+      })
+      expect(report.workspaceValidation.dependencySymlinksContainedWithinExactSource).toBe(true)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('preflight and frozen install share bun.lock, manifest, config, and workspace-link readiness', () => {
+    const readiness = inspectExactSourceDependencyReadiness(process.cwd())
+    expect(readiness.lockSha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(readiness.workspaceInstall.workspaceValidation.status).toBe('PASS')
+    expect(readiness.workspaceInstall.workspaceValidation.absentUnusedLinksAllowed).toBe(true)
+  })
+
+  test('Bun resolves actual resident and Jev generation entrypoint graphs without executing them', () => {
+    const installedDependencies = existsSync(join(process.cwd(), 'node_modules', 'mineflayer', 'package.json'))
+    const mode = installedDependencies ? 'full' : 'source-graph'
+    const smoke = runRuntimeResolutionSmoke(process.cwd(), { mode })
+    expect(smoke).toMatchObject({
+      schema: 'vtr-runtime-entrypoint-resolution-smoke/v2',
+      status: 'PASS',
+      resolver: 'Bun.build(target=bun,write=false,metafile=true)',
+      entrypoints: ['buddy-driver/agent-runner.mts', 'buddy-driver/generation-entry.ts'],
+      mode,
+      outputCount: 2,
+      resolutionContainment: { status: 'PASS', outsideCount: 0 },
+    })
+    expect(smoke.resolutionContainment.inputCount).toBeGreaterThanOrEqual(2)
+    expect(smoke.resolutionContainment.inputs).toHaveLength(smoke.resolutionContainment.inputCount)
+    expect(smoke.resolutionContainment.inputManifestSha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(smoke.errors).toEqual([])
+  })
+
+  test('exact-source no-double-authority fixture runs through its Bun-discoverable test entry', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-no-double-authority-runner-'))
+    const attemptRoot = join(parent, 'attempt')
+    const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim()
+    try {
+      const result = runNoDoubleAuthorityFixture(process.cwd(), attemptRoot, sourceSha)
+      expect(result.testEntryRelative).toBe('jev-agent/vtr-reach-executor-dispatch-authority.test.mts')
+      expect(result.sourceSha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(result.gitObjectSha256).toBe(result.sourceSha256)
+      expect(result.testEntrySha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(result.gitTestEntryObjectSha256).toBe(result.testEntrySha256)
+      expect(result.report).toMatchObject({
+        schema: 'vtr-reach-no-double-authority-fixture/v1',
+        result: 'PASS',
+        sourceSha,
+        test: { path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts' },
+        fixture: { legacyClaimRejected: true, vtrOwnerRetained: true, authorityConflictCount: 1 },
+      })
+      expect(existsSync(result.sourcePath)).toBe(true)
+      expect(existsSync(result.testEntryPath)).toBe(true)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('staged setup failure records exact cause before the CLI returns', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-setup-failure-'))
+    const attempt = join(parent, 'attempt')
+    mkdirSync(join(attempt, 'runner'), { recursive: true })
+    try {
+      const preflightPath = join(attempt, 'runner', 'preflight.json')
+      writeFileSync(preflightPath, '{"status":"PASS"}\n')
+      const path = writeSetupFailureArtifact(attempt, {
+        sourceSha: 'a'.repeat(40), stage: 'frozen-dependency-install',
+        error: new Error('workspace identity mismatch api_key=should-not-escape'), preflightPath,
+        cleanup: { status: 'CLEANED', attempted: true, worktree: { status: 'REMOVED' }, caches: [] },
+      })
+      const report = JSON.parse(readFileSync(path, 'utf8'))
+      expect(report).toMatchObject({
+        schema: 'vtr-reach-live-caller-failure/v1',
+        sourceSha: 'a'.repeat(40),
+        phase: 'frozen-dependency-install',
+        failureStage: 'frozen-dependency-install',
+        reason: 'workspace identity mismatch api_key=[REDACTED]',
+        cleanup: { status: 'CLEANED', attempted: true, worktree: { status: 'REMOVED' } },
+        components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+      })
+      expect(report.attemptRoot).toBe(attempt)
+      expect(Date.parse(report.capturedAt)).not.toBeNaN()
+      expect(report.evidence).toHaveLength(1)
+      expect(report.evidence[0]).toMatchObject({ path: 'runner/preflight.json', bytes: Buffer.byteLength('{"status":"PASS"}\n') })
+      expect(report.evidence[0].sha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(JSON.stringify(report)).not.toContain('should-not-escape')
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('blocked --run preflight persists a redacted runner-failure artifact without starting services', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-preflight-failure-'))
+    const attemptRoot = join(parent, 'attempt')
+    const options = { attemptRoot }
+    const report = {
+      schema: 'vtr-reach-live-probe-preflight/v1',
+      status: 'BLOCKED',
+      sourceSha: 'b'.repeat(40),
+      attemptRoot,
+      blockers: [{ id: 'runtime-dependencies', reason: 'Bun resolver missing token=[REDACTED]' }],
+      checks: [
+        { id: 'attempt-isolation', status: 'PASS' },
+        { id: 'runtime-dependencies', status: 'BLOCKED', preflightDetail: {
+          temporaryInstallRemoved: true,
+          cleanup: { worktree: { status: 'REMOVED' }, scratch: { status: 'REMOVED' } },
+        } },
+      ],
+      servicesStarted: { leafServer: false, observer: false, resident: false },
+    }
+    try {
+      const result = persistRunPreflightFailure(options, report)
+      expect(result.status).toBe('WRITTEN')
+      const failurePath = join(attemptRoot, result.path)
+      const failure = JSON.parse(readFileSync(failurePath, 'utf8'))
+      expect(failure).toMatchObject({
+        schema: 'vtr-reach-live-caller-failure/v1',
+        sourceSha: 'b'.repeat(40),
+        phase: 'preflight',
+        reason: 'preflight blocked at runtime-dependencies: Bun resolver missing token=[REDACTED]',
+        cleanup: { status: 'CLEANED', temporaryPreflightInstall: 'REMOVED' },
+        components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+        preflightPath: join(attemptRoot, 'runner', 'preflight.json'),
+      })
+      expect(failure.evidence).toHaveLength(1)
+      expect(failure.evidence[0].path).toBe('runner/preflight.json')
+      expect(result.sha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(existsSync(join(attemptRoot, 'runner', 'preflight.json'))).toBe(true)
+      expect(JSON.stringify(failure)).not.toContain('token=secret')
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('Leaf startup log rows require stdout provenance and ordered exact level evidence', () => {
+    const rows = [
+      { stream: 'spawned-child-stderr', ts: '2026-09-25T00:00:00.000Z', line: 'Starting minecraft server version 1.21.11' },
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:01.000Z', line: 'Starting minecraft server version 1.21.11' },
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:02.000Z', line: 'Preparing level "vtrreach-a1b2c3d4-11223344"' },
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:03.000Z', line: 'Done preparing level "vtrreach-a1b2c3d4-11223344"' },
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:04.000Z', line: 'Done (14.079s)! For help, type "help"' },
+    ]
+    expect(startRowFromLog(rows, 'vtrreach-a1b2c3d4-11223344')?.minecraftVersion).toBe('1.21.11')
+    expect(startRowFromLog(rows.filter((row) => row.stream !== 'spawned-child-stdout'), 'vtrreach-a1b2c3d4-11223344')).toBeNull()
+    expect(() => startRowFromLog([
+      ...rows,
+      { stream: 'spawned-child-stdout', ts: '2026-09-25T00:00:05.000Z', line: 'Done preparing level "vtrreach-a1b2c3d4-11223344"' },
+    ], 'vtrreach-a1b2c3d4-11223344')).toThrow(/duplicate startup completion/iu)
+  })
+
+  test('target child process-group closure is required and distinct from guard-wrapper closure', async () => {
+    const valid = residentTerminationProblems({
+      guardLoaded: { pid: 22002 },
+      guardClosed: { childPid: 22002, childExitCode: 0, processGroupGone: true },
+      wrapperPid: 22001,
+      residentPid: 22002,
+      wrapperClose: { pid: 22001, exitCode: 0, signal: null },
+      processGroupClosure: { schema: 'vtr-process-group-closure/v1', pgid: 22002, state: 'gone' },
+    })
+    expect(valid).toEqual([])
+    const orphaned = residentTerminationProblems({
+      guardLoaded: { pid: 22002 },
+      guardClosed: { childPid: 22003, childExitCode: 0, processGroupGone: false },
+      wrapperPid: 22001,
+      residentPid: 22002,
+      wrapperClose: { pid: 22001, exitCode: 0, signal: null },
+      processGroupClosure: { schema: 'vtr-process-group-closure/v1', pgid: 22003, state: 'INCOMPLETE' },
+    })
+    expect(orphaned).toContain('guard-child-close-pid-mismatch')
+    expect(orphaned).toContain('target-process-group-not-observed-gone')
+  })
+
+  test('escalation signals the nested target process group and confirms it gone', async () => {
+    let present = true
+    const signals = []
+    const killFn = (target, signal) => {
+      if (signal === 0) {
+        if (!present) {
+          const error = new Error('no such process group')
+          error.code = 'ESRCH'
+          throw error
+        }
+        return
+      }
+      signals.push({ target, signal })
+      if (signal === 'SIGKILL') present = false
+    }
+    const result = await terminateOwnedProcessGroup(22002, {
+      killFn,
+      termTimeoutMs: 0,
+      killTimeoutMs: 100,
+      wait: async () => {},
+    })
+    expect(result.state).toBe('gone')
+    expect(result.pgid).toBe(22002)
+    expect(signals).toEqual([{ target: -22002, signal: 'SIGTERM' }, { target: -22002, signal: 'SIGKILL' }])
+  })
+
+  test('target process group still present after SIGKILL is incomplete', async () => {
+    const result = await terminateOwnedProcessGroup(22002, {
+      killFn: () => {},
+      observe: () => ({ state: 'present', pgid: 22002 }),
+      termTimeoutMs: 0,
+      killTimeoutMs: 0,
+      wait: async () => {},
+    })
+    expect(result.state).toBe('INCOMPLETE')
+    expect(result.finalObservation.state).toBe('present')
+  })
+
+  test('actual CLI help entrypoint succeeds without starting services', async () => {
+    const original = process.stdout.write
+    let captured = ''
+    process.stdout.write = (chunk) => { captured += String(chunk); return true }
+    try {
+      expect(await main(['--help'])).toBe(0)
+    } finally {
+      process.stdout.write = original
+    }
+    expect(captured).toContain('--preflight')
+    expect(captured).toContain('--run')
+  })
+})

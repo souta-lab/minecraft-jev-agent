@@ -43,6 +43,7 @@ import type {
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { milestoneReport } from './milestone-report.ts'
+import { resolveResidentBootConfig } from './resident-config.ts'
 import { MilestonePredicateRecorder } from './milestone-predicates.ts'
 import {
   MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
@@ -77,7 +78,7 @@ import type { PendingProposals } from './proposal-staging.ts'
 import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { isHostileEntityName } from '../jev-agent/src/state.ts'
-import { AGENT_SNAPSHOT_SCHEMA_VERSION, goalQueueSnapshotFromState } from './state-snapshot.ts'
+import { AGENT_SNAPSHOT_SCHEMA_VERSION, goalQueueSnapshotFromState, rebindSnapshotServerIdentity } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
 import { connectAfterGenerationValidation, generationModuleReadinessError } from './generation-connection-gate.ts'
@@ -115,6 +116,7 @@ const LISTENER_EVENTS = [
   'blockUpdate',
   'entitySpawn',
   'health',
+  'breath',
   'playerCollect',
   'death',
   'end',
@@ -134,8 +136,9 @@ const LOCK_PATH = join(DATA, 'host.lock')
 const MC_AI = dirname(HERE)
 const JEV_SRC = join(MC_AI, 'jev-agent', 'src')
 
-const HOST = '127.0.0.1'
-const PORT = 25565
+const RESIDENT_BOOT_CONFIG = resolveResidentBootConfig(process.env)
+const HOST = RESIDENT_BOOT_CONFIG.host
+const PORT = RESIDENT_BOOT_CONFIG.port
 const USERNAME = process.env.BUDDY_USERNAME ?? 'AI_Buddy'
 const VERSION = '1.21.11'
 const HEARTBEAT_MS = 15000
@@ -144,8 +147,8 @@ const RELOAD_DEBOUNCE_MS = 1200
 const GEN_RESTART_MS = 3000
 const LISTENER_BASELINE_POLL_MS = 25
 const LISTENER_BASELINE_MAX_POLLS = 200
-const GOAL_ITEM = 'iron_ingot'
-const GOAL_COUNT = 3
+const GOAL_ITEM = RESIDENT_BOOT_CONFIG.goalItem
+const GOAL_COUNT = RESIDENT_BOOT_CONFIG.goalCount
 const MODEL_AUTHORITY_MISMATCHES: readonly ModelAuthorityMismatch[] = [
   'expected-identity-missing',
   'actual-identity-missing',
@@ -166,7 +169,7 @@ function isModelAuthorityMismatch(value: unknown): value is ModelAuthorityMismat
 // configuration.  The HOST must not capture its leak baseline until this set
 // is attached; otherwise deterministic bootstrap (which awaits its plan
 // before scheduler.start()) makes a healthy generation look like a leak.
-const GENERATION_SCHEDULER_EVENTS = ['goal_reached', 'blockUpdate', 'entitySpawn', 'health', 'playerCollect'] as const
+const GENERATION_SCHEDULER_EVENTS = ['goal_reached', 'blockUpdate', 'entitySpawn', 'health', 'breath', 'playerCollect'] as const
 
 for (const dir of [DATA, LOGS, JEV_LOGS, FREEZE_DIR]) mkdirSync(dir, { recursive: true })
 
@@ -322,6 +325,24 @@ function loadState(): AgentSnapshot {
 }
 
 let state = loadState()
+const serverRebind = rebindSnapshotServerIdentity(state, SERVER_ID)
+if (serverRebind.changed) {
+  const previousWorldKey = {
+    serverId: serverRebind.previousServerId,
+    dimension: state.dimension,
+    worldEpoch: state.worldEpoch,
+  }
+  state = serverRebind.snapshot
+  log('WORLD_IDENTITY_REBOUND', {
+    previousServerId: serverRebind.previousServerId,
+    serverId: SERVER_ID,
+    previousWorldKey,
+    worldKey: { serverId: state.serverId, dimension: state.dimension, worldEpoch: state.worldEpoch },
+    archivedWorldMemoryKeys: Object.keys(state.worldMemoryByKey),
+    clearedWorldBoundLedger: true,
+    clearedMilestone: true,
+  })
+}
 
 /**
  * Issue #48: revision at which the authoritative ledger was last committed by an
@@ -2380,18 +2401,6 @@ function depVersion(pkg: string): string {
   }
 }
 
-function serverSeed(): string | null {
-  try {
-    // M2 reproducibility trials pass their exact staged config only to this
-    // child process. The default path remains the resident's historical source.
-    const propertiesPath = process.env.BUDDY_SERVER_PROPERTIES_PATH ?? '/home/s0u7a/mc-server/server.properties'
-    const match = /^level-seed=(.*)$/m.exec(readFileSync(propertiesPath, 'utf8'))
-    return match?.[1]?.trim() ?? null
-  } catch {
-    return null
-  }
-}
-
 function gitCommit(): string | null {
   try {
     return execSync('git rev-parse HEAD', { cwd: MC_AI, encoding: 'utf8' }).trim()
@@ -2408,7 +2417,6 @@ function writeAcceptance(): string {
     runId,
     bootSourceSha,
     observedLevelName: state.levelName,
-    observedSeed: serverSeed(),
   })
   const record: AcceptanceRecord = {
     record: 'acceptance',
@@ -3129,6 +3137,8 @@ log('BOOT', {
   pid: process.pid,
   runId,
   source: bootSourceSha,
+  connection: { host: HOST, port: PORT, serverId: SERVER_ID },
+  mission: { kind: 'inventory_at_least', item: GOAL_ITEM, count: GOAL_COUNT, source: 'BUDDY_MISSION_* or default' },
   runtime: 'bun',
   runtimeVersion: Bun.version,
   bundle: currentBundle ?? 'none',

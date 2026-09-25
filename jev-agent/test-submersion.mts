@@ -37,6 +37,7 @@ import {
   observedAir,
 } from './src/state.ts'
 import type { AgentSignals, GoalState, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import { bindSelfAirMetadataProjection } from './src/air.ts'
 import {
   defaultCandidateOptions,
   dryAwarePlacementSpots,
@@ -47,6 +48,7 @@ import {
 import type { Candidate } from './src/candidates.ts'
 import {
   CRITICAL_TRIGGERS,
+  MIRRORED_MARKERS,
   questionSetForTrigger,
 } from './src/controller.ts'
 import { guardCandidate, guardRejectionChargesOption } from './src/policy.ts'
@@ -119,7 +121,11 @@ function selfAirProjection(state: WorldState) {
   return buildJevSemanticProjection(input)
 }
 
-function makeLogger(): { logger: EventLogger; messages: () => string[] } {
+function makeLogger(): {
+  logger: EventLogger
+  messages: () => string[]
+  records: () => Array<{ message: string; detail: Record<string, unknown> }>
+} {
   const dir = mkdtempSync(join(tmpdir(), 'submersion-'))
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
@@ -130,6 +136,11 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
         .split('\n')
         .filter((line) => line.trim().length > 0)
         .map((line) => (JSON.parse(line) as { message?: string }).message ?? ''),
+    records: () =>
+      readFileSync(logPath, 'utf8')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { message: string; detail: Record<string, unknown> }),
   }
 }
 
@@ -433,7 +444,7 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     removeListener: () => undefined,
     inventory: { on: () => undefined, removeListener: () => undefined },
   }
-  const { logger, messages } = makeLogger()
+  const { logger, messages, records } = makeLogger()
   const events: Array<{ trigger: DecisionTrigger; detail: Record<string, unknown> }> = []
   const scheduler = new DecisionScheduler(bot as unknown as Bot, logger, {
     heartbeatMs: 3_600_000,
@@ -465,11 +476,17 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
 
   const preempts = events.filter((event) => event.trigger === 'low_air')
   const lines = messages().filter((line) => line.startsWith(LOW_AIR_PREEMPT))
+  const diagnostics = records().filter((record) => record.message.startsWith(LOW_AIR_PREEMPT))
+  const firstDiagnostic = diagnostics[0]?.detail
+  const firstRawAir = firstDiagnostic?.rawSelfAirMetadata as { status?: unknown } | undefined
+  const firstFeetCell = firstDiagnostic?.feetCell as { provenance?: unknown; blockName?: unknown } | undefined
+  const firstEyesCell = firstDiagnostic?.eyesCell as { provenance?: unknown; blockName?: unknown } | undefined
   const pass =
     PREEMPTIVE_TRIGGERS.has('low_air') &&
     TRIGGER_PRIORITY.low_air >= TRIGGER_PRIORITY.mob_appeared &&
     CRITICAL_TRIGGERS.has('low_air') &&
     questionSetForTrigger('low_air') === 'threat' &&
+    MIRRORED_MARKERS.has(LOW_AIR_PREEMPT) &&
     shouldInterruptAttackLease('low_air', 20, 6, 4) === true &&
     shouldInterruptAttackLease('low_air', 20, 6, null) === false &&
     shouldInterruptAttackLease('low_air', 20, 6, -1) === false &&
@@ -480,11 +497,177 @@ function makeLogger(): { logger: EventLogger; messages: () => string[] } {
     preempts.length === 4 &&
     preempts.every((event) => event.detail.threshold === LOW_AIR_LEVEL) &&
     lines.length === 4 &&
+    diagnostics.length === 4 &&
+    typeof firstDiagnostic?.schedulerInstanceId === 'string' &&
+    firstDiagnostic?.air === 10 &&
+    firstDiagnostic?.lowAirBand === 2 &&
+    firstDiagnostic?.mineflayerOxygenLevel === 10 &&
+    firstDiagnostic?.mineflayerOxygenLevelStatus === 'observed' &&
+    firstRawAir?.status === 'unknown' &&
+    firstFeetCell?.provenance === 'unknown' &&
+    firstEyesCell?.provenance === 'unknown' &&
     lines[0] === formatLowAirPreempt(10, { x: 67.5, y: 58.3, z: 28.5 })
   check(
     '(c2) low air is a typed preemptive trigger, edge-triggered per air band',
     pass,
-    `preempts=${preempts.length} lines=${lines.length} first="${lines[0] ?? 'none'}" priority=${TRIGGER_PRIORITY.low_air}`,
+    `preempts=${preempts.length} diagnostics=${diagnostics.length} lines=${lines.length} first="${lines[0] ?? 'none'}" priority=${TRIGGER_PRIORITY.low_air}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (c2diag) same-sample low-air evidence includes loaded feet/eyes and raw metadata
+// ---------------------------------------------------------------------------
+{
+  type Handler = (...args: unknown[]) => void
+  const handlers = new Map<string, Handler[]>()
+  let oxygenLevel = 9
+  let rawAirSupply = 135
+  const bot = {
+    registry: { entitiesByName: { player: { metadataKeys: ['shared_flags', 'air_supply'] } } },
+    entity: {
+      position: new Vec3(1.5, 64, 1.5),
+      metadata: { 0: 0, 1: rawAirSupply },
+    },
+    game: { dimension: 'minecraft:overworld' },
+    health: 20,
+    food: 20,
+    get oxygenLevel() { return oxygenLevel },
+    blockAt: (position: Vec3Json) => ({
+      name: Math.floor(position.y) === 64 ? 'water' : 'air',
+      boundingBox: 'empty' as const,
+      diggable: false,
+    }),
+    on: (event: string, handler: Handler) => {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler])
+    },
+    removeListener: () => undefined,
+    inventory: { on: () => undefined, removeListener: () => undefined },
+  }
+  const { logger, records } = makeLogger()
+  const scheduler = new DecisionScheduler(bot as unknown as Bot, logger, {
+    heartbeatMs: 3_600_000,
+    enabledTriggers: ['low_air'],
+    coalesceMs: 1,
+  })
+  scheduler.start()
+  const breath = (air: number, raw: number): void => {
+    oxygenLevel = air
+    rawAirSupply = raw
+    bot.entity.metadata[1] = raw
+    for (const handler of handlers.get('breath') ?? []) handler()
+  }
+  breath(9, 135)
+  breath(8, 120) // same band: no second sample or preempt
+  breath(4, 60)
+  scheduler.stop()
+
+  const diagnostics = records().filter((record) => record.message.startsWith(LOW_AIR_PREEMPT))
+  const first = diagnostics[0]?.detail
+  const firstRawAir = first?.rawSelfAirMetadata as { status?: unknown; source?: unknown; key?: unknown; value?: unknown } | undefined
+  const firstFeetCell = first?.feetCell as { provenance?: unknown; blockName?: unknown; samplePosition?: { y?: unknown } } | undefined
+  const firstEyesCell = first?.eyesCell as { provenance?: unknown; blockName?: unknown; samplePosition?: { y?: unknown } } | undefined
+  const second = diagnostics[1]?.detail
+  const pass =
+    diagnostics.length === 2 &&
+    typeof first?.schedulerInstanceId === 'string' &&
+    first?.lowAirBand === 1 &&
+    first?.air === 9 &&
+    first?.mineflayerOxygenLevel === 9 &&
+    first?.dimension === 'minecraft:overworld' &&
+    firstRawAir?.status === 'observed' &&
+    firstRawAir.source === 'self-entity-metadata' &&
+    firstRawAir.key === 'air_supply' &&
+    firstRawAir.value === 135 &&
+    firstFeetCell?.provenance === 'loaded' &&
+    firstFeetCell.blockName === 'water' &&
+    firstFeetCell.samplePosition?.y === 64 &&
+    firstEyesCell?.provenance === 'loaded' &&
+    firstEyesCell.blockName === 'air' &&
+    firstEyesCell.samplePosition?.y === 65.62 &&
+    second?.lowAirBand === 0 &&
+    second?.mineflayerOxygenLevel === 4
+  check(
+    '(c2diag) the low-air edge records one bounded same-sample diagnostic per crossed band',
+    pass,
+    `diagnostics=${diagnostics.length} first=${JSON.stringify(first)} secondBand=${String(second?.lowAirBand ?? 'missing')}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (c2a) Mineflayer metadata from another entity cannot overwrite self breath
+// ---------------------------------------------------------------------------
+{
+  type Handler = (...args: unknown[]) => void
+  const handlers = new Map<string, Handler[]>()
+  const bot = {
+    registry: { entitiesByName: { player: { metadataKeys: ['shared_flags', 'air_supply'] } } },
+    entity: {
+      id: 47,
+      position: { x: -14.5, y: 114, z: 14.5 },
+      metadata: { 0: 0, 1: 300 as unknown },
+    },
+    supportFeature: (feature: string) => feature === 'mcDataHasEntityMetadata',
+    health: 20,
+    food: 20,
+    oxygenLevel: 20 as number | undefined,
+    on: (event: string, handler: Handler) => {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler])
+    },
+    removeListener: () => undefined,
+    inventory: { on: () => undefined, removeListener: () => undefined },
+  }
+  const remote = { id: 52, metadata: { air_supply: 300 } }
+  const binding = bindSelfAirMetadataProjection(bot)
+  const { logger, messages } = makeLogger()
+  const events: Array<{ trigger: DecisionTrigger; detail: Record<string, unknown> }> = []
+  const scheduler = new DecisionScheduler(bot as unknown as Bot, logger, {
+    heartbeatMs: 3_600_000,
+    enabledTriggers: ['low_air'],
+    coalesceMs: 1,
+  })
+  scheduler.start()
+  scheduler.onDecision((event) => events.push({ trigger: event.trigger, detail: event.detail }))
+
+  const metadataPacket = (entityId: number, airSupply: number): void => {
+    if (entityId === bot.entity.id) bot.entity.metadata[1] = airSupply
+    else remote.metadata.air_supply = airSupply
+    // Mineflayer 4.39's named-metadata path writes each entity's value to this
+    // scalar before emitting `breath`; reproduce that upstream assignment.
+    bot.oxygenLevel = Math.round(airSupply / 15)
+    for (const handler of handlers.get('breath') ?? []) handler()
+  }
+  metadataPacket(remote.id, 0)
+  metadataPacket(remote.id, 60)
+  metadataPacket(remote.id, 0)
+  const airAfterRemotePackets = bot.oxygenLevel
+  const eventsAfterRemotePackets = events.filter((event) => event.trigger === 'low_air').length
+  metadataPacket(bot.entity.id, 150)
+  scheduler.stop()
+
+  const missingKeyBot = {
+    oxygenLevel: 7,
+    entity: { metadata: { 0: 300 } },
+    registry: { entitiesByName: { player: { metadataKeys: ['shared_flags'] } } },
+    supportFeature: (feature: string) => feature === 'mcDataHasEntityMetadata',
+  }
+  const missingKeyBinding = bindSelfAirMetadataProjection(missingKeyBot)
+
+  const preempts = events.filter((event) => event.trigger === 'low_air')
+  const lines = messages().filter((line) => line.startsWith(LOW_AIR_PREEMPT))
+  const pass =
+    binding === 'self-entity-metadata' &&
+    airAfterRemotePackets === MAX_AIR &&
+    eventsAfterRemotePackets === 0 &&
+    bot.oxygenLevel === 10 &&
+    missingKeyBinding === 'unavailable-self-air-metadata-key' &&
+    missingKeyBot.oxygenLevel === 7 &&
+    preempts.length === 1 &&
+    preempts[0]?.detail.air === 10 &&
+    lines.length === 1
+  check(
+    '(c2a) remote entity air metadata cannot change self breath or wake low-air; self metadata still does',
+    pass,
+    `binding=${binding} remoteAir=${String(airAfterRemotePackets)} wakesAfterRemote=${eventsAfterRemotePackets} selfAir=${String(bot.oxygenLevel)} missingKey=${missingKeyBinding} wakes=${preempts.length}`,
   )
 }
 

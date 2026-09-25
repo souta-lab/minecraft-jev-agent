@@ -17,6 +17,7 @@
 import type { Bot } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
+import { Vec3 } from 'vec3'
 import type { EventLogger } from './jev.ts'
 import { observedAir } from './air.ts'
 import { EYE_HEIGHT, isHostileEntityName, LOW_AIR_LEVEL, MAX_AIR, PROBE_FLUIDS } from './state.ts'
@@ -201,6 +202,83 @@ function readAir(bot: Bot): number | null {
   return observedAir((bot as { oxygenLevel?: number }).oxygenLevel)
 }
 
+interface BreathPosition {
+  readonly x: number
+  readonly y: number
+  readonly z: number
+}
+
+function breathPosition(bot: Bot): BreathPosition | null {
+  try {
+    const position = (bot.entity as unknown as { position?: Partial<BreathPosition> } | undefined)?.position
+    if (
+      position === undefined ||
+      !Number.isFinite(position.x) ||
+      !Number.isFinite(position.y) ||
+      !Number.isFinite(position.z)
+    ) return null
+    return { x: position.x as number, y: position.y as number, z: position.z as number }
+  } catch {
+    return null
+  }
+}
+
+function sampleBreathCell(bot: Bot, position: BreathPosition | null): Record<string, unknown> {
+  if (position === null) return { provenance: 'unknown', blockName: null, samplePosition: null, reason: 'self_position_unavailable' }
+  const samplePosition = { x: position.x, y: position.y, z: position.z }
+  try {
+    if (typeof bot.blockAt !== 'function') {
+      return { provenance: 'unknown', blockName: null, samplePosition, reason: 'block_at_unavailable' }
+    }
+    const block = bot.blockAt(new Vec3(position.x, position.y, position.z))
+    if (block === null) {
+      return { provenance: 'unknown', blockName: null, samplePosition, reason: 'chunk_not_loaded_or_unobserved' }
+    }
+    return {
+      provenance: 'loaded',
+      blockName: typeof block.name === 'string' ? block.name : null,
+      samplePosition,
+    }
+  } catch {
+    return { provenance: 'unknown', blockName: null, samplePosition, reason: 'block_at_threw' }
+  }
+}
+
+/** Read the self player's raw air_supply slot only when the registry names it. */
+function sampleRawSelfAirMetadata(bot: Bot): Record<string, unknown> {
+  try {
+    const registry = (bot as unknown as {
+      registry?: { entitiesByName?: Record<string, { metadataKeys?: unknown } | undefined> }
+    }).registry
+    const metadataKeys = registry?.entitiesByName?.player?.metadataKeys
+    if (!Array.isArray(metadataKeys)) return { status: 'unknown', reason: 'player_metadata_keys_unavailable' }
+    const index = metadataKeys.indexOf('air_supply')
+    if (index < 0) return { status: 'unknown', reason: 'air_supply_metadata_key_unavailable' }
+    const metadata = (bot.entity as unknown as { metadata?: unknown } | undefined)?.metadata
+    if (metadata === null || typeof metadata !== 'object') {
+      return { status: 'unknown', reason: 'self_entity_metadata_unavailable', metadataIndex: index }
+    }
+    const value = Reflect.get(metadata, String(index)) as unknown
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return { status: 'unknown', reason: 'self_air_supply_value_unavailable', metadataIndex: index }
+    }
+    return { status: 'observed', source: 'self-entity-metadata', key: 'air_supply', metadataIndex: index, value }
+  } catch {
+    return { status: 'unknown', reason: 'self_air_metadata_read_failed' }
+  }
+}
+
+function breathDimension(bot: Bot): string | null {
+  try {
+    const dimension = (bot as unknown as { game?: { dimension?: unknown } }).game?.dimension
+    return typeof dimension === 'string' ? dimension : null
+  } catch {
+    return null
+  }
+}
+
+let schedulerInstanceSequence = 0
+
 /** Higher wins when a burst of triggers is coalesced; a critical trigger is never overwritten. */export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
   damage_taken: 10,
   hp_changed: 9,
@@ -272,6 +350,7 @@ export class DecisionScheduler {
   private readonly logger: EventLogger
   private readonly options: SchedulerOptions
   private readonly enabled: ReadonlySet<DecisionTrigger>
+  private readonly schedulerInstanceId: string
 
   private handler: ((event: TriggerEvent) => void) | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
@@ -312,6 +391,8 @@ export class DecisionScheduler {
     this.logger = logger
     this.options = { ...defaultSchedulerOptions, ...options }
     this.enabled = new Set(this.options.enabledTriggers)
+    schedulerInstanceSequence += 1
+    this.schedulerInstanceId = `scheduler-${schedulerInstanceSequence.toString(36)}`
   }
 
   get heartbeatMs(): number {
@@ -552,7 +633,8 @@ export class DecisionScheduler {
    */
   private readonly onBreath = (): void => {
     this.observeUnknownAirHeadSubmersion()
-    const air = readAir(this.bot)
+    const oxygenLevel = (this.bot as unknown as { oxygenLevel?: unknown }).oxygenLevel
+    const air = observedAir(oxygenLevel)
     if (air === null || air > LOW_AIR_LEVEL) {
       this.lowAirBand = null
       return
@@ -562,8 +644,32 @@ export class DecisionScheduler {
     const band = Math.max(0, Math.floor(air / 5))
     if (this.lowAirBand === band) return
     this.lowAirBand = band
-    const position = this.bot.entity?.position ?? null
-    this.logger.warn('scheduler', formatLowAirPreempt(air, position), { air, threshold: LOW_AIR_LEVEL, trigger: 'low_air' })
+    const position = breathPosition(this.bot)
+    const finiteOxygenLevel = typeof oxygenLevel === 'number' && Number.isFinite(oxygenLevel) ? oxygenLevel : null
+    const feetCell = sampleBreathCell(this.bot, position)
+    const eyesPosition = position === null ? null : { x: position.x, y: position.y + EYE_HEIGHT, z: position.z }
+    const eyesCell = sampleBreathCell(this.bot, eyesPosition)
+    // LOW_AIR_PREEMPT is mirrored by the resident logger; its HOST sink binds
+    // this same detail to runId, generationId, sourceSha and buildHash.
+    this.logger.warn(
+      'scheduler',
+      formatLowAirPreempt(air, position),
+      {
+        air,
+        threshold: LOW_AIR_LEVEL,
+        trigger: 'low_air',
+        diagnosticVersion: 1,
+        schedulerInstanceId: this.schedulerInstanceId,
+        lowAirBand: band,
+        mineflayerOxygenLevel: finiteOxygenLevel,
+        mineflayerOxygenLevelStatus: finiteOxygenLevel === null ? 'unknown' : 'observed',
+        rawSelfAirMetadata: sampleRawSelfAirMetadata(this.bot),
+        position,
+        dimension: breathDimension(this.bot),
+        feetCell,
+        eyesCell,
+      },
+    )
     this.request('low_air', { air, threshold: LOW_AIR_LEVEL })
   }
 

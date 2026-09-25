@@ -320,7 +320,9 @@ export function walkBoundaryAfterLeg(input: WalkBoundaryInput): WalkStop | WalkC
 
 /** The `selectedBy` half of `SKILL_START`, from the commitment's own provenance. */
 export function walkSelectedBy(commitment: Pick<SkillCommitment, 'selectedBy'>): SkillSelectionSource {
-  return commitment.selectedBy === 'hard_safety' ? 'hard-safety' : 'jev'
+  if (commitment.selectedBy === 'hard_safety') return 'hard-safety'
+  if (commitment.selectedBy === 'vtr_transition') return 'vtr-transition'
+  return 'jev'
 }
 
 /**

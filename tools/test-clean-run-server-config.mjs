@@ -13,12 +13,22 @@ const TEMPLATE = new URL('./fixtures/m3-clean-environment.json', import.meta.url
 const SOURCE_SHA = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd'
 const RUN_ID = 'run-startup-config-fixture'
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'clean-run-server-config-'))
+const agentRunnerSource = readFileSync(new URL('../buddy-driver/agent-runner.mts', import.meta.url), 'utf8')
 
 function asProperties(values) {
   return `${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`
 }
 
 try {
+  // Acceptance must not read the repository's shared server.properties as a
+  // live-world seed. Only the run-bound startup descriptor can supply one.
+  assert.doesNotMatch(agentRunnerSource, /function serverSeed\(/)
+  assert.doesNotMatch(agentRunnerSource, /observedSeed\s*:/)
+  const acceptanceIdentityCall = /cleanRunAcceptanceWorldIdentity\(\{([\s\S]*?)\}\)/.exec(agentRunnerSource)
+  assert.ok(acceptanceIdentityCall, 'HOST acceptance must derive its world identity')
+  assert.match(acceptanceIdentityCall[1], /attestation:\s*bootCleanRunServerConfig/)
+  assert.doesNotMatch(acceptanceIdentityCall[1], /serverSeed|BUDDY_SERVER_PROPERTIES_PATH/)
+
   const container = join(temporaryRoot, 'server')
   const runDir = join(container, 'runs', 'm3-live', 'm3clean-fixture')
   mkdirSync(runDir, { recursive: true })
@@ -156,7 +166,6 @@ try {
     runId: RUN_ID,
     bootSourceSha: SOURCE_SHA,
     observedLevelName: null,
-    observedSeed: null,
   })
   assert.equal(acceptanceWorld.levelName, descriptor.values.levelName, 'verified Leaf --level-name binds a missing Mineflayer game levelName')
   assert.equal(acceptanceWorld.seed, String(descriptor.values.levelSeed), 'same-run verified descriptor binds the exact seed')
@@ -168,7 +177,6 @@ try {
     runId: 'run-other',
     bootSourceSha: SOURCE_SHA,
     observedLevelName: null,
-    observedSeed: null,
   })
   assert.equal(wrongRunWorld.levelName, null, 'a verified startup proof from another run cannot be reused')
   const wrongSourceWorld = cleanRunAcceptanceWorldIdentity({
@@ -176,7 +184,6 @@ try {
     runId: RUN_ID,
     bootSourceSha: 'f'.repeat(40),
     observedLevelName: null,
-    observedSeed: null,
   })
   assert.equal(wrongSourceWorld.seed, null, 'a verified startup proof from another source cannot be reused')
   const conflictWorld = cleanRunAcceptanceWorldIdentity({
@@ -184,10 +191,18 @@ try {
     runId: RUN_ID,
     bootSourceSha: SOURCE_SHA,
     observedLevelName: 'wrong-world',
-    observedSeed: null,
   })
   assert.equal(conflictWorld.levelName, null, 'conflicting observed game world name invalidates the acceptance identity')
   assert.equal(conflictWorld.seed, null)
+
+  const seedWithoutStartupProof = cleanRunAcceptanceWorldIdentity({
+    attestation: null,
+    runId: RUN_ID,
+    bootSourceSha: SOURCE_SHA,
+    observedLevelName: 'unattested-world',
+  })
+  assert.equal(seedWithoutStartupProof.seed, null, 'without run-bound Leaf startup proof the live world seed is unknown')
+  assert.equal(seedWithoutStartupProof.seedEvidence, null)
 
   const artifact = {
     record: 'milestone-run-artifact',

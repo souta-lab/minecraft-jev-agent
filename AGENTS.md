@@ -1,277 +1,368 @@
-最終目標は、汎用Minecraft AIとして M3 を live で達成すること。
+# AGENTS.md — V4 Migration Contract
 
-M3 PASS の定義:
-- Nether 到達を live で証明する
-- ender_eye >= 12 を同一runの最終在庫で証明する
-- run-scoped artifact に少なくとも以下を残す:
-  - exact source SHA
-  - runId
-  - Minecraft version / difficulty / relevant environment configuration
-  - 初期 inventory
-  - 最終 inventory
-  - dimension transition evidence
-  - milestone predicate evidence
-  - effective System2 provider/model
-  - effective Jev provider/model
-  - hidden deterministic fallback が無かったこと
-- `tools/m3-gate.mjs --run <runId>` または現行canonical gateで PASS を確定する
-- 推測・all-time log・別runの証拠混合では PASS としない
+## 0. Canonical architecture
 
-前提:
-1. まず M2 Nether gate
-   build -> light -> verify
-   を fresh exact-source live run の run-scoped evidence で証明する。
-2. 必要なら difficulty や server/runtime configuration を変更してよい。
-   ただし変更内容・理由・runへの影響をartifactへ記録する。
-3. benchmarkを簡単にするための既知座標、固定ルート、seed固有攻略、事前survey等をproduction AIへ埋め込まない。
+`NEW-ARCHITECTURE-V4.md` is the normative architecture for this repository.
 
-最重要設計原則:
-このプロジェクトの目的は M3 専用機械ではなく、汎用Minecraft AIを作ること。
+V4 supersedes the old assumption that #11 / #308 Grounded Option OS is the final architecture.
+#11, #308, Option/Jev/System2 issues and historical docs remain valuable evidence, but they are not constitutional authority when they conflict with V4.
 
-authority:
-- System2 LLM = WHAT
-  長期的な意図、Option、戦略、依存関係の修復を決める。
-  自然言語による意味理解・計画能力を活用する。
-- Jev π = WHICH
-  コードで接地された typed candidate / Skill の中から局所的な選択を行う。
-- Jev β = WHETHER
-  現在のOptionを継続するか、意味的に終了/放棄するかを判断する。
-- Code = CAN / TRUE / SAFE / DONE
-  Minecraftの真実、能力、合法性、安全性、reachability、recipe、geometry、
-  success predicate、verificationを決める。
-- Skill / Executor = HOW
-  選ばれた一つの意味的行動をbounded closed-loopで物理実行する。
-- HOST = connection / durable state / lifecycle / lease / evidence。
-訂正；決定論は場合により使用許可。#11が聖典
-禁止:
-- M3の各場面専用の決定論攻略を追加してPASSさせない。
-- 「blazeならこの方向」「M3ならこの順」「3回失敗したらこの戦略」
-  のようなincident-specific semantic policyをproductionへ追加しない。
-- benchmark RUNGS / milestone orderingをproduction WHATとして使わない。
-- LLM/Jev失敗をsilent deterministic fallbackで隠さない。
-- body movementをgoal/search progressとして扱わない。
-- テストを通すためだけのfake evidenceを作らない。
+Reality precedence:
+1. current source and live server truth
+2. current deterministic tests / probes
+3. exact-run evidence
+4. `NEW-ARCHITECTURE-V4.md`
+5. current migration docs/issues
+6. historical architecture/status docs
 
-許可される決定論:
-- Minecraft mechanics
-- recipe/tool legality
-- block/entity truth
-- pathfinding / geometry solver
-- exact reachability
-- hazard/safety guard
-- bounded motor control
-- deterministic verification
-- state-conditioned mechanical invalidity
+Do not bend current code toward stale documentation. Update, supersede, or historicalize stale docs.
 
-複数の意味的に妥当な選択肢が残るなら、コードで順位を決めずJev/System2へ渡す。
+## 1. Project mission
 
-開発方針:
-毎ターン最初に具体的なTODOを作る。
-TODOは「調査する」だけではなく、
-- audit
-- implementation
-- tests
-- live validation
-- integration
-を可能な限り同じターンで複数進める。
+Build a general Minecraft agent that can autonomously drive verified world-state transitions for long periods without human feedback.
 
-TODOを書くだけでターンを終了しない。
-現在地報告だけで終了しない。
-一つ修正しただけで終了しない。
-goalが未達なら、利用可能な作業を続ける。
+The architecture target is **Verified Transition Runtime (VTR)** with **Jev as the production-default fast decision policy**:
+Mission predicates -> Verified World Model -> Causal Transition Graph -> Transition Scheduler (Jev-first policy) -> VTR admission/commit -> Persistent Transition Controllers -> Minecraft Runtime Adapter + VERIFY -> verified facts -> frontier re-derivation.
 
-サブエージェント:
-- 毎ターン可能な限り最大限使用する。
-- ただし同じ修正を複数agentへ重複して担当させない。
-- subsystem / issue / audit対象ごとに独立laneへ分割する。
-- サブエージェントが動いている間も自分自身は別laneで作業を続ける。
-- サブエージェントを呼んだことを作業完了理由にしない。
-- サブエージェントの結果は必ず自分でreview / integrate / verifyする。
-- concurrent worktreeの他者作業をreset/overwriteしない。
+M2/M3/M4 are proof corpora, not the production brain. M3 remains an important live integration gate, but an M3 PASS obtained by preserving the wrong control architecture is not project completion.
+## 2. V4 constitution
 
-並列laneの例:
-A. live consolidated log監査
-B. current M3 first causal blockerの実装修正
-C. #11 / generalization違反監査
-D. tests / regression fixture
-E. run-scoped gate/evidence監査
-F. open issue triage
+> The agent owns verified world-state transitions, not individual semantic actions. A controller may change tactics, temporary targets, and mechanical realization while the desired predicate, admissible side effects, and risk/resource contract remain unchanged. Higher-level reasoning is required only when that contract itself must change.
 
-issue / PR:
-開発速度を落とすために、1つの小バグごとにissueやPRを作らない。
-issueは以下の場合に作る:
-- 独立したroot cause / acceptance boundaryがある
-- 後続追跡が必要
-- architecture invariantとして永続的価値がある
-- live evidence付きの重要failure
+VTR is the stable control kernel, not a temporary migration architecture. Jev is the repository's primary fast System-One decision implementation on top of that kernel; VTR being policy-provider-independent does **not** mean Jev is project-optional or should be engineered out of the normal production path. New intelligence should normally enter through Jev decision policy, Transition scheduling/routing, Verified World Model estimation, controller policy/capability implementation, or sparse System2 reasoning — not by inventing a new cross-layer authority model. Change the VTR constitution only when current-source tests and runtime evidence demonstrate that its contract/ownership/verification model is itself insufficient.
 
-同一root causeの小修正はまとめる。
-既存issueがある場合は新規issueより既存issueへ統合する。
-PRも意味のある一まとまりで作る。
+Operational interpretation:
+- Code may choose among tactics inside one Transition Contract.
+- Deterministic choice is allowed when its objective/cost/risk model is explicit, grounded, bounded, and testable.
+- Do not surrender Transition ownership back to Jev/System2 merely because execution needs a different path, witness, local tactic, bridge, staircase, detour, equip, pickup, or retry mode already inside the contract. A controller may consult Jev for a bounded in-contract choice without ending or recommitting the Transition; Jev policy consultation is not an authority handoff.
+- Return to the scheduler/reasoner when the desired predicate, mutation envelope, resource/risk budget, or dependency assumptions must change.
+- Exact coordinates/entities are usually witnesses, not semantic identity. Preserve the predicate contract when a valid witness changes.
 
-M3優先順位:
-active workを次の3種類に分類する。
+## 3. Canonical V4 layers
 
-A. M3_CRITICAL
-   現在のfresh live runの最初のcausal blocker
+1. **Mission** — desired predicates, not benchmark rung order.
+2. **Verified World Model** — TRUE/FALSE/UNKNOWN facts with provenance, worldKey, dimension and epoch.
+3. **Causal Transition Graph** — known ways to establish predicates and their real prerequisites/effects.
+4. **Transition Scheduler + Decision Policy** — enumerate grounded enabled Transitions; production defaults to Jev for meaningful choice/ranking/scoring, while deterministic no-choice fast paths are allowed.
+5. **VTR Admission + Commit** — stale-fence the proposal, validate requires/effects/budgets/identity, and establish one authoritative Transition owner.
+6. **Persistent Transition Controllers** — closed-loop ownership until verified SUCCESS or typed terminal boundary; may use Jev internally for bounded policy choices without relinquishing ownership.
+7. **Viability Runtime** — health/hunger/air/threat and other mission-crossing survival invariants.
+8. **Minecraft Runtime Adapter + VERIFY** — backend-specific gameplay observation/actuation behind typed ports plus deterministic postcondition truth.
+9. **Sparse System2 Reasoning Service** — graph/contract synthesis and repair only where the known graph/controllers/Jev policy cannot resolve the problem.
+10. **Durable Fact Store + Transition Journal** — world facts and causal experience, not a mutable agenda as truth.
+## 4. Concepts to keep, demote, or retire
 
-B. ARCHITECTURE_BLOCKER
-   #11 / generalization / truth / durability / authority違反で、
-   M3 PASS自体を無効またはbenchmark-specificにするもの
+KEEP / strengthen:
+- Resident HOST, hot reload, leases and atomic generation swap
+- worldKey/worldEpoch and run/source provenance
+- minecraft-data mechanics truth
+- Guard and deterministic VERIFY
+- typed outcomes and causal evidence
+- durable world facts
+- executor/mechanical capabilities
+- Jev System-One policy client/harness, typed batched questions, calibrated-confidence provenance, and decision logging
+- live no-LLM capability probes
 
-C. DEFER
-   M3達成に不要な研究、M4、cosmetic cleanup、将来機能
+DEMOTE:
+- System2 -> sparse graph/contract repair service, not always-on WHAT authority
+- legacy Jev π/β *authority split* -> compatibility evidence only; Jev itself remains the production-default fast decision policy
+- candidate sets -> scheduler/controller-local grounded affordances, not the universal brain interface
+- GoalQueue -> compatibility/debug projection only
+- RUNGS -> benchmark/evaluation or explicit baseline only
 
-A/Bを優先する。
-Cを理由なく実装し始めない。
+RETIRE as canonical authority:
+- Jev π as universal WHICH owner
+- Jev β as universal WHETHER/termination owner
+- Option/OptionLedger as the fundamental runtime unit
+- GoalQueue ordering as semantic truth
+- fixed strategy menus and benchmark-shaped production policy
+- cross-layer retry/oscillation counters that substitute for Transition-local progress/failure contracts
 
-ただし「M3優先」はM3専用heuristicを許可する意味ではない。
-各修正は必ず
-「このseed/incidentではなく、どの一般的Minecraft capability classを直すのか」
-を説明できること。
+Do not expand legacy authority merely to make migration easier.
+## 5. Transition Contract requirements
 
-live loop:
-可能な限り以下を繰り返す。
+Every production Transition must make its control contract explicit enough to test independently.
 
-exact origin/main SHAを固定
--> tests/typecheck
--> resident/live run
--> consolidated log監査
--> first causal blockerを特定
--> generic root-cause fix
--> regression test
--> merge/integrate
--> fresh exact-source live run
--> run-scoped gate
--> 次のblocker
+At minimum define or make inspectable:
+- `requires`: predicates needed to start
+- `ensures`: predicates the Transition owns establishing
+- `invariants`: facts that must remain valid while running
+- admissible world/body effects
+- resource and risk budget
+- Transition-specific progress definition
+- controller state
+- allowed witness/target substitution
+- typed terminal failures / infeasibility conditions
+- world/dimension/epoch identity
+- deterministic verification of SUCCESS
 
-一度のrunで複数の独立したfailureが明確なら並列で修正してよい。
-ただし推測で大量の修正を入れない。
+A Transition may internally perform many mechanical actions and tactical changes.
+`action done` is not Transition success. Only the declared verified predicate closes SUCCESS.
 
-総合log監査:
-毎ターン live run が存在するなら consolidated log を確認する。
+Progress is local to the Transition type:
+- navigation: verified closing/reachability/frontier progress
+- search: new relevant observation / frontier coverage / hypothesis elimination
+- acquisition: inventory/postcondition progress
+- construction: verified structure predicates
+- combat: encounter objective plus viability margin
 
-最低限見る:
-- active Option / OptionInstance
-- System2 invocation / plan transition
-- Jev π decisions
-- Jev β outputs
-- candidate distribution
-- execution success/failure
-- verification
-- body/search/goal progress
-- recurrent states
-- oscillation
-- WAIT streak / unbounded idle
-- repeated station construction
-- purposeless DIG/MOVE
-- death/regression
-- dimension transitions
-- inventory deltas
-- model calls / retries / fallback
-- actuation lease / generation lifecycle anomalies
+Never use body motion alone as generic semantic progress. Never normalize missing/undefined progress into success evidence.
+## 6. Viability is parallel control, not a queued side quest
 
-「動いている」ではなく、
-semantic progress が発生しているかを見る。
+Health, hunger, air, immediate lethal threat, fall/lava/fire escape, and essential self-protection are mission-crossing invariants.
 
-行動品質:
-以下を正常挙動として放置しない。
-- 同じ場所の往復
-- 4点以上の局所徘徊
-- 目的のないDIG/MOVE
-- usable crafting table / furnaceがあるのに同じ設備を量産
-- bounded wake condition無しの永久WAIT
-- body motionだけでsemantic stall timerがresetされる
-- 同じ失敗をstate不変のまま繰り返す
+The viability runtime may temporarily stabilize the body without replacing the mission predicate.
+After stabilization, re-evaluate the active Transition against fresh world truth.
+Do not require GoalQueue head ownership or System2 availability for obvious bounded survival control.
+Do not encode seed/incident-specific survival scripts; use grounded state, explicit risk and deterministic postconditions.
 
-これらは個別ルールで禁止するのではなく、
-Option / postcondition / search novelty / typed recoveryとの因果関係を直す。
+## 7. Jev decision plane and System2 after V4
 
-Jev:
-Jevを普通のchat LLMとして扱わない。
-Jevはtyped probabilistic System One decision modelとして使う。
+**Jev is the primary production fast decision policy for this repository.** VTR is deliberately capable of running deterministic probes and continuing already-committed mechanics without a model, but that portability is a kernel property, not a statement that Jev is unimportant.
 
-原則:
-- π: Choice over grounded typed candidates
-- β: Noul/Boolean semantic termination probability
-- Score: 本当にordered scaleが必要な場合のみ
-- raw probability/distributionを保存
-- probabilityをtruthにしない
-- Guard/VERIFYを通す
-- Option contextとrecent causal outcomesを入力する
-- primitive motor controlを毎回Jevへ投げない
-- candidate setが悪い場合をJevの知能不足として誤診しない
+Use Jev at explicit **decision epochs**, not at every primitive mechanical step. Good Jev responsibilities are:
+- choose/rank among grounded enabled Transition proposals when more than one meaningfully valid route remains;
+- score risk, uncertainty, or expected value over grounded alternatives;
+- arbitrate bounded tactics inside an active Transition when the desired predicate/effect/risk/resource contract is unchanged;
+- interpret typed terminal outcomes and choose the next grounded contract;
+- decide whether uncertainty/failure warrants sparse System2 escalation.
 
-System2:
-provider/model名をarchitectureに焼かない。
-Mercury/Muse/DeepSeek等はprovider/model configuration。
-architecture上は汎用 `System2 LLM` とする。
+Prefer one versioned, stale-fenced **Jev Decision Frame** with batched typed questions over independent universal π and β authority calls. The frame should consume a bounded semantic projection: Mission frontier, verified facts, enabled Transition ids/contracts, relevant budgets and typed outcomes. Jev outputs grounded ids/scores/booleans/probabilities; VTR admission validates the result before commit.
 
-LLMに渡すstateは、
-巨大な全ログではなく、
-現在のMission / Option / predicates / recent outcomes /
-world memory / blockers / grounded alternativesを
-compactに表現する。
+Jev does **not** own world truth, deterministic SUCCESS, raw Minecraft client access, the actuation lease, or generic Transition termination. A Jev choice is policy input to VTR/controller ownership, not permission for one primitive Mineflayer call.
 
-汎用性:
-最重要評価軸。
+No meaningful choice means no Jev call is required. An already-active controller may continue through a short Jev outage when its contract still determines the next mechanical work. If a genuine new policy decision is required and Jev is unavailable, fail/suspend through an explicit typed policy-unavailable path or an explicitly configured test/offline policy; never silently switch to an undeclared semantic fallback.
 
-M3 PASSよりも上位の制約として、
-同じproduction architectureが
-- 別seed
-- 別terrain
-- 中途半端なinventory
-- benchmark順序を変更した状態
-- M2/M3以外のsupported objective
-でも新しい専用planner branch無しで動く方向を維持する。
+System2 remains the sparse reasoning layer and is appropriate when:
+- a Mission needs initial predicate/transition decomposition that current code cannot derive;
+- no known Transition can establish an unsatisfied predicate;
+- a contract must be synthesized, repaired, or replaced beyond the known graph;
+- repeated typed failures require a genuinely new causal hypothesis;
+- genuinely different long-horizon alternatives cannot be grounded sufficiently for Jev to decide over.
 
-M3は汎用性の証明材料であって、production brainではない。
+Provider outage must not kill mechanical continuity that does not require a new policy epoch.
+Never replay stale Jev/System2 decisions across changed world/generation/contract identity.
+Never hide a model failure with an undeclared benchmark-specific semantic fallback.
+## 8. Migration strategy: strangler with real vertical slices
 
-既存issue:
-M3を妨げるopen issueを継続的にtriageする。
-実装済み/再現不能/別issueへ完全吸収されたものはcloseする。
-live evidenceで残っているものはcloseしない。
-closed issueでも現main/liveで再発が確認できればreopenする。
+Do not attempt a flag-day rewrite.
+Do not spend months perfecting Option/Jev/β before VTR exists.
+Do not decompose the mega-controller under unchanged semantics merely for cleanliness.
 
-docs:
-古いMarkdownをproduction truthとして盲信しない。
-優先順位:
-1. current source
-2. current tests
-3. live run-scoped evidence
-4. canonical architecture contract
-5. historical docs
+Build VTR beside the legacy semantic plane, move one complete causal path at a time, prove it, then remove the replaced authority.
 
-古いstatus/TODO/architecture記述が現実と違う場合、
-コードを古いdocへ合わせずdocを修正/歴史化する。
+### Current P0 migration milestone
 
-自律性:
-通常の調査、コード変更、テスト、live実行、ログ監査、issue整理、
-branch/worktree整理、アーキテクチャ、方針変更、必要な再起動・設定変更について
-逐一許可を求めず進める。
+Create the smallest production VTR vertical slice that proves the new control model end-to-end.
 
+Preferred first slice: **Reach / Navigation Transition**, using the existing `walkSkill`/movement machinery as substrate.
 
-ターン終了条件:
-以下になるまで作業を続ける。
-- M3 PASSがrun-scoped evidenceで確定した
+The slice must demonstrate:
+1. a Mission/desired predicate produces an enabled Transition without benchmark RUNGS deciding WHAT;
+2. one first-class Transition Contract is committed and journaled;
+3. one controller owns repeated walk/path/jump and permitted bounded terrain adaptation for the same `ensures` predicate;
+4. temporary waypoint/target changes do not require a new Jev authority epoch when the contract is unchanged; an optional Jev in-controller policy query may choose among grounded tactics without ending the Transition;
+5. SUCCESS is deterministic predicate verification;
+6. terminal block/budget/world-change outcomes are typed and return to the scheduler, not β;
+7. the active Transition can continue through a short Jev/System2 outage when no new policy/contract decision is required;
+8. GoalQueue/Option may be mirrored for compatibility/evidence but cannot be the authority for this slice;
+9. a no-LLM live probe proves the controller mechanically;
+10. an integration fixture proves the VTR path and legacy path do not both actuate.
 
-単に
-「TODOを作った」
-「subagentを呼んだ」
-「issueを書いた」
-「1個直した」
-「次は〜する」
-は終了理由にしない。
+Do not declare V4 migrated after interfaces/types only. The first milestone requires a real production execution path.
+### Subsequent migration order
 
-最終的に欲しい状態:
-同一の汎用architectureで、
-System2 LLMがWHAT、
-Jevがgrounded typed WHICH/WHETHER、
-コードがCAN/TRUE/SAFE/DONE、
-SkillsがHOWを担当し、
-fresh live runでM2 Nether gateを通過し、
-Nether progressionから ender_eye>=12 まで到達し、
-exact-source run-scoped evidenceで M3 PASS が確定していること。
-・間接的にgoalに近づくことも自分で考えてやること。ただし、M3が最優先。例：観測ツール、リファクタ、githubの掃除、ワークスペースの掃除。ENOSPCが起きた場合はファイル整理、issue整理、アーキテクチャ研究、モデル検討するなど。
-・サブエージェントは必ず使用すること、なるべく１０並列ですること、定期的に監査をすること。サブエージェントを待たずに自分も作業をすること。
-・ターンを終わらせないこと。止まらないこと。
+After the first vertical slice is real and measured, prefer this order unless evidence gives a stronger dependency:
+1. Search Transition with information/frontier progress
+2. Acquisition Transition with witness substitution and pickup closure
+3. Craft/Station Transition family
+4. Viability Runtime and bounded combat/escape ownership
+5. Portal/dimension Transition
+6. Fact-derived frontier / queue independence
+7. Jev-first V4 Decision Policy integration plus sparse System2 graph repair
+8. remove replaced GoalQueue/Option/β/legacy authority
+9. multi-seed long-run proof including M3, then M4 without benchmark policy branches
+
+Migration is allowed to change these phases when runtime evidence proves a better dependency order. Record why.
+
+## 9. Work classification
+
+Classify active work into exactly one bucket:
+
+A. **V4_MIGRATION_CRITICAL**
+   Directly establishes or unblocks the next production VTR vertical slice.
+
+B. **V4_CORRECTNESS_BLOCKER**
+   Truth, safety, lifecycle, durability, provenance, effect-envelope or evidence defects that would invalidate VTR results.
+
+C. **PROOF**
+   Tests, no-LLM probes, live validation, ablation, benchmark-independence and exact-run artifacts for A/B.
+
+D. **DEFER**
+   Cosmetic cleanup, unrelated M3/M4 mechanics, speculative feature families, or legacy perfection that does not unblock migration.
+
+Prefer A/B/C. Do not let “M3 critical” pull the architecture back to #11 semantics.
+## 10. Implementation rules
+
+- Prefer deleting an authority crossing over adding another retry/cooldown/fence around it.
+- New production code should be V4-shaped. Do not create new Option or universal Jev π/β authority abstractions. Integrate Jev through V4 scheduler/controller decision-policy boundaries instead of recreating per-action permission/termination layers.
+- Any compatibility adapter must state which side is authoritative and have a deletion condition.
+- Do not add a second mutable semantic source of truth.
+- Derive current work from verified facts and predicates where practical; do not persist agenda just because it is convenient.
+- Reuse existing mechanics, Guard, VERIFY, lease, world identity and evidence code aggressively.
+- Preserve fail-closed effect boundaries for irreversible world mutation.
+- A controller can select tactics deterministically inside its declared contract; do not manufacture an LLM call solely to satisfy old authority doctrine.
+- Do not hardcode benchmark order, known seed coordinates, fixed routes, or incident-specific semantic strategy.
+- Do not make success easier by weakening verification or evidence gates.
+
+### Minecraft runtime boundary
+
+VTR core is runtime-backend independent.
+- Mission, Verified World Model, Transition Graph, Scheduler/Decision Policy, Transition Controllers, Viability Runtime, Jev and System2 MUST NOT receive, retain, import, or call a raw Mineflayer `Bot` or future backend-specific live client in the final architecture.
+- Gameplay observation and actuation cross typed runtime ports only. Only the Minecraft Runtime Adapter performs gameplay reads/writes against the raw client (`entity`, inventory, block lookup, pathfinder, dig/place/attack/equip/craft/container/control-state APIs, etc.).
+- HOST may create/own/connect/reconnect the raw client solely for lifecycle, generation identity, lease and adapter wiring; HOST must not become gameplay policy or bypass the Runtime Adapter for semantic/mechanical actions.
+- Transition Controllers express desired capabilities/effects through backend-independent ports. Verified World Model consumes typed observations/evidence, never live backend objects.
+- Backend-specific types must not appear in Transition Contracts, scheduler state, durable facts, journal schema, Jev/System2 semantic projections, or model-facing contracts.
+- During strangler migration, existing raw `Bot` access may survive only as an explicitly identified compatibility adapter with one authoritative side and a deletion condition. Any **new** raw-client dependency outside HOST lifecycle/Runtime Adapter is an architecture violation.
+
+When touching legacy mega-files, ask first whether the change should instead create/move ownership into a Transition/controller boundary.
+Avoid growing `controller-legacy.ts`, `planner-legacy.ts`, GoalQueue or beta machinery for defects VTR is meant to eliminate.
+
+## 11. Testing and proof hierarchy
+
+For each migrated Transition family require, as applicable:
+1. pure contract/state-machine tests
+2. deterministic mechanical fixture
+3. no-LLM live probe for CAN/HOW/DONE
+4. integration test through the real VTR scheduler/runtime
+5. legacy-vs-VTR double-authority exclusion
+6. stale world/epoch/lease tests
+7. target/witness substitution tests
+8. progress and budget exhaustion tests
+9. provider-outage test when model independence is claimed
+10. fresh exact-source live evidence
+
+A capability probe PASS proves mechanics only. It does not prove autonomous composition.
+A benchmark PASS proves an end-to-end outcome only. It does not prove architectural generality.
+## 12. Live loop
+
+For migration work, prefer this loop:
+
+exact `origin/main` SHA
+-> inspect current VTR/legacy ownership boundary
+-> tests/typecheck/probes
+-> run the smallest causal experiment that can distinguish hypotheses
+-> identify the first contract/fact/controller failure
+-> implement the generic V4 fix
+-> regression + no-double-authority tests
+-> integrate
+-> fresh exact-source run/probe
+-> compare world-state progress, model-call rate, controller closure and typed outcomes
+-> remove superseded compatibility authority when evidence is sufficient
+
+Do not treat “the bot moved” as progress. Ask which verified predicate changed and which Transition owned it.
+Do not shotgun speculative fixes into one run.
+
+## 13. Runtime evidence to inspect
+
+At minimum, make it possible to answer:
+- active Mission predicate frontier
+- active Transition type / instance / contract hash
+- `requires` and `ensures`
+- controller-local progress
+- temporary target/witness changes
+- resource/risk budget consumption
+- viability interruptions and resume/re-evaluation
+- deterministic postcondition verification
+- terminal outcome and reason
+- world/dimension/epoch identity
+- model calls and why they were necessary
+- any legacy Option/GoalQueue/Jev π/β authority participation, separately from V4 Jev Decision Frame calls
+- whether two authority paths could actuate simultaneously
+
+For V4 slices, model calls per verified Transition and mechanical steps per model call are important measurements.
+## 14. Parallel work / subagents
+
+Use subagents and independent worktrees aggressively when available, preferably 6-10 parallel research/proof lanes for large migration tasks.
+
+Rules:
+- one mutation owner per subsystem/blocker;
+- do not give multiple agents the same implementation;
+- parallelize audits, tests, probes, history analysis, contract design and independent controller families;
+- while subagents run, continue a separate useful lane yourself;
+- review and integrate subagent results yourself;
+- never reset/overwrite concurrent worktrees or another lane's unmerged work;
+- retire superseded worktrees instead of accumulating them indefinitely.
+
+Good parallel lanes for V4:
+A. Transition Contract/runtime core
+B. first controller vertical slice
+C. verified world-model / fact-frontier audit
+D. no-LLM probe harness and fixtures
+E. legacy authority/double-actuation audit
+F. viability runtime design/evidence
+G. tests and property/invariant checks
+H. live metrics / exact-run evidence
+I. issue/history reconciliation
+J. deletion map for superseded Option/Jev/GoalQueue code
+
+## 15. Issues and PRs
+
+Do not create one issue/PR per tiny symptom.
+Create or reuse an issue when there is a distinct causal boundary, migration invariant, durable acceptance criterion, or live-evidenced failure.
+
+V4 migration issues should describe:
+- old authority being replaced
+- new Transition/contract owner
+- compatibility period
+- proof required before deletion
+- deletion/retirement condition
+
+Historical #11 issues should be relabeled/reframed/superseded when their requested direction conflicts with V4. Do not blindly finish them because they are open.
+## 16. M3 under V4
+
+M3 remains `ender_eye >= 12` under the canonical run-scoped gate unless the milestone contract itself changes.
+Use M3 as an integration proof that migrated Transition families compose across:
+- long-horizon acquisition
+- crafting/stations
+- survival
+- navigation/search
+- Nether transition
+- hostile-mob drops
+- durable recovery
+
+Do not optimize the architecture around the expected M3 route.
+A fresh M3 PASS is valuable only if production intent remains benchmark-independent and migrated VTR authority is visible in the run artifact.
+
+After a credible VTR path reaches M3, test changed seeds, partial-start states, benchmark-absent missions and non-M2/M3 supported predicates before calling the architecture general.
+
+## 17. Explicit anti-goals
+
+Do NOT solve migration by:
+- renaming Option to Transition while keeping the same per-action control loop;
+- wrapping GoalQueue in another canonical ledger;
+- making β smarter instead of removing generic model-owned termination;
+- ending/recommitting the active Transition and bouncing every tactical recovery to a new Jev authority epoch merely because it is “semantic”; bounded Jev consultation inside the same controller contract is allowed;
+- creating a giant deterministic benchmark planner;
+- moving the legacy mega-controller into smaller files without changing causal ownership;
+- increasing candidate count/model context as a substitute for controller closure;
+- adding unbounded retries or arbitrary N-failure policy switches;
+- weakening Guard/VERIFY/evidence to get a green run;
+- keeping both old and new authority indefinitely.
+
+## 18. Turn/work-session discipline and autonomy
+
+At the start of a substantial task, form concrete TODOs covering as many of audit, implementation, tests, probes/live validation, integration and deletion as the task allows.
+Do not end merely because a plan was written, an issue was filed, a subagent was launched, one interface was added, or one local test passed. A status report is not completion. If the requested goal is still unmet and useful work is available, continue.
+
+Work autonomously toward the requested goal. Do not wait for step-by-step permission for ordinary investigation, code edits, tests, live runs, log/evidence audits, issue triage, branch/worktree maintenance, necessary restarts/configuration changes, or other reversible engineering work that is causally useful to the goal. Preserve concurrent work and do not overwrite another lane's unmerged changes.
+
+Also pursue indirect but useful work when it materially increases the probability or speed of reaching the goal: observability/probe tooling, generic refactors that unblock the slice, repository/GitHub hygiene, workspace cleanup, evidence tooling, model/policy investigation, and disk-space/ENOSPC recovery are legitimate work. Choose such work yourself from current evidence; do not require the user to enumerate every intermediate step. Do not use "indirect progress" as an excuse for unrelated cleanup while a clearer causal blocker is available.
+
+Architecture autonomy is narrower: VTR is frozen by default. Routine implementation and policy evolution may proceed autonomously inside the VTR constitution, but changing the contract/ownership/verification constitution itself requires the runtime-evidence threshold defined above rather than taste, novelty, or convenience.
+
+Continue until the current requested migration milestone is actually proven, or until an external blocker makes further useful work impossible. If blocked, leave exact evidence and the next falsifiable experiment.
+
+The default current milestone is the **P0 Reach/Navigation VTR vertical slice** in section 8, not “finish #11” and not “M3 at any cost”.
+
+When a migrated slice is proven, remove or disable the semantic authority it replaces instead of leaving a permanent dual-control architecture.

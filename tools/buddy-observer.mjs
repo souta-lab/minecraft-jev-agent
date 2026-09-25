@@ -13,6 +13,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } fr
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildVtrObserverReadModel, renderVtrObserverHtml } from './vtr-observer-read-model.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
@@ -25,7 +26,48 @@ const MAX_RUN_BOUNDARY_SCAN_BYTES = 1024 * 1024
 const MAX_RUN_ARTIFACT_BYTES = 64 * 1024
 const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const MAX_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
+const DEFAULT_VTR_RUN_LOG_BYTES = 1024 * 1024
 const DEFAULT_CONTROL_TIMEOUT_MS = 5000
+
+const VTR_TRACE_EVENTS = new Set([
+  'VTR_REACH_PROBE_HOLD',
+  'VTR_DUAL_AUTHORITY_FENCE',
+  'VTR_MISSION_SNAPSHOT_REFUSED',
+  'VTR_TERMINAL_HANDOFF_REFUSED',
+  'VTR_RISK_OBSERVED',
+  'VTR_REACH_GUARD_REFUSED',
+  'VTR_RUNTIME_INTENT_REFUSED',
+  'VTR_EXECUTOR_CLAIM_REFUSED',
+  'VTR_INTENT_RELEASE_REFUSED',
+  'VTR_CONTROLLER_TICK_REFUSED',
+  'VTR_RISK_OBSERVATION_REFUSED',
+  'VTR_COMPLETION_REFUSED',
+  'VTR_MECHANICAL_OUTCOME_REFUSED',
+  'VTR_VERIFY_JOURNAL_REFUSED',
+  'VTR_ROUTE_SELECTION_REQUIRED',
+  'VTR_TRANSITION_COMMIT',
+  'VTR_TRANSITION_PROGRESS',
+  'VTR_TRANSITION_ACTUATION',
+  'VTR_ACTION_COMPLETION_HANDLER_FAILED',
+  'VTR_SCHEDULER_HOLDS_NO_ADMISSIBLE_ROUTE',
+  'VTR_SCHEDULER_HOLDS_TERMINAL',
+  'VTR_MECHANICAL_STEP_REFUSED',
+  'VTR_MECHANICAL_STEP_RESERVED',
+  'VTR_MECHANICAL_STEP_OUTCOME',
+  'VTR_MECHANICAL_OUTCOME_REJECTED',
+  'VTR_MECHANICAL_OUTCOME',
+  'VTR_TERMINAL_ACTION_CORRELATED',
+  'VTR_TERMINAL_ACTION_SETTLEMENT_MISMATCH',
+  'VTR_REACH_ROUTE_DECISION',
+  'VTR_TRANSITION_VERIFY',
+  'VTR_TRANSITION_OUTCOME',
+  'VTR_TRANSITION_MODEL_METRICS',
+  'VTR_ORPHAN_ACTION_OUTCOME',
+  'VTR_LEGACY_REACH_MOVE_WITHHELD',
+  'VTR_LEGACY_REACH_HANDOFF',
+  'VTR_ORPHAN_ACTUATION_REVOKED',
+  'VTR_SAFETY_TRIGGER_STALE',
+])
 
 const TRACE_EVENTS = new Set([
   'JEV_HEADS',
@@ -68,6 +110,7 @@ const TRACE_EVENTS = new Set([
   'BUILD',
   'FATAL',
   'ERROR',
+  ...VTR_TRACE_EVENTS,
 ])
 
 const SECRET_KEY = /(api.?key|authorization|cookie|password|secret|token)/i
@@ -309,26 +352,53 @@ function readRunMetadata(runtimeDir, runId) {
   }
 }
 
-function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, runBoot = null) {
-  const sourceSha = metadata?.sourceSha
-  const validSourceSha = typeof sourceSha === 'string' && /^[0-9a-f]{40}$/i.test(sourceSha)
+function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, runBoot = null, reportedWorldKey = null) {
+  const validSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
   const bootSourceSha = runBoot?.detail?.source ?? runBoot?.detail?.sourceSha ?? null
   const readySourceSha = readyEvent?.detail?.source ?? readyEvent?.detail?.sourceSha ?? null
+  const reportedWorld = normalizeWorldKey(reportedWorldKey)
+  const bootWorld = normalizeWorldKey(runBoot?.detail?.worldKey ?? runBoot?.detail?.identity?.worldKey)
+  const readyWorldValue = readyEvent?.detail?.worldKey ?? readyEvent?.detail?.identity?.worldKey
+  const readyWorld = readyWorldValue === undefined || readyWorldValue === null
+    ? null
+    : normalizeWorldKey(readyWorldValue)
+  const reportedWorldId = completeWorldIdentity(reportedWorld)
+  const bootWorldId = completeWorldIdentity(bootWorld)
+  const readyWorldId = readyWorld === null ? null : completeWorldIdentity(readyWorld)
+  const artifactSourceCandidates = [metadata?.acceptance?.gitCommit, metadata?.predicates?.sourceSha]
+    .filter((value) => typeof value === 'string' && value.length > 0)
+  const artifactWorldCandidates = [
+    metadata?.acceptance?.worldKey ?? metadata?.acceptance?.identity?.worldKey,
+    metadata?.predicates?.worldKey ?? metadata?.predicates?.identity?.worldKey,
+  ].filter((value) => value !== undefined && value !== null)
+  const artifactConflict = metadata?.sourceShaConflict === true
+    || artifactSourceCandidates.some((value) => !validSha(value))
+    || new Set(artifactSourceCandidates).size > 1
+  const artifactWorldConflict = artifactWorldCandidates.some((value) => {
+    const identity = completeWorldIdentity(normalizeWorldKey(value))
+    return identity === null || identity !== reportedWorldId
+  })
+  const eventSourceBound = validSha(bootSourceSha)
+    && validSha(readySourceSha)
+    && bootSourceSha === readySourceSha
+  const artifactMatchesEvents = artifactSourceCandidates.every((value) => value === bootSourceSha)
   return typeof runId === 'string'
-    && metadata?.runArtifactsMatched === true
-    && validSourceSha
-    && metadata.sourceShaConflict !== true
-    && metadata.acceptance?.runId === runId
-    && metadata.predicates?.runId === runId
-    && metadata.acceptance?.gitCommit === sourceSha
-    && metadata.predicates?.sourceSha === sourceSha
-    && (runBoot === null || (runBoot.event === 'BOOT' && runBoot.detail?.runId === runId))
-    && (bootSourceSha === null || bootSourceSha === sourceSha)
+    && generationId !== null
     && typeof generationId === 'string'
+    && !artifactConflict
+    && !artifactWorldConflict
+    && eventSourceBound
+    && artifactMatchesEvents
+    && reportedWorldId !== null
+    && bootWorldId === reportedWorldId
+    && (readyWorldValue === undefined || readyWorldValue === null || readyWorldId === reportedWorldId)
+    && (metadata?.acceptance?.runId === undefined || metadata.acceptance.runId === runId)
+    && (metadata?.predicates?.runId === undefined || metadata.predicates.runId === runId)
+    && (runBoot === null || (runBoot.event === 'BOOT' && runBoot.detail?.runId === runId))
+    && runBoot?.detail?.runId === runId
     && readyEvent?.event === 'GENERATION_READY'
     && readyEvent.detail?.id === generationId
-    && (readyEvent.detail?.runId === undefined || readyEvent.detail.runId === runId)
-    && (readySourceSha === null || readySourceSha === sourceSha)
+    && readyEvent.detail?.runId === runId
     && parseTimestamp(readyEvent.ts) !== null
 }
 
@@ -349,6 +419,7 @@ function eventBelongsToRunGeneration(entry, { runId, generationId, generationSta
   if (eventRunId !== undefined && eventRunId !== null && eventRunId !== runId) return false
   if (generationBound !== true || typeof generationId !== 'string') return false
   const eventGenerationId = entry.detail?.generationId
+    ?? entry.detail?.identity?.generationId
     ?? (entry.event === 'GENERATION_READY' ? entry.detail?.id : null)
   if (eventGenerationId !== null && eventGenerationId !== undefined) return eventGenerationId === generationId
   const eventAt = parseTimestamp(entry.ts)
@@ -365,6 +436,24 @@ export function readJsonlTail(logPath, maxBytes = 1024 * 1024) {
       return []
     }
   })
+}
+
+/** Parse only structured VTR lifecycle events from the resident run journal. */
+export function parseVtrRunJsonlEvents(records) {
+  return records.flatMap((record) => {
+    if (record?.record !== 'agent-event' || record?.source !== 'vtr'
+      || typeof record.message !== 'string' || parseTimestamp(record.ts) === null) return []
+    const event = /^(VTR_[A-Z0-9_]+)(?:\s|$)/.exec(record.message)?.[1] ?? null
+    if (event === null || !VTR_TRACE_EVENTS.has(event)) return []
+    const detail = record.detail !== null && typeof record.detail === 'object' && !Array.isArray(record.detail)
+      ? record.detail
+      : {}
+    return [{ ts: record.ts, event, source: record.source, detail: redactSecrets(detail), raw: redactSecrets(record.message) }]
+  })
+}
+
+export function readVtrRunJsonlEvents(logPath, maxBytes = DEFAULT_VTR_RUN_LOG_BYTES) {
+  return parseVtrRunJsonlEvents(readJsonlTail(logPath, maxBytes))
 }
 
 export function latestEvent(events, names) {
@@ -407,7 +496,15 @@ export async function callControlSocket(socketPath, cmd = 'report', timeoutMs = 
 }
 
 function normalizeWorldKey(key) {
-  if (key === null || typeof key !== 'object') return null
+  if (typeof key === 'string') {
+    const parts = key.split('|')
+    if (parts.length !== 3 || parts[0] === '' || parts[1] === '') return null
+    const worldEpoch = Number(parts[2])
+    return Number.isSafeInteger(worldEpoch)
+      ? { serverId: parts[0], dimension: normalizeDimension(parts[1]), worldEpoch }
+      : null
+  }
+  if (key === null || typeof key !== 'object' || Array.isArray(key)) return null
   return {
     serverId: key.serverId ?? null,
     dimension: normalizeDimension(key.dimension),
@@ -716,14 +813,24 @@ function projectMission(mission, { runId, generationId, generationBound, sourceC
     : null
   const provenanceRunId = provenance?.runId ?? null
   const provenanceGenerationId = provenance?.generationId ?? null
+  const structuredPredicate = typeof mission?.kind === 'string'
+    && ((mission.kind === 'inventory_at_least'
+      && typeof mission.item === 'string' && mission.item.length > 0
+      && Number.isFinite(mission.count) && mission.count >= 0)
+      || (mission.kind !== 'inventory_at_least' && mission.predicate !== undefined))
+  const title = typeof mission?.title === 'string' && mission.title.trim() !== ''
+    ? mission.title
+    : mission?.kind === 'inventory_at_least' && typeof mission.item === 'string'
+      ? Number.isFinite(mission.count) ? `Acquire ${mission.count} ${mission.item}` : null
+      : null
   let reason = null
 
   if (runId === null) reason = 'mission_live_run_identity_unavailable'
   else if (generationId === null) reason = 'mission_current_generation_identity_unavailable'
   else if (generationBound !== true) reason = 'mission_current_generation_boundary_unavailable'
   else if (source === null) reason = 'mission_source_unavailable'
-  else if (typeof mission?.id !== 'string' || mission.id.trim() === ''
-    || typeof mission?.title !== 'string' || mission.title.trim() === '') reason = 'mission_identity_unavailable'
+  else if (!structuredPredicate && (typeof mission?.id !== 'string' || mission.id.trim() === ''
+    || title === null)) reason = 'mission_identity_unavailable'
   else if (provenanceRunId !== runId) reason = 'mission_source_run_mismatch'
   else if (provenanceGenerationId !== generationId) reason = 'mission_source_generation_mismatch'
 
@@ -744,8 +851,11 @@ function projectMission(mission, { runId, generationId, generationBound, sourceC
 
   return {
     status: 'observed',
-    id: mission.id,
-    title: mission.title,
+    id: typeof mission.id === 'string' ? mission.id : null,
+    title,
+    ...(structuredPredicate ? {
+      predicate: pickFields(mission, ['kind', 'item', 'count', 'predicate']),
+    } : {}),
     provenance: {
       status: 'run_generation_bound',
       source,
@@ -800,6 +910,621 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
+function transitionModelMetricsProjection(entry) {
+  if (entry === null) return null
+  const detail = entry.detail ?? {}
+  return {
+    transitionId: detail.transitionId ?? null,
+    contractHash: detail.contractHash ?? null,
+    typedTerminalOutcome: detail.typedTerminalOutcome ?? null,
+    mechanicalSteps: detail.mechanicalSteps ?? null,
+    jevDecisionFrameInvocations: detail.jevDecisionFrameInvocations ?? null,
+    jevDecisionFramesPerMechanicalStep: detail.jevDecisionFramesPerMechanicalStep ?? null,
+    jevModelProviderEvaluateAttempts: detail.jevModelProviderEvaluateAttempts ?? null,
+    jevModelProviderEvaluateAttemptsPerMechanicalStep: detail.jevModelProviderEvaluateAttemptsPerMechanicalStep ?? null,
+    policy: detail.policy ?? null,
+    model: detail.model ?? null,
+    provider: detail.provider ?? null,
+    identity: detail.identity ?? null,
+    observedAt: entry.ts,
+    event: traceProjection(entry),
+  }
+}
+
+function mechanicalStepId(entry) {
+  const detail = entry?.detail ?? {}
+  const value = detail.stepId ?? detail.mechanicalStepId ?? detail.step?.stepId
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function mechanicalIntentId(entry) {
+  const detail = entry?.detail ?? {}
+  const value = detail.intentId ?? detail.intent?.intentId
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function mechanicalStepProjection(linked) {
+  const reservations = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_RESERVED')
+  const actuations = linked.filter((entry) => entry.event === 'VTR_TRANSITION_ACTUATION')
+  const stepOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_OUTCOME')
+  const actionOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_OUTCOME')
+  const controlNames = new Set([
+    'VTR_DUAL_AUTHORITY_FENCE',
+    'VTR_REACH_GUARD_REFUSED',
+    'VTR_RUNTIME_INTENT_REFUSED',
+    'VTR_EXECUTOR_CLAIM_REFUSED',
+    'VTR_INTENT_RELEASE_REFUSED',
+    'VTR_MECHANICAL_STEP_REFUSED',
+    'VTR_MECHANICAL_OUTCOME_REFUSED',
+    'VTR_MECHANICAL_OUTCOME_REJECTED',
+    'VTR_ORPHAN_ACTUATION_REVOKED',
+  ])
+  const controls = linked.filter((entry) => controlNames.has(entry.event))
+  const steps = reservations.map((reservation) => {
+    const stepId = mechanicalStepId(reservation)
+    const intentId = mechanicalIntentId(reservation)
+    const stepActuations = actuations.filter((entry) => {
+      const actuationStepId = mechanicalStepId(entry)
+      if (actuationStepId !== null) return stepId !== null && actuationStepId === stepId
+      return intentId !== null && mechanicalIntentId(entry) === intentId
+    })
+    const stepOutcomeEvents = stepOutcomes.filter((entry) => stepId !== null && mechanicalStepId(entry) === stepId)
+    const intentOutcomeEvents = actionOutcomes.filter((entry) => intentId !== null && mechanicalIntentId(entry) === intentId)
+    const stepControls = controls.filter((entry) => {
+      const controlStepId = mechanicalStepId(entry)
+      const controlIntentId = mechanicalIntentId(entry)
+      if (controlStepId !== null) return stepId !== null && controlStepId === stepId
+      return intentId !== null && controlIntentId === intentId
+    })
+    const actuationBinding = stepActuations.map((entry) => ({
+      scope: mechanicalStepId(entry) === stepId && stepId !== null ? 'step' : 'intent',
+      event: traceProjection(entry),
+    }))
+    const outcome = stepOutcomeEvents.at(-1) ?? null
+    const intentOutcome = intentOutcomeEvents.at(-1) ?? null
+    const outcomeDetail = outcome?.detail ?? null
+    const reservedDetail = reservation.detail ?? {}
+    return {
+      stepId,
+      leg: reservedDetail.leg ?? null,
+      intentId,
+      effectKind: reservedDetail.effectKind ?? null,
+      status: outcome !== null ? 'mechanical_outcome_observed'
+        : intentOutcome !== null ? 'intent_outcome_only'
+          : stepControls.length > 0 ? 'control_event_observed'
+            : stepActuations.length > 0 ? 'actuated_outcome_unobserved'
+              : 'reserved_without_actuation',
+      reserved: traceProjection(reservation),
+      actuations: actuationBinding,
+      outcome: traceProjection(outcome),
+      stepOutcome: outcomeDetail === null ? null : {
+        event: outcome.event,
+        stepId: mechanicalStepId(outcome),
+        leg: outcomeDetail.leg ?? null,
+        status: outcomeDetail.status ?? null,
+        outcome: outcomeDetail.outcome ?? null,
+        verified: typeof outcomeDetail.verified === 'boolean' ? outcomeDetail.verified : null,
+        reason: outcomeDetail.reason ?? null,
+        contractHash: outcomeDetail.contractHash ?? null,
+        identity: outcomeDetail.identity ?? null,
+        observedAtMs: outcomeDetail.observedAtMs ?? null,
+        usage: outcomeDetail.usage ?? null,
+        observedAt: outcome.ts,
+      },
+      intentOutcome: traceProjection(intentOutcome),
+      controlEvents: stepControls.map(traceProjection),
+      correlation: {
+        reservation: stepId === null ? 'missing-step-id' : 'step-id',
+        actuation: stepActuations.length === 0 ? 'unmatched'
+          : stepActuations.every((entry) => mechanicalStepId(entry) === stepId && stepId !== null)
+            ? 'step-id' : 'shared-intent-id',
+        outcome: outcome !== null ? 'step-id' : intentOutcome !== null ? 'intent-id-only' : 'not-observed',
+      },
+      trace: [reservation, ...stepActuations, ...(outcome === null ? [] : [outcome]), ...(intentOutcome === null ? [] : [intentOutcome]), ...stepControls]
+        .sort((left, right) => (parseTimestamp(left.ts) ?? 0) - (parseTimestamp(right.ts) ?? 0))
+        .map(traceProjection),
+    }
+  })
+  return {
+    steps: steps.slice(0, 256),
+    truncated: steps.length > 256,
+    reservationCount: reservations.length,
+    actuationEventCount: actuations.length,
+    stepOutcomeEventCount: stepOutcomes.length,
+    actionOutcomeEventCount: actionOutcomes.length,
+    mechanicalOutcomeEventCount: stepOutcomes.length + actionOutcomes.length,
+    controlEventCount: controls.length,
+    stepOutcomeEvents: stepOutcomes.slice(-256).map(traceProjection),
+    actionOutcomes: actionOutcomes.slice(-64).map(traceProjection),
+    controlEvents: controls.slice(-64).map(traceProjection),
+  }
+}
+
+function observedInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function observedLabel(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function compareObservedSources(sources) {
+  const observed = Object.values(sources).filter((value) => value !== null)
+  const distinct = new Set(observed)
+  if (distinct.size > 1) return 'MISMATCH'
+  if (observed.length !== Object.keys(sources).length) return 'UNKNOWN'
+  return 'CONSISTENT'
+}
+
+function combineConsistencyStatuses(statuses) {
+  if (statuses.includes('MISMATCH')) return 'MISMATCH'
+  if (statuses.includes('UNKNOWN')) return 'UNKNOWN'
+  return 'CONSISTENT'
+}
+
+function projectVtrMetricsConsistency({ modelMetrics, modelMetricsEventCount, outcomeDetail, linked }) {
+  const reservations = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_RESERVED')
+  const stepOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_OUTCOME')
+  const reservationIds = reservations.map(mechanicalStepId)
+  const stepOutcomeIds = stepOutcomes.map(mechanicalStepId)
+  const reservationIdCounts = new Map()
+  const stepOutcomeIdCounts = new Map()
+  for (const id of reservationIds) if (id !== null) reservationIdCounts.set(id, (reservationIdCounts.get(id) ?? 0) + 1)
+  for (const id of stepOutcomeIds) if (id !== null) stepOutcomeIdCounts.set(id, (stepOutcomeIdCounts.get(id) ?? 0) + 1)
+  const duplicatedReservationIds = [...reservationIdCounts].filter(([, count]) => count > 1).map(([id]) => id)
+  const duplicatedStepOutcomeIds = [...stepOutcomeIdCounts].filter(([, count]) => count > 1).map(([id]) => id)
+  const reservationIdSet = new Set(reservationIds.filter((id) => id !== null))
+  const stepOutcomeIdSet = new Set(stepOutcomeIds.filter((id) => id !== null))
+  const unreservedStepOutcomeIds = [...stepOutcomeIdSet].filter((id) => !reservationIdSet.has(id))
+  const missingStepOutcomeIds = [...reservationIdSet].filter((id) => !stepOutcomeIdSet.has(id))
+  const stepIdentityStatus = duplicatedReservationIds.length > 0
+    || duplicatedStepOutcomeIds.length > 0
+    || unreservedStepOutcomeIds.length > 0
+    ? 'MISMATCH'
+    : reservations.length === 0 || stepOutcomes.length === 0
+      || reservationIds.some((id) => id === null) || stepOutcomeIds.some((id) => id === null)
+      || missingStepOutcomeIds.length > 0
+      ? 'UNKNOWN'
+      : 'CONSISTENT'
+
+  const mechanicalStepSources = {
+    modelMetrics: observedInteger(modelMetrics?.mechanicalSteps),
+    transitionUsage: observedInteger(outcomeDetail?.usage?.mechanicalSteps),
+    transitionMetric: observedInteger(outcomeDetail?.metrics?.mechanicalStepsPerTransition),
+    reservations: reservations.length === 0 ? null : reservations.length,
+    stepOutcomes: stepOutcomes.length === 0 ? null : stepOutcomes.length,
+  }
+  const declaredCounts = [mechanicalStepSources.modelMetrics, mechanicalStepSources.transitionUsage, mechanicalStepSources.transitionMetric]
+    .filter((value) => value !== null)
+  const expectedMechanicalSteps = declaredCounts.length === 0 || new Set(declaredCounts).size > 1
+    ? null
+    : declaredCounts[0]
+  const overReportedMechanicalSteps = expectedMechanicalSteps !== null
+    && ((mechanicalStepSources.reservations ?? 0) > expectedMechanicalSteps
+      || (mechanicalStepSources.stepOutcomes ?? 0) > expectedMechanicalSteps)
+  const mechanicalEventCountStatus = expectedMechanicalSteps === null
+    ? 'UNKNOWN'
+    : overReportedMechanicalSteps
+      ? 'MISMATCH'
+      : mechanicalStepSources.reservations !== expectedMechanicalSteps || mechanicalStepSources.stepOutcomes !== expectedMechanicalSteps
+        ? 'UNKNOWN'
+        : 'CONSISTENT'
+  const mechanicalStepsStatus = combineConsistencyStatuses([
+    compareObservedSources({
+      modelMetrics: mechanicalStepSources.modelMetrics,
+      transitionUsage: mechanicalStepSources.transitionUsage,
+      transitionMetric: mechanicalStepSources.transitionMetric,
+    }),
+    mechanicalEventCountStatus,
+    stepIdentityStatus,
+    modelMetricsEventCount === 1 ? 'CONSISTENT' : modelMetricsEventCount === 0 ? 'UNKNOWN' : 'MISMATCH',
+  ])
+
+  const terminalStepOutcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_OUTCOME'
+    && entry.detail?.status === 'terminal')
+  const terminalStepOutcomeValues = terminalStepOutcomes.map((entry) => observedLabel(entry.detail?.outcome))
+  const typedTerminalOutcomeSources = {
+    modelMetrics: observedLabel(modelMetrics?.typedTerminalOutcome),
+    transitionOutcome: observedLabel(outcomeDetail?.outcome?.kind),
+    transitionMetric: observedLabel(outcomeDetail?.metrics?.typedTerminalOutcome),
+    terminalStepOutcome: terminalStepOutcomes.length === 1 ? terminalStepOutcomeValues[0] : null,
+  }
+  const terminalStepAgreement = terminalStepOutcomes.length === 0
+    ? 'UNKNOWN'
+    : terminalStepOutcomes.length > 1
+      ? 'MISMATCH'
+      : compareObservedSources({
+        transitionOutcome: typedTerminalOutcomeSources.transitionOutcome,
+        terminalStepOutcome: typedTerminalOutcomeSources.terminalStepOutcome,
+      })
+  const typedTerminalOutcomeStatus = combineConsistencyStatuses([
+    compareObservedSources({
+      modelMetrics: typedTerminalOutcomeSources.modelMetrics,
+      transitionOutcome: typedTerminalOutcomeSources.transitionOutcome,
+      transitionMetric: typedTerminalOutcomeSources.transitionMetric,
+    }),
+    terminalStepAgreement,
+    modelMetricsEventCount === 1 ? 'CONSISTENT' : modelMetricsEventCount === 0 ? 'UNKNOWN' : 'MISMATCH',
+  ])
+  const typedTerminalOutcome = {
+    status: typedTerminalOutcomeStatus,
+    sources: typedTerminalOutcomeSources,
+    terminalStepEventCount: terminalStepOutcomes.length,
+    terminalStepAgreement,
+  }
+  const mechanicalSteps = {
+    status: mechanicalStepsStatus,
+    sources: mechanicalStepSources,
+    expected: expectedMechanicalSteps,
+    eventCountStatus: mechanicalEventCountStatus,
+    stepIdentityStatus,
+    reservationStepIds: reservationIds,
+    stepOutcomeIds,
+    missingStepOutcomeIds,
+    unreservedStepOutcomeIds,
+    duplicatedReservationIds,
+    duplicatedStepOutcomeIds,
+  }
+  const status = combineConsistencyStatuses([mechanicalSteps.status, typedTerminalOutcome.status])
+  return {
+    status,
+    modelMetricsEventCount,
+    mechanicalSteps,
+    typedTerminalOutcome,
+  }
+}
+
+function projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification) {
+  const orphanEvents = linked.filter((entry) => entry.event === 'VTR_ORPHAN_ACTION_OUTCOME')
+  const terminalIndex = linked.indexOf(outcomeEvent)
+  const terminalAt = parseTimestamp(outcomeEvent?.ts)
+  const postTerminal = terminalKind === 'SUCCESS'
+    ? orphanEvents.filter((entry) => {
+      const eventAt = parseTimestamp(entry.ts)
+      return eventAt !== null && terminalAt !== null
+        && (eventAt > terminalAt || (eventAt === terminalAt && linked.indexOf(entry) > terminalIndex))
+    })
+    : []
+  const contradictions = postTerminal.map((entry) => {
+    const result = entry.detail?.result ?? {}
+    return {
+      kind: 'orphan_action_after_success',
+      severity: 'contradiction',
+      transitionId: entry.detail?.transitionId ?? null,
+      intentId: entry.detail?.intentId ?? null,
+      actionId: result.actionId ?? entry.detail?.actionId ?? null,
+      actionStatus: result.status ?? entry.detail?.status ?? null,
+      actionVerified: result.verified ?? entry.detail?.verified ?? null,
+      skillOutcome: result.skillOutcome ?? entry.detail?.skillOutcome ?? null,
+      verifiedTransition: verification?.verified === true,
+      observedAt: entry.ts,
+      event: traceProjection(entry),
+    }
+  })
+  return {
+    status: contradictions.length > 0 ? 'contradiction'
+      : orphanEvents.length > 0 ? 'orphan_observed'
+        : outcomeEvent === null ? 'pending' : 'no_post_terminal_orphan_observed',
+    orphanActionOutcomes: orphanEvents.slice(-64).map(traceProjection),
+    contradictions,
+  }
+}
+
+function projectVtrReachRouteDecision(entry) {
+  if (entry === null) return null
+  const detail = entry.detail ?? {}
+  const routeIds = Array.isArray(detail.routeIds)
+    ? detail.routeIds.filter((routeId) => typeof routeId === 'string' && routeId.length > 0).slice(0, 64)
+    : []
+  const selectedRouteId = typeof detail.selectedRouteId === 'string' && detail.selectedRouteId.length > 0
+    ? detail.selectedRouteId
+    : null
+  const selectedIsGrounded = selectedRouteId !== null && routeIds.includes(selectedRouteId)
+  const rawProbabilities = detail.probabilities
+  const probabilityEntries = rawProbabilities !== null && typeof rawProbabilities === 'object' && !Array.isArray(rawProbabilities)
+    ? Object.entries(rawProbabilities).filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+    : null
+  const source = typeof detail.source === 'string' ? detail.source : null
+  const actor = source === 'jev' ? 'jev'
+    : source === 'fallback' ? 'fallback'
+      : source === 'reflex' ? 'reflex'
+        : 'unknown'
+  return redactSecrets({
+    observedAt: entry.ts,
+    event: entry.event,
+    actor,
+    source,
+    policy: typeof detail.policy === 'string' ? detail.policy : null,
+    model: typeof detail.model === 'string' ? detail.model : null,
+    callId: typeof detail.callId === 'string' ? detail.callId : null,
+    transitionId: detail.transitionId ?? null,
+    contractHash: detail.contractHash ?? null,
+    status: selectedIsGrounded ? 'selected_grounded_route'
+      : detail.reason !== undefined ? 'unavailable'
+        : selectedRouteId !== null ? 'selected_route_not_in_grounded_set' : 'selection_unavailable',
+    selectedRouteId,
+    selectedRoute: selectedIsGrounded ? {
+      routeId: selectedRouteId,
+      grounded: true,
+      groundingSource: 'VTR_REACH_ROUTE_DECISION.detail.routeIds',
+    } : null,
+    routeIds,
+    routeIdsTruncated: Array.isArray(detail.routeIds) && detail.routeIds.length > routeIds.length,
+    actionProbability: typeof detail.actionProbability === 'number' && Number.isFinite(detail.actionProbability)
+      ? detail.actionProbability
+      : null,
+    probabilities: probabilityEntries === null ? null : Object.fromEntries(probabilityEntries.slice(0, 64)),
+    probabilitiesTruncated: probabilityEntries !== null && probabilityEntries.length > 64,
+    latencyMs: typeof detail.latencyMs === 'number' && Number.isFinite(detail.latencyMs) ? detail.latencyMs : null,
+    reason: detail.reason ?? null,
+    binding: {
+      runId: detail.runId ?? detail.identity?.runId ?? null,
+      generationId: detail.generationId ?? detail.identity?.generationId ?? null,
+      sourceSha: detail.sourceSha ?? detail.sourceCommit ?? detail.identity?.sourceSha ?? null,
+      worldKey: worldKeyFromVtrDetail(detail),
+    },
+  })
+}
+
+function worldKeyFromVtrDetail(detail) {
+  return normalizeWorldKey(detail?.worldKey ?? detail?.identity?.worldKey
+    ?? (typeof detail?.serverId === 'string' && typeof detail?.dimension === 'string'
+      ? { serverId: detail.serverId, dimension: detail.dimension, worldEpoch: detail.worldEpoch }
+      : null))
+}
+
+function vtrEventMatchesLiveFence(entry, { runId, generationId, sourceCommit, worldKey, generationStartedAt }) {
+  const detail = entry?.detail ?? {}
+  const identity = detail.identity ?? {}
+  const directRunId = detail.runId ?? identity.runId ?? null
+  const directGenerationId = detail.generationId ?? identity.generationId ?? null
+  const directSourceSha = detail.sourceSha ?? detail.sourceCommit ?? identity.sourceSha ?? null
+  const eventAt = parseTimestamp(entry?.ts)
+  const eventWorld = worldKeyFromVtrDetail(detail)
+  const expectedWorld = normalizeWorldKey(worldKey)
+  if (directRunId !== null && directRunId !== runId) return false
+  if (directGenerationId !== null && directGenerationId !== generationId) return false
+  if (directSourceSha !== null && directSourceSha !== sourceCommit) return false
+  if (eventAt === null || generationStartedAt === null || eventAt < generationStartedAt) return false
+  if (eventWorld !== null && completeWorldIdentity(eventWorld) !== completeWorldIdentity(expectedWorld)) return false
+  const declaredEpoch = detail.worldEpoch ?? identity.worldEpoch
+  if (eventWorld !== null && declaredEpoch !== undefined && Number(declaredEpoch) !== eventWorld.worldEpoch) return false
+  const declaredDimension = detail.dimension ?? identity.dimension
+  if (eventWorld !== null && declaredDimension !== undefined
+    && normalizeDimension(declaredDimension) !== eventWorld.dimension) return false
+  if (entry.event === 'VTR_TRANSITION_COMMIT') {
+    return directGenerationId === generationId
+      && eventWorld !== null
+      && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
+  }
+  if (entry.event === 'VTR_TRANSITION_VERIFY') {
+    return detail.runId === runId
+      && detail.generationId === generationId
+      && detail.sourceSha === sourceCommit
+      && eventWorld !== null
+      && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
+  }
+  if (entry.event === 'VTR_REACH_ROUTE_DECISION') {
+    return directRunId === runId
+      && directGenerationId === generationId
+      && directSourceSha === sourceCommit
+      && typeof detail.transitionId === 'string'
+      && typeof detail.contractHash === 'string'
+      && eventWorld !== null
+      && completeWorldIdentity(eventWorld) === completeWorldIdentity(expectedWorld)
+  }
+  return true
+}
+
+/** Build an exact-generation VTR journal view without presenting it as a Jev choice. */
+export function projectVtrTransitions({ events = [], runId = null, generationId = null, sourceCommit = null, worldKey = null, generationStartedAt = null }) {
+  if (typeof runId !== 'string' || typeof generationId !== 'string'
+    || typeof sourceCommit !== 'string' || completeWorldIdentity(normalizeWorldKey(worldKey)) === null
+    || generationStartedAt === null) {
+    return { status: 'unknown', binding: null, latest: null, transitions: [], events: [], unknown: ['vtr_run_generation_source_world_boundary_unavailable'] }
+  }
+
+  const scopedEvents = events
+    .filter((entry) => entry?.source === 'vtr' && VTR_TRACE_EVENTS.has(entry.event))
+    .filter((entry) => vtrEventMatchesLiveFence(entry, { runId, generationId, sourceCommit, worldKey, generationStartedAt }))
+    .map((entry, index) => ({ entry, index, time: parseTimestamp(entry.ts) }))
+    .sort((left, right) => {
+      if (left.time === null && right.time === null) return left.index - right.index
+      if (left.time === null) return 1
+      if (right.time === null) return -1
+      return left.time - right.time || left.index - right.index
+    })
+    .map(({ entry }) => entry)
+  const commits = scopedEvents.filter((entry) => entry.event === 'VTR_TRANSITION_COMMIT'
+    && typeof entry.detail?.transitionId === 'string'
+    && typeof entry.detail?.contractHash === 'string')
+  const transitions = commits.map((commit) => {
+    const detail = commit.detail
+    const transitionId = detail.transitionId
+    const contractHash = detail.contractHash
+    const linked = scopedEvents.filter((entry) => entry.detail?.transitionId === transitionId
+      && (entry.detail?.contractHash === undefined || entry.detail.contractHash === contractHash))
+    const progressEvents = linked.filter((entry) => entry.event === 'VTR_TRANSITION_PROGRESS')
+    const progressEvent = progressEvents.at(-1) ?? null
+    const actuationEvent = latestEvent(linked, ['VTR_TRANSITION_ACTUATION'])
+    const routeDecisionEvent = latestEvent(linked, ['VTR_REACH_ROUTE_DECISION'])
+    const verifyEvent = latestEvent(linked, ['VTR_TRANSITION_VERIFY'])
+    const outcomeEvent = latestEvent(linked, ['VTR_TRANSITION_OUTCOME'])
+    const modelMetricsEvents = linked.filter((entry) => entry.event === 'VTR_TRANSITION_MODEL_METRICS')
+    const modelMetricsEvent = modelMetricsEvents.at(-1) ?? null
+    const verifyDetail = verifyEvent?.detail ?? null
+    const verification = verifyDetail === null ? null : {
+      truth: verifyDetail.truth ?? null,
+      predicates: verifyDetail.predicates ?? [],
+      evidenceIds: verifyDetail.evidenceIds ?? [],
+      verifiedAtMs: verifyDetail.verifiedAtMs ?? null,
+      identityMatches: verifyDetail.identityMatches === true,
+      predicatesVerified: verifyDetail.predicatesVerified === true,
+      verified: verifyDetail.identityMatches === true
+        && verifyDetail.predicatesVerified === true
+        && verifyDetail.truth === 'TRUE',
+      binding: {
+        runId: verifyDetail.runId ?? null,
+        generationId: verifyDetail.generationId ?? null,
+        sourceSha: verifyDetail.sourceSha ?? null,
+        worldKey: verifyDetail.worldKey ?? null,
+      },
+    }
+    const outcomeDetail = outcomeEvent?.detail ?? null
+    const terminalKind = outcomeDetail?.outcome?.kind ?? null
+    const verifiedSuccess = terminalKind === 'SUCCESS' && verification?.verified === true
+    const mechanical = mechanicalStepProjection(linked)
+    const modelMetrics = transitionModelMetricsProjection(modelMetricsEvent)
+    const modelMetricsConsistency = projectVtrMetricsConsistency({
+      modelMetrics,
+      modelMetricsEventCount: modelMetricsEvents.length,
+      outcomeDetail,
+      linked,
+    })
+    const outcomeConsistency = projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification)
+    const lifecycleEvents = linked.filter((entry) => /(?:REFUSED|FENCE|ORPHAN|HANDOFF|STALE|FAILED|REQUIRED|REVOKED|WITHHELD|REJECTED|HOLDS|TERMINAL_ACTION_CORRELATED|TERMINAL_ACTION_SETTLEMENT_MISMATCH)/.test(entry.event))
+    const status = verifiedSuccess
+      ? 'verified_success'
+      : terminalKind === 'SUCCESS' ? 'success_without_verified_predicate'
+        : terminalKind !== null ? 'terminal'
+          : 'active_or_pending'
+    return {
+      transitionId,
+      contractHash,
+      status,
+      committedAt: commit.ts,
+      mission: detail.mission ?? null,
+      desiredPredicate: detail.desiredPredicate ?? null,
+      contract: {
+        requires: detail.requires ?? [],
+        ensures: detail.ensures ?? [],
+        invariants: detail.invariants ?? [],
+        admissibleEffects: detail.admissibleEffects ?? [],
+        budget: detail.budget ?? null,
+        identity: detail.identity ?? null,
+        witness: detail.witness ?? null,
+        progressDefinition: detail.progressDefinition ?? null,
+        initialRouteIds: detail.initialRouteIds ?? [],
+        routePolicy: detail.routePolicy ?? null,
+      },
+      progress: progressEvent?.detail?.progress ?? null,
+      progressEvent: traceProjection(progressEvent),
+      progressHistory: progressEvents.slice(-64).map((entry) => ({
+        observedAt: entry.ts,
+        sequence: entry.detail?.progress?.observationSequence ?? null,
+        latestPredicateDistance: entry.detail?.progress?.latestPredicateDistance ?? null,
+        bestPredicateDistance: entry.detail?.progress?.bestPredicateDistance ?? null,
+        reachability: entry.detail?.progress?.reachability ?? null,
+        frontierId: entry.detail?.progress?.frontierId ?? null,
+        evidenceId: entry.detail?.progress?.evidenceId ?? null,
+      })),
+      progressHistoryTruncated: progressEvents.length > 64,
+      mechanical,
+      modelMetrics,
+      modelMetricsEventCount: modelMetricsEvents.length,
+      modelMetricsConsistency,
+      lifecycleEvents: lifecycleEvents.slice(-64).map(traceProjection),
+      routeDecision: projectVtrReachRouteDecision(routeDecisionEvent),
+      actuation: actuationEvent === null ? null : {
+        candidate: actuationEvent.detail?.candidate ?? null,
+        target: actuationEvent.detail?.target ?? null,
+        selectedBy: actuationEvent.detail?.selectedBy ?? null,
+        authority: actuationEvent.detail?.authority ?? null,
+        leaseEpoch: actuationEvent.detail?.leaseEpoch ?? null,
+        event: traceProjection(actuationEvent),
+      },
+      verification,
+      outcomeConsistency,
+      outcome: outcomeDetail === null ? null : {
+        kind: terminalKind,
+        boundary: outcomeDetail.boundary ?? null,
+        reason: outcomeDetail.outcome?.reason ?? null,
+        typed: outcomeDetail.outcome ?? null,
+        usage: outcomeDetail.usage ?? null,
+        metrics: outcomeDetail.metrics ?? null,
+        event: traceProjection(outcomeEvent),
+      },
+      binding: {
+        runId,
+        generationId,
+        sourceSha: sourceCommit,
+        worldKey: normalizeWorldKey(worldKey),
+        method: 'live-report+BOOT+GENERATION_READY+VTR-contract-identity',
+        confidence: 'direct',
+      },
+    }
+  })
+  const latest = transitions.at(-1) ?? null
+  const latestCommit = commits.at(-1) ?? null
+  const latestRouteDecision = transitions
+    .map((transition) => transition.routeDecision)
+    .filter((decision) => decision !== null)
+    .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
+  const latestRouteTransition = latestRouteDecision === null ? null : transitions.find((transition) =>
+    transition.transitionId === latestRouteDecision.transitionId && transition.contractHash === latestRouteDecision.contractHash) ?? null
+  const latestAdmission = latestCommit === null ? null : {
+    observedAt: latestCommit.ts,
+    actor: 'vtr',
+    event: latestCommit.event,
+    selected: {
+      transitionId: latestCommit.detail.transitionId,
+      contractHash: latestCommit.detail.contractHash,
+      ensures: latestCommit.detail.desiredPredicate?.id ?? latestCommit.detail.ensures?.[0]?.id ?? null,
+      mission: latestCommit.detail.mission ?? null,
+    },
+    reason: latestCommit.detail.routePolicy ?? 'grounded VTR transition admitted',
+    generationId,
+  }
+  const routeDecisionSummary = latestRouteDecision === null ? null : {
+    observedAt: latestRouteDecision.observedAt,
+    actor: latestRouteDecision.actor,
+    event: latestRouteDecision.event,
+    selected: {
+      transitionId: latestRouteDecision.transitionId,
+      contractHash: latestRouteDecision.contractHash,
+      ensures: latestRouteTransition?.desiredPredicate?.id ?? null,
+      routeId: latestRouteDecision.selectedRoute?.routeId ?? null,
+      grounded: latestRouteDecision.selectedRoute?.grounded ?? false,
+      source: latestRouteDecision.source,
+      policy: latestRouteDecision.policy,
+      model: latestRouteDecision.model,
+      callId: latestRouteDecision.callId,
+      probabilities: latestRouteDecision.probabilities,
+    },
+    reason: latestRouteDecision.reason ?? (latestRouteDecision.source === 'jev'
+      ? 'Jev selected among grounded VTR Reach routes'
+      : latestRouteDecision.source === 'fallback'
+        ? 'Explicit fallback policy selected among grounded VTR Reach routes'
+        : latestRouteDecision.source === 'reflex'
+          ? 'Code reflex selected a grounded VTR Reach route'
+          : null),
+    generationId,
+    routeDecision: latestRouteDecision,
+  }
+  const latestDecision = latestAdmission === null ? routeDecisionSummary
+    : routeDecisionSummary === null || (parseTimestamp(latestAdmission.observedAt) ?? 0) > (parseTimestamp(routeDecisionSummary.observedAt) ?? 0)
+      ? latestAdmission
+      : routeDecisionSummary
+  return {
+    status: latest === null ? 'not_recorded' : 'observed',
+    binding: {
+      runId,
+      generationId,
+      sourceSha: sourceCommit,
+      worldKey: normalizeWorldKey(worldKey),
+      method: 'live-report+BOOT+GENERATION_READY+VTR-contract-identity',
+      confidence: 'direct',
+    },
+    latest,
+    latestDecision,
+    latestAdmission,
+    latestRouteDecision,
+    transitions: transitions.slice(-12),
+    events: scopedEvents.slice(-24).reverse().map(traceProjection),
+    unknown: latest === null ? ['no_vtr_transition_commit_in_bounded_run_tail'] : [],
+  }
+}
+
 export function buildObserverSnapshot({ report, events, mission = null, runBoot = null, runBuild = null, runMetadata = null, runGenerationReady = null, jevCalls = [], now = Date.now() }) {
   const data = report?.ok === true ? report.data : null
   const status = data?.status ?? null
@@ -813,9 +1538,20 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       : runBoot?.detail?.runId === runId
         ? runBoot
         : null
+  const candidateGenerationReady = runGenerationReady ?? [...events].reverse().find((entry) => entry.event === 'GENERATION_READY'
+    && entry.detail?.id === generationId
+    && entry.detail?.runId === runId) ?? null
   const runStartedAt = candidateBoot?.detail?.runId === runId ? Date.parse(candidateBoot.ts) : NaN
-  const generationBound = runGenerationAnchorMatches(runMetadata, runId, generationId, runGenerationReady, candidateBoot)
-  const generationStartedAt = generationBound ? parseTimestamp(runGenerationReady.ts) ?? NaN : NaN
+  const reportedWorldKey = data?.worldKey ?? status?.worldKey ?? null
+  const generationBound = runGenerationAnchorMatches(
+    runMetadata,
+    runId,
+    generationId,
+    candidateGenerationReady,
+    candidateBoot,
+    reportedWorldKey,
+  )
+  const generationStartedAt = generationBound ? parseTimestamp(candidateGenerationReady.ts) ?? NaN : NaN
   const runEvents = runId === null ? [] : events.filter((entry) => eventBelongsToRunGeneration(entry, {
     runId,
     generationId,
@@ -823,6 +1559,14 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     generationBound,
   }))
   const relevantEvents = runEvents.filter((entry) => TRACE_EVENTS.has(entry.event)).slice(-60)
+  const relevantVtrEvents = runEvents
+    .filter((entry) => VTR_TRACE_EVENTS.has(entry.event)
+      && (entry.source === 'vtr' || (entry.event === 'VTR_REACH_ROUTE_DECISION'
+        && entry.source === undefined
+        && entry.detail?.runId === runId
+        && entry.detail?.generationId === generationId
+        && typeof entry.detail?.sourceSha === 'string')))
+    .map((entry) => entry.source === 'vtr' ? entry : { ...entry, source: 'vtr', projectionStream: 'buddy.log' })
   const boot = latestEvent(relevantEvents, ['BOOT'])
     ?? (runId !== null && runBoot?.detail?.runId === runId ? runBoot : null)
   const build = latestEvent(relevantEvents, ['BUILD'])
@@ -847,8 +1591,9 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
   const current = queue.current
   const worldKey = data?.worldKey ?? status?.worldKey ?? boot?.detail?.worldKey ?? null
   const eventSourceSha = boot?.detail?.source ?? null
+  const readySourceSha = candidateGenerationReady?.detail?.sourceSha ?? candidateGenerationReady?.detail?.source ?? null
   const artifactSourceSha = runMetadata?.sourceSha ?? null
-  const sourceCandidates = [eventSourceSha, artifactSourceSha]
+  const sourceCandidates = [eventSourceSha, readySourceSha, artifactSourceSha]
     .filter((value) => value !== null && value !== undefined && value !== '')
   const sourceCandidatesValid = sourceCandidates.every((value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value))
   const distinctSourceCandidates = [...new Set(sourceCandidates)]
@@ -860,10 +1605,32 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
     : distinctSourceCandidates[0]
   const sourceCommitBinding = sourceCommit === null
     ? sourceCommitConflict ? 'conflict' : 'unknown'
-    : eventSourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+acceptance+predicate-artifacts'
-      : artifactSourceSha !== null ? 'run-acceptance+predicate-artifacts'
-        : 'run-BOOT-event'
-  const missionProjection = projectMission(mission, {
+    : eventSourceSha !== null && readySourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+GENERATION_READY+acceptance+predicate-artifacts'
+      : eventSourceSha !== null && readySourceSha !== null ? 'run-BOOT+GENERATION_READY'
+        : eventSourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+acceptance+predicate-artifacts'
+          : artifactSourceSha !== null ? 'run-acceptance+predicate-artifacts'
+            : 'run-BOOT-event'
+  const vtr = projectVtrTransitions({
+    events: relevantVtrEvents,
+    runId,
+    generationId,
+    sourceCommit,
+    worldKey,
+    generationStartedAt: Number.isFinite(generationStartedAt) ? generationStartedAt : null,
+  })
+  let runtimeMission = null
+  if (mission === null && vtr.latest?.mission !== null && vtr.latest?.mission !== undefined) {
+    runtimeMission = {
+      ...vtr.latest.mission,
+      provenance: { source: 'VTR_TRANSITION_COMMIT.detail.mission', runId, generationId },
+    }
+  } else if (mission === null && candidateBoot?.detail?.mission !== undefined) {
+    runtimeMission = {
+      ...candidateBoot.detail.mission,
+      provenance: { source: 'BOOT.detail.mission', runId, generationId },
+    }
+  }
+  const missionProjection = projectMission(mission ?? runtimeMission, {
     runId,
     generationId,
     generationBound,
@@ -910,8 +1677,8 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       generationBoundary: generationBound ? {
         event: 'GENERATION_READY',
         generationId,
-        observedAt: runGenerationReady.ts,
-        method: 'live-report+exact-run-source-artifacts+GENERATION_READY-id',
+        observedAt: candidateGenerationReady.ts,
+        method: 'live-report+worldKey+BOOT-runId/sourceSha/worldKey+GENERATION_READY-runId/generationId/sourceSha',
         artifactGenerations: {
           acceptance: generationArtifactStatus(runMetadata?.acceptance, generationId),
           predicates: generationArtifactStatus(runMetadata?.predicates, generationId),
@@ -960,7 +1727,16 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
       mercury: traceProjection(mercury),
       action: traceProjection(latestActionEvent),
       death: traceProjection(latestDeath),
+      vtr: vtr.latest === null ? null : {
+        transitionId: vtr.latest.transitionId,
+        contractHash: vtr.latest.contractHash,
+        status: vtr.latest.status,
+        verification: vtr.latest.verification,
+        outcome: vtr.latest.outcome,
+        modelMetrics: vtr.latest.modelMetrics,
+      },
     },
+    vtr,
     runtimeFailure: traceProjection(runtimeFailure),
     events: relevantEvents.slice(-30).reverse().map(traceProjection),
   }
@@ -1651,7 +2427,12 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     : null
   const jev = projectChoice(jevEvent, 'jev')
   const system2 = projectChoice(system2Event, 'system2', system2Reason)
-  const latest = [jev, system2]
+  const vtrDecision = snapshot.vtr?.latestDecision ?? null
+  const jevReachRouteDecision = snapshot.vtr?.latestRouteDecision?.source === 'jev'
+    ? snapshot.vtr.latestRouteDecision
+    : null
+  const latestIsVtrReachRouteDecision = vtrDecision?.event === 'VTR_REACH_ROUTE_DECISION'
+  const latest = [jev, system2, vtrDecision]
     .filter((choice) => choice !== null)
     .sort((left, right) => (parseTimestamp(right.observedAt) ?? 0) - (parseTimestamp(left.observedAt) ?? 0))[0] ?? null
   const actionEvent = latestProjectedEvent(snapshot, ['ACTION', 'ACTION_COMMIT', 'ACTION_PREEMPT', 'ACTION_UNVERIFIED'])
@@ -1697,19 +2478,32 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   if (latest !== null && latest.reason === null) unknown.push('latest_choice_has_no_explicit_reason')
   if (snapshot.truth === null) unknown.push('authoritative_world_truth_unavailable')
   if (heartbeatLive !== true) unknown.push('world_heartbeat_stale_or_missing')
-  if (latest?.actor === 'jev' && jevEvidence?.available !== true) unknown.push('jev_call_context_unavailable')
-  if (jevEvidence?.available === true && jevEvidence.binding?.confidence !== 'strong') unknown.push('jev_call_binding_is_partial')
-  if (jevEvidence?.available === true && jevEvidence.state?.structures?.status !== 'observed') unknown.push('structures_not_recorded_in_decision_snapshot')
-  if (jevEvidence?.outcome?.status === 'pending_or_not_observed') unknown.push('selected_action_outcome_not_yet_observed')
+  const latestHasVtrJevRouteEvidence = latestIsVtrReachRouteDecision && jevReachRouteDecision !== null
+  if (latest?.actor === 'jev' && jevEvidence?.available !== true && !latestHasVtrJevRouteEvidence) unknown.push('jev_call_context_unavailable')
+  if (!latestIsVtrReachRouteDecision && jevEvidence?.available === true && jevEvidence.binding?.confidence !== 'strong') unknown.push('jev_call_binding_is_partial')
+  if (!latestIsVtrReachRouteDecision && jevEvidence?.available === true && jevEvidence.state?.structures?.status !== 'observed') unknown.push('structures_not_recorded_in_decision_snapshot')
+  if (!latestIsVtrReachRouteDecision && jevEvidence?.outcome?.status === 'pending_or_not_observed') unknown.push('selected_action_outcome_not_yet_observed')
   const selection = latest?.selected?.strategy
     ?? latest?.selected?.chosen
     ?? latest?.selected?.id
     ?? latest?.selected?.actionId
     ?? latest?.selected?.toolName
+    ?? latest?.selected?.routeId
+    ?? (latest?.actor === 'vtr'
+      ? `Transition ${latest.selected?.transitionId ?? 'UNKNOWN'} ensures ${latest.selected?.ensures ?? 'UNKNOWN'}`
+      : null)
     ?? null
   const headline = latest === null
     ? 'No choice event has been observed.'
     : `${latest.actor} selected ${selection ?? 'UNKNOWN'}; explicit reason: ${latest.reason ?? 'not emitted'}.`
+  const vtrTerminalHeadline = snapshot.vtr?.latest?.outcome?.kind !== null
+    && snapshot.vtr?.latest?.outcome?.kind !== undefined
+    ? ` VTR outcome=${snapshot.vtr.latest.outcome.kind}; predicate verification=${snapshot.vtr.latest.verification?.verified === true ? 'TRUE' : snapshot.vtr.latest.verification?.truth ?? 'not recorded'}.`
+    : ''
+  const postSuccessContradiction = snapshot.vtr?.latest?.outcomeConsistency?.contradictions?.[0] ?? null
+  const vtrConsistencyHeadline = postSuccessContradiction === null
+    ? ''
+    : ` Lifecycle contradiction: orphan action ${postSuccessContradiction.actionId ?? 'UNKNOWN'} reported ${postSuccessContradiction.actionStatus ?? 'unknown status'} after Transition SUCCESS (predicate verification=${postSuccessContradiction.verifiedTransition ? 'TRUE' : 'not confirmed'}).`
   const failureHeadline = runtimeFailure?.detail?.code
     ? ` Runtime failure: ${runtimeFailure.detail.code}${runtimeFailure.detail.context ? ` (${runtimeFailure.detail.context})` : ''}.`
     : ''
@@ -1721,7 +2515,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-decision-summary',
-    headline: `${headline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
+    headline: `${headline}${vtrTerminalHeadline}${vtrConsistencyHeadline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
     observedAt: snapshot.observedAt,
     freshnessMs,
     run: {
@@ -1752,6 +2546,9 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     choices: {
       latest,
       jev,
+      jevStatus: jev === null && jevReachRouteDecision === null ? 'not_recorded' : 'observed',
+      jevReachRouteDecision,
+      vtr: snapshot.vtr ?? null,
       jevEvidence,
       jevCombatDecision,
       system2: {
@@ -1768,6 +2565,8 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
       selectedChoiceInterruption: jevEvidence?.outcome?.interruption ?? null,
       latestDeath: snapshot.decisionTrace?.death ?? null,
     },
+    transition: snapshot.vtr?.latest ?? null,
+    vtr: snapshot.vtr ?? null,
     worldProbe: {
       href: '/api/world-probe?radius=6&verticalRadius=3',
       method: 'GET',
@@ -1825,6 +2624,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   const socketPath = join(runtimeDir, 'data', 'resident', 'control.sock')
   const logPath = join(runtimeDir, 'buddy.log')
   const jevCallsPath = join(runtimeDir, 'logs', 'jev', 'jev-calls.jsonl')
+  const vtrRunLogPath = join(runtimeDir, 'logs', 'jev', 'run.jsonl')
   const runnerOutPath = join(runtimeDir, 'runner.out')
 
   // Summary requests also expose the on-demand live probe. Multiple readers
@@ -1859,22 +2659,28 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   let cachedRunMetadata = null
   let cachedGenerationId = null
   let cachedGenerationReady = null
+  let cachedWorldKey = null
   const snapshot = async () => {
     if (snapshotInFlight !== null) return await snapshotInFlight
     snapshotInFlight = Promise.all([
       callControlSocket(socketPath, 'report'),
       Promise.resolve(readLogTail(logPath)),
       Promise.resolve(readJsonlTail(jevCallsPath)),
-    ]).then(([report, events, jevCalls]) => {
+      Promise.resolve(readVtrRunJsonlEvents(vtrRunLogPath)),
+    ]).then(([report, events, jevCalls, vtrEvents]) => {
       const bootFromTail = latestEvent(events, ['BOOT'])
       const reportedRunId = report?.ok === true ? report.data?.runId : null
       const currentRunId = typeof reportedRunId === 'string' && reportedRunId.length > 0 ? reportedRunId : null
       const reportedGenerationId = report?.ok === true ? report.data?.generationId : null
       const currentGenerationId = typeof reportedGenerationId === 'string' && reportedGenerationId.length > 0 ? reportedGenerationId : null
+      const currentWorldKey = report?.ok === true
+        ? report.data?.worldKey ?? report.data?.status?.worldKey ?? null
+        : null
       if (currentRunId === null) {
         cachedRunId = null
         cachedRunBoot = null
         cachedRunBuild = null
+        cachedWorldKey = null
       } else if (currentRunId !== cachedRunId) {
         cachedRunId = currentRunId
         cachedRunBoot = bootFromTail?.detail?.runId === currentRunId
@@ -1883,20 +2689,27 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
       const runMetadata = currentRunId === null ? null : readRunMetadata(runtimeDir, currentRunId)
-      let candidateGenerationReady = latestEvent(events, ['GENERATION_READY'])
-      if (candidateGenerationReady === null) candidateGenerationReady = readLogEvent(logPath, 'GENERATION_READY')
+      let candidateGenerationReady = [...events].reverse().find((entry) => entry.event === 'GENERATION_READY'
+        && entry.detail?.runId === currentRunId
+        && entry.detail?.id === currentGenerationId) ?? null
+      if (candidateGenerationReady === null) {
+        candidateGenerationReady = readLogEvent(logPath, 'GENERATION_READY', currentRunId,
+          (detail) => detail.id === currentGenerationId)
+      }
       const runGenerationReady = runGenerationAnchorMatches(
         runMetadata,
         currentRunId,
         currentGenerationId,
         candidateGenerationReady,
         cachedRunBoot,
+        currentWorldKey,
       ) ? candidateGenerationReady : null
       cachedRunMetadata = runMetadata
       cachedGenerationId = currentGenerationId
       cachedGenerationReady = runGenerationReady
+      cachedWorldKey = currentWorldKey
       const runnerEvents = readRunnerOutEvents(runnerOutPath, { runId: currentRunId, bootTs: cachedRunBoot?.ts ?? null })
-      const combinedEvents = [...events, ...runnerEvents].sort((left, right) => {
+      const combinedEvents = [...events, ...runnerEvents, ...vtrEvents].sort((left, right) => {
         const leftTs = Date.parse(left.ts ?? '')
         const rightTs = Date.parse(right.ts ?? '')
         return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0)
@@ -1904,9 +2717,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
       return buildObserverSnapshot({
         report,
         events: combinedEvents,
-        // A repository milestone label is not evidence of the active mission.
-        // A future runtime source must bind its mission record to this run and
-        // generation before the observer can project it as observed.
+        // Mission is derived below only from run-bound structured runtime evidence.
         mission: null,
         runBoot: cachedRunBoot,
         runBuild: cachedRunBuild,
@@ -1924,7 +2735,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     const generationId = cachedGenerationId
     const generationReady = cachedGenerationReady
     const generationStartedAt = parseTimestamp(generationReady?.ts)
-    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady, cachedRunBoot)
+    const generationBound = runGenerationAnchorMatches(cachedRunMetadata, runId, generationId, generationReady, cachedRunBoot, cachedWorldKey)
     const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.floor(limit))) : 12
     const boundedMaxBytes = Number.isFinite(maxBytes)
       ? Math.max(1, Math.min(MAX_RECENT_CHOICE_LOG_BYTES, Math.floor(maxBytes)))
@@ -1975,167 +2786,17 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     })
   }
 
-  return { runtimeDir, socketPath, logPath, jevCallsPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
-}
-
-function bindProbeToSummary(summary, probe) {
-  const probeBinding = probe?.binding ?? null
-  const summaryWorld = normalizeWorldKey(summary?.run?.worldKey)
-  const probeWorld = normalizeWorldKey(probeBinding?.probeWorld)
-  const sameRun = typeof summary?.run?.id === 'string' && typeof probeBinding?.probeRunId === 'string'
-    ? summary.run.id === probeBinding.probeRunId
-    : null
-  const sameWorld = summaryWorld !== null && probeWorld !== null
-    ? summaryWorld.serverId === probeWorld.serverId
-      && summaryWorld.dimension === probeWorld.dimension
-      && summaryWorld.worldEpoch === probeWorld.worldEpoch
-    : null
-  const sameGeneration = typeof summary?.run?.generationId === 'string' && typeof probeBinding?.probeGenerationId === 'string'
-    ? summary.run.generationId === probeBinding.probeGenerationId
-    : null
-  const status = sameRun === true && sameWorld === true && sameGeneration === true
-    ? 'aligned'
-    : [sameRun, sameWorld, sameGeneration].includes(false) ? 'mismatch' : 'unknown'
-  return {
-    ...probe,
-    summaryBinding: {
-      status,
-      sameRun,
-      sameWorld,
-      sameGeneration,
-      summary: {
-        runId: summary?.run?.id ?? null,
-        generationId: summary?.run?.generationId ?? null,
-        worldKey: summaryWorld,
-      },
-      probe: {
-        runId: probeBinding?.probeRunId ?? null,
-        generationId: probeBinding?.probeGenerationId ?? null,
-        worldKey: probeWorld,
-      },
-    },
-  }
-}
-
-function htmlPage() {
-  return String.raw`<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Buddy Observer</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #0b0e13; color: #e7edf5; }
-    header { position: sticky; top: 0; z-index: 2; display:flex; gap:16px; align-items:center; justify-content:space-between; padding:16px 22px; background:#10151dcc; backdrop-filter: blur(12px); border-bottom:1px solid #263041; }
-    h1 { font-size:18px; margin:0; letter-spacing:.02em; }
-    .status { display:flex; gap:10px; align-items:center; color:#9fafc2; font-size:13px; }
-    .dot { width:9px; height:9px; border-radius:999px; background:#687587; box-shadow:0 0 0 4px #68758722; }
-    .dot.online { background:#50d890; box-shadow:0 0 0 4px #50d89022; }
-    main { max-width:1400px; margin:0 auto; padding:22px; }
-    .flow { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:14px; }
-    .flow-card,.card { background:#121821; border:1px solid #263041; border-radius:14px; padding:14px; min-width:0; }
-    .flow-card .eyebrow,.eyebrow { font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:#73839a; margin-bottom:8px; }
-    .flow-card .primary { font-size:16px; font-weight:650; overflow-wrap:anywhere; }
-    .flow-card .secondary { margin-top:7px; color:#9fafc2; font-size:12px; overflow-wrap:anywhere; }
-    .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:14px; }
-    .card { grid-column:span 4; }
-    .card.wide { grid-column:span 8; }
-    .card.full { grid-column:1/-1; }
-    h2 { margin:0 0 12px; font-size:15px; }
-    dl { display:grid; grid-template-columns:minmax(110px,.8fr) 2fr; gap:7px 12px; margin:0; font-size:13px; }
-    dt { color:#73839a; }
-    dd { margin:0; overflow-wrap:anywhere; }
-    code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
-    .trace { display:grid; gap:9px; }
-    .trace-row { border-left:2px solid #39485d; padding:8px 10px; background:#0e131a; border-radius:0 8px 8px 0; }
-    .trace-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; }
-    .trace-event { font-weight:650; font-size:12px; }
-    .trace-time { color:#65748a; font-size:11px; white-space:nowrap; }
-    .trace-detail { color:#afbdcf; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .empty { color:#65748a; font-size:13px; }
-    .note { color:#7f8da1; font-size:12px; margin:0 0 14px; }
-    @media (max-width: 900px) { .flow { grid-template-columns:1fr 1fr; } .card,.card.wide { grid-column:1/-1; } }
-    @media (max-width: 560px) { main { padding:12px; } header { padding:13px 14px; } .flow { grid-template-columns:1fr; } }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>AI Buddy Observer</h1>
-    <div class="status"><span id="dot" class="dot"></span><span id="resident">resident unavailable</span><span id="updated">--:--:--</span></div>
-  </header>
-  <main>
-    <p class="note">Decision Trace は resident が実際に記録した Goal / Option / Jev / System2 / Action の監査情報です。</p>
-    <section class="flow">
-      <div class="flow-card"><div class="eyebrow">Goal</div><div id="flow-goal" class="primary">—</div><div id="flow-goal-sub" class="secondary"></div></div>
-      <div class="flow-card"><div class="eyebrow">Option</div><div id="flow-option" class="primary">—</div><div id="flow-option-sub" class="secondary"></div></div>
-      <div class="flow-card"><div class="eyebrow">Decision</div><div id="flow-decision" class="primary">—</div><div id="flow-decision-sub" class="secondary"></div></div>
-      <div class="flow-card"><div class="eyebrow">Action</div><div id="flow-action" class="primary">—</div><div id="flow-action-sub" class="secondary"></div></div>
-    </section>
-    <section class="grid">
-      <article class="card"><h2>Mission / Goal</h2><dl id="goal"></dl></article>
-      <article class="card"><h2>Jev authority</h2><dl id="jev"></dl></article>
-      <article class="card"><h2>System2 / Mercury</h2><dl id="system2"></dl></article>
-      <article class="card wide"><h2>Decision Trace</h2><div id="trace" class="trace"></div></article>
-      <article class="card"><h2>World truth</h2><dl id="truth"></dl></article>
-      <article class="card full"><h2>Recent audit events</h2><div id="events" class="trace"></div></article>
-    </section>
-  </main>
-  <script>
-    const $ = (id) => document.getElementById(id)
-    const text = (value, fallback='—') => value === null || value === undefined || value === '' ? fallback : String(value)
-    const compact = (value) => value === null || value === undefined ? '—' : typeof value === 'string' ? value : JSON.stringify(value)
-    const rows = (target, entries) => { target.innerHTML = entries.map(([k,v]) => '<dt>'+escapeHtml(k)+'</dt><dd>'+escapeHtml(compact(v))+'</dd>').join('') }
-    const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-    const eventRow = (entry) => {
-      if (!entry) return '<div class="empty">No observed decision yet.</div>'
-      const time = entry.ts ? new Date(entry.ts).toLocaleTimeString() : ''
-      return '<div class="trace-row"><div class="trace-head"><span class="trace-event">'+escapeHtml(entry.event)+'</span><span class="trace-time">'+escapeHtml(time)+'</span></div><div class="trace-detail">'+escapeHtml(JSON.stringify(entry.detail, null, 2))+'</div></div>'
-    }
-    function render(s) {
-      $('dot').className = 'dot' + (s.resident.available && s.resident.connected ? ' online' : '')
-      $('resident').textContent = s.resident.available ? (s.resident.connected ? 'connected' : 'resident online / bot disconnected') : 'resident unavailable'
-      $('updated').textContent = new Date(s.observedAt).toLocaleTimeString()
-      const current = s.goal.queue.current
-      const j = s.decisionTrace.jev
-      $('flow-goal').textContent = text(current?.description, text(s.goal.frontier))
-      $('flow-goal-sub').textContent = 'frontier=' + text(s.goal.frontier) + ' · depth=' + text(s.goal.queue.depth)
-      $('flow-option').textContent = text(s.option?.intent)
-      $('flow-option-sub').textContent = text(s.option?.templateId)
-      $('flow-decision').textContent = text(j?.detail?.action, text(s.decisionTrace.system2Decision?.detail?.chosen, text(s.decisionTrace.system2Decision?.detail?.strategy)))
-      $('flow-decision-sub').textContent = j ? 'Jev · ' + text(j.detail.decision) : s.decisionTrace.system2Decision ? 'System2 · ' + text(s.decisionTrace.system2Decision.detail.provider) : '—'
-      $('flow-action').textContent = text(s.action?.kind, text(s.decisionTrace.action?.detail?.kind))
-      $('flow-action-sub').textContent = s.action ? text(s.action.phase) + ' · ' + text(s.action.id) : text(s.decisionTrace.action?.detail?.id)
-      rows($('goal'), [
-        ['mission', s.mission.status === 'observed' ? s.mission.id + ': ' + s.mission.title : 'unknown'], ['mission provenance', s.mission.provenance?.source ?? s.mission.provenance?.reason], ['frontier', s.goal.frontier], ['current', current?.description], ['progress', current ? text(current.haveCount) + '/' + text(current.requiredCount) : null], ['queue depth', s.goal.queue.depth], ['queue revision', s.goal.queue.revision], ['option', s.option?.intent], ['option id', s.option?.templateId]
-      ])
-      rows($('jev'), [
-        ['provider', s.authority.policy?.provider], ['model', s.authority.policy?.model], ['policy', s.authority.policy?.kind], ['selected action', j?.detail?.action], ['abandon p', j?.detail?.abandon], ['beta decision', j?.detail?.decision], ['beta authority', j?.detail?.betaAuthority]
-      ])
-      rows($('system2'), [
-        ['configured', s.authority.system2?.configured], ['last authority', s.authority.system2?.last], ['trigger', s.decisionTrace.system2Input?.detail?.trigger ?? s.decisionTrace.system2Input?.detail?.reason], ['candidate options', s.decisionTrace.system2Input?.detail?.optionIds], ['selected', s.decisionTrace.system2Decision?.detail?.chosen ?? s.decisionTrace.system2Decision?.detail?.strategy], ['goals', s.decisionTrace.system2Decision?.detail?.goals], ['Mercury state', s.decisionTrace.mercury?.event]
-      ])
-      rows($('truth'), [
-        ['position', s.truth?.position], ['dimension', s.truth?.dimension], ['health', s.truth?.health], ['food', s.truth?.food], ['on ground', s.truth?.onGround], ['inventory', s.truth?.inventory], ['generation', s.resident.generationId], ['run', s.resident.runId]
-      ])
-      $('trace').innerHTML = [s.decisionTrace.jev, s.decisionTrace.system2Input, s.decisionTrace.system2Decision, s.decisionTrace.mercury, s.decisionTrace.action].filter(Boolean).map(eventRow).join('') || '<div class="empty">No observed decision yet.</div>'
-      $('events').innerHTML = s.events.map(eventRow).join('') || '<div class="empty">No audit events in the current log tail.</div>'
-    }
-    async function fallback() { try { render(await fetch('/api/snapshot', {cache:'no-store'}).then(r => r.json())) } catch {} }
-    const stream = new EventSource('/events')
-    stream.onmessage = (event) => { try { render(JSON.parse(event.data)) } catch {} }
-    stream.onerror = fallback
-    fallback()
-  </script>
-</body>
-</html>`
+  return { runtimeDir, socketPath, logPath, jevCallsPath, vtrRunLogPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
 }
 
 export function startObserverServer(options = {}) {
   const observer = createObserver(options)
   const hostname = options.hostname ?? DEFAULT_HOST
   const port = options.port ?? DEFAULT_PORT
+  const readModel = async ({ currentWorldProbe = null } = {}) => buildVtrObserverReadModel(
+    await observer.snapshot(),
+    { now: Date.now(), currentWorldProbe },
+  )
 
   const server = Bun.serve({
     hostname,
@@ -2144,22 +2805,25 @@ export function startObserverServer(options = {}) {
       const url = new URL(request.url)
       if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 })
       if (url.pathname === '/') {
-        return new Response(htmlPage(), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+        return new Response(renderVtrObserverHtml(), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
       }
+      // Retained for compatibility/debugging. The dashboard and AI endpoint
+      // use the VTR-native read model below.
       if (url.pathname === '/api/snapshot') {
         return Response.json(await observer.snapshot(), { headers: { 'cache-control': 'no-store' } })
+      }
+      if (url.pathname === '/api/vtr-view') {
+        return Response.json(await readModel(), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/ai-summary') {
         const [snapshot, probe] = await Promise.all([
           observer.snapshot(),
           observer.worldProbe({ radius: 6, verticalRadius: 3 }),
         ])
-        const summary = buildAiSummary(snapshot)
-        return Response.json({
-          ...summary,
-          currentWorldProbe: bindProbeToSummary(summary, probe),
-          recentChoiceOutcomes: await observer.recentChoiceOutcomes(),
-        }, { headers: { 'cache-control': 'no-store' } })
+        return Response.json(buildVtrObserverReadModel(snapshot, {
+          now: Date.now(),
+          currentWorldProbe: probe,
+        }), { headers: { 'cache-control': 'no-store' } })
       }
       if (url.pathname === '/api/world-probe') {
         const radiusValue = Number(url.searchParams.get('radius') ?? 6)
@@ -2174,7 +2838,7 @@ export function startObserverServer(options = {}) {
           start(controller) {
             const emit = async () => {
               try {
-                const current = await observer.snapshot()
+                const current = await readModel()
                 controller.enqueue(`data: ${JSON.stringify(current)}\n\n`)
               } catch (error) {
                 controller.enqueue(`event: observer-error\ndata: ${JSON.stringify({ message: error instanceof Error ? error.message : String(error) })}\n\n`)

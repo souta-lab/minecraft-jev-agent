@@ -409,6 +409,8 @@ process.stdout.write('issue #437 §2/§3 - SkillOutcomePacket + decision-epoch i
   const pillar = envelopeForCandidate(retrieveCandidate({ vertical: 'pillar-up' }))
   const digRoute = envelopeForCandidate(retrieveCandidate({ digRoute: true }))
   const plain = envelopeForCandidate(retrieveCandidate({}))
+  const explicitLevelRoute = envelopeForCandidate(retrieveCandidate({ vertical: 'none' }))
+  const fallbackVerticalRoute = envelopeForCandidate(retrieveCandidate({ vertical: 'none', fallbackVertical: 'staircase' }))
   const pass =
     pillar.mayPlaceGroundedRoute === true &&
     pillar.mayDigGroundedRoute === true &&
@@ -418,13 +420,22 @@ process.stdout.write('issue #437 §2/§3 - SkillOutcomePacket + decision-epoch i
     plain.mayPlaceGroundedRoute === false &&
     plain.mayDigGroundedRoute === false &&
     (plain.mayDigBlocks ?? []).length === 0 &&
-    (plain.mayPlaceBlocks ?? []).length === 0
+    (plain.mayPlaceBlocks ?? []).length === 0 &&
+    // verticalPlanMeta uses an explicit sentinel for ordinary level movement;
+    // it must not accidentally grant terrain effects that the executor skips.
+    explicitLevelRoute.mayPlaceGroundedRoute === false &&
+    explicitLevelRoute.mayDigGroundedRoute === false &&
+    // A real fallback vertical tactic remains covered by the same envelope.
+    fallbackVerticalRoute.mayPlaceGroundedRoute === true &&
+    fallbackVerticalRoute.mayDigGroundedRoute === true
   report(
     pass,
     '8. RETRIEVE/RETREAT carry their own grounded route authority, and a plain one carries none (U4)',
     `pillar place=${pillar.mayPlaceGroundedRoute} dig=${pillar.mayDigGroundedRoute} | ` +
       `digRoute dig=${digRoute.mayDigGroundedRoute} place=${digRoute.mayPlaceGroundedRoute} | ` +
-      `plain place=${plain.mayPlaceGroundedRoute} dig=${plain.mayDigGroundedRoute}`,
+      `plain place=${plain.mayPlaceGroundedRoute} dig=${plain.mayDigGroundedRoute} | ` +
+      `vertical=none place=${explicitLevelRoute.mayPlaceGroundedRoute} dig=${explicitLevelRoute.mayDigGroundedRoute} | ` +
+      `fallback=staircase place=${fallbackVerticalRoute.mayPlaceGroundedRoute} dig=${fallbackVerticalRoute.mayDigGroundedRoute}`,
   )
 }
 
@@ -1090,6 +1101,31 @@ function targetIdentityKeyOf(identity: CausalTargetIdentity): string {
     pass,
     '7. a worldEpoch change invalidates the live commitment (fail closed, no side effect)',
     `status=${result.status} failure=${result.failure} outcome=${result.skillOutcome} swings=${fixture.swings()} invalidated=${JSON.stringify(invalidated)}`,
+  )
+}
+
+{
+  // VTR's direct Executor.claim path does not pass through the legacy candidate
+  // stamper. When its MOVE has no explicit epoch, the HOST-owned live epoch must
+  // be bound here rather than silently defaulting to epoch 0.
+  const fixture = makeFixture()
+  const candidate = measuredMoveCandidate()
+  candidate.meta = { ...candidate.meta }
+  delete candidate.meta.worldEpoch
+  const executor = makeExecutor(fixture, { observedWorldEpoch: () => 3 })
+  const claim = executor.claim(candidate)
+  const target = executor.current?.commitment?.target
+  const committedEpoch = target !== undefined && target.kind === 'position' ? target.worldEpoch : null
+  const changedWorldInvalidation = fixture.logger
+    .matching('SKILL_INVALIDATED')
+    .some((line) => line.includes('reason=WORLD_CHANGED'))
+  executor.cancelCurrent('epoch-binding-fixture-complete')
+  const result = await claim.completion
+  const pass = committedEpoch === 3 && !changedWorldInvalidation && result.skillOutcome !== 'WORLD_CHANGED'
+  report(
+    pass,
+    '7a. VTR candidates without provenance bind the HOST live world epoch',
+    `committedEpoch=${committedEpoch} invalidated=${changedWorldInvalidation} outcome=${result.skillOutcome ?? 'none'}`,
   )
 }
 

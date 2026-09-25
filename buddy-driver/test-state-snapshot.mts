@@ -12,6 +12,7 @@ import {
   emptyAgentSnapshot,
   findPersistedServerTruthKeys,
   restoreAgentSnapshot,
+  rebindSnapshotServerIdentity,
   validateAgentSnapshot,
 } from './state-snapshot.ts'
 
@@ -235,6 +236,37 @@ addCase('#40: a persisted snapshot survives a simulated restart (file round-trip
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+addCase('server identity change fences old world state while retaining archived memory', () => {
+  const cap = capture()
+  const base = emptyAgentSnapshot({ bot: 'AI_M1S40', serverId: '127.0.0.1:25565' })
+  const restored = restoreAgentSnapshot(currentSnapshot(), base, cap.log)
+  const result = rebindSnapshotServerIdentity(restored, '127.0.0.1:25568')
+  const oldMemoryKey = '127.0.0.1:25565|minecraft:overworld|5'
+  const pass =
+    result.changed &&
+    result.previousServerId === '127.0.0.1:25565' &&
+    result.snapshot.serverId === '127.0.0.1:25568' &&
+    result.snapshot.worldEpoch === 6 &&
+    result.snapshot.generationId === null &&
+    result.snapshot.lastGenerationId === 'gen-abc' &&
+    result.snapshot.dimension === 'minecraft:overworld' &&
+    result.snapshot.levelName === null &&
+    result.snapshot.ledger === null &&
+    result.snapshot.milestoneIndex === -1 &&
+    result.snapshot.milestone === null &&
+    result.snapshot.worldMemoryByKey[oldMemoryKey]?.knownResources.length === 1 &&
+    result.snapshot.worldMemoryByKey['127.0.0.1:25568|minecraft:overworld|6'] === undefined
+  return { pass, detail: `changed=${result.changed} server=${result.snapshot.serverId} epoch=${result.snapshot.worldEpoch} memoryKeys=${Object.keys(result.snapshot.worldMemoryByKey).join(';')}` }
+})
+
+addCase('same server identity preserves resumable snapshot unchanged', () => {
+  const base = emptyAgentSnapshot({ bot: 'AI_M1S40', serverId: '127.0.0.1:25565' })
+  const restored = restoreAgentSnapshot(currentSnapshot(), base, capture().log)
+  const result = rebindSnapshotServerIdentity(restored, restored.serverId)
+  const pass = !result.changed && result.snapshot === restored && result.snapshot.ledger?.counter === 3 && result.snapshot.worldEpoch === 5
+  return { pass, detail: `changed=${result.changed} sameObject=${result.snapshot === restored} epoch=${result.snapshot.worldEpoch}` }
 })
 
 addCase('#40: a persisted unknown schemaVersion is rejected on restart and cannot poison state', () => {

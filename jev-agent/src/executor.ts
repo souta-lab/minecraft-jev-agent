@@ -60,6 +60,7 @@ import {
   formatRoutePlaceDeclared,
 } from './routePlaceDeclaration.ts'
 import type { BodySubmersion } from './state.ts'
+import type { ReachMechanicalWaypoint } from './vtr/reach-mechanical-waypoint.ts'
 import {
   armorFallMitigation,
   classifyStepLanding,
@@ -331,6 +332,8 @@ export type FailureCode =
   | 'fall_lethal'
   /** issue #436 section 5/27: the step was outside the commitment's effect envelope */
   | 'effect_envelope_violation'
+  /** a VTR internal-effect budget/lease reservation refused before actuation */
+  | 'effect_reservation_refused'
   /** issue #436 section 14/23: the world this commitment was grounded in changed */
   | 'world_changed'
   /** issue #436 section 11: two or more strategically distinct carried weapons */
@@ -468,18 +471,93 @@ export interface CurrentAction {
    * Persisted for the whole action lifetime and carried into the evidence.
    */
   commitment?: SkillCommitment
+  /** V4 controller ownership; absent means this is a legacy selected action. */
+  authority?: 'legacy' | 'vtr-reach'
+  /** Active Reach Transition that authorized this subordinate mechanical action. */
+  transitionId?: string
+  /** Immutable contract identity paired with `transitionId` for VTR-owned mechanics. */
+  transitionContractHash?: string
+  /** Contract reservation hook run immediately before each physical walk leg. */
+  beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
+  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean | 'verified-terminal'
+  /** Resolve a short pathfinder-grounded checkpoint for the active Reach contract. */
+  resolveVtrReachMechanicalWaypoint?: (destination: Vec3Json) => ReachMechanicalWaypoint | null
+  /** Reserve and account for candidate-declared internal dig/place/equip calls. */
+  internalEffectCallbacks?: InternalEffectCallbacks
 }
 
-export interface ExecutionClaimContext {
+/** Internal effects whose exact candidate declaration is checked by the executor. */
+export type CandidateDeclaredInternalEffect = Extract<Effect, { type: 'dig' | 'place' | 'equip' }>
+
+/** Stable identity passed to the VTR budget/journal at an internal mutation boundary. */
+export interface InternalEffectReservation {
+  readonly actionId: string
+  readonly actionEpoch: number
+  readonly transitionId: string | null
+  readonly effectId: string
+  readonly effect: Readonly<CandidateDeclaredInternalEffect>
+}
+
+/**
+ * The actuator promise outcome only. `actuator-returned` is deliberately not a
+ * claim that the world predicate was verified; deterministic VERIFY remains a
+ * separate executor/controller responsibility.
+ */
+export type InternalEffectActuationOutcome =
+  | { status: 'actuator-returned' }
+  | { status: 'actuator-rejected'; error: string }
+
+export interface InternalEffectCallbacks {
+  /** Must reserve the exact declared effect before the executor calls the actuator. */
+  before: (reservation: InternalEffectReservation) => boolean
+  /** Receives the matching actuator promise outcome after it settles. */
+  after: (settlement: InternalEffectReservation & { readonly outcome: InternalEffectActuationOutcome }) => void
+}
+
+interface ExecutionClaimContextFields {
   /** currently validated members from the fresh, merged world observation */
   liveStructureMembers?: readonly LiveStructureMember[]
+  /** Reserve the VTR transition's per-leg budget before any physical movement. */
+  beforeMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean
+  /** Record observed effects/risk after a leg; VTR may close the action from verified Transition truth. */
+  afterMechanicalStep?: (step: { stepId: string; leg: number; effectKind: 'locomotion' }) => boolean | 'verified-terminal'
+  /** Runtime-adapter route segmenter; its value is a temporary mechanical target, never SUCCESS evidence. */
+  resolveVtrReachMechanicalWaypoint?: (destination: Vec3Json) => ReachMechanicalWaypoint | null
+  /** Optional paired hooks for candidate-declared internal dig/place/equip effects. */
+  internalEffectCallbacks?: InternalEffectCallbacks
 }
+
+export type ExecutionClaimContext = ExecutionClaimContextFields & (
+  | {
+      /** VTR is the authority for this mechanical action; legacy policy did not select it. */
+      authority: 'vtr-reach'
+      /** stable parent Transition identity for correlated evidence */
+      transitionId: string
+      /** exact committed Reach contract; a new contract cannot reuse this action's mechanics */
+      transitionContractHash: string
+    }
+  | {
+      /** absent means a legacy action claim */
+      authority?: 'legacy'
+      transitionId?: string
+      transitionContractHash?: string
+    }
+)
 
 export interface ClaimResult {
   /** true when the same action is already running and ownership was retained */
   kept: boolean
   epoch: number
   completion: Promise<ExecutionResult>
+}
+
+/** A running body lease cannot be silently adopted across authority boundaries. */
+export class ExecutionAuthorityConflict extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ExecutionAuthorityConflict'
+  }
 }
 
 /**
@@ -2027,10 +2105,13 @@ export class Executor {
 
   private epochCounter = 0
   private activeEpoch = 0
+  /** Monotonic within the current action; combined with action id/epoch for stable effect IDs. */
+  private internalEffectSequence = 0
   private controller: AbortController | null = null
   private action: CurrentAction | null = null
   private owned = 0
   private maxConcurrent = 0
+  private authorityConflicts = 0
   private movementsReady = false
   private lastResultValue: ExecutionResult | null = null
   /** issue #436 section 4: the commitment of the running action, or null */
@@ -2100,6 +2181,10 @@ export class Executor {
     return this.maxConcurrent
   }
 
+  get authorityConflictCount(): number {
+    return this.authorityConflicts
+  }
+
   /**
    * The contents this body has OBSERVED, for the controller to inject into the
    * next sensor tick (`SensorInput.containerContents`). Containers nobody opened
@@ -2163,6 +2248,37 @@ export class Executor {
   claim(candidate: Candidate, context: ExecutionClaimContext = {}): ClaimResult {
     this.ensureMovements()
     const running = this.action
+    const requestedAuthority = context.authority ?? 'legacy'
+    if (requestedAuthority === 'vtr-reach' &&
+      (typeof context.transitionId !== 'string' || context.transitionId.trim().length === 0)) {
+      throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionId')
+    }
+    if (requestedAuthority === 'vtr-reach' &&
+      (typeof context.transitionContractHash !== 'string' || context.transitionContractHash.trim().length === 0)) {
+      throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionContractHash')
+    }
+    if (
+      running !== null && running.status === 'running' &&
+      (running.authority !== requestedAuthority ||
+        (requestedAuthority === 'vtr-reach' && running.transitionId !== context.transitionId) ||
+        (requestedAuthority === 'vtr-reach' && running.transitionContractHash !== context.transitionContractHash))
+    ) {
+      this.authorityConflicts += 1
+      const message =
+        `actuation authority conflict: running=${running.authority ?? 'legacy'}:${running.transitionId ?? running.id} ` +
+        `requested=${requestedAuthority}:${context.transitionId ?? candidate.id}:${context.transitionContractHash ?? 'hash-unspecified'}`
+      this.logger.error('executor', `ACTUATION_AUTHORITY_CONFLICT ${message}`, {
+        runningActionId: running.id,
+        runningAuthority: running.authority ?? 'legacy',
+        runningTransitionId: running.transitionId ?? null,
+        runningTransitionContractHash: running.transitionContractHash ?? null,
+        requestedActionId: candidate.id,
+        requestedAuthority,
+        requestedTransitionId: context.transitionId ?? null,
+        requestedTransitionContractHash: context.transitionContractHash ?? null,
+      })
+      throw new ExecutionAuthorityConflict(message)
+    }
     if (running !== null && running.status === 'running' && running.id === candidate.id) {
       return { kept: true, epoch: running.epoch, completion: running.completion }
     }
@@ -2184,7 +2300,7 @@ export class Executor {
     // the whole bounded lifetime of the action - identity, target, declared
     // postconditions, effect envelope, budget, interrupt policy, and the
     // provenance (who selected it, at which state fingerprint).
-    const commitment = this.buildCommitment(candidate)
+    const commitment = this.buildCommitment(candidate, context)
     const liveStructureMembers =
       context.liveStructureMembers === undefined
         ? undefined
@@ -2204,10 +2320,18 @@ export class Executor {
       detail: '',
       completion,
       commitment,
+      authority: context.authority ?? 'legacy',
+      ...(context.transitionId === undefined ? {} : { transitionId: context.transitionId }),
+      ...(context.transitionContractHash === undefined ? {} : { transitionContractHash: context.transitionContractHash }),
+      ...(context.beforeMechanicalStep === undefined ? {} : { beforeMechanicalStep: context.beforeMechanicalStep }),
+      ...(context.afterMechanicalStep === undefined ? {} : { afterMechanicalStep: context.afterMechanicalStep }),
+      ...(context.resolveVtrReachMechanicalWaypoint === undefined ? {} : { resolveVtrReachMechanicalWaypoint: context.resolveVtrReachMechanicalWaypoint }),
+      ...(context.internalEffectCallbacks === undefined ? {} : { internalEffectCallbacks: context.internalEffectCallbacks }),
       liveStructureMembers,
     }
     this.action = action
     this.activeCommitment = commitment
+    this.internalEffectSequence = 0
     this.stepLog.clear()
     // NOTE (§17 single owner): `SKILL_COMMIT` is NOT emitted here. The controller
     // owns it, because section 3 makes the ACTIVE decision epoch the thing that
@@ -2499,9 +2623,14 @@ export class Executor {
   }
 
   /** Build the first-class commitment for one policy-selected candidate. */
-  private buildCommitment(candidate: Candidate): SkillCommitment {
+  private buildCommitment(candidate: Candidate, context: ExecutionClaimContext = {}): SkillCommitment {
     const dimension = this.observedDimension()
-    const worldEpoch = readMetaNumber(candidate, 'worldEpoch', 0)
+    // Candidate provenance may be absent on a VTR-owned action: it reaches
+    // claim() directly and does not pass through the legacy selection stamper.
+    // Bind that missing identity at the executor/host trust boundary. An
+    // explicitly supplied epoch is preserved so stale candidates still fail
+    // closed in commitmentInvalidation().
+    const worldEpoch = readMetaNumber(candidate, 'worldEpoch', this.options.observedWorldEpoch?.() ?? 0)
     const selectedBy = readMetaString(candidate, 'selectedBy')
     // #436 section 5/17: the block(s) this locomotion route's own placement step
     // declared at candidate time are what authorizes the equip below, so the
@@ -2543,7 +2672,12 @@ export class Executor {
         transfers: this.groundedTransfers(candidate),
       }),
       budget: { ms: this.budgetMsFor(candidate), steps: null, retries: 0 },
-      selectedBy: selectedBy === 'hard_safety' ? 'hard_safety' : 'jev_pi',
+      selectedBy:
+        context.authority === 'vtr-reach'
+          ? 'vtr_transition'
+          : selectedBy === 'hard_safety'
+            ? 'hard_safety'
+            : 'jev_pi',
       selectedAtStateFingerprint: readMetaString(candidate, 'stateFingerprint'),
       params: {
         candidateId: candidate.id,
@@ -2618,7 +2752,7 @@ export class Executor {
    * active. A step outside the declared envelope FAILS CLOSED - it is never a
    * reason to widen the envelope (section 16).
    */
-  private assertEffect(effect: Effect): void {
+  private assertEffect(effect: Effect, recordStep = true): void {
     const commitment = this.activeCommitment
     if (commitment === null) return
     this.assertCommitmentValid()
@@ -2636,7 +2770,100 @@ export class Executor {
         `${effect.type} is outside the ${commitment.skillKind} effect envelope (${violation}); failing closed`,
       )
     }
-    this.noteMechanicalStep(commitment, effect)
+    if (recordStep) this.noteMechanicalStep(commitment, effect)
+  }
+
+  /**
+   * Run one candidate-declared dig/place/equip actuator call. The existing
+   * SkillCommitment envelope check remains the first gate; a VTR reservation is
+   * then obtained immediately before the actuator and the matching callback
+   * reports only whether that actuator promise returned or rejected. It never
+   * claims deterministic world-state success.
+   */
+  private async performInternalEffect<T>(
+    effect: CandidateDeclaredInternalEffect,
+    actuator: () => Promise<T>,
+  ): Promise<T> {
+    this.assertEffect(effect, false)
+    const action = this.action
+    const callbacks = action?.internalEffectCallbacks
+    if (action === null || action === undefined || callbacks === undefined) {
+      const commitment = this.activeCommitment
+      if (commitment !== null) this.noteMechanicalStep(commitment, effect)
+      return await actuator()
+    }
+
+    const effectId = `${action.id}:epoch:${action.epoch}:effect:${++this.internalEffectSequence}`
+    const immutableEffect = effect.type === 'dig'
+      ? Object.freeze({ ...effect, position: Object.freeze({ ...effect.position }) })
+      : effect.type === 'place'
+        ? Object.freeze({ ...effect, position: Object.freeze({ ...effect.position }) })
+        : Object.freeze({ ...effect })
+    const reservation: InternalEffectReservation = Object.freeze({
+      actionId: action.id,
+      actionEpoch: action.epoch,
+      transitionId: action.transitionId ?? null,
+      effectId,
+      effect: immutableEffect,
+    })
+
+    let reserved = false
+    try {
+      reserved = callbacks.before(reservation)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new ExecutorError(
+        'effect_reservation_refused',
+        `VTR refused ${effect.type} reservation ${effectId} before actuation: ${reason}`,
+      )
+    }
+    if (!reserved) {
+      throw new ExecutorError(
+        'effect_reservation_refused',
+        `VTR refused ${effect.type} reservation ${effectId} before actuation`,
+      )
+    }
+
+    // Record mechanical continuation only after a configured VTR reservation
+    // accepts it; a refused budget must not appear as an executed step.
+    const commitment = this.activeCommitment
+    if (commitment !== null) this.noteMechanicalStep(commitment, effect)
+
+    let afterCalled = false
+    try {
+      const result = await actuator()
+      afterCalled = true
+      callbacks.after({ ...reservation, outcome: { status: 'actuator-returned' } })
+      return result
+    } catch (error) {
+      if (!afterCalled) {
+        afterCalled = true
+        const message = error instanceof Error ? error.message : String(error)
+        callbacks.after({ ...reservation, outcome: { status: 'actuator-rejected', error: message } })
+      }
+      throw error
+    }
+  }
+
+  private performEquipEffect(item: Item, destination: EquipmentDestination): Promise<void> {
+    return this.performInternalEffect(
+      { type: 'equip', itemName: item.name, destination },
+      async () => {
+        if (this.options.actuationPort !== undefined) {
+          await this.options.actuationPort.equip(item, destination)
+        } else {
+          await this.bot.equip(item, destination)
+        }
+      },
+    )
+  }
+
+  private performPlaceEffect(
+    position: Vec3Json,
+    itemName: string,
+    actuator: () => Promise<void>,
+  ): Promise<void> {
+    return this.performInternalEffect({ type: 'place', position: { ...position }, itemName }, actuator)
   }
 
   /**
@@ -3309,6 +3536,19 @@ export class Executor {
       // fails closed with the typed SKILL_INVALIDATED event and never re-plans into
       // the new world - the replacement target belongs to policy.
       this.assertCommitmentValid()
+      const activeAction = this.action
+      const mechanicalStep = {
+        stepId: `${activeAction?.id ?? candidate.id}#${epoch}:walk-leg-${legs + 1}`,
+        leg: legs + 1,
+        effectKind: 'locomotion' as const,
+      }
+      if (
+        activeAction?.epoch === epoch &&
+        activeAction.beforeMechanicalStep !== undefined &&
+        !activeAction.beforeMechanicalStep(mechanicalStep)
+      ) {
+        throw new ActionCancelled(`VTR refused walk leg ${legs + 1} before mechanical dispatch`)
+      }
       const bound = this.boundWalkLeg(signal, deadlineAt)
       const before = remaining
       let arrived = false
@@ -3329,6 +3569,89 @@ export class Executor {
         legFailure = this.walkLegFailureOf(error, bound.timedOut())
       } finally {
         bound.cleanup()
+      }
+      let mechanicalOutcome: boolean | 'verified-terminal' = true
+      let outcomeHookFailed = false
+      let outcomeHookError: unknown = null
+      if (activeAction?.epoch === epoch && activeAction.afterMechanicalStep !== undefined) {
+        try {
+          mechanicalOutcome = activeAction.afterMechanicalStep(mechanicalStep)
+        } catch (error) {
+          // Outcome accounting can fail independently of physical leg settlement.
+          // Preserve the completed mechanical-leg evidence before propagating the
+          // callback failure so a reservation is never silently absent from logs.
+          outcomeHookFailed = true
+          outcomeHookError = error
+        }
+      }
+      // Settle the executor-side leg ledger before any typed terminal early
+      // return. The final physical leg is still a real, reserved mechanical leg
+      // and must keep its unique id/ordinal in the same evidence as prior legs.
+      const after = this.distanceToFeet(target)
+      remaining = after
+      // Durable mechanical progress: distance actually closed toward the committed
+      // target. A leg that failed mechanically but still closed distance is
+      // progress (section 5: body motion is progress, never completion).
+      stalledLegs = before - after >= WALK_SKILL_MIN_PROGRESS ? 0 : stalledLegs + 1
+      const walkLegMessage = formatWalkLeg({
+        skill,
+        commitment,
+        leg: legs,
+        evidence: walkLegEvidence({ leg: legs, from: before, to: after, failureCode: legFailure?.code ?? null, phase }),
+        worldDelta: this.bodyDelta(),
+        failure: legFailure?.code ?? null,
+      })
+      this.logger.info(
+        'executor',
+        `${walkLegMessage} actionId=${candidate.id} transitionId=${activeAction?.transitionId ?? 'none'} ` +
+          `contractHash=${activeAction?.transitionContractHash ?? 'none'} stepId=${mechanicalStep.stepId}`,
+        {
+          actionId: candidate.id,
+          commitmentId: commitment.commitmentId,
+          step: 'walk_leg',
+          count: legs,
+          transitionId: activeAction?.transitionId ?? null,
+          contractHash: activeAction?.transitionContractHash ?? null,
+          stepId: mechanicalStep.stepId,
+          leg: legs,
+          failure: legFailure?.code ?? null,
+          remaining: round2(after),
+          mechanicalOutcome: outcomeHookFailed
+            ? 'outcome-hook-error'
+            : mechanicalOutcome === false
+              ? 'refused'
+              : mechanicalOutcome === 'verified-terminal'
+                ? 'verified-terminal'
+                : 'settled',
+          outcomeHookError: outcomeHookFailed
+            ? outcomeHookError instanceof Error ? outcomeHookError.message : String(outcomeHookError)
+            : null,
+          transitionTerminal: mechanicalOutcome === 'verified-terminal',
+        },
+      )
+      if (outcomeHookFailed) throw outcomeHookError
+      if (mechanicalOutcome === false) {
+        throw new ActionCancelled(`VTR rejected observed effects after walk leg ${legs}`)
+      }
+      if (mechanicalOutcome === 'verified-terminal') {
+        if (settled?.status === 'done' && settled.verified) return settled
+        return this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'done',
+          'verified_transition',
+          `VTR verified the Reach Transition predicate after walk leg ${legs}`,
+          null,
+          {
+            verified: true,
+            blockRemoved: false,
+            dropObserved: false,
+            itemsGained: 0,
+            goalItemCount: this.countGoalItem(),
+            progressed: settled?.progressed ?? false,
+          },
+        )
       }
       // A fail-closed envelope refusal is a statement about the COMMITMENT, not a
       // transient leg failure: the commitment cannot perform a step it needs, so
@@ -3359,30 +3682,6 @@ export class Executor {
           startDistance - remaining,
         )
       }
-      const after = this.distanceToFeet(target)
-      remaining = after
-      // Durable mechanical progress: distance actually closed toward the committed
-      // target. A leg that failed mechanically but still closed distance is
-      // progress (section 5: body motion is progress, never completion).
-      stalledLegs = before - after >= WALK_SKILL_MIN_PROGRESS ? 0 : stalledLegs + 1
-      this.logger.info(
-        'executor',
-        formatWalkLeg({
-          skill,
-          commitment,
-          leg: legs,
-          evidence: walkLegEvidence({ leg: legs, from: before, to: after, failureCode: legFailure?.code ?? null, phase }),
-          worldDelta: this.bodyDelta(),
-          failure: legFailure?.code ?? null,
-        }),
-        {
-          actionId: candidate.id,
-          commitmentId: commitment.commitmentId,
-          leg: legs,
-          failure: legFailure?.code ?? null,
-          remaining: round2(after),
-        },
-      )
       const decision = walkBoundaryAfterLeg({
         legs,
         stalledLegs,
@@ -3552,12 +3851,12 @@ export class Executor {
       classifyTravelLeg({ remainingBefore: this.distanceToFeet(target), remainingAfter: this.distanceToFeet(target) })
         .warranted,
     )
-    const anchor = this.anchorBlock(candidate)
+    const declaredAnchor = this.anchorBlock(candidate)
     this.setPhase(candidate, epoch, 'pathing')
     const before = this.distanceToFeet(target)
     const startPosition = this.bot.entity.position.clone()
     const startY = startPosition.y
-    const anchorBefore = anchor === null ? null : this.distanceToEyes(anchor)
+    const anchorBefore = declaredAnchor === null ? null : this.distanceToEyes(declaredAnchor)
 
     // A visible resource may be above the current floor.  MINE/MOVE candidates
     // carry the same vertical contract as RETRIEVE candidates so navigation
@@ -3629,6 +3928,29 @@ export class Executor {
         }
       }
     }
+    const activeAction = this.action
+    const waypointResolver = this.options.actuation === 'pathfinder' &&
+      activeAction?.epoch === epoch &&
+      activeAction.authority === 'vtr-reach'
+      ? activeAction.resolveVtrReachMechanicalWaypoint
+      : null
+    const waypoint = waypointResolver?.(target) ?? null
+    const mechanicalTarget = waypoint?.target ?? target
+    // A witness anchor belongs to the declared destination. Applying it to an
+    // intermediate path node could incorrectly turn checkpoint arrival into
+    // semantic arrival, so only the final segment may use that anchor.
+    const anchor = waypoint === null ? declaredAnchor : null
+    if (waypoint !== null) {
+      this.logger.info(
+        'vtr',
+        `VTR_REACH_MECHANICAL_WAYPOINT transition=${activeAction?.transitionId ?? 'missing'} ` +
+          `contractHash=${activeAction?.transitionContractHash ?? 'missing'} action=${candidate.id} ` +
+          `target=${waypoint.target.x},${waypoint.target.y},${waypoint.target.z} ` +
+          `pathDistance=${round2(waypoint.pathDistance)} remainingDistance=${round2(waypoint.remainingDistance)} ` +
+          `evidence=${waypoint.planEvidence}`,
+        { transitionId: activeAction?.transitionId ?? null, contractHash: activeAction?.transitionContractHash ?? null, actionId: candidate.id, ...waypoint },
+      )
+    }
     let pathError: unknown = null
     try {
       // STOCK-FIRST: `pathTo` drives the stock pathfinder (`setGoal`) as the
@@ -3637,7 +3959,7 @@ export class Executor {
       // block is NOT the arrival goal here: a MOVE exists to walk to the
       // standable spot, and `anchorIsGoal` is deliberately omitted so the
       // fallback tests the FEET distance to the spot.
-      await this.pathTo(target, epoch, signal, 'GoalBlock', {
+      await this.pathTo(mechanicalTarget, epoch, signal, 'GoalBlock', {
         anchor,
         requireLevel: true,
         budgetMs: stageMs,
@@ -3662,7 +3984,7 @@ export class Executor {
     // that closes less than `LEG_TRAVEL_MIN_PROGRESS` keeps the original typed
     // failure (no false progress, bounded by the move-failure memory).
     let legProgressed = false
-    if (pathError !== null) {
+    if (pathError !== null && waypoint === null) {
       const leg = await this.runTravelLeg(
         candidate,
         target,
@@ -3690,21 +4012,32 @@ export class Executor {
     // proof the server accepted the move (see classifyMoveArrival).
     const arrival = classifyMoveArrival({
       end: { x: endPosition.x, y: endPosition.y, z: endPosition.z },
-      target,
+      target: mechanicalTarget,
       anchor,
       anchorBefore,
       anchorDistance,
       reach: this.options.reach,
       pinned: stuck,
     })
-    const verified = arrival.verified
+    // An intermediate pathfinder node is a reobservation boundary only. It can
+    // never claim the committed predicate, even when the waypoint itself was
+    // deterministically reached; the Reach callback verifies the original
+    // contract after this mechanical step.
+    const verified = waypoint === null && arrival.verified
 
     this.logger.info(
       'executor',
       `${candidate.kind} ${candidate.id} arrival start=(${round2(startPosition.x)},${round2(startPosition.y)},${round2(startPosition.z)}) ` +
         `end=(${round2(endPosition.x)},${round2(endPosition.y)},${round2(endPosition.z)}) moved=${round2(startPosition.distanceTo(endPosition))}m ` +
         `targetDistance=${round2(before)}m->${round2(after)}m anchorEyeDistance=${round2(anchorDistance)}m`,
-      { target, actionId: candidate.id, start: { x: startPosition.x, y: startPosition.y, z: startPosition.z }, end: { x: endPosition.x, y: endPosition.y, z: endPosition.z } },
+      {
+        target: mechanicalTarget,
+        committedTarget: target,
+        mechanicalWaypoint: waypoint,
+        actionId: candidate.id,
+        start: { x: startPosition.x, y: startPosition.y, z: startPosition.z },
+        end: { x: endPosition.x, y: endPosition.y, z: endPosition.z },
+      },
     )
     if (pathError !== null && !verified) throw pathError
     if (pathError !== null) {
@@ -3723,10 +4056,12 @@ export class Executor {
         epoch,
         startedAt,
         'done',
-        legProgressed && !verified ? 'leg' : 'arrived',
-        legProgressed && !verified
-          ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
-          : `moved from ${round2(before)}m to ${round2(after)}m`,
+        waypoint !== null || (legProgressed && !verified) ? 'leg' : 'arrived',
+        waypoint !== null
+          ? `reached pathfinder-grounded mechanical waypoint (${mechanicalTarget.x},${mechanicalTarget.y},${mechanicalTarget.z}); committed Reach predicate remains open (${round2(after)}m away)`
+          : legProgressed && !verified
+            ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
+            : `moved from ${round2(before)}m to ${round2(after)}m`,
         null,
         {
           verified,
@@ -3734,7 +4069,7 @@ export class Executor {
           dropObserved: false,
           itemsGained: 0,
           goalItemCount: this.countGoalItem(),
-          progressed: legProgressed,
+          progressed: legProgressed || (waypoint !== null && before - after >= WALK_SKILL_MIN_PROGRESS),
         },
       ),
     }
@@ -4026,9 +4361,8 @@ export class Executor {
         // effect-envelope gate (and section 17 step evidence) as every other
         // mechanical step, so a bridge cell outside its declared span fails
         // closed instead of silently widening the envelope.
-        this.assertEffect({ type: 'place', position: span.place, itemName: block })
         try {
-          await this.bot.placeBlock(reference.block, reference.face)
+          await this.performPlaceEffect(span.place, block, () => this.bot.placeBlock(reference.block, reference.face))
         } catch (error) {
           if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
           const observed = this.currentBlockAt(span.place)?.name ?? null
@@ -4970,8 +5304,7 @@ export class Executor {
     const budget = decidePillarStepBudget(toY - Math.floor(this.bot.entity.position.y), PILLAR_SEARCH_POLICY)
     this.logger.info('agent', formatPillarSearch(budget), { actionId: candidate.id })
     this.setPhase(candidate, epoch, 'equipping')
-    this.assertEffect({ type: 'equip', itemName: item.name, destination: 'hand' })
-    await this.bot.equip(item, 'hand')
+    await this.performEquipEffect(item, 'hand')
     this.ensureOwned(epoch, signal)
     const solidAt: SolidAt = (x, y, z) => this.solidSupportAt(x, y, z)
     // Physics on, and the stale onGround flag patched from the block grid -
@@ -5153,8 +5486,7 @@ export class Executor {
           const held = this.bot.inventory.items().find((entry) => entry.name === placeName)
           if (held === undefined) break
           this.setPhase(candidate, epoch, 'equipping')
-          this.assertEffect({ type: 'equip', itemName: held.name, destination: 'hand' })
-          await this.bot.equip(held, 'hand')
+          await this.performEquipEffect(held, 'hand')
           this.ensureOwned(epoch, signal)
         }
         // Re-read immediately before the placement: the gate above answered from
@@ -5265,7 +5597,6 @@ export class Executor {
               // The envelope declares the CELL that may be placed, not the face
               // direction: recording the direction made a per-cell declaration
               // unmatchable against its own effect.
-              this.assertEffect({ type: 'place', position: cell, itemName: placeName })
               // The attempt-time observation. `pillarStepUp` re-reads the body in
               // the tick it authorises, and this is the tick the packet is written
               // in, so the two are the same instant. It is what the live record was
@@ -5277,7 +5608,7 @@ export class Executor {
                 cellTop: placeCell.y + 1,
                 handshakeTicks: this.pillarPlaceHandshakeTicks(),
               }
-              return this.placePillarBlock(liveFooting, toVec3(this.bot, face))
+              return this.performPlaceEffect(cell, placeName, () => this.placePillarBlock(liveFooting, toVec3(this.bot, face)))
             },
             blockPlaced: () => this.currentBlockAt(placeCell)?.boundingBox === 'block',
           },
@@ -6520,8 +6851,7 @@ export class Executor {
     const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
     if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
     this.setPhase(candidate, epoch, 'equipping')
-    this.assertEffect({ type: 'equip', itemName: item.name, destination: 'hand' })
-    await this.bot.equip(item, 'hand')
+    await this.performEquipEffect(item, 'hand')
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'consuming')
     await this.bot.consume()
@@ -8308,9 +8638,8 @@ export class Executor {
           // effect-envelope gate as every other mechanical step, so a descent cell
           // outside its declared contract fails closed instead of silently widening
           // the envelope.
-          this.assertEffect({ type: 'place', position: place, itemName: block })
           try {
-            await this.bot.placeBlock(reference.block, reference.face)
+            await this.performPlaceEffect(place, block, () => this.bot.placeBlock(reference.block, reference.face))
           } catch (error) {
             if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
             const observed = this.currentBlockAt(place)?.name ?? null
@@ -8682,12 +9011,7 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<void> {
-    this.assertEffect({ type: 'equip', itemName: item.name, destination })
-    if (this.options.actuationPort !== undefined) {
-      await this.options.actuationPort.equip(item, destination)
-    } else {
-      await this.bot.equip(item, destination)
-    }
+    await this.performEquipEffect(item, destination)
     this.ensureOwned(epoch, signal)
   }
 
@@ -8744,12 +9068,7 @@ export class Executor {
     await this.equipPlacementItem(candidate, itemName, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
     try {
-      this.assertEffect({
-        type: 'place',
-        position: { x: target.x, y: target.y, z: target.z },
-        itemName,
-      })
-      await this.bot.placeBlock(reference.block, reference.face)
+      await this.performPlaceEffect(target, itemName, () => this.bot.placeBlock(reference.block, reference.face))
     } catch (error) {
       // The placement mechanism's own rejection was previously an untyped
       // `unknown_event`: mineflayer's `placeBlock` throws a plain `Error`
@@ -9197,12 +9516,7 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.equipPlacementItem(candidate, supportItem.name, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
-    this.assertEffect({
-      type: 'place',
-      position: { x: scaffold.x, y: scaffold.y, z: scaffold.z },
-      itemName: supportItem.name,
-    })
-    await this.bot.placeBlock(reference.block, reference.face)
+    await this.performPlaceEffect(scaffold, supportItem.name, () => this.bot.placeBlock(reference.block, reference.face))
     this.ensureOwned(epoch, signal)
     const placedName = await this.waitForPlacedBlock(scaffold, supportItem.name, epoch, signal)
     if (!isPlacePostconditionMet(placedName, supportItem.name)) {
@@ -9294,12 +9608,7 @@ export class Executor {
     }
 
     this.setPhase(candidate, epoch, 'equipping')
-    this.assertEffect({ type: 'equip', itemName: held.name, destination: 'hand' })
-    if (this.options.actuationPort !== undefined) {
-      await this.options.actuationPort.equip(held, 'hand')
-    } else {
-      await this.bot.equip(held, 'hand')
-    }
+    await this.performEquipEffect(held, 'hand')
     this.ensureOwned(epoch, signal)
 
     const block = this.currentBlockAt(target)
@@ -11681,8 +11990,7 @@ export class Executor {
       )
       const tool = this.bot.inventory.items().find((item) => ids.has(item.type))
       if (tool !== undefined) {
-        this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
-        await this.bot.equip(tool, 'hand')
+        await this.performEquipEffect(tool, 'hand')
         this.ensureOwned(epoch, signal)
       }
     }
@@ -12006,11 +12314,6 @@ export class Executor {
     // held item is replaced by a carried admissible tool, and when none exists the
     // dig FAILS CLOSED with the typed `dig_no_tool` instead of proceeding.
     if (purpose === 'harvest') await this.requireHarvestTool(block, epoch, signal)
-    this.assertEffect({
-      type: 'dig',
-      position: { x: block.position.x, y: block.position.y, z: block.position.z },
-      blockName: block.name,
-    })
     this.assertEffect({ type: 'look' })
     await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
     this.ensureOwned(epoch, signal)
@@ -12029,7 +12332,10 @@ export class Executor {
     // `DIG_BUDGET` marker records any extension.
     const mechanism: DigMechanism = {
       digTime: () => this.bot.digTime(block),
-      dig: () => this.bot.dig(block, 'ignore'),
+      dig: () => this.performInternalEffect(
+        { type: 'dig', position: { x: block.position.x, y: block.position.y, z: block.position.z }, blockName: block.name },
+        () => this.bot.dig(block, 'ignore'),
+      ),
       stopDigging: () => this.bot.stopDigging(),
     }
     this.digStartedAt = Date.now()
@@ -12459,7 +12765,6 @@ export class Executor {
         `held=${held?.name ?? 'none'} -> equip=${tool.name} reason=non_harvesting_held_item`,
       { block: block.name, held: held?.name ?? null, equipped: tool.name },
     )
-    this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
     await this.equipItemTo(tool, 'hand', epoch, signal)
   }
 
@@ -12481,8 +12786,7 @@ export class Executor {
           throw new ExecutorError('dig_no_tool', `no ${toolName} in the inventory`)
         }
       } else {
-        this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
-        await this.bot.equip(tool, 'hand')
+        await this.performEquipEffect(tool, 'hand')
         this.ensureOwned(epoch, signal)
       }
     }

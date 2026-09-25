@@ -2150,9 +2150,10 @@ function buildEnvHazard(
 }
 
 /**
- * The remaining breath. Mineflayer sets `bot.oxygenLevel` from the server's
- * `air_supply` metadata. Missing or malformed metadata stays unknown; the
- * sensor never turns absence into a full-air world fact.
+ * The remaining breath. The resident binds `bot.oxygenLevel` to the bot's own
+ * entity `air_supply` metadata on modern named-metadata clients; older clients
+ * retain Mineflayer's self-filtered breath listener. Missing or malformed
+ * metadata stays unknown rather than becoming a full-air world fact.
  */
 function readAir(bot: Bot): number | null {
   return observedAir((bot as { oxygenLevel?: number }).oxygenLevel)
@@ -2658,7 +2659,7 @@ function stableFindBlocks(
   return sensorPositions(positions, scanId)
 }
 
-function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
+function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState, focusItem: string | null): BlockState[] {
   const positions = stableFindBlocks(bot, `logs:${options.scanRadius}:256`, {
     matching: (block) => LOG_NAME.test(block.name),
     maxDistance: options.scanRadius,
@@ -2667,8 +2668,8 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): Bloc
   // Resolve the cheap, world-read-free facts first, cut to the kept list, and
   // only then probe the 12 stand neighbours. `findAdjacentStandable` costs 36
   // block reads per target, and the old order ran it for up to 256 logs before
-  // `slice(0, maxLogs)` threw ~240 of them away. The sort key (distance then y)
-  // never depended on adjacency, so the kept list is identical.
+  // `slice(0, maxLogs)` threw ~240 of them away. Distance then y establishes
+  // deterministic nearest-first order within the focused and general pools.
   const rows: Array<{ block: Exclude<ReturnType<Bot['blockAt']>, null>; pos: Vec3Json; distance: number; harvest: ReturnType<typeof resolveBlockHarvest> }> = []
   for (const position of positions) {
     const block = sensorBlockAt(bot, position, 'log-scan')
@@ -2682,7 +2683,22 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): Bloc
     })
   }
   rows.sort((a, b) => a.distance - b.distance || b.pos.y - a.pos.y)
-  return rows.slice(0, options.maxLogs).map((row) => {
+  // Keep the bounded scan, but reserve its front slots for logs that can
+  // satisfy the current concrete Mission/resource focus. Without this, sixteen
+  // nearer logs of unrelated species could evict the only sensed producer
+  // before candidate generation ever sees it (for example, a nearby
+  // stripped_mangrove_log among ordinary oak logs). The focus is a perception
+  // hint only: all retained cells still pass through the same world read,
+  // geometry, candidate and VERIFY gates.
+  const focused = focusItem === null
+    ? []
+    : rows.filter((row) => resourceMatches(row.harvest.yield, focusItem))
+  const focusedCells = new Set(focused.map((row) => `${row.pos.x},${row.pos.y},${row.pos.z}`))
+  const retained = [
+    ...focused,
+    ...rows.filter((row) => !focusedCells.has(`${row.pos.x},${row.pos.y},${row.pos.z}`)),
+  ].slice(0, options.maxLogs)
+  return retained.map((row) => {
     const adjacentStandable = findAdjacentStandable(bot, row.pos)
     return {
       kind: 'log' as const,
@@ -3355,7 +3371,7 @@ function buildBlocks(
   focusItem: string | null,
   inventoryCounts: Readonly<Record<string, number>>,
 ): BlockState[] {
-  const logs = buildLogBlocks(bot, options, self)
+  const logs = buildLogBlocks(bot, options, self, focusItem)
   const stoneFocus = focusItem !== null && STONE_YIELDS.has(focusItem) ? focusItem : null
   // A vertical Skill can be mechanically blocked by the absence of a held
   // placeable block while the parent Option is collecting/crafting something
