@@ -6,6 +6,7 @@ export type TransitionId = string
 export type ContractHash = string
 export type PredicateId = string
 export type ResourceKey = string
+export type ResourcePath = readonly string[]
 export type FactId = string
 
 export interface WorldIdentity {
@@ -51,6 +52,7 @@ export interface ResourceClaim {
   readonly mode: LeaseMode
   readonly preemptible: boolean
   readonly resumable: boolean
+  readonly maxNonPreemptibleMs: number | null
 }
 
 export interface EffectPermit {
@@ -97,6 +99,7 @@ export interface ResourceLease {
   readonly mode: LeaseMode
   readonly grantedAtEpoch: number
   readonly preemptible: boolean
+  readonly maxNonPreemptibleMs: number | null
 }
 
 export interface TransitionUsage {
@@ -116,6 +119,7 @@ export interface TransitionRuntimeState {
   readonly suspendReason: SuspendReason | null
   readonly blockReason: BlockReason | null
   readonly starvationAge: number
+  readonly witnessRevision: number
   readonly usage: TransitionUsage
   readonly terminalOutcome: TransitionOutcome | null
 }
@@ -143,10 +147,35 @@ export interface VerifiedFact<T = unknown> {
   readonly provenance: string
 }
 
+export interface PredicateVerification {
+  readonly predicateId: PredicateId
+  readonly factRevision: number
+  readonly world: WorldIdentity
+  readonly evidenceId: string
+  readonly truth: 'true'
+}
+
 export interface VerificationEvidence {
+  readonly transitionId: TransitionId
+  readonly contractHash: ContractHash
+  readonly binding: RuntimeBinding
   readonly fact: VerifiedFact
   readonly deterministic: true
   readonly causalCredit: 'self' | 'shared' | 'external'
+  readonly requiresVerified: readonly PredicateVerification[]
+  readonly invariantsVerified: readonly PredicateVerification[]
+}
+
+export interface ResumeProof {
+  readonly transitionId: TransitionId
+  readonly contractHash: ContractHash
+  readonly world: WorldIdentity
+  readonly binding: RuntimeBinding
+  readonly witnessRevision: number
+  readonly registryContainsTransition: true
+  readonly missionAuthorizesPredicate: true
+  readonly requiresVerified: readonly PredicateVerification[]
+  readonly invariantsVerified: readonly PredicateVerification[]
 }
 
 export interface ActiveTransitionRegistry {
@@ -205,8 +234,31 @@ export interface EffectCommitToken {
   readonly contractHash: ContractHash
   readonly effect: EffectKind
   readonly scope: string
-  readonly factRevision: number
+  readonly world: WorldIdentity
+  readonly binding: RuntimeBinding
+  readonly leaseFingerprint: string
+  readonly permitKey: string
   readonly expiresAtMs: number
+}
+
+export type PreemptionPhase =
+  | 'PREEMPT_REQUESTED'
+  | 'WAITING_BOUNDED_SECTION'
+  | 'YIELD_ACKNOWLEDGED'
+  | 'LEASES_REVOKED'
+  | 'SUSPENDED'
+  | 'GRANTED'
+  | 'DEADLINE_EXPIRED'
+
+export interface PreemptionTransaction {
+  readonly transactionId: string
+  readonly victim: TransitionId
+  readonly requester: TransitionId
+  readonly phase: PreemptionPhase
+  readonly requestedAtMs: number
+  readonly yieldDeadlineAtMs: number
+  readonly conflictResources: readonly ResourceKey[]
+  readonly priorityInherited: boolean
 }
 
 export function sameWorld(a: WorldIdentity, b: WorldIdentity): boolean {
@@ -217,8 +269,22 @@ export function leaseModesConflict(a: LeaseMode, b: LeaseMode): boolean {
   return a === 'EXCLUSIVE_WRITE' || b === 'EXCLUSIVE_WRITE'
 }
 
+export function resourcePath(resource: ResourceKey): ResourcePath {
+  const parts = resource.split(/[.:@/]+/g).map((part) => part.trim()).filter(Boolean)
+  if (parts.length === 0) throw new Error('resource key must contain at least one path segment')
+  return parts
+}
+
+export function resourcePathsOverlap(a: ResourceKey, b: ResourceKey): boolean {
+  const left = resourcePath(a)
+  const right = resourcePath(b)
+  const n = Math.min(left.length, right.length)
+  for (let i = 0; i < n; i += 1) if (left[i] !== right[i]) return false
+  return true
+}
+
 export function claimsConflict(a: ResourceClaim, b: ResourceClaim): boolean {
-  return a.resource === b.resource && leaseModesConflict(a.mode, b.mode)
+  return resourcePathsOverlap(a.resource, b.resource) && leaseModesConflict(a.mode, b.mode)
 }
 
 export function canonicalClaims(claims: readonly ResourceClaim[]): readonly ResourceClaim[] {
@@ -230,11 +296,9 @@ export function conflictingLeases(
   claims: readonly ResourceClaim[],
   leases: readonly ResourceLease[],
 ): readonly ResourceLease[] {
-  const wanted = new Map(claims.map((claim) => [claim.resource, claim.mode]))
   return leases.filter((lease) => {
     if (lease.owner === requester) return false
-    const requestedMode = wanted.get(lease.resource)
-    return requestedMode !== undefined && leaseModesConflict(requestedMode, lease.mode)
+    return claims.some((claim) => resourcePathsOverlap(claim.resource, lease.resource) && leaseModesConflict(claim.mode, lease.mode))
   })
 }
 
@@ -246,6 +310,11 @@ export function grantLeaseBundle(
   schedulerEpoch: number,
 ): { readonly ok: true; readonly leases: readonly ResourceLease[] } | { readonly ok: false; readonly conflicts: readonly ResourceLease[] } {
   const ordered = canonicalClaims(claims)
+  for (const claim of ordered) {
+    if (!claim.preemptible && (claim.maxNonPreemptibleMs === null || !Number.isFinite(claim.maxNonPreemptibleMs) || claim.maxNonPreemptibleMs <= 0)) {
+      throw new Error(`non-preemptible claim ${claim.resource} requires a finite positive maxNonPreemptibleMs`)
+    }
+  }
   const conflicts = conflictingLeases(owner, ordered, leases)
   if (conflicts.length > 0) return { ok: false, conflicts }
   const retained = leases.filter((lease) => lease.owner !== owner)
@@ -255,6 +324,7 @@ export function grantLeaseBundle(
     mode: claim.mode,
     grantedAtEpoch: schedulerEpoch,
     preemptible: claim.preemptible,
+    maxNonPreemptibleMs: claim.maxNonPreemptibleMs,
   }))
   return { ok: true, leases: [...retained, ...granted] }
 }
@@ -282,26 +352,57 @@ export function suspendTransition(
 
 export type ResumeResult =
   | { readonly ok: true; readonly state: TransitionRuntimeState }
-  | { readonly ok: false; readonly reason: 'WORLD_CHANGED' | 'STALE_REBIND' | 'TERMINAL' }
+  | { readonly ok: false; readonly reason: 'WORLD_CHANGED' | 'STALE_REBIND' | 'TERMINAL' | 'INVALID_LIFECYCLE' | 'CONTRACT_MISMATCH' | 'PROOF_INCOMPLETE' }
+
+function coversAtBinding(
+  required: readonly PredicateId[],
+  verified: readonly PredicateVerification[],
+  binding: RuntimeBinding,
+  world: WorldIdentity,
+): boolean {
+  return required.every((predicate) => verified.some((proof) =>
+    proof.predicateId === predicate && proof.evidenceId.trim().length > 0 && proof.truth === 'true' && proof.factRevision === binding.factRevision && sameWorld(proof.world, world),
+  ))
+}
+
+export function runtimeBindingEqual(a: RuntimeBinding, b: RuntimeBinding): boolean {
+  return a.generationId === b.generationId && a.factRevision === b.factRevision &&
+    a.registryRevision === b.registryRevision && a.missionRevision === b.missionRevision
+}
 
 export function resumeTransition(
   state: TransitionRuntimeState,
   contract: TransitionContract,
-  observedWorld: WorldIdentity,
-  binding: RuntimeBinding,
-  freshRevalidation: boolean,
+  proof: ResumeProof,
+  liveWorld: WorldIdentity,
+  liveBinding: RuntimeBinding,
 ): ResumeResult {
   if (state.lifecycle === 'TERMINAL') return { ok: false, reason: 'TERMINAL' }
-  if (!sameWorld(contract.world, observedWorld)) return { ok: false, reason: 'WORLD_CHANGED' }
-  const generationChanged = state.binding.generationId !== binding.generationId
-  if (generationChanged && !freshRevalidation) return { ok: false, reason: 'STALE_REBIND' }
-  if (binding.factRevision < state.binding.factRevision && !freshRevalidation) return { ok: false, reason: 'STALE_REBIND' }
+  if (state.lifecycle !== 'SUSPENDED' && state.lifecycle !== 'BLOCKED' && state.lifecycle !== 'OBSERVING') return { ok: false, reason: 'INVALID_LIFECYCLE' }
+  if (state.transitionId !== contract.transitionId || state.contractHash !== contract.contractHash ||
+      proof.transitionId !== contract.transitionId || proof.contractHash !== contract.contractHash) {
+    return { ok: false, reason: 'CONTRACT_MISMATCH' }
+  }
+  if (!sameWorld(contract.world, proof.world) || !sameWorld(proof.world, liveWorld)) return { ok: false, reason: 'WORLD_CHANGED' }
+  if (!runtimeBindingEqual(proof.binding, liveBinding)) return { ok: false, reason: 'STALE_REBIND' }
+  if (proof.registryContainsTransition !== true || proof.missionAuthorizesPredicate !== true) return { ok: false, reason: 'PROOF_INCOMPLETE' }
+  if (proof.binding.factRevision < state.binding.factRevision ||
+      proof.binding.registryRevision < state.binding.registryRevision ||
+      proof.binding.missionRevision < state.binding.missionRevision) {
+    return { ok: false, reason: 'STALE_REBIND' }
+  }
+  if (proof.witnessRevision < state.witnessRevision) return { ok: false, reason: 'STALE_REBIND' }
+  if (!coversAtBinding(contract.requires, proof.requiresVerified, proof.binding, proof.world) ||
+      !coversAtBinding(contract.invariants, proof.invariantsVerified, proof.binding, proof.world)) {
+    return { ok: false, reason: 'PROOF_INCOMPLETE' }
+  }
   return {
     ok: true,
     state: {
       ...state,
       lifecycle: 'RUNNABLE',
-      binding,
+      binding: proof.binding,
+      witnessRevision: proof.witnessRevision,
       heldResources: [],
       suspendReason: null,
       blockReason: null,
@@ -339,9 +440,18 @@ export function verifyTransitionSuccess(
   contract: TransitionContract,
   state: TransitionRuntimeState,
   evidence: VerificationEvidence,
+  liveWorld: WorldIdentity,
+  liveBinding: RuntimeBinding,
 ): TransitionRuntimeState {
   if (state.lifecycle === 'TERMINAL') return state
-  if (!sameWorld(contract.world, evidence.fact.world)) return state
+  if (evidence.deterministic !== true) return state
+  if (state.transitionId !== contract.transitionId || state.contractHash !== contract.contractHash) return state
+  if (evidence.transitionId !== state.transitionId || evidence.contractHash !== state.contractHash) return state
+  if (!runtimeBindingEqual(evidence.binding, state.binding) || !runtimeBindingEqual(evidence.binding, liveBinding)) return state
+  if (!sameWorld(contract.world, evidence.fact.world) || !sameWorld(evidence.fact.world, liveWorld)) return state
+  if (evidence.fact.factRevision !== evidence.binding.factRevision) return state
+  if (!coversAtBinding(contract.requires, evidence.requiresVerified, evidence.binding, evidence.fact.world) ||
+      !coversAtBinding(contract.invariants, evidence.invariantsVerified, evidence.binding, evidence.fact.world)) return state
   if (evidence.fact.predicateId !== contract.desiredPredicate) return state
   if (evidence.fact.truth !== 'true') return state
   const outcome: TransitionOutcome = {
@@ -369,10 +479,8 @@ export function jevDecisionIsCurrent(
     decision.frameHash === frame.frameHash &&
     decision.schedulerEpoch === frame.schedulerEpoch &&
     decision.schedulerEpoch === liveSchedulerEpoch &&
-    decision.binding.generationId === liveBinding.generationId &&
-    decision.binding.factRevision === liveBinding.factRevision &&
-    decision.binding.registryRevision === liveBinding.registryRevision &&
-    decision.binding.missionRevision === liveBinding.missionRevision
+    runtimeBindingEqual(frame.binding, decision.binding) &&
+    runtimeBindingEqual(decision.binding, liveBinding)
   )
 }
 
@@ -425,22 +533,174 @@ export function initialRuntimeState(
     suspendReason: null,
     blockReason: null,
     starvationAge: 0,
+    witnessRevision: 0,
     usage: { activeMs: 0, mechanicalSteps: 0, resources: {}, risk: {} },
     terminalOutcome: null,
   }
 }
 
+export function permitKey(kind: EffectKind, scope: string): string {
+  return `${kind}:${scope}`
+}
+
+export function leaseBindingFingerprint(owner: TransitionId, leases: readonly ResourceLease[]): string {
+  return leases.filter((lease) => lease.owner === owner)
+    .map((lease) => `${lease.resource}|${lease.mode}|${lease.grantedAtEpoch}|${lease.preemptible}|${lease.maxNonPreemptibleMs ?? 'none'}`)
+    .sort().join(';;')
+}
+
 export function effectCommitIsCurrent(
   token: EffectCommitToken,
+  contract: TransitionContract,
   state: TransitionRuntimeState,
-  factRevision: number,
+  world: WorldIdentity,
+  liveBinding: RuntimeBinding,
+  leases: readonly ResourceLease[],
   nowMs: number,
 ): boolean {
+  const permit = contract.effects.find((candidate) => candidate.kind === token.effect && candidate.scope === token.scope)
   return (
     state.lifecycle === 'ACTIVE' &&
-    token.transitionId === state.transitionId &&
-    token.contractHash === state.contractHash &&
-    token.factRevision === factRevision &&
+    token.transitionId === state.transitionId && token.transitionId === contract.transitionId &&
+    token.contractHash === state.contractHash && token.contractHash === contract.contractHash &&
+    sameWorld(token.world, world) && sameWorld(contract.world, world) &&
+    runtimeBindingEqual(token.binding, liveBinding) && runtimeBindingEqual(state.binding, liveBinding) &&
+    token.leaseFingerprint === leaseBindingFingerprint(state.transitionId, leases) &&
+    permit !== undefined && token.permitKey === permitKey(permit.kind, permit.scope) &&
     token.expiresAtMs >= nowMs
   )
+}
+
+export function createRegistry(states: readonly TransitionRuntimeState[] = []): ActiveTransitionRegistry {
+  const transitions = new Map<TransitionId, TransitionRuntimeState>()
+  for (const state of states) {
+    const existing = transitions.get(state.transitionId)
+    if (existing !== undefined && existing.contractHash !== state.contractHash) {
+      throw new Error('ATR initialization contains duplicate transitionId with different contractHash')
+    }
+    transitions.set(state.transitionId, state)
+  }
+  return { revision: 0, transitions }
+}
+
+export function putTransition(registry: ActiveTransitionRegistry, state: TransitionRuntimeState): ActiveTransitionRegistry {
+  const existing = registry.transitions.get(state.transitionId)
+  if (existing !== undefined && existing.contractHash !== state.contractHash) {
+    throw new Error('ATR put cannot replace a semantic owner with a different contractHash')
+  }
+  const transitions = new Map(registry.transitions)
+  transitions.set(state.transitionId, state)
+  return { revision: registry.revision + 1, transitions }
+}
+
+export function mutateTransition(
+  registry: ActiveTransitionRegistry,
+  transitionId: TransitionId,
+  mutate: (state: TransitionRuntimeState) => TransitionRuntimeState,
+): ActiveTransitionRegistry {
+  const current = registry.transitions.get(transitionId)
+  if (current === undefined) return registry
+  const next = mutate(current)
+  if (next.transitionId !== transitionId || next.contractHash !== current.contractHash) {
+    throw new Error('ATR mutation cannot change semantic identity')
+  }
+  return putTransition(registry, next)
+}
+
+export function removeTransition(registry: ActiveTransitionRegistry, transitionId: TransitionId): ActiveTransitionRegistry {
+  if (!registry.transitions.has(transitionId)) return registry
+  const transitions = new Map(registry.transitions)
+  transitions.delete(transitionId)
+  return { revision: registry.revision + 1, transitions }
+}
+
+export function requestPreemption(
+  transactionId: string,
+  victim: TransitionId,
+  requester: TransitionId,
+  requesterClaims: readonly ResourceClaim[],
+  leases: readonly ResourceLease[],
+  requestedAtMs: number,
+  preemptibleYieldBudgetMs: number,
+): PreemptionTransaction | null {
+  const conflicts = conflictingLeases(requester, requesterClaims, leases).filter((lease) => lease.owner === victim)
+  if (conflicts.length === 0) return null
+  const bounded = conflicts.some((lease) => !lease.preemptible)
+  const bounds = conflicts.filter((lease) => !lease.preemptible).map((lease) => lease.maxNonPreemptibleMs)
+  if (bounds.some((bound) => bound === null || !Number.isFinite(bound) || Number(bound) <= 0)) {
+    throw new Error('non-preemptible lease requires a finite positive maxNonPreemptibleMs')
+  }
+  const waitMs = bounded ? Math.max(...bounds.map(Number)) : preemptibleYieldBudgetMs
+  if (!Number.isFinite(waitMs) || waitMs <= 0) throw new Error('preemption yield budget must be finite and positive')
+  return {
+    transactionId, victim, requester,
+    phase: bounded ? 'WAITING_BOUNDED_SECTION' : 'PREEMPT_REQUESTED',
+    requestedAtMs, yieldDeadlineAtMs: requestedAtMs + waitMs,
+    conflictResources: conflicts.map((lease) => lease.resource).sort(),
+    priorityInherited: bounded,
+  }
+}
+
+export function acknowledgePreemptionYield(
+  tx: PreemptionTransaction,
+  nowMs: number,
+  safeYield: boolean,
+): PreemptionTransaction {
+  if (tx.phase === 'GRANTED' || tx.phase === 'DEADLINE_EXPIRED') return tx
+  if (nowMs > tx.yieldDeadlineAtMs) return { ...tx, phase: 'DEADLINE_EXPIRED', priorityInherited: true }
+  if (!safeYield) return tx
+  return { ...tx, phase: 'YIELD_ACKNOWLEDGED' }
+}
+
+export function revokePreemptionLeases(
+  tx: PreemptionTransaction,
+  leases: readonly ResourceLease[],
+): { readonly transaction: PreemptionTransaction; readonly leases: readonly ResourceLease[] } {
+  if (tx.phase !== 'YIELD_ACKNOWLEDGED') throw new Error('safe yield acknowledgement required before lease revocation')
+  return { transaction: { ...tx, phase: 'LEASES_REVOKED' }, leases: releaseTransitionLeases(tx.victim, leases) }
+}
+
+export function suspendPreemptionVictim(
+  tx: PreemptionTransaction,
+  victimState: TransitionRuntimeState,
+): { readonly transaction: PreemptionTransaction; readonly victimState: TransitionRuntimeState } {
+  if (tx.phase !== 'LEASES_REVOKED') throw new Error('leases must be revoked before victim suspension')
+  if (victimState.transitionId !== tx.victim) throw new Error('preemption victim state does not match transaction victim')
+  return { transaction: { ...tx, phase: 'SUSPENDED' }, victimState: suspendTransition(victimState, 'PREEMPTED') }
+}
+
+export function grantPreemptionRequester(
+  tx: PreemptionTransaction,
+  requesterClaims: readonly ResourceClaim[],
+  leases: readonly ResourceLease[],
+  schedulerEpoch: number,
+): { readonly ok: true; readonly transaction: PreemptionTransaction; readonly leases: readonly ResourceLease[] }
+  | { readonly ok: false; readonly reason: 'GRANT_CONFLICT' } {
+  if (tx.phase !== 'SUSPENDED') throw new Error('victim must be suspended before requester grant')
+  const grant = grantLeaseBundle(tx.requester, requesterClaims, leases, schedulerEpoch)
+  if (!grant.ok) return { ok: false, reason: 'GRANT_CONFLICT' }
+  return { ok: true, transaction: { ...tx, phase: 'GRANTED' }, leases: grant.leases }
+}
+
+export function executePreemption(
+  tx: PreemptionTransaction,
+  victimState: TransitionRuntimeState,
+  requesterClaims: readonly ResourceClaim[],
+  leases: readonly ResourceLease[],
+  schedulerEpoch: number,
+): { readonly ok: true; readonly transaction: PreemptionTransaction; readonly victimState: TransitionRuntimeState; readonly leases: readonly ResourceLease[]; readonly phases: readonly PreemptionPhase[] }
+  | { readonly ok: false; readonly reason: 'SAFE_YIELD_REQUIRED' | 'DEADLINE_EXPIRED' | 'GRANT_CONFLICT' } {
+  if (tx.phase === 'DEADLINE_EXPIRED') return { ok: false, reason: 'DEADLINE_EXPIRED' }
+  if (tx.phase !== 'YIELD_ACKNOWLEDGED') return { ok: false, reason: 'SAFE_YIELD_REQUIRED' }
+  const revoked = revokePreemptionLeases(tx, leases)
+  const suspended = suspendPreemptionVictim(revoked.transaction, victimState)
+  const granted = grantPreemptionRequester(suspended.transaction, requesterClaims, revoked.leases, schedulerEpoch)
+  if (!granted.ok) return granted
+  return {
+    ok: true,
+    transaction: granted.transaction,
+    victimState: suspended.victimState,
+    leases: granted.leases,
+    phases: ['YIELD_ACKNOWLEDGED', 'LEASES_REVOKED', 'SUSPENDED', 'GRANTED'],
+  }
 }

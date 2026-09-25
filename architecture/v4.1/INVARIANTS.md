@@ -57,4 +57,29 @@ Each invariant is intended to become a pure/property/adapter test. `M` = already
 
 ## Model coverage now
 
-`model.test.ts` directly exercises I01, I03-I08, I10-I11, I13-I16, I28, I35-I36, I39-I40, I43, and I49. Migration phases must convert the remaining P invariants into adapter/static/live tests before claiming the corresponding production family is V4.1-conformant.
+`model.test.ts` directly exercises I01, I03-I08, I10-I11, I13-I16, I28, I35-I36, I39-I40, I43, and I49. Migration phases must convert the remaining P invariants into adapter/static/live tests before claiming the corresponding production family is V4.1.1-conformant. V4.1.1 additionally model-tests I51-I72 through the hardening cases below.
+
+## V4.1.1 hardening invariants
+
+51. Resource conflict is defined by hierarchical path overlap, never raw key equality alone.
+52. An exclusive parent claim conflicts with every descendant claim, and an exclusive descendant conflicts with its ancestors.
+53. Resume accepts a typed `ResumeProof`; no boolean freshness override exists.
+54. A resume proof must bind the same `transitionId` and `contractHash` as both state and contract.
+55. `factRevision`, `registryRevision`, and `missionRevision` never regress across resume.
+56. Resume proof covers every contract `requires` and `invariant` predicate at the bound revision.
+57. VERIFY cannot close a runtime state using a different Transition contract even when the desired predicate is identical.
+58. VERIFY evidence binding equals the runtime state's exact current binding and its fact uses that exact factRevision.
+59. Preemption cannot revoke the victim's leases before explicit safe-yield acknowledgement.
+60. A non-preemptible conflicting lease enters a bounded waiting phase with priority inheritance; deadline expiry does not force unsafe revocation.
+61. Jev admission requires `frame.binding == decision.binding == live.binding` in addition to frame/epoch identity.
+62. An irreversible effect token is invalid after world, generation, fact, registry, Mission, lease-fingerprint, or permit identity changes.
+63. Effect token scope/kind must exactly match a permit in the current Transition contract.
+64. ATR state mutation increments `registryRevision` through named mutation APIs.
+65. ATR mutation cannot silently change `transitionId` or `contractHash` of an existing semantic owner.
+66. Resume proof binding equals the current live binding exactly; merely being newer than the suspended state is insufficient.
+67. Predicate evidence used for resume/VERIFY is true in the exact live world and exact live factRevision, with non-empty provenance/evidence identity.
+68. Witness revision is monotonic across suspend/resume.
+69. A non-preemptible claim cannot receive a lease unless it declares a finite positive maximum critical-section duration.
+70. Preemption phase order is mechanically enforced: ACK -> revoke -> suspend -> grant; no phase may be skipped.
+71. A safe-yield ACK received after its declared deadline remains a typed deadline violation and cannot silently authorize grant.
+72. ATR initialization and replacement APIs reject duplicate semantic identity with a different contractHash, not only mutation callbacks.

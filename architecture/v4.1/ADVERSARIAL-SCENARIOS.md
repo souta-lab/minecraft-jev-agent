@@ -39,4 +39,22 @@ The pure model currently exercises scenarios 1, 2, 3, 4, 7, 8, 11, 13, 15, 18 (t
 
 ## Falsification triggers
 
-Any scenario that requires silent shared mutation, an unbounded non-preemptible resource, model-owned truth, hidden target substitution outside the effect envelope, or action-return-as-success is evidence against the current V4.1 contract and must be escalated to architecture review rather than patched locally.
+Any scenario that requires silent shared mutation, an unbounded non-preemptible resource, model-owned truth, hidden target substitution outside the effect envelope, or action-return-as-success is evidence against the current V4.1.1 contract and must be escalated to architecture review rather than patched locally.
+
+## V4.1.1 hardening scenarios
+
+29. **Parent/child resource collision** — `body` WRITE vs `body.locomotion` WRITE. Expected: overlap conflict; second bundle is not granted.
+30. **Mission revision changes while suspended** — old Mission rev cannot resume. Expected: typed current `ResumeProof`; complete revalidation required.
+31. **Fact revision regression with apparently fresh proof** — proof fact rev < suspended binding. Expected: `STALE_REBIND`; no boolean override exists.
+32. **Registry revision regression** — ATR changed then stale proof arrives. Expected: resume rejected before lease acquisition.
+33. **Same predicate, wrong contract** — another contract verifies the same predicate. Expected: no SUCCESS because transition/contract binding mismatches.
+34. **Stale VERIFY evidence** — fact is true but evidence binding is not current. Expected: no SUCCESS.
+35. **Preempt request before safe yield** — high-priority contender requests resource. Expected: victim retains lease until controller ACK; requester gets nothing.
+36. **Non-preemptible inventory critical section** — Viability waits on bounded click sequence. Expected: priority inheritance, bounded wait, safe yield; timeout is typed fault, not forced revoke.
+37. **Jev decision binding differs from frame** — decision and live happen to match but request frame was older. Expected: stale drop.
+38. **Effect token after lease/generation/permit change** — token otherwise unexpired. Expected: adapter refuses dispatch.
+39. **ATR semantic identity mutation attempt** — mutator changes contract hash. Expected: throw/fail closed; registry does not launder identity.
+40. **Resume proof newer than state but older than live ATR** — Expected: reject; proof must equal live binding exactly.
+41. **Safe-yield arrives one tick after non-preemptible bound** — Expected: `DEADLINE_EXPIRED`; record fault, do not silently grant.
+42. **Preemption transaction given wrong victim state** — Expected: fail closed before suspension.
+43. **Duplicate ATR initialization id with different contractHash** — Expected: registry construction fails; identity cannot be laundered before first mutation.
