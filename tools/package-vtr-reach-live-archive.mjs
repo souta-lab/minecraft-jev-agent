@@ -39,7 +39,6 @@ const REQUIRED_ARCHIVE_PATHS = Object.freeze([
   'server/server.properties.effective-after-boot',
   'server/world/level.dat',
   'server/world/playerdata.dat',
-  'server/world/r.-1.0.mca',
 ])
 
 const HELP = `Usage: bun tools/package-vtr-reach-live-archive.mjs \
@@ -51,8 +50,9 @@ Manifest schema: vtr-reach-live-archive-input/v1
 The supplied run-metadata.json must record source {repository, branch, commit},
 the complete validator run identity/timestamps, mission inventories/positions,
 and fixture facts. Map the actual server-start/config, initial/final snapshots,
-fixture command journal, world files, acceptance record, and milestone snapshot
-to their canonical paths in files. Collector logs/journals are copied from
+fixture command journal, world files (including the MCA region containing the
+committed witness coordinates), acceptance record, and milestone snapshot to
+their canonical paths in files. Collector logs/journals are copied from
 the paths and hashes in the collector report; do not duplicate those mappings.
 
 To claim observed zero provider activity, also supply
@@ -151,6 +151,16 @@ function sameWorldKey(left, right) {
 function collectorRows(report) {
   const rows = report?.observed?.transition?.sourceEventRows
   return Array.isArray(rows) ? rows.filter((row) => row && typeof row === 'object') : []
+}
+
+/** Resolve the required archived MCA region from the committed integer witness. */
+function witnessRegionArchivePath(target) {
+  if (!target || !Number.isSafeInteger(target.x) || !Number.isSafeInteger(target.y) || !Number.isSafeInteger(target.z)) return null
+  const chunkX = Math.floor(target.x / 16)
+  const chunkZ = Math.floor(target.z / 16)
+  const regionX = Math.floor(chunkX / 32)
+  const regionZ = Math.floor(chunkZ / 32)
+  return `server/world/r.${regionX}.${regionZ}.mca`
 }
 
 function eventName(row) {
@@ -465,6 +475,8 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   const collectorDir = dirname(collectorReportFile)
   const identity = identityFromCollector(report)
   identity.mission = report.expected?.mission ?? null
+  const transitionRows = collectorRows(report)
+  const transition = projectTransition(report)
   if (report.schema !== 'vtr-reach-live-collector/v1') check(statuses, 'FAIL', 'collector-schema', { expected: 'vtr-reach-live-collector/v1', observed: report.schema ?? null })
   if (!['PASS', 'INCOMPLETE', 'FAIL'].includes(report.status)) check(statuses, 'FAIL', 'collector-status', { reason: 'collector report status is missing or invalid', observed: report.status ?? null })
   else if (report.status === 'INCOMPLETE') check(statuses, 'INCOMPLETE', 'collector-status', { status: report.status })
@@ -553,6 +565,14 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   for (const requiredPath of REQUIRED_ARCHIVE_PATHS) {
     if (!archiveFiles.has(requiredPath)) check(statuses, 'INCOMPLETE', `required:${requiredPath}`, { reason: 'no run-scoped source artifact was supplied for this validator input' })
   }
+  const requiredWitnessRegionPath = witnessRegionArchivePath(transition?.witness?.target)
+  if (requiredWitnessRegionPath === null) {
+    check(statuses, 'INCOMPLETE', 'required:world-witness-region', { reason: 'committed Transition has no integer witness coordinates' })
+  } else if (!archiveFiles.has(requiredWitnessRegionPath)) {
+    check(statuses, 'INCOMPLETE', 'required:world-witness-region', { reason: 'coordinate-derived MCA region for the committed witness was not supplied', expectedPath: requiredWitnessRegionPath, witness: transition.witness.target })
+  } else {
+    check(statuses, 'PASS', 'required:world-witness-region', { path: requiredWitnessRegionPath, witness: transition.witness.target })
+  }
 
   const metadataBytes = copiedSources.get('runner/run-metadata.json')?.bytes ?? null
   let metadata = null
@@ -564,7 +584,6 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   if (captureBytes !== null) {
     try { providerCapture = JSON.parse(captureBytes.toString('utf8')) } catch { providerCapture = null }
   }
-  const transitionRows = collectorRows(report)
   const providerCaptureResult = inspectProviderCapture({
     capture: providerCapture,
     identity,
@@ -577,7 +596,6 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   else check(statuses, providerCaptureResult.status === 'FAIL' ? 'FAIL' : 'INCOMPLETE', 'provider-activity-zero', { status: providerCaptureResult.status, reason: providerCaptureResult.reason })
 
   const bundle = copiedSources.get('runner/generation-bundle.mjs')?.bytes ?? null
-  const transition = projectTransition(report)
   const readinessMissing = probeReadiness({ identity, metadata, transition, bundle })
   const run = metadata?.run ?? {}
   const runIdentityConflicts = []
@@ -653,7 +671,8 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
     collectorReport: { schema: report.schema ?? null, status: report.status ?? null, capturedAt: report.capturedAt ?? null },
     identity: { sourceSha: identity.sourceSha, runId: identity.runId, generationId: identity.generationId, worldKey: identity.worldKey },
     providerActivity: providerCaptureResult,
-    requiredValidatorPaths: REQUIRED_ARCHIVE_PATHS,
+    requiredValidatorPaths: [...REQUIRED_ARCHIVE_PATHS, ...(requiredWitnessRegionPath === null ? [] : [requiredWitnessRegionPath])],
+    requiredWitnessRegionPath,
     fullMigrationArtifactsMissing: fullMilestoneMissing,
     checks: statuses,
     files: [...archiveFiles].sort(),

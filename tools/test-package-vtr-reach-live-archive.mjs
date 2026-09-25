@@ -21,7 +21,15 @@ function event(offset, name, detail) {
   return { record: 'agent-event', ts: iso(offset), source: 'vtr', message: `${name} transitionId=${TRANSITION}`, detail }
 }
 
-function makeFixture(root, { omitProvider = null, addCapture = true, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false } = {}) {
+function regionPathForWitness(position) {
+  const chunkX = Math.floor(position.x / 16)
+  const chunkZ = Math.floor(position.z / 16)
+  const regionX = Math.floor(chunkX / 32)
+  const regionZ = Math.floor(chunkZ / 32)
+  return `server/world/r.${regionX}.${regionZ}.mca`
+}
+
+function makeFixture(root, { omitProvider = null, addCapture = true, wrongServerIdentity = false, captureStartsLate = false, nonzeroActivity = false, witnessPosition = { x: 4, y: 64, z: 4 } } = {}) {
   const inputDir = join(root, 'captured')
   const extraDir = join(root, 'extra')
   const archive = join(root, 'archive')
@@ -48,7 +56,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
     budget: { maxMechanicalSteps: 4, maxElapsedMs: 10000, resources: {}, risk: {} },
     controller: { allowedTactics: ['walk', 'replan'] },
     progressDefinition: { kind: 'verified-distance-reduction' },
-    witness: { target: { x: 4, y: 64, z: 4 }, witnessId: 'oak-log-witness' },
+    witness: { target: witnessPosition, witnessId: 'oak-log-witness' },
   })
   const verify = event(30, 'VTR_TRANSITION_VERIFY', {
     transitionId: TRANSITION,
@@ -139,7 +147,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
       finalPosition: { x: 1.5, y: 64, z: 1.5 },
     },
     mission: { ...MISSION, initialInventory: {}, finalInventory: {}, initialPosition: { x: 0.5, y: 64, z: 0.5 }, finalPosition: { x: 1.5, y: 64, z: 1.5 } },
-    fixture: { block: 'oak_log', position: { x: 4, y: 64, z: 4 }, transitionStartPosition: { x: 0.5, y: 64, z: 0.5 } },
+    fixture: { block: 'oak_log', position: witnessPosition, transitionStartPosition: { x: 0.5, y: 64, z: 0.5 } },
     configuredNoLlmProbe: {
       fallback: { fallbackPolicyWasExplicitlyConfigured: true, silentFallbackOnProviderFailure: false, JevDecisionInvoked: false },
     },
@@ -166,7 +174,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
     'server/server.properties.effective-after-boot': writeFixtureFile(extraDir, 'server.properties.effective-after-boot', effectiveProperties),
     'server/world/level.dat': writeFixtureFile(extraDir, 'level.dat', Buffer.from('level fixture bytes')),
     'server/world/playerdata.dat': writeFixtureFile(extraDir, 'playerdata.dat', Buffer.from('player fixture bytes')),
-    'server/world/r.-1.0.mca': writeFixtureFile(extraDir, 'r.-1.0.mca', Buffer.from('region fixture bytes')),
+    [regionPathForWitness(witnessPosition)]: writeFixtureFile(extraDir, 'witness-region.mca', Buffer.from('region fixture bytes')),
   }
 
   if (addCapture) {
@@ -182,7 +190,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, wrongServer
   for (const [archivePath, sourcePath] of Object.entries(files)) files[archivePath] = sourcePath
   const manifestPath = join(root, 'manifest.json')
   writeJson(manifestPath, { schema: 'vtr-reach-live-archive-input/v1', files })
-  return { collectorPath, manifestPath, archive, collectorReport, files }
+  return { collectorPath, manifestPath, archive, collectorReport, files, witnessRegionPath: regionPathForWitness(witnessPosition) }
 }
 
 const PROVIDER_JOURNALS = ['jev-calls', 'jev-decisions', 'system2-journal']
@@ -214,6 +222,11 @@ try {
   assert.equal(packagedProbe.run.worldKey, WORLD)
   assert.equal(packagedProbe.transition.requires.length, 0)
   assert.equal(packagedProbe.transition.transitionId, TRANSITION)
+  assert.equal(completeResult.report.requiredWitnessRegionPath, complete.witnessRegionPath)
+  assert.ok(completeResult.report.requiredValidatorPaths.includes(complete.witnessRegionPath))
+  assert.equal(completeResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'PASS')
+  assert.equal(complete.witnessRegionPath, 'server/world/r.0.0.mca')
+  assert.equal(existsSync(join(complete.archive, 'server/world/r.-1.0.mca')), false, 'a positive witness does not require the former fixed negative-region path')
   assert.equal(packagedProbe.configuredNoLlmProbe.networkModelCalls, 0)
   for (const [name, filename] of [['jev-calls', 'jev-calls.jsonl'], ['jev-decisions', 'jev-decisions.jsonl'], ['system2-journal', 'system2.jsonl']]) {
     assert.equal(readFileSync(join(complete.archive, `runner/${filename}`), 'utf8'), '', `empty captured journal ${name} is preserved`)
@@ -250,8 +263,35 @@ try {
   const conflictingResult = packageVtrReachArchive({ collectorReportPath: conflicting.collectorPath, manifestPath: conflicting.manifestPath, archivePath: conflicting.archive })
   assert.equal(conflictingResult.report.packageStatus, 'FAIL')
   assert.ok(conflictingResult.report.checks.some((entry) => entry.id === 'identity:server/server-start.json' && entry.status === 'FAIL'))
+
+  const positiveRegion = makeFixture(join(tempRoot, 'positive-region'), { witnessPosition: { x: 513, y: 64, z: 515 } })
+  const positiveRegionResult = packageVtrReachArchive({ collectorReportPath: positiveRegion.collectorPath, manifestPath: positiveRegion.manifestPath, archivePath: positiveRegion.archive })
+  assert.equal(positiveRegion.witnessRegionPath, 'server/world/r.1.1.mca')
+  assert.equal(positiveRegionResult.report.requiredWitnessRegionPath, positiveRegion.witnessRegionPath)
+  assert.ok(positiveRegionResult.report.requiredValidatorPaths.includes(positiveRegion.witnessRegionPath))
+  assert.equal(positiveRegionResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'PASS')
+  assert.equal(positiveRegionResult.report.packageStatus, 'READY_FOR_VALIDATION')
+
+  const negativeRegion = makeFixture(join(tempRoot, 'negative-region'), { witnessPosition: { x: -513, y: 64, z: -515 } })
+  const negativeRegionResult = packageVtrReachArchive({ collectorReportPath: negativeRegion.collectorPath, manifestPath: negativeRegion.manifestPath, archivePath: negativeRegion.archive })
+  assert.equal(negativeRegion.witnessRegionPath, 'server/world/r.-2.-2.mca')
+  assert.equal(negativeRegionResult.report.requiredWitnessRegionPath, negativeRegion.witnessRegionPath)
+  assert.ok(negativeRegionResult.report.requiredValidatorPaths.includes(negativeRegion.witnessRegionPath))
+  assert.equal(negativeRegionResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'PASS')
+  assert.equal(negativeRegionResult.report.packageStatus, 'READY_FOR_VALIDATION')
+
+  const missingWitnessRegion = makeFixture(join(tempRoot, 'missing-witness-region'), { witnessPosition: { x: 35, y: 64, z: 0 } })
+  const manifestWithoutWitness = JSON.parse(readFileSync(missingWitnessRegion.manifestPath, 'utf8'))
+  delete manifestWithoutWitness.files[missingWitnessRegion.witnessRegionPath]
+  writeJson(missingWitnessRegion.manifestPath, manifestWithoutWitness)
+  const missingWitnessResult = packageVtrReachArchive({ collectorReportPath: missingWitnessRegion.collectorPath, manifestPath: missingWitnessRegion.manifestPath, archivePath: missingWitnessRegion.archive })
+  assert.equal(missingWitnessRegion.witnessRegionPath, 'server/world/r.0.0.mca')
+  assert.equal(missingWitnessResult.report.requiredWitnessRegionPath, missingWitnessRegion.witnessRegionPath)
+  assert.ok(missingWitnessResult.report.requiredValidatorPaths.includes(missingWitnessRegion.witnessRegionPath))
+  assert.equal(missingWitnessResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'INCOMPLETE')
+  assert.equal(missingWitnessResult.report.packageStatus, 'INCOMPLETE', 'omitting the committed witness region must still fail closed')
 } finally {
   rmSync(tempRoot, { recursive: true, force: true })
 }
 
-process.stdout.write('VTR Reach archive packaging tests passed (6 cases)\n')
+process.stdout.write('VTR Reach archive packaging tests passed (9 cases)\n')
