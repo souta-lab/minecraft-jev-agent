@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   main,
+  parseListenerOwnerOutput,
   parseCliArgs,
   parseJavaMajor,
   parseJavaRuntime,
@@ -66,6 +67,15 @@ describe('Reach live probe caller pure contracts', () => {
       major: 25, version: '25.0.5-ea', earlyAccess: true,
     })
     expect(parseJavaRuntime('openjdk version "25-ea" 2026-10-20')).toMatchObject({ major: 25, earlyAccess: true })
+  })
+
+  test('Leaf listener attestation accepts exact IPv4 and IPv4-mapped loopback only', () => {
+    const ipv4 = parseListenerOwnerOutput(25577, 'LISTEN 0 4096 127.0.0.1:25577 *:* users:(("java",pid=1234,fd=8))')
+    const mapped = parseListenerOwnerOutput(25577, 'LISTEN 0 4096 [::ffff:127.0.0.1]:25577 *:* users:(("java",pid=1234,fd=8))')
+    const wildcard = parseListenerOwnerOutput(25577, 'LISTEN 0 4096 0.0.0.0:25577 *:* users:(("java",pid=1234,fd=8))')
+    expect(ipv4).toMatchObject({ status: 'OBSERVED', host: '127.0.0.1', pid: 1234, comm: 'java' })
+    expect(mapped).toMatchObject({ status: 'OBSERVED', host: '127.0.0.1', pid: 1234, comm: 'java' })
+    expect(wildcard).toMatchObject({ status: 'INCOMPLETE', reason: 'expected-one-exact-loopback-listener' })
   })
 
   test('fresh Leaf attempts require and preserve the existing EULA acceptance', () => {

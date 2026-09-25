@@ -1333,18 +1333,26 @@ export function residentTerminationProblems({
   return problems
 }
 
+export function parseListenerOwnerOutput(port, output) {
+  const lines = String(output ?? '').trim().split(/\r?\n/u).filter(Boolean)
+  const matching = lines.filter((line) => {
+    const columns = line.trim().split(/\s+/u)
+    const localEndpoint = columns[3] ?? ''
+    return localEndpoint === `127.0.0.1:${port}` || localEndpoint === `[::ffff:127.0.0.1]:${port}`
+  })
+  if (matching.length !== 1) return { status: 'INCOMPLETE', reason: 'expected-one-exact-loopback-listener', count: matching.length }
+  const match = /users:\(\("([^"]+)",pid=(\d+),fd=\d+\)\)/u.exec(matching[0])
+  if (!match) return { status: 'INCOMPLETE', reason: 'listener-pid-or-comm-unavailable' }
+  return { status: 'OBSERVED', pid: Number(match[2]), comm: match[1], host: '127.0.0.1', port, observedAt: isoNow() }
+}
+
 function listenerOwner(port) {
   const result = spawnSync('ss', ['-H', '-ltnp', `sport = :${port}`], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000,
     env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C' },
   })
   if (result.error || result.status !== 0) return { status: 'INCOMPLETE', reason: result.error?.code ?? result.status ?? 'ss-failed' }
-  const lines = String(result.stdout ?? '').trim().split(/\r?\n/u).filter(Boolean)
-  const matching = lines.filter((line) => new RegExp(`127\\.0\\.0\\.1:${port}\\s`).test(line))
-  if (matching.length !== 1) return { status: 'INCOMPLETE', reason: 'expected-one-exact-loopback-listener', count: matching.length }
-  const match = /users:\(\("([^"]+)",pid=(\d+),fd=\d+\)\)/u.exec(matching[0])
-  if (!match) return { status: 'INCOMPLETE', reason: 'listener-pid-or-comm-unavailable' }
-  return { status: 'OBSERVED', pid: Number(match[2]), comm: match[1], host: '127.0.0.1', port, observedAt: isoNow() }
+  return parseListenerOwnerOutput(port, result.stdout)
 }
 
 function observeOwnedProcess(pid) {
