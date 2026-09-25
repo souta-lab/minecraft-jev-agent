@@ -32,6 +32,7 @@
     "tool-recovery-test": "bun test ./test-tool-recovery.mts",
     "route-opening-continuation-test": "bun test ./test-route-opening-continuation.mts",
     "scan-position-cache-test": "bun ./test-scan-position-cache.mts",
+    "focused-log-retention-test": "bun ./test-focused-log-retention.mts",
     "place-spot-test": "bun test ./test-place-spot.mts",
     "perception-test": "bun test ./test-perception.mts",
     "pit-escape-test": "bun test ./test-pit-escape.mts",
