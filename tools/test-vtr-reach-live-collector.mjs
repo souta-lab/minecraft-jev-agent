@@ -263,6 +263,8 @@ actionOnly.input.runJournalText = actionOnly.input.runJournalText.split('\n').fi
 const actionOnlyReport = evaluateCapture(actionOnly.input)
 assert.equal(actionOnlyReport.status, 'FAIL')
 assert.equal(actionOnlyReport.checks.find((entry) => entry.id === 'transition:deterministic-verify-and-success').status, 'FAIL')
+assert.equal(actionOnlyReport.observed.transition.validatorBoundaryCompatible, false)
+assert.equal(actionOnlyReport.observed.transition.interpretedTerminalBoundary, null)
 
 const changedSource = fixture({ sourceSha: 'b'.repeat(40) })
 const changedSourceReport = evaluateCapture(changedSource.input)
@@ -347,10 +349,44 @@ assert.equal(wrongRunReport.checks.find((entry) => entry.id === 'transition:dete
 
 const mechanicalBoundary = fixture({ boundary: 'mechanical-step-outcome' })
 const mechanicalBoundaryReport = evaluateCapture(mechanicalBoundary.input)
-assert.equal(mechanicalBoundaryReport.status, 'INCOMPLETE')
+assert.equal(mechanicalBoundaryReport.status, 'PASS', JSON.stringify(mechanicalBoundaryReport.checks, null, 2))
 assert.equal(mechanicalBoundaryReport.observed.transition.typedOutcomeOk, true)
 assert.equal(mechanicalBoundaryReport.observed.transition.mechanicalReservationsMatchActuation, true)
-assert.equal(mechanicalBoundaryReport.checks.find((entry) => entry.id === 'schema:validator-boundary-compatibility').status, 'INCOMPLETE')
+assert.equal(mechanicalBoundaryReport.observed.transition.outcome.detail.boundary, 'mechanical-step-outcome')
+assert.equal(mechanicalBoundaryReport.observed.transition.interpretedTerminalBoundary, 'verified-terminal')
+assert.equal(mechanicalBoundaryReport.observed.transition.boundaryInterpretation, 'deterministic-verify-before-matching-typed-success')
+assert.equal(mechanicalBoundaryReport.observed.transition.validatorBoundaryCompatible, true)
+assert.equal(mechanicalBoundaryReport.checks.find((entry) => entry.id === 'schema:validator-boundary-compatibility').status, 'PASS')
+
+const unverifiedMechanicalBoundary = fixture({ boundary: 'mechanical-step-outcome' })
+unverifiedMechanicalBoundary.input.runJournalText = unverifiedMechanicalBoundary.input.runJournalText
+  .split('\n').filter((line) => !line.includes('VTR_TRANSITION_VERIFY')).join('\n') + '\n'
+const unverifiedMechanicalBoundaryReport = evaluateCapture(unverifiedMechanicalBoundary.input)
+assert.equal(unverifiedMechanicalBoundaryReport.status, 'FAIL')
+assert.equal(unverifiedMechanicalBoundaryReport.observed.transition.typedOutcomeOk, false)
+assert.equal(unverifiedMechanicalBoundaryReport.observed.transition.validatorBoundaryCompatible, false)
+assert.equal(unverifiedMechanicalBoundaryReport.checks.find((entry) => entry.id === 'schema:validator-boundary-compatibility').status, 'INCOMPLETE')
+
+const failedMechanicalBoundary = fixture({ boundary: 'mechanical-step-outcome', outcomeKind: 'BLOCKED' })
+const failedMechanicalBoundaryReport = evaluateCapture(failedMechanicalBoundary.input)
+assert.equal(failedMechanicalBoundaryReport.status, 'FAIL')
+assert.equal(failedMechanicalBoundaryReport.observed.transition.outcome.detail.outcome.kind, 'BLOCKED')
+assert.equal(failedMechanicalBoundaryReport.observed.transition.typedOutcomeOk, false)
+assert.equal(failedMechanicalBoundaryReport.observed.transition.validatorBoundaryCompatible, false)
+assert.equal(failedMechanicalBoundaryReport.checks.find((entry) => entry.id === 'schema:validator-boundary-compatibility').status, 'INCOMPLETE')
+
+const wrongGenerationMechanicalBoundary = fixture({ boundary: 'mechanical-step-outcome' })
+wrongGenerationMechanicalBoundary.input.runJournalText = wrongGenerationMechanicalBoundary.input.runJournalText
+  .split('\n').filter(Boolean).map((line) => {
+    const entry = JSON.parse(line)
+    if (entry.message?.startsWith('VTR_TRANSITION_VERIFY ')) entry.detail.generationId = 'gen-other-xyz789'
+    return JSON.stringify(entry)
+  }).join('\n') + '\n'
+const wrongGenerationMechanicalBoundaryReport = evaluateCapture(wrongGenerationMechanicalBoundary.input)
+assert.equal(wrongGenerationMechanicalBoundaryReport.status, 'FAIL')
+assert.equal(wrongGenerationMechanicalBoundaryReport.observed.transition.typedOutcomeOk, false)
+assert.equal(wrongGenerationMechanicalBoundaryReport.observed.transition.validatorBoundaryCompatible, false)
+assert.equal(wrongGenerationMechanicalBoundaryReport.checks.find((entry) => entry.id === 'schema:validator-boundary-compatibility').status, 'INCOMPLETE')
 
 const pinnedPostRun = fixture()
 pinnedPostRun.input.observerSamples = []
@@ -404,4 +440,4 @@ try {
   rmSync(tempDir, { recursive: true, force: true })
 }
 
-process.stdout.write('VTR Reach live collector tests passed (16 cases)\n')
+process.stdout.write('VTR Reach live collector tests passed (19 cases)\n')

@@ -769,8 +769,22 @@ export function evaluateCapture(input) {
     persistentOwnershipProblems.push(...contractMismatchRows.map(({ event }) => `contract-mismatch:${event}`))
     const reservationsMatchActuation = persistentOwnershipProblems.length === 0
     const persistentOwnershipOk = reservationsMatchActuation
+    // The controller can discover the declared predicate already holds while
+    // settling a mechanical leg. In that callback, the source boundary names
+    // the callback (`mechanical-step-outcome`), while the VTR_VERIFY row is the
+    // evidence that the Transition itself reached verified SUCCESS. Interpret
+    // that callback boundary as verified-terminal only after the same strict
+    // commit/run/generation/world/contract-bound VERIFY row has been checked
+    // above and appears before this typed terminal outcome. Keep the raw event
+    // unchanged in sourceEventRows/outcome for archival truth.
+    const verifiedTerminalSuccess = typedOutcome.kind === 'SUCCESS' && verificationOk
+    const verificationBackedMechanicalSuccess = outcomeDetail.boundary === 'mechanical-step-outcome'
+      && verifiedTerminalSuccess
+    const validatorBoundaryCompatible = verifiedTerminalSuccess
+      && (outcomeDetail.boundary === 'verified-terminal' || verificationBackedMechanicalSuccess)
+    const interpretedTerminalBoundary = validatorBoundaryCompatible ? 'verified-terminal' : null
     const outcomeOk = outcomeRow !== null && typedOutcome.kind === 'SUCCESS'
-      && ['verified-terminal', 'mechanical-step-outcome'].includes(outcomeDetail.boundary)
+      && validatorBoundaryCompatible
       && metrics.verifiedTransitionCompletion === 1
       && metrics.typedTerminalOutcome === 'SUCCESS'
       && metrics.duplicateAuthority === false
@@ -844,7 +858,11 @@ export function evaluateCapture(input) {
         ? { intentId: actuationOwners[0].intentId, actionId: actuationOwners[0].actionId }
         : null,
       identityOk,
-      validatorBoundaryCompatible: outcomeDetail.boundary === 'verified-terminal',
+      validatorBoundaryCompatible,
+      interpretedTerminalBoundary,
+      boundaryInterpretation: verificationBackedMechanicalSuccess
+        ? 'deterministic-verify-before-matching-typed-success'
+        : validatorBoundaryCompatible ? 'source-declared-verified-terminal-with-matching-deterministic-verify' : null,
     }
     checks.push(check('transition:contract-and-world-binding', identityOk ? 'PASS' : 'FAIL', {
       transitionId: id,
@@ -878,15 +896,23 @@ export function evaluateCapture(input) {
       source: modelMetricRows.length === 0 ? null : 'run-journal',
       conflicts: [...new Set(modelMetricsProblems)],
     }, modelMetricsStatus === 'OBSERVED' ? null : modelMetricsStatus === 'UNKNOWN' ? 'VTR_TRANSITION_MODEL_METRICS is missing for the committed Transition' : 'model-metrics rows are duplicated, malformed, or conflict with the Transition identity/outcome'))
-    if (outcomeRow !== null && outcomeDetail.boundary !== 'verified-terminal') {
-      checks.push(check('schema:validator-boundary-compatibility', 'INCOMPLETE', {
+    if (outcomeRow !== null && validatorBoundaryCompatible) {
+      checks.push(check('schema:validator-boundary-compatibility', 'PASS', {
         observedBoundary: outcomeDetail.boundary,
-        deterministicVerifyBeforeSuccess: verificationOk,
-        sourceCodeBoundaryAtMechanicalSuccess: 'mechanical-step-outcome',
-        evidenceValidatorExpectedBoundary: 'verified-terminal',
-      }, 'current source emits mechanical-step-outcome for SUCCESS from mechanical completion, while the archival validator requires verified-terminal'))
+        interpretedBoundary: interpretedTerminalBoundary,
+        interpretation: verificationBackedMechanicalSuccess
+          ? 'typed SUCCESS is backed by a matching deterministic TRUE VERIFY row before terminal'
+        : 'typed SUCCESS has a matching deterministic TRUE VERIFY row before terminal',
+        verificationBeforeTerminal: verificationOk,
+      }))
     } else if (outcomeRow !== null) {
-      checks.push(check('schema:validator-boundary-compatibility', 'PASS', { observedBoundary: outcomeDetail.boundary }))
+      checks.push(check('schema:validator-boundary-compatibility', 'INCOMPLETE', {
+        observedBoundary: outcomeDetail.boundary ?? null,
+        interpretedBoundary: interpretedTerminalBoundary,
+        deterministicVerifyBeforeSuccess: verificationOk,
+        typedOutcome: typedOutcome.kind ?? null,
+        evidenceValidatorExpectedBoundary: 'verified-terminal',
+      }, 'mechanical-step-outcome is compatible with verified-terminal only for a typed SUCCESS backed by the matching deterministic VERIFY row before terminal'))
     }
   } else {
     checks.push(check('transition:contract-and-world-binding', 'INCOMPLETE', null, 'no Reach Transition commit for the live BOOT/run/generation/mission'))
