@@ -991,9 +991,14 @@ export async function runVtrReachProbeSupervisor({
     let last = null
     while (now() < deadline) {
       pollWatch()
-      const result = await read()
-      if (result?.status === 'READY' || result?.status === 'TERMINAL') return result
-      last = result
+      try {
+        const result = await read()
+        if (result?.status === 'READY' || result?.status === 'TERMINAL') return result
+        last = result
+      } catch (error) {
+        if (error instanceof ProbeSupervisorError) throw error
+        last = { status: 'ERROR', error: safeErrorDescription(error) }
+      }
       await sleep(pollMs)
     }
     throw new ProbeSupervisorError(`timeout waiting for ${label}${last === null ? '' : `; last=${JSON.stringify(last)}`}`, 'PROBE_WAIT_TIMEOUT')
