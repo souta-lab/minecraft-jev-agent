@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
+import { eventMessage, persistentActionIdentity, persistentSkillStartProof } from './vtr-reach-evidence-events.mjs'
 
 const row = (message, detail = {}) => ({ message, detail })
 
@@ -19,8 +19,10 @@ test('persistent Reach evidence binds multiple legs to one VTR intent and action
   const reservations = [1, 2, 3].map((step) => row('VTR_MECHANICAL_STEP_RESERVED', { stepId: `s${step}`, intentId: 'intent-1', actionId: 'action-1' }))
   const outcomes = [1, 2, 3].map((step) => row('VTR_MECHANICAL_STEP_OUTCOME', { stepId: `s${step}`, intentId: 'intent-1', actionId: 'action-1' }))
   const actuations = [row('VTR_TRANSITION_ACTUATION', { intentId: 'intent-1', actionId: 'action-1' })]
+  const actionOutcomes = [row('VTR_MECHANICAL_OUTCOME', { intentId: 'intent-1', actionId: 'action-1' })]
 
-  assert.deepEqual(persistentActionIdentity({ reservations, outcomes, actuations }), { problems: [] })
+  assert.deepEqual(persistentActionIdentity({ reservations, outcomes, actuations, actionOutcomes }), { problems: [] })
+  assert.ok(persistentActionIdentity({ reservations, outcomes, actuations, actionOutcomes: [row('VTR_MECHANICAL_OUTCOME', { intentId: 'intent-2', actionId: 'action-2' })] }).problems.some((problem) => problem.reason === 'action-outcome-owner-does-not-match-mechanical-legs'))
 })
 
 test('persistent Reach evidence rejects one actuation per mechanical leg', () => {
@@ -34,3 +36,12 @@ test('persistent Reach evidence rejects one actuation per mechanical leg', () =>
   assert.ok(result.problems.some((problem) => problem.field === 'actuations' && problem.reason === 'persistent-reach-proof-requires-one-actuation'))
 })
 
+test('one VTR-selected SKILL_START binds the persistent action and starts before its multiple legs', () => {
+  const start = row('SKILL_START skill=WALK_TO selectedBy=vtr-transition', { actionId: 'action-1' })
+  const base = { skillStartRows: [start], actionId: 'action-1', mechanicalSteps: 3, commitIndex: 2, skillStartIndex: 3, firstReservationIndex: 4, outcomeIndex: 12 }
+  assert.equal(persistentSkillStartProof(base).status, 'PASS')
+  assert.equal(persistentSkillStartProof({ ...base, actionId: 'action-2' }).status, 'FAIL')
+  assert.equal(persistentSkillStartProof({ ...base, skillStartIndex: 5 }).status, 'FAIL')
+  assert.equal(persistentSkillStartProof({ ...base, skillStartRows: [start, start] }).status, 'FAIL')
+  assert.equal(persistentSkillStartProof({ ...base, skillStartRows: [row('SKILL_START selectedBy=vtr-transition')]}).status, 'INCOMPLETE')
+})

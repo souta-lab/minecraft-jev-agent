@@ -9,7 +9,7 @@ import { gunzipSync, inflateSync } from 'node:zlib'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parse as parseNbt } from 'prismarine-nbt'
-import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
+import { eventMessage, persistentActionIdentity, persistentSkillStartProof } from './vtr-reach-evidence-events.mjs'
 
 const EXIT = Object.freeze({ PASS: 0, FAIL: 1, INCOMPLETE: 2, USAGE: 64 })
 const CHECK_STATUS = Object.freeze({ PASS: 'PASS', FAIL: 'FAIL', INCOMPLETE: 'INCOMPLETE' })
@@ -955,7 +955,7 @@ async function validate(archive, repo) {
       const mechanicalProblems = []
       const seenStepIds = new Set()
       const stepEvidence = []
-      const persistentIdentity = persistentActionIdentity({ reservations, outcomes: mechanicalStepOutcomes, actuations })
+      const persistentIdentity = persistentActionIdentity({ reservations, outcomes: mechanicalStepOutcomes, actuations, actionOutcomes: mechanicalOutcomes })
       mechanicalProblems.push(...persistentIdentity.problems.map((problem) => ({ field: 'persistent Transition action identity', ...problem })))
       const actuationByIntentId = new Map()
       for (const row of actuations) {
@@ -1162,10 +1162,25 @@ async function validate(archive, repo) {
     const skillStartIndices = skillStartRows.map((row) => events.indexOf(row))
     const commitIndex = events.indexOf(commits[0])
     const outcomeIndex = events.indexOf(outcomes[0])
-    const skillOrderValid = skillStartIndices.every((index) => index > commitIndex && index < outcomeIndex) && skillStartIndices.every((index, position) => position === 0 || index > skillStartIndices[position - 1])
-    if (skillStarts === 1 && vtrSelectedSkills === 1 && transitionExpectedMechanicalSteps >= 3 && skillOrderValid) pass('authority:single-skill-owner', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, selectedBy: 'vtr-transition', proof: 'one VTR-selected skill owns at least three mechanical legs under one Transition' })
-    else if (skillStarts === 0) incomplete('authority:single-skill-owner', 'no raw executor SKILL_START event was archived')
-    else fail('authority:single-skill-owner', 'persistent Reach proof requires exactly one VTR-selected executor skill to own at least three mechanical legs, ordered between commit and terminal', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, commitIndex, outcomeIndex, skillOrderValid })
+    const firstReservationIndex = reservations.length === 0 ? -1 : Math.min(...reservations.map((row) => events.indexOf(row)))
+    const legAndActuationActionIds = [...new Set(
+      [...reservations, ...mechanicalStepOutcomes, ...actuations]
+        .map((row) => row?.detail?.actionId)
+        .filter((value) => typeof value === 'string' && value.length > 0),
+    )]
+    const expectedActionId = legAndActuationActionIds.length === 1 ? legAndActuationActionIds[0] : null
+    const skillStartProof = persistentSkillStartProof({
+      skillStartRows,
+      actionId: expectedActionId,
+      mechanicalSteps: transitionExpectedMechanicalSteps,
+      commitIndex,
+      skillStartIndex: skillStartIndices[0],
+      firstReservationIndex,
+      outcomeIndex,
+    })
+    if (skillStartProof.status === 'PASS' && vtrSelectedSkills === 1) pass('authority:single-skill-owner', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, selectedBy: 'vtr-transition', actionId: expectedActionId, proof: 'one VTR-selected skill owns at least three mechanical legs under one Transition' })
+    else if (skillStartProof.status === 'INCOMPLETE') incomplete('authority:single-skill-owner', 'SKILL_START identity/order is not fully bound to the persistent per-leg action', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, firstReservationIndex, commitIndex, outcomeIndex, actionIds: legAndActuationActionIds, proof: skillStartProof })
+    else fail('authority:single-skill-owner', skillStartProof.reason ?? 'persistent Reach proof does not establish one VTR-selected action across multiple mechanical legs', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, firstReservationIndex, commitIndex, outcomeIndex, actionIds: legAndActuationActionIds, proof: skillStartProof })
     const legacyActuationSource = '(?:selectedBy=(?:jev|legacy|option|goalqueue)|LEGACY_ACTUATION|legacyActuation=true|authority=(?:legacy|option|goalqueue)|(?:GOAL_QUEUE|OPTION)_ACTUATION)'
     const legacyActuationMatches = (botLog.match(new RegExp(legacyActuationSource, 'gi')) ?? []).length + events.filter((row) => new RegExp(legacyActuationSource, 'i').test(String(row?.message ?? ''))).length
     if (legacyActuationMatches === 0 && transition.metrics?.duplicateAuthority === false) pass('authority:no-legacy-actuation-observed', { matches: legacyActuationMatches })
