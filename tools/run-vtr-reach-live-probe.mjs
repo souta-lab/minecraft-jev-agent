@@ -1673,7 +1673,7 @@ function buildRunMetadata({ runtimeSource, identity, collectorReport, terminal, 
     source: {
       repository: 'souta-lab/minecraft-jev-agent',
       commit: identity.sourceSha,
-      branch: runGit(runtimeSource, ['branch', '--show-current']),
+      branch: runGit(runtimeSource, ['branch', '--show-current']) || 'detached-exact-source',
       buildHash,
     },
     run: {
@@ -1959,6 +1959,7 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
     freshWorld: true,
     serverJar: options.leafJar,
     serverJarSha256: jarSha256,
+    serverPropertiesPath: configLaunch,
     serverPropertiesSha256: sha256(Buffer.from(launchProperties)),
     serverPropertiesEffectiveSha256: sha256(Buffer.from(effectiveText)),
     eulaAcceptance: eulaAttestation,
@@ -2814,6 +2815,7 @@ function archiveInputManifest({ attemptRoot, runtimeSource, server, observer, pa
   const regionName = freshWorld.regionPath ? relative(join(server.worldRoot, 'region'), freshWorld.regionPath).split(sep).join('/') : null
   if (regionName) add(`server/world/region/${regionName}`, freshWorld.regionPath)
   add('runner/mercury-calls.jsonl', paths['mercury-calls'])
+  add('runner/kernel-shadow.jsonl', join(runtimeSource, 'buddy-driver', 'logs', 'jev', 'kernel-shadow.jsonl'))
   const manifestPath = join(runner, 'archive-input-manifest.json')
   writeJsonExclusive(manifestPath, { schema: 'vtr-reach-live-archive-input/v1', files })
   return { manifestPath, files }
@@ -2951,6 +2953,17 @@ async function captureAndPackage({
       worldIdentity: { serverId: expectedWorld.serverId, dimension: expectedWorld.dimension, worldEpoch: expectedWorld.worldEpoch },
     },
   })
+
+  // Leaf rewrites the --config properties file during boot (normalized header
+  // and defaults); the spawn observation and server-start record bind the
+  // launch input hash captured before boot. The post-boot content is already
+  // preserved as server.properties.effective-after-boot, so restore the exact
+  // launch bytes now that the server has provably stopped, letting the archive
+  // re-hash to the attested launch input.
+  if (typeof server.launchProperties === 'string' && typeof server.configLaunch === 'string'
+      && existsSync(server.configLaunch)) {
+    writeFileSync(server.configLaunch, server.launchProperties)
+  }
 
   const { manifestPath } = archiveInputManifest({
     attemptRoot, runtimeSource, server, observer, paths, collectorPath: collectorDescriptor.path,

@@ -1156,7 +1156,7 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   if (report.expected?.sourceSha && identity.sourceSha && report.expected.sourceSha.toLowerCase() !== identity.sourceSha) {
     check(statuses, 'FAIL', 'collector-source-pin', { expected: report.expected.sourceSha, observed: identity.sourceSha })
   }
-  const sourceInputs = report.inputs ?? []
+  const sourceInputs = report.observed?.inputs ?? report.inputs ?? []
   const knownInputs = new Map(sourceInputs.map((input) => [input?.name, input]))
 
   const collectorBytes = readFileSync(collectorReportFile)
