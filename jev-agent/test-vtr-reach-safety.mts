@@ -44,7 +44,8 @@ describe('VTR Reach safety wakeups use current viability truth', () => {
 
   it('wires the assessment into production and journals ignored stale safety edges', () => {
     assert.match(controller, /assessReachViability\(trigger,\s*\{/)
-    assert.match(controller, /if \(viability\.shouldInterrupt\)/)
+    assert.match(controller, /active !== null && viability\.shouldInterrupt/)
+    assert.match(controller, /safetyInterruption:/)
     assert.match(controller, /VTR_SAFETY_TRIGGER_STALE/)
   })
 })

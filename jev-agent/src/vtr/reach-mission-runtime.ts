@@ -19,6 +19,62 @@ import type {
   ReachTransitionContract,
   ReachTransitionState,
 } from './reach.ts'
+import type { ReachRuntimeActionSnapshot } from './reach-runtime-ports.ts'
+
+export interface ReachMissionRuntimeSession {
+  readonly mission: InventoryReachTransitionInput['mission']
+  readonly transitionId: string
+  readonly contractHash: string
+  readonly ensures: ReachTransitionContract['ensures']
+  readonly identity: ReachIdentity
+  readonly jevCallsAtStart: number
+  readonly system2CallsAtStart: number
+  readonly authorityConflictsAtStart: number
+  duplicateAuthorityObserved: boolean
+  lastHealth: number
+}
+
+/** Typed scheduler frame assembled from adapter observations and compatibility DTOs; it contains no live client objects. */
+export interface ReachMissionRuntimeFrame {
+  readonly mission: InventoryReachTransitionInput['mission']
+  readonly snapshot: ReachRuntimeSnapshot
+  readonly interactionReach: number
+  readonly sourceNames: readonly string[]
+  readonly transitionId: string
+  readonly probe: boolean
+  readonly schedulerOwner: 'mission' | 'human'
+  readonly actuationLease:
+    | { readonly status: 'owned'; readonly leaseId: string }
+    | { readonly status: 'lost'; readonly expectedLeaseId: string; readonly observedLeaseId: string; readonly reason: string }
+  readonly activeAction: ReachRuntimeActionSnapshot | null
+  /** Compatibility adapter classification; prevents a matching legacy walk from racing VTR admission. */
+  readonly activeActionMatchesMissionReach: boolean
+  readonly missionSatisfiedEvidenceId?: string
+  readonly reachAlreadyTrueEvidenceId?: string
+  readonly safeToStart: boolean
+  readonly inadmissibleRouteIds?: readonly string[]
+  readonly observedHealth: number
+  readonly counters: {
+    readonly jevCalls: number
+    readonly system2Calls: number
+    readonly authorityConflicts: number
+  }
+}
+
+export type ReachMissionRuntimeDecision =
+  | { readonly kind: 'declined'; readonly reason: string }
+  | { readonly kind: 'held'; readonly reason: string; readonly transitionId?: string }
+  | { readonly kind: 'revoke-action'; readonly reason: string; readonly transitionId?: string }
+  | {
+      readonly kind: 'transition'
+      readonly result: ReachControllerResult
+      readonly mission: InventoryReachTransitionInput['mission']
+      readonly contract: ReachTransitionContract
+      readonly snapshot: ReachRuntimeSnapshot
+      readonly started: boolean
+      readonly dispatch: boolean
+      readonly cancelAction: boolean
+    }
 
 /** VTR policy dependencies. Production supplies Jev; tests/offline probes may supply an explicit policy. */
 export interface ReachMissionRuntimeDependencies {
@@ -39,6 +95,7 @@ export interface ReachTerminalHandoff {
   readonly contractHash: string
   readonly state: ReachTransitionState
   readonly outcome: ReachTerminalOutcome
+  readonly session: Readonly<ReachMissionRuntimeSession> | null
 }
 
 interface ReachMissionScope {
@@ -87,6 +144,39 @@ function isTerminalWitnessBoundary(outcome: ReachTerminalOutcome): boolean {
     outcome.kind === 'CONTRACT_VIOLATION'
 }
 
+function bindMissionSnapshot(contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot): ReachRuntimeSnapshot {
+  // Candidate geometry is prepared by the runtime adapter, while predicate
+  // identity is owned by the VTR-derived contract. Bind it here before the
+  // scheduler can admit or continue a route.
+  let changed = false
+  const routes = snapshot.routes.map((route) => {
+    if (route.witness.desiredPredicateIdentity === contract.desiredPredicateIdentity) return route
+    changed = true
+    return { ...route, witness: { ...route.witness, desiredPredicateIdentity: contract.desiredPredicateIdentity } }
+  })
+  return changed ? { ...snapshot, routes } : snapshot
+}
+
+function withObservedLeaseLoss(snapshot: ReachRuntimeSnapshot, observedLeaseId: string): ReachRuntimeSnapshot {
+  const identity: ReachIdentity = {
+    ...snapshot.observation.identity,
+    leaseId: observedLeaseId,
+  }
+  return {
+    ...snapshot,
+    observation: { ...snapshot.observation, identity },
+  }
+}
+
+function missionSessionSnapshot(session: ReachMissionRuntimeSession): Readonly<ReachMissionRuntimeSession> {
+  return Object.freeze({
+    ...session,
+    mission: Object.freeze({ ...session.mission }),
+    ensures: Object.freeze([...session.ensures]),
+    identity: Object.freeze({ ...session.identity }),
+  })
+}
+
 /**
  * Production VTR ownership boundary for the first Mission→Reach slice.
  *
@@ -101,6 +191,7 @@ export class ReachMissionRuntime {
   private readonly onTransitionNotCommitted: ReachMissionRuntimeDependencies['onTransitionNotCommitted']
   private terminalWitnessExclusion: TerminalWitnessExclusion | null = null
   private activeContractScope: ActiveContractScope | null = null
+  private session: ReachMissionRuntimeSession | null = null
 
   constructor(dependencies: ReachMissionRuntimeDependencies) {
     this.controller = new ReachController(dependencies.routePolicy, dependencies.commitFreshnessFence)
@@ -110,6 +201,177 @@ export class ReachMissionRuntime {
 
   get current(): ReachControllerCurrent | null {
     return this.controller.current
+  }
+
+  /** Mission/session ownership belongs here; callers receive a read-only projection. */
+  get missionSession(): Readonly<ReachMissionRuntimeSession> | null {
+    return this.session === null ? null : missionSessionSnapshot(this.session)
+  }
+
+  get activeMission(): (Readonly<ReachMissionRuntimeSession> & ReachControllerCurrent) | null {
+    const current = this.controller.current
+    const session = this.session
+    if (current === null || session === null || current.contract.contractHash !== session.contractHash) return null
+    return { ...missionSessionSnapshot(session), ...current }
+  }
+
+  /**
+   * Production Mission scheduler and lifecycle boundary. The adapter prepares
+   * immutable typed facts/routes; this runtime alone decides admission,
+   * continuation, supersession, and typed controller handoff.
+   */
+  async driveMission(frame: ReachMissionRuntimeFrame): Promise<ReachMissionRuntimeDecision> {
+    const current = this.controller.current
+    const session = this.session
+    const mission = frame.mission
+    if (mission.id.trim() === '' || mission.item.trim() === '' || !Number.isSafeInteger(mission.count) || mission.count < 1) {
+      return { kind: 'declined', reason: 'invalid-mission' }
+    }
+
+    if (frame.schedulerOwner === 'human') {
+      if (current === null) return frame.probe ? { kind: 'held', reason: 'human-intent-owns-scheduler' } : { kind: 'declined', reason: 'human-intent-owns-scheduler' }
+      const result = await this.supersede({
+        reason: 'human intent replaced the autonomous Mission owner',
+        evidenceId: `human-intent:${frame.snapshot.observation.observedAtMs}`,
+        identity: frame.snapshot.observation.identity,
+        nowMs: frame.snapshot.observation.observedAtMs,
+      })
+      if (result.status === 'terminal') {
+        return {
+          kind: 'transition', result, mission: session?.mission ?? mission, contract: current.contract,
+          snapshot: frame.snapshot, started: false, dispatch: false, cancelAction: frame.activeAction !== null,
+        }
+      }
+      return { kind: 'held', reason: 'human-intent-supersession-refused', transitionId: current.contract.transitionId }
+    }
+
+    if (current !== null) {
+      if (session === null || session.contractHash !== current.contract.contractHash) {
+        const result = await this.supersede({
+          reason: 'active Reach contract has no matching Mission session',
+          evidenceId: `mission-session-mismatch:${current.contract.transitionId}`,
+          identity: frame.snapshot.observation.identity,
+          nowMs: frame.snapshot.observation.observedAtMs,
+        })
+        return result.status === 'terminal'
+          ? { kind: 'transition', result, mission, contract: current.contract, snapshot: frame.snapshot, started: false, dispatch: false, cancelAction: frame.activeAction !== null }
+          : { kind: 'held', reason: 'mission-session-mismatch', transitionId: current.contract.transitionId }
+      }
+      if (session.mission.id !== mission.id || session.mission.item !== mission.item || session.mission.count !== mission.count) {
+        const result = await this.supersede({
+          reason: 'parent Mission predicate changed',
+          evidenceId: `mission-revision:${mission.id}:${mission.item}:${mission.count}`,
+          identity: frame.snapshot.observation.identity,
+          nowMs: frame.snapshot.observation.observedAtMs,
+        })
+        return result.status === 'terminal'
+          ? { kind: 'transition', result, mission: session.mission, contract: current.contract, snapshot: frame.snapshot, started: false, dispatch: false, cancelAction: frame.activeAction !== null }
+          : { kind: 'held', reason: 'mission-revision-supersession-refused', transitionId: current.contract.transitionId }
+      }
+      if (frame.activeAction !== null && (
+        frame.activeAction.status === 'running' &&
+        (frame.activeAction.authority !== 'vtr-reach' || frame.activeAction.transitionId !== current.contract.transitionId)
+      )) {
+        session.duplicateAuthorityObserved = true
+        const currentOwner = frame.activeAction.authority === 'vtr-reach'
+          ? `foreign VTR transition ${frame.activeAction.transitionId ?? 'missing'}`
+          : `legacy action ${frame.activeAction.id}`
+        const result = await this.supersede({
+          reason: `${currentOwner} overlapped active Reach contract ${current.contract.transitionId}`,
+          evidenceId: `dual-authority:${frame.activeAction.epoch}:${frame.activeAction.id}:${frame.activeAction.transitionId ?? 'missing'}`,
+          identity: frame.snapshot.observation.identity,
+          nowMs: frame.snapshot.observation.observedAtMs,
+        })
+        return result.status === 'terminal'
+          ? { kind: 'transition', result, mission: session.mission, contract: current.contract, snapshot: frame.snapshot, started: false, dispatch: false, cancelAction: true }
+          : { kind: 'held', reason: 'dual-authority-supersession-refused', transitionId: current.contract.transitionId }
+      }
+      const snapshot = bindMissionSnapshot(current.contract, frame.snapshot)
+      if (frame.actuationLease.status === 'lost') {
+        const lostSnapshot = withObservedLeaseLoss(snapshot, frame.actuationLease.observedLeaseId)
+        const result = await this.tick(lostSnapshot)
+        return this.transitionDecision(result, session.mission, current.contract, lostSnapshot, false, frame.activeAction !== null)
+      }
+      const damage = Math.max(0, session.lastHealth - frame.observedHealth)
+      session.lastHealth = frame.observedHealth
+      if (damage > 0) {
+        const risk = this.observeRisk(current.contract.identity, `world-observation:${snapshot.observation.observedAtMs}`, { damage }, snapshot.observation.observedAtMs)
+        if (risk.status === 'terminal') {
+          return this.transitionDecision(risk, session.mission, current.contract, snapshot, false, frame.activeAction !== null)
+        }
+        return { kind: 'held', reason: 'risk-observation-accounted', transitionId: current.contract.transitionId }
+      }
+      const result = await this.tick(snapshot)
+      return this.transitionDecision(result, session.mission, current.contract, snapshot, false, frame.activeAction !== null)
+    }
+
+    if (frame.activeAction !== null) {
+      if (frame.activeAction.authority === 'vtr-reach') {
+        return { kind: 'revoke-action', reason: 'orphan-vtr-actuation-without-active-contract', transitionId: frame.activeAction.transitionId }
+      }
+      if (frame.activeActionMatchesMissionReach || frame.probe) {
+        return { kind: 'revoke-action', reason: frame.activeActionMatchesMissionReach ? 'legacy-reach-handoff' : 'probe-revokes-legacy-actuation' }
+      }
+      return { kind: 'declined', reason: 'unrelated-action-owns-actuation' }
+    }
+    if (frame.actuationLease.status === 'lost') return frame.probe ? { kind: 'held', reason: 'actuation-lease-unavailable' } : { kind: 'declined', reason: 'actuation-lease-unavailable' }
+    if (frame.actuationLease.leaseId !== frame.snapshot.observation.identity.leaseId) {
+      return frame.probe
+        ? { kind: 'held', reason: 'lease-identity-mismatch' }
+        : { kind: 'declined', reason: 'lease-identity-mismatch' }
+    }
+    if (frame.missionSatisfiedEvidenceId !== undefined) {
+      return frame.probe ? { kind: 'held', reason: 'mission-already-satisfied' } : { kind: 'declined', reason: 'mission-already-satisfied' }
+    }
+    if (frame.reachAlreadyTrueEvidenceId !== undefined) {
+      return frame.probe ? { kind: 'held', reason: 'ensures-already-true' } : { kind: 'declined', reason: 'ensures-already-true' }
+    }
+    if (!frame.safeToStart) return frame.probe ? { kind: 'held', reason: 'body-not-safe' } : { kind: 'declined', reason: 'body-not-safe' }
+    if (frame.snapshot.routes.length === 0) {
+      return frame.probe || (frame.inadmissibleRouteIds?.length ?? 0) > 0
+        ? { kind: 'held', reason: (frame.inadmissibleRouteIds?.length ?? 0) > 0 ? 'no-admissible-reach-route' : 'no-grounded-reach-candidate' }
+        : { kind: 'declined', reason: 'no-grounded-reach-candidate' }
+    }
+
+    const plan = this.deriveInventoryReachTransition({
+      mission,
+      interactionReach: frame.interactionReach,
+      sourceNames: frame.sourceNames,
+      identity: frame.snapshot.observation.identity,
+      transitionId: frame.transitionId,
+    })
+    const snapshot = bindMissionSnapshot(plan.contract, frame.snapshot)
+    this.session = {
+      mission,
+      transitionId: plan.contract.transitionId,
+      contractHash: plan.contract.contractHash,
+      ensures: plan.contract.ensures,
+      identity: plan.contract.identity,
+      jevCallsAtStart: frame.counters.jevCalls,
+      system2CallsAtStart: frame.counters.system2Calls,
+      authorityConflictsAtStart: frame.counters.authorityConflicts,
+      duplicateAuthorityObserved: false,
+      lastHealth: frame.observedHealth,
+    }
+    const result = await this.commit(plan.contract, snapshot)
+    if (result.status !== 'active' && result.status !== 'terminal') {
+      this.session = null
+      return { kind: 'held', reason: result.status === 'decision_required' ? 'route-decision-required' : 'contract-not-admitted', transitionId: plan.contract.transitionId }
+    }
+    return this.transitionDecision(result, mission, plan.contract, snapshot, true, false)
+  }
+
+  noteAuthorityConflict(): void {
+    if (this.session !== null) this.session.duplicateAuthorityObserved = true
+  }
+
+  noteMissionHealth(health: number): number {
+    if (!Number.isFinite(health)) return 0
+    const session = this.session
+    if (session === null) return 0
+    const damage = Math.max(0, session.lastHealth - health)
+    session.lastHealth = health
+    return damage
   }
 
   /** Derive a value contract; adapters may build a typed snapshot from this value before commit. */
@@ -219,7 +481,28 @@ export class ReachMissionRuntime {
       }
     }
     this.activeContractScope = null
-    return { contractHash: state.contractHash, state, outcome }
+    const session = this.session === null ? null : missionSessionSnapshot(this.session)
+    this.session = null
+    return { contractHash: state.contractHash, state, outcome, session }
+  }
+
+  private transitionDecision(
+    result: ReachControllerResult,
+    mission: InventoryReachTransitionInput['mission'],
+    contract: ReachTransitionContract,
+    snapshot: ReachRuntimeSnapshot,
+    started: boolean,
+    actionAlreadyRunning: boolean,
+  ): ReachMissionRuntimeDecision {
+    if (result.status === 'terminal') return { kind: 'transition', result, mission, contract, snapshot, started, dispatch: false, cancelAction: result.cancelIntentId !== null }
+    if (result.status === 'active') {
+      return {
+        kind: 'transition', result, mission, contract, snapshot, started,
+        dispatch: !actionAlreadyRunning && result.phase === 'actuate' && result.intent !== undefined,
+        cancelAction: false,
+      }
+    }
+    return { kind: 'held', reason: result.status === 'refused' ? result.reason : result.status, transitionId: contract.transitionId }
   }
 
   /** Filter a previously terminal witness before VTR asks its route decision policy. */
