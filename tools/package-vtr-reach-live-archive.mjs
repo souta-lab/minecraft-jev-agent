@@ -1000,6 +1000,10 @@ function projectTransition(report) {
     }
   }
   projected.verification = verifies.length === 1 ? structuredClone(verifies[0].detail?.verification ?? verifies[0].detail ?? {}) : null
+  // v1 comparator aliases: the committed contract object and the deterministic
+  // VERIFY record under their canonical names.
+  projected.commit = structuredClone(commitDetail)
+  projected.verify = projected.verification === null ? null : structuredClone(projected.verification)
   return projected
 }
 
@@ -1046,7 +1050,63 @@ function collectIdentityConflicts(value, identity, path = '$', out = []) {
   return out
 }
 
-function makeProbe({ report, identity, metadata, transition, bundle, providerCaptureResult, egressAuditResult, authorityFixtureResult }) {
+/** Derive the comparison-visible fixture facts from already-archived raw
+ * fixture records. Every field is left absent when its raw evidence is absent;
+ * nothing is fabricated for the comparator. */
+function enrichProbeFixture(fixture, { transition, copiedSources }) {
+  if (!fixture || typeof fixture !== 'object' || Array.isArray(fixture)) return fixture ?? null
+  const enriched = structuredClone(fixture)
+  const start = enriched.transitionStartPosition ?? enriched.initialPlayerPosition ?? null
+  const position = enriched.position ?? transition?.witness?.target ?? null
+  const block = enriched.block ?? null
+  if (enriched.relativeResourceSource === undefined && block !== null && position !== null) {
+    enriched.relativeResourceSource = { block, position: structuredClone(position) }
+  }
+  if (enriched.sourceOffsetFromInitialPlayer === undefined && position !== null && start !== null &&
+      ['x', 'y', 'z'].every((key) => Number.isFinite(position[key]) && Number.isFinite(start[key]))) {
+    enriched.sourceOffsetFromInitialPlayer = {
+      x: position.x - Math.floor(start.x),
+      y: position.y - Math.floor(start.y),
+      z: position.z - Math.floor(start.z),
+    }
+  }
+  if (enriched.witnessChosenByProductionSensor === undefined) {
+    const evidenceId = transition?.witness?.evidenceId ?? ''
+    if (typeof evidenceId === 'string' && evidenceId.startsWith('sensor:')) {
+      enriched.witnessChosenByProductionSensor = true
+    }
+  }
+  if (enriched.flatSolidGround === undefined) {
+    const ground = deriveFlatSolidGround(copiedSources)
+    if (ground === true) enriched.flatSolidGround = true
+  }
+  return enriched
+}
+
+function deriveFlatSolidGround(copiedSources) {
+  const propertiesText = ['server/server.properties.effective-after-boot', 'server/server.properties.launch']
+    .map((name) => copiedSources.get(name)?.bytes?.toString('utf8') ?? null)
+    .find((text) => typeof text === 'string') ?? null
+  const levelType = /^level-type=(.+)$/mu.exec(propertiesText ?? '')?.[1]?.trim().replace(/\\:/g, ':') ?? null
+  if (levelType !== 'minecraft:flat' && levelType !== 'flat') return null
+  const transcript = copiedSources.get('server/fixture-commands.jsonl')?.bytes?.toString('utf8') ?? null
+  if (transcript === null) return null
+  const rows = transcript.split(/\r?\n/).filter((line) => line.trim() !== '').map((line) => {
+    try { return JSON.parse(line) } catch { return null }
+  })
+  if (rows.some((row) => row === null)) return null
+  const fill = rows.find((row) => row.kind === 'fill')
+  const setblock = rows.find((row) => row.kind === 'setblock')
+  const anchor = fill?.fixtureAnchor?.offsets ?? setblock?.fixtureAnchor?.offsets ?? null
+  if (fill === undefined || setblock === undefined || anchor === null) return null
+  const fillSucceeded = typeof fill.serverOutput === 'string' && /\bfilled\b/i.test(fill.serverOutput)
+  const setblockSucceeded = typeof setblock.serverOutput === 'string' && /\bchanged\b/i.test(setblock.serverOutput)
+  const singleLayerUnderPath = Number.isSafeInteger(anchor.fillFrom?.y) && anchor.fillFrom.y === -1 &&
+    Number.isSafeInteger(anchor.fillTo?.y) && anchor.fillTo.y === -1
+  return fillSucceeded && setblockSucceeded && singleLayerUnderPath ? true : null
+}
+
+function makeProbe({ report, identity, metadata, transition, bundle, providerCaptureResult, egressAuditResult, authorityFixtureResult, copiedSources }) {
   const sourceMeta = metadata.source
   const run = structuredClone(metadata.run)
   const mission = structuredClone(metadata.mission)
@@ -1109,6 +1169,7 @@ function makeProbe({ report, identity, metadata, transition, bundle, providerCap
   }
   if (mission.missionCompletion !== undefined) missionProjection.missionCompletion = mission.missionCompletion
   return {
+    schema: 'vtr-reach-live-probe/v1',
     source: {
       repository: sourceMeta.repository,
       commit: identity.sourceSha,
@@ -1117,10 +1178,20 @@ function makeProbe({ report, identity, metadata, transition, bundle, providerCap
       bundleBytes: bundle?.length ?? null,
       bundleSha256: bundle === null ? null : sha256(bundle),
     },
+    server: {
+      serverId: run.serverId ?? null,
+      dimension: run.dimension ?? null,
+      worldEpoch: run.worldEpoch ?? null,
+      minecraftVersion: run.minecraftVersion ?? null,
+      gameMode: run.gameMode ?? null,
+      difficulty: run.difficulty ?? null,
+      seed: run.seed ?? null,
+      worldSeedFromLevelDat: run.seed ?? null,
+    },
     run,
     mission: missionProjection,
     transition,
-    fixture: metadata.fixture ?? null,
+    fixture: enrichProbeFixture(metadata.fixture ?? null, { transition, copiedSources }),
     configuredNoLlmProbe: config,
     egressAudit: egressAuditResult,
     noDoubleAuthorityFixture: authorityFixtureResult,
@@ -1406,7 +1477,7 @@ export function packageVtrReachArchive({ collectorReportPath, manifestPath, arch
   })
   else check(statuses, freshWorldResult.status, 'server:fresh-world-attestation', { reason: freshWorldResult.reason })
   if (metadata && runIdentityConflicts.length === 0 && readinessMissing.length === 0 && archiveFiles.has('runner/run-metadata.json')) {
-    const probe = makeProbe({ report, identity, metadata, transition, bundle, providerCaptureResult, egressAuditResult, authorityFixtureResult })
+    const probe = makeProbe({ report, identity, metadata, transition, bundle, providerCaptureResult, egressAuditResult, authorityFixtureResult, copiedSources })
     const mismatch = []
     if (probe.source.commit !== identity.sourceSha) mismatch.push('source.commit')
     if (probe.run.runId !== identity.runId || probe.run.generationId !== identity.generationId) mismatch.push('run identity')
