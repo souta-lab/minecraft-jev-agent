@@ -1,0 +1,10 @@
+{
+  "schema": "vtr-no-llm-egress-policy/v1",
+  "allow": [
+    "AF_UNIX",
+    "AF_INET loopback (127.0.0.0/8)",
+    "AF_INET6 loopback (::1)"
+  ],
+  "deny": "all other socket destinations at intercepted libc egress calls",
+  "audit": "append-only JSONL on inherited descriptor"
+}
