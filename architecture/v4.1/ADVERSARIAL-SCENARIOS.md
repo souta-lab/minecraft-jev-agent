@@ -39,7 +39,7 @@ The pure model currently exercises scenarios 1, 2, 3, 4, 7, 8, 11, 13, 15, 18 (t
 
 ## Falsification triggers
 
-Any scenario that requires silent shared mutation, an unbounded non-preemptible resource, model-owned truth, hidden target substitution outside the effect envelope, or action-return-as-success is evidence against the current V4.1.1 contract and must be escalated to architecture review rather than patched locally.
+Any scenario that requires silent shared mutation, an unbounded non-preemptible resource, model-owned truth, hidden target substitution outside the effect envelope, or action-return-as-success is evidence against the current V4.1.2 contract and must be escalated to architecture review rather than patched locally.
 
 ## V4.1.1 hardening scenarios
 
@@ -58,3 +58,50 @@ Any scenario that requires silent shared mutation, an unbounded non-preemptible 
 41. **Safe-yield arrives one tick after non-preemptible bound** — Expected: `DEADLINE_EXPIRED`; record fault, do not silently grant.
 42. **Preemption transaction given wrong victim state** — Expected: fail closed before suspension.
 43. **Duplicate ATR initialization id with different contractHash** — Expected: registry construction fails; identity cannot be laundered before first mutation.
+
+## V4.1.2 authority-kernel adversarial scenarios
+
+44. **TERMINAL tries to reacquire** — Expected: lifecycle gate rejects before lease creation.
+45. **SUSPENDED caller invokes acquire directly** — Expected: only RUNNABLE can acquire; current live revalidation must move it through resume first.
+46. **ACTIVE pause during bounded window click** — Expected: scheduler PAUSE is rejected `SAFE_YIELD_REQUIRED`; controller ACK completes pause without force revoke.
+47. **Deadline expires inside bounded critical section** — Expected: outcome is pending, lease remains, new effects are blocked, later safe yield terminalizes while preserving deadline evidence.
+48. **VERIFY becomes true inside bounded critical section** — Expected: SUCCESS is pending rather than force-revoking; safe yield completes SUCCESS.
+49. **Mission removes predicate inside bounded critical section** — Expected: MISSION_SUPERSEDED is pending; no new work; safe yield completes terminalization.
+50. **Old preemption after victim regrant** — Expected: exact lease incarnation mismatch makes transaction stale; new lease is untouched.
+51. **Two victims needed by one requester, one not ready** — Expected: no victim is suspended and no requester lease is granted until all victims ACK.
+52. **Two non-preemptible conflicts with 10ms and 25ms bounds** — Expected: 10ms is the governing hard-yield deadline.
+53. **Late safe yield after bound** — Expected: recovery proceeds only after ACK; `deadlineViolated=true` remains journal evidence.
+54. **Stale preemption still claims priority inheritance** — Expected: currentness check removes inherited priority/execution preference.
+55. **Same effect commit dispatched twice** — Expected: only first transition from ISSUED to DISPATCHING succeeds; maxCount is already charged.
+56. **Crash after irreversible dispatch** — Expected: UNKNOWN may persist; no automatic replay/reissue until trusted world reconciliation.
+57. **Caller supplies true verifier object/booleans** — Expected: no authority without runtime-branded registered verifier capability and accepted facts.
+58. **Duplicate predicate true+false in one verifier snapshot** — Expected: whole snapshot rejected; factRevision unchanged.
+59. **Old witness proof after a newer revision** — Expected: witness revision regression rejected; no resume authority gained.
+60. **Forged/tampered replay journal** — Expected: regenerated full event mismatch rejects replay; audit replay result cannot be used as live KernelState.
+61. **Trusted restart recovery** — Expected: only JOURNAL recovery capability may rebrand a fully replayed, invariant-valid snapshot.
+62. **Jev ranks unknown id or tactic** — Expected: ungrounded output rejected even if frame hash/binding otherwise current.
+63. **Jev frame survives witness/resource/lifecycle mutation** — Expected: it does not; relevant decision digests change and old frame is stale.
+64. **Unknown mutating ResourceId domain from plugin** — Expected: canonical resource construction fails closed until adapter canonicalizer maps it to a reviewed domain/path/instance.
+65. **Effect permit asks for resource not in contract claims** — Expected: contract construction rejects; permit cannot expand authority at runtime.
+66. **APPEND duplicate id with changed payload** — Expected: fail closed; same id/same payload is the only duplicate suppression path.
+67. **Generation changes while controller holds authority** — Expected: semantic contract remains stored; leases/effect authority become invalid and old controller capability cannot act.
+68. **World epoch/dimension changes** — Expected: all old world-scoped mechanical/semantic evidence becomes invalid; old Transition runtime cannot resume blindly.
+
+## V4.1.2 five-pass closure scenarios
+
+69. **Forged VERIFY capability with valid current facts** — Expected: `UNTRUSTED_VERIFIER_CAPABILITY`; current truth does not authorize an arbitrary caller to close the Transition or choose causal credit.
+70. **VERIFY uses a registered verifier id with the wrong contract version** — Expected: `VERIFICATION_DEFINITION_MISMATCH`; no SUCCESS.
+71. **Victim ACKs preemption then tries to issue an effect before commit** — Expected: unused effect commits are revoked at ACK and all new effect/debit/APPEND work is rejected until the atomic ownership transfer completes.
+72. **Victim claims safe yield while irreversible dispatch is still in flight** — Expected: ACK rejected `EFFECT_DISPATCH_IN_FLIGHT`; ownership is not transferred around an ambiguous side effect.
+73. **Highly aged/max-urgency MISSION competes with zero-urgency MISSION_CRITICAL** — Expected: MISSION_CRITICAL remains higher; class order cannot be crossed.
+74. **Same-class peers differ only in urgency** — Expected: bounded canonical urgency orders them deterministically.
+75. **Same-class/urgency/age peers have different deadlines** — Expected: earlier deadline receives only a bounded tie-break; no class escalation.
+76. **Current trusted but unrelated fact is supplied to effect reconciliation** — Expected: `EFFECT_CAUSAL_EVIDENCE_REQUIRED`; the fact must carry the exact effect commit id.
+77. **Effect-causal fact references nonexistent/old-world commit** — Expected: snapshot rejected before it can become reconciliation evidence.
+78. **Forged progress evaluator reports progress** — Expected: `UNTRUSTED_PROGRESS_CAPABILITY`; no progress revision change.
+79. **Progress revision repeats/skips/regresses** — Expected: fail closed; only exact next revision is accepted.
+80. **Old Jev frame after only progress changed** — Expected: binding/epoch may still match, but live frame re-derivation returns `STALE_FRAME_STATE`.
+81. **Old Jev frame after only effect commit state changed** — Expected: `STALE_FRAME_STATE`; effect authority is part of decision context.
+82. **Production `bot.attack` bypasses transition adapter** — Expected migration gate failure until attack is explicit in ActuationPort/resident guard and bound to attack/entity authority.
+83. **Production `bot.openFurnace` bypasses transition adapter** — Expected migration gate failure until station/window/interaction authority is explicit.
+84. **Audit-replayed snapshot is passed back as live KernelState** — Expected: `UNTRUSTED_KERNEL_STATE`; only trusted journal recovery may rebrand invariant-valid replay.

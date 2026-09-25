@@ -57,7 +57,7 @@ Each invariant is intended to become a pure/property/adapter test. `M` = already
 
 ## Model coverage now
 
-`model.test.ts` directly exercises I01, I03-I08, I10-I11, I13-I16, I28, I35-I36, I39-I40, I43, and I49. Migration phases must convert the remaining P invariants into adapter/static/live tests before claiming the corresponding production family is V4.1.1-conformant. V4.1.1 additionally model-tests I51-I72 through the hardening cases below.
+V4.1.1 historical coverage is preserved in commit `d231942`. V4.1.2 supersedes the executable authority path with `kernel.test.ts`, `kernel.property.test.ts`, and the safe `model.ts` facade. Remaining adapter/live invariants still require production evidence before any Transition family is declared migration-safe.
 
 ## V4.1.1 hardening invariants
 
@@ -83,3 +83,57 @@ Each invariant is intended to become a pure/property/adapter test. `M` = already
 70. Preemption phase order is mechanically enforced: ACK -> revoke -> suspend -> grant; no phase may be skipped.
 71. A safe-yield ACK received after its declared deadline remains a typed deadline violation and cannot silently authorize grant.
 72. ATR initialization and replacement APIs reject duplicate semantic identity with a different contractHash, not only mutation callbacks.
+
+## V4.1.2 production-authority kernel invariants
+
+73. The only production-facing authority mutation is the transactional kernel reducer; V4.1.1 helper mutation is not exported by `model.ts`.
+74. `contractHash` is computed from canonical semantic fields by the kernel and a modified same-hash lookalike cannot register as canonical authority.
+75. Every canonical contract is runtime-deep-frozen and bound to a registered compiler at registration.
+76. `requires`, `ensures`, and `invariants` are canonical contract fields and `desiredPredicate` is a declared ensure.
+77. Runtime resource authority uses structured canonical ResourceIds; unknown authority domains fail closed.
+78. A live lease binds owner transition, owner contract, world, generation, scheduler grant incarnation, resource, mode, and critical-section timing.
+79. Only RUNNABLE ATR members may atomically acquire their complete declared canonical bundle.
+80. ACTIVE `heldLeaseIds` exactly equal Lease Store ownership; every non-ACTIVE lifecycle owns zero actuation leases.
+81. No ordinary lifecycle/terminal edge force-revokes a bounded non-preemptible critical section; safe yield is required.
+82. Budget/deadline/VERIFY/Mission terminalization inside a bounded critical section becomes `pendingTerminalOutcome` until safe yield.
+83. A pending-terminal Transition cannot issue/dispatch new effects and retains no unused ISSUED commit.
+84. Resource claim normalization rejects ambiguous overlapping modes/yield semantics and never silently replaces a live bundle.
+85. `resumable=false` has executable preemption semantics and cannot silently resume the same runtime continuation.
+86. A preemption plan binds the full victim set, exact lease ids, requester claim fingerprint, world, generation, binding, and scheduler epoch.
+87. Multi-victim preemption changes no victim until every victim has safely yielded and the entire plan revalidates at atomic commit.
+88. The earliest conflicting bounded hard-yield deadline governs multi-critical safe-yield timing.
+89. Priority inheritance is applied only for a live current higher-priority waiter and changes executable scheduling opportunity for the blocking owner.
+90. A stale/canceled/committed preemption contributes no inherited priority.
+91. Effect commit creation is kernel-owned; dispatch is single-use and `maxCount` is debited at the dispatch linearization point.
+92. Every effect permit names required physical resources that are covered by the contract claim envelope; issue/dispatch require matching live leases.
+93. `DISPATCHING -> UNKNOWN` never automatically returns to ISSUED; irreversible ambiguity requires authoritative reconciliation.
+94. Verifier facts and witness proofs require runtime-branded trusted source capabilities; naked booleans/structural proof objects are not truth authority.
+95. A trusted fact snapshot contains at most one value per predicate and cannot regress accepted observation monotonic time.
+96. Witness revision is monotonic and a witness record binds contract, world, binding, relation and validator identity/version.
+97. Resume validity is derived from live ATR, Mission, trusted facts, world/binding and witness store; it cannot be self-attested by caller booleans.
+98. Controller capabilities are transition+contract+generation scoped; cross-transition budget debit is forbidden.
+99. APPEND accepts only registered append-store resources under a live APPEND lease; operation-id replay is idempotent and id/payload collision fails closed.
+100. Jev admission accepts only kernel-built current frames and grounded RUNNABLE transition/tactic ids; world/binding/epoch/frame mismatch fails closed.
+101. Jev frame identity changes when authoritative facts, witnesses, lifecycle/resource conflict state, Mission, budgets/urgency or other hashed decision inputs change.
+102. Audit replay reproduces exact events but returns non-authoritative state; only trusted journal recovery may create live authority from replay.
+103. Full event replay comparison detects tampered event data even if the embedded command is unchanged.
+104. World identity replacement invalidates old leases/effects/preemption/facts/witnesses/model frames; generation replacement preserves semantics but invalidates mechanical authority.
+105. Terminal transitions retain no live lease or ISSUED/DISPATCHING effect authority and cannot be resurrected.
+106. Registry/fact/Mission/scheduler revisions are kernel-owned monotonic state and cannot be caller-adjusted independently of their mutation.
+107. Seeded randomized command sequences preserve all kernel invariants and deterministic semantic replay after every accepted/rejected step.
+
+## V4.1.2 five-pass closure invariants
+
+108. VERIFY invocation itself requires a runtime-branded verifier capability matching the contract's registered `verificationDefinition`; causal credit cannot be asserted through an untrusted structural command.
+109. A preemption safe-yield ACK is invalid while that victim has an irreversible effect in `DISPATCHING` state.
+110. After a valid preemption safe-yield ACK, the victim retains no ISSUED/DISPATCHING effect and cannot issue effects, debit usage, or APPEND new work before atomic preemption commit.
+111. Scheduling class order is absolute: `VIABILITY > MISSION_CRITICAL > MISSION > BACKGROUND`; fairness aging, urgency, and deadline pressure cannot cross a class boundary.
+112. Contract urgency is canonical, bounded, hashed semantic input; peer urgency affects scheduling without changing authority class.
+113. Deadline pressure is a bounded within-class tie-break and never creates a higher scheduling class.
+114. Definite effect reconciliation requires at least one current trusted verifier fact causally bound to the exact `effectCommitId`; unrelated current facts are insufficient.
+115. Accepted effect-causal facts may reference only an existing same-world effect commit.
+116. Runtime progress is kernel state, not an arbitrary controller counter: each report is emitted by the contract-bound registered progress evaluator with exact next revision and monotonic observation time.
+117. Jev frame identity includes live effect state/usage and runtime progress revision/value/time.
+118. Jev admission re-derives the live decision projection; a self-consistent old frame is rejected after any frame-relevant same-binding mutation.
+119. World, scheduler epoch, and runtime binding stale fences are evaluated before generic live-frame staleness so identity failures preserve typed stale reasons.
+120. `model.ts` remains a compatibility facade over the single canonical kernel and cannot reintroduce an independent authority implementation.
