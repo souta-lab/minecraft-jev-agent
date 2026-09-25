@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   main,
   parseCliArgs,
@@ -8,8 +11,24 @@ import {
   residentTerminationProblems,
   startRowFromLog,
   terminateOwnedProcessGroup,
+  validateExactSourceWorkspaceInstall,
   validatePortPolicy,
+  writeSetupFailureArtifact,
 } from './run-vtr-reach-live-probe.mjs'
+
+function writeWorkspaceFixture(root, { linkTarget = null } = {}) {
+  mkdirSync(join(root, 'unused-workspace'), { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture-root', workspaces: ['unused-workspace'], dependencies: {} }))
+  writeFileSync(join(root, 'bun.lock'), JSON.stringify({ workspaces: {
+    '': { name: 'fixture-root' },
+    'unused-workspace': { name: 'unused-workspace', version: '1.0.0' },
+  } }))
+  writeFileSync(join(root, 'unused-workspace', 'package.json'), JSON.stringify({ name: 'unused-workspace', version: '1.0.0', dependencies: {} }))
+  if (linkTarget) {
+    mkdirSync(join(root, 'node_modules'), { recursive: true })
+    symlinkSync(linkTarget, join(root, 'node_modules', 'unused-workspace'), 'dir')
+  }
+}
 
 describe('Reach live probe caller pure contracts', () => {
   test('help parsing does not require a live server configuration', () => {
@@ -30,6 +49,60 @@ describe('Reach live probe caller pure contracts', () => {
     expect(parseJavaMajor('openjdk version "21.0.4" 2026-07-15')).toBe(21)
     expect(parseJavaMajor('java version "1.8.0_402"')).toBe(8)
     expect(parseJavaMajor('not a Java version')).toBeNull()
+  })
+
+  test('exact-source install accepts an unused declared workspace without a Bun link', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-workspace-install-'))
+    const root = join(parent, 'source')
+    mkdirSync(root)
+    try {
+      writeWorkspaceFixture(root)
+      const report = validateExactSourceWorkspaceInstall(root, ['unused-workspace'])
+      expect(report.workspaceLinks['unused-workspace'].installedLink.status).toBe('NOT_LINKED')
+      expect(report.workspaceLinks['unused-workspace'].bunLockWorkspace).toEqual({
+        path: 'unused-workspace', name: 'unused-workspace', version: '1.0.0',
+      })
+      expect(report.workspaceValidation).toMatchObject({ status: 'PASS', absentUnusedLinksAllowed: true, installedLinksChecked: true })
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('exact-source install rejects a present workspace link that escapes the checkout', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-workspace-link-'))
+    const root = join(parent, 'source')
+    const external = join(parent, 'outside-workspace')
+    mkdirSync(root)
+    mkdirSync(external)
+    try {
+      writeWorkspaceFixture(root, { linkTarget: external })
+      expect(() => validateExactSourceWorkspaceInstall(root, ['unused-workspace']))
+        .toThrow(/resolves outside the exact-source tree/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('staged setup failure records exact cause before the CLI returns', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-setup-failure-'))
+    const attempt = join(parent, 'attempt')
+    mkdirSync(join(attempt, 'runner'), { recursive: true })
+    try {
+      const path = writeSetupFailureArtifact(attempt, {
+        sourceSha: 'a'.repeat(40), stage: 'frozen-dependency-install',
+        error: new Error('workspace identity mismatch'), preflightPath: join(attempt, 'runner', 'preflight.json'),
+      })
+      const report = JSON.parse(readFileSync(path, 'utf8'))
+      expect(report).toMatchObject({
+        schema: 'vtr-reach-live-caller-failure/v1',
+        sourceSha: 'a'.repeat(40),
+        failureStage: 'frozen-dependency-install',
+        reason: 'workspace identity mismatch',
+        servicesStarted: false,
+      })
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
   })
 
   test('Leaf startup log rows require stdout provenance and ordered exact level evidence', () => {

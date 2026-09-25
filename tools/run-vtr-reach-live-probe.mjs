@@ -526,6 +526,117 @@ const WORKSPACE_PATHS = Object.freeze([
   'mcbot/movement-test/variants/A', 'companion', 'system2-harness',
 ])
 
+function readBunLock(lockPath) {
+  const text = readFileSync(lockPath, 'utf8')
+  if (!globalThis.Bun?.JSONC?.parse) throw new Error('Bun JSONC parser is unavailable for exact-source lock validation')
+  return globalThis.Bun.JSONC.parse(text)
+}
+
+/**
+ * Validate workspace identity from the exact checkout's root manifest and lock,
+ * then inspect only links Bun actually installed. A workspace need not have a
+ * node_modules link when no package depends on it by package name.
+ */
+export function validateExactSourceWorkspaceInstall(runtimeSource, workspacePaths = WORKSPACE_PATHS) {
+  const root = realpathSync(runtimeSource)
+  const rootPackagePath = join(root, 'package.json')
+  const rootPackageStat = lstatSync(rootPackagePath)
+  if (rootPackageStat.isSymbolicLink() || !rootPackageStat.isFile()) throw new Error('exact-source root package.json must be a regular file')
+  const rootPackageBytes = readFileSync(rootPackagePath)
+  const rootPackage = JSON.parse(rootPackageBytes.toString('utf8'))
+  if (!Array.isArray(rootPackage.workspaces)) throw new Error('exact-source root package.json has no workspace path list')
+  const declared = new Set(rootPackage.workspaces)
+  const expected = new Set(workspacePaths)
+  if (declared.size !== expected.size || [...expected].some((path) => !declared.has(path))) {
+    throw new Error('exact-source workspace path list differs from the pinned caller workspace inventory')
+  }
+
+  const lockPath = join(root, 'bun.lock')
+  const lockStat = lstatSync(lockPath)
+  if (lockStat.isSymbolicLink() || !lockStat.isFile()) throw new Error('exact-source bun.lock must be a regular file')
+  const lockBytes = readFileSync(lockPath)
+  const lock = readBunLock(lockPath)
+  if (!isPlainObject(lock.workspaces) || !isPlainObject(lock.workspaces[''])) throw new Error('exact-source bun.lock has no root/workspace identity map')
+  if (lock.workspaces[''].name !== rootPackage.name) throw new Error('root package identity differs from bun.lock')
+
+  const nodeModulesPath = join(root, 'node_modules')
+  try {
+    const nodeModulesStat = lstatSync(nodeModulesPath)
+    if (nodeModulesStat.isSymbolicLink() || !nodeModulesStat.isDirectory()) throw new Error('exact-source node_modules must be a real directory when present')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+
+  const workspaces = {}
+  const names = new Set()
+  for (const workspacePath of workspacePaths) {
+    if (typeof workspacePath !== 'string' || workspacePath.startsWith('/') || workspacePath.split('/').includes('..')) {
+      throw new Error(`workspace path is unsafe: ${String(workspacePath)}`)
+    }
+    const packagePath = join(root, workspacePath, 'package.json')
+    const packageStat = lstatSync(packagePath)
+    if (packageStat.isSymbolicLink() || !packageStat.isFile()) throw new Error(`workspace package manifest must be a regular file: ${workspacePath}`)
+    const packageBytes = readFileSync(packagePath)
+    const packageJson = JSON.parse(packageBytes.toString('utf8'))
+    const name = packageJson.name
+    if (typeof name !== 'string' || name.length === 0 || name.startsWith('/') || names.has(name)) {
+      throw new Error(`workspace package name is invalid or duplicated: ${workspacePath}`)
+    }
+    names.add(name)
+    const lockWorkspace = lock.workspaces[workspacePath]
+    if (!isPlainObject(lockWorkspace) || lockWorkspace.name !== name
+      || (packageJson.version != null && lockWorkspace.version !== packageJson.version)) {
+      throw new Error(`workspace package identity differs from bun.lock: ${workspacePath}`)
+    }
+    const expectedLexicalRoot = resolve(root, workspacePath)
+    if (!(expectedLexicalRoot === root || expectedLexicalRoot.startsWith(`${root}${sep}`))) throw new Error(`workspace path escapes exact-source root: ${workspacePath}`)
+    const expectedPackageRoot = realpathSync(expectedLexicalRoot)
+    if (expectedPackageRoot !== expectedLexicalRoot) throw new Error(`workspace path resolves through a symlink: ${workspacePath}`)
+    const linkPath = join(root, 'node_modules', name)
+    let linkStat = null
+    try {
+      // lstat detects dangling symlinks too; existsSync would misclassify them
+      // as absent and could hide a broken or redirected install entry.
+      linkStat = lstatSync(linkPath)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+    let installedLink
+    if (linkStat === null) {
+      installedLink = { status: 'NOT_LINKED', path: relative(root, linkPath).split(sep).join('/') }
+    } else {
+      const actual = realpathSync(linkPath)
+      if (actual !== expectedPackageRoot) throw new Error(`workspace dependency resolves outside the exact-source tree: ${name}`)
+      installedLink = {
+        status: 'PRESENT',
+        path: relative(root, linkPath).split(sep).join('/'),
+        target: relative(root, actual).split(sep).join('/'),
+      }
+    }
+    workspaces[name] = {
+      packagePath: workspacePath,
+      packageJsonSha256: sha256(packageBytes),
+      bunLockWorkspace: { path: workspacePath, name, version: packageJson.version ?? null },
+      installedLink,
+    }
+  }
+  for (const workspacePath of workspacePaths) {
+    if (!Object.hasOwn(lock.workspaces, workspacePath)) throw new Error(`bun.lock is missing workspace entry: ${workspacePath}`)
+  }
+  return {
+    rootPackageJsonSha256: sha256(rootPackageBytes),
+    bunLockSha256: sha256(lockBytes),
+    workspaceLinks: workspaces,
+    noExternalWorkspaceLinks: true,
+    workspaceValidation: {
+      status: 'PASS',
+      manifestSource: 'exact-source package.json + bun.lock',
+      absentUnusedLinksAllowed: true,
+      installedLinksChecked: true,
+    },
+  }
+}
+
 function inspectProjectConfigPaths(root) {
   const found = []
   for (const directory of ['.', ...WORKSPACE_PATHS]) {
@@ -588,19 +699,11 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
   const logPath = join(attemptRoot, 'runner', 'dependency-install.log')
   writeFileSync(logPath, redactOperationalText(`${result.stdout ?? ''}\n${result.stderr ?? ''}`), { flag: 'wx', mode: 0o600 })
   if (result.error || result.status !== 0) throw new Error(`frozen dependency install failed (${result.error?.code ?? result.status ?? 'unknown'}); see runner/dependency-install.log`)
-  const workspaces = {}
-  for (const workspacePath of WORKSPACE_PATHS) {
-    const packageJsonPath = join(runtimeSource, workspacePath, 'package.json')
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
-    const name = packageJson.name
-    if (typeof name !== 'string' || name.length === 0 || name.startsWith('/')) throw new Error(`workspace package name is invalid: ${workspacePath}`)
-    const linkPath = join(runtimeSource, 'node_modules', name)
-    const expected = realpathSync(join(runtimeSource, workspacePath))
-    if (!existsSync(linkPath)) throw new Error(`exact-source Bun workspace link is absent: ${name}`)
-    const actual = realpathSync(linkPath)
-    if (actual !== expected) throw new Error(`workspace dependency resolves outside the exact-source tree: ${name}`)
-    workspaces[name] = { packagePath: workspacePath, link: relative(runtimeSource, linkPath).split(sep).join('/'), target: relative(runtimeSource, actual).split(sep).join('/') }
-  }
+  // Frozen install success plus lock/manifest identity is authoritative for
+  // unused workspaces. Bun materializes node_modules links only for packages
+  // referenced by dependencies, so require exact-source resolution only for
+  // links that are actually present.
+  const workspaceInstall = validateExactSourceWorkspaceInstall(runtimeSource)
   const version = spawnSync(process.execPath, ['--no-env-file', '--version'], { cwd: runtimeSource, env: minimalEnvironment(installEnvironment), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 })
   const metadata = {
     schema: 'vtr-exact-source-dependency-install/v1',
@@ -622,8 +725,7 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
       ambientProjectConfigFiles: [],
       credentialValuesArchived: false,
     },
-    workspaceLinks: workspaces,
-    noExternalWorkspaceLinks: true,
+    ...workspaceInstall,
   }
   const metadataPath = join(attemptRoot, 'runner', 'dependency-install.json')
   const sourceBunLockPath = join(attemptRoot, 'runner', 'source-bun.lock')
@@ -2408,6 +2510,22 @@ function writePreflightArtifact(attemptRoot, report) {
   return path
 }
 
+export function writeSetupFailureArtifact(attemptRoot, { sourceSha, stage, error, preflightPath = null }) {
+  const path = join(attemptRoot, 'runner', 'runner-failure.json')
+  writeJsonExclusive(path, {
+    schema: 'vtr-reach-live-caller-failure/v1',
+    sourceSha,
+    attemptRoot,
+    failureStage: stage,
+    reason: safeErrorDescription(error),
+    cleanup: [],
+    servicesStarted: false,
+    preflightPath,
+    capturedAt: isoNow(),
+  })
+  return path
+}
+
 async function executeRun(options, preflight) {
   const sourceSha = preflight.sourceSha
   if (!SHA40.test(String(sourceSha ?? ''))) throw new Error('preflight did not establish an exact source SHA')
@@ -2419,9 +2537,23 @@ async function executeRun(options, preflight) {
   for (const dir of ['runner', 'server', 'tmp', 'home', 'cache']) mkdirSync(join(options.attemptRoot, dir), { recursive: true, mode: 0o700 })
   const preflightPath = writePreflightArtifact(options.attemptRoot, preflight)
   const exactBranch = preflight.branch ?? 'detached-exact-source'
-  const { runtimeSource } = ensureRuntimeSource(options.sourceRoot, options.attemptRoot, sourceSha, exactBranch)
-  const install = runFrozenInstall(runtimeSource, options.attemptRoot)
-  const noDouble = runNoDoubleAuthorityFixture(runtimeSource, options.attemptRoot, sourceSha)
+  let runtimeSource
+  let install
+  let noDouble
+  let setupStage = 'exact-source-worktree'
+  try {
+    ;({ runtimeSource } = ensureRuntimeSource(options.sourceRoot, options.attemptRoot, sourceSha, exactBranch))
+    setupStage = 'frozen-dependency-install'
+    install = runFrozenInstall(runtimeSource, options.attemptRoot)
+    setupStage = 'no-double-authority-fixture'
+    noDouble = runNoDoubleAuthorityFixture(runtimeSource, options.attemptRoot, sourceSha)
+  } catch (error) {
+    const failurePath = join(options.attemptRoot, 'runner', 'runner-failure.json')
+    if (!existsSync(failurePath)) {
+      try { writeSetupFailureArtifact(options.attemptRoot, { sourceSha, stage: setupStage, error, preflightPath }) } catch {}
+    }
+    throw error
+  }
   const runNonce = randomBytes(8).toString('hex')
   const levelName = `vtrreach-${sourceSha.slice(0, 12)}-${runNonce}`
   writeJsonExclusive(join(options.attemptRoot, 'runner', 'mission.json'), { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
