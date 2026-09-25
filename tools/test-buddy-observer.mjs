@@ -415,8 +415,17 @@ const ingressReadyTs = '2026-09-21T13:00:00.000Z'
 const ingressCommitTs = '2026-09-21T13:00:01.000Z'
 const ingressRouteTs = '2026-09-21T13:00:01.050Z'
 const ingressRouteMirrorTs = '2026-09-21T13:00:01.051Z'
+const ingressIntentRefusedTs = '2026-09-21T13:00:01.052Z'
+const ingressLegacyRevokedTs = '2026-09-21T13:00:01.055Z'
+const ingressLegOneReserveTs = '2026-09-21T13:00:01.060Z'
+const ingressLegOneActuationTs = '2026-09-21T13:00:01.065Z'
+const ingressLegOneOutcomeTs = '2026-09-21T13:00:01.070Z'
+const ingressLegTwoReserveTs = '2026-09-21T13:00:01.080Z'
+const ingressLegTwoActuationTs = '2026-09-21T13:00:01.085Z'
+const ingressLegTwoOutcomeTs = '2026-09-21T13:00:01.090Z'
 const ingressVerifyTs = '2026-09-21T13:00:02.000Z'
 const ingressOutcomeTs = '2026-09-21T13:00:02.010Z'
+const ingressOrphanTs = '2026-09-21T13:00:02.020Z'
 const ingressWorld = {
   serverId: 'observer-local',
   dimension: 'minecraft:overworld',
@@ -521,9 +530,73 @@ const ingressOutcome = {
     transitionId: ingressTransitionId,
     contractHash: ingressContractHash,
     outcome: { kind: 'SUCCESS', contractHash: ingressContractHash, evidenceIds: ['verify:observer-vtr-ingress'] },
+    usage: { mechanicalSteps: 2, elapsedMs: 1000, resources: {}, risk: {}, effects: { locomotion: 2 } },
     metrics: { verifiedTransitionCompletion: 1, mechanicalStepsPerTransition: 2, jevCallsPerTransition: 0, duplicateAuthority: false },
   },
 }
+const ingressStepEvent = (ts, event, detail, message) => ({
+  record: 'agent-event',
+  ts,
+  source: 'vtr',
+  message,
+  detail: { ...ingressContractIdentity, transitionId: ingressTransitionId, contractHash: ingressContractHash, ...detail },
+})
+const ingressIntentRefused = ingressStepEvent(
+  ingressIntentRefusedTs,
+  'VTR_RUNTIME_INTENT_REFUSED',
+  { intentId: 'intent-refused', routeId: 'MOVE:stale', reason: 'route-not-in-current-observation' },
+  `VTR_RUNTIME_INTENT_REFUSED transition=${ingressTransitionId} intent=intent-refused reason=route-not-in-current-observation`,
+)
+const ingressLegacyActuationRevoked = ingressStepEvent(
+  ingressLegacyRevokedTs,
+  'VTR_ORPHAN_ACTUATION_REVOKED',
+  { actionId: 'MOVE:legacy', authority: 'legacy', reason: 'vtr-transition-owns-body' },
+  `VTR_ORPHAN_ACTUATION_REVOKED transition=${ingressTransitionId} action=MOVE:legacy`,
+)
+const ingressMechanicalRecords = [
+  ingressStepEvent(
+    ingressLegOneReserveTs,
+    'VTR_MECHANICAL_STEP_RESERVED',
+    { intentId: 'intent-leg-1', stepId: 'step-leg-1', leg: 1, effectKind: 'locomotion', usage: { mechanicalSteps: 1 } },
+    `VTR_MECHANICAL_STEP_RESERVED transition=${ingressTransitionId} step=step-leg-1 leg=1`,
+  ),
+  ingressStepEvent(
+    ingressLegOneActuationTs,
+    'VTR_TRANSITION_ACTUATION',
+    { intentId: 'intent-leg-1', stepId: 'step-leg-1', candidate: 'MOVE:oak-1', target: { x: 5, y: 63, z: 490 }, selectedBy: 'vtr_transition_controller', authority: 'vtr-transition-controller', leaseEpoch: 1 },
+    `VTR_TRANSITION_ACTUATION id=${ingressTransitionId} step=step-leg-1`,
+  ),
+  ingressStepEvent(
+    ingressLegOneOutcomeTs,
+    'VTR_MECHANICAL_OUTCOME',
+    { intentId: 'intent-leg-1', stepId: 'step-leg-1', leg: 1, status: 'completed', verified: true, usage: { mechanicalSteps: 1 } },
+    `VTR_MECHANICAL_OUTCOME transition=${ingressTransitionId} step=step-leg-1 status=completed`,
+  ),
+  ingressStepEvent(
+    ingressLegTwoReserveTs,
+    'VTR_MECHANICAL_STEP_RESERVED',
+    { intentId: 'intent-leg-2', stepId: 'step-leg-2', leg: 2, effectKind: 'locomotion', usage: { mechanicalSteps: 2 } },
+    `VTR_MECHANICAL_STEP_RESERVED transition=${ingressTransitionId} step=step-leg-2 leg=2`,
+  ),
+  ingressStepEvent(
+    ingressLegTwoActuationTs,
+    'VTR_TRANSITION_ACTUATION',
+    { intentId: 'intent-leg-2', stepId: 'step-leg-2', candidate: 'MOVE:oak-2', target: { x: 6, y: 63, z: 490 }, selectedBy: 'vtr_transition_controller', authority: 'vtr-transition-controller', leaseEpoch: 2 },
+    `VTR_TRANSITION_ACTUATION id=${ingressTransitionId} step=step-leg-2`,
+  ),
+  ingressStepEvent(
+    ingressLegTwoOutcomeTs,
+    'VTR_MECHANICAL_OUTCOME',
+    { intentId: 'intent-leg-2', stepId: 'step-leg-2', leg: 2, status: 'completed', verified: true, usage: { mechanicalSteps: 2 } },
+    `VTR_MECHANICAL_OUTCOME transition=${ingressTransitionId} step=step-leg-2 status=completed`,
+  ),
+]
+const ingressOrphanActionOutcome = ingressStepEvent(
+  ingressOrphanTs,
+  'VTR_ORPHAN_ACTION_OUTCOME',
+  { intentId: 'intent-leg-2', result: { actionId: 'MOVE:oak-2', status: 'cancelled', verified: false, skillOutcome: 'LEASE_REVOKED', failure: 'cancelled' } },
+  `VTR_ORPHAN_ACTION_OUTCOME transition=${ingressTransitionId} intent=intent-leg-2 action=MOVE:oak-2 status=cancelled`,
+)
 const wrongBoundaryRecord = (ts, id, identityOverrides) => ({
   record: 'agent-event',
   ts,
@@ -556,8 +629,12 @@ const wrongRunVerify = {
 const ingressRecords = [
   ingressCommit,
   ingressRouteRecord,
+  ingressIntentRefused,
+  ingressLegacyActuationRevoked,
+  ...ingressMechanicalRecords,
   ingressVerify,
   ingressOutcome,
+  ingressOrphanActionOutcome,
   wrongRouteBoundaryRecord('2026-09-21T13:00:02.100Z', { runId: 'run-prior' }),
   wrongRouteBoundaryRecord('2026-09-21T13:00:02.200Z', { generationId: 'gen-prior' }),
   wrongRouteBoundaryRecord('2026-09-21T13:00:02.300Z', { sourceSha: 'd'.repeat(40) }),
@@ -623,6 +700,40 @@ try {
   })
   assert.equal(ingressSnapshot.vtr.latest.verification.truth, 'TRUE')
   assert.equal(ingressSnapshot.vtr.latest.outcome.kind, 'SUCCESS')
+  assert.equal(ingressSnapshot.vtr.latest.mechanical.reservationCount, 2)
+  assert.equal(ingressSnapshot.vtr.latest.mechanical.actuationEventCount, 2)
+  assert.equal(ingressSnapshot.vtr.latest.mechanical.mechanicalOutcomeEventCount, 2)
+  assert.deepEqual(ingressSnapshot.vtr.latest.lifecycleEvents.map((event) => event.event), [
+    'VTR_RUNTIME_INTENT_REFUSED',
+    'VTR_ORPHAN_ACTUATION_REVOKED',
+    'VTR_ORPHAN_ACTION_OUTCOME',
+  ])
+  assert.deepEqual(ingressSnapshot.vtr.latest.mechanical.steps.map((step) => ({
+    stepId: step.stepId,
+    leg: step.leg,
+    status: step.status,
+    correlation: step.correlation,
+    traceEvents: step.trace.map((event) => event.event),
+  })), [
+    {
+      stepId: 'step-leg-1',
+      leg: 1,
+      status: 'mechanical_outcome_observed',
+      correlation: { reservation: 'step-id', actuation: 'step-id', outcome: 'step-id' },
+      traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_OUTCOME'],
+    },
+    {
+      stepId: 'step-leg-2',
+      leg: 2,
+      status: 'mechanical_outcome_observed',
+      correlation: { reservation: 'step-id', actuation: 'step-id', outcome: 'step-id' },
+      traceEvents: ['VTR_MECHANICAL_STEP_RESERVED', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_OUTCOME'],
+    },
+  ])
+  assert.equal(ingressSummary.vtr.latest.outcomeConsistency.status, 'contradiction')
+  assert.equal(ingressSummary.vtr.latest.outcomeConsistency.contradictions[0].kind, 'orphan_action_after_success')
+  assert.equal(ingressSummary.vtr.latest.outcomeConsistency.contradictions[0].actionStatus, 'cancelled')
+  assert.match(ingressSummary.headline, /Lifecycle contradiction: orphan action MOVE:oak-2 reported cancelled after Transition SUCCESS \(predicate verification=TRUE\)/)
   assert.equal(ingressSnapshot.vtr.latest.binding.runId, ingressRunId)
   assert.equal(ingressSnapshot.vtr.latest.binding.generationId, ingressGenerationId)
   assert.equal(ingressSnapshot.vtr.latest.binding.sourceSha, ingressSourceSha)

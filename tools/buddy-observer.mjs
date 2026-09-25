@@ -30,13 +30,38 @@ const DEFAULT_CONTROL_TIMEOUT_MS = 5000
 
 const VTR_TRACE_EVENTS = new Set([
   'VTR_REACH_PROBE_HOLD',
+  'VTR_DUAL_AUTHORITY_FENCE',
+  'VTR_MISSION_SNAPSHOT_REFUSED',
+  'VTR_TERMINAL_HANDOFF_REFUSED',
+  'VTR_RISK_OBSERVED',
+  'VTR_REACH_GUARD_REFUSED',
+  'VTR_RUNTIME_INTENT_REFUSED',
+  'VTR_EXECUTOR_CLAIM_REFUSED',
+  'VTR_INTENT_RELEASE_REFUSED',
+  'VTR_CONTROLLER_TICK_REFUSED',
+  'VTR_RISK_OBSERVATION_REFUSED',
+  'VTR_COMPLETION_REFUSED',
+  'VTR_MECHANICAL_OUTCOME_REFUSED',
+  'VTR_VERIFY_JOURNAL_REFUSED',
+  'VTR_ROUTE_SELECTION_REQUIRED',
   'VTR_TRANSITION_COMMIT',
   'VTR_TRANSITION_PROGRESS',
   'VTR_TRANSITION_ACTUATION',
+  'VTR_ACTION_COMPLETION_HANDLER_FAILED',
+  'VTR_SCHEDULER_HOLDS_NO_ADMISSIBLE_ROUTE',
+  'VTR_SCHEDULER_HOLDS_TERMINAL',
+  'VTR_MECHANICAL_STEP_REFUSED',
+  'VTR_MECHANICAL_STEP_RESERVED',
+  'VTR_MECHANICAL_OUTCOME_REJECTED',
+  'VTR_MECHANICAL_OUTCOME',
   'VTR_REACH_ROUTE_DECISION',
   'VTR_TRANSITION_VERIFY',
   'VTR_TRANSITION_OUTCOME',
   'VTR_ORPHAN_ACTION_OUTCOME',
+  'VTR_LEGACY_REACH_MOVE_WITHHELD',
+  'VTR_LEGACY_REACH_HANDOFF',
+  'VTR_ORPHAN_ACTUATION_REVOKED',
+  'VTR_SAFETY_TRIGGER_STALE',
 ])
 
 const TRACE_EVENTS = new Set([
@@ -859,6 +884,133 @@ function traceProjection(entry) {
   return { ts: entry.ts, event: entry.event, detail: entry.detail }
 }
 
+function mechanicalStepId(entry) {
+  const detail = entry?.detail ?? {}
+  const value = detail.stepId ?? detail.mechanicalStepId ?? detail.step?.stepId
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function mechanicalIntentId(entry) {
+  const detail = entry?.detail ?? {}
+  const value = detail.intentId ?? detail.intent?.intentId
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function mechanicalStepProjection(linked) {
+  const reservations = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_STEP_RESERVED')
+  const actuations = linked.filter((entry) => entry.event === 'VTR_TRANSITION_ACTUATION')
+  const outcomes = linked.filter((entry) => entry.event === 'VTR_MECHANICAL_OUTCOME')
+  const controlNames = new Set([
+    'VTR_DUAL_AUTHORITY_FENCE',
+    'VTR_REACH_GUARD_REFUSED',
+    'VTR_RUNTIME_INTENT_REFUSED',
+    'VTR_EXECUTOR_CLAIM_REFUSED',
+    'VTR_INTENT_RELEASE_REFUSED',
+    'VTR_MECHANICAL_STEP_REFUSED',
+    'VTR_MECHANICAL_OUTCOME_REFUSED',
+    'VTR_MECHANICAL_OUTCOME_REJECTED',
+    'VTR_ORPHAN_ACTUATION_REVOKED',
+  ])
+  const controls = linked.filter((entry) => controlNames.has(entry.event))
+  const steps = reservations.map((reservation) => {
+    const stepId = mechanicalStepId(reservation)
+    const intentId = mechanicalIntentId(reservation)
+    const stepActuations = actuations.filter((entry) => {
+      const actuationStepId = mechanicalStepId(entry)
+      if (actuationStepId !== null) return stepId !== null && actuationStepId === stepId
+      return intentId !== null && mechanicalIntentId(entry) === intentId
+    })
+    const stepOutcomes = outcomes.filter((entry) => stepId !== null && mechanicalStepId(entry) === stepId)
+    const intentOutcomes = outcomes.filter((entry) => mechanicalStepId(entry) === null
+      && intentId !== null && mechanicalIntentId(entry) === intentId)
+    const stepControls = controls.filter((entry) => {
+      const controlStepId = mechanicalStepId(entry)
+      const controlIntentId = mechanicalIntentId(entry)
+      if (controlStepId !== null) return stepId !== null && controlStepId === stepId
+      return intentId !== null && controlIntentId === intentId
+    })
+    const actuationBinding = stepActuations.map((entry) => ({
+      scope: mechanicalStepId(entry) === stepId && stepId !== null ? 'step' : 'intent',
+      event: traceProjection(entry),
+    }))
+    const outcome = stepOutcomes.at(-1) ?? null
+    const intentOutcome = intentOutcomes.at(-1) ?? null
+    const reservedDetail = reservation.detail ?? {}
+    return {
+      stepId,
+      leg: reservedDetail.leg ?? null,
+      intentId,
+      effectKind: reservedDetail.effectKind ?? null,
+      status: outcome !== null ? 'mechanical_outcome_observed'
+        : intentOutcome !== null ? 'intent_outcome_only'
+          : stepControls.length > 0 ? 'control_event_observed'
+            : stepActuations.length > 0 ? 'actuated_outcome_unobserved'
+              : 'reserved_without_actuation',
+      reserved: traceProjection(reservation),
+      actuations: actuationBinding,
+      outcome: traceProjection(outcome),
+      intentOutcome: traceProjection(intentOutcome),
+      controlEvents: stepControls.map(traceProjection),
+      correlation: {
+        reservation: stepId === null ? 'missing-step-id' : 'step-id',
+        actuation: stepActuations.length === 0 ? 'unmatched'
+          : stepActuations.every((entry) => mechanicalStepId(entry) === stepId && stepId !== null)
+            ? 'step-id' : 'shared-intent-id',
+        outcome: outcome !== null ? 'step-id' : intentOutcome !== null ? 'intent-id-only' : 'not-observed',
+      },
+      trace: [reservation, ...stepActuations, ...(outcome === null ? [] : [outcome]), ...(intentOutcome === null ? [] : [intentOutcome]), ...stepControls]
+        .sort((left, right) => (parseTimestamp(left.ts) ?? 0) - (parseTimestamp(right.ts) ?? 0))
+        .map(traceProjection),
+    }
+  })
+  return {
+    steps: steps.slice(0, 256),
+    truncated: steps.length > 256,
+    reservationCount: reservations.length,
+    actuationEventCount: actuations.length,
+    mechanicalOutcomeEventCount: outcomes.length,
+    controlEventCount: controls.length,
+    actionOutcomes: outcomes.filter((entry) => mechanicalStepId(entry) === null).slice(-64).map(traceProjection),
+    controlEvents: controls.slice(-64).map(traceProjection),
+  }
+}
+
+function projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification) {
+  const orphanEvents = linked.filter((entry) => entry.event === 'VTR_ORPHAN_ACTION_OUTCOME')
+  const terminalIndex = linked.indexOf(outcomeEvent)
+  const terminalAt = parseTimestamp(outcomeEvent?.ts)
+  const postTerminal = terminalKind === 'SUCCESS'
+    ? orphanEvents.filter((entry) => {
+      const eventAt = parseTimestamp(entry.ts)
+      return eventAt !== null && terminalAt !== null
+        && (eventAt > terminalAt || (eventAt === terminalAt && linked.indexOf(entry) > terminalIndex))
+    })
+    : []
+  const contradictions = postTerminal.map((entry) => {
+    const result = entry.detail?.result ?? {}
+    return {
+      kind: 'orphan_action_after_success',
+      severity: 'contradiction',
+      transitionId: entry.detail?.transitionId ?? null,
+      intentId: entry.detail?.intentId ?? null,
+      actionId: result.actionId ?? entry.detail?.actionId ?? null,
+      actionStatus: result.status ?? entry.detail?.status ?? null,
+      actionVerified: result.verified ?? entry.detail?.verified ?? null,
+      skillOutcome: result.skillOutcome ?? entry.detail?.skillOutcome ?? null,
+      verifiedTransition: verification?.verified === true,
+      observedAt: entry.ts,
+      event: traceProjection(entry),
+    }
+  })
+  return {
+    status: contradictions.length > 0 ? 'contradiction'
+      : orphanEvents.length > 0 ? 'orphan_observed'
+        : outcomeEvent === null ? 'pending' : 'no_post_terminal_orphan_observed',
+    orphanActionOutcomes: orphanEvents.slice(-64).map(traceProjection),
+    contradictions,
+  }
+}
+
 function projectVtrReachRouteDecision(entry) {
   if (entry === null) return null
   const detail = entry.detail ?? {}
@@ -1011,6 +1163,9 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
     const outcomeDetail = outcomeEvent?.detail ?? null
     const terminalKind = outcomeDetail?.outcome?.kind ?? null
     const verifiedSuccess = terminalKind === 'SUCCESS' && verification?.verified === true
+    const mechanical = mechanicalStepProjection(linked)
+    const outcomeConsistency = projectPostTerminalOrphans(linked, outcomeEvent, terminalKind, verification)
+    const lifecycleEvents = linked.filter((entry) => /(?:REFUSED|FENCE|ORPHAN|HANDOFF|STALE|FAILED|REQUIRED|REVOKED|WITHHELD|REJECTED|HOLDS)/.test(entry.event))
     const status = verifiedSuccess
       ? 'verified_success'
       : terminalKind === 'SUCCESS' ? 'success_without_verified_predicate'
@@ -1036,6 +1191,8 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
       },
       progress: progressEvent?.detail?.progress ?? null,
       progressEvent: traceProjection(progressEvent),
+      mechanical,
+      lifecycleEvents: lifecycleEvents.slice(-64).map(traceProjection),
       routeDecision: projectVtrReachRouteDecision(routeDecisionEvent),
       actuation: actuationEvent === null ? null : {
         candidate: actuationEvent.detail?.candidate ?? null,
@@ -1046,6 +1203,7 @@ export function projectVtrTransitions({ events = [], runId = null, generationId 
         event: traceProjection(actuationEvent),
       },
       verification,
+      outcomeConsistency,
       outcome: outcomeDetail === null ? null : {
         kind: terminalKind,
         boundary: outcomeDetail.boundary ?? null,
@@ -2102,6 +2260,10 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
     && snapshot.vtr?.latest?.outcome?.kind !== undefined
     ? ` VTR outcome=${snapshot.vtr.latest.outcome.kind}; predicate verification=${snapshot.vtr.latest.verification?.verified === true ? 'TRUE' : snapshot.vtr.latest.verification?.truth ?? 'not recorded'}.`
     : ''
+  const postSuccessContradiction = snapshot.vtr?.latest?.outcomeConsistency?.contradictions?.[0] ?? null
+  const vtrConsistencyHeadline = postSuccessContradiction === null
+    ? ''
+    : ` Lifecycle contradiction: orphan action ${postSuccessContradiction.actionId ?? 'UNKNOWN'} reported ${postSuccessContradiction.actionStatus ?? 'unknown status'} after Transition SUCCESS (predicate verification=${postSuccessContradiction.verifiedTransition ? 'TRUE' : 'not confirmed'}).`
   const failureHeadline = runtimeFailure?.detail?.code
     ? ` Runtime failure: ${runtimeFailure.detail.code}${runtimeFailure.detail.context ? ` (${runtimeFailure.detail.context})` : ''}.`
     : ''
@@ -2113,7 +2275,7 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   return redactSecrets({
     schemaVersion: 1,
     kind: 'ai-buddy-decision-summary',
-    headline: `${headline}${vtrTerminalHeadline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
+    headline: `${headline}${vtrTerminalHeadline}${vtrConsistencyHeadline}${modelUnavailable ? ` Model authority unavailable; retryAt=${modelAvailability.retryAt ?? 'retry starting'}.` : ''}${failureHeadline}${interruptionHeadline}`,
     observedAt: snapshot.observedAt,
     freshnessMs,
     run: {
