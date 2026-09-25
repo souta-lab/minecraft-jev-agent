@@ -64,6 +64,81 @@ function ratio(value, path) {
   return value
 }
 
+const VTR_TRANSITION_MODEL_METRICS = 'VTR_TRANSITION_MODEL_METRICS'
+
+function eventToken(line, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?:^|\\s)${escaped}=([^\\s]+)`).exec(line)?.[1] ?? null
+}
+
+function eventCount(line, name, pathLabel) {
+  const value = eventToken(line, name)
+  if (value === null || !/^\d+$/.test(value)) throw new Error(`${pathLabel}.${name} must be a non-negative integer`)
+  return count(Number(value), `${pathLabel}.${name}`)
+}
+
+function parseTransitionModelMetricsEventLines(lines, transitionId, contractHash, pathLabel) {
+  const matching = []
+  for (const line of lines) {
+    const markerAt = line.indexOf(VTR_TRANSITION_MODEL_METRICS)
+    if (markerAt < 0) continue
+    const event = line.slice(markerAt)
+    if (eventToken(event, 'transitionId') !== transitionId) continue
+    const observedContractHash = eventToken(event, 'contractHash')
+    if (observedContractHash !== contractHash) {
+      throw new Error(`${pathLabel} ${VTR_TRANSITION_MODEL_METRICS} contractHash does not match the committed Transition`)
+    }
+    matching.push({
+      transitionId,
+      contractHash,
+      outcome: text(eventToken(event, 'outcome'), `${pathLabel}.outcome`),
+      mechanicalSteps: eventCount(event, 'mechanicalSteps', pathLabel),
+      decisionFrameInvocations: eventCount(event, 'decisionFrameInvocations', pathLabel),
+      providerEvaluateAttempts: eventCount(event, 'providerEvaluateAttempts', pathLabel),
+      source: pathLabel,
+    })
+  }
+  if (matching.length > 1) {
+    throw new Error(`${pathLabel} contains ${matching.length} ${VTR_TRANSITION_MODEL_METRICS} rows for Transition ${transitionId}`)
+  }
+  return matching[0] ?? null
+}
+
+function transitionModelMetricsFromSequence(transition, transitionId, contractHash) {
+  const lines = Array.isArray(transition.eventSequence)
+    ? transition.eventSequence.filter((line) => typeof line === 'string')
+    : []
+  return parseTransitionModelMetricsEventLines(
+    lines,
+    transitionId,
+    contractHash,
+    'transition.eventSequence',
+  )
+}
+
+function transitionModelMetricsFromRunJsonl(path, transitionId, contractHash) {
+  if (!existsSync(path)) return null
+  const messages = []
+  for (const [index, line] of readFileSync(path, 'utf8').split(/\r?\n/).entries()) {
+    if (line.trim() === '') continue
+    let row
+    try { row = JSON.parse(line) } catch (error) {
+      throw new Error(`${path}:${index + 1}: invalid JSONL (${error.message})`)
+    }
+    if (typeof row?.message === 'string' && row.message.includes(VTR_TRANSITION_MODEL_METRICS)) messages.push(row.message)
+  }
+  return parseTransitionModelMetricsEventLines(messages, transitionId, contractHash, 'runner/run.jsonl')
+}
+
+function sameTransitionModelMetrics(left, right) {
+  return left.transitionId === right.transitionId
+    && left.contractHash === right.contractHash
+    && left.outcome === right.outcome
+    && left.mechanicalSteps === right.mechanicalSteps
+    && left.decisionFrameInvocations === right.decisionFrameInvocations
+    && left.providerEvaluateAttempts === right.providerEvaluateAttempts
+}
+
 function closeEnough(a, b) {
   return Math.abs(a - b) <= 0.011
 }
@@ -421,6 +496,28 @@ function adaptArchivedVtrProbe(raw, archiveRoot) {
     throw new Error('archive lacks a run/source/generation-bound PASS no-double-authority proof')
   }
   const eventSequence = Array.isArray(transition.eventSequence) ? transition.eventSequence : []
+  const runnerLogPath = join(archiveRoot, 'runner', 'buddy.log')
+  const runnerLogLines = readFileSync(runnerLogPath, 'utf8').split(/\r?\n/)
+  const structuredModelMetricsEvidence = transitionModelMetricsFromRunJsonl(
+    join(archiveRoot, 'runner', 'run.jsonl'),
+    commit.transitionId,
+    terminal.contractHash,
+  )
+  const buddyLogModelMetricsEvidence = parseTransitionModelMetricsEventLines(
+    runnerLogLines,
+    commit.transitionId,
+    terminal.contractHash,
+    'runner/buddy.log',
+  )
+  const sequenceModelMetricsEvidence = transitionModelMetricsFromSequence(transition, commit.transitionId, terminal.contractHash)
+  const observedMetricEvents = [structuredModelMetricsEvidence, buddyLogModelMetricsEvidence, sequenceModelMetricsEvidence]
+    .filter((event) => event !== null)
+  for (const observed of observedMetricEvents.slice(1)) {
+    if (!sameTransitionModelMetrics(observedMetricEvents[0], observed)) {
+      throw new Error('VTR_TRANSITION_MODEL_METRICS copies disagree across archived event sources')
+    }
+  }
+  const modelMetricsEvidence = structuredModelMetricsEvidence ?? buddyLogModelMetricsEvidence ?? sequenceModelMetricsEvidence
   const verifyEventIndex = eventSequence.findIndex((event) => String(event).includes('VTR_TRANSITION_VERIFY'))
   const outcomeEventIndex = eventSequence.findIndex((event) => String(event).includes('VTR_TRANSITION_OUTCOME'))
   const verificationEvidenceMatches = verify.truth === 'TRUE' && verify.identityMatches === true && verify.predicatesVerified === true &&
@@ -479,6 +576,7 @@ function adaptArchivedVtrProbe(raw, archiveRoot) {
       desiredPredicate,
       ensures: commit.ensures,
       worldIdentity: identity,
+      modelMetricsEvidence,
       metrics: { ...metrics, concurrentLegacyActuations: 0 },
       outcome: { kind: terminalOutcome.kind, boundary: terminal.boundary, evidenceIds: terminalOutcome.evidenceIds },
       precommitUnknownSourceHolds,
@@ -525,12 +623,82 @@ function parseVtr(raw) {
   const probeSystem2 = record(probe.effectiveSystem2, 'vtr.configuredNoLlmProbe.effectiveSystem2')
   const runWorld = parseWorldKey(run.worldKey, 'vtr.run.worldKey')
   const contractWorld = parseWorldKey(worldIdentity.worldKey, 'vtr.transition.worldIdentity.worldKey')
+  const rawModelMetricsEvidence = transition.modelMetricsEvidence ?? transitionModelMetricsFromSequence(
+    transition,
+    text(transition.transitionId, 'vtr.transition.transitionId'),
+    text(transition.contractHash, 'vtr.transition.contractHash'),
+  )
+  const modelMetricsEvidence = rawModelMetricsEvidence === null
+    ? null
+    : {
+        transitionId: text(rawModelMetricsEvidence.transitionId, 'vtr.transition.modelMetricsEvidence.transitionId'),
+        contractHash: text(rawModelMetricsEvidence.contractHash, 'vtr.transition.modelMetricsEvidence.contractHash'),
+        outcome: text(rawModelMetricsEvidence.outcome, 'vtr.transition.modelMetricsEvidence.outcome'),
+        mechanicalSteps: count(rawModelMetricsEvidence.mechanicalSteps, 'vtr.transition.modelMetricsEvidence.mechanicalSteps'),
+        decisionFrameInvocations: count(rawModelMetricsEvidence.decisionFrameInvocations, 'vtr.transition.modelMetricsEvidence.decisionFrameInvocations'),
+        providerEvaluateAttempts: count(rawModelMetricsEvidence.providerEvaluateAttempts, 'vtr.transition.modelMetricsEvidence.providerEvaluateAttempts'),
+        source: text(rawModelMetricsEvidence.source, 'vtr.transition.modelMetricsEvidence.source'),
+      }
+  const legacyJevCallsPerTransition = count(metrics.jevCallsPerTransition, 'vtr.transition.metrics.jevCallsPerTransition')
+  const system2CallsPerTransition = count(metrics.system2CallsPerTransition, 'vtr.transition.metrics.system2CallsPerTransition')
+  const mechanicalStepsPerTransition = count(metrics.mechanicalStepsPerTransition, 'vtr.transition.metrics.mechanicalStepsPerTransition')
+  const modelMetricsConsistencyIssues = []
+  if (modelMetricsEvidence !== null) {
+    if (modelMetricsEvidence.mechanicalSteps !== mechanicalStepsPerTransition) {
+      modelMetricsConsistencyIssues.push({
+        field: 'mechanicalSteps',
+        transitionOutcome: mechanicalStepsPerTransition,
+        modelMetricsEvent: modelMetricsEvidence.mechanicalSteps,
+      })
+    }
+    if (modelMetricsEvidence.outcome !== metrics.typedTerminalOutcome) {
+      modelMetricsConsistencyIssues.push({
+        field: 'typedTerminalOutcome',
+        transitionOutcome: metrics.typedTerminalOutcome,
+        modelMetricsEvent: modelMetricsEvidence.outcome,
+      })
+    }
+    if (modelMetricsEvidence.decisionFrameInvocations !== legacyJevCallsPerTransition) {
+      modelMetricsConsistencyIssues.push({
+        field: 'decisionFrameInvocations',
+        legacyJevCallsPerTransition,
+        modelMetricsEvent: modelMetricsEvidence.decisionFrameInvocations,
+      })
+    }
+    const configuredDecisionFrames = probeJev.decisionCalls
+    if (Number.isSafeInteger(configuredDecisionFrames) && configuredDecisionFrames !== modelMetricsEvidence.decisionFrameInvocations) {
+      modelMetricsConsistencyIssues.push({
+        field: 'effectiveJev.decisionCalls',
+        configuredDecisionFrames,
+        modelMetricsEvent: modelMetricsEvidence.decisionFrameInvocations,
+      })
+    }
+  }
+  const providerEvaluateAttempts = modelMetricsEvidence?.providerEvaluateAttempts ?? null
+  const providerEvaluateAttemptsPerMechanicalStep = modelMetricsEvidence === null || mechanicalStepsPerTransition === 0
+    ? null
+    : providerEvaluateAttempts / mechanicalStepsPerTransition
   const vtrMetrics = {
     verifiedTransitions: count(metrics.verifiedTransitionCompletion, 'vtr.transition.metrics.verifiedTransitionCompletion'),
-    mechanicalStepsPerTransition: count(metrics.mechanicalStepsPerTransition, 'vtr.transition.metrics.mechanicalStepsPerTransition'),
-    jevCallsPerTransition: count(metrics.jevCallsPerTransition, 'vtr.transition.metrics.jevCallsPerTransition'),
-    system2CallsPerTransition: count(metrics.system2CallsPerTransition, 'vtr.transition.metrics.system2CallsPerTransition'),
-    modelCallsPerMechanicalStep: ratio(metrics.modelCallsPerMechanicalStep, 'vtr.transition.metrics.modelCallsPerMechanicalStep'),
+    mechanicalStepsPerTransition,
+    /** Compatibility counter only; never use this as a provider/model call count. */
+    legacyJevCallsPerTransition,
+    /** Exact only when backed by VTR_TRANSITION_MODEL_METRICS. */
+    decisionFrameInvocations: modelMetricsEvidence?.decisionFrameInvocations ?? null,
+    /** Actual Jev evaluate() invocations, including retry attempts. */
+    providerEvaluateAttempts,
+    providerEvaluateAttemptsPerMechanicalStep,
+    providerAttemptMeaning: modelMetricsEvidence === null ? 'UNKNOWN' : 'evaluate() attempts including retries',
+    modelMetricsSource: modelMetricsEvidence?.source ?? null,
+    modelMetricsStatus: modelMetricsEvidence === null
+      ? 'UNKNOWN'
+      : modelMetricsConsistencyIssues.length > 0 ? 'CONFLICT' : 'OBSERVED',
+    modelMetricsConsistencyIssues,
+    system2CallsPerTransition,
+    /** Deprecated source field was based on policy calls; do not report it as model calls. */
+    deprecatedModelCallsPerMechanicalStep: typeof metrics.modelCallsPerMechanicalStep === 'number'
+      ? metrics.modelCallsPerMechanicalStep
+      : null,
     typedTerminalOutcome: text(metrics.typedTerminalOutcome, 'vtr.transition.metrics.typedTerminalOutcome'),
     duplicateAuthority: metrics.duplicateAuthority,
     duplicateAuthorityConflicts: count(metrics.duplicateAuthorityConflicts, 'vtr.transition.metrics.duplicateAuthorityConflicts'),
@@ -600,14 +768,20 @@ function parseVtr(raw) {
   const providerCalls = count(probe.networkModelCalls, 'vtr.configuredNoLlmProbe.networkModelCalls')
   const jevCalls = count(probeJev.decisionCalls, 'vtr.configuredNoLlmProbe.effectiveJev.decisionCalls')
   const system2Calls = count(probeSystem2.decisionCalls, 'vtr.configuredNoLlmProbe.effectiveSystem2.decisionCalls')
-  if (providerCalls !== 0 || jevCalls !== vtrMetrics.jevCallsPerTransition || system2Calls !== vtrMetrics.system2CallsPerTransition) {
+  if (jevCalls !== vtrMetrics.legacyJevCallsPerTransition || system2Calls !== vtrMetrics.system2CallsPerTransition) {
     throw new Error('VTR top-level effective policy call counts disagree with per-Transition metrics')
   }
-  const totalVtrModelCalls = vtrMetrics.jevCallsPerTransition + vtrMetrics.system2CallsPerTransition
-  const expectedVtrRatio = vtrMetrics.mechanicalStepsPerTransition === 0 ? null : totalVtrModelCalls / vtrMetrics.mechanicalStepsPerTransition
-  if (expectedVtrRatio === null || !closeEnough(vtrMetrics.modelCallsPerMechanicalStep, expectedVtrRatio)) {
-    throw new Error('VTR modelCallsPerMechanicalStep disagrees with Jev + System2 calls and mechanical steps')
+  const noNetworkProfileIssues = []
+  if (providerCalls !== 0) noNetworkProfileIssues.push(`configuredNoLlmProbe.networkModelCalls=${providerCalls}`)
+  if (vtrMetrics.providerEvaluateAttempts !== null && vtrMetrics.providerEvaluateAttempts !== 0) {
+    noNetworkProfileIssues.push(`VTR_TRANSITION_MODEL_METRICS.providerEvaluateAttempts=${vtrMetrics.providerEvaluateAttempts}`)
   }
+  if (vtrMetrics.modelMetricsConsistencyIssues.length > 0) {
+    noNetworkProfileIssues.push('VTR_TRANSITION_MODEL_METRICS conflicts with another Transition metric')
+  }
+  const noNetworkProfileStatus = noNetworkProfileIssues.length > 0
+    ? 'FAIL'
+    : vtrMetrics.modelMetricsStatus === 'UNKNOWN' ? 'UNKNOWN' : 'PASS'
 
   return {
     schema: input.schema,
@@ -666,6 +840,10 @@ function parseVtr(raw) {
       system2Mode: probeSystem2.configuredMode,
       actualNetworkCalls: providerCalls,
     },
+    noNetworkProfile: {
+      status: noNetworkProfileStatus,
+      issues: noNetworkProfileIssues,
+    },
   }
 }
 
@@ -708,9 +886,6 @@ const legacyWorld = legacy.worldKey === null ? null : parseWorldKey(legacy.world
 const vtrWorld = parseWorldKey(vtr.worldKey, 'vtr.run.worldKey')
 if ((legacyWorld !== null && legacyWorld.epoch !== legacy.worldEpoch) || vtrWorld.epoch !== vtr.worldEpoch) {
   throw new Error('worldKey epoch does not match the recorded worldEpoch')
-}
-if (legacy.metrics.networkModelCalls !== 0 || vtr.configuredNoLlm.actualNetworkCalls !== 0) {
-  throw new Error('these artifacts are only comparable under the archived no-network-model-call setup')
 }
 
 const missionInputMatch = legacy.missionInput !== null
@@ -770,16 +945,30 @@ const alignment = {
   environment: environmentAlignment === true ? 'PASS' : environmentAlignment === false ? 'NOT_COMPARABLE' : 'INCOMPLETE',
 }
 const alignmentStates = Object.values(alignment)
-const comparisonStatus = alignmentStates.includes('NOT_COMPARABLE')
+const alignedStatus = alignmentStates.includes('NOT_COMPARABLE')
   ? 'NOT_COMPARABLE'
   : alignmentStates.includes('INCOMPLETE')
     ? 'INCOMPLETE'
     : 'PASS'
+const noNetworkProfileIssues = [...vtr.noNetworkProfile.issues]
+if (legacy.metrics.networkModelCalls !== 0) {
+  noNetworkProfileIssues.push(`legacy.networkModelCalls=${legacy.metrics.networkModelCalls}`)
+}
+const noNetworkProfileStatus = noNetworkProfileIssues.length > 0
+  ? 'FAIL'
+  : vtr.metrics.modelMetricsStatus === 'UNKNOWN' ? 'UNKNOWN' : 'PASS'
+const comparisonStatus = noNetworkProfileStatus === 'FAIL'
+  ? 'INVALID_NO_LLM_PROFILE'
+  : noNetworkProfileStatus === 'UNKNOWN' && alignedStatus === 'PASS'
+    ? 'INCOMPLETE'
+    : alignedStatus
 const output = {
   schema: 'vtr-reach-fixture-comparison/v2',
   comparisonStatus,
   classification: comparisonStatus === 'PASS'
     ? 'structured Mission/fixture/environment alignment; summary comparison only'
+    : comparisonStatus === 'INVALID_NO_LLM_PROFILE'
+      ? 'invalid no-network measurement profile; provider activity is present or metrics conflict'
     : comparisonStatus === 'NOT_COMPARABLE'
       ? 'inputs contain a known Mission/fixture/environment mismatch'
       : 'alignment cannot be established from the available structured summary fields',
@@ -787,6 +976,16 @@ const output = {
   acceptanceEligible: false,
   acceptanceStatus: 'NOT_ASSESSED_SUMMARY_ONLY',
   alignment,
+  noNetworkProfile: {
+    status: noNetworkProfileStatus,
+    issues: noNetworkProfileIssues,
+    modelMetrics: {
+      status: vtr.metrics.modelMetricsStatus,
+      source: vtr.metrics.modelMetricsSource,
+      decisionFrameInvocations: vtr.metrics.decisionFrameInvocations,
+      providerEvaluateAttemptsIncludingRetries: vtr.metrics.providerEvaluateAttempts,
+    },
+  },
   inputs: { legacy: legacyPath, vtr: vtrPath },
   lineage: {
     legacy: {
@@ -888,12 +1087,19 @@ const output = {
       },
       vtr: {
         ...vtr.configuredNoLlm,
-        jevCallsPerTransition: vtr.metrics.jevCallsPerTransition,
+        legacyJevCallsPerTransition: vtr.metrics.legacyJevCallsPerTransition,
+        decisionFrameInvocationsPerTransition: vtr.metrics.decisionFrameInvocations,
+        jevProviderEvaluateAttemptsIncludingRetriesPerTransition: vtr.metrics.providerEvaluateAttempts,
+        jevProviderEvaluateAttemptsPerMechanicalStep: vtr.metrics.providerEvaluateAttemptsPerMechanicalStep,
+        providerAttemptMeaning: vtr.metrics.providerAttemptMeaning,
+        modelMetricsStatus: vtr.metrics.modelMetricsStatus,
+        modelMetricsSource: vtr.metrics.modelMetricsSource,
+        modelMetricsConsistencyIssues: vtr.metrics.modelMetricsConsistencyIssues,
         system2CallsPerTransition: vtr.metrics.system2CallsPerTransition,
-        networkModelCallsPerMechanicalStep: vtr.metrics.modelCallsPerMechanicalStep,
+        deprecatedModelCallsPerMechanicalStep: vtr.metrics.deprecatedModelCallsPerMechanicalStep,
         precommitUnknownSourceHolds: vtr.metrics.precommitUnknownSourceHolds,
       },
-      interpretation: 'Both archived runs explicitly used no network model calls. This does not measure provider behavior, latency, or production Jev efficiency. Decision frames/question calls are reported separately from provider model calls.',
+      interpretation: 'The legacy Jev counter is shown only as a compatibility policy-call count. VTR Decision Frame invocations and provider evaluate attempts are separate; provider attempts include retries. The no-network profile fails if any provider attempt is observed and remains UNKNOWN when the authoritative metrics event is missing.',
     },
     authority: {
       legacy: { status: 'not-applicable: baseline source has no VTR authority to compare against', duplicateAuthority: null },
@@ -909,11 +1115,11 @@ const output = {
     'These artifacts have distinct run identities; the comparator does not replay or align an identical world state, so this is not a same-world A/B experiment.',
     'Fixture coordinates are reported as both exact body-position deltas and block offsets from floor(initial body position); fixture equivalence does not make different top-level Mission inputs comparable.',
     'A PASS means only that structured Mission/fixture/environment fields align. A summary-only PASS is not a VTR migration acceptance result.',
-    'Both runs explicitly used offline/deterministic policy and recorded zero network model calls; no provider performance or production model-behavior gain is established.',
+    'The no-network comparison profile is checked independently from model-metric availability. A missing VTR_TRANSITION_MODEL_METRICS event leaves Decision Frame and provider-attempt counts UNKNOWN.',
     'Legacy MOVE action SUCCESS/verified and the next-frame inReach candidate are not a Reach-specific deterministic terminal. Only the VTR artifact records a Reach Contract SUCCESS with verifier evidence.',
     'The VTR probe establishes the Reach predicate only; its oak_log inventory Mission remains incomplete. Neither artifact proves autonomous long-horizon composition or M2/M3.',
   ],
 }
 
 console.log(JSON.stringify(output, null, 2))
-process.exitCode = comparisonStatus === 'PASS' ? 0 : 2
+process.exitCode = noNetworkProfileStatus === 'FAIL' ? 1 : comparisonStatus === 'PASS' ? 0 : 2

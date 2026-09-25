@@ -145,7 +145,7 @@ function compare(legacy, vtr) {
     writeFileSync(legacyPath, JSON.stringify(legacy))
     writeFileSync(vtrPath, JSON.stringify(vtr))
     const result = spawnSync(process.execPath, [script, legacyPath, vtrPath], { encoding: 'utf8' })
-    assert.ok(result.status === 0 || result.status === 2, result.stderr)
+    assert.ok(result.status === 0 || result.status === 1 || result.status === 2, result.stderr)
     return JSON.parse(result.stdout)
   } finally {
     rmSync(directory, { recursive: true, force: true })
@@ -170,6 +170,38 @@ test('falls back to mission initial position when no Transition start was record
   assert.equal(report.fixtureAlignment.sameExactCartesianDelta, false)
   assert.equal(report.alignment.missionInput, 'NOT_COMPARABLE')
   assert.equal(report.alignment.environment, 'NOT_COMPARABLE')
+})
+
+test('reports a deterministic Jev Decision Frame separately from zero provider evaluations', () => {
+  const vtr = vtrArtifact()
+  vtr.transition.metrics.jevCallsPerTransition = 1
+  vtr.configuredNoLlmProbe.effectiveJev.decisionCalls = 1
+  vtr.transition.eventSequence = [
+    'VTR_TRANSITION_MODEL_METRICS transitionId=transition-1 contractHash=contract-hash outcome=SUCCESS mechanicalSteps=1 decisionFrameInvocations=1 providerEvaluateAttempts=0',
+  ]
+  const report = compare(legacyArtifact(), vtr)
+  const vtrPolicy = report.metrics.policyAndModels.vtr
+  assert.equal(report.noNetworkProfile.status, 'PASS')
+  assert.equal(vtrPolicy.decisionFrameInvocationsPerTransition, 1)
+  assert.equal(vtrPolicy.jevProviderEvaluateAttemptsIncludingRetriesPerTransition, 0)
+  assert.equal(vtrPolicy.jevProviderEvaluateAttemptsPerMechanicalStep, 0)
+  assert.equal(vtrPolicy.legacyJevCallsPerTransition, 1)
+})
+
+test('keeps absent Transition model metrics UNKNOWN instead of deriving provider calls from Jev calls', () => {
+  const vtr = vtrArtifact()
+  vtr.transition.metrics.jevCallsPerTransition = 2
+  vtr.transition.metrics.modelCallsPerMechanicalStep = 2
+  vtr.configuredNoLlmProbe.effectiveJev.decisionCalls = 2
+  const report = compare(legacyArtifact(), vtr)
+  const vtrPolicy = report.metrics.policyAndModels.vtr
+  assert.equal(report.noNetworkProfile.status, 'UNKNOWN')
+  assert.equal(report.noNetworkProfile.modelMetrics.status, 'UNKNOWN')
+  assert.equal(vtrPolicy.legacyJevCallsPerTransition, 2)
+  assert.equal(vtrPolicy.decisionFrameInvocationsPerTransition, null)
+  assert.equal(vtrPolicy.jevProviderEvaluateAttemptsIncludingRetriesPerTransition, null)
+  assert.equal(vtrPolicy.jevProviderEvaluateAttemptsPerMechanicalStep, null)
+  assert.equal(report.comparisonStatus, 'NOT_COMPARABLE')
 })
 
 function archivedVtrProbe() {
@@ -276,7 +308,12 @@ function archivedVtrProbe() {
   }
 }
 
-function compareWithVtrArchive(legacy, probe, { teleportAt = '2026-09-24T21:01:41.883Z', commitAt = '2026-09-24T21:01:46.059Z' } = {}) {
+function compareWithVtrArchive(legacy, probe, {
+  teleportAt = '2026-09-24T21:01:41.883Z',
+  commitAt = '2026-09-24T21:01:46.059Z',
+  modelMetricsEvent = `VTR_TRANSITION_MODEL_METRICS transitionId=${probe.transition.commit.transitionId} contractHash=archive-contract-hash outcome=SUCCESS mechanicalSteps=1 decisionFrameInvocations=0 providerEvaluateAttempts=0`,
+  runJsonlModelMetricsEvent = null,
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'compare-vtr-reach-archive-test-'))
   try {
     const archiveRoot = join(directory, 'archive')
@@ -296,7 +333,12 @@ function compareWithVtrArchive(legacy, probe, { teleportAt = '2026-09-24T21:01:4
       command: probe.fixture.harnessTeleportCommand,
       username: 'AI_Buddy',
     }) + '\n')
-    writeFileSync(join(runnerDir, 'buddy.log'), `[${commitAt}] VTR_TRANSITION_COMMIT transitionId=${probe.transition.commit.transitionId} mission=run-mission\n`)
+    const runnerLines = [`[${commitAt}] VTR_TRANSITION_COMMIT transitionId=${probe.transition.commit.transitionId} mission=run-mission`]
+    if (modelMetricsEvent !== null) runnerLines.push(`[${commitAt}] [vtr] ${modelMetricsEvent}`)
+    writeFileSync(join(runnerDir, 'buddy.log'), `${runnerLines.join('\n')}\n`)
+    if (runJsonlModelMetricsEvent !== null) {
+      writeFileSync(join(runnerDir, 'run.jsonl'), `${JSON.stringify({ record: 'agent-event', message: runJsonlModelMetricsEvent })}\n`)
+    }
     writeFileSync(join(proofsDir, 'no-double-authority.json'), JSON.stringify({
       result: 'PASS',
       runId: probe.runId,
@@ -332,6 +374,65 @@ test('archive adapter uses a pre-commit harness transition start and keeps missi
     assert.equal(report.fixtureAlignment.environmentMatch.seedProvenance, false)
     assert.equal(report.fixtureAlignment.vtrFixture.flatSolidGround, null)
     assert.equal(report.fixtureAlignment.sameRelativeFixture, true)
+    assert.equal(report.noNetworkProfile.status, 'PASS')
+    assert.equal(report.noNetworkProfile.modelMetrics.decisionFrameInvocations, 0)
+    assert.equal(report.noNetworkProfile.modelMetrics.providerEvaluateAttemptsIncludingRetries, 0)
+    assert.equal(report.metrics.policyAndModels.vtr.modelMetricsSource, 'runner/buddy.log')
+  } finally {
+    cleanup()
+  }
+})
+
+test('prefers structured run.jsonl model metrics and cross-checks duplicated log evidence', () => {
+  const probe = archivedVtrProbe()
+  const event = `VTR_TRANSITION_MODEL_METRICS transitionId=${probe.transition.commit.transitionId} contractHash=${probe.transition.terminalOutcome.contractHash} outcome=SUCCESS mechanicalSteps=1 decisionFrameInvocations=0 providerEvaluateAttempts=0`
+  const { result, cleanup } = compareWithVtrArchive(legacyArtifact(), probe, {
+    modelMetricsEvent: event,
+    runJsonlModelMetricsEvent: event,
+  })
+  try {
+    assert.equal(result.status, 2, result.stderr)
+    const report = JSON.parse(result.stdout)
+    assert.equal(report.noNetworkProfile.status, 'PASS')
+    assert.equal(report.noNetworkProfile.modelMetrics.source, 'runner/run.jsonl')
+  } finally {
+    cleanup()
+  }
+})
+
+test('surfaces retry-inclusive provider attempts and fails a claimed no-network profile', () => {
+  const probe = archivedVtrProbe()
+  probe.metrics.jevCallsPerTransition = 1
+  probe.configuration.networkModelCalls = 0
+  const modelMetricsEvent = `VTR_TRANSITION_MODEL_METRICS transitionId=${probe.transition.commit.transitionId} contractHash=${probe.transition.terminalOutcome.contractHash} outcome=SUCCESS mechanicalSteps=1 decisionFrameInvocations=1 providerEvaluateAttempts=3`
+  const { result, cleanup } = compareWithVtrArchive(legacyArtifact(), probe, { modelMetricsEvent })
+  try {
+    assert.equal(result.status, 1, result.stderr)
+    const report = JSON.parse(result.stdout)
+    const vtrPolicy = report.metrics.policyAndModels.vtr
+    assert.equal(report.comparisonStatus, 'INVALID_NO_LLM_PROFILE')
+    assert.equal(report.acceptanceEligible, false)
+    assert.equal(report.noNetworkProfile.status, 'FAIL')
+    assert.ok(report.noNetworkProfile.issues.includes('VTR_TRANSITION_MODEL_METRICS.providerEvaluateAttempts=3'))
+    assert.equal(vtrPolicy.legacyJevCallsPerTransition, 1)
+    assert.equal(vtrPolicy.decisionFrameInvocationsPerTransition, 1)
+    assert.equal(vtrPolicy.jevProviderEvaluateAttemptsIncludingRetriesPerTransition, 3)
+    assert.equal(vtrPolicy.jevProviderEvaluateAttemptsPerMechanicalStep, 3)
+    assert.equal(vtrPolicy.deprecatedModelCallsPerMechanicalStep, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('archived run without VTR_TRANSITION_MODEL_METRICS leaves provider metrics UNKNOWN', () => {
+  const { result, cleanup } = compareWithVtrArchive(legacyArtifact(), archivedVtrProbe(), { modelMetricsEvent: null })
+  try {
+    assert.equal(result.status, 2, result.stderr)
+    const report = JSON.parse(result.stdout)
+    assert.equal(report.noNetworkProfile.status, 'UNKNOWN')
+    assert.equal(report.noNetworkProfile.modelMetrics.status, 'UNKNOWN')
+    assert.equal(report.noNetworkProfile.modelMetrics.decisionFrameInvocations, null)
+    assert.equal(report.noNetworkProfile.modelMetrics.providerEvaluateAttemptsIncludingRetries, null)
   } finally {
     cleanup()
   }
