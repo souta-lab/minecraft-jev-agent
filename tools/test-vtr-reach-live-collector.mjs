@@ -34,8 +34,42 @@ function row(offset, message, detail) {
   return { record: 'agent-event', ts: iso(offset), tick: offset, source: 'vtr', level: 'info', message, detail }
 }
 
-function fixture({ sourceSha = SOURCE, outcomeKind = 'SUCCESS', verified = true, modelCalls = 0, identityRun = RUN, boundary = 'verified-terminal' } = {}) {
+function fixture({
+  sourceSha = SOURCE,
+  outcomeKind = 'SUCCESS',
+  verified = true,
+  decisionFrames = 0,
+  providerAttempts = 0,
+  includeModelMetrics = true,
+  conflictingModelMetrics = false,
+  suffixOnlyModelMetrics = false,
+  legs = 1,
+  separateActuationPerLeg = false,
+  decisionFrameMarker = false,
+  identityRun = RUN,
+  boundary = 'verified-terminal',
+} = {}) {
   const expected = { ...MISSION }
+  const actionId = 'MOVE:oak#1'
+  const intentId = 'intent-1'
+  const stepIds = Array.from({ length: legs }, (_, index) => `${actionId}:walk-leg-${index + 1}`)
+  const actuationSpecs = separateActuationPerLeg
+    ? stepIds.map((stepId, index) => ({ intentId: `intent-${index + 1}`, actionId: `${actionId}:leg-${index + 1}`, stepId }))
+    : [{ intentId, actionId, stepId: stepIds[0] }]
+  const terminalOffset = 9 + 2 * (legs - 1)
+  const verifyOffset = terminalOffset - 1
+  const evidenceId = `verify:${verifyOffset}:oak_log@1,64,1`
+  const hostActuations = actuationSpecs.map((owner) => hostLine(5, 'VTR_TRANSITION_ACTUATION', {
+    transitionId: TRANSITION, contractHash: CONTRACT, runId: RUN, generationId: GENERATION, sourceSha: SOURCE,
+    intentId: owner.intentId, actionId: owner.actionId, authority: 'vtr_transition',
+  }))
+  const hostReservations = stepIds.map((stepId, index) => {
+    const owner = actuationSpecs[index % actuationSpecs.length]
+    return hostLine(6 + index, 'VTR_MECHANICAL_STEP_RESERVED', {
+      transitionId: TRANSITION, contractHash: CONTRACT, intentId: owner.intentId, actionId: owner.actionId, stepId, leg: index + 1,
+      usage: { mechanicalSteps: index + 1 }, runId: RUN, generationId: GENERATION, sourceSha: SOURCE,
+    })
+  })
   const hostLogText = [
     hostLine(0, 'BOOT', {
       runId: RUN,
@@ -63,33 +97,58 @@ function fixture({ sourceSha = SOURCE, outcomeKind = 'SUCCESS', verified = true,
       policyProvider: 'deterministic',
       system2Provider: 'none',
     }),
-    hostLine(4, 'VTR_TRANSITION_COMMIT', { id: TRANSITION, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
-    hostLine(5, 'VTR_TRANSITION_ACTUATION', { transitionId: TRANSITION, contractHash: CONTRACT, runId: RUN, generationId: GENERATION, sourceSha: SOURCE, authority: 'vtr_transition' }),
-    hostLine(6, 'VTR_MECHANICAL_STEP_RESERVED', { transitionId: TRANSITION, intentId: 'intent-1', stepId: 'MOVE:oak#1:walk-leg-1', usage: { mechanicalSteps: 1 }, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
-    hostLine(7, 'VTR_MECHANICAL_OUTCOME', { transitionId: TRANSITION, contractHash: CONTRACT, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
-    hostLine(8, 'VTR_TRANSITION_VERIFY', { id: TRANSITION, contractHash: CONTRACT, truth: verified ? 'TRUE' : 'FALSE', runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
-    hostLine(9, 'VTR_TRANSITION_OUTCOME', { id: TRANSITION, contractHash: CONTRACT, outcome: outcomeKind, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
+    hostLine(4, 'VTR_TRANSITION_COMMIT', { id: TRANSITION, contractHash: CONTRACT, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
+    ...hostActuations,
+    ...hostReservations,
+    hostLine(6 + legs * 2, 'VTR_MECHANICAL_OUTCOME', { transitionId: TRANSITION, contractHash: CONTRACT, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
+    hostLine(verifyOffset, 'VTR_TRANSITION_VERIFY', { id: TRANSITION, contractHash: CONTRACT, truth: verified ? 'TRUE' : 'FALSE', runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
+    hostLine(terminalOffset, 'VTR_TRANSITION_OUTCOME', { id: TRANSITION, contractHash: CONTRACT, outcome: outcomeKind, runId: RUN, generationId: GENERATION, sourceSha: SOURCE }),
   ].join('\n') + '\n'
   const commit = row(4, `VTR_TRANSITION_COMMIT id=${TRANSITION} contractHash=${CONTRACT}`, {
     transitionId: TRANSITION,
+    contractHash: CONTRACT,
     mission: expected,
     desiredPredicate: ENSURE,
     ensures: [ENSURE_REORDERED],
     identity: { worldKey: WORLD, dimension: 'overworld', worldEpoch: 4, generationId: GENERATION, leaseId: GENERATION },
   })
-  const actuation = row(5, `VTR_TRANSITION_ACTUATION transitionId=${TRANSITION} contractHash=${CONTRACT} authority=vtr_transition`, { transitionId: TRANSITION, intentId: 'intent-1', candidate: 'MOVE:oak#1', contractHash: CONTRACT, authority: 'vtr_transition' })
-  const reserved = row(6, `VTR_MECHANICAL_STEP_RESERVED transitionId=${TRANSITION} intentId=intent-1 stepId=MOVE:oak#1:walk-leg-1`, { transitionId: TRANSITION, intentId: 'intent-1', stepId: 'MOVE:oak#1:walk-leg-1', usage: { mechanicalSteps: 1 } })
-  const skillStep = row(6, 'SKILL_STEP skill=walk_to step=move', { actionId: 'MOVE:oak#1', stepKind: 'move', count: 1 })
-  const mechanical = row(7, `VTR_MECHANICAL_OUTCOME transitionId=${TRANSITION} contractHash=${CONTRACT} status=done verified=true`, { transitionId: TRANSITION, contractHash: CONTRACT, status: 'done', verified: true })
-  const movement = row(8, 'MOVE MOVE:oak#1 arrival start=(1,64,1) end=(2,65,2)', { actionId: 'MOVE:oak#1', start: { x: 1, y: 64, z: 1 }, end: { x: 2, y: 65, z: 2 } })
-  const verify = row(8, `VTR_TRANSITION_VERIFY id=${TRANSITION} contractHash=${CONTRACT} truth=${verified ? 'TRUE' : 'FALSE'}`, {
+  const actuations = actuationSpecs.map((owner, index) => row(5 + index, `VTR_TRANSITION_ACTUATION transitionId=${TRANSITION} intent=${owner.intentId} action=${owner.actionId} contractHash=${CONTRACT} authority=vtr_transition`, {
+    transitionId: TRANSITION, intentId: owner.intentId, actionId: owner.actionId, candidate: actionId, contractHash: CONTRACT, authority: 'vtr-transition-controller',
+  }))
+  const reservations = stepIds.map((stepId, index) => {
+    const owner = actuationSpecs[index % actuationSpecs.length]
+    return row(6 + index, `VTR_MECHANICAL_STEP_RESERVED transition=${TRANSITION} intent=${owner.intentId} action=${owner.actionId} step=${stepId} leg=${index + 1}`, {
+      transitionId: TRANSITION, contractHash: CONTRACT, intentId: owner.intentId, actionId: owner.actionId, stepId, leg: index + 1,
+      usage: { mechanicalSteps: index + 1 },
+    })
+  })
+  const skillSteps = stepIds.map((_, index) => row(6 + index, 'SKILL_STEP skill=walk_to step=move', {
+    actionId: actuationSpecs[index % actuationSpecs.length].actionId, stepKind: 'move', count: 1,
+  }))
+  const stepOutcomes = stepIds.map((stepId, index) => {
+    const owner = actuationSpecs[index % actuationSpecs.length]
+    const isTerminalSuccess = index === legs - 1 && outcomeKind === 'SUCCESS'
+    const status = isTerminalSuccess ? 'terminal' : 'active'
+    const stepOutcome = isTerminalSuccess ? 'SUCCESS' : 'CONTINUING'
+    return row(6 + legs + index, `VTR_MECHANICAL_STEP_OUTCOME transition=${TRANSITION} intent=${owner.intentId} action=${owner.actionId} step=${stepId} leg=${index + 1} status=${status} outcome=${stepOutcome} verified=${isTerminalSuccess}`, {
+      transitionId: TRANSITION, contractHash: CONTRACT, intentId: owner.intentId, actionId: owner.actionId, stepId, leg: index + 1,
+      status, outcome: stepOutcome, verified: isTerminalSuccess,
+    })
+  })
+  const mechanical = row(6 + legs * 2, `VTR_MECHANICAL_OUTCOME transitionId=${TRANSITION} contractHash=${CONTRACT} status=done verified=true`, {
+    transitionId: TRANSITION, contractHash: CONTRACT, status: 'done', verified: true,
+  })
+  const movement = row(6 + legs * 2, `MOVE ${actionId} arrival start=(1,64,1) end=(2,65,2)`, {
+    actionId, start: { x: 1, y: 64, z: 1 }, end: { x: 2, y: 65, z: 2 },
+  })
+  const verify = row(verifyOffset, `VTR_TRANSITION_VERIFY id=${TRANSITION} contractHash=${CONTRACT} truth=${verified ? 'TRUE' : 'FALSE'}`, {
     transitionId: TRANSITION,
     contractHash: CONTRACT,
     truth: verified ? 'TRUE' : 'FALSE',
-    predicates: [{ id: ENSURE.id, expected: true, truth: verified ? 'true' : 'false', evidenceId: 'verify:8:oak_log@1,64,1' }],
-    evidenceIds: ['verify:8:oak_log@1,64,1'],
-    verifiedAtMs: T0 + 8,
-    observedAtMs: T0 + 8,
+    predicates: [{ id: ENSURE.id, expected: true, truth: verified ? 'true' : 'false', evidenceId }],
+    evidenceIds: [evidenceId],
+    verifiedAtMs: T0 + verifyOffset,
+    observedAtMs: T0 + verifyOffset,
     runId: identityRun,
     generationId: GENERATION,
     leaseId: GENERATION,
@@ -100,24 +159,49 @@ function fixture({ sourceSha = SOURCE, outcomeKind = 'SUCCESS', verified = true,
     identityMatches: true,
     predicatesVerified: verified,
   })
-  const outcome = row(9, `VTR_TRANSITION_OUTCOME id=${TRANSITION} outcome=${outcomeKind} boundary=${boundary}`, {
+  const metricsEventText = `VTR_TRANSITION_MODEL_METRICS transitionId=${TRANSITION} contractHash=${CONTRACT} outcome=${outcomeKind} mechanicalSteps=${legs} decisionFrameInvocations=${decisionFrames} providerEvaluateAttempts=${providerAttempts}`
+  const metricsEvent = row(verifyOffset, metricsEventText, {
     transitionId: TRANSITION,
     contractHash: CONTRACT,
-    outcome: { kind: outcomeKind, contractHash: CONTRACT, evidenceIds: ['verify:8:oak_log@1,64,1'] },
+    typedTerminalOutcome: outcomeKind,
+    mechanicalSteps: legs,
+    jevDecisionFrameInvocations: decisionFrames,
+    jevModelProviderEvaluateAttempts: providerAttempts,
+  })
+  const conflictingMetricsEvent = row(verifyOffset, metricsEventText.replace(`providerEvaluateAttempts=${providerAttempts}`, `providerEvaluateAttempts=${providerAttempts + 1}`), {
+    transitionId: TRANSITION,
+    contractHash: CONTRACT,
+    typedTerminalOutcome: outcomeKind,
+    mechanicalSteps: legs,
+    jevDecisionFrameInvocations: decisionFrames,
+    jevModelProviderEvaluateAttempts: providerAttempts + 1,
+  })
+  const decisionFrame = row(5, 'JEV_DECISION_EPOCH_START epoch=1 reason=grounded_route_choice', { epoch: 1 })
+  const outcome = row(terminalOffset, `VTR_TRANSITION_OUTCOME id=${TRANSITION} outcome=${outcomeKind} boundary=${boundary}`, {
+    transitionId: TRANSITION,
+    contractHash: CONTRACT,
+    outcome: { kind: outcomeKind, contractHash: CONTRACT, evidenceIds: [evidenceId] },
     boundary,
-    usage: { mechanicalSteps: 1, elapsedMs: 300, resources: {}, risk: {}, effects: { locomotion: 1 } },
+    usage: { mechanicalSteps: legs, elapsedMs: 300, resources: {}, risk: {}, effects: { locomotion: 1 } },
     metrics: {
       verifiedTransitionCompletion: outcomeKind === 'SUCCESS' ? 1 : 0,
-      mechanicalStepsPerTransition: 1,
-      jevCallsPerTransition: modelCalls,
+      mechanicalStepsPerTransition: legs,
+      jevCallsPerTransition: decisionFrames,
       system2CallsPerTransition: 0,
-      modelCallsPerMechanicalStep: modelCalls,
+      modelCallsPerMechanicalStep: legs === 0 ? null : decisionFrames / legs,
       typedTerminalOutcome: outcomeKind,
       duplicateAuthority: false,
       duplicateAuthorityConflicts: 0,
     },
   })
-  const runJournalText = [commit, actuation, reserved, skillStep, mechanical, movement, verify, outcome].map((entry) => JSON.stringify(entry)).join('\n') + '\n'
+  const runRows = [commit, ...actuations, ...reservations, ...skillSteps, ...stepOutcomes, mechanical, movement]
+  if (decisionFrameMarker) runRows.push(decisionFrame)
+  runRows.push(verify)
+  if (includeModelMetrics) runRows.push(metricsEvent)
+  if (conflictingModelMetrics) runRows.push(conflictingMetricsEvent)
+  if (suffixOnlyModelMetrics) runRows.push(row(verifyOffset, `X_${metricsEventText}`, { transitionId: TRANSITION, contractHash: CONTRACT }))
+  runRows.push(outcome)
+  const runJournalText = runRows.map((entry) => JSON.stringify(entry)).join('\n') + '\n'
   const summary = {
     freshnessMs: 10,
     status: { available: true, connected: true, frozen: false },
@@ -157,6 +241,7 @@ assert.equal(successReport.acceptanceEligible, false)
 assert.equal(successReport.observed.transition.metrics.verifiedTransitionCompletion, 1)
 assert.equal(successReport.observed.transition.metrics.mechanicalStepsPerTransition, 1)
 assert.equal(successReport.observed.transition.metrics.mechanicalStepReservations, 1)
+assert.equal(successReport.observed.transition.metrics.mechanicalStepOutcomeRows, 1)
 assert.equal(successReport.observed.transition.metrics.skillStepEventRows, 1)
 assert.deepEqual(successReport.observed.transition.metrics.skillStepKindEventRows, { move: 1 })
 assert.equal(successReport.observed.transition.metrics.observedCommitToTerminalMs, 5)
@@ -165,7 +250,13 @@ assert.deepEqual(successReport.observed.transition.executionTrace.movementComple
   end: { x: 2, y: 65, z: 2 },
 })
 assert.equal(successReport.observed.transition.metrics.jevCallsPerTransition, 0)
+assert.equal(successReport.observed.transition.metrics.modelMetricsStatus, 'OBSERVED')
+assert.equal(successReport.observed.transition.metrics.decisionFrameInvocations, 0)
+assert.equal(successReport.observed.transition.metrics.providerEvaluateAttempts, 0)
+assert.equal(successReport.observed.transition.metrics.providerEvaluateAttemptsIncludingRetries, 0)
 assert.equal(successReport.observed.transition.outcome.detail.outcome.kind, 'SUCCESS')
+assert.equal(successReport.checks.find((entry) => entry.id === 'transition:persistent-reach-actuation').status, 'PASS')
+assert.equal(successReport.checks.find((entry) => entry.id === 'metrics:vtr-transition-model-metrics').status, 'PASS')
 
 const actionOnly = fixture()
 actionOnly.input.runJournalText = actionOnly.input.runJournalText.split('\n').filter((line) => !line.includes('VTR_TRANSITION_VERIFY')).join('\n') + '\n'
@@ -178,10 +269,76 @@ const changedSourceReport = evaluateCapture(changedSource.input)
 assert.equal(changedSourceReport.status, 'FAIL')
 assert.equal(changedSourceReport.checks.find((entry) => entry.id === 'observer:exact-live-identity').status, 'FAIL')
 
-const modelCall = fixture({ modelCalls: 1 })
-const modelCallReport = evaluateCapture(modelCall.input)
-assert.equal(modelCallReport.status, 'FAIL')
-assert.equal(modelCallReport.checks.find((entry) => entry.id === 'policy:no-model-activity-during-probe').status, 'FAIL')
+const localDecisionFrame = fixture({ decisionFrames: 1, decisionFrameMarker: true })
+localDecisionFrame.input.jevCallsText = `${JSON.stringify({ record: 'jev-call', ts: iso(5), policy: 'fallback', providerAttempts: 0 })}\n`
+localDecisionFrame.input.jevDecisionsText = `${JSON.stringify({ record: 'decision', ts: iso(5), jev: { policy: 'fallback', source: 'fallback' } })}\n`
+const localDecisionFrameReport = evaluateCapture(localDecisionFrame.input)
+assert.equal(localDecisionFrameReport.status, 'PASS', JSON.stringify(localDecisionFrameReport.checks, null, 2))
+assert.equal(localDecisionFrameReport.observed.transition.metrics.decisionFrameInvocations, 1)
+assert.equal(localDecisionFrameReport.observed.transition.metrics.providerEvaluateAttempts, 0)
+assert.equal(localDecisionFrameReport.observed.transition.metrics.providerEvaluateAttemptsIncludingRetries, 0)
+assert.equal(localDecisionFrameReport.checks.find((entry) => entry.id === 'policy:no-model-activity-during-probe').status, 'PASS')
+assert.equal(localDecisionFrameReport.checks.find((entry) => entry.id === 'policy:no-model-activity-during-probe').observed.decisionFrameMarkers, 1)
+
+const providerAttempt = fixture({ decisionFrames: 1, providerAttempts: 1, decisionFrameMarker: true })
+const providerAttemptReport = evaluateCapture(providerAttempt.input)
+assert.equal(providerAttemptReport.status, 'FAIL')
+assert.equal(providerAttemptReport.observed.transition.metrics.decisionFrameInvocations, 1)
+assert.equal(providerAttemptReport.observed.transition.metrics.providerEvaluateAttemptsIncludingRetries, 1)
+assert.equal(providerAttemptReport.checks.find((entry) => entry.id === 'policy:no-model-activity-during-probe').status, 'FAIL')
+
+const system2JournalActivity = fixture()
+system2JournalActivity.input.system2Text = `${JSON.stringify({ record: 'system2-plan', ts: iso(5), providerAttempts: 0 })}\n`
+const system2JournalActivityReport = evaluateCapture(system2JournalActivity.input)
+assert.equal(system2JournalActivityReport.status, 'FAIL')
+assert.equal(system2JournalActivityReport.checks.find((entry) => entry.id === 'policy:no-model-activity-during-probe').status, 'FAIL')
+
+const missingMetrics = fixture({ includeModelMetrics: false })
+const missingMetricsReport = evaluateCapture(missingMetrics.input)
+assert.equal(missingMetricsReport.status, 'INCOMPLETE')
+assert.equal(missingMetricsReport.observed.transition.metrics.modelMetricsStatus, 'UNKNOWN')
+assert.equal(missingMetricsReport.observed.transition.metrics.decisionFrameInvocations, null)
+assert.equal(missingMetricsReport.observed.transition.metrics.providerEvaluateAttemptsIncludingRetries, null)
+assert.equal(missingMetricsReport.checks.find((entry) => entry.id === 'policy:no-model-activity-during-probe').status, 'INCOMPLETE')
+
+const conflictingMetrics = fixture({ conflictingModelMetrics: true })
+const conflictingMetricsReport = evaluateCapture(conflictingMetrics.input)
+assert.equal(conflictingMetricsReport.status, 'FAIL')
+assert.equal(conflictingMetricsReport.observed.transition.metrics.modelMetricsStatus, 'CONFLICT')
+assert.equal(conflictingMetricsReport.checks.find((entry) => entry.id === 'metrics:vtr-transition-model-metrics').status, 'FAIL')
+
+const suffixMetricMarker = fixture({ includeModelMetrics: false, suffixOnlyModelMetrics: true })
+const suffixMetricMarkerReport = evaluateCapture(suffixMetricMarker.input)
+assert.equal(suffixMetricMarkerReport.status, 'INCOMPLETE')
+assert.equal(suffixMetricMarkerReport.observed.transition.metrics.modelMetricsStatus, 'UNKNOWN')
+
+const threeLegReach = fixture({ legs: 3, decisionFrames: 2 })
+const threeLegReachReport = evaluateCapture(threeLegReach.input)
+assert.equal(threeLegReachReport.status, 'PASS', JSON.stringify(threeLegReachReport.checks, null, 2))
+assert.equal(threeLegReachReport.observed.transition.metrics.mechanicalStepReservations, 3)
+assert.equal(threeLegReachReport.observed.transition.metrics.mechanicalStepOutcomeRows, 3)
+assert.equal(threeLegReachReport.observed.transition.executionTrace.actionIds.length, 1)
+assert.equal(threeLegReachReport.observed.transition.persistentActuationOwner.intentId, 'intent-1')
+assert.equal(threeLegReachReport.checks.find((entry) => entry.id === 'transition:persistent-reach-actuation').observed.actuationCount, 1)
+
+const perLegActuations = fixture({ legs: 3, separateActuationPerLeg: true })
+const perLegActuationsReport = evaluateCapture(perLegActuations.input)
+assert.equal(perLegActuationsReport.status, 'FAIL')
+assert.equal(perLegActuationsReport.checks.find((entry) => entry.id === 'transition:persistent-reach-actuation').status, 'FAIL')
+assert.ok(perLegActuationsReport.observed.transition.persistentReachOwnershipProblems.some((entry) => entry.startsWith('persistent-transition-requires-one-actuation:')))
+
+const mismatchedStepEvidence = fixture({ legs: 3 })
+mismatchedStepEvidence.input.runJournalText = mismatchedStepEvidence.input.runJournalText.split('\n').filter(Boolean).map((line) => {
+  const entry = JSON.parse(line)
+  if (entry.message?.startsWith('VTR_MECHANICAL_STEP_OUTCOME ') && entry.detail?.leg === 2) entry.detail.actionId = `${entry.detail.actionId}:wrong-owner`
+  if (entry.message?.startsWith('VTR_MECHANICAL_STEP_OUTCOME ') && entry.detail?.leg === 3) entry.detail.contractHash = 'd'.repeat(64)
+  return JSON.stringify(entry)
+}).join('\n') + '\n'
+const mismatchedStepEvidenceReport = evaluateCapture(mismatchedStepEvidence.input)
+assert.equal(mismatchedStepEvidenceReport.status, 'FAIL')
+assert.equal(mismatchedStepEvidenceReport.checks.find((entry) => entry.id === 'transition:persistent-reach-actuation').status, 'FAIL')
+assert.ok(mismatchedStepEvidenceReport.observed.transition.persistentReachOwnershipProblems.some((entry) => entry.includes('reservation-step-outcome-actionId-mismatch')))
+assert.ok(mismatchedStepEvidenceReport.observed.transition.persistentReachOwnershipProblems.some((entry) => entry === 'contract-mismatch:VTR_MECHANICAL_STEP_OUTCOME'))
 
 const wrongRun = fixture({ identityRun: 'run-other-xyz' })
 const wrongRunReport = evaluateCapture(wrongRun.input)
@@ -247,4 +404,4 @@ try {
   rmSync(tempDir, { recursive: true, force: true })
 }
 
-process.stdout.write('VTR Reach live collector tests passed (8 cases)\n')
+process.stdout.write('VTR Reach live collector tests passed (16 cases)\n')

@@ -25,7 +25,11 @@ import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const SHA_RE = /^[0-9a-f]{40}$/i
-const MODEL_ACTIVITY_RE = /JEV_DECISION(?:_EPOCH_START|_FRAME)?|SYSTEM2_(?:PLAN|DECISION|PROVIDER|LLM)|(?:JEV|SYSTEM2)_MODEL_(?:CALL|REQUEST|RETRY|FAILURE)|(?:MODEL|PROVIDER)_(?:CALL|REQUEST|RETRY|FAILURE|UNAVAILABLE|FALLBACK)|FALLBACK_AFTER_PROVIDER_FAILURE|GatewayInternalServerError|Service temporarily unavailable|MODEL_UNAVAILABLE|HTTP 5\d\d/iu
+// A Decision Frame can run through the explicitly configured deterministic
+// fallback. Count provider evaluate attempts from its dedicated terminal event;
+// a Jev decision epoch marker alone is not network activity.
+const MODEL_ACTIVITY_RE = /SYSTEM2_(?:PLAN|DECISION|PROVIDER|LLM)|(?:JEV|SYSTEM2)_MODEL_(?:CALL|REQUEST|RETRY|FAILURE)|(?:MODEL|PROVIDER)_(?:CALL|REQUEST|RETRY|FAILURE|UNAVAILABLE|FALLBACK)|FALLBACK_AFTER_PROVIDER_FAILURE|GatewayInternalServerError|Service temporarily unavailable|MODEL_UNAVAILABLE|HTTP 5\d\d/iu
+const VTR_TRANSITION_MODEL_METRICS = 'VTR_TRANSITION_MODEL_METRICS'
 const LEGACY_ACTUATION_RE = /(?:selectedBy=(?:jev|legacy|option|goalqueue)|LEGACY_ACTUATION|legacyActuation=true|authority=(?:legacy|option|goalqueue)|(?:GOAL_QUEUE|OPTION)_ACTUATION)/iu
 
 const HELP = `Usage: node tools/collect-vtr-reach-live.mjs --host-log <buddy.log> --run-journal <run.jsonl>
@@ -247,6 +251,62 @@ function contractHash(row) {
     ?? null
 }
 
+function intentId(row) {
+  const value = row?.detail?.intentId ?? token(row?.message ?? '', 'intentId') ?? token(row?.message ?? '', 'intent')
+  return typeof value === 'string' && value.length > 0 && value !== 'missing' ? value : null
+}
+
+function actionId(row) {
+  const value = row?.detail?.actionId ?? token(row?.message ?? '', 'actionId') ?? token(row?.message ?? '', 'action')
+  return typeof value === 'string' && value.length > 0 && value !== 'missing' ? value : null
+}
+
+function mechanicalStepId(row) {
+  const value = row?.detail?.stepId ?? token(row?.message ?? '', 'stepId') ?? token(row?.message ?? '', 'step')
+  return typeof value === 'string' && value.length > 0 && value !== 'missing' ? value : null
+}
+
+function nonNegativeInteger(value) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && /^\d+$/u.test(value)) {
+    const parsed = Number(value)
+    if (Number.isSafeInteger(parsed)) return parsed
+  }
+  return null
+}
+
+function modelMetricsEvent(row) {
+  const conflicts = []
+  const textValue = (detailNames, messageName) => {
+    const detailValue = detailNames.map((key) => row?.detail?.[key]).find((value) => typeof value === 'string' && value.length > 0) ?? null
+    const messageValue = token(row?.message ?? '', messageName)
+    if (detailValue !== null && messageValue !== null && detailValue !== messageValue) conflicts.push(messageName)
+    return detailValue ?? messageValue
+  }
+  const countValue = (detailNames, messageName) => {
+    const detailRaw = detailNames.map((key) => row?.detail?.[key]).find((value) => value !== undefined && value !== null) ?? null
+    const messageRaw = token(row?.message ?? '', messageName)
+    const detailValue = detailRaw === null ? null : nonNegativeInteger(detailRaw)
+    const messageValue = messageRaw === null ? null : nonNegativeInteger(messageRaw)
+    if (detailRaw !== null && detailValue === null) conflicts.push(messageName)
+    if (messageRaw !== null && messageValue === null) conflicts.push(messageName)
+    if (detailValue !== null && messageValue !== null && detailValue !== messageValue) conflicts.push(messageName)
+    return detailValue ?? messageValue
+  }
+  const metrics = {
+    transitionId: textValue(['transitionId', 'id'], 'transitionId'),
+    contractHash: textValue(['contractHash'], 'contractHash'),
+    outcome: textValue(['typedTerminalOutcome', 'outcome'], 'outcome'),
+    mechanicalSteps: countValue(['mechanicalSteps'], 'mechanicalSteps'),
+    decisionFrameInvocations: countValue(['jevDecisionFrameInvocations', 'decisionFrameInvocations'], 'decisionFrameInvocations'),
+    providerEvaluateAttempts: countValue(['jevModelProviderEvaluateAttempts', 'providerEvaluateAttempts'], 'providerEvaluateAttempts'),
+  }
+  for (const key of ['transitionId', 'contractHash', 'outcome', 'mechanicalSteps', 'decisionFrameInvocations', 'providerEvaluateAttempts']) {
+    if (metrics[key] === null) conflicts.push(`missing:${key}`)
+  }
+  return { ...metrics, conflicts: [...new Set(conflicts)] }
+}
+
 function eventTime(row) {
   const value = Date.parse(row?.ts ?? row?.timestamp ?? row?.createdAt)
   return Number.isFinite(value) ? value : null
@@ -347,6 +407,40 @@ function scopedJournalRows(journal, fromMs, toMs) {
 
 function hasModelActivity(message) {
   return MODEL_ACTIVITY_RE.test(String(message ?? ''))
+}
+
+function journalProviderEvidence(scopedJournals) {
+  const activityRows = []
+  const unknownRows = []
+  const deterministicJevRows = []
+  for (const [name, journal] of Object.entries(scopedJournals)) {
+    for (const row of journal.rows) {
+      const attemptsRaw = row.providerAttempts ?? row.providerEvaluateAttempts ?? row.detail?.providerAttempts ?? row.detail?.providerEvaluateAttempts
+      const attempts = attemptsRaw === undefined || attemptsRaw === null ? null : nonNegativeInteger(attemptsRaw)
+      const policy = row.policy ?? row.detail?.policy ?? row.jev?.policy
+      if (name === 'system2') {
+        activityRows.push({ journal: name, record: row.record ?? null, providerAttempts: attempts })
+        continue
+      }
+      if (attempts !== null) {
+        if (attempts > 0) activityRows.push({ journal: name, record: row.record ?? null, providerAttempts: attempts })
+        else if (name === 'jevCalls' || name === 'jevDecisions') deterministicJevRows.push({ journal: name, record: row.record ?? null, policy: policy ?? null, providerAttempts: 0 })
+        continue
+      }
+      if (attemptsRaw !== undefined && attemptsRaw !== null) {
+        unknownRows.push({ journal: name, record: row.record ?? null, reason: 'invalid-provider-attempt-count' })
+        continue
+      }
+      if (['fallback', 'reflex'].includes(policy) || (name === 'jevCalls' && row.record === 'jev-outcome')) {
+        deterministicJevRows.push({ journal: name, record: row.record ?? null, policy: policy ?? null, providerAttempts: 0 })
+      } else if (policy === 'typesafe' || row.record === 'jev-retry') {
+        activityRows.push({ journal: name, record: row.record ?? null, providerAttempts: null })
+      } else {
+        unknownRows.push({ journal: name, record: row.record ?? null, reason: 'provider-attempt-count-not-recorded' })
+      }
+    }
+  }
+  return { activityRows, unknownRows, deterministicJevRows }
 }
 
 function hasLegacyActuation(message) {
@@ -533,12 +627,22 @@ export function evaluateCapture(input) {
     const terminal = afterCommit.find(({ row, event }) => event === 'VTR_TRANSITION_OUTCOME'
       && transitionId(row) === id
       && contractHash(row) === hash) ?? null
-    const captureRows = afterCommit.filter(({ row, event, index }) => {
+    const captureEventKinds = [
+      'VTR_TRANSITION_COMMIT',
+      'VTR_TRANSITION_ACTUATION',
+      'VTR_MECHANICAL_STEP_RESERVED',
+      'VTR_MECHANICAL_STEP_OUTCOME',
+      'VTR_MECHANICAL_OUTCOME',
+      'VTR_TRANSITION_MODEL_METRICS',
+      'VTR_TRANSITION_VERIFY',
+      'VTR_TRANSITION_OUTCOME',
+    ]
+    const relatedRows = afterCommit.filter(({ row, event, index }) => {
       if (terminal !== null && index > terminal.index) return false
-      return ['VTR_TRANSITION_COMMIT', 'VTR_TRANSITION_ACTUATION', 'VTR_MECHANICAL_STEP_RESERVED', 'VTR_MECHANICAL_OUTCOME', 'VTR_TRANSITION_VERIFY', 'VTR_TRANSITION_OUTCOME'].includes(event)
-        && transitionId(row) === id
-        && (contractHash(row) === null || hash === null || contractHash(row) === hash)
+      return captureEventKinds.includes(event) && transitionId(row) === id
     })
+    const contractMismatchRows = relatedRows.filter(({ row }) => contractHash(row) !== hash)
+    const captureRows = relatedRows.filter(({ row }) => contractHash(row) === hash)
     transitionRows = captureRows
     const verifyRows = captureRows.filter(({ event }) => event === 'VTR_TRANSITION_VERIFY')
     const outcomeRow = captureRows.find(({ event }) => event === 'VTR_TRANSITION_OUTCOME') ?? null
@@ -574,8 +678,12 @@ export function evaluateCapture(input) {
       && captureRows.findIndex(({ event }) => event === 'VTR_TRANSITION_VERIFY') < (outcomeRow?.index ?? Number.POSITIVE_INFINITY)
     const actuationRows = captureRows.filter(({ event }) => event === 'VTR_TRANSITION_ACTUATION')
     const reservationRows = captureRows.filter(({ event }) => event === 'VTR_MECHANICAL_STEP_RESERVED')
+    const stepOutcomeRows = captureRows.filter(({ event }) => event === 'VTR_MECHANICAL_STEP_OUTCOME')
+    // VTR_MECHANICAL_OUTCOME is an action-level completion record. The durable
+    // per-leg ledger is VTR_MECHANICAL_STEP_OUTCOME, joined to its reservation.
     const mechanicalRows = captureRows.filter(({ event }) => event === 'VTR_MECHANICAL_OUTCOME')
-    const actionIds = new Set(actuationRows.map(({ row }) => row.detail?.candidate ?? row.detail?.actionId).filter((value) => typeof value === 'string'))
+    const modelMetricRows = relatedRows.filter(({ event }) => event === VTR_TRANSITION_MODEL_METRICS)
+    const actionIds = new Set(actuationRows.map(({ row }) => actionId(row)).filter((value) => value !== null))
     const skillStepRows = allRunRows.filter(({ row, event, ts }) => event === 'SKILL_STEP'
       && ts !== null && commitTime !== null && commitTime <= ts && ts <= (terminalTime ?? Number.POSITIVE_INFINITY)
       && actionIds.has(row.detail?.actionId))
@@ -589,11 +697,78 @@ export function evaluateCapture(input) {
     const movementCompletion = executionEventRows.map(({ row }) => positionFromMovementMessage(row.message)).find((value) => value !== null) ?? null
     const metricsSteps = Number(metrics.mechanicalStepsPerTransition)
     const usageSteps = Number(usage.mechanicalSteps)
-    const actuationIntentIds = new Set(actuationRows.map(({ row }) => row.detail?.intentId).filter((value) => typeof value === 'string'))
-    const reservationsMatchActuation = reservationRows.length === metricsSteps
-      && reservationRows.every(({ row }) => row.detail?.transitionId === id
-        && typeof row.detail?.intentId === 'string'
-        && actuationIntentIds.has(row.detail.intentId))
+    const modelMetrics = modelMetricRows.length === 1 && contractHash(modelMetricRows[0].row) === hash
+      ? modelMetricsEvent(modelMetricRows[0].row)
+      : null
+    const modelMetricsProblems = []
+    if (modelMetricRows.length > 1) modelMetricsProblems.push(`duplicate-model-metrics-events:${modelMetricRows.length}`)
+    if (modelMetricRows.some(({ row }) => contractHash(row) !== hash)) modelMetricsProblems.push('model-metrics-contract-mismatch')
+    if (modelMetrics !== null) {
+      modelMetricsProblems.push(...modelMetrics.conflicts)
+      if (Number.isFinite(metricsSteps) && modelMetrics.mechanicalSteps !== metricsSteps) modelMetricsProblems.push('mechanicalSteps-vs-terminal-metrics')
+      if (modelMetrics.outcome !== (metrics.typedTerminalOutcome ?? typedOutcome.kind)) modelMetricsProblems.push('outcome-vs-terminal-metrics')
+    }
+    const modelMetricsStatus = modelMetricRows.length === 0
+      ? 'UNKNOWN'
+      : modelMetricsProblems.length > 0 || modelMetrics === null ? 'CONFLICT' : 'OBSERVED'
+    const providerEvaluateAttempts = modelMetricsStatus === 'OBSERVED' ? modelMetrics.providerEvaluateAttempts : null
+    const decisionFrameInvocations = modelMetricsStatus === 'OBSERVED' ? modelMetrics.decisionFrameInvocations : null
+
+    const stepOutcomeById = new Map()
+    const persistentOwnershipProblems = []
+    const requiredOwnerFields = (row, role, requireStep) => {
+      const owner = {
+        transitionId: transitionId(row),
+        contractHash: contractHash(row),
+        intentId: intentId(row),
+        actionId: actionId(row),
+        stepId: requireStep ? mechanicalStepId(row) : null,
+      }
+      for (const key of ['transitionId', 'contractHash', 'intentId', 'actionId', ...(requireStep ? ['stepId'] : [])]) {
+        if (owner[key] === null) persistentOwnershipProblems.push(`${role}-missing-${key}`)
+      }
+      if (owner.transitionId !== id) persistentOwnershipProblems.push(`${role}-transitionId-mismatch`)
+      if (owner.contractHash !== hash) persistentOwnershipProblems.push(`${role}-contractHash-mismatch`)
+      return owner
+    }
+    const actuationOwners = actuationRows.map(({ row }) => requiredOwnerFields(row, 'actuation', false))
+    const reservationOwners = reservationRows.map(({ row }) => requiredOwnerFields(row, 'reservation', true))
+    const stepOutcomeOwners = stepOutcomeRows.map(({ row }) => requiredOwnerFields(row, 'step-outcome', true))
+    if (actuationOwners.length !== 1) persistentOwnershipProblems.push(`persistent-transition-requires-one-actuation:${actuationOwners.length}`)
+    if (reservationRows.length !== metricsSteps) persistentOwnershipProblems.push(`reservation-count:${reservationRows.length}/${metricsSteps}`)
+    if (stepOutcomeRows.length !== reservationRows.length) persistentOwnershipProblems.push(`step-outcome-count:${stepOutcomeRows.length}/${reservationRows.length}`)
+    const reservedStepIds = new Set()
+    for (const owner of reservationOwners) {
+      if (owner.stepId !== null && reservedStepIds.has(owner.stepId)) persistentOwnershipProblems.push(`duplicate-reservation:${owner.stepId}`)
+      if (owner.stepId !== null) reservedStepIds.add(owner.stepId)
+    }
+    for (const owner of stepOutcomeOwners) {
+      if (stepOutcomeById.has(owner.stepId)) persistentOwnershipProblems.push(`duplicate-step-outcome:${owner.stepId}`)
+      else stepOutcomeById.set(owner.stepId, owner)
+    }
+    for (const owner of reservationOwners) {
+      if (owner.stepId === null || !stepOutcomeById.has(owner.stepId)) {
+        persistentOwnershipProblems.push(`reservation-without-step-outcome:${owner.stepId ?? 'missing'}`)
+        continue
+      }
+      const outcomeOwner = stepOutcomeById.get(owner.stepId)
+      for (const key of ['transitionId', 'contractHash', 'intentId', 'actionId', 'stepId']) {
+        if (owner[key] !== outcomeOwner[key]) persistentOwnershipProblems.push(`reservation-step-outcome-${key}-mismatch:${owner.stepId}`)
+      }
+    }
+    if (actuationOwners.length === 1) {
+      const owner = actuationOwners[0]
+      for (const [role, stepOwners] of [['reservation', reservationOwners], ['step-outcome', stepOutcomeOwners]]) {
+        for (const stepOwner of stepOwners) {
+          if (stepOwner.intentId !== owner.intentId || stepOwner.actionId !== owner.actionId) {
+            persistentOwnershipProblems.push(`${role}-owner-differs-from-transition-actuation:${stepOwner.stepId ?? 'missing'}`)
+          }
+        }
+      }
+    }
+    persistentOwnershipProblems.push(...contractMismatchRows.map(({ event }) => `contract-mismatch:${event}`))
+    const reservationsMatchActuation = persistentOwnershipProblems.length === 0
+    const persistentOwnershipOk = reservationsMatchActuation
     const outcomeOk = outcomeRow !== null && typedOutcome.kind === 'SUCCESS'
       && ['verified-terminal', 'mechanical-step-outcome'].includes(outcomeDetail.boundary)
       && metrics.verifiedTransitionCompletion === 1
@@ -602,8 +777,7 @@ export function evaluateCapture(input) {
       && Number(metrics.duplicateAuthorityConflicts) === 0
       && metricsSteps > 0
       && usageSteps === metricsSteps
-      && actuationRows.length > 0
-      && reservationsMatchActuation
+      && persistentOwnershipOk
       && verificationOk
       && commitTime !== null && terminalTime !== null && commitTime <= terminalTime
     const identityOk = id !== null && hash !== null
@@ -629,12 +803,25 @@ export function evaluateCapture(input) {
         verifiedTransitionCompletion: metrics.verifiedTransitionCompletion ?? null,
         mechanicalStepsPerTransition: metricsSteps,
         mechanicalStepReservations: reservationRows.length,
+        mechanicalStepOutcomeRows: stepOutcomeRows.length,
         observedMechanicalOutcomeRows: mechanicalRows.length,
         skillStepEventRows: skillStepRows.length,
         skillStepKindEventRows: skillStepKindCounts,
         observedCommitToTerminalMs: commitTime === null || terminalTime === null ? null : terminalTime - commitTime,
+        /** Compatibility policy counter; not a provider-call count. */
         jevCallsPerTransition: metrics.jevCallsPerTransition ?? null,
+        legacyJevCallsPerTransition: metrics.jevCallsPerTransition ?? null,
+        decisionFrameInvocations,
+        providerEvaluateAttempts,
+        providerEvaluateAttemptsIncludingRetries: providerEvaluateAttempts,
+        providerEvaluateAttemptsPerMechanicalStep: providerEvaluateAttempts === null || !Number.isFinite(metricsSteps) || metricsSteps === 0
+          ? null
+          : providerEvaluateAttempts / metricsSteps,
+        modelMetricsStatus,
+        modelMetricsSource: modelMetricRows.length === 0 ? null : 'run-journal',
+        modelMetricsConflicts: [...new Set(modelMetricsProblems)],
         system2CallsPerTransition: metrics.system2CallsPerTransition ?? null,
+        /** Deprecated aggregate mixes Jev policy calls with model calls. */
         modelCallsPerMechanicalStep: metrics.modelCallsPerMechanicalStep ?? null,
         typedTerminalOutcome: metrics.typedTerminalOutcome ?? typedOutcome.kind ?? null,
         duplicateAuthority: metrics.duplicateAuthority ?? null,
@@ -651,6 +838,11 @@ export function evaluateCapture(input) {
       verificationOk,
       typedOutcomeOk: outcomeOk,
       mechanicalReservationsMatchActuation: reservationsMatchActuation,
+      persistentReachOwnershipOk: persistentOwnershipOk,
+      persistentReachOwnershipProblems: [...new Set(persistentOwnershipProblems)],
+      persistentActuationOwner: actuationOwners.length === 1
+        ? { intentId: actuationOwners[0].intentId, actionId: actuationOwners[0].actionId }
+        : null,
       identityOk,
       validatorBoundaryCompatible: outcomeDetail.boundary === 'verified-terminal',
     }
@@ -670,6 +862,22 @@ export function evaluateCapture(input) {
       transitionId: id,
       contractHash: hash,
     }, outcomeRow === null ? 'committed Transition has not reached a typed terminal outcome' : outcomeOk ? null : 'SUCCESS lacks a matching deterministic TRUE verification or typed metrics'))
+    checks.push(check('transition:persistent-reach-actuation', outcomeRow === null ? 'INCOMPLETE' : persistentOwnershipOk ? 'PASS' : 'FAIL', {
+      actuationCount: actuationRows.length,
+      intentId: actuationOwners.length === 1 ? actuationOwners[0].intentId : null,
+      actionId: actuationOwners.length === 1 ? actuationOwners[0].actionId : null,
+      mechanicalStepReservations: reservationRows.length,
+      mechanicalStepOutcomes: stepOutcomeRows.length,
+      mechanicalStepsPerTransition: Number.isFinite(metricsSteps) ? metricsSteps : null,
+      problems: [...new Set(persistentOwnershipProblems)],
+    }, outcomeRow === null ? 'Transition has not reached a terminal outcome' : persistentOwnershipOk ? null : 'mechanical legs are not all owned by one contract-bound intent/action actuation'))
+    checks.push(check('metrics:vtr-transition-model-metrics', modelMetricsStatus === 'OBSERVED' ? 'PASS' : modelMetricsStatus === 'UNKNOWN' ? 'INCOMPLETE' : 'FAIL', {
+      status: modelMetricsStatus,
+      decisionFrameInvocations,
+      providerEvaluateAttemptsIncludingRetries: providerEvaluateAttempts,
+      source: modelMetricRows.length === 0 ? null : 'run-journal',
+      conflicts: [...new Set(modelMetricsProblems)],
+    }, modelMetricsStatus === 'OBSERVED' ? null : modelMetricsStatus === 'UNKNOWN' ? 'VTR_TRANSITION_MODEL_METRICS is missing for the committed Transition' : 'model-metrics rows are duplicated, malformed, or conflict with the Transition identity/outcome'))
     if (outcomeRow !== null && outcomeDetail.boundary !== 'verified-terminal') {
       checks.push(check('schema:validator-boundary-compatibility', 'INCOMPLETE', {
         observedBoundary: outcomeDetail.boundary,
@@ -683,6 +891,8 @@ export function evaluateCapture(input) {
   } else {
     checks.push(check('transition:contract-and-world-binding', 'INCOMPLETE', null, 'no Reach Transition commit for the live BOOT/run/generation/mission'))
     checks.push(check('transition:deterministic-verify-and-success', 'INCOMPLETE', null, 'no Reach Transition commit for the live BOOT/run/generation/mission'))
+    checks.push(check('transition:persistent-reach-actuation', 'INCOMPLETE', null, 'no Reach Transition commit for the live BOOT/run/generation/mission'))
+    checks.push(check('metrics:vtr-transition-model-metrics', 'INCOMPLETE', null, 'no Reach Transition commit for the live BOOT/run/generation/mission'))
   }
 
   const terminalTime = transition?.outcome === null || transition?.outcome === undefined ? null : eventTime(transition.outcome)
@@ -691,31 +901,52 @@ export function evaluateCapture(input) {
   const scopedJournals = Object.fromEntries(Object.entries(journals).map(([name, journal]) => [name, scopedJournalRows(journal, modelStart, modelEnd)]))
   const malformedJournal = Object.values(journals).some((journal) => journal.errors.length > 0)
   const unscopedJournalRows = Object.values(scopedJournals).reduce((sum, entry) => sum + entry.unscoped, 0)
-  const nonEmptyDuringProbe = Object.values(scopedJournals).flatMap((entry) => entry.rows)
-  const callCountersZero = transition !== null
-    && Number(transition.metrics.jevCallsPerTransition) === 0
-    && Number(transition.metrics.system2CallsPerTransition) === 0
-    && Number(transition.metrics.modelCallsPerMechanicalStep) === 0
+  const journalEvidence = journalProviderEvidence(scopedJournals)
+  const system2Calls = transition === null ? null : nonNegativeInteger(transition.metrics.system2CallsPerTransition)
+  const providerEvaluateAttempts = transition?.metrics.providerEvaluateAttemptsIncludingRetries ?? null
+  const modelMetricsObserved = transition?.metrics.modelMetricsStatus === 'OBSERVED'
+    && Number.isSafeInteger(providerEvaluateAttempts)
+    && providerEvaluateAttempts >= 0
+  const providerAttemptsZero = modelMetricsObserved && providerEvaluateAttempts === 0
+  const system2CallsZero = system2Calls === 0
   const modelMarkers = allRunRows.filter(({ ts, row }) => ts !== null && ts >= modelStart && ts <= modelEnd && hasModelActivity(row.message))
   const modelHostMarkers = hostRows.filter((row) => row.ts !== null && row.ts >= modelStart && row.ts <= modelEnd && MODEL_ACTIVITY_RE.test(row.raw))
-  const noModelObserved = callCountersZero && nonEmptyDuringProbe.length === 0 && modelMarkers.length === 0 && modelHostMarkers.length === 0
+  const decisionFrameMarkers = allRunRows.filter(({ ts, row }) => ts !== null && ts >= modelStart && ts <= modelEnd && /\bJEV_DECISION(?:_EPOCH_START|_FRAME)?\b/u.test(row.message ?? ''))
+  const noModelObserved = providerAttemptsZero && system2CallsZero
+    && journalEvidence.activityRows.length === 0 && journalEvidence.unknownRows.length === 0
+    && modelMarkers.length === 0 && modelHostMarkers.length === 0
     && unscopedJournalRows === 0 && !malformedJournal
     && missingJournalNames.length === 0 && readyMatches && configuredOffline
-  const modelEvidenceContradiction = callCountersZero === false || nonEmptyDuringProbe.length > 0 || modelMarkers.length > 0 || modelHostMarkers.length > 0 || malformedJournal
-  const modelEvidenceUnknown = unscopedJournalRows > 0 || missingJournalNames.length > 0
+  const modelEvidenceContradiction = (modelMetricsObserved && providerEvaluateAttempts > 0)
+    || (transition?.metrics.modelMetricsStatus === 'CONFLICT')
+    || (Number.isSafeInteger(system2Calls) && system2Calls > 0)
+    || journalEvidence.activityRows.length > 0 || modelMarkers.length > 0 || modelHostMarkers.length > 0 || malformedJournal
+  const modelEvidenceUnknown = !modelMetricsObserved || system2Calls === null
+    || journalEvidence.unknownRows.length > 0 || unscopedJournalRows > 0 || missingJournalNames.length > 0
   const modelCheckStatus = !readyMatches || !configuredOffline || modelEvidenceContradiction ? 'FAIL'
     : transition === null || terminalTime === null || modelEvidenceUnknown ? 'INCOMPLETE'
       : noModelObserved ? 'PASS' : 'INCOMPLETE'
   checks.push(check('policy:no-model-activity-during-probe', modelCheckStatus, {
     profile: { jevPolicyMode: config?.fields.jevPolicyMode ?? null, system2Mode: config?.fields.system2Mode ?? null, effectiveJev: ready?.fields.policyProvider ?? null, effectiveSystem2: ready?.fields.system2Provider ?? null },
-    counters: { jev: transition?.metrics.jevCallsPerTransition ?? null, system2: transition?.metrics.system2CallsPerTransition ?? null, perStep: transition?.metrics.modelCallsPerMechanicalStep ?? null },
+    counters: {
+      legacyJevPolicyInvocations: transition?.metrics.legacyJevCallsPerTransition ?? null,
+      decisionFrameInvocations: transition?.metrics.decisionFrameInvocations ?? null,
+      providerEvaluateAttempts,
+      providerEvaluateAttemptsIncludingRetries: providerEvaluateAttempts,
+      system2Calls,
+      deprecatedModelCallsPerMechanicalStep: transition?.metrics.modelCallsPerMechanicalStep ?? null,
+    },
     providerJournalRowsDuringProbe: Object.fromEntries(Object.entries(scopedJournals).map(([name, value]) => [name, value.rows.length])),
+    providerJournalActivityRows: journalEvidence.activityRows,
+    providerJournalUnknownRows: journalEvidence.unknownRows,
+    deterministicJevJournalRows: journalEvidence.deterministicJevRows,
     unscopedProviderJournalRows: unscopedJournalRows,
     missingProviderJournals: missingJournalNames,
     malformedProviderJournals: Object.entries(journals).filter(([, journal]) => journal.errors.length > 0).map(([name]) => name),
+    decisionFrameMarkers: decisionFrameMarkers.length,
     modelActivityRunRows: modelMarkers.length,
     modelActivityHostLines: modelHostMarkers.length,
-  }, !readyMatches || !configuredOffline ? 'VTR offline profile did not bind' : modelEvidenceContradiction ? 'model counters, journals, or activity markers indicate model/provider activity' : transition === null || terminalTime === null || modelEvidenceUnknown ? 'cannot prove model silence: terminal outcome, provider journals, or journal scope is missing' : null))
+  }, !readyMatches || !configuredOffline ? 'VTR offline profile did not bind' : modelEvidenceContradiction ? 'provider attempts, System2 calls, or provider activity evidence was observed' : transition === null || terminalTime === null || modelEvidenceUnknown ? 'cannot prove provider silence: VTR provider-attempt metrics, provider journals, or journal scope is missing/ambiguous' : null))
 
   const commitTime = transition === null ? null : eventTime(transition.sourceEventRows[0])
   const duplicateRows = commitTime === null || terminalTime === null ? [] : [
