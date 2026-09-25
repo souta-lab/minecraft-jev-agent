@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -9,8 +9,11 @@ import {
   propertiesObject,
   renderProbeServerProperties,
   residentTerminationProblems,
+  persistRunPreflightFailure,
+  runRuntimeResolutionSmoke,
   startRowFromLog,
   terminateOwnedProcessGroup,
+  inspectExactSourceDependencyReadiness,
   validateExactSourceWorkspaceInstall,
   validatePortPolicy,
   writeSetupFailureArtifact,
@@ -83,23 +86,99 @@ describe('Reach live probe caller pure contracts', () => {
     }
   })
 
+  test('preflight and frozen install share bun.lock, manifest, config, and workspace-link readiness', () => {
+    const readiness = inspectExactSourceDependencyReadiness(process.cwd())
+    expect(readiness.lockSha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(readiness.workspaceInstall.workspaceValidation.status).toBe('PASS')
+    expect(readiness.workspaceInstall.workspaceValidation.absentUnusedLinksAllowed).toBe(true)
+  })
+
+  test('Bun resolves actual resident and Jev generation entrypoint graphs without executing them', () => {
+    const installedDependencies = existsSync(join(process.cwd(), 'node_modules', 'mineflayer', 'package.json'))
+    const mode = installedDependencies ? 'full' : 'source-graph'
+    const smoke = runRuntimeResolutionSmoke(process.cwd(), { mode })
+    expect(smoke).toMatchObject({
+      schema: 'vtr-runtime-entrypoint-resolution-smoke/v1',
+      status: 'PASS',
+      resolver: 'Bun.build(target=bun,write=false)',
+      entrypoints: ['buddy-driver/agent-runner.mts', 'buddy-driver/generation-entry.ts'],
+      mode,
+      outputCount: 2,
+    })
+    expect(smoke.errors).toEqual([])
+  })
+
   test('staged setup failure records exact cause before the CLI returns', () => {
     const parent = mkdtempSync(join(tmpdir(), 'vtr-setup-failure-'))
     const attempt = join(parent, 'attempt')
     mkdirSync(join(attempt, 'runner'), { recursive: true })
     try {
+      const preflightPath = join(attempt, 'runner', 'preflight.json')
+      writeFileSync(preflightPath, '{"status":"PASS"}\n')
       const path = writeSetupFailureArtifact(attempt, {
         sourceSha: 'a'.repeat(40), stage: 'frozen-dependency-install',
-        error: new Error('workspace identity mismatch'), preflightPath: join(attempt, 'runner', 'preflight.json'),
+        error: new Error('workspace identity mismatch api_key=should-not-escape'), preflightPath,
+        cleanup: { status: 'CLEANED', attempted: true, worktree: { status: 'REMOVED' }, caches: [] },
       })
       const report = JSON.parse(readFileSync(path, 'utf8'))
       expect(report).toMatchObject({
         schema: 'vtr-reach-live-caller-failure/v1',
         sourceSha: 'a'.repeat(40),
+        phase: 'frozen-dependency-install',
         failureStage: 'frozen-dependency-install',
-        reason: 'workspace identity mismatch',
-        servicesStarted: false,
+        reason: 'workspace identity mismatch api_key=[REDACTED]',
+        cleanup: { status: 'CLEANED', attempted: true, worktree: { status: 'REMOVED' } },
+        components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
       })
+      expect(report.attemptRoot).toBe(attempt)
+      expect(Date.parse(report.capturedAt)).not.toBeNaN()
+      expect(report.evidence).toHaveLength(1)
+      expect(report.evidence[0]).toMatchObject({ path: 'runner/preflight.json', bytes: Buffer.byteLength('{"status":"PASS"}\n') })
+      expect(report.evidence[0].sha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(JSON.stringify(report)).not.toContain('should-not-escape')
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('blocked --run preflight persists a redacted runner-failure artifact without starting services', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-preflight-failure-'))
+    const attemptRoot = join(parent, 'attempt')
+    const options = { attemptRoot }
+    const report = {
+      schema: 'vtr-reach-live-probe-preflight/v1',
+      status: 'BLOCKED',
+      sourceSha: 'b'.repeat(40),
+      attemptRoot,
+      blockers: [{ id: 'runtime-dependencies', reason: 'Bun resolver missing token=[REDACTED]' }],
+      checks: [
+        { id: 'attempt-isolation', status: 'PASS' },
+        { id: 'runtime-dependencies', status: 'BLOCKED', preflightDetail: {
+          temporaryInstallRemoved: true,
+          cleanup: { worktree: { status: 'REMOVED' }, scratch: { status: 'REMOVED' } },
+        } },
+      ],
+      servicesStarted: { leafServer: false, observer: false, resident: false },
+    }
+    try {
+      const result = persistRunPreflightFailure(options, report)
+      expect(result.status).toBe('WRITTEN')
+      const failurePath = join(attemptRoot, result.path)
+      const failure = JSON.parse(readFileSync(failurePath, 'utf8'))
+      expect(failure).toMatchObject({
+        schema: 'vtr-reach-live-caller-failure/v1',
+        sourceSha: 'b'.repeat(40),
+        phase: 'preflight',
+        reason: 'preflight blocked at runtime-dependencies: Bun resolver missing token=[REDACTED]',
+        cleanup: { status: 'CLEANED', temporaryPreflightInstall: 'REMOVED' },
+        components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+        preflightPath: join(attemptRoot, 'runner', 'preflight.json'),
+      })
+      expect(failure.evidence).toHaveLength(1)
+      expect(failure.evidence[0].path).toBe('runner/preflight.json')
+      expect(result.sha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(existsSync(join(attemptRoot, 'runner', 'preflight.json'))).toBe(true)
+      expect(JSON.stringify(failure)).not.toContain('token=secret')
     } finally {
       rmSync(parent, { recursive: true, force: true })
     }

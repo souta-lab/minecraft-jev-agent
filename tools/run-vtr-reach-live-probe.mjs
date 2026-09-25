@@ -41,8 +41,10 @@ Options:
   --java <executable>              Java executable (default: java from PATH)
   --timeout-ms <integer>           Probe/boot timeout (default: 180000)
 
---preflight does not create a worktree, directory, server, observer, or evidence
-file. It briefly binds and closes the selected loopback ports to check availability.
+--preflight creates and removes a private exact-source worktree and frozen
+dependency install to prove the same Bun runtime import resolution used by live.
+It does not start a Leaf server, observer, or resident and retains no install
+directory. It briefly binds/closes the selected loopback ports to check availability.
 --run is required for persistent worktrees, directories, listeners, and evidence.
 The run refuses protected server ports 25565/25570/25572/25576 and observer
 ports 4173/4174, and binds both processes to 127.0.0.1 only.
@@ -205,7 +207,11 @@ export async function preflightProbe(options) {
   const add = (id, status, detail = {}) => checks.push({ id, status, ...detail })
   const check = async (id, fn) => {
     try { const detail = await fn(); add(id, 'PASS', detail ?? {}) }
-    catch (error) { add(id, 'BLOCKED', { reason: error instanceof Error ? error.message : 'check failed' }) }
+    catch (error) {
+      const reason = redactOperationalText(safeErrorDescription(error))
+      const extra = isPlainObject(error?.preflightDetail) ? error.preflightDetail : {}
+      add(id, 'BLOCKED', { reason, ...extra })
+    }
   }
 
   let sourceSha = null
@@ -318,11 +324,20 @@ export async function preflightProbe(options) {
   })
 
   await check('runtime-dependencies', () => {
-    const lockPath = ['bun.lock', 'bun.lockb'].map((name) => join(options.sourceRoot, name)).find(existsSync)
-    if (!lockPath) throw new Error('frozen Bun lockfile is missing')
-    const ambientConfig = inspectProjectConfigPaths(options.sourceRoot)
-    if (ambientConfig.length > 0) throw new Error(`project npm/Bun user config is present; refusing ambient registry credentials (${ambientConfig.map((entry) => entry.path).join(', ')})`)
-    return { bunLockfile: relative(options.sourceRoot, lockPath), lockSha256: sha256(readFileSync(lockPath)), installMode: 'bun install --frozen-lockfile in nested exact-source worktree' }
+    if (!SHA40.test(String(sourceSha ?? ''))) throw new Error('exact source SHA is unavailable; skipping temporary dependency installation')
+    if (checks.find((entry) => entry.id === 'source-checkout')?.status !== 'PASS') throw new Error('exact-source checkout readiness failed; skipping temporary dependency installation')
+    const readiness = inspectExactSourceDependencyReadiness(options.sourceRoot)
+    const fullSmoke = runPreflightFrozenInstall(options, sourceSha)
+    return {
+      bunLockfile: relative(options.sourceRoot, readiness.lockPath),
+      lockSha256: readiness.lockSha256,
+      installMode: 'bun install --frozen-lockfile in nested exact-source worktree',
+      workspaceValidation: readiness.workspaceInstall.workspaceValidation,
+      workspaceLinks: readiness.workspaceInstall.workspaceLinks,
+      rootPackageJsonSha256: readiness.workspaceInstall.rootPackageJsonSha256,
+      temporaryInstallRemoved: fullSmoke.temporaryInstallRemoved,
+      fullRuntimeResolutionSmoke: fullSmoke,
+    }
   })
 
   await check('runtime-source-identity', () => {
@@ -344,7 +359,9 @@ export async function preflightProbe(options) {
     ports: { leaf: options.port, observer: options.observerPort },
     checks,
     blockers: blocked.map(({ id, reason }) => ({ id, reason })),
-    readOnly: true,
+    sourceTreeReadOnly: true,
+    temporaryInstallRemoved: checks.find((entry) => entry.id === 'runtime-dependencies')?.temporaryInstallRemoved ?? null,
+    servicesStarted: { leafServer: false, observer: false, resident: false },
   }
 }
 
@@ -650,6 +667,200 @@ function inspectProjectConfigPaths(root) {
   return found
 }
 
+export function inspectExactSourceDependencyReadiness(runtimeSource) {
+  const projectConfig = inspectProjectConfigPaths(runtimeSource)
+  if (projectConfig.length > 0) throw new Error(`exact-source project contains ambient package-manager config (${projectConfig.map((entry) => entry.path).join(', ')})`)
+  const lockPath = join(runtimeSource, 'bun.lock')
+  if (!existsSync(lockPath)) throw new Error('exact-source frozen Bun lockfile bun.lock is missing')
+  const lockStat = lstatSync(lockPath)
+  if (lockStat.isSymbolicLink() || !lockStat.isFile()) throw new Error('exact-source bun.lock must be a regular non-symlink file')
+  const workspaceInstall = validateExactSourceWorkspaceInstall(runtimeSource)
+  const lockSha256 = sha256(readFileSync(lockPath))
+  if (workspaceInstall.bunLockSha256 !== lockSha256) throw new Error('workspace validator observed a different bun.lock identity')
+  return { lockPath, lockSha256, workspaceInstall }
+}
+
+function evidenceDescriptors(attemptRoot, candidates) {
+  const evidence = []
+  for (const candidate of candidates.filter((value) => typeof value === 'string')) {
+    try {
+      const fileStat = lstatSync(candidate)
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) continue
+      const bytes = readFileSync(candidate)
+      evidence.push({ path: relative(attemptRoot, candidate).split(sep).join('/'), bytes: bytes.length, sha256: sha256(bytes) })
+    } catch {
+      // Missing evidence remains missing; this function never fabricates it.
+    }
+  }
+  return evidence
+}
+
+function setupEvidenceCandidates(attemptRoot, preflightPath = null) {
+  return [
+    preflightPath,
+    join(attemptRoot, 'runner', 'dependency-install.log'),
+    join(attemptRoot, 'runner', 'dependency-install.json'),
+    join(attemptRoot, 'runner', 'source-bun.lock'),
+    join(attemptRoot, 'runner', 'runtime-resolution-full.log'),
+    join(attemptRoot, 'runner', 'no-double-authority-fixture.json'),
+    join(attemptRoot, 'runner', 'no-double-authority-fixture-test.log'),
+    join(attemptRoot, 'runner', 'fixtures', 'test-vtr-reach-executor-dispatch-authority.mts'),
+  ]
+}
+
+function runtimeFailureEvidenceCandidates(attemptRoot, preflightPath = null) {
+  return [
+    ...setupEvidenceCandidates(attemptRoot, preflightPath),
+    ...[
+      'runner/server-start.json', 'runner/fresh-world-attestation.json',
+      'runner/host-lifecycle.jsonl', 'runner/supervisor-capture.json', 'runner/supervisor-lifecycle.json',
+      'runner/supervisor-result.json', 'runner/collector-report.json', 'runner/acceptance.json',
+      'runner/initial-snapshot.json', 'runner/final-snapshot.json', 'runner/terminal-snapshot.json',
+      'runner/no-llm-egress-audit.json', 'runner/no-llm-egress-provenance.json',
+      'runner/resident-process-group-closure.json', 'runner/package-report.json',
+      'runner/validation-report.json', 'runner/caller-result.json', 'runner/fixture-transcript.json',
+      'server/server-start.json', 'server/leaf-latest.log', 'server/leaf-stdout-events.jsonl',
+      'server/fresh-world-attestation.json',
+    ].map((path) => join(attemptRoot, path)),
+  ]
+}
+
+function createPreflightScratchRoot(options) {
+  let parent = dirname(options.attemptRoot)
+  while (!existsSync(parent)) {
+    const next = dirname(parent)
+    if (next === parent) throw new Error('cannot find a parent for temporary preflight installation')
+    parent = next
+  }
+  const parentStat = lstatSync(parent)
+  if (parentStat.isSymbolicLink() || !parentStat.isDirectory() || realpathSync(parent) !== parent) throw new Error('temporary preflight parent must be a canonical real directory')
+  const available = statfsSync(parent)
+  const freeBytes = Number(available.bavail) * Number(available.bsize)
+  const requiredBytes = 2 * 1024 * 1024 * 1024
+  if (!Number.isFinite(freeBytes) || freeBytes < requiredBytes) throw new Error(`temporary preflight filesystem has less than ${requiredBytes} bytes available`)
+  const scratch = join(parent, `.vtr-reach-preflight-${process.pid}-${randomBytes(5).toString('hex')}`)
+  if (ensureInside(options.sourceRoot, scratch) || ensureInside(scratch, options.sourceRoot)) throw new Error('temporary preflight directory must be isolated from the exact-source checkout')
+  assertNoSymlinkAncestors(scratch)
+  mkdirSync(scratch, { recursive: false, mode: 0o700 })
+  return scratch
+}
+
+function removePreflightWorktree(sourceRoot, runtimeSource) {
+  let registered = false
+  try {
+    const listing = runGit(sourceRoot, ['worktree', 'list', '--porcelain'])
+    registered = listing.split(/\r?\n/u).some((line) => line === `worktree ${runtimeSource}`)
+  } catch {
+    return { status: 'INCOMPLETE', reason: 'unable-to-inspect-worktree-registration' }
+  }
+  if (registered) {
+    const removed = spawnSync('git', ['-C', sourceRoot, 'worktree', 'remove', '--force', runtimeSource], {
+      stdio: ['ignore', 'ignore', 'pipe'], env: minimalEnvironment(), encoding: 'utf8', timeout: 30_000,
+    })
+    if (removed.error || removed.status !== 0) return { status: 'INCOMPLETE', reason: `git-worktree-remove-${removed.error?.code ?? removed.status ?? 'unknown'}` }
+  } else if (existsSync(runtimeSource)) {
+    rmSync(runtimeSource, { recursive: true, force: true })
+  }
+  return { status: existsSync(runtimeSource) ? 'INCOMPLETE' : 'REMOVED', registered }
+}
+
+function runPreflightFrozenInstall(options, sourceSha) {
+  if (!SHA40.test(String(sourceSha ?? ''))) throw new Error('exact source SHA is unavailable for temporary frozen install')
+  const scratch = createPreflightScratchRoot(options)
+  const runtimeSource = join(scratch, 'runtime', 'source')
+  let phase = 'exact-source-worktree'
+  let install = null
+  let error = null
+  let evidence = []
+  let cleanup = { worktree: { status: 'NOT_ATTEMPTED' }, scratch: { status: 'NOT_ATTEMPTED' } }
+  try {
+    for (const directory of ['runner', 'server', 'tmp', 'home', 'cache']) mkdirSync(join(scratch, directory), { recursive: true, mode: 0o700 })
+    ensureRuntimeSource(options.sourceRoot, scratch, sourceSha, 'preflight-exact-source')
+    phase = 'frozen-dependency-install-and-full-resolution-smoke'
+    install = runFrozenInstall(runtimeSource, scratch)
+  } catch (caught) {
+    error = caught
+  } finally {
+    evidence = evidenceDescriptors(scratch, setupEvidenceCandidates(scratch))
+    cleanup.worktree = removePreflightWorktree(options.sourceRoot, runtimeSource)
+    if (cleanup.worktree.status === 'REMOVED') {
+      try {
+        rmSync(scratch, { recursive: true, force: true })
+        cleanup.scratch = { status: existsSync(scratch) ? 'INCOMPLETE' : 'REMOVED' }
+      } catch (caught) {
+        cleanup.scratch = { status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(caught)) }
+      }
+    } else {
+      cleanup.scratch = { status: 'PRESERVED_FOR_RECOVERY', path: scratch }
+    }
+  }
+  const details = {
+    phase,
+    sourceSha,
+    cleanup,
+    temporaryInstallRemoved: cleanup.worktree.status === 'REMOVED' && cleanup.scratch.status === 'REMOVED',
+    components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+    evidence: evidence.map((entry) => ({ ...entry, retained: cleanup.scratch.status !== 'REMOVED' })),
+    temporaryRootRemoved: cleanup.scratch.status === 'REMOVED',
+    installedWorkspaceValidation: install?.workspaceValidation ?? null,
+    installedWorkspaceLinks: install?.workspaceLinks ?? null,
+    installedLockfile: install?.lockfile ?? null,
+    fullRuntimeResolutionSmoke: install?.runtimeResolutionSmoke ?? null,
+    frozenInstallStatus: install?.status ?? (error ? 'FAILED' : 'INCOMPLETE'),
+  }
+  if (error || !details.temporaryInstallRemoved) {
+    const reason = error ? redactOperationalText(safeErrorDescription(error)) : 'temporary exact-source install cleanup was incomplete'
+    const failure = new Error(reason)
+    failure.preflightDetail = details
+    throw failure
+  }
+  return details
+}
+
+const RUNTIME_RESOLUTION_ENTRYPOINTS = Object.freeze([
+  'buddy-driver/agent-runner.mts',
+  'buddy-driver/generation-entry.ts',
+])
+
+export function runRuntimeResolutionSmoke(runtimeSource, { mode = 'full', attemptRoot = null } = {}) {
+  if (!['full', 'source-graph'].includes(mode)) throw new Error(`unsupported runtime resolution smoke mode: ${mode}`)
+  const script = [
+    'const entrypoints = ' + JSON.stringify(RUNTIME_RESOLUTION_ENTRYPOINTS) + ';',
+    `const mode = ${JSON.stringify(mode)};`,
+    'const result = await Bun.build({ entrypoints, target: "bun", write: false, external: mode === "source-graph" ? ["*"] : [] });',
+    'const errors = result.logs.filter((row) => row.level === "error").map((row) => String(row.message ?? row));',
+    'console.log(JSON.stringify({ schema: "vtr-runtime-entrypoint-resolution-smoke/v1", success: result.success, mode, resolver: "Bun.build(target=bun,write=false)", entrypoints, outputCount: result.outputs.length, errors }));',
+    'if (!result.success) process.exitCode = 1;',
+  ].join('\n')
+  const home = attemptRoot ? join(attemptRoot, 'home', `runtime-smoke-${mode}`) : '/nonexistent'
+  const tmp = attemptRoot ? join(attemptRoot, 'tmp', `runtime-smoke-${mode}`) : '/tmp'
+  const xdg = attemptRoot ? join(home, '.config') : '/nonexistent'
+  const logPath = attemptRoot ? join(attemptRoot, 'runner', `runtime-resolution-${mode}.log`) : null
+  if (attemptRoot) for (const directory of [home, tmp, xdg]) mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const result = spawnSync(process.execPath, ['--no-env-file', '--eval', script], {
+    cwd: runtimeSource,
+    env: minimalEnvironment({ HOME: home, TMPDIR: tmp, XDG_CONFIG_HOME: xdg, BUN_CONFIG_NO_ENV_FILE: '1' }),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: mode === 'full' ? 120_000 : 60_000,
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const safeStdout = redactOperationalText(result.stdout ?? '')
+  const safeStderr = redactOperationalText(result.stderr ?? '')
+  if (logPath) writeFileSync(logPath, `${safeStdout}\n${safeStderr}`, { flag: 'wx', mode: 0o600 })
+  if (result.error || result.status !== 0) {
+    throw new Error(`Bun ${mode} runtime import-resolution smoke failed (${result.error?.code ?? result.status ?? 'unknown'});${logPath ? ' see ' + relative(attemptRoot, logPath).split(sep).join('/') : ' inspect Bun resolver output'}`)
+  }
+  const output = safeStdout.trim().split(/\r?\n/u).at(-1)
+  let report
+  try { report = JSON.parse(output) } catch { throw new Error('Bun runtime resolution smoke did not emit its JSON result') }
+  if (report.schema !== 'vtr-runtime-entrypoint-resolution-smoke/v1' || report.success !== true || report.mode !== mode
+    || report.outputCount !== RUNTIME_RESOLUTION_ENTRYPOINTS.length || !Array.isArray(report.errors) || report.errors.length !== 0) {
+    throw new Error(`Bun ${mode} runtime import-resolution smoke returned an invalid result${logPath ? '; see ' + relative(attemptRoot, logPath).split(sep).join('/') : ''}`)
+  }
+  return { ...report, status: 'PASS', logPath: logPath ? relative(attemptRoot, logPath).split(sep).join('/') : null }
+}
+
 function ensureRuntimeSource(sourceRoot, attemptRoot, sourceSha, branch) {
   const runtimeParent = join(attemptRoot, 'runtime')
   mkdirSync(runtimeParent, { recursive: true, mode: 0o700 })
@@ -669,11 +880,8 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
   const bunCache = join(attemptRoot, 'cache', 'bun-install-store')
   const npmCache = join(attemptRoot, 'cache', 'npm-install')
   for (const directory of [home, xdgConfig, xdgCache, bunCache, npmCache]) mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const projectConfig = inspectProjectConfigPaths(runtimeSource)
-  if (projectConfig.length > 0) throw new Error(`exact-source project contains ambient package-manager config (${projectConfig.map((entry) => entry.path).join(', ')})`)
-  const lockPath = ['bun.lock', 'bun.lockb'].map((name) => join(runtimeSource, name)).find(existsSync)
-  if (!lockPath) throw new Error('exact-source worktree has no Bun lockfile')
-  const lockSha256 = sha256(readFileSync(lockPath))
+  const readinessBefore = inspectExactSourceDependencyReadiness(runtimeSource)
+  const { lockPath, lockSha256 } = readinessBefore
   const installEnvironment = {
     HOME: home,
     TMPDIR: tempDir,
@@ -703,7 +911,10 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
   // unused workspaces. Bun materializes node_modules links only for packages
   // referenced by dependencies, so require exact-source resolution only for
   // links that are actually present.
-  const workspaceInstall = validateExactSourceWorkspaceInstall(runtimeSource)
+  const readinessAfter = inspectExactSourceDependencyReadiness(runtimeSource)
+  if (readinessAfter.lockSha256 !== lockSha256) throw new Error('bun.lock changed during frozen dependency install')
+  const workspaceInstall = readinessAfter.workspaceInstall
+  const runtimeResolutionSmoke = runRuntimeResolutionSmoke(runtimeSource, { mode: 'full', attemptRoot })
   const version = spawnSync(process.execPath, ['--no-env-file', '--version'], { cwd: runtimeSource, env: minimalEnvironment(installEnvironment), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 })
   const metadata = {
     schema: 'vtr-exact-source-dependency-install/v1',
@@ -725,6 +936,7 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
       ambientProjectConfigFiles: [],
       credentialValuesArchived: false,
     },
+    runtimeResolutionSmoke,
     ...workspaceInstall,
   }
   const metadataPath = join(attemptRoot, 'runner', 'dependency-install.json')
@@ -2459,19 +2671,19 @@ async function cleanupPartialAttempt({ tracked, server, observer, resident, opti
         wrapperTermTimeoutMs: 5000,
       })
       results.push({ component: 'resident', status: stopped.status, pid: stopped.pid, exitCode: stopped.exitCode })
-    } catch (error) { results.push({ component: 'resident', status: 'INCOMPLETE', reason: safeErrorDescription(error) }) }
+    } catch (error) { results.push({ component: 'resident', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }) }
   }
   if (server?.handle && isChildRunning(server.handle)) {
     try {
       const stopped = await stopLeaf({ attestation: server.serverStart, attemptRoot, server })
       results.push({ component: 'leaf', status: stopped.status, pid: stopped.pid, exitCode: stopped.exitCode })
-    } catch (error) { results.push({ component: 'leaf', status: 'INCOMPLETE', reason: safeErrorDescription(error) }) }
+    } catch (error) { results.push({ component: 'leaf', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }) }
   } else if (!server && tracked.leaf?.child && isChildRunning(tracked.leaf)) {
     try {
       if (tracked.leaf.child.stdin && !tracked.leaf.child.stdin.destroyed) writeLineToChild(tracked.leaf, 'stop')
       const stopped = await stopPartialChild(tracked.leaf, { label: 'partially-started-Leaf', port: options.port, timeoutMs: 5000 })
       results.push({ component: 'leaf', ...stopped })
-    } catch (error) { results.push({ component: 'leaf', status: 'INCOMPLETE', reason: safeErrorDescription(error) }) }
+    } catch (error) { results.push({ component: 'leaf', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }) }
   }
   const observerHandle = observer?.handle ?? tracked.observer
   if (!keepObserver && observerHandle?.child && isChildRunning(observerHandle)) {
@@ -2487,9 +2699,18 @@ async function cleanupPartialAttempt({ tracked, server, observer, resident, opti
         listenerClosureObservation: stopped.listenerClosureObservation,
         signals: stopped.signals,
       })
-    } catch (error) { results.push({ component: 'observer', status: 'INCOMPLETE', reason: safeErrorDescription(error) }) }
+    } catch (error) { results.push({ component: 'observer', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }) }
   }
   return results
+}
+
+function failedRunComponentState(handle, cleanupResults, component) {
+  if (!handle) return 'NOT_STARTED'
+  const stopped = cleanupResults.find((row) => row.component === component && row.status === 'STOPPED')
+  if (stopped) return 'STOPPED'
+  const incomplete = cleanupResults.find((row) => row.component === component && row.status === 'INCOMPLETE')
+  if (incomplete) return 'STOP_INCOMPLETE'
+  return isChildRunning(handle) ? 'RUNNING_AFTER_CLEANUP' : 'STOPPED'
 }
 
 function makeWatchFactory() {
@@ -2510,20 +2731,133 @@ function writePreflightArtifact(attemptRoot, report) {
   return path
 }
 
-export function writeSetupFailureArtifact(attemptRoot, { sourceSha, stage, error, preflightPath = null }) {
+export function persistRunPreflightFailure(options, report) {
+  const isolated = report?.checks?.find((row) => row.id === 'attempt-isolation')?.status === 'PASS'
+  if (!isolated || resolve(options.attemptRoot) !== report.attemptRoot) {
+    return { status: 'NOT_WRITTEN', reason: 'attempt-root-not-proven-isolated' }
+  }
+
+  let preflightPath = null
+  try {
+    assertNoSymlinkAncestors(options.attemptRoot)
+    if (existsSync(options.attemptRoot)) throw new Error('attempt-root appeared after preflight; refusing to reuse it')
+    mkdirSync(dirname(options.attemptRoot), { recursive: true, mode: 0o700 })
+    assertNoSymlinkAncestors(options.attemptRoot)
+    mkdirSync(options.attemptRoot, { recursive: false, mode: 0o700 })
+    const rootStat = lstatSync(options.attemptRoot)
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || realpathSync(options.attemptRoot) !== options.attemptRoot) {
+      throw new Error('attempt-root changed during preflight failure capture')
+    }
+    mkdirSync(join(options.attemptRoot, 'runner'), { recursive: false, mode: 0o700 })
+    preflightPath = writePreflightArtifact(options.attemptRoot, report)
+
+    const dependencyCheck = report.checks.find((row) => row.id === 'runtime-dependencies')
+    const dependencyDetail = dependencyCheck?.preflightDetail
+    const scratchCleanup = dependencyDetail?.cleanup
+    const cleanup = {
+      status: dependencyDetail?.temporaryInstallRemoved === false || scratchCleanup?.scratch?.status === 'PRESERVED_FOR_RECOVERY'
+        ? 'INCOMPLETE'
+        : 'CLEANED',
+      attempted: true,
+      temporaryPreflightInstall: dependencyDetail?.temporaryInstallRemoved === true ? 'REMOVED'
+        : dependencyDetail?.temporaryInstallRemoved === false ? 'INCOMPLETE' : 'NOT_CREATED_OR_NOT_REPORTED',
+      details: scratchCleanup ?? null,
+    }
+    const blocker = report.blockers?.[0]
+    const reason = blocker ? `preflight blocked at ${blocker.id}: ${blocker.reason ?? 'unspecified check failure'}` : 'preflight blocked'
+    const failurePath = writeSetupFailureArtifact(options.attemptRoot, {
+      sourceSha: report.sourceSha ?? null,
+      stage: 'preflight',
+      error: new Error(reason),
+      preflightPath,
+      cleanup,
+      components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+      evidenceCandidates: [preflightPath],
+    })
+    return {
+      status: 'WRITTEN',
+      path: relative(options.attemptRoot, failurePath).split(sep).join('/'),
+      sha256: sha256(readFileSync(failurePath)),
+    }
+  } catch (error) {
+    // Best effort: if the failure happened after attemptRoot/runner existed,
+    // preserve a redacted failure row there even when preflight.json could not
+    // be written. Unsafe/unavailable roots remain untouched.
+    try {
+      if (existsSync(join(options.attemptRoot, 'runner')) && !existsSync(join(options.attemptRoot, 'runner', 'runner-failure.json'))) {
+        const failurePath = writeSetupFailureArtifact(options.attemptRoot, {
+          sourceSha: report.sourceSha ?? null,
+          stage: 'preflight-artifact-persistence',
+          error,
+          preflightPath,
+          cleanup: { status: 'INCOMPLETE', attempted: true, reason: redactOperationalText(safeErrorDescription(error)) },
+          components: { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+          evidenceCandidates: preflightPath ? [preflightPath] : [],
+        })
+        return {
+          status: 'WRITTEN',
+          path: relative(options.attemptRoot, failurePath).split(sep).join('/'),
+          sha256: sha256(readFileSync(failurePath)),
+        }
+      }
+    } catch {
+      // The returned status makes the inability to persist explicit.
+    }
+    return { status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) }
+  }
+}
+
+export function writeSetupFailureArtifact(attemptRoot, {
+  sourceSha, stage, error, preflightPath = null,
+  cleanup = { status: 'NOT_REQUIRED', attempted: false, results: [] },
+  components = { leafServer: 'NOT_STARTED', observer: 'NOT_STARTED', resident: 'NOT_STARTED' },
+  evidenceCandidates = setupEvidenceCandidates(attemptRoot, preflightPath),
+}) {
   const path = join(attemptRoot, 'runner', 'runner-failure.json')
+  const evidence = evidenceDescriptors(attemptRoot, evidenceCandidates)
   writeJsonExclusive(path, {
     schema: 'vtr-reach-live-caller-failure/v1',
     sourceSha,
     attemptRoot,
+    phase: stage,
     failureStage: stage,
-    reason: safeErrorDescription(error),
-    cleanup: [],
-    servicesStarted: false,
+    reason: redactOperationalText(safeErrorDescription(error)),
+    cleanup,
+    components,
+    evidence,
     preflightPath,
     capturedAt: isoNow(),
   })
   return path
+}
+
+function cleanupFailedRunSetup(sourceRoot, runtimeSource, attemptRoot) {
+  const worktree = removePreflightWorktree(sourceRoot, runtimeSource)
+  const caches = []
+  for (const relativePath of [
+    'cache/bun-install', 'cache/bun-install-store', 'cache/npm-install',
+    'home/bun-install', 'home/fixture-test', 'tmp/bun-install', 'tmp/fixture-test',
+  ]) {
+    const candidate = join(attemptRoot, relativePath)
+    try {
+      const stat = lstatSync(candidate)
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        caches.push({ path: relativePath, status: 'PRESERVED_UNSAFE_TYPE' })
+        continue
+      }
+      rmSync(candidate, { recursive: true, force: true })
+      caches.push({ path: relativePath, status: existsSync(candidate) ? 'INCOMPLETE' : 'REMOVED' })
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      caches.push({ path: relativePath, status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(error)) })
+    }
+  }
+  return {
+    status: worktree.status === 'REMOVED' && caches.every((row) => row.status === 'REMOVED') ? 'CLEANED' : 'INCOMPLETE',
+    attempted: true,
+    worktree,
+    caches,
+  }
 }
 
 async function executeRun(options, preflight) {
@@ -2534,15 +2868,18 @@ async function executeRun(options, preflight) {
   mkdirSync(options.attemptRoot, { recursive: false, mode: 0o700 })
   const rootStat = lstatSync(options.attemptRoot)
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || realpathSync(options.attemptRoot) !== options.attemptRoot) throw new Error('attempt root must be a new canonical directory')
-  for (const dir of ['runner', 'server', 'tmp', 'home', 'cache']) mkdirSync(join(options.attemptRoot, dir), { recursive: true, mode: 0o700 })
-  const preflightPath = writePreflightArtifact(options.attemptRoot, preflight)
   const exactBranch = preflight.branch ?? 'detached-exact-source'
-  let runtimeSource
+  let runtimeSource = join(options.attemptRoot, 'runtime', 'source')
+  let preflightPath = null
   let install
   let noDouble
-  let setupStage = 'exact-source-worktree'
+  let setupStage = 'attempt-artifact-layout'
   try {
-    ;({ runtimeSource } = ensureRuntimeSource(options.sourceRoot, options.attemptRoot, sourceSha, exactBranch))
+    for (const dir of ['runner', 'server', 'tmp', 'home', 'cache']) mkdirSync(join(options.attemptRoot, dir), { recursive: true, mode: 0o700 })
+    setupStage = 'preflight-artifact'
+    preflightPath = writePreflightArtifact(options.attemptRoot, preflight)
+    setupStage = 'exact-source-worktree'
+    ensureRuntimeSource(options.sourceRoot, options.attemptRoot, sourceSha, exactBranch)
     setupStage = 'frozen-dependency-install'
     install = runFrozenInstall(runtimeSource, options.attemptRoot)
     setupStage = 'no-double-authority-fixture'
@@ -2550,13 +2887,11 @@ async function executeRun(options, preflight) {
   } catch (error) {
     const failurePath = join(options.attemptRoot, 'runner', 'runner-failure.json')
     if (!existsSync(failurePath)) {
-      try { writeSetupFailureArtifact(options.attemptRoot, { sourceSha, stage: setupStage, error, preflightPath }) } catch {}
+      const cleanup = cleanupFailedRunSetup(options.sourceRoot, runtimeSource, options.attemptRoot)
+      try { writeSetupFailureArtifact(options.attemptRoot, { sourceSha, stage: setupStage, error, preflightPath, cleanup }) } catch {}
     }
     throw error
   }
-  const runNonce = randomBytes(8).toString('hex')
-  const levelName = `vtrreach-${sourceSha.slice(0, 12)}-${runNonce}`
-  writeJsonExclusive(join(options.attemptRoot, 'runner', 'mission.json'), { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
   const tracked = {}
   const onChild = (name, handle) => { tracked[name] = handle }
   let server = null
@@ -2567,8 +2902,14 @@ async function executeRun(options, preflight) {
   let acceptanceRef = null
   let supervisorEntered = false
   let result = null
+  let failurePhase = 'mission-preparation'
   try {
+    const runNonce = randomBytes(8).toString('hex')
+    const levelName = `vtrreach-${sourceSha.slice(0, 12)}-${runNonce}`
+    writeJsonExclusive(join(options.attemptRoot, 'runner', 'mission.json'), { kind: 'inventory_at_least', item: 'oak_log', count: 1 })
+    failurePhase = 'leaf-start'
     server = await startLeaf(options, sourceSha, options.attemptRoot, levelName, onChild)
+    failurePhase = 'observer-start'
     observer = await startObserver(options, sourceSha, options.attemptRoot, runtimeSource, onChild)
     const runtimeDir = realpathSync(join(runtimeSource, 'buddy-driver'))
     const paths = runtimeAttemptSinkPaths(runtimeDir)
@@ -2578,6 +2919,7 @@ async function executeRun(options, preflight) {
       result: join(options.attemptRoot, 'runner', 'supervisor-result.json'),
     }
     const watchFactory = makeWatchFactory()
+    failurePhase = 'supervisor-lifecycle'
     supervisorEntered = true
     result = await runVtrReachProbeSupervisor({
       attemptRoot: options.attemptRoot,
@@ -2596,14 +2938,17 @@ async function executeRun(options, preflight) {
       outputPaths,
       adapters: {
         async startResidentFrozen() {
+          failurePhase = 'resident-start'
           resident = await startResident(options, sourceSha, options.attemptRoot, runtimeSource, runtimeDir, paths, onChild)
           return resident
         },
         async prepareFixture({ handle, identity }) {
+          failurePhase = 'fixture-preparation'
           identityRef = { ...identity }
           return await prepareFixtureContext({ server, runtimeDir, attemptRoot: options.attemptRoot, identity, sourceSha, startSnapshot: snapshotRef })
         },
         async resumeResident({ handle, identity }) {
+          failurePhase = 'generation-resume'
           const resumed = await controlRequest(findControlSocket(runtimeDir), 'resume', {}, 20_000)
           if (resumed?.started !== true || resumed?.frozen !== false) throw new Error('resident control plane did not acknowledge unfreeze and generation start')
           const completeIdentity = await waitAndBindGenerationReady(server, runtimeDir, identity.runId, options.timeoutMs)
@@ -2611,13 +2956,16 @@ async function executeRun(options, preflight) {
           return { started: true, generationId: completeIdentity.generationId }
         },
         async stopResident(args) {
+          failurePhase = 'resident-stop'
           const stopped = await stopResident({ ...args, attemptRoot: options.attemptRoot })
           return stopped
         },
         async stopIsolatedLeaf({ attestation, identity, reason }) {
+          failurePhase = 'leaf-stop'
           return await stopLeaf({ attestation: { ...attestation, worldKey: server.serverStart.worldKey }, attemptRoot: options.attemptRoot, server })
         },
         async collect({ identity, terminal, observerUrl }) {
+          failurePhase = 'terminal-collection'
           identityRef = identity
           acceptanceRef = await captureAcceptanceWhileResidentAlive({ runtimeDir, attemptRoot: options.attemptRoot, identity })
           const state = await controlRequest(findControlSocket(runtimeDir), 'state', { radius: 8, verticalRadius: 4 }, 15_000)
@@ -2644,6 +2992,7 @@ async function executeRun(options, preflight) {
           return { status: collector.report.status, path: outputPath, sha256: sha256(readFileSync(outputPath)), report: collector.report, exitCode: collector.exitCode }
         },
         async sealArchive(args) {
+          failurePhase = 'archive-seal'
           if (!acceptanceRef?.sourcePath || !snapshotRef.value) throw new Error('acceptance/initial snapshot must be captured while the run is live')
           return await captureAndPackage({
             runtimeSource, options, attemptRoot: options.attemptRoot, server, observer, noDouble, install, paths,
@@ -2654,6 +3003,7 @@ async function executeRun(options, preflight) {
           })
         },
         async validateArchive({ archive }) {
+          failurePhase = 'archive-validation'
           const archivePath = archive?.path
           if (typeof archivePath !== 'string' || !existsSync(archivePath)) throw new Error('archive directory does not exist for validation')
           const validatorPath = join(runtimeSource, 'tools', 'validate-vtr-reach-evidence.mjs')
@@ -2686,6 +3036,7 @@ async function executeRun(options, preflight) {
     // return a frozen resident handle to the supervisor. The supervisor then
     // has no `resident` value to stop in its finally block; reconcile every
     // still-live registered child here before reporting the attempt.
+    failurePhase = 'post-supervisor-cleanup'
     const lateCleanup = await cleanupPartialAttempt({
       tracked, server, observer, resident, options, identity: identityRef, attemptRoot: options.attemptRoot,
       keepObserver: true,
@@ -2693,22 +3044,37 @@ async function executeRun(options, preflight) {
     if (lateCleanup.length > 0) writeJsonExclusive(join(options.attemptRoot, 'runner', 'post-supervisor-cleanup.json'), {
       schema: 'vtr-reach-probe-post-supervisor-cleanup/v1', capturedAt: isoNow(), results: lateCleanup,
     })
+    failurePhase = 'caller-result'
     const runnerResultPath = join(options.attemptRoot, 'runner', 'caller-result.json')
     writeJsonExclusive(runnerResultPath, { schema: 'vtr-reach-live-caller-result/v1', preflightPath, attemptRoot: options.attemptRoot, sourceSha, result })
     return result
   } catch (error) {
-    const cleanup = await cleanupPartialAttempt({
-      tracked, server, observer, resident, options, identity: identityRef, attemptRoot: options.attemptRoot,
-      // Once the supervisor bound the observer with leave-bound, preserve that
-      // declared endpoint for post-run diagnosis even when the probe is red.
-      keepObserver: false,
-    })
+    let cleanup = []
+    try {
+      cleanup = await cleanupPartialAttempt({
+        tracked, server, observer, resident, options, identity: identityRef, attemptRoot: options.attemptRoot,
+        keepObserver: false,
+      })
+    } catch (cleanupError) {
+      cleanup = [{ component: 'cleanup', status: 'INCOMPLETE', reason: redactOperationalText(safeErrorDescription(cleanupError)) }]
+    }
     const failurePath = join(options.attemptRoot, 'runner', 'runner-failure.json')
-    if (!existsSync(failurePath)) writeJsonExclusive(failurePath, {
-      schema: 'vtr-reach-live-caller-failure/v1', sourceSha, attemptRoot: options.attemptRoot,
-      reason: redactOperationalText(safeErrorDescription(error)), cleanup,
-      capturedAt: isoNow(),
-    })
+    if (!existsSync(failurePath)) {
+      const cleanupStatus = cleanup.some((row) => row.status === 'INCOMPLETE') ? 'INCOMPLETE' : 'COMPLETE'
+      const components = {
+        leafServer: failedRunComponentState(server?.handle ?? tracked.leaf, cleanup, 'leaf'),
+        observer: failedRunComponentState(observer?.handle ?? tracked.observer, cleanup, 'observer'),
+        resident: failedRunComponentState(resident?.handle ?? tracked.resident, cleanup, 'resident'),
+      }
+      try {
+        writeSetupFailureArtifact(options.attemptRoot, {
+          sourceSha, stage: failurePhase, error, preflightPath,
+          cleanup: { status: cleanupStatus, attempted: true, results: cleanup },
+          components,
+          evidenceCandidates: runtimeFailureEvidenceCandidates(options.attemptRoot, preflightPath),
+        })
+      } catch {}
+    }
     throw error
   }
 }
@@ -2724,12 +3090,17 @@ export async function main(argv = process.argv.slice(2)) {
     return 0
   }
   const preflight = await preflightProbe(options)
-  process.stdout.write(`${JSON.stringify(preflight, null, 2)}\n`)
-  if (options.preflight) return preflight.status === 'READY' ? 0 : 2
+  if (options.preflight) {
+    process.stdout.write(`${JSON.stringify(preflight, null, 2)}\n`)
+    return preflight.status === 'READY' ? 0 : 2
+  }
   if (preflight.status !== 'READY') {
-    process.stderr.write('preflight is BLOCKED; no attempt directory or service was started\n')
+    preflight.failureArtifact = persistRunPreflightFailure(options, preflight)
+    process.stdout.write(`${JSON.stringify(preflight, null, 2)}\n`)
+    process.stderr.write(`preflight is BLOCKED; no service was started; failure artifact: ${preflight.failureArtifact.path ?? preflight.failureArtifact.status}\n`)
     return 2
   }
+  process.stdout.write(`${JSON.stringify(preflight, null, 2)}\n`)
   try {
     const result = await executeRun(options, preflight)
     process.stdout.write(`${JSON.stringify({ status: result.status, attemptRoot: options.attemptRoot, sourceSha: result.sourceSha, runId: result.runId, generationId: result.generationId, transitionId: result.terminal?.transitionId ?? null, captureStatus: result.captureGate?.status ?? null, probeStatus: result.validation?.probeStatus ?? result.validation?.status ?? null, observer: `http://127.0.0.1:${options.observerPort}/api/ai-summary` })}\n`)
