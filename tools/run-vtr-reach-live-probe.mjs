@@ -204,6 +204,18 @@ export function parseJavaRuntime(output) {
   }
 }
 
+export function inspectLeafEula(leafJarPath) {
+  const sourcePath = join(dirname(resolve(leafJarPath)), 'eula.txt')
+  const contents = readFileSync(sourcePath, 'utf8')
+  const activeEulaLines = contents.split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#') && /^eula\s*=/iu.test(line))
+  if (activeEulaLines.length !== 1 || !/^eula\s*=\s*true$/iu.test(activeEulaLines[0] ?? '')) {
+    throw new Error('an existing `eula=true` acceptance beside the selected Leaf JAR is required')
+  }
+  return { sourcePath, contents, sourceSha256: sha256(Buffer.from(contents, 'utf8')) }
+}
+
 function javaVersion(javaExecutable) {
   const result = spawnSync(javaExecutable, ['-version'], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000,
@@ -279,6 +291,11 @@ export async function preflightProbe(options) {
     const stat = realRegularFile(options.leafJar, 'Leaf jar')
     const digest = sha256(readFileSync(options.leafJar))
     return { path: options.leafJar, bytes: stat.size, sha256: digest }
+  })
+
+  await check('leaf-eula-acceptance', () => {
+    const acceptance = inspectLeafEula(options.leafJar)
+    return { accepted: true, sourcePath: acceptance.sourcePath, sourceSha256: acceptance.sourceSha256, stagedIntoAttempt: true }
   })
 
   await check('java-runtime', () => {
@@ -729,6 +746,8 @@ function setupEvidenceCandidates(attemptRoot, preflightPath = null) {
     join(attemptRoot, 'runner', 'no-double-authority-fixture-test.log'),
     join(attemptRoot, 'runner', 'fixtures', 'test-vtr-reach-executor-dispatch-authority.mts'),
     join(attemptRoot, 'runner', 'fixtures', 'vtr-reach-executor-dispatch-authority.test.mts'),
+    join(attemptRoot, 'server', 'eula.txt'),
+    join(attemptRoot, 'server', 'eula-attestation.json'),
   ]
 }
 
@@ -1643,6 +1662,9 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
   const worldRoot = join(universe, levelName)
   const configLaunch = join(serverDir, 'server.properties.launch')
   const configEffective = join(serverDir, 'server.properties.effective-after-boot')
+  const eula = inspectLeafEula(options.leafJar)
+  const eulaAttemptPath = join(serverDir, 'eula.txt')
+  const eulaAttestationPath = join(serverDir, 'eula-attestation.json')
   const javaTmp = join(attemptRoot, 'tmp', 'java')
   const home = join(attemptRoot, 'home', 'leaf')
   for (const directory of [universe, javaTmp, home]) mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -1652,6 +1674,16 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
   writeJsonExclusive(preStartPath, preStart)
   const launchProperties = renderProbeServerProperties({ port: options.port, levelName })
   writeFileSync(configLaunch, launchProperties, { flag: 'wx', mode: 0o600 })
+  writeFileSync(eulaAttemptPath, eula.contents, { flag: 'wx', mode: 0o600 })
+  const eulaAttestation = {
+    schema: 'vtr-server-eula-acceptance/v1',
+    accepted: true,
+    sourcePath: eula.sourcePath,
+    sourceSha256: eula.sourceSha256,
+    attemptCopyPath: 'server/eula.txt',
+    attemptCopySha256: sha256(Buffer.from(eula.contents, 'utf8')),
+  }
+  writeJsonExclusive(eulaAttestationPath, eulaAttestation)
   const launchProps = propertiesObject(launchProperties)
   const expected = { 'server-ip': '127.0.0.1', 'server-port': String(options.port), 'level-name': levelName, gamemode: 'survival', difficulty: 'peaceful', 'level-seed': '', 'level-type': 'minecraft:flat' }
   for (const [key, value] of Object.entries(expected)) if (launchProps[key] !== value) throw new Error(`launch properties do not contain the exact isolated profile (${key})`)
@@ -1773,6 +1805,7 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
     serverJarSha256: jarSha256,
     serverPropertiesSha256: sha256(Buffer.from(launchProperties)),
     serverPropertiesEffectiveSha256: sha256(Buffer.from(effectiveText)),
+    eulaAcceptance: eulaAttestation,
     startedAt: spawned.at,
     spawnedAt: spawned.at,
     process: {
@@ -1802,7 +1835,7 @@ async function startLeaf(options, sourceSha, attemptRoot, levelName, onChild = (
   }
   const serverStartPath = join(serverDir, 'server-start.json')
   writeJsonExclusive(serverStartPath, serverStart)
-  return { handle, options, attemptRoot, serverDir, universe, worldRoot: realWorldRoot, configLaunch, configEffective, logPath, serverLogLines, stdoutReceipts, stdoutState, stdoutEventsPath, preStart, preStartPath, launchProperties, effectiveText, serverStart, serverStartPath, level, jarSha256, startup }
+  return { handle, options, attemptRoot, serverDir, universe, worldRoot: realWorldRoot, configLaunch, configEffective, eulaAttemptPath, eulaAttestationPath, eulaAttestation, logPath, serverLogLines, stdoutReceipts, stdoutState, stdoutEventsPath, preStart, preStartPath, launchProperties, effectiveText, serverStart, serverStartPath, level, jarSha256, startup }
 }
 
 async function startObserver(options, sourceSha, attemptRoot, runtimeSource, onChild = () => {}) {
@@ -2448,6 +2481,8 @@ function archiveInputManifest({ attemptRoot, runtimeSource, server, observer, pa
   add('server/server-start.json', server.serverStartPath)
   add('server/server.properties.launch', server.configLaunch)
   add('server/server.properties.effective-after-boot', server.configEffective)
+  add('server/eula.txt', server.eulaAttemptPath)
+  add('server/eula-attestation.json', server.eulaAttestationPath)
   add('server/pre-start-world-observation.json', server.preStartPath)
   add('server/fresh-world-attestation.json', freshWorld.path)
   add('server/world/level.dat', freshWorld.levelDat)

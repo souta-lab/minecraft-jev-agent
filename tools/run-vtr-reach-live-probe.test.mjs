@@ -16,6 +16,7 @@ import {
   startRowFromLog,
   terminateOwnedProcessGroup,
   inspectExactSourceDependencyReadiness,
+  inspectLeafEula,
   runNoDoubleAuthorityFixture,
   validateExactSourceWorkspaceInstall,
   validatePortPolicy,
@@ -65,6 +66,25 @@ describe('Reach live probe caller pure contracts', () => {
       major: 25, version: '25.0.5-ea', earlyAccess: true,
     })
     expect(parseJavaRuntime('openjdk version "25-ea" 2026-10-20')).toMatchObject({ major: 25, earlyAccess: true })
+  })
+
+  test('fresh Leaf attempts require and preserve the existing EULA acceptance', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-leaf-eula-'))
+    const leafJar = join(parent, 'leaf.jar')
+    writeFileSync(leafJar, 'fixture jar')
+    writeFileSync(join(parent, 'eula.txt'), '# existing acceptance\neula=true\n')
+    try {
+      expect(inspectLeafEula(leafJar)).toMatchObject({
+        sourcePath: join(parent, 'eula.txt'),
+        contents: '# existing acceptance\neula=true\n',
+      })
+      writeFileSync(join(parent, 'eula.txt'), 'eula=false\n')
+      expect(() => inspectLeafEula(leafJar)).toThrow(/eula=true.*required/iu)
+      writeFileSync(join(parent, 'eula.txt'), 'eula=true\neula=false\n')
+      expect(() => inspectLeafEula(leafJar)).toThrow(/eula=true.*required/iu)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
   })
 
   test('exact-source install accepts an unused declared workspace without a Bun link', () => {
