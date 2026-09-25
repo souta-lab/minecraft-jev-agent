@@ -128,6 +128,7 @@ test('route choice asks Jev over grounded routes with the complete VTR contract 
   const calls: JevRequest[] = []
   const requests: Array<{ input: ReachRouteDecisionInput; result: JevResult; chosen: string | null }> = []
   const started: ReachRouteDecisionInput[] = []
+  let providerAttemptCallbacks = 0
   const policy: JevPolicy = {
     kind: 'typesafe', model: 'test-primary-jev',
     async decide(request) {
@@ -139,6 +140,7 @@ test('route choice asks Jev over grounded routes with the complete VTR contract 
     policy: () => policy,
     worldState: () => worldState(),
     onCallStart: (request) => started.push(request),
+    onProviderAttempt: () => { providerAttemptCallbacks += 1 },
     onResult: (request, response, chosen) => requests.push({ input: request, result: response, chosen }),
     onFailure: (_request, reason) => assert.fail(reason),
   })
@@ -147,6 +149,8 @@ test('route choice asks Jev over grounded routes with the complete VTR contract 
   assert.equal(started.length, 1)
   assert.equal(calls.length, 1)
   assert.equal(requests[0]?.result.source, 'jev')
+  assert.equal(requests[0]?.result.providerAttempts, undefined, 'offline fixture policy does not claim provider evaluate attempts')
+  assert.equal(providerAttemptCallbacks, 0)
   assert.equal(requests[0]?.chosen, 'MOVE:oak-b')
   assert.deepEqual(calls[0]?.candidates.map(({ id }) => id), ['MOVE:oak-a', 'MOVE:oak-b'])
   assert.deepEqual(calls[0]?.questionNames, ['action'])
@@ -170,6 +174,7 @@ test('route choice asks Jev over grounded routes with the complete VTR contract 
 test('VTR route frame journal records bounded Jev policy input without generic pi or beta authority', async () => {
   const records: unknown[] = []
   const observedResults: JevResult[] = []
+  let providerAttemptCallbacks = 0
   const evaluateStub = async (args: { questions: Record<string, unknown> }) => {
     assert.deepEqual(Object.keys(args.questions), ['action'])
     return {
@@ -198,6 +203,7 @@ test('VTR route frame journal records bounded Jev policy input without generic p
     policy: () => policy,
     worldState: () => worldState(),
     onCallStart: () => undefined,
+    onProviderAttempt: () => { providerAttemptCallbacks += 1 },
     onResult: (_request, result) => { observedResults.push(result) },
     onFailure: (_request, reason) => assert.fail(reason),
   })
@@ -205,15 +211,19 @@ test('VTR route frame journal records bounded Jev policy input without generic p
   assert.deepEqual(await adapter.chooseRoute(input), { status: 'selected', routeId: 'MOVE:oak-b' })
   assert.equal(observedResults[0]?.source, 'jev', 'route selection remains production Jev policy input')
   assert.equal(observedResults[0]?.answers.action?.value, 'MOVE:oak-b', 'the verified result retains Jev’s grounded choice')
+  assert.equal(observedResults[0]?.providerAttempts, 1)
+  assert.equal(providerAttemptCallbacks, 1)
 
   const call = records.find((record) => (record as { record?: string }).record === 'jev-call') as {
     policy: string
     model: string
+    providerAttempts: number
     authority: Record<string, unknown>
     response: { answers: Record<string, JevAnswer> }
   }
   assert.equal(call.policy, 'typesafe', 'the route frame still uses the configured production Jev policy')
   assert.equal(call.model, 'test-primary-jev')
+  assert.equal(call.providerAttempts, 1)
   assert.deepEqual(call.authority.decisionFrame, {
     kind: 'vtr-reach-route',
     policy: 'jev',
@@ -232,6 +242,7 @@ test('VTR route frame journal records bounded Jev policy input without generic p
 test('failed VTR route frame journals only route policy failure, without legacy Option/β metadata', async () => {
   const records: unknown[] = []
   let failureReason = ''
+  let providerAttemptCallbacks = 0
   const policy = new AuthorityJevPolicy(
     {
       writer: { path: 'fixture', write(record: unknown) { records.push(record) } },
@@ -250,6 +261,7 @@ test('failed VTR route frame journals only route policy failure, without legacy 
     policy: () => policy,
     worldState: () => worldState(),
     onCallStart: () => undefined,
+    onProviderAttempt: () => { providerAttemptCallbacks += 1 },
     onResult: () => assert.fail('failed Jev evaluation must not produce a route result'),
     onFailure: (_request, reason) => { failureReason = reason },
   })
@@ -264,8 +276,11 @@ test('failed VTR route frame journals only route policy failure, without legacy 
     authority: Record<string, unknown>
     response: unknown
     error: string
+    providerAttempts: number
   }
   assert.equal(failedCall.response, null)
+  assert.equal(failedCall.providerAttempts, 1)
+  assert.equal(providerAttemptCallbacks, 1)
   assert.match(failedCall.error, /synthetic Jev transport refusal/)
   assert.deepEqual(failedCall.authority.decisionFrame, {
     kind: 'vtr-reach-route',
@@ -277,12 +292,164 @@ test('failed VTR route frame journals only route policy failure, without legacy 
   assert.deepEqual(findKeysDeep(failedCall, legacyOptionBetaMetadataKeys), [], 'failed route journal must not record legacy Option/β keys at any depth')
 })
 
+test('provider attempt count records each entered evaluate call across retries', async () => {
+  const records: unknown[] = []
+  let evaluateCalls = 0
+  let providerAttemptCallbacks = 0
+  const policy = new AuthorityJevPolicy(
+    {
+      writer: { path: 'fixture', write(record: unknown) { records.push(record) } },
+      model: 'test-primary-jev',
+      timeoutMs: 1_000,
+      maxRetries: 1,
+      rateLimitRetries: 0,
+      rateLimitBaseDelayMs: 1,
+    } as unknown as JevPolicyOptions,
+    { key: 'fixture-only', origin: 'test' },
+    {
+      evaluate: (async () => {
+        evaluateCalls += 1
+        if (evaluateCalls === 1) throw { statusCode: 503, message: 'service temporarily unavailable' }
+        return {
+          answers: { action: { choice: 'MOVE:oak-b', probabilities: { 'MOVE:oak-a': 0.1, 'MOVE:oak-b': 0.9 } } },
+          providerMetadata: {},
+          usage: null,
+        } as unknown as Awaited<ReturnType<typeof import('ai').experimental_evaluate>>
+      }) as unknown as NonNullable<ConstructorParameters<typeof AuthorityJevPolicy>[2]>['evaluate'],
+      sleep: async () => undefined,
+      random: () => 0,
+    },
+  )
+  const finalResults: JevResult[] = []
+  const adapter = new JevReachRouteDecisionPolicy({
+    policy: () => policy,
+    worldState: () => worldState(),
+    onCallStart: () => undefined,
+    onProviderAttempt: () => { providerAttemptCallbacks += 1 },
+    onResult: (_request, result) => { finalResults.push(result) },
+    onFailure: (_request, reason) => assert.fail(reason),
+  })
+
+  assert.deepEqual(await adapter.chooseRoute(input), { status: 'selected', routeId: 'MOVE:oak-b' })
+  assert.equal(evaluateCalls, 2)
+  assert.equal(providerAttemptCallbacks, 2)
+  assert.equal(finalResults[0]?.providerAttempts, 2)
+  const callAttempts = records
+    .filter((record) => (record as { record?: string }).record === 'jev-call')
+    .map((record) => (record as { providerAttempts?: number }).providerAttempts)
+  assert.deepEqual(callAttempts, [1, 2], 'retry and success journals contain the cumulative entered evaluate count')
+  const retry = records.find((record) => (record as { record?: string }).record === 'jev-retry') as {
+    providerAttempts?: number
+  }
+  assert.equal(retry.providerAttempts, 1, 'a scheduled retry is not counted until its evaluate call begins')
+})
+
+test('provider timeout retry counts only evaluate calls actually entered', async () => {
+  const records: unknown[] = []
+  let evaluateCalls = 0
+  let providerAttemptCallbacks = 0
+  const policy = new AuthorityJevPolicy(
+    {
+      writer: { path: 'fixture', write(record: unknown) { records.push(record) } },
+      model: 'test-primary-jev',
+      timeoutMs: 10,
+      maxRetries: 1,
+      rateLimitRetries: 0,
+      rateLimitBaseDelayMs: 1,
+    } as unknown as JevPolicyOptions,
+    { key: 'fixture-only', origin: 'test' },
+    {
+      evaluate: (async (args: { abortSignal: AbortSignal }) => {
+        evaluateCalls += 1
+        if (evaluateCalls === 1) {
+          return await new Promise<never>((_resolve, reject) => {
+            args.abortSignal.addEventListener('abort', () => reject(new DOMException('timed out', 'AbortError')), { once: true })
+          })
+        }
+        return {
+          answers: { action: { choice: 'MOVE:oak-b' } }, providerMetadata: {}, usage: null,
+        } as unknown as Awaited<ReturnType<typeof import('ai').experimental_evaluate>>
+      }) as unknown as NonNullable<ConstructorParameters<typeof AuthorityJevPolicy>[2]>['evaluate'],
+      sleep: async () => undefined,
+      random: () => 0,
+    },
+  )
+  const finalResults: JevResult[] = []
+  const adapter = new JevReachRouteDecisionPolicy({
+    policy: () => policy,
+    worldState: () => worldState(),
+    onCallStart: () => undefined,
+    onProviderAttempt: () => { providerAttemptCallbacks += 1 },
+    onResult: (_request, result) => { finalResults.push(result) },
+    onFailure: (_request, reason) => assert.fail(reason),
+  })
+
+  assert.deepEqual(await adapter.chooseRoute(input), { status: 'selected', routeId: 'MOVE:oak-b' })
+  assert.equal(evaluateCalls, 2)
+  assert.equal(providerAttemptCallbacks, 2)
+  assert.equal(finalResults[0]?.providerAttempts, 2)
+  const terminalCall = records.filter((record) => (record as { record?: string }).record === 'jev-call').at(-1) as {
+    providerAttempts?: number
+  }
+  assert.equal(terminalCall.providerAttempts, 2)
+})
+
+test('provider attempt count does not include a retry whose wait aborts before evaluate', async () => {
+  const records: unknown[] = []
+  let evaluateCalls = 0
+  let providerAttemptCallbacks = 0
+  const policy = new AuthorityJevPolicy(
+    {
+      writer: { path: 'fixture', write(record: unknown) { records.push(record) } },
+      model: 'test-primary-jev',
+      timeoutMs: 1_000,
+      maxRetries: 2,
+      rateLimitRetries: 0,
+      rateLimitBaseDelayMs: 1,
+    } as unknown as JevPolicyOptions,
+    { key: 'fixture-only', origin: 'test' },
+    {
+      evaluate: (async () => {
+        evaluateCalls += 1
+        throw { statusCode: 503, message: 'service temporarily unavailable' }
+      }) as unknown as NonNullable<ConstructorParameters<typeof AuthorityJevPolicy>[2]>['evaluate'],
+      sleep: async () => { throw new DOMException('cancelled while waiting', 'AbortError') },
+      random: () => 0,
+    },
+  )
+  let failureReason = ''
+  const adapter = new JevReachRouteDecisionPolicy({
+    policy: () => policy,
+    worldState: () => worldState(),
+    onCallStart: () => undefined,
+    onProviderAttempt: () => { providerAttemptCallbacks += 1 },
+    onResult: () => assert.fail('an aborted retry wait cannot return a route'),
+    onFailure: (_request, reason) => { failureReason = reason },
+  })
+
+  assert.equal((await adapter.chooseRoute(input)).status, 'unavailable')
+  assert.match(failureReason, /aborted during transient retry wait/)
+  assert.equal(evaluateCalls, 1)
+  assert.equal(providerAttemptCallbacks, 1)
+  const call = records.find((record) => (record as { record?: string }).record === 'jev-call') as {
+    providerAttempts?: number
+    retryScheduled?: boolean
+  }
+  assert.equal(call.providerAttempts, 1)
+  assert.equal(call.retryScheduled, true)
+  const retry = records.find((record) => (record as { record?: string }).record === 'jev-retry') as {
+    providerAttempts?: number
+  }
+  assert.equal(retry.providerAttempts, 1, 'sleeping on a scheduled retry must not increment provider attempts')
+})
+
 test('an unoffered Jev route is refused without deterministic substitution', async () => {
   let failures = 0
   const adapter = new JevReachRouteDecisionPolicy({
     policy: () => ({ kind: 'typesafe', model: 'test-primary-jev', decide: async () => result('MOVE:invented') }),
     worldState: () => worldState(),
     onCallStart: () => undefined,
+    onProviderAttempt: () => undefined,
     onResult: () => undefined,
     onFailure: () => { failures += 1 },
   })
@@ -298,6 +465,7 @@ test('stale route world evidence suspends choice before invoking Jev', async () 
     policy: () => ({ kind: 'typesafe', model: 'test-primary-jev', decide: async () => { calls += 1; return result('MOVE:oak-a') } }),
     worldState: () => worldState(9_999),
     onCallStart: () => undefined,
+    onProviderAttempt: () => undefined,
     onResult: () => undefined,
     onFailure: (_request, value) => { reason = value },
   })

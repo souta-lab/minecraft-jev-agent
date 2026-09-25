@@ -96,12 +96,16 @@ export interface JevResult {
   latencyMs: number
   usage: JevUsage | null
   answers: Record<string, JevAnswer>
+  /** Number of actual model-provider evaluate attempts; absent for legacy/offline policies. */
+  providerAttempts?: number
 }
 
 export interface JevRequest {
   stage: string
   state: WorldState
   candidates: readonly Candidate[]
+  /** Internal telemetry hook called immediately before each model-provider evaluate attempt. */
+  onProviderAttempt?: () => void
   /** Bounded V4 authority frame for a non-Option choice such as grounded Reach routing. */
   decisionFrame?: {
     readonly kind: 'vtr-reach-route'
@@ -158,6 +162,8 @@ export interface JevCallRecord {
   policy: JevPolicyKind
   model: string
   stage: string
+  /** Cumulative number of entered provider evaluate calls in this decision; absent in older/offline records. */
+  providerAttempts?: number
   latencyMs: number
   /** rate-limit retries already consumed before this successful attempt */
   rateLimitRetries: number
@@ -178,6 +184,8 @@ export interface JevRetryRecord {
   delayMs: number
   totalWaitMs: number
   error: string
+  /** Cumulative entered provider evaluate calls; a scheduled retry is not itself an attempt. */
+  providerAttempts?: number
 }
 
 export interface JevOutcomeRecord {

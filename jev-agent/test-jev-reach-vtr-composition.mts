@@ -117,10 +117,11 @@ function makeContext(policy: JevPolicy, state = worldState()): { context: JevRea
 }
 
 function startSnapshot(contractValue: ReachTransitionContract, observedAtMs: number, route: ReachRoute): ReachRuntimeSnapshot {
-  const predicates: Record<string, { truth: 'true'; evidenceId: string }> = {
+  const predicates: Record<string, { truth: 'true' | 'false'; evidenceId: string }> = {
     'mission.unsatisfied': { truth: 'true', evidenceId: 'mission:unsatisfied' },
     'reach.source-grounded': { truth: 'true', evidenceId: 'source:grounded' },
     'body.alive': { truth: 'true', evidenceId: 'body:alive' },
+    [contractValue.desiredPredicate.id]: { truth: 'false', evidenceId: 'reach:not-yet' },
     [route.groundingPredicateId]: { truth: 'true', evidenceId: route.witness.evidenceId },
   }
   return {
@@ -128,6 +129,75 @@ function startSnapshot(contractValue: ReachTransitionContract, observedAtMs: num
     routes: [route],
     progress: { predicateDistance: 8, reachability: 'reachable', frontierId: route.routeId, evidenceId: 'progress:commit' },
   }
+}
+
+function snapshotForRoutes(
+  contractValue: ReachTransitionContract,
+  observedAtMs: number,
+  routes: readonly ReachRoute[],
+): ReachRuntimeSnapshot {
+  const first = routes[0]
+  if (first === undefined) throw new Error('test requires at least one grounded route')
+  const initial = startSnapshot(contractValue, observedAtMs, first)
+  return {
+    ...initial,
+    routes,
+    observation: {
+      ...initial.observation,
+      predicates: {
+        ...initial.observation.predicates,
+        ...Object.fromEntries(routes.map((candidate) => [
+          candidate.groundingPredicateId,
+          { truth: 'true' as const, evidenceId: candidate.witness.evidenceId },
+        ])),
+      },
+    },
+  }
+}
+
+async function finishMetricsTransition(policy: JevPolicy): Promise<{
+  readonly context: JevReachVtrCompositionContext
+  readonly logs: Array<{ level: string; message: string; detail: Record<string, unknown> }>
+  readonly terminalOutcome: string
+}> {
+  const { context, logs } = makeContext(policy)
+  const composition = createJevReachVtrComposition(context)
+  const offeredRoutes = [routeFor(contract, 10_000, 'MOVE:oak-a'), routeFor(contract, 10_000, 'MOVE:oak-b')]
+  const committed = await composition.runtime.commit(contract, snapshotForRoutes(contract, 10_000, offeredRoutes))
+  if (committed.status !== 'active' || committed.intent === undefined) {
+    throw new Error(`expected route policy to commit an active Reach intent; got ${committed.status}`)
+  }
+  const authorization = composition.runtime.authorizeMechanicalStep(committed.intent.intentId, identity, {
+    stepId: `${committed.intent.intentId}:leg:1`,
+    effectKind: committed.intent.effectKind,
+    resources: {},
+    risk: {},
+    nowMs: 10_001,
+  })
+  if (authorization.status !== 'authorized') throw new Error(`expected one mechanical reservation; got ${authorization.status}`)
+  const settled = composition.runtime.recordMechanicalStepOutcome(committed.intent.intentId, authorization.stepId, {
+    snapshot: snapshotForRoutes(contract, 10_100, offeredRoutes),
+  })
+  if (settled.status !== 'active') throw new Error(`expected settled mechanical leg; got ${settled.status}`)
+  const unverified = snapshotForRoutes(contract, 10_200, offeredRoutes)
+  const completed = await composition.runtime.complete(committed.intent.intentId, {
+    status: 'completed',
+    evidenceId: 'executor:reach-done',
+    snapshot: {
+      ...unverified,
+      observation: {
+        ...unverified.observation,
+        predicates: {
+          ...unverified.observation.predicates,
+          [contract.desiredPredicate.id]: { truth: 'true', evidenceId: 'verified:reach-predicate' },
+        },
+      },
+    },
+  })
+  if (completed.status !== 'terminal') throw new Error(`expected deterministic verified terminal; got ${completed.status}`)
+  const handoff = composition.runtime.takeTerminalHandoff()
+  if (handoff === null) throw new Error('expected one typed terminal handoff')
+  return { context, logs, terminalOutcome: handoff.outcome.kind }
 }
 
 test('composition builds the runtime and preserves Jev route telemetry through context-owned callbacks', async () => {
@@ -150,11 +220,57 @@ test('composition builds the runtime and preserves Jev route telemetry through c
   assert.ok(context.counters.lastJevAt.value > 0)
   assert.deepEqual(context.lastRouteDecision.value, {
     selectedRouteId: 'MOVE:oak-b', policy: 'typesafe', source: 'jev', model: 'test-primary-jev',
-    callId: 'composition-jev-call', probabilities: { 'MOVE:oak-a': 0.2, 'MOVE:oak-b': 0.8 }, accepted: true,
+    callId: 'composition-jev-call', probabilities: { 'MOVE:oak-a': 0.2, 'MOVE:oak-b': 0.8 }, providerAttempts: 0, accepted: true,
   })
   assert.equal(logs[0]?.detail.selectedGroundedRouteId, 'MOVE:oak-b')
   assert.equal(logs[0]?.detail.callId, 'composition-jev-call')
   assert.equal(logs[0]?.detail.identity && (logs[0]!.detail.identity as ReachIdentity).leaseId, identity.leaseId)
+})
+
+test('terminal Reach model metrics bind frame invocations separately from provider evaluate attempts', async () => {
+  const policy: JevPolicy = {
+    kind: 'typesafe', model: 'test-primary-jev',
+    async decide(request) {
+      request.onProviderAttempt?.()
+      request.onProviderAttempt?.()
+      return { ...jevResult('MOVE:oak-b'), providerAttempts: 2 }
+    },
+  }
+  const { context, logs, terminalOutcome } = await finishMetricsTransition(policy)
+  const event = logs.find(({ message }) => message.startsWith('VTR_TRANSITION_MODEL_METRICS '))
+  assert.equal(terminalOutcome, 'SUCCESS')
+  assert.ok(event, 'one separate typed event records metrics for the completed Transition')
+  assert.equal(event?.detail.transitionId, contract.transitionId)
+  assert.equal(event?.detail.contractHash, contract.contractHash)
+  assert.equal(event?.detail.typedTerminalOutcome, 'SUCCESS')
+  assert.equal(event?.detail.mechanicalSteps, 1)
+  assert.equal(event?.detail.jevDecisionFrameInvocations, 1, 'counts JevPolicy.decide/Decision Frame invocations')
+  assert.equal(event?.detail.jevDecisionFramesPerMechanicalStep, 1)
+  assert.equal(event?.detail.jevModelProviderEvaluateAttempts, 2, 'counts actual provider evaluate entries including retries')
+  assert.equal(event?.detail.jevModelProviderEvaluateAttemptsPerMechanicalStep, 2)
+  assert.equal('jevCallsPerTransition' in (event?.detail ?? {}), false, 'new model metrics do not reuse the legacy Jev call label')
+  assert.equal('modelCallsPerMechanicalStep' in (event?.detail ?? {}), false, 'decision frames are not mislabeled as provider model calls')
+  assert.equal(context.counters.jevCalls.value, 1, 'legacy Jev call counter remains the Decision Frame invocation count')
+})
+
+test('fallback Decision Frame records zero model provider evaluate attempts', async () => {
+  const policy: JevPolicy = {
+    kind: 'fallback', model: 'offline',
+    async decide() {
+      return {
+        callId: 'fallback-route-call', policy: 'fallback', source: 'fallback', model: 'offline', latencyMs: 0,
+        usage: null, answers: { action: answer('MOVE:oak-a') },
+      }
+    },
+  }
+  const { context, logs, terminalOutcome } = await finishMetricsTransition(policy)
+  const event = logs.find(({ message }) => message.startsWith('VTR_TRANSITION_MODEL_METRICS '))
+  assert.equal(terminalOutcome, 'SUCCESS')
+  assert.ok(event)
+  assert.equal(context.counters.jevCalls.value, 1, 'offline policy invocation remains separately observable')
+  assert.equal(event?.detail.jevDecisionFrameInvocations, 1)
+  assert.equal(event?.detail.jevModelProviderEvaluateAttempts, 0)
+  assert.equal(event?.detail.jevModelProviderEvaluateAttemptsPerMechanicalStep, 0)
 })
 
 test('composition fences commit when mutable world identity changes after the snapshot is made', async () => {

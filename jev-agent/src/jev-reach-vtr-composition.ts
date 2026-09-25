@@ -28,6 +28,7 @@ export interface JevReachRouteDecisionRecord {
   readonly model: string
   readonly callId: string
   readonly probabilities: Record<string, number> | null
+  readonly providerAttempts: number
   readonly accepted: boolean
 }
 
@@ -46,6 +47,7 @@ export interface JevReachVtrCompositionContext {
   readonly policy: JevReachMutableCell<JevPolicy>
   readonly cachedWorldState: JevReachMutableCell<WorldState | null>
   readonly counters: {
+    /** Historical compatibility counter: JevPolicy.decide / Decision Frame invocations, not provider requests. */
     readonly jevCalls: JevReachMutableCell<number>
     readonly lastJevAt: JevReachMutableCell<number>
     readonly tickCounter: JevReachMutableCell<number>
@@ -126,9 +128,30 @@ function commitFreshness(
   return { status: 'current' }
 }
 
-function recordCallStart(context: JevReachVtrCompositionContext): void {
+function recordDecisionFrameInvocation(context: JevReachVtrCompositionContext): void {
   context.counters.jevCalls.value += 1
   context.counters.lastJevAt.value = Date.now()
+}
+
+interface ReachRouteTransitionMetrics {
+  readonly contractHash: string
+  decisionFrameInvocations: number
+  providerEvaluateAttempts: number
+}
+
+function metricsForTransition(
+  metrics: Map<string, ReachRouteTransitionMetrics>,
+  input: ReachRouteDecisionInput,
+): ReachRouteTransitionMetrics {
+  const existing = metrics.get(input.transitionId)
+  if (existing !== undefined && existing.contractHash === input.contractHash) return existing
+  const created: ReachRouteTransitionMetrics = {
+    contractHash: input.contractHash,
+    decisionFrameInvocations: 0,
+    providerEvaluateAttempts: 0,
+  }
+  metrics.set(input.transitionId, created)
+  return created
 }
 
 function recordRouteResult(
@@ -139,6 +162,7 @@ function recordRouteResult(
   accepted: boolean,
 ): void {
   const answer = result.answers.action
+  const providerAttempts = result.providerAttempts ?? 0
   context.lastRouteDecision.value = {
     selectedRouteId,
     policy: result.policy,
@@ -146,6 +170,7 @@ function recordRouteResult(
     model: result.model,
     callId: result.callId,
     probabilities: answer?.probabilities ?? null,
+    providerAttempts,
     accepted,
   }
   context.logger.info(
@@ -164,6 +189,7 @@ function recordRouteResult(
       model: result.model,
       callId: result.callId,
       latencyMs: result.latencyMs,
+      providerAttempts,
       actionProbability: answer?.probability ?? null,
       probabilities: answer?.probabilities ?? null,
       identity: input.identity,
@@ -196,15 +222,52 @@ function recordRouteFailure(
 export function createJevReachVtrComposition(
   context: JevReachVtrCompositionContext,
 ): JevReachVtrComposition {
+  const transitionMetrics = new Map<string, ReachRouteTransitionMetrics>()
   const routePolicy = new JevReachRouteDecisionPolicy({
     policy: () => context.policy.value,
     worldState: (input) => currentReachWorldState(context, input),
-    onCallStart: () => recordCallStart(context),
+    onCallStart: (input) => {
+      recordDecisionFrameInvocation(context)
+      metricsForTransition(transitionMetrics, input).decisionFrameInvocations += 1
+    },
+    onProviderAttempt: (input) => {
+      metricsForTransition(transitionMetrics, input).providerEvaluateAttempts += 1
+    },
     onResult: (input, result, selectedRouteId, accepted) =>
       recordRouteResult(context, input, result, selectedRouteId, accepted),
     onFailure: (input, reason) => recordRouteFailure(context, input, reason),
   })
   const commitFreshnessFence: ReachCommitFreshnessFence = (input) => commitFreshness(context, input)
-  const runtime = new ReachMissionRuntime({ routePolicy, commitFreshnessFence })
+  const runtime = new ReachMissionRuntime({
+    routePolicy,
+    commitFreshnessFence,
+    onTransitionNotCommitted: (transitionId) => { transitionMetrics.delete(transitionId) },
+    onTerminalHandoff: ({ transitionId, contractHash, state, outcome }) => {
+      const routeMetrics = transitionMetrics.get(transitionId)
+      const decisionFrameInvocations = routeMetrics?.contractHash === contractHash ? routeMetrics.decisionFrameInvocations : 0
+      const providerEvaluateAttempts = routeMetrics?.contractHash === contractHash ? routeMetrics.providerEvaluateAttempts : 0
+      const mechanicalSteps = state.usage.mechanicalSteps
+      const decisionFramesPerMechanicalStep = mechanicalSteps === 0 ? null : decisionFrameInvocations / mechanicalSteps
+      const providerAttemptsPerMechanicalStep = mechanicalSteps === 0 ? null : providerEvaluateAttempts / mechanicalSteps
+      context.logger.info(
+        'vtr',
+        `VTR_TRANSITION_MODEL_METRICS transitionId=${transitionId} contractHash=${contractHash} outcome=${outcome.kind} mechanicalSteps=${mechanicalSteps} decisionFrameInvocations=${decisionFrameInvocations} providerEvaluateAttempts=${providerEvaluateAttempts}`,
+        {
+          transitionId,
+          contractHash,
+          typedTerminalOutcome: outcome.kind,
+          mechanicalSteps,
+          jevDecisionFrameInvocations: decisionFrameInvocations,
+          jevDecisionFramesPerMechanicalStep: decisionFramesPerMechanicalStep,
+          jevModelProviderEvaluateAttempts: providerEvaluateAttempts,
+          jevModelProviderEvaluateAttemptsPerMechanicalStep: providerAttemptsPerMechanicalStep,
+          policy: 'jev-reach-route',
+          identity: state.identity,
+        },
+        context.counters.tickCounter.value,
+      )
+      transitionMetrics.delete(transitionId)
+    },
+  })
   return { runtime, routePolicy }
 }

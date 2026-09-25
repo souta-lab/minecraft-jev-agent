@@ -24,6 +24,15 @@ import type {
 export interface ReachMissionRuntimeDependencies {
   readonly routePolicy: ReachRouteDecisionPolicy
   readonly commitFreshnessFence: ReachCommitFreshnessFence
+  /** Run-scoped policy telemetry; does not influence VTR admission or outcomes. */
+  readonly onTerminalHandoff?: (handoff: {
+    readonly transitionId: string
+    readonly contractHash: string
+    readonly state: ReachTransitionState
+    readonly outcome: ReachTerminalOutcome
+  }) => void
+  /** Drop telemetry for a route proposal that never acquired a committed Transition. */
+  readonly onTransitionNotCommitted?: (transitionId: string) => void
 }
 
 export interface ReachTerminalHandoff {
@@ -45,6 +54,7 @@ interface TerminalWitnessExclusion extends ReachMissionScope {
 }
 
 interface ActiveContractScope {
+  readonly transitionId: string
   readonly contractHash: string
   readonly scope: ReachMissionScope
 }
@@ -87,11 +97,15 @@ function isTerminalWitnessBoundary(outcome: ReachTerminalOutcome): boolean {
  */
 export class ReachMissionRuntime {
   private readonly controller: ReachController
+  private readonly onTerminalHandoff: ReachMissionRuntimeDependencies['onTerminalHandoff']
+  private readonly onTransitionNotCommitted: ReachMissionRuntimeDependencies['onTransitionNotCommitted']
   private terminalWitnessExclusion: TerminalWitnessExclusion | null = null
   private activeContractScope: ActiveContractScope | null = null
 
   constructor(dependencies: ReachMissionRuntimeDependencies) {
     this.controller = new ReachController(dependencies.routePolicy, dependencies.commitFreshnessFence)
+    this.onTerminalHandoff = dependencies.onTerminalHandoff
+    this.onTransitionNotCommitted = dependencies.onTransitionNotCommitted
   }
 
   get current(): ReachControllerCurrent | null {
@@ -108,7 +122,13 @@ export class ReachMissionRuntime {
     const scopedSnapshot = this.excludePriorTerminalWitness(contract, snapshot)
     const result = await this.controller.commit(contract, scopedSnapshot)
     if (result.status === 'active' || result.status === 'terminal') {
-      this.activeContractScope = { contractHash: contract.contractHash, scope: missionScope(contract) }
+      this.activeContractScope = { transitionId: contract.transitionId, contractHash: contract.contractHash, scope: missionScope(contract) }
+    } else {
+      try {
+        this.onTransitionNotCommitted?.(contract.transitionId)
+      } catch {
+        // Telemetry cleanup must not affect the VTR admission result.
+      }
     }
     return result
   }
@@ -185,6 +205,18 @@ export class ReachMissionRuntime {
       state.witness !== null
     ) {
       this.terminalWitnessExclusion = { ...scope.scope, witnessId: state.witness.witnessId }
+    }
+    if (scope !== null && scope.contractHash === state.contractHash) {
+      try {
+        this.onTerminalHandoff?.({
+          transitionId: scope.transitionId,
+          contractHash: state.contractHash,
+          state,
+          outcome,
+        })
+      } catch {
+        // Run telemetry must not prevent delivering an already-consumed typed handoff.
+      }
     }
     this.activeContractScope = null
     return { contractHash: state.contractHash, state, outcome }

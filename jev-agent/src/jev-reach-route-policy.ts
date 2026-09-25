@@ -18,6 +18,7 @@ export interface JevReachRouteDecisionCallbacks {
   /** The runtime adapter returns only the fresh typed WorldState matching this exact observation. */
   readonly worldState: (input: ReachRouteDecisionInput) => WorldState | null
   readonly onCallStart: (input: ReachRouteDecisionInput) => void
+  readonly onProviderAttempt?: (input: ReachRouteDecisionInput) => void
   readonly onResult: (input: ReachRouteDecisionInput, result: JevResult, selectedRouteId: string | null, accepted: boolean) => void
   readonly onFailure: (input: ReachRouteDecisionInput, reason: string) => void
 }
@@ -78,9 +79,9 @@ function candidateForRoute(input: ReachRouteDecisionInput, routeIndex: number): 
 
 /**
  * Production Jev Decision Frame adapter for grounded route choices. It uses
- * typed route facts and a fresh WorldState supplied by the Minecraft runtime
- * adapter; Jev proposes a route id, while ReachController revalidates and owns
- * the intent.
+ * only typed route facts and a fresh WorldState supplied by the Minecraft
+ * runtime adapter; Jev proposes a route id, while ReachController revalidates
+ * and owns the intent.
  */
 export class JevReachRouteDecisionPolicy implements ReachRouteDecisionPolicy {
   constructor(private readonly callbacks: JevReachRouteDecisionCallbacks) {}
@@ -100,13 +101,19 @@ export class JevReachRouteDecisionPolicy implements ReachRouteDecisionPolicy {
       return { status: 'unavailable', reason }
     }
     const groundedCandidates = candidates as Candidate[]
-    this.callbacks.onCallStart(input)
     try {
-      const result = await this.callbacks.policy().decide({
+      const policy = this.callbacks.policy()
+      try {
+        this.callbacks.onCallStart(input)
+      } catch {
+        // Telemetry must not prevent invoking the configured Jev policy.
+      }
+      const result = await policy.decide({
         stage: `vtr-reach-route-${input.transitionId}`,
         state,
         candidates: groundedCandidates,
         questionNames: ['action'],
+        onProviderAttempt: () => this.callbacks.onProviderAttempt?.(input),
         decisionFrame: {
           kind: 'vtr-reach-route',
           instructions: REACH_ROUTE_INSTRUCTIONS,

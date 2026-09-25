@@ -791,6 +791,7 @@ export class AuthorityJevPolicy implements JevPolicy {
     const modelState = authorityState(request) as Parameters<typeof evaluate>[0]['state']
     const maxGeneralAttempts = Math.max(1, this.options.maxRetries + 1)
     let generalAttempt = 0
+    let providerAttempts = 0
     let rateAttempt = 0
     let rateWaitMs = 0
     let transientRetryCount = 0
@@ -803,6 +804,12 @@ export class AuthorityJevPolicy implements JevPolicy {
       const timeout = AbortSignal.timeout(this.options.timeoutMs)
       const abortSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
       try {
+        providerAttempts += 1
+        try {
+          request.onProviderAttempt?.()
+        } catch {
+          // Telemetry must not prevent the provider call whose attempt it measures.
+        }
         const response = await this.requestEvaluation({
           model: this.model,
           state: modelState,
@@ -837,6 +844,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           policy: this.kind,
           model: this.model,
           stage: request.stage,
+          providerAttempts,
           latencyMs,
           rateLimitRetries: rateAttempt,
           rateLimitWaitMs: rateWaitMs,
@@ -858,6 +866,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           latencyMs,
           usage,
           answers,
+          providerAttempts,
           ...(authorityDecision === undefined ? {} : { authorityDecision }),
         }
         return result
@@ -873,7 +882,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
             transientRetries: transientRetryCount, transientWaitMs,
-            state: modelState, questions, response: null, error: message,
+            state: modelState, questions, response: null, error: message, providerAttempts,
             authority: authorityJournal(request, { failure: 'cancelled' }),
             ...providerDiagnosticsField,
           })
@@ -891,6 +900,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: rateAttempt,
             delayMs, totalWaitMs: rateWaitMs, error: message,
+            providerAttempts,
             ...providerDiagnosticsField,
           })
           try {
@@ -918,7 +928,7 @@ export class AuthorityJevPolicy implements JevPolicy {
               model: this.model, stage: request.stage, latencyMs: Date.now() - started,
               rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
               transientRetries: transientRetryCount, transientWaitMs,
-              state: modelState, questions, response: null, error: message,
+              state: modelState, questions, response: null, error: message, providerAttempts,
               authority: authorityJournal(request, { failure: 'transient-provider-retry' }),
               retryScheduled: true,
               ...providerDiagnosticsField,
@@ -926,7 +936,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             this.options.writer.write({
               record: 'jev-retry', callId, ts: new Date().toISOString(),
               attempt: generalAttempt, delayMs: retryDelayMs, totalWaitMs: rateWaitMs + transientWaitMs,
-              retryClass: 'transient-provider', error: message,
+              retryClass: 'transient-provider', error: message, providerAttempts,
               ...providerDiagnosticsField,
             })
             try {
@@ -946,7 +956,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
-            transientRetries: transientRetryCount, transientWaitMs, state: modelState,
+            transientRetries: transientRetryCount, transientWaitMs, state: modelState, providerAttempts,
             questions, response: null, error: message,
             authority: authorityJournal(request, { failure: 'transient-provider-unavailable' }),
             retryable: true,
@@ -958,6 +968,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           this.options.writer.write({
             record: 'jev-retry', callId, ts: new Date().toISOString(), attempt: generalAttempt,
             delayMs: 0, totalWaitMs: rateWaitMs, error: message,
+            providerAttempts,
             ...providerDiagnosticsField,
           })
           continue
@@ -966,7 +977,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
           model: this.model, stage: request.stage, latencyMs: Date.now() - started,
           rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
-          transientRetries: transientRetryCount, transientWaitMs, state: modelState,
+          transientRetries: transientRetryCount, transientWaitMs, state: modelState, providerAttempts,
           questions, response: null, error: message,
           authority: authorityJournal(request, { failure: 'fatal-no-fallback' }),
           ...providerDiagnosticsField,
