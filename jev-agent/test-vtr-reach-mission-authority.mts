@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import { test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
-import { filterLegacyReachCandidates } from './src/vtr/legacy-reach-compat.ts'
+import { filterLegacyReachCandidates } from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
+import { projectMinecraftReachRoutes } from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 import type { Candidate } from './src/candidates.ts'
@@ -186,12 +187,19 @@ function makeController(input: {
       return world
     },
     reachIdentity: () => identity,
-    reachCandidates: (candidateWorld: WorldState, mission: typeof configuredMission) => {
+    projectReachMission: (mission: typeof configuredMission, candidateWorld: WorldState, projectionIdentity: typeof identity, contract: null, options: Record<string, unknown>) => {
       reachCandidateCalls.push({ missionItem: mission.item, worldGoalItem: candidateWorld.goal.targetItem })
-      return {
+      return projectMinecraftReachRoutes({
+        mission,
+        world: candidateWorld,
+        identity: projectionIdentity,
+        witnessIdentity: projectionIdentity,
+        contract,
+        previousFrontierId: null,
+        previousActionFailure: null,
         candidates: [...input.candidates],
-        grounded: { candidates: [...input.candidates] },
-      }
+        snapshotOptions: options,
+      })
     },
     reachabilityGateOptions: () => ({ pathProbe: () => 'reachable', stationApproach: null }),
     canComputePath: () => true,

@@ -101,8 +101,10 @@ function fixture() {
     buildReachWorldState: () => ({ timestampMs: verifiedAtMs, tick: 8, self: { health: 20 } }),
     reachIdentity: () => identity,
     liveReachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [] }),
-    reachRuntimeSnapshot: () => verificationSnapshot,
+    projectReachMission: () => ({
+      snapshot: verificationSnapshot,
+      candidates: [], sourceCandidates: [], inadmissibleCandidates: [], missionSourceNames: [], hasObservedMissionSource: true,
+    }),
     noteCandidateSuccess: () => undefined,
     requestDecision: (trigger: string, detail: Record<string, unknown>) => decisions.push({ trigger, detail }),
     logger: {

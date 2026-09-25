@@ -220,8 +220,10 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
     buildReachWorldState: () => ({ self: { health: 20 }, timestampMs: 100 }),
     reachIdentity: () => identity,
     liveReachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [], grounded: { candidates: [] } }),
-    reachRuntimeSnapshot: () => ({ observation: { identity, observedAtMs: 100, predicates: {} }, routes: [], progress: {} }),
+    projectReachMission: () => ({
+      snapshot: { observation: { identity, observedAtMs: 100, predicates: {} }, routes: [], progress: {} },
+      candidates: [], sourceCandidates: [], inadmissibleCandidates: [], missionSourceNames: [], hasObservedMissionSource: false,
+    }),
     logReachVerification: () => undefined,
     logger: {
       info: (_category: string, message: string) => logs.push(message),

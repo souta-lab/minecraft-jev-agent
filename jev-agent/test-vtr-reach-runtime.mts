@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
+import { projectMinecraftReachRoutes } from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
@@ -123,7 +124,18 @@ test('production Reach uses injected VTR authority through same-contract continu
       reachIdentity: () => identity,
       liveReachIdentity: () => identity,
       reachabilityGateOptions: () => ({ pathProbe: () => 'reachable' }),
-      reachCandidates: () => ({ candidates: [offered], grounded: { candidates: [offered] } }),
+      projectReachMission: (projectMission: typeof mission, projectionWorld: WorldState, projectionIdentity: typeof identity, contract: any, options: Record<string, unknown>) =>
+        projectMinecraftReachRoutes({
+          mission: projectMission,
+          world: projectionWorld,
+          identity: projectionIdentity,
+          witnessIdentity: projectionIdentity,
+          contract,
+          previousFrontierId: null,
+          previousActionFailure: null,
+          candidates: [offered],
+          snapshotOptions: options,
+        }),
       requestDecision: () => undefined,
       logger: {
         info: (_source: string, line: string) => events.push(line),

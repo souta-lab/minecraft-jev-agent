@@ -5,9 +5,11 @@ import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 const runtimeAdapter = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-runtime-adapter.ts', import.meta.url), 'utf8')
+const minecraftReachProjection = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-mission-projection.ts', import.meta.url), 'utf8')
 const runtimePortsSource = readFileSync(new URL('./src/vtr/reach-runtime-ports.ts', import.meta.url), 'utf8')
 const reachController = readFileSync(new URL('./src/vtr/reach-controller.ts', import.meta.url), 'utf8')
 const reachMissionRuntime = readFileSync(new URL('./src/vtr/reach-mission-runtime.ts', import.meta.url), 'utf8')
+const reachMissionProjection = readFileSync(new URL('./src/vtr/reach-mission-projection.ts', import.meta.url), 'utf8')
 const jevRoutePolicy = readFileSync(new URL('./src/jev-reach-route-policy.ts', import.meta.url), 'utf8')
 const jevComposition = readFileSync(new URL('./src/jev-reach-vtr-composition.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
@@ -28,21 +30,20 @@ describe('VTR Reach production authority seam', () => {
     assert.match(jevComposition, /cachedWorldState: JevReachMutableCell<WorldState \| null>/)
     assert.doesNotMatch(jevComposition, /from ['"]mineflayer['"]|\bBot\b|this\.bot/)
 
-    const observationStart = controller.indexOf('private reachObservation(')
-    const snapshotStart = controller.indexOf('private reachRuntimeSnapshot(', observationStart)
-    const snapshotEnd = controller.indexOf('/** Map one typed VTR intent', snapshotStart)
-    const observation = controller.slice(observationStart, snapshotStart)
-    const snapshot = controller.slice(snapshotStart, snapshotEnd)
-    assert.ok(observationStart >= 0 && snapshotStart > observationStart && snapshotEnd > snapshotStart)
-    assert.match(observation, /isMissionSource\(mission\.item, block\.name, block\.yield\) && block\.inReach/)
-    assert.match(observation, /'reach\.resource-source':\s*\{\s*truth:/)
-    assert.match(observation, /predicates\[`reach\.route:\$\{candidate\.id\}`\] = \{ truth: 'true', evidenceId: witness\.evidenceId \}/)
-    assert.match(snapshot, /const routes: ReachRoute\[\] = candidates\.flatMap/)
-    assert.match(snapshot, /groundingPredicateId: `reach\.route:\$\{candidate\.id\}`/)
-    assert.match(snapshot, /witness,/)
-    assert.match(snapshot, /effectKind: 'locomotion'/)
-    assert.match(snapshot, /resources: \{\}/)
-    assert.match(snapshot, /risk: \{\}/)
+    assert.match(minecraftReachProjection, /generateGroundedCandidates\(world, input\.candidateOptions\)/)
+    assert.match(minecraftReachProjection, /isMissionReachSourceCandidate\(/)
+    assert.match(minecraftReachProjection, /projectReachMissionSnapshot\(/)
+    assert.match(minecraftReachProjection, /reachMoveFitsLocomotionContract/)
+    assert.match(reachMissionProjection, /export function projectReachMissionSnapshot\(/)
+    assert.match(reachMissionProjection, /matchingSource\(input, route\)/)
+    assert.match(reachMissionProjection, /'reach\.resource-source':\s*\{/)
+    assert.match(reachMissionProjection, /predicates\[`reach\.route:\$\{route\.routeId\}`\] = \{ truth: 'true', evidenceId: route\.witness\.evidenceId \}/)
+    assert.match(reachMissionProjection, /groundingPredicateId: `reach\.route:\$\{route\.routeId\}`/)
+    assert.match(reachMissionProjection, /effectKind: 'locomotion'/)
+    assert.match(reachMissionProjection, /resources: \{\}/)
+    assert.match(reachMissionProjection, /risk: \{\}/)
+    const backendNeutralProjection = reachMissionProjection.replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, '')
+    assert.doesNotMatch(backendNeutralProjection, /from ['"][^'"]*(?:mineflayer|candidates|state)\.ts['"]|\bWorldState\b|\bCandidate\b|\bBlockState\b|\bEntityState\b/)
 
     const groundingStart = reachController.indexOf('function routeIsGrounded(')
     const groundingEnd = reachController.indexOf('\n}\n', groundingStart)
@@ -93,7 +94,7 @@ describe('VTR Reach production authority seam', () => {
     assert.ok(legacyRecovery > consume && queueAuthority > consume)
 
     const reachStart = controller.indexOf('private async tickReachTransition(')
-    const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
+    const reachEnd = controller.indexOf('private authorizeReachMechanicalStep(', reachStart)
     const reachTick = controller.slice(reachStart, reachEnd)
     assert.match(reachTick, /this\.reachRuntime\.activeMission/)
     assert.match(reachTick, /this\.reachRuntime\.driveMission\(/)
@@ -105,7 +106,7 @@ describe('VTR Reach production authority seam', () => {
 
   it('terminalizes a foreign VTR transition lease instead of treating it as this Reach owner', () => {
     const reachStart = controller.indexOf('private async tickReachTransition(')
-    const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
+    const reachEnd = controller.indexOf('private authorizeReachMechanicalStep(', reachStart)
     const reachTick = controller.slice(reachStart, reachEnd)
     assert.ok(reachStart >= 0 && reachEnd > reachStart)
     assert.match(reachMissionRuntime, /frame\.activeAction\.authority !== 'vtr-reach' \|\| frame\.activeAction\.transitionId !== current\.contract\.transitionId/)
@@ -127,6 +128,7 @@ describe('VTR Reach production authority seam', () => {
     assert.match(runtimeAdapter, /this\.bot\.pathfinder/)
     assert.match(runtimeAdapter, /this\.bot\.blockAt/)
     assert.match(runtimeAdapter, /this\.executor\.claim\(/)
+    assert.doesNotMatch(runtimePortsSource, /\bBot\b|\bExecutor\b|Mineflayer/)
     const runtimePortsStart = runtimePortsSource.indexOf('export interface ReachRuntimePorts {')
     const runtimePortsEnd = runtimePortsSource.indexOf('\n}', runtimePortsStart)
     const runtimePorts = runtimePortsSource.slice(runtimePortsStart, runtimePortsEnd)
@@ -139,7 +141,7 @@ describe('VTR Reach production authority seam', () => {
     const dispatchStart = controller.indexOf('private async dispatchReachIntent(')
     const releaseStart = controller.indexOf('private async releaseUnstartedReachIntent(', dispatchStart)
     const reachStart = controller.indexOf('private async tickReachTransition(')
-    const reachEnd = controller.indexOf('private reachWitnessForCandidateShape(', reachStart)
+    const reachEnd = controller.indexOf('private authorizeReachMechanicalStep(', reachStart)
     assert.ok(sensingStart >= 0 && sensingEnd > sensingStart && dispatchStart >= 0 && releaseStart > dispatchStart && reachEnd > reachStart)
     const dispatch = controller.slice(dispatchStart, releaseStart)
     const reachOrchestration = controller.slice(reachStart, reachEnd)
@@ -150,9 +152,10 @@ describe('VTR Reach production authority seam', () => {
     assert.match(dispatch, /this\.reachRuntimeAdapter\.dispatch\(/)
     assert.doesNotMatch(dispatch, /this\.executor\.claim\(|guardCandidate\(/)
     assert.doesNotMatch(reachOrchestration, /this\.bot|this\.executor\.(?:claim|current|cancelCurrent)/)
-    assert.match(reachOrchestration, /this\.reachCandidates\(state, /)
-    assert.match(reachOrchestration, /reachRuntimeSnapshot\(/)
-    assert.match(reachOrchestration, /Mission scheduling\/session\/lifecycle ownership lives in VTR/)
+    assert.match(reachOrchestration, /this\.projectReachMission\(/)
+    assert.doesNotMatch(reachOrchestration, /generateGroundedCandidates|reachObservation\(|reachRuntimeSnapshot\(|reachWitnessForCandidate/)
+    assert.match(reachOrchestration, /Mission scheduling\/session\/lifecycle[\s\S]*?ownership lives in the backend-independent ReachMissionRuntime/)
+    assert.match(minecraftReachProjection, /Deletion condition:[\s\S]*?canonical Minecraft[\s\S]*?typed resource-source/)
     assert.match(reachOrchestration, /Delete this shim after Reach observation,[\s\S]*?exact-source evidence proves no legacy caller needs this entry point/)
     assert.doesNotMatch(jevRoutePolicy, /from ['"]mineflayer['"]|\bBot\b/)
     assert.match(jevRoutePolicy, /ReachRouteDecisionInput/)
@@ -191,16 +194,14 @@ describe('VTR Reach production authority seam', () => {
       'observeThreatState',
       'observeUnansweredRangedThreat',
       'observeEnvHazard',
-      'reachCandidates',
+      'projectReachMission',
       'reachIdentity',
       'liveReachIdentity',
-      'reachObservation',
-      'reachRuntimeSnapshot',
-      'reachWitnessForCandidate',
     ]
     for (const name of typedObservationHelpers) {
       assert.doesNotMatch(method(name), /this\.bot|this\.currentDimension\(\)/, `${name} must consume typed observations only`)
     }
+    assert.doesNotMatch(method('projectReachMission'), /generateGroundedCandidates|WorldState\.blocks|reach\.resource-source|reach\.waypoint/)
     assert.match(method('syncTerrainSignals'), /this\.bindDigMemoryScope\(state\.self\.dimension\)/)
     assert.doesNotMatch(method('syncTerrainSignals'), /this\.digMemory(?:\.|\s)/)
     assert.match(runtimeAdapter, /bodyAvailable\(\): boolean\s*\{\s*return this\.bot\.entity !== undefined/)
@@ -337,7 +338,7 @@ describe('VTR Reach production authority seam', () => {
     assert.ok(ownerFilter >= 0 && filterEnd > ownerFilter)
     const suppression = controller.slice(ownerFilter, filterEnd)
     assert.match(suppression, /missionItem: vtrMission\.item/)
-    assert.match(suppression, /missionSourceNames: this\.missionSourceNames\(vtrMission\.item\)/)
+    assert.match(suppression, /missionSourceNames: minecraftMissionSourceNames\(vtrMission\.item\)/)
     assert.match(suppression, /vtrOwnsReachMove: this\.vtrOwnsReachMoveThisTick/)
     assert.match(suppression, /candidates = legacyReachFilter\.candidates/)
     assert.match(suppression, /VTR_LEGACY_REACH_MOVE_WITHHELD/)
@@ -347,23 +348,20 @@ describe('VTR Reach production authority seam', () => {
     const tick = controller.slice(tickStart, tickEnd)
     assert.ok(tick.indexOf('filterLegacyReachCandidates({') < tick.indexOf('await this.decide(state, candidates'))
 
-    const compatibility = readFileSync(new URL('./src/vtr/legacy-reach-compat.ts', import.meta.url), 'utf8')
+    const compatibility = minecraftReachProjection
     assert.match(compatibility, /Temporary strangler boundary/)
-    assert.match(compatibility, /Delete this filter[\s\S]*?legacy candidate\/claim path no longer owns Mission semantics/)
-    assert.match(compatibility, /missionResourceSourceMatches\(item, name, null, sourceNames\)/)
+    assert.match(compatibility, /Delete this filter[\s\S]*?legacy candidate\/claim path no longer owns[\s\S]*?Mission semantics/)
+    assert.match(compatibility, /missionResourceSourceMatches\(item, sourceName, null, sourceNames\)/)
     assert.match(compatibility, /world\.blocks\.some\(/)
 
-    const sourceShapeStart = controller.indexOf('private reachMissionSourceCandidateShape(')
-    const sourceShapeEnd = controller.indexOf('/**\n   * Match only a still-current legacy walk commitment', sourceShapeStart)
-    const sourceShape = controller.slice(sourceShapeStart, sourceShapeEnd)
-    assert.ok(sourceShapeStart >= 0 && sourceShapeEnd > sourceShapeStart)
-    assert.match(sourceShape, /isLegacyMissionReachSourceMove\(candidate, state, item, this\.missionSourceNames\(item\)\)/)
+    assert.match(compatibility, /export function isMissionReachSourceCandidate\(/)
 
     const schedulerStart = controller.indexOf('private async tickReachTransition(')
-    const schedulerEnd = controller.indexOf('private reachWitnessForCandidateShape(', schedulerStart)
+    const schedulerEnd = controller.indexOf('private authorizeReachMechanicalStep(', schedulerStart)
     const scheduler = controller.slice(schedulerStart, schedulerEnd)
-    assert.match(scheduler, /this\.vtrOwnsReachMoveThisTick = state\.blocks\.some/)
-    assert.match(scheduler, /this\.isMissionSource\(configuredMission\.item, block\.name, block\.yield\)/)
+    assert.match(scheduler, /this\.vtrOwnsReachMoveThisTick = projection\.hasObservedMissionSource/)
+    assert.match(scheduler, /isMissionReachWalkAction\(/)
+    assert.match(scheduler, /const projection = this\.projectReachMission\(/)
     assert.match(scheduler, /this\.reachRuntime\.driveMission\(/)
     assert.match(controller, /this\.vtrOwnsReachMoveThisTick = true/)
   })

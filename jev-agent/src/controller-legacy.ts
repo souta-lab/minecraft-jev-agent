@@ -173,26 +173,29 @@ import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import {
   countMissionInventoryResource,
-  missionResourceSourceMatches,
 } from './vtr/reach.ts'
-import { filterLegacyReachCandidates, isLegacyMissionReachSourceMove } from './vtr/legacy-reach-compat.ts'
+import {
+  filterLegacyReachCandidates,
+  isMissionReachWalkAction,
+  minecraftMissionSourceNames,
+  projectMinecraftReachMission,
+} from './runtime-adapters/minecraft-reach-mission-projection.ts'
 import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
-import type { ReachControllerResult, ReachRuntimeSnapshot, ReachRoute } from './vtr/reach-controller.ts'
+import type { ReachControllerResult, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
 import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
-import type { ReachMechanicalActionOutcome, ReachRuntimeActionSnapshot, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
+import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
 import { assessReachViability } from './vtr/reach-safety.ts'
 import { createJevReachVtrComposition } from './jev-reach-vtr-composition.ts'
 import type { JevReachRouteDecisionRecord } from './jev-reach-vtr-composition.ts'
 import type {
   ReachIdentity,
-  ReachObservation,
   ReachTerminalOutcome,
   ReachTransitionContract,
   ReachTransitionState,
-  ReachWitness,
 } from './vtr/reach.ts'
+import type { ReachMissionSnapshotOptions } from './vtr/reach-mission-projection.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
@@ -2309,25 +2312,6 @@ export function controllerUnreachableMoveReason(candidate: Candidate, state: Wor
   return unreachableMove(candidate, state)
 }
 
-/**
- * The production Reach contract currently admits locomotion only. Derive the
- * candidate's real Executor envelope and refuse a MOVE that can mutate terrain.
- * An explicit `vertical: 'none'` sentinel describes an ordinary level route and
- * must not be mistaken for authority to dig or place terrain.
- */
-export function reachMoveFitsLocomotionContract(candidate: Candidate): boolean {
-  if (candidate.kind !== 'MOVE' || candidate.meta.mayPlaceBlocks === true || candidate.id.startsWith('BRIDGE:')) {
-    return false
-  }
-  const envelope = envelopeForCandidate(candidate)
-  return (
-    (envelope.mayDigBlocks?.length ?? 0) === 0 &&
-    envelope.mayDigGroundedRoute !== true &&
-    (envelope.mayPlaceBlocks?.length ?? 0) === 0 &&
-    envelope.mayPlaceGroundedRoute !== true
-  )
-}
-
 /** Beta is semantic authority only when one canonical current Option exists. */
 export function canAuthoritativelyAbandonOption(optionId: string | null): optionId is string {
   return typeof optionId === 'string' && optionId.length > 0
@@ -3751,14 +3735,10 @@ export class JevController {
       if (nowMs > after.state.startedAtMs + after.contract.budget.maxElapsedMs) {
         const fresh = this.buildReachWorldState(after.mission)
         const identity = this.reachIdentity(fresh) ?? this.liveReachIdentity(after.contract.identity)
-        const grounding = this.reachCandidates(fresh, after.mission)
-      const expired = await this.reachRuntime.tick(
-          this.reachRuntimeSnapshot({ contract: after.contract, mission: after.mission }, fresh, identity, grounding.candidates),
-        )
+        const projection = this.projectReachMission(after.mission, fresh, identity, after.contract)
+        const expired = await this.reachRuntime.tick(projection.snapshot)
         if (expired.status === 'terminal') {
-          if (expired.outcome.kind === 'SUCCESS') {
-            this.logReachVerification(expired.outcome, this.reachRuntimeSnapshot({ contract: after.contract, mission: after.mission }, fresh, identity, grounding.candidates))
-          }
+          if (expired.outcome.kind === 'SUCCESS') this.logReachVerification(expired.outcome, projection.snapshot)
           this.closeReachTransition(expired.outcome, expired.state, 'model-recovery-budget', expired.cancelIntentId)
           this.completeModelRecoveryReachDrain(transitionId, expired.outcome.kind)
           return
@@ -4121,159 +4101,42 @@ export class JevController {
     return state
   }
 
-  private missionSourceNames(item: string): readonly string[] {
-    const names = new Set(scannedBlockNames(item) ?? [])
-    if (item.endsWith('_log')) names.add(item)
-    return [...names].sort()
-  }
-
-  private isMissionSource(item: string, name: string | null | undefined, yielded: string | null | undefined = null): boolean {
-    return missionResourceSourceMatches(item, name, yielded, this.missionSourceNames(item))
-  }
-
-  private missionSourceAlreadyReachable(state: WorldState, item: string): boolean {
-    return state.blocks.some(
-      (block) => this.isMissionSource(item, block.name, block.yield) && block.inReach && block.visible !== false,
-    )
-  }
-
-  /** Only source-approach MOVE affordances can start/continue a Reach contract. */
-  private reachWitnessForCandidate(
-    contract: Pick<ReachTransitionContract, 'desiredPredicateIdentity'> | null,
-    item: string,
-    candidate: Candidate,
-    state: WorldState,
-  ): ReachWitness | null {
-    if (candidate.kind !== 'MOVE' || candidate.target === null || candidate.meta.explore === true) return null
-    if (!reachMoveFitsLocomotionContract(candidate)) return null
-    const sourceName =
-      typeof candidate.meta.targetBlockName === 'string'
-        ? candidate.meta.targetBlockName
-        : candidate.targetName
-    if (!this.isMissionSource(item, sourceName)) return null
-    const x = candidate.meta.targetBlockX
-    const y = candidate.meta.targetBlockY
-    const z = candidate.meta.targetBlockZ
-    if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return null
-    const position = { x, y, z }
-    const sensed = state.blocks.some(
-      (block) =>
-        block.name === sourceName &&
-        block.position.x === x && block.position.y === y && block.position.z === z,
-    )
-    if (!sensed) return null
-    const observedIdentity = this.reachIdentity(state)
-    if (observedIdentity === null) return null
-    return {
-      witnessId: `${sourceName}@${x},${y},${z}`,
-      target: position,
-      // A new contract's predicate identity is bound by ReachMissionRuntime
-      // before admission. This placeholder never crosses that typed boundary.
-      desiredPredicateIdentity: contract?.desiredPredicateIdentity ?? `unbound-reach-predicate:${item}`,
-      evidenceId: `sensor:block:${state.tick}:${sourceName}@${x},${y},${z}`,
-      observedIdentity,
-      observedAtMs: state.timestampMs,
-    }
-  }
-
-  private reachObservation(
-    active: { readonly contract?: Pick<ReachTransitionContract, 'desiredPredicateIdentity'>; readonly mission: VtrInventoryMission },
+  /**
+   * Thin compatibility bridge: inject current typed observations and local
+   * candidate affordance facts into the isolated Minecraft Reach projection.
+   * Predicate, witness, route, and progress semantics live in the projection
+   * adapter, never in this controller.
+   */
+  private projectReachMission(
+    mission: VtrInventoryMission,
     state: WorldState,
     identity: ReachIdentity,
-    candidates: readonly Candidate[],
-  ): ReachObservation {
-    const mission = active.mission
-    const required = Math.max(1, Math.floor(mission.count))
-    const have = countMissionInventoryResource(state.inventory.counts, mission.item)
-    const inReachSources = state.blocks.filter(
-      (block) => this.isMissionSource(mission.item, block.name, block.yield) && block.inReach && block.visible !== false,
-    )
-    const predicates: Record<string, { truth: 'true' | 'false' | 'unknown'; evidenceId: string | null }> = {
-      'mission.unsatisfied': {
-        truth: have < required ? 'true' : 'false',
-        evidenceId: `inventory:${state.timestampMs}:${mission.item}=${have}/${required}`,
-      },
-      'reach.source-grounded': {
-        truth: candidates.length > 0 ? 'true' : 'unknown',
-        evidenceId: candidates.length > 0 ? `grounding:${state.tick}:${candidates.map((candidate) => candidate.id).join(',')}` : null,
-      },
-      'body.alive': {
-        truth: state.self.health > 0 ? 'true' : 'false',
-        evidenceId: `body:${state.timestampMs}:health=${state.self.health}`,
-      },
-      'reach.resource-source': {
-        truth: inReachSources.length > 0 ? 'true' : 'false',
-        evidenceId:
-          inReachSources.length > 0
-            ? `verify:${state.tick}:${inReachSources.map((block) => `${block.name}@${block.position.x},${block.position.y},${block.position.z}`).join(',')}`
-            : `verify:${state.tick}:no-interaction-reach-source`,
-      },
-    }
-    for (const candidate of candidates) {
-      const witness = this.reachWitnessForCandidate(active.contract ?? null, mission.item, candidate, state)
-      if (witness === null || candidate.target === null) continue
-      predicates[`reach.route:${candidate.id}`] = { truth: 'true', evidenceId: witness.evidenceId }
-      predicates[`reach.waypoint:${candidate.id}`] = {
-        truth: 'true',
-        evidenceId: `grounded-waypoint:${state.tick}:${candidate.id}`,
-      }
-    }
-    return { identity, observedAtMs: state.timestampMs, predicates }
-  }
-
-  /** Typed observation/route port used by the backend-independent VTR controller. */
-  private reachRuntimeSnapshot(
-    active: { readonly contract?: ReachTransitionContract; readonly mission: VtrInventoryMission },
-    state: WorldState,
-    identity: ReachIdentity,
-    candidates: readonly Candidate[],
-    options: {
-      readonly parentMissionSatisfied?: { readonly evidenceId: string }
-      readonly safetyInterruption?: { readonly reason: string; readonly evidenceId: string }
-      readonly infeasibility?: { readonly reason: string; readonly evidenceId: string }
-    } = {},
-  ): ReachRuntimeSnapshot {
-    // The Jev route adapter may use this only when its identity and timestamp
-    // match the typed Reach observation passed below.
+    contract: ReachTransitionContract | null = null,
+    snapshotOptions: ReachMissionSnapshotOptions = {},
+  ): ReturnType<typeof projectMinecraftReachMission> {
     this.reachRouteDecisionWorld = state
-    const observation = this.reachObservation(active, state, identity, candidates)
-    const routes: ReachRoute[] = candidates.flatMap((candidate) => {
-      const witness = this.reachWitnessForCandidate(active.contract ?? null, active.mission.item, candidate, state)
-      if (witness === null || candidate.target === null) return []
-      return [{
-        routeId: candidate.id,
-        groundingPredicateId: `reach.route:${candidate.id}`,
-        waypointGroundingPredicateId: `reach.waypoint:${candidate.id}`,
-        witness,
-        waypoint: {
-          waypointId: candidate.id,
-          target: candidate.target,
-          evidenceId: `grounded-waypoint:${state.tick}:${candidate.id}`,
-        },
-        tactic: this.lastReachActionFailure === null ? 'walk' : 'path_replan',
-        effectKind: 'locomotion',
-        estimatedDistance: distance(state.self.position, candidate.target),
-        resources: {},
-        risk: {},
-      }]
+    const options = candidateOptions(
+      this.options,
+      this.recipeIndex,
+      this.unreachableStationKeys(state),
+      this.reachRuntimeAdapter.reachabilityGateOptions(this.tickCounter, this.reachabilityProofs),
+      this.blacklistedMoveTargets(state),
+      state.portalFrame,
+      this.searchedSurfaceTargets,
+      null,
+      this.placementRetries.retiredItemSet(),
+    )
+    return projectMinecraftReachMission({
+      mission,
+      world: state,
+      candidateOptions: options,
+      identity,
+      witnessIdentity: this.reachIdentity(state),
+      contract,
+      previousFrontierId: this.reachRuntime.current?.state.progress.frontierId ?? null,
+      previousActionFailure: this.lastReachActionFailure,
+      snapshotOptions,
     })
-    const nearest = state.blocks
-      .filter((block) => this.isMissionSource(active.mission.item, block.name, block.yield))
-      .map((block) => distance(state.self.position, block.position))
-    const progress = {
-      predicateDistance: nearest.length === 0 ? null : Math.min(...nearest),
-      reachability: routes.length > 0 ? 'reachable' as const : 'unknown' as const,
-      frontierId: routes[0]?.routeId ?? this.reachRuntime.current?.state.progress.frontierId ?? null,
-      evidenceId: `reach-progress:${state.tick}:${routes[0]?.routeId ?? 'no-grounded-route'}`,
-    }
-    return {
-      observation,
-      routes,
-      progress,
-      ...(options.parentMissionSatisfied === undefined ? {} : { parentMissionSatisfied: options.parentMissionSatisfied }),
-      ...(options.safetyInterruption === undefined ? {} : { safetyInterruption: options.safetyInterruption }),
-      ...(options.infeasibility === undefined ? {} : { infeasibility: options.infeasibility }),
-    }
   }
 
   private currentVtrReachRouteDecision(): typeof this.lastVtrReachRouteDecision {
@@ -4384,34 +4247,11 @@ export class JevController {
     this.requestDecision('action_completed', { transitionId, intentId, typedOutcome: 'intent-refused', evidence })
   }
 
-  private reachCandidates(state: WorldState, mission: VtrInventoryMission): { candidates: Candidate[]; grounded: ReturnType<typeof generateGroundedCandidates> } {
-    const options = candidateOptions(
-      this.options,
-      this.recipeIndex,
-      this.unreachableStationKeys(state),
-      this.reachRuntimeAdapter.reachabilityGateOptions(this.tickCounter, this.reachabilityProofs),
-      this.blacklistedMoveTargets(state),
-      state.portalFrame,
-      this.searchedSurfaceTargets,
-      null,
-      this.placementRetries.retiredItemSet(),
-    )
-    const grounded = generateGroundedCandidates(state, options)
-    const threatOffer = applyGroundedThreatRestriction(state, grounded.candidates, grounded.withheld)
-    let candidates = threatOffer.candidates
-      .filter((candidate) => this.reachWitnessForCandidateShape(mission.item, candidate, state))
-      .filter((candidate) => candidate.kind === 'MOVE')
-    candidates = restrictCandidatesAtCriticalHealth(state, candidates)
-    candidates = restrictCandidatesDuringSubmersion(state, candidates)
-    candidates = restrictCandidatesDuringCriticalDamage(state, candidates)
-    candidates = restrictCandidatesDuringUnseenAttacker(state, candidates)
-    candidates = restrictCandidatesDuringEnvHazard(state, candidates)
-    return { candidates, grounded }
-  }
-
   private async tickReachTransition(trigger: DecisionTrigger, detail: Record<string, unknown>): Promise<boolean> {
-    // Strangler entry only: HOST/control-loop code prepares fresh typed observations
-    // and adapter DTOs. Mission scheduling/session/lifecycle ownership lives in VTR.
+    // Strangler entry only: HOST/control-loop code prepares a typed Mission,
+    // Reach snapshot, route-candidate and lease/action DTOs. These DTOs are the
+    // only gameplay input crossing into VTR; Mission scheduling/session/lifecycle
+    // ownership lives in the backend-independent ReachMissionRuntime.
     // Delete this shim after Reach observation, typed actuation and evidence callbacks
     // are wired directly through the canonical Runtime Adapter ports and fresh
     // exact-source evidence proves no legacy caller needs this entry point.
@@ -4427,9 +4267,6 @@ export class JevController {
     const activeBefore = this.reachRuntime.activeMission
     const observedMission = activeBefore?.mission ?? configuredMission
     const state = this.buildReachWorldState(observedMission)
-    this.vtrOwnsReachMoveThisTick = state.blocks.some((block) =>
-      this.isMissionSource(configuredMission.item, block.name, block.yield),
-    )
 
     let identity = this.reachIdentity(state)
     if (identity === null) {
@@ -4455,16 +4292,9 @@ export class JevController {
     const active = this.reachRuntime.activeMission
     const runtimeMission = active?.mission ?? configuredMission
     const action = this.reachRuntimeAdapter.currentAction()
+    const sourceNames = minecraftMissionSourceNames(configuredMission.item)
     const legacyReachAction = active === null && action !== null &&
-      this.isLegacyReachAction(action, configuredMission.item, state.self.dimension, this.options.worldEpoch)
-    const grounding = this.reachCandidates(state, runtimeMission)
-    const candidates = active === null
-      ? grounding.candidates
-          .filter((candidate) => this.reachWitnessForCandidateShape(runtimeMission.item, candidate, state))
-          .sort((a, b) => distance(state.self.position, a.target!) - distance(state.self.position, b.target!) || a.id.localeCompare(b.id))
-      : grounding.candidates
-          .filter((candidate) => this.reachWitnessForCandidate(active.contract, runtimeMission.item, candidate, state) !== null)
-          .sort((a, b) => distance(state.self.position, a.target!) - distance(state.self.position, b.target!) || a.id.localeCompare(b.id))
+      isMissionReachWalkAction(action, configuredMission.item, state.self.dimension, this.options.worldEpoch, sourceNames)
 
     const health = state.self.health
     const threat = state.signals.threat
@@ -4474,65 +4304,50 @@ export class JevController {
       environmentalHazard: state.self.envHazard?.active === true,
       activeThreat: threat?.active === true,
     })
-    const missionSatisfiedEvidenceId =
-      countMissionInventoryResource(state.inventory.counts, configuredMission.item) >= configuredMission.count
-        ? `inventory:${state.timestampMs}:${configuredMission.item}=${countMissionInventoryResource(state.inventory.counts, configuredMission.item)}/${configuredMission.count}`
-        : undefined
-    const ensureAlreadyTrueEvidenceId = active === null && this.missionSourceAlreadyReachable(state, configuredMission.item)
-      ? `verify:${state.tick}:reach.resource-source-already-true`
-      : undefined
     const unsafeFacts = [
       ...(health <= CRITICAL_COMBAT_HEALTH ? ['critical-health'] : []),
       ...(bodyNeedsBreathEscape(state.self) ? ['breath-escape'] : []),
       ...(state.self.envHazard?.active === true ? ['environmental-hazard'] : []),
       ...(threat?.active === true ? ['active-threat'] : []),
     ]
-    const snapshot = this.reachRuntimeSnapshot(
-      { contract: active?.contract, mission: runtimeMission },
-      state,
-      identity,
-      candidates,
-      {
-        ...(active !== null && missionSatisfiedEvidenceId !== undefined
-          ? { parentMissionSatisfied: { evidenceId: missionSatisfiedEvidenceId } }
-          : {}),
-        ...(active !== null && viability.shouldInterrupt
-          ? {
-              safetyInterruption: {
-                reason: viability.safetyTrigger
-                  ? `safety trigger ${trigger} confirmed by ${unsafeFacts.join(',')}`
-                  : `fresh viability facts require a different transition: ${unsafeFacts.join(',')}`,
-                evidenceId: `viability:${state.tick}:${trigger}:${state.self.health}:${state.self.food}`,
-              },
-            }
-          : {}),
-        ...(active !== null && active.state.witness !== null
-          ? (() => {
-              const witness = active.state.witness!
-              const falsified = state.knownResourceEvidence?.find((entry) =>
-                entry.status === 'falsified' &&
-                entry.position.x === (witness.target as { x?: number }).x &&
-                entry.position.y === (witness.target as { y?: number }).y &&
-                entry.position.z === (witness.target as { z?: number }).z,
-              )
-              return falsified === undefined
-                ? {}
-                : {
-                    infeasibility: {
-                      reason: `grounded resource witness ${falsified.name} was falsified (${falsified.reason ?? 'world evidence'})`,
-                      evidenceId: `known-resource:${state.tick}:${falsified.name}:${falsified.reason ?? 'falsified'}`,
-                    },
-                  }
-            })()
-          : {}),
-      },
-    )
-    const rejectedReachRoutes = active === null
-      ? grounding.grounded.candidates.filter((candidate) =>
-          this.reachMissionSourceCandidateShape(configuredMission.item, candidate, state) &&
-          !reachMoveFitsLocomotionContract(candidate),
-        )
-      : []
+    const snapshotOptions: ReachMissionSnapshotOptions = {
+      ...(active !== null && viability.shouldInterrupt
+        ? {
+            safetyInterruption: {
+              reason: viability.safetyTrigger
+                ? `safety trigger ${trigger} confirmed by ${unsafeFacts.join(',')}`
+                : `fresh viability facts require a different transition: ${unsafeFacts.join(',')}`,
+              evidenceId: `viability:${state.tick}:${trigger}:${state.self.health}:${state.self.food}`,
+            },
+          }
+        : {}),
+      ...(active !== null && active.state.witness !== null
+        ? (() => {
+            const witness = active.state.witness!
+            const falsified = state.knownResourceEvidence?.find((entry) =>
+              entry.status === 'falsified' &&
+              entry.position.x === (witness.target as { x?: number }).x &&
+              entry.position.y === (witness.target as { y?: number }).y &&
+              entry.position.z === (witness.target as { z?: number }).z,
+            )
+            return falsified === undefined
+              ? {}
+              : {
+                  infeasibility: {
+                    reason: `grounded resource witness ${falsified.name} was falsified (${falsified.reason ?? 'world evidence'})`,
+                    evidenceId: `known-resource:${state.tick}:${falsified.name}:${falsified.reason ?? 'falsified'}`,
+                  },
+                }
+          })()
+        : {}),
+    }
+    const projection = this.projectReachMission(runtimeMission, state, identity, active?.contract ?? null, snapshotOptions)
+    const snapshot = projection.snapshot
+    const candidates = projection.candidates
+    const rejectedReachRoutes = projection.inadmissibleCandidates
+    const missionSatisfiedEvidenceId = projection.missionSatisfiedEvidenceId
+    const ensureAlreadyTrueEvidenceId = active === null ? projection.ensuresAlreadyTrueEvidenceId : undefined
+    this.vtrOwnsReachMoveThisTick = projection.hasObservedMissionSource
     const safeToStart = health > CRITICAL_COMBAT_HEALTH &&
       !bodyNeedsBreathEscape(state.self) &&
       state.self.envHazard?.active !== true &&
@@ -4543,7 +4358,7 @@ export class JevController {
       mission: configuredMission,
       snapshot,
       interactionReach: this.options.reach,
-      sourceNames: this.missionSourceNames(configuredMission.item),
+      sourceNames: projection.missionSourceNames,
       transitionId: active?.contract.transitionId ?? randomUUID(),
       probe: this.options.vtrReachProbe === true,
       schedulerOwner: this.queue.current?.origin === 'human' ? 'human' : 'mission',
@@ -4710,41 +4525,6 @@ export class JevController {
     return true
   }
 
-  private reachWitnessForCandidateShape(item: string, candidate: Candidate, state: WorldState): boolean {
-    return this.reachMissionSourceCandidateShape(item, candidate, state) && reachMoveFitsLocomotionContract(candidate)
-  }
-
-  /**
-   * Identify a grounded Reach witness independently of whether this controller's
-   * current effect envelope admits the route. The legacy suppression boundary
-   * must still recognize same-Mission movement that VTR refuses (for example,
-   * a staircase route requiring an uncommitted terrain mutation).
-   */
-  private reachMissionSourceCandidateShape(item: string, candidate: Candidate, state: WorldState): boolean {
-    return isLegacyMissionReachSourceMove(candidate, state, item, this.missionSourceNames(item))
-  }
-
-  /**
-   * Match only a still-current legacy walk commitment to this Mission's
-   * resource-source predicate. The commitment records the selected source name
-   * and world-scoped destination; neither body movement nor a generic MOVE is
-   * enough to be adopted by VTR.
-   */
-  private isLegacyReachAction(
-    action: ReachRuntimeActionSnapshot,
-    item: string,
-    dimension: string,
-    worldEpoch: number,
-  ): boolean {
-    const commitment = action.commitment
-    if (action.authority === 'vtr-reach' || action.kind !== 'MOVE' || commitment?.skillKind !== 'walk_to') return false
-    const sourceName = commitment.params.targetName
-    if (typeof sourceName !== 'string' || !this.isMissionSource(item, sourceName)) return false
-    return commitment.target.kind === 'position' &&
-      commitment.target.dimension === dimension &&
-      commitment.target.worldEpoch === worldEpoch
-  }
-
   private authorizeReachMechanicalStep(
     intentId: string,
     identity: ReachIdentity,
@@ -4800,8 +4580,7 @@ export class JevController {
     if (active === null || metadata === null || active.intent?.intentId !== intentId) return false
     const state = this.buildReachWorldState(metadata.mission)
     const observedIdentity = this.reachIdentity(state) ?? this.liveReachIdentity(identity)
-    const grounding = this.reachCandidates(state, metadata.mission)
-    const snapshot = this.reachRuntimeSnapshot({ contract: active.contract, mission: metadata.mission }, state, observedIdentity, grounding.candidates)
+    const snapshot = this.projectReachMission(metadata.mission, state, observedIdentity, active.contract).snapshot
     const damage = this.noteReachHealth(state.self.health)
     const result = this.reachRuntime.recordMechanicalStepOutcome(intentId, step.stepId, {
       snapshot,
@@ -4916,8 +4695,7 @@ export class JevController {
     else if (result.status === 'done' && result.verified) this.noteCandidateSuccess(candidate.id)
     const world = this.buildReachWorldState(metadata.mission)
     const identity = this.reachIdentity(world) ?? this.liveReachIdentity(active.contract.identity)
-    const grounding = this.reachCandidates(world, metadata.mission)
-    const snapshot = this.reachRuntimeSnapshot({ contract: active.contract, mission: metadata.mission }, world, identity, grounding.candidates)
+    const snapshot = this.projectReachMission(metadata.mission, world, identity, active.contract).snapshot
     const damage = this.noteReachHealth(world.self.health)
     this.logger.info(
       'vtr',
@@ -5406,7 +5184,7 @@ export class JevController {
           candidates,
           world: state,
           missionItem: vtrMission.item,
-          missionSourceNames: this.missionSourceNames(vtrMission.item),
+          missionSourceNames: minecraftMissionSourceNames(vtrMission.item),
           vtrOwnsReachMove: this.vtrOwnsReachMoveThisTick,
         })
         if (legacyReachFilter.withheld.length > 0) {

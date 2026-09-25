@@ -1,10 +1,17 @@
 import { expect, test } from 'bun:test'
-import { JevController, reachMoveFitsLocomotionContract } from './src/controller-legacy.ts'
+import { JevController } from './src/controller-legacy.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { CurrentAction } from './src/executor.ts'
 import { bodyNeedsBreathEscape } from './src/state.ts'
 import type { WorldState } from './src/state.ts'
 import { envelopeForCandidate } from './src/skillCommitment.ts'
+import {
+  hasReachableMissionSource,
+  isMissionReachSourceCandidate,
+  minecraftMissionSourceNames,
+  projectMinecraftReachRoutes,
+  reachMoveFitsLocomotionContract,
+} from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
@@ -95,11 +102,8 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
   // The source is genuinely sensed but outside interaction reach. The body is
   // healthy, breathing normally, and has no environmental or hostile threat, so
   // this cannot be explained by a viability interruption.
-  const missionSourceAlreadyReachable = (JevController.prototype as unknown as {
-    missionSourceAlreadyReachable(this: JevController, state: WorldState, item: string): boolean
-  }).missionSourceAlreadyReachable
   const controller = Object.create(JevController.prototype) as JevController
-  expect(missionSourceAlreadyReachable.call(controller, world, mission.item)).toBe(false)
+  expect(hasReachableMissionSource(world, mission.item)).toBe(false)
   expect(world.self.health).toBe(20)
   expect(bodyNeedsBreathEscape(world.self)).toBe(false)
   expect(world.self.envHazard?.active).toBe(false)
@@ -128,21 +132,27 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
     requestDecision: () => { legacyDecisionRequests += 1 },
     buildReachWorldState: () => world,
     reachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [], grounded: { candidates: [candidate] } }),
+    projectReachMission: (projectMission: typeof mission, projectionWorld: WorldState, projectionIdentity: typeof identity, contract: null, options: Record<string, unknown>) =>
+      projectMinecraftReachRoutes({
+        mission: projectMission,
+        world: projectionWorld,
+        identity: projectionIdentity,
+        witnessIdentity: projectionIdentity,
+        contract,
+        previousFrontierId: null,
+        previousActionFailure: null,
+        candidates: [],
+        inadmissibleCandidates: [candidate],
+        snapshotOptions: options,
+      }),
   })
   installVtrReachTestRuntimePorts(controller)
 
   expect(controllerState.reachTransition).toBeNull()
   expect(controllerState.executor.current).toBeNull()
-  expect(controllerState.reachCandidates(world, mission).grounded.candidates).toEqual([candidate])
-  const missionSourceCandidateShape = (JevController.prototype as unknown as {
-    reachMissionSourceCandidateShape(this: JevController, item: string, candidate: Candidate, state: WorldState): boolean
-  }).reachMissionSourceCandidateShape
-  const reachWitnessForCandidateShape = (JevController.prototype as unknown as {
-    reachWitnessForCandidateShape(this: JevController, item: string, candidate: Candidate, state: WorldState): boolean
-  }).reachWitnessForCandidateShape
-  expect(missionSourceCandidateShape.call(controller, mission.item, candidate, world)).toBe(true)
-  expect(reachWitnessForCandidateShape.call(controller, mission.item, candidate, world)).toBe(false)
+  const sourceNames = minecraftMissionSourceNames(mission.item)
+  expect(isMissionReachSourceCandidate(candidate, world, mission.item, sourceNames)).toBe(true)
+  expect(reachMoveFitsLocomotionContract(candidate)).toBe(false)
 
   const tickReachTransition = (JevController.prototype as unknown as {
     tickReachTransition(this: JevController, trigger: string, detail: Record<string, unknown>): Promise<boolean>
@@ -192,7 +202,19 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
     requestDecision: () => { probeLegacyDecisionRequests += 1 },
     buildReachWorldState: () => unsafeWorld,
     reachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [candidate], grounded: { candidates: [candidate] } }),
+    projectReachMission: (projectMission: typeof mission, projectionWorld: WorldState, projectionIdentity: typeof identity, contract: null, options: Record<string, unknown>) =>
+      projectMinecraftReachRoutes({
+        mission: projectMission,
+        world: projectionWorld,
+        identity: projectionIdentity,
+        witnessIdentity: projectionIdentity,
+        contract,
+        previousFrontierId: null,
+        previousActionFailure: null,
+        candidates: [],
+        inadmissibleCandidates: [candidate],
+        snapshotOptions: options,
+      }),
   })
   installVtrReachTestRuntimePorts(probeController)
   expect(await tickReachTransition.call(probeController, 'damage_taken', {})).toBe(true)
@@ -297,7 +319,18 @@ test('a running legacy walk for the configured Reach predicate is revoked before
     buildReachWorldState: () => world,
     reachIdentity: () => identity,
     reachabilityGateOptions: () => ({ pathProbe: () => 'reachable' }),
-    reachCandidates: () => ({ candidates: [candidate], grounded: { candidates: [candidate] } }),
+    projectReachMission: (projectMission: typeof mission, projectionWorld: WorldState, projectionIdentity: typeof identity, contract: null, options: Record<string, unknown>) =>
+      projectMinecraftReachRoutes({
+        mission: projectMission,
+        world: projectionWorld,
+        identity: projectionIdentity,
+        witnessIdentity: projectionIdentity,
+        contract,
+        previousFrontierId: null,
+        previousActionFailure: null,
+        candidates: [candidate],
+        snapshotOptions: options,
+      }),
   })
   installVtrReachTestRuntimePorts(controller)
 

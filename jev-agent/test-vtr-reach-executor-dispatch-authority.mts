@@ -14,6 +14,7 @@ import { JevController } from './src/controller-legacy.ts'
 import type { WorldState } from './src/state.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+import { projectMinecraftReachRoutes } from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
 import type { ReachIdentity, ReachTerminalOutcome, ReachTransitionState } from './src/vtr/reach.ts'
 import { MineflayerReachRuntimeAdapter } from './src/runtime-adapters/minecraft-reach-runtime-adapter.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'
@@ -271,7 +272,18 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     },
     buildReachWorldState: () => observedWorld,
     reachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [vtrCandidate], grounded: { candidates: [vtrCandidate] } }),
+    projectReachMission: (projectMission: typeof mission, world: WorldState, projectionIdentity: typeof identity, contract: any, options: Record<string, unknown>) =>
+      projectMinecraftReachRoutes({
+        mission: projectMission,
+        world,
+        identity: projectionIdentity,
+        witnessIdentity: projectionIdentity,
+        contract,
+        previousFrontierId: null,
+        previousActionFailure: null,
+        candidates: [vtrCandidate],
+        snapshotOptions: options,
+      }),
   })
 
   try {

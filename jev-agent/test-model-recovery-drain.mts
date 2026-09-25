@@ -10,13 +10,13 @@ import {
 } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import {
-  createReachTransitionContract,
   type ReachIdentity,
   type ReachObservation,
   type ReachTerminalOutcome,
   type ReachTransitionContract,
   type ReachTransitionState,
 } from './src/vtr/reach.ts'
+import { createInventoryReachTransition } from './src/vtr/reach-scheduler.ts'
 import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 
 interface Fixture {
@@ -68,7 +68,7 @@ function makeFixture(startedAt = Date.now()): Fixture {
     modelRecoveryReachDrainTransitionId: null,
     modelRecoveryReachDrainAdvancing: false,
     modelRecoveryReachDrainPending: false,
-    reachRuntime: { current: null },
+    reachRuntime: { activeMission: null, current: null },
     reachRunMetadata: null,
     tickCounter: 1,
     watchdog: null,
@@ -176,24 +176,11 @@ function makeReachContract(): { contract: ReachTransitionContract; identity: Rea
     generationId: 'generation-vtr-recovery',
     leaseId: 'lease-vtr-recovery',
   }
-  const desired = {
-    id: 'reach.resource-source',
-    proposition: { kind: 'within-interaction-reach-of-resource-source', item: 'log', interactionReach: 4.5 },
-    expected: true,
-  } as const
-  const contract = createReachTransitionContract({
+  const { contract } = createInventoryReachTransition({
+    mission: { id: 'mission-log-1', kind: 'inventory_at_least', item: 'log', count: 1 },
+    interactionReach: 4.5,
+    sourceNames: ['log'],
     transitionId: 'transition-model-recovery-reach-1',
-    desiredPredicate: desired,
-    requires: [{ id: 'mission.unsatisfied', proposition: { kind: 'inventory-below', item: 'log', count: 1 }, expected: true }],
-    ensures: [desired],
-    invariants: [{ id: 'body.alive', proposition: { kind: 'health-above-zero' }, expected: true }],
-    admissibleEffects: [{ kind: 'locomotion', maxUses: null }],
-    budget: { maxMechanicalSteps: 8, maxElapsedMs: 30_000, resources: {}, risk: { damage: 1 } },
-    controller: {
-      allowedTactics: ['walk', 'path_replan', 'jump', 'detour'],
-      allowTemporaryWaypointChanges: true,
-      allowWitnessSubstitution: true,
-    },
     identity,
   })
   return { contract, identity }
@@ -234,6 +221,7 @@ function makeReachSnapshot(
     observedAtMs: at,
     predicates: {
       'mission.unsatisfied': { truth: 'true', evidenceId: `mission:${at}` },
+      'reach.source-grounded': { truth: 'true', evidenceId: `source-grounded:${at}` },
       'body.alive': { truth: 'true', evidenceId: `alive:${at}` },
       'reach.resource-source': { truth: reached ? 'true' : 'false', evidenceId: `reach:${at}` },
       [route.groundingPredicateId]: { truth: 'true', evidenceId: route.witness.evidenceId },
@@ -267,10 +255,29 @@ async function makeReachRecoveryFixture(): Promise<{
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),
   })
-  const committed = await reachRuntime.commit(contract, makeReachSnapshot(contract, identity, observedAt, false))
-  if (committed.status !== 'active' || committed.intent === undefined) {
+  const committed = await reachRuntime.driveMission({
+    mission: { id: 'mission-log-1', kind: 'inventory_at_least', item: 'log', count: 1 },
+    snapshot: makeReachSnapshot(contract, identity, observedAt, false),
+    interactionReach: 4.5,
+    sourceNames: ['log'],
+    transitionId,
+    probe: false,
+    schedulerOwner: 'mission',
+    actuationLease: { status: 'owned', leaseId: identity.leaseId },
+    activeAction: null,
+    activeActionMatchesMissionReach: false,
+    safeToStart: true,
+    observedHealth: 20,
+    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0 },
+  })
+  if (committed.kind !== 'transition') {
     throw new Error(`Reach fixture failed to commit: ${JSON.stringify(committed)}`)
   }
+  const initialResult = committed.result
+  if (initialResult.status !== 'active' || initialResult.intent === undefined) {
+    throw new Error(`Reach fixture failed to commit: ${JSON.stringify(committed)}`)
+  }
+  const initialIntentId = initialResult.intent.intentId
   const events: string[] = []
   const metrics = { legacyActuations: 0, cancellations: 0, schedulerStops: 0 }
   const actions: CurrentAction[] = []
@@ -343,9 +350,29 @@ async function makeReachRecoveryFixture(): Promise<{
       return { timestampMs: observedAt, self: { health: 20 } }
     },
     reachIdentity: () => identity,
-    reachCandidates: () => ({ candidates: [candidateFor(actions.length)], grounded: {} }),
-    reachRuntimeSnapshot: (_runtime: unknown, world: { timestampMs: number }, _identity: ReachIdentity) =>
-      makeReachSnapshot(contract, identity, world.timestampMs, false),
+    projectReachMission: (_mission: unknown, world: { timestampMs: number }) => ({
+      snapshot: makeReachSnapshot(contract, identity, world.timestampMs, false),
+      candidates: [candidateFor(actions.length)], sourceCandidates: [candidateFor(actions.length)],
+      inadmissibleCandidates: [], missionSourceNames: ['oak_log'], hasObservedMissionSource: true,
+    }),
+    reachRuntimeAdapter: {
+      currentAction: () => active === null ? null : {
+        id: active.id,
+        kind: active.kind,
+        epoch: active.epoch,
+        status: active.status,
+        authority: active.authority,
+        transitionId: active.transitionId,
+      },
+      cancelCurrent: () => {
+        if (active?.status !== 'running') return false
+        metrics.cancellations += 1
+        active.status = 'cancelled'
+        active = null
+        return true
+      },
+      authorityConflictCount: () => 0,
+    },
     executor: {
       get current() { return active },
       authorityConflictCount: 0,
@@ -422,7 +449,7 @@ async function makeReachRecoveryFixture(): Promise<{
   const initial = claimInitial(initialCandidate, { authority: 'vtr-reach', transitionId })
   void initial.completion.then((result: ExecutionResult) => {
     void (controller as unknown as { onReachActionComplete(result: ExecutionResult, candidate: Candidate, id: string, intentId: string): Promise<void> })
-      .onReachActionComplete(result, initialCandidate, transitionId, committed.intent!.intentId)
+      .onReachActionComplete(result, initialCandidate, transitionId, initialIntentId)
   })
 
   return {
