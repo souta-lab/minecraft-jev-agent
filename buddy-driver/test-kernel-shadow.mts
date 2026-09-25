@@ -214,6 +214,14 @@ addCase('committed Reach transition replays commit/step/terminal with zero block
   session.observeMutation({ surface: 'pathfinder.setGoal', guarded: true, leaseOutcome: 'granted', argsSignature: ['vec3(1,64,2)'], instanceHint: null })
   session.observeMutation({ surface: 'pathfinder.goto', guarded: true, leaseOutcome: 'granted', argsSignature: ['object'], instanceHint: null })
   session.observe({ type: 'mechanical-step-settled', transitionId: 't-1', intentId: 'i-1', stepId: 's-1', status: 'active', verified: false, progressed: true })
+  // The verification-time observation: the production verifier saw the
+  // ensures predicate true with real evidence; VERIFY replays from those
+  // observed facts only — never from the SUCCESS signal itself.
+  session.observe({
+    type: 'world-observation',
+    observedAtMs: 1100,
+    predicates: { ...COMMIT_PREDICATES, 'reach.resource-source': { truth: 'true', evidenceId: 'verify:0:in-reach' } },
+  })
   session.observe({ type: 'transition-terminal', transitionId: 't-1', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
   const terminal = session.state().transitions['t-1']
   const summary = session.summary()
@@ -225,10 +233,32 @@ addCase('committed Reach transition replays commit/step/terminal with zero block
     summary.mutationsMapped === 2 &&
     summary.mutationsAttributedToTransition === 2 &&
     summary.coverageComplete &&
+    summary.verifyFactIds.length > 0 &&
+    summary.typedTerminals === 1 &&
     blockers().length === 0
   return {
     pass,
-    detail: `active=${activeOk} terminal=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} mapped=${summary.mutationsMapped}/${summary.mutationsObserved} attributed=${summary.mutationsAttributedToTransition} blockers=${blockers().map((b) => b.kind).join(',') || 'none'}`,
+    detail: `active=${activeOk} terminal=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} mapped=${summary.mutationsMapped}/${summary.mutationsObserved} attributed=${summary.mutationsAttributedToTransition} factIds=${summary.verifyFactIds.length} blockers=${blockers().map((b) => b.kind).join(',') || 'none'}`,
+  }
+})
+
+addCase('SUCCESS terminal without observed ensures facts refuses to mint truth', () => {
+  const { session, blockers } = makeSession(() => vtrContext)
+  const contract = makeContract('t-noverify')
+  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
+  // No verification-time observation flips 'reach.resource-source' to true:
+  // the kernel must refuse VERIFY_SUCCESS and the shadow must record it.
+  session.observe({ type: 'transition-terminal', transitionId: 't-noverify', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
+  const summary = session.summary()
+  const blockerKinds = blockers().map((b) => b.kind)
+  const pass =
+    summary.kernelDenied > 0 &&
+    blockerKinds.includes('verify-proof-not-observed') &&
+    blockerKinds.includes('kernel-command-denied')
+  return {
+    pass,
+    detail: `kernelDenied=${summary.kernelDenied} blockers=${blockerKinds.join(',') || 'none'}`,
   }
 })
 
@@ -243,15 +273,21 @@ addCase('transition committed already-terminal replays VERIFY_SUCCESS without ac
   return { pass, detail: `lifecycle=${terminal?.lifecycle} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
 })
 
-addCase('non-success terminal replays the scheduler cancel path', () => {
+addCase('non-success terminal closes via stand-in and records the projection limitation', () => {
   const { session, blockers } = makeSession(() => vtrContext)
   const contract = makeContract('t-fail')
   session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
   session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
-  session.observe({ type: 'transition-terminal', transitionId: 't-fail', contractHash: contract.contractHash, outcome: { kind: 'INFEASIBLE', reason: 'no-path' } })
+  session.observe({ type: 'transition-terminal', transitionId: 't-fail', contractHash: contract.contractHash, outcome: { kind: 'PROVEN_INFEASIBLE', reason: 'no-path' } })
   const terminal = session.state().transitions['t-fail']
-  const pass = terminal?.lifecycle === 'TERMINAL' && terminal.terminalOutcome?.kind === 'CANCELED'
-  return { pass, detail: `lifecycle=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+  const summary = session.summary()
+  const pass =
+    terminal?.lifecycle === 'TERMINAL' &&
+    terminal.terminalOutcome?.kind === 'CANCELED' &&
+    summary.projectionLimitations === 1 &&
+    summary.projectionLimitationKinds.includes('PROVEN_INFEASIBLE') &&
+    blockers().some((b) => b.kind === 'shadow-projection-limitation')
+  return { pass, detail: `lifecycle=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} limitations=${summary.projectionLimitationKinds.join(',') || 'none'} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
 })
 
 // --------------------------------------------------------------------------

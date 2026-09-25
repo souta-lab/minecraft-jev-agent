@@ -56,6 +56,8 @@ export type ShadowBlockerKind =
   | 'mutation-exceeds-transition-leases'
   | 'kernel-command-denied'
   | 'contract-mapping-failed'
+  | 'verify-proof-not-observed'
+  | 'shadow-projection-limitation'
   | 'observer-error'
 
 export interface ShadowBlocker {
@@ -82,6 +84,18 @@ export interface ShadowCoverageSummary {
   readonly mutationsUnguarded: number
   readonly lifecycleCommands: number
   readonly kernelDenied: number
+  /** Fact ids the kernel actually consumed for the last VERIFY_SUCCESS. */
+  readonly verifyFactIds: readonly string[]
+  /** Reach terminals projected onto an exact typed kernel outcome. */
+  readonly typedTerminals: number
+  /**
+   * Reach terminal kinds with no command-reachable kernel outcome. Each is a
+   * named 'shadow-projection-limitation' blocker and a cutover blocker; the
+   * kernel-side lifecycle is closed with an explicit CANCELED stand-in whose
+   * reason preserves the Reach outcome kind.
+   */
+  readonly projectionLimitations: number
+  readonly projectionLimitationKinds: readonly string[]
   readonly blockers: readonly ShadowBlocker[]
   /** True only when every observed mutation mapped and carried authority. */
   readonly coverageComplete: boolean
@@ -158,6 +172,9 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   let mutationsUnguarded = 0
   let lifecycleCommands = 0
   let kernelDenied = 0
+  let verifyFactIds: readonly string[] = []
+  let typedTerminals = 0
+  const projectionLimitationKinds: string[] = []
 
   const mono = (): number => Math.max(0, now() - t0)
 
@@ -329,19 +346,47 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     if (input.outcome.kind === 'SUCCESS') {
       const contract = transitionRegistered(input.transitionId)
       if (contract !== null) {
-        const proofPredicates: Record<string, { truth: 'true' | 'false' | 'unknown'; evidenceId: string | null }> = {}
-        for (const predicateId of [...contract.ensures, ...contract.invariants]) {
-          proofPredicates[predicateId] = { truth: 'true', evidenceId: `shadow-verify:${input.transitionId}:${predicateId}` }
+        // Independent VERIFY: feed only the facts the runtime actually
+        // observed (the last verified world-observation, which is the
+        // observation the production verifier consumed for this outcome).
+        // SUCCESS must never mint truth: if an ensures/invariants predicate
+        // was not observed 'true', the kernel MUST refuse and the miss is a
+        // hard blocker, not a synthesized proof.
+        feedSnapshot(lastPredicates, 'transition-terminal')
+        const missing = [...contract.ensures, ...contract.invariants].filter(
+          (predicateId) => lastPredicates[predicateId]?.truth !== 'true')
+        journal({
+          type: 'verify-attempt',
+          transitionId: input.transitionId,
+          ensures: [...contract.ensures],
+          invariants: [...contract.invariants],
+          missingObservedProof: missing,
+          observedPredicateCount: Object.keys(lastPredicates).length,
+        })
+        if (missing.length > 0) {
+          block('verify-proof-not-observed', `ensures/invariants lack observed 'true' facts: ${missing.join(',')}`, {
+            transitionId: input.transitionId,
+          })
         }
-        feedSnapshot(proofPredicates, 'transition-terminal')
       }
-      apply({
+      const verified = apply({
         kind: 'VERIFY_SUCCESS',
         transitionId: input.transitionId,
         causalCredit: 'self',
         verifier: SHADOW_REGISTRY.verifier,
         capability: caps.verifier,
       }, 'transition-terminal')
+      if (verified.ok) {
+        verifyFactIds = verified.events.flatMap((event) =>
+          event.kind === 'TRANSITION_VERIFIED_SUCCESS' ? ((event.data.factIds as readonly string[] | undefined) ?? []) : [])
+        typedTerminals += 1
+        journal({
+          type: 'verify-provenance',
+          transitionId: input.transitionId,
+          verifier: SHADOW_REGISTRY.verifier,
+          factIds: verifyFactIds,
+        })
+      }
     }
     const afterVerify = state.transitions[input.transitionId]
     if (afterVerify !== undefined && afterVerify.lifecycle === 'ACTIVE' && afterVerify.pendingTerminalOutcome !== null) {
@@ -353,25 +398,88 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       }), 'transition-terminal')
     }
     const stillLive = state.transitions[input.transitionId]
-    if (stillLive !== undefined && stillLive.lifecycle !== 'TERMINAL' && stillLive.terminalOutcome === null) {
-      // Non-success terminals map to the scheduler's cancel path; the Reach
-      // contract claims are preemptible+resumable so REQUEST_CANCEL
-      // terminalizes atomically. This is the shadow's honest stand-in for
-      // typed outcomes the kernel does not yet name.
-      apply({
-        kind: 'REQUEST_CANCEL',
-        transitionId: input.transitionId,
-        reason: `shadow-terminal:${input.outcome.kind}`,
-        capability: caps.scheduler,
-      }, 'transition-terminal')
-      const pending = state.transitions[input.transitionId]
-      if (pending !== undefined && pending.cancelRequested) {
+    if (stillLive !== undefined && stillLive.lifecycle !== 'TERMINAL' && stillLive.terminalOutcome === null && stillLive.pendingTerminalOutcome === null) {
+      const kind = input.outcome.kind
+      let limitation: string | null = null
+      if (kind === 'WORLD_CHANGED' && typeof input.outcome.observed !== 'undefined') {
+        // Exact typed outcome: CHANGE_WORLD terminalizes with WORLD_CHANGED.
+        const observed: WorldIdentity =
+          input.outcome.field === 'dimension'
+            ? { ...state.world, dimension: String(input.outcome.observed) }
+            : input.outcome.field === 'worldEpoch'
+              ? { ...state.world, worldEpoch: Number(input.outcome.observed) }
+              : { ...state.world, serverId: String(input.outcome.observed) }
+        apply({ kind: 'CHANGE_WORLD', world: observed, capability: caps.worldAdapter }, 'transition-terminal')
+        typedTerminals += 1
+        journal({ type: 'terminal-projection', transitionId: input.transitionId, reachOutcomeKind: kind, kernelOutcome: 'WORLD_CHANGED', derived: true })
+      } else if (kind === 'GENERATION_CHANGED' && typeof input.outcome.observed !== 'undefined') {
+        // Honest kernel command for the real event; the kernel suspends for
+        // rebind rather than terminalizing, so the Reach GENERATION_CHANGED
+        // terminal itself remains a projection limitation.
+        apply({
+          kind: 'CHANGE_GENERATION',
+          generationId: String(input.outcome.observed),
+          capability: caps.runtimeAdapter,
+        }, 'transition-terminal')
+        limitation = 'kernel suspends for generation rebind; no GENERATION_CHANGED terminal outcome'
+      } else if (kind === 'BUDGET_EXHAUSTED') {
+        // Honest typed derivation: the kernel's own budget sweep in
+        // ADVANCE_TIME terminalizes when kernel-side accounting crosses the
+        // canonical contract budget. If it does not reproduce the breach,
+        // that divergence is the projection limitation — the outcome is
+        // never fabricated.
+        apply((at) => ({ kind: 'ADVANCE_TIME', toMonoMs: at, capability: caps.clock }), 'transition-terminal')
+        const derived = state.transitions[input.transitionId]
+        const derivedOutcome = derived?.terminalOutcome ?? derived?.pendingTerminalOutcome ?? null
+        if (derivedOutcome !== null) {
+          typedTerminals += 1
+          journal({ type: 'terminal-projection', transitionId: input.transitionId, reachOutcomeKind: kind, kernelOutcome: derivedOutcome.kind, derived: true })
+        } else {
+          limitation = `kernel budget sweep did not reproduce ${kind}:${String(input.outcome.budget ?? 'unknown')}`
+        }
+      } else if (kind !== 'SUCCESS') {
+        limitation = `kernel has no command-reachable typed outcome for ${kind}`
+      }
+      const afterTyped = state.transitions[input.transitionId]
+      if (afterTyped !== undefined && afterTyped.lifecycle === 'ACTIVE' && afterTyped.pendingTerminalOutcome !== null) {
         apply((at) => ({
-          kind: 'ACK_CANCEL_YIELD',
+          kind: 'ACK_TERMINAL_YIELD',
           transitionId: input.transitionId,
           atMonoMs: at,
           capability: controllerCap(input.transitionId),
         }), 'transition-terminal')
+      }
+      const needsStandIn = state.transitions[input.transitionId]
+      if (
+        needsStandIn !== undefined &&
+        needsStandIn.lifecycle !== 'TERMINAL' &&
+        needsStandIn.terminalOutcome === null &&
+        needsStandIn.pendingTerminalOutcome === null
+      ) {
+        if (limitation !== null) {
+          projectionLimitationKinds.push(kind)
+          block('shadow-projection-limitation', `${kind}: ${limitation}`, { transitionId: input.transitionId })
+        }
+        // The kernel cannot express this Reach terminal kind; CANCELED is the
+        // mechanical stand-in that closes the shadow lifecycle. The reason
+        // preserves the Reach kind and the projection-limitation blocker
+        // above marks it as a cutover blocker — never a semantic cancel.
+        apply({
+          kind: 'REQUEST_CANCEL',
+          transitionId: input.transitionId,
+          reason: `shadow-terminal:${kind}`,
+          capability: caps.scheduler,
+        }, 'transition-terminal')
+        const pending = state.transitions[input.transitionId]
+        if (pending !== undefined && pending.cancelRequested) {
+          apply((at) => ({
+            kind: 'ACK_CANCEL_YIELD',
+            transitionId: input.transitionId,
+            atMonoMs: at,
+            capability: controllerCap(input.transitionId),
+          }), 'transition-terminal')
+        }
+        journal({ type: 'terminal-projection', transitionId: input.transitionId, reachOutcomeKind: kind, kernelOutcome: 'CANCELED', derived: false, standIn: true })
       }
     }
     for (const [commitId, open] of openEffects) {
@@ -604,6 +712,10 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         mutationsUnguarded,
         lifecycleCommands,
         kernelDenied,
+        verifyFactIds,
+        typedTerminals,
+        projectionLimitations: projectionLimitationKinds.length,
+        projectionLimitationKinds: [...projectionLimitationKinds],
         blockers: [...blockers],
         coverageComplete: mutationsObserved > 0 && hardBlockers.length === 0,
       }
