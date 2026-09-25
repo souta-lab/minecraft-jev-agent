@@ -220,6 +220,10 @@ describe('VTR Reach production authority seam', () => {
     assert.match(completion, /status: result\.status === 'done' \? 'completed'/)
     assert.match(completion, /if \(completed\.status === 'terminal'\)/)
     assert.doesNotMatch(completion, /if \(result\.status === 'done'\)[\s\S]{0,80}closeReachTransition/)
+    assert.match(controller, /controller: contract\.controller/)
+    assert.match(controller, /progressDefinition: contract\.progressDefinition/)
+    assert.match(controller, /desiredPredicateIdentity: contract\.desiredPredicateIdentity/)
+    assert.match(controller, /ensuresIdentity: contract\.ensuresIdentity/)
   })
 
   it('records the controller typed terminal before handing scheduling back; no action completion asks legacy beta', () => {

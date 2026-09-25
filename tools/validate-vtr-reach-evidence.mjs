@@ -8,6 +8,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { gunzipSync, inflateSync } from 'node:zlib'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { parse as parseNbt } from 'prismarine-nbt'
+import { eventMessage, persistentActionIdentity } from './vtr-reach-evidence-events.mjs'
 
 const EXIT = Object.freeze({ PASS: 0, FAIL: 1, INCOMPLETE: 2, USAGE: 64 })
 const CHECK_STATUS = Object.freeze({ PASS: 'PASS', FAIL: 'FAIL', INCOMPLETE: 'INCOMPLETE' })
@@ -151,10 +152,6 @@ function readProperties(text) {
   return props
 }
 
-function eventMessage(rows, includes) {
-  return rows.filter((row) => typeof row?.message === 'string' && row.message.includes(includes))
-}
-
 function eventTimestamp(row) {
   const value = Date.parse(row?.ts)
   return Number.isFinite(value) ? value : null
@@ -191,8 +188,12 @@ function transitionRowStepId(row, allowSingleStepFallback = false) {
   const detail = row?.detail ?? {}
   const direct = detail.stepId
   if (typeof direct === 'string' && direct.length > 0) return direct
+  const intent = detail.intentId
+  if (typeof intent === 'string' && intent.length > 0) return `intent:${intent}`
+  const action = detail.actionId
+  if (typeof action === 'string' && action.length > 0) return `action:${action}`
   if (!allowSingleStepFallback) return null
-  const fallback = detail.actionId ?? detail.candidate ?? token(` ${String(row?.message ?? '')}`, 'action') ?? token(` ${String(row?.message ?? '')}`, 'candidate')
+  const fallback = detail.candidate ?? token(` ${String(row?.message ?? '')}`, 'action') ?? token(` ${String(row?.message ?? '')}`, 'candidate')
   return typeof fallback === 'string' && fallback.length > 0 ? `action:${fallback}` : null
 }
 
@@ -696,6 +697,7 @@ async function validate(archive, repo) {
     const reservations = eventMessage(events, 'VTR_MECHANICAL_STEP_RESERVED')
     const actuations = eventMessage(events, 'VTR_TRANSITION_ACTUATION')
     const mechanicalOutcomes = eventMessage(events, 'VTR_MECHANICAL_OUTCOME')
+    const mechanicalStepOutcomes = eventMessage(events, 'VTR_MECHANICAL_STEP_OUTCOME')
     const verifyRows = events.filter((row) => /(?:^|\s)(?:VTR_TRANSITION_VERIFY|VTR_VERIFY|TRANSITION_VERIFY)(?:\s|$)/.test(String(row?.message ?? '')))
     if (commits.length !== 1) fail('transition:commit-count', 'expected exactly one Transition commit', { count: commits.length })
     else pass('transition:commit-count', { count: commits.length })
@@ -708,7 +710,7 @@ async function validate(archive, repo) {
     if (commit && outcomeEvent && transition.transitionId === commit.transitionId && transition.transitionId === outcomeEvent.transitionId) pass('transition:id-chain', { transitionId: transition.transitionId })
     else fail('transition:id-chain', 'probe, commit and terminal outcome Transition ids differ', { probeId: transition.transitionId ?? null, commitId: commit?.transitionId ?? null, outcomeId: outcomeEvent?.transitionId ?? null })
 
-    const contractBoundRows = [...commits, ...reservations, ...actuations, ...mechanicalOutcomes, ...outcomes]
+    const contractBoundRows = [...commits, ...reservations, ...actuations, ...mechanicalOutcomes, ...mechanicalStepOutcomes, ...outcomes]
     const rowContractHashes = contractBoundRows.map((row) => transitionRowContractHash(row))
     const missingContractHashRows = contractBoundRows.map((row, index) => ({ row, index, hash: rowContractHashes[index] })).filter(({ hash }) => typeof hash !== 'string' || hash.length === 0)
     const conflictingContractHashRows = contractBoundRows.map((row, index) => ({ row, index, hash: rowContractHashes[index] })).filter(({ hash }) => typeof hash === 'string' && hash.length > 0 && hash !== contractHash)
@@ -730,38 +732,51 @@ async function validate(archive, repo) {
 
     const transitionExpectedMechanicalSteps = Number(outcomeEvent?.usage?.mechanicalSteps)
     let transitionOrderedRows = []
-    const repeatedStepCounts = {
-      reservations: reservations.length,
-      actuations: actuations.length,
-      mechanicalOutcomes: mechanicalOutcomes.length,
-    }
+    const repeatedStepCounts = { reservations: reservations.length, mechanicalStepOutcomes: mechanicalStepOutcomes.length }
     if (!Number.isInteger(transitionExpectedMechanicalSteps) || transitionExpectedMechanicalSteps < 1) {
       fail('transition:event-order', 'terminal does not declare a positive integer mechanical step count', { mechanicalSteps: outcomeEvent?.usage?.mechanicalSteps ?? null })
     } else if (Object.values(repeatedStepCounts).some((count) => count > transitionExpectedMechanicalSteps)) {
       fail('transition:event-order', 'event chain contains more mechanical rows than the terminal usage count', { expectedMechanicalSteps: transitionExpectedMechanicalSteps, observed: repeatedStepCounts })
     } else if (Object.values(repeatedStepCounts).some((count) => count < transitionExpectedMechanicalSteps)) {
-      incomplete('transition:event-order', 'one or more reserved/actuation/mechanical rows are missing for the terminal mechanical step count', { expectedMechanicalSteps: transitionExpectedMechanicalSteps, observed: repeatedStepCounts })
+      incomplete('transition:event-order', 'one or more reserved/mechanical-step-outcome rows are missing for the terminal mechanical step count', { expectedMechanicalSteps: transitionExpectedMechanicalSteps, observed: repeatedStepCounts, intentActuations: actuations.length })
     } else if (commits.length !== 1 || outcomes.length !== 1 || verifyRows.length !== 1) {
       if (commits.length > 1 || outcomes.length > 1 || verifyRows.length > 1) fail('transition:event-order', 'commit, terminal, or VERIFY event is duplicated', { commits: commits.length, outcomes: outcomes.length, verifyRows: verifyRows.length })
       else incomplete('transition:event-order', 'commit, exactly one terminal outcome, or exactly one VERIFY row is absent', { commits: commits.length, outcomes: outcomes.length, verifyRows: verifyRows.length })
     } else {
-      transitionOrderedRows = [commits[0]]
-      for (let index = 0; index < transitionExpectedMechanicalSteps; index += 1) {
-        transitionOrderedRows.push(reservations[index], actuations[index], mechanicalOutcomes[index])
-      }
-      transitionOrderedRows.push(verifyRows[0], outcomes[0])
-      const indices = transitionOrderedRows.map((row) => events.indexOf(row))
-      const timestamps = transitionOrderedRows.map(eventTimestamp)
-      if (indices.some((value) => value < 0) || indices.some((value, index) => index > 0 && value <= indices[index - 1]) || timestamps.some((value) => value === null) || timestamps.some((value, index) => index > 0 && value < timestamps[index - 1])) {
-        fail('transition:event-order', 'commit and each reserve/actuation/mechanical-outcome must be ordered before VERIFY and terminal', { indices, timestamps, expectedMechanicalSteps: transitionExpectedMechanicalSteps })
-      } else pass('transition:event-order', { markers: ['commit', ...Array.from({ length: transitionExpectedMechanicalSteps }, (_, index) => [`reservation-${index + 1}`, `actuation-${index + 1}`, `mechanical-outcome-${index + 1}`]).flat(), 'verify', 'terminal-outcome'], timestamps: transitionOrderedRows.map((row) => row.ts), mechanicalSteps: transitionExpectedMechanicalSteps })
+      const stepOutcomeById = new Map(mechanicalStepOutcomes.map((row) => [row?.detail?.stepId, row]))
+      const stepPairs = reservations.map((reserve) => ({ reserve, outcome: stepOutcomeById.get(reserve?.detail?.stepId) }))
+      const commitIndex = events.indexOf(commits[0])
+      const verifyIndex = events.indexOf(verifyRows[0])
+      const terminalIndex = events.indexOf(outcomes[0])
+      const invalidPairs = stepPairs.filter(({ reserve, outcome }) => !outcome || events.indexOf(reserve) >= events.indexOf(outcome))
+      const stepIntentIds = new Set([...reservations, ...mechanicalStepOutcomes].map((row) => row?.detail?.intentId).filter((value) => typeof value === 'string'))
+      const actuationIntentIds = actuations.map((row) => row?.detail?.intentId).filter((value) => typeof value === 'string')
+      const duplicateActuationIntentIds = actuationIntentIds.filter((value, index, all) => all.indexOf(value) !== index)
+      const unactuatedIntentIds = [...stepIntentIds].filter((intentId) => !actuationIntentIds.includes(intentId))
+      const allExecutionRows = [...commits, ...actuations, ...reservations, ...mechanicalStepOutcomes, ...verifyRows, ...outcomes]
+      const sortedExecutionRows = [...allExecutionRows].sort((left, right) => events.indexOf(left) - events.indexOf(right))
+      transitionOrderedRows = sortedExecutionRows
+      const timestamps = sortedExecutionRows.map(eventTimestamp)
+      const stepOutcomesBeforeVerify = mechanicalStepOutcomes.every((row) => events.indexOf(row) < verifyIndex)
+      const reasons = []
+      if (actuations.length === 0) reasons.push('no VTR intent actuation was recorded')
+      if (duplicateActuationIntentIds.length) reasons.push('an intent was actuated more than once')
+      if (unactuatedIntentIds.length) reasons.push('mechanical steps refer to an intent with no actuation event')
+      if (invalidPairs.length) reasons.push('each mechanical step must have one later typed outcome with the same stepId')
+      if (commitIndex < 0 || sortedExecutionRows[0] !== commits[0]) reasons.push('commit must precede every execution row')
+      if (!stepOutcomesBeforeVerify || verifyIndex <= Math.max(...mechanicalStepOutcomes.map((row) => events.indexOf(row)))) reasons.push('all per-step outcomes must precede VERIFY')
+      if (terminalIndex <= verifyIndex) reasons.push('terminal outcome must follow VERIFY')
+      if (timestamps.some((value) => value === null) || timestamps.some((value, index) => index > 0 && value < timestamps[index - 1])) reasons.push('execution timestamps must be present and monotonic')
+      if (reasons.length) fail('transition:event-order', 'VTR intent, per-step reservation/outcome, VERIFY, and terminal ordering is inconsistent', { reasons, expectedMechanicalSteps: transitionExpectedMechanicalSteps, observed: { reservations: reservations.length, mechanicalStepOutcomes: mechanicalStepOutcomes.length, intentActuations: actuations.length, intentIds: [...stepIntentIds] } })
+      else pass('transition:event-order', { markers: ['commit', 'intent-actuation', 'mechanical-step-reserved', 'mechanical-step-outcome', 'verify', 'terminal-outcome'], timestamps: sortedExecutionRows.map((row) => row.ts), mechanicalSteps: transitionExpectedMechanicalSteps, intentActuations: actuations.length })
     }
 
     const transitionLogMarkerGroups = [
       ['commit', 'VTR_TRANSITION_COMMIT', commits],
       ['reservation', 'VTR_MECHANICAL_STEP_RESERVED', reservations],
       ['actuation', 'VTR_TRANSITION_ACTUATION', actuations],
-      ['mechanical-outcome', 'VTR_MECHANICAL_OUTCOME', mechanicalOutcomes],
+      ['mechanical-action-outcome', 'VTR_MECHANICAL_OUTCOME', mechanicalOutcomes],
+      ['mechanical-step-outcome', 'VTR_MECHANICAL_STEP_OUTCOME', mechanicalStepOutcomes],
       ['terminal-outcome', 'VTR_TRANSITION_OUTCOME', outcomes],
     ]
     const logLines = rawHostLines
@@ -787,7 +802,11 @@ async function validate(archive, repo) {
         }
         let matching = logLines.filter((line) => hostEventToken(line) === marker && (line.includes(`transitionId=${id}`) || line.includes(`id=${id}`)))
         const directStepId = typeof row?.detail?.stepId === 'string' && row.detail.stepId.length > 0 ? row.detail.stepId : null
-        if (directStepId !== null) matching = matching.filter((line) => line.includes(`stepId=${directStepId}`) || line.includes(JSON.stringify(directStepId)))
+        const directIntentId = typeof row?.detail?.intentId === 'string' && row.detail.intentId.length > 0 ? row.detail.intentId : null
+        const directActionId = typeof row?.detail?.actionId === 'string' && row.detail.actionId.length > 0 ? row.detail.actionId : null
+        if (directStepId !== null) matching = matching.filter((line) => line.includes(`stepId=${directStepId}`) || line.includes(`stepId=${JSON.stringify(directStepId)}`))
+        else if (directIntentId !== null) matching = matching.filter((line) => line.includes(`intentId=${directIntentId}`) || line.includes(`intentId=${JSON.stringify(directIntentId)}`))
+        else if (directActionId !== null) matching = matching.filter((line) => line.includes(`actionId=${directActionId}`) || line.includes(`actionId=${JSON.stringify(directActionId)}`))
         else if (rows.length > 1) matching = []
         if (matching.length !== 1) {
           if (matching.length > 1) mismatchedEventLogBinding = true
@@ -850,32 +869,50 @@ async function validate(archive, repo) {
     else if (budgetCheck.missing.length) incomplete('transition:budget', 'budget or terminal usage is too incomplete to check against the committed contract', { missing: budgetCheck.missing })
     else pass('transition:budget', { mechanicalSteps: outcomeEvent.usage.mechanicalSteps, elapsedMs: outcomeEvent.usage.elapsedMs, resources: outcomeEvent.usage.resources, risk: outcomeEvent.usage.risk, effects: outcomeEvent.usage.effects })
 
-    const mechanicalCounts = { reservations: reservations.length, actuations: actuations.length, mechanicalOutcomes: mechanicalOutcomes.length }
-    const mechanicalCountValues = Object.values(mechanicalCounts)
+    const mechanicalCounts = { reservations: reservations.length, perStepOutcomes: mechanicalStepOutcomes.length, intentActuations: actuations.length }
     if (!Number.isInteger(transitionExpectedMechanicalSteps) || transitionExpectedMechanicalSteps < 1) {
       fail('transition:mechanical-counts', 'terminal mechanicalSteps is not a positive integer', { mechanicalSteps: outcomeEvent?.usage?.mechanicalSteps ?? null, observed: mechanicalCounts })
-    } else if (mechanicalCountValues.some((count) => count > transitionExpectedMechanicalSteps)) {
-      fail('transition:mechanical-counts', 'reserved/actuation/mechanical event count exceeds terminal mechanicalSteps', { expected: transitionExpectedMechanicalSteps, observed: mechanicalCounts })
-    } else if (mechanicalCountValues.some((count) => count < transitionExpectedMechanicalSteps)) {
-      incomplete('transition:mechanical-counts', 'reserved/actuation/mechanical event count is below terminal mechanicalSteps', { expected: transitionExpectedMechanicalSteps, observed: mechanicalCounts })
+    } else if ([reservations.length, mechanicalStepOutcomes.length].some((count) => count > transitionExpectedMechanicalSteps)) {
+      fail('transition:mechanical-counts', 'per-leg reservation/outcome count exceeds terminal mechanicalSteps', { expected: transitionExpectedMechanicalSteps, observed: mechanicalCounts })
+    } else if (reservations.length < transitionExpectedMechanicalSteps || mechanicalStepOutcomes.length < transitionExpectedMechanicalSteps) {
+      incomplete('transition:mechanical-counts', 'per-leg reservation/outcome count is below terminal mechanicalSteps', { expected: transitionExpectedMechanicalSteps, observed: mechanicalCounts })
+    } else if (actuations.length === 0) {
+      incomplete('transition:mechanical-counts', 'no VTR intent actuation was archived', { expected: transitionExpectedMechanicalSteps, observed: mechanicalCounts })
     } else {
       pass('transition:mechanical-counts', { expected: transitionExpectedMechanicalSteps, observed: mechanicalCounts })
       const mechanicalMissing = []
       const mechanicalProblems = []
       const seenStepIds = new Set()
       const stepEvidence = []
+      const persistentIdentity = persistentActionIdentity({ reservations, outcomes: mechanicalStepOutcomes, actuations })
+      mechanicalProblems.push(...persistentIdentity.problems.map((problem) => ({ field: 'persistent Transition action identity', ...problem })))
+      const actuationByIntentId = new Map()
+      for (const row of actuations) {
+        const intentId = row?.detail?.intentId
+        if (typeof intentId !== 'string' || intentId.length === 0) {
+          mechanicalMissing.push('actuation.intentId')
+          continue
+        }
+        if (actuationByIntentId.has(intentId)) mechanicalProblems.push({ field: 'unique actuation intentId', observed: intentId })
+        else actuationByIntentId.set(intentId, row)
+      }
+      const outcomeStepIds = mechanicalStepOutcomes.map((row) => row?.detail?.stepId)
+      const duplicateOutcomeStepIds = outcomeStepIds.filter((stepId, index, all) => typeof stepId === 'string' && all.indexOf(stepId) !== index)
+      if (duplicateOutcomeStepIds.length) mechanicalProblems.push({ field: 'unique outcome stepId', observed: [...new Set(duplicateOutcomeStepIds)] })
       for (let index = 0; index < transitionExpectedMechanicalSteps; index += 1) {
         const reserveRow = reservations[index]
-        const actionRow = actuations[index]
-        const mechRow = mechanicalOutcomes[index]
         const reserve = reserveRow?.detail ?? {}
-        const action = actionRow?.detail ?? {}
+        const reserveStepId = typeof reserve.stepId === 'string' && reserve.stepId.length > 0 ? reserve.stepId : null
+        const matchingOutcomes = mechanicalStepOutcomes.filter((row) => row?.detail?.stepId === reserveStepId)
+        const mechRow = matchingOutcomes[0] ?? null
         const mech = mechRow?.detail ?? {}
+        const actionRow = typeof reserve.intentId === 'string' ? actuationByIntentId.get(reserve.intentId) : null
+        const action = actionRow?.detail ?? {}
         const rowIds = [transitionRowId(reserveRow), transitionRowId(actionRow), transitionRowId(mechRow)]
         if (rowIds.some((id) => id === null)) mechanicalMissing.push(`step ${index + 1} transitionId`)
         else if (rowIds.some((id) => id !== transition.transitionId)) mechanicalProblems.push({ step: index + 1, field: 'transitionId', expected: transition.transitionId, observed: rowIds })
 
-        if (action.authority !== 'vtr_transition') mechanicalProblems.push({ step: index + 1, field: 'authority', expected: 'vtr_transition', observed: action.authority ?? null })
+        if (action.authority !== 'vtr-transition-controller') mechanicalProblems.push({ step: index + 1, field: 'authority', expected: 'vtr-transition-controller', observed: action.authority ?? null })
         const actionContractHash = transitionRowContractHash(actionRow)
         if (actionContractHash !== contractHash) mechanicalProblems.push({ step: index + 1, field: 'actuation.contractHash', expected: contractHash, observed: actionContractHash ?? null })
         const reserveUsage = Number(reserve.usage?.mechanicalSteps)
@@ -886,39 +923,39 @@ async function validate(archive, repo) {
         if (!Number.isFinite(mechUsage)) mechanicalMissing.push(`step ${expectedOrdinal} mechanical outcome usage.mechanicalSteps`)
         else if (mechUsage !== expectedOrdinal) mechanicalProblems.push({ step: expectedOrdinal, field: 'mechanical outcome mechanicalSteps', expected: expectedOrdinal, observed: mechUsage })
 
-        const reserveStepId = typeof reserve.stepId === 'string' && reserve.stepId.length > 0 ? reserve.stepId : null
-        const actionStepId = typeof action.stepId === 'string' && action.stepId.length > 0 ? action.stepId : null
         const mechStepId = typeof mech.stepId === 'string' && mech.stepId.length > 0 ? mech.stepId : null
-        const actionId = typeof action.actionId === 'string' ? action.actionId : (typeof action.candidate === 'string' ? action.candidate : null)
+        const actionId = typeof action.actionId === 'string' ? action.actionId : null
+        const reserveActionId = typeof reserve.actionId === 'string' ? reserve.actionId : null
         const mechActionId = typeof mech.actionId === 'string' ? mech.actionId : null
+        const reserveIntentId = typeof reserve.intentId === 'string' ? reserve.intentId : null
+        const mechIntentId = typeof mech.intentId === 'string' ? mech.intentId : null
         let canonicalStepId = reserveStepId
         if (!reserveStepId) {
           mechanicalMissing.push(`step ${expectedOrdinal} reservation.stepId`)
-        } else if (transitionExpectedMechanicalSteps > 1 && (!actionStepId || !mechStepId)) {
-          mechanicalMissing.push(`step ${expectedOrdinal} unique stepId on reservation, actuation, and mechanical outcome`)
-        } else if (reserveStepId && actionStepId && mechStepId) {
-          if (reserveStepId !== actionStepId || reserveStepId !== mechStepId) mechanicalProblems.push({ step: expectedOrdinal, field: 'stepId', expected: reserveStepId, actuation: actionStepId, mechanicalOutcome: mechStepId })
-          canonicalStepId = reserveStepId
-        } else if (transitionExpectedMechanicalSteps === 1 && reserveStepId) {
-          const baseStep = reserveStepId.split('#', 1)[0]
-          if (actionStepId !== null && actionStepId !== reserveStepId) mechanicalProblems.push({ step: expectedOrdinal, field: 'actuation.stepId', expected: reserveStepId, observed: actionStepId })
-          if (mechStepId !== null && mechStepId !== reserveStepId) mechanicalProblems.push({ step: expectedOrdinal, field: 'mechanicalOutcome.stepId', expected: reserveStepId, observed: mechStepId })
-          if (!actionId || !mechActionId) mechanicalMissing.push('single-step action identity for reservation pairing')
-          else if (baseStep !== actionId || baseStep !== mechActionId) mechanicalProblems.push({ step: expectedOrdinal, field: 'action/step binding', expected: baseStep, actuation: actionId, mechanicalOutcome: mechActionId })
-          canonicalStepId = reserveStepId
-        } else {
-          mechanicalMissing.push(`step ${expectedOrdinal} stable stepId/action identity`)
+        } else if (matchingOutcomes.length === 0) {
+          mechanicalMissing.push(`step ${expectedOrdinal} VTR_MECHANICAL_STEP_OUTCOME`)
+        } else if (matchingOutcomes.length > 1) {
+          mechanicalProblems.push({ step: expectedOrdinal, field: 'unique per-step outcome', count: matchingOutcomes.length })
         }
+        if (reserveStepId && mechStepId !== null && reserveStepId !== mechStepId) mechanicalProblems.push({ step: expectedOrdinal, field: 'stepId', expected: reserveStepId, mechanicalOutcome: mechStepId })
+        if (!reserveIntentId || !mechIntentId || !action.intentId) mechanicalMissing.push(`step ${expectedOrdinal} intentId correlation`)
+        else if (reserveIntentId !== mechIntentId || reserveIntentId !== action.intentId) mechanicalProblems.push({ step: expectedOrdinal, field: 'intentId', reservation: reserveIntentId, outcome: mechIntentId, actuation: action.intentId })
+        if (!reserveActionId || !mechActionId || !actionId) mechanicalMissing.push(`step ${expectedOrdinal} actionId correlation`)
+        else if (reserveActionId !== mechActionId || reserveActionId !== actionId) mechanicalProblems.push({ step: expectedOrdinal, field: 'actionId', reservation: reserveActionId, outcome: mechActionId, actuation: actionId })
+        if (transitionRowContractHash(reserveRow) !== contractHash || transitionRowContractHash(mechRow) !== contractHash) mechanicalProblems.push({ step: expectedOrdinal, field: 'step contractHash', expected: contractHash, reservation: transitionRowContractHash(reserveRow), outcome: transitionRowContractHash(mechRow) })
+        if (mech.status !== 'active' && mech.status !== 'terminal' && mech.status !== 'refused') mechanicalProblems.push({ step: expectedOrdinal, field: 'typed step status', observed: mech.status ?? null })
+        if (actionRow && reserveRow && events.indexOf(actionRow) >= events.indexOf(reserveRow)) mechanicalProblems.push({ step: expectedOrdinal, field: 'intent actuation order', intentId: reserveIntentId })
+        if (reserveRow && mechRow && events.indexOf(reserveRow) >= events.indexOf(mechRow)) mechanicalProblems.push({ step: expectedOrdinal, field: 'reservation/outcome order', stepId: reserveStepId })
 
         if (canonicalStepId !== null) {
           if (seenStepIds.has(canonicalStepId)) mechanicalProblems.push({ step: expectedOrdinal, field: 'unique stepId', observed: canonicalStepId })
           seenStepIds.add(canonicalStepId)
         }
-        stepEvidence.push({ ordinal: expectedOrdinal, stepId: canonicalStepId, actionId: actionId ?? mechActionId, usage: mechUsage })
+        stepEvidence.push({ ordinal: expectedOrdinal, stepId: canonicalStepId, intentId: reserveIntentId, actionId: actionId ?? mechActionId, leg: reserve.leg ?? null, status: mech.status ?? null, usage: mechUsage })
       }
-      if (mechanicalProblems.length) fail('transition:mechanical-chain', 'one or more mechanical rows conflict with the active Transition, policy owner, step identity, or cumulative usage', { problems: mechanicalProblems, missing: mechanicalMissing })
-      else if (mechanicalMissing.length) incomplete('transition:mechanical-chain', 'mechanical rows do not fully bind unique ordered steps to the active Transition', { missing: mechanicalMissing, steps: stepEvidence })
-      else pass('transition:mechanical-chain', { transitionId: transition.transitionId, contractHash, authority: 'vtr_transition', mechanicalSteps: transitionExpectedMechanicalSteps, steps: stepEvidence })
+      if (mechanicalProblems.length) fail('transition:mechanical-chain', 'one or more per-leg rows conflict with the active Transition, intent owner, step identity, or cumulative usage', { problems: mechanicalProblems, missing: mechanicalMissing })
+      else if (mechanicalMissing.length) incomplete('transition:mechanical-chain', 'per-leg reservation/outcome rows do not fully bind unique ordered steps to the active Transition', { missing: mechanicalMissing, steps: stepEvidence })
+      else pass('transition:mechanical-chain', { transitionId: transition.transitionId, contractHash, authority: 'vtr_transition', mechanicalSteps: transitionExpectedMechanicalSteps, steps: stepEvidence, actionOutcomes: mechanicalOutcomes.length })
     }
 
     let verifyHostCheck = null
@@ -947,7 +984,7 @@ async function validate(archive, repo) {
           const observedAtMs = Number(detail.observedAtMs ?? detail.verifiedAtMs)
           const reportedVerifiedAtMs = Number(detail.verifiedAtMs)
           const verifyEventAt = eventTimestamp(verify)
-          const lastMechanicalOutcome = mechanicalOutcomes.at(-1)
+          const lastMechanicalOutcome = mechanicalStepOutcomes.at(-1)
           const mechAt = eventTimestamp(lastMechanicalOutcome)
           const terminalAt = eventTimestamp(outcomes[0])
           const verifyProblems = []
@@ -1017,7 +1054,7 @@ async function validate(archive, repo) {
             const hostLineIndex = logLines.indexOf(hostLine)
             if (hostAt === null || verifyEventAt === null) hostMissing.push('timestamp')
             else if (hostAt < verifyEventAt) hostProblems.push({ key: 'host timestamp precedes JSONL emission', expectedAtLeast: verifyEventAt, observed: hostAt, deltaMs: hostAt - verifyEventAt })
-            const lastMechanicalHostRow = mirroredRows.find((item) => item.row === mechanicalOutcomes.at(-1))
+            const lastMechanicalHostRow = mirroredRows.find((item) => item.row === mechanicalStepOutcomes.at(-1))
             const terminalHostRow = mirroredRows.find((item) => item.row === outcomes[0])
             if (!lastMechanicalHostRow || !terminalHostRow) hostMissing.push('matching mechanical-outcome/terminal HOST mirror lines for order check')
             else if (hostLineIndex <= lastMechanicalHostRow.lineIndex || hostLineIndex >= terminalHostRow.lineIndex) hostProblems.push({ key: 'host mirror order', expected: 'mechanical outcome < VERIFY < terminal outcome', observed: { mechanicalLineIndex: lastMechanicalHostRow.lineIndex, verifyLineIndex: hostLineIndex, terminalLineIndex: terminalHostRow.lineIndex } })
@@ -1055,9 +1092,9 @@ async function validate(archive, repo) {
     const commitIndex = events.indexOf(commits[0])
     const outcomeIndex = events.indexOf(outcomes[0])
     const skillOrderValid = skillStartIndices.every((index) => index > commitIndex && index < outcomeIndex) && skillStartIndices.every((index, position) => position === 0 || index > skillStartIndices[position - 1])
-    if (skillStarts > 0 && skillStarts <= transitionExpectedMechanicalSteps && vtrSelectedSkills === skillStarts && skillOrderValid) pass('authority:single-skill-owner', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, selectedBy: 'vtr-transition' })
+    if (skillStarts === 1 && vtrSelectedSkills === 1 && transitionExpectedMechanicalSteps >= 3 && skillOrderValid) pass('authority:single-skill-owner', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, selectedBy: 'vtr-transition', proof: 'one VTR-selected skill owns at least three mechanical legs under one Transition' })
     else if (skillStarts === 0) incomplete('authority:single-skill-owner', 'no raw executor SKILL_START event was archived')
-    else fail('authority:single-skill-owner', 'executor skills must all be VTR-selected, ordered between commit and terminal, and no more numerous than mechanical steps', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, commitIndex, outcomeIndex, skillOrderValid })
+    else fail('authority:single-skill-owner', 'persistent Reach proof requires exactly one VTR-selected executor skill to own at least three mechanical legs, ordered between commit and terminal', { skillStarts, vtrSelectedSkills, mechanicalSteps: transitionExpectedMechanicalSteps, skillStartIndices, commitIndex, outcomeIndex, skillOrderValid })
     const legacyActuationSource = '(?:selectedBy=(?:jev|legacy|option|goalqueue)|LEGACY_ACTUATION|legacyActuation=true|authority=(?:legacy|option|goalqueue)|(?:GOAL_QUEUE|OPTION)_ACTUATION)'
     const legacyActuationMatches = (botLog.match(new RegExp(legacyActuationSource, 'gi')) ?? []).length + events.filter((row) => new RegExp(legacyActuationSource, 'i').test(String(row?.message ?? ''))).length
     if (legacyActuationMatches === 0 && transition.metrics?.duplicateAuthority === false) pass('authority:no-legacy-actuation-observed', { matches: legacyActuationMatches })

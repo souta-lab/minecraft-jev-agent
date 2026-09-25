@@ -1952,11 +1952,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'VTR_SCHEDULER_HOLDS_TERMINAL',
   'VTR_REACH_PROBE_HOLD',
   'VTR_TRANSITION_COMMIT',
+  'VTR_TRANSITION_MODEL_METRICS',
   'VTR_MECHANICAL_STEP_REFUSED',
   'VTR_MECHANICAL_STEP_RESERVED',
+  'VTR_MECHANICAL_STEP_OUTCOME',
   'VTR_MECHANICAL_OUTCOME_REJECTED',
   'VTR_ORPHAN_ACTION_OUTCOME',
   'VTR_MECHANICAL_OUTCOME',
+  'VTR_TERMINAL_ACTION_CORRELATED',
+  'VTR_TERMINAL_ACTION_SETTLEMENT_MISMATCH',
+  'VTR_TERMINAL_ACTION_CORRELATION_REFUSED',
   'VTR_TRANSITION_VERIFY',
   'VTR_TRANSITION_OUTCOME',
   'VTR_LEGACY_REACH_MOVE_WITHHELD',
@@ -4320,8 +4325,8 @@ export class JevController {
     this.lastReachActionFailure = null
     this.logger.info(
       'vtr',
-      `VTR_TRANSITION_ACTUATION id=${intent.transitionId} candidate=${candidate.id} target=${JSON.stringify(guard.candidate.target)} selectedBy=vtr_transition_controller`,
-      { transitionId: intent.transitionId, intentId: intent.intentId, contractHash: intent.contractHash, candidate: candidate.id, target: guard.candidate.target, authority: 'vtr-transition-controller', leaseEpoch: claim.epoch },
+      `VTR_TRANSITION_ACTUATION id=${intent.transitionId} intent=${intent.intentId} action=${this.executor.current?.id ?? 'missing'} candidate=${candidate.id} target=${JSON.stringify(guard.candidate.target)} selectedBy=vtr_transition_controller`,
+      { transitionId: intent.transitionId, intentId: intent.intentId, actionId: this.executor.current?.id ?? null, contractHash: intent.contractHash, candidate: candidate.id, target: guard.candidate.target, authority: 'vtr-transition-controller', leaseEpoch: claim.epoch },
       this.tickCounter,
     )
     void claim.completion
@@ -4802,11 +4807,15 @@ export class JevController {
         contractHash: contract.contractHash,
         mission,
         desiredPredicate: desired,
+        desiredPredicateIdentity: contract.desiredPredicateIdentity,
         requires: contract.requires,
         ensures: contract.ensures,
+        ensuresIdentity: contract.ensuresIdentity,
         invariants: contract.invariants,
         admissibleEffects: contract.admissibleEffects,
         budget: contract.budget,
+        controller: contract.controller,
+        progressDefinition: contract.progressDefinition,
         identity,
         selectedRoute: this.reachRuntime.current?.route ?? null,
         witness: this.reachRuntime.current?.route.witness ?? null,
@@ -4906,10 +4915,11 @@ export class JevController {
       )
       return false
     }
+    const actionId = this.executor.current?.id ?? null
     this.logger.info(
       'vtr',
-      `VTR_MECHANICAL_STEP_RESERVED transition=${active.contract.transitionId} step=${step.stepId} leg=${step.leg} count=${result.state.usage.mechanicalSteps}/${active.contract.budget.maxMechanicalSteps}`,
-      { transitionId: active.contract.transitionId, intentId, stepId: step.stepId, leg: step.leg, effectKind: step.effectKind, usage: result.state.usage },
+      `VTR_MECHANICAL_STEP_RESERVED transition=${active.contract.transitionId} intent=${intentId} action=${actionId ?? 'missing'} step=${step.stepId} leg=${step.leg} count=${result.state.usage.mechanicalSteps}/${active.contract.budget.maxMechanicalSteps}`,
+      { transitionId: active.contract.transitionId, contractHash: active.contract.contractHash, intentId, actionId, stepId: step.stepId, leg: step.leg, effectKind: step.effectKind, usage: result.state.usage },
       this.tickCounter,
     )
     return true
@@ -4933,6 +4943,32 @@ export class JevController {
       snapshot,
       ...(damage > 0 ? { observedRisk: { damage } } : {}),
     })
+    const settledState = 'state' in result ? result.state : active.state
+    const settledOutcome = result.status === 'terminal'
+      ? result.outcome.kind
+      : result.status === 'refused'
+        ? 'REFUSED'
+        : 'CONTINUING'
+    const actionId = this.executor.current?.id ?? null
+    const stepEvent = `VTR_MECHANICAL_STEP_OUTCOME transition=${active.contract.transitionId} intent=${intentId} action=${actionId ?? 'missing'} step=${step.stepId} leg=${step.leg} status=${result.status} outcome=${settledOutcome} verified=${result.status === 'terminal' && result.outcome.kind === 'SUCCESS'} mechanicalSteps=${settledState.usage.mechanicalSteps}`
+    const stepDetail = {
+      transitionId: active.contract.transitionId,
+      contractHash: active.contract.contractHash,
+      intentId,
+      actionId,
+      stepId: step.stepId,
+      leg: step.leg,
+      effectKind: step.effectKind,
+      status: result.status,
+      outcome: settledOutcome,
+      verified: result.status === 'terminal' && result.outcome.kind === 'SUCCESS',
+      reason: result.status === 'refused' ? result.reason : null,
+      identity: snapshot.observation.identity,
+      observedAtMs: snapshot.observation.observedAtMs,
+      usage: settledState.usage,
+    }
+    if (result.status === 'refused') this.logger.warn('vtr', stepEvent, stepDetail, this.tickCounter)
+    else this.logger.info('vtr', stepEvent, stepDetail, this.tickCounter)
     if (result.status === 'terminal') {
       if (result.outcome.kind === 'SUCCESS') this.logReachVerification(result.outcome, snapshot)
       const current = this.executor.current
