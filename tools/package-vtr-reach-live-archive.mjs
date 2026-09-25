@@ -985,6 +985,9 @@ function projectTransition(report) {
   if (terminalDetail.metrics && typeof terminalDetail.metrics === 'object') Object.assign(projected.metrics, structuredClone(terminalDetail.metrics))
   const rawOutcome = terminalDetail.outcome
   projected.outcome = rawOutcome && typeof rawOutcome === 'object' ? structuredClone(rawOutcome) : null
+  if (projected.outcome !== null && terminalDetail.boundary !== undefined) {
+    projected.outcome.boundary = terminalDetail.boundary
+  }
   // Canonical probe alias consumed by the comparator and validators:
   // transition.terminalOutcome.outcome + .boundary.
   projected.terminalOutcome = {
@@ -1004,6 +1007,30 @@ function projectTransition(report) {
   // VERIFY record under their canonical names.
   projected.commit = structuredClone(commitDetail)
   projected.verify = projected.verification === null ? null : structuredClone(projected.verification)
+  // v1 comparator alias: the transition's bound world identity under its
+  // canonical name (the contract carries it as `identity`).
+  projected.worldIdentity = projected.identity === undefined || projected.identity === null
+    ? null
+    : structuredClone(projected.identity)
+  // Canonical v1 provenance: the captured event rows for this Transition in
+  // journal order, plus the precommit UNKNOWN-source hold count derived from
+  // them (the comparator re-derives the same count from eventSequence).
+  const sourceEventRows = Array.isArray(transitionInfo.sourceEventRows) ? transitionInfo.sourceEventRows : []
+  projected.eventSequence = sourceEventRows.map((row) => row?.message).filter((message) => typeof message === 'string')
+  const commitIndex = projected.eventSequence.findIndex((message) => message.includes('VTR_TRANSITION_COMMIT'))
+  projected.precommitUnknownSourceHolds = projected.eventSequence
+    .slice(0, Math.max(0, commitIndex))
+    .filter((message) => message.includes('VTR_REACH_PROBE_HOLD') && /unknown|unavailable/iu.test(message)).length
+  const verifyIndex = projected.eventSequence.findIndex((message) => message.includes('VTR_TRANSITION_VERIFY'))
+  const outcomeIndex = projected.eventSequence.findIndex((message) => message.includes('VTR_TRANSITION_OUTCOME'))
+  projected.actionSkillReportedSuccessWasNotUsedAsTransitionTerminal =
+    transitionInfo.actionSkillReportedSuccessWasNotUsedAsTransitionTerminal === true
+  const verifyDetail = projected.verification
+  projected.archivedVerificationBeforeOutcome = verifyIndex >= 0 && outcomeIndex > verifyIndex &&
+    verifyDetail !== null && verifyDetail.truth === 'TRUE' &&
+    Array.isArray(verifyDetail.evidenceIds) && Array.isArray(projected.outcome?.evidenceIds) &&
+    isDeepStrictEqual(verifyDetail.evidenceIds, projected.outcome.evidenceIds) &&
+    verifyDetail.desiredPredicateIdentity === projected.outcome?.desiredPredicateIdentity
   return projected
 }
 
@@ -1167,7 +1194,11 @@ function makeProbe({ report, identity, metadata, transition, bundle, providerCap
     initialPosition: mission.initialPosition,
     finalPosition: mission.finalPosition,
   }
-  if (mission.missionCompletion !== undefined) missionProjection.missionCompletion = mission.missionCompletion
+  if (mission.id !== undefined) missionProjection.id = mission.id
+  else if (typeof transition?.mission?.id === 'string') missionProjection.id = transition.mission.id
+  missionProjection.missionCompletion = mission.missionCompletion !== undefined
+    ? mission.missionCompletion
+    : (mission.finalInventory?.[mission.item] ?? 0) >= mission.count
   return {
     schema: 'vtr-reach-live-probe/v1',
     source: {
@@ -1556,11 +1587,11 @@ async function main(argv) {
     return 0
   }
   try {
-    const result = packageVtrReachArchive(options)
+    const result = packageVtrReachArchive({ collectorReportPath: options.collectorReport, manifestPath: options.manifest, archivePath: options.archive, repoPath: options.repo })
     process.stdout.write(`${JSON.stringify({ packageStatus: result.report.packageStatus, archive: result.outputRoot, sourceSha: result.report.identity.sourceSha, runId: result.report.identity.runId, generationId: result.report.identity.generationId })}\n`)
     return result.report.packageStatus === 'FAIL' ? 1 : result.report.packageStatus === 'INCOMPLETE' ? 2 : 0
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`)
     return 64
   }
 }

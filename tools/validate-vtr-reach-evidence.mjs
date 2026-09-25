@@ -1293,9 +1293,16 @@ function inspectRawVtrSide(side, expectedIdentity) {
   const terminalAt = Date.parse(outcomes[0].ts ?? '')
   const reservationTimes = reservations.map((row) => Date.parse(row.ts ?? ''))
   const outcomeTimes = stepOutcomes.map((row) => Date.parse(row.ts ?? ''))
+  const rowIndex = (row) => rows.indexOf(row)
+  const commitIndex = rowIndex(commitRow)
+  const verifyIndex = rowIndex(verifies[0])
+  const terminalIndex = rowIndex(outcomes[0])
   if (![commitAt, verifyAt, terminalAt, ...reservationTimes, ...outcomeTimes].every(Number.isFinite) ||
-      reservationTimes.some((value) => value < commitAt || value >= verifyAt) ||
-      outcomeTimes.some((value) => value < commitAt || value >= verifyAt) || verifyAt > terminalAt) {
+      reservations.some((row) => rowIndex(row) <= commitIndex || rowIndex(row) >= verifyIndex) ||
+      stepOutcomes.some((row) => rowIndex(row) <= commitIndex || rowIndex(row) >= verifyIndex) ||
+      reservationTimes.some((value) => value < commitAt || value > verifyAt) ||
+      outcomeTimes.some((value) => value < commitAt || value > verifyAt) ||
+      verifyAt > terminalAt || verifyIndex > terminalIndex) {
     throw new Error('VTR commit/mechanical/VERIFY/terminal records are not time-ordered')
   }
   const skillStartAt = Date.parse(eventNamed(rows, 'SKILL_START', (row) => row.detail?.actionId === selectedActionId)[0]?.ts ?? '')

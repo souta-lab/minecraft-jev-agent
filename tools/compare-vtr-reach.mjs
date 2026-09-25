@@ -533,6 +533,9 @@ const VTR_RAW_REQUIREMENTS = [
   'runner/jev-calls.jsonl',
   'runner/jev-decisions.jsonl',
   'runner/system2.jsonl',
+  'runner/mercury-calls.jsonl',
+  'runner/host-lifecycle.jsonl',
+  'runner/no-llm-egress-audit.json',
   'runner/provider-activity-capture.json',
   'runner/acceptance.json',
   'server/fixture-commands.jsonl',
@@ -694,6 +697,9 @@ function parseLegacy(raw, sourceText, legacyPath) {
       generationId: text(input.generationId, 'legacy.generationId') }
     const legacyArchive = findLegacyArchive(legacyPath, expectedIdentity)
     const rawCommandMission = normalizedMissionFromLegacyArchive(legacyArchive?.root, legacyArchive?.evidence)
+    const archiveFixture = legacyArchive === null
+      ? { evidence: null, path: null, fixture: null }
+      : legacyFixtureFromArchive(legacyArchive.root, expectedIdentity, legacyArchive.evidence)
     return {
       schema: input.schema,
       sourceSha,
@@ -717,8 +723,8 @@ function parseLegacy(raw, sourceText, legacyPath) {
       missionInputComparable: false,
       fixtureClassComparable: fixture.block === 'oak_log',
       fixtureDescription: `${fixture.block} at ${fixture.position?.x},${fixture.position?.y},${fixture.position?.z}; offset=${JSON.stringify(fixture.offset)}`,
-      fixture: structuredFixture(legacyArchive?.evidence?.fixture ?? fixture),
-      fixtureEvidencePath: legacyArchive === null ? null : 'runner/reach-slice-evidence.json',
+      fixture: structuredFixture(archiveFixture.fixture ?? legacyArchive?.evidence?.fixture ?? fixture),
+      fixtureEvidencePath: archiveFixture.path ?? (legacyArchive === null ? null : 'runner/reach-slice-evidence.json'),
       missionInput: structuredMission(rawCommandMission ?? legacyArchive?.evidence?.missionInput ?? input.missionInput ?? input.legacyMissionInput ?? input.mission ?? oldPlan.missionInput ?? oldPlan.mission),
       sameMissionClaim: rawCommandMission !== null ? true : typeof input.sameMissionInput === 'boolean' ? input.sameMissionInput : null,
       metrics: {
@@ -1449,7 +1455,13 @@ const output = {
     authority: {
       legacy: { status: 'not-applicable: baseline source has no VTR authority to compare against', duplicateAuthority: null },
       vtr: {
-        duplicateAuthority: vtr.metrics.duplicateAuthority,
+        // Exclusivity proof (positive form): true means the probe recorded
+        // exactly one authority and no legacy concurrent actuation. The raw
+        // probe flag `duplicateAuthority` is the negative violation flag
+        // (false = no duplicate); both polarities are preserved below.
+        duplicateAuthority: vtr.metrics.duplicateAuthority === false &&
+          vtr.metrics.duplicateAuthorityConflicts === 0 && vtr.metrics.concurrentLegacyActuations === 0,
+        duplicateAuthorityReported: vtr.metrics.duplicateAuthority,
         duplicateAuthorityConflicts: vtr.metrics.duplicateAuthorityConflicts,
         concurrentLegacyActuations: vtr.metrics.concurrentLegacyActuations,
       },
