@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
+import { filterLegacyReachCandidates } from './src/vtr/legacy-reach-compat.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
@@ -268,4 +269,55 @@ test('normal mode reconciles a non-admitted Mission source so legacy cannot repl
   assert.deepEqual(fixture.claimed, [])
   assert.equal(fixture.events.some(({ line }) => line.includes('VTR_REACH_PROBE_HOLD')), false)
   assert.equal(fixture.requestedDecisions.length, 0)
+
+  const unrelated = moveToOakLog()
+  unrelated.id = 'MOVE:iron_ore@24,64,0'
+  unrelated.label = 'approach unrelated iron ore source'
+  unrelated.targetName = 'iron_ore'
+  unrelated.meta = {
+    targetBlockName: 'iron_ore',
+    targetBlockX: 24,
+    targetBlockY: 64,
+    targetBlockZ: 0,
+  }
+  const declinedWorld = {
+    ...fixture.world,
+    blocks: [
+      ...fixture.world.blocks,
+      {
+        name: 'iron_ore',
+        yield: 'raw_iron',
+        kind: 'ore' as const,
+        visible: true,
+        inReach: false,
+        distance: 16,
+        diggable: true,
+        position: { x: 24, y: 64, z: 0 },
+        hasAdjacentStandable: true,
+        adjacentStandable: { x: 23, y: 64, z: 0 },
+      },
+    ],
+  }
+  const afterVtrDecline = filterLegacyReachCandidates({
+    candidates: [moveToOakLog(), unrelated],
+    world: declinedWorld,
+    missionItem: configuredMission.item,
+    missionSourceNames: ['oak_log'],
+    vtrOwnsReachMove: runtime.vtrOwnsReachMoveThisTick,
+  })
+  assert.deepEqual(afterVtrDecline.withheld.map((candidate) => candidate.id), ['MOVE:oak_log@8,64,0'])
+  assert.deepEqual(afterVtrDecline.candidates.map((candidate) => candidate.id), ['MOVE:iron_ore@24,64,0'])
+  assert.equal(afterVtrDecline.candidates[0]?.id, unrelated.id, 'the unrelated candidate remains eligible to legacy policy')
+
+  const legacyOwnsNoSamePredicateTick = filterLegacyReachCandidates({
+    candidates: [moveToOakLog(), unrelated],
+    world: declinedWorld,
+    missionItem: configuredMission.item,
+    missionSourceNames: ['oak_log'],
+    vtrOwnsReachMove: false,
+  })
+  assert.deepEqual(legacyOwnsNoSamePredicateTick.candidates.map((candidate) => candidate.id), [
+    'MOVE:oak_log@8,64,0',
+    'MOVE:iron_ore@24,64,0',
+  ])
 })

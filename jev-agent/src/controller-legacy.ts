@@ -175,6 +175,7 @@ import {
   countMissionInventoryResource,
   missionResourceSourceMatches,
 } from './vtr/reach.ts'
+import { filterLegacyReachCandidates, isLegacyMissionReachSourceMove } from './vtr/legacy-reach-compat.ts'
 import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
 import type { ReachControllerResult, ReachRuntimeSnapshot, ReachRoute } from './vtr/reach-controller.ts'
@@ -4942,16 +4943,7 @@ export class JevController {
    * a staircase route requiring an uncommitted terrain mutation).
    */
   private reachMissionSourceCandidateShape(item: string, candidate: Candidate, state: WorldState): boolean {
-    if (candidate.kind !== 'MOVE' || candidate.target === null || candidate.meta.explore === true) return false
-    const name = typeof candidate.meta.targetBlockName === 'string' ? candidate.meta.targetBlockName : candidate.targetName
-    const x = candidate.meta.targetBlockX
-    const y = candidate.meta.targetBlockY
-    const z = candidate.meta.targetBlockZ
-    return (
-      this.isMissionSource(item, name) &&
-      typeof x === 'number' && typeof y === 'number' && typeof z === 'number' &&
-      state.blocks.some((block) => block.name === name && block.position.x === x && block.position.y === y && block.position.z === z)
-    )
+    return isLegacyMissionReachSourceMove(candidate, state, item, this.missionSourceNames(item))
   }
 
   /**
@@ -5554,19 +5546,23 @@ export class JevController {
       )
       let candidates = grounded.candidates
       const vtrMission = this.options.vtrMission
-      if (this.vtrOwnsReachMoveThisTick && vtrMission !== null && vtrMission !== undefined) {
-        const legacyReachMoves = candidates.filter((candidate) =>
-          this.reachMissionSourceCandidateShape(vtrMission.item, candidate, state),
-        )
-        if (legacyReachMoves.length > 0) {
-          candidates = candidates.filter((candidate) => !legacyReachMoves.includes(candidate))
+      if (vtrMission !== null && vtrMission !== undefined) {
+        const legacyReachFilter = filterLegacyReachCandidates({
+          candidates,
+          world: state,
+          missionItem: vtrMission.item,
+          missionSourceNames: this.missionSourceNames(vtrMission.item),
+          vtrOwnsReachMove: this.vtrOwnsReachMoveThisTick,
+        })
+        if (legacyReachFilter.withheld.length > 0) {
           this.logger.info(
             'vtr',
-            `VTR_LEGACY_REACH_MOVE_WITHHELD mission=${vtrMission.id} count=${legacyReachMoves.length}`,
-            { mission: vtrMission, candidates: legacyReachMoves.map((candidate) => candidate.id), authority: 'vtr-transition' },
+            `VTR_LEGACY_REACH_MOVE_WITHHELD mission=${vtrMission.id} count=${legacyReachFilter.withheld.length}`,
+            { mission: vtrMission, candidates: legacyReachFilter.withheld.map((candidate) => candidate.id), authority: 'vtr-transition' },
             this.tickCounter,
           )
         }
+        candidates = legacyReachFilter.candidates
       }
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)

@@ -232,21 +232,32 @@ describe('VTR Reach production authority seam', () => {
   })
 
   it('withholds same-Mission resource MOVE from the legacy decision plane while VTR owns Reach', () => {
-    const ownerFilter = controller.indexOf('if (this.vtrOwnsReachMoveThisTick && vtrMission !== null')
+    const ownerFilter = controller.indexOf('const legacyReachFilter = filterLegacyReachCandidates({')
     const filterEnd = controller.indexOf('candidates = this.applyFurnacePrereq', ownerFilter)
     assert.ok(ownerFilter >= 0 && filterEnd > ownerFilter)
     const suppression = controller.slice(ownerFilter, filterEnd)
-    assert.match(suppression, /candidates\.filter\(\(candidate\) =>\s*this\.reachMissionSourceCandidateShape\(vtrMission\.item, candidate, state\)/)
-    assert.match(suppression, /candidates = candidates\.filter\(\(candidate\) => !legacyReachMoves\.includes\(candidate\)\)/)
+    assert.match(suppression, /missionItem: vtrMission\.item/)
+    assert.match(suppression, /missionSourceNames: this\.missionSourceNames\(vtrMission\.item\)/)
+    assert.match(suppression, /vtrOwnsReachMove: this\.vtrOwnsReachMoveThisTick/)
+    assert.match(suppression, /candidates = legacyReachFilter\.candidates/)
     assert.match(suppression, /VTR_LEGACY_REACH_MOVE_WITHHELD/)
+
+    const tickStart = controller.indexOf('private async tick(trigger: DecisionTrigger')
+    const tickEnd = controller.indexOf('private jevLog(', tickStart)
+    const tick = controller.slice(tickStart, tickEnd)
+    assert.ok(tick.indexOf('filterLegacyReachCandidates({') < tick.indexOf('await this.decide(state, candidates'))
+
+    const compatibility = readFileSync(new URL('./src/vtr/legacy-reach-compat.ts', import.meta.url), 'utf8')
+    assert.match(compatibility, /Temporary strangler boundary/)
+    assert.match(compatibility, /Delete this filter[\s\S]*?legacy candidate\/claim path no longer owns Mission semantics/)
+    assert.match(compatibility, /missionResourceSourceMatches\(item, name, null, sourceNames\)/)
+    assert.match(compatibility, /world\.blocks\.some\(/)
 
     const sourceShapeStart = controller.indexOf('private reachMissionSourceCandidateShape(')
     const sourceShapeEnd = controller.indexOf('/**\n   * Match only a still-current legacy walk commitment', sourceShapeStart)
     const sourceShape = controller.slice(sourceShapeStart, sourceShapeEnd)
     assert.ok(sourceShapeStart >= 0 && sourceShapeEnd > sourceShapeStart)
-    assert.match(sourceShape, /candidate\.kind !== 'MOVE'/)
-    assert.match(sourceShape, /this\.isMissionSource\(item, name\)/)
-    assert.match(sourceShape, /state\.blocks\.some\(/)
+    assert.match(sourceShape, /isLegacyMissionReachSourceMove\(candidate, state, item, this\.missionSourceNames\(item\)\)/)
 
     const schedulerStart = controller.indexOf('private async tickReachTransition(')
     const schedulerEnd = controller.indexOf('private reachWitnessForCandidateShape(', schedulerStart)
