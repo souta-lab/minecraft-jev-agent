@@ -1118,7 +1118,7 @@ export async function runVtrReachProbeSupervisor({
       identity,
       maxObserverFreshnessMs,
     ))
-    observerSnapshots.push({ phase: 'generation-ready', at: new Date(now()).toISOString(), ...readyObserver.summary })
+    observerSnapshots.push({ phase: 'generation-ready', at: new Date(now()).toISOString(), status: readyObserver.status, ...readyObserver.summary })
     events.push({ event: 'observer-generation-ready-identity-verified', at: new Date(now()).toISOString(), summary: readyObserver.summary })
 
     const terminalResult = await waitUntil('typed Reach Transition terminal outcome', () => terminalForRunJournal(sinkPaths['run-journal'], identity))
@@ -1144,7 +1144,7 @@ export async function runVtrReachProbeSupervisor({
       identity,
       maxObserverFreshnessMs,
     ))
-    observerSnapshots.push({ phase: 'terminal', at: new Date(now()).toISOString(), ...terminalObserver.summary })
+    observerSnapshots.push({ phase: 'terminal', at: new Date(now()).toISOString(), status: terminalObserver.status, ...terminalObserver.summary })
     events.push({ event: 'observer-terminal-identity-verified', at: new Date(now()).toISOString(), summary: terminalObserver.summary })
 
     pollWatch()
