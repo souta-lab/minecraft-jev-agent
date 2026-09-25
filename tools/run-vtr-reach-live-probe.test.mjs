@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +15,7 @@ import {
   startRowFromLog,
   terminateOwnedProcessGroup,
   inspectExactSourceDependencyReadiness,
+  runNoDoubleAuthorityFixture,
   validateExactSourceWorkspaceInstall,
   validatePortPolicy,
   writeSetupFailureArtifact,
@@ -106,6 +108,31 @@ describe('Reach live probe caller pure contracts', () => {
       outputCount: 2,
     })
     expect(smoke.errors).toEqual([])
+  })
+
+  test('exact-source no-double-authority fixture runs through its Bun-discoverable test entry', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'vtr-no-double-authority-runner-'))
+    const attemptRoot = join(parent, 'attempt')
+    const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim()
+    try {
+      const result = runNoDoubleAuthorityFixture(process.cwd(), attemptRoot, sourceSha)
+      expect(result.testEntryRelative).toBe('jev-agent/vtr-reach-executor-dispatch-authority.test.mts')
+      expect(result.sourceSha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(result.gitObjectSha256).toBe(result.sourceSha256)
+      expect(result.testEntrySha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(result.gitTestEntryObjectSha256).toBe(result.testEntrySha256)
+      expect(result.report).toMatchObject({
+        schema: 'vtr-reach-no-double-authority-fixture/v1',
+        result: 'PASS',
+        sourceSha,
+        test: { path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts' },
+        fixture: { legacyClaimRejected: true, vtrOwnerRetained: true, authorityConflictCount: 1 },
+      })
+      expect(existsSync(result.sourcePath)).toBe(true)
+      expect(existsSync(result.testEntryPath)).toBe(true)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
   })
 
   test('staged setup failure records exact cause before the CLI returns', () => {

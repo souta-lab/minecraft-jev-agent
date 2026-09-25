@@ -22,6 +22,8 @@ import { packageVtrReachArchive } from './package-vtr-reach-live-archive.mjs'
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_SOURCE_ROOT = resolve(TOOL_DIR, '..')
 const REQUIRED_CAPTURE_SCHEMA = 'vtr-provider-activity-capture/v2'
+const NO_DOUBLE_AUTHORITY_FIXTURE_SOURCE = 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts'
+const NO_DOUBLE_AUTHORITY_FIXTURE_TEST_ENTRY = 'jev-agent/vtr-reach-executor-dispatch-authority.test.mts'
 const PROTECTED_SERVER_PORTS = new Set([25565, 25570, 25572, 25576, 4173, 4174])
 const PROTECTED_OBSERVER_PORTS = new Set([25565, 25570, 25572, 25576, 4173, 4174])
 const SHA40 = /^[0-9a-f]{40}$/iu
@@ -315,12 +317,21 @@ export async function preflightProbe(options) {
   })
 
   await check('no-double-authority-fixture-contract', () => {
-    const fixturePath = join(options.sourceRoot, 'jev-agent', 'test-vtr-reach-executor-dispatch-authority.mts')
+    const fixturePath = join(options.sourceRoot, NO_DOUBLE_AUTHORITY_FIXTURE_SOURCE)
     const source = readFileSync(fixturePath, 'utf8')
     for (const token of ['VTR_REACH_AUTHORITY_FIXTURE_REPORT', 'VTR_REACH_SOURCE_SHA', 'vtr-reach-no-double-authority-fixture/v1']) {
       if (!source.includes(token)) throw new Error(`fixture source does not support exact-source report contract (${token})`)
     }
-    return { sourcePath: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts', runBeforeServerStart: true }
+    const testEntryPath = join(options.sourceRoot, NO_DOUBLE_AUTHORITY_FIXTURE_TEST_ENTRY)
+    const testEntry = readFileSync(testEntryPath, 'utf8')
+    if (!testEntry.includes("import './test-vtr-reach-executor-dispatch-authority.mts'")) {
+      throw new Error('Bun-discoverable fixture entry must import the exact-source authority fixture')
+    }
+    return {
+      sourcePath: NO_DOUBLE_AUTHORITY_FIXTURE_SOURCE,
+      testEntryPath: NO_DOUBLE_AUTHORITY_FIXTURE_TEST_ENTRY,
+      runBeforeServerStart: true,
+    }
   })
 
   await check('runtime-dependencies', () => {
@@ -705,6 +716,7 @@ function setupEvidenceCandidates(attemptRoot, preflightPath = null) {
     join(attemptRoot, 'runner', 'no-double-authority-fixture.json'),
     join(attemptRoot, 'runner', 'no-double-authority-fixture-test.log'),
     join(attemptRoot, 'runner', 'fixtures', 'test-vtr-reach-executor-dispatch-authority.mts'),
+    join(attemptRoot, 'runner', 'fixtures', 'vtr-reach-executor-dispatch-authority.test.mts'),
   ]
 }
 
@@ -946,15 +958,22 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
   return { ...metadata, lockPath, logPath, metadataPath, sourceBunLockPath }
 }
 
-function runNoDoubleAuthorityFixture(runtimeSource, attemptRoot, sourceSha) {
-  const sourceRelative = 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts'
+export function runNoDoubleAuthorityFixture(runtimeSource, attemptRoot, sourceSha) {
+  const sourceRelative = NO_DOUBLE_AUTHORITY_FIXTURE_SOURCE
+  const testEntryRelative = NO_DOUBLE_AUTHORITY_FIXTURE_TEST_ENTRY
   const sourcePath = join(runtimeSource, sourceRelative)
+  const testEntryPath = join(runtimeSource, testEntryRelative)
   const sourceBytes = readFileSync(sourcePath)
+  const testEntryBytes = readFileSync(testEntryPath)
   const gitSourceBytes = Buffer.from(execFileSync('git', ['-C', runtimeSource, 'show', `${sourceSha}:${sourceRelative}`]))
+  const gitTestEntryBytes = Buffer.from(execFileSync('git', ['-C', runtimeSource, 'show', `${sourceSha}:${testEntryRelative}`]))
   if (sha256(gitSourceBytes) !== sha256(sourceBytes)) throw new Error('fixture bytes in exact checkout differ from the pinned git object')
+  if (sha256(gitTestEntryBytes) !== sha256(testEntryBytes)) throw new Error('fixture test entry bytes in exact checkout differ from the pinned git object')
   const archivedSource = join(attemptRoot, 'runner', 'fixtures', 'test-vtr-reach-executor-dispatch-authority.mts')
+  const archivedTestEntry = join(attemptRoot, 'runner', 'fixtures', 'vtr-reach-executor-dispatch-authority.test.mts')
   mkdirSync(dirname(archivedSource), { recursive: true, mode: 0o700 })
   writeFileSync(archivedSource, sourceBytes, { flag: 'wx', mode: 0o600 })
+  writeFileSync(archivedTestEntry, testEntryBytes, { flag: 'wx', mode: 0o600 })
   const reportPath = join(attemptRoot, 'runner', 'no-double-authority-fixture.json')
   mkdirSync(dirname(reportPath), { recursive: true, mode: 0o700 })
   const tmpDir = join(attemptRoot, 'tmp', 'fixture-test')
@@ -962,7 +981,10 @@ function runNoDoubleAuthorityFixture(runtimeSource, attemptRoot, sourceSha) {
   const logPath = join(attemptRoot, 'runner', 'no-double-authority-fixture-test.log')
   const isolatedHome = join(attemptRoot, 'home', 'fixture-test')
   mkdirSync(isolatedHome, { recursive: true, mode: 0o700 })
-  const result = spawnSync(process.execPath, ['--no-env-file', 'test', sourceRelative], {
+  // Bun does not accept the historical `test-*` source filename as a direct
+  // test filter. This committed `.test.mts` entry imports and executes the
+  // exact-source fixture while remaining discoverable by Bun.
+  const result = spawnSync(process.execPath, ['--no-env-file', 'test', testEntryRelative], {
     cwd: runtimeSource,
     env: minimalEnvironment({
       HOME: isolatedHome,
@@ -997,8 +1019,12 @@ function runNoDoubleAuthorityFixture(runtimeSource, attemptRoot, sourceSha) {
   return {
     reportPath,
     sourcePath: archivedSource,
+    testEntryPath: archivedTestEntry,
+    testEntryRelative,
     sourceSha256: sha256(sourceBytes),
+    testEntrySha256: sha256(testEntryBytes),
     gitObjectSha256: sha256(gitSourceBytes),
+    gitTestEntryObjectSha256: sha256(gitTestEntryBytes),
     executedCheckoutSha256: sha256(sourceBytes),
     logPath,
     report,
