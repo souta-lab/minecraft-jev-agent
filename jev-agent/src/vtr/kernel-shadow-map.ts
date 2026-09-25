@@ -285,10 +285,23 @@ export function reachContractToKernelSpec(
   world: WorldIdentity,
 ): ReachKernelContractResult {
   const identity = contract.identity
-  if (identity.dimension !== world.dimension || identity.worldEpoch !== world.worldEpoch) {
+  // Reach identities use the jev-agent bare-dimension convention ('overworld')
+  // while host world keys carry the canonical 'minecraft:' namespace. Compare
+  // both sides under the same bare form so a namespaced and a bare spelling of
+  // the same dimension agree — real mismatches (e.g. nether vs overworld)
+  // still fail closed.
+  const bareDimension = (dimension: string): string => dimension.replace(/^minecraft:/, '')
+  const worldDim = bareDimension(world.dimension)
+  if (bareDimension(identity.dimension) !== worldDim || identity.worldEpoch !== world.worldEpoch) {
     return { ok: false, reason: `contract identity ${identity.dimension}@${identity.worldEpoch} disagrees with kernel world ${world.dimension}@${world.worldEpoch}` }
   }
-  if (identity.worldKey !== `${world.serverId}|${world.dimension}|${world.worldEpoch}`) {
+  const worldKeyParts = identity.worldKey.split('|')
+  const worldKeyAgrees =
+    worldKeyParts.length === 3 &&
+    worldKeyParts[0] === world.serverId &&
+    bareDimension(worldKeyParts[1]!) === worldDim &&
+    worldKeyParts[2] === String(world.worldEpoch)
+  if (!worldKeyAgrees) {
     return { ok: false, reason: `contract worldKey ${identity.worldKey} disagrees with kernel world` }
   }
   if (contract.admissibleEffects.length === 0) {

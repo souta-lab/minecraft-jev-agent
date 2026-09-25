@@ -273,6 +273,24 @@ addCase('transition committed already-terminal replays VERIFY_SUCCESS without ac
   return { pass, detail: `lifecycle=${terminal?.lifecycle} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
 })
 
+addCase('namespaced kernel world accepts the bare Reach dimension convention', () => {
+  // Live proof regression: the host world identity carries 'minecraft:' while
+  // Reach identities are bare. Registration must agree under normalization.
+  const session = createKernelShadowSession({
+    world: { serverId: 'srv', dimension: 'minecraft:overworld', worldEpoch: 7 },
+    generationId: 'gen-1',
+    journalPath: null,
+  })
+  session.bindActuationContext(() => vtrContext)
+  const contract = makeContract('t-ns')
+  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
+  const registered = session.state().transitions['t-ns']
+  const blockers = session.blockers()
+  const pass = registered !== undefined && blockers.length === 0
+  return { pass, detail: `registered=${registered?.lifecycle ?? 'none'} blockers=${blockers.map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+})
+
 addCase('non-success terminal closes via stand-in and records the projection limitation', () => {
   const { session, blockers } = makeSession(() => vtrContext)
   const contract = makeContract('t-fail')
