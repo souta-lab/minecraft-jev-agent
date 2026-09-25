@@ -8,6 +8,25 @@ import type { ReachIdentity } from './src/vtr/reach.ts'
 import type { ReachRoute, ReachRouteDecisionInput } from './src/vtr/reach-controller.ts'
 import type { WorldState } from './src/state.ts'
 
+const LEGACY_OPTION_BETA_METADATA_KEYS = [
+  'betaProbability',
+  'betaAdopt',
+  'optionInstanceId',
+  'optionTemplateId',
+  'betaThreshold',
+] as const
+
+function findKeysDeep(value: unknown, sought: ReadonlySet<string>, path = '$'): string[] {
+  if (Array.isArray(value)) return value.flatMap((entry, index) => findKeysDeep(entry, sought, `${path}[${index}]`))
+  if (typeof value !== 'object' || value === null) return []
+  return Object.entries(value).flatMap(([key, entry]) => [
+    ...(sought.has(key) ? [`${path}.${key}`] : []),
+    ...findKeysDeep(entry, sought, `${path}.${key}`),
+  ])
+}
+
+const legacyOptionBetaMetadataKeys = new Set<string>(LEGACY_OPTION_BETA_METADATA_KEYS)
+
 const identity: ReachIdentity = {
   worldKey: 'fixture-world|minecraft:overworld|4',
   dimension: 'minecraft:overworld',
@@ -204,9 +223,58 @@ test('VTR route frame journal records bounded Jev policy input without generic p
   assert.equal(call.authority.beta, undefined)
   assert.equal(call.authority.code, 'grounding+safety+truth')
   assert.equal(call.response.answers.action?.note, 'jev-reach-route-policy-input')
-  const decision = call.authority.decision as { betaProbability: number | null; betaAdopt: boolean }
-  assert.equal(decision.betaProbability, null, 'route-frame logging must not manufacture a beta vote')
-  assert.equal(decision.betaAdopt, false)
+  assert.equal('decision' in call.authority, false, 'route journal must not include legacy Option/β metadata')
+  assert.equal('authorityDecision' in observedResults[0]!, false, 'route result must not expose legacy Option/β metadata')
+  assert.deepEqual(findKeysDeep(call, legacyOptionBetaMetadataKeys), [], 'route journal must not record legacy Option/β keys at any depth')
+  assert.deepEqual(findKeysDeep(observedResults[0], legacyOptionBetaMetadataKeys), [], 'route result must not expose legacy Option/β keys at any depth')
+})
+
+test('failed VTR route frame journals only route policy failure, without legacy Option/β metadata', async () => {
+  const records: unknown[] = []
+  let failureReason = ''
+  const policy = new AuthorityJevPolicy(
+    {
+      writer: { path: 'fixture', write(record: unknown) { records.push(record) } },
+      model: 'test-primary-jev',
+      timeoutMs: 1_000,
+      maxRetries: 0,
+      rateLimitRetries: 0,
+      rateLimitBaseDelayMs: 1,
+    } as unknown as JevPolicyOptions,
+    { key: 'fixture-only', origin: 'test' },
+    {
+      evaluate: (async () => { throw new Error('synthetic Jev transport refusal') }) as unknown as NonNullable<ConstructorParameters<typeof AuthorityJevPolicy>[2]>['evaluate'],
+    },
+  )
+  const adapter = new JevReachRouteDecisionPolicy({
+    policy: () => policy,
+    worldState: () => worldState(),
+    onCallStart: () => undefined,
+    onResult: () => assert.fail('failed Jev evaluation must not produce a route result'),
+    onFailure: (_request, reason) => { failureReason = reason },
+  })
+
+  const decision = await adapter.chooseRoute(input)
+  assert.equal(decision.status, 'unavailable')
+  if (decision.status === 'unavailable') {
+    assert.match(decision.reason, /jev_route_policy_failed:FatalModelError: FATAL model failure/)
+  }
+  assert.match(failureReason, /synthetic Jev transport refusal/)
+  const failedCall = records.find((record) => (record as { record?: string }).record === 'jev-call') as {
+    authority: Record<string, unknown>
+    response: unknown
+    error: string
+  }
+  assert.equal(failedCall.response, null)
+  assert.match(failedCall.error, /synthetic Jev transport refusal/)
+  assert.deepEqual(failedCall.authority.decisionFrame, {
+    kind: 'vtr-reach-route',
+    policy: 'jev',
+    questionAuthorities: { action: 'jev-policy-input' },
+  })
+  assert.equal('pi' in failedCall.authority, false)
+  assert.equal('beta' in failedCall.authority, false)
+  assert.deepEqual(findKeysDeep(failedCall, legacyOptionBetaMetadataKeys), [], 'failed route journal must not record legacy Option/β keys at any depth')
 })
 
 test('an unoffered Jev route is refused without deterministic substitution', async () => {

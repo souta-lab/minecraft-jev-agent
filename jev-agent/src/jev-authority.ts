@@ -822,9 +822,14 @@ export class AuthorityJevPolicy implements JevPolicy {
           if (!grounded) throw new Error(`Jev invented non-grounded action id ${JSON.stringify(action.value)}`)
         }
 
-        const authorityDecision = authorityDecisionMeta(request, answers)
+        // Reach route frames are scoped policy inputs owned by VTR. They do not
+        // participate in the legacy Option/β authority contract, so neither the
+        // journal nor the returned Jev result may carry Option identity or β
+        // threshold/adoption metadata for this call.
+        const authorityDecision = isReachRouteFrame ? undefined : authorityDecisionMeta(request, answers)
         const usage = readUsage(response.usage)
         const latencyMs = Date.now() - started
+        const decisionJournal = authorityDecision === undefined ? {} : { decision: authorityDecision }
         this.options.writer.write({
           record: 'jev-call',
           callId,
@@ -843,7 +848,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           questions,
           response: { model: this.model, usage, answers },
           error: null,
-          authority: authorityJournal(request, { decision: authorityDecision }),
+          authority: authorityJournal(request, decisionJournal),
         })
         const result = {
           callId,
@@ -853,7 +858,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           latencyMs,
           usage,
           answers,
-          authorityDecision,
+          ...(authorityDecision === undefined ? {} : { authorityDecision }),
         }
         return result
       } catch (error) {
