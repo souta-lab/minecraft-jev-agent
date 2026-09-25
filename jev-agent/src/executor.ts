@@ -2246,7 +2246,6 @@ export class Executor {
    * running, ownership is retained and the caller just re-attaches to it.
    */
   claim(candidate: Candidate, context: ExecutionClaimContext = {}): ClaimResult {
-    this.ensureMovements()
     const running = this.action
     const requestedAuthority = context.authority ?? 'legacy'
     if (requestedAuthority === 'vtr-reach' &&
@@ -2333,6 +2332,17 @@ export class Executor {
     this.activeCommitment = commitment
     this.internalEffectSequence = 0
     this.stepLog.clear()
+    // Movement pinning mutates pathfinder state and must happen under the
+    // action's own authority, so it runs after `this.action` is established
+    // and still before the first dispatch in runAction. A failure here must
+    // not orphan the action record: release it before rethrowing.
+    try {
+      this.ensureMovements()
+    } catch (error) {
+      this.action = null
+      this.activeCommitment = null
+      throw error
+    }
     // NOTE (§17 single owner): `SKILL_COMMIT` is NOT emitted here. The controller
     // owns it, because section 3 makes the ACTIVE decision epoch the thing that
     // authorizes a commitment; it reads this commitment's id + contract hashes
