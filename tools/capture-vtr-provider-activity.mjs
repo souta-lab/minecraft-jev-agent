@@ -73,7 +73,7 @@ function bootWorldKey(fields) {
     if (typeof value.serverId !== 'string' || !value.serverId
       || typeof value.dimension !== 'string' || !value.dimension
       || !Number.isSafeInteger(value.worldEpoch)) return null
-    return `${value.serverId}|${value.dimension}|${value.worldEpoch}`
+    return `${value.serverId}|${value.dimension.replace(/^minecraft:/u, '')}|${value.worldEpoch}`
   } catch {
     return null
   }
@@ -107,10 +107,14 @@ function deterministicFallbackCall(row) {
 }
 
 function lifecycleWorldKey(value) {
-  if (typeof value === 'string') return value
+  if (typeof value === 'string') {
+    const parts = value.split('|')
+    if (parts.length !== 3) return value
+    return `${parts[0]}|${parts[1].replace(/^minecraft:/u, '')}|${parts[2]}`
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   if (typeof value.serverId !== 'string' || !value.serverId || typeof value.dimension !== 'string' || !value.dimension || !Number.isSafeInteger(value.worldEpoch)) return null
-  return `${value.serverId}|${value.dimension}|${value.worldEpoch}`
+  return `${value.serverId}|${value.dimension.replace(/^minecraft:/u, '')}|${value.worldEpoch}`
 }
 
 function loopbackPortFromWorldKey(worldKey) {

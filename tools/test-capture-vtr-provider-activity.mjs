@@ -85,7 +85,7 @@ try {
       sourceSha: SOURCE,
       runId: RUN,
       generationId: GENERATION,
-      worldKey: `${SERVER}|${DIMENSION}|${EPOCH}`,
+      worldKey: `${SERVER}|overworld|${EPOCH}`,
     })
     assert.deepEqual(capture.activity, {
       jevDecisionFrames: 0,
