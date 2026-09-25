@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { inspectReachComparisonProof } from './validate-vtr-reach-evidence.mjs'
+import { inspectLiveSkillOwnership, inspectReachComparisonProof } from './validate-vtr-reach-evidence.mjs'
 
 const sha256 = (value) => createHash('sha256').update(Buffer.from(value, 'utf8')).digest('hex')
 const encode = (value) => {
@@ -29,7 +29,7 @@ const worldKey = '127.0.0.1:25576|minecraft:overworld|1'
 const legacyWorldKey = '127.0.0.1:25572|minecraft:overworld|1'
 const targetPosition = { x: 6, y: 63, z: 489 }
 const startPosition = { x: 0.5, y: 63, z: 492.5 }
-const actionId = 'MOVE:reach-witness-1'
+const actionId = 'MOVE:b6_63_489'
 const intentId = 'intent-reach-1'
 const evidenceIds = ['verify:reach:oak_log@6,63,489']
 const predicateIdentity = 'reach-oak-log-witness'
@@ -61,13 +61,14 @@ function readText(side, path) {
 }
 
 function legacySide() {
-  const first = { decisionId: 'decision-first', callId: 'call-first', chosenAction: actionId,
+  const first = { decisionId: 'decision-first', callId: 'call-first', ts: t(2), chosenAction: actionId,
     runId: LEGACY.runId, generationId: LEGACY.generationId, sourceSha: LEGACY.sourceSha,
-    jev: { callId: 'call-first', answers: { action: { value: actionId } } } }
-  const next = { decisionId: 'decision-next', callId: 'call-next', chosenAction: 'MINE:oak_log',
+    jev: { callId: 'call-first', answers: { action: { value: actionId } } },
+    candidates: [{ id: actionId, kind: 'MOVE', targetName: 'oak_log', inReach: false }] }
+  const next = { decisionId: 'decision-next', callId: 'call-next', ts: t(7), chosenAction: 'MINE:b6_63_489',
     runId: LEGACY.runId, generationId: LEGACY.generationId, sourceSha: LEGACY.sourceSha,
-    jev: { callId: 'call-next', answers: { action: { value: 'MINE:oak_log' } } },
-    candidates: [{ id: 'MINE:oak_log', inReach: true }] }
+    jev: { callId: 'call-next', answers: { action: { value: 'MINE:b6_63_489' } } },
+    candidates: [{ id: 'MINE:b6_63_489', kind: 'MINE', targetName: 'oak_log', inReach: true }] }
   const summary = {
     ...LEGACY,
     missionInput: mission,
@@ -77,8 +78,8 @@ function legacySide() {
     sliceMetrics: { system2LlmCalls: 0, networkModelCalls: 0 },
     events: {
       firstDecision: { decisionId: first.decisionId },
-      nextDecisionInRange: { decisionId: next.decisionId, selected: 'MINE:oak_log' },
-      moveActionEnd: { actionId, movementStepCount: 2, pathLegs: 2, pathCallback: 'completed',
+      nextDecisionInRange: { decisionId: next.decisionId, selected: 'MINE:b6_63_489' },
+      moveActionEnd: { actionId, timestamp: t(6), movementStepCount: 2, pathLegs: 2, pathCallback: 'completed',
         skillEnd: 'SUCCESS', verification: 'verified' },
     },
   }
@@ -92,9 +93,9 @@ function legacySide() {
   ]
   skillRows[0].source = 'agent'
   const host = [
-    `[${t(3)}] SKILL_START actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha}`,
-    `[${t(6)}] SKILL_END actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha} outcome=SUCCESS failure=null`,
-    `[${t(6)}] PATH_CALLBACK phase=completed actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha}`,
+    `[${t(3)}] SKILL_START actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha} buildHash=${LEGACY.buildHash}`,
+    `[${t(6)}] SKILL_END actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha} buildHash=${LEGACY.buildHash} outcome=SUCCESS failure=null`,
+    `[${t(6)}] PATH_CALLBACK phase=completed actionId=${actionId} runId=${LEGACY.runId} generationId=${LEGACY.generationId} sourceSha=${LEGACY.sourceSha} buildHash=${LEGACY.buildHash}`,
   ].join('\n') + '\n'
   const call = (callId) => ({ record: 'jev-call', callId, policy: 'fallback', model: 'deterministic-local-fallback', latencyMs: 0, usage: { totalTokens: 0 } })
   return {
@@ -228,9 +229,9 @@ function vtrSide() {
   const host = [
     `[${t(0)}] BOOT runId=${VTR.runId} source=${VTR.sourceSha}`,
     `[${t(1)}] GENERATION_READY runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} buildHash=${VTR.buildHash}`,
-    `[${t(2)}] VTR_TRANSITION_COMMIT transitionId=${VTR.transitionId} runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} contractHash=${VTR.contractHash}`,
-    `[${t(12)}] VTR_TRANSITION_VERIFY transitionId=${VTR.transitionId} runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} contractHash=${VTR.contractHash} truth=TRUE`,
-    `[${t(13)}] VTR_TRANSITION_OUTCOME transitionId=${VTR.transitionId} runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} contractHash=${VTR.contractHash} outcome={"kind":"SUCCESS"}`,
+    `[${t(2)}] VTR_TRANSITION_COMMIT transitionId=${VTR.transitionId} runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} buildHash=${VTR.buildHash} contractHash=${VTR.contractHash}`,
+    `[${t(12)}] VTR_TRANSITION_VERIFY transitionId=${VTR.transitionId} runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} buildHash=${VTR.buildHash} contractHash=${VTR.contractHash} truth=TRUE`,
+    `[${t(13)}] VTR_TRANSITION_OUTCOME transitionId=${VTR.transitionId} runId=${VTR.runId} generationId=${VTR.generationId} sourceSha=${VTR.sourceSha} buildHash=${VTR.buildHash} contractHash=${VTR.contractHash} outcome={"kind":"SUCCESS"}`,
   ].join('\n') + '\n'
   const files = encodedFiles({
     'runner/probe.json': JSON.stringify(probe),
@@ -361,6 +362,37 @@ test('rejects a legacy movement whose raw SKILL_END is not verified SUCCESS', ()
   const result = inspectReachComparisonProof(proof, VTR.sourceSha, LEGACY.sourceSha)
   assert.equal(result.status, 'FAIL')
   assert.match(result.reason, /legacy MOVE SKILL_END is not a verified SUCCESS/)
+})
+
+test('rejects a legacy inReach decision that predates the completed MOVE', () => {
+  const proof = rawProof()
+  const side = proof.rawComparisonEvidence.legacy
+  const rows = readText(side, 'runner/runtime/logs/jev/decisions.jsonl').trim().split('\n').map((line) => JSON.parse(line))
+  rows.find((row) => row.decisionId === 'decision-next').ts = t(5)
+  replaceText(side, 'runner/runtime/logs/jev/decisions.jsonl', eventFile(rows))
+  const result = inspectReachComparisonProof(proof, VTR.sourceSha, LEGACY.sourceSha)
+  assert.equal(result.status, 'FAIL')
+  assert.match(result.reason, /legacy witness, MOVE execution, and next inReach decision are not in causal order/)
+})
+
+test('requires the Reach ownership proof to contain at least three legs under one Skill', () => {
+  const start = { message: 'selectedBy=vtr-transition', detail: { actionId } }
+  const incomplete = inspectLiveSkillOwnership({
+    skillStartRows: [start], selectedSkillCount: 1, actionId, mechanicalSteps: 2,
+  })
+  assert.equal(incomplete.status, 'INCOMPLETE')
+  assert.match(incomplete.reason, /at least three mechanical legs/)
+
+  const reservations = [1, 2, 3].map((leg) => ({ detail: { actionId, stepId: `step-${leg}` } }))
+  const outcomes = [1, 2, 3].map((leg) => ({ detail: { actionId, stepId: `step-${leg}` } }))
+  const actuations = [{ detail: { actionId } }]
+  const events = [{}, start, reservations[0], outcomes[2], {}]
+  const complete = inspectLiveSkillOwnership({
+    skillStartRows: [start], selectedSkillCount: 1, actionId, reservations, stepOutcomes: outcomes, actuations,
+    mechanicalSteps: 3, commitIndex: 0, skillStartIndex: 1, firstReservationIndex: 2, outcomeIndex: 3, events,
+  })
+  assert.equal(complete.status, 'PASS')
+  assert.equal(complete.mechanicalSteps, 3)
 })
 
 test('rejects source-contract and report-metric tampering even when the raw files rehash', () => {

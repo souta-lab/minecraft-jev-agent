@@ -338,9 +338,22 @@ function inspectRawLegacySide(side, expectedIdentity) {
   }
   const firstSelected = firstRows[0].chosenAction ?? firstRows[0].jev?.answers?.action?.value ?? null
   if (firstSelected !== moveEnd.actionId || !String(firstSelected).startsWith('MOVE:')) throw new Error('legacy first decision did not choose its recorded MOVE action')
+  const target = summary.fixture?.position
+  const targetBlock = summary.fixture?.block
+  if (!target || !['x', 'y', 'z'].every((key) => Number.isSafeInteger(target[key])) || typeof targetBlock !== 'string') {
+    throw new Error('legacy summary does not bind an integer resource witness')
+  }
+  const blockSuffix = `b${target.x}_${target.y}_${target.z}`
+  const firstCandidate = firstRows[0].candidates?.find((candidate) => candidate.id === firstSelected)
+  if (!firstCandidate || firstCandidate.kind !== 'MOVE' || firstCandidate.targetName !== targetBlock || firstSelected !== `MOVE:${blockSuffix}`) {
+    throw new Error('legacy MOVE candidate is not bound to the run-scoped resource witness')
+  }
   const nextSelected = nextRows[0].chosenAction ?? nextRows[0].jev?.answers?.action?.value ?? null
   const nextCandidate = nextRows[0].candidates?.find((candidate) => candidate.id === nextSelected)
-  if (!nextCandidate || nextCandidate.inReach !== true || nextCandidate.id !== next.selected) throw new Error('legacy next decision does not establish an inReach candidate')
+  if (!nextCandidate || nextCandidate.inReach !== true || nextCandidate.id !== next.selected || nextCandidate.kind !== 'MINE' ||
+      nextCandidate.targetName !== targetBlock || nextSelected !== `MINE:${blockSuffix}`) {
+    throw new Error('legacy next decision does not establish inReach for the same run-scoped resource witness')
+  }
   const callPath = 'runner/runtime/logs/jev/jev-calls.jsonl'
   const calls = parsedJsonLines(exactRawFile(files, callPath, 'legacy').text, callPath)
   const callIds = [firstRows[0].jev?.callId, nextRows[0].jev?.callId]
@@ -391,17 +404,31 @@ function inspectRawLegacySide(side, expectedIdentity) {
   const host = fileText(files, 'runner/runtime/buddy.log')
   const hostRows = (marker) => host.split(/\r?\n/).filter((line) => line.includes(marker) && line.includes(`actionId=${moveEnd.actionId}`) &&
     line.includes(`runId=${expectedIdentity.runId}`) && line.includes(`generationId=${expectedIdentity.generationId}`) &&
-    line.includes(`sourceSha=${expectedIdentity.sourceSha}`))
+    line.includes(`sourceSha=${expectedIdentity.sourceSha}`) && line.includes(`buildHash=${expectedIdentity.buildHash}`))
   if (hostRows('SKILL_START').length !== 1 || hostRows('SKILL_END').length !== 1) throw new Error('legacy HOST log does not uniquely bind the MOVE start/end to the raw run identity')
   if (hostRows('SKILL_END').some((line) => !/\boutcome=SUCCESS\b/.test(line) || !/\bfailure=null\b/.test(line))) {
     throw new Error('legacy HOST SKILL_END does not corroborate the verified successful MOVE')
   }
   const completedPath = host.split(/\r?\n/).filter((line) => line.includes('PATH_CALLBACK phase=completed') &&
     line.includes(`actionId=${moveEnd.actionId}`) && line.includes(`runId=${expectedIdentity.runId}`) &&
-    line.includes(`generationId=${expectedIdentity.generationId}`) && line.includes(`sourceSha=${expectedIdentity.sourceSha}`))
+    line.includes(`generationId=${expectedIdentity.generationId}`) && line.includes(`sourceSha=${expectedIdentity.sourceSha}`) &&
+    line.includes(`buildHash=${expectedIdentity.buildHash}`))
   if (completedPath.length !== 1 || summary.events?.moveActionEnd?.pathCallback !== 'completed' ||
       summary.events?.moveActionEnd?.skillEnd !== 'SUCCESS' || summary.events?.moveActionEnd?.verification !== 'verified') {
     throw new Error('legacy raw path callback and verified Skill outcome do not corroborate the movement summary')
+  }
+  const witnessAt = Date.parse(witness[0].at ?? '')
+  const firstAt = Date.parse(firstRows[0].ts ?? firstRows[0].timestamp ?? '')
+  const moveStartAt = Date.parse((/^\[([^\]]+)\]/.exec(hostRows('SKILL_START')[0]) ?? [])[1] ?? '')
+  const moveEndAt = Date.parse((/^\[([^\]]+)\]/.exec(hostRows('SKILL_END')[0]) ?? [])[1] ?? '')
+  const summaryMoveEndAt = Date.parse(summary.events?.moveActionEnd?.timestamp ?? summary.events?.moveActionEnd?.at ?? '')
+  const nextAt = Date.parse(nextRows[0].ts ?? nextRows[0].timestamp ?? '')
+  if (![witnessAt, firstAt, moveStartAt, moveEndAt, summaryMoveEndAt, nextAt].every(Number.isFinite)) {
+    throw new Error('legacy witness/MOVE/decision chronology is missing timestamps')
+  }
+  if (!(witnessAt <= firstAt && firstAt <= moveStartAt && moveStartAt <= moveEndAt &&
+      moveEndAt <= summaryMoveEndAt && summaryMoveEndAt <= nextAt)) {
+    throw new Error('legacy witness, MOVE execution, and next inReach decision are not in causal order')
   }
   return {
     files,
@@ -1020,7 +1047,7 @@ export function inspectLiveSkillOwnership({
     return incomplete('SKILL_START and mechanical rows do not expose one Executor actionId', { startActionId: startActionId ?? null, actionId: actionId ?? null })
   }
   if (startActionId !== actionId) return fail('SKILL_START actionId differs from the Transition mechanical owner', { expectedActionId: actionId, observedActionId: startActionId })
-  if (!Number.isSafeInteger(mechanicalSteps) || mechanicalSteps < 1) return incomplete('live Transition has no measurable mechanical legs', { mechanicalSteps })
+  if (!Number.isSafeInteger(mechanicalSteps) || mechanicalSteps < 3) return incomplete('live Reach proof needs at least three mechanical legs under one Transition', { mechanicalSteps })
   if (!Array.isArray(reservations) || !Array.isArray(stepOutcomes) || !Array.isArray(actuations)) return incomplete('raw reservation, step outcome, or actuation rows are unavailable')
   if (reservations.length !== mechanicalSteps || stepOutcomes.length !== mechanicalSteps || actuations.length !== 1) {
     return fail('live mechanical legs do not all have one reservation, outcome, and unique Transition actuation', {

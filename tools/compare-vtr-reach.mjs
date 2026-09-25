@@ -418,21 +418,46 @@ function bindLegacyRawEvents(side, evidence, expected) {
   const selected = firstRow.chosenAction ?? firstRow.jev?.answers?.action?.value ?? null
   const moveActionId = moveEnd.actionId
   if (selected !== moveActionId || !String(selected).startsWith('MOVE:')) return { status: 'FAIL', reason: 'raw first decision does not select the summarized legacy MOVE action' }
+  const target = rawSummary.fixture?.position
+  const block = rawSummary.fixture?.block
+  if (!target || !['x', 'y', 'z'].every((key) => Number.isSafeInteger(target[key])) || typeof block !== 'string') {
+    return { status: 'INCOMPLETE', reason: 'legacy run summary does not bind an integer target witness' }
+  }
+  const blockSuffix = `b${target.x}_${target.y}_${target.z}`
+  const firstCandidate = firstRow.candidates?.find((candidate) => candidate.id === selected)
+  if (!firstCandidate || firstCandidate.kind !== 'MOVE' || firstCandidate.targetName !== block || selected !== `MOVE:${blockSuffix}`) {
+    return { status: 'FAIL', reason: 'legacy first MOVE does not target the block in the run-scoped witness observation' }
+  }
   const nextSelected = nextRow.chosenAction ?? nextRow.jev?.answers?.action?.value ?? null
   const nextCandidate = nextRow.candidates?.find((candidate) => candidate.id === nextSelected)
-  if (nextCandidate?.inReach !== true || nextCandidate.id !== next.selected) return { status: 'FAIL', reason: 'raw next decision does not establish the summarized inReach candidate' }
+  if (nextCandidate?.inReach !== true || nextCandidate.id !== next.selected || nextCandidate.kind !== 'MINE' ||
+      nextCandidate.targetName !== block || nextSelected !== `MINE:${blockSuffix}`) {
+    return { status: 'FAIL', reason: 'raw next decision does not establish inReach for the same observed block witness' }
+  }
   const hostText = capturedText(side, hostPath)
   const matchingHostRows = (marker) => hostText.split(/\r?\n/).filter((line) => line.includes(marker) &&
     line.includes(`actionId=${moveActionId}`) && line.includes(`runId=${expected.runId}`) &&
-    line.includes(`generationId=${expected.generationId}`) && line.includes(`sourceSha=${expected.sourceSha}`))
+    line.includes(`generationId=${expected.generationId}`) && line.includes(`sourceSha=${expected.sourceSha}`) &&
+    line.includes(`buildHash=${expected.buildHash}`))
   const startLines = matchingHostRows('SKILL_START')
   const endLines = matchingHostRows('SKILL_END')
   if (startLines.length !== 1 || endLines.length !== 1) return { status: 'INCOMPLETE', reason: 'raw HOST log does not uniquely bind legacy MOVE start/end to the source run' }
   const missionEvent = humanTask.find((row) => typeof row.command === 'string' && /^agent\s+/i.test(row.command))
-  const sourcePosition = rawSummary.fixture?.position
+  const sourcePosition = target
   const witnessRow = witnessRows.find((row) => row.tag === 'target' && row.name === rawSummary.fixture?.block &&
     ['x', 'y', 'z'].every((key) => row.position?.[key] === sourcePosition?.[key]))
   if (!missionEvent || !witnessRow) return { status: 'INCOMPLETE', reason: 'raw operator Mission or pre-action witness observation is missing' }
+  const firstAt = Date.parse(firstRow.ts ?? firstRow.timestamp ?? '')
+  const moveEndAt = Date.parse(moveEnd.timestamp ?? moveEnd.at ?? '')
+  const nextAt = Date.parse(nextRow.ts ?? nextRow.timestamp ?? '')
+  const hostEndAt = Date.parse(/^\[([^\]]+)\]/.exec(endLines[0])?.[1] ?? '')
+  const witnessAt = Date.parse(witnessRow.at ?? '')
+  if (![firstAt, moveEndAt, nextAt, hostEndAt, witnessAt].every(Number.isFinite)) {
+    return { status: 'INCOMPLETE', reason: 'legacy witness/decision/MOVE timestamps are incomplete' }
+  }
+  if (!(witnessAt <= firstAt && firstAt <= hostEndAt && hostEndAt <= moveEndAt && moveEndAt <= nextAt)) {
+    return { status: 'FAIL', reason: 'legacy witness, selected MOVE, completed Skill, and next inReach decision are out of causal order' }
+  }
   return {
     status: 'PASS',
     sourcePaths: { summary: 'runner/reach-slice-evidence.json', decisions: decisionPath, host: hostPath, missionInput: missionPath, witnessObservation: witnessPath, runJournal: runPath },
@@ -456,7 +481,8 @@ function bindVtrRawEvents(side, expected) {
   const markers = ['VTR_TRANSITION_COMMIT', 'VTR_TRANSITION_VERIFY', 'VTR_TRANSITION_OUTCOME']
   const eventLines = Object.fromEntries(markers.map((marker) => [marker, hostText.split(/\r?\n/).filter((line) =>
     line.includes(marker) && line.includes(`transitionId=${expected.transitionId}`) && line.includes(`runId=${expected.runId}`) &&
-    line.includes(`generationId=${expected.generationId}`) && line.includes(`sourceSha=${expected.sourceSha}`))]))
+    line.includes(`generationId=${expected.generationId}`) && line.includes(`sourceSha=${expected.sourceSha}`) &&
+    line.includes(`buildHash=${expected.buildHash}`) && line.includes(`contractHash=${expected.contractHash}`))]))
   if (Object.values(eventLines).some((matches) => matches.length !== 1)) return { status: 'INCOMPLETE', reason: 'VTR raw HOST log does not uniquely bind commit/VERIFY/outcome to this Transition' }
   const verifyLine = eventLines.VTR_TRANSITION_VERIFY[0]
   const outcomeLine = eventLines.VTR_TRANSITION_OUTCOME[0]
