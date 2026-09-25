@@ -9,6 +9,8 @@ import {
 } from './reach-controller.ts'
 import {
   createInventoryReachTransition,
+  type InventoryReachTransitionInput,
+  type InventoryReachTransitionPlan,
   type InventoryReachMission,
 } from './reach-scheduler.ts'
 import type {
@@ -48,6 +50,51 @@ export interface ReachTerminalHandoff {
   readonly outcome: ReachTerminalOutcome
 }
 
+interface ReachMissionScope {
+  readonly predicateIdentity: string
+  readonly missionRequirement: string
+  readonly worldKey: string
+  readonly dimension: string
+  readonly worldEpoch: number
+}
+
+interface TerminalWitnessExclusion extends ReachMissionScope {
+  readonly witnessId: string
+}
+
+interface ActiveContractScope {
+  readonly contractHash: string
+  readonly scope: ReachMissionScope
+}
+
+function missionScope(contract: ReachTransitionContract): ReachMissionScope {
+  // VTR Mission identity is predicate-based. Include the unsatisfied-Mission
+  // precondition so a changed required count is a different scope even when its
+  // navigation predicate (the resource type) remains the same.
+  const missionRequirement = contract.requires.find(({ id }) => id === 'mission.unsatisfied')
+  return {
+    predicateIdentity: contract.desiredPredicateIdentity,
+    missionRequirement: JSON.stringify(missionRequirement?.proposition ?? null),
+    worldKey: contract.identity.worldKey,
+    dimension: contract.identity.dimension,
+    worldEpoch: contract.identity.worldEpoch,
+  }
+}
+
+function sameMissionWorldScope(exclusion: TerminalWitnessExclusion, scope: ReachMissionScope): boolean {
+  return exclusion.predicateIdentity === scope.predicateIdentity &&
+    exclusion.missionRequirement === scope.missionRequirement &&
+    exclusion.worldKey === scope.worldKey &&
+    exclusion.dimension === scope.dimension &&
+    exclusion.worldEpoch === scope.worldEpoch
+}
+
+function isTerminalWitnessBoundary(outcome: ReachTerminalOutcome): boolean {
+  return outcome.kind === 'BUDGET_EXHAUSTED' ||
+    outcome.kind === 'PROVEN_INFEASIBLE' ||
+    outcome.kind === 'CONTRACT_VIOLATION'
+}
+
 /**
  * Production VTR ownership boundary for the first Mission→Reach slice.
  *
@@ -58,6 +105,8 @@ export interface ReachTerminalHandoff {
  */
 export class ReachMissionRuntime {
   private readonly controller: ReachController
+  private terminalWitnessExclusion: TerminalWitnessExclusion | null = null
+  private activeContractScope: ActiveContractScope | null = null
 
   constructor(dependencies: ReachMissionRuntimeDependencies) {
     this.controller = new ReachController(dependencies.routePolicy, dependencies.commitFreshnessFence)
@@ -67,12 +116,31 @@ export class ReachMissionRuntime {
     return this.controller.current
   }
 
+  /** Derive a value contract; adapters may build a typed snapshot from this value before commit. */
+  deriveInventoryReachTransition(input: InventoryReachTransitionInput): InventoryReachTransitionPlan {
+    return createInventoryReachTransition(input)
+  }
+
+  /** Commit an already-derived contract and typed snapshot through VTR ownership. */
+  async commit(contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot): Promise<ReachControllerResult> {
+    const scopedSnapshot = this.excludePriorTerminalWitness(contract, snapshot)
+    const result = await this.controller.commit(contract, scopedSnapshot)
+    if (result.status === 'active' || result.status === 'terminal') {
+      this.activeContractScope = { contractHash: contract.contractHash, scope: missionScope(contract) }
+    }
+    return result
+  }
+
   /**
-   * Derive an inventory-source Reach contract inside VTR, then admit/commit it
-   * through the persistent controller. Benchmark ladder state is not an input.
+   * Temporary strangler compatibility for callers that still need a callback
+   * to project a snapshot after contract derivation. Delete once
+   * `controller-legacy.ts` uses deriveInventoryReachTransition() followed by
+   * typed snapshot construction and commit(contract, snapshot).
+   *
+   * @deprecated Use deriveInventoryReachTransition() and commit().
    */
   async startInventoryReach(input: StartInventoryReachInput): Promise<InventoryReachCommit> {
-    const { contract } = createInventoryReachTransition({
+    const { contract } = this.deriveInventoryReachTransition({
       mission: input.mission,
       interactionReach: input.interactionReach,
       sourceNames: input.sourceNames,
@@ -83,7 +151,7 @@ export class ReachMissionRuntime {
     return {
       mission: input.mission,
       contract,
-      result: await this.controller.commit(contract, snapshot),
+      result: await this.commit(contract, snapshot),
     }
   }
 
@@ -151,6 +219,24 @@ export class ReachMissionRuntime {
     const state = this.controller.lastTerminalState
     const outcome = this.controller.takeOutcome()
     if (state === null || outcome === null) return null
+    const scope = this.activeContractScope
+    if (
+      scope !== null &&
+      scope.contractHash === state.contractHash &&
+      isTerminalWitnessBoundary(outcome) &&
+      state.witness !== null
+    ) {
+      this.terminalWitnessExclusion = { ...scope.scope, witnessId: state.witness.witnessId }
+    }
+    this.activeContractScope = null
     return { contractHash: state.contractHash, state, outcome }
+  }
+
+  /** Filter a previously terminal witness before VTR asks its route decision policy. */
+  private excludePriorTerminalWitness(contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot): ReachRuntimeSnapshot {
+    const exclusion = this.terminalWitnessExclusion
+    if (exclusion === null || !sameMissionWorldScope(exclusion, missionScope(contract))) return snapshot
+    const routes = snapshot.routes.filter(({ witness }) => witness.witnessId !== exclusion.witnessId)
+    return routes.length === snapshot.routes.length ? snapshot : { ...snapshot, routes }
   }
 }
