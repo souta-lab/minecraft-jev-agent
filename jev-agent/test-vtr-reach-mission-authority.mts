@@ -5,6 +5,7 @@ import { JevController } from './src/controller-legacy.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { filterLegacyReachCandidates } from './src/vtr/legacy-reach-compat.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
 
@@ -131,6 +132,7 @@ function makeController(input: {
   })
 
   Object.assign(controller as unknown as Record<string, unknown>, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: world.tick }),
     options: {
       vtrMission: configuredMission,
       vtrReachProbe: input.probe,

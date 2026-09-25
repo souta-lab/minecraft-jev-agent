@@ -7,6 +7,7 @@ import type { WorldState } from './src/state.ts'
 import { envelopeForCandidate } from './src/skillCommitment.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 
 function newReachRuntime(): ReachMissionRuntime {
   return new ReachMissionRuntime({
@@ -108,6 +109,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
   let legacyDecisionRequests = 0
   const controllerState = controller as unknown as Record<string, any>
   Object.assign(controllerState, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: world.tick }),
     options: { vtrMission: mission, serverId: '127.0.0.1:25565', worldEpoch: 1, actuationPort: null },
     queue: { current: null },
     reachRuntime: newReachRuntime(),
@@ -170,6 +172,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
   let probeLegacyDecisionRequests = 0
   const probeController = Object.create(JevController.prototype) as JevController
   Object.assign(probeController as unknown as Record<string, any>, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: unsafeWorld.tick }),
     options: { vtrMission: mission, vtrReachProbe: true, serverId: '127.0.0.1:25565', worldEpoch: 1, actuationPort: null },
     queue: { current: null },
     reachRuntime: newReachRuntime(),
@@ -255,6 +258,7 @@ test('a running legacy walk for the configured Reach predicate is revoked before
   const events: string[] = []
   const controller = Object.create(JevController.prototype) as JevController
   Object.assign(controller as unknown as Record<string, any>, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: world.tick }),
     options: { vtrMission: mission, serverId: '127.0.0.1:25569', worldEpoch: identity.worldEpoch, reach: 4, maxCandidateAgeTicks: 8, actuationPort: null },
     queue: { current: null }, reachRuntime: newReachRuntime(), reachRunMetadata: null, reachTerminalHandoff: null,
     modelRecoveryStopping: false, modelRecoveryReachDrainTransitionId: null,

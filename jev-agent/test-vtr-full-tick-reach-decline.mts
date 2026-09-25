@@ -9,8 +9,6 @@ import type { Candidate } from './src/candidates.ts'
 import { JevController } from './src/controller-legacy.ts'
 import type { JevResult } from './src/jev-legacy.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import type { StartInventoryReachInput } from './src/vtr/reach-mission-runtime.ts'
-import { createInventoryReachTransition } from './src/vtr/reach-scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
 import type { ReachRoute, ReachRuntimeSnapshot } from './src/vtr/reach-controller.ts'
 
@@ -86,7 +84,7 @@ function makeBot(): Bot {
 
 function primeUnconsumedMissionSatisfiedOutcome(runtime: ReachMissionRuntime): Promise<void> {
   const atMs = 1_000
-  const { contract } = createInventoryReachTransition({
+  const { contract } = runtime.deriveInventoryReachTransition({
     mission,
     interactionReach: 4.5,
     sourceNames: ['oak_log'],
@@ -131,14 +129,7 @@ function primeUnconsumedMissionSatisfiedOutcome(runtime: ReachMissionRuntime): P
     },
     parentMissionSatisfied: { evidenceId: `prior-inventory:${atMs}` },
   }
-  return runtime.startInventoryReach({
-    mission,
-    interactionReach: 4.5,
-    sourceNames: ['oak_log'],
-    identity,
-    transitionId: contract.transitionId,
-    snapshotForContract: () => snapshot,
-  }).then(({ result }) => {
+  return runtime.commit(contract, snapshot).then((result) => {
     assert.equal(result.status, 'terminal')
     if (result.status === 'terminal') assert.equal(result.outcome.kind, 'MISSION_SATISFIED')
   })
@@ -181,18 +172,12 @@ test('real full tick hands only unrelated grounded candidates to legacy policy a
     // Its next Mission start must be refused before any VTR intent can actuate.
     await primeUnconsumedMissionSatisfiedOutcome(runtime)
     assert.equal(runtime.current, null)
-    const actualStartInventoryReach = runtime.startInventoryReach.bind(runtime)
-    ;(runtime as unknown as Record<string, any>).startInventoryReach = async (input: StartInventoryReachInput) => {
-      const started = await actualStartInventoryReach({
-        ...input,
-        snapshotForContract: (contract: ReachTransitionContract) => {
-          const snapshot = input.snapshotForContract(contract) as ReachRuntimeSnapshot
-          vtrSnapshotRoutes.push(snapshot.routes.map((route) => route.routeId))
-          return snapshot
-        },
-      })
-      startResults.push(started.result)
-      return started
+    const actualCommit = runtime.commit.bind(runtime)
+    ;(runtime as unknown as Record<string, any>).commit = async (contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot) => {
+      vtrSnapshotRoutes.push(snapshot.routes.map((route) => route.routeId))
+      const result = await actualCommit(contract, snapshot)
+      startResults.push(result)
+      return result
     }
     Object.assign(controller as unknown as Record<string, unknown>, { reachRuntime: runtime, running: true })
     const internals = controller as unknown as Record<string, any>

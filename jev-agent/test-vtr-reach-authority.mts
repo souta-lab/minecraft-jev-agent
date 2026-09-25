@@ -12,6 +12,7 @@ import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import type { CurrentAction } from './src/executor.ts'
 import type { EventLogger } from './src/jev.ts'
 import { EventLogger as JsonLogger, JsonlWriter } from './src/jev.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import {
   ReachController,
   type ReachRoute,
@@ -247,6 +248,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
     const adapter = Object.create(JevController.prototype) as JevController
     const adapterFields = adapter as unknown as Record<string, any>
     Object.assign(adapter as unknown as Record<string, unknown>, {
+      reachVtrCells: createVtrReachTestCells({ tickCounter: 7 }),
       reachRunMetadata: {
         mission,
         transitionId: contract.transitionId,

@@ -77,9 +77,10 @@ function candidateForRoute(input: ReachRouteDecisionInput, routeIndex: number): 
 }
 
 /**
- * Production Jev π adapter for grounded route choices. It uses only typed
- * route facts and a fresh WorldState supplied by the Minecraft runtime adapter;
- * Jev selects a route id, while ReachController revalidates and owns the intent.
+ * Production Jev Decision Frame adapter for grounded route choices. It uses
+ * typed route facts and a fresh WorldState supplied by the Minecraft runtime
+ * adapter; Jev proposes a route id, while ReachController revalidates and owns
+ * the intent.
  */
 export class JevReachRouteDecisionPolicy implements ReachRouteDecisionPolicy {
   constructor(private readonly callbacks: JevReachRouteDecisionCallbacks) {}

@@ -7,15 +7,22 @@ const controller = readFileSync(new URL('./src/controller-legacy.ts', import.met
 const reachController = readFileSync(new URL('./src/vtr/reach-controller.ts', import.meta.url), 'utf8')
 const reachMissionRuntime = readFileSync(new URL('./src/vtr/reach-mission-runtime.ts', import.meta.url), 'utf8')
 const jevRoutePolicy = readFileSync(new URL('./src/jev-reach-route-policy.ts', import.meta.url), 'utf8')
+const jevComposition = readFileSync(new URL('./src/jev-reach-vtr-composition.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
 const generationEntry = readFileSync(new URL('../buddy-driver/generation-entry.ts', import.meta.url), 'utf8')
 
 describe('VTR Reach production authority seam', () => {
   it('grounds production Reach routes from current world evidence before the persistent owner may use them', () => {
-    assert.match(controller, /private readonly reachRuntime = new ReachMissionRuntime\(\{[\s\S]*?routePolicy: new JevReachRouteDecisionPolicy\(/)
+    assert.match(controller, /private initializeReachVtrRuntime\(\)/)
+    assert.match(controller, /createJevReachVtrComposition\(/)
     assert.doesNotMatch(controller, /new ReachController\(nearestGroundedReachRoutePolicy\)/)
-    assert.match(controller, /this\.reachRuntime\.startInventoryReach\(/)
+    assert.match(controller, /this\.reachRuntime\.deriveInventoryReachTransition\(/)
+    assert.match(controller, /this\.reachRuntime\.commit\(contract, snapshot\)/)
+    assert.doesNotMatch(controller, /snapshotForContract|startInventoryReach/)
     assert.doesNotMatch(controller, /createInventoryReachTransition\(/)
+    assert.match(jevComposition, /policy: \(\) => context\.policy\.value/)
+    assert.match(jevComposition, /cachedWorldState: JevReachMutableCell<WorldState \| null>/)
+    assert.doesNotMatch(jevComposition, /from ['"]mineflayer['"]|\bBot\b|this\.bot/)
 
     const observationStart = controller.indexOf('private reachObservation(')
     const snapshotStart = controller.indexOf('private reachRuntimeSnapshot(', observationStart)
@@ -86,7 +93,8 @@ describe('VTR Reach production authority seam', () => {
     const reachTick = controller.slice(reachStart, reachEnd)
     assert.match(reachTick, /this\.reachRuntime\.current/)
     assert.match(reachTick, /this\.reachRuntime\.tick\(snapshot\)/)
-    assert.match(reachTick, /this\.reachRuntime\.startInventoryReach\(/)
+    assert.match(reachTick, /this\.reachRuntime\.deriveInventoryReachTransition\(/)
+    assert.match(reachTick, /this\.reachRuntime\.commit\(contract, snapshot\)/)
     assert.match(reachTick, /await this\.dispatchReachIntent\(/)
     assert.doesNotMatch(reachTick, /decideBeta|applyBeta/)
   })
@@ -126,6 +134,8 @@ describe('VTR Reach production authority seam', () => {
     assert.doesNotMatch(jevRoutePolicy, /from ['"]mineflayer['"]|\bBot\b/)
     assert.match(jevRoutePolicy, /ReachRouteDecisionInput/)
     assert.match(jevRoutePolicy, /decisionFrame: \{/)
+    assert.match(jevComposition, /createJevReachVtrComposition/)
+    assert.doesNotMatch(reachMissionRuntime, /snapshotForContract|startInventoryReach/)
     assert.match(jevRoutePolicy, /input\.contract\.(desiredPredicate|budget|admissibleEffects|identity)/)
     assert.match(controller, /selectedRoute: this\.reachRuntime\.current\?\.route/)
     assert.match(controller, /probabilities: routeSelection\.probabilities/)
@@ -133,7 +143,7 @@ describe('VTR Reach production authority seam', () => {
   })
 
   it('does not journal an admitted Transition when its initial Jev route choice is unresolved', () => {
-    const start = controller.indexOf('const scheduled = await this.reachRuntime.startInventoryReach({')
+    const start = controller.indexOf('const plan = this.reachRuntime.deriveInventoryReachTransition({')
     const decisionRequired = controller.indexOf("if (started.status === 'decision_required')", start)
     const commitEvent = controller.indexOf('VTR_TRANSITION_COMMIT', start)
     assert.ok(start >= 0 && decisionRequired > start && commitEvent > decisionRequired)

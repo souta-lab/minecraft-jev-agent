@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { JevController } from './src/controller-legacy.ts'
 import type { Candidate } from './src/candidates.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 
 const identity = {
   worldKey: '127.0.0.1:25565|minecraft:overworld|1',
@@ -72,6 +73,7 @@ function fixture() {
   const controller = Object.create(JevController.prototype) as JevController
   const fields = controller as unknown as Record<string, any>
   Object.assign(fields, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: 7 }),
     options: {
       decisionProvenance: { runId: 'run-success-boundary', sourceSha: 'source-success-boundary', buildHash: null },
     },

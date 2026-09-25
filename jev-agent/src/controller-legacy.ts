@@ -179,9 +179,9 @@ import { filterLegacyReachCandidates, isLegacyMissionReachSourceMove } from './v
 import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
 import type { ReachControllerResult, ReachRuntimeSnapshot, ReachRoute } from './vtr/reach-controller.ts'
-import type { ReachRouteDecisionInput } from './vtr/reach-controller.ts'
 import { assessReachViability } from './vtr/reach-safety.ts'
-import { JevReachRouteDecisionPolicy } from './jev-reach-route-policy.ts'
+import { createJevReachVtrComposition } from './jev-reach-vtr-composition.ts'
+import type { JevReachRouteDecisionRecord } from './jev-reach-vtr-composition.ts'
 import type {
   ReachIdentity,
   ReachObservation,
@@ -447,15 +447,6 @@ interface ActiveReachTransition {
   readonly authorityConflictsAtStart: number
   readonly duplicateAuthorityObserved: boolean
   readonly lastHealth: number
-}
-
-interface ReachTerminalHandoff {
-  readonly missionId: string
-  readonly item: string
-  readonly count: number
-  readonly worldKey: string
-  readonly witnessId: string
-  readonly outcomeKind: 'BUDGET_EXHAUSTED' | 'PROVEN_INFEASIBLE' | 'CONTRACT_VIOLATION'
 }
 
 export interface JevAgentOptions {
@@ -2399,117 +2390,30 @@ export class JevController {
   private system2: System2Brain
   private queue: GoalQueue
   private recipeIndex: RecipeIndex
-  /** V4 owns Reach contract state; the legacy controller only projects typed facts and intents. */
-  private reachRouteDecisionWorld: WorldState | null = null
-  private lastVtrReachRouteDecision: {
-    readonly selectedRouteId: string | null
-    readonly policy: JevPolicy['kind']
-    readonly source: JevResult['source']
-    readonly model: string
-    readonly callId: string
-    readonly probabilities: Record<string, number> | null
-    readonly accepted: boolean
-  } | null = null
-  private readonly reachRuntime = new ReachMissionRuntime({
-    routePolicy: new JevReachRouteDecisionPolicy({
-    policy: () => this.jev,
-    worldState: (input) => {
-      const state = this.reachRouteDecisionWorld
-      if (
-        state === null ||
-        state.timestampMs !== input.observedAtMs ||
-        state.self.dimension !== input.identity.dimension
-      ) return null
-      const identity = this.reachIdentity(state)
-      return identity !== null &&
-        identity.worldKey === input.identity.worldKey &&
-        identity.dimension === input.identity.dimension &&
-        identity.worldEpoch === input.identity.worldEpoch &&
-        identity.generationId === input.identity.generationId &&
-        identity.leaseId === input.identity.leaseId
-        ? state
-        : null
+  /** Backend-independent Reach cells shared with the composition through typed ports only. */
+  private readonly reachVtrCells = {
+    cachedWorldState: { value: null as WorldState | null },
+    lastRouteDecision: { value: null as JevReachRouteDecisionRecord | null },
+    counters: {
+      jevCalls: { value: 0 },
+      lastJevAt: { value: 0 },
+      tickCounter: { value: 0 },
     },
-    onCallStart: () => {
-      this.jevCalls += 1
-      this.lastJevAt = Date.now()
-    },
-    onResult: (input, result, selectedRouteId, accepted) => {
-      const answer = result.answers.action
-      this.lastVtrReachRouteDecision = {
-        selectedRouteId,
-        policy: result.policy,
-        source: result.source,
-        model: result.model,
-        callId: result.callId,
-        probabilities: answer?.probabilities ?? null,
-        accepted,
-      }
-      this.logger.info(
-        'vtr',
-        `VTR_REACH_ROUTE_DECISION transition=${input.transitionId} selected=${selectedRouteId ?? 'unavailable'} source=${result.source} policy=${result.policy} model=${result.model}`,
-        {
-          transitionId: input.transitionId,
-          contractHash: input.contractHash,
-          desiredPredicate: input.contract.desiredPredicate,
-          routeIds: input.routes.map((route) => route.routeId),
-          selectedRouteId,
-          accepted,
-          selectedGroundedRouteId: accepted ? selectedRouteId : null,
-          source: result.source,
-          policy: result.policy,
-          model: result.model,
-          callId: result.callId,
-          latencyMs: result.latencyMs,
-          actionProbability: answer?.probability ?? null,
-          probabilities: answer?.probabilities ?? null,
-          identity: input.identity,
-        },
-        this.tickCounter,
-      )
-    },
-    onFailure: (input, reason) => {
-      this.lastVtrReachRouteDecision = null
-      this.logger.warn(
-        'vtr',
-        `VTR_REACH_ROUTE_DECISION transition=${input.transitionId} selected=unavailable reason=${reason}`,
-        {
-          transitionId: input.transitionId,
-          contractHash: input.contractHash,
-          routeIds: input.routes.map((route) => route.routeId),
-          reason,
-          identity: input.identity,
-        },
-        this.tickCounter,
-      )
-    },
-    }),
-    commitFreshnessFence: ({ contract, snapshot }) => {
-    const currentState = this.reachRouteDecisionWorld
-    if (currentState === null) return { status: 'stale', reason: 'unavailable' }
-    const currentIdentity = this.reachIdentity(currentState)
-    if (currentIdentity === null) return { status: 'stale', reason: 'unavailable' }
-    const submittedIdentity = snapshot.observation.identity
-    if (
-      currentIdentity.worldKey !== submittedIdentity.worldKey ||
-      currentIdentity.dimension !== submittedIdentity.dimension ||
-      currentIdentity.worldEpoch !== submittedIdentity.worldEpoch ||
-      currentIdentity.generationId !== submittedIdentity.generationId ||
-      currentIdentity.leaseId !== submittedIdentity.leaseId ||
-      currentIdentity.worldKey !== contract.identity.worldKey ||
-      currentIdentity.dimension !== contract.identity.dimension ||
-      currentIdentity.worldEpoch !== contract.identity.worldEpoch ||
-      currentIdentity.generationId !== contract.identity.generationId ||
-      currentIdentity.leaseId !== contract.identity.leaseId
-    ) return { status: 'stale', reason: 'identity_changed', currentIdentity }
-    if (currentState.timestampMs !== snapshot.observation.observedAtMs) {
-      return { status: 'stale', reason: 'observation_advanced', currentObservedAtMs: currentState.timestampMs, currentIdentity }
-    }
-      return { status: 'current' }
-    },
-  })
+  }
+  private reachRuntime!: ReachMissionRuntime
+  private get reachRouteDecisionWorld(): WorldState | null {
+    return this.reachVtrCells.cachedWorldState.value
+  }
+  private set reachRouteDecisionWorld(state: WorldState | null) {
+    this.reachVtrCells.cachedWorldState.value = state
+  }
+  private get lastVtrReachRouteDecision(): JevReachRouteDecisionRecord | null {
+    return this.reachVtrCells.lastRouteDecision.value
+  }
+  private set lastVtrReachRouteDecision(decision: JevReachRouteDecisionRecord | null) {
+    this.reachVtrCells.lastRouteDecision.value = decision
+  }
   private reachRunMetadata: ReachRunMetadata | null = null
-  private reachTerminalHandoff: ReachTerminalHandoff | null = null
   private lastReachActionFailure: string | null = null
   private vtrOwnsReachMoveThisTick = false
 
@@ -2519,8 +2423,10 @@ export class JevController {
   private recentOutcomes: System2Outcome[] = []
   private recentSemanticOutcomes: System2SemanticOutcome[] = []
 
-  private tickCounter = 0
-  private jevCalls = 0
+  private get tickCounter(): number { return this.reachVtrCells.counters.tickCounter.value }
+  private set tickCounter(value: number) { this.reachVtrCells.counters.tickCounter.value = value }
+  private get jevCalls(): number { return this.reachVtrCells.counters.jevCalls.value }
+  private set jevCalls(value: number) { this.reachVtrCells.counters.jevCalls.value = value }
   private guardRejections = 0
   /**
    * Chosen SURVIVAL actions re-grounded from the fresh offer after their
@@ -2602,7 +2508,8 @@ export class JevController {
   private pendingTransition: DecisionSubgoalLog | null = null
 
   private lastDecision: JevResult | null = null
-  private lastJevAt = 0
+  private get lastJevAt(): number { return this.reachVtrCells.counters.lastJevAt.value }
+  private set lastJevAt(value: number) { this.reachVtrCells.counters.lastJevAt.value = value }
   private lastDecisionId: string | null = null
   /** whether the last beta abandon vote actually led to a replan (#46 guard). */
   private lastAbandonAdopted = false
@@ -3114,9 +3021,25 @@ export class JevController {
         ? new EventLogger(this.runWriter, this.options.verbose)
         : new MirroringEventLogger(this.runWriter, this.options.verbose, this.options.eventSink)
     this.jev = this.buildPolicy()
+    this.initializeReachVtrRuntime()
     this.scheduler = this.buildScheduler()
     this.executor = new Executor(bot, this.logger, executorOptions(this.options, this.scheduler))
     this.system2 = new StubSystem2(this.system2Writer)
+  }
+
+  /** Compose VTR with a restricted adapter context; VTR retains no controller or Bot reference. */
+  private initializeReachVtrRuntime(): void {
+    this.reachRuntime = createJevReachVtrComposition({
+      serverId: this.options.serverId,
+      worldEpoch: this.options.worldEpoch,
+      generationId: this.options.decisionProvenance.generationId,
+      leaseId: this.options.actuationPort?.generationId ?? null,
+      policy: { value: this.jev },
+      cachedWorldState: this.reachVtrCells.cachedWorldState,
+      counters: this.reachVtrCells.counters,
+      lastRouteDecision: this.reachVtrCells.lastRouteDecision,
+      logger: this.logger,
+    }).runtime
   }
 
   // -------------------------------------------------------------------------
@@ -3256,6 +3179,7 @@ export class JevController {
         ? new EventLogger(this.runWriter, this.options.verbose)
         : new MirroringEventLogger(this.runWriter, this.options.verbose, this.options.eventSink)
     this.jev = this.buildPolicy()
+    this.initializeReachVtrRuntime()
     this.scheduler = this.buildScheduler()
     this.executor = new Executor(this.bot, this.logger, executorOptions(this.options, this.scheduler))
     this.system2 = new StubSystem2(this.system2Writer)
@@ -4819,60 +4743,34 @@ export class JevController {
       }
       return false
     }
-    const terminalHandoff = this.reachTerminalHandoff
-    const sameTerminalScope = terminalHandoff !== null &&
-      terminalHandoff.missionId === mission.id &&
-      terminalHandoff.item === mission.item &&
-      terminalHandoff.count === mission.count &&
-      terminalHandoff.worldKey === identity.worldKey
-    const eligible = sameTerminalScope
-      ? potential.filter((candidate) => this.reachWitnessIdForCandidate(mission.item, candidate) !== terminalHandoff.witnessId)
-      : potential
-    if (eligible.length === 0) {
-      this.vtrOwnsReachMoveThisTick = true
-      this.logger.info(
-        'vtr',
-        `VTR_SCHEDULER_HOLDS_TERMINAL mission=${mission.id} outcome=${terminalHandoff?.outcomeKind ?? 'unknown'} witness=${terminalHandoff?.witnessId ?? 'unknown'}`,
-        { mission, terminalHandoff, groundedCandidates: potential.map((candidate) => candidate.id), reason: 'same world/mission/witness facts; no automatic contract retry' },
-        this.tickCounter,
-      )
-      return true
-    }
     const transitionId = randomUUID()
-    let snapshot: ReachRuntimeSnapshot | null = null
     this.lastVtrReachRouteDecision = null
     this.lastReachActionFailure = null
-    const scheduled = await this.reachRuntime.startInventoryReach({
+    const plan = this.reachRuntime.deriveInventoryReachTransition({
       mission,
       interactionReach: this.options.reach,
       sourceNames: this.missionSourceNames(mission.item),
       identity,
       transitionId,
-      snapshotForContract: (contract) => {
-        this.reachRunMetadata = {
-          mission: { ...mission, count: Math.max(1, Math.floor(mission.count)) },
-          transitionId: contract.transitionId,
-          contractHash: contract.contractHash,
-          ensures: contract.ensures,
-          identity: contract.identity,
-          jevCallsAtStart: this.jevCalls,
-          system2CallsAtStart: this.runtimeLlmCalls + this.planCalls,
-          authorityConflictsAtStart: this.executor.authorityConflictCount,
-          duplicateAuthorityObserved: false,
-          lastHealth: state.self.health,
-        }
-        snapshot = this.reachRuntimeSnapshot({ contract, mission }, state, identity, eligible)
-        return snapshot
-      },
     })
-    const { contract, result: started } = scheduled
+    const { contract } = plan
     const desired = contract.desiredPredicate
-    if (snapshot === null) {
-      this.reachRunMetadata = null
-      this.logger.error('vtr', `VTR_MISSION_SNAPSHOT_REFUSED transition=${transitionId} reason=typed-runtime-adapter-returned-no-snapshot`, { transitionId, mission }, this.tickCounter)
-      return true
+    this.reachRunMetadata = {
+      mission: { ...mission, count: Math.max(1, Math.floor(mission.count)) },
+      transitionId: contract.transitionId,
+      contractHash: contract.contractHash,
+      ensures: contract.ensures,
+      identity: contract.identity,
+      jevCallsAtStart: this.jevCalls,
+      system2CallsAtStart: this.runtimeLlmCalls + this.planCalls,
+      authorityConflictsAtStart: this.executor.authorityConflictCount,
+      duplicateAuthorityObserved: false,
+      lastHealth: state.self.health,
     }
+    const snapshot = this.reachRuntimeSnapshot({ contract, mission }, state, identity, potential)
+    const started = await this.reachRuntime.commit(contract, snapshot)
     const transitionSnapshot = snapshot
+    const eligible = potential
     const routeSelection = this.currentVtrReachRouteDecision()
     if (started.status === 'not_enabled' || started.status === 'refused') {
       this.reachRunMetadata = null
@@ -4903,11 +4801,9 @@ export class JevController {
         identity,
         selectedRoute: this.reachRuntime.current?.route ?? null,
         witness: this.reachRuntime.current?.route.witness ?? null,
-        initialRouteIds: eligible.map((candidate) => candidate.id),
+        observedRouteIds: snapshot.routes.map((route) => route.routeId),
         routePolicy: routeSelection === null
-          ? eligible.length <= 1
-            ? { authority: 'unique-grounded-route', callId: null, source: null, model: null, probabilities: null }
-            : { authority: 'route-choice-unavailable', routeIds: eligible.map((candidate) => candidate.id), callId: null, source: null, model: null, probabilities: null }
+          ? { authority: 'vtr-deterministic-or-unique-route', callId: null, source: null, model: null, probabilities: null }
           : {
               authority: !routeSelection.accepted
                 ? 'jev-choice-refused'
@@ -4965,21 +4861,6 @@ export class JevController {
     return commitment.target.kind === 'position' &&
       commitment.target.dimension === dimension &&
       commitment.target.worldEpoch === worldEpoch
-  }
-
-  private sourcePositionForCandidate(candidate: Candidate): Vec3Json | null {
-    const x = candidate.meta.targetBlockX
-    const y = candidate.meta.targetBlockY
-    const z = candidate.meta.targetBlockZ
-    return typeof x === 'number' && typeof y === 'number' && typeof z === 'number' ? { x, y, z } : null
-  }
-
-  private reachWitnessIdForCandidate(item: string, candidate: Candidate): string | null {
-    const sourceName = typeof candidate.meta.targetBlockName === 'string' ? candidate.meta.targetBlockName : candidate.targetName
-    const position = this.sourcePositionForCandidate(candidate)
-    return sourceName !== null && position !== null && this.isMissionSource(item, sourceName)
-      ? `${sourceName}@${position.x},${position.y},${position.z}`
-      : null
   }
 
   private authorizeReachMechanicalStep(
@@ -5161,19 +5042,6 @@ export class JevController {
     const system2Calls = Math.max(0, this.runtimeLlmCalls + this.planCalls - metadata.system2CallsAtStart)
     const duplicateAuthorityConflicts = Math.max(0, this.executor.authorityConflictCount - metadata.authorityConflictsAtStart)
     const duplicateAuthority = metadata.duplicateAuthorityObserved || duplicateAuthorityConflicts > 0
-    if (
-      (outcome.kind === 'BUDGET_EXHAUSTED' || outcome.kind === 'PROVEN_INFEASIBLE' || outcome.kind === 'CONTRACT_VIOLATION') &&
-      state.witness !== null
-    ) {
-      this.reachTerminalHandoff = {
-        missionId: metadata.mission.id,
-        item: metadata.mission.item,
-        count: metadata.mission.count,
-        worldKey: metadata.identity.worldKey,
-        witnessId: state.witness.witnessId,
-        outcomeKind: outcome.kind,
-      }
-    }
     this.logger.info(
       'vtr',
       `VTR_TRANSITION_OUTCOME id=${metadata.transitionId} outcome=${outcome.kind} boundary=${terminalBoundary} mechanicalSteps=${state.usage.mechanicalSteps} jevCalls=${jevCalls} system2Calls=${system2Calls}`,

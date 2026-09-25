@@ -4,11 +4,11 @@ import type { CurrentAction, ExecutionResult } from './src/executor.ts'
 import type { SkillCommitment } from './src/skillCommitment.ts'
 import type { Candidate } from './src/candidates.ts'
 import {
-  ReachController,
   nearestGroundedReachRoutePolicy,
   type ReachRoute,
   type ReachRuntimeSnapshot,
 } from './src/vtr/reach-controller.ts'
+import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import {
   createReachTransitionContract,
   type ReachIdentity,
@@ -17,6 +17,7 @@ import {
   type ReachTransitionContract,
   type ReachTransitionState,
 } from './src/vtr/reach.ts'
+import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 
 interface Fixture {
   controller: JevController
@@ -60,13 +61,14 @@ function makeFixture(startedAt = Date.now()): Fixture {
     resolveRun = resolve
   })
   Object.assign(state, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: 1 }),
     running: true,
     modelRecoveryStopping: false,
     modelRecoveryDrainTimer: null,
     modelRecoveryReachDrainTransitionId: null,
     modelRecoveryReachDrainAdvancing: false,
     modelRecoveryReachDrainPending: false,
-    reachController: new ReachController(nearestGroundedReachRoutePolicy),
+    reachRuntime: { current: null },
     reachRunMetadata: null,
     tickCounter: 1,
     watchdog: null,
@@ -261,8 +263,11 @@ async function makeReachRecoveryFixture(): Promise<{
   const { contract, identity } = makeReachContract()
   const transitionId = contract.transitionId
   let observedAt = startedAt
-  const reachController = new ReachController(nearestGroundedReachRoutePolicy)
-  const committed = await reachController.commit(contract, makeReachSnapshot(contract, identity, observedAt, false))
+  const reachRuntime = new ReachMissionRuntime({
+    routePolicy: nearestGroundedReachRoutePolicy,
+    commitFreshnessFence: () => ({ status: 'current' }),
+  })
+  const committed = await reachRuntime.commit(contract, makeReachSnapshot(contract, identity, observedAt, false))
   if (committed.status !== 'active' || committed.intent === undefined) {
     throw new Error(`Reach fixture failed to commit: ${JSON.stringify(committed)}`)
   }
@@ -290,13 +295,14 @@ async function makeReachRecoveryFixture(): Promise<{
   const controller = Object.create(JevController.prototype) as JevController
   const stateBag = controller as unknown as Record<string, any>
   Object.assign(stateBag, {
+    reachVtrCells: createVtrReachTestCells({ tickCounter: 1 }),
     running: true,
     modelRecoveryStopping: false,
     modelRecoveryDrainTimer: null,
     modelRecoveryReachDrainTransitionId: null,
     modelRecoveryReachDrainAdvancing: false,
     modelRecoveryReachDrainPending: false,
-    reachController,
+    reachRuntime,
     reachRunMetadata: {
       mission: { id: 'mission-log-1', kind: 'inventory_at_least', item: 'log', count: 1 },
       transitionId,
@@ -379,7 +385,7 @@ async function makeReachRecoveryFixture(): Promise<{
   })
 
   // Stand in for grounded candidate selection only. Controller progression,
-  // action completion and terminal verification use the real ReachController.
+  // action completion and terminal verification use the production VTR runtime.
   Object.defineProperty(controller, 'tickReachTransition', {
     configurable: true,
     value: async function (this: JevController): Promise<boolean> {
@@ -390,7 +396,7 @@ async function makeReachRecoveryFixture(): Promise<{
       const actionCount = actions.length
       observedAt = Math.max(Date.now(), observedAt + 1)
       const reached = actionCount >= 3
-      const result = await reachController.tick(makeReachSnapshot(contract, identity, observedAt, reached))
+      const result = await reachRuntime.tick(makeReachSnapshot(contract, identity, observedAt, reached))
       if (result.status === 'terminal') {
         if (result.outcome.kind !== 'SUCCESS') throw new Error(`unexpected Reach terminal: ${JSON.stringify(result.outcome)}`)
         ;(this as unknown as { closeReachTransition(outcome: ReachTerminalOutcome, state: ReachTransitionState, boundary: string): void })

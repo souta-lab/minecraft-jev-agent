@@ -163,23 +163,25 @@ test('composition fences commit when mutable world identity changes after the sn
     async decide() { throw new Error('a single grounded route must not call Jev') },
   })
   const composition = createJevReachVtrComposition(context)
-  const result = await composition.runtime.startInventoryReach({
+  const plan = composition.runtime.deriveInventoryReachTransition({
     mission: { id: 'mission:oak', kind: 'inventory_at_least', item: 'oak_log', count: 1 },
     interactionReach: 5,
     sourceNames: ['oak_log'],
     identity,
     transitionId: 'composition-commit-transition',
-    snapshotForContract(contractValue) {
-      const route = routeFor(contractValue, 10_000, 'MOVE:oak-commit')
-      const snapshot = startSnapshot(contractValue, 10_000, route)
-      context.worldEpoch += 1
-      return snapshot
-    },
   })
+  const route = routeFor(plan.contract, 10_000, 'MOVE:oak-commit')
+  const snapshot = startSnapshot(plan.contract, 10_000, route)
+  const worldChanged = worldState(10_001)
+  context.cachedWorldState.value = {
+    ...worldChanged,
+    self: { ...worldChanged.self, dimension: 'minecraft:the_nether' },
+  } as WorldState
+  const result = await composition.runtime.commit(plan.contract, snapshot)
 
-  assert.equal(result.result.status, 'decision_required')
-  if (result.result.status !== 'decision_required') return
-  assert.match(result.result.reason, /reach_commit_stale_identity_changed/)
+  assert.equal(result.status, 'decision_required')
+  if (result.status !== 'decision_required') return
+  assert.match(result.reason, /reach_commit_stale_identity_changed/)
   assert.equal(composition.runtime.current, null)
 })
 

@@ -11,7 +11,6 @@ import {
   createInventoryReachTransition,
   type InventoryReachTransitionInput,
   type InventoryReachTransitionPlan,
-  type InventoryReachMission,
 } from './reach-scheduler.ts'
 import type {
   ReachIdentity,
@@ -25,23 +24,6 @@ import type {
 export interface ReachMissionRuntimeDependencies {
   readonly routePolicy: ReachRouteDecisionPolicy
   readonly commitFreshnessFence: ReachCommitFreshnessFence
-}
-
-/** A typed Mission request. Snapshot facts and candidate routes contain no runtime client objects. */
-export interface StartInventoryReachInput {
-  readonly mission: InventoryReachMission
-  readonly interactionReach: number
-  readonly sourceNames: readonly string[]
-  readonly identity: ReachIdentity
-  readonly transitionId: string
-  /** Typed Minecraft adapter projects facts/routes only after VTR derives the contract. */
-  readonly snapshotForContract: (contract: ReachTransitionContract) => ReachRuntimeSnapshot
-}
-
-export interface InventoryReachCommit {
-  readonly mission: InventoryReachMission
-  readonly contract: ReachTransitionContract
-  readonly result: ReachControllerResult
 }
 
 export interface ReachTerminalHandoff {
@@ -129,30 +111,6 @@ export class ReachMissionRuntime {
       this.activeContractScope = { contractHash: contract.contractHash, scope: missionScope(contract) }
     }
     return result
-  }
-
-  /**
-   * Temporary strangler compatibility for callers that still need a callback
-   * to project a snapshot after contract derivation. Delete once
-   * `controller-legacy.ts` uses deriveInventoryReachTransition() followed by
-   * typed snapshot construction and commit(contract, snapshot).
-   *
-   * @deprecated Use deriveInventoryReachTransition() and commit().
-   */
-  async startInventoryReach(input: StartInventoryReachInput): Promise<InventoryReachCommit> {
-    const { contract } = this.deriveInventoryReachTransition({
-      mission: input.mission,
-      interactionReach: input.interactionReach,
-      sourceNames: input.sourceNames,
-      identity: input.identity,
-      transitionId: input.transitionId,
-    })
-    const snapshot = input.snapshotForContract(contract)
-    return {
-      mission: input.mission,
-      contract,
-      result: await this.commit(contract, snapshot),
-    }
   }
 
   /** Re-observe facts and continue the same committed contract. */
