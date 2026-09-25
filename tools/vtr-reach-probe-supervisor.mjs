@@ -330,7 +330,8 @@ function validateProbeProfile(rows, identity, generationReadyAt) {
   if (queues.length !== 1) fail(`no-LLM Reach probe must emit exactly one VTR_REACH_PROBE_QUEUE_EMPTY; observed=${queues.length}`)
   const config = configs[0].fields
   const mission = canonicalJson(config.mission)
-  const bootMission = canonicalJson(rows.find((row) => row.event === 'BOOT' && row.fields.runId === identity.runId)?.fields.mission)
+  const { source: _bootMissionSource, ...bootMissionSemantics } = rows.find((row) => row.event === 'BOOT' && row.fields.runId === identity.runId)?.fields.mission ?? {}
+  const bootMission = canonicalJson(bootMissionSemantics)
   if (JSON.stringify(mission) !== JSON.stringify(bootMission)
     || config.compatibilityLadder !== 'observer-only'
     || config.ledgerRestore !== 'disabled'

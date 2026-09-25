@@ -158,7 +158,7 @@ function createAdapters({ calls, paths, leaf, outcomeKind = 'SUCCESS', wrongOutc
       appendFileSync(paths['host-log'], hostLine(t(1), 'BOOT', {
         runId: RUN,
         source: SOURCE,
-        mission: { kind: 'inventory_at_least', item: 'amethyst_block', count: 1 },
+        mission: { kind: 'inventory_at_least', item: 'amethyst_block', count: 1, source: 'BUDDY_MISSION_* or default' },
         worldKey: { serverId: targetServerId, dimension: 'minecraft:overworld', worldEpoch: 7 },
       }))
       assert.equal(parseHostLog(readFileSync(paths['host-log'], 'utf8')).length, 1, 'fixture writes a parseable BOOT')
