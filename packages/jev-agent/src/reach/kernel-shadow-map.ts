@@ -18,8 +18,8 @@ import type {
   ResourceId,
   TransitionContractSpec,
   WorldIdentity,
-} from '../../../kernel/v4.1/kernel.ts'
-import { resourceId, resourceKey } from '../../../kernel/v4.1/kernel.ts'
+} from '../../../kernel/kernel.ts'
+import { resourceId, resourceKey } from '../../../kernel/kernel.ts'
 import type { ReachTransitionContract, ReachWitness } from '../reach/transition.ts'
 
 /** Canonical resource requirement on one mapped mutation surface. */

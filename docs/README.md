@@ -4,7 +4,7 @@ Repository documentation, organized by role per `architecture/TYPESCRIPT-PACKAGE
 The constitutional entrypoints remain at the repository root: `README.md` and `AGENTS.md`.
 
 - `architecture/` — current normative architecture. Canonical: `architecture/NEW-ARCHITECTURE-V4.1.2.md`;
-  `architecture/v4.1/` holds the kernel contract prose mirroring `packages/kernel/v4.1/` code.
+  `architecture/v4.1/` holds the kernel contract prose mirroring `packages/kernel/` code.
 - `decision/` — planner/Jev decision-plane boundaries and the observer read-model.
 - `development/` — development method, definition of done, regression corpus,
   package-ownership map and bounded-improvement roadmap (`PBF-OWNERSHIP-MAP.md`).

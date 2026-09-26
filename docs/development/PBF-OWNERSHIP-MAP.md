@@ -14,7 +14,7 @@ aspirational fiction.
 | `packages/jev-agent/src/jev/` | Jev decision policy: `client` (legacy policy+harness+logging), `authority` (auditable live-policy kernel), `semantic-projection` (#437 epoch/packet machinery) | Root `src/jev.ts` stays a thin facade. |
 | `packages/jev-agent/src/system2/` | Sparse reasoning service: `service`, `payload`, `authority`, `escalation`, `causal-history`, `handoff` | Exception-driven; no motor commands. |
 | `packages/jev-agent/src/legacy/` | Quarantined controller planes behind Host contracts | Temporary layer; each file's deletion condition is documented in its header. Not a permanent home. |
-| `packages/kernel/v4.1/` | The authority kernel (`kernel.ts`) + contract docs | `src/vtr/` was removed once empty: no cross-feature mechanism currently lives in jev-agent. |
+| `packages/kernel/` | The authority kernel (`kernel.ts`, `kernel-internal/`, tests) | Versioned path suffix was removed: the kernel is the sole canonical runtime. |
 | flat `packages/jev-agent/src/*.ts` | Transitional modules (see §2) | Awaiting canonical addresses as host contracts shed backend types. |
 
 ## 1b. Monorepo-level ownership (repo root)
