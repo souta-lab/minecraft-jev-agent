@@ -8,7 +8,7 @@ import { classifyActionOutcome, truthfulActionOutcome } from '../jev-agent/src/a
 import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-legacy.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, currentOptionContextForQueuedGoal, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
-import { buildAuthorityQuestions } from '../jev-agent/src/jev-authority.ts'
+import { buildAuthorityQuestions } from '../jev-agent/src/jev/authority.ts'
 import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2/authority.ts'
 import {
   evaluateBetaTerminationBoundary,
