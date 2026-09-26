@@ -48,6 +48,20 @@ export interface PathProbesHost {
   readonly stationApproachLogged: Set<string>
   gateOptions: ReachabilityGateOptions | null
   gateOptionsTick: number
+  attackStandProbe(): (query: { entityId: number; position: Vec3Json }) => AttackStandFact | null
+  botPassableAt(x: number, y: number, z: number): boolean
+  botSeesEntityFrom(x: number, y: number, z: number, entityPosition: Vec3Json, height: number): boolean
+  botSolidSupportAt(x: number, y: number, z: number): boolean
+  botStandColumnHazardAt(x: number, y: number, z: number): boolean
+  botStandsInDimensionTransfer(feet: Vec3Json): boolean
+  canComputeMeleePath(position: Vec3Json): boolean
+  canComputePathNear(position: Vec3Json): boolean
+  computePathFacts(position: Vec3Json): { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute }
+  digApproachProbe(): DigApproachProbe
+  forgetStationUnreachable(kind: StationKindName, station: Vec3Json): void
+  noteStationUnreachable(kind: StationKindName, station: Vec3Json, reason: StationApproachRefusal): void
+  routeCrossesDimensionTransfer(path: readonly { x: number; y: number; z: number }[]): DimensionTransferRoute
+  stationApproachProbe(): StationApproachProbe
 }
 
 export function canComputePath(host: PathProbesHost, position: Vec3Json): boolean {
@@ -103,7 +117,7 @@ export function reachabilityGateOptions(host: PathProbesHost): ReachabilityGateO
   // dimension-transfer cell. Computing the plan twice would double the
   // pathfinder cost of the whole gate.
   const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
-  const pathFacts = createPositionFactCache((position) => computePathFacts(host, position))
+  const pathFacts = createPositionFactCache((position) => host.computePathFacts(position))
   host.gateOptions = {
     memory: host.reachabilityProofs,
     pathProbe: (position) => pathFacts(position).probe,
@@ -112,13 +126,13 @@ export function reachabilityGateOptions(host: PathProbesHost): ReachabilityGateO
       const key = `${position.x},${position.y},${position.z}`
       const cached = attackPathCache.get(key)
       if (cached !== undefined) return cached
-      const result = canComputeMeleePath(host, position) ? 'reachable' : 'no_path'
+      const result = host.canComputeMeleePath(position) ? 'reachable' : 'no_path'
       attackPathCache.set(key, result)
       return result
     },
-    stationApproach: stationApproachProbe(host),
-    digApproach: digApproachProbe(host),
-    attackStandProbe: attackStandProbe(host),
+    stationApproach: host.stationApproachProbe(),
+    digApproach: host.digApproachProbe(),
+    attackStandProbe: host.attackStandProbe(),
   }
   host.gateOptionsTick = host.tickCounter
   return host.gateOptions
@@ -163,8 +177,8 @@ export function attackStandProbe(host: PathProbesHost): (query: { entityId: numb
       reach: MELEE_ATTACK_REACH,
       world: {
         standable: (x, y, z) => isStandable(host.bot, { x, y, z }),
-        hazard: (x, y, z) => botStandColumnHazardAt(host, x, y, z),
-        visible: (x, y, z) => botSeesEntityFrom(host, x, y, z, query.position, height),
+        hazard: (x, y, z) => host.botStandColumnHazardAt(x, y, z),
+        visible: (x, y, z) => host.botSeesEntityFrom(x, y, z, query.position, height),
       },
     })
     cache.set(query.entityId, fact)
@@ -247,7 +261,7 @@ export function computePathFacts(host: PathProbesHost, position: Vec3Json): { pr
     const goal = new goals.GoalBlock(position.x, position.y, position.z)
     const plan = host.bot.pathfinder.getPathTo(host.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
     if (plan.status !== 'success') return { probe: 'no_path', transfer: 'unknown' }
-    return { probe: 'reachable', transfer: routeCrossesDimensionTransfer(host, plan.path) }
+    return { probe: 'reachable', transfer: host.routeCrossesDimensionTransfer(plan.path) }
   } catch {
     return { probe: 'no_path', transfer: 'unknown' }
   }
@@ -261,7 +275,7 @@ export function computePathFacts(host: PathProbesHost, position: Vec3Json): { pr
  */
 export function routeCrossesDimensionTransfer(host: PathProbesHost, path: readonly { x: number; y: number; z: number }[]): DimensionTransferRoute {
   for (const node of path) {
-    if (botStandsInDimensionTransfer(host, { x: node.x, y: node.y, z: node.z })) return 'crosses'
+    if (host.botStandsInDimensionTransfer({ x: node.x, y: node.y, z: node.z })) return 'crosses'
   }
   return 'clear'
 }
@@ -296,8 +310,8 @@ export function digApproachProbe(host: PathProbesHost): DigApproachProbe {
       block,
       { x: feet.x, y: feet.y, z: feet.z },
       {
-        passable: (x, y, z) => botPassableAt(host, x, y, z),
-        solidSupport: (x, y, z) => botSolidSupportAt(host, x, y, z),
+        passable: (x, y, z) => host.botPassableAt(x, y, z),
+        solidSupport: (x, y, z) => host.botSolidSupportAt(x, y, z),
       },
       host.options.reach,
     )
@@ -307,7 +321,7 @@ export function digApproachProbe(host: PathProbesHost): DigApproachProbe {
       fact = { approach: null, path: null }
     } else if (pathProbes < pathProbeBudget) {
       pathProbes += 1
-      fact = { approach: stand, path: canComputePathNear(host, stand) ? 'reachable' : 'no_path' }
+      fact = { approach: stand, path: host.canComputePathNear(stand) ? 'reachable' : 'no_path' }
     } else {
       fact = { approach: stand, path: null }
     }
@@ -327,20 +341,20 @@ export function stationApproachProbe(host: PathProbesHost): StationApproachProbe
       station,
       { x: feet.x, y: feet.y, z: feet.z },
       {
-        passable: (x, y, z) => botPassableAt(host, x, y, z),
-        solidSupport: (x, y, z) => botSolidSupportAt(host, x, y, z),
+        passable: (x, y, z) => host.botPassableAt(x, y, z),
+        solidSupport: (x, y, z) => host.botSolidSupportAt(x, y, z),
       },
       host.options.reach,
     )
     const stand = stands[0] ?? null
     let fact: StationApproachFact
     if (stand === null) {
-      noteStationUnreachable(host, kind, station, 'no_interaction_stand')
+      host.noteStationUnreachable(kind, station, 'no_interaction_stand')
       fact = { approach: null, path: null }
     } else {
-      const path = canComputePathNear(host, stand) ? 'reachable' : 'no_path'
-      if (path === 'no_path') noteStationUnreachable(host, kind, station, 'no_path_to_stand')
-      else forgetStationUnreachable(host, kind, station)
+      const path = host.canComputePathNear(stand) ? 'reachable' : 'no_path'
+      if (path === 'no_path') host.noteStationUnreachable(kind, station, 'no_path_to_stand')
+      else host.forgetStationUnreachable(kind, station)
       fact = { approach: stand, path }
     }
     cache.set(cacheKey, fact)

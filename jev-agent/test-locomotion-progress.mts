@@ -64,6 +64,10 @@ function moveFailureMemoryAfterSuccess(observation: typeof stationary): MoveFail
     tickCounter: 0,
     lastMoveTarget: null,
     notifyMoveFailureMemory: (): void => {},
+    // Plain-object fixture: resolve the delegate's plane-host view as self.
+    get ledgersHost(): unknown {
+      return this
+    },
   }
   recordMoveSuccess.call(fakeController, { id: 'MOVE:p3_64_7', kind: 'MOVE', target })
   return memory

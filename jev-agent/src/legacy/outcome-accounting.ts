@@ -136,6 +136,9 @@ export interface OutcomeAccountingHost {
   readonly tickCounter: number
   verifiedDigs: number
   readonly waitStreakEscalation: WaitStreakEscalation
+  onDescendComplete(result: ExecutionResult, candidate: Candidate): void
+  onRetrievalDescent(candidate: Candidate): void
+  recordFailure(code: FailureCode | GuardCode | string | null, detail: string): void
 }
 
 /**
@@ -592,7 +595,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
         return
       }
     }
-    if (result.kind === 'DESCEND') onDescendComplete(host, result, candidate)
+    if (result.kind === 'DESCEND') host.onDescendComplete(result, candidate)
     // The dig route's own progress assertion: the step CLAIMED it lands closer
     // to the goal's target, so a settled step re-measures the distance. Only a
     // real decrease is reported.
@@ -601,7 +604,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
     // distance to the target after the step. Only a real downward move is reported.
     if (candidate.meta.levelScan === true) host.logLevelScanStep(result, candidate)
     if (result.kind === 'RETRIEVE') {
-      if (result.blockRemoved) onRetrievalDescent(host, candidate)
+      if (result.blockRemoved) host.onRetrievalDescent(candidate)
       // Only a COMPLETED retrieval - the target actually arrived or the item
       // was acquired - retires the active target and resets the coordinate
       // failure memory. A measured distance closure or a vertical chunk is
@@ -679,7 +682,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
     if (result.kind !== 'ESCALATE' && result.kind !== 'WAIT') {
       host.noteCandidateFailure(result.actionId)
       host.recordMoveFailure(candidate, moveFailureReason(result.failure))
-      recordFailure(host, result.failure, `${result.actionId}: ${result.detail}`)
+      host.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
       // #78 follow-up: bound the OTHER loop - the same plan re-offered with its
       // action failing the same typed way. `onUnverifiedAction` owns unverified
       // postconditions with its own budget, and a PLACE retry was handled above,
@@ -789,7 +792,7 @@ result: ExecutionResult, postcondition: string, pending: PendingDecision | undef
     host.tickCounter,
   )
   host.noteCandidateFailure(result.actionId)
-  recordFailure(host, 'verify_failed', `${result.actionId} unverified: ${result.detail}`)
+  host.recordFailure('verify_failed', `${result.actionId} unverified: ${result.detail}`)
 
   const switched = host.advancePrereqAfterUnverified()
   const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })

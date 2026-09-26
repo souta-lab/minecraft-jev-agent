@@ -96,6 +96,14 @@ export interface OutcomeLedgersHost {
   signals: AgentSignals
   readonly tickCounter: number
   zeroProgressRoutes: ZeroProgressRoutes
+  candidateFailureCount(candidateId: string): number
+  currentDimension(): string
+  failureSnapshot(): Record<string, number>
+  movePathFailureScope(state?: WorldState | null): MoveFailurePathScope | null
+  notifyMoveFailureMemory(): void
+  notifyRepeatedOutcomes(): void
+  recordMoveFailure(candidate: Candidate, reason: MoveFailureReason): void
+  resetDescendBudgetAfterWorldChange(actionId: string, reason: 'verified_mine' | 'verified_move'): void
 }
 
 export function createMoveFailMemory(host: OutcomeLedgersHost): MoveFailMemory {
@@ -165,7 +173,7 @@ export function failureSnapshot(host: OutcomeLedgersHost): Record<string, number
 }
 
 export function candidateFailureCount(host: OutcomeLedgersHost, candidateId: string): number {
-  return failureCount(failureSnapshot(host), candidateId)
+  return failureCount(host.failureSnapshot(), candidateId)
 }
 
 export function noteCandidateFailure(host: OutcomeLedgersHost, candidateId: string): void {
@@ -177,7 +185,7 @@ export function noteCandidateFailure(host: OutcomeLedgersHost, candidateId: stri
     host.candidateFailures.set(spatial, (host.candidateFailures.get(spatial) ?? 0) + 1)
     host.candidateFailureAt.set(spatial, now)
   }
-  host.signals.failedCandidates = failureSnapshot(host)
+  host.signals.failedCandidates = host.failureSnapshot()
 }
 
 export function noteCandidateSuccess(host: OutcomeLedgersHost, candidateId: string): void {
@@ -188,7 +196,7 @@ export function noteCandidateSuccess(host: OutcomeLedgersHost, candidateId: stri
     host.candidateFailures.delete(spatial)
     host.candidateFailureAt.delete(spatial)
   }
-  host.signals.failedCandidates = failureSnapshot(host)
+  host.signals.failedCandidates = host.failureSnapshot()
 }
 
 /**
@@ -263,7 +271,7 @@ export function breakFailureDeadlock(host: OutcomeLedgersHost, candidates: reado
   )
   if (actionable.length === 0) return
   const allExhausted = actionable.every(
-    (candidate) => candidateFailureCount(host, candidate.id) >= host.options.candidateFailureLimit,
+    (candidate) => host.candidateFailureCount(candidate.id) >= host.options.candidateFailureLimit,
   )
   if (!allExhausted) return
   const localRouteOnly = actionable.every(
@@ -496,7 +504,7 @@ export function noteRepeatedOutcome(
   progressKinds: readonly string[],
 ): void {
   if (!isRepeatTrackedKind(candidate.kind)) return
-  const dimension = currentDimension(host)
+  const dimension = host.currentDimension()
   const actionShape = actionShapeOf(result.actionId)
   const cell = repeatedOutcomeCell(dimension, candidate.target, host.bot.entity.position)
   const outcome = repeatedOutcomeToken({ failure: result.failure, status: result.status, verified })
@@ -571,7 +579,7 @@ export function noteRepeatedOutcome(
       host.tickCounter,
     )
   }
-  if (decision.escalate || decision.restarted !== null) notifyRepeatedOutcomes(host)
+  if (decision.escalate || decision.restarted !== null) host.notifyRepeatedOutcomes()
 }
 
 /**
@@ -659,7 +667,7 @@ export function checkUnreachableMove(host: OutcomeLedgersHost, candidate: Candid
     )
   }
   host.noteCandidateFailure(candidate.id)
-  recordMoveFailure(host, candidate, 'unreachable')
+  host.recordMoveFailure(candidate, 'unreachable')
 }
 
 /** #8: drop movement targets still inside their blacklist cooldown. */
@@ -669,7 +677,7 @@ export function filterMoveCandidates(host: OutcomeLedgersHost, candidates: reado
     candidates,
     host.moveFailMemory,
     dimension,
-    movePathFailureScope(host, state),
+    host.movePathFailureScope(state),
   )
   if (!log) return kept
   for (const entry of skipped) {
@@ -693,13 +701,13 @@ export function rememberMoveTarget(host: OutcomeLedgersHost, candidate: Candidat
   if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
   const previous = host.lastMoveTarget
   if (previous !== null) host.previousMoveTarget = previous
-  host.lastMoveTarget = { dimension: currentDimension(host), position: { ...candidate.target } }
+  host.lastMoveTarget = { dimension: host.currentDimension(), position: { ...candidate.target } }
 }
 
 export function recordMoveFailure(host: OutcomeLedgersHost, candidate: Candidate, reason: MoveFailureReason): void {
   if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
-  const dimension = currentDimension(host)
-  const pathFailureScope = reason === 'no_path' ? movePathFailureScope(host) : null
+  const dimension = host.currentDimension()
+  const pathFailureScope = reason === 'no_path' ? host.movePathFailureScope() : null
   const result =
     pathFailureScope === null
       ? host.moveFailMemory.record(dimension, candidate.target, reason)
@@ -711,7 +719,7 @@ export function recordMoveFailure(host: OutcomeLedgersHost, candidate: Candidate
     { actionId: candidate.id, key, attempts: result.entry.attempts, reason, kind: candidate.kind },
     host.tickCounter,
   )
-  notifyMoveFailureMemory(host)
+  host.notifyMoveFailureMemory()
   if (!result.newlyBlacklisted) return
   host.logger.warn(
     'agent',
@@ -746,8 +754,8 @@ export function remainingCooldownSeconds(blacklistedUntil: number, now = Date.no
 
 export function recordMoveSuccess(host: OutcomeLedgersHost, candidate: Candidate): void {
   if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
-  resetDescendBudgetAfterWorldChange(host, candidate.id, 'verified_move')
-  const dimension = currentDimension(host)
+  host.resetDescendBudgetAfterWorldChange(candidate.id, 'verified_move')
+  const dimension = host.currentDimension()
   const key = moveFailureKey(dimension, candidate.target)
   // A verified MOVE inside an idle, unobserved or low-efficiency window is mechanical success, not
   // progress. Resetting the failure memory there is exactly what let the live
@@ -769,7 +777,7 @@ export function recordMoveSuccess(host: OutcomeLedgersHost, candidate: Candidate
     host.lastMoveTarget = null
   }
   host.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, host.tickCounter)
-  notifyMoveFailureMemory(host)
+  host.notifyMoveFailureMemory()
 }
 
 export function resetDescendBudgetAfterWorldChange(host: OutcomeLedgersHost, actionId: string, reason: 'verified_mine' | 'verified_move'): void {

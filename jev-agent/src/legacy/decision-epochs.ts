@@ -152,6 +152,9 @@ export interface DecisionEpochsHost {
   readonly waitStreakEscalation: WaitStreakEscalation
   waitSuppressed: boolean
   withheldCandidateIds: ReadonlySet<string>
+  actionCommitmentPlanKey(state: WorldState): string
+  candidateCommitCost(candidate: Candidate, index: number): number
+  deterministicInvalid(candidates: readonly Candidate[], state: WorldState): ReadonlySet<string>
 }
 
 /** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
@@ -192,7 +195,7 @@ export function applyCandidateCommitment(
   host.commitmentProgressEpoch = host.progressEpoch
   const offered: readonly FlapCandidate[] = candidates.map((candidate, index) => ({
     id: candidate.id,
-    cost: candidateCommitCost(host, candidate, index),
+    cost: host.candidateCommitCost(candidate, index),
   }))
   const decision = evaluateCandidateFlap({
     previous: host.commitmentState,
@@ -200,7 +203,7 @@ export function applyCandidateCommitment(
     fingerprint: host.lastStateFingerprint,
     progressed,
     candidates: offered,
-    invalid: deterministicInvalid(host, candidates, state),
+    invalid: host.deterministicInvalid(candidates, state),
   })
   host.commitmentState = decision.state
   if (decision.line !== null) {
@@ -257,7 +260,7 @@ export function applyActionCommitment(
   state: WorldState,
 ): string {
   const running = host.executor.current
-  const invalid = running === null ? null : deterministicInvalid(host, candidates, state)
+  const invalid = running === null ? null : host.deterministicInvalid(candidates, state)
   // SAFE: in melee contact a threat response must execute now. Code owns only
   // the contact fact and the kind test; the choice is still Jev's (the newer
   // one). Without this, the measured fight held the in-flight RETREAT while
@@ -274,7 +277,7 @@ export function applyActionCommitment(
         ? null
         : { id: running.id, epoch: running.epoch, startedAtMs: running.startedAt },
     chosenId,
-    planKey: actionCommitmentPlanKey(host, state),
+    planKey: host.actionCommitmentPlanKey(state),
     nowMs: Date.now(),
     inFlightInvalid: running !== null && invalid !== null && invalid.has(running.id),
     inFlightOffered: running !== null && candidates.some((candidate) => candidate.id === running.id),
@@ -285,7 +288,7 @@ export function applyActionCommitment(
     host.logger.warn(
       'policy',
       decision.line,
-      { chosenId, heldId: decision.chosenId, planKey: actionCommitmentPlanKey(host, state) },
+      { chosenId, heldId: decision.chosenId, planKey: host.actionCommitmentPlanKey(state) },
       host.tickCounter,
     )
   }
@@ -293,7 +296,7 @@ export function applyActionCommitment(
     host.logger.warn(
       'policy',
       decision.releaseLine,
-      { chosenId, heldId: null, planKey: actionCommitmentPlanKey(host, state) },
+      { chosenId, heldId: null, planKey: host.actionCommitmentPlanKey(state) },
       host.tickCounter,
     )
   }
