@@ -9,7 +9,7 @@ import type {
   ReachRouteDecisionInput,
 } from './vtr/reach-controller.ts'
 import type { ReachIdentity } from './vtr/reach.ts'
-import type { KernelShadowSink } from './vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority, KernelShadowSink } from './vtr/kernel-shadow-map.ts'
 
 export interface JevReachMutableCell<T> {
   value: T
@@ -61,6 +61,12 @@ export interface JevReachVtrCompositionContext {
    * shadow; the shadow never returns authority or gates production decisions.
    */
   readonly kernelShadow?: KernelShadowSink
+  /**
+   * V4.1.2 Phase-2 production-authority gate. When present, Reach admission,
+   * activation, effect issue/settlement and terminalization consult the real
+   * kernel before the corresponding production act; denials fail closed.
+   */
+  readonly kernelAuthority?: KernelReachAuthority
 }
 
 export interface JevReachVtrComposition {
@@ -249,6 +255,7 @@ export function createJevReachVtrComposition(
     routePolicy,
     commitFreshnessFence,
     kernelShadow: context.kernelShadow,
+    kernelAuthority: context.kernelAuthority,
     onTransitionNotCommitted: (transitionId) => { transitionMetrics.delete(transitionId) },
     onTerminalHandoff: ({ transitionId, contractHash, state, outcome }) => {
       const routeMetrics = transitionMetrics.get(transitionId)
