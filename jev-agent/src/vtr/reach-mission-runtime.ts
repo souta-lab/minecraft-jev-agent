@@ -20,7 +20,7 @@ import type {
   ReachTransitionState,
 } from './reach.ts'
 import type { ReachRuntimeActionSnapshot } from './reach-runtime-ports.ts'
-import type { KernelReachAuthority, KernelShadowSink } from './kernel-shadow-map.ts'
+import type { KernelReachAuthority } from './kernel-shadow-map.ts'
 
 export interface ReachMissionRuntimeSession {
   readonly mission: InventoryReachTransitionInput['mission']
@@ -93,20 +93,14 @@ export interface ReachMissionRuntimeDependencies {
   /** Drop telemetry for a route proposal that never acquired a committed Transition. */
   readonly onTransitionNotCommitted?: (transitionId: string) => void
   /**
-   * V4.1.2 Phase-1 shadow sink. The host-owned kernel shadow receives
-   * observation/commit/step/terminal inputs here; it never returns authority
-   * or gates production decisions. Used only when `kernelAuthority` is absent.
+   * V4.1.2 production-authority gate — REQUIRED. The runtime consults the real
+   * kernel command path BEFORE commit/actuation/SUCCESS: a denied verdict is
+   * terminal for the gated act and never falls back to a legacy path. World
+   * observations flow through `kernelAuthority.feedObservation` into the same
+   * session the gates run on. There is no authority-less mode: Reach mutation,
+   * terminal and SUCCESS authority are exactly the kernel.
    */
-  readonly kernelShadow?: KernelShadowSink
-  /**
-   * V4.1.2 production-authority gate (Phase-2 cutover). When present, the
-   * runtime consults the real kernel command path BEFORE commit/actuation/
-   * SUCCESS: a denied verdict is terminal for the gated act and never falls
-   * back to a legacy path. World-observation inputs still flow through
-   * `kernelShadow` (same session feeds the facts the gate verifies against);
-   * lifecycle/step inputs are replaced by verdict-returning gate calls.
-   */
-  readonly kernelAuthority?: KernelReachAuthority
+  readonly kernelAuthority: KernelReachAuthority
 }
 
 export interface ReachTerminalHandoff {
@@ -207,25 +201,27 @@ export class ReachMissionRuntime {
   private readonly controller: ReachController
   private readonly onTerminalHandoff: ReachMissionRuntimeDependencies['onTerminalHandoff']
   private readonly onTransitionNotCommitted: ReachMissionRuntimeDependencies['onTransitionNotCommitted']
-  private readonly kernelShadow: KernelShadowSink | undefined
-  private readonly kernelAuthority: KernelReachAuthority | undefined
+  private readonly kernelAuthority: KernelReachAuthority
   private terminalWitnessExclusion: TerminalWitnessExclusion | null = null
   private activeContractScope: ActiveContractScope | null = null
   private session: ReachMissionRuntimeSession | null = null
 
   constructor(dependencies: ReachMissionRuntimeDependencies) {
+    if (dependencies.kernelAuthority === undefined || dependencies.kernelAuthority === null) {
+      // Reach mutation/terminal/SUCCESS authority is exactly the kernel gate;
+      // an authority-less runtime could still walk the body with no owner.
+      throw new Error('ReachMissionRuntime requires KernelReachAuthority')
+    }
     this.controller = new ReachController(dependencies.routePolicy, dependencies.commitFreshnessFence)
     this.onTerminalHandoff = dependencies.onTerminalHandoff
     this.onTransitionNotCommitted = dependencies.onTransitionNotCommitted
-    this.kernelShadow = dependencies.kernelShadow
     this.kernelAuthority = dependencies.kernelAuthority
   }
 
-  /** Fire-and-forget shadow input. A throwing sink is contained: the shadow never affects VTR authority. */
-  private shadow(input: Parameters<KernelShadowSink>[0]): void {
-    if (this.kernelShadow === undefined) return
+  /** Feed the kernel fact store; a throwing observer is contained and never gates production. */
+  private feedObservation(input: Parameters<KernelReachAuthority['feedObservation']>[0]): void {
     try {
-      this.kernelShadow(input)
+      this.kernelAuthority.feedObservation(input)
     } catch {
       // Observation must never break the production runtime.
     }
@@ -256,8 +252,7 @@ export class ReachMissionRuntime {
     const current = this.controller.current
     const session = this.session
     const mission = frame.mission
-    this.shadow({
-      type: 'world-observation',
+    this.feedObservation({
       observedAtMs: frame.snapshot.observation.observedAtMs,
       predicates: frame.snapshot.observation.predicates,
     })
@@ -420,83 +415,69 @@ export class ReachMissionRuntime {
   /** Commit an already-derived contract and typed snapshot through VTR ownership. */
   async commit(contract: ReachTransitionContract, snapshot: ReachRuntimeSnapshot): Promise<ReachControllerResult> {
     const scopedSnapshot = this.excludePriorTerminalWitness(contract, snapshot)
-    const authority = this.kernelAuthority
-    // Authority mode: the kernel admits the contract BEFORE the production
-    // controller commits. A denied verdict ends the attempt here; there is no
-    // path that retries this contract through legacy scheduling.
-    if (authority !== undefined) {
-      const admitted = authority.admitTransition(contract)
-      if (!admitted.ok) return { status: 'refused', reason: `kernel-admit-denied:${admitted.reason}` }
-    }
+    // The kernel admits the contract BEFORE the production controller commits.
+    // A denied verdict ends the attempt here; there is no path that retries
+    // this contract through legacy scheduling.
+    const admitted = this.kernelAuthority.admitTransition(contract)
+    if (!admitted.ok) return { status: 'refused', reason: `kernel-admit-denied:${admitted.reason}` }
     const result = await this.controller.commit(contract, scopedSnapshot)
     if (result.status === 'active' || result.status === 'terminal') {
       this.activeContractScope = { transitionId: contract.transitionId, contractHash: contract.contractHash, scope: missionScope(contract) }
-      if (authority !== undefined) {
-        if (result.status === 'active') {
-          // Fresh proofs + witness + declared resource bundle acquisition.
-          // Only after this verdict may any effect be issued.
-          const activated = authority.activateTransition(contract.transitionId, result.state.witness)
-          if (!activated.ok) {
-            const torn = this.controller.supersede({
-              reason: `kernel activation denied: ${activated.reason}`,
-              evidenceId: `kernel-activation-denied:${contract.transitionId}`,
-              identity: contract.identity,
-              // The gate verdict is a real-time authority event, strictly
-              // after the commit-time observation; wall-clock keeps the
-              // supersession evidence fresh without faking a world timestamp.
-              nowMs: Date.now(),
-            })
-            authority.terminalize({
-              transitionId: contract.transitionId,
-              contractHash: contract.contractHash,
-              outcome: torn.status === 'terminal'
-                ? torn.outcome
-                : {
-                    kind: 'CONTRACT_SUPERSEDED',
-                    contractHash: contract.contractHash,
-                    reason: `kernel-activation-denied:${activated.reason}`,
-                    evidenceId: `kernel-activation-denied:${contract.transitionId}`,
-                  },
-            })
-            // Fail closed: a denied activation may never continue to dispatch,
-            // even if the controller-side teardown did not fully terminalize.
-            return torn.status === 'terminal'
-              ? torn
-              : { status: 'refused', reason: `kernel-activation-denied:${activated.reason}` }
-          }
-          return result
+      if (result.status === 'active') {
+        // Fresh proofs + witness + declared resource bundle acquisition.
+        // Only after this verdict may any effect be issued.
+        const activated = this.kernelAuthority.activateTransition(contract.transitionId, result.state.witness)
+        if (!activated.ok) {
+          const torn = this.controller.supersede({
+            reason: `kernel activation denied: ${activated.reason}`,
+            evidenceId: `kernel-activation-denied:${contract.transitionId}`,
+            identity: contract.identity,
+            // The gate verdict is a real-time authority event, strictly
+            // after the commit-time observation; wall-clock keeps the
+            // supersession evidence fresh without faking a world timestamp.
+            nowMs: Date.now(),
+          })
+          this.kernelAuthority.terminalize({
+            transitionId: contract.transitionId,
+            contractHash: contract.contractHash,
+            outcome: torn.status === 'terminal'
+              ? torn.outcome
+              : {
+                  kind: 'CONTRACT_SUPERSEDED',
+                  contractHash: contract.contractHash,
+                  reason: `kernel-activation-denied:${activated.reason}`,
+                  evidenceId: `kernel-activation-denied:${contract.transitionId}`,
+                },
+          })
+          // Fail closed: a denied activation may never continue to dispatch,
+          // even if the controller-side teardown did not fully terminalize.
+          return torn.status === 'terminal'
+            ? torn
+            : { status: 'refused', reason: `kernel-activation-denied:${activated.reason}` }
         }
-        // The controller committed directly into terminal state; mirror the
-        // same typed closure on the kernel side (admitted, never activated).
-        authority.terminalize({
-          transitionId: contract.transitionId,
-          contractHash: contract.contractHash,
-          outcome: result.outcome,
-        })
         return result
       }
-      this.shadow({
-        type: 'transition-committed',
-        contract,
-        witness: result.state.witness,
-        lifecycle: result.status,
+      // The controller committed directly into terminal state; mirror the
+      // same typed closure on the kernel side (admitted, never activated).
+      this.kernelAuthority.terminalize({
+        transitionId: contract.transitionId,
+        contractHash: contract.contractHash,
+        outcome: result.outcome,
       })
     } else {
-      if (authority !== undefined) {
-        // The controller refused or parked the contract after the kernel
-        // admitted it; close the admitted kernel transition so no RUNNABLE
-        // zombie outlives the production decision.
-        authority.terminalize({
-          transitionId: contract.transitionId,
+      // The controller refused or parked the contract after the kernel
+      // admitted it; close the admitted kernel transition so no RUNNABLE
+      // zombie outlives the production decision.
+      this.kernelAuthority.terminalize({
+        transitionId: contract.transitionId,
+        contractHash: contract.contractHash,
+        outcome: {
+          kind: 'CONTRACT_SUPERSEDED',
           contractHash: contract.contractHash,
-          outcome: {
-            kind: 'CONTRACT_SUPERSEDED',
-            contractHash: contract.contractHash,
-            reason: `not-committed:${result.status}`,
-            evidenceId: `not-committed:${contract.transitionId}`,
-          },
-        })
-      }
+          reason: `not-committed:${result.status}`,
+          evidenceId: `not-committed:${contract.transitionId}`,
+        },
+      })
       try {
         this.onTransitionNotCommitted?.(contract.transitionId)
       } catch {
@@ -519,27 +500,16 @@ export class ReachMissionRuntime {
   ): ReachStepAuthorization {
     const result = this.controller.authorizeMechanicalStep(intentId, identity, step)
     if (result.status === 'authorized') {
-      const authority = this.kernelAuthority
-      if (authority !== undefined) {
-        // Authority mode: ISSUE_EFFECT + BEGIN_EFFECT_DISPATCH must succeed in
-        // the kernel BEFORE the physical leg may dispatch. A denied verdict
-        // means zero mutation reaches Minecraft for this step.
-        const issued = authority.issueStepEffect({
-          transitionId: result.transitionId,
-          intentId,
-          stepId: step.stepId,
-          effectKind: step.effectKind,
-        })
-        if (!issued.ok) return { status: 'refused', reason: `kernel-effect-denied:${issued.reason}` }
-      } else {
-        this.shadow({
-          type: 'mechanical-step-issued',
-          transitionId: result.transitionId,
-          intentId,
-          stepId: step.stepId,
-          effectKind: step.effectKind,
-        })
-      }
+      // ISSUE_EFFECT + BEGIN_EFFECT_DISPATCH must succeed in the kernel BEFORE
+      // the physical leg may dispatch. A denied verdict means zero mutation
+      // reaches Minecraft for this step.
+      const issued = this.kernelAuthority.issueStepEffect({
+        transitionId: result.transitionId,
+        intentId,
+        stepId: step.stepId,
+        effectKind: step.effectKind,
+      })
+      if (!issued.ok) return { status: 'refused', reason: `kernel-effect-denied:${issued.reason}` }
     }
     return result
   }
@@ -552,24 +522,18 @@ export class ReachMissionRuntime {
   ): ReachControllerResult {
     const result = this.controller.recordMechanicalStepOutcome(intentId, stepId, input)
     const transitionId = this.session?.transitionId ?? this.controller.current?.contract.transitionId ?? 'unknown'
-    this.shadow({
-      type: 'world-observation',
+    this.feedObservation({
       observedAtMs: input.snapshot.observation.observedAtMs,
       predicates: input.snapshot.observation.predicates,
     })
-    const settled = {
+    this.kernelAuthority.settleStepEffect({
       transitionId,
       intentId,
       stepId,
       status: result.status,
       verified: result.status === 'terminal' && result.outcome.kind === 'SUCCESS',
       progressed: result.status === 'active',
-    }
-    if (this.kernelAuthority !== undefined) {
-      this.kernelAuthority.settleStepEffect(settled)
-    } else {
-      this.shadow({ type: 'mechanical-step-settled', ...settled })
-    }
+    })
     return result
   }
 
@@ -625,32 +589,22 @@ export class ReachMissionRuntime {
     }
     if (scope !== null && scope.contractHash === state.contractHash) {
       let deliveredOutcome: ReachTerminalOutcome = outcome
-      const authority = this.kernelAuthority
-      if (authority !== undefined) {
-        const verdict = authority.terminalize({
-          transitionId: scope.transitionId,
+      const verdict = this.kernelAuthority.terminalize({
+        transitionId: scope.transitionId,
+        contractHash: state.contractHash,
+        outcome,
+      })
+      if (!verdict.ok && outcome.kind === 'SUCCESS') {
+        // The kernel could not verify SUCCESS from observed facts. The
+        // controller's outcome is evidence of what it computed, but
+        // production MUST NOT ship SUCCESS: degrade to the typed violation
+        // so downstream authority records exactly what the kernel allowed.
+        deliveredOutcome = {
+          kind: 'CONTRACT_VIOLATION',
           contractHash: state.contractHash,
-          outcome,
-        })
-        if (!verdict.ok && outcome.kind === 'SUCCESS') {
-          // The kernel could not verify SUCCESS from observed facts. The
-          // controller's outcome is evidence of what it computed, but
-          // production MUST NOT ship SUCCESS: degrade to the typed violation
-          // so downstream authority records exactly what the kernel allowed.
-          deliveredOutcome = {
-            kind: 'CONTRACT_VIOLATION',
-            contractHash: state.contractHash,
-            violation: 'invalid_evidence',
-            detail: `kernel-verify-success-denied:${verdict.reason}`,
-          }
+          violation: 'invalid_evidence',
+          detail: `kernel-verify-success-denied:${verdict.reason}`,
         }
-      } else {
-        this.shadow({
-          type: 'transition-terminal',
-          transitionId: scope.transitionId,
-          contractHash: state.contractHash,
-          outcome,
-        })
       }
       try {
         this.onTerminalHandoff?.({

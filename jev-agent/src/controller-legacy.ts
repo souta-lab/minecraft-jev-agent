@@ -184,7 +184,7 @@ import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
 import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
 import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
-import type { KernelReachAuthority, KernelShadowSink, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
 import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
 import { assessReachViability } from './vtr/reach-safety.ts'
@@ -452,19 +452,14 @@ export interface JevAgentOptions {
   /** Isolated no-LLM probe: VTR is the only semantic/locomotion owner until stopped. */
   vtrReachProbe?: boolean
   /**
-   * V4.1.2 Phase-1 shadow sink owned by the resident host. The Reach runtime
-   * mirrors observation/commit/step/terminal facts into it; the shadow never
-   * returns authority or gates a production decision.
+   * V4.1.2 production-authority gate — REQUIRED at construction. The kernel
+   * gates every gated Reach act (admission, activation, effect issue,
+   * settlement, terminalization, SUCCESS) and receives verified world
+   * observations through `feedObservation`. Legacy Reach scheduling for the
+   * Mission item is withheld unconditionally (no fallback); there is no
+   * authority-less or observer-only Reach mode.
    */
-  kernelShadow?: KernelShadowSink
-  /**
-   * V4.1.2 production-authority gate. Production generations always install
-   * it: legacy Reach scheduling for the Mission item is withheld
-   * unconditionally (no fallback), and the Reach runtime consults the kernel
-   * before every gated act. An absent gate leaves the runtime in
-   * shadow-observe mode, which exists only for offline/test fixtures.
-   */
-  kernelAuthority?: KernelReachAuthority
+  kernelAuthority: KernelReachAuthority
   /** maximum time between decisions while idle (the fallback heartbeat) */
   heartbeatMs: number
   /** which world events may request a decision */
@@ -684,7 +679,14 @@ export interface JevAgentOptions {
   decisionProvenance: Readonly<DecisionRecordProvenance>
 }
 
-export const defaultJevAgentOptions: JevAgentOptions = {
+/**
+ * Option fields production may default. The V4.1.2 kernel gate has no safe
+ * default — it is a construction requirement on `JevController`, so the
+ * defaults literal is typed to exclude it.
+ */
+export type JevAgentOptionDefaults = Omit<JevAgentOptions, 'kernelAuthority'>
+
+export const defaultJevAgentOptions: JevAgentOptionDefaults = {
   goalItem: 'oak_log',
   goalCount: 1,
   vtrMission: null,
@@ -3025,7 +3027,7 @@ export class JevController {
     return damage
   }
 
-  constructor(bot: Bot, options: Partial<JevAgentOptions> = {}) {
+  constructor(bot: Bot, options: Partial<JevAgentOptions> & Pick<JevAgentOptions, 'kernelAuthority'>) {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
     this.moveFailMemory = this.createMoveFailMemory()
@@ -3073,7 +3075,6 @@ export class JevController {
       counters: this.reachVtrCells.counters,
       lastRouteDecision: this.reachVtrCells.lastRouteDecision,
       logger: this.logger,
-      kernelShadow: this.options.kernelShadow,
       kernelAuthority: this.options.kernelAuthority,
     }).runtime
   }
@@ -3210,7 +3211,7 @@ export class JevController {
   }
 
   /** Must be called before start(). Rebuilds every derived object. */
-  setOptions(partial: Partial<JevAgentOptions>): void {
+  setOptions(partial: Partial<Omit<JevAgentOptions, 'kernelAuthority'>>): void {
     if (this.running) throw new Error('setOptions() cannot be called while the agent is running')
     this.options = normalizeOptions({ ...this.options, ...partial })
     this.moveFailMemory = this.createMoveFailMemory()
@@ -5279,7 +5280,6 @@ export class JevController {
           world: state,
           missionItem: vtrMission.item,
           missionSourceNames: minecraftMissionSourceNames(vtrMission.item),
-          vtrOwnsReachMove: true,
         })
         if (legacyReachFilter.withheld.length > 0) {
           this.logger.info(

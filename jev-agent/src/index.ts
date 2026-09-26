@@ -13,6 +13,7 @@
 //   bot.jev.start()
 import type { Bot } from 'mineflayer'
 import { defaultJevAgentOptions, JevController } from './controller.ts'
+import type { KernelReachAuthority } from './vtr/kernel-shadow-map.ts'
 import type { EscalationReason, JevAgentOptions, RunSummary } from './controller.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, toVec3 } from './state.ts'
 import type { ActiveItemUseState, AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'
@@ -52,11 +53,14 @@ const registered = new WeakSet<Bot>()
 /**
  * Register the agent on a bot. Side-effect free: it only attaches the
  * controller, so the caller decides when to `start()` (typically on 'spawn').
+ * The caller MUST supply the host-owned V4.1.2 kernel authority gate — the
+ * plugin cannot mint one, so a plain `bot.loadPlugin(jevAgent)` is no longer a
+ * valid semantic entry point (use the buddy-driver generation composition).
  */
-export function jevAgent(bot: Bot): void {
+export function jevAgent(bot: Bot, kernelAuthority: KernelReachAuthority): void {
   if (registered.has(bot)) return
   registered.add(bot)
-  bot.jev = new JevController(bot, defaultJevAgentOptions)
+  bot.jev = new JevController(bot, { ...defaultJevAgentOptions, kernelAuthority })
 }
 
 export default jevAgent

@@ -9,7 +9,7 @@ import type {
   ReachRouteDecisionInput,
 } from './vtr/reach-controller.ts'
 import type { ReachIdentity } from './vtr/reach.ts'
-import type { KernelReachAuthority, KernelShadowSink } from './vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from './vtr/kernel-shadow-map.ts'
 
 export interface JevReachMutableCell<T> {
   value: T
@@ -56,17 +56,12 @@ export interface JevReachVtrCompositionContext {
   readonly lastRouteDecision: JevReachMutableCell<JevReachRouteDecisionRecord | null>
   readonly logger: JevReachTelemetryLogger
   /**
-   * V4.1.2 Phase-1 shadow sink owned by the resident host. When present the
-   * runtime mirrors observation/commit/step/terminal facts into the kernel
-   * shadow; the shadow never returns authority or gates production decisions.
+   * V4.1.2 production-authority gate — REQUIRED. Reach admission, activation,
+   * effect issue/settlement and terminalization consult the real kernel before
+   * the corresponding production act; denials fail closed. The same gate also
+   * carries verified world observations into the kernel fact store.
    */
-  readonly kernelShadow?: KernelShadowSink
-  /**
-   * V4.1.2 Phase-2 production-authority gate. When present, Reach admission,
-   * activation, effect issue/settlement and terminalization consult the real
-   * kernel before the corresponding production act; denials fail closed.
-   */
-  readonly kernelAuthority?: KernelReachAuthority
+  readonly kernelAuthority: KernelReachAuthority
 }
 
 export interface JevReachVtrComposition {
@@ -254,7 +249,6 @@ export function createJevReachVtrComposition(
   const runtime = new ReachMissionRuntime({
     routePolicy,
     commitFreshnessFence,
-    kernelShadow: context.kernelShadow,
     kernelAuthority: context.kernelAuthority,
     onTransitionNotCommitted: (transitionId) => { transitionMetrics.delete(transitionId) },
     onTerminalHandoff: ({ transitionId, contractHash, state, outcome }) => {

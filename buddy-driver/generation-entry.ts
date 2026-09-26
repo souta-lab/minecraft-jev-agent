@@ -2318,6 +2318,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     journalPath: join(ctx.logDir, 'kernel-shadow.jsonl'),
     authorityMode: kernelAuthorityMode,
   })
+  // Fail closed at generation construction: the production controller requires
+  // the verdict-returning gate; an authority-less session must never produce
+  // a generation whose Reach work runs without a kernel owner.
+  const kernelAuthority = kernelShadow.authority
+  if (kernelAuthority === null) {
+    throw new Error('V4.1.2 kernel authority session did not produce the production gate')
+  }
   ctx.log('KERNEL_AUTHORITY_MODE', { mode: kernelAuthorityMode, generationId: id })
   // Late-bound: the controller (and its executor projection) exists only after
   // the leased bot is built. The resolver reads the CURRENT claim at mutation
@@ -2987,7 +2994,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
   }
 
-  const options: Partial<JevAgentOptions> = {
+  const options: Partial<JevAgentOptions> & Pick<JevAgentOptions, 'kernelAuthority'> = {
     goalItem: rootGoal.goalItem,
     goalCount: rootGoal.goalCount,
     // V4 Mission truth is the run's configured objective, never the deterministic
@@ -3055,8 +3062,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     },
     actuation: 'pathfinder',
     actuationPort,
-    kernelShadow: kernelShadow.observe,
-    kernelAuthority: kernelShadow.authority ?? undefined,
+    kernelAuthority,
     reach: 5,
     scanRadius: 48,
     verbose: true,

@@ -54,7 +54,6 @@ export interface MinecraftReachMissionProjection {
   readonly sourceCandidates: readonly Candidate[]
   readonly inadmissibleCandidates: readonly Candidate[]
   readonly missionSourceNames: readonly string[]
-  readonly hasObservedMissionSource: boolean
   readonly missionSatisfiedEvidenceId?: string
   readonly ensuresAlreadyTrueEvidenceId?: string
 }
@@ -112,9 +111,11 @@ export function hasReachableMissionSource(
 }
 
 /**
- * Temporary strangler boundary at the legacy candidate/claim edge. VTR owns
- * the Reach Mission; this filter only withholds a same-body, same-predicate
- * action while VTR is eligible or active.
+ * Strangler boundary at the legacy candidate/claim edge. The V4.1.2 kernel is
+ * the sole Reach authority for the configured Mission, so a grounded
+ * same-mission-source MOVE is withheld from legacy scheduling unconditionally
+ * — a denied/held VTR decision must never fall back into a same-body
+ * same-predicate legacy walk.
  *
  * Delete this filter when the legacy candidate/claim path no longer owns
  * Mission semantics and scheduler dispatch crosses only typed runtime ports.
@@ -124,9 +125,7 @@ export function filterLegacyReachCandidates(input: {
   readonly world: Pick<WorldState, 'blocks'>
   readonly missionItem: string
   readonly missionSourceNames: readonly string[]
-  readonly vtrOwnsReachMove: boolean
 }): { readonly candidates: Candidate[]; readonly withheld: Candidate[] } {
-  if (!input.vtrOwnsReachMove) return { candidates: [...input.candidates], withheld: [] }
   const candidates: Candidate[] = []
   const withheld: Candidate[] = []
   for (const candidate of input.candidates) {
@@ -245,16 +244,12 @@ export function projectMinecraftReachRoutes(input: MinecraftReachMissionRoutePro
   })
   const routeIds = new Set(projection.groundedRouteIds)
   const candidates = input.candidates.filter((candidate) => routeIds.has(candidate.id))
-  const hasObservedMissionSource = world.blocks.some((block) =>
-    missionResourceSourceMatches(mission.item, block.name, block.yield, sourceNames),
-  )
   return {
     snapshot: projection.snapshot,
     candidates,
     sourceCandidates: input.candidates,
     inadmissibleCandidates: input.inadmissibleCandidates ?? [],
     missionSourceNames: sourceNames,
-    hasObservedMissionSource,
     ...(projection.missionSatisfiedEvidenceId === undefined ? {} : { missionSatisfiedEvidenceId: projection.missionSatisfiedEvidenceId }),
     ...(projection.ensuresAlreadyTrueEvidenceId === undefined ? {} : { ensuresAlreadyTrueEvidenceId: projection.ensuresAlreadyTrueEvidenceId }),
   }
