@@ -44,10 +44,10 @@ export const REPO_ROOT = path.resolve(HERE, '..')
 export const MC_AI_ROOT =
   process.env.MC_AI_ROOT || (fs.existsSync('/home/s0u7a/mc-ai') ? '/home/s0u7a/mc-ai' : REPO_ROOT)
 export const RUNS_ROOT = path.join(MC_AI_ROOT, 'runs')
-export const ACCEPTANCE_DIR = path.join(MC_AI_ROOT, 'buddy-driver', 'data', 'resident')
-export const BUDDY_LOG = path.join(MC_AI_ROOT, 'buddy-driver', 'buddy.log')
-export const MERCURY_CALLS = path.join(MC_AI_ROOT, 'buddy-driver', 'logs', 'jev', 'mercury-calls.jsonl')
-export const JEV_CALLS = path.join(MC_AI_ROOT, 'buddy-driver', 'logs', 'jev', 'jev-calls.jsonl')
+export const ACCEPTANCE_DIR = path.join(MC_AI_ROOT, 'packages/buddy-driver', 'data', 'resident')
+export const BUDDY_LOG = path.join(MC_AI_ROOT, 'packages/buddy-driver', 'buddy.log')
+export const MERCURY_CALLS = path.join(MC_AI_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'mercury-calls.jsonl')
+export const JEV_CALLS = path.join(MC_AI_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'jev-calls.jsonl')
 
 const RUN_ID_RE = /^(run-[A-Za-z0-9-]+)$/
 
@@ -443,8 +443,8 @@ export function buildChecks(record, mercuryModel = null) {
     push(
       'acceptance_record_present',
       'docs/development/DEVELOPMENT-METHOD.md §4: every acceptance claim must be backed by a run-scoped AcceptanceRecord.',
-      'buddy-driver/agent-runner.mts:1166-1211 writeAcceptance().',
-      'no acceptance-<runId>.json under buddy-driver/data/resident/.',
+      'packages/buddy-driver/agent-runner.mts:1166-1211 writeAcceptance().',
+      'no acceptance-<runId>.json under packages/buddy-driver/data/resident/.',
       'UNKNOWN',
       'bun tools/run-artifacts.mjs capture <runId>',
     )
@@ -480,7 +480,7 @@ export function buildChecks(record, mercuryModel = null) {
   push(
     'listener_stability',
     'docs/operations/RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across reloads; listenerLeak must be false.',
-    'buddy-driver/agent-runner.mts:518-527 listenerCounts()/listenerLeak(); baseline set at :667-668; recorded at :1201-1203.',
+    'packages/buddy-driver/agent-runner.mts:518-527 listenerCounts()/listenerLeak(); baseline set at :667-668; recorded at :1201-1203.',
     `listenerLeak=${record.listenerLeak} grew=[${grew.join(',')}] baseline=${JSON.stringify(baseline)} current=${JSON.stringify(current)}`,
     record.listenerLeak === false && grew.length === 0 ? 'PASS' : 'FAIL',
     `bun tools/run-artifacts.mjs capture ${record.runId}`,
@@ -488,7 +488,7 @@ export function buildChecks(record, mercuryModel = null) {
   push(
     'reconnect_free',
     'docs/operations/RESIDENT-MODE.md §13-0 P1: the run must complete with reconnect 0.',
-    'buddy-driver/resident-types.ts:308 stats.reconnects; recorded at buddy-driver/agent-runner.mts:1195.',
+    'packages/buddy-driver/resident-types.ts:308 stats.reconnects; recorded at packages/buddy-driver/agent-runner.mts:1195.',
     `reconnects=${record.reconnects}`,
     record.reconnects === 0 ? 'PASS' : 'FAIL',
     `bun tools/run-artifacts.mjs capture ${record.runId}`,
@@ -496,7 +496,7 @@ export function buildChecks(record, mercuryModel = null) {
   push(
     'reload_hash_churn',
     'docs/operations/RESIDENT-MODE.md §13-0 P1: at least 5 real reloads with a changed generation hash (skipped=unchanged does not count).',
-    'buddy-driver/agent-runner.mts:1249,1283 increment stats.reloadsChangedHash; recorded at :1197.',
+    'packages/buddy-driver/agent-runner.mts:1249,1283 increment stats.reloadsChangedHash; recorded at :1197.',
     `reloadsChangedHash=${record.reloadsChangedHash} reloadsSkippedUnchanged=${record.reloadsSkippedUnchanged} reloadsFailed=${record.reloadsFailed}`,
     record.reloadsChangedHash >= 5 ? 'PASS' : 'FAIL',
     `bun tools/run-artifacts.mjs capture ${record.runId}`,
@@ -504,7 +504,7 @@ export function buildChecks(record, mercuryModel = null) {
   push(
     'no_wedge',
     'Root AGENTS.md §2 / #12 acceptance: the agent must not be wedged.',
-    'buddy-driver/resident-types.ts:307 stats.wedge; recorded at buddy-driver/agent-runner.mts:1194.',
+    'packages/buddy-driver/resident-types.ts:307 stats.wedge; recorded at packages/buddy-driver/agent-runner.mts:1194.',
     `wedge=${record.wedge} goalComplete=${record.goalComplete}`,
     record.wedge === false ? 'PASS' : 'FAIL',
     `bun tools/run-artifacts.mjs capture ${record.runId}`,
@@ -547,9 +547,9 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
     window: window ?? null,
     logLineCount: logLineCount ?? null,
     sources: {
-      acceptanceRecord: record ? `buddy-driver/data/resident/acceptance-${record.runId}.json` : null,
-      buddyLog: 'buddy-driver/buddy.log',
-      mercuryCalls: 'buddy-driver/logs/jev/mercury-calls.jsonl',
+      acceptanceRecord: record ? `packages/buddy-driver/data/resident/acceptance-${record.runId}.json` : null,
+      buddyLog: 'packages/buddy-driver/buddy.log',
+      mercuryCalls: 'packages/buddy-driver/logs/jev/mercury-calls.jsonl',
     },
     dirtyTreeSource: 'git status --porcelain at capture',
   }

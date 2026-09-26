@@ -27,12 +27,12 @@ const TEST_ARGS = ['test', '--timeout=120000', '--max-concurrency=1']
 // real failures instead of timing out a passing suite.
 const SUITE_OPTIONS = { timeout: 300_000 }
 
-test('jev-agent Bun suite', async () => runBun(resolve(ROOT, 'jev-agent'), TEST_ARGS), SUITE_OPTIONS)
-test('buddy-driver Bun suite', async () => runBun(resolve(ROOT, 'buddy-driver'), TEST_ARGS), SUITE_OPTIONS)
+test('jev-agent Bun suite', async () => runBun(resolve(ROOT, 'packages/jev-agent'), TEST_ARGS), SUITE_OPTIONS)
+test('buddy-driver Bun suite', async () => runBun(resolve(ROOT, 'packages/buddy-driver'), TEST_ARGS), SUITE_OPTIONS)
 test('Bedrock MCP companion imports under Bun', async () => {
   await runBun(ROOT, [
     '-e',
-    "const { McBot } = require('./src/bot.js'); if (typeof McBot !== 'function') throw new Error('McBot export missing')",
+    "const { McBot } = require('./packages/mcp-server/bot.js'); if (typeof McBot !== 'function') throw new Error('McBot export missing')",
   ])
 })
 

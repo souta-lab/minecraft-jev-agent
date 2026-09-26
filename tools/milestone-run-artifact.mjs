@@ -122,10 +122,10 @@ export const OPERATOR_DECISION_RECORD = 'operator-decision'
  * `milestoneAcceptance`, which is derived from the delegated gates.
  */
 export const ACCEPTANCE_WRITER = Object.freeze({
-  source: 'buddy-driver/agent-runner.mts',
+  source: 'packages/buddy-driver/agent-runner.mts',
   symbol: 'writeAcceptance()',
   record: 'acceptance',
-  pathPattern: 'buddy-driver/data/resident/acceptance-<runId>.json',
+  pathPattern: 'packages/buddy-driver/data/resident/acceptance-<runId>.json',
   firesOn: ['generation-reload-commit', 'control:freeze', 'control:resume', 'control:acceptance', 'shutdown'],
   note: 'attests the run/HOST state (provenance, listeners, epoch); it never asserts a milestone PASS and is not written at boot',
   /**
@@ -381,7 +381,7 @@ export function parseServerProperties(text) {
 //   advisor / advisorSource                 -> the resolved long-horizon advisor
 //
 // `system2AuthorityStack` is `{ provider, model }` where `model` is the stack
-// string built by `buddy-driver/planner.ts` (`get authorityStack()`):
+// string built by `packages/buddy-driver/planner.ts` (`get authorityStack()`):
 //
 //   deterministic -> '<plannerModel>'                                  (single segment)
 //   single brain  -> '<plannerModel>'                                  (single segment)
@@ -442,7 +442,7 @@ export function parseAuthorityStack(stack) {
 
 /**
  * The host's own `policyProvider` getter maps the policy kind to the provider
- * (`jev-agent/src/controller-legacy.ts`: `kind === 'typesafe' ? 'typesafe-ai' :
+ * (`packages/jev-agent/src/controller-legacy.ts`: `kind === 'typesafe' ? 'typesafe-ai' :
  * 'deterministic'`). Used ONLY when the explicit `policyProvider=` field is
  * absent, and always labelled as the derivation it is.
  */
@@ -1000,26 +1000,26 @@ async function scanRunSourceWindow(paths, runId) {
 // ---------------------------------------------------------------------------
 
 export function derivePaths(root, overrides = {}) {
-  const acceptanceDir = overrides.acceptanceDir ?? join(root, 'buddy-driver', 'data', 'resident')
+  const acceptanceDir = overrides.acceptanceDir ?? join(root, 'packages/buddy-driver', 'data', 'resident')
   // Operator decisions are a REPO-level product record, not resident data, so the
   // default is repo-relative; each entry is still scoped to its own runId.
   const repoRoot = fileURLToPath(new URL('..', import.meta.url))
   return {
-    logPath: overrides.logPath ?? join(root, 'buddy-driver', 'buddy.log'),
+    logPath: overrides.logPath ?? join(root, 'packages/buddy-driver', 'buddy.log'),
     snapshotDir: overrides.snapshotDir ?? acceptanceDir,
-    decisionsPath: overrides.decisionsPath ?? join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'),
+    decisionsPath: overrides.decisionsPath ?? join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'),
     // A worktree resident logs to buddy.log with no runner.out; the gates already fall
     // back to it, so read the authority fields from the stream that actually exists.
     runnerOutPath:
       overrides.runnerOutPath ??
       firstExistingPath([
-        join(root, 'buddy-driver', 'runner.out'),
-        join(root, 'buddy-driver', 'buddy.log'),
+        join(root, 'packages/buddy-driver', 'runner.out'),
+        join(root, 'packages/buddy-driver', 'buddy.log'),
       ]),
     controlSocketPath:
       overrides.controlSocketPath === null
         ? null
-        : overrides.controlSocketPath ?? join(root, 'buddy-driver', 'data', 'resident', 'control.sock'),
+        : overrides.controlSocketPath ?? join(root, 'packages/buddy-driver', 'data', 'resident', 'control.sock'),
     acceptanceDir,
     operatorDecisions:
       overrides.operatorDecisions === null
@@ -1818,7 +1818,7 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
     explicitProvider !== null
       ? 'log:GENERATION_READY:policyProvider'
       : policyProvider !== null
-        ? 'derived:policyKind (jev-agent/src/controller-legacy.ts get policyProvider())'
+        ? 'derived:policyKind (packages/jev-agent/src/controller-legacy.ts get policyProvider())'
         : generation?.source ?? null
   const jev = {
     provider: policyProvider,
@@ -2957,11 +2957,11 @@ export function usage() {
     '  --out <path>             write the artifact to this path instead of stdout',
     '  --json                   emit compact single-line JSON (default: 2-space pretty JSON)',
     '  --pretty                 emit 2-space pretty JSON (default)',
-    '  --log <path>             override <root>/buddy-driver/buddy.log',
-    '  --snapshot-dir <path>    override <root>/buddy-driver/data/resident (m2-snapshot-<runId>.json)',
-    '  --decisions <path>       override <root>/buddy-driver/logs/jev/decisions.jsonl',
-    '  --runner-out <path>      override <root>/buddy-driver/runner.out (BOOT/GENERATION_READY window)',
-    '  --control-socket <path>  override <root>/buddy-driver/data/resident/control.sock (read-only report query)',
+    '  --log <path>             override <root>/packages/buddy-driver/buddy.log',
+    '  --snapshot-dir <path>    override <root>/packages/buddy-driver/data/resident (m2-snapshot-<runId>.json)',
+    '  --decisions <path>       override <root>/packages/buddy-driver/logs/jev/decisions.jsonl',
+    '  --runner-out <path>      override <root>/packages/buddy-driver/runner.out (BOOT/GENERATION_READY window)',
+    '  --control-socket <path>  override <root>/packages/buddy-driver/data/resident/control.sock (read-only report query)',
     '  --no-control-socket      never query the resident control socket',
     '  --acceptance-dir <path>  override the acceptance-<runId>.json directory',
     '  --operator-decisions <p>  read explicit operator milestone decisions (default <repo>/OPERATOR-DECISIONS.json)',

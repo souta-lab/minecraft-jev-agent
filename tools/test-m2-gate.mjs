@@ -700,7 +700,7 @@ function chainLinksOf(text) {
   // (no_run_scoped_m2_evidence) with the evidence sitting one directory away.
   const dir = mkdtempSync(join(tmpdir(), 'm2-home-other-'))
   const home = join(dir, 'resident-tree')
-  const snapshotDir = join(home, 'buddy-driver', 'data', 'resident')
+  const snapshotDir = join(home, 'packages/buddy-driver', 'data', 'resident')
   mkdirSync(snapshotDir, { recursive: true })
   writeFileSync(
     join(snapshotDir, `m2-snapshot-${RUN}.json`),
@@ -713,7 +713,7 @@ function chainLinksOf(text) {
       inventory: { obsidian: 1, flint_and_steel: 1 },
     }),
   )
-  writeFileSync(join(home, 'buddy-driver', 'buddy.log'), `${boot(RUN)}\n`)
+  writeFileSync(join(home, 'packages/buddy-driver', 'buddy.log'), `${boot(RUN)}\n`)
   const out = capture()
   const code = await runM2Gate({
     expectedRunId: RUN,
@@ -734,7 +734,7 @@ function chainLinksOf(text) {
   // run A's snapshot and nothing else; asking for run B stays UNKNOWN.
   const dir = mkdtempSync(join(tmpdir(), 'm2-home-foreign-'))
   const homeA = join(dir, 'home-a')
-  const snapshotDirA = join(homeA, 'buddy-driver', 'data', 'resident')
+  const snapshotDirA = join(homeA, 'packages/buddy-driver', 'data', 'resident')
   mkdirSync(snapshotDirA, { recursive: true })
   writeFileSync(
     join(snapshotDirA, `m2-snapshot-${RUN}.json`),
@@ -778,7 +778,7 @@ function chainLinksOf(text) {
   // missing half without the operator naming the .out file.
   const dir = mkdtempSync(join(tmpdir(), 'm2-home-supervisor-'))
   const home = join(dir, 'resident-tree')
-  const snapshotDir = join(home, 'buddy-driver', 'data', 'resident')
+  const snapshotDir = join(home, 'packages/buddy-driver', 'data', 'resident')
   const runsDir = join(home, 'runs')
   mkdirSync(snapshotDir, { recursive: true })
   mkdirSync(runsDir, { recursive: true })
@@ -814,7 +814,7 @@ function chainLinksOf(text) {
   // home answers from that file alone.
   const dir = mkdtempSync(join(tmpdir(), 'm2-home-explicit-'))
   const home = join(dir, 'resident-tree')
-  const snapshotDir = join(home, 'buddy-driver', 'data', 'resident')
+  const snapshotDir = join(home, 'packages/buddy-driver', 'data', 'resident')
   const runsDir = join(home, 'runs')
   mkdirSync(snapshotDir, { recursive: true })
   mkdirSync(runsDir, { recursive: true })

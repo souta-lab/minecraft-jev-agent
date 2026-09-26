@@ -17,7 +17,7 @@ import { buildVtrObserverReadModel, renderVtrObserverHtml } from './vtr-observer
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
-const DEFAULT_RUNTIME_DIR = join(REPO, 'buddy-driver')
+const DEFAULT_RUNTIME_DIR = join(REPO, 'packages/buddy-driver')
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4173
 const DEFAULT_INTERVAL_MS = 2500

@@ -15,7 +15,7 @@
         "prismarine-nbt": "^2.8.0",
       },
     },
-    "buddy-driver": {
+    "packages/buddy-driver": {
       "name": "buddy-driver",
       "version": "0.1.0",
       "dependencies": {
@@ -36,11 +36,11 @@
         "typescript": "^5.7.2",
       },
     },
-    "companion": {
+    "packages/companion": {
       "name": "mc-companion-buddy",
       "version": "0.0.1",
     },
-    "jev-agent": {
+    "packages/jev-agent": {
       "name": "jev-agent",
       "version": "0.1.0",
       "dependencies": {
@@ -61,7 +61,7 @@
         "typescript": "^5.7.2",
       },
     },
-    "jev-harness": {
+    "packages/jev-harness": {
       "name": "jev-harness",
       "version": "0.1.0",
       "dependencies": {
@@ -72,24 +72,28 @@
         "typescript": "^5.7.2",
       },
     },
-    "mcbot": {
+    "packages/mcbot": {
       "name": "mcbot",
       "version": "1.0.0",
       "dependencies": {
         "mineflayer": "github:PrismarineJS/mineflayer#fc480ee8c456de87ce77769b31ba8bcf88703043",
       },
     },
-    "mcbot/movement-test": {
+    "packages/mcbot/movement-test": {
       "name": "movement-test",
       "version": "1.0.0",
     },
-    "mcbot/movement-test/variants/A": {
+    "packages/mcbot/movement-test/variants/A": {
       "name": "mt-variant-A",
       "dependencies": {
         "mineflayer": "4.39.0",
       },
     },
-    "system2-harness": {
+    "packages/mcp-server": {
+      "name": "mcp-server",
+      "version": "0.0.0",
+    },
+    "packages/system2-harness": {
       "name": "system2-harness",
       "version": "0.1.0",
       "dependencies": {
@@ -176,7 +180,7 @@
 
     "brace-expansion": ["brace-expansion@1.1.21", "", { "dependencies": { "balanced-match": "^1.0.0", "concat-map": "0.0.1" } }, "sha512-9zeA+KLZNNzglF2TPKRQEDyx6Yby7daAkuy8MiPzpXPsYDWi/DRM8jmwUDxokQjYqBpv5DgPiwD4h4ZZSy1Ujw=="],
 
-    "buddy-driver": ["buddy-driver@workspace:buddy-driver"],
+    "buddy-driver": ["buddy-driver@workspace:packages/buddy-driver"],
 
     "buffer": ["buffer@6.0.3", "", { "dependencies": { "base64-js": "^1.3.1", "ieee754": "^1.2.1" } }, "sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA=="],
 
@@ -352,9 +356,9 @@
 
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 
-    "jev-agent": ["jev-agent@workspace:jev-agent"],
+    "jev-agent": ["jev-agent@workspace:packages/jev-agent"],
 
-    "jev-harness": ["jev-harness@workspace:jev-harness"],
+    "jev-harness": ["jev-harness@workspace:packages/jev-harness"],
 
     "jose": ["jose@6.2.12", "", {}, "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw=="],
 
@@ -408,9 +412,11 @@
 
     "math-intrinsics": ["math-intrinsics@1.1.0", "", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
 
-    "mc-companion-buddy": ["mc-companion-buddy@workspace:companion"],
+    "mc-companion-buddy": ["mc-companion-buddy@workspace:packages/companion"],
 
-    "mcbot": ["mcbot@workspace:mcbot"],
+    "mcbot": ["mcbot@workspace:packages/mcbot"],
+
+    "mcp-server": ["mcp-server@workspace:packages/mcp-server"],
 
     "media-typer": ["media-typer@1.1.1", "", {}, "sha512-yz3xRaG20c6/BOzvYoDaGtPmGscs7YivItZEEqe6GbwNfHuxu9YNmvnEkMzKldAGY4/80pRcQRZSEnhquk9XuQ=="],
 
@@ -450,11 +456,11 @@
 
     "moo": ["moo@0.5.3", "", {}, "sha512-m2fmM2dDm7GZQsY7KK2cme8agi+AAljILjQnof7p1ZMDe6dQ4bdnSMx0cPppudoeNv5hEFQirN6u+O4fDE0IWA=="],
 
-    "movement-test": ["movement-test@workspace:mcbot/movement-test"],
+    "movement-test": ["movement-test@workspace:packages/mcbot/movement-test"],
 
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
 
-    "mt-variant-A": ["mt-variant-A@workspace:mcbot/movement-test/variants/A"],
+    "mt-variant-A": ["mt-variant-A@workspace:packages/mcbot/movement-test/variants/A"],
 
     "nearley": ["nearley@2.20.1", "", { "dependencies": { "commander": "^2.19.0", "moo": "^0.5.0", "railroad-diagrams": "^1.0.0", "randexp": "0.4.6" }, "bin": { "nearleyc": "bin/nearleyc.js", "nearley-test": "bin/nearley-test.js", "nearley-unparse": "bin/nearley-unparse.js", "nearley-railroad": "bin/nearley-railroad.js" } }, "sha512-+Mc8UaAebFzgV+KpI5n7DasuuQCHA89dmwm7JXw3TV43ukfNQ9DnBH3Mdb2g/I4Fdxc26pwimBWvjIw0UAILSQ=="],
 
@@ -600,7 +606,7 @@
 
     "strip-json-comments": ["strip-json-comments@2.0.1", "", {}, "sha512-4gB8na07fecVVkOI6Rs4e7T6NOTki5EmL7TUduTs6bu3EdnSycntVJ4re8kgZA+wx9IueI2Y11bfbgwtzuE0KQ=="],
 
-    "system2-harness": ["system2-harness@workspace:system2-harness"],
+    "system2-harness": ["system2-harness@workspace:packages/system2-harness"],
 
     "tar": ["tar@4.4.19", "", { "dependencies": { "chownr": "^1.1.4", "fs-minipass": "^1.2.7", "minipass": "^2.9.0", "minizlib": "^1.3.3", "mkdirp": "^0.5.5", "safe-buffer": "^5.2.1", "yallist": "^3.1.1" } }, "sha512-a20gEsvHnWe0ygBY8JbxoM4w3SJdhc7ZAuxkLqh+nvNQN2IOt0B5lLgM490X5Hl8FF0dl0tOf2ewFYAlIFgzVA=="],
 

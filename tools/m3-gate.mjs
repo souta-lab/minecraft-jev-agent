@@ -718,7 +718,7 @@ export async function runM3Gate({
     const runnerOutForScan =
       runnerOutPath !== null && runnerOutPath !== undefined && existsSync(runnerOutPath)
         ? runnerOutPath
-        : join(repoRoot, 'buddy-driver', 'buddy.log')
+        : join(repoRoot, 'packages/buddy-driver', 'buddy.log')
     rawPolicy = await loadPolicy({
       runId: expectedRunId,
       socket: socketBinding?.runId === expectedRunId ? socketBinding : null,

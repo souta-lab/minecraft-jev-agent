@@ -94,26 +94,26 @@ export interface FirewallDebtEntry {
  */
 export const FIREWALL_DEBT: readonly FirewallDebtEntry[] = [
   {
-    file: 'jev-agent/src/jev-authority.ts',
+    file: 'packages/jev-agent/src/jev/authority.ts',
     headIds: ['pi_action_v3', 'beta_terminate_v2', 'danger_v1', 'retreat_v1'],
     migrationPhase: 'C',
     reason:
       'model-authoritative kernel batching pi/beta/danger/retreat into one experimental_evaluate call; Phase C moves it behind harness.evaluateBatch()',
   },
   {
-    file: 'jev-agent/src/jev-legacy.ts',
+    file: 'packages/jev-agent/src/jev/client.ts',
     headIds: ['pi_action_legacy_v1', 'beta_terminate_legacy_v1', 'danger_legacy_v1', 'retreat_legacy_v1'],
     migrationPhase: 'E',
     reason: 'legacy TypeSafeJevPolicy; Phase E deletes or migrates it deliberately',
   },
   {
-    file: 'buddy-driver/advisor.ts',
+    file: 'packages/buddy-driver/advisor.ts',
     headIds: ['advisor_strategy_v1'],
     migrationPhase: 'C',
     reason: 'advisor strategy choice + durable cache + MAX_CACHE_REPLAYS; Phase C moves the choice behind the harness',
   },
   {
-    file: 'buddy-driver/planner-legacy.ts',
+    file: 'packages/buddy-driver/planner-legacy.ts',
     headIds: ['system2_horizon_v1', 'system2_plan_fit_v1', 'system2_strategy_change_v1'],
     migrationPhase: 'C',
     reason: 'legacy System2 batched call; its `match ?? options[0] ?? FRONT_FALLBACK` fallback must become an explicit code-authority fallback',
@@ -126,10 +126,10 @@ export interface ProductionRoot {
 }
 
 export const PRODUCTION_ROOTS: readonly ProductionRoot[] = [
-  { dir: 'jev-agent/src', extensions: ['.ts', '.mts'] },
-  { dir: 'buddy-driver', extensions: ['.ts', '.mts'] },
-  { dir: 'src', extensions: ['.ts', '.mts', '.js', '.mjs'] },
-  { dir: 'mcbot', extensions: ['.ts', '.mts', '.js', '.mjs'] },
+  { dir: 'packages/jev-agent/src', extensions: ['.ts', '.mts'] },
+  { dir: 'packages/buddy-driver', extensions: ['.ts', '.mts'] },
+  { dir: 'packages/mcp-server', extensions: ['.ts', '.mts', '.js', '.mjs'] },
+  { dir: 'packages/mcbot', extensions: ['.ts', '.mts', '.js', '.mjs'] },
   { dir: 'tools', extensions: ['.ts', '.mts', '.js', '.mjs'] },
 ]
 
@@ -242,7 +242,7 @@ export function listProductionFiles(root: string): readonly string[] {
 /** Scan the harness itself: only `jev-harness/providers/**` may match. */
 /** Harness-relative file list (`root` is the repo root). */
 export function listHarnessFiles(root: string): readonly string[] {
-  const base = resolve(root, 'jev-harness')
+  const base = resolve(root, 'packages/jev-harness')
   const files: string[] = []
   walk(base, base, ['.ts', '.mts'], files)
   return files
@@ -250,7 +250,7 @@ export function listHarnessFiles(root: string): readonly string[] {
 
 export function scanHarnessSources(root: string): readonly FirewallFinding[] {
   const files = listHarnessFiles(root)
-  const base = resolve(root, 'jev-harness')
+  const base = resolve(root, 'packages/jev-harness')
   const findings: FirewallFinding[] = []
   for (const file of files) {
     if (file.startsWith('bun-tests/')) continue
@@ -400,7 +400,7 @@ export const PLATFORM_EXEMPT_FILES: readonly string[] = [
 ]
 
 export function checkHarnessIsolation(options: HarnessIsolationOptions): readonly IsolationViolation[] {
-  const harnessDir = options.harnessDir ?? 'jev-harness'
+  const harnessDir = options.harnessDir ?? 'packages/jev-harness'
   const base = resolve(options.root, harnessDir)
   const violations: IsolationViolation[] = []
   const files = listHarnessFiles(options.root).filter((file) => existsSync(resolve(base, file)))
@@ -435,7 +435,7 @@ export function checkHarnessIsolation(options: HarnessIsolationOptions): readonl
 
 const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '')
 if (isMain) {
-  const root = resolve(process.argv[2] ?? join(dirname(new URL(import.meta.url).pathname), '..', '..'))
+  const root = resolve(process.argv[2] ?? join(dirname(new URL(import.meta.url).pathname), '..', '..', '..'))
   const report = checkFirewall(root)
   const isolation = checkHarnessIsolation({ root })
   for (const finding of report.findings) process.stdout.write(`debt   ${formatFinding(finding)}\n`)

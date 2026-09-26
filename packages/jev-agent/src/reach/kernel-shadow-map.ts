@@ -2,7 +2,7 @@
 //
 // This module is the CANONICAL map from observed production mutation surfaces
 // to V4.1.2 kernel authority concepts (resource bundle + effect permit), built
-// from `architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md`. It is pure: it
+// from `docs/architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md`. It is pure: it
 // imports only the public kernel types and performs no side effects, so both
 // the host-side shadow session and tests can depend on it without minting
 // trusted capabilities.
@@ -18,8 +18,8 @@ import type {
   ResourceId,
   TransitionContractSpec,
   WorldIdentity,
-} from '../../../architecture/v4.1/kernel.ts'
-import { resourceId, resourceKey } from '../../../architecture/v4.1/kernel.ts'
+} from '../../../kernel/v4.1/kernel.ts'
+import { resourceId, resourceKey } from '../../../kernel/v4.1/kernel.ts'
 import type { ReachTransitionContract, ReachWitness } from '../reach/transition.ts'
 
 /** Canonical resource requirement on one mapped mutation surface. */

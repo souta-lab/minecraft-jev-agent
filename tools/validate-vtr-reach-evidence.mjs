@@ -2494,7 +2494,7 @@ export function inspectNoDoubleAuthorityFixtureProof({ report, reportBytes, test
   }
   if (report.schema !== 'vtr-reach-no-double-authority-fixture/v1' || report.result !== 'PASS' ||
       report.sourceSha?.toLowerCase?.() !== expectedSourceSha ||
-      report.test?.path !== 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts' ||
+      report.test?.path !== 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts' ||
       report.test?.name !== 'production Reach dispatch and legacy Executor claim cannot overlap body authority' ||
       report.test?.sourceSha256?.toLowerCase?.() !== sourceDigest) {
     return fail('fixture report does not bind the required exact-source legacy claim refusal test')

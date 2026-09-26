@@ -4,9 +4,9 @@ This inventory is derived from the live repository surfaces, not only from the a
 
 ## Audited source surfaces
 
-- `jev-agent/src/actuationPort.ts`: explicit generation-side allowlist capability and its 16 operations.
-- `buddy-driver/resident-safety.ts`: `MUTATING_BOT_METHODS`, nested `pathfinder`, `_client`, `collectBlock`, mutable `entity`/Vec3 guards, and `createActuationPort`.
-- `jev-agent/src/executor.ts`: direct production calls to pathfinder/control state, dig/place, equip/consume, look/attack, craft, container/furnace, activateBlock, collectblock, and direct pose mutation.
+- `packages/jev-agent/src/actuationPort.ts`: explicit generation-side allowlist capability and its 16 operations.
+- `packages/buddy-driver/resident-safety.ts`: `MUTATING_BOT_METHODS`, nested `pathfinder`, `_client`, `collectBlock`, mutable `entity`/Vec3 guards, and `createActuationPort`.
+- `packages/jev-agent/src/executor.ts`: direct production calls to pathfinder/control state, dig/place, equip/consume, look/attack, craft, container/furnace, activateBlock, collectblock, and direct pose mutation.
 
 The resident proxy provides generation-level containment for many nested calls. V4.1.2 additionally needs transition/contract/resource/effect authority at the exact mutation boundary.
 

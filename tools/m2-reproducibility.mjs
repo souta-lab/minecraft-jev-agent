@@ -60,7 +60,7 @@
 //     paths/hashes — never file contents — are persisted.
 //   * It never touches another trial's evidence: every trial writes into
 //     `trial-<NNN>/attempt-<K>/`, created with an exclusive mkdir.
-//   * It does not parallelise. `buddy-driver/agent-runner.mts` hardcodes
+//   * It does not parallelise. `packages/buddy-driver/agent-runner.mts` hardcodes
 //     `HOST=127.0.0.1` / `PORT=25565` and the HOST lock is one-per-driver-tree,
 //     so exactly one trial can be live on this machine at a time. Campaigns are
 //     therefore strictly serial and one campaign refuses to start while another
@@ -585,7 +585,7 @@ export async function checkPreconditions(config, { mode }) {
     if (config.driverDir.startsWith(resolve(LIVE_CONTAINER))) {
       blockers.push('rehearsal_driver_dir_inside_server_root')
     }
-    if (config.driverDir === resolve(join(config.frozenTree, 'buddy-driver')) && observations.residentProcesses.length > 0) {
+    if (config.driverDir === resolve(join(config.frozenTree, 'packages/buddy-driver')) && observations.residentProcesses.length > 0) {
       blockers.push(`resident_already_live_in_this_driver_dir: pids=${observations.residentProcesses.map((p) => p.pid).join(',')}`)
     }
     // The live trial's resident/server are EXPECTED to be running: record it.
@@ -601,7 +601,7 @@ export async function checkPreconditions(config, { mode }) {
     const harnessSource = inspectFrozenSource({
       ...config,
       frozenTree: REPO_ROOT,
-      driverDir: join(REPO_ROOT, 'buddy-driver'),
+      driverDir: join(REPO_ROOT, 'packages/buddy-driver'),
     })
     observations.harnessSource = harnessSource.observation
     if (harnessSource.blockers.length > 0) {
@@ -1264,7 +1264,7 @@ export function scanLogBoots(logPath, { chunk = 1 << 22 } = {}) {
  */
 async function observeRun(config, args, log) {
   const tree = resolve(args.observeRoot ?? config.driverDir)
-  const driverDir = tree.endsWith('buddy-driver') ? tree : join(tree, 'buddy-driver')
+  const driverDir = tree.endsWith('packages/buddy-driver') ? tree : join(tree, 'packages/buddy-driver')
   const logPath = join(driverDir, 'buddy.log')
   const runId = args.run
   const boots = scanLogBoots(logPath)
@@ -1292,7 +1292,7 @@ async function observeRun(config, args, log) {
   const gate = await gateTrial({
     runId,
     evidenceDir,
-    driverRoot: tree.endsWith('buddy-driver') ? dirname(tree) : tree,
+    driverRoot: tree.endsWith('packages/buddy-driver') ? dirname(tree) : tree,
     runnerOutPath: join(driverDir, 'runner.out'),
     // Deliberately NOT the live control socket: an observation reads files only.
     controlSocketPath: join(evidenceDir, 'no-such-socket'),
@@ -1813,7 +1813,7 @@ function stubResidentSource() {
 // (BOOT ... runId=..., HEARTBEAT ... rung=..., the portal chain, GENERATION_READY,
 // SYSTEM2_AUTHORITY_DECISION), writes a run-scoped m2-snapshot, and then stays
 // alive so teardown has something to stop. Every line goes to BOTH the resident
-// log and stdout, exactly as buddy-driver/agent-runner.mts log() does.
+// log and stdout, exactly as packages/buddy-driver/agent-runner.mts log() does.
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 const outcome = process.env.M2_REPRO_STUB_OUTCOME ?? 'pass'
@@ -1970,7 +1970,7 @@ function resolveConfig(args) {
     frozenSha: args.frozenSha,
     frozenTree: resolve(frozenTree),
     createFrozenTree: args.createFrozenTree,
-    driverDir: resolve(args.driverDir ?? join(frozenTree, 'buddy-driver')),
+    driverDir: resolve(args.driverDir ?? join(frozenTree, 'packages/buddy-driver')),
     serverRoot,
     descriptorPath: resolve(args.descriptorPath),
     trialsDir: resolve(trialsDir),
@@ -2017,7 +2017,7 @@ async function ensureFrozenTree(config, log) {
     return { created: false, tree: config.frozenTree, error: `host_lock_is_live:pid=${String(hostLock.pid)} (operator decision (root AGENTS.md H4); no signal will be sent)` }
   }
   let created = false
-  if (existsSync(join(config.frozenTree, '.git')) || existsSync(join(config.frozenTree, 'buddy-driver'))) {
+  if (existsSync(join(config.frozenTree, '.git')) || existsSync(join(config.frozenTree, 'packages/buddy-driver'))) {
     created = false
   } else {
     if (!config.createFrozenTree) return { created: false, tree: config.frozenTree, missing: true }
@@ -2585,7 +2585,7 @@ function finishRow(config, row, { log }) {
 function buildBackend(config, { attemptDir, trialDir, levelName, levelSeed, serverPropertiesPath = null }) {
   // The supervisor spawns its child with `cwd: driverDir`; a missing directory
   // makes posix_spawn fail with a misleading ENOENT naming the interpreter. A
-  // fresh campaign tree has no buddy-driver/ yet, so create it first.
+  // fresh campaign tree has no packages/buddy-driver/ yet, so create it first.
   mkdirSync(config.driverDir, { recursive: true })
   if (config.rehearse) {
     const stubDir = join(config.trialsDir, '_stubs')

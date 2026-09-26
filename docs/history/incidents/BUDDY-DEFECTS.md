@@ -2,7 +2,7 @@
 
 > **Historical incident report (2026-09-18).** Dated user-play defect tickets against the then-running resident; retained for provenance.
 
-> 対象: 常駐エージェント `AI_Buddy`（`/home/s0u7a/mc-ai/buddy-driver/agent-runner.mts`, pid 150528 で稼働中）
+> 対象: 常駐エージェント `AI_Buddy`（`/home/s0u7a/mc-ai/packages/buddy-driver/agent-runner.mts`, pid 150528 で稼働中）
 > 記録時刻: 2026-09-18 00:0x JST / 証拠はすべて一次ログ（推測なし）
 > 注入先: buddy-driver のセッション（実行中はゲートで弾かれるため、空き次第）
 

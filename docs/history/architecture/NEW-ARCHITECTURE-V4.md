@@ -112,16 +112,16 @@ HOST部分はかなり健全である。
 
 代表的には、
 
-* `buddy-driver/planner.ts`
+* `packages/buddy-driver/planner.ts`
 
   * production System2 authorityを名乗る
   * しかし `planner-legacy.ts` をexportしている
-* `jev-agent/src/controller.ts`
+* `packages/jev-agent/src/controller.ts`
 
   * #11 authority facade
   * 実体は `LegacyJevController` を継承
   * 14,000行超の `controller-legacy.ts` の内部関数を書き換えるstrangler
-* `jev-agent/src/optionSpec.ts`
+* `packages/jev-agent/src/optionSpec.ts`
 
   * first-class Option facade
   * 実装本体は `optionSpec-legacy.ts`
@@ -160,20 +160,20 @@ HOST部分はかなり健全である。
 
 | File                                 | Approx. lines |
 | ------------------------------------ | ------------: |
-| `jev-agent/src/candidates.ts`        |        14,779 |
-| `jev-agent/src/controller-legacy.ts` |        14,034 |
-| `jev-agent/src/executor.ts`          |        12,715 |
-| `jev-agent/src/state.ts`             |         5,291 |
-| `buddy-driver/planner-legacy.ts`     |         3,623 |
-| `buddy-driver/generation-entry.ts`   |         3,495 |
-| `buddy-driver/mercury-system2.ts`    |         3,488 |
-| `buddy-driver/agent-runner.mts`      |         3,147 |
-| `jev-agent/src/optionSpec-legacy.ts` |         2,203 |
-| `jev-agent/src/goalQueue.ts`         |         1,971 |
+| `packages/jev-agent/src/candidates.ts`        |        14,779 |
+| `packages/jev-agent/src/controller-legacy.ts` |        14,034 |
+| `packages/jev-agent/src/executor.ts`          |        12,715 |
+| `packages/jev-agent/src/state.ts`             |         5,291 |
+| `packages/buddy-driver/planner-legacy.ts`     |         3,623 |
+| `packages/buddy-driver/generation-entry.ts`   |         3,495 |
+| `packages/buddy-driver/mercury-system2.ts`    |         3,488 |
+| `packages/buddy-driver/agent-runner.mts`      |         3,147 |
+| `packages/jev-agent/src/optionSpec-legacy.ts` |         2,203 |
+| `packages/jev-agent/src/goalQueue.ts`         |         1,971 |
 
 である。
 
-`jev-agent/src` だけで約88k行、`buddy-driver` 約51k行。
+`packages/jev-agent/src` だけで約88k行、`buddy-driver` 約51k行。
 
 これは「大きいから悪い」という話ではない。
 
@@ -1717,21 +1717,21 @@ mechanicsが悪かったのではない。
 
 ### Current production
 
-* `buddy-driver/agent-runner.mts`
-* `buddy-driver/generation-entry.ts`
-* `buddy-driver/planner.ts`
-* `buddy-driver/planner-legacy.ts`
-* `buddy-driver/mercury-system2.ts`
-* `jev-agent/src/controller.ts`
-* `jev-agent/src/controller-legacy.ts`
-* `jev-agent/src/candidates.ts`
-* `jev-agent/src/executor.ts`
-* `jev-agent/src/state.ts`
-* `jev-agent/src/goalQueue.ts`
-* `jev-agent/src/optionSpec.ts`
-* `jev-agent/src/optionSpec-legacy.ts`
-* `jev-agent/src/skillCommitment.ts`
-* `jev-agent/src/walkSkill.ts`
+* `packages/buddy-driver/agent-runner.mts`
+* `packages/buddy-driver/generation-entry.ts`
+* `packages/buddy-driver/planner.ts`
+* `packages/buddy-driver/planner-legacy.ts`
+* `packages/buddy-driver/mercury-system2.ts`
+* `packages/jev-agent/src/controller.ts`
+* `packages/jev-agent/src/controller-legacy.ts`
+* `packages/jev-agent/src/candidates.ts`
+* `packages/jev-agent/src/executor.ts`
+* `packages/jev-agent/src/state.ts`
+* `packages/jev-agent/src/goalQueue.ts`
+* `packages/jev-agent/src/optionSpec.ts`
+* `packages/jev-agent/src/optionSpec-legacy.ts`
+* `packages/jev-agent/src/skillCommitment.ts`
+* `packages/jev-agent/src/walkSkill.ts`
 
 ### Runtime / liveness / truth
 

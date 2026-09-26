@@ -8,8 +8,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 
-export const REPO_ROOT = resolve(import.meta.dir, '..', '..')
-export const HARNESS_DIR = join(REPO_ROOT, 'system2-harness')
+export const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..')
+export const HARNESS_DIR = join(REPO_ROOT, 'packages', 'system2-harness')
 
 /**
  * Production files that still call a provider SDK directly.
@@ -22,22 +22,22 @@ export const HARNESS_DIR = join(REPO_ROOT, 'system2-harness')
  *     migration becomes visible instead of silently drifting).
  */
 export const ALLOWED_LEGACY_PROVIDER_CALLS: Readonly<Record<string, string>> = Object.freeze({
-  'buddy-driver/mercury-system2.ts': '#439 Phase D/E: the live System2 WHAT authority being replaced by the harness',
-  'buddy-driver/planner-legacy.ts': '#439 Phase C/D: legacy planner that chooses WHAT',
-  'buddy-driver/advisor.ts': '#439 Phase D: shadow/advisory only, never authority',
-  'buddy-driver/muse-plan-replica.mts': '#419 naming/provider migration: offline evidence replica, no authority',
-  'jev-agent/src/jev-authority.ts': '#438 lane: Jev pi harness extraction in flight',
-  'jev-agent/src/jev-legacy.ts': '#438 lane: legacy Jev pi path, shadow comparison',
+  'packages/buddy-driver/mercury-system2.ts': '#439 Phase D/E: the live System2 WHAT authority being replaced by the harness',
+  'packages/buddy-driver/planner-legacy.ts': '#439 Phase C/D: legacy planner that chooses WHAT',
+  'packages/buddy-driver/advisor.ts': '#439 Phase D: shadow/advisory only, never authority',
+  'packages/buddy-driver/muse-plan-replica.mts': '#419 naming/provider migration: offline evidence replica, no authority',
+  'packages/jev-agent/src/jev/authority.ts': '#438 lane: Jev pi harness extraction in flight',
+  'packages/jev-agent/src/jev/client.ts': '#438 lane: legacy Jev pi path, shadow comparison',
 })
 
 const SOURCE_DIRS = [
-  'buddy-driver',
-  'jev-agent/src',
-  'src',
+  'packages/buddy-driver',
+  'packages/jev-agent/src',
+  'packages/mcp-server',
   'tools',
-  'companion',
-  'mcbot',
-  'system2-harness',
+  'packages/companion',
+  'packages/mcbot',
+  'packages/system2-harness',
 ] as const
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'runs', 'data', 'dist', 'build'])
@@ -94,7 +94,7 @@ export function providerSdkImporters(): readonly string[] {
   const importers: string[] = []
   for (const file of allProductionSourceFiles()) {
     const relativePath = relativeToRepo(file)
-    if (relativePath.startsWith('system2-harness/')) continue
+    if (relativePath.startsWith('packages/system2-harness/')) continue
     if (PROVIDER_SDK_PATTERN.test(readSource(file))) importers.push(relativePath)
   }
   return importers.sort()
@@ -117,7 +117,7 @@ export function deepHarnessImports(): readonly string[] {
   const offenders: string[] = []
   for (const file of allProductionSourceFiles()) {
     const relativePath = relativeToRepo(file)
-    if (relativePath.startsWith('system2-harness/')) continue
+    if (relativePath.startsWith('packages/system2-harness/')) continue
     const source = readSource(file)
     const specifiers = [...source.matchAll(/from\s+['"]([^'"]*system2-harness[^'"]*)['"]/g)].map((match) => match[1] ?? '')
     for (const specifier of specifiers) {
@@ -130,7 +130,7 @@ export function deepHarnessImports(): readonly string[] {
 
 /** Text of every non-test harness module, for token-level absence checks. */
 export function harnessModuleSources(): readonly { readonly file: string; readonly text: string }[] {
-  return listSourceFiles('system2-harness')
+  return listSourceFiles('packages/system2-harness')
     .filter((file) => !isTestPath(relativeToRepo(file)))
     .map((file) => ({ file: relativeToRepo(file), text: readSource(file) }))
     .sort((left, right) => left.file.localeCompare(right.file))

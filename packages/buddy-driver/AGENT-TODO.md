@@ -41,6 +41,6 @@ Do NOT add deterministic semantic ranking/retry/goal-ordering rules to make M2 a
 
 ## Current work
 
-The machine-readable current work queue is `../ISSUE-ROUTING.json`.
+The machine-readable current work queue is `../../ISSUE-ROUTING.json`.
 
 Do not duplicate it here.

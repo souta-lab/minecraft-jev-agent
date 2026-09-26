@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 // test-milestone-run-artifact: offline fixtures for tools/milestone-run-artifact.mjs.
 //
-// Every fixture below is a synthetic resident tree (buddy-driver/buddy.log,
-// buddy-driver/logs/jev/decisions.jsonl, buddy-driver/runner.out and
-// buddy-driver/data/resident/acceptance-<runId>.json). No live resident, socket,
+// Every fixture below is a synthetic resident tree (packages/buddy-driver/buddy.log,
+// packages/buddy-driver/logs/jev/decisions.jsonl, packages/buddy-driver/runner.out and
+// packages/buddy-driver/data/resident/acceptance-<runId>.json). No live resident, socket,
 // or network is used. Positive M3 cases inject an explicitly synthetic,
 // same-run acceptance-time report through buildRunArtifact's readSocket seam;
 // `--no-control-socket` cases deliberately have no terminal report.
@@ -212,16 +212,16 @@ const ACCEPTANCE = (runId) =>
 function makeRoot(name) {
   const root = mkdtempSync(join(tmpdir(), `run-artifact-${name}-`))
   ROOTS.push(root)
-  mkdirSync(join(root, 'buddy-driver', 'data', 'resident'), { recursive: true })
-  mkdirSync(join(root, 'buddy-driver', 'logs', 'jev'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'data', 'resident'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'logs', 'jev'), { recursive: true })
   return root
 }
 
 function writeFixture(root, runId, { logLines, acceptance = true, runner = {}, initialSnapshot = false }) {
-  writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
   writeFileSync(
-    join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'),
+    join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'),
     decisionsFor(runId, runner.sourceSha ?? SOURCE_SHA, (runner.offsetSec ?? 0) + 2),
     'utf8',
   )
@@ -231,7 +231,7 @@ function writeFixture(root, runId, { logLines, acceptance = true, runner = {}, i
     const initialInventory = scoped.inventorySamples[0]?.counts ?? {}
     const buildHash = runner.build ?? SYSTEM2_BUILD_HASH
     writeFileSync(
-      join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+      join(root, 'packages/buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
       JSON.stringify({
         record: 'm2-snapshot',
         runId,
@@ -258,7 +258,7 @@ function writeFixture(root, runId, { logLines, acceptance = true, runner = {}, i
     )
   }
   if (acceptance) {
-    writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
+    writeFileSync(join(root, 'packages/buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
   }
 }
 
@@ -433,7 +433,7 @@ assert.equal(passArtifact.acceptance.present, true)
 assert.equal(passArtifact.acceptance.record.runId, RUN_PASS)
 // The tool's own attribution agrees with the gates' scanner.
 {
-  const lines = readFileSync(join(passRoot, 'buddy-driver', 'buddy.log'), 'utf8').split(/\r?\n/)
+  const lines = readFileSync(join(passRoot, 'packages/buddy-driver', 'buddy.log'), 'utf8').split(/\r?\n/)
   const mine = attributeRunLines(RUN_PASS, lines)
   const gate = scanRunLines(RUN_PASS, lines)
   assert.equal(mine.inventorySamples.length, gate.inventorySamples.length)
@@ -470,7 +470,7 @@ for (const [label, snapshotSource] of [['foreign', 'f'.repeat(40)], ['missing', 
     },
   }
   if (snapshotSource !== null) snapshot.bootSourceSha = snapshotSource
-  writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`), JSON.stringify(snapshot), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`), JSON.stringify(snapshot), 'utf8')
   const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
   assert.equal(artifact.inventory.boot, null)
   assert.equal(artifact.inventory.bootEvidence.status, 'unknown')
@@ -564,7 +564,7 @@ ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
   const hostRoot = makeRoot('host')
   writeFixture(hostRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }), initialSnapshot: true })
   writeFileSync(
-    join(hostRoot, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
+    join(hostRoot, 'packages/buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
     JSON.stringify({
       record: 'milestone-predicates',
       schemaVersion: 1,
@@ -597,7 +597,7 @@ ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
   const mismatchRoot = makeRoot('host-mismatch')
   writeFixture(mismatchRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }), initialSnapshot: true })
   writeFileSync(
-    join(mismatchRoot, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
+    join(mismatchRoot, 'packages/buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
     JSON.stringify({
       record: 'milestone-predicates',
       schemaVersion: 1,
@@ -910,7 +910,7 @@ ok('a run with 12 eyes but no Nether transition: nether_reached UNKNOWN, artifac
   const lines = fullLog(runId, { terminalEye: 0 }).filter((entry) => !entry.includes('DIMENSION_TRANSITION'))
   writeFixture(root, runId, { logLines: lines })
   writeFileSync(
-    join(root, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
+    join(root, 'packages/buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
     JSON.stringify({
       record: 'milestone-predicates',
       schemaVersion: 1,
@@ -1146,13 +1146,13 @@ ok('a run with no authority marker keeps authority.system2 missing with a reason
     '\n' +
     runnerOut(target, { stack: null, decisions: [], offsetSec: 100 }).trimEnd() +
     '\n'
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerText, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'runner.out'), runnerText, 'utf8')
   writeFileSync(
-    join(root, 'buddy-driver', 'buddy.log'),
+    join(root, 'packages/buddy-driver', 'buddy.log'),
     `${[boot(100, target), line(101, 'HEARTBEAT pos=0,64,0 running=true')].join('\n')}\n`,
     'utf8',
   )
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '', 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '', 'utf8')
 
   const targetArtifact = cli(['--run', target, '--root', root, '--json', '--no-control-socket']).json()
   assert.equal(targetArtifact.authority.system2.provider, null, 'the FOREIGN stack must not be attributed')
@@ -1293,7 +1293,7 @@ ok('a synthetic complete run answers source SHA, env, inventory, transitions, pr
   const runId = 'run-fixture-acceptance-source-mismatch'
   const root = makeRoot('acceptance-source-mismatch')
   writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }) })
-  const acceptancePath = join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`)
+  const acceptancePath = join(root, 'packages/buddy-driver', 'data', 'resident', `acceptance-${runId}.json`)
   writeFileSync(
     acceptancePath,
     JSON.stringify({ record: 'acceptance', runId, gitCommit: 'f'.repeat(40), checkoutHead: SOURCE_SHA }),
@@ -1363,12 +1363,12 @@ ok('a synthetic complete run answers source SHA, env, inventory, transitions, pr
   assert.match(source.provenanceBasis, /hash=bbbb33334444/)
   assert.match(source.provenanceBasis, /trigger=source-changed/)
   // The recorded line index really points at that marker in the run window.
-  const windowLines = readFileSync(join(root, 'buddy-driver', 'runner.out'), 'utf8').split(/\r?\n/)
+  const windowLines = readFileSync(join(root, 'packages/buddy-driver', 'runner.out'), 'utf8').split(/\r?\n/)
   assert.match(windowLines[source.latestReload.lineIndex], /hash=bbbb33334444/)
   // Window identity: same BOOT rule as the gates, scanned to EOF, with the boot
   // generation's own BUILD hash recorded next to it.
   assert.equal(source.window.status, 'valid')
-  assert.equal(source.window.path, join(root, 'buddy-driver', 'runner.out'))
+  assert.equal(source.window.path, join(root, 'packages/buddy-driver', 'runner.out'))
   assert.equal(source.window.scannedToEof, true)
   assert.equal(source.window.closedByRunId, null)
   assert.equal(source.window.bootBuildHash, 'boot11112222')
@@ -1397,7 +1397,7 @@ ok('two in-window reloads: the LATEST source-changing hash is effective, with tr
   const root = makeRoot('reload-blind')
   writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }), runner: { build: 'boot11112222' } })
   writeFileSync(
-    join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+    join(root, 'packages/buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
     JSON.stringify({ record: 'm2-snapshot', runId, buildHash: 'later99998888', bootSourceSha: SOURCE_SHA, markers: [] }),
     'utf8',
   )
@@ -1473,13 +1473,13 @@ ok('no reload marker: BOOT fallback named in provenance + a proven blind window 
       reloads: [{ sec: 150, body: 'RELOAD ok=true trigger=source-changed ms=100 hash=foreign666666 id=gen-foreign generations=9' }],
     }).trimEnd() +
     '\n'
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerText, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'runner.out'), runnerText, 'utf8')
   writeFileSync(
-    join(root, 'buddy-driver', 'buddy.log'),
+    join(root, 'packages/buddy-driver', 'buddy.log'),
     `${[boot(0, target), line(1, 'HEARTBEAT pos=0,64,0 running=true')].join('\n')}\n`,
     'utf8',
   )
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '', 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '', 'utf8')
 
   const targetArtifact = cli(['--run', target, '--root', root, '--json', '--no-control-socket']).json()
   assert.equal(targetArtifact.run.source.provenance, 'reload')
@@ -1733,28 +1733,28 @@ ok('the control-socket generation hash is a read-only cross-check: agreement/dis
   const root = makeRoot('window-in-log')
   // The live shape: the resident restarted, so runner.out carries ONLY the new run
   // while the append-only buddy.log still holds the requested run's whole window.
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(successor, { offsetSec: 200, build: 'bootSuccessor1' }), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'runner.out'), runnerOut(successor, { offsetSec: 200, build: 'bootSuccessor1' }), 'utf8')
   writeFileSync(
-    join(root, 'buddy-driver', 'buddy.log'),
+    join(root, 'packages/buddy-driver', 'buddy.log'),
     `${fullLog(runId, { terminalEye: 12 }).join('\n')}\n` +
       `${line(60, 'RELOAD ok=true trigger=source-changed ms=1240 hash=logOnly33333 id=gen-log generations=2')}\n` +
       `${line(61, 'RELOAD ok=true trigger=source-changed deferred=frozen ms=900 hash=staged444444 contractVersion=3')}\n` +
       `${boot(200, successor)}\n`,
     'utf8',
   )
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisionsFor(runId), 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisionsFor(runId), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
 
   const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
   const artifact = result.json()
   const source = artifact.run.source
   assert.equal(source.window.status, 'valid', 'the window is found in the log stream')
-  assert.equal(source.window.path, join(root, 'buddy-driver', 'buddy.log'))
+  assert.equal(source.window.path, join(root, 'packages/buddy-driver', 'buddy.log'))
   assert.deepEqual(
     source.window.attempts,
     [
-      { path: join(root, 'buddy-driver', 'runner.out'), status: 'unknown', reason: `run_boundary_missing runId=${runId}` },
-      { path: join(root, 'buddy-driver', 'buddy.log'), status: 'valid', reason: null },
+      { path: join(root, 'packages/buddy-driver', 'runner.out'), status: 'unknown', reason: `run_boundary_missing runId=${runId}` },
+      { path: join(root, 'packages/buddy-driver', 'buddy.log'), status: 'valid', reason: null },
     ],
     'both stream attempts are recorded, in order',
   )
@@ -1836,7 +1836,7 @@ ok('a frozen host cannot make its staged candidate look like the executing sourc
   const decisionTsMs = Date.parse(at(3))
   writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 12 }), initialSnapshot: true })
   writeFileSync(
-    join(root, 'buddy-driver', 'runner.out'),
+    join(root, 'packages/buddy-driver', 'runner.out'),
     [
       boot(0, runId),
       line(1, `GENERATION_READY runId=${runId} id=${generationId} generationId=${generationId} sourceSha=${SOURCE_SHA} buildHash=${buildHash} system2ConfiguredProvider=${configuredProvider} system2ConfiguredModel=${configuredModel} policy=typesafe policyProvider=typesafe-ai policyModel=typesafe-ai/jev planner=llm plannerModel=typesafe-ai/jev deterministicFallbackEnabled=false system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}`),

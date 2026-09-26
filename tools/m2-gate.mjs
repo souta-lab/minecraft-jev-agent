@@ -37,8 +37,8 @@
 // WHERE THE RUN'S EVIDENCE IS FOUND
 // ---------------------------------
 // A run's facts live in the RESIDENT TREE that produced them - the checkout
-// owning `buddy-driver/buddy.log`, `buddy-driver/data/resident/`,
-// `buddy-driver/logs/jev/decisions.jsonl` - plus, for a supervised resident, the
+// owning `packages/buddy-driver/buddy.log`, `packages/buddy-driver/data/resident/`,
+// `packages/buddy-driver/logs/jev/decisions.jsonl` - plus, for a supervised resident, the
 // supervisor's own stdout under `<resident-tree>/runs/` (recursively, `*.out`). The gate must not
 // require the operator to know that path, so it resolves evidence in this order:
 //
@@ -94,7 +94,7 @@ export const M2_REQUIRED_STAGES = Object.freeze([
 /**
  * Marker names emitted by the portal runtime (netherPortalPlan.ts:37-45) plus
  * `PORTAL_TRUTH`, the resident's live-world / durable-memory portal verdict
- * (buddy-driver/generation-entry.ts). PORTAL_TRUTH carries NO build chain: it
+ * (packages/buddy-driver/generation-entry.ts). PORTAL_TRUTH carries NO build chain: it
  * only ever reports that a verified portal already existed.
  */
 export const PORTAL_MARKERS = Object.freeze([
@@ -118,21 +118,21 @@ export const DIAMOND = 'diamond'
 export const DIAMOND_PICKAXE = 'diamond_pickaxe'
 export const FLINT_AND_STEEL = 'flint_and_steel'
 export const OBSIDIAN = 'obsidian'
-/** matcher for the run-scoped snapshot record written by buddy-driver/m2-snapshot.ts */
+/** matcher for the run-scoped snapshot record written by packages/buddy-driver/m2-snapshot.ts */
 export const M2_GATE_SNAPSHOT_RECORD = 'm2-snapshot'
 
 const TOOLS_DIR = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = dirname(TOOLS_DIR)
 export const M2_GATE_LOG =
-  process.env.M2_GATE_LOG ?? process.env.M2_LOG ?? process.env.BUDDY_LOG ?? join(REPO_ROOT, 'buddy-driver', 'buddy.log')
+  process.env.M2_GATE_LOG ?? process.env.M2_LOG ?? process.env.BUDDY_LOG ?? join(REPO_ROOT, 'packages/buddy-driver', 'buddy.log')
 export const M2_GATE_SNAPSHOT_DIR =
-  process.env.M2_GATE_SNAPSHOT_DIR ?? process.env.M2_SNAPSHOT_DIR ?? join(REPO_ROOT, 'buddy-driver', 'data', 'resident')
+  process.env.M2_GATE_SNAPSHOT_DIR ?? process.env.M2_SNAPSHOT_DIR ?? join(REPO_ROOT, 'packages/buddy-driver', 'data', 'resident')
 export const M2_GATE_DECISIONS =
-  process.env.M2_DECISIONS ?? join(REPO_ROOT, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl')
+  process.env.M2_DECISIONS ?? join(REPO_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl')
 export const M2_GATE_RUNNER_OUT =
-  process.env.M2_RUNNER_OUT ?? join(REPO_ROOT, 'buddy-driver', 'runner.out')
+  process.env.M2_RUNNER_OUT ?? join(REPO_ROOT, 'packages/buddy-driver', 'runner.out')
 export const M2_GATE_CONTROL_SOCK =
-  process.env.M2_CONTROL_SOCK ?? join(REPO_ROOT, 'buddy-driver', 'data', 'resident', 'control.sock')
+  process.env.M2_CONTROL_SOCK ?? join(REPO_ROOT, 'packages/buddy-driver', 'data', 'resident', 'control.sock')
 
 /** Declared resident tree (`--root` / M2_GATE_ROOT); null = the gate's own tree. */
 export const M2_GATE_ROOT = process.env.M2_GATE_ROOT ?? null
@@ -154,7 +154,7 @@ export const M2_GATE_SUPERVISOR_OUT_LIMIT = Number.parseInt(process.env.M2_GATE_
  * agree so the contract cannot drift apart.
  */
 export function residentPaths(root) {
-  const base = join(root, 'buddy-driver')
+  const base = join(root, 'packages/buddy-driver')
   return {
     root,
     logPath: join(base, 'buddy.log'),
@@ -330,7 +330,7 @@ const INVENTORY_RE = /\b(?:items|inventory)=(\{[^{}]*\})/
  */
 const DIMENSION_RE = /\bdimension=(minecraft:[a-z_]+|[a-z_]+)\b/
 /**
- * The ONLY markers that report the BODY's own dimension (buddy-driver/dimension-observer.ts):
+ * The ONLY markers that report the BODY's own dimension (packages/buddy-driver/dimension-observer.ts):
  * `DIMENSION_OBSERVED` at generation start and `DIMENSION_TRANSITION` on a live change, whose
  * `dimension=` is the canonical current field. Every other marker that happens to carry a
  * `dimension=` field names something else - the portal's own dimension (PORTAL_LIT,

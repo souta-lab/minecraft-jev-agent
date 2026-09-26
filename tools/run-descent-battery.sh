@@ -25,7 +25,7 @@ run() {
   fi
 }
 
-cd "$ROOT/jev-agent"
+cd "$ROOT/packages/jev-agent"
 run test-column-descent bun test ./test-column-descent.mts
 run test-pit-escape bun test ./test-pit-escape.mts
 run test-vertical-plan bun test ./test-vertical-plan.mts
@@ -38,7 +38,7 @@ run test-mob-survival bun test ./test-mob-survival.mts
 run test-descend-plan bun test ./test-descend-plan.mts
 run test-portal-entry-route bun test ./test-portal-entry-route.mts
 run test-nether-portal bun test ./test-nether-portal.mts
-cd "$ROOT/buddy-driver"
+cd "$ROOT/packages/buddy-driver"
 run test-ladder bun test ./test-ladder.mts
 cd "$ROOT"
 run bun-tests bun test --timeout=120000 --max-concurrency=1 ./bun-tests

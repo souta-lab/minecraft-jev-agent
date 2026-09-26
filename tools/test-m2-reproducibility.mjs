@@ -237,7 +237,7 @@ function scanLines(lines, fromOffset = 0) {
 // ---------------------------------------------------------------------------
 {
   const tree = join(SCRATCH, 'frozen-source')
-  const driverDir = join(tree, 'buddy-driver')
+  const driverDir = join(tree, 'packages/buddy-driver')
   mkdirSync(driverDir, { recursive: true })
   writeFileSync(join(driverDir, 'agent-runner.mts'), 'export {}\n', 'utf8')
   const git = (args) => {
@@ -248,7 +248,7 @@ function scanLines(lines, fromOffset = 0) {
   git(['init', '-q'])
   git(['config', 'user.name', 'M2 Harness Test'])
   git(['config', 'user.email', 'm2-harness-test@example.invalid'])
-  git(['add', 'buddy-driver/agent-runner.mts'])
+  git(['add', 'packages/buddy-driver/agent-runner.mts'])
   git(['commit', '-q', '-m', 'fixture'])
   const sha = git(['rev-parse', 'HEAD'])
   const clean = inspectFrozenSource({ frozenTree: tree, driverDir, frozenSha: sha })
@@ -265,7 +265,7 @@ function scanLines(lines, fromOffset = 0) {
   const sharedPropertiesHash = sha256Text(readFileSync(join(serverRoot, 'server.properties')))
   const backend = buildBackend({
     rehearse: false,
-    driverDir: join(SCRATCH, 'backend-driver', 'buddy-driver'),
+    driverDir: join(SCRATCH, 'backend-driver', 'packages/buddy-driver'),
     frozenTree: tree,
     serverRoot,
     maxRestarts: 0,

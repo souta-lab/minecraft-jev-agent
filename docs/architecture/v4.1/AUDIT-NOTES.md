@@ -27,9 +27,9 @@ The original `/home/s0u7a/mc-ai` working tree was not modified. It was dirty at 
 
 Repository search found the actual production/harness pattern rather than relying on naming alone:
 
-- `jev-harness/contract.ts`: typed `choice`, `boolean`, `score`; model answer is a proposal and never Guard/TRUE/DONE authority.
-- `jev-harness/harness.ts`: `evaluateBatch`, closed candidate sets, projection hashing, typed failure algebra, stale re-verification, artifact provenance.
-- `jev-harness/identity.ts`: decision/world/generation stale fencing.
+- `packages/jev-harness/contract.ts`: typed `choice`, `boolean`, `score`; model answer is a proposal and never Guard/TRUE/DONE authority.
+- `packages/jev-harness/harness.ts`: `evaluateBatch`, closed candidate sets, projection hashing, typed failure algebra, stale re-verification, artifact provenance.
+- `packages/jev-harness/identity.ts`: decision/world/generation stale fencing.
 - historical/runtime docs and controller code: Jev π for grounded local choice, β for historical Option termination, and batched decision questions.
 - `docs/history/architecture/ARCHITECTURE.md`: AI SDK call shape `experimental_evaluate({ model: 'typesafe-ai/jev', state, questions })`.
 
@@ -62,4 +62,4 @@ A concurrent worker produced a second V4.1.2 kernel split inside this dedicated 
 Required Jev example search was repeated before/while hardening. Repository examples confirmed bounded structured state + typed choice/boolean/score questions with code-side stale fencing. Public search confirmed the Vercel AI/TypeSafe provider pattern using `experimental_evaluate`, shared `state`, typed `questions`, and Choice/Score/Boolean evaluation. V4.1.2 therefore treats Jev as bounded decision advice over a kernel-built projection, never as truth/lease/effect/termination authority.
 The five adversarial review passes found and closed issues beyond the supplied audit list: unsafe budget/deadline terminalization across bounded critical sections; pause/VERIFY/Mission safe-yield bypasses; replay rebranding risk; witness revision non-advancement; duplicate predicate snapshots; stale priority inheritance; latest-vs-earliest critical deadline; untrusted VERIFY invocation; post-preemption-ACK new-work race; lower-class fairness/urgency class crossing; unrelated fact effect reconciliation; and same-binding Jev frame staleness after effect/progress changes.
 
-Production mutation inventory was rebuilt from `jev-agent/src/actuationPort.ts`, `buddy-driver/resident-safety.ts`, and direct mutator sites in `jev-agent/src/executor.ts`. Two concrete production blockers are especially important: direct `bot.attack(entity)` is not represented in ActuationPort and is absent from `MUTATING_BOT_METHODS`; direct `bot.openFurnace(block)` is also absent from both. `consume` is generation-guarded but not ActuationPort-exposed, while pathfinder movement configuration remains a hidden locomotion mutation. These are migration gates in `RESOURCE-AUTHORITY-INVENTORY.md`, not assumed solved by the pure kernel.
+Production mutation inventory was rebuilt from `packages/jev-agent/src/actuationPort.ts`, `packages/buddy-driver/resident-safety.ts`, and direct mutator sites in `packages/jev-agent/src/executor.ts`. Two concrete production blockers are especially important: direct `bot.attack(entity)` is not represented in ActuationPort and is absent from `MUTATING_BOT_METHODS`; direct `bot.openFurnace(block)` is also absent from both. `consume` is generation-guarded but not ActuationPort-exposed, while pathfinder movement configuration remains a hidden locomotion mutation. These are migration gates in `RESOURCE-AUTHORITY-INVENTORY.md`, not assumed solved by the pure kernel.

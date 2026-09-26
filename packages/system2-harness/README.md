@@ -1,7 +1,7 @@
 # system2-harness — the sealed System2 WHAT boundary (#439)
 
 Status: **Phases B/C/D/E implemented as a workspace package with no production call
-site yet.** Nothing in `buddy-driver/` or `jev-agent/` imports it, so landing this
+site yet.** Nothing in `packages/buddy-driver/` or `packages/jev-agent/` imports it, so landing this
 changes no live behaviour. Phases C/D/E (wiring the four existing call sites onto
 `System2Harness.propose`) and Phase F (removing the legacy deterministic WHAT
 authority) are mapped below and deliberately NOT executed here.
@@ -67,12 +67,12 @@ them so **one reader can consume both artifact corpora**. Per-file mapping:
 
 | #439 module | #438 source | Adoption |
 | --- | --- | --- |
-| `canonical.ts` | `jev-harness/canonical.ts` | symbol-for-symbol: `NonCanonicalValueError`, `canonicalJson` (keys sorted; `undefined` object members dropped; `undefined`-in-array, `NaN`/`Infinity`, `bigint`/`symbol`/`function`, class instances, `Map`/`Set`/`Date` all THROW), `sha256Hex` (full 64 hex), `hashId(v, len=16)`, `stableSeed` (FNV-1a), `deepFreeze`, `projectionHash({projectionId,version,payload})` = `sha256Hex(canonicalJson(...))` with NO truncation, `projectionVersionKey` = `` `${projectionId}@${version}` ``, `assertPlainData`, `epistemicEntry` |
-| `epistemic.ts` | `jev-harness/contract.ts` §6 (`Epistemic<T>`) | same four discriminators `known`/`unknown`/`not_observed`/`sensor_error`; `known`, `notObserved`, `sensorError`, `isKnown`, `requireKnown` (THROWS `UnknownFactError`), `epistemicToJson`; **no defaulting API** is exported (pinned by the parity test) |
-| `artifacts.ts` | `jev-harness/artifacts.ts` | one JSONL record stream with a `record` discriminator, deterministic ids, deep-frozen plain data, and SIBLING records instead of mutation: `SYSTEM2_DECISION` (envelope `{artifactId, runId, sourceSha, sequence, createdAt}`), `STALE_SYSTEM2_RESULT_DROPPED`, `SYSTEM2_DECISION_LINK`, `CODE_FALLBACK` (`fallbackAuthority:'legacy_code'`, `system2AnswerPresent:false`, `architectureException`) |
-| `provider.ts` | `jev-harness/provider.ts` | adapter seam `{identity:{providerId,modelId,transport}, dispatch(request, signal)}` with typed `ProviderFailure{kind, retryable}`; the adapter classifies, the harness owns retry currency |
-| `epochs.ts` | `jev-harness/identity.ts` | `CausalIdentity` + `checkCurrency` with field priority **epoch advanced > generation changed > world key changed > world epoch changed > human intent changed > mission changed > option-graph revision changed > active option changed** |
-| `replayAdapter.ts` | `jev-harness/replay.ts` | provider-free adapter over the same interface, modes `exact \| malformed \| timeout \| provider_error \| stale_completion` |
+| `canonical.ts` | `packages/jev-harness/canonical.ts` | symbol-for-symbol: `NonCanonicalValueError`, `canonicalJson` (keys sorted; `undefined` object members dropped; `undefined`-in-array, `NaN`/`Infinity`, `bigint`/`symbol`/`function`, class instances, `Map`/`Set`/`Date` all THROW), `sha256Hex` (full 64 hex), `hashId(v, len=16)`, `stableSeed` (FNV-1a), `deepFreeze`, `projectionHash({projectionId,version,payload})` = `sha256Hex(canonicalJson(...))` with NO truncation, `projectionVersionKey` = `` `${projectionId}@${version}` ``, `assertPlainData`, `epistemicEntry` |
+| `epistemic.ts` | `packages/jev-harness/contract.ts` §6 (`Epistemic<T>`) | same four discriminators `known`/`unknown`/`not_observed`/`sensor_error`; `known`, `notObserved`, `sensorError`, `isKnown`, `requireKnown` (THROWS `UnknownFactError`), `epistemicToJson`; **no defaulting API** is exported (pinned by the parity test) |
+| `artifacts.ts` | `packages/jev-harness/artifacts.ts` | one JSONL record stream with a `record` discriminator, deterministic ids, deep-frozen plain data, and SIBLING records instead of mutation: `SYSTEM2_DECISION` (envelope `{artifactId, runId, sourceSha, sequence, createdAt}`), `STALE_SYSTEM2_RESULT_DROPPED`, `SYSTEM2_DECISION_LINK`, `CODE_FALLBACK` (`fallbackAuthority:'legacy_code'`, `system2AnswerPresent:false`, `architectureException`) |
+| `provider.ts` | `packages/jev-harness/provider.ts` | adapter seam `{identity:{providerId,modelId,transport}, dispatch(request, signal)}` with typed `ProviderFailure{kind, retryable}`; the adapter classifies, the harness owns retry currency |
+| `epochs.ts` | `packages/jev-harness/identity.ts` | `CausalIdentity` + `checkCurrency` with field priority **epoch advanced > generation changed > world key changed > world epoch changed > human intent changed > mission changed > option-graph revision changed > active option changed** |
+| `replayAdapter.ts` | `packages/jev-harness/replay.ts` | provider-free adapter over the same interface, modes `exact \| malformed \| timeout \| provider_error \| stale_completion` |
 
 `candidateSetHash`/`candidateOrdering`/`candidateOrderSalt` (the #438 candidate
 shape) has no System2 counterpart yet: System2's order-independent collection is
@@ -205,7 +205,7 @@ recorded under a different semantic contract (`SEMANTIC_CONTRACT_CHANGED`).
 
 | # | Invariant | Executable form | Fails when |
 | --- | --- | --- | --- |
-| S1 | no direct provider import outside the harness | **ratchet**: `providerSdkImporters()` must equal the pinned legacy set exactly; `deepHarnessImports()` must be empty | a new bypass appears, OR a migrated file is left in the allowlist, OR someone deep-imports `system2-harness/compiler.ts` |
+| S1 | no direct provider import outside the harness | **ratchet**: `providerSdkImporters()` must equal the pinned legacy set exactly; `deepHarnessImports()` must be empty | a new bypass appears, OR a migrated file is left in the allowlist, OR someone deep-imports `packages/system2-harness/compiler.ts` |
 | S2 | no unregistered prompt/call path | registry has exactly 1 entry pointing at `System2Harness.propose`; `buildSystem2Prompt` referenced only by `prompt.ts`+`harness.ts`; only `providers/aiGateway.ts` imports the SDK | a second prompt builder or call path appears |
 | S3 | typed wake reason on every request | all 10 reasons round-trip with causal evidence; an unregistered reason → `invalid_request` with **zero provider calls** | a wake reason is invented or untyped |
 | S4 | binds `system2Epoch` + base revision | a request with a non-live `optionGraphRevision` is `stale` before dispatch; epoch participates in `decisionId` | an unbound request reaches the model |
@@ -257,10 +257,10 @@ Phase A inventory (verified against `main` at `93030d2`):
 
 | # | Call site | Current role | Phase | Migration |
 | --- | --- | --- | --- | --- |
-| 1 | `buddy-driver/mercury-system2.ts` — `import {generateText, tool}` :56, transports :1412 (json-text) / :1439 (tool-call), `class MercurySystem2` :1727, `.tryRepair` :1921, `SYSTEM_PROMPT` :1458, `isCurrent` staleness :1827/:1924 | **the only current WHAT authority** (`patch`/`replace` via `System2Brain`) | D+E | `MercurySystem2` becomes a thin wiring of `createSystem2Harness({provider: createAiGatewayProvider(...)})`: its `MERCURY_PLAN_SCHEMA`/`SYSTEM_PROMPT`/`MERCURY_INTENT` prose path is replaced by the typed `System2Proposal` contract; `tryRepair` builds one `System2Request` (projection from `plannerModelView` (:2637) + `System2PlanRequest.goalQueueState`/`objective`/`recentOutcomes` + the grounded index) and returns the committed patch. Its `isCurrent`/`StaleMercuryGenerationError` checks collapse into the harness epoch fence (`checkSystem2Currency`) and the HOST CAS commit. **`generateText`/`tool` move out of this file entirely.** |
-| 2 | `buddy-driver/planner-legacy.ts` — `experimental_evaluate` :30, call :3520, `PlannerBrain` :2784, `askLlm` :3498 | legacy WHAT chooser (one grounded plan id from a horizon) | C+D | `askLlm` becomes `harness.propose()` with `wake: PLAN_REPAIR_REQUIRED`/`NO_SEMANTIC_FRONTIER`; `readChoice`'s "chose an id that may not exist" handling is replaced by the compiler's grounded intent validation (today :3046 silently substitutes `fallbackOption` when the chosen id is unknown). Cache/dedupe (:3009) moves behind `System2ProposalCache`. |
-| 3 | `buddy-driver/planner.ts` — `experimental_evaluate` :19, call :605, `PlannerBrain` :272 | second WHAT chooser; the resident default (`resolvePlannerMode` :49 → `'llm'` when `BUDDY_PLANNER` is unset) | C+D | Same as (2): one `System2Request`, `opt_*` ids become `optionId`/`optionInstanceId` from the compiler, and the derived execution queue replaces the horizon list. `planner-legacy` remains reachable only through explicit `deterministic` mode. |
-| 4 | `buddy-driver/advisor.ts` — `experimental_evaluate` :18, call :383, `class Advisor` :274, `.decide` :308 | **shadow/advisory, never authority** | D | Migrate last and keep it non-authoritative: it may consume the harness's typed diagnostics/evidence, but it must not become a second WHAT author. If it cannot be expressed as evidence input, delete it rather than duplicate the question. |
+| 1 | `packages/buddy-driver/mercury-system2.ts` — `import {generateText, tool}` :56, transports :1412 (json-text) / :1439 (tool-call), `class MercurySystem2` :1727, `.tryRepair` :1921, `SYSTEM_PROMPT` :1458, `isCurrent` staleness :1827/:1924 | **the only current WHAT authority** (`patch`/`replace` via `System2Brain`) | D+E | `MercurySystem2` becomes a thin wiring of `createSystem2Harness({provider: createAiGatewayProvider(...)})`: its `MERCURY_PLAN_SCHEMA`/`SYSTEM_PROMPT`/`MERCURY_INTENT` prose path is replaced by the typed `System2Proposal` contract; `tryRepair` builds one `System2Request` (projection from `plannerModelView` (:2637) + `System2PlanRequest.goalQueueState`/`objective`/`recentOutcomes` + the grounded index) and returns the committed patch. Its `isCurrent`/`StaleMercuryGenerationError` checks collapse into the harness epoch fence (`checkSystem2Currency`) and the HOST CAS commit. **`generateText`/`tool` move out of this file entirely.** |
+| 2 | `packages/buddy-driver/planner-legacy.ts` — `experimental_evaluate` :30, call :3520, `PlannerBrain` :2784, `askLlm` :3498 | legacy WHAT chooser (one grounded plan id from a horizon) | C+D | `askLlm` becomes `harness.propose()` with `wake: PLAN_REPAIR_REQUIRED`/`NO_SEMANTIC_FRONTIER`; `readChoice`'s "chose an id that may not exist" handling is replaced by the compiler's grounded intent validation (today :3046 silently substitutes `fallbackOption` when the chosen id is unknown). Cache/dedupe (:3009) moves behind `System2ProposalCache`. |
+| 3 | `packages/buddy-driver/planner.ts` — `experimental_evaluate` :19, call :605, `PlannerBrain` :272 | second WHAT chooser; the resident default (`resolvePlannerMode` :49 → `'llm'` when `BUDDY_PLANNER` is unset) | C+D | Same as (2): one `System2Request`, `opt_*` ids become `optionId`/`optionInstanceId` from the compiler, and the derived execution queue replaces the horizon list. `planner-legacy` remains reachable only through explicit `deterministic` mode. |
+| 4 | `packages/buddy-driver/advisor.ts` — `experimental_evaluate` :18, call :383, `class Advisor` :274, `.decide` :308 | **shadow/advisory, never authority** | D | Migrate last and keep it non-authoritative: it may consume the harness's typed diagnostics/evidence, but it must not become a second WHAT author. If it cannot be expressed as evidence input, delete it rather than duplicate the question. |
 
 Order: **1 → 3 → 2 → 4**. (1) is the only live WHAT authority, so it proves the
 boundary first; (3) is the resident default, so it determines what most runs
@@ -270,8 +270,8 @@ must not survive as a parallel authority. Each step must delete its row from
 
 **Supersession note.** The repo already has a weaker stale fence:
 `System2RequestContext`/`System2ApplyState`/`System2DiscardReason` +
-`decideSystem2Apply` in `jev-agent/src/system2Authority.ts:8-64`, carried on
-`System2PlanRequest.requestContext` (`jev-agent/src/system2.ts:73-83`). The harness
+`decideSystem2Apply` in `packages/jev-agent/src/system2Authority.ts:8-64`, carried on
+`System2PlanRequest.requestContext` (`packages/jev-agent/src/system2.ts:73-83`). The harness
 epoch fence is a strict superset and should replace it rather than sit beside it:
 
 | `System2RequestContext` | `CausalIdentity` |
@@ -293,7 +293,7 @@ step that wires the harness.
 
 ## Phase F — legacy WHAT fallback staging map (report only, NOT executed)
 
-Per `buddy-driver/AGENTS.md` §2/§3 the deterministic ladder may not silently author
+Per `packages/buddy-driver/AGENTS.md` §2/§3 the deterministic ladder may not silently author
 WHAT. Today it can, in these exact places:
 
 | # | Location | Why it is WHAT authority | Exception record needed |

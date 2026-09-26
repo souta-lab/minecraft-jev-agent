@@ -147,7 +147,7 @@
 2026-09-18 03:42 JST — ★P1ロールバックが実障害で機能（#45 cherry-pick コンフリクト事件）
   経緯: #45(6d614fd) を cherry-pick → コンフリクトで作業ツリーに <<<<<<< が混入
   一次ログ: RELOAD ok=false trigger=source-changed ms=12 message=Build failed:
-            ../jev-agent/src/executor.ts:709:2: ERROR: Unexpected "<<"
+            packages/jev-agent/src/executor.ts:709:2: ERROR: Unexpected "<<"
     → ホストが壊れたバンドルを拒否し、旧世代のまま稼働継続（ダウンタイム0）
   復旧: git cherry-pick --abort → beac6f6 へ戻し typecheck ok → RELOAD ok=true skipped=unchanged
   学び: mainツリーでの cherry-pick/merge は危険。必ず worktree で行い、mainはビルド元として清潔に保つ

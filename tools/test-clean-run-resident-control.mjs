@@ -10,7 +10,7 @@ const ROOTS = []
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'clean-run-resident-control-'))
   ROOTS.push(root)
-  const residentDir = join(root, 'buddy-driver', 'data', 'resident')
+  const residentDir = join(root, 'packages/buddy-driver', 'data', 'resident')
   mkdirSync(residentDir, { recursive: true })
   const socketPath = join(residentDir, 'control.sock')
   const lockPath = join(residentDir, 'host.lock')

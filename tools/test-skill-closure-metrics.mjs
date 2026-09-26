@@ -23,10 +23,10 @@ const root = mkdtempSync(join(tmpdir(), 'skill-closure-metrics-'))
 const line = (text) => `[2026-09-22T00:00:00.000Z] ${text}`
 
 function writeTree(logBody) {
-  mkdirSync(join(root, 'buddy-driver', 'logs', 'jev'), { recursive: true })
-  writeFileSync(join(root, 'buddy-driver', 'buddy.log'), logBody)
+  mkdirSync(join(root, 'packages/buddy-driver', 'logs', 'jev'), { recursive: true })
+  writeFileSync(join(root, 'packages/buddy-driver', 'buddy.log'), logBody)
   // The tool refuses to run without a decisions file; its contents are not read here.
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '')
+  writeFileSync(join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '')
 }
 
 function run(runId) {

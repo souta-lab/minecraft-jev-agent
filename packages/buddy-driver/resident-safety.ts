@@ -397,7 +397,7 @@ export type MutationObserver = (observation: MutationObservation) => void
 /**
  * Bot methods that mutate server-side state but are NOT in the generation
  * guard today (`attack`, `openFurnace`, `stopDigging`, ... - see
- * architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md §3). They are wrapped
+ * docs/architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md §3). They are wrapped
  * observation-only: the shadow sees the dispatch while production behaviour is
  * exactly unchanged. Presence in this list is itself a migration blocker.
  */

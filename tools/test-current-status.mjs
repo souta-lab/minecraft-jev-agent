@@ -90,7 +90,7 @@ const offlineResident = async () => null
       return null
     },
   })
-  const expectedSocket = join(runtimeRoot, 'buddy-driver', 'data', 'resident', 'control.sock')
+  const expectedSocket = join(runtimeRoot, 'packages/buddy-driver', 'data', 'resident', 'control.sock')
   assert.equal(observedSocket, expectedSocket)
   assert.ok(commands.includes(`socket ${expectedSocket} <- {"cmd":"report"} (2000ms timeout)`))
   ok('runtime-root override reads the selected resident socket')
@@ -107,7 +107,7 @@ const offlineResident = async () => null
       return null
     },
   })
-  assert.equal(observedSocket, join(runtimeRoot, 'buddy-driver', 'data', 'resident', 'control.sock'))
+  assert.equal(observedSocket, join(runtimeRoot, 'packages/buddy-driver', 'data', 'resident', 'control.sock'))
   ok('CLI runtime-root override reaches the injected resident reader')
 }
 
@@ -166,8 +166,8 @@ const offlineResident = async () => null
     executedJobs: 0,
     totalJobs: 5,
     jobs: [
-      { name: 'system2-harness', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
-      { name: 'jev-harness', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+      { name: 'packages/system2-harness', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+      { name: 'packages/jev-harness', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
       { name: 'authority-contract', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
       { name: 'convergence', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
       { name: 'core-deterministic', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },

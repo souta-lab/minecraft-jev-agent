@@ -153,7 +153,7 @@ absolute executable path too.
 #     For the managed unit, use systemctl --user stop ai-buddy-resident.service.
 #     If a legacy direct resident remains, use the repository helper, which sends
 #     only the implementation's native cmd=quit and waits for socket + HOST lock:
-if test -S <frozen-tree>/buddy-driver/data/resident/control.sock; then \
+if test -S <frozen-tree>/packages/buddy-driver/data/resident/control.sock; then \
   <absolute-bun> <frozen-tree>/tools/clean-run-resident-control.mjs --root <frozen-tree>
 fi
 
@@ -199,7 +199,7 @@ systemd-run --user --unit=ai-buddy-clean-leaf --collect --no-block \
 #     Then run the user-systemd command printed as
 #     step 6 in operator-commands.txt. StandardOutput/StandardError append to this
 #     exact runner.out path so BOOT, generation identity, and authority lines reach
-#     the run-scoped evidence readers (`--property=StandardOutput=append:<frozen-checkout>/buddy-driver/runner.out`
+#     the run-scoped evidence readers (`--property=StandardOutput=append:<frozen-checkout>/packages/buddy-driver/runner.out`
 #     and matching StandardError); the external provider env file is not output.
 <absolute-bun> <frozen-checkout>/tools/clean-run-runner-output.mjs --root <frozen-checkout>
 #     The service sets BUDDY_SERVER_PROPERTIES_PATH for HOST seed reading
@@ -215,7 +215,7 @@ systemd-run --user --unit=ai-buddy-clean-leaf --collect --no-block \
 <absolute-bun> <frozen-checkout>/tools/clean-run-console-capture.mjs \
   --environment <run-dir>/environment-resolved.json \
   --attestation <run-dir>/server-start-attestation.json \
-  --resident-log <frozen-checkout>/buddy-driver/buddy.log --run <RUN_ID>
+  --resident-log <frozen-checkout>/packages/buddy-driver/buddy.log --run <RUN_ID>
 #     All declared/queryable gamerules are checked in each required dimension.
 #     A missing/ambiguous response exits UNKNOWN; any mismatch fails closed.
 #     max_minecart_speed is explicitly unavailable in this world and remains UNKNOWN,
@@ -270,7 +270,7 @@ descriptor is not an acceptance.
 | tree HEAD | `bundle.git.head` + `liveSignals.bootSourceMatchesTreeHead` |
 | `worldKey` | `BOOT ... worldKey={"serverId":…,"dimension":…,"worldEpoch":…}` → `artifact.run.worldKey` (it is the world memory namespace: `serverId|dimension|worldEpoch`; it does NOT contain the seed) |
 | level name + seed | the HOST `acceptance-<runId>.json` (`levelName`, `seed`) → `artifact.acceptance.record`; the clean gate compares both against the descriptor (`run.levelNameAttested`, `run.seedAttested`). `seed` comes from `serverSeed()` via `BUDDY_SERVER_PROPERTIES_PATH`; that is only HOST seed evidence, not proof of the server's runtime config |
-| Leaf launch/config | wrapper-produced `server-start-attestation.json` records the observed Leaf PID/argv, Java version/executable, JAR path/hash, effective `Paper.IgnoreJavaVersion` flag, `--config` path, safe property projection, config/manifest hashes and run-private console paths. HOST rechecks the descriptor, BOOT SHA, manifest, property bytes and live `/proc` argv into `artifact.run.boot.cleanRunServerConfig`; the gate rechecks those bindings from disk and requires `run.serverConfigAttestation=PASS` |
+| Leaf ops/launch/config | wrapper-produced `server-start-attestation.json` records the observed Leaf PID/argv, Java version/executable, JAR path/hash, effective `Paper.IgnoreJavaVersion` flag, `--config` path, safe property projection, config/manifest hashes and run-private console paths. HOST rechecks the descriptor, BOOT SHA, manifest, property bytes and live `/proc` argv into `artifact.run.boot.cleanRunServerConfig`; the gate rechecks those bindings from disk and requires `run.serverConfigAttestation=PASS` |
 | gamerules | `clean-run-console-capture.mjs` records seed plus each queryable declared gamerule response from the private Leaf stdout log, including byte offsets and hashes, and writes `commands.jsonl`, `capture.json`, and `gamerule-verification.txt`. The gate checks command safety, response bytes, hashes, exact runId, descriptor SHA, startup attestation/PID, BOOT source SHA, and every dimension/rule. A pasted file cannot PASS. Rules explicitly excluded as unavailable (currently `max_minecart_speed`) remain UNKNOWN and are never described as observed |
 | initial inventory | `artifact.inventory.boot` comes only from the generation-entry `initialInventory` snapshot whose `runId` and `bootSourceSha` match this run's BOOT. A periodic `INVENTORY` line cannot stand in for that starting state. `run.bootInventoryEmpty` requires this source-bound snapshot to be empty |
 | model authority / no fallback | `artifact.authority.system2.identityStatus` must be `verified`: each same-run decision is joined to its `generationId`, source SHA, build hash, actual provider/model, and configured System2 provider/model. M3 requires every recorded System2 decision to count as model-backed. The run-scoped Jev decision log must contain only classifiable decisions, at least one `source=jev`, no fallback/other/unclassifiable sources, and `GENERATION_READY` must bind typesafe Jev policy with planner mode `llm` and deterministic fallback disabled. Missing, malformed, stub-only, or unknown-source evidence stays UNKNOWN |

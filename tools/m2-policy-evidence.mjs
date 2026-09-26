@@ -8,12 +8,12 @@
 //   1. decisions: every in-window decision has HOST provenance (runId,
 //      sourceSha, generationId) that joins the requested BOOT and an exact
 //      in-window GENERATION_READY; at least one joined decision has source=jev
-//      (`buddy-driver/logs/jev/decisions.jsonl`; fallback entries carry
+//      (`packages/buddy-driver/logs/jev/decisions.jsonl`; fallback entries carry
 //       source=fallback).
 //   2. generation: R's generation status reports policyKind=typesafe and
 //      policyModel=typesafe-ai/jev. The resident `report` exposes this as
 //      `status.policyKind` / `status.policyModel`; the `GENERATION_READY` line
-//      in `buddy-driver/runner.out` renders the same facts as `policy=` /
+//      in `packages/buddy-driver/runner.out` renders the same facts as `policy=` /
 //      `model=`.
 //
 // R's log window is bracketed by the `BOOT ... runId=R` line in runner.out and
@@ -29,9 +29,9 @@ import { createInterface } from 'node:readline'
 export const REQUIRED_POLICY_KIND = 'typesafe'
 export const REQUIRED_POLICY_MODEL = 'typesafe-ai/jev'
 export const DEFAULT_DECISIONS =
-  process.env.M2_DECISIONS ?? '/home/s0u7a/mc-ai/buddy-driver/logs/jev/decisions.jsonl'
+  process.env.M2_DECISIONS ?? '/home/s0u7a/mc-ai/packages/buddy-driver/logs/jev/decisions.jsonl'
 export const DEFAULT_RUNNER_OUT =
-  process.env.M2_RUNNER_OUT ?? '/home/s0u7a/mc-ai/buddy-driver/runner.out'
+  process.env.M2_RUNNER_OUT ?? '/home/s0u7a/mc-ai/packages/buddy-driver/runner.out'
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 
 const TS_RE = /^\[([^\]]+)\]/

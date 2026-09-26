@@ -10,7 +10,7 @@ login). Nothing in the PrismLauncher config is modified.
 ## Run it
 
 ```bash
-bun /home/s0u7a/mc-ai/launch/launch.mjs
+bun /home/s0u7a/mc-ai/ops/ops/launch/launch.mjs
 ```
 
 Useful flags:
@@ -113,10 +113,10 @@ client matching the local Leaf 1.21.11 server. Use a separate `--data-dir` and
 `localhost:25565`:
 
 ```bash
-bun /home/s0u7a/mc-ai/launch/launch.mjs \
+bun /home/s0u7a/mc-ai/ops/ops/launch/launch.mjs \
   --mc-version 1.21.11 --vanilla \
-  --game-dir /home/s0u7a/mc-ai/launch/game-1.21.11 \
-  --data-dir /home/s0u7a/mc-ai/launch/data-1.21.11 \
+  --game-dir /home/s0u7a/mc-ai/ops/ops/launch/game-1.21.11 \
+  --data-dir /home/s0u7a/mc-ai/ops/ops/launch/data-1.21.11 \
   --assets-dir /home/s0u7a/.local/share/PrismLauncher/assets \
   --server localhost:25565 --username s0u7a --memory 3G
 ```
@@ -124,7 +124,7 @@ bun /home/s0u7a/mc-ai/launch/launch.mjs \
 Dry-run (verified working, downloads meta/libraries/client but launches nothing):
 
 ```bash
-bun /home/s0u7a/mc-ai/launch/launch.mjs --mc-version 1.21.11 --vanilla \
+bun /home/s0u7a/mc-ai/ops/ops/launch/launch.mjs --mc-version 1.21.11 --vanilla \
   --server localhost:25565 --username s0u7a --dry-run
 ```
 

@@ -47,24 +47,24 @@ import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { generateGroundedCandidates, defaultCandidateOptions } from '../jev-agent/src/candidates.ts'
-import { createRecipeIndex } from '../jev-agent/src/crafting.ts'
-import { emptyGoalQueueState } from '../jev-agent/src/goalQueue.ts'
-import { Executor, defaultExecutorOptions } from '../jev-agent/src/executor.ts'
-import { EventLogger, JsonlWriter } from '../jev-agent/src/jev.ts'
-import { buildWorldState, defaultSensorOptions, makeGoal } from '../jev-agent/src/state.ts'
+import { generateGroundedCandidates, defaultCandidateOptions } from '../packages/jev-agent/src/candidates.ts'
+import { createRecipeIndex } from '../packages/jev-agent/src/crafting.ts'
+import { emptyGoalQueueState } from '../packages/jev-agent/src/goalQueue.ts'
+import { Executor, defaultExecutorOptions } from '../packages/jev-agent/src/executor.ts'
+import { EventLogger, JsonlWriter } from '../packages/jev-agent/src/jev.ts'
+import { buildWorldState, defaultSensorOptions, makeGoal } from '../packages/jev-agent/src/state.ts'
 import {
   OBSIDIAN,
   OVERWORLD,
   orderedPlacementCells,
   portalFrameLayout,
   validatePortalFrame,
-} from '../jev-agent/src/netherPortalPlan.ts'
+} from '../packages/jev-agent/src/netherPortalPlan.ts'
 
 const require = createRequire(import.meta.url)
 // `minecraft-data` is a jev-agent dependency, not a root one: resolve it from
 // the package that declares it, never from the tools directory by accident.
-const jevRequire = createRequire(new URL('../jev-agent/package.json', import.meta.url))
+const jevRequire = createRequire(new URL('../packages/jev-agent/package.json', import.meta.url))
 const Vec3 = require('vec3')
 const registry = jevRequire('minecraft-data')('1.21.11')
 const RECIPES = createRecipeIndex(registry)

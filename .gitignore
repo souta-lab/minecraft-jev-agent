@@ -10,17 +10,17 @@ runner*.out
 # Resident runtime state / generated bundles
 buddy-state.json
 buddy-ledger.json
-buddy-driver/buddy-ledger-stale-*.json
-buddy-driver/data/
+packages/buddy-driver/buddy-ledger-stale-*.json
+packages/buddy-driver/data/
 
 # Run-scoped acceptance artifacts (tools/run-artifacts.mjs); local evidence only
 runs/
 
 # `data/` dirs hold run artifacts; keep only the jev-agent *.mts probe sources
 data/
-!jev-agent/data/
-jev-agent/data/*
-!jev-agent/data/*.mts
+!packages/jev-agent/data/
+packages/jev-agent/data/*
+!packages/jev-agent/data/*.mts
 
 # Secrets and local-only server config (NEVER commit)
 server.properties
@@ -37,9 +37,6 @@ world*/
 bds/
 mc-world-backups/
 mc-server/
-launch/data/
-launch/data-*/
-launch/game-*/
 ops/launch/data/
 ops/launch/data-*/
 ops/launch/game-*/

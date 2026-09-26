@@ -733,7 +733,7 @@ export async function buildAcceptanceBundle({
   const exitCode = acceptanceStatus === 'FAIL' ? 1 : acceptanceStatus === 'PASS' ? 0 : 2
 
   // ---- live signals: a synthetic tree can never be a live PASS -------------
-  const hostLockPath = join(resolvedRoot, 'buddy-driver', 'data', 'resident', 'host.lock')
+  const hostLockPath = join(resolvedRoot, 'packages/buddy-driver', 'data', 'resident', 'host.lock')
   const liveSignals = [
     { id: 'hostLock', ok: existsSync(hostLockPath), detail: hostLockPath },
     { id: 'acceptanceRecord', ok: acceptancePresent, detail: artifact?.acceptance?.path ?? null },

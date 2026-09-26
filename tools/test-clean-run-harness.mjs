@@ -180,8 +180,8 @@ function cleanLog(runId, { source = FIXTURE_SHA, envMarker = 'ENVIRONMENT diffic
 
 function makeRoot(name) {
   const root = join(SCRATCH, name)
-  mkdirSync(join(root, 'buddy-driver', 'data', 'resident'), { recursive: true })
-  mkdirSync(join(root, 'buddy-driver', 'logs', 'jev'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'data', 'resident'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'logs', 'jev'), { recursive: true })
   return root
 }
 
@@ -201,10 +201,10 @@ function initCleanFixtureGit(root) {
       '/server-start-attestation.json',
       '/server-console/',
       '/gamerules-observed.json',
-      '/buddy-driver/buddy.log',
-      '/buddy-driver/runner.out',
-      '/buddy-driver/logs/',
-      '/buddy-driver/data/',
+      '/packages/buddy-driver/buddy.log',
+      '/packages/buddy-driver/runner.out',
+      '/packages/buddy-driver/logs/',
+      '/packages/buddy-driver/data/',
       '',
     ].join('\n'),
     'utf8',
@@ -230,12 +230,12 @@ function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance 
   const attachMarker = (lines) => startupMarker === null
     ? lines
     : lines.map((entry) => /\bBOOT\b(?!_)/.test(entry) ? `${entry} cleanRunServerConfig=${JSON.stringify(startupMarker)}` : entry)
-  writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${attachMarker(logLines).join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), `${attachMarker(runnerOut(runId, source).trimEnd().split('\n')).join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisions ?? decisionsFor(runId, source), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'buddy.log'), `${attachMarker(logLines).join('\n')}\n`, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'runner.out'), `${attachMarker(runnerOut(runId, source).trimEnd().split('\n')).join('\n')}\n`, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'), decisions ?? decisionsFor(runId, source), 'utf8')
   const firstInventory = logLines.map((entry) => /\bINVENTORY items=(\{.*\})/.exec(entry)?.[1] ?? null).find((entry) => entry !== null)
   writeFileSync(
-    join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+    join(root, 'packages/buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
     JSON.stringify({
       record: 'm2-snapshot',
       runId,
@@ -261,7 +261,7 @@ function writeFixture(root, runId, { logLines, source = FIXTURE_SHA, acceptance 
   )
   if (acceptance) {
     writeFileSync(
-      join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`),
+      join(root, 'packages/buddy-driver', 'data', 'resident', `acceptance-${runId}.json`),
       acceptanceRecord(runId, { gitCommit: source, ...acceptanceOptions, startupMarker }),
       'utf8',
     )
@@ -528,7 +528,7 @@ function writeGameruleVerification(root, runId, descriptor, bootSourceSha) {
     descriptor: { path: descriptor.path, sha256: loaded.sha256 },
     startupAttestation: { path: startupPath, sha256: startupSha256 },
     process: { pid, commandLineSha256: marker.process.commandLineSha256 },
-    residentLog: { path: join(root, 'buddy-driver', 'buddy.log'), sourceSha: bootSourceSha },
+    residentLog: { path: join(root, 'packages/buddy-driver', 'buddy.log'), sourceSha: bootSourceSha },
     capturePath,
     console: {
       directory: consoleDir,
@@ -666,7 +666,7 @@ const runCondition = (verdict, id) => condition(verdict, id)
   const bootEvidenceChecks = checkRunEvidence({
     descriptor: descriptor.document,
     artifact: wrongInitialSource,
-    logText: readFileSync(join(root, 'buddy-driver', 'buddy.log'), 'utf8'),
+    logText: readFileSync(join(root, 'packages/buddy-driver', 'buddy.log'), 'utf8'),
     runId: RUN,
     descriptorPath: descriptor.path,
     descriptorSha256: loadCleanEnvironment(descriptor.path).sha256,
@@ -834,7 +834,7 @@ const runCondition = (verdict, id) => condition(verdict, id)
   writeFixture(root, RUN, { source: head, descriptor, logLines: cleanLog(RUN, { source: head }) })
   // the third live signal: a HOST acceptance record (the fixture writes it; a real
   // run must refresh it through the read-only `acceptance` control query).
-  writeFileSync(join(root, 'buddy-driver', 'data', 'resident', 'host.lock'), `${JSON.stringify({ pid: 4242, runId: RUN })}\n`, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'data', 'resident', 'host.lock'), `${JSON.stringify({ pid: 4242, runId: RUN })}\n`, 'utf8')
 
   const { bundle, outDir } = await buildBundle(root, RUN, { environmentPath: descriptor.path, evidenceClass: 'live', outName: 'bundle-live', sourceSha: head })
   assert.equal(bundle.acceptanceVerdict.status, 'PASS')
@@ -1208,8 +1208,8 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.match(startupRecipe, /--no-block/)
   assert.match(startupRecipe, /KillMode=mixed/)
   assert.ok(startupRecipe.includes(`'${process.execPath}'`), 'systemd-managed Leaf, resident, and evidence commands use the absolute Bun executable')
-  assert.ok(startupRecipe.includes(`StandardOutput=append:${join(operatorRoot, 'buddy-driver', 'runner.out')}`), 'resident stdout appends to the exact bundle runner.out')
-  assert.ok(startupRecipe.includes(`StandardError=append:${join(operatorRoot, 'buddy-driver', 'runner.out')}`), 'resident stderr appends to the same run-bound output artifact')
+  assert.ok(startupRecipe.includes(`StandardOutput=append:${join(operatorRoot, 'packages/buddy-driver', 'runner.out')}`), 'resident stdout appends to the exact bundle runner.out')
+  assert.ok(startupRecipe.includes(`StandardError=append:${join(operatorRoot, 'packages/buddy-driver', 'runner.out')}`), 'resident stderr appends to the same run-bound output artifact')
   assert.doesNotMatch(startupRecipe, /VERCEL_API_KEY=|API_KEY=.{12}/, 'provider secrets stay in the protected environment file and are not embedded in commands')
   assert.doesNotMatch(startupRecipe, /clean-run-server-launch\.mjs[^\n]*&/)
   assert.match(startupRecipe, /Never pass --bonusChest/)

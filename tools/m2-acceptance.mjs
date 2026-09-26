@@ -36,7 +36,7 @@
 //   the same run R must ALSO show that the real policy actually ran, otherwise
 //   RESULT is UNKNOWN and M2 can never PASS. Two run-bound facts are required:
 //     - >= 1 decision in R's window with source=jev
-//       (buddy-driver/logs/jev/decisions.jsonl), and
+//       (packages/buddy-driver/logs/jev/decisions.jsonl), and
 //     - R's generation reports policyKind=typesafe / policyModel=typesafe-ai/jev
 //       (socket `report.status`, or the GENERATION_READY line in runner.out).
 //   See tools/m2-policy-evidence.mjs. A deterministic fallback run (source=
@@ -56,7 +56,7 @@ import { pathToFileURL } from 'node:url'
 import { evaluatePolicyEvidence, loadPolicyEvidence } from './m2-policy-evidence.mjs'
 
 export const SOCK_PATH =
-  process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
+  process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/packages/buddy-driver/data/resident/control.sock'
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 /**
  * Run-scoped evidence the RESIDENT writes at marker time. A snapshot for one run
@@ -64,9 +64,9 @@ export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
  * and the recorded build/source must match the run's BOOT/BUILD records.
  */
 export const M2_SNAPSHOT_DIR =
-  process.env.M2_SNAPSHOT_DIR ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident'
+  process.env.M2_SNAPSHOT_DIR ?? '/home/s0u7a/mc-ai/packages/buddy-driver/data/resident'
 export const M2_LOG_PATH =
-  process.env.M2_LOG ?? process.env.BUDDY_LOG ?? '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
+  process.env.M2_LOG ?? process.env.BUDDY_LOG ?? '/home/s0u7a/mc-ai/packages/buddy-driver/buddy.log'
 export const M2_SNAPSHOT_RECORD = 'm2-snapshot'
 export const M2_REQUIRED_MARKERS = Object.freeze(['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'])
 

@@ -19,8 +19,8 @@ bun 1.4.2+          bun install --frozen-lockfile in the checkout you run the to
 ```
 
 Do not run the bundle against the shared main tree while the resident runs from a
-worktree: `--root` must name the tree that owns `buddy-driver/buddy.log`,
-`buddy-driver/logs/jev/decisions.jsonl` and `buddy-driver/data/resident/`.
+worktree: `--root` must name the tree that owns `packages/buddy-driver/buddy.log`,
+`packages/buddy-driver/logs/jev/decisions.jsonl` and `packages/buddy-driver/data/resident/`.
 
 `tools/m2-gate.mjs` takes the same `--root <resident-tree>` and resolves the run's
 log, snapshot dir, decisions and authority stream from it. By default it also treats
@@ -75,8 +75,8 @@ still written on exit 2** — that is the point: the undecided condition is name
 
 ## 3. The HOST acceptance record (evidence class `acceptance`)
 
-`buddy-driver/agent-runner.mts` `writeAcceptance()` writes
-`buddy-driver/data/resident/acceptance-<runId>.json` on: a committed generation
+`packages/buddy-driver/agent-runner.mts` `writeAcceptance()` writes
+`packages/buddy-driver/data/resident/acceptance-<runId>.json` on: a committed generation
 reload, `control:freeze`, `control:resume`, `control:reground`, the read-only
 `acceptance` control query, and a clean shutdown. It is **not** written at boot, so
 a run that has hit none of those has no record yet.
@@ -86,7 +86,7 @@ send the one read-only query that also refreshes it:
 
 ```bash
 printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
-  | socat - UNIX-CONNECT:<root>/buddy-driver/data/resident/control.sock
+  | socat - UNIX-CONNECT:<root>/packages/buddy-driver/data/resident/control.sock
 ```
 
 `freeze` (reversible) also writes it but changes actuation availability; a clean

@@ -24,8 +24,8 @@ if (runId === undefined) {
 }
 const root = resolve(args.get('root') ?? process.cwd())
 const limit = Number(args.get('lines') ?? 20000)
-const logPath = join(root, 'buddy-driver', 'buddy.log')
-const decisionsPath = join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl')
+const logPath = join(root, 'packages/buddy-driver', 'buddy.log')
+const decisionsPath = join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl')
 for (const p of [logPath, decisionsPath]) if (!existsSync(p)) { console.error(`SKILL_METRICS missing=${p}`); process.exit(2) }
 
 // --- the run window: from the run's BOOT line to the next BOOT (same rule the gates use) ---

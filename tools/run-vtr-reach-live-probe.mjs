@@ -22,8 +22,8 @@ import { packageVtrReachArchive } from './package-vtr-reach-live-archive.mjs'
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_SOURCE_ROOT = resolve(TOOL_DIR, '..')
 const REQUIRED_CAPTURE_SCHEMA = 'vtr-provider-activity-capture/v2'
-const NO_DOUBLE_AUTHORITY_FIXTURE_SOURCE = 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts'
-const NO_DOUBLE_AUTHORITY_FIXTURE_TEST_ENTRY = 'jev-agent/vtr-reach-executor-dispatch-authority.test.mts'
+const NO_DOUBLE_AUTHORITY_FIXTURE_SOURCE = 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts'
+const NO_DOUBLE_AUTHORITY_FIXTURE_TEST_ENTRY = 'packages/jev-agent/vtr-reach-executor-dispatch-authority.test.mts'
 const PROTECTED_SERVER_PORTS = new Set([25565, 25570, 25572, 25576, 4173, 4174])
 const PROTECTED_OBSERVER_PORTS = new Set([25565, 25570, 25572, 25576, 4173, 4174])
 const SHA40 = /^[0-9a-f]{40}$/iu
@@ -382,9 +382,9 @@ export async function preflightProbe(options) {
 
   await check('runtime-source-identity', () => {
     if (sourceSha === null) throw new Error('source checkout check did not establish exact SHA')
-    const runtimePath = join(options.sourceRoot, 'buddy-driver', 'agent-runner.mts')
+    const runtimePath = join(options.sourceRoot, 'packages/buddy-driver', 'agent-runner.mts')
     realRegularFile(runtimePath, 'resident HOST source')
-    const probeSource = readFileSync(join(options.sourceRoot, 'buddy-driver', 'generation-entry.ts'), 'utf8')
+    const probeSource = readFileSync(join(options.sourceRoot, 'packages/buddy-driver', 'generation-entry.ts'), 'utf8')
     if (!probeSource.includes("process.env.BUDDY_VTR_REACH_PROBE?.trim() === '1'")) throw new Error('exact source lacks the opt-in VTR Reach probe path')
     return { sourceSha, mission: 'inventory_at_least:minecraft:oak_log x1', startFrozen: true }
   })
@@ -579,8 +579,8 @@ function cleanStatus(root) {
 }
 
 const WORKSPACE_PATHS = Object.freeze([
-  'jev-harness', 'jev-agent', 'buddy-driver', 'mcbot', 'mcbot/movement-test',
-  'mcbot/movement-test/variants/A', 'companion', 'system2-harness',
+  'packages/jev-harness', 'packages/jev-agent', 'packages/buddy-driver', 'packages/mcbot', 'packages/mcbot/movement-test',
+  'packages/mcbot/movement-test/variants/A', 'packages/companion', 'packages/system2-harness',
 ])
 
 /**
@@ -925,8 +925,8 @@ function runPreflightFrozenInstall(options, sourceSha) {
 }
 
 const RUNTIME_RESOLUTION_ENTRYPOINTS = Object.freeze([
-  'buddy-driver/agent-runner.mts',
-  'buddy-driver/generation-entry.ts',
+  'packages/buddy-driver/agent-runner.mts',
+  'packages/buddy-driver/generation-entry.ts',
 ])
 
 export function runRuntimeResolutionSmoke(runtimeSource, { mode = 'full', attemptRoot = null } = {}) {
@@ -1650,7 +1650,7 @@ function buildRunMetadata({ runtimeSource, identity, collectorReport, terminal, 
   const witness = worldWitnessTarget(terminal)
   const commit = terminal?.commit?.detail ?? {}
   const verified = terminal?.row?.detail?.outcome ?? {}
-  const hostLog = join(runtimeSource, 'buddy-driver', 'buddy.log')
+  const hostLog = join(runtimeSource, 'packages/buddy-driver', 'buddy.log')
   const rows = parseHostLog(readFileSync(hostLog, 'utf8')).map((row) => ({ ...row, ts: row.ts === null ? null : new Date(row.ts).toISOString() }))
   const readyRow = rows.find((row) => row.event === 'GENERATION_READY'
     && row.fields.runId === identity.runId
@@ -2022,7 +2022,7 @@ async function startObserver(options, sourceSha, attemptRoot, runtimeSource, onC
     childProcess = spawn(process.execPath, ['--no-env-file', observerScript], {
       cwd: runtimeSource,
       env: minimalEnvironment({ HOME: home, TMPDIR: tmp, LANG: 'C.UTF-8',
-        BUDDY_OBSERVER_RUNTIME_DIR: join(runtimeSource, 'buddy-driver'),
+        BUDDY_OBSERVER_RUNTIME_DIR: join(runtimeSource, 'packages/buddy-driver'),
         BUDDY_OBSERVER_HOST: '127.0.0.1', BUDDY_OBSERVER_PORT: String(options.observerPort),
       }),
       detached: true,
@@ -2049,7 +2049,7 @@ async function startObserver(options, sourceSha, attemptRoot, runtimeSource, onC
   const initial = {
     schema: 'vtr-reach-observer-lifecycle/v1',
     sourceSha,
-    runtimeDir: realpathSync(join(runtimeSource, 'buddy-driver')),
+    runtimeDir: realpathSync(join(runtimeSource, 'packages/buddy-driver')),
     observerUrl: url,
     host: '127.0.0.1',
     port: options.observerPort,
@@ -2381,7 +2381,7 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
   const auditPath = join(attemptRoot, 'runner', 'no-llm-egress-audit.json')
   const guardLogPath = join(attemptRoot, 'runner', 'resident-guard.log')
   const guardScript = join(runtimeSource, 'tools', 'with-no-llm-egress-guard.mjs')
-  const residentScript = join(runtimeSource, 'buddy-driver', 'agent-runner.mts')
+  const residentScript = join(runtimeSource, 'packages/buddy-driver', 'agent-runner.mts')
   const env = minimalEnvironment({
     HOME: home,
     TMPDIR: tmp,
@@ -2832,7 +2832,7 @@ function archiveInputManifest({ attemptRoot, runtimeSource, server, observer, pa
   const regionName = freshWorld.regionPath ? relative(join(server.worldRoot, 'region'), freshWorld.regionPath).split(sep).join('/') : null
   if (regionName) add(`server/world/region/${regionName}`, freshWorld.regionPath)
   add('runner/mercury-calls.jsonl', paths['mercury-calls'])
-  add('runner/kernel-shadow.jsonl', join(runtimeSource, 'buddy-driver', 'logs', 'jev', 'kernel-shadow.jsonl'))
+  add('runner/kernel-shadow.jsonl', join(runtimeSource, 'packages/buddy-driver', 'logs', 'jev', 'kernel-shadow.jsonl'))
   const manifestPath = join(runner, 'archive-input-manifest.json')
   writeJsonExclusive(manifestPath, { schema: 'vtr-reach-live-archive-input/v1', files })
   return { manifestPath, files }
@@ -2856,7 +2856,7 @@ async function captureAndPackage({
   const buildHash = collectorDescriptor.report?.observed?.generationReady?.buildHash
   let bundleSource = null
   if (typeof buildHash === 'string' && /^[0-9a-f]{12}$/iu.test(buildHash)) {
-    const candidate = join(runtimeSource, 'buddy-driver', 'data', 'resident', `gen-${buildHash}.mjs`)
+    const candidate = join(runtimeSource, 'packages/buddy-driver', 'data', 'resident', `gen-${buildHash}.mjs`)
     if (existsSync(candidate) && sha256(readFileSync(candidate)).startsWith(buildHash.toLowerCase())) {
       bundleSource = join(attemptRoot, 'runner', 'generation-bundle.mjs')
       copyExact(candidate, bundleSource)
@@ -3341,7 +3341,7 @@ async function executeRun(options, preflight) {
     server = await startLeaf(options, sourceSha, options.attemptRoot, levelName, onChild)
     failurePhase = 'observer-start'
     observer = await startObserver(options, sourceSha, options.attemptRoot, runtimeSource, onChild)
-    const runtimeDir = realpathSync(join(runtimeSource, 'buddy-driver'))
+    const runtimeDir = realpathSync(join(runtimeSource, 'packages/buddy-driver'))
     const paths = runtimeAttemptSinkPaths(runtimeDir)
     const outputPaths = {
       capture: join(options.attemptRoot, 'runner', 'supervisor-capture.json'),

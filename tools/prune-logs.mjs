@@ -29,11 +29,11 @@ const dryRun = args.includes('--dry-run')
 const cutoff = Date.now() - hours * 3_600_000
 
 const streams = [
-  join(root, 'buddy-driver/buddy.log'),
-  join(root, 'buddy-driver/logs/jev/run.jsonl'),
-  join(root, 'buddy-driver/logs/jev/decisions.jsonl'),
-  join(root, 'buddy-driver/logs/jev/jev-calls.jsonl'),
-  join(root, 'buddy-driver/logs/jev/mercury-calls.jsonl'),
+  join(root, 'packages/buddy-driver/buddy.log'),
+  join(root, 'packages/buddy-driver/logs/jev/run.jsonl'),
+  join(root, 'packages/buddy-driver/logs/jev/decisions.jsonl'),
+  join(root, 'packages/buddy-driver/logs/jev/jev-calls.jsonl'),
+  join(root, 'packages/buddy-driver/logs/jev/mercury-calls.jsonl'),
 ]
 
 const timestampOf = (line) => {

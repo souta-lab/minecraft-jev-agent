@@ -5,13 +5,13 @@
 Base: `f834867` (`merge: task/m2-headroom`), 2026-09-18. Scope: the heuristics
 added on the M2 critical path (git log since `07465cf`) in
 
-- `jev-agent/src/pillarJump.ts`
-- `jev-agent/src/verticalPlan.ts`
-- `jev-agent/src/executor.ts` (pillar/hop/headroom/climb code)
-- `jev-agent/src/controller.ts` (stall/abandon/escalation branches)
-- `jev-agent/src/candidates.ts`
-- `jev-agent/src/moveFailMemory.ts`
-- `jev-agent/src/prereqOption.ts`
+- `packages/jev-agent/src/pillarJump.ts`
+- `packages/jev-agent/src/verticalPlan.ts`
+- `packages/jev-agent/src/executor.ts` (pillar/hop/headroom/climb code)
+- `packages/jev-agent/src/controller.ts` (stall/abandon/escalation branches)
+- `packages/jev-agent/src/candidates.ts`
+- `packages/jev-agent/src/moveFailMemory.ts`
+- `packages/jev-agent/src/prereqOption.ts`
 
 plus the deterministic truth owners the above depend on (`state.ts`,
 `gameData.ts`, `actionPostcondition.ts`), cited where the audit crosses them.

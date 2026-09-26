@@ -1,8 +1,8 @@
-# AI_Buddy resident driver (`buddy-driver/`)
+# AI_Buddy resident driver (`packages/buddy-driver/`)
 
 Resident agent for the local **Leaf / Minecraft Java 1.21.11** server
 (`127.0.0.1:25565`, offline, peaceful). One long-lived Mineflayer connection; the
-intelligence is hot-swappable without reconnecting. Spec: `../docs/operations/RESIDENT-MODE.md`.
+intelligence is hot-swappable without reconnecting. Spec: `../../docs/operations/RESIDENT-MODE.md`.
 
 ## Runtime decision (recorded per §0-A)
 
@@ -91,7 +91,7 @@ QUARANTINED (`STATE_QUARANTINED`, moved aside as `state-quarantine-*.json`) befo
 the default snapshot is used in memory; if it cannot be moved aside the HOST refuses
 to boot instead of replacing it (`STATE_QUARANTINE_FAILED`). Known legacy versions
 (1/2) log `STATE_MIGRATED` with no quarantine. The durable-write, quarantine, lock
-and fatal invariants are canonical in `../docs/operations/RESIDENT-MODE.md` §4-F. Cache writes stay best-effort
+and fatal invariants are canonical in `../../docs/operations/RESIDENT-MODE.md` §4-F. Cache writes stay best-effort
 (try/catch) so a read-only or corrupt cache can never fail a generation.
 
 ## Control channel (§6)
@@ -113,7 +113,7 @@ re-placed. Beyond the ladder it keeps collecting (resident upkeep).
 
 ## Verification
 
-- **Launch**: `cd /home/s0u7a/mc-ai/buddy-driver && setsid nohup bun
+- **Launch**: `cd /home/s0u7a/mc-ai/packages/buddy-driver && setsid nohup bun
   agent-runner.mts </dev/null >> runner.out 2>&1 &`
 - **Reload without reconnect**: `RELOAD ok=true ... ms=236/243/502` with **no
   `SPAWN`/`RECONNECT`** between reloads → the connection was preserved.

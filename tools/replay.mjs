@@ -47,10 +47,10 @@ export const ABANDON_DECISION = 'ESCALATE'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 export const REPO_ROOT = path.resolve(HERE, '..')
-export const DEFAULT_DECISIONS = path.join(REPO_ROOT, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl')
-export const DEFAULT_RUN = path.join(REPO_ROOT, 'buddy-driver', 'logs', 'jev', 'run.jsonl')
-export const DEFAULT_JEV_CALLS = path.join(REPO_ROOT, 'buddy-driver', 'logs', 'jev', 'jev-calls.jsonl')
-export const DEFAULT_MERCURY_CALLS = path.join(REPO_ROOT, 'buddy-driver', 'logs', 'jev', 'mercury-calls.jsonl')
+export const DEFAULT_DECISIONS = path.join(REPO_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl')
+export const DEFAULT_RUN = path.join(REPO_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'run.jsonl')
+export const DEFAULT_JEV_CALLS = path.join(REPO_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'jev-calls.jsonl')
+export const DEFAULT_MERCURY_CALLS = path.join(REPO_ROOT, 'packages/buddy-driver', 'logs', 'jev', 'mercury-calls.jsonl')
 
 // ---------------------------------------------------------------------------
 // Record readers (streaming: the live JSONL files can exceed the string limit)
@@ -587,7 +587,7 @@ function usage() {
     'usage: bun tools/replay.mjs [options]',
     '',
     'options:',
-    '  --decisions <path>     default buddy-driver/logs/jev/decisions.jsonl',
+    '  --decisions <path>     default packages/buddy-driver/logs/jev/decisions.jsonl',
     '  --run <path>           run JSONL with CAUSAL verified outcomes (optional)',
     '  --jev-calls <path>     jev-calls.jsonl for latency/error enrichment (optional)',
     '  --mercury-calls <path> mercury-calls.jsonl summary (optional)',

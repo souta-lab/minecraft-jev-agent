@@ -79,11 +79,11 @@ describe('S2: no unregistered prompt/call path', () => {
   })
 
   test('the prompt builder is reachable only from the harness', () => {
-    expect(referencesSymbol('', 'buildSystem2Prompt')).toEqual(['system2-harness/harness.ts', 'system2-harness/prompt.ts'])
+    expect(referencesSymbol('', 'buildSystem2Prompt')).toEqual(['packages/system2-harness/harness.ts', 'packages/system2-harness/prompt.ts'])
   })
 
   test('only the provider adapter touches the SDK inside the harness', () => {
-    expect(harnessSdkImporters()).toEqual(['system2-harness/providers/aiGateway.ts'])
+    expect(harnessSdkImporters()).toEqual(['packages/system2-harness/providers/aiGateway.ts'])
   })
 })
 

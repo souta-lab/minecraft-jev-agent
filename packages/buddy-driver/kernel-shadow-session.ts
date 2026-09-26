@@ -17,7 +17,7 @@
 //
 // The session holds kernel-internal trusted capabilities because buddy-driver
 // is the host/wiring layer; production semantic code must never import this
-// module or `architecture/v4.1/kernel-internal/*` — it sees only the narrow
+// module or `packages/kernel/v4.1/kernel-internal/*` — it sees only the narrow
 // `KernelShadowSink`/`KernelReachAuthority` surfaces.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -34,8 +34,8 @@ import {
   type KernelState,
   type ResourceLease,
   type WorldIdentity,
-} from '../architecture/v4.1/kernel.ts'
-import type { TrustedCapability } from '../architecture/v4.1/kernel-internal/authority-secret.ts'
+} from '../kernel/v4.1/kernel.ts'
+import type { TrustedCapability } from '../kernel/v4.1/kernel-internal/authority-secret.ts'
 import {
   trustedContractCompiler,
   trustedController,
@@ -47,7 +47,7 @@ import {
   trustedVerifier,
   trustedWitnessValidator,
   trustedWorldAdapter,
-} from '../architecture/v4.1/kernel-internal/trusted-adapter.ts'
+} from '../kernel/v4.1/kernel-internal/trusted-adapter.ts'
 import {
   mapMutationSurface,
   reachContractToKernelSpec,

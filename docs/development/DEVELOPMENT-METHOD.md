@@ -5,10 +5,10 @@ Scope: a factual, reviewable description of the development *process* for `minec
 
 Evidence basis: `AGENTS.md`, `docs/status/TODO.md`, `docs/decision/PLANNERS.md`, `docs/history/architecture/ARCHITECTURE.md`, `docs/operations/RESIDENT-MODE.md`,
 `tools/*.mjs`, `git log --oneline` (all branches), `git worktree list`, `git branch -r`,
-`git ls-remote origin`, and live markers grepped from `buddy-driver/buddy.log`.
+`git ls-remote origin`, and live markers grepped from `packages/buddy-driver/buddy.log`.
 
 This document is a snapshot. Log counters below were read on 2026-09-18 from the live
-`buddy-driver/buddy.log` (21.5 MB at read time); they are diagnostic markers, not acceptance
+`packages/buddy-driver/buddy.log` (21.5 MB at read time); they are diagnostic markers, not acceptance
 (§3.1). Anything not backed by a file, command, or log marker is labelled `UNVERIFIED`.
 
 Acceptance evidence is now run-scoped (§4.2): `runs/<runId>/{manifest.json, acceptance.json,
@@ -55,7 +55,7 @@ The canonical order, highest first. A lower document MUST NOT silently supersede
 ```
 human explicit instruction
 > root AGENTS.md
-> nearest scoped AGENTS.md (e.g. buddy-driver/AGENTS.md)
+> nearest scoped AGENTS.md (e.g. packages/buddy-driver/AGENTS.md)
 > current operational queue / TODO (docs/status/TODO.md)
 > design / evidence docs (docs/decision/PLANNERS.md / docs/operations/RESIDENT-MODE.md / docs/history/architecture/ARCHITECTURE.md / docs/history/investigations/PRIOR-WORK.md)
 > historical / superseded sections
@@ -69,7 +69,7 @@ Rules:
    does **not** outrank root `AGENTS.md`. Where §13-0's P0-P6 ladder conflicts with the current
    root `AGENTS.md` §2 order — which now puts P0 methodology/evidence integrity (#63) first and
    the Grounded-Options skeleton ahead of LLM-planner authority — `AGENTS.md` §2 wins.
-3. `buddy-driver/AGENTS.md` is a scoped elaboration and inherits root policy. It must be read
+3. `packages/buddy-driver/AGENTS.md` is a scoped elaboration and inherits root policy. It must be read
    after root `AGENTS.md`, and may not silently supersede it.
 4. On conflict between a lower and a higher document: stop, set the affected claim to
    `COMPLIANCE=UNKNOWN` (§3.1), and fix the contradictory document before using it to close or
@@ -151,12 +151,12 @@ elements, or state clearly that it is incomplete ("成功偽装の禁止", fakin
 | # | Required proof | Concrete command / source | Example found in repo |
 |---|---|---|---|
 | a | Code exists at the changed location | `grep -rn '<symbol>' <file>` | `docs/status/TODO.md` line 136 mandates it; commits cite file+symbol |
-| b | Full test suite green, with counts | `bun run typecheck`, `guard-test`, `gating-test`, `loop-test`, `m1-test`, `audit-test`, `step-pipeline-test`, `movement-patch:check` (`jev-agent/package.json`) | `docs/status/TODO.md` line 167: `typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10` |
+| b | Full test suite green, with counts | `bun run typecheck`, `guard-test`, `gating-test`, `loop-test`, `m1-test`, `audit-test`, `step-pipeline-test`, `movement-patch:check` (`packages/jev-agent/package.json`) | `docs/status/TODO.md` line 167: `typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10` |
 | c | Branch actually pushed | `git ls-remote origin` | `AGENTS.md` line 136 mandates it; lane branches present under `refs/heads/task/*` |
-| d | Live log lines for behaviour changes | grep `buddy-driver/buddy.log` for the named marker | see marker table below |
+| d | Live log lines for behaviour changes | grep `packages/buddy-driver/buddy.log` for the named marker | see marker table below |
 | e | Explicit statement of what remains | lane report must say if incomplete | `docs/status/TODO.md` line 136; `docs/history/architecture/ARCHITECTURE.md` lines 406-409 |
 
-Marker vocabulary used as live proof (counts read from `buddy-driver/buddy.log` on 2026-09-18):
+Marker vocabulary used as live proof (counts read from `packages/buddy-driver/buddy.log` on 2026-09-18):
 
 | Marker | Count | Meaning |
 |---|---|---|
@@ -203,17 +203,17 @@ Rules:
 ```
 POLICY      #22 / #24: `abandon_option` beta is shadow-only by default; it may never, by itself,
             cause a replan. Source: root AGENTS.md §0.1, docs/decision/PLANNERS.md §3, docs/operations/RESIDENT-MODE.md §14.
-IMPLEMENTED `jev-agent/src/betaAuthority.ts:45-54` — with `betaAuthority:false` the decision is
-            `{adopt:false, shadowed:true}`; `jev-agent/src/jev.ts:577-580` `resolveBetaAuthority()`
+IMPLEMENTED `packages/jev-agent/src/betaAuthority.ts:45-54` — with `betaAuthority:false` the decision is
+            `{adopt:false, shadowed:true}`; `packages/jev-agent/src/jev.ts:577-580` `resolveBetaAuthority()`
             defaults OFF (only `BUDDY_BETA_AUTHORITY=1` opts in); default wired at
-            `jev-agent/src/controller.ts:224`.
+            `packages/jev-agent/src/controller.ts:224`.
 OBSERVED    buddy.log holds 18812 `BETA_SHADOW` lines, but 18155 carry `mode=authority` (only 664
             `mode=shadow`), and 15242 `JEV_HEADS` lines report `decision=replan`, including
             `[2026-09-17T17:18:38.744Z] JEV_HEADS action=WAIT abandon=1 decision=replan`.
             Post-fix line:
             `[2026-09-18T00:31:53.030Z] BETA_SHADOW optionId=smelt:iron_ingot beta=0 ... mode=shadow betaAuthority=false`.
 COMPLIANCE  FAIL for the pre-fix window (the marker existed while beta had replan authority).
-            Command: `grep -c 'BETA_SHADOW.*mode=authority' buddy-driver/buddy.log` -> 18155.
+            Command: `grep -c 'BETA_SHADOW.*mode=authority' packages/buddy-driver/buddy.log` -> 18155.
 ```
 
 Lesson: a marker named `BETA_SHADOW` is NOT proof that beta was shadow-only. Issue #22 was
@@ -225,7 +225,7 @@ reopened for exactly this. The marker must be validated against the authority fl
 ```
 POLICY      docs/operations/RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across
             reloads; `listenerLeak` must be false.
-IMPLEMENTED `buddy-driver/agent-runner.mts:518-527` listenerCounts()/listenerLeak(); baseline at
+IMPLEMENTED `packages/buddy-driver/agent-runner.mts:518-527` listenerCounts()/listenerLeak(); baseline at
             `:667-668`; recorded at `:1201-1203`.
 OBSERVED    Run `run-mu5qd4ah-3xdh` acceptance record: `listenerLeak=true`, `physicsTick` grew
             2 -> 3 (`listenerCurrent.physicsTick=3` vs `listenerBaseline.physicsTick=2`). Some
@@ -282,7 +282,7 @@ All tools are read-only, print no secrets, and live under `tools/`.
 | `tools/replay.mjs` | Deterministic offline A/B over `logs/jev/decisions.jsonl`: Policy A = recorded action, Policy B = β-as-authority (`ESCALATE` when `beta >= threshold`); reports agreement rate, divergences, verified outcomes | β authority **screen** (#23), never final authority (#24); see §4.1 | lines 1-46; `SCHEMA_VERSION=1`, `DEFAULT_THRESHOLD=0.5` |
 | `tools/run-artifacts.mjs` | Writes/reads `runs/<runId>/{manifest.json,acceptance.json,evidence.log,mercury-calls.jsonl}`; slices a log by runId or time range; resolves which evidence a gate will read | Makes acceptance run-scoped and labels all-time fallbacks | §4.2 |
 | `tools/agent-report.mjs` (+ `tools/test-agent-report.mjs`) | Read-only report combining the control socket with `buddy.log`: identity, rung, current action, blockers, stuck heuristics, VERDICT | Is the agent stuck, and why? | commit `22b135e`; stuck thresholds at lines 34-41 |
-| Per-lane `test-*.mts` suites | Pure unit/behaviour tests per lane | Lane-level correctness | `jev-agent/package.json`: `replan-throttle-test`, `issue43-test`, `option-spec-test`, `retrieval-stall-test`, `vertical-plan-test`, `predicate-goal-test`, `descend-plan-test`, `fuel-guard-test`, `skill-candidate-test`, `observability-test` |
+| Per-lane `test-*.mts` suites | Pure unit/behaviour tests per lane | Lane-level correctness | `packages/jev-agent/package.json`: `replan-throttle-test`, `issue43-test`, `option-spec-test`, `retrieval-stall-test`, `vertical-plan-test`, `predicate-goal-test`, `descend-plan-test`, `fuel-guard-test`, `skill-candidate-test`, `observability-test` |
 | `tools/test-replay.mjs` | Offline fixture tests for the replay harness | Replay harness correctness | present in `tools/` |
 
 Gate design flaws found and fixed (each is a real commit):
@@ -367,7 +367,7 @@ regressions. Record the baseline in the lane report; never silently drop a faili
 | Rule | Statement | Source |
 |---|---|---|
 | Shared-tree HEAD must be `main`; never checkout/merge/cherry-pick there | The live host rebuilds the bundle from the work tree, and a reset moves the current branch; the guard fails with `SYNC_HEAD_WRONG` before a non-main branch can be rewritten | `AGENTS.md` §4.0; `tools/sync-shared-tree.mjs`; issue #90 |
-| Host-layer lanes serialized | Only one lane at a time may touch `buddy-driver/agent-runner.mts`, `buddy-driver/resident-types.ts`, or `buddy-driver/package.json` | `AGENTS.md` §4.0-A; commit `f53d7ee`; conflict precedent #26/#34 vs #27/#28 |
+| Host-layer lanes serialized | Only one lane at a time may touch `packages/buddy-driver/agent-runner.mts`, `packages/buddy-driver/resident-types.ts`, or `packages/buddy-driver/package.json` | `AGENTS.md` §4.0-A; commit `f53d7ee`; conflict precedent #26/#34 vs #27/#28 |
 | Abort and delegate on conflict | Resolve conflicts inside the lane worktree, report the merged branch, then land one at a time | `AGENTS.md` lines 104-105; `git cherry-pick --abort` in `docs/status/TODO.md` line 147 |
 | No force-push, no history rewrite | Explicitly forbidden | `AGENTS.md` line 128 |
 | No secrets | Never print anything under `/home/s0u7a/.config/kimaki-secrets/`; tools are "read-only, no secrets printed" | `AGENTS.md` line 148; headers of `verify-mercury.mjs`, `buddy-status.mjs`, `agent-report.mjs` |
@@ -383,7 +383,7 @@ shared tree, produced conflict markers, and the host rejected the broken bundle:
 
 ```
 RELOAD ok=false trigger=source-changed ms=12 message=Build failed:
-  ../jev-agent/src/executor.ts:709:2: ERROR: Unexpected "<<"
+  packages/jev-agent/src/executor.ts:709:2: ERROR: Unexpected "<<"
 ```
 
 The host kept the old generation running, so downtime was zero. Recovery was
@@ -466,7 +466,7 @@ Canonical priority order (root policy; see §1.1):
    methodology/evidence integrity (#63) first, then P1 safety/durability, then the #11
    Grounded-Options skeleton, then shadow/eval, then Mercury correctness, then #24, M2, #35, #41,
    M3/M4.
-3. Nearest scoped `AGENTS.md` (`buddy-driver/AGENTS.md`), read as an elaboration of root policy.
+3. Nearest scoped `AGENTS.md` (`packages/buddy-driver/AGENTS.md`), read as an elaboration of root policy.
 4. Current operational queue (`docs/status/TODO.md`).
 5. Design/evidence docs: `docs/decision/PLANNERS.md`, `docs/operations/RESIDENT-MODE.md`, `docs/history/architecture/ARCHITECTURE.md`, `docs/history/investigations/PRIOR-WORK.md`.
 
@@ -520,7 +520,7 @@ the mitigation is verified.
 
 - Symptom: two resident hosts logged in as `AI_Buddy` kick each other, each reconnect kicks the
   other in a loop.
-- Evidence: `buddy-driver/buddy.log`
+- Evidence: `packages/buddy-driver/buddy.log`
   `[2026-09-17T15:36:51.299Z] ERROR where=bot.kicked ... "multiplayer.disconnect.duplicate_login"`
   and a second occurrence at `15:36:56.350Z`.
 - Mitigation: a `HOST_LOCK` file (`data/resident/host.lock`), the single-instance assertion in
@@ -573,7 +573,7 @@ the mitigation is verified.
 
 - Symptom: an operator rehearsal of death recovery reset the live rung to wood and discarded
   held materials, rewinding real progress.
-- Evidence: `buddy-driver/buddy.log`
+- Evidence: `packages/buddy-driver/buddy.log`
   `LADDER_RESET reason=death invEmpty=true cause=simulated simulated=true` immediately followed by
   `LADDER_RESET reason=death invEmpty=true rungIndex=0 rungId=wood goals=["collect 3 x log","craft 1 x wooden_pickaxe"]`.
 - Mitigation: commit `90d57f8` adds a soft `simdeath` mode (default) that snapshots the ledger,
@@ -636,7 +636,7 @@ the mitigation is verified.
 | Gate pass counts | pass/total from each verifier | `verify-issue12/13/mercury.mjs` | #12 `5/6`; #13 is 2 checks; Mercury `5/5` |
 | Cost per Mercury call | `cost` field in `mercury-calls.jsonl` | `tools/verify-mercury.mjs` reads it | `cost=0.000281`, `cost=0.000289`, `cost=0.000329` (`docs/status/TODO.md` line 11; `docs/history/architecture/ARCHITECTURE.md` line 444) |
 | Jev call cost | mean cost per Jev call from `jev-calls.jsonl` | `docs/history/architecture/ARCHITECTURE.md` lines 80 | about `$0.00018/call`, p50 latency 410-720 ms |
-| M1 milestone | 4/4 subgoals, `llm.called==false`, wedge 0 | `README.md`; `jev-agent/logs/m1-fresh2-console.log`; `docs/history/architecture/ARCHITECTURE.md` §5.1 | `planned=4 done=4`, `with_llm_called_true=0`, `verifiedDigs=22` |
+| M1 milestone | 4/4 subgoals, `llm.called==false`, wedge 0 | `README.md`; `packages/jev-agent/logs/m1-fresh2-console.log`; `docs/history/architecture/ARCHITECTURE.md` §5.1 | `planned=4 done=4`, `with_llm_called_true=0`, `verifiedDigs=22` |
 | Historical iron-age M2 evidence | iron obtained, proven by inventory | `buddy.log` `LADDER_RESUME ... inventory={...,"raw_iron":8,...}` and `HEARTBEAT ... inv={...,"raw_iron":8,...}` | `raw_iron:8`, charcoal smelted 2026-09-18 00:13 JST (`README.md`); `FURNACE_READY=0`, `SMELT_DONE=0` |
 | Stuck heuristics | movement < 5 blocks, action repeats >= 8, no inventory change >= 10 min, abandons >= 3 in a 30-min window | `tools/agent-report.mjs` lines 34-41 | tool exists; VERDICT output is its gate |
 
@@ -689,11 +689,11 @@ frozen rather than productive, which is why `#44` used `FREEZE` deliberately and
 | As-built architecture and evidence | `docs/history/architecture/ARCHITECTURE.md` |
 | Resident-mode canonical requirements | `docs/operations/RESIDENT-MODE.md` |
 | Gate tools | `tools/buddy-status.mjs`, `tools/verify-issue12.mjs`, `tools/verify-issue13.mjs`, `tools/verify-mercury.mjs`, `tools/replay.mjs`, `tools/agent-report.mjs`, `tools/test-replay.mjs`, `tools/test-agent-report.mjs` |
-| Lane tests | `jev-agent/test-*.mts`, `jev-agent/data/step-pipeline-test.mts` |
-| Live host log | `buddy-driver/buddy.log` |
-| Mercury call records | `buddy-driver/logs/jev/mercury-calls.jsonl` |
-| Jev call records | `buddy-driver/logs/jev/jev-calls.jsonl` |
-| Control socket | `buddy-driver/data/resident/control.sock` (0600) |
+| Lane tests | `packages/jev-agent/test-*.mts`, `packages/jev-agent/data/step-pipeline-test.mts` |
+| Live host log | `packages/buddy-driver/buddy.log` |
+| Mercury call records | `packages/buddy-driver/logs/jev/mercury-calls.jsonl` |
+| Jev call records | `packages/buddy-driver/logs/jev/jev-calls.jsonl` |
+| Control socket | `packages/buddy-driver/data/resident/control.sock` (0600) |
 | Branch model | `git worktree list`; `git ls-remote origin` |
 
 ## Appendix B: status of claims

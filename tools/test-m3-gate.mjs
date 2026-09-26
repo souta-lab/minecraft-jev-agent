@@ -86,7 +86,7 @@ const FALLBACK_POLICY = {
 const boot = (runId, sourceSha = SOURCE_SHA) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=${sourceSha} worldEpoch=1`
 const inv = (counts, pos = '10,64,20') => `[2026-09-20T10:00:01.000Z] INVENTORY items=${JSON.stringify(counts)} pos=${pos}`
 // The real HEARTBEAT carries NO dimension field (0 occurrences in a live 75 MB log). The body's own
-// dimension is reported by DIMENSION_OBSERVED / DIMENSION_TRANSITION (buddy-driver/dimension-observer.ts)
+// dimension is reported by DIMENSION_OBSERVED / DIMENSION_TRANSITION (packages/buddy-driver/dimension-observer.ts)
 // and by SPAWN / DEATH. These helpers build those real shapes; the old fixture fed the dimension through
 // HEARTBEAT, i.e. it tested evidence production never emits and hid a real false PASS.
 const heartbeat = () => `[2026-09-20T10:00:01.500Z] HEARTBEAT pos=10,64,20 health=20 rung=enter_nether`

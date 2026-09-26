@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // tools/resident-supervisor.mjs — operations-layer availability supervisor for the
-// resident host (buddy-driver/agent-runner.mts).
+// resident host (packages/buddy-driver/agent-runner.mts).
 //
 // WHY THIS EXISTS
 // The resident host is fail-loud on purpose (#226). When an unrecoverable model
@@ -32,7 +32,7 @@
 //     marked and returned as 130/143, so it cannot masquerade as an intentional
 //     clean exit. Signals received by this supervisor are forwarded and stop it.
 //
-// The fail-loud authority contract in buddy-driver/AGENTS.md §3 is deliberately
+// The fail-loud authority contract in packages/buddy-driver/AGENTS.md §3 is deliberately
 // untouched: this is an ops process wrapper, not an authority layer.
 //
 // Usage:
@@ -358,7 +358,7 @@ export function parseArgs(argv) {
     else if (a.startsWith('-')) throw new Error(`unknown flag: ${a}`)
     else opts._.push(a)
   }
-  opts.driverDir = opts.driverDir ?? path.join(opts.root, 'buddy-driver')
+  opts.driverDir = opts.driverDir ?? path.join(opts.root, 'packages/buddy-driver')
   opts.childScript = opts.childScript ?? path.join(opts.driverDir, 'agent-runner.mts')
   opts.artifactDir = opts.artifactDir ?? path.join(opts.driverDir, 'data', 'supervisor')
   if (opts.maxDelayMs < opts.baseDelayMs) opts.maxDelayMs = opts.baseDelayMs

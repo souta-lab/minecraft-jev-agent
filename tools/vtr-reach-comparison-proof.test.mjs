@@ -715,7 +715,7 @@ test('re-hashes the exact-source legacy-claim refusal fixture separately from li
     result: 'PASS',
     sourceSha: VTR.sourceSha,
     test: {
-      path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
+      path: 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
       name: 'production Reach dispatch and legacy Executor claim cannot overlap body authority',
       sourceSha256: sha256(testSourceBytes),
     },

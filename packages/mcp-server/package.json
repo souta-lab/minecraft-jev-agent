@@ -1,0 +1,7 @@
+{
+  "name": "mcp-server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Bedrock MCP companion server, CLI, and bot driver",
+  "type": "module"
+}

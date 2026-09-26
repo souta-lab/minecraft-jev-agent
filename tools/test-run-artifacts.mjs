@@ -68,8 +68,8 @@ try {
   assert.equal(buildManifest({ record: partialRecord, window: null, logLineCount: 0, mercuryModel }).models.mercury, mercuryModel)
   checks++
 
-  const runtimeLog = join(dir, 'buddy-driver', 'buddy.log')
-  const sharedMercury = join(dir, 'buddy-driver', 'logs', 'jev', 'mercury-calls.jsonl')
+  const runtimeLog = join(dir, 'packages/buddy-driver', 'buddy.log')
+  const sharedMercury = join(dir, 'packages/buddy-driver', 'logs', 'jev', 'mercury-calls.jsonl')
   mkdirSync(dirname(sharedMercury), { recursive: true })
   const activeLines = [
     '[2026-09-19T00:00:00.000Z] BOOT pid=10 runId=run-active bundle=active',

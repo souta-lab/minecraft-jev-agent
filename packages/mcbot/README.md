@@ -14,7 +14,7 @@ MC 26.1.2 (protocol **775**) out of the box.
 | Server version | Leaf `26.1.2-3-ver/26.1.2@3c591d7` for Minecraft **26.1.2** (protocol 775) |
 | Listen address | `0.0.0.0:25565` (TCP) |
 | Java | Temurin JRE **25.0.2** (GA), `JAVA` env override supported |
-| Bot dir | `/home/s0u7a/mc-ai/mcbot` |
+| Bot dir | `/home/s0u7a/mc-ai/packages/mcbot` |
 | Bot name | `AI_Bot` |
 
 > **EULA:** `/home/s0u7a/mc-server/eula.txt` contains `eula=true`. Writing this
@@ -61,7 +61,7 @@ with `JAVA=/path/to/java ./start.sh`.
 Dependencies are plain published packages (no patches, no `postinstall`):
 
 ```bash
-cd /home/s0u7a/mc-ai/mcbot
+cd /home/s0u7a/mc-ai/packages/mcbot
 bun install mineflayer
 ```
 

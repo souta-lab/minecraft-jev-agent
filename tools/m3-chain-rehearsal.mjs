@@ -15,8 +15,8 @@
 // WHAT THIS DOES (no Minecraft server or external network)
 // -----------------------------------------------
 // 1. Drives the REAL terminal craft path -- the same entry points the controller
-//    uses, `generateGroundedCandidates` (jev-agent/src/candidates.ts) and
-//    `planNextCraftStep` (jev-agent/src/crafting.ts), imported verbatim -- for the
+//    uses, `generateGroundedCandidates` (packages/jev-agent/src/candidates.ts) and
+//    `planNextCraftStep` (packages/jev-agent/src/crafting.ts), imported verbatim -- for the
 //    exact endgame inventory: `ender_pearl: 12`, `blaze_rod: 7`, no eyes. It
 //    applies only the recipe's own mechanical effect and records the emitted
 //    candidate sequence until no CRAFT candidate remains.
@@ -24,7 +24,7 @@
 //    and then STOPS (WAIT only), and that the multi-count `want` threading fixed
 //    in 30dec38 is what keeps a partial count offered. The exact sequence is
 //    reported (see M3_CHAIN_REHEARSAL_EYES).
-// 3. Cross-checks the real ladder rung (buddy-driver/planner-legacy.ts), the real
+// 3. Cross-checks the real ladder rung (packages/buddy-driver/planner-legacy.ts), the real
 //    planner and the real gate on the SAME threshold (12 eyes / 7 rods / 12
 //    powder). Any disagreement is reported with file:line on both sides.
 // 4. Materializes a synthetic single-run fixture (BOOT boundary + INVENTORY
@@ -47,10 +47,10 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { RUNGS } from '../buddy-driver/planner-legacy.ts'
-import { defaultCandidateOptions, generateGroundedCandidates } from '../jev-agent/src/candidates.ts'
-import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
-import { loadGameData } from '../jev-agent/src/gameData.ts'
+import { RUNGS } from '../packages/buddy-driver/planner-legacy.ts'
+import { defaultCandidateOptions, generateGroundedCandidates } from '../packages/jev-agent/src/candidates.ts'
+import { createRecipeIndex, planNextCraftStep } from '../packages/jev-agent/src/crafting.ts'
+import { loadGameData } from '../packages/jev-agent/src/gameData.ts'
 import {
   BLAZE_POWDER,
   BLAZE_POWDER_REQUIRED,
@@ -99,7 +99,7 @@ server.on('error', () => process.exit(1))
 server.listen(socketPath)
 `
 
-/** 1 blaze_rod -> 2 blaze_powder (pinned by jev-agent/test-m3-terminal-craft.mts). */
+/** 1 blaze_rod -> 2 blaze_powder (pinned by packages/jev-agent/test-m3-terminal-craft.mts). */
 export const POWDER_PER_ROD = 2
 
 /** The exact endgame inventory: the ladder's `blaze_rods` rung + 12 pearls. */
@@ -136,15 +136,15 @@ export const M3_TERMINAL_GOAL = Object.freeze({
  */
 export const M3_CHAIN_SOURCES = Object.freeze({
   ladder_blaze_rods:
-    'buddy-driver/planner-legacy.ts:675-679 id=blaze_rods satisfied blaze_rod>=7 / goals collect 7 x blaze_rod',
+    'packages/buddy-driver/planner-legacy.ts:675-679 id=blaze_rods satisfied blaze_rod>=7 / goals collect 7 x blaze_rod',
   ladder_ender_pearls:
-    'buddy-driver/planner-legacy.ts:680-684 id=ender_pearls satisfied ender_pearl>=12 / goals collect 12 x ender_pearl',
+    'packages/buddy-driver/planner-legacy.ts:680-684 id=ender_pearls satisfied ender_pearl>=12 / goals collect 12 x ender_pearl',
   ladder_ender_eyes:
-    'buddy-driver/planner-legacy.ts:685-689 id=ender_eyes satisfied ender_eye>=12 / goals craft 12 x ender_eye',
+    'packages/buddy-driver/planner-legacy.ts:685-689 id=ender_eyes satisfied ender_eye>=12 / goals craft 12 x ender_eye',
   terminal_goal_want:
-    'jev-agent/src/candidates.ts:5920-5924 craftGoalRequirement(current.requiredCount) -> planNextCraftStep want',
+    'packages/jev-agent/src/candidates.ts:5920-5924 craftGoalRequirement(current.requiredCount) -> planNextCraftStep want',
   planner_want_check:
-    'jev-agent/src/crafting.ts:201-208 planNextCraftStep(... want) + have(item, want)',
+    'packages/jev-agent/src/crafting.ts:201-208 planNextCraftStep(... want) + have(item, want)',
   gate_eye_threshold:
     'tools/milestone-predicates.mjs:43-44 ENDER_EYE=ender_eye ENDER_EYE_REQUIRED=12 (imported by tools/m3-gate.mjs:54-63)',
   gate_pearl_threshold:
@@ -158,13 +158,13 @@ export const M3_CHAIN_SOURCES = Object.freeze({
    * The two ACQUISITION steps this rehearsal deliberately does NOT model, named
    * so its coverage claim is honest: the endgame inventory is SEEDED with
    * `{ender_pearl: 12, blaze_rod: 7}`, so neither the kill nor the
-   * drop->inventory pickup is exercised here. `jev-agent/test-eye-chain.mts` owns
+   * drop->inventory pickup is exercised here. `packages/jev-agent/test-eye-chain.mts` owns
    * those (a sensed dropped item entity is offered as a grounded `PICKUP` and
    * verified by the inventory delta), and `tools/m3-gate.mjs#evaluateEnderEyes`
    * observes ONLY inventory samples - it cannot see a kill or a pickup at all.
    */
   not_modelled_acquisition:
-    'jev-agent/src/candidates.ts:10320-10365 pickupCandidates (dropped-item route NOT rehearsed here; endgame inventory is seeded) + jev-agent/test-eye-chain.mts:1 (owns the kill/drop/pickup shapes)',
+    'packages/jev-agent/src/candidates.ts:10320-10365 pickupCandidates (dropped-item route NOT rehearsed here; endgame inventory is seeded) + packages/jev-agent/test-eye-chain.mts:1 (owns the kill/drop/pickup shapes)',
 })
 
 /** One shared, read-only recipe index built from the pinned minecraft-data registry. */
@@ -958,7 +958,7 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
   if ((terminalSample[ENDER_EYE] ?? 0) !== ENDER_EYE_REQUIRED) missing.push(`terminal_sample_eyes=${terminalSample[ENDER_EYE] ?? 0}`)
 
   // The item-id trap the terminal predicate must never fall for: `eye_of_ender`
-  // is the thrown projectile ENTITY, never an item (jev-agent/test-m3-terminal-craft.mts).
+  // is the thrown projectile ENTITY, never an item (packages/jev-agent/test-m3-terminal-craft.mts).
   const wrongItemName = gateCase({
     missing,
     write,

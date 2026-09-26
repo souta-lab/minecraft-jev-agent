@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 'use strict'
 
-// Drives src/mcp-server.js over stdio and exercises every MCP tool.
-// Run: bun test/mcp-test.js
+// Drives mcp-server.js over stdio and exercises every MCP tool.
+// Run: bun packages/mcp-server/mcp-test.js
 const path = require('path')
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js')
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js')
@@ -14,7 +14,7 @@ const Z = 190
 async function main () {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(__dirname, '..', 'src', 'mcp-server.js')],
+    args: [path.join(__dirname, 'mcp-server.js')],
     stderr: 'inherit',
   })
   const client = new Client({ name: 'mc-test-client', version: '1.0.0' })

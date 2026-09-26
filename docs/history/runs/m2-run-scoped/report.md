@@ -170,7 +170,7 @@ So the run's *authority* was real; its *portal build chain* is what is missing.
   (rung index 13). The `nether_portal` rung is already behind this run.
 
 IMPLEMENTED basis for `PORTAL_TRUTH`
-(`buddy-driver/generation-entry.ts`, live worktree, read-only):
+(`packages/buddy-driver/generation-entry.ts`, live worktree, read-only):
 
 ```
 890:  const refreshLiveFacts = (reason: string): void => {

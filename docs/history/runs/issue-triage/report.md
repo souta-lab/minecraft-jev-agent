@@ -3,7 +3,7 @@
 - Date: 2026-09-21 (UTC)
 - Base revision audited: `origin/main` = `d8d53c2` (worktree `task/issue-triage`, `/home/s0u7a/mc-ai-worktrees/issue-triage`)
 - Runner: Bun 1.4.2 only (`bun install --frozen-lockfile`, `bun test`, `bun tools/*.mjs`)
-- Live resident observed read-only: `AI_Buddy`, pid 1939257, run `run-muaxgdyk-15kc9`, m3-live worktree, log `/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log`
+- Live resident observed read-only: `AI_Buddy`, pid 1939257, run `run-muaxgdyk-15kc9`, m3-live worktree, log `/home/s0u7a/mc-ai-worktrees/m3-live/packages/buddy-driver/buddy.log`
 - Shared checkout `/home/s0u7a/mc-ai` was **not** modified (it is on a diverged local `main`, see "Repo-state finding").
 
 ## Method
@@ -36,7 +36,7 @@ Landed commits verified as ancestors of `origin/main`:
 | #78 held-furnace/prereq (CLOSED historical) | CLOSED | Historical; #326 generalizes it | commented, **not reopened** | `de3f1ec` on main; live acceptance tracked in #327 |
 | #79 unverified zero-progress (CLOSED historical) | CLOSED | Invariant PASS; original live acceptance **UNKNOWN**; closure not evidenced | commented, **not reopened**, recommended owner decision | `test-action-verify.mts` 12/12; M2 gate UNKNOWN; `closedAt=2026-09-19T17:20:35Z` with no closing evidence comment |
 | #73 empty goal queue at iron rung (CLOSED historical) | CLOSED | Symptom superseded; original acceptance **not met** | commented, **not reopened** | live `rung=nether_portal`, non-empty queue; M2 gate UNKNOWN; `closedAt=2026-09-19T17:17:19Z` |
-| #325/#703c17d dig-down guard | — | PASS (fixture registered + green) | no issue exists to comment | `jev-agent/package.json:38`; `candidates.ts:362`, `executor.ts:1436`; `test-dig-down-guard.mts` all PASS |
+| #325/#703c17d dig-down guard | — | PASS (fixture registered + green) | no issue exists to comment | `packages/jev-agent/package.json:38`; `candidates.ts:362`, `executor.ts:1436`; `test-dig-down-guard.mts` all PASS |
 
 No issue was closed: none met its full acceptance from landed + verified evidence.
 
@@ -71,9 +71,9 @@ No issue was closed: none met its full acceptance from landed + verified evidenc
 - Recommendation recorded in each comment; no state change was made unilaterally.
 
 ### #325 / #703c17d — dig-down guard (no owning issue)
-- Fixture registered: `jev-agent/package.json:38` (`dig-down-guard-test`).
+- Fixture registered: `packages/jev-agent/package.json:38` (`dig-down-guard-test`).
 - Code: `candidates.ts:362` `digsBotSupport`, `:371` `formatDigDownRefused`, `:1100` support-cell MINE withheld; `executor.ts:1436` refuses support-cell target.
-- `bun test jev-agent/test-dig-down-guard.mts` → all cases pass (controlled DESCEND preserved, unsafe MINE withheld, executor wired).
+- `bun test packages/jev-agent/test-dig-down-guard.mts` → all cases pass (controlled DESCEND preserved, unsafe MINE withheld, executor wired).
 - No OPEN issue states this symptom, so no comment was posted.
 
 ## False-completion check

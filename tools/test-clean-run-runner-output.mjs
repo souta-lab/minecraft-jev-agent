@@ -9,8 +9,8 @@ const roots = []
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'clean-run-runner-output-'))
   roots.push(root)
-  const driverDir = join(root, 'buddy-driver')
-  mkdirSync(driverDir)
+  const driverDir = join(root, 'packages/buddy-driver')
+  mkdirSync(driverDir, { recursive: true })
   mkdirSync(join(driverDir, 'data', 'resident'), { recursive: true })
   return { root, driverDir, outputPath: join(driverDir, 'runner.out'), hostLockPath: join(driverDir, 'data', 'resident', 'host.lock'), controlSocketPath: join(driverDir, 'data', 'resident', 'control.sock') }
 }
@@ -79,7 +79,7 @@ function fixture() {
   assert.equal(status, 0)
   assert.match(stdout, /CLEAN_RUN_RUNNER_OUTPUT status=CREATED/)
   assert.equal(stderr, '')
-  console.log('  ok - CLI creates the exact root/buddy-driver/runner.out location')
+  console.log('  ok - CLI creates the exact root/packages/buddy-driver/runner.out location')
 }
 
 for (const root of roots) rmSync(root, { recursive: true, force: true })

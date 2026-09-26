@@ -392,7 +392,7 @@ describe('Reach live probe caller pure contracts', () => {
       schema: 'vtr-runtime-entrypoint-resolution-smoke/v2',
       status: 'PASS',
       resolver: 'Bun.build(target=bun,write=false,metafile=true)',
-      entrypoints: ['buddy-driver/agent-runner.mts', 'buddy-driver/generation-entry.ts'],
+      entrypoints: ['packages/buddy-driver/agent-runner.mts', 'packages/buddy-driver/generation-entry.ts'],
       mode,
       outputCount: 2,
       resolutionContainment: { status: 'PASS', outsideCount: 0 },
@@ -409,7 +409,7 @@ describe('Reach live probe caller pure contracts', () => {
     const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim()
     try {
       const result = runNoDoubleAuthorityFixture(process.cwd(), attemptRoot, sourceSha)
-      expect(result.testEntryRelative).toBe('jev-agent/vtr-reach-executor-dispatch-authority.test.mts')
+      expect(result.testEntryRelative).toBe('packages/jev-agent/vtr-reach-executor-dispatch-authority.test.mts')
       expect(result.sourceSha256).toMatch(/^[a-f0-9]{64}$/u)
       expect(result.gitObjectSha256).toBe(result.sourceSha256)
       expect(result.testEntrySha256).toMatch(/^[a-f0-9]{64}$/u)
@@ -418,7 +418,7 @@ describe('Reach live probe caller pure contracts', () => {
         schema: 'vtr-reach-no-double-authority-fixture/v1',
         result: 'PASS',
         sourceSha,
-        test: { path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts' },
+        test: { path: 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts' },
         fixture: { legacyClaimRejected: true, vtrOwnerRetained: true, authorityConflictCount: 1 },
       })
       expect(existsSync(result.sourcePath)).toBe(true)

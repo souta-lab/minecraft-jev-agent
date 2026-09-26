@@ -160,7 +160,7 @@ control socket still answers in step 8.
 
 ```bash
 printf '{"id":"acceptance-refresh","cmd":"acceptance"}\n' \
-  | socat - UNIX-CONNECT:/home/s0u7a/mc-ai-worktrees/m3-clean-run/buddy-driver/data/resident/control.sock
+  | socat - UNIX-CONNECT:/home/s0u7a/mc-ai-worktrees/m3-clean-run/packages/buddy-driver/data/resident/control.sock
 ```
 
 This is the only attestation of `levelName` + `seed` (there is no `writeAcceptance()`

@@ -21,7 +21,7 @@ export function parseArgs(argv) {
   if (options.help === true) return options
   if (typeof options.root !== 'string' || options.root.length === 0) throw new Error('--root requires a path')
   const root = resolve(options.root)
-  const driverDir = join(root, 'buddy-driver')
+  const driverDir = join(root, 'packages/buddy-driver')
   return { ...options, root, driverDir, outputPath: join(driverDir, 'runner.out'), hostLockPath: join(driverDir, 'data', 'resident', 'host.lock'), controlSocketPath: join(driverDir, 'data', 'resident', 'control.sock') }
 }
 

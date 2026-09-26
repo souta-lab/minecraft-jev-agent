@@ -14,7 +14,7 @@
 // plus flint_and_steel>=1 / obsidian>=10 inventory samples and real model
 // authority. The live resident is gathering exactly those materials. Nobody had
 // proven, offline, that the resident's own deterministic portal plan
-// (jev-agent/src/netherPortalPlan.ts) actually emits that marker order and would
+// (packages/jev-agent/src/netherPortalPlan.ts) actually emits that marker order and would
 // satisfy the gate. A marker-order or reachability bug would only surface at the
 // very end of a long live run.
 //
@@ -88,8 +88,8 @@ import {
   portalStepsToPlannedGoals,
   validatePortalFrame,
   verifyPortal,
-} from '../jev-agent/src/netherPortalPlan.ts'
-import { placedFrameCellLine, frameReadyLine } from '../jev-agent/src/executor.ts'
+} from '../packages/jev-agent/src/netherPortalPlan.ts'
+import { placedFrameCellLine, frameReadyLine } from '../packages/jev-agent/src/executor.ts'
 import {
   INHERITED_PORTAL_REASON,
   evaluatePortalChain,
@@ -158,25 +158,25 @@ export const MARKER_EMITTER_PROBES = Object.freeze({
   [PORTAL_BLOCK_PLACED]: Object.freeze([
     {
       id: 'block-placed-formatter',
-      file: 'jev-agent/src/netherPortalPlan.ts',
+      file: 'packages/jev-agent/src/netherPortalPlan.ts',
       expect: 'call',
       text: 'export function formatPortalBlockPlaced(pos: PortalBlockPosition): string {',
     },
     {
       id: 'block-placed-executor-call',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'call',
       text: 'return formatPortalBlockPlaced(at)',
     },
     {
       id: 'emit-frame-cell-action',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'symbol',
       text: 'private emitFrameCell(',
     },
     {
       id: 'run-place-cells-action',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'symbol',
       text: 'private async runPlaceCells(',
     },
@@ -184,13 +184,13 @@ export const MARKER_EMITTER_PROBES = Object.freeze({
   [PORTAL_FRAME_READY]: Object.freeze([
     {
       id: 'frame-ready-formatter',
-      file: 'jev-agent/src/netherPortalPlan.ts',
+      file: 'packages/jev-agent/src/netherPortalPlan.ts',
       expect: 'call',
       text: 'export function formatPortalFrameReady(validation: PortalFrameValidation): string {',
     },
     {
       id: 'frame-ready-executor-call',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'call',
       text: 'const ready = formatPortalFrameReady(validation)',
     },
@@ -198,19 +198,19 @@ export const MARKER_EMITTER_PROBES = Object.freeze({
   [PORTAL_LIT]: Object.freeze([
     {
       id: 'portal-lit-formatter',
-      file: 'jev-agent/src/netherPortalPlan.ts',
+      file: 'packages/jev-agent/src/netherPortalPlan.ts',
       expect: 'call',
       text: 'export function formatPortalLit(position: PortalBlockPosition, dimension: string = OVERWORLD): string {',
     },
     {
       id: 'portal-lit-executor-call',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'call',
       text: "this.logger.info('agent', formatPortalLit(target, dimension),",
     },
     {
       id: 'run-ignite-action',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'symbol',
       text: 'private async runIgnite(',
     },
@@ -218,13 +218,13 @@ export const MARKER_EMITTER_PROBES = Object.freeze({
   [PORTAL_VERIFIED]: Object.freeze([
     {
       id: 'verify-portal-formatter',
-      file: 'jev-agent/src/netherPortalPlan.ts',
+      file: 'packages/jev-agent/src/netherPortalPlan.ts',
       expect: 'call',
       text: 'export function verifyPortal(input: VerifyPortalInput): VerifyPortalResult {',
     },
     {
       id: 'verified-executor-call',
-      file: 'jev-agent/src/executor.ts',
+      file: 'packages/jev-agent/src/executor.ts',
       expect: 'call',
       text: "this.logger.info('agent', verifyPortal({ lit: true, portalBlockPresent: true, dimension }).line,",
     },
@@ -578,7 +578,7 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
   // The same run in the DECLARED resident-tree layout (`--root <dir>`), so the
   // rehearsal can drive the real gate's OPERATOR surface as well as its
   // explicit-path surface. No control socket is created: the run stays offline.
-  const homeDir = join(dir, 'buddy-driver')
+  const homeDir = join(dir, 'packages/buddy-driver')
   mkdirSync(join(homeDir, 'logs', 'jev'), { recursive: true })
   mkdirSync(join(homeDir, 'data', 'resident'), { recursive: true })
   writeFileSync(join(homeDir, 'buddy.log'), `${logLines.join('\n')}\n`)

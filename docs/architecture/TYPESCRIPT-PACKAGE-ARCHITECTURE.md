@@ -248,7 +248,7 @@ Only keep a cycle if there is an exceptional, documented reason and a structural
 The intended long-term shape is shallow and feature-oriented:
 
 ```text
-jev-agent/src/
+packages/jev-agent/src/
   app/
   reach/
   navigation/
@@ -418,7 +418,7 @@ docs/features/reach/
 This should correspond conceptually to:
 
 ```text
-jev-agent/src/reach/
+packages/jev-agent/src/reach/
 ```
 
 The source and documentation trees do not need identical directory structures, but they should agree on ownership vocabulary. If code calls a capability `reach`, its durable feature documentation should not be split across unrelated names such as `movement-v2`, `locomotion-runtime`, and `phase0` without a strong reason.

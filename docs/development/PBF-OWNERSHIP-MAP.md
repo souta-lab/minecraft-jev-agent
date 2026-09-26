@@ -9,13 +9,13 @@ aspirational fiction.
 
 | Package | Contents | Notes |
 |---|---|---|
-| `jev-agent/src/reach/` | Reach feature: `transition`, `controller`, `controller-plane`, `scheduler`, `mission-runtime`, `mission-projection`, `ports`, `safety`, `route-policy`, `jev-composition`, `mechanical-waypoint`, `kernel-shadow-map` | Backend-independent. `kernel-shadow-map` is the Reach-slice kernel gate (`KernelReachAuthority` + shadow map). |
-| `jev-agent/src/minecraft/` | Backend implementations of consumer ports: `reach-runtime-adapter`, `reach-mission-projection` | Only package allowed raw Mineflayer outside the flat allowlist. |
-| `jev-agent/src/jev/` | Jev decision policy: `client` (legacy policy+harness+logging), `authority` (auditable live-policy kernel), `semantic-projection` (#437 epoch/packet machinery) | Root `src/jev.ts` stays a thin facade. |
-| `jev-agent/src/system2/` | Sparse reasoning service: `service`, `payload`, `authority`, `escalation`, `causal-history`, `handoff` | Exception-driven; no motor commands. |
-| `jev-agent/src/legacy/` | Quarantined controller planes behind Host contracts | Temporary layer; each file's deletion condition is documented in its header. Not a permanent home. |
-| `architecture/v4.1/` | The authority kernel (`kernel.ts`) + contract docs | `src/vtr/` was removed once empty: no cross-feature mechanism currently lives in jev-agent. |
-| flat `jev-agent/src/*.ts` | Transitional modules (see §2) | Awaiting canonical addresses as host contracts shed backend types. |
+| `packages/jev-agent/src/reach/` | Reach feature: `transition`, `controller`, `controller-plane`, `scheduler`, `mission-runtime`, `mission-projection`, `ports`, `safety`, `route-policy`, `jev-composition`, `mechanical-waypoint`, `kernel-shadow-map` | Backend-independent. `kernel-shadow-map` is the Reach-slice kernel gate (`KernelReachAuthority` + shadow map). |
+| `packages/jev-agent/src/minecraft/` | Backend implementations of consumer ports: `reach-runtime-adapter`, `reach-mission-projection` | Only package allowed raw Mineflayer outside the flat allowlist. |
+| `packages/jev-agent/src/jev/` | Jev decision policy: `client` (legacy policy+harness+logging), `authority` (auditable live-policy kernel), `semantic-projection` (#437 epoch/packet machinery) | Root `src/jev.ts` stays a thin facade. |
+| `packages/jev-agent/src/system2/` | Sparse reasoning service: `service`, `payload`, `authority`, `escalation`, `causal-history`, `handoff` | Exception-driven; no motor commands. |
+| `packages/jev-agent/src/legacy/` | Quarantined controller planes behind Host contracts | Temporary layer; each file's deletion condition is documented in its header. Not a permanent home. |
+| `packages/kernel/v4.1/` | The authority kernel (`kernel.ts`) + contract docs | `src/vtr/` was removed once empty: no cross-feature mechanism currently lives in jev-agent. |
+| flat `packages/jev-agent/src/*.ts` | Transitional modules (see §2) | Awaiting canonical addresses as host contracts shed backend types. |
 
 ## 2. Flat-file classification (transitional remainder)
 
@@ -64,14 +64,14 @@ tightening lands — that is the blocker, not the filename.
 
 ## 3. Mechanically enforced boundaries
 
-- `jev-agent/test-package-boundaries.mts` — static import-direction guard:
+- `packages/jev-agent/test-package-boundaries.mts` — static import-direction guard:
   `reach → {minecraft, legacy}` forbidden; `vtr → {reach, minecraft, legacy,
   system2, jev, flat}` forbidden; `minecraft → legacy`, `legacy → minecraft`,
   `system2 → {minecraft, legacy}`, `jev → {minecraft, legacy}` forbidden;
   raw Mineflayer/`Bot`/`this.bot` allowed only in `minecraft/` and the flat
   allowlist (type-only `Bot` tolerated inside quarantined `legacy/` Host
   interfaces while they narrow).
-- `jev-agent/test-vtr-reach-production.mts` — authority seams:
+- `packages/jev-agent/test-vtr-reach-production.mts` — authority seams:
   `KernelReachAuthority` required by construction; one mutation path
   (kernel `issueStepEffect` → adapter `dispatch`); one terminal path
   (kernel `terminalize`); SUCCESS only through kernel `VERIFY_SUCCESS` on

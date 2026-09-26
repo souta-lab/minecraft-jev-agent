@@ -91,7 +91,7 @@ live: unavailable
 - `git log -1 --format=%H%n%s%n%cI origin/main`
 - `gh pr list --state open --limit 1000 --json number,title,headRefName`
 - `gh issue list --state open --limit 1000 --json number,title,labels`
-- `socket /home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock <- {"cmd":"report"} (2000ms timeout)`
+- `socket /home/s0u7a/mc-ai/packages/buddy-driver/data/resident/control.sock <- {"cmd":"report"} (2000ms timeout)`
 - `gh run list --workflow=repo-invariants.yml --limit 1 --json databaseId,headSha,createdAt,conclusion,headBranch`
 - `gh api repos/souta-lab/minecraft-jev-agent/actions/runs/35878346555/jobs`
 - `gh api repos/souta-lab/minecraft-jev-agent/check-runs/107240050335/annotations`

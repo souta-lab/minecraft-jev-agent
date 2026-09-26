@@ -4,7 +4,7 @@ An embodied Minecraft Java agent. An **LLM planner answers bounded questions**; 
 policy** (Jev, a TypeSafe semantic-judgement model) holds **sole action authority**; **Mineflayer
 is the motor/reflex layer**. The three layers are separated by how far ahead they reason, not by a
 fixed tick rate. There is **no Mineflayer fork** — stock `mineflayer@4.39.0` plus a single local
-movement patch under `jev-agent/patches/`.
+movement patch under `packages/jev-agent/patches/`.
 
 Perception loop:
 
@@ -74,13 +74,13 @@ for acceptance work:
 
 ```bash
 # deterministic high-level planner: no planner network call
-BUDDY_PLANNER=deterministic bun buddy-driver/agent-runner.mts
+BUDDY_PLANNER=deterministic bun packages/buddy-driver/agent-runner.mts
 
 # bounded Jev high-level horizon planner (requires configured Jev/Gateway credentials)
-BUDDY_PLANNER=llm bun buddy-driver/agent-runner.mts
+BUDDY_PLANNER=llm bun packages/buddy-driver/agent-runner.mts
 
 # optional exception-driven Mercury System2 repair; explicit opt-in only
-BUDDY_SYSTEM2=mercury bun buddy-driver/agent-runner.mts
+BUDDY_SYSTEM2=mercury bun packages/buddy-driver/agent-runner.mts
 ```
 
 `BUDDY_PLANNER=auto` exists for convenience and currently selects the Jev planner when a usable API
@@ -105,7 +105,7 @@ dependency layout here; it does not select another runtime.
 
 ```bash
 # jev-agent: agent, tests, M1/M2 ladders
-cd jev-agent
+cd packages/jev-agent
 bun install
 bun run movement-patch:check
 bun run typecheck
@@ -135,11 +135,18 @@ keep it small so causality and rollback remain clear.
 
 | Path | Purpose |
 | --- | --- |
-| `jev-agent/` | Sensor/world state, grounded candidates, Jev policy, Guard, Skills/Executor, VERIFY. |
-| `buddy-driver/` | Persistent host, generation hot reload, control socket, durable state/WorldMemory. |
-| `companion/` | Minimal companion bot. |
-| `launch/` | Local play-environment helpers. |
+| `packages/jev-agent/` | Sensor/world state, grounded candidates, Jev policy, Guard, Skills/Executor, VERIFY. |
+| `packages/buddy-driver/` | Persistent host, generation hot reload, control socket, durable state/WorldMemory. |
+| `packages/jev-harness/` | Jev decision-policy harness: typed questions, heads registry, import firewall. |
+| `packages/system2-harness/` | Sparse System2 reasoning harness: proposal/compile/commit pipeline. |
+| `packages/kernel/` | V4.1.2 shared executable kernel (authority/effects/facts), `v4.1/` subtree. |
+| `packages/mcp-server/` | Bedrock MCP companion server, CLI, and bot driver. |
+| `packages/mcbot/` | mineflayer movement substrate and variants workspace. |
+| `packages/companion/` | Minimal companion bot. |
+| `ops/` | Operator/runtime infrastructure: `launch/`, `deploy/`, `keydrop/`. |
 | `tools/` | Repository convergence, evidence and orchestration tools. |
+| `bun-tests/` | Repository-wide Bun test battery (package suites + tool fixtures). |
+| `runs/` | Generated run-output sink (git-ignored, not source). |
 | `ISSUE-ROUTING.json` | Small machine-readable execution frontier over the larger issue backlog. |
 
 ## Docs

@@ -28,11 +28,11 @@ const follow = flag('follow')
 const out = opt('out', null)
 
 const streams = [
-  { name: 'agent', path: join(root, 'buddy-driver/buddy.log'), kind: 'text' },
-  { name: 'run', path: join(root, 'buddy-driver/logs/jev/run.jsonl'), kind: 'jsonl' },
-  { name: 'decision', path: join(root, 'buddy-driver/logs/jev/decisions.jsonl'), kind: 'jsonl' },
-  { name: 'jev', path: join(root, 'buddy-driver/logs/jev/jev-calls.jsonl'), kind: 'jsonl' },
-  { name: 'mercury', path: join(root, 'buddy-driver/logs/jev/mercury-calls.jsonl'), kind: 'jsonl' },
+  { name: 'agent', path: join(root, 'packages/buddy-driver/buddy.log'), kind: 'text' },
+  { name: 'run', path: join(root, 'packages/buddy-driver/logs/jev/run.jsonl'), kind: 'jsonl' },
+  { name: 'decision', path: join(root, 'packages/buddy-driver/logs/jev/decisions.jsonl'), kind: 'jsonl' },
+  { name: 'jev', path: join(root, 'packages/buddy-driver/logs/jev/jev-calls.jsonl'), kind: 'jsonl' },
+  { name: 'mercury', path: join(root, 'packages/buddy-driver/logs/jev/mercury-calls.jsonl'), kind: 'jsonl' },
   { name: 'server', path: '/home/s0u7a/mc-server/server.log', kind: 'server' },
 ]
 

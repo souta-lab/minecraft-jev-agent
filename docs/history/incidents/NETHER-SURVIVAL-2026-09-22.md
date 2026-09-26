@@ -2,24 +2,24 @@
 
 > **Historical lane report (2026-09-22).** Dated live-log investigation retained as evidence, not as current instruction.
 
-Lane: `task/nether-survival`. Owning layer: the **candidate layer** (`jev-agent/src/candidates.ts`
-enumeration + the contact threat envelope), the **gear-truth module** (`jev-agent/src/gearPlan.ts`),
-the **executor**'s equip action (`jev-agent/src/executor.ts`), the **guard** that admits an EQUIP
-(`jev-agent/src/policy.ts`), and the **survival evidence/control action** in
-`jev-agent/src/threat.ts` mirrored by `jev-agent/src/controller-legacy.ts`.
+Lane: `task/nether-survival`. Owning layer: the **candidate layer** (`packages/jev-agent/src/candidates.ts`
+enumeration + the contact threat envelope), the **gear-truth module** (`packages/jev-agent/src/gearPlan.ts`),
+the **executor**'s equip action (`packages/jev-agent/src/executor.ts`), the **guard** that admits an EQUIP
+(`packages/jev-agent/src/policy.ts`), and the **survival evidence/control action** in
+`packages/jev-agent/src/threat.ts` mirrored by `packages/jev-agent/src/controller-legacy.ts`.
 
 Primary evidence: the live log
-`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log` (read twice while this lane ran: 553 301
+`/home/s0u7a/mc-ai-worktrees/m3-live/packages/buddy-driver/buddy.log` (read twice while this lane ran: 553 301
 lines at 2026-09-22T12:10Z, 1 335 209 lines at 2026-09-22T17:24Z — every number below carries its
 snapshot) and the generation-local sink
-`/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/logs/jev/run.jsonl` (124 `EQUIP_WEAPON`, 2 `EQUIP_ARMOR`).
+`/home/s0u7a/mc-ai-worktrees/m3-live/packages/buddy-driver/logs/jev/run.jsonl` (124 `EQUIP_WEAPON`, 2 `EQUIP_ARMOR`).
 
 ---
 
 ## 1. Measured death profile
 
 **Snapshot boundary (the log is LIVE and grew while this lane ran).** All numbers below come from
-ONE read of `/home/s0u7a/mc-ai-worktrees/m3-live/buddy-driver/buddy.log` at
+ONE read of `/home/s0u7a/mc-ai-worktrees/m3-live/packages/buddy-driver/buddy.log` at
 `2026-09-21T08:06:00.437Z → 2026-09-22T17:24:10.703Z`, **1 335 209 lines**. An earlier pass during
 this lane saw the same file at 553 301 lines / 104 `DEATH` lines / 98 real; the profile grew as the
 resident kept dying, so any number quoted without its snapshot boundary is not reproducible. (The
@@ -228,7 +228,7 @@ Secondary measured defects in the same layer:
    `SURVIVAL_ESCAPE_NONE` are now in `MIRRORED_MARKERS`, and `logSurvivalRace` mirrors the race fact
    from the restricted offer (deduped on the line, so it re-logs per landed hit).
 
-Declared shared files touched: `jev-agent/src/{candidates,controller-legacy,executor,gearPlan,policy,threat}.ts`.
+Declared shared files touched: `packages/jev-agent/src/{candidates,controller-legacy,executor,gearPlan,policy,threat}.ts`.
 No mob name is hard-coded in the decision path; the gear module owns what is best from what is held;
 no reflex bypasses the effect envelope, the hazard guard or the lease (every equip goes through
 `equipItemTo` + `ensureOwned`).
@@ -248,7 +248,7 @@ damage source, and the executor's equip result is a verified post-condition or a
 
 ## 5. Fixtures
 
-New: `jev-agent/test-nether-survival-gear.mts` (21 cases) — (i1–i5) the measured damage race
+New: `packages/jev-agent/test-nether-survival-gear.mts` (21 cases) — (i1–i5) the measured damage race
 (grounded response at contact, typed facts, `outside_reach` vs `inside_reach` vs `none`, the typed
 `CAPABILITY_LOST`, the mirroring), (ii1–ii3) the respawn case (arm + armour offered, Jev chooses;
 one offer per weapon class; sword-vs-axe never ranked), (iii1–iii3) healthy-body no-churn (no offer
@@ -258,7 +258,7 @@ there is no food / no false EAT at a full hunger bar, (v1–v3) player vs mob vs
 unattributed damage separated, (vii1–vii2) the code-owned control action at contact, and (ii4) the guard admits the `hand`
 destination while still refusing a foreign slot.
 
-Extended: `jev-agent/test-equip-affordance.mts` (+4 cases → 20/20) — the arm candidate is offered,
+Extended: `packages/jev-agent/test-equip-affordance.mts` (+4 cases → 20/20) — the arm candidate is offered,
 executed through the real `Executor` (equips the **named** weapon, verifies the live main hand,
 emits `EQUIP_WEAPON`), the item-left-inventory case is a typed loss with no substitute, and no offer
 when the hand already holds the best carried weapon.
@@ -284,7 +284,7 @@ when the hand already holds the best carried weapon.
   `prerequisite`. When nothing is affordable the tick emits
   `ARMOR_CRAFT_REFUSED slot=torso item=iron_chestplate material=iron_ingot need=8 have=2 shortfall=6`
   instead of silence, and when it IS affordable it emits `ARMOR_CRAFT ...`. Fixtures:
-  `jev-agent/test-armour-route.mts`, including a byte-identical control for this lane's weapon-arm
+  `packages/jev-agent/test-armour-route.mts`, including a byte-identical control for this lane's weapon-arm
   candidate (same sha256 as 38cbb22).
 * **Arming is gated to "a fight is on the table"** (a threat envelope is active or an ATTACK is
   enumerated). A body mining with a pickaxe and carrying a sword is deliberately not offered the
@@ -309,33 +309,33 @@ when the hand already holds the best carried weapon.
 
 ```text
 bun run typecheck                                    clean (jev-agent + buddy-driver)
-bun jev-agent/test-mob-survival.mts                   23/23
-bun jev-agent/test-nether-survival.mts                23/23
-bun jev-agent/test-nether-survival-gear.mts           21/21   (new)
-bun jev-agent/test-env-hazard.mts                     all passed
-bun jev-agent/test-waypoint-hazard-guard.mts          all passed
-bun jev-agent/test-threat-response.mts                9/9
-bun jev-agent/test-threat-response-grounding.mts      28/28
-bun jev-agent/test-combat-closure.mts                 26/26
-bun jev-agent/test-candidate-policy.mts               12/12
-bun jev-agent/test-equip-affordance.mts               20/20   (16 + 4 new)
+bun packages/jev-agent/test-mob-survival.mts                   23/23
+bun packages/jev-agent/test-nether-survival.mts                23/23
+bun packages/jev-agent/test-nether-survival-gear.mts           21/21   (new)
+bun packages/jev-agent/test-env-hazard.mts                     all passed
+bun packages/jev-agent/test-waypoint-hazard-guard.mts          all passed
+bun packages/jev-agent/test-threat-response.mts                9/9
+bun packages/jev-agent/test-threat-response-grounding.mts      28/28
+bun packages/jev-agent/test-combat-closure.mts                 26/26
+bun packages/jev-agent/test-candidate-policy.mts               12/12
+bun packages/jev-agent/test-equip-affordance.mts               20/20   (16 + 4 new)
 bun test ./bun-tests                                  136 pass / 0 fail
 bun run bun-residue-check                             PASS
 bun run contract-docs-check                           5/5
 ```
 
-Whole-corpus sweep, every `jev-agent/test-*.mts` + `buddy-driver/test-*.mts` run as
+Whole-corpus sweep, every `packages/jev-agent/test-*.mts` + `packages/buddy-driver/test-*.mts` run as
 `bun <file>` in this worktree and in a pristine checkout of the same base (`b5325b3`):
 
 ```text
 diff pristine-vs-worktree:
-  jev-agent/test-equip-affordance.mts   16/16  ->  20/20     (the 4 added cases)
-  jev-agent/test-nether-survival-gear.mts   absent -> 21/21  (new file)
+  packages/jev-agent/test-equip-affordance.mts   16/16  ->  20/20     (the 4 added cases)
+  packages/jev-agent/test-nether-survival-gear.mts   absent -> 21/21  (new file)
   (nothing else changed)
 known-red, IDENTICAL in pristine and worktree (pre-existing, no new regression):
-  jev-agent/test-audit.mts
-  jev-agent/test-pillar-takeoff-evidence.mts
-  buddy-driver/test-dimension-observer.mts
+  packages/jev-agent/test-audit.mts
+  packages/jev-agent/test-pillar-takeoff-evidence.mts
+  packages/buddy-driver/test-dimension-observer.mts
 ```
 
 Base: `b5325b3` (latest `origin/main` at the time of the rebase). Branch

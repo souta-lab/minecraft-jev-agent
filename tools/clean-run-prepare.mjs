@@ -785,7 +785,7 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
       `# Identity/evidence directory: ${runDir}`,
     ]
   }
-  const driverDir = join(tree, 'buddy-driver')
+  const driverDir = join(tree, 'packages/buddy-driver')
   const runnerOutPath = join(driverDir, 'runner.out')
   const environmentFile = join(process.env.HOME ?? '/home/s0u7a', '.config', 'mc-ai', 'resident.env')
   const managedLeafCommand = [
@@ -847,7 +847,7 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `# 1. OPERATOR / H4: stop the current owner and wait. For a managed resident, this deliberate unit stop is not restarted:`,
     `if systemctl --user is-active --quiet ai-buddy-resident.service; then systemctl --user stop ai-buddy-resident.service; fi`,
     `#    If a legacy direct resident remains, send the protocol's cmd=quit and wait for both control.sock and host.lock to release:`,
-    `if test -S ${shellQuote(join(tree, 'buddy-driver/data/resident/control.sock'))}; then ${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-resident-control.mjs'))} --root ${shellQuote(tree)}; fi`,
+    `if test -S ${shellQuote(join(tree, 'packages/buddy-driver/data/resident/control.sock'))}; then ${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-resident-control.mjs'))} --root ${shellQuote(tree)}; fi`,
     `# 2. OPERATOR / H4: stop the current Leaf server gracefully from its console; wait for it to exit.`,
     `#    Do not copy over, edit, or restore the shared ${container}/server.properties.`,
     `# 3. start the clean world and keep its allowlisted console relay alive in a transient user-systemd service:`,
@@ -870,7 +870,7 @@ export function buildOperatorCommands({ container, runDir, levelName, levelSeed,
     `#    The command helper only sends read-only seed and gamerule queries. Review the actual responses in ${join(runDir, 'server-console', 'leaf-server.log')}.`,
     `# 8. continue the M3 attempt (Nether arrival + 12 eyes) and record the runId from BOOT.`,
     `# 9. refresh the HOST acceptance record (read-only query; it attests levelName + seed):`,
-    `${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-acceptance-refresh.mjs'))} --run <RUN_ID> --source-sha ${sourceSha} --root ${shellQuote(tree)} --socket ${shellQuote(join(tree, 'buddy-driver/data/resident/control.sock'))}`,
+    `${bunExecutable} ${shellQuote(join(tree, 'tools/clean-run-acceptance-refresh.mjs'))} --run <RUN_ID> --source-sha ${sourceSha} --root ${shellQuote(tree)} --socket ${shellQuote(join(tree, 'packages/buddy-driver/data/resident/control.sock'))}`,
     `# 10. the canonical bundle, with the RESOLVED descriptor as the environment record:`,
     `${bunExecutable} ${shellQuote(join(tree, 'tools/m3-acceptance-bundle.mjs'))} --run <RUN_ID> --root ${shellQuote(tree)} --environment ${shellQuote(join(runDir, 'environment-resolved.json'))} --evidence-class live`,
     `# 11. run the clean-run gate, written NEXT TO the bundle; it verifies the machine capture and Leaf log itself:`,

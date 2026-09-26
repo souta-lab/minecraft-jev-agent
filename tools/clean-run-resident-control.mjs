@@ -27,7 +27,7 @@ export function parseArgs(argv) {
     throw new Error('--timeout-ms must be an integer from 100 to 60000')
   }
   const root = resolve(options.root)
-  const residentDir = join(root, 'buddy-driver', 'data', 'resident')
+  const residentDir = join(root, 'packages/buddy-driver', 'data', 'resident')
   return {
     ...options,
     root,

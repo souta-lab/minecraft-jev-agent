@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
-const DIR = resolve(process.env.BUDDY_STATUS_RUNTIME_DIR ?? join(REPO, 'buddy-driver'))
+const DIR = resolve(process.env.BUDDY_STATUS_RUNTIME_DIR ?? join(REPO, 'packages/buddy-driver'))
 const LOG = join(DIR, 'buddy.log')
 const SOCK = join(DIR, 'data', 'resident', 'control.sock')
 const JSON_OUT = process.argv.includes('--json')

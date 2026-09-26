@@ -25,7 +25,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const BASE = process.env.MC_AI_DIR || '/home/s0u7a/mc-ai'
-const BUDDY_DIR = path.join(BASE, 'buddy-driver')
+const BUDDY_DIR = path.join(BASE, 'packages/buddy-driver')
 export const DEFAULT_LOG = path.join(BUDDY_DIR, 'buddy.log')
 export const DEFAULT_SOCK = path.join(BUDDY_DIR, 'data/resident/control.sock')
 const DEFAULT_STATE = path.join(BUDDY_DIR, 'buddy-state.json')

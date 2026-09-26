@@ -1,6 +1,6 @@
 # AGENTS.md — buddy-driver scoped rules
 
-This file contains only durable rules for work under `buddy-driver/`.
+This file contains only durable rules for work under `packages/buddy-driver/`.
 
 Historical incidents, timestamped blockers, and old phase plans are intentionally NOT repeated here. They remain available in Git history and closed issues. Do not reconstruct current work from old incident prose.
 
@@ -106,7 +106,7 @@ Caches/rate limits must not silently change authority. Cache hits must replay at
 Detached start (when host startup is explicitly appropriate):
 
 ```bash
-cd /home/s0u7a/mc-ai/buddy-driver
+cd /home/s0u7a/mc-ai/packages/buddy-driver
 setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 ```
 

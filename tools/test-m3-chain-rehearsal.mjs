@@ -40,8 +40,8 @@ import {
   runRealGate,
   runRehearsal,
 } from './m3-chain-rehearsal.mjs'
-import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
-import { loadGameData } from '../jev-agent/src/gameData.ts'
+import { createRecipeIndex, planNextCraftStep } from '../packages/jev-agent/src/crafting.ts'
+import { loadGameData } from '../packages/jev-agent/src/gameData.ts'
 
 let checks = 0
 function ok(label) {

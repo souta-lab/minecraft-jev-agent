@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 // test-m3-acceptance-bundle: OFFLINE fixtures for tools/m3-acceptance-bundle.mjs.
 //
-// Every fixture below is a SYNTHETIC resident tree (buddy-driver/buddy.log,
-// buddy-driver/runner.out, buddy-driver/logs/jev/decisions.jsonl,
-// buddy-driver/data/resident/acceptance-<runId>.json). No live resident, no
+// Every fixture below is a SYNTHETIC resident tree (packages/buddy-driver/buddy.log,
+// packages/buddy-driver/runner.out, packages/buddy-driver/logs/jev/decisions.jsonl,
+// packages/buddy-driver/data/resident/acceptance-<runId>.json). No live resident, no
 // socket, no network:
 //   * `noControlSocket: true` is passed everywhere, so not even the read-only
 //     `report` probe runs;
@@ -154,18 +154,18 @@ function fullLog(runId, { terminalEye, materials = true }) {
 function makeRoot(name) {
   const root = mkdtempSync(join(tmpdir(), `m3-bundle-${name}-`))
   ROOTS.push(root)
-  mkdirSync(join(root, 'buddy-driver', 'data', 'resident'), { recursive: true })
-  mkdirSync(join(root, 'buddy-driver', 'logs', 'jev'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'data', 'resident'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'logs', 'jev'), { recursive: true })
   return root
 }
 
 function writeFixture(root, runId, { logLines, acceptance = true, runner = {} }) {
-  writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
+  writeFileSync(join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
   const firstInventory = logLines.map((entry) => /\bINVENTORY items=(\{.*\})/.exec(entry)?.[1] ?? null).find((entry) => entry !== null)
   writeFileSync(
-    join(root, 'buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
+    join(root, 'packages/buddy-driver', 'data', 'resident', `m2-snapshot-${runId}.json`),
     JSON.stringify({
       record: 'm2-snapshot',
       runId,
@@ -190,7 +190,7 @@ function writeFixture(root, runId, { logLines, acceptance = true, runner = {} })
     'utf8',
   )
   if (acceptance) {
-    writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
+    writeFileSync(join(root, 'packages/buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
   }
 }
 
@@ -456,7 +456,7 @@ function condition(bundle, id) {
       ],
     },
   })
-  assert.match(readFileSync(join(root, 'buddy-driver', 'runner.out'), 'utf8'), /provider=deterministic model=deterministic-baseline/)
+  assert.match(readFileSync(join(root, 'packages/buddy-driver', 'runner.out'), 'utf8'), /provider=deterministic model=deterministic-baseline/)
   const { bundle, exitCode } = await buildAcceptanceBundle({
     runId: RUN,
     root,
@@ -854,7 +854,7 @@ function condition(bundle, id) {
 // ---------------------------------------------------------------------------
 {
   const root = makeRoot('no-log')
-  mkdirSync(join(root, 'buddy-driver', 'data', 'resident'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver', 'data', 'resident'), { recursive: true })
   const errors = stderrCapture()
   const { bundle, exitCode } = await buildAcceptanceBundle({
     runId: RUN,

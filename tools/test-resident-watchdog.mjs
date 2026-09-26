@@ -132,7 +132,7 @@ try {
 
   // ---- 1. healthy progress -> OK ------------------------------------------
   const healthyDir = join(tmp, 'healthy')
-  const healthyLog = writeLog(healthyDir, 'buddy-driver/buddy.log', logText([
+  const healthyLog = writeLog(healthyDir, 'packages/buddy-driver/buddy.log', logText([
     [-70, 'BOOT pid=1201 runId=run-fixture-healthy'],
     [-55, 'HEARTBEAT pos=1.0,64.0,1.0 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=0 action=SMELT'],
     [-45, 'ACTION n=1 id=SMELT:iron_ingot kind=SMELT phase=pathing-to-furnace pos=1.0,64.0,1.0 rung=nether_portal'],
@@ -153,7 +153,7 @@ try {
 
   // ---- 2. identical heartbeats past the threshold -> FROZEN ---------------
   const frozenDir = join(tmp, 'frozen-pos')
-  const frozenLog = writeLog(frozenDir, 'buddy-driver/buddy.log', logText([
+  const frozenLog = writeLog(frozenDir, 'packages/buddy-driver/buddy.log', logText([
     [-250, 'HEARTBEAT pos=8.7,65.0,-9.3 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=SMELT'],
     [-190, 'HEARTBEAT pos=8.7,65.0,-9.3 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=SMELT'],
     [-120, 'HEARTBEAT pos=8.7,65.0,-9.3 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=SMELT'],
@@ -184,7 +184,7 @@ try {
     [-10, LIVE_HEARTBEAT],
     [-8, LIVE_SMELT],
   ])
-  const liveLog = writeLog(liveDir, 'buddy-driver/buddy.log', liveText)
+  const liveLog = writeLog(liveDir, 'packages/buddy-driver/buddy.log', liveText)
   for (const exact of [LIVE_HEARTBEAT, LIVE_SMELT, LIVE_STALL]) {
     assert.ok(liveText.includes(exact), `fixture must contain the exact live line: ${exact}`)
   }
@@ -217,7 +217,7 @@ try {
 
   // ---- 4. repeated WAIT action with moving body -> FROZEN wait-loop -------
   const waitDir = join(tmp, 'wait-loop')
-  const waitLog = writeLog(waitDir, 'buddy-driver/buddy.log', logText([
+  const waitLog = writeLog(waitDir, 'packages/buddy-driver/buddy.log', logText([
     [-60, 'HEARTBEAT pos=1.0,64.0,1.0 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=WAIT'],
     [-50, 'ACTION n=1 id=WAIT kind=WAIT phase=waiting 300ms pos=1.0,64.0,1.0 rung=nether_portal'],
     [-40, 'HEARTBEAT pos=1.1,64.0,1.0 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=WAIT'],
@@ -235,7 +235,7 @@ try {
 
   // ---- 5. throttled replans + repeated local recovery -> FROZEN -----------
   const replanDir = join(tmp, 'replan')
-  const replanLog = writeLog(replanDir, 'buddy-driver/buddy.log', logText([
+  const replanLog = writeLog(replanDir, 'packages/buddy-driver/buddy.log', logText([
     [-60, 'HEARTBEAT pos=8.7,65.0,-9.3 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=idle'],
     [-50, 'REPLAN_THROTTLED reason=no_progress ageMs=337177 stateHash=61a04d6271b97fc3 because=no_new_info'],
     [-45, 'LOCAL_RECOVERY_ENTER boundary=local_recovery'],
@@ -256,7 +256,7 @@ try {
 
   // ---- 6. stale log -> DEAD ----------------------------------------------
   const staleDir = join(tmp, 'stale')
-  const staleLog = writeLog(staleDir, 'buddy-driver/buddy.log', logText([
+  const staleLog = writeLog(staleDir, 'packages/buddy-driver/buddy.log', logText([
     [-600, 'HEARTBEAT pos=1.0,64.0,1.0 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=SMELT'],
   ]), { mtimeMs: BASE - 600_000 })
   const stale = await runWatchdog(['--log', staleLog, '--now', String(BASE)])
@@ -271,7 +271,7 @@ try {
 
   // ---- 7. dead pid -> DEAD -----------------------------------------------
   const deadDir = join(tmp, 'dead-pid')
-  const deadLog = writeLog(deadDir, 'buddy-driver/buddy.log', logText([
+  const deadLog = writeLog(deadDir, 'packages/buddy-driver/buddy.log', logText([
     [-20, 'HEARTBEAT pos=1.0,64.0,1.0 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=SMELT'],
   ]))
   const exitChild = Bun.spawn([process.execPath, '-e', ''], { stdout: 'ignore', stderr: 'ignore' })
@@ -287,11 +287,11 @@ try {
 
   // ---- 8. host.lock pid is read (not written) and drives DEAD -------------
   const lockDir = join(tmp, 'lock-tree')
-  const lockLog = writeLog(lockDir, 'buddy-driver/buddy.log', logText([
+  const lockLog = writeLog(lockDir, 'packages/buddy-driver/buddy.log', logText([
     [-20, 'HEARTBEAT pos=1.0,64.0,1.0 health=20 running=true rung=nether_portal queue=smelt 1 x iron_ingot depth=6 done=1 action=SMELT'],
   ]))
-  mkdirSync(join(lockDir, 'buddy-driver/data/resident'), { recursive: true })
-  writeFileSync(join(lockDir, 'buddy-driver/data/resident/host.lock'), `${deadPid}\n`, 'utf8')
+  mkdirSync(join(lockDir, 'packages/buddy-driver/data/resident'), { recursive: true })
+  writeFileSync(join(lockDir, 'packages/buddy-driver/data/resident/host.lock'), `${deadPid}\n`, 'utf8')
   const lockRun = await runWatchdog(['--root', lockDir, '--now', String(BASE)])
   assert.equal(lockRun.status, EXIT_DEAD)
   const lockSummary = summaryOf(lockRun.stdout)
@@ -324,14 +324,14 @@ try {
 
   // ---- 12. strictly read-only over a resident-like tree -------------------
   const roDir = join(tmp, 'read-only-tree')
-  const roLog = writeLog(roDir, 'buddy-driver/buddy.log', logText([
+  const roLog = writeLog(roDir, 'packages/buddy-driver/buddy.log', logText([
     [-200, LIVE_HEARTBEAT],
     [-100, LIVE_HEARTBEAT],
     [-60, LIVE_STALL],
     [-15, LIVE_STALL],
   ]))
-  mkdirSync(join(roDir, 'buddy-driver/data/resident'), { recursive: true })
-  writeFileSync(join(roDir, 'buddy-driver/data/resident/host.lock'), '999999999\n', 'utf8')
+  mkdirSync(join(roDir, 'packages/buddy-driver/data/resident'), { recursive: true })
+  writeFileSync(join(roDir, 'packages/buddy-driver/data/resident/host.lock'), '999999999\n', 'utf8')
   const before = snapshotTree(roDir)
   await runWatchdog(['--root', roDir, '--now', String(BASE)])
   await runWatchdog(['--root', roDir, '--now', String(BASE), '--json'])

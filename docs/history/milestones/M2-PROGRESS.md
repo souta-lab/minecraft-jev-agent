@@ -203,7 +203,7 @@ R2/R3 NOT reached — EXACT next blocker (candidate reachability, not locomotion
 
 Verification: `bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit-test 9/9
 (audit case H updated to assert the new `headroomAt`/`landingHeadroom`/`jumpAllowed` wiring).
-Temp probe files (`probe-dep*.mjs`) created for the diagnosis were deleted; `~/mc-ai/mcbot/movement-test/`
+Temp probe files (`probe-dep*.mjs`) created for the diagnosis were deleted; `~/mc-ai/packages/mcbot/movement-test/`
 was read/executed but not modified.
 
 ## MIGRATION STAGE (2026-09-17 ~20:40 JST) — Leaf 26.1.2 -> 1.21.11
@@ -248,8 +248,8 @@ S4 tests (retargeted)
 - typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9.
 
 S5 launched the client check
-- `bun launch/launch.mjs --mc-version 1.21.11 --vanilla --server localhost:25565 --username s0u7a
-  --dry-run` -> exit 0 (documented in launch/README.md). No client launched for real.
+- `bun ops/launch/launch.mjs --mc-version 1.21.11 --vanilla --server localhost:25565 --username s0u7a
+  --dry-run` -> exit 0 (documented in ops/launch/README.md). No client launched for real.
 
 M2 (furnace/charcoal -> iron_ore -> iron ingot x3 -> iron_pickaxe): NOT reached (gated behind M1).
 

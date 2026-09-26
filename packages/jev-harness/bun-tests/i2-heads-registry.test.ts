@@ -26,7 +26,7 @@ import { staticIdentitySource } from '../identity.ts'
 import { MemoryArtifactSink } from '../artifacts.ts'
 import { toCausalIdentity } from '../identity.ts'
 
-const ROOT = resolve(import.meta.dir, '..', '..')
+const ROOT = resolve(import.meta.dir, '..', '..', '..')
 
 describe('#438 section 4 - versioned head registry', () => {
   test('the shipped registry is structurally valid', () => {

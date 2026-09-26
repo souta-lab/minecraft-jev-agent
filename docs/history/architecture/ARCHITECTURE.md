@@ -7,7 +7,7 @@
 読み方に関する注意:
 - 本ドキュメントは 2026-09-18 00:03 JST 時点のスナップショット。この時点で **リポジトリは赤い**（typecheck が通らない、2 つのテストがロード不能）。同時に **常駐ホストが生きたプロセスとして走っている**（移行前ランタイム、PID 150528）。つまり「実装中」の状態を写している。現在の起動方法は下記のBun移行記録に従う。
 - 検証できなかった主張は `UNVERIFIED: ...` と明記した。プロンプト側の主張でも、実ファイルと食い違うものは実測を優先し、差分を本文に書いた。
-- ファイルパスは `/home/s0u7a/mc-ai/` 起点。ログは `jev-agent/logs/` 起点。
+- ファイルパスは `/home/s0u7a/mc-ai/` 起点。ログは `packages/jev-agent/logs/` 起点。
 - **優先順位は `docs/operations/RESIDENT-MODE.md` §13-0（P0 green build → P1 atomic swap → P2 freeze/resume → P3 M1 golden → P4 2-block fixture → P5 Jev shadow→authority → P6 M2 ladder）が正典であり、本文書 §7 の順序に優先する。**
 
 ---
@@ -46,7 +46,7 @@ sensor -> WorldModel(JSON) -> deterministic grounded CANDIDATES
       -> fresh sensor re-validation -> Executor (single-action) -> VERIFY -> loop
 ```
 
-実装モジュール（`/home/s0u7a/mc-ai/jev-agent/src/`）:
+実装モジュール（`/home/s0u7a/mc-ai/packages/jev-agent/src/`）:
 
 | モジュール | 役割 | 主な中身 |
 |---|---|---|
@@ -92,7 +92,7 @@ locomotion, actuator, dig/pickup, craft/smelt を担当。主要なもの:
 - `scripts/apply-movement-patch.mjs` が `postinstall` で冪等適用、`bun run movement-patch:check` で検証。実測直近: `applied 0 hunk(s), 5 already present; verified 4/4 checks`（`bun run movement-patch:check`, 2026-09-18 00:02）。
 - 撤退口: `bun install --frozen-lockfile --ignore-scripts`。
 
-### 2.5 常駐ホスト（`buddy-driver/`、2026-09-17 深夜に実装済み）
+### 2.5 常駐ホスト（`packages/buddy-driver/`、2026-09-17 深夜に実装済み）
 
 | ファイル | 役割 |
 |---|---|
@@ -129,7 +129,7 @@ WORLD リセットの履歴（枯渇対策）:
 
 人間クライアント:
 - PrismLauncher AppImage + Fabulously Optimized 1.21.11 instance（`Fabulously Optimized(1)`）。`s0u7a` で参加。プロセス実測で PrismLauncher の Java 21 runtime が起動中。
-- 簡易 buddy（`companion/buddy.cjs`）は `s0u7a` を追従。`companion/buddy.log` 実測: `SPAWN pos=(-3.5,73.0,6.5)` → `HEARTBEAT target=s0u7a dist=3.0` まで接近後、`dist=3.5〜10.3` で停滞（`REPATH_DISTANCE=5` + `GoalNear` の既知の追従失敗モード。`docs/operations/RESIDENT-MODE.md` §12）。
+- 簡易 buddy（`packages/companion/buddy.cjs`）は `s0u7a` を追従。`packages/companion/buddy.log` 実測: `SPAWN pos=(-3.5,73.0,6.5)` → `HEARTBEAT target=s0u7a dist=3.0` まで接近後、`dist=3.5〜10.3` で停滞（`REPATH_DISTANCE=5` + `GoalNear` の既知の追従失敗モード。`docs/operations/RESIDENT-MODE.md` §12）。
 
 ---
 
@@ -279,7 +279,7 @@ stock の `bot.craft` のまま（実証済み）。失敗時は recipe/delta/in
 ### 6.5 Hot reload: 実装済み、ただし atomic swap は未成立
 
 プロンプトの「not delivered yet」は **stale**。現状:
-- `buddy-driver/agent-runner.mts`（689 行）に host、`generation-entry.ts`（404 行）、`build.mts`、`resident-types.ts` が存在。
+- `packages/buddy-driver/agent-runner.mts`（689 行）に host、`generation-entry.ts`（404 行）、`build.mts`、`resident-types.ts` が存在。
 - 移行前バンドラの historical build 成功: `BUILD hash=45ed55a58a16 bytes=1004535 ms=33 outfile=.../gen-45ed55a58a16.mjs`（`buddy.log` 2026-09-17 23:59:58）。現在のビルドはBun.buildを使用する。
 - control socket 実在: `data/resident/control.sock`（mode `srw-------`）。
 - source watcher と reload 調停が動き、RELOAD ログが出ている（`buddy.log`）:
@@ -367,30 +367,30 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 | `/home/s0u7a/mc-ai/docs/operations/RESIDENT-MODE.md` | 常駐化の正典要件（所有権、bundling 訂正、generation 契約、state store、制御チャネル、freeze/resume、検証、運用ノート） |
 | `/home/s0u7a/mc-ai/docs/status/MILESTONES.md` | M0〜M4 のマイルストーン台帳（559 行） |
 | `/home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md` | M2 の全試行履歴（649 行） |
-| `/home/s0u7a/mc-ai/jev-agent/src/` | 決定層 + motor + LLM の全実装（`craftWindow.ts` 含む 15 ファイル） |
-| `/home/s0u7a/mc-ai/jev-agent/logs/m1-fresh2-console.log` | M1 PASS 4/4（fresh world, `llm.called==false 0/40`, verifiedDigs=22, wedge 0） |
-| `/home/s0u7a/mc-ai/jev-agent/logs/m2-phase1e-console.log` | craft-at-station が gained 0 で wedge した full run（2/14, wedge 64546ms） |
-| `/home/s0u7a/mc-ai/jev-agent/logs/m1-diag2-console.log` | craft 成功（subgoal COMPLETE）と、2-block 面 hop ループ wedge 67715ms の最新実測 |
-| `/home/s0u7a/mc-ai/jev-agent/src/craftWindow.ts` | table craft を明示所有（`openBlock` + `_syncWindow` + recipe 配置 + `closeWindow`）。`#3906` の stateId stale 化対策 |
-| `/home/s0u7a/mc-ai/jev-agent/logs/probe-direct3.log` | `DIRECT craftAtTable ok` と `AGENT-PATH result ... crafted 1x wooden_pickaxe gained=1`（修復の直接証拠） |
-| `/home/s0u7a/mc-ai/jev-agent/logs/m1-craftfix-console.log` | live M1: `craft recipe wooden_pickaxe ... table=crafting_table@-10,67,11` → `subgoal COMPLETE ... have=1` |
-| `/home/s0u7a/mc-ai/jev-agent/logs/probe-direct.log` | `outShape:null` の `null.length` stack（後処理バグの証拠） |
-| `/home/s0u7a/mc-ai/jev-agent/logs/probe-craft-diag2.log` | `AGENT-PATH result ... crafted 1x wooden_pickaxe gained=1` と window stateId の packet trace |
-| `/home/s0u7a/mc-ai/jev-agent/logs/m2-phase1b-console.log` | `phase ledger restored` の実測 |
-| `/home/s0u7a/mc-ai/jev-agent/data/seed-scan.mts`, `logs/seed-scan-2024.log` | seed 2024 の資源スキャン（oak 207+ standable、surface stone 枯渇） |
-| `/home/s0u7a/mc-ai/jev-agent/data/step-pipeline-test.mts` | STEP/DESCEND guard の決定論テスト（history 6/6、現在ロード不能） |
-| `/home/s0u7a/mc-ai/jev-agent/patches/mineflayer-4.39.0-locomotion.patch` | PR #4063 サブセットのローカル patch |
-| `/home/s0u7a/mc-ai/jev-agent/scripts/apply-movement-patch.mjs` | postinstall 適用 + `--check`（実測 4/4 ok） |
-| `/home/s0u7a/mc-ai/buddy-driver/agent-runner.mts` | 常駐 HOST（接続、reconnect、制御 socket、reload 調停、state mirror） |
-| `/home/s0u7a/mc-ai/buddy-driver/generation-entry.ts` | RELOADABLE 層の入口（JevController + ladder planner） |
-| `/home/s0u7a/mc-ai/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION` の code 正典。値は `docs/operations/RESIDENT-MODE.md` §4-A） |
-| `/home/s0u7a/mc-ai/buddy-driver/build.mts` | Bun.build バンドラ |
-| `/home/s0u7a/mc-ai/buddy-driver/buddy.log` | BOOT / BUILD / SPAWN / GENERATION_READY / RELOAD(ok=false) / SHUTDOWN |
-| `/home/s0u7a/mc-ai/buddy-driver/runner.out` | generation の agent ログ（DESCEND dig_error, smoke 失敗の文脈） |
-| `/home/s0u7a/mc-ai/buddy-driver/buddy-state.json` | durable mirror（`reloads:0`, `generations:2`, `worldMemory.craftingTables`） |
-| `/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock` | mode 0600 の制御ソケット（実在） |
-| `/home/s0u7a/mc-ai/buddy-driver/logs/jev/` | resident の `decisions.jsonl` / `jev-calls.jsonl` / `run.jsonl` |
-| `/home/s0u7a/mc-ai/companion/buddy.log` | 簡易 buddy の追従ログ（`s0u7a` を 3 m まで接近後 3.5〜10.3 m で停滞） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/src/` | 決定層 + motor + LLM の全実装（`craftWindow.ts` 含む 15 ファイル） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/m1-fresh2-console.log` | M1 PASS 4/4（fresh world, `llm.called==false 0/40`, verifiedDigs=22, wedge 0） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/m2-phase1e-console.log` | craft-at-station が gained 0 で wedge した full run（2/14, wedge 64546ms） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/m1-diag2-console.log` | craft 成功（subgoal COMPLETE）と、2-block 面 hop ループ wedge 67715ms の最新実測 |
+| `/home/s0u7a/mc-ai/packages/jev-agent/src/craftWindow.ts` | table craft を明示所有（`openBlock` + `_syncWindow` + recipe 配置 + `closeWindow`）。`#3906` の stateId stale 化対策 |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/probe-direct3.log` | `DIRECT craftAtTable ok` と `AGENT-PATH result ... crafted 1x wooden_pickaxe gained=1`（修復の直接証拠） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/m1-craftfix-console.log` | live M1: `craft recipe wooden_pickaxe ... table=crafting_table@-10,67,11` → `subgoal COMPLETE ... have=1` |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/probe-direct.log` | `outShape:null` の `null.length` stack（後処理バグの証拠） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/probe-craft-diag2.log` | `AGENT-PATH result ... crafted 1x wooden_pickaxe gained=1` と window stateId の packet trace |
+| `/home/s0u7a/mc-ai/packages/jev-agent/logs/m2-phase1b-console.log` | `phase ledger restored` の実測 |
+| `/home/s0u7a/mc-ai/packages/jev-agent/data/seed-scan.mts`, `logs/seed-scan-2024.log` | seed 2024 の資源スキャン（oak 207+ standable、surface stone 枯渇） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/data/step-pipeline-test.mts` | STEP/DESCEND guard の決定論テスト（history 6/6、現在ロード不能） |
+| `/home/s0u7a/mc-ai/packages/jev-agent/patches/mineflayer-4.39.0-locomotion.patch` | PR #4063 サブセットのローカル patch |
+| `/home/s0u7a/mc-ai/packages/jev-agent/scripts/apply-movement-patch.mjs` | postinstall 適用 + `--check`（実測 4/4 ok） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/agent-runner.mts` | 常駐 HOST（接続、reconnect、制御 socket、reload 調停、state mirror） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/generation-entry.ts` | RELOADABLE 層の入口（JevController + ladder planner） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION` の code 正典。値は `docs/operations/RESIDENT-MODE.md` §4-A） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/build.mts` | Bun.build バンドラ |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/buddy.log` | BOOT / BUILD / SPAWN / GENERATION_READY / RELOAD(ok=false) / SHUTDOWN |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/runner.out` | generation の agent ログ（DESCEND dig_error, smoke 失敗の文脈） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/buddy-state.json` | durable mirror（`reloads:0`, `generations:2`, `worldMemory.craftingTables`） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/data/resident/control.sock` | mode 0600 の制御ソケット（実在） |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/logs/jev/` | resident の `decisions.jsonl` / `jev-calls.jsonl` / `run.jsonl` |
+| `/home/s0u7a/mc-ai/packages/companion/buddy.log` | 簡易 buddy の追従ログ（`s0u7a` を 3 m まで接近後 3.5〜10.3 m で停滞） |
 | `/home/s0u7a/mc-server/server.properties` | Leaf 設定（offline, peaceful, seed 2024, spawn-protection 0, view-distance 8） |
 | `/home/s0u7a/mc-server/leaf-1.21.11-178.jar` | Leaf 本体（sha256 一致） |
 | `/home/s0u7a/mc-server/world-depleted-20260917-223756/` | 枯渇 world の退避 backup（world / nether / end） |
@@ -423,23 +423,23 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 
 ## AI_Buddy resident driver (added)
 
-`buddy-driver/` runs the M2 intelligence as a **resident** agent: one long-lived
+`packages/buddy-driver/` runs the M2 intelligence as a **resident** agent: one long-lived
 Mineflayer connection as `AI_Buddy`, with the reloadable layer bundled by
 **Bun.build** into one hash-stamped file and hot-swapped without reconnecting.
 Runtime: **Bun 1.4.2**. The bundler is the Bun runtime's native build API; no separate
 bundler package or separate TypeScript runner is required.
 
-- Host: `buddy-driver/agent-runner.mts` (bot, reconnect, logger, state mirror,
+- Host: `packages/buddy-driver/agent-runner.mts` (bot, reconnect, logger, state mirror,
   control socket, reload arbiter).
-- Reloadable: `buddy-driver/generation-entry.ts` + `jev-agent/src/**`.
-- State: `buddy-driver/buddy-state.json` + `buddy-driver/buddy-ledger.json`.
-- Logs: `buddy-driver/buddy.log`, `buddy-driver/logs/jev/*.jsonl`.
-- Control: `buddy-driver/data/resident/control.sock` (0600) —
+- Reloadable: `packages/buddy-driver/generation-entry.ts` + `packages/jev-agent/src/**`.
+- State: `packages/buddy-driver/buddy-state.json` + `packages/buddy-driver/buddy-ledger.json`.
+- Logs: `packages/buddy-driver/buddy.log`, `packages/buddy-driver/logs/jev/*.jsonl`.
+- Control: `packages/buddy-driver/data/resident/control.sock` (0600) —
   `report|reload|freeze|resume|leakcheck|gc|goal|quit`.
 - Deterministic policy (`forceFallbackPolicy=true`) → `llm.called === false`;
   System One remains the sole action authority. `canDig=false`, no teleports.
 
-Full detail: `buddy-driver/ARCHITECTURE.md`.
+Full detail: `packages/buddy-driver/ARCHITECTURE.md`.
 
 ---
 
@@ -449,10 +449,10 @@ Full detail: `buddy-driver/ARCHITECTURE.md`.
 - **`meta/muse-spark-1.3-contributor` is live as System2Brain** (the semantic WHAT layer; exception-driven plus the drained-queue consult):
   `ADVISOR source=mercury reason=no_candidate strategy=mercury_continue_collect_raw_iron cost=0.000329 ms=6870`
   followed by `STRATEGY_SET ... source=mercury goals=["collect 3 x raw_iron"]`. Transport: Vercel AI Gateway,
-  model id `meta/muse-spark-1.3-contributor`, same gateway key as Jev. Call records: `buddy-driver/logs/jev/mercury-calls.jsonl` (historical ids `inception/mercury-2.5` / `-2` remain priced for old records)
+  model id `meta/muse-spark-1.3-contributor`, same gateway key as Jev. Call records: `packages/buddy-driver/logs/jev/mercury-calls.jsonl` (historical ids `inception/mercury-2.5` / `-2` remain priced for old records)
   (schema: record, callId, ts, model, stage, latencyMs, retries, state, prompt, response, usage, cost, error).
   An earlier failure mode `aborted due to timeout` at latencyMs=52 was fixed (realistic timeout + retry).
-- **Hot reload is healthy**: reloads with changing hashes at 150-300 ms, watcher covers `jev-agent/src`.
+- **Hot reload is healthy**: reloads with changing hashes at 150-300 ms, watcher covers `packages/jev-agent/src`.
 - **P2 freeze -> context dump -> resume is verified**: control-socket `freeze {reason}` produced
   `logs/resident/freeze-2026-09-17T16-39-46-442Z.json`, `resume` returned `{frozen:false,started:true}`.
 - **Death recovery exists**: `DEATH` and `LADDER_RESET` markers present; an operator rehearsal command `simdeath`
@@ -486,7 +486,7 @@ above a threshold requests a System2 replan. See `docs/operations/RESIDENT-MODE.
 ## Operating facts for whoever picks this up
 - One-shot health dashboard: `bun tools/buddy-status.mjs` (`--json` for machine-readable). It prints host count,
   control-socket state, churn counters, listener leak, world memory, acceptance/freeze artifact paths, and marker counts.
-- Control socket `buddy-driver/data/resident/control.sock` (0600, JSON lines):
+- Control socket `packages/buddy-driver/data/resident/control.sock` (0600, JSON lines):
   query-only `report | status | goal | milestone`; `acceptance` is a query that also REFRESHES the run-scoped
   `data/resident/acceptance-<runId>.json` via `acceptanceProvenance`/`writeAcceptance()` (no run state, lease or
   generation change); actions `freeze | resume | reload | gc | leakcheck | simdeath | quit`. Goal/milestone CANNOT be injected externally: the only way to unstick the agent is a code fix.

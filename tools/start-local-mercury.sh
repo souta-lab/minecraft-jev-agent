@@ -46,4 +46,4 @@ exec env \
   BUDDY_POLICY="${BUDDY_POLICY:-fallback}" \
   BUDDY_PLANNER="local-mercury" \
   BUDDY_SYSTEM2="mercury" \
-  bun buddy-driver/agent-runner.mts
+  bun packages/buddy-driver/agent-runner.mts

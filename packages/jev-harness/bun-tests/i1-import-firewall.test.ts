@@ -19,7 +19,7 @@ import {
   stripComments,
 } from '../tools/firewall.ts'
 
-const ROOT = resolve(import.meta.dir, '..', '..')
+const ROOT = resolve(import.meta.dir, '..', '..', '..')
 
 describe('#438 section 22 I1 - no direct Jev/provider access outside the harness', () => {
   const report = checkFirewall(ROOT)
@@ -48,7 +48,7 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
 
   test('a new violating production file fails with file:line', () => {
     const root = mkdtempSync(join(tmpdir(), 'jev-firewall-'))
-    mkdirSync(join(root, 'jev-agent', 'src'), { recursive: true })
+    mkdirSync(join(root, 'packages', 'jev-agent', 'src'), { recursive: true })
     writeFileSync(
       join(root, 'jev-agent', 'src', 'rogue.ts'),
       "import { experimental_evaluate as evaluate } from 'ai'\nconst q = await evaluate({})\n",
@@ -64,7 +64,7 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
 
   test('a violating file inside the harness is never acceptable', () => {
     const root = mkdtempSync(join(tmpdir(), 'jev-firewall-'))
-    mkdirSync(join(root, 'jev-harness'), { recursive: true })
+    mkdirSync(join(root, 'packages', 'jev-harness'), { recursive: true })
     writeFileSync(join(root, 'jev-harness', 'sneaky.ts'), "export const x = 'experimental_evaluate'\n")
     const fixtureReport = checkFirewall(root)
     expect(fixtureReport.harnessViolations.length).toBeGreaterThan(0)
@@ -73,7 +73,7 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
 
   test('debt clearing is detected (allowlist cannot outlive the debt)', () => {
     const root = mkdtempSync(join(tmpdir(), 'jev-firewall-'))
-    mkdirSync(join(root, 'buddy-driver'), { recursive: true })
+    mkdirSync(join(root, 'packages', 'buddy-driver'), { recursive: true })
     // The production tree is nearly empty, so every debt entry is "cleared".
     const fixtureReport = checkFirewall(root)
     expect(fixtureReport.cleared.length).toBe(FIREWALL_DEBT.length)

@@ -45,9 +45,9 @@ Bunの互換層で最大のリスクは **mineflayer / minecraft-protocol**（`n
 ## 1. 所有権マップ（衝突防止）
 | ディレクトリ | 所有者 | 備考 |
 |---|---|---|
-| `/home/s0u7a/mc-ai/jev-agent/` | 単一の編集者（現: M2セッション） | 他は読み取りのみ |
-| `/home/s0u7a/mc-ai/buddy-driver/` | AI_Buddy 常駐ドライバ | 常駐化の実装場所（推奨） |
-| `/home/s0u7a/mc-ai/companion/` | 簡易buddy（終了予定） | AI_Buddy名は明け渡す |
+| `/home/s0u7a/mc-ai/packages/jev-agent/` | 単一の編集者（現: M2セッション） | 他は読み取りのみ |
+| `/home/s0u7a/mc-ai/packages/buddy-driver/` | AI_Buddy 常駐ドライバ | 常駐化の実装場所（推奨） |
+| `/home/s0u7a/mc-ai/packages/companion/` | 簡易buddy（終了予定） | AI_Buddy名は明け渡す |
 | `/home/s0u7a/mc-ai/docs/` 配下の md | 各タスクが追記 | `history/architecture/ARCHITECTURE.md` `status/MILESTONES.md` `history/milestones/M2-PROGRESS.md` |
 
 - サーバー停止・再設定禁止／人間 `s0u7a` に干渉しない。
@@ -94,14 +94,14 @@ CONTRACT_VERSION = 3
 STATE_SCHEMA_VERSION = 3
 ```
 
-- **code 正典**: `buddy-driver/resident-types.ts` の `export const CONTRACT_VERSION`（現行 **3**）。
+- **code 正典**: `packages/buddy-driver/resident-types.ts` の `export const CONTRACT_VERSION`（現行 **3**）。
 - **同一値を持たなければならない code サイト**（`check-contract-docs.mjs` が全一致を検査）:
-  - `buddy-driver/resident-types.ts`（契約定義・code 正典）
-  - `buddy-driver/generation-entry.ts`（世代バンドルの export。structural smoke が `CONTRACT_VERSION === 3` を検査）
-  - `buddy-driver/agent-runner.mts`（HOST。native TS stripping のため import せず、起動時に自分の定数として焼き込む）
-- **STATE_SCHEMA_VERSION の code 正典**: `buddy-driver/state-snapshot.ts` の `AGENT_SNAPSHOT_SCHEMA_VERSION`
+  - `packages/buddy-driver/resident-types.ts`（契約定義・code 正典）
+  - `packages/buddy-driver/generation-entry.ts`（世代バンドルの export。structural smoke が `CONTRACT_VERSION === 3` を検査）
+  - `packages/buddy-driver/agent-runner.mts`（HOST。native TS stripping のため import せず、起動時に自分の定数として焼き込む）
+- **STATE_SCHEMA_VERSION の code 正典**: `packages/buddy-driver/state-snapshot.ts` の `AGENT_SNAPSHOT_SCHEMA_VERSION`
   （`agent-runner.mts` は `const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION` で別名を持つ）。
-- 他の文書（`docs/history/architecture/ARCHITECTURE.md` / `buddy-driver/AGENTS.md` / root `AGENTS.md` など）は**この節を参照し、数値を再掲しない**。
+- 他の文書（`docs/history/architecture/ARCHITECTURE.md` / `packages/buddy-driver/AGENTS.md` / root `AGENTS.md` など）は**この節を参照し、数値を再掲しない**。
   再掲は `check-contract-docs.mjs` の duplicate 検査で FAIL になる。
 
 ### 4-B. ライフサイクル（`resident-types.ts` の `ResidentGeneration`）
@@ -123,7 +123,7 @@ stopReason() / hasStopped()
 - HOST→generation の受け渡しは **DATA-ONLY**。`{x,y,z}` DTO（`Vec3Json`）のみで、Block / Entity /
   Vec3 / Window / Recipe / Bot インスタンスを永続化しない。必要箇所で `new Vec3(...)` により再水和する。
 
-### 4-C. スワップ順序と commit 点（`buddy-driver/generation-swap.ts`）
+### 4-C. スワップ順序と commit 点（`packages/buddy-driver/generation-swap.ts`）
 
 ```
 build -> import -> createGeneration -> attach -> structuralSmoke
@@ -164,8 +164,8 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
 
 ### 4-E. 移行手順（CONTRACT_VERSION を変更するとき）
 
-1. `buddy-driver/resident-types.ts` の `CONTRACT_VERSION` を上げる／下げる（code 正典）。
-   同時に `buddy-driver/generation-entry.ts` と `buddy-driver/agent-runner.mts` のコピーを同じ値へ更新する
+1. `packages/buddy-driver/resident-types.ts` の `CONTRACT_VERSION` を上げる／下げる（code 正典）。
+   同時に `packages/buddy-driver/generation-entry.ts` と `packages/buddy-driver/agent-runner.mts` のコピーを同じ値へ更新する
    （guard が 3 サイトの一致を強制）。
 2. 本節 **4-A の `CONTRACT_VERSION = <n>`** を同じ値へ更新し、`STATE_SCHEMA_VERSION` も必要なら更新する。
 3. 破壊的な snapshot 変更を伴うなら `state-snapshot.ts` の `AGENT_SNAPSHOT_SCHEMA_VERSION` と
@@ -185,7 +185,7 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
 ### 4-F. durable commit / quarantine / lock / fatal（P0 durability invariants）
 
 HOST の durable claim は「失敗を表現できる」ことで初めて成立する。code 正典は
-`buddy-driver/host-durability.ts`（marker 名もそこが定義）。数値は §4-A のみが持つ。
+`packages/buddy-driver/host-durability.ts`（marker 名もそこが定義）。数値は §4-A のみが持つ。
 
 ```text
 STATE_WRITE_FAILED       durable write が landed しなかった。revision は進めず、in-memory の
@@ -213,7 +213,7 @@ FATAL_SHUTDOWN           uncaughtException / unhandledRejection は log だけ�
   および control socket の `report` / `status` 応答 `durability` に mirror される
   （counts + その run で観測した marker 名）。acceptance record が示せない durability 主張はしない。
 - これらの経路は HOST プロセスの lifecycle に属するため、**修正の反映には HOST 再起動が必要**
-  （hot reload では変わらない）。fixture は `buddy-driver/test-host-durability.mts`。
+  （hot reload では変わらない）。fixture は `packages/buddy-driver/test-host-durability.mts`。
 
 ## 5. 状態の持ち越し（リロードで失ってはいけないもの）
 - サブゴール台帳: 既存 `GoalQueue.snapshot()/restore()`（`goalQueue.ts:251-259`）＋`ledgerPath`
@@ -300,7 +300,7 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 - **`mineflayer-pathfinder@2.4.5` のエクスポート**: `GoalNear` は直下ではなく `goals` 経由。
   `const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')` → `new goals.GoalNear(x,y,z,range)`。
   （`mineflayer` は 1.21.11 = protocol 774 に対応済み。実測 `version=1.21.11` で接続成功）
-- **実測ログ（簡易buddy）**: `SPAWN pos=(-3.5,73.0,6.5)` → `TARGET name=s0u7a` → `HEARTBEAT target=s0u7a dist=3.0 pos=-4.5,70.4,-1.7`（2〜3mまで接近成功）。ログ: `/home/s0u7a/mc-ai/companion/buddy.log`
+- **実測ログ（簡易buddy）**: `SPAWN pos=(-3.5,73.0,6.5)` → `TARGET name=s0u7a` → `HEARTBEAT target=s0u7a dist=3.0 pos=-4.5,70.4,-1.7`（2〜3mまで接近成功）。ログ: `/home/s0u7a/mc-ai/packages/companion/buddy.log`
 - **★追従の失敗モード（ユーザー実測: 「直線上に壁が1mでもあれば動かん／登らない・迂回しない」）**:
   原因は pathfinder の能力ではなく**制御ロジック**。`REPATH_DISTANCE=5`（距離>5mのときだけ再パス）＋`GoalNear(..., STOP_RANGE=3)`（3m以内は到達済み判定）の組合せで、
   **壁越し3〜5mでは再パスも到達判定も「済み」になり完全に停止**する。静止しているので当然 段差も迂回もしない。
@@ -346,7 +346,7 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 ### craft 根本原因の来歴（訂正）
 `mineflayer@4.39.0` の 3x3 クラフトが**エラーも item も出さずに無言で失敗する**現象について、来歴を分離する:
 - **upstream `PrismarineJS/mineflayer#3906`** は「同種/類似の silent 3x3 crafting failure」として参照する（上流の報告）。
-- **stale `stateId`** という機序は **本プロジェクトのローカル診断**であり、1.21.11 の packet trace（`jev-agent/logs/probe-craft-diag2.log`）から導いたもの。upstream の説明として帰属させない。
+- **stale `stateId`** という機序は **本プロジェクトのローカル診断**であり、1.21.11 の packet trace（`packages/jev-agent/logs/probe-craft-diag2.log`）から導いたもの。upstream の説明として帰属させない。
 
 ---
 

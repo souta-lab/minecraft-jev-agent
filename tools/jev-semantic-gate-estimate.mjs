@@ -24,8 +24,8 @@ for (let index = 2; index < process.argv.length; index += 2) args.set(process.ar
 const root = resolve(args.get('root') ?? process.cwd())
 const runId = args.get('run') ?? null
 const last = Number(args.get('last') ?? 500)
-const logPath = join(root, 'buddy-driver', 'buddy.log')
-const decisionsPath = join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl')
+const logPath = join(root, 'packages/buddy-driver', 'buddy.log')
+const decisionsPath = join(root, 'packages/buddy-driver', 'logs', 'jev', 'decisions.jsonl')
 for (const path of [logPath, decisionsPath]) if (!existsSync(path)) { console.error(`JEV_GATE_ESTIMATE missing=${path}`); process.exit(2) }
 
 const lines = readFileSync(logPath, 'utf8').split('\n')

@@ -198,7 +198,7 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
   const launchSource = copiedSources.get('server/server.properties.launch') ?? copiedSources.get('server/server.properties.clean') ?? null
   const launch = launchSource?.bytes ?? null
   const effective = copiedSources.get('server/server.properties.effective-after-boot')?.bytes ?? copiedSources.get('server/server.properties.clean')?.bytes ?? null
-  if (!configuration || launch === null || effective === null) return incomplete('fresh-world launch/effective config or archived bytes are absent')
+  if (!configuration || launch === null || effective === null) return incomplete('fresh-world ops/ops/launch/effective config or archived bytes are absent')
   if (typeof launchSource.path !== 'string' || !isAbsolute(launchSource.path) ||
       typeof serverStart.serverPropertiesPath !== 'string' || !isAbsolute(serverStart.serverPropertiesPath) ||
       resolve(launchSource.path) !== resolve(serverStart.serverPropertiesPath)) {
@@ -208,7 +208,7 @@ export function inspectFreshWorldAttestation({ copiedSources, identity, run, ser
   const effectiveSha = sha256(effective)
   if (configuration.launchPropertiesSha256 !== launchSha || configuration.launchPropertiesSha256 !== serverStart.serverPropertiesSha256 ||
       configuration.effectivePropertiesSha256 !== effectiveSha || configuration.effectivePropertiesSha256 !== serverStart.serverPropertiesEffectiveSha256) {
-    return fail('fresh-world configuration hashes differ from archived launch/effective properties')
+    return fail('fresh-world configuration hashes differ from archived ops/ops/launch/effective properties')
   }
   if (spawnObservation.configSha256 !== launchSha || typeof spawnObservation.jarSha256 !== 'string' ||
       !/^[0-9a-f]{64}$/iu.test(spawnObservation.jarSha256)) {

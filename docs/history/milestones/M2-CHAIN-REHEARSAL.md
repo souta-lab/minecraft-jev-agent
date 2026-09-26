@@ -71,15 +71,15 @@ The first link that a rehearsal **could not drive without re-implementing a
 server mechanism** was **L3 `craft the pickaxe`**, and the reason is structural:
 
 ```text
-jev-agent/src/executor.ts:7204   await craftAtTable(this.bot, table, recipe as ..., faceVec)
-jev-agent/src/craftWindow.ts:57  const win = await bot.openBlock(table, face)
+packages/jev-agent/src/executor.ts:7204   await craftAtTable(this.bot, table, recipe as ..., faceVec)
+packages/jev-agent/src/craftWindow.ts:57  const win = await bot.openBlock(table, face)
                                  -> bot._syncWindow / bot.clickWindow / bot.putSelectedItemRange
-jev-agent/src/executor.ts:7187   await this.bot.craft(recipe, craftCount)   # the 2x2 arm
+packages/jev-agent/src/executor.ts:7187   await this.bot.craft(recipe, craftCount)   # the 2x2 arm
 ```
 
 Both craft arms actuate through the **raw `Bot`**, while the allowlisted
-`ActuationPort.craft` capability (`jev-agent/src/actuationPort.ts`, implemented
-and lease-asserted at `buddy-driver/resident-safety.ts:729`) is called from **nowhere
+`ActuationPort.craft` capability (`packages/jev-agent/src/actuationPort.ts`, implemented
+and lease-asserted at `packages/buddy-driver/resident-safety.ts:729`) is called from **nowhere
 in the repository**. Consequence, measured: a fixture that supplies only world
 truth cannot perform the craft — it must emulate prismarine's window protocol
 (slots, click semantics, quick-shift, `selectedItem`) — and a protocol failure
@@ -120,7 +120,7 @@ so nothing can turn it into "obtain a tool".
 
 **Fixed (general, class-level, no coordinate/seed/order/milestone branch):** the
 craft arm's missing typed, mirrored outcome evidence. `formatCraftLog` in
-`jev-agent/src/executor.ts` now emits
+`packages/jev-agent/src/executor.ts` now emits
 
 ```text
 CRAFT_DONE   item=<item> gained=<verified inventory delta> recipe=<delta> table=<name@x,y,z|none> attempt=<n>
@@ -128,7 +128,7 @@ CRAFT_FAILED item=<item> reason=<reason> recipe=<delta> table=<name@x,y,z|none>
 ```
 
 and both tokens are registered in `MIRRORED_MARKERS`
-(`jev-agent/src/controller-legacy.ts`), so the host mirror carries them. Before
+(`packages/jev-agent/src/controller-legacy.ts`), so the host mirror carries them. Before
 this, the "obtain a tool" link was the **only** link of the chain with no typed
 run-scoped line: the acceptance artifact could show the pickaxe in an inventory
 sample but could never show that a craft happened, for which item, or why it

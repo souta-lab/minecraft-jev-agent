@@ -62,7 +62,7 @@ writeFileSync(fakeChild, FAKE_CHILD, 'utf8')
 
 function makeRoot(name) {
   const root = join(tmp, name)
-  mkdirSync(join(root, 'buddy-driver'), { recursive: true })
+  mkdirSync(join(root, 'packages/buddy-driver'), { recursive: true })
   return root
 }
 
@@ -181,8 +181,8 @@ try {
   const args = parseArgs(['--max-restarts', '7', '--base-delay-ms', '5', '--root', '/x'])
   assert.equal(args.maxRestarts, 7)
   assert.equal(args.baseDelayMs, 5)
-  assert.equal(args.driverDir, join('/x', 'buddy-driver'))
-  assert.equal(args.childScript, join('/x', 'buddy-driver', 'agent-runner.mts'))
+  assert.equal(args.driverDir, join('/x', 'packages/buddy-driver'))
+  assert.equal(args.childScript, join('/x', 'packages/buddy-driver', 'agent-runner.mts'))
   checks++
 
   // ---- restart on transient exit, then clean stop -------------------------
@@ -300,9 +300,9 @@ try {
 
   // ---- preflight refuses to start a second host ---------------------------
   const rootE = makeRoot('root-e')
-  mkdirSync(join(rootE, 'buddy-driver', 'data', 'resident'), { recursive: true })
-  writeFileSync(join(rootE, 'buddy-driver', 'data', 'resident', 'host.lock'), `${process.pid}\n`, 'utf8')
-  const pre = preflight({ driverDir: join(rootE, 'buddy-driver'), checkProcesses: false })
+  mkdirSync(join(rootE, 'packages/buddy-driver', 'data', 'resident'), { recursive: true })
+  writeFileSync(join(rootE, 'packages/buddy-driver', 'data', 'resident', 'host.lock'), `${process.pid}\n`, 'utf8')
+  const pre = preflight({ driverDir: join(rootE, 'packages/buddy-driver'), checkProcesses: false })
   assert.equal(pre.ok, false)
   assert.match(pre.blockers.join('\n'), /host lock held by live pid=/)
   const artE = join(tmp, 'art-e')

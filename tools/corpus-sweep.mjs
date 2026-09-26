@@ -26,7 +26,7 @@ function argOf(name, fallback) {
 
 const root = resolve(argOf('--root', process.cwd()))
 const out = resolve(argOf('--out', join(root, 'corpus-sweep.jsonl')))
-const packages = ['jev-agent', 'buddy-driver']
+const packages = ['packages/jev-agent', 'packages/buddy-driver']
 const timeoutMs = Number(argOf('--timeout-ms', '900000'))
 
 const records = []

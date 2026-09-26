@@ -19,7 +19,7 @@ A fact is not a policy. Distance, cost, failure count, stall count, remembered c
 
 ## Runtime split
 
-`buddy-driver/planner-legacy.ts` and `jev-agent/src/jev-legacy.ts` preserve the pre-overhaul implementations for compatibility and explicit offline baselines. They are not the normal resident model path.
+`packages/buddy-driver/planner-legacy.ts` and `packages/jev-agent/src/jev-legacy.ts` preserve the pre-overhaul implementations for compatibility and explicit offline baselines. They are not the normal resident model path.
 
 The public `PlannerBrain` defaults to model authority. `BUDDY_PLANNER=deterministic|off|fallback|none` is the explicit baseline escape hatch. Missing credentials are a fatal configuration/model failure, not permission to switch authority.
 

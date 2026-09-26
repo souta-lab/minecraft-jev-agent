@@ -88,18 +88,18 @@ BUDDY_MERCURY_MODEL=qwen3.5-9b-local \
 BUDDY_MERCURY_LOCAL_NO_THINK=1 \
 BUDDY_SYSTEM2_TIMEOUT_MS=240000 \
 BUDDY_POLICY=fallback BUDDY_PLANNER=local-mercury BUDDY_SYSTEM2=mercury \
-bun buddy-driver/agent-runner.mts
+bun packages/buddy-driver/agent-runner.mts
 ```
 
 ## Ready-to-run setup (9B)
 
 Two repo files carry the setup so it survives on another machine:
 
-- `deploy/mercury-local-9b.service` — systemd **user** unit that serves
+- `ops/deploy/mercury-local-9b.service` — systemd **user** unit that serves
   `/data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf` as alias `qwen3.5-9b-local` on
   `127.0.0.1:8081` (`--ctx-size 16384 --jinja --temp 0`, `Restart=on-failure`).
   Install with
-  `cp deploy/mercury-local-9b.service ~/.config/systemd/user/ && systemctl --user daemon-reload`.
+  `cp ops/deploy/mercury-local-9b.service ~/.config/systemd/user/ && systemctl --user daemon-reload`.
   Start it only when needed with `systemctl --user start mercury-local-9b`; leave the unit disabled so login does not auto-start it.
 - `tools/mercury-local-preflight.mjs` — proves the endpoint is usable:
   `GET /models` lists the alias, then one `POST /chat/completions` with
@@ -121,7 +121,7 @@ POST /chat/completions (preflight)           -> 312 ms, {"op":"patch","goals":[]
 ```
 
 Switching the live resident to it requires stopping the current process first: the host
-guard (`buddy-driver/data/resident/host.lock`) is single-instance, so two residents cannot
+guard (`packages/buddy-driver/data/resident/host.lock`) is single-instance, so two residents cannot
 coexist, and the patch lives on a branch until it is merged into `main`.
 
 

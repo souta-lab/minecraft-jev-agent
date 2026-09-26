@@ -7,17 +7,17 @@
 // class of failure.
 //
 // This tool is the single checker. It:
-//   1. reads the canonical CODE value from `buddy-driver/resident-types.ts`
+//   1. reads the canonical CODE value from `packages/buddy-driver/resident-types.ts`
 //      (`export const CONTRACT_VERSION`) and asserts every other code definition
 //      site carries the same number;
 //   2. reads the canonical DOC value from the machine-readable block in
 //      `docs/operations/RESIDENT-MODE.md` (`CONTRACT_VERSION = <n>`) and asserts it equals code;
 //   3. does the same for `STATE_SCHEMA_VERSION` (code source
-//      `buddy-driver/state-snapshot.ts`);
+//      `packages/buddy-driver/state-snapshot.ts`);
 //   4. fails loudly with both numbers and the file:line of each when they differ,
 //      and refuses any *other* markdown file that re-hardcodes the number.
 //
-// The pure helpers are exported so `buddy-driver/test-contract-docs.mts` can test
+// The pure helpers are exported so `packages/buddy-driver/test-contract-docs.mts` can test
 // the checker itself (positive + negative) without shelling out.
 //
 // Run: bun tools/check-contract-docs.mjs
@@ -30,16 +30,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** Canonical code definition sites. The first entry is the single code source. */
 export const CODE_VERSION_SOURCES = [
-  { path: 'buddy-driver/resident-types.ts', regex: /export const CONTRACT_VERSION = (\d+)/, canonical: true },
-  { path: 'buddy-driver/generation-entry.ts', regex: /export const CONTRACT_VERSION = (\d+)/, canonical: false },
-  { path: 'buddy-driver/agent-runner.mts', regex: /^const CONTRACT_VERSION = (\d+)/m, canonical: false },
+  { path: 'packages/buddy-driver/resident-types.ts', regex: /export const CONTRACT_VERSION = (\d+)/, canonical: true },
+  { path: 'packages/buddy-driver/generation-entry.ts', regex: /export const CONTRACT_VERSION = (\d+)/, canonical: false },
+  { path: 'packages/buddy-driver/agent-runner.mts', regex: /^const CONTRACT_VERSION = (\d+)/m, canonical: false },
 ]
 
 /** Canonical doc definition block. */
 export const DOC_VERSION_SOURCE = { path: 'docs/operations/RESIDENT-MODE.md', regex: /^CONTRACT_VERSION = (\d+)$/m }
 
 export const CODE_SCHEMA_SOURCES = [
-  { path: 'buddy-driver/state-snapshot.ts', regex: /export const AGENT_SNAPSHOT_SCHEMA_VERSION = (\d+)/, canonical: true },
+  { path: 'packages/buddy-driver/state-snapshot.ts', regex: /export const AGENT_SNAPSHOT_SCHEMA_VERSION = (\d+)/, canonical: true },
 ]
 
 export const DOC_SCHEMA_SOURCE = { path: 'docs/operations/RESIDENT-MODE.md', regex: /^STATE_SCHEMA_VERSION = (\d+)$/m }

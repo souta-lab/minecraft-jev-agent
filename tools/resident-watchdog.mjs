@@ -165,7 +165,7 @@ export function parseRecoveryMarker(rec) {
 }
 
 // Completion evidence is deliberately narrow: movement is NOT completion
-// (buddy-driver/AGENTS.md §5). STATION_VERIFIED is excluded because the resident
+// (packages/buddy-driver/AGENTS.md §5). STATION_VERIFIED is excluded because the resident
 // emits it while enumerating known stations, not when a goal completes.
 const COMPLETION_PATTERNS = [
   /\b[A-Z][A-Z0-9_]*_DONE\b/,
@@ -523,7 +523,7 @@ export function readLogTail(logPath, { tailLines = DEFAULTS.tailLines, maxReadBy
 }
 
 function resolvePaths(opts) {
-  const logPath = opts.log !== null ? resolve(opts.log) : join(resolve(opts.root), 'buddy-driver', 'buddy.log')
+  const logPath = opts.log !== null ? resolve(opts.log) : join(resolve(opts.root), 'packages/buddy-driver', 'buddy.log')
   const pidFile = opts.pidFile !== null ? resolve(opts.pidFile) : join(dirname(logPath), 'data', 'resident', 'host.lock')
   return { logPath, pidFile }
 }
@@ -711,8 +711,8 @@ Usage:
 
 Options:
   --log PATH            resident log to read
-                        (default <root>/buddy-driver/buddy.log)
-  --root PATH           resident tree root whose buddy-driver/buddy.log and
+                        (default <root>/packages/buddy-driver/buddy.log)
+  --root PATH           resident tree root whose packages/buddy-driver/buddy.log and
                         data/resident/host.lock are used (default ${DEFAULT_ROOT})
   --stall-minutes N     no-position-change threshold (default ${DEFAULTS.stallMinutes})
   --stall-marker-count N  repeated LOCAL_PROGRESS_STALL lines that mean FROZEN

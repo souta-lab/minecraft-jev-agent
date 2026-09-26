@@ -107,7 +107,7 @@ the clientbound-teleport reply writes the server's target into `lastSent`, and
 `updatePosition` re-sends on any exact inequality instead of vanilla's `2e-4`
 threshold. `patches/mineflayer-4.39.0-locomotion.patch` ports the two changes that
 the upstream PR #4063 ablation attributes the fix to (L and K in
-`mcbot/movement-test/README.md` §7). `scripts/apply-movement-patch.mjs` applies it
+`packages/mcbot/movement-test/README.md` §7). `scripts/apply-movement-patch.mjs` applies it
 idempotently and is wired into `postinstall`, so the patch survives `bun install`:
 
 ```bash
@@ -333,7 +333,7 @@ re-validates the log-anchored `MOVE` against `state.blocks`.
 Reproduce with:
 
 ```bash
-cd /home/s0u7a/mc-ai/jev-agent
+cd /home/s0u7a/mc-ai/packages/jev-agent
 bun demo.mts --username AI_M32 --seconds 60 --settle 9000 --log-dir logs/m0-final
 ```
 

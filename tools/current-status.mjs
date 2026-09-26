@@ -22,7 +22,7 @@ import { FAIL, INFRA_UNKNOWN, PASS, readCiStatus } from './ci-classify.mjs'
 
 export const CODE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const DEFAULT_RUNTIME_ROOT = CODE_ROOT
-export const RESIDENT_SOCKET = join(CODE_ROOT, 'buddy-driver', 'data', 'resident', 'control.sock')
+export const RESIDENT_SOCKET = join(CODE_ROOT, 'packages/buddy-driver', 'data', 'resident', 'control.sock')
 export const RESIDENT_TIMEOUT_MS = 2000
 
 /**
@@ -33,7 +33,7 @@ export const RESIDENT_TIMEOUT_MS = 2000
 export function resolveResidentSocket({ runtimeRoot = DEFAULT_RUNTIME_ROOT, residentSocket = null } = {}) {
   if (typeof residentSocket === 'string' && residentSocket.length > 0) return resolve(residentSocket)
   if (typeof runtimeRoot !== 'string' || runtimeRoot.length === 0) return RESIDENT_SOCKET
-  return join(resolve(runtimeRoot), 'buddy-driver', 'data', 'resident', 'control.sock')
+  return join(resolve(runtimeRoot), 'packages/buddy-driver', 'data', 'resident', 'control.sock')
 }
 
 export function formatCommand(command, args = []) {

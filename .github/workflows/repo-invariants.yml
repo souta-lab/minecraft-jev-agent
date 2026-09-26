@@ -60,13 +60,13 @@ jobs:
       - name: Verify movement patch
         run: bun run movement-patch:check
       - name: Resident typecheck
-        working-directory: buddy-driver
+        working-directory: packages/buddy-driver
         run: bun run typecheck
       - name: System2 and Jev authority swap points
-        working-directory: buddy-driver
+        working-directory: packages/buddy-driver
         run: bun run authority-test
       - name: Jev-owned anti-flap commitment
-        working-directory: jev-agent
+        working-directory: packages/jev-agent
         run: bun test ./test-anti-flap.mts
 
   core-deterministic:
@@ -74,7 +74,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: jev-agent
+        working-directory: packages/jev-agent
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -106,7 +106,7 @@ jobs:
     timeout-minutes: 8
     defaults:
       run:
-        working-directory: jev-harness
+        working-directory: packages/jev-harness
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -122,14 +122,14 @@ jobs:
         run: bun test --timeout=120000 --max-concurrency=1 ./bun-tests
       - name: Jev import firewall (section 22 I1/I10)
         working-directory: .
-        run: bun jev-harness/tools/firewall.ts
+        run: bun packages/jev-harness/tools/firewall.ts
 
   system2-harness:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     defaults:
       run:
-        working-directory: system2-harness
+        working-directory: packages/system2-harness
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

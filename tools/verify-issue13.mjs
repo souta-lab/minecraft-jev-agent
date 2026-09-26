@@ -13,8 +13,8 @@ import net from 'node:net'
 import { existsSync, readFileSync } from 'node:fs'
 import { inspectGenerationCallbackLog } from './issue13-evidence.mjs'
 
-const SOCK = process.env.BUDDY_CONTROL_SOCKET || '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
-const LOG_PATH = process.env.BUDDY_LOG_PATH || 'buddy-driver/buddy.log'
+const SOCK = process.env.BUDDY_CONTROL_SOCKET || '/home/s0u7a/mc-ai/packages/buddy-driver/data/resident/control.sock'
+const LOG_PATH = process.env.BUDDY_LOG_PATH || 'packages/buddy-driver/buddy.log'
 const args = process.argv.slice(2)
 
 function valueAfter(flag) {

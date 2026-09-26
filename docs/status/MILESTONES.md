@@ -56,10 +56,10 @@ Known gaps to implement for M1 (blockers):
   - no inventory-derived subgoal progress tracking (counts from `bot.inventory`)
   - no goal/subgoal queue consumed by the policy (the LLM plan JSON shape is already specified)
 
-Sequencing: do NOT edit jev-agent/src concurrently with the in-flight M0 fix run; M1 implementation starts once the M0 fix lands (walking + MOVE candidates verified).
+Sequencing: do NOT edit packages/jev-agent/src concurrently with the in-flight M0 fix run; M1 implementation starts once the M0 fix lands (walking + MOVE candidates verified).
 
 ## M0 result: PASS (verified)
-Evidence dir: /home/s0u7a/mc-ai/jev-agent/logs/m0-final/
+Evidence dir: /home/s0u7a/mc-ai/packages/jev-agent/logs/m0-final/
   target MOVE:b19_63_-65 (5.52m, out of reach) -> walked -> path_completed -> MINE:b19_63_-65
   -> blockRemoved=true dropObserved=true oak_log_in_inventory=1 -> stopped success=true verifiedDigs=1
   cost $0.000407 | 2 Jev calls (610/493 ms) | forcedRepositions=1 (0 during the walk)
@@ -72,7 +72,7 @@ Invariants verified: pinned mineflayer, canDig=false, single-action ownership, g
   CAUTION: src/ is being concurrently rewritten by the M1 task; `bun run typecheck` was reported with 7 transient errors
   (controller.ts, system2.ts, data/probe-walk.mts) at one point - re-verify typecheck before trusting any M1 evidence.
 
-## M1 result: PASS (5/5 acceptance) - evidence in /home/s0u7a/mc-ai/jev-agent/logs/m1-final/
+## M1 result: PASS (5/5 acceptance) - evidence in /home/s0u7a/mc-ai/packages/jev-agent/logs/m1-final/
 
 Canonical run (`m1.mts`, log dir `logs/m1-final/`, console also saved as
 `logs/m1-final-console.5of5.inherited.log`):
@@ -130,7 +130,7 @@ REMAINING GAP (exact): VERTICAL MOVEMENT is still unfixed at the server/movement
   plan can proceed.
 
 ## V1 (vertical movement) result: DONE - the terrain blocker is closed
-Ported the proven recipe from `mcbot/movement-test/vertical.mjs#navigateTo` into `src/executor.ts`:
+Ported the proven recipe from `packages/mcbot/movement-test/vertical.mjs#navigateTo` into `src/executor.ts`:
   - `scanAhead()` / `surfaceBlockAt()`: look 0.8-2.8 m along travel; a 1-2 block surface rise within ~2.2 m while
     grounded and not colliding triggers a pre-emptive jump WITH forward held (jump before packet-level contact).
   - pinned recovery: vertical hop first (forward released, ~180 ms), then push forward while airborne; if still
@@ -228,7 +228,7 @@ The following sections document the old furnace/charcoal/iron-pickaxe milestone.
 They remain useful regression evidence but are not the current M2 definition.
 
 ### Historical M2 - IN PROGRESS, blocker = drop pickup / packet locomotion
-Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md, runs in jev-agent/logs/m2-s1-m1{,b,c}/, logs/m2-s2-resource-probe.log, logs/m2-s3-ladder/.
+Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md, runs in packages/jev-agent/logs/m2-s1-m1{,b,c}/, logs/m2-s2-resource-probe.log, logs/m2-s3-ladder/.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5):
   - WEDGE DETECTOR in controller: abort when one action id is chosen >5x or goal progress stays 0 >60s;
@@ -252,7 +252,7 @@ lava n=0 near spawn. So iron/diamond legs additionally need proven vertical MINE
 end to end. M4 (Ender Dragon) stays deferred.
 
 ## M2 S3 (STOCK-FIRST MOVEMENT + R2/R3 attempt)
-Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md "AUDIT S3" section; logs in jev-agent/logs/stock-move/ and logs/m2-r2r3/.
+Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md "AUDIT S3" section; logs in packages/jev-agent/logs/stock-move/ and logs/m2-r2r3/.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9):
   - MOVEMENT IS STOCK-FIRST (user's standing rule): default actuation is `pathfinder`; `Executor.pathTo`
@@ -274,8 +274,8 @@ subgoals were never offered. Jev calls=6 (llm.called=0/6, runtimeCalls=0 planCal
 ($0.000110/call), wedgeAborts=1.
 
 ## M2 S4 (LOCOMOTION HEADROOM/STEP-UP FIX - landed; R2/R3 still blocked on candidate reachability)
-Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md "AUDIT S4"; live runs jev-agent/logs/m2-r2r3-fix{,2,3}/ and
-jev-agent/logs/dep-escape-agent.log; agent-level test movement-agent-test.mts.
+Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md "AUDIT S4"; live runs packages/jev-agent/logs/m2-r2r3-fix{,2,3}/ and
+packages/jev-agent/logs/dep-escape-agent.log; agent-level test movement-agent-test.mts.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9):
   - `Executor.headroomAt()` now measures the TWO cells above the feet block with `Math.floor(feet)`.
@@ -533,7 +533,7 @@ step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present
 ## M2 three-blocker fix round (2026-09-18) — canopy clearance + pickup + phased ledger
 
 Evidence: `/home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md` "THREE-BLOCKER FIX ROUND"; runs in
-`jev-agent/logs/m2-phase1{,b,c,d,e}/` and the M1 attempts `logs/m1-phase-check{,2}/`.
+`packages/jev-agent/logs/m2-phase1{,b,c,d,e}/` and the M1 attempts `logs/m1-phase-check{,2}/`.
 
 ### Fix 1 — canopy-pocket ceiling MINE (LIVE-PROVEN)
 `src/state.ts` `headroomCuts` (feet+1/feet+2 solid, diggable, non-hazard, 3x3 footprint, own column

@@ -263,7 +263,7 @@ The first five mandatory scenario proofs are:
 4. Smelt may remain OBSERVING while the body leaves.
 5. World/dimension/epoch/prerequisite invalidation prevents stale resume.
 
-The model in `architecture/v4.1/model.test.ts` exercises these and additional concurrency invariants without Minecraft.
+The model in `packages/kernel/v4.1/model.test.ts` exercises these and additional concurrency invariants without Minecraft.
 
 ## 27. Migration strategy
 
@@ -487,11 +487,11 @@ A future discovery in these classes should trigger architecture review rather th
 
 **Changed from V4 / Reach proof:** single active contract -> Active Transition Registry; safety terminal -> suspend/Viability/resume when recoverable; lease/generation removed from semantic contract identity; global actuation ownership -> resource/effect bundles; one decision timescale -> four explicit scales; transition SUCCESS causality -> verification plus `self/shared/external` credit; long-running waiting -> OBSERVING/BLOCKED lifecycle; scheduler priority -> priority + urgency/deadline + fairness + preemption rules.
 
-**Repository evidence inspected:** `AGENTS.md`; historical `docs/history/architecture/ARCHITECTURE.md`, `docs/operations/RESIDENT-MODE.md`, `docs/decision/PLANNERS.md`; `jev-harness/{contract,identity,harness}.ts`; `jev-agent/src/{controller-legacy,executor,goalQueue,optionSpec,scheduler,actuationPort,worldMemory,combatClosure,crafting,containerAccess,netherPortalPlan,prereqOption}.ts`; HOST world/generation fencing; and the read-only Reach VTR acceptance integration including `vtr/reach*.ts` and its Minecraft runtime adapter.
+**Repository evidence inspected:** `AGENTS.md`; historical `docs/history/architecture/ARCHITECTURE.md`, `docs/operations/RESIDENT-MODE.md`, `docs/decision/PLANNERS.md`; `packages/jev-harness/{contract,identity,harness}.ts`; `packages/jev-agent/src/{controller-legacy,executor,goalQueue,optionSpec,scheduler,actuationPort,worldMemory,combatClosure,crafting,containerAccess,netherPortalPlan,prereqOption}.ts`; HOST world/generation fencing; and the read-only Reach VTR acceptance integration including `vtr/reach*.ts` and its Minecraft runtime adapter.
 
 **Jev usage audit:** repository code and external examples were searched before defining the V4.1 frame. Observed usage consistently supplies shared structured state and typed bounded questions, can batch questions, and returns structured probabilities/choices/scores. V4.1 therefore treats Jev as a fast typed judgment plane whose outputs remain stale-fenced and deterministically admitted.
 
-Executable prototype: `architecture/v4.1/model.ts`.
-Executable acceptance tests: `architecture/v4.1/model.test.ts`.
-Machine-oriented invariants: `architecture/v4.1/INVARIANTS.md`.
-Counterexample suite: `architecture/v4.1/ADVERSARIAL-SCENARIOS.md`.
+Executable prototype: `packages/kernel/v4.1/model.ts`.
+Executable acceptance tests: `packages/kernel/v4.1/model.test.ts`.
+Machine-oriented invariants: `docs/packages/kernel/v4.1/INVARIANTS.md`.
+Counterexample suite: `packages/kernel/v4.1/ADVERSARIAL-SCENARIOS.md`.

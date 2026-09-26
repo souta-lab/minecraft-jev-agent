@@ -353,7 +353,7 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     result: 'PASS',
     sourceSha: SOURCE,
     test: {
-      path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
+      path: 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
       name: 'production Reach dispatch and legacy Executor claim cannot overlap body authority',
       sourceSha256: tamperFixtureSourceHash ? 'f'.repeat(64) : digest(authorityFixtureSourceBytes),
     },

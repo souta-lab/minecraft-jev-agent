@@ -256,7 +256,7 @@ Provider / integration sources:
 Repository evidence:
 
 - GitHub issue **#360** — `recover_vertical_access` live oscillation audit.
-- `buddy-driver/logs/jev/run.jsonl` for the measured Jev π/β activity described in §8.
+- `packages/buddy-driver/logs/jev/run.jsonl` for the measured Jev π/β activity described in §8.
 
 ## 12. One-line summary
 

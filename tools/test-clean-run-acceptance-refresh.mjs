@@ -12,7 +12,7 @@ const RUN = 'run-refresh-fixture'
 function root() {
   const path = mkdtempSync(join(tmpdir(), 'clean-run-acceptance-refresh-'))
   ROOTS.push(path)
-  mkdirSync(join(path, 'buddy-driver', 'data', 'resident'), { recursive: true })
+  mkdirSync(join(path, 'packages/buddy-driver', 'data', 'resident'), { recursive: true })
   return path
 }
 function listen(path, handler) {
@@ -27,7 +27,7 @@ function close(server) {
 }
 function makeReplyServer(rootDir, { runId = RUN, sourceSha = SOURCE_SHA, ok = true, reportedPath = null } = {}) {
   const socketPath = join(rootDir, 'control.sock')
-  const expectedPath = join(rootDir, 'buddy-driver', 'data', 'resident', `acceptance-${RUN}.json`)
+  const expectedPath = join(rootDir, 'packages/buddy-driver', 'data', 'resident', `acceptance-${RUN}.json`)
   return listen(socketPath, (socket) => {
     let buffer = ''
     socket.on('data', (chunk) => {
@@ -53,7 +53,7 @@ function makeReplyServer(rootDir, { runId = RUN, sourceSha = SOURCE_SHA, ok = tr
   assert.equal(result.status, 'VERIFIED')
   assert.equal(result.runId, RUN)
   assert.equal(result.sourceSha, SOURCE_SHA)
-  assert.equal(result.path, resolve(rootDir, 'buddy-driver', 'data', 'resident', `acceptance-${RUN}.json`))
+  assert.equal(result.path, resolve(rootDir, 'packages/buddy-driver', 'data', 'resident', `acceptance-${RUN}.json`))
   await close(server)
   console.log('  ok - query sends only cmd=acceptance and verifies same-run/source HOST artifact')
 }

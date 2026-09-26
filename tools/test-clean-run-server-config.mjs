@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cleanRunAcceptanceWorldIdentity, cleanRunServerConfigAtBoot } from '../buddy-driver/clean-run-server-config.ts'
+import { cleanRunAcceptanceWorldIdentity, cleanRunServerConfigAtBoot } from '../packages/buddy-driver/clean-run-server-config.ts'
 import { checkRunEvidence } from './clean-run-environment.mjs'
 import { buildLeafStartupAttestation } from './clean-run-server-launch.mjs'
 import { expectedLeafLaunchIdentity, expectedRuntimeServerProperties, inspectJavaRuntime, parseServerProperties, sha256Text } from './clean-run-server-config.mjs'
@@ -13,7 +13,7 @@ const TEMPLATE = new URL('./fixtures/m3-clean-environment.json', import.meta.url
 const SOURCE_SHA = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd'
 const RUN_ID = 'run-startup-config-fixture'
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'clean-run-server-config-'))
-const agentRunnerSource = readFileSync(new URL('../buddy-driver/agent-runner.mts', import.meta.url), 'utf8')
+const agentRunnerSource = readFileSync(new URL('../packages/buddy-driver/agent-runner.mts', import.meta.url), 'utf8')
 
 function asProperties(values) {
   return `${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`

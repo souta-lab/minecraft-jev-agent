@@ -36,7 +36,7 @@ export function parseArgs(argv) {
   return {
     ...options,
     root,
-    socket: resolve(options.socket ?? join(root, 'buddy-driver', 'data', 'resident', 'control.sock')),
+    socket: resolve(options.socket ?? join(root, 'packages/buddy-driver', 'data', 'resident', 'control.sock')),
     sourceSha: options.sourceSha.toLowerCase(),
   }
 }
@@ -91,8 +91,8 @@ export async function refreshAcceptance({ root = REPO_ROOT, socketPath = null, r
   if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) throw new Error('an exact runId is required')
   if (typeof sourceSha !== 'string' || !SHA_RE.test(sourceSha)) throw new Error('the expected source SHA must be 40 hexadecimal characters')
   const resolvedRoot = resolve(root)
-  const resolvedSocket = resolve(socketPath ?? join(resolvedRoot, 'buddy-driver', 'data', 'resident', 'control.sock'))
-  const expectedArtifactPath = resolve(join(resolvedRoot, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`))
+  const resolvedSocket = resolve(socketPath ?? join(resolvedRoot, 'packages/buddy-driver', 'data', 'resident', 'control.sock'))
+  const expectedArtifactPath = resolve(join(resolvedRoot, 'packages/buddy-driver', 'data', 'resident', `acceptance-${runId}.json`))
   const requestId = `clean-run-${randomUUID()}`
   const response = await requestAcceptance({ socketPath: resolvedSocket, requestId, timeoutMs, connect })
   const reportedPath = response?.data?.path

@@ -27,12 +27,12 @@ const addCase = (name: string, run: Case['run']): void => {
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const ROOT = resolve(HERE, '..')
+const ROOT = resolve(HERE, '..', '..')
 const CHECKER = join(ROOT, 'tools', 'check-contract-docs.mjs')
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')
 
 function codeValue(): number {
-  const match = /export const CONTRACT_VERSION = (\d+)/.exec(read('buddy-driver/resident-types.ts'))
+  const match = /export const CONTRACT_VERSION = (\d+)/.exec(read('packages/buddy-driver/resident-types.ts'))
   if (match === null || match[1] === undefined) throw new Error('CONTRACT_VERSION not found in resident-types.ts')
   return Number(match[1])
 }
@@ -88,9 +88,9 @@ addCase('b3. simulated override equal to the code value still exits 0', () => {
 // (c1) every code definition site carries one value ---------------------------
 addCase('c1. all CONTRACT_VERSION definition sites carry the same value', () => {
   const sites: { rel: string; regex: RegExp }[] = [
-    { rel: 'buddy-driver/resident-types.ts', regex: /export const CONTRACT_VERSION = (\d+)/ },
-    { rel: 'buddy-driver/generation-entry.ts', regex: /export const CONTRACT_VERSION = (\d+)/ },
-    { rel: 'buddy-driver/agent-runner.mts', regex: /^const CONTRACT_VERSION = (\d+)/m },
+    { rel: 'packages/buddy-driver/resident-types.ts', regex: /export const CONTRACT_VERSION = (\d+)/ },
+    { rel: 'packages/buddy-driver/generation-entry.ts', regex: /export const CONTRACT_VERSION = (\d+)/ },
+    { rel: 'packages/buddy-driver/agent-runner.mts', regex: /^const CONTRACT_VERSION = (\d+)/m },
   ]
   const values = sites.map((site) => {
     const match = site.regex.exec(read(site.rel))
@@ -102,8 +102,8 @@ addCase('c1. all CONTRACT_VERSION definition sites carry the same value', () => 
 
 // (c2) mismatch is logged with both versions ----------------------------------
 addCase('c2. host reload-refusal logs ERROR + RELOAD_REJECTED + RELOAD ok=false with both versions', () => {
-  const runner = read('buddy-driver/agent-runner.mts')
-  const readiness = read('buddy-driver/generation-connection-gate.ts')
+  const runner = read('packages/buddy-driver/agent-runner.mts')
+  const readiness = read('packages/buddy-driver/generation-connection-gate.ts')
   const mismatch = generationModuleReadinessError({ CONTRACT_VERSION: 2, createGeneration: () => ({}) }, 3)
   const rendered = mismatch ?? ''
   const templateHits = (readiness.match(/CONTRACT_VERSION mismatch: generation=/g) ?? []).length
@@ -121,8 +121,8 @@ addCase('c2. host reload-refusal logs ERROR + RELOAD_REJECTED + RELOAD ok=false 
 
 // (c3) status/report/acceptance expose contractVersion ------------------------
 addCase('c3. report/status, acceptance and generation status expose contractVersion', () => {
-  const runner = read('buddy-driver/agent-runner.mts')
-  const gen = read('buddy-driver/generation-entry.ts')
+  const runner = read('packages/buddy-driver/agent-runner.mts')
+  const gen = read('packages/buddy-driver/generation-entry.ts')
   const runnerCount = (runner.match(/contractVersion: CONTRACT_VERSION/g) ?? []).length
   const genCount = (gen.match(/contractVersion: CONTRACT_VERSION/g) ?? []).length
   const pass = runnerCount >= 3 && genCount >= 1

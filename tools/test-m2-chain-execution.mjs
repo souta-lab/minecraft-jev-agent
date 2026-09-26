@@ -148,7 +148,7 @@ const mergeDeltas = (id) => {
   }
   // The formatter + its call site are PROBED in the source, so a rename or a
   // removed call is a GAP rather than a stale claim in a comment.
-  const executor = read('jev-agent/src/executor.ts')
+  const executor = read('packages/jev-agent/src/executor.ts')
   assert.match(
     executor,
     /export function formatCraftLog\(event: 'CRAFT_DONE' \| 'CRAFT_FAILED', detail: Record<string, unknown>\): string \{/,
@@ -166,7 +166,7 @@ const mergeDeltas = (id) => {
   )
   // …and both must be on the MIRRORED path, or a run-scoped artifact still
   // cannot see them.
-  const controller = read('jev-agent/src/controller-legacy.ts')
+  const controller = read('packages/jev-agent/src/controller-legacy.ts')
   const mirror = /const MIRRORED_MARKERS[\s\S]*?\n\]\)/.exec(controller)
   assert.notEqual(mirror, null, 'MIRRORED_MARKERS block found')
   assert.match(mirror[0], /'CRAFT_DONE'/)

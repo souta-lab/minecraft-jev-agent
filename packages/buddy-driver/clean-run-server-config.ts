@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
-import { assertExactLeafArgv, compareRuntimeServerProperties, expectedLeafLaunchIdentity, expectedLeafServerArgs, parseServerProperties } from '../tools/clean-run-server-config.mjs'
+import { assertExactLeafArgv, compareRuntimeServerProperties, expectedLeafLaunchIdentity, expectedLeafServerArgs, parseServerProperties } from '../../tools/clean-run-server-config.mjs'
 
 type Plain = Record<string, unknown>
 

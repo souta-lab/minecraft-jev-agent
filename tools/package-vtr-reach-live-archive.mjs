@@ -32,7 +32,7 @@ const PROVIDER_ARCHIVE_PATHS = Object.freeze({
 const PROVIDER_JOURNALS = Object.freeze(Object.keys(PROVIDER_ARCHIVE_PATHS))
 const AUTHORITY_FIXTURE_REPORT_PATH = 'proofs/no-double-authority-fixture.json'
 const AUTHORITY_FIXTURE_SOURCE_PATH = 'runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts'
-const AUTHORITY_FIXTURE_TEST_PATH = 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts'
+const AUTHORITY_FIXTURE_TEST_PATH = 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts'
 const AUTHORITY_FIXTURE_TEST_NAME = 'production Reach dispatch and legacy Executor claim cannot overlap body authority'
 const REQUIRED_ARCHIVE_PATHS = Object.freeze([
   'runner/acceptance.json',
@@ -109,7 +109,7 @@ libc-interposition evidence and makes no kernel isolation claim.
 
 The legacy-claim exclusion fixture is a separate source-bound proof, not a live
 counter. Supply proofs/no-double-authority-fixture.json emitted by
-jev-agent/test-vtr-reach-executor-dispatch-authority.mts and its exact source at
+packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts and its exact source at
 runner/fixtures/test-vtr-reach-executor-dispatch-authority.mts. The adapter
 checks the test source hash and recorded refusal/owner/pathfinder observations;
 fixture conflict counts do not alter the live run's duplicate-authority zero.

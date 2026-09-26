@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Whole-corpus sweep of jev-agent/test-*.mts for the attack-position lane.
+# Whole-corpus sweep of packages/jev-agent/test-*.mts for the attack-position lane.
 # Usage: bash tools/attack-position-corpus-sweep.sh <label>
 # Writes /tmp/attack-position-sweep-<label>.txt (outside the repo tree).
 set -u
 LABEL="${1:-run}"
 OUT="/tmp/attack-position-sweep-${LABEL}.txt"
-cd "$(dirname "$0")/../jev-agent" || exit 2
+cd "$(dirname "$0")/../packages/jev-agent" || exit 2
 : > "$OUT"
 for f in test-*.mts; do
   start=$(date +%s)
