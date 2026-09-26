@@ -192,13 +192,41 @@ import type {
   ReachTransitionState,
 } from './vtr/reach.ts'
 import type { ReachMissionSnapshotOptions } from './vtr/reach-mission-projection.ts'
-import { sensorOptions, candidateOptions, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
+import { sensorOptions, candidateOptions, currentFocusItem, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
 import * as diagnostics from './legacy/candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './legacy/candidate-diagnostics.ts'
 import * as portal from './legacy/portal-evidence.ts'
 import type { PortalEvidenceHost } from './legacy/portal-evidence.ts'
 import * as threat from './legacy/threat-observers.ts'
 import type { ThreatObserverHost } from './legacy/threat-observers.ts'
+import * as retrieval from './legacy/retrieval-progress.ts'
+import type { RetrievalProgressHost } from './legacy/retrieval-progress.ts'
+import {
+  DESCEND_NO_CANDIDATE_TICKS,
+  DESCEND_STALL_TICKS,
+  KNOWN_RETRIEVE_RETIRE_LIMIT,
+  RETRIEVAL_PROGRESS_EPSILON,
+  RETRIEVAL_STALL_TICKS,
+  decideKnownRetrieve,
+  filterKnownResources,
+  formatKnownResourceRetired,
+  resourceKey,
+  shouldClearActiveRetrieval,
+} from './legacy/retrieval-progress.ts'
+export {
+  KNOWN_RETRIEVE_RETIRE_LIMIT,
+  decideKnownRetrieve,
+  filterKnownResources,
+  formatKnownResourceRetired,
+  knownRetrieveMadeProgress,
+  shouldClearActiveRetrieval,
+  shouldRetireKnownRetrieve,
+} from './legacy/retrieval-progress.ts'
+export type {
+  KnownRetrieveDecision,
+  KnownRetrieveDecisionInput,
+  KnownRetrieveRetireInput,
+} from './legacy/retrieval-progress.ts'
 import * as reach from './vtr/reach-controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './vtr/reach-controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
@@ -839,13 +867,9 @@ const WAIT_REPLAN_LIMIT = 4
  */
 const SURFACE_ASCENT_IMPOSSIBLE_STREAK = 3
 /** Issue #45: an active RETRIEVE that stops closing distance for this many ticks escalates. */
-const RETRIEVAL_STALL_TICKS = resolveRetrievalStallTicks()
 /** Issue #41: a descend goal with no vertical progress for this many ticks escalates. */
-const DESCEND_STALL_TICKS = resolveDescendStallTicks()
 /** Issue #41: a descend goal with no executable descend candidate this long escalates. */
-const DESCEND_NO_CANDIDATE_TICKS = resolveDescendNoCandidateTicks()
 /** Distance decrease (m) that counts as real retrieval progress. */
-const RETRIEVAL_PROGRESS_EPSILON = 0.5
 /** Issue #8: failed attempts at one coordinate before it is blacklisted. */
 // Below this windowed locomotion efficiency a verified MOVE is mechanical success
 // without progress, so it must not clear the failure memory (issue #360).
@@ -929,19 +953,7 @@ export function guardMoveFailureReason(
  * Bounded like UNVERIFIED_ACTION_LIMIT: the retrieve already proved it closed no
  * distance, gained no altitude and dug no step.
  */
-export const KNOWN_RETRIEVE_RETIRE_LIMIT = 2
 
-export interface KnownRetrieveRetireInput {
-  /** `candidate.meta.retrieval` (`known` for a durable remembered resource) */
-  retrieval: unknown
-  /** the remembered resource cell */
-  target: Vec3Json | null
-  /** the retrieve finished `done`/`verified` (a real arrival / climb chunk) */
-  verified: boolean
-  /** consecutive zero-progress retrieves for this resource INCLUDING this one */
-  attempts: number
-  limit?: number
-}
 
 /**
  * A remembered resource can be PRESENT yet unreachable (a y=68 log from y=59
@@ -952,12 +964,6 @@ export interface KnownRetrieveRetireInput {
  * same unreachable list. Retire the resource after a bounded number of
  * zero-progress retrieves so the generator moves to the next resource / branch.
  */
-export function shouldRetireKnownRetrieve(input: KnownRetrieveRetireInput): boolean {
-  if (input.retrieval !== 'known') return false
-  if (input.target === null) return false
-  if (input.verified) return false
-  return input.attempts >= Math.max(1, Math.floor(input.limit ?? KNOWN_RETRIEVE_RETIRE_LIMIT))
-}
 
 /**
  * Live iron-ore loop (run-mu8a7phm-rfm0): the executor reports
@@ -975,39 +981,9 @@ export function shouldRetireKnownRetrieve(input: KnownRetrieveRetireInput): bool
  * already uses the exact same criterion for the move-failure memory; the
  * retirement counter must agree with it.
  */
-export function knownRetrieveMadeProgress(
-  result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>,
-): boolean {
-  return result.status === 'done' && result.verified && hasObservableProgress(result)
-}
 
 /** What `retireFailedKnownRetrieve` must do with one finished known-resource retrieve. */
-export type KnownRetrieveDecision =
-  | { kind: 'ignore' }
-  | { kind: 'clear' }
-  | { kind: 'charge'; attempts: number }
-  | { kind: 'retire'; attempts: number }
 
-export interface KnownRetrieveDecisionInput {
-  /** `candidate.meta.retrieval` (`known` for a durable remembered resource) */
-  retrieval: unknown
-  /** the remembered resource cell */
-  target: Vec3Json | null
-  /** the finished executor result */
-  result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>
-  /** consecutive zero-progress retrieves for this resource BEFORE this one */
-  previousAttempts: number
-  limit?: number
-  /**
-   * Whether this retrieve actually COMPLETED: the target arrived or the item
-   * was acquired (`retrieveCompleted`). A measured distance closure or a
-   * bounded vertical chunk (`progressed`) is durable body evidence, never
-   * completion - the counter must be CHARGED for it (RC8: `21.69m->20.42m`
-   * repeatedly, no station arrival). When omitted, the observable-progress
-   * proxy `knownRetrieveMadeProgress` is used for direct pure callers.
-   */
-  completed?: boolean
-}
 
 /**
  * Pure decision the controller applies to every finished known-resource
@@ -1021,20 +997,6 @@ export interface KnownRetrieveDecisionInput {
  * `completed` is supplied by `retrieveCompleted` (arrival or acquisition); the
  * `knownRetrieveMadeProgress` fallback keeps the direct pure callers' contract.
  */
-export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRetrieveDecision {
-  if (input.retrieval !== 'known' || input.target === null) return { kind: 'ignore' }
-  const completed = input.completed ?? knownRetrieveMadeProgress(input.result)
-  if (completed) return { kind: 'clear' }
-  const attempts = input.previousAttempts + 1
-  const retire = shouldRetireKnownRetrieve({
-    retrieval: input.retrieval,
-    target: input.target,
-    verified: false,
-    attempts,
-    limit: input.limit,
-  })
-  return retire ? { kind: 'retire', attempts } : { kind: 'charge', attempts }
-}
 
 /**
  * May a finished RETRIEVE clear the controller's active-retrieval stall track?
@@ -1049,15 +1011,6 @@ export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRet
  * waypoints are a separate search frontier and never own an active resource
  * stall track, so they must not clear this memory.
  */
-export function shouldClearActiveRetrieval(input: {
-  retrieval: unknown
-  hasObservableProgress: boolean
-  arrived: boolean
-}): boolean {
-  if (!input.hasObservableProgress) return false
-  if (input.retrieval !== 'known') return false
-  return input.arrived
-}
 
 /**
  * The one boundary between a finished RETRIEVE and the movement failure memory.
@@ -1131,17 +1084,8 @@ export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | und
   return op
 }
 
-function resourceKey(resource: { name: string; position: Vec3Json }): string {
-  return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
-}
 
 /** Drop resources the controller has proven unreachable for the current plan. */
-export function filterKnownResources(
-  resources: readonly KnownResource[],
-  unreachable: ReadonlySet<string>,
-): KnownResource[] {
-  return resources.filter((resource) => !unreachable.has(resourceKey(resource)))
-}
 
 /**
  * `KNOWN_RESOURCE_FALSIFIED item=<item> name=<name> cell=<x,y,z> reason=<reason>`.
@@ -1178,9 +1122,6 @@ export function formatKnownResourceResighted(
  * but this body could not close it: retirement is per-cell and unrelated to the
  * falsification reasons above (a merely unreachable resource is not disproved).
  */
-export function formatKnownResourceRetired(item: string, cell: Vec3Json, attempts: number): string {
-  return `KNOWN_RESOURCE_RETIRED item=${item} cell=${cell.x},${cell.y},${cell.z} attempts=${attempts}`
-}
 
 /** Dedupe state for remembered-cell verdict lines (one per generation). */
 export interface KnownResourceVerdictLatch {
@@ -2988,6 +2929,11 @@ export class JevController {
   /** ThreatObserverHost view of this controller (same structural-cast pattern as reachHost). */
   private get threatHost(): ThreatObserverHost {
     return this as unknown as ThreatObserverHost
+  }
+
+  /** RetrievalProgressHost view of this controller (same structural-cast pattern as reachHost). */
+  private get retrievalHost(): RetrievalProgressHost {
+    return this as unknown as RetrievalProgressHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -10023,9 +9969,7 @@ export class JevController {
 
   /** A pillar ascent attempt that did not verify is a refused ascend. */
   private noteAscendOutcome(result: ExecutionResult, candidate: Candidate): void {
-    if (candidate.meta.vertical !== 'pillar') return
-    if (result.status === 'done' && result.verified) return
-    this.ascendRefusedSinceObservation = true
+    return retrieval.noteAscendOutcome(this.retrievalHost, result, candidate)
   }
 
   /**
@@ -10041,56 +9985,11 @@ export class JevController {
    * run's stall clock so a long climb is never abandoned mid-ascent.
    */
   private observeRetrievalStall(): void {
-    const active = this.activeRetrieval
-    const entity = this.bot.entity
-    if (active === null || entity === undefined) {
-      this.retrievalTrack = null
-      return
-    }
-    if (this.goal.complete || this.unreachableResources.has(this.retrievalKey(active))) {
-      this.activeRetrieval = null
-      this.retrievalTrack = null
-      return
-    }
-    const current = Math.hypot(
-      entity.position.x - active.target.x,
-      entity.position.y - active.target.y,
-      entity.position.z - active.target.z,
-    )
-    const verticalGap = Math.abs(entity.position.y - active.target.y)
-    if (this.retrievalTrack === null || this.retrievalTrack.id !== active.id) {
-      this.retrievalTrack = { id: active.id, best: current, ticks: 0, bestGap: verticalGap }
-      return
-    }
-    const previousBestGap = this.retrievalTrack.bestGap
-    const decision = evaluateRetrievalProgress({
-      previous: {
-        best: this.retrievalTrack.best,
-        ticks: this.retrievalTrack.ticks,
-        bestGap: previousBestGap,
-      },
-      distance: current,
-      verticalGap,
-      verticalEpsilon: ASCENT_PROGRESS_EPSILON,
-      epsilon: RETRIEVAL_PROGRESS_EPSILON,
-      stallTicks: RETRIEVAL_STALL_TICKS,
-    })
-    this.retrievalTrack.best = decision.best
-    this.retrievalTrack.ticks = decision.ticks
-    this.retrievalTrack.bestGap = decision.bestGap
-    // Altitude gain is real progress for the whole run too: a 56-block climb
-    // does not move the goal inventory, so without this the wedge clock would
-    // keep aging while the bot is demonstrably ascending.
-    const altitudeImproved =
-      decision.outcome === 'progress' &&
-      previousBestGap !== undefined &&
-      verticalGap <= previousBestGap - ASCENT_PROGRESS_EPSILON
-    if (altitudeImproved) this.lastProgressAt = Date.now()
-    if (decision.outcome === 'stalled') this.onRetrievalStall(active, current)
+    return retrieval.observeRetrievalStall(this.retrievalHost)
   }
 
   private retrievalKey(active: { knownName: string; target: Vec3Json }): string {
-    return resourceKey({ name: active.knownName, position: active.target })
+    return retrieval.retrievalKey(this.retrievalHost, active)
   }
 
   /**
@@ -10102,167 +10001,29 @@ export class JevController {
    * goal. Tracking resets whenever the goal changes or is satisfied.
    */
   private observeDescendProgress(candidates: readonly Candidate[]): void {
-    const current = this.queue.current
-    const entity = this.bot.entity
-    if (current === null || current.kind !== 'descend' || typeof current.targetY !== 'number' || entity === undefined) {
-      this.resetDescendTracking()
-      return
-    }
-    const targetY: number = current.targetY
-    const y = entity.position.y
-    const goalKey = `${current.id}:${targetY}`
-    if (this.descendGoalKey !== goalKey) {
-      this.descendGoalKey = goalKey
-      this.descendProgress = { bestY: y, ticks: 0 }
-      this.descendStallTicks = 0
-      this.descendProgressTicks = 0
-    }
-    const previous = this.descendProgress ?? { bestY: y, ticks: 0 }
-    const decision = evaluateDescendProgress({ previous, y, stallTicks: DESCEND_STALL_TICKS })
-    this.descendProgress = { bestY: decision.bestY, ticks: decision.ticks }
-    const delta = Math.round((decision.bestY - y) * 10) / 10
-    if (decision.outcome === 'progress') {
-      this.descendProgressTicks = 0
-      this.descendStallTicks = 0
-      this.logger.info(
-        'agent',
-        formatDescendProgress(Math.floor(y), targetY, delta, 0),
-        { y, targetY, delta, outcome: decision.outcome },
-        this.tickCounter,
-      )
-      return
-    }
-    const hasDescendCandidate = candidates.some((candidate) => candidate.kind === 'DESCEND')
-    this.descendStallTicks = hasDescendCandidate ? 0 : this.descendStallTicks + 1
-    this.descendProgressTicks += 1
-    if (this.descendProgressTicks % DESCEND_PROGRESS_LOG_TICKS === 0) {
-      this.logger.info(
-        'agent',
-        formatDescendProgress(Math.floor(y), targetY, delta, this.descendStallTicks),
-        { y, targetY, delta, hasDescendCandidate, stallTicks: this.descendStallTicks },
-        this.tickCounter,
-      )
-    }
-    const noCandidateStalled = this.descendStallTicks >= DESCEND_NO_CANDIDATE_TICKS
-    if (!noCandidateStalled && decision.outcome !== 'stalled') return
-    const stallTicks = noCandidateStalled ? this.descendStallTicks : DESCEND_STALL_TICKS
-    this.logger.warn(
-      'agent',
-      formatDescendStalled(Math.floor(y), targetY, stallTicks),
-      { y, targetY, stallTicks, hasDescendCandidate },
-      this.tickCounter,
-    )
-    // Strategy switch: forget the latched descent budget and chosen direction so
-    // the next tick can pick a different column/step. This is local mechanical
-    // recovery; a stalled actuator is not a semantic Option boundary.
-    this.digMemory.markResourceProgress()
-    this.descendProgress = { bestY: y, ticks: 0 }
-    this.descendStallTicks = 0
-    this.logger.warn(
-      'agent',
-      `LOCAL_DESCEND_STALL goal=${current.id} y=${Math.floor(y)} target_y=${targetY} ticks=${stallTicks} system2=false`,
-      { goal: current.id, y, targetY, stallTicks, boundary: 'local_recovery' },
-      this.tickCounter,
-    )
+    return retrieval.observeDescendProgress(this.retrievalHost, candidates)
   }
 
   private resetDescendTracking(): void {
-    this.descendProgress = null
-    this.descendStallTicks = 0
-    this.descendProgressTicks = 0
-    this.descendGoalKey = null
+    return retrieval.resetDescendTracking(this.retrievalHost)
   }
 
   private retrievalTargetExists(): boolean {
-    const active = this.activeRetrieval
-    if (active === null) return false
-    return (this.options.knownResources ?? []).some(
-      (resource) =>
-        resource.name === active.knownName &&
-        resource.position.x === active.target.x &&
-        resource.position.y === active.target.y &&
-        resource.position.z === active.target.z,
-    )
+    return retrieval.retrievalTargetExists(this.retrievalHost)
   }
 
   private onRetrievalStall(
     active: { id: string; resource: string; knownName: string; target: Vec3Json },
     current: number,
   ): void {
-    const ticks = RETRIEVAL_STALL_TICKS
-    this.logger.warn(
-      'agent',
-      formatRetrieveStalled(active.target, Math.round(current), ticks),
-      { target: active.target, dist: Math.round(current), ticks },
-      this.tickCounter,
-    )
-    // Issue #58: a stalled furnace-station retrieval is not an unreachable
-    // resource to give up on - it is one prereq path losing to another. Switch
-    // to the next scored path (place held / craft) and keep the parent smelt.
-    if (active.resource === 'furnace' && this.prereqPlan !== null) {
-      const next = nextPrereqPath(this.prereqPlan, 'use_known_station')
-      if (next !== null) {
-        this.logger.warn(
-          'agent',
-          formatPrereqSwitch('use_known_station', next),
-          { from: 'use_known_station', to: next, stallTicks: ticks, goal: this.currentGoalKey() },
-          this.tickCounter,
-        )
-        this.prereqForcedPath = next
-        this.prereqProgress = null
-        this.prereqLoggedKey = null
-        this.noteCandidateFailure(active.id)
-        this.digMemory.markResourceProgress()
-        this.activeRetrieval = null
-        this.retrievalTrack = null
-        return
-      }
-    }
-    this.dropUnreachableResource(active, current)
-    this.noteCandidateFailure(active.id)
-    this.digMemory.markResourceProgress()
-    this.activeRetrieval = null
-    this.retrievalTrack = null
-    this.retrievalEscalationPending = true
-    this.logger.warn(
-      'agent',
-      `LOCAL_RETRIEVAL_STALL target=${active.target.x},${active.target.y},${active.target.z} dist=${Math.round(current)} ticks=${ticks} system2=false`,
-      { target: active.target, dist: Math.round(current), ticks, boundary: 'local_recovery' },
-      this.tickCounter,
-    )
+    return retrieval.onRetrievalStall(this.retrievalHost, active, current)
   }
 
   private dropUnreachableResource(
     active: { resource: string; knownName: string; target: Vec3Json },
     current: number,
   ): void {
-    const key = this.retrievalKey(active)
-    if (this.unreachableResources.has(key)) return
-    this.unreachableResources.add(key)
-    this.logger.warn(
-      'agent',
-      formatKnownResourceUnreachable(active.resource, active.knownName, active.target),
-      { item: active.resource, name: active.knownName, at: active.target, dist: Math.round(current) },
-      this.tickCounter,
-    )
-    const entity = this.bot.entity
-    const escalation = planRetrievalEscalation({
-      failedName: active.knownName,
-      failedTarget: active.target,
-      known: this.options.knownResources ?? [],
-      self:
-        entity === undefined
-          ? { x: 0, y: 0, z: 0 }
-          : { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-    })
-    this.logger.info(
-      'agent',
-      escalation.kind === 'switch-resource'
-        ? `RETRIEVAL_ESCALATION kind=switch-resource name=${escalation.name} at=${escalation.position.x},${escalation.position.y},${escalation.position.z}`
-        : `RETRIEVAL_ESCALATION kind=branch-mine y=${escalation.y}`,
-      { escalation },
-      this.tickCounter,
-    )
+    return retrieval.dropUnreachableResource(this.retrievalHost, active, current)
   }
 
   /**
@@ -10276,47 +10037,7 @@ export class JevController {
    * partial 20 m approach both satisfy it - the live iron-ore and RC8 loops).
    */
   private retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void {
-    if (candidate.meta.retrieval !== 'known' || candidate.target === null) return
-    const knownName =
-      typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'resource'
-    const key = resourceKey({ name: knownName, position: candidate.target })
-    const decision = decideKnownRetrieve({
-      retrieval: candidate.meta.retrieval,
-      target: candidate.target,
-      result,
-      previousAttempts: this.knownRetrieveFailures.get(key) ?? 0,
-      completed: this.retrieveCompleted(candidate, result),
-    })
-    if (decision.kind === 'ignore') return
-    if (decision.kind === 'clear') {
-      this.knownRetrieveFailures.delete(key)
-      return
-    }
-    this.knownRetrieveFailures.set(key, decision.attempts)
-    if (decision.kind === 'charge') return
-    // The retire boundary is about reachability, not truth: the cell was never
-    // disproved, so it is dropped (bounded) rather than falsified. The typed
-    // marker keeps the two apart in the run log.
-    this.logger.warn(
-      'agent',
-      formatKnownResourceRetired(
-        typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
-        candidate.target,
-        decision.attempts,
-      ),
-      { item: candidate.meta.resource ?? knownName, cell: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
-      this.tickCounter,
-    )
-    this.dropUnreachableResource(
-      {
-        resource: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
-        knownName,
-        target: candidate.target,
-      },
-      this.retrievalDistance(candidate.target) ?? 0,
-    )
-    this.activeRetrieval = null
-    this.retrievalTrack = null
+    return retrieval.retireFailedKnownRetrieve(this.retrievalHost, candidate, result)
   }
 
   /**
@@ -10713,40 +10434,15 @@ export class JevController {
   }
 
   private logRetrievalAction(candidate: Candidate): void {
-    const resource = typeof candidate.meta.resource === 'string' ? candidate.meta.resource : 'unknown'
-    const at = candidate.target === null ? null : `${candidate.target.x},${candidate.target.y},${candidate.target.z}`
-    if (candidate.meta.retrieval === 'surface') {
-      this.logger.info(
-        'agent',
-        `EXPLORE kind=surface target=${resource} at=${at ?? 'unknown'}`,
-        { kind: 'surface', target: resource, at },
-        this.tickCounter,
-      )
-      return
-    }
-    const dist = this.retrievalDistance(candidate.target)
-    const vertical = typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : 'none'
-    const knownName = typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : resource
-    if (candidate.target !== null) {
-      this.activeRetrieval = { id: candidate.id, resource, knownName, target: candidate.target }
-    }
-    this.logger.info(
-      'agent',
-      `RETURN_TO_KNOWN_RESOURCE item=${resource} target=${at ?? 'unknown'} dist=${dist ?? 'unknown'} vertical=${vertical}`,
-      { item: resource, name: candidate.targetName, target: at, dist, vertical },
-      this.tickCounter,
-    )
+    return retrieval.logRetrievalAction(this.retrievalHost, candidate)
   }
 
   private retrievalDistance(target: Vec3Json | null): number | null {
-    const exact = this.retrievalDistanceExact(target)
-    return exact === null ? null : Math.round(exact)
+    return retrieval.retrievalDistance(this.retrievalHost, target)
   }
 
   private retrievalDistanceExact(target: Vec3Json | null): number | null {
-    const entity = this.bot.entity
-    if (target === null || entity === undefined) return null
-    return Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z)
+    return retrieval.retrievalDistanceExact(this.retrievalHost, target)
   }
 
   /**
@@ -10756,9 +10452,7 @@ export class JevController {
    * `shouldClearActiveRetrieval`; this only measures the live body.
    */
   private retrievalArrived(candidate: Candidate): boolean {
-    if (candidate.meta.retrieval !== 'known' || candidate.target === null) return false
-    const distance = this.retrievalDistanceExact(candidate.target)
-    return distance !== null && distance <= 2
+    return retrieval.retrievalArrived(this.retrievalHost, candidate)
   }
 
   /**
@@ -10767,22 +10461,11 @@ export class JevController {
    * must never be treated as acquisition of the parent collect Option.
    */
   private surfaceSearchArrived(candidate: Candidate): boolean {
-    if (candidate.meta.retrieval !== 'surface' || candidate.target === null) return false
-    const distance = this.retrievalDistanceExact(candidate.target)
-    return distance !== null && distance <= 2
+    return retrieval.surfaceSearchArrived(this.retrievalHost, candidate)
   }
 
   private recordSurfaceSearch(candidate: Candidate): void {
-    if (candidate.target === null) return
-    const key = surfaceSearchKey(this.currentDimension(), candidate.target)
-    if (this.searchedSurfaceTargets.has(key)) return
-    this.searchedSurfaceTargets.add(key)
-    this.logger.info(
-      'agent',
-      `SURFACE_SEARCH_RECORDED target=${candidate.target.x},${candidate.target.y},${candidate.target.z}`,
-      { target: candidate.target, key, frontier: 'advanced', resource: candidate.meta.resource ?? null },
-      this.tickCounter,
-    )
+    return retrieval.recordSurfaceSearch(this.retrievalHost, candidate)
   }
 
   /**
@@ -10796,17 +10479,7 @@ export class JevController {
    * is added here.
    */
   private retrieveCompleted(candidate: Candidate, result: ExecutionResult): boolean {
-    if (result.itemsGained > 0) return true
-    // Surface arrival proves only that a search waypoint was visited. The
-    // requested resource is still absent until the next sensor/MINE cycle.
-    if (candidate.meta.retrieval !== 'known') return false
-    const arrived = this.retrievalArrived(candidate)
-    if (arrived) return true
-    return shouldClearActiveRetrieval({
-      retrieval: candidate.meta.retrieval,
-      hasObservableProgress: hasObservableProgress(result),
-      arrived,
-    })
+    return retrieval.retrieveCompleted(this.retrievalHost, candidate, result)
   }
 
   /**
@@ -10827,15 +10500,7 @@ export class JevController {
    * the very next tick without waiting for a generation swap.
    */
   private knownResourcesForSensor(): KnownResource[] {
-    const out: KnownResource[] = []
-    const seen = new Set<string>()
-    for (const resource of [...(this.options.knownResources ?? []), ...this.placedStations]) {
-      const key = resourceKey(resource)
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push(resource)
-    }
-    return out
+    return retrieval.knownResourcesForSensor(this.retrievalHost)
   }
 
   /**
@@ -10846,12 +10511,7 @@ export class JevController {
    * same memory - verifying only the focus left that cell unproven forever.
    */
   private retrievalProbeItems(): string[] {
-    const out: string[] = []
-    const focus = currentFocusItem(this.goal, this.queue.state)
-    if (focus !== null) out.push(focus)
-    const proxy = queuedRetrievalProxyItem(this.queue.state)
-    if (proxy !== null && !out.includes(proxy)) out.push(proxy)
-    return out
+    return retrieval.retrievalProbeItems(this.retrievalHost)
   }
 
   /**
@@ -10875,25 +10535,7 @@ export class JevController {
    * fallback never runs.
    */
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
-    const keys = new Set<string>()
-    const dimension = state.self.dimension
-    const pathFailureScope = this.movePathFailureScope(state)
-    const consider = (name: string, position: Vec3Json): void => {
-      const retrieveId = `RETRIEVE:known:station:${name}:${blockId('b', position)}`
-      const withheld = this.withheldCandidateIds.has(retrieveId)
-      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, position, pathFailureScope)) return
-      keys.add(knownStationKey({ name, position }))
-    }
-    for (const resource of state.signals.knownResources ?? []) {
-      if (resource.kind === 'station') consider(resource.name, resource.position)
-    }
-    for (const station of state.furnaces ?? []) {
-      consider('furnace', station)
-    }
-    for (const station of state.craftingTables ?? []) {
-      consider('crafting_table', station)
-    }
-    return keys
+    return retrieval.unreachableStationKeys(this.retrievalHost, state)
   }
 
   /**
@@ -10903,14 +10545,7 @@ export class JevController {
    * target that filterMoveCandidates immediately removes, leaving only WAIT.
    */
   private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
-    const dimension = state.self.dimension
-    const pathFailureScope = this.movePathFailureScope(state)
-    const keys = new Set<string>()
-    for (const entry of this.moveFailMemory.snapshot()) {
-      if (entry.dimension !== dimension) continue
-      if (this.moveFailMemory.isBlacklisted(dimension, entry, pathFailureScope)) keys.add(entry.key)
-    }
-    return keys
+    return retrieval.blacklistedMoveTargets(this.retrievalHost, state)
   }
 
   private applyFurnacePrereq(
@@ -13157,10 +12792,6 @@ function goalWithHave(goal: GoalState, have: number): GoalState {
     progress: Math.min(1, have / required),
     complete: have >= required,
   }
-}
-
-function currentFocusItem(goal: GoalState, queue: GoalQueueState): string | null {
-  return queue.current?.targetItem ?? goal.targetItem ?? null
 }
 
 function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler): ExecutorOptions {

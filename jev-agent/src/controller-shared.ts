@@ -10,6 +10,8 @@ import type { DimensionProvenance, SensorOptions } from './state.ts'
 import { defaultCandidateOptions } from './candidates.ts'
 import type { CandidateOptions, ReachabilityGateOptions } from './candidates.ts'
 import type { RecipeIndex } from './crafting.ts'
+import type { GoalState } from './state.ts'
+import type { GoalQueueState } from './goalQueue.ts'
 import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
 import type { PrereqRankPolicy } from './prereqOption.ts'
 
@@ -65,3 +67,7 @@ export function candidateOptions(
 
 /** Hard upper bound for settling a committed safety Skill during model recovery. */
 export const MODEL_RECOVERY_DRAIN_GRACE_MS = 1_000
+
+export function currentFocusItem(goal: GoalState, queue: GoalQueueState): string | null {
+  return queue.current?.targetItem ?? goal.targetItem ?? null
+}
