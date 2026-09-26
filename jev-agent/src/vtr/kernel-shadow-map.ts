@@ -430,3 +430,64 @@ export type KernelShadowInput =
 
 /** Narrow sink the semantic runtime may hold; the host owns the implementation. */
 export type KernelShadowSink = (input: KernelShadowInput) => void
+
+// ---------------------------------------------------------------------------
+// V4.1.2 production-authority gate (Phase-2 cutover)
+// ---------------------------------------------------------------------------
+
+export type KernelGateVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string }
+
+export type KernelAuthorityMode = 'shadow' | 'authority'
+
+/**
+ * Host-owned kernel gate for V4.1.2 Reach production authority.
+ *
+ * Unlike the fire-and-forget `KernelShadowSink`, every call here returns the
+ * real kernel verdict and the caller MUST honor a denial by not performing the
+ * production act it gates. Ordering contract, enforced by call sequence:
+ *
+ *   admitTransition (REGISTER + mission authorize + ADMIT)
+ *     -> production controller commit
+ *   activateTransition (fresh proofs + witness + ACQUIRE_DECLARED_RESOURCES)
+ *     -> declared resource bundle is held; only now may effects be issued
+ *   issueStepEffect (ISSUE_EFFECT + BEGIN_EFFECT_DISPATCH)
+ *     -> typed adapter mutation for exactly one physical leg
+ *   settleStepEffect (RECONCILE_EFFECT + DEBIT_USAGE)
+ *   terminalize (VERIFY_SUCCESS for SUCCESS; typed/stand-in closure otherwise)
+ *
+ * A denied verdict is terminal for the gated act, never a request to try the
+ * same thing through a legacy path.
+ */
+export interface KernelReachAuthority {
+  /** Present only when the session runs in production-authority mode. */
+  readonly mode: 'authority'
+  /** Contract legality + mission authorization + admission gate before production commit. */
+  admitTransition(contract: ReachTransitionContract): KernelGateVerdict
+  /** Proof/witness freshness + declared resource bundle acquisition before first dispatch. */
+  activateTransition(transitionId: string, witness: ReachWitness | null): KernelGateVerdict
+  /** One effect commit issued and dispatch-linearized before the physical leg runs. */
+  issueStepEffect(input: {
+    readonly transitionId: string
+    readonly intentId: string
+    readonly stepId: string
+    readonly effectKind: string
+  }): KernelGateVerdict
+  /** Reconcile the settled leg and debit usage; a denial is a hard blocker, never reversible. */
+  settleStepEffect(input: {
+    readonly transitionId: string
+    readonly intentId: string
+    readonly stepId: string
+    readonly status: string
+    readonly verified: boolean
+    readonly progressed: boolean
+  }): void
+  /**
+   * Close the transition. For SUCCESS the kernel performs VERIFY_SUCCESS over
+   * observed facts only; a denial means production MUST NOT claim SUCCESS.
+   */
+  terminalize(input: {
+    readonly transitionId: string
+    readonly contractHash: string
+    readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
+  }): KernelGateVerdict
+}

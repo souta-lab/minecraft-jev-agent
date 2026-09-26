@@ -1,16 +1,24 @@
-// kernel-shadow-session.ts - V4.1.2 Phase-1 SHADOW authority observer.
+// kernel-shadow-session.ts - V4.1.2 kernel authority session (shadow + authority modes).
 //
-// The host owns this session. It replays observed production mutation dispatches
-// and the Reach Transition lifecycle through the V4.1.2 executable kernel
-// (`applyKernelCommand`) as an OBSERVER ONLY: no result is returned to
-// production code and no mutation is blocked by the shadow. The session holds
-// kernel-internal trusted capabilities because buddy-driver is the host/wiring
-// layer; production semantic code must never import this module or
-// `architecture/v4.1/kernel-internal/*`.
+// The host owns this session and drives the V4.1.2 executable kernel
+// (`applyKernelCommand`) against observed production mutation dispatches and
+// the Reach Transition lifecycle.
 //
-// A mutation that does not map to a canonical resource bundle, is not
-// attributable to a committed Transition on the migrated path, or would be
-// denied by the kernel is recorded as a migration blocker in the shadow journal.
+// Mode 'shadow' (default): OBSERVER ONLY. No result reaches production code;
+// kernel denials and unmapped/unauthorized mutations are journaled migration
+// blockers, not gates.
+//
+// Mode 'authority': the session also exposes `authority`, a KernelReachAuthority
+// gate the production runtime MUST consult before actuation. The same kernel
+// command path runs causally BEFORE the gated act (admit -> activate -> issue
+// -> dispatch -> settle -> terminalize) and a denied verdict is journaled and
+// returned so production fails closed; a denial never triggers a legacy
+// fallback because the legacy path is disabled by the same mode flag.
+//
+// The session holds kernel-internal trusted capabilities because buddy-driver
+// is the host/wiring layer; production semantic code must never import this
+// module or `architecture/v4.1/kernel-internal/*` — it sees only the narrow
+// `KernelShadowSink`/`KernelReachAuthority` surfaces.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -44,6 +52,9 @@ import {
   mapMutationSurface,
   reachContractToKernelSpec,
   SHADOW_REGISTRY,
+  type KernelAuthorityMode,
+  type KernelGateVerdict,
+  type KernelReachAuthority,
   type KernelShadowInput,
   type ShadowMutationContext,
 } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
@@ -74,6 +85,13 @@ export interface ShadowSessionConfig {
   /** Append-only JSONL destination for shadow records; null disables file IO. */
   readonly journalPath: string | null
   readonly now?: () => number
+  /**
+   * 'shadow' (default): observer only; denials are journaled migration
+   * blockers. 'authority': the session exposes `authority`, a verdict-
+   * returning gate the production runtime must consult before actuation;
+   * kernel denials gate production and remain journaled as hard evidence.
+   */
+  readonly authorityMode?: KernelAuthorityMode
 }
 
 export interface ShadowCoverageSummary {
@@ -105,6 +123,10 @@ export interface ShadowCoverageSummary {
   readonly blockers: readonly ShadowBlocker[]
   /** True only when every observed mutation mapped and carried authority. */
   readonly coverageComplete: boolean
+  /** 'shadow' = observer only; 'authority' = kernel gates Reach actuation. */
+  readonly authorityMode: KernelAuthorityMode
+  /** Gate calls the kernel refused under authority mode (also journaled). */
+  readonly gateDenials: readonly { readonly gate: string; readonly reason: string }[]
 }
 
 function sha(value: unknown): string {
@@ -130,12 +152,19 @@ export interface KernelShadowSession {
   }) => void
   /** Late-bind the actuation-context resolver (executor.current projection). */
   bindActuationContext(resolve: () => ShadowMutationContext | null): void
+  /**
+   * V4.1.2 production-authority gate; non-null only when the session was
+   * created with `authorityMode: 'authority'`. Production code holds this via
+   * the narrow `KernelReachAuthority` interface (no capability access).
+   */
+  readonly authority: KernelReachAuthority | null
   readonly summary: () => ShadowCoverageSummary
   readonly blockers: () => readonly ShadowBlocker[]
   readonly state: () => KernelState
 }
 
 export function createKernelShadowSession(config: ShadowSessionConfig): KernelShadowSession {
+  const authorityMode: KernelAuthorityMode = config.authorityMode ?? 'shadow'
   const now = config.now ?? (() => Date.now())
   const t0 = now()
   let state: KernelState = createKernelState({
@@ -182,6 +211,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   let verifyFactIds: readonly string[] = []
   let typedTerminals = 0
   const projectionLimitationKinds: string[] = []
+  const gateDenials: { readonly gate: string; readonly reason: string }[] = []
 
   const mono = (): number => Math.max(0, now() - t0)
 
@@ -278,23 +308,31 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     lastFactSignature = signature
   }
 
+  const deny = (gate: string, reason: string): KernelGateVerdict => {
+    gateDenials.push({ gate, reason })
+    journal({ type: 'gate-denied', gate, reason })
+    return { ok: false, reason }
+  }
+
   const transitionRegistered = (transitionId: string): CanonicalTransitionContract | null => {
     const hash = state.transitionContracts[transitionId]
     return hash === undefined ? null : state.contracts[hash] ?? null
   }
 
-  const commitTransition = (contract: ReachTransitionContract, witness: ReachWitness | null, lifecycle: 'active' | 'terminal'): void => {
+  /** REGISTER_TRANSITION + mission authorization + ADMIT_TRANSITION. */
+  const admitTransition = (contract: ReachTransitionContract, via: string): KernelGateVerdict => {
     const mapped = reachContractToKernelSpec(contract, config.world)
     if (!mapped.ok) {
       block('contract-mapping-failed', `${contract.transitionId}: ${mapped.reason}`, { transitionId: contract.transitionId })
-      return
+      return deny('admitTransition', mapped.reason)
     }
     let canonical: CanonicalTransitionContract
     try {
       canonical = createTransitionContract(mapped.spec)
     } catch (error) {
-      block('contract-mapping-failed', `${contract.transitionId}: ${error instanceof Error ? error.message : String(error)}`, { transitionId: contract.transitionId })
-      return
+      const reason = error instanceof Error ? error.message : String(error)
+      block('contract-mapping-failed', `${contract.transitionId}: ${reason}`, { transitionId: contract.transitionId })
+      return deny('admitTransition', reason)
     }
     journal({
       type: 'shadow-contract',
@@ -303,53 +341,75 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       kernelContractHash: canonical.contractHash,
       desiredPredicate: canonical.desiredPredicate,
     })
-    apply({
+    const registered = apply({
       kind: 'REGISTER_TRANSITION',
       contract: canonical,
       compiler: SHADOW_REGISTRY.compiler,
       capability: caps.compiler,
-    }, 'transition-committed')
-    if (state.transitions[contract.transitionId] === undefined) return
+    }, via)
+    if (!registered.ok) return deny('admitTransition', registered.reason)
+    if (state.transitions[contract.transitionId] === undefined) return deny('admitTransition', 'transition-not-registered')
     if (!state.missionPredicates.includes(canonical.desiredPredicate)) {
-      apply({
+      const mission = apply({
         kind: 'UPDATE_MISSION',
         predicates: [...state.missionPredicates, canonical.desiredPredicate],
         authority: SHADOW_REGISTRY.missionAuthority,
         capability: caps.mission,
-      }, 'transition-committed')
+      }, via)
+      if (!mission.ok) return deny('admitTransition', mission.reason)
     }
-    apply({ kind: 'ADMIT_TRANSITION', transitionId: contract.transitionId, capability: caps.scheduler }, 'transition-committed')
+    const admitted = apply({ kind: 'ADMIT_TRANSITION', transitionId: contract.transitionId, capability: caps.scheduler }, via)
+    if (!admitted.ok) return deny('admitTransition', admitted.reason)
+    return { ok: true }
+  }
+
+  /**
+   * Re-establish proof + witness freshness after registration changed the
+   * RuntimeBinding, then acquire the declared resource bundle -> ACTIVE.
+   * `acquire: false` leaves the transition RUNNABLE (shadow replay of a
+   * contract that committed directly to terminal).
+   */
+  const activateTransition = (transitionId: string, witness: ReachWitness | null, acquire: boolean, via: string): KernelGateVerdict => {
     // RuntimeBinding covers factRevision/registryRevision/missionRevision, so
     // every command above just invalidated the freshness of earlier proofs and
     // witnesses. Re-establish them NOW, in order, before activation: the same
     // verified observation the production commit consumed, then the witness.
-    feedSnapshot(lastPredicates, 'transition-committed')
+    feedSnapshot(lastPredicates, via)
     if (witness !== null) {
-      witnessByTransition.set(contract.transitionId, witness)
-      const revision = Math.max(1, witnessRevisions.get(contract.transitionId) ?? 0)
-      witnessRevisions.set(contract.transitionId, revision)
-      apply({
+      witnessByTransition.set(transitionId, witness)
+      const revision = Math.max(1, witnessRevisions.get(transitionId) ?? 0)
+      witnessRevisions.set(transitionId, revision)
+      const accepted = apply({
         kind: 'ACCEPT_WITNESS_PROOF',
-        transitionId: contract.transitionId,
+        transitionId,
         witnessRevision: revision,
         witnessRefHash: sha({ witnessId: witness.witnessId, evidenceId: witness.evidenceId }),
         relationId: 'reach-route-witness',
         validator: SHADOW_REGISTRY.witness,
         capability: caps.witness,
-      }, 'transition-committed')
+      }, via)
+      if (!accepted.ok) return deny('activateTransition', accepted.reason)
     }
-    if (lifecycle === 'active') {
-      apply({ kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: contract.transitionId, capability: caps.scheduler }, 'transition-committed')
-    }
+    if (!acquire) return { ok: true }
+    const granted = apply({ kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId, capability: caps.scheduler }, via)
+    if (!granted.ok) return deny('activateTransition', granted.reason)
+    return { ok: true }
   }
 
-  const terminalTransition = (input: Extract<KernelShadowInput, { type: 'transition-terminal' }>): void => {
+  const commitTransition = (contract: ReachTransitionContract, witness: ReachWitness | null, lifecycle: 'active' | 'terminal'): void => {
+    const admitted = admitTransition(contract, 'transition-committed')
+    if (!admitted.ok || state.transitions[contract.transitionId] === undefined) return
+    activateTransition(contract.transitionId, witness, lifecycle === 'active', 'transition-committed')
+  }
+
+  const terminalTransition = (input: Extract<KernelShadowInput, { type: 'transition-terminal' }>, authoritative = false): KernelGateVerdict => {
     const transition = state.transitions[input.transitionId]
     if (transition === undefined) {
       block('kernel-command-denied', `terminal for unregistered transition ${input.transitionId}`, { transitionId: input.transitionId })
-      return
+      return deny('terminalize', `unregistered-transition:${input.transitionId}`)
     }
-    if (transition.lifecycle === 'TERMINAL') return
+    if (transition.lifecycle === 'TERMINAL') return { ok: true }
+    let successVerified: boolean | null = null
     if (input.outcome.kind === 'SUCCESS') {
       const contract = transitionRegistered(input.transitionId)
       if (contract !== null) {
@@ -383,6 +443,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         verifier: SHADOW_REGISTRY.verifier,
         capability: caps.verifier,
       }, 'transition-terminal')
+      successVerified = verified.ok
       if (verified.ok) {
         verifyFactIds = verified.events.flatMap((event) =>
           event.kind === 'TRANSITION_VERIFIED_SUCCESS' ? ((event.data.factIds as readonly string[] | undefined) ?? []) : [])
@@ -465,7 +526,14 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       ) {
         if (limitation !== null) {
           projectionLimitationKinds.push(kind)
-          block('shadow-projection-limitation', `${kind}: ${limitation}`, { transitionId: input.transitionId })
+          if (authoritative) {
+            // In authority mode the kind-preserving CANCELED stand-in IS the
+            // designed kernel closure for Reach outcomes the kernel cannot
+            // type; the record is evidence, not a migration blocker.
+            journal({ type: 'terminal-projection-limitation', transitionId: input.transitionId, reachOutcomeKind: kind, detail: limitation })
+          } else {
+            block('shadow-projection-limitation', `${kind}: ${limitation}`, { transitionId: input.transitionId })
+          }
         }
         // The kernel cannot express this Reach terminal kind; CANCELED is the
         // mechanical stand-in that closes the shadow lifecycle. The reason
@@ -474,7 +542,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         apply({
           kind: 'REQUEST_CANCEL',
           transitionId: input.transitionId,
-          reason: `shadow-terminal:${kind}`,
+          reason: authoritative ? `authority-terminal:${kind}` : `shadow-terminal:${kind}`,
           capability: caps.scheduler,
         }, 'transition-terminal')
         const pending = state.transitions[input.transitionId]
@@ -492,12 +560,25 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     for (const [commitId, open] of openEffects) {
       if (open.transitionId === input.transitionId) openEffects.delete(commitId)
     }
+    if (!authoritative) return { ok: true }
+    if (input.outcome.kind === 'SUCCESS' && successVerified !== true) {
+      return deny('terminalize', `kernel-verify-success-denied:${input.transitionId}`)
+    }
+    const closed = state.transitions[input.transitionId]
+    if (closed === undefined || closed.lifecycle !== 'TERMINAL') {
+      return deny('terminalize', `kernel-transition-not-terminal:${input.transitionId}`)
+    }
+    return { ok: true }
   }
 
-  const stepIssued = (input: Extract<KernelShadowInput, { type: 'mechanical-step-issued' }>): void => {
+  const stepIssued = (input: Extract<KernelShadowInput, { type: 'mechanical-step-issued' }>, authoritative = false): KernelGateVerdict => {
     if (input.effectKind !== 'locomotion') {
       block('unmapped-mutation-surface', `step effect kind ${input.effectKind} is not in the Reach map`, { transitionId: input.transitionId })
-      return
+      return authoritative ? deny('issueStepEffect', `unmapped-effect-kind:${input.effectKind}`) : { ok: true }
+    }
+    if (openEffects.has(input.stepId)) {
+      block('kernel-command-denied', `duplicate dispatch for mechanical step ${input.stepId}`, { transitionId: input.transitionId })
+      return authoritative ? deny('issueStepEffect', `duplicate-step-dispatch:${input.stepId}`) : { ok: true }
     }
     // ISSUE_EFFECT re-checks activationPreconditions against the CURRENT
     // RuntimeBinding: any snapshot/registry/mission revision since activation
@@ -526,20 +607,21 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       ttlMs: 30_000,
       capability: controllerCap(input.transitionId),
     }, 'mechanical-step-issued')
-    if (!issued.ok) return
+    if (!issued.ok) return authoritative ? deny('issueStepEffect', issued.reason) : { ok: true }
     const commitId = (issued.events[0]?.data.commitId as string | undefined) ?? null
     if (commitId === null) {
       block('observer-error', 'ISSUE_EFFECT succeeded without a commitId event')
-      return
+      return authoritative ? deny('issueStepEffect', 'missing-commit-id') : { ok: true }
     }
     const dispatched = apply({
       kind: 'BEGIN_EFFECT_DISPATCH',
       commitId,
       capability: caps.dispatcher,
     }, 'mechanical-step-issued')
-    if (dispatched.ok) {
-      openEffects.set(input.stepId, { commitId, stepId: input.stepId, transitionId: input.transitionId })
-    }
+    if (!dispatched.ok) return authoritative ? deny('issueStepEffect', dispatched.reason) : { ok: true }
+    openEffects.set(input.stepId, { commitId, stepId: input.stepId, transitionId: input.transitionId })
+    journal({ type: 'effect-dispatch', transitionId: input.transitionId, stepId: input.stepId, commitId, authority: authoritative })
+    return { ok: true }
   }
 
   const stepSettled = (input: Extract<KernelShadowInput, { type: 'mechanical-step-settled' }>): void => {
@@ -706,12 +788,50 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     }
   }
 
+  const authorityGate: KernelReachAuthority | null = authorityMode === 'authority'
+    ? {
+        mode: 'authority',
+        admitTransition(contract: ReachTransitionContract): KernelGateVerdict {
+          return admitTransition(contract, 'gate-admit')
+        },
+        activateTransition(transitionId: string, witness: ReachWitness | null): KernelGateVerdict {
+          return activateTransition(transitionId, witness, true, 'gate-activate')
+        },
+        issueStepEffect(input: {
+          readonly transitionId: string
+          readonly intentId: string
+          readonly stepId: string
+          readonly effectKind: string
+        }): KernelGateVerdict {
+          return stepIssued({ type: 'mechanical-step-issued', ...input }, true)
+        },
+        settleStepEffect(input: {
+          readonly transitionId: string
+          readonly intentId: string
+          readonly stepId: string
+          readonly status: string
+          readonly verified: boolean
+          readonly progressed: boolean
+        }): void {
+          stepSettled({ type: 'mechanical-step-settled', ...input })
+        },
+        terminalize(input: {
+          readonly transitionId: string
+          readonly contractHash: string
+          readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
+        }): KernelGateVerdict {
+          return terminalTransition({ type: 'transition-terminal', ...input } as Extract<KernelShadowInput, { type: 'transition-terminal' }>, true)
+        },
+      }
+    : null
+
   return {
     observe,
     observeMutation,
     bindActuationContext(resolve: () => ShadowMutationContext | null): void {
       resolveContext = resolve
     },
+    authority: authorityGate,
     summary(): ShadowCoverageSummary {
       const hardBlockers = blockers.filter((b) =>
         b.kind === 'unmapped-mutation-surface' ||
@@ -733,6 +853,8 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         projectionLimitationKinds: [...projectionLimitationKinds],
         blockers: [...blockers],
         coverageComplete: mutationsObserved > 0 && hardBlockers.length === 0,
+        authorityMode,
+        gateDenials: [...gateDenials],
       }
     },
     blockers: () => [...blockers],
