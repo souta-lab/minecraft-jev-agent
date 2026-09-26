@@ -440,6 +440,17 @@ export type KernelGateVerdict = { readonly ok: true } | { readonly ok: false; re
 export type KernelAuthorityMode = 'shadow' | 'authority'
 
 /**
+ * One verified world observation fed into the kernel fact store. The authority
+ * gate consumes these unconditionally (they are what VERIFY reads), so this is
+ * the observation half of the same session the verdict gates run on — not a
+ * fire-and-forget shadow replay input.
+ */
+export type KernelWorldObservation = Omit<
+  Extract<KernelShadowInput, { type: 'world-observation' }>,
+  'type'
+>
+
+/**
  * Host-owned kernel gate for V4.1.2 Reach production authority.
  *
  * Unlike the fire-and-forget `KernelShadowSink`, every call here returns the
@@ -455,12 +466,20 @@ export type KernelAuthorityMode = 'shadow' | 'authority'
  *   settleStepEffect (RECONCILE_EFFECT + DEBIT_USAGE)
  *   terminalize (VERIFY_SUCCESS for SUCCESS; typed/stand-in closure otherwise)
  *
+ * `feedObservation` is the observation half of the same session: verified world
+ * facts the kernel must verify and check freshness against. It returns no
+ * verdict, but VERIFY_SUCCESS reads only facts fed here, so production MUST
+ * feed every decision-relevant observation or VERIFY denies for lack of
+ * observed proof.
+ *
  * A denied verdict is terminal for the gated act, never a request to try the
  * same thing through a legacy path.
  */
 export interface KernelReachAuthority {
   /** Present only when the session runs in production-authority mode. */
   readonly mode: 'authority'
+  /** Feed a verified world observation into the kernel fact store (no verdict). */
+  feedObservation(input: KernelWorldObservation): void
   /** Contract legality + mission authorization + admission gate before production commit. */
   admitTransition(contract: ReachTransitionContract): KernelGateVerdict
   /** Proof/witness freshness + declared resource bundle acquisition before first dispatch. */

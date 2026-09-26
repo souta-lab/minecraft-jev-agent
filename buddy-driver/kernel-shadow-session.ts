@@ -56,6 +56,7 @@ import {
   type KernelGateVerdict,
   type KernelReachAuthority,
   type KernelShadowInput,
+  type KernelWorldObservation,
   type ShadowMutationContext,
 } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
 import type { ReachTransitionContract, ReachWitness } from '../jev-agent/src/vtr/reach.ts'
@@ -795,6 +796,9 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   const authorityGate: KernelReachAuthority | null = authorityMode === 'authority'
     ? {
         mode: 'authority',
+        feedObservation(input: KernelWorldObservation): void {
+          observe({ type: 'world-observation', ...input })
+        },
         admitTransition(contract: ReachTransitionContract): KernelGateVerdict {
           return admitTransition(contract, 'gate-admit')
         },
