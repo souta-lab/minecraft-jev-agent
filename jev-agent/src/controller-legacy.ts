@@ -238,6 +238,7 @@ import type { AbandonLifecycleHost } from './legacy/abandon-lifecycle.ts'
 export { canAuthoritativelyAbandonOption } from './legacy/abandon-lifecycle.ts'
 export { betaAbandonProgressObserved } from './legacy/abandon-lifecycle.ts'
 export { filterFurnacePrerequisiteCandidates } from './legacy/abandon-lifecycle.ts'
+export { questionSetForTrigger } from './legacy/decision-epochs.ts'
 import type { StallObserverHost } from './legacy/stall-observers.ts'
 import * as wedge from './legacy/wedge.ts'
 import type { WedgeHost } from './legacy/wedge.ts'
@@ -756,18 +757,8 @@ export interface RunSummary {
 
 export { TRIGGER_PRIORITY }
 
-const STALL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
-  'path_stuck',
-  'path_no_path',
-  'action_timeout',
-])
 
 /** Pick the CORE + trigger-specific question set (P1-7). */
-export function questionSetForTrigger(trigger: DecisionTrigger): QuestionSetKind {
-  if (epochs.CRITICAL_TRIGGERS.has(trigger)) return 'threat'
-  if (STALL_TRIGGERS.has(trigger)) return 'stall'
-  return 'core'
-}
 
 function emptySignals(): AgentSignals {
   return {
@@ -5094,198 +5085,7 @@ export class JevController {
     trigger: DecisionTrigger,
     chainId: string,
   ): Promise<JevResult> {
-    this.lastAbandonAdopted = false
-    const now = Date.now()
-    const stateHash = stableStateHash(state)
-    // §6 rate evidence. The raw-state reuse key (`stateHash ===
-    // this.lastDecisionStateHash`) is GONE: `stableStateHash` covers `tick`, the
-    // float body position and the per-tick `recentEvents`, so it changed every
-    // tick and the old gate effectively never fired. The semantic projection hash
-    // below is the reuse key now; `sinceLastCallMs` only reports how fast the
-    // semantic plane is moving.
-    const sinceLastCallMs = this.lastJevAt === 0 ? null : now - this.lastJevAt
-    const identityContext = {
-      optionInstanceId: optionIdForGoal(state.goalQueue.current) ?? state.currentOption?.instanceId ?? null,
-      dimension: state.self.dimension,
-      worldEpoch: this.options.worldEpoch,
-    }
-    // §4/§8: the semantic offer - stable identities, mechanically-equivalent
-    // realizations collapsed. The controller keeps the FULL grounded set for
-    // guard/commitment/execution; only the model's choice set is deduped, and
-    // every representative id below is a real member of that full set.
-    const dedupe = dedupeSemanticCandidates(candidates, identityContext, (candidateId) =>
-      failureCount(state.signals.failedCandidates, candidateId),
-    )
-    const projection = this.buildSemanticProjection(state, candidates, dedupe.merged)
-    // The projection's own candidate views are the single source of truth for the
-    // hash, the log and the offer: one identity function, no drift.
-    const views = projection.candidates
-    const hash = semanticProjectionHash(projection)
-    const candidateIdentities = views.map((view) => view.identity)
-
-    // §3: a world/epoch change invalidates the ACTIVE epoch, so a result
-    // attributed to it can no longer authorize a commitment.
-    if (!this.decisionEpochs.matchesWorld({ dimension: state.self.dimension, worldEpoch: this.options.worldEpoch })) {
-      const invalidated = this.decisionEpochs.invalidate('world_changed')
-      if (invalidated !== null) {
-        this.logger.warn(
-          'policy',
-          formatStaleResultDropped(invalidated.epoch, null, 'world_or_epoch_changed'),
-          { projectionHash: invalidated.projectionHash, dimension: state.self.dimension },
-          this.tickCounter,
-        )
-      }
-    }
-
-    // §6/§9: re-query only at a semantic boundary. A settled mechanical step with
-    // an unchanged semantic projection is NOT a policy event, so the previous
-    // decision is replayed inside a NEW epoch: causal isolation is preserved (the
-    // replay is attributed to the current epoch, never to the stale one), and no
-    // model call is spent on an identical semantic state.
-    const boundary = classifySemanticBoundary({
-      active: this.decisionEpochs.active,
-      projectionHash: hash,
-      candidateIdentities,
-      worldKey: { dimension: state.self.dimension, worldEpoch: this.options.worldEpoch, leaseHeld: true },
-      optionKey: projection.option.instanceId,
-      safetyKey: JSON.stringify(projection.safety),
-      goalKey: projection.goal.key,
-      lastOutcomeRequiredDecision: this.skillOutcomeBoundary,
-    })
-    // §4/§10: the cached decision names the realization that was representative
-    // when the model chose. Identity is stable, the realization id is mechanical,
-    // so the SAME semantic choice is re-pointed at the current representative. If
-    // the chosen identity is gone the state genuinely changed -> re-query below
-    // instead of replaying an unusable decision.
-    const replayed = this.lastDecision === null ? null : this.repointReplay(this.lastDecision, views)
-    if (!boundary.requery && replayed !== null) {
-      const previousActive = this.decisionEpochs.active
-      const reusedFrom = previousActive?.epoch ?? null
-      const epoch = this.decisionEpochs.begin({
-        projectionHash: hash,
-        candidateIdentities,
-        dimension: state.self.dimension,
-        worldEpoch: this.options.worldEpoch,
-        nowMs: now,
-        cacheHit: true,
-        reusedFrom,
-      })
-      this.logEpochSuperseded(previousActive)
-      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger, sinceLastCallMs)
-      this.lastSemanticProjection = projection
-      this.lastProjectionHash = hash
-      this.skillOutcomeBoundary = false
-      this.lastDecision = replayed
-      return replayed
-    }
-
-    try {
-      this.policyEpoch += 1
-      this.issuedPolicyEpoch = this.policyEpoch
-      this.issuedCandidateHash = candidateIdentities.join('|')
-      const previousActive = this.decisionEpochs.active
-      const epoch = this.decisionEpochs.begin({
-        projectionHash: hash,
-        candidateIdentities,
-        dimension: state.self.dimension,
-        worldEpoch: this.options.worldEpoch,
-        nowMs: now,
-      })
-      this.logEpochSuperseded(previousActive)
-      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger, sinceLastCallMs)
-      this.lastSemanticProjection = projection
-      this.lastProjectionHash = hash
-      this.skillOutcomeBoundary = false
-      // issue #436 section 3: `candidates.length === 1` is deliberately NOT a
-      // Jev bypass here. A superficially single remaining candidate does not prove
-      // there is no semantic choice (generation may be incomplete, the active
-      // Option may be stale, and beta still owns semantic termination), so policy
-      // is consulted on every decision regardless of the candidate count. The only
-      // deterministic authority classes are a selected Skill's mechanical
-      // continuation / DONE / hard safety / the U1..U6 prerequisite contract, and
-      // each of those is recorded by the executor's `SKILL_STEP authority=`.
-      const result = await this.jev.decide({
-        stage: `policy-tick-${this.tickCounter}-${trigger}`,
-        state,
-        // §8: Jev sees one representative per semantic identity. The controller's
-        // own `candidates` stays complete, so guard/commitment resolution and the
-        // executor are unchanged.
-        candidates: dedupe.offered,
-        semanticProjection: projection,
-        projectionHash: hash,
-        questionNames: questionNamesFor(questionSetForTrigger(trigger)),
-      })
-      if (this.options.recoveryPolicyAuthority !== undefined && this.options.recoveryPolicyAuthority !== null) {
-        assertRecoveryModelAuthority(
-          this.options.recoveryPolicyAuthority,
-          { provider: this.policyProvider, model: result.model },
-          result.source,
-        )
-      }
-      this.jevCalls += 1
-      this.lastJevAt = Date.now()
-      this.lastDecision = result
-      this.lastDecisionId = decisionIdFrom(result)
-      this.signals.lastPolicyConfidence = result.answers.action?.confidence ?? null
-
-      // §3: only the ACTIVE epoch may authorize. A result whose epoch was
-      // invalidated while the model call was in flight is DROPPED here, before
-      // any commitment is claimed.
-      const acceptance = this.decisionEpochs.accept(epoch.epoch)
-      if (!acceptance.accepted) {
-        this.staleDecisionDropped = true
-        this.logger.warn(
-          'policy',
-          formatStaleResultDropped(epoch.epoch, this.decisionEpochs.active?.epoch ?? null, acceptance.reason),
-          { trigger, callId: result.callId, chosen: this.lastDecisionId },
-          this.tickCounter,
-        )
-        return result
-      }
-
-      const chosen = dedupe.offered.find((candidate) => candidate.id === this.lastDecisionId)
-      this.logger.info(
-        'policy',
-        `trigger=${trigger} -> action=${this.lastDecisionId ?? 'none'} kind=${chosen?.kind ?? 'unknown'} | ${chosen?.label ?? 'no matching candidate'}`,
-        {
-          trigger,
-          source: result.source,
-          policy: result.policy,
-          model: result.model,
-          callId: result.callId,
-          chainId,
-          projectionHash: hash,
-          decisionEpoch: epoch.epoch,
-          latencyMs: result.latencyMs,
-          inputTokens: result.usage?.inputTokens ?? null,
-          actionConfidence: result.answers.action?.confidence ?? null,
-          dangerScore: result.answers.danger?.value ?? null,
-          dangerConfidence: result.answers.danger?.confidence ?? null,
-          shouldRetreat: result.answers.should_retreat?.probability ?? null,
-          abandonOption: result.answers.abandon_option?.probability ?? null,
-        },
-        this.tickCounter,
-      )
-      const planGoal = state.goalQueue.current
-      const optionId = optionIdForGoal(planGoal)
-      const planId = planRevisionForGoal(planGoal)
-      const verdict = this.abandonVerdict(result, optionId, planId)
-      this.logHeads(result, verdict, chainId)
-      this.logShadowMetrics(state)
-      this.lastAbandonAdopted = this.applyAbandon(result, verdict)
-
-      const confidence = result.answers.action?.confidence
-      if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {
-        this.escalate(
-          'low_confidence',
-          `action confidence ${confidence} < ${this.options.lowConfidenceThreshold} for ${this.lastDecisionId ?? 'none'}`,
-        )
-      }
-      return result
-    } catch (error) {
-      const fatal = error instanceof FatalModelError ? error : new FatalModelError('jev-policy', 1, describeFailure(error))
-      return failLoud(fatal, (event, detail) => this.logger.error('policy', event, { trigger, ...(detail ?? {}) }, this.tickCounter), this.options.terminateOnModelFailure)
-    }
+    return epochs.decide(this.epochsHost, state, candidates, trigger, chainId)
   }
 
   private logBoundary(
