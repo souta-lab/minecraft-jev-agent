@@ -26,7 +26,7 @@ import {
 import { declaredProjectionFields, lookupProjectionSchema } from '../semanticProjection.ts'
 import { fixture, piRequestFor } from './support.ts'
 
-const LANDED_SOURCE = new URL('../../jev-agent/src/jevSemanticProjection.ts', import.meta.url)
+const LANDED_SOURCE = new URL('../../jev-agent/src/jev/semantic-projection.ts', import.meta.url)
 const source = readFileSync(LANDED_SOURCE, 'utf8')
 
 /** Top-level field names of an exported interface, ignoring nested object bodies. */

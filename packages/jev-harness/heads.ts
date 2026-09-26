@@ -5,10 +5,10 @@
 // track the four remaining direct-provider call sites; retired heads with no
 // current caller stay registered for historical artifact decoding.
 //
-//   jev-agent/src/jev-authority.ts:335   batched: action / abandon_option / danger / should_retreat
-//   jev-agent/src/jev-legacy.ts:997      batched legacy: action / abandon_option / danger / should_retreat
-//   buddy-driver/advisor.ts:367          choice: next_strategy over a declared strategy set
-//   buddy-driver/planner-legacy.ts:3432  batched: horizon / plan_fit / strategy_change
+//   packages/jev-agent/src/jev/authority.ts:335   batched: action / abandon_option / danger / should_retreat
+//   packages/jev-agent/src/jev/client.ts:997      batched legacy: action / abandon_option / danger / should_retreat
+//   packages/buddy-driver/advisor.ts:367          choice: next_strategy over a declared strategy set
+//   packages/buddy-driver/planner-legacy.ts:3432  batched: horizon / plan_fit / strategy_change
 //   (the former planner.ts choice was retired when System2 became the WHAT authority)
 //
 // A head is versioned as a whole: bumping the version means a NEW head id, and
@@ -108,7 +108,7 @@ export interface JevHead {
   readonly notes: string
 }
 
-/** DANGER_LEVELS from jev-agent/src/jev-legacy.ts (ordered danger levels). */
+/** DANGER_LEVELS from packages/jev-agent/src/jev/client.ts (ordered danger levels). */
 export const DANGER_SCALE: ScoreScaleSpec = {
   id: 'danger_levels',
   version: 1,
@@ -117,7 +117,7 @@ export const DANGER_SCALE: ScoreScaleSpec = {
   levels: ['safe', 'minor risk', 'dangerous', 'lethal'],
 }
 
-/** PLAN_FIT_LEVELS from buddy-driver/planner-legacy.ts. */
+/** PLAN_FIT_LEVELS from packages/buddy-driver/planner-legacy.ts. */
 export const PLAN_FIT_SCALE: ScoreScaleSpec = {
   id: 'plan_fit_levels',
   version: 1,
@@ -126,7 +126,7 @@ export const PLAN_FIT_SCALE: ScoreScaleSpec = {
   levels: ['poor fit', 'weak fit', 'reasonable fit', 'good fit', 'excellent fit'],
 }
 
-/** ADVISOR_STRATEGIES from buddy-driver/advisor.ts. */
+/** ADVISOR_STRATEGIES from packages/buddy-driver/advisor.ts. */
 export const ADVISOR_STRATEGY_IDS: readonly string[] = [
   'descend_to_y16',
   'explore_cave',
@@ -142,12 +142,12 @@ const SYSTEM2_LEGACY_STATE = SYSTEM2_PLANNER_STATE_PROJECTION
 const SYSTEM2_BRAIN_STATE = SYSTEM2_COMPACT_STATE_PROJECTION
 
 function legacyEvalRef(symbol: string, lineHint: number): HeadSourceRef {
-  return { file: 'jev-agent/src/jev-legacy.ts', symbol, lineHint }
+  return { file: 'packages/jev-agent/src/jev/client.ts', symbol, lineHint }
 }
 
 export const JEV_HEADS: readonly JevHead[] = [
   // -------------------------------------------------------------------------
-  // jev-authority.ts - the model-authoritative kernel (batched in one request)
+  // jev/authority.ts - the model-authoritative kernel (batched in one request)
   // -------------------------------------------------------------------------
   {
     id: 'pi_action_v3',
@@ -174,12 +174,12 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_authority',
-    allowedConsumers: ['jev-agent/src/controller.ts', 'jev-agent/src/jev-authority.ts'],
+    allowedConsumers: ['jev-agent/src/controller.ts', 'packages/jev-agent/src/jev/authority.ts'],
     sourceRefs: [
-      { file: 'jev-agent/src/jev-authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 335 },
-      { file: 'jev-agent/src/jev-authority.ts', symbol: 'authorityState', lineHint: 230 },
+      { file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 335 },
+      { file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'authorityState', lineHint: 230 },
     ],
-    legacyPromptRef: { file: 'jev-agent/src/jev-authority.ts', symbol: 'AUTHORITY_PRIMARY_INSTRUCTIONS', lineHint: 27 },
+    legacyPromptRef: { file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'AUTHORITY_PRIMARY_INSTRUCTIONS', lineHint: 27 },
     notes:
       'Model-authoritative pi. Cards: closed grounded candidate set, strict id membership (#438 section 3). Today the ' +
       'prompt is a long free-form constant; porting it verbatim is Phase C work and must be replay-validated.',
@@ -206,9 +206,9 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'beta_threshold_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_authority',
-    allowedConsumers: ['jev-agent/src/controller.ts', 'jev-agent/src/jev-authority.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 335 }],
-    legacyPromptRef: { file: 'jev-agent/src/jev-authority.ts', symbol: 'BETA_INSTRUCTIONS', lineHint: 42 },
+    allowedConsumers: ['jev-agent/src/controller.ts', 'packages/jev-agent/src/jev/authority.ts'],
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 335 }],
+    legacyPromptRef: { file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'BETA_INSTRUCTIONS', lineHint: 42 },
     notes: 'Raw P(abandon=true) is preserved; only the versioned calibration layer may threshold it (#438 section 11).',
   },
   {
@@ -233,8 +233,8 @@ export const JEV_HEADS: readonly JevHead[] = [
     abstention: 'none',
     batchGroup: 'jev_authority',
     allowedConsumers: ['jev-agent/src/controller.ts', 'jev-agent/src/threat.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 110 }],
-    legacyPromptRef: { file: 'jev-agent/src/jev-authority.ts', symbol: 'DANGER_INSTRUCTIONS', lineHint: 60 },
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 110 }],
+    legacyPromptRef: { file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'DANGER_INSTRUCTIONS', lineHint: 60 },
     notes: 'Shadow/safety estimate: consumed by deterministic safety gates, never as a plan choice (#11).',
   },
   {
@@ -258,8 +258,8 @@ export const JEV_HEADS: readonly JevHead[] = [
     abstention: 'none',
     batchGroup: 'jev_authority',
     allowedConsumers: ['jev-agent/src/controller.ts', 'jev-agent/src/threat.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 113 }],
-    legacyPromptRef: { file: 'jev-agent/src/jev-authority.ts', symbol: 'RETREAT_INSTRUCTIONS', lineHint: 57 },
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'buildAuthorityQuestions', lineHint: 113 }],
+    legacyPromptRef: { file: 'packages/jev-agent/src/jev/authority.ts', symbol: 'RETREAT_INSTRUCTIONS', lineHint: 57 },
     notes: 'Shadow safety estimate. A provider failure must never look like a calibrated continue (#438 section 9).',
   },
 
@@ -287,8 +287,8 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_legacy',
-    allowedConsumers: ['jev-agent/src/controller-legacy.ts', 'jev-agent/src/jev-legacy.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-legacy.ts', symbol: 'buildQuestions', lineHint: 997 }],
+    allowedConsumers: ['jev-agent/src/controller-legacy.ts', 'packages/jev-agent/src/jev/client.ts'],
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/client.ts', symbol: 'buildQuestions', lineHint: 997 }],
     legacyPromptRef: legacyEvalRef('PRIMARY_INSTRUCTIONS', 356),
     notes:
       'Deprecated: the authority path (pi_action_v3) is the current production head. Kept registered so legacy ' +
@@ -314,8 +314,8 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'beta_threshold_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_legacy',
-    allowedConsumers: ['jev-agent/src/controller-legacy.ts', 'jev-agent/src/jev-legacy.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-legacy.ts', symbol: 'buildQuestions', lineHint: 997 }],
+    allowedConsumers: ['jev-agent/src/controller-legacy.ts', 'packages/jev-agent/src/jev/client.ts'],
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/client.ts', symbol: 'buildQuestions', lineHint: 997 }],
     legacyPromptRef: legacyEvalRef('buildQuestions', 368),
     notes: 'Deprecated legacy beta head.',
   },
@@ -340,8 +340,8 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'score_level_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_legacy',
-    allowedConsumers: ['jev-agent/src/jev-legacy.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-legacy.ts', symbol: 'buildQuestions', lineHint: 382 }],
+    allowedConsumers: ['packages/jev-agent/src/jev/client.ts'],
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/client.ts', symbol: 'buildQuestions', lineHint: 382 }],
     legacyPromptRef: legacyEvalRef('buildQuestions', 382),
     notes: 'Diagnostic-only legacy safety score.',
   },
@@ -365,8 +365,8 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'boolean_threshold_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_legacy',
-    allowedConsumers: ['jev-agent/src/jev-legacy.ts'],
-    sourceRefs: [{ file: 'jev-agent/src/jev-legacy.ts', symbol: 'buildQuestions', lineHint: 390 }],
+    allowedConsumers: ['packages/jev-agent/src/jev/client.ts'],
+    sourceRefs: [{ file: 'packages/jev-agent/src/jev/client.ts', symbol: 'buildQuestions', lineHint: 390 }],
     legacyPromptRef: legacyEvalRef('buildQuestions', 390),
     notes: 'Diagnostic-only legacy retreat vote.',
   },
@@ -402,9 +402,9 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: null,
-    allowedConsumers: ['buddy-driver/advisor.ts', 'buddy-driver/planner.ts'],
-    sourceRefs: [{ file: 'buddy-driver/advisor.ts', symbol: 'ADVISOR_STRATEGIES', lineHint: 367 }],
-    legacyPromptRef: { file: 'buddy-driver/advisor.ts', symbol: 'STRATEGY_CRITERIA', lineHint: 43 },
+    allowedConsumers: ['packages/buddy-driver/advisor.ts', 'buddy-driver/planner.ts'],
+    sourceRefs: [{ file: 'packages/buddy-driver/advisor.ts', symbol: 'ADVISOR_STRATEGIES', lineHint: 367 }],
+    legacyPromptRef: { file: 'packages/buddy-driver/advisor.ts', symbol: 'STRATEGY_CRITERIA', lineHint: 43 },
     notes:
       'The closed set is the declared strategy enum, so the same closed-world rule applies without grounded candidates ' +
       '(#438 section 3).',
@@ -433,9 +433,9 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'system2_legacy',
-    allowedConsumers: ['buddy-driver/planner-legacy.ts'],
-    sourceRefs: [{ file: 'buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3432 }],
-    legacyPromptRef: { file: 'buddy-driver/planner-legacy.ts', symbol: 'HORIZON_INSTRUCTIONS', lineHint: 3411 },
+    allowedConsumers: ['packages/buddy-driver/planner-legacy.ts'],
+    sourceRefs: [{ file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3432 }],
+    legacyPromptRef: { file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'HORIZON_INSTRUCTIONS', lineHint: 3411 },
     notes:
       'Legacy System2 WHAT head. Its current call site has a hidden fallback (`match ?? options[0] ?? FRONT_FALLBACK`); ' +
       'the harness refuses that shape (#438 section 9) - Phase C/D must move the fallback decision to an explicit, ' +
@@ -460,9 +460,9 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'score_level_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'system2_legacy',
-    allowedConsumers: ['buddy-driver/planner-legacy.ts'],
-    sourceRefs: [{ file: 'buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3432 }],
-    legacyPromptRef: { file: 'buddy-driver/planner-legacy.ts', symbol: 'PLAN_FIT_LEVELS', lineHint: 2450 },
+    allowedConsumers: ['packages/buddy-driver/planner-legacy.ts'],
+    sourceRefs: [{ file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3432 }],
+    legacyPromptRef: { file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'PLAN_FIT_LEVELS', lineHint: 2450 },
     notes: 'Shadow metric; the plan choice itself is the horizon head.',
   },
   {
@@ -483,9 +483,9 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'strategy_change_threshold_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'system2_legacy',
-    allowedConsumers: ['buddy-driver/planner-legacy.ts'],
-    sourceRefs: [{ file: 'buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3435 }],
-    legacyPromptRef: { file: 'buddy-driver/planner-legacy.ts', symbol: 'resolveStrategyChangeThreshold', lineHint: 2497 },
+    allowedConsumers: ['packages/buddy-driver/planner-legacy.ts'],
+    sourceRefs: [{ file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3435 }],
+    legacyPromptRef: { file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'resolveStrategyChangeThreshold', lineHint: 2497 },
     notes: 'Threshold centralisation target: `resolveStrategyChangeThreshold()` becomes a registry calibration parameter.',
   },
 

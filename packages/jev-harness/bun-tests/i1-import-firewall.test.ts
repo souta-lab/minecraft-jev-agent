@@ -39,10 +39,10 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
 
   test('the debt allowlist is exactly the four remaining direct provider call sites', () => {
     expect(FIREWALL_DEBT.map((entry) => entry.file).sort()).toEqual([
-      'buddy-driver/advisor.ts',
-      'buddy-driver/planner-legacy.ts',
-      'jev-agent/src/jev-authority.ts',
-      'jev-agent/src/jev-legacy.ts',
+      'packages/buddy-driver/advisor.ts',
+      'packages/buddy-driver/planner-legacy.ts',
+      'packages/jev-agent/src/jev/authority.ts',
+      'packages/jev-agent/src/jev/client.ts',
     ])
   })
 
@@ -50,22 +50,22 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
     const root = mkdtempSync(join(tmpdir(), 'jev-firewall-'))
     mkdirSync(join(root, 'packages', 'jev-agent', 'src'), { recursive: true })
     writeFileSync(
-      join(root, 'jev-agent', 'src', 'rogue.ts'),
+      join(root, 'packages', 'jev-agent', 'src', 'rogue.ts'),
       "import { experimental_evaluate as evaluate } from 'ai'\nconst q = await evaluate({})\n",
     )
     const fixtureReport = checkFirewall(root)
     expect(fixtureReport.ok).toBe(false)
     const violation = fixtureReport.violations[0]
     expect(violation).toBeDefined()
-    expect(violation?.file).toBe('jev-agent/src/rogue.ts')
+    expect(violation?.file).toBe('packages/jev-agent/src/rogue.ts')
     expect(violation?.line).toBe(1)
-    expect(formatFinding(violation!)).toContain('jev-agent/src/rogue.ts:1')
+    expect(formatFinding(violation!)).toContain('packages/jev-agent/src/rogue.ts:1')
   })
 
   test('a violating file inside the harness is never acceptable', () => {
     const root = mkdtempSync(join(tmpdir(), 'jev-firewall-'))
     mkdirSync(join(root, 'packages', 'jev-harness'), { recursive: true })
-    writeFileSync(join(root, 'jev-harness', 'sneaky.ts'), "export const x = 'experimental_evaluate'\n")
+    writeFileSync(join(root, 'packages', 'jev-harness', 'sneaky.ts'), "export const x = 'experimental_evaluate'\n")
     const fixtureReport = checkFirewall(root)
     expect(fixtureReport.harnessViolations.length).toBeGreaterThan(0)
     expect(fixtureReport.ok).toBe(false)
@@ -88,9 +88,9 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
 
   test('the scanner covers the five production roots and skips fixtures', () => {
     const files = listProductionFiles(ROOT)
-    expect(files).toContain('jev-agent/src/jev-authority.ts')
-    expect(files).toContain('buddy-driver/planner.ts')
-    expect(files.some((file) => file.startsWith('buddy-driver/data/'))).toBe(false)
+    expect(files).toContain('packages/jev-agent/src/jev/authority.ts')
+    expect(files).toContain('packages/buddy-driver/planner.ts')
+    expect(files.some((file) => file.startsWith('packages/buddy-driver/data/'))).toBe(false)
     expect(files.some((file) => file.includes('node_modules'))).toBe(false)
     expect(files.some((file) => /(^|\/)test-.*\.mts$/.test(file))).toBe(false)
   })
