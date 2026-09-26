@@ -25,12 +25,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
-import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
+import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { assessSurvivalRace, bodySurvivalFacts, classifyDamageSource, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalDamageRace, formatSurvivalEscapeNone, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorCraft, formatArmorCraftRefusal, formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import { contactGapY, formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, meleeHorizontalBudget, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
@@ -152,7 +152,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
 import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
@@ -166,7 +166,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyStarving, buildWorldState, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, scannedBlockNames, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, bodyStarving, buildWorldState, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, scannedBlockNames, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -197,6 +197,8 @@ import * as diagnostics from './legacy/candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './legacy/candidate-diagnostics.ts'
 import * as portal from './legacy/portal-evidence.ts'
 import type { PortalEvidenceHost } from './legacy/portal-evidence.ts'
+import * as threat from './legacy/threat-observers.ts'
+import type { ThreatObserverHost } from './legacy/threat-observers.ts'
 import * as reach from './vtr/reach-controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './vtr/reach-controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
@@ -350,11 +352,8 @@ import {
 } from './strategicStall.ts'
 import {
   CriticalDamageTracker,
-  formatCriticalDamageEvidence,
-  formatCriticalDamageExhausted,
   resolveCriticalDamageLimit,
-  sampleHealthTransition,
-} from './criticalDamage.ts'
+  } from './criticalDamage.ts'
 import { computeShadowMetrics } from './shadowMetrics.ts'
 
 export type EscalationReason =
@@ -2984,6 +2983,11 @@ export class JevController {
   /** PortalEvidenceHost view of this controller (same structural-cast pattern as reachHost). */
   private get portalHost(): PortalEvidenceHost {
     return this as unknown as PortalEvidenceHost
+  }
+
+  /** ThreatObserverHost view of this controller (same structural-cast pattern as reachHost). */
+  private get threatHost(): ThreatObserverHost {
+    return this as unknown as ThreatObserverHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -9813,140 +9817,11 @@ export class JevController {
    * fresh attributed event keeps attribution only inside the same hit burst.
    */
   private observeThreat(trigger: DecisionTrigger, detail: Record<string, unknown>, currentHealth: number): void {
-    const now = Date.now()
-    if (trigger === 'damage_taken') {
-      const sourceId =
-        typeof detail.attackerId === 'number' && Number.isFinite(detail.attackerId) ? detail.attackerId : null
-      const sourceName = typeof detail.attackerName === 'string' && detail.attackerName.length > 0 ? detail.attackerName : null
-      const sourcePosition = damageOrigin(detail.attackerPosition)
-      this.signals.lastDamage = {
-        atMs: now,
-        health: currentHealth,
-        sourceId,
-        sourceName,
-        // The server-stated damage ORIGIN (the scheduler reads it off the
-        // `damage_event` packet, which mineflayer's `entityHurt` drops). This is
-        // the fact that lets the body ground a direction to break contact with an
-        // attacker it cannot see. Absent means UNKNOWN - the field is left off
-        // rather than filled with a guess.
-        ...(sourcePosition === null ? {} : { sourcePosition }),
-      }
-      return
-    }
-    if (trigger !== 'hp_changed') return
-    const delta = typeof detail.delta === 'number' ? detail.delta : 0
-    if (delta >= 0) return
-    const previous = this.signals.lastDamage ?? null
-    const sameBurst = previous !== null && now - previous.atMs <= 1500
-    this.signals.lastDamage = {
-      atMs: now,
-      health: typeof detail.health === 'number' ? detail.health : currentHealth,
-      sourceId: sameBurst ? previous.sourceId : null,
-      sourceName: sameBurst ? previous.sourceName : null,
-      // Attribution follows the same-burst rule as identity: a negative health
-      // step inside the same hit burst keeps the origin the damage event stated,
-      // and a step outside it keeps nothing (an origin without a source is not
-      // an attacker).
-      ...(sameBurst && previous?.sourcePosition !== undefined && previous.sourcePosition !== null
-        ? { sourcePosition: previous.sourcePosition }
-        : {}),
-    }
+    return threat.observeThreat(this.threatHost, trigger, detail, currentHealth)
   }
-
-  /**
-   * SAFE: the bounded danger STATE no other counter owns.
-   *
-   * `restrictCandidatesDuringImmediateThreat` is a per-tick predicate: it arms
-   * while a hostile is inside `IMMEDIATE_HOSTILE_RANGE` in the CURRENT snapshot.
-   * Measured live, that let the body retreat once and go straight back to
-   * digging the moment the mob's snapshot moved outside it; the zombie followed,
-   * landed the next hit, and health eroded 20 -> 18 -> 16 -> 2 -> death over a
-   * minute (eight deaths in seven minutes, `run-mubobiq6-12onv`). This tracker
-   * owns the missing state: enter on the threat predicate, stay while any
-   * hostile is inside the bounded danger radius or has engaged the body, and
-   * leave only after the whole envelope has been continuously clear for
-   * `THREAT_CLEAR_MS`.
-   *
-   * The typed `THREAT_NEARBY` line is emitted on a change with the mob name,
-   * distance, contact/danger flags, the code-owned weapon the body holds and
-   * whether the body can regenerate at all - so a post-mortem never has to guess
-   * what killed the body or what it was holding. `THREAT_CLEAR` records the
-   * bounded exit.
-   */
   private observeThreatState(state: WorldState): void {
-    const evidence = this.threat.note({
-      atMs: state.timestampMs,
-      entities: state.entities,
-      lastDamage: state.signals.lastDamage ?? null,
-    })
-    this.signals.threat = evidence
-    state.signals = { ...state.signals, threat: evidence }
-    const goalKey = this.currentGoalKey()
-    if (!evidence.active) {
-      this.lastThreatLine = null
-      if (this.threatWasActive) {
-        this.threatWasActive = false
-        this.logger.info(
-          'agent',
-          formatThreatClear(goalKey, evidence),
-          { clearMs: evidence.clearMs, clearForMs: evidence.clearForMs },
-          this.tickCounter,
-        )
-      }
-      return
-    }
-    this.threatWasActive = true
-    const weapon = weaponFacts(state.self.heldItem?.name ?? null)
-    const line = formatThreatNearby(goalKey, evidence, weapon, bodySurvivalFacts(state.self))
-    // Bounded dedup: the line carries `activeMs`, which changes every decision,
-    // so the signature drops it and keeps the facts a post-mortem needs
-    // (identity, whole-metre distance, contact/danger, envelope size, weapon). A
-    // mob hovering at the same distance does not re-log every tick.
-    const signature = [
-      evidence.threatId,
-      evidence.threatName,
-      evidence.inContact ? 'contact' : evidence.inDanger ? 'danger' : 'engaged',
-      evidence.threatDistance === null ? 'na' : Math.round(evidence.threatDistance),
-      evidence.hostileCount,
-      weapon.name ?? 'fists',
-    ].join('|')
-    if (signature === this.lastThreatLine) return
-    this.lastThreatLine = signature
-    this.logger.warn(
-      'agent',
-      line,
-      {
-        threat: evidence.threatName,
-        threatId: evidence.threatId,
-        distance: evidence.threatDistance,
-        contact: evidence.inContact,
-        danger: evidence.inDanger,
-        entryReason: evidence.entryReason,
-        activeMs: evidence.activeMs,
-        weapon: state.self.heldItem?.name ?? 'fists',
-        food: state.self.food,
-        health: state.self.health,
-      },
-      this.tickCounter,
-    )
+    return threat.observeThreatState(this.threatHost, state)
   }
-
-  /**
-   * The code-owned identity facts the bounded mob-churn rule reads
-   * (`threat.ts` `MobIdentityContext`).
-   *
-   * `previousEntityTracked` is read from the CLIENT's tracked set (`bot.entities`),
-   * never from the sensor snapshot: the sensor is a bounded radius, so "gone from
-   * the snapshot" cannot be told apart from "walked 30 m away", while
-   * `bot.entities[id] === undefined` means the server destroyed that exact id
-   * (`entity_destroy`). An entity that is present but `isValid === false` counts as
-   * gone for the same reason; anything the controller cannot resolve (no candidate
-   * entity id) stays `null` = UNKNOWN, and the rule refuses.
-   *
-   * `knownEntityIds` is the DECISION-time snapshot, so the rule can require the
-   * replacement to be an entity that appeared during the churn window instead of a
-   * bystander of the same kind that was already standing there.
-   */
   private mobIdentityContext(
     chosen: Candidate | null,
     decisionState: WorldState,
@@ -10002,473 +9877,35 @@ export class JevController {
    * ground a response from.
    */
   private observeUnansweredRangedThreat(state: WorldState): void {
-    const unanswered = unansweredRangedThreats(state.entities)
-    const threat = unanswered[0] ?? null
-    const sourceName = state.signals.lastDamage?.sourceName ?? null
-    // The unsensed case: the attacker is named by the damage attribution and is
-    // NOT in the sensor snapshot. `unsensedAttackerFacts` owns that predicate
-    // (identity + recency + absence), so the marker, the offer restriction and
-    // the death telemetry all read ONE fact instead of three near-copies.
-    const attacker = unsensedAttackerFacts(state)
-    const unsensed = threat === null && attacker !== null
-    if (threat === null && !unsensed) {
-      this.lastRangedThreatLine = null
-      return
-    }
-    // What the body can still DO: the sensor builds its escape/cover cells for
-    // the attributed origin too, so a non-empty escape set is a real grounded
-    // destination. No cells means no direction could be grounded - which the
-    // marker says explicitly instead of implying there is no threat.
-    const escapeCells = state.terrain.escapeCells ?? []
-    const coverCells = state.terrain.threatCoverCells ?? []
-    const response = unsensedThreatResponse({
-      attacker,
-      groundedDestinations: attacker?.position === null ? 0 : escapeCells.length + coverCells.length,
-      coverCells: coverCells.length,
-      availableMoves: escapeCells.length + coverCells.length,
-    })
-    const line = formatThreatRangedUnanswered({
-      goalKey: this.currentGoalKey(),
-      threat,
-      sourceName: unsensed ? (attacker?.name ?? sourceName) : null,
-      body: bodySurvivalFacts(state.self),
-      weapon: weaponFacts(state.self.heldItem?.name ?? null),
-      attacker,
-      response: attacker === null ? undefined : response,
-    })
-    if (line === this.lastRangedThreatLine) return
-    this.lastRangedThreatLine = line
-    this.logger.warn(
-      'agent',
-      line,
-      {
-        threat: threat?.name ?? attacker?.name ?? sourceName,
-        distance: threat?.distance ?? null,
-        sensed: threat !== null,
-        standoff: threat?.standoff ?? attacker?.standoff ?? null,
-        sourcePosition: attacker?.position ?? null,
-        response: attacker === null ? null : response.kind,
-        missing: response.missing,
-        health: state.self.health,
-        weapon: state.self.heldItem?.name ?? 'fists',
-        source: sourceName,
-      },
-      this.tickCounter,
-    )
-    // The bounded break-contact evidence: no destination could be grounded from
-    // the damage attribution, so the body's only answer is to keep moving. This
-    // is the typed statement that the body is NOT idle, and exactly which facts
-    // were missing to do better.
-    if (attacker === null || response.grounded || response.kind !== 'break_contact') {
-      this.lastBreakContactLine = null
-      return
-    }
-    const moves = (state.terrain.escapeCells ?? []).map((cell) => `${cell.x},${cell.y},${cell.z}`)
-    const breakLine = formatThreatBreakContact({
-      goalKey: this.currentGoalKey(),
-      attacker,
-      response,
-      body: bodySurvivalFacts(state.self),
-      weapon: weaponFacts(state.self.heldItem?.name ?? null),
-      availableMoves: moves,
-    })
-    if (breakLine === this.lastBreakContactLine) return
-    this.lastBreakContactLine = breakLine
-    this.logger.warn(
-      'guard',
-      breakLine,
-      {
-        marker: THREAT_BREAK_CONTACT,
-        threat: attacker.name,
-        attackerId: attacker.id,
-        sourcePosition: attacker.position,
-        missing: response.missing,
-        response: response.kind,
-        health: state.self.health,
-        food: state.self.food,
-      },
-      this.tickCounter,
-    )
+    return threat.observeUnansweredRangedThreat(this.threatHost, state)
   }
-
-  /** Current CAN says the conservative proximity threat is occluded/unreachable. */
   private logThreatOccluded(offer: ThreatOffer): void {
-    if (offer.occluded === null || offer.threat === null) {
-      this.lastThreatOccludedLine = null
-      return
-    }
-    const line = formatThreatOccluded(this.currentGoalKey(), offer.threat, offer.occluded.entityIds)
-    if (line === this.lastThreatOccludedLine) return
-    this.lastThreatOccludedLine = line
-    this.logger.info(
-      'agent',
-      line,
-      {
-        marker: THREAT_OCCLUDED,
-        threat: offer.threat.threatName,
-        ids: offer.occluded.entityIds,
-        distance: offer.threat.threatDistance,
-        reason: offer.occluded.reason,
-      },
-      this.tickCounter,
-    )
+    return threat.logThreatOccluded(this.threatHost, offer)
   }
-
-  /**
-   * Mirror the escape-versus-damage fact while a hostile is ON the body: the
-   * measured shape is a body whose every grounded `RETREAT` was re-grounded onto a
-   * cell that never broke contact (`buddy.log` 2026-09-22T10:49:5x: distance 2.98 m
-   * -> 2.06 m, health 16.704 -> 8.316 -> dead in ~4 s). Without this line the death
-   * is indistinguishable from a body that had nowhere to go, and the difference
-   * decides whether the fix is "ground a real escape" or "the race was lost".
-   *
-   * Emitted only while the threat is ACTIVE and in CONTACT: an ordinary danger-band
-   * tick is not a race, and the marker must not become per-tick noise. When the body
-   * has no landable escape at all the same facts are mirrored as
-   * `SURVIVAL_ESCAPE_NONE ... outcome=CAPABILITY_LOST`.
-   */
   private logSurvivalRace(state: WorldState, offer: ThreatOffer): void {
-    const evidence = offer.threat
-    if (evidence === null || evidence.active !== true || !evidence.inContact) {
-      this.lastSurvivalRaceLine = null
-      return
-    }
-    const escapes = offer.candidates
-      .filter((candidate) => candidate.kind === 'RETREAT')
-      .map((candidate) => ({
-        separationGain:
-          typeof candidate.meta.separationGain === 'number' && Number.isFinite(candidate.meta.separationGain)
-            ? candidate.meta.separationGain
-            : 0,
-        outsideReach: candidate.meta.outsideReach === true,
-      }))
-    const lastDamage = state.signals.lastDamage ?? null
-    const facts = assessSurvivalRace({
-      evidence,
-      body: bodySurvivalFacts(state.self),
-      weapon: weaponFacts(state.self.heldItem?.name ?? null),
-      damage: classifyDamageSource(lastDamage, state.entities),
-      escapes,
-      damageAgoMs:
-        lastDamage === null || !Number.isFinite(lastDamage.atMs) ? null : Math.max(0, state.timestampMs - lastDamage.atMs),
-    })
-    const line = facts.escape === 'none' ? formatSurvivalEscapeNone(facts) : formatSurvivalDamageRace(facts)
-    if (line === this.lastSurvivalRaceLine) return
-    this.lastSurvivalRaceLine = line
-    this.logger.warn(
-      'agent',
-      line,
-      {
-        marker: facts.escape === 'none' ? SURVIVAL_ESCAPE_NONE : SURVIVAL_DAMAGE_RACE,
-        threat: facts.threatName,
-        threatId: facts.threatId,
-        distance: facts.distance,
-        contact: facts.contact,
-        source: facts.damage.source,
-        sourceName: facts.damage.name,
-        health: facts.body.health,
-        food: facts.body.food,
-        weapon: facts.weapon.name,
-        escapes: facts.escapeCount,
-        escapesOutsideReach: facts.escapesOutsideReach,
-        bestSeparationGain: facts.bestSeparationGain,
-        escape: facts.escape,
-        damageAgoMs: facts.damageAgoMs,
-        reason: facts.reason,
-      },
-      this.tickCounter,
-    )
+    return threat.logSurvivalRace(this.threatHost, state, offer)
   }
-
-  /**
-   * Mirror the code-owned threat capability gap: the body is under threat and
-   * the deterministic layer could ground neither an attack nor a keep-distance
-   * route, so only a bounded ESCALATE is offered. This is the honest replacement
-   * for the old fallback that returned the work set while a zombie was inside
-   * melee reach.
-   */
   private logThreatGap(state: WorldState, offer: ThreatOffer): void {
-    if (offer.gap === null || offer.threat === null) {
-      this.lastThreatGapLine = null
-      return
-    }
-    const line = formatThreatNoEscape(
-      this.currentGoalKey(),
-      offer.threat,
-      weaponFacts(state.self.heldItem?.name ?? null),
-      `${offer.gap.reason}${offer.inContact ? '@contact' : '@danger'}`,
-    )
-    if (line === this.lastThreatGapLine) return
-    this.lastThreatGapLine = line
-    this.logger.warn(
-      'agent',
-      line,
-      {
-        threat: offer.threat.threatName,
-        distance: offer.threat.threatDistance,
-        inContact: offer.inContact,
-        reason: offer.gap.reason,
-      },
-      this.tickCounter,
-    )
+    return threat.logThreatGap(this.threatHost, state, offer)
   }
-
-  /**
-   * SAFE: the survival fact no other counter owns. `damage_taken` / `hp_changed`
-   * carry the health step, so this records consecutive damage at critical health
-   * for the ACTIVE plan; the code-owned `bodyStarving` sensor fact is fed on
-   * every decision so the durable critical STARVING state arms the same counter
-   * even when no damage event arrives (the measured live plateau: health 1,
-   * food 0, no further `hp_changed`). Once the bounded count is exhausted it logs
-   * the typed `CRITICAL_DAMAGE_EXHAUSTED` (or `BODY_STARVING` when the hunger bar
-   * is empty), removes WAIT for one decision, and wakes System2 through the same
-   * `escalate()` path #326/#337 use. The choice of WHAT ends the damage stays
-   * with Jev; this only proves the current plan is not ending it.
-   *
-   * Health is de-duplicated against the controller's own last observation, not
-   * `detail.previousHealth`: both triggers can be delivered for one damage event
-   * (and the scheduler's coalescing keeps only `damage_taken`), so counting the
-   * step itself is what makes one hit cost exactly one.
-   */
   private observeCriticalDamage(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
-    const rawHealth = typeof detail.health === 'number' && Number.isFinite(detail.health) ? detail.health : this.bot.health
-    const health = typeof rawHealth === 'number' && Number.isFinite(rawHealth) ? rawHealth : Number.NaN
-    const rawFood = typeof detail.food === 'number' && Number.isFinite(detail.food) ? detail.food : this.bot.food
-    const food = typeof rawFood === 'number' && Number.isFinite(rawFood) ? rawFood : null
-    const planKey = `${this.currentGoalKey()}|${this.queue.current?.id ?? 'none'}`
-    if (trigger === 'damage_taken' || trigger === 'hp_changed') {
-      // A fresh damage observation advances the event counter exactly once per
-      // health step. Only damage triggers may overwrite `lastObservedHealth`: a
-      // non-damage tick that did so would erase the step before it is counted.
-      const previousHealth = this.lastObservedHealth
-      if (Number.isFinite(health)) this.lastObservedHealth = health
-      // The environmental-hazard tracker counts the SAME observation. A real
-      // negative health step is damage; a `damage_taken` event with no comparable
-      // step (a respawn/hot-reload boundary) is still a hit.
-      if (
-        (typeof previousHealth === 'number' && Number.isFinite(previousHealth) && health < previousHealth) ||
-        (trigger === 'damage_taken' && !(typeof previousHealth === 'number' && Number.isFinite(previousHealth)))
-      ) {
-        this.damageObservedThisTick = true
-      }
-      this.criticalDamage.note({
-        health,
-        previousHealth,
-        planKey,
-        food,
-        // SAFE: Mineflayer's attribution wins; when there is none and the body's
-        // own hazard state names a damage-dealing environmental cause, that cause
-        // is the honest source (`source=fire` instead of the measured
-        // `source=environment` while burning). `envHazardDamageSource` refuses to
-        // attribute damage to a hazard that cannot deal it (`adjacent_lava`
-        // alone).
-        sourceName: this.signals.lastDamage?.sourceName ?? this.envHazardAttribution(),
-      })
-    }
-    // SAFE: the critical STARVING state is a durable sensor fact, not an event.
-    // On this server starvation damage floors at 1 HP, so the measured live body
-    // (health 1, food 0, no food item, no `hp_changed` for a whole generation)
-    // never armed the event counter and idled with no escalation. Feeding the
-    // state fact on every decision - not only on a damage trigger - lets the same
-    // bounded boundary fire; a grounded food route that actually ends the
-    // starvation clears the fact and resets the count on the next decision.
-    const starving = food !== null && bodyStarving({ food, health })
-    const evidence = this.criticalDamage.noteStarving({ planKey, health, food, starving })
-    this.signals.criticalDamage = evidence
-    const goalKey = this.currentGoalKey()
-    if (!evidence.active) {
-      this.lastCriticalDamageLine = null
-      return
-    }
-    const entity = this.bot.entity
-    const at = entity === undefined ? { x: 0, y: 0, z: 0 } : entity.position
-    const line =
-      evidence.food !== null && bodyStarving({ food: evidence.food, health: evidence.health })
-        ? formatBodyStarving({ food: evidence.food, health: evidence.health }, at)
-        : formatCriticalDamageEvidence(goalKey, evidence)
-    if (line !== this.lastCriticalDamageLine) {
-      this.lastCriticalDamageLine = line
-      this.logger.warn(
-        'agent',
-        line,
-        {
-          health: evidence.health,
-          food: evidence.food,
-          source: evidence.sourceName,
-          damage: evidence.consecutiveDamage,
-          limit: evidence.limit,
-        },
-        this.tickCounter,
-      )
-    }
-    if (!evidence.exhausted) return
-    this.logger.warn(
-      'agent',
-      formatCriticalDamageExhausted(goalKey, evidence),
-      {
-        health: evidence.health,
-        food: evidence.food,
-        source: evidence.sourceName,
-        damage: evidence.consecutiveDamage,
-        limit: evidence.limit,
-        boundary: 'semantic_boundary',
-      },
-      this.tickCounter,
-    )
-    // Consume the evidence (the next boundary needs a longer run on the same
-    // plan) and force the next decision to pick a real candidate, so the body
-    // cannot settle into an unbounded WAIT while it keeps losing health.
-    this.signals.criticalDamage = this.criticalDamage.acknowledgeEscalation()
-    this.lastCriticalDamageLine = null
-    this.waitSuppressed = true
-    this.escalate(
-      'progress_stall',
-      `CRITICAL_DAMAGE_EXHAUSTED goal=${goalKey} health=${evidence.health} food=${evidence.food ?? 'unknown'} damage=${evidence.consecutiveDamage}/${evidence.limit} source=${evidence.sourceName ?? 'environment'}`,
-    )
+    return threat.observeCriticalDamage(this.threatHost, trigger, detail)
   }
-
-  /**
-   * SAFE (issue #436 §8/§17): the hard-safety reflex telemetry.
-   *
-   * Three lines, all emitted only after the guard accepted the candidate so a
-   * line can never claim an action the mechanical checks refused:
-   *
-   *   SKILL_STEP ... authority=HARD_SAFETY_REFLEX budget=1
-   *     the §17 layer: this step was an immediate safety stabilisation, not a
-   *     mechanical continuation of the selected Skill;
-   *   REFLEX ownerSkill=<the interrupted skill> reason=hard_safety action=<what>
-   *     evidence=<the block/flag that proved it>
-   *     the §8 proof: code was allowed to finish exactly this action;
-   *   SKILL_INTERRUPT + SKILL_POLICY_BOUNDARY skill=... reason=hard_safety_interrupt
-   *     alternatives=[...]
-   *     the boundary: the in-flight Skill was preempted and the decision returns
-   *     to the semantic controller with the other grounded routes exposed.
-   *
-   * The REFLEX line is de-duplicated by its own facts so a persistent hazard
-   * does not re-log every tick.
-   */
   private logReflex(
     reflex: EnvHazardReflex,
     state: WorldState,
     inFlight: InFlightAction | null,
     alternatives: readonly string[],
   ): void {
-    const interruptReason: SkillPolicyBoundaryReason = 'hard_safety_interrupt'
-    const evidence = formatEnvHazardReflexEvidence(this.envHazard.evidence())
-    const ownerSkill = inFlight?.id ?? state.currentOption?.templateId ?? this.currentGoalKey()
-    const line = formatReflex({
-      ownerSkill,
-      reason: 'hard_safety',
-      action: reflex.candidate.id,
-      evidence,
-    })
-    if (line !== this.lastReflexLine) {
-      this.lastReflexLine = line
-      this.logger.warn(
-        'policy',
-        line,
-        {
-          ownerSkill,
-          reason: 'hard_safety',
-          action: reflex.candidate.id,
-          kind: reflex.kind,
-          escapeKind: reflex.escapeKind,
-          evidence,
-          goal: this.currentGoalKey(),
-        },
-        this.tickCounter,
-      )
-    }
-    this.logger.warn(
-      'policy',
-      formatSkillStep(
-        ownerSkill,
-        'env_hazard_stabilize',
-        formatSkillStepAuthority('HARD_SAFETY_REFLEX', evidence, 'stabilize_one_step', { budget: 1 }),
-      ),
-      {
-        ownerSkill,
-        authority: 'HARD_SAFETY_REFLEX',
-        stepKind: 'env_hazard_stabilize',
-        budget: 1,
-        action: reflex.candidate.id,
-        kind: reflex.kind,
-        target: reflex.candidate.target,
-      },
-      this.tickCounter,
-    )
-    if (inFlight === null) return
-    this.logger.warn(
-      'policy',
-      `${formatSkillInterrupt(inFlight.id, reflex.kind)} -> kind=${inFlight.kind} reflex=${reflex.candidate.id}`,
-      {
-        reason: reflex.kind,
-        interrupted: inFlight.id,
-        interruptedKind: inFlight.kind,
-        reflex: reflex.candidate.id,
-      },
-      this.tickCounter,
-    )
-    // §8: the reflex may preempt, but the decision then returns to the semantic
-    // controller - which the boundary line records with the remaining grounded
-    // routes exposed.
-    this.logger.warn(
-      'policy',
-      formatSkillPolicyBoundary({
-        skill: inFlight.id,
-        reason: interruptReason,
-        alternatives,
-      }),
-      { skill: inFlight.id, reason: 'hard_safety_interrupt', alternatives, authority: 'HARD_SAFETY_REFLEX' },
-      this.tickCounter,
-    )
+    return threat.logReflex(this.threatHost, reflex, state, inFlight, alternatives)
   }
-
-  /**
-   * SAFE (issue #436 §8/§17): the boundary where code must NOT take over.
-   *
-   * The body is in an environmental hazard with an in-flight Skill, and the exit
-   * is not a unique immediate stabilisation - either several grounded routes
-   * exist (Jev's WHICH) or none does (the typed `ENV_HAZARD_NO_EXIT` gap). This
-   * line names that boundary and exposes the grounded alternatives so a reviewer
-   * can see that code returned the decision instead of picking a destination.
-   */
   private logEnvHazardBoundary(
     state: WorldState,
     candidates: readonly Candidate[],
     inFlight: InFlightAction | null,
   ): void {
-    const hazard = state.self.envHazard ?? null
-    if (hazard?.active !== true || hazard.escapeRequired !== true || inFlight === null) return
-    const routes = envHazardEscapeRoutes(state, candidates)
-    const reason: SkillPolicyBoundaryReason =
-      routes.length === 0 ? 'no_grounded_escape' : 'multiple_grounded_escapes'
-    const line = formatSkillPolicyBoundary({
-      skill: inFlight.id,
-      reason,
-      alternatives: routes.map((route) => route.id),
-    })
-    if (line === this.lastEnvBoundaryLine) return
-    this.lastEnvBoundaryLine = line
-    this.logger.warn(
-      'policy',
-      line,
-      {
-        skill: inFlight.id,
-        reason,
-        alternatives: routes.map((route) => route.id),
-        kind: hazard.kinds.join('+'),
-      },
-      this.tickCounter,
-    )
+    return threat.logEnvHazardBoundary(this.threatHost, state, candidates, inFlight)
   }
-
-  /**
-   * The synthetic decision a hard-safety reflex carries: the SAME downstream
-   * pipeline (decision record, guard, executor claim) with an explicit
-   * provenance that is neither Jev nor the deterministic fallback, and NO model
-   * call. `answers.action` is the one authoritative choice the executor reads.
-   */
   private reflexDecision(candidate: Candidate): JevResult {
     return {
       callId: `reflex:${randomUUID()}`,
@@ -10504,120 +9941,14 @@ export class JevController {
    * hazard that cannot deal damage (`adjacent_lava` alone).
    */
   private envHazardAttribution(): string | null {
-    const evidence = this.envHazard.evidence()
-    if (!evidence.active) return null
-    return envHazardDamageSource(evidence.kinds)
+    return threat.envHazardAttribution(this.threatHost)
   }
-
-  /**
-   * SAFE: the body's own environmental-hazard telemetry (fire / lava / burning /
-   * drowning).
-   *
-   * Measured live (`run-mucaq28q-1ftq1`, main 99f0020): the body burned to death
-   * in the Nether, every tick arrived as `source=environment`, and a scan of the
-   * whole run found FIRE 0 | LAVA 0 | HAZARD_FIRE 0 | IN_FIRE 0 | BURN 0 - the
-   * system had NO state for it. This mirrors the sensed fact as `ENV_HAZARD`
-   * (with the exits the world actually grounds), the typed CAN gap
-   * `ENV_HAZARD_NO_EXIT` when it grounds none, and `ENV_HAZARD_CLEAR` when the
-   * body gets out. It never invents a route and never ranks one: the exits are
-   * ordinary candidates and the choice among them stays Jev's
-   * (`envHazardReflexAction` fires only when exactly one is grounded).
-   */
   private observeEnvHazard(state: WorldState): void {
-    const hazard = state.self.envHazard ?? null
-    const evidence = this.envHazard.note({
-      atMs: state.timestampMs,
-      hazard,
-      damageObserved: this.damageObservedThisTick,
-    })
-    this.damageObservedThisTick = false
-    const goalKey = this.currentGoalKey()
-    if (evidence.active) {
-      const escapes = envHazardEscapeSpots(state, this.blacklistedMoveTargets(state))
-      const line = formatEnvHazard(goalKey, evidence, escapes)
-      if (line !== this.lastEnvHazardLine) {
-        this.lastEnvHazardLine = line
-        this.logger.warn(
-          'agent',
-          line,
-          {
-            kind: evidence.kinds.join('+'),
-            cell: evidence.cell,
-            block: evidence.block,
-            damage: evidence.damage,
-            activeMs: evidence.activeMs,
-            onFire: evidence.onFire,
-            headWet: evidence.headInWater,
-            airAbove: evidence.airAbove,
-            exits: escapes.length,
-            waterExit: escapes.some((escape) => escape.water),
-          },
-          this.tickCounter,
-        )
-      }
-      if (evidence.escapeRequired && escapes.length === 0) {
-        const gap = formatEnvHazardNoExit(goalKey, evidence, state.envHazardCells?.length ?? 0)
-        if (gap !== this.lastEnvHazardGapLine) {
-          this.lastEnvHazardGapLine = gap
-          this.logger.warn(
-            'agent',
-            gap,
-            { kind: evidence.kinds.join('+'), cell: evidence.cell, reason: 'no_safe_adjacent_cell' },
-            this.tickCounter,
-          )
-        }
-      } else {
-        this.lastEnvHazardGapLine = null
-      }
-      return
-    }
-    this.lastEnvHazardLine = null
-    this.lastEnvHazardGapLine = null
-    const cleared = this.envHazard.takeCleared()
-    if (cleared !== null) {
-      this.logger.info(
-        'agent',
-        formatEnvHazardClear(cleared),
-        {
-          lastKind: cleared.kinds.join('+'),
-          lastCell: cleared.cell,
-          lastBlock: cleared.block,
-          damage: cleared.damage,
-          activeMs: cleared.activeMs,
-        },
-        this.tickCounter,
-      )
-    }
+    return threat.observeEnvHazard(this.threatHost, state)
   }
-
-  /**
-   * Health events are authoritative when delivered. A direct per-tick sample is
-   * the fail-safe for hot-reload/respawn windows where Mineflayer changes
-   * `bot.health` but the scheduler event is not observed by this generation.
-   * The pure transition helper prevents an initial seed or an unchanged sample
-   * from inventing damage; only a real delta enters the existing tracker.
-   */
   private sampleHealthFallback(): void {
-    const health = this.bot.health
-    const transition = sampleHealthTransition(this.lastObservedHealth, health)
-    if (this.lastObservedHealth === null && Number.isFinite(health)) {
-      this.lastObservedHealth = health
-    }
-    if (!transition.observe) return
-    this.observeCriticalDamage('hp_changed', {
-      health,
-      previousHealth: transition.previousHealth,
-      food: this.bot.food,
-      delta: transition.delta,
-    })
+    return threat.sampleHealthFallback(this.threatHost)
   }
-
-  /**
-   * M2 capability trap observable. The deterministic predicate decides; this
-   * method only feeds it the live y / target / refusal flag and reacts with the
-   * `CAPABILITY_GAP` marker plus a strategic replan. It is not a movement
-   * heuristic and it never claims success.
-   */
   private observeCapabilityGap(): void {
     const entity = this.bot.entity
     if (entity === undefined) return
@@ -13868,22 +13199,4 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
       },
     },
   }
-}
-
-/**
- * The damage ORIGIN a scheduler trigger carries, validated, or null.
- *
- * The scheduler only ever sets `attackerPosition` from a finite server-stated
- * coordinate (the `damage_event` packet's `sourcePosition`, or the resolved
- * source entity's position), but this is the boundary where an untrusted
- * payload could reach the durable signal: a non-finite or malformed value is
- * dropped here so "unknown" stays unknown instead of poisoning a distance
- * comparison downstream.
- */
-function damageOrigin(value: unknown): Vec3Json | null {
-  if (typeof value !== 'object' || value === null) return null
-  const point = value as { x?: unknown; y?: unknown; z?: unknown }
-  if (typeof point.x !== 'number' || typeof point.y !== 'number' || typeof point.z !== 'number') return null
-  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) return null
-  return { x: point.x, y: point.y, z: point.z }
 }
