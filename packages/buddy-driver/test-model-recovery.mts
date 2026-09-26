@@ -420,7 +420,7 @@ describe('model authority recovery host policy', () => {
     expect(queue.revision).toBe(revisionBefore)
     expect(queue.state).toEqual(before)
 
-    const plane = readFileSync(new URL('../jev-agent/src/legacy/system2-plane.ts', import.meta.url), 'utf8')
+    const plane = readFileSync(new URL('../jev-agent/src/system2-plane.ts', import.meta.url), 'utf8')
     const applyStart = plane.indexOf('const applyPlan = (): QueuedGoal[] => {', plane.indexOf('const answersTheHead'))
     const applyEnd = plane.indexOf('let added: QueuedGoal[]', applyStart)
     const fenceCall = plane.indexOf('const fenced = applySystem2RecoveryFence(', applyEnd)
@@ -880,9 +880,9 @@ describe('model authority recovery host policy', () => {
     expect(mercury).toContain('if (cached !== undefined && !this.requireFreshProviderDecision)')
     const controller = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
     expect(
-      controller + readFileSync(new URL('../jev-agent/src/legacy/system2-plane.ts', import.meta.url), 'utf8'),
+      controller + readFileSync(new URL('../jev-agent/src/system2-plane.ts', import.meta.url), 'utf8'),
     ).toMatch(/provider: system2Authority\.provider,\s*model: system2Authority\.model,/)
-    const decisionEpochs = readFileSync(new URL('../jev-agent/src/legacy/decision-epochs.ts', import.meta.url), 'utf8')
+    const decisionEpochs = readFileSync(new URL('../jev-agent/src/decision-epochs.ts', import.meta.url), 'utf8')
     const decisionSource = controller + decisionEpochs
     const decisionStart = decisionSource.indexOf('const result = await host.jev.decide({')
     const authorityCheck = decisionSource.indexOf('assertRecoveryModelAuthority(', decisionStart)

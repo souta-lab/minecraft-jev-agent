@@ -361,7 +361,7 @@ addCase('the deferral bound resolves from env with safe defaults', () => {
 addCase('wiring: the controller owns the bound and mirrors the markers', () => {
   const text =
     readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/abandon-lifecycle.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
+    readFileSync(new URL('./src/abandon-lifecycle.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
   const missing = [
     'new BetaAbandonDeferral(',
     'betaAbandonDeferral.note(',

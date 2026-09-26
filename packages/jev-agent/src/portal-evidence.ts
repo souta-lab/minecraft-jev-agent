@@ -7,7 +7,7 @@
 // caller; this module only produces evidence rows and typed refusals.
 
 import type { Bot } from 'mineflayer'
-import type { PortalEntryRefusal } from '../candidates.ts'
+import type { PortalEntryRefusal } from './candidates.ts'
 import {
   formatPortalEntryNoKnownSite,
   isPortalIgnitionPostconditionMet,
@@ -19,16 +19,16 @@ import {
   PORTAL_LIT_PREDICATE,
   PORTAL_OBSIDIAN_REQUIRED,
   portalFrameLayout,
-} from '../netherPortalPlan.ts'
-import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from '../netherPortalPlan.ts'
-import type { QueuedGoal } from '../goalQueue.ts'
-import { recordedPortalSitesFromKnownResources } from '../goalSuccess.ts'
-import type { RecordedPortalSite } from '../goalSuccess.ts'
-import type { EventLogger } from '../jev.ts'
-import { sensorOptions } from '../controller-shared.ts'
-import { isStandable, liveStructureMembersForSites, sensedPortalFrameSites } from '../state.ts'
-import type { DimensionProvenance, KnownResource, WorldState } from '../state.ts'
-import { ROUTE_ALL_SPENT_REASON } from '../zeroProgressRoute.ts'
+} from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
+import type { QueuedGoal } from './goalQueue.ts'
+import { recordedPortalSitesFromKnownResources } from './goalSuccess.ts'
+import type { RecordedPortalSite } from './goalSuccess.ts'
+import type { EventLogger } from './jev.ts'
+import { sensorOptions } from './controller-shared.ts'
+import { isStandable, liveStructureMembersForSites, sensedPortalFrameSites } from './state.ts'
+import type { DimensionProvenance, KnownResource, WorldState } from './state.ts'
+import { ROUTE_ALL_SPENT_REASON } from './zeroProgressRoute.ts'
 import type { EscalationReason } from './escalation.ts'
 
 /** Narrow host surface for the portal-evidence slice. */

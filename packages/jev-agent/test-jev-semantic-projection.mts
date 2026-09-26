@@ -268,9 +268,9 @@ function outcomePacket(
 
 const SRC_CONTROLLER =
   readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-  readFileSync(new URL('./src/legacy/system2-plane.ts', import.meta.url), 'utf8') +
-  readFileSync(new URL('./src/legacy/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
-  readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
+  readFileSync(new URL('./src/system2-plane.ts', import.meta.url), 'utf8') +
+  readFileSync(new URL('./src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
+  readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
 
 addCase('(0) air bands share the sensor scale, reject invalid readings, and use normalized state air', () => {
   const values = [0, LOW_AIR_LEVEL, LOW_AIR_LEVEL + 1, MAX_AIR]

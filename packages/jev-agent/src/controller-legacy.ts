@@ -199,11 +199,11 @@ import type {
 import type { ReachMissionSnapshotOptions } from './reach/mission-projection.ts'
 import { sensorOptions, candidateOptions, currentFocusItem, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
 import type { JevAgentOptions } from './controller-shared.ts'
-import * as escalationplane from './legacy/escalation.ts'
-import type { EscalationHost } from './legacy/escalation.ts'
-import type { EscalationReason } from './legacy/escalation.ts'
-import type { PendingDecision } from './legacy/decision-epochs.ts'
-import * as diagnostics from './legacy/candidate-diagnostics.ts'
+import * as escalationplane from './escalation.ts'
+import type { EscalationHost } from './escalation.ts'
+import type { EscalationReason } from './escalation.ts'
+import type { PendingDecision } from './decision-epochs.ts'
+import * as diagnostics from './candidate-diagnostics.ts'
 import {
   candidateStarvationLine,
   candidateStarvationMissing,
@@ -212,18 +212,18 @@ import {
   goalStarvationBlockedBy,
   mirroredEventToken,
   withheldToolGaps,
-} from './legacy/candidate-diagnostics.ts'
-import type { CandidateDiagnosticsHost } from './legacy/candidate-diagnostics.ts'
-import * as evidence from './legacy/grounded-evidence.ts'
-import type { GroundedEvidenceHost } from './legacy/grounded-evidence.ts'
-import * as probes from './legacy/path-probes.ts'
-import type { PathProbesHost } from './legacy/path-probes.ts'
-import * as portal from './legacy/portal-evidence.ts'
-import type { PortalEvidenceHost } from './legacy/portal-evidence.ts'
-import * as threat from './legacy/threat-observers.ts'
-import type { ThreatObserverHost } from './legacy/threat-observers.ts'
-import * as retrieval from './legacy/retrieval-progress.ts'
-import type { RetrievalProgressHost } from './legacy/retrieval-progress.ts'
+} from './candidate-diagnostics.ts'
+import type { CandidateDiagnosticsHost } from './candidate-diagnostics.ts'
+import * as evidence from './grounded-evidence.ts'
+import type { GroundedEvidenceHost } from './grounded-evidence.ts'
+import * as probes from './path-probes.ts'
+import type { PathProbesHost } from './path-probes.ts'
+import * as portal from './portal-evidence.ts'
+import type { PortalEvidenceHost } from './portal-evidence.ts'
+import * as threat from './threat-observers.ts'
+import type { ThreatObserverHost } from './threat-observers.ts'
+import * as retrieval from './retrieval-progress.ts'
+import type { RetrievalProgressHost } from './retrieval-progress.ts'
 import {
   DESCEND_NO_CANDIDATE_TICKS,
   DESCEND_STALL_TICKS,
@@ -235,7 +235,7 @@ import {
   formatKnownResourceRetired,
   resourceKey,
   shouldClearActiveRetrieval,
-} from './legacy/retrieval-progress.ts'
+} from './retrieval-progress.ts'
 export {
   KNOWN_RETRIEVE_RETIRE_LIMIT,
   decideKnownRetrieve,
@@ -244,23 +244,23 @@ export {
   knownRetrieveMadeProgress,
   shouldClearActiveRetrieval,
   shouldRetireKnownRetrieve,
-} from './legacy/retrieval-progress.ts'
-import * as stall from './legacy/stall-observers.ts'
-import * as modelrecovery from './legacy/model-recovery.ts'
-import type { ModelRecoveryHost } from './legacy/model-recovery.ts'
-import * as system2plane from './legacy/system2-plane.ts'
-import * as queueplane from './legacy/goal-queue-plane.ts'
-import type { AbandonVerdict, GoalQueuePlaneHost } from './legacy/goal-queue-plane.ts'
-export { evaluateSurfaceRecovery, orphanedSmeltPrerequisiteReason, staleOreDescend } from './legacy/goal-queue-plane.ts'
-import type { System2PlaneHost } from './legacy/system2-plane.ts'
-import * as goalstate from './legacy/goal-state.ts'
-import type { GoalStateHost } from './legacy/goal-state.ts'
-import * as abandonlifecycle from './legacy/abandon-lifecycle.ts'
-import type { AbandonLifecycleHost } from './legacy/abandon-lifecycle.ts'
-export { canAuthoritativelyAbandonOption } from './legacy/abandon-lifecycle.ts'
-export { betaAbandonProgressObserved } from './legacy/abandon-lifecycle.ts'
-export { filterFurnacePrerequisiteCandidates } from './legacy/abandon-lifecycle.ts'
-export { questionSetForTrigger } from './legacy/decision-epochs.ts'
+} from './retrieval-progress.ts'
+import * as stall from './stall-observers.ts'
+import * as modelrecovery from './model-recovery.ts'
+import type { ModelRecoveryHost } from './model-recovery.ts'
+import * as system2plane from './system2-plane.ts'
+import * as queueplane from './goal-queue-plane.ts'
+import type { AbandonVerdict, GoalQueuePlaneHost } from './goal-queue-plane.ts'
+export { evaluateSurfaceRecovery, orphanedSmeltPrerequisiteReason, staleOreDescend } from './goal-queue-plane.ts'
+import type { System2PlaneHost } from './system2-plane.ts'
+import * as goalstate from './goal-state.ts'
+import type { GoalStateHost } from './goal-state.ts'
+import * as abandonlifecycle from './abandon-lifecycle.ts'
+import type { AbandonLifecycleHost } from './abandon-lifecycle.ts'
+export { canAuthoritativelyAbandonOption } from './abandon-lifecycle.ts'
+export { betaAbandonProgressObserved } from './abandon-lifecycle.ts'
+export { filterFurnacePrerequisiteCandidates } from './abandon-lifecycle.ts'
+export { questionSetForTrigger } from './decision-epochs.ts'
 export {
   MIRRORED_MARKERS,
   MAX_STARVATION_MISSING,
@@ -272,20 +272,20 @@ export {
   goalStarvationBlockedBy,
   ensureCraftStepActionable,
   goalPreconditionCause,
-} from './legacy/candidate-diagnostics.ts'
-export { resolveBootstrapPlanOp } from './legacy/system2-plane.ts'
-import type { StallObserverHost } from './legacy/stall-observers.ts'
-import * as wedge from './legacy/wedge.ts'
-import type { WedgeHost } from './legacy/wedge.ts'
-import type { WedgeSuppressReason } from './legacy/wedge.ts'
+} from './candidate-diagnostics.ts'
+export { resolveBootstrapPlanOp } from './system2-plane.ts'
+import type { StallObserverHost } from './stall-observers.ts'
+import * as wedge from './wedge.ts'
+import type { WedgeHost } from './wedge.ts'
+import type { WedgeSuppressReason } from './wedge.ts'
 export {
   evaluateWaitWedge,
   evaluateWedgeRepeat,
   formatWedgeAbort,
   formatWedgeSuppressed,
-} from './legacy/wedge.ts'
-import * as outcome from './legacy/outcome-accounting.ts'
-import type { OutcomeAccountingHost } from './legacy/outcome-accounting.ts'
+} from './wedge.ts'
+import * as outcome from './outcome-accounting.ts'
+import type { OutcomeAccountingHost } from './outcome-accounting.ts'
 export {
   classifyMoveOutcome,
   decideRetrieveMemory,
@@ -293,33 +293,33 @@ export {
   moveFailureReason,
   PLACED_STATION_ITEMS,
   registerPlacedStation,
-} from './legacy/outcome-accounting.ts'
-export type { MoveOutcome } from './legacy/outcome-accounting.ts'
-import * as ledgers from './legacy/outcome-ledgers.ts'
-import type { OutcomeLedgersHost } from './legacy/outcome-ledgers.ts'
-export { controllerUnreachableMoveReason } from './legacy/outcome-ledgers.ts'
-import * as epochs from './legacy/decision-epochs.ts'
-import type { DecisionEpochsHost } from './legacy/decision-epochs.ts'
-export { CRITICAL_TRIGGERS, guardMoveFailureReason } from './legacy/decision-epochs.ts'
+} from './outcome-accounting.ts'
+export type { MoveOutcome } from './outcome-accounting.ts'
+import * as ledgers from './outcome-ledgers.ts'
+import type { OutcomeLedgersHost } from './outcome-ledgers.ts'
+export { controllerUnreachableMoveReason } from './outcome-ledgers.ts'
+import * as epochs from './decision-epochs.ts'
+import type { DecisionEpochsHost } from './decision-epochs.ts'
+export { CRITICAL_TRIGGERS, guardMoveFailureReason } from './decision-epochs.ts'
 export type {
   WaitWedgeDecision,
   WaitWedgeInput,
   WedgeRepeatDecision,
   WedgeRepeatInput,
   WedgeSuppressReason,
-} from './legacy/wedge.ts'
+} from './wedge.ts'
 export type {
   KnownRetrieveDecision,
   KnownRetrieveDecisionInput,
   KnownRetrieveRetireInput,
-} from './legacy/retrieval-progress.ts'
-import type { KnownResourceVerdictLatch } from './legacy/candidate-diagnostics.ts'
+} from './retrieval-progress.ts'
+import type { KnownResourceVerdictLatch } from './candidate-diagnostics.ts'
 export {
   formatKnownResourceFalsified,
   formatKnownResourceResighted,
   nextKnownResourceVerdict,
-} from './legacy/candidate-diagnostics.ts'
-export type { KnownResourceVerdict, KnownResourceVerdictLatch } from './legacy/candidate-diagnostics.ts'
+} from './candidate-diagnostics.ts'
+export type { KnownResourceVerdict, KnownResourceVerdictLatch } from './candidate-diagnostics.ts'
 import * as reach from './reach/controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './reach/controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
@@ -736,8 +736,8 @@ function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
 
 /** Kept byte-identical to the pre-fix genuine-wedge abort message. */
 
-export type { EscalationReason } from './legacy/escalation.ts'
-export type { PendingDecision } from './legacy/decision-epochs.ts'
+export type { EscalationReason } from './escalation.ts'
+export type { PendingDecision } from './decision-epochs.ts'
 
 /** #79: the controller's actual abandon decision for one Jev result. */
 

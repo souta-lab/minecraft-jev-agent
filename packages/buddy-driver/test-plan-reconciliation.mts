@@ -1076,7 +1076,7 @@ addCase('(ix) the warrant is bounded: a different head, a human head, or a value
 addCase('(ix) the controller arms the warrant only for a head-about summon and applies it only to a real plan', async () => {
   const source =
     (await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()) +
-    (await Bun.file(new URL('./../jev-agent/src/legacy/system2-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
+    (await Bun.file(new URL('./../jev-agent/src/system2-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
   const required = [
     "reason === 'action_impossible' || reason === 'no_progress'",
     'this.queue.replaceAnsweredHead({',
@@ -1320,7 +1320,7 @@ addCase('(x) the binding never empties the offer and never touches a row that ca
 addCase('(x) the controller binds the offer, remembers the fact, and interrupts an in-flight work action', async () => {
   const source =
     (await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()) +
-    (await Bun.file(new URL('./../jev-agent/src/legacy/goal-queue-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
+    (await Bun.file(new URL('./../jev-agent/src/goal-queue-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
   const required = [
     'restrictCandidatesNotExecutableHere(',
     'this.notExecutableHereBinding =',
@@ -1454,7 +1454,7 @@ addCase('(xi) goto keeps its own dimension guard and is never read as a transfer
 addCase('(xi) the controller only binds on escalate and cancels only body motion', async () => {
   const source =
     (await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()) +
-    (await Bun.file(new URL('./../jev-agent/src/legacy/goal-queue-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
+    (await Bun.file(new URL('./../jev-agent/src/goal-queue-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
   const required = [
     "result.action === 'escalate' && result.goalId !== null",
     'isNotExecutableHereWithheldKind(running.kind)',

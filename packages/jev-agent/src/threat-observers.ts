@@ -11,15 +11,15 @@
 // the plain-object fixture seam is unchanged.
 
 import type { Bot } from 'mineflayer'
-import { envHazardEscapeRoutes, envHazardEscapeSpots, IMMEDIATE_HOSTILE_RANGE } from '../candidates.ts'
-import type { Candidate, EnvHazardReflex, ThreatOffer } from '../candidates.ts'
+import { envHazardEscapeRoutes, envHazardEscapeSpots, IMMEDIATE_HOSTILE_RANGE } from './candidates.ts'
+import type { Candidate, EnvHazardReflex, ThreatOffer } from './candidates.ts'
 import {
   CRITICAL_DAMAGE_EXHAUSTED_MARKER,
   CriticalDamageTracker,
   formatCriticalDamageEvidence,
   formatCriticalDamageExhausted,
   sampleHealthTransition,
-} from '../criticalDamage.ts'
+} from './criticalDamage.ts'
 import {
   ENV_HAZARD_CLEAR,
   ENV_HAZARD_NO_EXIT,
@@ -29,8 +29,8 @@ import {
   formatEnvHazardClear,
   formatEnvHazardNoExit,
   formatEnvHazardReflexEvidence,
-} from '../envHazard.ts'
-import type { EventLogger } from '../jev.ts'
+} from './envHazard.ts'
+import type { EventLogger } from './jev.ts'
 import {
   formatReflex,
   formatSkillInterrupt,
@@ -39,12 +39,12 @@ import {
   formatSkillStepAuthority,
   SKILL_INTERRUPT,
   SKILL_POLICY_BOUNDARY,
-} from '../netherPortalPlan.ts'
-import type { SkillPolicyBoundaryReason } from '../netherPortalPlan.ts'
-import type { InFlightAction } from '../policy.ts'
-import type { DecisionTrigger } from '../scheduler.ts'
-import { BODY_STARVING, bodyStarving, formatBodyStarving } from '../state.ts'
-import type { AgentSignals, Vec3Json, WorldState } from '../state.ts'
+} from './netherPortalPlan.ts'
+import type { SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
+import type { InFlightAction } from './policy.ts'
+import type { DecisionTrigger } from './scheduler.ts'
+import { BODY_STARVING, bodyStarving, formatBodyStarving } from './state.ts'
+import type { AgentSignals, Vec3Json, WorldState } from './state.ts'
 import {
   assessSurvivalRace,
   bodySurvivalFacts,
@@ -69,8 +69,8 @@ import {
   unsensedAttackerFacts,
   unsensedThreatResponse,
   weaponFacts,
-} from '../threat.ts'
-import type { MobIdentityContext } from '../threat.ts'
+} from './threat.ts'
+import type { MobIdentityContext } from './threat.ts'
 import type { EscalationReason } from './escalation.ts'
 
 /** Narrow host surface for the threat/env-hazard observer slice. */

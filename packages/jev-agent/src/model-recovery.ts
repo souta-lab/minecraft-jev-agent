@@ -9,15 +9,15 @@
 // authority is exercised here: this is lifecycle/quiesce bookkeeping only.
 // ---------------------------------------------------------------------------
 
-import type { EventLogger } from '../jev.ts'
-import type { CurrentAction, Executor } from '../executor.ts'
-import { MODEL_RECOVERY_DRAIN_GRACE_MS } from '../controller-shared.ts'
-import type { DecisionScheduler } from '../scheduler.ts'
-import type { TriggerEvent } from '../scheduler.ts'
-import type { System2Brain } from '../system2/service.ts'
-import type { ReachTerminalOutcome, ReachTransitionState } from '../reach/transition.ts'
-import type { ActiveReachTransition } from '../reach/controller-plane.ts'
-import type { RunSummary } from '../controller-legacy.ts'
+import type { EventLogger } from './jev.ts'
+import type { CurrentAction, Executor } from './executor.ts'
+import { MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
+import type { DecisionScheduler } from './scheduler.ts'
+import type { TriggerEvent } from './scheduler.ts'
+import type { System2Brain } from './system2/service.ts'
+import type { ReachTerminalOutcome, ReachTransitionState } from './reach/transition.ts'
+import type { ActiveReachTransition } from './reach/controller-plane.ts'
+import type { RunSummary } from './controller-legacy.ts'
 
 export interface ModelRecoveryHost {
   running: boolean

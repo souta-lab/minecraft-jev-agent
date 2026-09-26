@@ -2,7 +2,7 @@
 // Jev decision epoch escalates to System2, and the Jev -> LLM summon bridge.
 // Pure contract data; no authority ownership.
 
-import type { LlmSummonReason } from '../system2/service.ts'
+import type { LlmSummonReason } from './system2/service.ts'
 
 export type EscalationReason =
   | 'low_confidence'
@@ -43,11 +43,11 @@ export const ESCALATION_TO_SUMMON: Record<EscalationReason, LlmSummonReason> = {
   policy_error: 'unknown_situation',
 }
 
-import type { EventLogger } from '../jev.ts'
-import type { DecisionLlmResummonLog } from '../decisionlog.ts'
-import type { GoalQueue } from '../goalQueue.ts'
-import type { GoalState, AgentSignals } from '../state.ts'
-import type { JevAgentOptions } from '../controller-shared.ts'
+import type { EventLogger } from './jev.ts'
+import type { DecisionLlmResummonLog } from './decisionlog.ts'
+import type { GoalQueue } from './goalQueue.ts'
+import type { GoalState, AgentSignals } from './state.ts'
+import type { JevAgentOptions } from './controller-shared.ts'
 
 /**
  * Escalation bookkeeping plane: the cooldown-gated typed escalation emit and

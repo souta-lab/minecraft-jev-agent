@@ -514,9 +514,9 @@ addCase('(E) the cancellation is wired into the tick, stops the running skill, a
   const controllerSource = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
   const source =
     controllerSource +
-    readFileSync(new URL('../jev-agent/src/legacy/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
-    readFileSync(new URL('../jev-agent/src/legacy/retrieval-progress.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('../jev-agent/src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
+    readFileSync(new URL('../jev-agent/src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
+    readFileSync(new URL('../jev-agent/src/retrieval-progress.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('../jev-agent/src/candidate-diagnostics.ts', import.meta.url), 'utf8')
   const wired = /this\.cancelContradictedSkillTarget\(state\)/.test(source)
   const cancels = /this\.executor\.cancelCurrent\(`contradicted target/.test(source)
   const falsifiedOnly = /evidence\.status === 'falsified' &&/.test(source)

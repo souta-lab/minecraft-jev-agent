@@ -9,7 +9,7 @@ import type { ReachMissionRuntimeDependencies } from './src/reach/mission-runtim
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 const reachPlane = readFileSync(new URL('./src/reach/controller-plane.ts', import.meta.url), 'utf8')
-const stallObservers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
+const stallObservers = readFileSync(new URL('./src/stall-observers.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
 const indexSource = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8')
 const runtimeAdapter = readFileSync(new URL('./src/minecraft/reach-runtime-adapter.ts', import.meta.url), 'utf8')
 const minecraftReachProjection = readFileSync(new URL('./src/minecraft/reach-mission-projection.ts', import.meta.url), 'utf8')

@@ -12,29 +12,29 @@
 // in-module calls to those names go through the host and the class keeps
 // one-line delegates everywhere.
 
-import { isZeroProgressOutcome } from '../actionPostcondition.ts'
-import type { TruthfulOutcome } from '../actionPostcondition.ts'
-import type { Candidate } from '../candidates.ts'
-import type { JevAgentOptions } from '../controller-shared.ts'
+import { isZeroProgressOutcome } from './actionPostcondition.ts'
+import type { TruthfulOutcome } from './actionPostcondition.ts'
+import type { Candidate } from './candidates.ts'
+import type { JevAgentOptions } from './controller-shared.ts'
 import type { EscalationReason } from './escalation.ts'
 import type { PendingDecision } from './decision-epochs.ts'
-import type { ExecutionResult } from '../executor.ts'
-import { decayedFailureCount, failureCount, spatialFailureKey } from '../failureMemory.ts'
-import type { GoalQueue } from '../goalQueue.ts'
-import type { EventLogger } from '../jev.ts'
-import { formatLocomotionObservation, isEfficientLocomotionProgress } from '../locomotion.ts'
-import type { LocomotionObservation } from '../locomotion.ts'
-import { filterBlacklistedMoves, formatMoveFailMem, formatMoveFailMemReset, formatMoveTargetSkipped, isTrackedMoveKind, MoveFailMemory, moveFailureKey } from '../moveFailMemory.ts'
-import type { MoveFailurePathScope, MoveFailureReason } from '../moveFailMemory.ts'
-import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from '../policy.ts'
-import { actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken } from '../repeatedOutcomeEscalation.ts'
-import { formatActionFailureExhausted, formatActionFailureRepeat } from '../replanThrottle.ts'
-import type { ActionFailureEscalation } from '../replanThrottle.ts'
+import type { ExecutionResult } from './executor.ts'
+import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
+import type { GoalQueue } from './goalQueue.ts'
+import type { EventLogger } from './jev.ts'
+import { formatLocomotionObservation, isEfficientLocomotionProgress } from './locomotion.ts'
+import type { LocomotionObservation } from './locomotion.ts'
+import { filterBlacklistedMoves, formatMoveFailMem, formatMoveFailMemReset, formatMoveTargetSkipped, isTrackedMoveKind, MoveFailMemory, moveFailureKey } from './moveFailMemory.ts'
+import type { MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
+import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
+import { actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken } from './repeatedOutcomeEscalation.ts'
+import { formatActionFailureExhausted, formatActionFailureRepeat } from './replanThrottle.ts'
+import type { ActionFailureEscalation } from './replanThrottle.ts'
 import { KNOWN_RETRIEVE_RETIRE_LIMIT } from './retrieval-progress.ts'
-import type { DecisionScheduler } from '../scheduler.ts'
-import type { AgentSignals, Vec3Json, WorldState } from '../state.ts'
-import { DIG_PATH_CAP } from '../worldMemory.ts'
-import type { DigMemory } from '../worldMemory.ts'
+import type { DecisionScheduler } from './scheduler.ts'
+import type { AgentSignals, Vec3Json, WorldState } from './state.ts'
+import { DIG_PATH_CAP } from './worldMemory.ts'
+import type { DigMemory } from './worldMemory.ts'
 import {
   cellKey,
   clearZeroProgressStand,
@@ -50,8 +50,8 @@ import {
   routeFailureStage,
   routeSignature,
   ZERO_PROGRESS_STAND_ROUTE_LIMIT,
-} from '../zeroProgressRoute.ts'
-import type { ZeroProgressRoutes } from '../zeroProgressRoute.ts'
+} from './zeroProgressRoute.ts'
+import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import type { Bot } from 'mineflayer'
 
 // Below this windowed locomotion efficiency a verified MOVE is mechanical success

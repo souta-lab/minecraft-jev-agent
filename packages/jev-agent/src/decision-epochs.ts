@@ -19,18 +19,18 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Bot } from 'mineflayer'
-import type { OptionAttemptTracker } from '../abandonPolicy.ts'
-import { evaluateActionCommitment, evaluateCandidateFlap } from '../candidateCommitment.ts'
-import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from '../candidateCommitment.ts'
-import { CONTACT_THREAT_KINDS, CRITICAL_COMBAT_HEALTH, KNOWN_RETRIEVE_SKILL } from '../candidates.ts'
-import type { Candidate, CandidateKind } from '../candidates.ts'
-import { attachResult } from '../decisionlog.ts'
-import type { DecisionJevLog, DecisionRecord } from '../decisionlog.ts'
-import type { ExecutionResult, Executor, FailureCode } from '../executor.ts'
-import type { GatedScore } from '../gating.ts'
-import type { GoalQueue } from '../goalQueue.ts'
-import { decisionIdFrom } from '../jev.ts'
-import type { EventLogger, JevResult, JsonlWriter, QuestionSetKind } from '../jev.ts'
+import type { OptionAttemptTracker } from './abandonPolicy.ts'
+import { evaluateActionCommitment, evaluateCandidateFlap } from './candidateCommitment.ts'
+import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
+import { CONTACT_THREAT_KINDS, CRITICAL_COMBAT_HEALTH, KNOWN_RETRIEVE_SKILL } from './candidates.ts'
+import type { Candidate, CandidateKind } from './candidates.ts'
+import { attachResult } from './decisionlog.ts'
+import type { DecisionJevLog, DecisionRecord } from './decisionlog.ts'
+import type { ExecutionResult, Executor, FailureCode } from './executor.ts'
+import type { GatedScore } from './gating.ts'
+import type { GoalQueue } from './goalQueue.ts'
+import { decisionIdFrom } from './jev.ts'
+import type { EventLogger, JevResult, JsonlWriter, QuestionSetKind } from './jev.ts'
 import {
   buildSkillOutcomePacket,
   classifyProjectionChange,
@@ -43,7 +43,7 @@ import {
   mandatoryPolicyBoundary,
   repointReplayedChoice,
   semanticTargetRef,
-} from '../jev/semantic-projection.ts'
+} from './jev/semantic-projection.ts'
 import type {
   DecisionEpoch,
   GroundedFact,
@@ -52,39 +52,39 @@ import type {
   SemanticCandidateView,
   SemanticDelta,
   SkillOutcomePacket,
-} from '../jev/semantic-projection.ts'
-import { isTrackedMoveKind } from '../moveFailMemory.ts'
-import type { MoveFailureReason } from '../moveFailMemory.ts'
-import { formatSkillEnd, formatSkillInterrupt } from '../netherPortalPlan.ts'
-import type { CurrentOptionContext } from '../optionSpec.ts'
-import { PLACE_RETRIES_EXHAUSTED } from '../placementGuard.ts'
-import type { PlaceRetryLedger } from '../placementGuard.ts'
-import { formatActionRejected, guardRejectionChargesOption, unreachableMove } from '../policy.ts'
-import type { GuardCode, GuardResult } from '../policy.ts'
-import { formatWaitExhausted, formatWaitStreak } from '../replanThrottle.ts'
-import type { WaitStreakEscalation } from '../replanThrottle.ts'
-import { commitmentInvalidation, formatSkillInvalidated, targetIdentityKey } from '../skillCommitment.ts'
-import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease } from '../scheduler.ts'
-import type { DecisionTrigger, TriggerEvent } from '../scheduler.ts'
-import type { GoalState, Vec3Json, WorldState } from '../state.ts'
-import { MELEE_THREAT_REACH } from '../threat.ts'
-import type { MobIdentityContext } from '../threat.ts'
-import type { JevAgentOptions } from '../controller-shared.ts'
+} from './jev/semantic-projection.ts'
+import { isTrackedMoveKind } from './moveFailMemory.ts'
+import type { MoveFailureReason } from './moveFailMemory.ts'
+import { formatSkillEnd, formatSkillInterrupt } from './netherPortalPlan.ts'
+import type { CurrentOptionContext } from './optionSpec.ts'
+import { PLACE_RETRIES_EXHAUSTED } from './placementGuard.ts'
+import type { PlaceRetryLedger } from './placementGuard.ts'
+import { formatActionRejected, guardRejectionChargesOption, unreachableMove } from './policy.ts'
+import type { GuardCode, GuardResult } from './policy.ts'
+import { formatWaitExhausted, formatWaitStreak } from './replanThrottle.ts'
+import type { WaitStreakEscalation } from './replanThrottle.ts'
+import { commitmentInvalidation, formatSkillInvalidated, targetIdentityKey } from './skillCommitment.ts'
+import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease } from './scheduler.ts'
+import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
+import type { GoalState, Vec3Json, WorldState } from './state.ts'
+import { MELEE_THREAT_REACH } from './threat.ts'
+import type { MobIdentityContext } from './threat.ts'
+import type { JevAgentOptions } from './controller-shared.ts'
 import type { EscalationReason } from './escalation.ts'
-import type { JevPolicy } from '../jev.ts'
+import type { JevPolicy } from './jev.ts'
 import {
   classifySemanticBoundary,
   dedupeSemanticCandidates,
   formatStaleResultDropped,
   projectionHash as semanticProjectionHash,
-} from '../jev/semantic-projection.ts'
-import { stableStateHash } from '../decisionlog.ts'
-import { failureCount } from '../failureMemory.ts'
-import { questionNamesFor } from '../jev.ts'
-import { optionIdForGoal, planRevisionForGoal } from '../causal.ts'
-import { assertRecoveryModelAuthority, describeFailure, failLoud, FatalModelError } from '../modelFailure.ts'
+} from './jev/semantic-projection.ts'
+import { stableStateHash } from './decisionlog.ts'
+import { failureCount } from './failureMemory.ts'
+import { questionNamesFor } from './jev.ts'
+import { optionIdForGoal, planRevisionForGoal } from './causal.ts'
+import { assertRecoveryModelAuthority, describeFailure, failLoud, FatalModelError } from './modelFailure.ts'
 import type { AbandonVerdict } from './goal-queue-plane.ts'
-import type { AgentSignals } from '../state.ts'
+import type { AgentSignals } from './state.ts'
 
 
 /** Safety-critical events: an incompatible threat makes the Jev answer stale. */

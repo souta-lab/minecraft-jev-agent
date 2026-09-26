@@ -611,8 +611,8 @@ check(
 check(
   '(wiring) onActionComplete feeds the BODY cell, the movement ATTEMPT cell and the progress kinds',
   () => {
-    const outcome = readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
-    const observers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8')
+    const outcome = readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8')
+    const observers = readFileSync(new URL('./src/stall-observers.ts', import.meta.url), 'utf8')
     const complete = /export function onActionComplete\([\s\S]*?\nexport function [a-zA-Z]/.exec(outcome)?.[0] ?? ''
     return (
       complete.includes('host.observeLocalMotion(result, candidate, taxonomy)') &&
@@ -628,7 +628,7 @@ check(
 check(
   '(wiring) the exhausted record crosses the typed boundary and is escalated upward, never re-planned locally',
   () => {
-    const observers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8')
+    const observers = readFileSync(new URL('./src/stall-observers.ts', import.meta.url), 'utf8')
     const start = observers.indexOf('function observeLocalMotion')
     const body = observers.slice(start, observers.indexOf('export function persistLocalOscillation', start))
     return (

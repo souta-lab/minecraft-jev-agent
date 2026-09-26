@@ -839,12 +839,12 @@ addCase("(d') a RETRIEVE with a path-stage failure obeys the identical rule (no 
 addCase('the live controller records the verdict and emits the typed markers', () => {
   const source =
     readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/outcome-ledgers.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/escalation.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
-  const diagSource = readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
-  const portalSource = readFileSync(new URL('./src/legacy/portal-evidence.ts', import.meta.url), 'utf8')
+    readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/outcome-ledgers.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/escalation.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8')
+  const diagSource = readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8')
+  const portalSource = readFileSync(new URL('./src/portal-evidence.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const facade = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const routeSource = readFileSync(new URL('./src/zeroProgressRoute.ts', import.meta.url), 'utf8')

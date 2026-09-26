@@ -172,7 +172,7 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
   const normal = trigger('inventory_changed', 6)
   const keptCritical = pickHigherPriority(critical, normal)
   const promoted = pickHigherPriority(normal, critical)
-  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}\n${read('src/legacy/decision-epochs.ts')}`
+  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}\n${read('src/decision-epochs.ts')}`
   const wired =
     controller.includes('criticalArrivedDuringFlight') &&
     controller.includes('hasCriticalTriggerDuringFlight') &&

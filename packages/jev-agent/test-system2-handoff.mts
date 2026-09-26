@@ -57,7 +57,7 @@ describe('typed Jev to System2 escalation handoff', () => {
   })
 
   it('wires ESCALATE settlement to the dispatcher and never queues the same completion decision', () => {
-    const controller = readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
+    const controller = readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8')
     const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
     const candidates = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
     const completionTrigger = controller.indexOf('const completionTrigger: DecisionTrigger =')

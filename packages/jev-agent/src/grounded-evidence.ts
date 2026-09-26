@@ -36,7 +36,7 @@ import {
   smeltRouteGap,
   smeltStationRetry,
   surfaceAscentRouteless,
-} from '../candidates.ts'
+} from './candidates.ts'
 import type {
   Candidate,
   CandidateOptions,
@@ -53,24 +53,24 @@ import type {
   ResourceSourceGap,
   SmeltRouteGap,
   SurfaceAscentRefusal,
-} from '../candidates.ts'
-import { formatContactUnreachable } from '../combatClosure.ts'
-import { candidateOptions, sensorOptions } from '../controller-shared.ts'
-import type { JevAgentOptions } from '../controller-shared.ts'
-import { formatContainerRefusal } from '../containerAccess.ts'
-import type { ContainerRefusal } from '../containerAccess.ts'
-import type { RecipeIndex } from '../crafting.ts'
-import { formatFoodSourceGap } from '../foodSources.ts'
-import type { FoodSourceGap } from '../foodSources.ts'
-import { formatArmorCraft, formatArmorCraftRefusal, formatArmorRefusal, formatCombatKitGap } from '../gearPlan.ts'
-import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from '../gearPlan.ts'
-import type { GoalQueue } from '../goalQueue.ts'
-import type { EventLogger } from '../jev.ts'
-import type { MoveFailMemory } from '../moveFailMemory.ts'
-import { formatPortalFrameSiteRejected } from '../netherPortalPlan.ts'
-import { explainNearestPortalFrameRejection } from '../state.ts'
-import type { WorldState } from '../state.ts'
-import { GUARD_REJECTIONS, MELEE_THREAT_REACH } from '../threat.ts'
+} from './candidates.ts'
+import { formatContactUnreachable } from './combatClosure.ts'
+import { candidateOptions, sensorOptions } from './controller-shared.ts'
+import type { JevAgentOptions } from './controller-shared.ts'
+import { formatContainerRefusal } from './containerAccess.ts'
+import type { ContainerRefusal } from './containerAccess.ts'
+import type { RecipeIndex } from './crafting.ts'
+import { formatFoodSourceGap } from './foodSources.ts'
+import type { FoodSourceGap } from './foodSources.ts'
+import { formatArmorCraft, formatArmorCraftRefusal, formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
+import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPlan.ts'
+import type { GoalQueue } from './goalQueue.ts'
+import type { EventLogger } from './jev.ts'
+import type { MoveFailMemory } from './moveFailMemory.ts'
+import { formatPortalFrameSiteRejected } from './netherPortalPlan.ts'
+import { explainNearestPortalFrameRejection } from './state.ts'
+import type { WorldState } from './state.ts'
+import { GUARD_REJECTIONS, MELEE_THREAT_REACH } from './threat.ts'
 
 export interface GroundedEvidenceHost {
   readonly bot: Bot

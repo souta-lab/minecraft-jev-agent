@@ -11,10 +11,10 @@
 
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { ENV_LAVA_PROXIMITY, envHazardKindOfBlock, isLavaClassBlock } from '../envHazard.ts'
-import { contactGapY, MELEE_ATTACK_REACH, meleeHorizontalBudget, selectAttackStand } from '../combatClosure.ts'
-import type { AttackStandFact } from '../combatClosure.ts'
-import { formatStationUnreachable } from '../reachability.ts'
+import { ENV_LAVA_PROXIMITY, envHazardKindOfBlock, isLavaClassBlock } from './envHazard.ts'
+import { contactGapY, MELEE_ATTACK_REACH, meleeHorizontalBudget, selectAttackStand } from './combatClosure.ts'
+import type { AttackStandFact } from './combatClosure.ts'
+import { formatStationUnreachable } from './reachability.ts'
 import type {
   DigApproachFact,
   DigApproachProbe,
@@ -23,15 +23,15 @@ import type {
   StationApproachProbe,
   StationApproachRefusal,
   StationKindName,
-} from '../reachability.ts'
-import type { ReachabilityGateOptions } from '../candidates.ts'
-import { interactionStandCandidates } from '../executor.ts'
-import type { EventLogger } from '../jev.ts'
-import type { StateFingerprintMemory } from '../moveFailMemory.ts'
-import { isDimensionTransferBlock } from '../netherPortalPlan.ts'
-import { createPositionFactCache } from '../positionFactCache.ts'
-import { entityVisibleFromEye, isStandable } from '../state.ts'
-import type { Vec3Json } from '../state.ts'
+} from './reachability.ts'
+import type { ReachabilityGateOptions } from './candidates.ts'
+import { interactionStandCandidates } from './executor.ts'
+import type { EventLogger } from './jev.ts'
+import type { StateFingerprintMemory } from './moveFailMemory.ts'
+import { isDimensionTransferBlock } from './netherPortalPlan.ts'
+import { createPositionFactCache } from './positionFactCache.ts'
+import { entityVisibleFromEye, isStandable } from './state.ts'
+import type { Vec3Json } from './state.ts'
 
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750

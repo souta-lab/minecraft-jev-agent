@@ -3,14 +3,14 @@
 // counters and escalate to the existing abort/summon paths. No new
 // authority: abort still goes through host.finish and system2 wake
 // through host.summonLlm.
-import type { DecisionLlmResummonLog } from '../decisionlog.ts'
-import type { GoalQueue } from '../goalQueue.ts'
-import type { EventLogger } from '../jev.ts'
-import { isFurnacePrerequisiteOption } from '../placementGuard.ts'
-import type { InFlightAction } from '../policy.ts'
-import type { PrereqDecision } from '../prereqOption.ts'
-import type { LlmSummonReason } from '../system2/service.ts'
-import { shouldWakeSystem2AfterLocalFailure } from '../system2/escalation.ts'
+import type { DecisionLlmResummonLog } from './decisionlog.ts'
+import type { GoalQueue } from './goalQueue.ts'
+import type { EventLogger } from './jev.ts'
+import { isFurnacePrerequisiteOption } from './placementGuard.ts'
+import type { InFlightAction } from './policy.ts'
+import type { PrereqDecision } from './prereqOption.ts'
+import type { LlmSummonReason } from './system2/service.ts'
+import { shouldWakeSystem2AfterLocalFailure } from './system2/escalation.ts'
 
 const WAIT_REPLAN_LIMIT = 4
 

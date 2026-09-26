@@ -5,38 +5,38 @@
 // this module is the legacy surface that keeps that projection fed.
 // No authority moves: System2 summon still crosses host.summonLlm and
 // world truth still crosses the narrow evaluator methods on the host.
-import { formatJevHeads } from '../betaAuthority.ts'
-import type { JevAgentOptions } from '../controller-shared.ts'
-import type { BetaAuthorityDecision } from '../betaAuthority.ts'
-import type { AbandonClassification, OptionAttemptTracker } from '../abandonPolicy.ts'
-import { formatSurfaceAscentRefused, surfaceAscentRouteless } from '../candidates.ts'
-import type { NotExecutableHereBinding, SurfaceAscentRefusal } from '../candidates.ts'
-import { optionIdForGoal } from '../causal.ts'
-import type { SensorOptionSlice } from '../controller-shared.ts'
-import type { DecisionLlmResummonLog, DecisionSubgoalLog } from '../decisionlog.ts'
-import { smeltInputFor } from '../gameData.ts'
-import { formatNonProgressEscalated, formatNonProgressYield, formatPlanIdentity, formatPlanIdentityChanged, formatRowDeferredNotExecutableHere, formatRowNotExecutableHere, notExecutableReplanRequest, planReplanRequest } from '../goalQueue.ts'
-import type { GoalQueue, PlannedGoal, PlanIdentity, QueuedGoal } from '../goalQueue.ts'
-import { evaluateGoalSuccess } from '../goalSuccess.ts'
-import { evaluateSpatialPredicate, predicateForGoal } from '../predicateGoal.ts'
-import { isResourceClass, matchesResourceClass, resourceMatches } from '../resourceClass.ts'
-import type { GoalSuccessWorldProbe, RecordedPortalSite } from '../goalSuccess.ts'
-import { abandonRequested, decisionIdFrom } from '../jev.ts'
-import type { EventLogger, JevResult } from '../jev.ts'
-import type { JevSemanticProjection, PreviousDecisionFacts, SkillOutcomePacket } from '../jev/semantic-projection.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE } from '../netherPortalPlan.ts'
-import type { PortalFrameSite } from '../netherPortalPlan.ts'
-import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, queuedToPlanned } from '../optionSpec.ts'
-import type { CurrentOptionContext, OptionWorldSnapshot } from '../optionSpec.ts'
-import { formatAbandonReason, shouldAdoptAbandon } from '../placementGuard.ts'
-import type { AbandonReason, PrerequisiteProtection } from '../placementGuard.ts'
-import type { PredicateEvaluation } from '../predicateGoal.ts'
-import type { ActionFailureEscalation, ReplanInputs, WaitStreakEscalation } from '../replanThrottle.ts'
-import type { DecisionTrigger } from '../scheduler.ts'
-import { bodyStarving, distance } from '../state.ts'
-import type { AgentSignals, GoalState, Vec3Json, WorldState } from '../state.ts'
-import type { LlmSummonReason, System2Outcome } from '../system2/service.ts'
-import type { DigMemory } from '../worldMemory.ts'
+import { formatJevHeads } from './betaAuthority.ts'
+import type { JevAgentOptions } from './controller-shared.ts'
+import type { BetaAuthorityDecision } from './betaAuthority.ts'
+import type { AbandonClassification, OptionAttemptTracker } from './abandonPolicy.ts'
+import { formatSurfaceAscentRefused, surfaceAscentRouteless } from './candidates.ts'
+import type { NotExecutableHereBinding, SurfaceAscentRefusal } from './candidates.ts'
+import { optionIdForGoal } from './causal.ts'
+import type { SensorOptionSlice } from './controller-shared.ts'
+import type { DecisionLlmResummonLog, DecisionSubgoalLog } from './decisionlog.ts'
+import { smeltInputFor } from './gameData.ts'
+import { formatNonProgressEscalated, formatNonProgressYield, formatPlanIdentity, formatPlanIdentityChanged, formatRowDeferredNotExecutableHere, formatRowNotExecutableHere, notExecutableReplanRequest, planReplanRequest } from './goalQueue.ts'
+import type { GoalQueue, PlannedGoal, PlanIdentity, QueuedGoal } from './goalQueue.ts'
+import { evaluateGoalSuccess } from './goalSuccess.ts'
+import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
+import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
+import { abandonRequested, decisionIdFrom } from './jev.ts'
+import type { EventLogger, JevResult } from './jev.ts'
+import type { JevSemanticProjection, PreviousDecisionFacts, SkillOutcomePacket } from './jev/semantic-projection.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE } from './netherPortalPlan.ts'
+import type { PortalFrameSite } from './netherPortalPlan.ts'
+import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, queuedToPlanned } from './optionSpec.ts'
+import type { CurrentOptionContext, OptionWorldSnapshot } from './optionSpec.ts'
+import { formatAbandonReason, shouldAdoptAbandon } from './placementGuard.ts'
+import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
+import type { PredicateEvaluation } from './predicateGoal.ts'
+import type { ActionFailureEscalation, ReplanInputs, WaitStreakEscalation } from './replanThrottle.ts'
+import type { DecisionTrigger } from './scheduler.ts'
+import { bodyStarving, distance } from './state.ts'
+import type { AgentSignals, GoalState, Vec3Json, WorldState } from './state.ts'
+import type { LlmSummonReason, System2Outcome } from './system2/service.ts'
+import type { DigMemory } from './worldMemory.ts'
 import type { Bot } from 'mineflayer'
 import { join } from 'node:path'
 
@@ -95,9 +95,9 @@ export interface GoalQueuePlaneHost {
   readonly tickCounter: number
   unfinishedGoals(): QueuedGoal[]
   readonly waitStreakEscalation: WaitStreakEscalation
-  readonly executor: import('../executor.ts').Executor
+  readonly executor: import('./executor.ts').Executor
   semanticStateGeneration: number
-  requestDecision(trigger: import('../scheduler.ts').DecisionTrigger, detail: Record<string, unknown>): void
+  requestDecision(trigger: import('./scheduler.ts').DecisionTrigger, detail: Record<string, unknown>): void
 }
 
 export function logHeads(host: GoalQueuePlaneHost,
