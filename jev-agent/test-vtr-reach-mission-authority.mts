@@ -161,7 +161,7 @@ function makeController(input: {
     reachRunMetadata: null,
     reachTerminalHandoff: null,
     lastReachActionFailure: null,
-    vtrOwnsReachMoveThisTick: false,
+
     modelRecoveryStopping: false,
     modelRecoveryReachDrainTransitionId: null,
     tickCounter: world.tick,
@@ -278,14 +278,14 @@ test('normal mode reconciles a non-admitted Mission source so legacy cannot repl
     candidates: [],
   })
   const handled = await tickReachTransition.call(fixture.controller, 'heartbeat', {})
-  const runtime = fixture.controller as unknown as { reachRuntime: ReachMissionRuntime; vtrOwnsReachMoveThisTick: boolean }
+  const runtime = fixture.controller as unknown as { reachRuntime: ReachMissionRuntime }
 
   // A missing admissible route has no active Reach controller state. The
   // compatibility scheduler may continue for other work, but the currently
-  // grounded same-Mission source MOVE is marked for suppression/reconciliation.
+  // grounded same-Mission source MOVE is suppressed unconditionally — legacy
+  // Reach scheduling for the Mission item is permanently off.
   assert.equal(handled, false)
   assert.equal(runtime.reachRuntime.current, null)
-  assert.equal(runtime.vtrOwnsReachMoveThisTick, true)
   assert.deepEqual(fixture.claimed, [])
   assert.equal(fixture.events.some(({ line }) => line.includes('VTR_REACH_PROBE_HOLD')), false)
   assert.equal(fixture.requestedDecisions.length, 0)
@@ -323,7 +323,7 @@ test('normal mode reconciles a non-admitted Mission source so legacy cannot repl
     world: declinedWorld,
     missionItem: configuredMission.item,
     missionSourceNames: ['oak_log'],
-    vtrOwnsReachMove: runtime.vtrOwnsReachMoveThisTick,
+    vtrOwnsReachMove: true,
   })
   assert.deepEqual(afterVtrDecline.withheld.map((candidate) => candidate.id), ['MOVE:oak_log@8,64,0'])
   assert.deepEqual(afterVtrDecline.candidates.map((candidate) => candidate.id), ['MOVE:iron_ore@24,64,0'])

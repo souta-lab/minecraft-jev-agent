@@ -116,7 +116,7 @@ test('production Reach uses injected VTR authority through same-contract continu
       jev: unavailableAuthority,
       system2: unavailableAuthority,
       modelRecoveryStopping: false, modelRecoveryReachDrainTransitionId: null,
-      vtrOwnsReachMoveThisTick: false, tickCounter: observedWorld.tick,
+tickCounter: observedWorld.tick,
       jevCalls: 0, runtimeLlmCalls: 0, planCalls: 0, lastReachActionFailure: null,
       candidateFailures: new Map(), candidateFailureAt: new Map(), signals: { failedCandidates: {} },
       bot: { health: 20, entity: { position: { clone: () => ({ ...observedWorld.self.position }) } } },

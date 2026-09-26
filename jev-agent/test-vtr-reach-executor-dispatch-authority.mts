@@ -267,7 +267,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     reachRunMetadata: null,
     reachTerminalHandoff: null,
     lastReachActionFailure: null,
-    vtrOwnsReachMoveThisTick: false,
+
     modelRecoveryStopping: false,
     modelRecoveryReachDrainTransitionId: null,
     tickCounter: observedWorld.tick,

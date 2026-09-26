@@ -458,10 +458,11 @@ export interface JevAgentOptions {
    */
   kernelShadow?: KernelShadowSink
   /**
-   * V4.1.2 Phase-2 production-authority gate. Presence IS the kill-switch:
-   * while set, legacy Reach scheduling for the Mission item is always
-   * withheld (no fallback), and the Reach runtime consults the kernel before
-   * every gated act. When absent the runtime stays in shadow-observe mode.
+   * V4.1.2 production-authority gate. Production generations always install
+   * it: legacy Reach scheduling for the Mission item is withheld
+   * unconditionally (no fallback), and the Reach runtime consults the kernel
+   * before every gated act. An absent gate leaves the runtime in
+   * shadow-observe mode, which exists only for offline/test fixtures.
    */
   kernelAuthority?: KernelReachAuthority
   /** maximum time between decisions while idle (the fallback heartbeat) */
@@ -2415,7 +2416,6 @@ export class JevController {
   /** Correlates a per-step terminal with the executor result that settles that same lease. */
   private pendingReachTerminalAction: ReachTerminalActionCorrelation | null = null
   private lastReachActionFailure: string | null = null
-  private vtrOwnsReachMoveThisTick = false
 
   private goal: GoalState
   private signals: AgentSignals = emptySignals()
@@ -4415,7 +4415,6 @@ export class JevController {
     const rejectedReachRoutes = projection.inadmissibleCandidates
     const missionSatisfiedEvidenceId = projection.missionSatisfiedEvidenceId
     const ensureAlreadyTrueEvidenceId = active === null ? projection.ensuresAlreadyTrueEvidenceId : undefined
-    this.vtrOwnsReachMoveThisTick = projection.hasObservedMissionSource
     const safeToStart = health > CRITICAL_COMBAT_HEALTH &&
       !bodyNeedsBreathEscape(state.self) &&
       state.self.envHazard?.active !== true &&
@@ -4469,7 +4468,6 @@ export class JevController {
 
     if (decision.kind === 'declined') return false
     if (decision.kind === 'held') {
-      if (decision.reason === 'no-admissible-reach-route') this.vtrOwnsReachMoveThisTick = true
       const level = decision.reason === 'body-not-safe' ? 'warn' : 'info'
       const message = decision.reason === 'no-admissible-reach-route'
         ? `VTR_SCHEDULER_HOLDS_NO_ADMISSIBLE_ROUTE mission=${configuredMission.id} item=${configuredMission.item} candidates=${rejectedReachRoutes.length}`
@@ -5003,7 +5001,6 @@ export class JevController {
   private async tick(trigger: DecisionTrigger, detail: Record<string, unknown>): Promise<void> {
     if (!this.running || this.ticking) return
     this.ticking = true
-    this.vtrOwnsReachMoveThisTick = false
     this.lastTickAt = Date.now()
     this.tickResummonLog = []
     this.tickLlmCalls = 0
@@ -5272,23 +5269,23 @@ export class JevController {
       let candidates = grounded.candidates
       const vtrMission = this.options.vtrMission
       if (vtrMission !== null && vtrMission !== undefined) {
-        // Kill-switch: with the kernel authority gate installed, legacy Reach
-        // scheduling is OFF unconditionally — a denied/held VTR decision must
-        // never fall back into a same-body same-predicate legacy walk. In
-        // shadow mode the tick-scoped VTR ownership still governs.
-        const legacyReachOff = this.options.kernelAuthority !== undefined
+        // Kill-switch (permanent): the V4.1.2 kernel is the sole Reach
+        // authority. Mission-source MOVEs are withheld from legacy scheduling
+        // unconditionally — a denied/held VTR decision must never fall back
+        // into a same-body same-predicate legacy walk, and there is no
+        // observer-only production mode that would re-enable it.
         const legacyReachFilter = filterLegacyReachCandidates({
           candidates,
           world: state,
           missionItem: vtrMission.item,
           missionSourceNames: minecraftMissionSourceNames(vtrMission.item),
-          vtrOwnsReachMove: this.vtrOwnsReachMoveThisTick || legacyReachOff,
+          vtrOwnsReachMove: true,
         })
         if (legacyReachFilter.withheld.length > 0) {
           this.logger.info(
             'vtr',
-            `VTR_LEGACY_REACH_MOVE_WITHHELD mission=${vtrMission.id} count=${legacyReachFilter.withheld.length} killSwitch=${legacyReachOff}`,
-            { mission: vtrMission, candidates: legacyReachFilter.withheld.map((candidate) => candidate.id), authority: legacyReachOff ? 'v4.1.2-kernel' : 'vtr-transition' },
+            `VTR_LEGACY_REACH_MOVE_WITHHELD mission=${vtrMission.id} count=${legacyReachFilter.withheld.length} killSwitch=permanent`,
+            { mission: vtrMission, candidates: legacyReachFilter.withheld.map((candidate) => candidate.id), authority: 'v4.1.2-kernel' },
             this.tickCounter,
           )
         }

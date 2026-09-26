@@ -121,7 +121,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
     reachTerminalHandoff: null,
     modelRecoveryStopping: false,
     modelRecoveryReachDrainTransitionId: null,
-    vtrOwnsReachMoveThisTick: false,
+
     tickCounter: world.tick,
     executor: { current: null, authorityConflictCount: 0 },
     logger: {
@@ -191,7 +191,7 @@ test('an inadmissible terrain-mutating Mission route is held at a VTR scheduler 
     reachTerminalHandoff: null,
     modelRecoveryStopping: false,
     modelRecoveryReachDrainTransitionId: null,
-    vtrOwnsReachMoveThisTick: false,
+
     tickCounter: unsafeWorld.tick,
     executor: { current: null, authorityConflictCount: 0 },
     logger: {
@@ -286,7 +286,7 @@ test('a running legacy walk for the configured Reach predicate is revoked before
     options: { vtrMission: mission, serverId: '127.0.0.1:25569', worldEpoch: identity.worldEpoch, reach: 4, maxCandidateAgeTicks: 8, actuationPort: null },
     queue: { current: null }, reachRuntime: newReachRuntime(), reachRunMetadata: null, reachTerminalHandoff: null,
     modelRecoveryStopping: false, modelRecoveryReachDrainTransitionId: null,
-    vtrOwnsReachMoveThisTick: false, tickCounter: world.tick,
+tickCounter: world.tick,
     jevCalls: 0, runtimeLlmCalls: 0, planCalls: 0, lastReachActionFailure: null,
     bot: { entity: { position: { clone: () => ({ ...world.self.position }) } } },
     executor: {
