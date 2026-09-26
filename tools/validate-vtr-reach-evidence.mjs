@@ -3581,7 +3581,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
     else if (!shadowSummaryOk || summaryMutationsDenied !== true || summaryKernelDenied !== true || summaryCoverage !== true) fail('authority:kernel-summary', 'kernel summary does not assert authority mode, zero gate denials, zero lease/kernel denials, and complete mutation coverage', { authorityModeOk: shadowSummaryOk, mutationsDeniedByLeaseZero: summaryMutationsDenied, kernelDeniedZero: summaryKernelDenied, coverageComplete: summaryCoverage, line: shadowSummaryLine })
     else pass('authority:kernel-summary', { mode: 'authority', gateDenials: 0, kernelDenied: 0, mutationsDeniedByLease: 0, coverageComplete: true })
 
-    const kernelJournalText = present.has('runner/kernel-shadow.jsonl') ? readText(archive, 'runner/kernel-shadow.jsonl') : null
+    const kernelJournalText = listing.files.includes('runner/kernel-shadow.jsonl') ? readText(archive, 'runner/kernel-shadow.jsonl') : null
     if (kernelJournalText === null) {
       incomplete('authority:kernel-gates-live', 'runner/kernel-shadow.jsonl is absent; the gated kernel command path cannot be bound to this Transition')
     } else {

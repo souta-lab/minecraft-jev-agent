@@ -242,7 +242,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
    * kernel refusal is a migration blocker (production did something the kernel
    * would not authorize), never a production failure.
    */
-  const apply = (build: KernelCommand | ((atMonoMs: number) => KernelCommand), via: string): KernelResult => {
+  const apply = (build: KernelCommand | ((atMonoMs: number) => KernelCommand), via: string, transitionId?: string): KernelResult => {
     try {
       const advance: KernelResult = applyKernelCommand(state, {
         kind: 'ADVANCE_TIME',
@@ -257,6 +257,9 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         type: 'kernel-command',
         via,
         command: command.kind,
+        // Transition-scoped rows bind the gated command path to the exact
+        // contract instance; world/generation commands have no such scope.
+        ...(transitionId === undefined ? {} : { transitionId }),
         ok: result.ok,
         ...(result.ok ? {} : { reason: result.reason }),
         events: result.ok ? result.events.map((event) => event.kind) : [],
@@ -288,6 +291,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     predicates: Readonly<Record<string, { readonly truth: 'true' | 'false' | 'unknown'; readonly evidenceId: string | null }>>,
     via: string,
     effectCommitId?: string,
+    transitionId?: string,
   ): void => {
     const facts = Object.entries(predicates).map(([predicateId, evidence]) => ({
       predicateId,
@@ -304,7 +308,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       materialChange: signature !== lastFactSignature,
       observedAtMonoMs: at,
       capability: caps.verifier,
-    }), via)
+    }), via, transitionId)
     lastFactSignature = signature
   }
 
@@ -346,7 +350,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       contract: canonical,
       compiler: SHADOW_REGISTRY.compiler,
       capability: caps.compiler,
-    }, via)
+    }, via, contract.transitionId)
     if (!registered.ok) return deny('admitTransition', registered.reason)
     if (state.transitions[contract.transitionId] === undefined) return deny('admitTransition', 'transition-not-registered')
     if (!state.missionPredicates.includes(canonical.desiredPredicate)) {
@@ -355,10 +359,10 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         predicates: [...state.missionPredicates, canonical.desiredPredicate],
         authority: SHADOW_REGISTRY.missionAuthority,
         capability: caps.mission,
-      }, via)
+      }, via, contract.transitionId)
       if (!mission.ok) return deny('admitTransition', mission.reason)
     }
-    const admitted = apply({ kind: 'ADMIT_TRANSITION', transitionId: contract.transitionId, capability: caps.scheduler }, via)
+    const admitted = apply({ kind: 'ADMIT_TRANSITION', transitionId: contract.transitionId, capability: caps.scheduler }, via, contract.transitionId)
     if (!admitted.ok) return deny('admitTransition', admitted.reason)
     return { ok: true }
   }
@@ -374,7 +378,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     // every command above just invalidated the freshness of earlier proofs and
     // witnesses. Re-establish them NOW, in order, before activation: the same
     // verified observation the production commit consumed, then the witness.
-    feedSnapshot(lastPredicates, via)
+    feedSnapshot(lastPredicates, via, undefined, transitionId)
     if (witness !== null) {
       witnessByTransition.set(transitionId, witness)
       const revision = Math.max(1, witnessRevisions.get(transitionId) ?? 0)
@@ -387,11 +391,11 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         relationId: 'reach-route-witness',
         validator: SHADOW_REGISTRY.witness,
         capability: caps.witness,
-      }, via)
+      }, via, transitionId)
       if (!accepted.ok) return deny('activateTransition', accepted.reason)
     }
     if (!acquire) return { ok: true }
-    const granted = apply({ kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId, capability: caps.scheduler }, via)
+    const granted = apply({ kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId, capability: caps.scheduler }, via, transitionId)
     if (!granted.ok) return deny('activateTransition', granted.reason)
     return { ok: true }
   }
@@ -419,7 +423,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         // SUCCESS must never mint truth: if an ensures/invariants predicate
         // was not observed 'true', the kernel MUST refuse and the miss is a
         // hard blocker, not a synthesized proof.
-        feedSnapshot(lastPredicates, 'transition-terminal')
+        feedSnapshot(lastPredicates, 'transition-terminal', undefined, input.transitionId)
         const missing = [...contract.ensures, ...contract.invariants].filter(
           (predicateId) => lastPredicates[predicateId]?.truth !== 'true')
         journal({
@@ -442,7 +446,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         causalCredit: 'self',
         verifier: SHADOW_REGISTRY.verifier,
         capability: caps.verifier,
-      }, 'transition-terminal')
+      }, 'transition-terminal', input.transitionId)
       successVerified = verified.ok
       if (verified.ok) {
         verifyFactIds = verified.events.flatMap((event) =>
@@ -463,7 +467,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         transitionId: input.transitionId,
         atMonoMs: at,
         capability: controllerCap(input.transitionId),
-      }), 'transition-terminal')
+      }), 'transition-terminal', input.transitionId)
     }
     const stillLive = state.transitions[input.transitionId]
     if (stillLive !== undefined && stillLive.lifecycle !== 'TERMINAL' && stillLive.terminalOutcome === null && stillLive.pendingTerminalOutcome === null) {
@@ -477,7 +481,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
             : input.outcome.field === 'worldEpoch'
               ? { ...state.world, worldEpoch: Number(input.outcome.observed) }
               : { ...state.world, serverId: String(input.outcome.observed) }
-        apply({ kind: 'CHANGE_WORLD', world: observed, capability: caps.worldAdapter }, 'transition-terminal')
+        apply({ kind: 'CHANGE_WORLD', world: observed, capability: caps.worldAdapter }, 'transition-terminal', input.transitionId)
         typedTerminals += 1
         journal({ type: 'terminal-projection', transitionId: input.transitionId, reachOutcomeKind: kind, kernelOutcome: 'WORLD_CHANGED', derived: true })
       } else if (kind === 'GENERATION_CHANGED' && typeof input.outcome.observed !== 'undefined') {
@@ -488,7 +492,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
           kind: 'CHANGE_GENERATION',
           generationId: String(input.outcome.observed),
           capability: caps.runtimeAdapter,
-        }, 'transition-terminal')
+        }, 'transition-terminal', input.transitionId)
         limitation = 'kernel suspends for generation rebind; no GENERATION_CHANGED terminal outcome'
       } else if (kind === 'BUDGET_EXHAUSTED') {
         // Honest typed derivation: the kernel's own budget sweep in
@@ -496,7 +500,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         // canonical contract budget. If it does not reproduce the breach,
         // that divergence is the projection limitation — the outcome is
         // never fabricated.
-        apply((at) => ({ kind: 'ADVANCE_TIME', toMonoMs: at, capability: caps.clock }), 'transition-terminal')
+        apply((at) => ({ kind: 'ADVANCE_TIME', toMonoMs: at, capability: caps.clock }), 'transition-terminal', input.transitionId)
         const derived = state.transitions[input.transitionId]
         const derivedOutcome = derived?.terminalOutcome ?? derived?.pendingTerminalOutcome ?? null
         if (derivedOutcome !== null) {
@@ -544,7 +548,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
           transitionId: input.transitionId,
           reason: authoritative ? `authority-terminal:${kind}` : `shadow-terminal:${kind}`,
           capability: caps.scheduler,
-        }, 'transition-terminal')
+        }, 'transition-terminal', input.transitionId)
         const pending = state.transitions[input.transitionId]
         if (pending !== undefined && pending.cancelRequested) {
           apply((at) => ({
@@ -584,7 +588,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     // RuntimeBinding: any snapshot/registry/mission revision since activation
     // stales the proofs and witness. Re-establish both before issuing, mirroring
     // the commit-time freshness fence the production controller already passed.
-    feedSnapshot(lastPredicates, 'mechanical-step-issued')
+    feedSnapshot(lastPredicates, 'mechanical-step-issued', undefined, input.transitionId)
     const witness = witnessByTransition.get(input.transitionId)
     const live = state.transitions[input.transitionId]
     if (witness !== undefined && live !== undefined) {
@@ -597,7 +601,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         relationId: 'reach-route-witness',
         validator: SHADOW_REGISTRY.witness,
         capability: caps.witness,
-      }, 'mechanical-step-issued')
+      }, 'mechanical-step-issued', input.transitionId)
     }
     const issued = apply({
       kind: 'ISSUE_EFFECT',
@@ -606,7 +610,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       scope: 'reach:leg',
       ttlMs: 30_000,
       capability: controllerCap(input.transitionId),
-    }, 'mechanical-step-issued')
+    }, 'mechanical-step-issued', input.transitionId)
     if (!issued.ok) return authoritative ? deny('issueStepEffect', issued.reason) : { ok: true }
     const commitId = (issued.events[0]?.data.commitId as string | undefined) ?? null
     if (commitId === null) {
@@ -617,7 +621,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       kind: 'BEGIN_EFFECT_DISPATCH',
       commitId,
       capability: caps.dispatcher,
-    }, 'mechanical-step-issued')
+    }, 'mechanical-step-issued', input.transitionId)
     if (!dispatched.ok) return authoritative ? deny('issueStepEffect', dispatched.reason) : { ok: true }
     openEffects.set(input.stepId, { commitId, stepId: input.stepId, transitionId: input.transitionId })
     journal({ type: 'effect-dispatch', transitionId: input.transitionId, stepId: input.stepId, commitId, authority: authoritative })
@@ -634,7 +638,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         targetTransitionId: input.transitionId,
         mechanicalSteps: 1,
         capability: controllerCap(input.transitionId),
-      }, 'mechanical-step-settled')
+      }, 'mechanical-step-settled', input.transitionId)
     }
     if (open === null || open === undefined) {
       block('observer-error', `settled step ${input.stepId} had no open kernel effect commit`, { transitionId: input.transitionId })
@@ -643,7 +647,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     if (input.status === 'continuing' || input.status === 'active' || (input.status === 'terminal' && input.verified)) {
       feedSnapshot({
         'reach.mechanical-step': { truth: 'true', evidenceId: `step:${input.stepId}` },
-      }, 'mechanical-step-settled', open.commitId)
+      }, 'mechanical-step-settled', open.commitId, input.transitionId)
       const factId = Object.entries(state.facts)
         .filter(([, fact]) => fact.effectCommitId === open.commitId)
         .sort(([a], [b]) => a.localeCompare(b))
@@ -655,7 +659,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         factIds: factId === undefined ? [] : [factId],
         verifier: SHADOW_REGISTRY.verifier,
         capability: caps.verifier,
-      }, 'mechanical-step-settled')
+      }, 'mechanical-step-settled', input.transitionId)
     } else {
       apply({
         kind: 'RECONCILE_EFFECT',
@@ -664,7 +668,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         factIds: [],
         verifier: SHADOW_REGISTRY.verifier,
         capability: caps.verifier,
-      }, 'mechanical-step-settled')
+      }, 'mechanical-step-settled', input.transitionId)
     }
   }
 
