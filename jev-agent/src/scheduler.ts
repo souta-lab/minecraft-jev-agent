@@ -772,3 +772,9 @@ export class DecisionScheduler {
     this.pendingTriggers.clear()
   }
 }
+
+/** Coalesced trigger pick: the higher-priority trigger wins; a critical trigger is never overwritten by a lower one. */
+export function pickHigherPriority(current: TriggerEvent | null, next: TriggerEvent): TriggerEvent {
+  if (current === null) return next
+  return TRIGGER_PRIORITY[next.trigger] > TRIGGER_PRIORITY[current.trigger] ? next : current
+}

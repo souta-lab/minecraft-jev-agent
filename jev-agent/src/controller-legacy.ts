@@ -25,7 +25,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -164,19 +164,15 @@ import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardCandidate, guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyNeedsBreathEscape, bodyStarving, buildWorldState, defaultSensorOptions, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, scannedBlockNames, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import { BODY_SUBMERGED, bodyStarving, buildWorldState, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, formatBodyStarving, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, scannedBlockNames, sensedPortalFrameSites } from './state.ts'
+import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import {
-  countMissionInventoryResource,
-} from './vtr/reach.ts'
-import {
   filterLegacyReachCandidates,
-  isMissionReachWalkAction,
   minecraftMissionSourceNames,
   projectMinecraftReachMission,
 } from './runtime-adapters/minecraft-reach-mission-projection.ts'
@@ -187,7 +183,6 @@ import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
 import type { KernelReachAuthority, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
 import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
-import { assessReachViability } from './vtr/reach-safety.ts'
 import { createJevReachVtrComposition } from './jev-reach-vtr-composition.ts'
 import type { JevReachRouteDecisionRecord } from './jev-reach-vtr-composition.ts'
 import type {
@@ -197,6 +192,9 @@ import type {
   ReachTransitionState,
 } from './vtr/reach.ts'
 import type { ReachMissionSnapshotOptions } from './vtr/reach-mission-projection.ts'
+import { sensorOptions, candidateOptions, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
+import * as reach from './vtr/reach-controller-plane.ts'
+import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './vtr/reach-controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
@@ -431,18 +429,6 @@ export function filterFurnacePrerequisiteCandidates(
 
 /** Compatibility export for the VTR-owned Mission shape during the strangler migration. */
 export type VtrInventoryMission = InventoryReachMission
-
-interface ReachTerminalActionCorrelation {
-  readonly transitionId: string
-  readonly intentId: string
-  readonly actionId: string
-  readonly outcomeKind: ReachTerminalOutcome['kind']
-}
-
-type ActiveReachTransition = Readonly<ReachMissionRuntimeSession> & {
-  readonly contract: ReachTransitionContract
-  readonly state: ReachTransitionState
-}
 
 export interface JevAgentOptions {
   goalItem: string
@@ -2375,7 +2361,6 @@ export function betaAbandonProgressObserved(
 }
 
 export class JevController {
-  private static readonly MODEL_RECOVERY_DRAIN_GRACE_MS = 1_000
   private readonly bot: Bot
   /** Temporary Mineflayer edge for the VTR Reach slice; semantic code receives typed results only. */
   private reachRuntimeAdapter!: ReachRuntimePorts
@@ -2981,6 +2966,16 @@ export class JevController {
   private completion: Promise<RunSummary> | null = null
   private resolveCompletion: ((summary: RunSummary) => void) | null = null
 
+  /**
+   * ReachPlaneHost view of this controller. The class keeps every field
+   * private; the plane's interface is satisfied structurally, so the cast is
+   * confined to this one site. Plain-object test fixtures are passed the same
+   * way, so their `host.*` stubs keep the old private-method seam.
+   */
+  private get reachHost(): ReachPlaneHost {
+    return this as unknown as ReachPlaneHost
+  }
+
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
   private get reachTransition(): ActiveReachTransition | null {
     const current = this.reachRuntime.activeMission
@@ -3008,23 +3003,11 @@ export class JevController {
   }
 
   private noteReachAuthorityConflict(): void {
-    const runtime = this.reachRuntime as ReachMissionRuntime | undefined
-    if (typeof runtime?.noteAuthorityConflict === 'function') {
-      runtime.noteAuthorityConflict()
-      return
-    }
-    const fixture = this.reachRunMetadataFixture as ({ duplicateAuthorityObserved: boolean } | null)
-    if (fixture !== null) fixture.duplicateAuthorityObserved = true
+    return reach.noteReachAuthorityConflict(this.reachHost)
   }
 
   private noteReachHealth(health: number): number {
-    const runtime = this.reachRuntime as ReachMissionRuntime | undefined
-    if (typeof runtime?.noteMissionHealth === 'function') return runtime.noteMissionHealth(health)
-    const fixture = this.reachRunMetadataFixture as ({ lastHealth: number } | null)
-    if (fixture === null || !Number.isFinite(health)) return 0
-    const damage = Math.max(0, fixture.lastHealth - health)
-    fixture.lastHealth = health
-    return damage
+    return reach.noteReachHealth(this.reachHost, health)
   }
 
   constructor(bot: Bot, options: Partial<JevAgentOptions> & Pick<JevAgentOptions, 'kernelAuthority'>) {
@@ -3622,7 +3605,7 @@ export class JevController {
     const budgetMs = commitment.budget.ms as number
     const drainDeadlineMs = Math.max(
       0,
-      current.startedAt + budgetMs + JevController.MODEL_RECOVERY_DRAIN_GRACE_MS - Date.now(),
+      current.startedAt + budgetMs + MODEL_RECOVERY_DRAIN_GRACE_MS - Date.now(),
     )
     this.modelRecoveryDrainTimer = setTimeout(() => {
       this.modelRecoveryDrainTimer = null
@@ -3633,13 +3616,13 @@ export class JevController {
       }
       this.logger.error(
         'agent',
-        `MODEL_RECOVERY_DRAIN phase=deadline actionId=${current.id} kind=${current.kind} budgetMs=${budgetMs} graceMs=${JevController.MODEL_RECOVERY_DRAIN_GRACE_MS} -> cancel over-budget Skill`,
+        `MODEL_RECOVERY_DRAIN phase=deadline actionId=${current.id} kind=${current.kind} budgetMs=${budgetMs} graceMs=${MODEL_RECOVERY_DRAIN_GRACE_MS} -> cancel over-budget Skill`,
         {
           actionId: current.id,
           kind: current.kind,
           commitmentId: commitment.commitmentId,
           budgetMs,
-          graceMs: JevController.MODEL_RECOVERY_DRAIN_GRACE_MS,
+          graceMs: MODEL_RECOVERY_DRAIN_GRACE_MS,
           elapsedMs: Date.now() - current.startedAt,
         },
         this.tickCounter,
@@ -3688,158 +3671,16 @@ export class JevController {
   }
 
   private beginModelRecoveryReachDrain(runtime: ActiveReachTransition): void {
-    const transitionId = runtime.contract.transitionId
-    this.modelRecoveryReachDrainTransitionId = transitionId
-    const deadlineAt = runtime.state.startedAtMs + runtime.contract.budget.maxElapsedMs + JevController.MODEL_RECOVERY_DRAIN_GRACE_MS
-    const deadlineDelayMs = Math.max(0, deadlineAt - Date.now())
-    this.logger.warn(
-      'agent',
-      `MODEL_RECOVERY_DRAIN phase=begin transitionId=${transitionId} kind=reach_transition budgetMs=${runtime.contract.budget.maxElapsedMs} remainingMs=${deadlineDelayMs}`,
-      {
-        transitionId,
-        contractHash: runtime.contract.contractHash,
-        ensures: runtime.contract.ensures,
-        mechanicalSteps: runtime.state.usage.mechanicalSteps,
-        budgetMs: runtime.contract.budget.maxElapsedMs,
-        deadlineAt,
-        authority: 'vtr-reach-controller',
-      },
-      this.tickCounter,
-    )
-    this.modelRecoveryDrainTimer = setTimeout(() => {
-      this.modelRecoveryDrainTimer = null
-      if (this.reachTransition?.contract.transitionId !== transitionId) {
-        this.finish('stopped-by-caller', false)
-        return
-      }
-      const current = this.executor.current
-      if (
-        current !== null && current.status === 'running' &&
-        current.authority === 'vtr-reach' && current.transitionId === transitionId
-      ) {
-        this.logger.warn(
-          'agent',
-          `MODEL_RECOVERY_DRAIN phase=deadline transitionId=${transitionId} actionId=${current.id} -> cancel over-budget Reach leg`,
-          { transitionId, actionId: current.id, epoch: current.epoch, contractHash: runtime.contract.contractHash },
-          this.tickCounter,
-        )
-        this.executor.cancelCurrent('model recovery Reach contract exceeded its committed time budget')
-      }
-      void this.advanceModelRecoveryReachDrain(transitionId, 'contract-deadline')
-    }, deadlineDelayMs)
-
-    const current = this.executor.current
-    if (
-      current !== null && current.status === 'running' &&
-      current.authority === 'vtr-reach' && current.transitionId === transitionId
-    ) {
-      // The existing completion handler will continue the same contract. Do not
-      // attach a second callback that would finish the generation after one leg.
-      return
-    }
-    void this.advanceModelRecoveryReachDrain(transitionId, 'model-outage')
+    return reach.beginModelRecoveryReachDrain(this.reachHost, runtime)
   }
 
   /** Continue only the named active Reach owner; this path never enters tick(), Jev, or System2. */
   private async advanceModelRecoveryReachDrain(transitionId: string, trigger: string): Promise<void> {
-    if (
-      !this.running || !this.modelRecoveryStopping ||
-      this.modelRecoveryReachDrainTransitionId !== transitionId
-    ) return
-    if (this.ticking || this.modelRecoveryReachDrainAdvancing) {
-      this.modelRecoveryReachDrainPending = true
-      return
-    }
-
-    const runtime = this.reachTransition
-    if (runtime === null || runtime.contract.transitionId !== transitionId || runtime.state.status !== 'active') {
-      this.completeModelRecoveryReachDrain(transitionId, 'transition-already-terminal')
-      return
-    }
-    const current = this.executor.current
-    if (
-      current !== null && current.status === 'running' &&
-      current.authority === 'vtr-reach' && current.transitionId === transitionId
-    ) {
-      return
-    }
-
-    this.modelRecoveryReachDrainAdvancing = true
-    this.modelRecoveryReachDrainPending = false
-    try {
-      this.logger.info(
-        'agent',
-        `MODEL_RECOVERY_DRAIN phase=continue transitionId=${transitionId} trigger=${trigger} mechanicalSteps=${runtime.state.usage.mechanicalSteps}`,
-        { transitionId, contractHash: runtime.contract.contractHash, trigger, mechanicalSteps: runtime.state.usage.mechanicalSteps },
-        this.tickCounter,
-      )
-      await this.tickReachTransition('heartbeat', { source: 'model-recovery-reach-drain', transitionId, trigger })
-
-      const after = this.reachTransition
-      if (after === null || after.contract.transitionId !== transitionId || after.state.status !== 'active') {
-        this.completeModelRecoveryReachDrain(transitionId, after?.state.terminalOutcome?.kind ?? 'typed-terminal')
-        return
-      }
-
-      const nowMs = Date.now()
-      if (nowMs > after.state.startedAtMs + after.contract.budget.maxElapsedMs) {
-        const fresh = this.buildReachWorldState(after.mission)
-        const identity = this.reachIdentity(fresh) ?? this.liveReachIdentity(after.contract.identity)
-        const projection = this.projectReachMission(after.mission, fresh, identity, after.contract)
-        const expired = await this.reachRuntime.tick(projection.snapshot)
-        if (expired.status === 'terminal') {
-          if (expired.outcome.kind === 'SUCCESS') this.logReachVerification(expired.outcome, projection.snapshot)
-          this.closeReachTransition(expired.outcome, expired.state, 'model-recovery-budget', expired.cancelIntentId)
-          this.completeModelRecoveryReachDrain(transitionId, expired.outcome.kind)
-          return
-        }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.logger.error(
-        'agent',
-        `MODEL_RECOVERY_DRAIN phase=controller_error transitionId=${transitionId} error=${message}`,
-        { transitionId, error: message },
-        this.tickCounter,
-      )
-      const active = this.reachTransition
-      if (active !== null && active.contract.transitionId === transitionId && active.state.status === 'active') {
-        const observed = this.liveReachIdentity(active.contract.identity)
-        const violation = this.reachRuntime.supersede({
-          reason: `model-recovery Reach controller failed: ${message}`,
-          evidenceId: `model-recovery-controller-error:${transitionId}:${Date.now()}`,
-          identity: observed,
-          nowMs: Date.now(),
-        })
-        if (violation.status === 'terminal') this.closeReachTransition(violation.outcome, violation.state, 'model-recovery-controller-error', violation.cancelIntentId)
-      }
-      this.completeModelRecoveryReachDrain(transitionId, 'controller-error')
-      return
-    } finally {
-      this.modelRecoveryReachDrainAdvancing = false
-    }
-
-    if (this.modelRecoveryReachDrainPending) {
-      this.modelRecoveryReachDrainPending = false
-      setImmediate(() => void this.advanceModelRecoveryReachDrain(transitionId, 'pending-controller-turn'))
-    }
+    return reach.advanceModelRecoveryReachDrain(this.reachHost, transitionId, trigger)
   }
 
   private completeModelRecoveryReachDrain(transitionId: string, outcome: string): void {
-    if (this.modelRecoveryReachDrainTransitionId !== transitionId) return
-    this.logger.warn(
-      'agent',
-      `MODEL_RECOVERY_DRAIN phase=terminal transitionId=${transitionId} outcome=${outcome}`,
-      { transitionId, outcome, schedulerStopped: true, modelAuthority: 'withdrawn' },
-      this.tickCounter,
-    )
-    this.modelRecoveryReachDrainTransitionId = null
-    this.modelRecoveryReachDrainPending = false
-    if (this.modelRecoveryDrainTimer !== null) {
-      clearTimeout(this.modelRecoveryDrainTimer)
-      this.modelRecoveryDrainTimer = null
-    }
-    this.finish('stopped-by-caller', false)
+    return reach.completeModelRecoveryReachDrain(this.reachHost, transitionId, outcome)
   }
 
   wait(): Promise<RunSummary> {
@@ -4078,77 +3919,17 @@ export class JevController {
   }
 
   private reachIdentity(state: WorldState): ReachIdentity | null {
-    const generationId = this.options.decisionProvenance.generationId
-    const leaseId = this.options.actuationPort?.generationId
-    if (generationId === null || generationId === undefined || leaseId === undefined || leaseId.length === 0) return null
-    return {
-      worldKey: `${this.options.serverId}|${state.self.dimension}|${this.options.worldEpoch}`,
-      dimension: state.self.dimension,
-      worldEpoch: this.options.worldEpoch,
-      generationId,
-      leaseId,
-    }
+    return reach.reachIdentity(this.reachHost, state)
   }
 
   /** Re-read world and HOST generation identity at each mechanical boundary. */
   private liveReachIdentity(fallback: ReachIdentity): ReachIdentity {
-    const dimension = this.reachRuntimeAdapter.currentDimension()
-    const generationId = this.options.decisionProvenance.generationId
-    const leaseId = this.options.actuationPort?.generationId
-    return {
-      worldKey: `${this.options.serverId}|${dimension}|${this.options.worldEpoch}`,
-      dimension,
-      worldEpoch: this.options.worldEpoch,
-      generationId: generationId ?? `${fallback.generationId}:missing`,
-      leaseId: leaseId ?? `${fallback.leaseId}:missing`,
-    }
+    return reach.liveReachIdentity(this.reachHost, fallback)
   }
 
   /** Build a VTR-only fact view. The empty GoalQueue projection is for old sensor helpers only. */
   private buildReachWorldState(mission: VtrInventoryMission): WorldState {
-    const have = countMissionInventoryResource(this.reachRuntimeAdapter.inventoryCounts(), mission.item)
-    const required = Math.max(1, Math.floor(mission.count))
-    const goal: GoalState = {
-      id: mission.id,
-      description: `Mission inventory ${mission.item} >= ${required}`,
-      targetItem: mission.item,
-      requiredCount: required,
-      startCount: 0,
-      haveCount: have,
-      progress: Math.min(1, have / required),
-      complete: have >= required,
-      startedAtMs: this.startedAt,
-    }
-    const compatibilityQueue: GoalQueueState = {
-      depth: 0,
-      current: null,
-      empty: true,
-      hasImpossible: false,
-      done: 0,
-      goals: [],
-    }
-    let state = this.reachRuntimeAdapter.observeWorldState(
-      {
-        tick: this.tickCounter,
-        goal,
-        goalQueue: compatibilityQueue,
-        currentOption: null,
-        recentOutcomes: [],
-        focusItem: mission.item,
-        retrievalItems: [mission.item],
-        recentEvents: [],
-        signals: { ...this.signals, knownResources: this.knownResourcesForSensor() },
-        rememberedStations: this.knownResourcesForSensor(),
-        containerContents: this.reachRuntimeAdapter.containerContents(),
-      },
-      sensorOptions(this.options, this.scheduler.worldRevision),
-    )
-    state = this.mergeRememberedPortalFrame(state)
-    this.syncTerrainSignals(state)
-    this.observeThreatState(state)
-    this.observeUnansweredRangedThreat(state)
-    this.observeEnvHazard(state)
-    return state
+    return reach.buildReachWorldState(this.reachHost, mission)
   }
 
   /**
@@ -4164,33 +3945,11 @@ export class JevController {
     contract: ReachTransitionContract | null = null,
     snapshotOptions: ReachMissionSnapshotOptions = {},
   ): ReturnType<typeof projectMinecraftReachMission> {
-    this.reachRouteDecisionWorld = state
-    const options = candidateOptions(
-      this.options,
-      this.recipeIndex,
-      this.unreachableStationKeys(state),
-      this.reachRuntimeAdapter.reachabilityGateOptions(this.tickCounter, this.reachabilityProofs),
-      this.blacklistedMoveTargets(state),
-      state.portalFrame,
-      this.searchedSurfaceTargets,
-      null,
-      this.placementRetries.retiredItemSet(),
-    )
-    return projectMinecraftReachMission({
-      mission,
-      world: state,
-      candidateOptions: options,
-      identity,
-      witnessIdentity: this.reachIdentity(state),
-      contract,
-      previousFrontierId: this.reachRuntime.current?.state.progress.frontierId ?? null,
-      previousActionFailure: this.lastReachActionFailure,
-      snapshotOptions,
-    })
+    return reach.projectReachMission(this.reachHost, mission, state, identity, contract, snapshotOptions)
   }
 
   private currentVtrReachRouteDecision(): typeof this.lastVtrReachRouteDecision {
-    return this.lastVtrReachRouteDecision
+    return reach.currentVtrReachRouteDecision(this.reachHost)
   }
 
   /** Map one typed VTR intent through the temporary Mineflayer Reach actuation port. */
@@ -4200,85 +3959,7 @@ export class JevController {
     identity: ReachIdentity,
     candidates: readonly Candidate[],
   ): Promise<boolean> {
-    if (result.status !== 'active' || result.phase !== 'actuate' || result.intent === undefined) return false
-    const intent = result.intent
-    let actuationJournaled = false
-    const candidate = candidates.find((entry) => entry.id === intent.routeId)
-    if (candidate === undefined || candidate.target === null || JSON.stringify(candidate.target) !== JSON.stringify(intent.target)) {
-      this.logger.warn(
-        'vtr',
-        `VTR_RUNTIME_INTENT_REFUSED transition=${intent.transitionId} route=${intent.routeId} reason=route-not-in-current-observation`,
-        { transitionId: intent.transitionId, intentId: intent.intentId, routeId: intent.routeId, authority: 'vtr-transition-controller' },
-        this.tickCounter,
-      )
-      return true
-    }
-    const dispatched = this.reachRuntimeAdapter.dispatch({
-      intent,
-      candidate,
-      observation: state,
-      reach: this.options.reach,
-      maxCandidateAgeTicks: this.options.maxCandidateAgeTicks,
-      reachability: this.reachRuntimeAdapter.reachabilityGateOptions(this.tickCounter, this.reachabilityProofs),
-      liveStructureMembers: state.liveStructureMembers ?? [],
-      beforeMechanicalStep: (step) => this.authorizeReachMechanicalStep(intent.intentId, identity, step),
-      afterMechanicalStep: (step) => this.recordReachMechanicalOutcome(intent.intentId, identity, step),
-      onBeforeRunStart: (started) => {
-        actuationJournaled = true
-        this.logReachActuation(intent, started.id, started.epoch, candidate.id, started.candidate)
-      },
-    })
-    if (dispatched.status === 'route-refused') {
-      this.logger.warn(
-        'vtr',
-        `VTR_RUNTIME_INTENT_REFUSED transition=${intent.transitionId} route=${intent.routeId} reason=${dispatched.reason}`,
-        { transitionId: intent.transitionId, intentId: intent.intentId, routeId: intent.routeId, reason: dispatched.reason, authority: 'vtr-transition-controller' },
-        this.tickCounter,
-      )
-      return true
-    }
-    if (dispatched.status === 'guard-refused') {
-      const guard = dispatched.rejection
-      this.logger.warn(
-        'vtr',
-        `VTR_REACH_GUARD_REFUSED id=${intent.transitionId} candidate=${candidate.id} code=${guard.code}`,
-        { transitionId: intent.transitionId, intentId: intent.intentId, candidate: candidate.id, code: guard.code, reason: guard.reason },
-        this.tickCounter,
-      )
-      this.noteCandidateFailure(candidate.id)
-      await this.releaseUnstartedReachIntent(intent.intentId, intent.transitionId, `guard:${guard.code}`)
-      return true
-    }
-    if (dispatched.status === 'claim-refused') {
-      const message = dispatched.message
-      if (dispatched.activeAction !== null && dispatched.activeAction.authority !== 'vtr-reach') {
-        this.noteReachAuthorityConflict()
-        this.reachRuntimeAdapter.cancelCurrent('VTR Reach claim refused by active legacy lease')
-      }
-      this.logger.error(
-        'vtr',
-        `VTR_EXECUTOR_CLAIM_REFUSED transition=${intent.transitionId} intent=${intent.intentId} reason=${message}`,
-        { transitionId: intent.transitionId, intentId: intent.intentId, candidate: candidate.id, error: message },
-        this.tickCounter,
-      )
-      await this.releaseUnstartedReachIntent(intent.intentId, intent.transitionId, `executor-claim:${message}`)
-      return true
-    }
-    const { claim, candidate: guardedCandidate, actionId } = dispatched
-    if (!claim.kept) this.actionStart = { ...state.self.position }
-    this.lastReachActionFailure = null
-    // Fresh claims through the production adapter journaled actuation inside the
-    // executor claim, ahead of the first mechanical leg (causal order). Adapters
-    // that do not fire the claim hook — and `kept` re-dispatches that never
-    // re-enter it — still journal the same single row after dispatch returns.
-    if (!actuationJournaled) this.logReachActuation(intent, actionId, claim.epoch, candidate.id, guardedCandidate)
-    void claim.completion
-      .then((execution) => this.onReachActionComplete(execution, guardedCandidate, intent.transitionId, intent.intentId))
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error)
-        this.logger.error('vtr', `VTR_ACTION_COMPLETION_HANDLER_FAILED transition=${intent.transitionId}: ${message}`, { transitionId: intent.transitionId, intentId: intent.intentId }, this.tickCounter)
-      })
-    return true
+    return reach.dispatchReachIntent(this.reachHost, result, state, identity, candidates)
   }
 
   private logReachActuation(
@@ -4288,309 +3969,15 @@ export class JevController {
     candidateId: string,
     guardedCandidate: Candidate,
   ): void {
-    this.logger.info(
-      'vtr',
-      `VTR_TRANSITION_ACTUATION id=${intent.transitionId} intent=${intent.intentId} action=${actionId ?? 'missing'} candidate=${candidateId} target=${JSON.stringify(guardedCandidate.target)} selectedBy=vtr_transition_controller`,
-      { transitionId: intent.transitionId, intentId: intent.intentId, actionId, contractHash: intent.contractHash, candidate: candidateId, target: guardedCandidate.target, authority: 'vtr-transition-controller', leaseEpoch: epoch },
-      this.tickCounter,
-    )
+    return reach.logReachActuation(this.reachHost, intent, actionId, epoch, candidateId, guardedCandidate)
   }
 
   private async releaseUnstartedReachIntent(intentId: string, transitionId: string, evidence: string): Promise<void> {
-    const metadata = this.reachRunMetadata
-    if (metadata === null || metadata.transitionId !== transitionId) return
-    const state = this.buildReachWorldState(metadata.mission)
-    const identity = this.reachIdentity(state) ?? metadata.identity
-    const released = await this.reachRuntime.refuseIntent(intentId, {
-      identity,
-      evidenceId: `reach-intent-refused:${transitionId}:${intentId}:${evidence}`,
-      observedAtMs: state.timestampMs,
-    })
-    if (released.status === 'terminal') {
-      this.closeReachTransition(released.outcome, released.state, 'intent-refused-terminal', released.cancelIntentId)
-      return
-    }
-    if (released.status === 'refused') {
-      this.logger.warn('vtr', `VTR_INTENT_RELEASE_REFUSED transition=${transitionId} intent=${intentId} reason=${released.reason}`, { transitionId, intentId, reason: released.reason, evidence }, this.tickCounter)
-    }
-    this.requestDecision('action_completed', { transitionId, intentId, typedOutcome: 'intent-refused', evidence })
+    return reach.releaseUnstartedReachIntent(this.reachHost, intentId, transitionId, evidence)
   }
 
   private async tickReachTransition(trigger: DecisionTrigger, detail: Record<string, unknown>): Promise<boolean> {
-    // Strangler entry only: HOST/control-loop code prepares a typed Mission,
-    // Reach snapshot, route-candidate and lease/action DTOs. These DTOs are the
-    // only gameplay input crossing into VTR; Mission scheduling/session/lifecycle
-    // ownership lives in the backend-independent ReachMissionRuntime.
-    // Delete this shim after Reach observation, typed actuation and evidence callbacks
-    // are wired directly through the canonical Runtime Adapter ports and fresh
-    // exact-source evidence proves no legacy caller needs this entry point.
-    if (
-      this.modelRecoveryStopping &&
-      (this.modelRecoveryReachDrainTransitionId === null ||
-        this.reachRuntime.current?.contract.transitionId !== this.modelRecoveryReachDrainTransitionId)
-    ) return true
-    const configuredMission = this.options.vtrMission
-    if (configuredMission === null || configuredMission === undefined || configuredMission.id.trim() === '' || configuredMission.item.trim() === '') return false
-    if (!Number.isSafeInteger(configuredMission.count) || configuredMission.count < 1) return false
-
-    const activeBefore = this.reachRuntime.activeMission
-    const observedMission = activeBefore?.mission ?? configuredMission
-    const state = this.buildReachWorldState(observedMission)
-
-    let identity = this.reachIdentity(state)
-    if (identity === null) {
-      if (activeBefore === null) return false
-      identity = {
-        ...activeBefore.contract.identity,
-        dimension: state.self.dimension,
-        worldKey: `${this.options.serverId}|${state.self.dimension}|${this.options.worldEpoch}`,
-        worldEpoch: this.options.worldEpoch,
-        generationId: this.options.decisionProvenance.generationId ?? 'generation-missing',
-        leaseId: this.options.actuationPort?.generationId ?? 'lease-missing',
-      }
-    }
-    const expectedLeaseId = identity.leaseId
-    let leaseFailure: string | null = null
-    try {
-      this.options.actuationPort?.assertLease(`vtr-reach-observe:${configuredMission.id}`)
-    } catch (error) {
-      leaseFailure = error instanceof Error ? error.message : String(error)
-      identity = { ...identity, leaseId: `lease-denied:${leaseFailure}` }
-    }
-
-    const active = this.reachRuntime.activeMission
-    const runtimeMission = active?.mission ?? configuredMission
-    const action = this.reachRuntimeAdapter.currentAction()
-    const sourceNames = minecraftMissionSourceNames(configuredMission.item)
-    const legacyReachAction = active === null && action !== null &&
-      isMissionReachWalkAction(action, configuredMission.item, state.self.dimension, this.options.worldEpoch, sourceNames)
-
-    const health = state.self.health
-    const threat = state.signals.threat
-    const viability = assessReachViability(trigger, {
-      criticalHealth: health <= CRITICAL_COMBAT_HEALTH,
-      needsBreathEscape: bodyNeedsBreathEscape(state.self),
-      environmentalHazard: state.self.envHazard?.active === true,
-      activeThreat: threat?.active === true,
-    })
-    const unsafeFacts = [
-      ...(health <= CRITICAL_COMBAT_HEALTH ? ['critical-health'] : []),
-      ...(bodyNeedsBreathEscape(state.self) ? ['breath-escape'] : []),
-      ...(state.self.envHazard?.active === true ? ['environmental-hazard'] : []),
-      ...(threat?.active === true ? ['active-threat'] : []),
-    ]
-    const snapshotOptions: ReachMissionSnapshotOptions = {
-      ...(active !== null && viability.shouldInterrupt
-        ? {
-            safetyInterruption: {
-              reason: viability.safetyTrigger
-                ? `safety trigger ${trigger} confirmed by ${unsafeFacts.join(',')}`
-                : `fresh viability facts require a different transition: ${unsafeFacts.join(',')}`,
-              evidenceId: `viability:${state.tick}:${trigger}:${state.self.health}:${state.self.food}`,
-            },
-          }
-        : {}),
-      ...(active !== null && active.state.witness !== null
-        ? (() => {
-            const witness = active.state.witness!
-            const falsified = state.knownResourceEvidence?.find((entry) =>
-              entry.status === 'falsified' &&
-              entry.position.x === (witness.target as { x?: number }).x &&
-              entry.position.y === (witness.target as { y?: number }).y &&
-              entry.position.z === (witness.target as { z?: number }).z,
-            )
-            return falsified === undefined
-              ? {}
-              : {
-                  infeasibility: {
-                    reason: `grounded resource witness ${falsified.name} was falsified (${falsified.reason ?? 'world evidence'})`,
-                    evidenceId: `known-resource:${state.tick}:${falsified.name}:${falsified.reason ?? 'falsified'}`,
-                  },
-                }
-          })()
-        : {}),
-    }
-    const projection = this.projectReachMission(runtimeMission, state, identity, active?.contract ?? null, snapshotOptions)
-    const snapshot = projection.snapshot
-    const candidates = projection.candidates
-    const rejectedReachRoutes = projection.inadmissibleCandidates
-    const missionSatisfiedEvidenceId = projection.missionSatisfiedEvidenceId
-    const ensureAlreadyTrueEvidenceId = active === null ? projection.ensuresAlreadyTrueEvidenceId : undefined
-    const safeToStart = health > CRITICAL_COMBAT_HEALTH &&
-      !bodyNeedsBreathEscape(state.self) &&
-      state.self.envHazard?.active !== true &&
-      threat?.active !== true
-
-    if (active === null) this.lastVtrReachRouteDecision = null
-    const decision = await this.reachRuntime.driveMission({
-      mission: configuredMission,
-      snapshot,
-      interactionReach: this.options.reach,
-      sourceNames: projection.missionSourceNames,
-      transitionId: active?.contract.transitionId ?? randomUUID(),
-      probe: this.options.vtrReachProbe === true,
-      schedulerOwner: this.queue.current?.origin === 'human' ? 'human' : 'mission',
-      actuationLease: leaseFailure === null
-        ? { status: 'owned', leaseId: identity.leaseId }
-        : {
-            status: 'lost',
-            expectedLeaseId,
-            observedLeaseId: identity.leaseId,
-            reason: leaseFailure,
-          },
-      activeAction: action,
-      activeActionMatchesMissionReach: legacyReachAction,
-      ...(active !== null || missionSatisfiedEvidenceId === undefined ? {} : { missionSatisfiedEvidenceId }),
-      ...(active !== null || ensureAlreadyTrueEvidenceId === undefined ? {} : { reachAlreadyTrueEvidenceId: ensureAlreadyTrueEvidenceId }),
-      safeToStart,
-      ...(rejectedReachRoutes.length === 0 ? {} : { inadmissibleRouteIds: rejectedReachRoutes.map((candidate) => candidate.id) }),
-      observedHealth: health,
-      counters: {
-        jevCalls: this.jevCalls,
-        system2Calls: this.runtimeLlmCalls + this.planCalls,
-        authorityConflicts: this.reachRuntimeAdapter.authorityConflictCount(),
-        nonVtrActuations: this.reachRuntimeAdapter.nonVtrActuationCount(),
-      },
-    })
-
-    if (viability.safetyTrigger && active !== null && !viability.shouldInterrupt) {
-      this.logger.info(
-        'vtr',
-        `VTR_SAFETY_TRIGGER_STALE transition=${active.contract.transitionId} trigger=${trigger} -> continue; no current unsafe fact`,
-        {
-          transitionId: active.contract.transitionId,
-          trigger,
-          observedFacts: { health, air: state.self.air, needsBreathEscape: bodyNeedsBreathEscape(state.self), environmentalHazard: state.self.envHazard?.active === true, activeThreat: threat?.active === true },
-          actionId: action?.id ?? null,
-        },
-        this.tickCounter,
-      )
-    }
-
-    if (decision.kind === 'declined') return false
-    if (decision.kind === 'held') {
-      const level = decision.reason === 'body-not-safe' ? 'warn' : 'info'
-      const message = decision.reason === 'no-admissible-reach-route'
-        ? `VTR_SCHEDULER_HOLDS_NO_ADMISSIBLE_ROUTE mission=${configuredMission.id} item=${configuredMission.item} candidates=${rejectedReachRoutes.length}`
-        : this.options.vtrReachProbe === true
-          ? `VTR_REACH_PROBE_HOLD mission=${configuredMission.id} reason=${decision.reason}`
-          : `VTR_MISSION_RUNTIME_HOLD mission=${configuredMission.id} reason=${decision.reason}`
-      this.logger[level]('vtr', message, {
-        mission: configuredMission,
-        reason: decision.reason,
-        candidateIds: candidates.map((candidate) => candidate.id),
-        ...(decision.reason === 'body-not-safe' ? {
-          safetyFacts: {
-            health,
-            needsBreathEscape: bodyNeedsBreathEscape(state.self),
-            environmentalHazard: state.self.envHazard?.active === true,
-            activeThreat: threat?.active === true,
-          },
-        } : {}),
-        ...(rejectedReachRoutes.length === 0 ? {} : { rejectedCandidates: rejectedReachRoutes.map((candidate) => candidate.id) }),
-        authority: 'vtr-transition-scheduler',
-      }, this.tickCounter)
-      return active !== null || this.options.vtrReachProbe === true || decision.reason === 'no-admissible-reach-route' || decision.reason === 'route-decision-required'
-    }
-    if (decision.kind === 'revoke-action') {
-      const cancelled = this.reachRuntimeAdapter.cancelCurrent(
-        decision.reason === 'legacy-reach-handoff'
-          ? 'VTR takes ownership of the Mission Reach predicate'
-          : decision.reason === 'orphan-vtr-actuation-without-active-contract'
-            ? 'VTR action has no active Reach contract'
-            : decision.reason === 'probe-revokes-legacy-actuation'
-              ? 'VTR Reach probe owns the configured Mission'
-              : 'VTR mission runtime revoked conflicting actuation',
-      )
-      this.logger.info(
-        'vtr',
-        decision.reason === 'legacy-reach-handoff'
-          ? `VTR_LEGACY_REACH_HANDOFF mission=${configuredMission.id} action=${action?.id ?? 'none'} cancelled=${cancelled}`
-          : `VTR_REACH_AUTHORITY_REVOKE reason=${decision.reason} action=${action?.id ?? 'none'} cancelled=${cancelled}`,
-        { mission: configuredMission, reason: decision.reason, actionId: action?.id ?? null, authority: 'vtr-mission-runtime' },
-        this.tickCounter,
-      )
-      if (decision.reason === 'legacy-reach-handoff' && cancelled && this.reachRuntimeAdapter.currentAction() === null) {
-        return this.tickReachTransition(trigger, { ...detail, source: 'vtr-legacy-reach-handoff' })
-      }
-      return true
-    }
-
-    const { result, mission, contract, snapshot: acceptedSnapshot } = decision
-    const routeSelection = decision.started ? this.currentVtrReachRouteDecision() : null
-    if (decision.started) {
-      this.lastReachActionFailure = null
-      this.logger.info(
-        'vtr',
-        `VTR_TRANSITION_COMMIT id=${contract.transitionId} mission=${mission.id} ensures=${contract.desiredPredicate.id} contractHash=${contract.contractHash}`,
-        {
-          transitionId: contract.transitionId,
-          contractHash: contract.contractHash,
-          mission,
-          desiredPredicate: contract.desiredPredicate,
-          desiredPredicateIdentity: contract.desiredPredicateIdentity,
-          requires: contract.requires,
-          ensures: contract.ensures,
-          ensuresIdentity: contract.ensuresIdentity,
-          invariants: contract.invariants,
-          admissibleEffects: contract.admissibleEffects,
-          budget: contract.budget,
-          controller: contract.controller,
-          progressDefinition: contract.progressDefinition,
-          identity,
-          selectedRoute: this.reachRuntime.current?.route ?? null,
-          witness: this.reachRuntime.current?.route.witness ?? null,
-          observedRouteIds: acceptedSnapshot.routes.map((route) => route.routeId),
-          routePolicy: routeSelection === null
-            ? { authority: 'jev-decision-frame-or-single-grounded-route', callId: null, source: null, model: null, probabilities: null }
-            : {
-                authority: !routeSelection.accepted
-                  ? 'jev-choice-refused'
-                  : routeSelection.source === 'jev' ? 'jev' : 'explicit-policy-configuration',
-                selectedRouteId: routeSelection.selectedRouteId,
-                callId: routeSelection.callId,
-                source: routeSelection.source,
-                policy: routeSelection.policy,
-                model: routeSelection.model,
-                probabilities: routeSelection.probabilities,
-              },
-          compatibilityProjection: 'GoalQueue is ignored for VTR Reach scheduling',
-        },
-        this.tickCounter,
-      )
-    }
-
-    if (result.status === 'terminal') {
-      if (result.outcome.kind === 'SUCCESS') this.logReachVerification(result.outcome, acceptedSnapshot)
-      this.closeReachTransition(
-        result.outcome,
-        result.state,
-        result.outcome.kind === 'SUCCESS' ? 'verified-terminal' : 'typed-terminal',
-        result.cancelIntentId,
-      )
-      if (decision.cancelAction) this.reachRuntimeAdapter.cancelCurrent('VTR transition terminal')
-      return true
-    }
-    if (result.status !== 'active') {
-      this.logger.warn(
-        'vtr',
-        `VTR_MISSION_RUNTIME_TRANSITION_REFUSED transition=${contract.transitionId} status=${result.status}`,
-        { transitionId: contract.transitionId, result },
-        this.tickCounter,
-      )
-      return true
-    }
-    const currentState = this.reachRuntime.current?.state ?? result.state
-    this.logger.info(
-      'vtr',
-      `VTR_TRANSITION_PROGRESS id=${contract.transitionId} sequence=${currentState.progress.observationSequence} distance=${currentState.progress.latestPredicateDistance ?? 'unknown'} reachable=${currentState.progress.reachability} mechanicalSteps=${currentState.usage.mechanicalSteps}`,
-      { transitionId: contract.transitionId, contractHash: contract.contractHash, progress: currentState.progress, usage: currentState.usage },
-      this.tickCounter,
-    )
-    if (decision.cancelAction) this.reachRuntimeAdapter.cancelCurrent('VTR terminal request')
-    if (!decision.dispatch) return true
-    await this.dispatchReachIntent(result, state, identity, candidates)
-    return true
+    return reach.tickReachTransition(this.reachHost, trigger, detail)
   }
 
   private authorizeReachMechanicalStep(
@@ -4598,44 +3985,7 @@ export class JevController {
     identity: ReachIdentity,
     step: { stepId: string; leg: number; effectKind: 'locomotion' },
   ): boolean {
-    const active = this.reachRuntime.current
-    if (active === null || active.intent?.intentId !== intentId) return false
-    let observedIdentity = this.liveReachIdentity(identity)
-    try {
-      this.options.actuationPort?.assertLease(`vtr-reach-step:${step.stepId}`)
-    } catch (error) {
-      observedIdentity = { ...observedIdentity, leaseId: `lease-denied:${error instanceof Error ? error.message : String(error)}` }
-    }
-    const result = this.reachRuntime.authorizeMechanicalStep(intentId, observedIdentity, {
-      stepId: step.stepId,
-      effectKind: step.effectKind,
-      resources: {},
-      risk: {},
-      nowMs: Date.now(),
-    })
-    if (result.status === 'terminal') {
-      this.closeReachTransition(result.outcome, result.state, 'actuation-reservation', result.cancelIntentId)
-      if (result.cancelIntentId !== null) this.reachRuntimeAdapter.cancelCurrent('VTR mechanical reservation terminal')
-      return false
-    }
-    if (result.status !== 'authorized') {
-      this.logger.warn(
-        'vtr',
-        `VTR_MECHANICAL_STEP_REFUSED transition=${active.contract.transitionId} step=${step.stepId} reason=${result.reason}`,
-        { transitionId: active.contract.transitionId, intentId, stepId: step.stepId, reason: result.reason },
-        this.tickCounter,
-      )
-      this.reachRunMetadata = null
-      return false
-    }
-    const actionId = this.reachRuntimeAdapter.currentAction()?.id ?? null
-    this.logger.info(
-      'vtr',
-      `VTR_MECHANICAL_STEP_RESERVED transition=${active.contract.transitionId} intent=${intentId} action=${actionId ?? 'missing'} step=${step.stepId} leg=${step.leg} count=${result.state.usage.mechanicalSteps}/${active.contract.budget.maxMechanicalSteps}`,
-      { transitionId: active.contract.transitionId, contractHash: active.contract.contractHash, intentId, actionId, stepId: step.stepId, leg: step.leg, effectKind: step.effectKind, usage: result.state.usage },
-      this.tickCounter,
-    )
-    return true
+    return reach.authorizeReachMechanicalStep(this.reachHost, intentId, identity, step)
   }
 
   private recordReachMechanicalOutcome(
@@ -4643,68 +3993,7 @@ export class JevController {
     identity: ReachIdentity,
     step: { stepId: string; leg: number; effectKind: 'locomotion' },
   ): boolean | 'verified-terminal' {
-    const active = this.reachRuntime.current
-    const metadata = this.reachRunMetadata
-    if (active === null || metadata === null || active.intent?.intentId !== intentId) return false
-    const state = this.buildReachWorldState(metadata.mission)
-    const observedIdentity = this.reachIdentity(state) ?? this.liveReachIdentity(identity)
-    const snapshot = this.projectReachMission(metadata.mission, state, observedIdentity, active.contract).snapshot
-    const damage = this.noteReachHealth(state.self.health)
-    const result = this.reachRuntime.recordMechanicalStepOutcome(intentId, step.stepId, {
-      snapshot,
-      ...(damage > 0 ? { observedRisk: { damage } } : {}),
-    })
-    const settledState = 'state' in result ? result.state : active.state
-    const settledOutcome = result.status === 'terminal'
-      ? result.outcome.kind
-      : result.status === 'refused'
-        ? 'REFUSED'
-        : 'CONTINUING'
-    const actionId = this.reachRuntimeAdapter.currentAction()?.id ?? null
-    const stepEvent = `VTR_MECHANICAL_STEP_OUTCOME transition=${active.contract.transitionId} intent=${intentId} action=${actionId ?? 'missing'} step=${step.stepId} leg=${step.leg} status=${result.status} outcome=${settledOutcome} verified=${result.status === 'terminal' && result.outcome.kind === 'SUCCESS'} mechanicalSteps=${settledState.usage.mechanicalSteps}`
-    const stepDetail = {
-      transitionId: active.contract.transitionId,
-      contractHash: active.contract.contractHash,
-      intentId,
-      actionId,
-      stepId: step.stepId,
-      leg: step.leg,
-      effectKind: step.effectKind,
-      status: result.status,
-      outcome: settledOutcome,
-      verified: result.status === 'terminal' && result.outcome.kind === 'SUCCESS',
-      reason: result.status === 'refused' ? result.reason : null,
-      identity: snapshot.observation.identity,
-      observedAtMs: snapshot.observation.observedAtMs,
-      usage: settledState.usage,
-    }
-    if (result.status === 'refused') this.logger.warn('vtr', stepEvent, stepDetail, this.tickCounter)
-    else this.logger.info('vtr', stepEvent, stepDetail, this.tickCounter)
-    if (result.status === 'terminal') {
-      if (result.outcome.kind === 'SUCCESS') this.logReachVerification(result.outcome, snapshot)
-      const current = this.reachRuntimeAdapter.currentAction()
-      const actionCorrelation =
-        current?.authority === 'vtr-reach' && current.transitionId === active.contract.transitionId
-          ? { intentId, actionId: current.id }
-          : undefined
-      const closed = this.closeReachTransition(result.outcome, result.state, 'mechanical-step-outcome', result.cancelIntentId, actionCorrelation)
-      if (result.cancelIntentId !== null && !closed) this.reachRuntimeAdapter.cancelCurrent('VTR mechanical step outcome terminal')
-      return result.outcome.kind === 'SUCCESS' && closed && actionCorrelation !== undefined ? 'verified-terminal' : false
-    }
-    if (result.status === 'refused') {
-      this.logger.warn('vtr', `VTR_MECHANICAL_OUTCOME_REFUSED transition=${active.contract.transitionId} step=${step.stepId} reason=${result.reason}`, { transitionId: active.contract.transitionId, intentId, stepId: step.stepId, reason: result.reason }, this.tickCounter)
-      return false
-    }
-    if (result.status !== 'active') return false
-    if (damage > 0) {
-      this.logger.info(
-        'vtr',
-        `VTR_RISK_OBSERVED transition=${active.contract.transitionId} step=${step.stepId} damage=${damage} total=${result.state.usage.risk.damage ?? 0}`,
-        { transitionId: active.contract.transitionId, intentId, stepId: step.stepId, observedDamage: damage, usage: result.state.usage },
-        this.tickCounter,
-      )
-    }
-    return true
+    return reach.recordReachMechanicalOutcome(this.reachHost, intentId, identity, step)
   }
 
   private async onReachActionComplete(
@@ -4713,82 +4002,7 @@ export class JevController {
     transitionId: string,
     intentId: string,
   ): Promise<void> {
-    const terminalAction = this.pendingReachTerminalAction
-    if (
-      terminalAction != null &&
-      terminalAction.transitionId === transitionId &&
-      terminalAction.intentId === intentId &&
-      terminalAction.actionId === result.actionId
-    ) {
-      this.pendingReachTerminalAction = null
-      const verifiedSettlement = terminalAction.outcomeKind === 'SUCCESS' && result.status === 'done' && result.verified
-      this.logger.info(
-        'vtr',
-        `VTR_TERMINAL_ACTION_CORRELATED transition=${transitionId} intent=${intentId} action=${result.actionId} outcome=${terminalAction.outcomeKind} status=${result.status} verified=${result.verified}`,
-        { transitionId, intentId, actionId: result.actionId, outcome: terminalAction.outcomeKind, status: result.status, verified: result.verified, verifiedSettlement },
-        this.tickCounter,
-      )
-      if (terminalAction.outcomeKind === 'SUCCESS' && !verifiedSettlement) {
-        this.logger.warn(
-          'vtr',
-          `VTR_TERMINAL_ACTION_SETTLEMENT_MISMATCH transition=${transitionId} intent=${intentId} action=${result.actionId} expected=done/verified actual=${result.status}/${result.verified}`,
-          { transitionId, intentId, actionId: result.actionId, outcome: terminalAction.outcomeKind, status: result.status, verified: result.verified },
-          this.tickCounter,
-        )
-      }
-      if (this.modelRecoveryReachDrainTransitionId === transitionId) {
-        void this.advanceModelRecoveryReachDrain(transitionId, 'action-completed')
-      } else {
-        const deferred = this.deferredTrigger
-        this.deferredTrigger = null
-        const handoff: TriggerEvent = {
-          trigger: 'action_completed',
-          detail: { actionId: result.actionId, transitionId, intentId, typedOutcome: terminalAction.outcomeKind, schedulerHandoff: true },
-          ts: Date.now(),
-        }
-        const next = deferred === null ? handoff : pickHigherPriority(deferred, handoff)
-        this.requestDecision(next.trigger, next.detail)
-      }
-      return
-    }
-    const active = this.reachRuntime.current
-    const metadata = this.reachRunMetadata
-    if (active === null || metadata === null || active.contract.transitionId !== transitionId || active.intent?.intentId !== intentId) {
-      this.logger.warn('vtr', `VTR_ORPHAN_ACTION_OUTCOME transition=${transitionId} intent=${intentId} action=${result.actionId} status=${result.status}`, { transitionId, intentId, result }, this.tickCounter)
-      if (this.modelRecoveryReachDrainTransitionId === transitionId) this.completeModelRecoveryReachDrain(transitionId, 'transition-closed-during-action')
-      return
-    }
-    this.lastReachActionFailure = result.status === 'failed' || result.status === 'cancelled' ? result.failure ?? 'cancelled' : null
-    if (result.status === 'failed') this.noteCandidateFailure(candidate.id)
-    else if (result.status === 'done' && result.verified) this.noteCandidateSuccess(candidate.id)
-    const world = this.buildReachWorldState(metadata.mission)
-    const identity = this.reachIdentity(world) ?? this.liveReachIdentity(active.contract.identity)
-    const snapshot = this.projectReachMission(metadata.mission, world, identity, active.contract).snapshot
-    const damage = this.noteReachHealth(world.self.health)
-    this.logger.info(
-      'vtr',
-      `VTR_MECHANICAL_OUTCOME transition=${transitionId} action=${result.actionId} status=${result.status} verified=${result.verified} failure=${result.failure ?? 'none'} progress=${result.progressed === true ? 'body' : 'none'}`,
-      { transitionId, intentId, contractHash: active.contract.contractHash, actionId: result.actionId, status: result.status, verified: result.verified, failure: result.failure ?? null, progress: result.progressed === true ? 'body' : 'none', usage: active.state.usage },
-      this.tickCounter,
-    )
-    const completed = await this.reachRuntime.complete(intentId, {
-      status: result.status === 'done' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed',
-      evidenceId: `executor:${result.actionId}:${result.status}`,
-      snapshot,
-      ...(damage > 0 ? { observedRisk: { damage } } : {}),
-    })
-    if (completed.status === 'terminal') {
-      if (completed.outcome.kind === 'SUCCESS') this.logReachVerification(completed.outcome, snapshot)
-      this.closeReachTransition(completed.outcome, completed.state, completed.outcome.kind === 'SUCCESS' ? 'verified-terminal' : 'typed-terminal', completed.cancelIntentId)
-      if (completed.cancelIntentId !== null) this.reachRuntimeAdapter.cancelCurrent('VTR completion terminal')
-    } else if (completed.status === 'refused') {
-      this.logger.warn('vtr', `VTR_COMPLETION_REFUSED transition=${transitionId} intent=${intentId} reason=${completed.reason}`, { transitionId, intentId, reason: completed.reason }, this.tickCounter)
-    }
-    if (this.modelRecoveryReachDrainTransitionId === transitionId) {
-      void this.advanceModelRecoveryReachDrain(transitionId, 'action-completed')
-    } else {
-      this.requestDecision('action_completed', { actionId: result.actionId, transitionId, intentId, authority: 'vtr-reach' })
-    }
+    return reach.onReachActionComplete(this.reachHost, result, candidate, transitionId, intentId)
   }
 
   private closeReachTransition(
@@ -4798,203 +4012,13 @@ export class JevController {
     cancelIntentId: string | null = null,
     action: { readonly intentId: string; readonly actionId: string } | undefined = undefined,
   ): boolean {
-    const projectedSession = this.reachRunMetadata
-    const handoff = this.reachRuntime.takeTerminalHandoff()
-    const metadata = handoff?.session ?? projectedSession
-    if (metadata === null) return false
-    if (
-      handoff === null ||
-      handoff.contractHash !== metadata.contractHash ||
-      reportedOutcome.contractHash !== handoff.contractHash ||
-      reportedState.contractHash !== handoff.contractHash ||
-      // The kernel may downgrade a controller-reported SUCCESS to
-      // CONTRACT_VIOLATION when VERIFY_SUCCESS is denied; that divergence is
-      // the designed authority-denial outcome, not a handoff corruption.
-      (reportedOutcome.kind !== handoff.outcome.kind &&
-        !(reportedOutcome.kind === 'SUCCESS' && handoff.outcome.kind === 'CONTRACT_VIOLATION'))
-    ) {
-      this.logger.error(
-        'vtr',
-        `VTR_TERMINAL_HANDOFF_REFUSED transition=${metadata.transitionId} reason=runtime-outcome-state-mismatch`,
-        {
-          transitionId: metadata.transitionId,
-          expectedContractHash: metadata.contractHash,
-          reportedContractHash: reportedOutcome.contractHash,
-          handedOffContractHash: handoff?.contractHash ?? null,
-          reportedOutcome: reportedOutcome.kind,
-          handedOffOutcome: handoff?.outcome.kind ?? null,
-        },
-        this.tickCounter,
-      )
-      return false
-    }
-    const outcome = handoff.outcome
-    const state = handoff.state
-    // SUCCESS is evidence-backed predicate verification, irrespective of which
-    // runtime callback observed it. The validator and downstream journal use
-    // this boundary to distinguish verified closure from an action/step result.
-    // A kernel-denied SUCCESS arrives here already downgraded, so it must not
-    // inherit the caller's 'verified-terminal' label.
-    const terminalBoundary = outcome.kind === 'SUCCESS'
-      ? 'verified-terminal'
-      : boundary === 'verified-terminal' ? 'typed-terminal' : boundary
-    let settleVerifiedAction = false
-    if (action !== undefined) {
-      const current = this.reachRuntimeAdapter.currentAction()
-      if (
-        current?.authority === 'vtr-reach' &&
-        current.transitionId === metadata.transitionId &&
-        current.id === action.actionId &&
-        action.intentId.length > 0
-      ) {
-        this.pendingReachTerminalAction = {
-          transitionId: metadata.transitionId,
-          intentId: action.intentId,
-          actionId: action.actionId,
-          outcomeKind: outcome.kind,
-        }
-        settleVerifiedAction = outcome.kind === 'SUCCESS'
-      } else {
-        this.logger.error(
-          'vtr',
-          `VTR_TERMINAL_ACTION_CORRELATION_REFUSED transition=${metadata.transitionId} reason=active-lease-mismatch`,
-          { transitionId: metadata.transitionId, intentId: action.intentId, actionId: action.actionId, currentActionId: current?.id ?? null, currentAuthority: current?.authority ?? null },
-          this.tickCounter,
-        )
-      }
-    }
-    // A terminal Reach result returned by afterMechanicalStep is immediately
-    // converted into a verified `done` result by runWalkSkill. Keep that
-    // selected action's lease alive long enough for the skill to settle; aborting
-    // it here turns a verified SUCCESS into LEASE_REVOKED and leaves the
-    // mechanical reservation without its outcome record. Terminals observed
-    // outside that correlated callback still cancel the live action below.
-    const shouldCancelAction = cancelIntentId !== null && !settleVerifiedAction
-    const cancelAfterWake = shouldCancelAction && action !== undefined
-    if (shouldCancelAction && !cancelAfterWake) {
-      const current = this.reachRuntimeAdapter.currentAction()
-      if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
-        this.reachRuntimeAdapter.cancelCurrent(`VTR terminal ${outcome.kind}`)
-      }
-    }
-    const jevCalls = Math.max(0, this.jevCalls - metadata.jevCallsAtStart)
-    const system2Calls = Math.max(0, this.runtimeLlmCalls + this.planCalls - metadata.system2CallsAtStart)
-    const duplicateAuthorityConflicts = Math.max(0, this.reachRuntimeAdapter.authorityConflictCount() - metadata.authorityConflictsAtStart)
-    const duplicateAuthority = metadata.duplicateAuthorityObserved || duplicateAuthorityConflicts > 0
-    const concurrentLegacyActuations = Math.max(0, this.reachRuntimeAdapter.nonVtrActuationCount() - metadata.nonVtrActuationsAtStart)
-    this.logger.info(
-      'vtr',
-      `VTR_TRANSITION_OUTCOME id=${metadata.transitionId} outcome=${outcome.kind} boundary=${terminalBoundary} mechanicalSteps=${state.usage.mechanicalSteps} jevCalls=${jevCalls} system2Calls=${system2Calls}`,
-      {
-        transitionId: metadata.transitionId,
-        contractHash: metadata.contractHash,
-        identity: metadata.identity,
-        runId: this.options.decisionProvenance.runId,
-        sourceSha: this.options.decisionProvenance.sourceSha,
-        outcome,
-        boundary: terminalBoundary,
-        progress: state.progress,
-        usage: state.usage,
-        metrics: {
-          verifiedTransitionCompletion: outcome.kind === 'SUCCESS' ? 1 : 0,
-          mechanicalStepsPerTransition: state.usage.mechanicalSteps,
-          jevCallsPerTransition: jevCalls,
-          system2CallsPerTransition: system2Calls,
-          modelCallsPerMechanicalStep: state.usage.mechanicalSteps === 0 ? null : (jevCalls + system2Calls) / state.usage.mechanicalSteps,
-          typedTerminalOutcome: outcome.kind,
-          duplicateAuthority,
-          duplicateAuthorityConflicts,
-          concurrentLegacyActuations,
-        },
-      },
-      this.tickCounter,
-    )
-    this.reachRunMetadata = null
-    this.lastReachActionFailure = null
-    this.requestDecision('action_completed', {
-      transitionId: metadata.transitionId,
-      typedOutcome: outcome.kind,
-      schedulerHandoff: true,
-      boundary: terminalBoundary,
-    })
-    // For a per-step terminal, queue the handoff while the current lease is
-    // still visible so requestDecision defers it until the correlated executor
-    // settlement. A verified action settles naturally; cancelling first would
-    // turn SUCCESS into LEASE_REVOKED. Non-success terminals are cancelled only
-    // after queuing, so the completion callback cannot schedule a duplicate wake.
-    if (cancelAfterWake) {
-      const current = this.reachRuntimeAdapter.currentAction()
-      if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
-        this.reachRuntimeAdapter.cancelCurrent(`VTR terminal ${outcome.kind}`)
-      }
-    }
-    return true
+    return reach.closeReachTransition(this.reachHost, reportedOutcome, reportedState, boundary, cancelIntentId, action)
   }
 
   /** Journal the exact fresh fact observation that authorized deterministic SUCCESS. */
   private logReachVerification(outcome: ReachTerminalOutcome, snapshot: ReachRuntimeSnapshot): void {
-    if (outcome.kind !== 'SUCCESS') return
-    const metadata = this.reachRunMetadata
-    if (metadata === null || metadata.transitionId === '' || metadata.contractHash !== outcome.contractHash) {
-      this.logger.error(
-        'vtr',
-        `VTR_VERIFY_JOURNAL_REFUSED transition=${metadata?.transitionId ?? 'missing'} reason=contract-metadata-mismatch`,
-        { transitionId: metadata?.transitionId ?? null, contractHash: metadata?.contractHash ?? null, outcomeContractHash: outcome.contractHash },
-        this.tickCounter,
-      )
-      return
-    }
-    const observation = snapshot.observation
-    const predicates = metadata.ensures.map((predicate) => {
-      const evidence = observation.predicates[predicate.id]
-      return {
-        id: predicate.id,
-        expected: predicate.expected,
-        truth: evidence?.truth ?? 'unknown',
-        evidenceId: evidence?.evidenceId ?? null,
-      }
-    })
-    const evidenceIds = predicates.map(({ evidenceId }) => evidenceId).filter((id): id is string => id !== null)
-    const identityMatches =
-      observation.identity.worldKey === metadata.identity.worldKey &&
-      observation.identity.dimension === metadata.identity.dimension &&
-      observation.identity.worldEpoch === metadata.identity.worldEpoch &&
-      observation.identity.generationId === metadata.identity.generationId &&
-      observation.identity.leaseId === metadata.identity.leaseId
-    const predicatesVerified = predicates.length > 0 && predicates.every(({ expected, truth, evidenceId }) =>
-      truth === (expected ? 'true' : 'false') && evidenceId !== null && outcome.evidenceIds.includes(evidenceId),
-    )
-    const timeMatches = observation.observedAtMs === outcome.verifiedAtMs
-    const truth = identityMatches && predicatesVerified && timeMatches ? 'TRUE' : 'FALSE'
-    const serverId = metadata.identity.worldKey.split('|')[0] ?? null
-    this.logger.info(
-      'vtr',
-      `VTR_TRANSITION_VERIFY id=${metadata.transitionId} contractHash=${metadata.contractHash} truth=${truth} verifiedAtMs=${outcome.verifiedAtMs} evidenceIds=${JSON.stringify(outcome.evidenceIds)}`,
-      {
-        transitionId: metadata.transitionId,
-        contractHash: metadata.contractHash,
-        desiredPredicateIdentity: outcome.desiredPredicateIdentity,
-        truth,
-        predicates,
-        evidenceIds,
-        verifiedAtMs: outcome.verifiedAtMs,
-        observedAtMs: observation.observedAtMs,
-        runId: this.options.decisionProvenance.runId,
-        serverId,
-        generationId: metadata.identity.generationId,
-        leaseId: metadata.identity.leaseId,
-        sourceSha: this.options.decisionProvenance.sourceSha,
-        buildHash: this.options.decisionProvenance.buildHash ?? null,
-        worldKey: metadata.identity.worldKey,
-        worldEpoch: metadata.identity.worldEpoch,
-        dimension: metadata.identity.dimension,
-        identityMatches,
-        predicatesVerified,
-      },
-      this.tickCounter,
-    )
+    return reach.logReachVerification(this.reachHost, outcome, snapshot)
   }
-
   // -------------------------------------------------------------------------
   // the one loop
   // -------------------------------------------------------------------------
@@ -15297,10 +14321,9 @@ export class JevController {
   }
 }
 
-export function pickHigherPriority(current: TriggerEvent | null, next: TriggerEvent): TriggerEvent {
-  if (current === null) return next
-  return TRIGGER_PRIORITY[next.trigger] > TRIGGER_PRIORITY[current.trigger] ? next : current
-}
+// Kept as a public re-export: tests and `controller.ts`'s `export *` consume it
+// from this module's historical location. Definition lives in `scheduler.ts`.
+export { pickHigherPriority }
 
 function isActionTimeout(result: ExecutionResult): boolean {
   return result.failure === 'path_timeout' || result.failure === 'dig_timeout'
@@ -15317,45 +14340,6 @@ function pickResummon(
   }
   const first = log[0]
   return first ?? { triggered: false, reason: null, detail: null }
-}
-
-function sensorOptions(options: JevAgentOptions, worldRevision: number | null = null): SensorOptions {
-  return {
-    ...defaultSensorOptions,
-    scanRadius: options.scanRadius,
-    reach: options.reach,
-    worldRevision,
-    // Only the decision-time build carries provenance: `sensorOptions(...)` is
-    // also used for standalone portal-frame projections outside `buildWorldState`,
-    // where the read gate is not armed and the reads are unchanged.
-    dimensionProvenance: options.dimensionProvenance ?? null,
-  }
-}
-
-function candidateOptions(
-  options: JevAgentOptions,
-  recipes: RecipeIndex,
-  unreachableStations: ReadonlySet<string> = new Set<string>(),
-  reachability: ReachabilityGateOptions | null = null,
-  blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
-  portalFrame: PortalFrameValidation | null = null,
-  searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
-  portalEntry: PortalEntryPlan | null = null,
-  retiredPlaceItems: ReadonlySet<string> = new Set<string>(),
-): CandidateOptions {
-  return {
-    ...defaultCandidateOptions,
-    reach: options.reach,
-    recipes,
-    unreachableStations,
-    blacklistedMoveTargets,
-    searchedSurfaceTargets,
-    reachability,
-    portalFrame,
-    portalEntry,
-    retiredPlaceItems,
-    prereqRankPolicy: options.prereqRankPolicy,
-  }
 }
 
 function subgoalState(goal: QueuedGoal, have: number): GoalState {
