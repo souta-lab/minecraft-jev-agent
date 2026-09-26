@@ -95,6 +95,11 @@ function criticalThreatFamily(trigger: DecisionTrigger): CriticalThreatFamily {
   return 'injury'
 }
 
+export interface PendingDecision {
+  record: DecisionRecord
+  healthAtDecision: number
+}
+
 export interface DecisionEpochsHost {
   readonly actionEpochByLease: Map<number, { epoch: number; commitmentId: string; identity: string }>
   actionCommitmentState: ActionCommitmentState | null
