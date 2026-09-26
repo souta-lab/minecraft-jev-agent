@@ -612,13 +612,14 @@ check(
   '(wiring) onActionComplete feeds the BODY cell, the movement ATTEMPT cell and the progress kinds',
   () => {
     const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+    const observers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8')
     const complete = /private onActionComplete\([\s\S]*?\n  private [a-zA-Z]/.exec(source)?.[0] ?? ''
     return (
       complete.includes('this.observeLocalMotion(result, candidate, taxonomy)') &&
-      /observeLocalOscillation\(/.test(source) &&
-      /isTrackedMoveKind\(result\.kind\) && candidate\.target !== null/.test(source) &&
-      /semanticProgress: taxonomy\.progressKinds\.some\(\(kind\) => kind === 'goal' \|\| kind === 'search'\)/.test(source) &&
-      /inventoryChanged,/.test(source)
+      /observeLocalOscillation\(/.test(observers) &&
+      /isTrackedMoveKind\(result\.kind\) && candidate\.target !== null/.test(observers) &&
+      /semanticProgress: taxonomy\.progressKinds\.some\(\(kind\) => kind === 'goal' \|\| kind === 'search'\)/.test(observers) &&
+      /inventoryChanged,/.test(observers)
     )
   },
   () => 'the controller passes the cell, attempt, progress and inventory facts',
@@ -627,13 +628,13 @@ check(
 check(
   '(wiring) the exhausted record crosses the typed boundary and is escalated upward, never re-planned locally',
   () => {
-    const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
-    const start = source.indexOf('private observeLocalMotion')
-    const body = source.slice(start, source.indexOf('private persistLocalOscillation', start))
+    const observers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8')
+    const start = observers.indexOf('function observeLocalMotion')
+    const body = observers.slice(start, observers.indexOf('export function persistLocalOscillation', start))
     return (
-      /evaluateLocalMotionBoundary\(\{[\s\S]{0,120}activeOption: this\.queue\.current !== null/.test(source) &&
-      /if \(!boundary\.wake\) return\n\s+this\.escalate\(/.test(source) &&
-      /'all_candidates_invalid',\n\s+`LOCAL_OSCILLATION_BOUNDARY/.test(source) &&
+      /evaluateLocalMotionBoundary\(\{[\s\S]{0,120}activeOption: host\.queue\.current !== null/.test(observers) &&
+      /if \(!boundary\.wake\) return\n\s+host\.escalate\(/.test(observers) &&
+      /'all_candidates_invalid',\n\s+`LOCAL_OSCILLATION_BOUNDARY/.test(observers) &&
       // it must not touch candidate selection or ranking
       start >= 0 && body.length > 0 && !/candidates\.(sort|filter|reverse)/.test(body)
     )

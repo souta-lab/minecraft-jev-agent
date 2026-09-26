@@ -222,6 +222,8 @@ export {
   shouldClearActiveRetrieval,
   shouldRetireKnownRetrieve,
 } from './legacy/retrieval-progress.ts'
+import * as stall from './legacy/stall-observers.ts'
+import type { StallObserverHost } from './legacy/stall-observers.ts'
 import * as wedge from './legacy/wedge.ts'
 import type { WedgeHost } from './legacy/wedge.ts'
 import type { WedgeSuppressReason } from './legacy/wedge.ts'
@@ -904,15 +906,12 @@ const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLD
 /** Issue #8: bound on tracked coordinates (least-failed/oldest evicted first). */
 const MOVE_FAILMEM_MAX_ENTRIES = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_MAX_ENTRIES', 256)
 /** Issue #8: do not re-log the same oscillating pair more often than this. */
-const OSCILLATION_REPEAT_LOG_MS = 5_000
 /**
  * #oscillation-boundary: the size of the body's cell envelope and the bounded
  * return count that proves the local recovery is exhausted. Reasoning lives on
  * the constants in `localOscillation.ts`; they are read once here like the
  * `MOVE_FAILMEM_*` pair above.
  */
-const LOCAL_OSCILLATION_RECENT_CELLS = resolveLocalOscillationRecentCells()
-const LOCAL_OSCILLATION_RETURN_LIMIT = resolveLocalOscillationReturnLimit()
 
 function resolveEnvPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name]
@@ -2838,6 +2837,11 @@ export class JevController {
   /** RetrievalProgressHost view of this controller (same structural-cast pattern as reachHost). */
   private get retrievalHost(): RetrievalProgressHost {
     return this as unknown as RetrievalProgressHost
+  }
+
+  /** StallObserverHost view of this controller (same structural-cast pattern as reachHost). */
+  private get stallHost(): StallObserverHost {
+    return this as unknown as StallObserverHost
   }
 
   /** WedgeHost view of this controller (same structural-cast pattern as reachHost). */
@@ -9438,35 +9442,7 @@ export class JevController {
   }
 
   private updateStallSignal(): void {
-    // #360: re-arm the recurrence evidence when System2 replaces the active
-    // Option, and refresh the snapshot beta reads this tick.
-    const optionInstanceId = this.currentOptionContext()?.instanceId ?? null
-    if (optionInstanceId !== this.strategicStallOptionId) {
-      this.strategicStallOptionId = optionInstanceId
-      this.signals.oscillationsDetected = 0
-    }
-    this.strategicStall.setOption(optionInstanceId)
-    this.signals.strategicNonProgress = this.strategicStall.evidence()
-    const stalledMs = Date.now() - this.lastProgressAt
-    this.signals.stalledMs = stalledMs
-    if (!this.goal.complete && stalledMs > this.options.stallMs) {
-      const boundary = shouldWakeSystem2AfterLocalFailure({
-        failureCode: 'path_stuck',
-        activeOption: this.queue.current !== null,
-        semanticExhausted: false,
-        semanticInvalid: false,
-        semanticAbandoned: false,
-      })
-      this.logger.warn(
-        'agent',
-        `LOCAL_PROGRESS_STALL stalledMs=${stalledMs} system2=false reason=${boundary.reason}`,
-        { stalledMs, goal: this.currentGoalKey(), boundary: boundary.reason },
-        this.tickCounter,
-      )
-    }
-    if (!this.goal.complete && stalledMs > this.options.wedgeStallMs) {
-      this.abortWedge(`goal progress stayed 0 for ${stalledMs}ms`)
-    }
+    return stall.updateStallSignal(this.stallHost)
   }
 
   /**
@@ -9493,86 +9469,7 @@ export class JevController {
     candidate: Candidate,
     taxonomy: ActionOutcomeTaxonomy,
   ): void {
-    const dimension = this.currentDimension()
-    const position = this.bot.entity.position
-    const bodyCell = localOscillationCell(dimension, position)
-    const startedCell = this.actionStart === null ? null : localOscillationCell(dimension, this.actionStart)
-    const attemptCell =
-      isTrackedMoveKind(result.kind) && candidate.target !== null
-        ? localOscillationCell(dimension, candidate.target)
-        : null
-    const inventory = ((): string => {
-      try {
-        return JSON.stringify(this.inventorySnapshot())
-      } catch {
-        // Inventory unreadable at a death/quit boundary: no delta evidence, and
-        // the record is deliberately NOT cleared (unknown is not progress).
-        return this.localOscillationInventory
-      }
-    })()
-    const inventoryChanged = this.localOscillationInventory !== '' && this.localOscillationInventory !== inventory
-    this.localOscillationInventory = inventory
-
-    const previous = this.localOscillation
-    const decision = observeLocalOscillation(
-      previous,
-      {
-        bodyCell,
-        attemptCell,
-        dimension,
-        goal: this.currentGoalKey(),
-        cellChanged: startedCell !== null && startedCell !== bodyCell,
-        semanticProgress: taxonomy.progressKinds.some((kind) => kind === 'goal' || kind === 'search'),
-        inventoryChanged,
-        // Only a RETRIEVE reports `distanceClosed`, and only for a run that moved
-        // the body closer to its target: real locomotion toward something.
-        distanceClosed: result.kind === 'RETRIEVE' && result.distanceClosed === true,
-        now: Date.now(),
-      },
-      { recentCells: LOCAL_OSCILLATION_RECENT_CELLS, returnLimit: LOCAL_OSCILLATION_RETURN_LIMIT },
-    )
-
-    this.localOscillation = decision.record
-    if (decision.cleared !== null && previous !== null && isNotableLocalOscillation(previous)) {
-      this.logger.info(
-        'agent',
-        formatLocalOscillationCleared(previous, decision.cleared),
-        { reason: decision.cleared, cells: previous.cells, goal: this.currentGoalKey() },
-        this.tickCounter,
-      )
-      this.persistLocalOscillation()
-    } else if (isNotableLocalOscillation(decision.record)) {
-      // Persist the FIRST evidence of a return and every change after it, so a
-      // generation change cannot restart the count. Ordinary walking (returns 0)
-      // writes nothing at all.
-      this.persistLocalOscillation()
-    }
-    if (!decision.exhausted || decision.line === null) return
-
-    const boundary = evaluateLocalMotionBoundary({
-      activeOption: this.queue.current !== null,
-      oscillationExhausted: true,
-    })
-    this.logger.warn(
-      'agent',
-      decision.line,
-      {
-        cells: decision.record?.cells ?? [],
-        returns: decision.record?.returns ?? 0,
-        required: decision.required,
-        trips: decision.record?.trips ?? 0,
-        goal: this.currentGoalKey(),
-        boundary: boundary.reason,
-      },
-      this.tickCounter,
-    )
-    if (!boundary.wake) return
-    this.escalate(
-      'all_candidates_invalid',
-      `LOCAL_OSCILLATION_BOUNDARY: ${decision.record?.returns ?? 0} re-engagements of the same ` +
-        `${decision.record?.cells.length ?? 0}-cell set with zero semantic progress; ` +
-        `cells=${JSON.stringify(decision.record?.cells ?? [])}`,
-    )
+    return stall.observeLocalMotion(this.stallHost, result, candidate, taxonomy)
   }
 
   /** Write the durable half through the HOST callback; never throws into the tick. */
@@ -9805,75 +9702,12 @@ export class JevController {
     return threat.sampleHealthFallback(this.threatHost)
   }
   private observeCapabilityGap(): void {
-    const entity = this.bot.entity
-    if (entity === undefined) return
-    const target = this.capabilityTarget()
-    // A refused ascent is either an executed pillar that did not verify (the
-    // executor path) OR the pure plan layer proving there is no grounded up
-    // plan at all. The second is what the measured `recover_vertical_access`
-    // y>=80 stretch hit: no pillar was ever offered, so no executed refusal was
-    // ever recorded and the trap never fired while the body paced between two
-    // cells. Both are deterministic facts, so both feed the same predicate.
-    const planRefused = this.ascentRefusedByPlan(target)
-    const decision = evaluateCapabilityGap(this.capabilityGapState, {
-      y: entity.position.y,
-      targetY: target === null ? null : target.y,
-      targetKey: target === null ? null : target.key,
-      ascendRefused: this.ascendRefusedSinceObservation || planRefused,
-    })
-    this.capabilityGapState = decision.state
-    this.ascendRefusedSinceObservation = false
-    if (!decision.gap) {
-      if (this.capabilityGapActive) {
-        this.capabilityGapActive = false
-        this.capabilityGapSignature = null
-        this.logger.info(
-          'agent',
-          `CAPABILITY_GAP_CLEARED target_y=${Math.round(decision.targetY ?? 0)}`,
-          { targetY: decision.targetY },
-          this.tickCounter,
-        )
-      }
-      return
-    }
-    const marker = formatCapabilityGap(decision)
-    if (!this.capabilityGapActive) {
-      this.capabilityGapActive = true
-      this.capabilityGapSignature = `ascend_blocked:${Math.round(decision.targetY ?? 0)}`
-      this.logger.warn(
-        'agent',
-        marker,
-        { attempts: decision.attempts, targetY: decision.targetY, reason: decision.reason },
-        this.tickCounter,
-      )
-      this.logger.warn(
-        'agent',
-        formatCapabilityGapPolicy(decision),
-        { ...decision.heuristic, attempts: decision.attempts, targetY: decision.targetY },
-        this.tickCounter,
-      )
-    }
-    this.ensureCapabilityGapSignal(marker)
-    const boundary = shouldWakeSystem2AfterLocalFailure({
-      failureCode: 'path_stuck',
-      activeOption: this.queue.current !== null,
-      semanticExhausted: false,
-      semanticInvalid: false,
-      semanticAbandoned: false,
-    })
-    this.logger.warn(
-      'agent',
-      `LOCAL_CAPABILITY_GAP target_y=${Math.round(decision.targetY ?? 0)} attempts=${decision.attempts} system2=false reason=${boundary.reason}`,
-      { attempts: decision.attempts, targetY: decision.targetY, boundary: boundary.reason },
-      this.tickCounter,
-    )
+    return stall.observeCapabilityGap(this.stallHost)
   }
 
   /** Keep the gap marker the newest recent event so the planner sees it. */
   private ensureCapabilityGapSignal(marker: string): void {
-    const last = this.recentEvents[this.recentEvents.length - 1]
-    if (last === marker) return
-    this.recentEvents.push(marker)
+    return stall.ensureCapabilityGapSignal(this.stallHost, marker)
   }
 
   /** A pillar ascent attempt that did not verify is a refused ascend. */
@@ -12057,60 +11891,7 @@ export class JevController {
    * detector cannot fire on the same stale samples again.
    */
   private detectMoveOscillation(): void {
-    const detection = detectOscillation(this.positionWindow)
-    if (!detection.detected || detection.from === null || detection.to === null) return
-    const fromKey = `${detection.from.x},${detection.from.y},${detection.from.z}`
-    const toKey = `${detection.to.x},${detection.to.y},${detection.to.z}`
-    const pair = `${fromKey}|${toKey}`
-    const now = Date.now()
-    this.positionWindow.length = 0
-    this.lastLocomotionObservation = NO_LOCOMOTION_OBSERVATION
-    if (pair === this.lastOscillationPair && now - this.lastOscillationAt < OSCILLATION_REPEAT_LOG_MS) return
-    this.lastOscillationPair = pair
-    this.lastOscillationAt = now
-    this.logger.warn(
-      'agent',
-      formatOscillationDetected(detection.from, detection.to, detection.cycles, 'blacklist'),
-      { from: fromKey, to: toKey, cycles: detection.cycles, action: 'blacklist' },
-      this.tickCounter,
-    )
-    // Blacklist both ends of the observed loop.  Blacklisting only the last
-    // selected target leaves the opposite endpoint available, so Jev can
-    // immediately choose A after B was retired and keep walking A<->B.
-    const dimension = this.currentDimension()
-    const seen = new Set<string>()
-    // #360 §6: the detector reports the two BODY positions the bot swapped between,
-    // while the candidate identities are the TARGET cells it stepped to. The key
-    // is now the canonical occupied block cell (`moveFailureKey` floors), so the
-    // body cell and the candidate cell are the same identity; the remembered
-    // targets are kept as an explicit second source for a landing that stopped on
-    // a cell edge. Live evidence before the fix: MOVE:p3_67_17/p3_67_18 looped
-    // while the escape blacklisted overworld:4,67,18 and :4,67,19 - different
-    // cells, so nothing was suppressed.
-    const trackedTargets: Vec3Json[] = []
-    if (this.lastMoveTarget !== null && this.lastMoveTarget.dimension === dimension) trackedTargets.push(this.lastMoveTarget.position)
-    if (this.previousMoveTarget !== null && this.previousMoveTarget.dimension === dimension) trackedTargets.push(this.previousMoveTarget.position)
-    for (const position of [...trackedTargets, detection.from, detection.to]) {
-      if (position === null) continue
-      const key = moveFailureKey(dimension, position)
-      if (seen.has(key)) continue
-      seen.add(key)
-      const result = this.moveFailMemory.blacklist(dimension, position, 'no_progress')
-      const cooldownSeconds = this.remainingCooldownSeconds(result.entry.blacklistedUntil, now)
-      this.logger.warn(
-        'agent',
-        formatMoveTargetSkipped(key, result.entry.attempts, cooldownSeconds),
-        { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: cooldownSeconds },
-        this.tickCounter,
-      )
-    }
-    if (seen.size > 0) this.notifyMoveFailureMemory()
-    this.logger.warn(
-      'agent',
-      `LOCAL_MOVE_OSCILLATION from=${fromKey} to=${toKey} cycles=${detection.cycles} system2=false`,
-      { from: fromKey, to: toKey, cycles: detection.cycles, boundary: 'local_recovery' },
-      this.tickCounter,
-    )
+    return stall.detectMoveOscillation(this.stallHost)
   }
 
   private syntheticWait(): JevResult {
