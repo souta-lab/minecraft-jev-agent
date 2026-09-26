@@ -2300,16 +2300,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   syncPortalSiteMemory('generation-start')
   // Same for a Nether-structure site already in scan range at generation start.
   syncStructureSiteMemory('generation-start')
-  // V4.1.2 kernel authority session.
-  // Default 'shadow': the host replays every observed mutation dispatch and the
-  // Reach Transition lifecycle through the V4.1.2 kernel as an observer only —
-  // kernel decisions cannot block, reroute, or authorize production actuation.
-  // `BUDDY_VTR_KERNEL_AUTHORITY=1` selects 'authority': the same kernel path
-  // runs causally BEFORE every gated Reach act and its verdict gates
-  // production; a denial fails closed and is journaled. In authority mode the
-  // same flag also installs the legacy-Reach kill-switch inside the controller
-  // (see JevAgentOptions.kernelAuthority), so a denied act never falls back.
-  const kernelAuthorityMode = process.env.BUDDY_VTR_KERNEL_AUTHORITY?.trim() === '1' ? 'authority' as const : 'shadow' as const
+  // V4.1.2 kernel authority session — production authority is unconditional:
+  // the kernel path runs causally BEFORE every gated Reach act and its verdict
+  // gates production; a denial fails closed and is journaled. Installing the
+  // gate also installs the legacy-Reach kill-switch inside the controller (see
+  // JevAgentOptions.kernelAuthority), so a denied act never falls back. There
+  // is no observer-only/shadow production mode — that would leave legacy Reach
+  // scheduling as a second live authority.
+  const kernelAuthorityMode = 'authority' as const
   const kernelShadow = createKernelShadowSession({
     world: {
       serverId: ctx.worldKey.serverId,
@@ -3138,9 +3136,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     id,
     journal: join(ctx.logDir, 'kernel-shadow.jsonl'),
     world: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
-    kernelAuthority: kernelAuthorityMode === 'authority' ? 'on' : 'off',
-    legacyReachAuthority: kernelAuthorityMode === 'authority' ? 'off' : 'shadow-observed',
-    phase: kernelAuthorityMode === 'authority' ? 'production-authority' : 'shadow-only',
+    kernelAuthority: 'on',
+    legacyReachAuthority: 'off',
+    phase: 'production-authority',
   })
   // The stock fallback has no DESCEND branch; without this wrapper a stalled
   // stone/iron goal whose only productive candidate is a descent step WAITs
