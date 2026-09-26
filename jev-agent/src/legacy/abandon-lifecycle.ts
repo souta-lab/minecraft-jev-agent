@@ -33,6 +33,28 @@ import { evaluateBetaTerminationBoundary } from '../system2Escalation.ts'
 import type { BetaTerminationBoundaryDecision } from '../system2Escalation.ts'
 import { MOVE_PROGRESS_EFFICIENCY_FLOOR } from './outcome-ledgers.ts'
 import type { AbandonVerdict } from './goal-queue-plane.ts'
+import {
+  decideFurnacePrereqObservation,
+  evaluatePrereqStall,
+  formatPrereqOptionDetail,
+  formatPrereqOptionFor,
+  formatPrereqRankShadow,
+  formatPrereqStationKnown,
+  formatPrereqSwitch,
+  isInventorySourced,
+  nextPrereqPath,
+  planPrereqOptions,
+  preferPrereqPath,
+  prereqOptionReason,
+  prereqProgressSignature,
+  prereqSubjectForGoal,
+  prereqWithheldCraft,
+  selectPrereqPath,
+} from '../prereqOption.ts'
+import { furnacePrereqInputFromState, FURNACE_PREREQUISITE_ROLE } from '../candidates.ts'
+import type { CandidateOptions } from '../candidates.ts'
+import { isSensedStation } from '../state.ts'
+import type { WorldState } from '../state.ts'
 
 export interface AbandonLifecycleHost {
   readonly abandonedOptions: AbandonmentLedger
@@ -76,6 +98,13 @@ export interface AbandonLifecycleHost {
   readonly tickCounter: number
   unfinishedGoals(): QueuedGoal[]
   readonly unreachableResources: Set<string>
+  prereqSatisfiedLoggedKey: string | null
+  readonly prereqStallTicks: number
+  lastDecisionId: string | null
+  furnacePrereqCandidateOptions(state: WorldState, unreachableStations: ReadonlySet<string>): CandidateOptions
+  resetFurnacePrereq(): void
+  abandonedPrereqSet(goalKey: string, now: number): Set<PrereqPath>
+  nextUsablePrereqPath(decision: PrereqDecision, current: PrereqPath, abandoned: ReadonlySet<PrereqPath>): PrereqPath | null
 }
 
 /** Beta is semantic authority only when one canonical current Option exists. */
@@ -454,4 +483,232 @@ export function logBetaShadow(host: AbandonLifecycleHost, optionId: string | nul
     },
     host.tickCounter,
   )
+}
+
+// ---------------------------------------------------------------------------
+// Furnace-prerequisite path selection + unproductive-option enforcement
+// (moved from controller-legacy.ts; the path lifecycle belongs with the
+// abandonment bookkeeping above)
+// ---------------------------------------------------------------------------
+
+/**
+ * Keep the active furnace prerequisite's semantic envelope closed.
+ *
+ * A furnace route may need a mechanically-derived acquisition step (for
+ * example clearing headroom before retrieving a remembered crafting table),
+ * so those candidates inherit the selected `prereqPath` from candidates.ts.
+ * Safety and control remain available regardless of the selected route.  An
+ * untagged productive candidate is not a safe fallback: allowing it here
+ * silently replaces the selected prerequisite with a different semantic goal
+ * and was the source of the exact-run `CRAFT:stick` detour.
+ */
+export function filterFurnacePrerequisiteCandidates(
+  candidates: readonly Candidate[],
+  chosen: PrereqPath | null,
+): Candidate[] {
+  return candidates.filter((candidate) => {
+    if (
+      candidate.kind === 'ATTACK' ||
+      candidate.kind === 'EAT' ||
+      candidate.kind === 'EQUIP' ||
+      candidate.kind === 'RETREAT' ||
+      candidate.kind === 'WAIT' ||
+      candidate.kind === 'ESCALATE'
+    ) {
+      return true
+    }
+    const role = candidate.meta.prerequisiteRole
+    return role === FURNACE_PREREQUISITE_ROLE && chosen !== null && candidate.meta.prereqPath === chosen
+  })
+}
+
+export function enforceUnproductiveAbandon(host: AbandonLifecycleHost,
+  optionId: string,
+  planId: string | null,
+  attempts: number,
+  probability: number | null,
+  ): void {
+  const now = Date.now()
+  host.optionAttempts.markAbandoned(optionId, planId, now)
+  if (host.prereqPlan !== null && host.prereqChosenPath !== null) {
+    const current = host.prereqChosenPath
+    const goalKey = host.prereqGoalKey ?? host.currentGoalKey()
+    const bucket = host.abandonedPrereqPaths.get(goalKey) ?? new Map<PrereqPath, number>()
+    bucket.set(current, now)
+    host.abandonedPrereqPaths.set(goalKey, bucket)
+    host.abandonedPrereqFingerprints.set(`${goalKey}|${current}`, host.lastStateFingerprint)
+    const next = nextPrereqPath(host.prereqPlan, current)
+    host.prereqForcedPath = next
+    host.prereqProgress = null
+    host.prereqLoggedKey = null
+    host.logger.warn(
+      'agent',
+      `PREREQ_ABANDON from=${current} to=${next ?? 'none'} reason=unproductive attempts=${attempts}`,
+      { from: current, to: next, reason: 'unproductive', attempts, goal: goalKey },
+      host.tickCounter,
+    )
+  }
+  host.markOptionAbandoned(host.lastDecisionId ?? optionId, 'unproductive')
+  host.summonLlm('no_progress', `abandon_option=${probability} enforced: ${optionId} unproductive after ${attempts} attempts`)
+}
+
+export function applyFurnacePrereq(host: AbandonLifecycleHost,
+  state: WorldState,
+  candidates: readonly Candidate[],
+  unreachableStations: ReadonlySet<string>,
+  ): Candidate[] {
+  const goal = state.goalQueue?.current ?? null
+  // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
+  // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
+  // stricter targetItem check here would let a retrieval candidate through unfiltered (#78).
+  const subject = prereqSubjectForGoal(goal)
+  if (subject === null) {
+    host.resetFurnacePrereq()
+    return [...candidates]
+  }
+  const sensedStationCount = (state.furnaces ?? []).filter(isSensedStation).length
+  const observation = decideFurnacePrereqObservation({
+    subject,
+    sensedStationCount,
+    goalKey: host.currentGoalKey(),
+    previousKey: host.prereqSatisfiedLoggedKey,
+  })
+  if (observation.key !== null) {
+    // A satisfied prerequisite is not a path choice: emit the distinct typed
+    // observation at most once per goal instead of a false PREREQ_OPTION.
+    host.resetFurnacePrereq()
+    if (observation.line !== null) {
+      host.prereqSatisfiedLoggedKey = observation.key
+      host.logger.info(
+        'agent',
+        observation.line,
+        { subject, source: 'sensed', sensedStationCount },
+        host.tickCounter,
+      )
+    }
+    return [...candidates]
+  }
+  const input = furnacePrereqInputFromState(state, host.furnacePrereqCandidateOptions(state, unreachableStations))
+  const decision = planPrereqOptions(input)
+  const goalKey = host.currentGoalKey()
+  if (host.prereqGoalKey !== goalKey) {
+    host.prereqGoalKey = goalKey
+    host.prereqForcedPath = null
+    host.prereqProgress = null
+    host.prereqLoggedKey = null
+    host.prereqStationKnownLoggedKey = null
+    host.abandonedRetrievePaths.clear()
+    host.retrieveUnverified = null
+  }
+  const abandoned = host.abandonedPrereqSet(goalKey, Date.now())
+  for (const [path, fingerprint] of host.abandonedRetrievePaths) {
+    if (fingerprint === host.lastStateFingerprint) abandoned.add(path)
+  }
+  const base = selectPrereqPath(decision, abandoned)
+  const forced = host.prereqForcedPath !== null && !abandoned.has(host.prereqForcedPath) ? host.prereqForcedPath : null
+  const chosen = preferPrereqPath(base, forced, decision)
+  if (host.prereqForcedPath !== null && host.prereqForcedPath !== chosen) host.prereqForcedPath = null
+  host.prereqPlan = decision
+  host.prereqChosenPath = chosen
+  const logKey = `${goalKey}|${chosen ?? 'none'}`
+  if (host.prereqLoggedKey !== logKey) {
+    host.prereqLoggedKey = logKey
+    host.logger.info(
+      'agent',
+      formatPrereqOptionFor(decision, chosen),
+      {
+        chosen,
+        options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
+      },
+      host.tickCounter,
+    )
+    host.logger.info(
+      'agent',
+      formatPrereqRankShadow(decision, chosen),
+      {
+        policy: decision.policy,
+        costChoice: chosen,
+        rankChoice: decision.rankBaseline,
+        agree: chosen === decision.rankBaseline,
+      },
+      host.tickCounter,
+    )
+    if (chosen !== null && isInventorySourced(chosen)) {
+      host.logger.info(
+        'agent',
+        formatPrereqOptionDetail('furnace', chosen, prereqOptionReason(chosen), input.heldCount),
+      { chosen, heldCount: input.heldCount, abandoned: [...abandoned] },
+        host.tickCounter,
+      )
+    }
+  }
+  // OPERATOR RULE (station-use-before-craft): when the world already holds a
+  // usable station of the needed kind the craft path is INELIGIBLE, so say so
+  // with its own typed line instead of only omitting `CRAFT:furnace` from the
+  // offered set. The line is derived from the very option the planner marked
+  // ineligible, and it names the path that runs instead, so the run log can
+  // never show a withheld duplicate craft without its reason.
+  const withheldCraft = prereqWithheldCraft(decision)
+  if (withheldCraft !== null && input.knownStation !== null) {
+    const stationKnownLine = formatPrereqStationKnown(input.knownStation, input.heldCount, chosen)
+    if (stationKnownLine !== host.prereqStationKnownLoggedKey) {
+      host.prereqStationKnownLoggedKey = stationKnownLine
+      host.logger.info(
+        'agent',
+        stationKnownLine,
+        {
+          reason: withheldCraft.reason,
+          station: input.knownStation,
+          held: input.heldCount,
+          chosen,
+          goal: goalKey,
+        },
+        host.tickCounter,
+      )
+    }
+  } else {
+    host.prereqStationKnownLoggedKey = null
+  }
+  const kept = filterFurnacePrerequisiteCandidates(candidates, chosen)
+  if (chosen === null) return kept
+
+  const signature = prereqProgressSignature(chosen, input)
+  const evaluated = evaluatePrereqStall({
+    previous: host.prereqProgress,
+    path: chosen,
+    signature,
+    stallTicks: host.prereqStallTicks,
+  })
+  host.prereqProgress = evaluated.progress
+  if (!evaluated.stalled) return kept
+
+  const next = host.nextUsablePrereqPath(decision, chosen, abandoned)
+  if (next === null) return kept
+  host.prereqForcedPath = next
+  host.prereqChosenPath = next
+  host.prereqProgress = null
+  host.prereqLoggedKey = null
+  host.logger.warn(
+    'agent',
+    formatPrereqSwitch(chosen, next),
+    { from: chosen, to: next, stallTicks: host.prereqStallTicks, goal: goalKey },
+    host.tickCounter,
+  )
+  return filterFurnacePrerequisiteCandidates(candidates, next)
+}
+
+export function nextUsablePrereqPath(host: AbandonLifecycleHost,
+  decision: PrereqDecision,
+  current: PrereqPath,
+  abandoned: ReadonlySet<PrereqPath>,
+  ): PrereqPath | null {
+  const seen = new Set<PrereqPath>([current])
+  for (;;) {
+    const next = nextPrereqPath(decision, current)
+    if (next === null || seen.has(next)) break
+    if (!abandoned.has(next)) return next
+    seen.add(next)
+    current = next
+  }
+  return null
 }

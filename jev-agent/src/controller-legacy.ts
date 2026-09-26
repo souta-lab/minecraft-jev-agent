@@ -236,6 +236,7 @@ import * as abandonlifecycle from './legacy/abandon-lifecycle.ts'
 import type { AbandonLifecycleHost } from './legacy/abandon-lifecycle.ts'
 export { canAuthoritativelyAbandonOption } from './legacy/abandon-lifecycle.ts'
 export { betaAbandonProgressObserved } from './legacy/abandon-lifecycle.ts'
+export { filterFurnacePrerequisiteCandidates } from './legacy/abandon-lifecycle.ts'
 import type { StallObserverHost } from './legacy/stall-observers.ts'
 import * as wedge from './legacy/wedge.ts'
 import type { WedgeHost } from './legacy/wedge.ts'
@@ -322,27 +323,9 @@ import {
 } from './placementGuard.ts'
 import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import {
-  decideFurnacePrereqObservation,
-  evaluatePrereqStall,
-  evaluateRetrieveAbandon,
-  formatPrereqOptionDetail,
-  formatPrereqOptionFor,
-  formatPrereqRankShadow,
-  formatPrereqStationKnown,
-  formatPrereqSwitch,
-  isInventorySourced,
-  knownStationKey,
-  nextPrereqPath,
-  planPrereqOptions,
-  preferPrereqPath,
   PREREQ_STATION_ALREADY_KNOWN,
-  prereqOptionReason,
-  prereqProgressSignature,
-  prereqSubjectForGoal,
-  prereqWithheldCraft,
   resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
-  selectPrereqPath,
 } from './prereqOption.ts'
 import type { PrereqDecision, PrereqPath, PrereqProgress, PrereqRankPolicy, RetrieveUnverifiedState } from './prereqOption.ts'
 import type { OscillationState } from './oscillation.ts'
@@ -433,36 +416,6 @@ import { computeShadowMetrics } from './shadowMetrics.ts'
 
 
 
-/**
- * Keep the active furnace prerequisite's semantic envelope closed.
- *
- * A furnace route may need a mechanically-derived acquisition step (for
- * example clearing headroom before retrieving a remembered crafting table),
- * so those candidates inherit the selected `prereqPath` from candidates.ts.
- * Safety and control remain available regardless of the selected route.  An
- * untagged productive candidate is not a safe fallback: allowing it here
- * silently replaces the selected prerequisite with a different semantic goal
- * and was the source of the exact-run `CRAFT:stick` detour.
- */
-export function filterFurnacePrerequisiteCandidates(
-  candidates: readonly Candidate[],
-  chosen: PrereqPath | null,
-): Candidate[] {
-  return candidates.filter((candidate) => {
-    if (
-      candidate.kind === 'ATTACK' ||
-      candidate.kind === 'EAT' ||
-      candidate.kind === 'EQUIP' ||
-      candidate.kind === 'RETREAT' ||
-      candidate.kind === 'WAIT' ||
-      candidate.kind === 'ESCALATE'
-    ) {
-      return true
-    }
-    const role = candidate.meta.prerequisiteRole
-    return role === FURNACE_PREREQUISITE_ROLE && chosen !== null && candidate.meta.prereqPath === chosen
-  })
-}
 
 /** Compatibility export for the VTR-owned Mission shape during the strangler migration. */
 export type VtrInventoryMission = InventoryReachMission
@@ -4970,28 +4923,7 @@ export class JevController {
     attempts: number,
     probability: number | null,
   ): void {
-    const now = Date.now()
-    this.optionAttempts.markAbandoned(optionId, planId, now)
-    if (this.prereqPlan !== null && this.prereqChosenPath !== null) {
-      const current = this.prereqChosenPath
-      const goalKey = this.prereqGoalKey ?? this.currentGoalKey()
-      const bucket = this.abandonedPrereqPaths.get(goalKey) ?? new Map<PrereqPath, number>()
-      bucket.set(current, now)
-      this.abandonedPrereqPaths.set(goalKey, bucket)
-      this.abandonedPrereqFingerprints.set(`${goalKey}|${current}`, this.lastStateFingerprint)
-      const next = nextPrereqPath(this.prereqPlan, current)
-      this.prereqForcedPath = next
-      this.prereqProgress = null
-      this.prereqLoggedKey = null
-      this.logger.warn(
-        'agent',
-        `PREREQ_ABANDON from=${current} to=${next ?? 'none'} reason=unproductive attempts=${attempts}`,
-        { from: current, to: next, reason: 'unproductive', attempts, goal: goalKey },
-        this.tickCounter,
-      )
-    }
-    this.markOptionAbandoned(this.lastDecisionId ?? optionId, 'unproductive')
-    this.summonLlm('no_progress', `abandon_option=${probability} enforced: ${optionId} unproductive after ${attempts} attempts`)
+    return abandonlifecycle.enforceUnproductiveAbandon(this.abandonLifecycleHost, optionId, planId, attempts, probability)
   }
 
   /** Why beta/controller chose abandon, from the deterministic failure signals. */
@@ -6237,155 +6169,19 @@ export class JevController {
     candidates: readonly Candidate[],
     unreachableStations: ReadonlySet<string>,
   ): Candidate[] {
-    const goal = state.goalQueue?.current ?? null
-    // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
-    // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
-    // stricter targetItem check here would let a retrieval candidate through unfiltered (#78).
-    const subject = prereqSubjectForGoal(goal)
-    if (subject === null) {
-      this.resetFurnacePrereq()
-      return [...candidates]
-    }
-    const sensedStationCount = (state.furnaces ?? []).filter(isSensedStation).length
-    const observation = decideFurnacePrereqObservation({
-      subject,
-      sensedStationCount,
-      goalKey: this.currentGoalKey(),
-      previousKey: this.prereqSatisfiedLoggedKey,
-    })
-    if (observation.key !== null) {
-      // A satisfied prerequisite is not a path choice: emit the distinct typed
-      // observation at most once per goal instead of a false PREREQ_OPTION.
-      this.resetFurnacePrereq()
-      if (observation.line !== null) {
-        this.prereqSatisfiedLoggedKey = observation.key
-        this.logger.info(
-          'agent',
-          observation.line,
-          { subject, source: 'sensed', sensedStationCount },
-          this.tickCounter,
-        )
-      }
-      return [...candidates]
-    }
-    const input = furnacePrereqInputFromState(
-      state,
-      candidateOptions(
-        this.options,
-        this.recipeIndex,
-        unreachableStations,
-        this.reachabilityGateOptions(),
-        this.blacklistedMoveTargets(state),
-        null,
-        this.searchedSurfaceTargets,
-      ),
-    )
-    const decision = planPrereqOptions(input)
-    const goalKey = this.currentGoalKey()
-    if (this.prereqGoalKey !== goalKey) {
-      this.prereqGoalKey = goalKey
-      this.prereqForcedPath = null
-      this.prereqProgress = null
-      this.prereqLoggedKey = null
-      this.prereqStationKnownLoggedKey = null
-      this.abandonedRetrievePaths.clear()
-      this.retrieveUnverified = null
-    }
-    const abandoned = this.abandonedPrereqSet(goalKey, Date.now())
-    for (const [path, fingerprint] of this.abandonedRetrievePaths) {
-      if (fingerprint === this.lastStateFingerprint) abandoned.add(path)
-    }
-    const base = selectPrereqPath(decision, abandoned)
-    const forced = this.prereqForcedPath !== null && !abandoned.has(this.prereqForcedPath) ? this.prereqForcedPath : null
-    const chosen = preferPrereqPath(base, forced, decision)
-    if (this.prereqForcedPath !== null && this.prereqForcedPath !== chosen) this.prereqForcedPath = null
-    this.prereqPlan = decision
-    this.prereqChosenPath = chosen
-    const logKey = `${goalKey}|${chosen ?? 'none'}`
-    if (this.prereqLoggedKey !== logKey) {
-      this.prereqLoggedKey = logKey
-      this.logger.info(
-        'agent',
-        formatPrereqOptionFor(decision, chosen),
-        {
-          chosen,
-          options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
-        },
-        this.tickCounter,
-      )
-      this.logger.info(
-        'agent',
-        formatPrereqRankShadow(decision, chosen),
-        {
-          policy: decision.policy,
-          costChoice: chosen,
-          rankChoice: decision.rankBaseline,
-          agree: chosen === decision.rankBaseline,
-        },
-        this.tickCounter,
-      )
-      if (chosen !== null && isInventorySourced(chosen)) {
-        this.logger.info(
-          'agent',
-          formatPrereqOptionDetail('furnace', chosen, prereqOptionReason(chosen), input.heldCount),
-        { chosen, heldCount: input.heldCount, abandoned: [...abandoned] },
-          this.tickCounter,
-        )
-      }
-    }
-    // OPERATOR RULE (station-use-before-craft): when the world already holds a
-    // usable station of the needed kind the craft path is INELIGIBLE, so say so
-    // with its own typed line instead of only omitting `CRAFT:furnace` from the
-    // offered set. The line is derived from the very option the planner marked
-    // ineligible, and it names the path that runs instead, so the run log can
-    // never show a withheld duplicate craft without its reason.
-    const withheldCraft = prereqWithheldCraft(decision)
-    if (withheldCraft !== null && input.knownStation !== null) {
-      const stationKnownLine = formatPrereqStationKnown(input.knownStation, input.heldCount, chosen)
-      if (stationKnownLine !== this.prereqStationKnownLoggedKey) {
-        this.prereqStationKnownLoggedKey = stationKnownLine
-        this.logger.info(
-          'agent',
-          stationKnownLine,
-          {
-            reason: withheldCraft.reason,
-            station: input.knownStation,
-            held: input.heldCount,
-            chosen,
-            goal: goalKey,
-          },
-          this.tickCounter,
-        )
-      }
-    } else {
-      this.prereqStationKnownLoggedKey = null
-    }
-    const kept = filterFurnacePrerequisiteCandidates(candidates, chosen)
-    if (chosen === null) return kept
+    return abandonlifecycle.applyFurnacePrereq(this.abandonLifecycleHost, state, candidates, unreachableStations)
+  }
 
-    const signature = prereqProgressSignature(chosen, input)
-    const evaluated = evaluatePrereqStall({
-      previous: this.prereqProgress,
-      path: chosen,
-      signature,
-      stallTicks: this.prereqStallTicks,
-    })
-    this.prereqProgress = evaluated.progress
-    if (!evaluated.stalled) return kept
-
-    const next = this.nextUsablePrereqPath(decision, chosen, abandoned)
-    if (next === null) return kept
-    this.prereqForcedPath = next
-    this.prereqChosenPath = next
-    this.prereqProgress = null
-    this.prereqLoggedKey = null
-    this.logger.warn(
-      'agent',
-      formatPrereqSwitch(chosen, next),
-      { from: chosen, to: next, stallTicks: this.prereqStallTicks, goal: goalKey },
-      this.tickCounter,
+  private furnacePrereqCandidateOptions(state: WorldState, unreachableStations: ReadonlySet<string>): CandidateOptions {
+    return candidateOptions(
+      this.options,
+      this.recipeIndex,
+      unreachableStations,
+      this.reachabilityGateOptions(),
+      this.blacklistedMoveTargets(state),
+      null,
+      this.searchedSurfaceTargets,
     )
-    return filterFurnacePrerequisiteCandidates(candidates, next)
   }
 
   /** The next feasible prereq path that has not been abandoned for this goal. */
@@ -6394,15 +6190,7 @@ export class JevController {
     current: PrereqPath,
     abandoned: ReadonlySet<PrereqPath>,
   ): PrereqPath | null {
-    const seen = new Set<PrereqPath>([current])
-    for (;;) {
-      const next = nextPrereqPath(decision, current)
-      if (next === null || seen.has(next)) break
-      if (!abandoned.has(next)) return next
-      seen.add(next)
-      current = next
-    }
-    return null
+    return abandonlifecycle.nextUsablePrereqPath(this.abandonLifecycleHost, decision, current, abandoned)
   }
 
   private abandonedPrereqSet(goalKey: string, now: number): Set<PrereqPath> {

@@ -577,7 +577,7 @@ function main(): void {
   // (run-scoped evidence that the duplicate craft was refused for a named reason).
   {
     const candidates = source('./src/candidates.ts')
-    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}\n${source('./src/legacy/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
     const prereq = source('./src/prereqOption.ts')
     const wired =
       candidates.includes('function stationWorldTruth') &&

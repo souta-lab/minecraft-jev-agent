@@ -168,7 +168,7 @@ addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path'
 })
 
 addCase('#63: controller.ts invokes planPrereqOptions / formatPrereqSwitch / formatPrereqOptionFor', () => {
-  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}\n${source('./src/legacy/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
   const missing = ['planPrereqOptions(input)', 'formatPrereqSwitch(', 'formatPrereqOptionFor(decision, chosen)'].filter(
     (needle) => !text.includes(needle),
   )
