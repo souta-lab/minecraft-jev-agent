@@ -442,7 +442,7 @@ export function parseAuthorityStack(stack) {
 
 /**
  * The host's own `policyProvider` getter maps the policy kind to the provider
- * (`packages/jev-agent/src/controller-legacy.ts`: `kind === 'typesafe' ? 'typesafe-ai' :
+ * (`packages/jev-agent/src/controller.ts` `get policyProvider()`: `kind === 'typesafe' ? 'typesafe-ai' :
  * 'deterministic'`). Used ONLY when the explicit `policyProvider=` field is
  * absent, and always labelled as the derivation it is.
  */
@@ -1818,7 +1818,7 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
     explicitProvider !== null
       ? 'log:GENERATION_READY:policyProvider'
       : policyProvider !== null
-        ? 'derived:policyKind (packages/jev-agent/src/controller-legacy.ts get policyProvider())'
+        ? 'derived:policyKind (packages/jev-agent/src/controller.ts get policyProvider())'
         : generation?.source ?? null
   const jev = {
     provider: policyProvider,
