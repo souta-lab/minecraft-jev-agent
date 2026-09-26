@@ -226,6 +226,8 @@ export {
   shouldRetireKnownRetrieve,
 } from './legacy/retrieval-progress.ts'
 import * as stall from './legacy/stall-observers.ts'
+import * as modelrecovery from './legacy/model-recovery.ts'
+import type { ModelRecoveryHost } from './legacy/model-recovery.ts'
 import * as system2plane from './legacy/system2-plane.ts'
 import * as queueplane from './legacy/goal-queue-plane.ts'
 import type { AbandonVerdict, GoalQueuePlaneHost } from './legacy/goal-queue-plane.ts'
@@ -2428,6 +2430,10 @@ export class JevController {
   }
 
   /** DecisionEpochsHost view of this controller (same structural-cast pattern as reachHost). */
+  private get modelRecoveryHost(): ModelRecoveryHost {
+    return this as unknown as ModelRecoveryHost
+  }
+
   private get epochsHost(): DecisionEpochsHost {
     return this as unknown as DecisionEpochsHost
   }
@@ -2843,119 +2849,7 @@ export class JevController {
    * escape Skills retain their existing one-Skill drain.
    */
   stopForModelRecovery(): void {
-    if (!this.running || this.modelRecoveryStopping) return
-    this.modelRecoveryStopping = true
-    this.system2?.cancelPending?.('model-recovery')
-    this.scheduler.stop()
-    this.clearDecisionTimer()
-    this.pendingTrigger = null
-    this.deferredTrigger = null
-
-    const reach = this.reachTransition ?? null
-    if (reach !== null) {
-      if (reach.state.status === 'active') {
-        this.beginModelRecoveryReachDrain(reach)
-        return
-      }
-      if (reach.state.terminalOutcome !== null) {
-        this.closeReachTransition(reach.state.terminalOutcome, reach.state, 'model-recovery-observed-terminal')
-        this.finish('stopped-by-caller', false)
-        return
-      }
-    }
-
-    const current = this.modelRecoveryDrainAction()
-    const commitment = current?.commitment ?? null
-    if (current === null || commitment === null) {
-      this.logger.warn(
-        'agent',
-        `MODEL_RECOVERY_DRAIN phase=cancel actionId=${current?.id ?? 'none'} kind=${current?.kind ?? 'none'} reason=no_bounded_escape_skill`,
-        { actionId: current?.id ?? null, kind: current?.kind ?? null, commitmentId: current?.commitment?.commitmentId ?? null },
-        this.tickCounter,
-      )
-      this.finish('stopped-by-caller', false)
-      return
-    }
-
-    this.logger.warn(
-      'agent',
-      `MODEL_RECOVERY_DRAIN phase=begin actionId=${current.id} kind=${current.kind} commitmentId=${commitment?.commitmentId} decisionEpoch=${commitment?.decisionEpoch} budgetMs=${commitment?.budget.ms}`,
-      {
-        actionId: current.id,
-        kind: current.kind,
-        commitmentId: commitment?.commitmentId ?? null,
-        decisionEpoch: commitment?.decisionEpoch ?? null,
-        budgetMs: commitment?.budget.ms ?? null,
-        selectedBy: commitment?.selectedBy ?? null,
-      },
-      this.tickCounter,
-    )
-    const budgetMs = commitment.budget.ms as number
-    const drainDeadlineMs = Math.max(
-      0,
-      current.startedAt + budgetMs + MODEL_RECOVERY_DRAIN_GRACE_MS - Date.now(),
-    )
-    this.modelRecoveryDrainTimer = setTimeout(() => {
-      this.modelRecoveryDrainTimer = null
-      const stillRunning = this.executor.current
-      if (stillRunning?.epoch !== current.epoch || stillRunning.status !== 'running') {
-        this.finish('stopped-by-caller', false)
-        return
-      }
-      this.logger.error(
-        'agent',
-        `MODEL_RECOVERY_DRAIN phase=deadline actionId=${current.id} kind=${current.kind} budgetMs=${budgetMs} graceMs=${MODEL_RECOVERY_DRAIN_GRACE_MS} -> cancel over-budget Skill`,
-        {
-          actionId: current.id,
-          kind: current.kind,
-          commitmentId: commitment.commitmentId,
-          budgetMs,
-          graceMs: MODEL_RECOVERY_DRAIN_GRACE_MS,
-          elapsedMs: Date.now() - current.startedAt,
-        },
-        this.tickCounter,
-      )
-      try {
-        this.executor.cancelCurrent('model recovery drain exceeded the committed Skill budget')
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.logger.error('agent', `MODEL_RECOVERY_DRAIN phase=cancel_error actionId=${current.id} error=${message}`, {
-          actionId: current.id,
-          kind: current.kind,
-          commitmentId: commitment.commitmentId,
-          error: message,
-        }, this.tickCounter)
-      } finally {
-        this.finish('stopped-by-caller', false)
-      }
-    }, drainDeadlineMs)
-    void current.completion.then(
-      (result) => {
-        this.logger.warn(
-          'agent',
-          `MODEL_RECOVERY_DRAIN phase=terminal actionId=${current.id} kind=${current.kind} outcome=${result.status} failureCode=${result.failure ?? 'none'}`,
-          {
-            actionId: current.id,
-            kind: current.kind,
-            commitmentId: commitment?.commitmentId ?? null,
-            outcome: result.status,
-            failureCode: result.failure ?? null,
-          },
-          this.tickCounter,
-        )
-        this.finish('stopped-by-caller', false)
-      },
-      (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error)
-        this.logger.error(
-          'agent',
-          `MODEL_RECOVERY_DRAIN phase=terminal actionId=${current.id} kind=${current.kind} outcome=completion_rejected`,
-          { actionId: current.id, kind: current.kind, commitmentId: commitment?.commitmentId ?? null, error: message },
-          this.tickCounter,
-        )
-        this.finish('stopped-by-caller', false)
-      },
-    )
+    return modelrecovery.stopForModelRecovery(this.modelRecoveryHost)
   }
 
   private beginModelRecoveryReachDrain(runtime: ActiveReachTransition): void {
@@ -2976,36 +2870,6 @@ export class JevController {
     return Promise.resolve(this.summary('stopped-by-caller', this.runSuccess()))
   }
 
-  private modelRecoveryDrainAction(): CurrentAction | null {
-    const current = this.executor.current
-    const recoveryReachId = this.modelRecoveryReachDrainTransitionId ?? null
-    if (
-      current !== null && current.status === 'running' &&
-      recoveryReachId !== null && current.authority === 'vtr-reach' && current.transitionId === recoveryReachId &&
-      this.reachTransition?.contract.transitionId === recoveryReachId && this.reachTransition.state.status === 'active'
-    ) {
-      return current
-    }
-    const commitment = current?.commitment ?? null
-    if (
-      current === null ||
-      current.status !== 'running' ||
-      commitment === null ||
-      commitment.candidateId !== current.id ||
-      commitment.budget.ms === null ||
-      !Number.isFinite(commitment.budget.ms) ||
-      commitment.budget.ms <= 0
-    ) {
-      return null
-    }
-    const escapeSkill =
-      (current.kind === 'RETREAT' && commitment.skillKind === 'retreat') ||
-      (current.kind === 'MOVE' &&
-        commitment.skillKind === 'walk_to' &&
-        commitment.allowedEffects.mayMove &&
-        (current.id.startsWith('MOVE:env:') || current.id.startsWith('ASCEND:breath:')))
-    return escapeSkill ? current : null
-  }
 
   // -------------------------------------------------------------------------
   // bot lifecycle
@@ -6103,6 +5967,10 @@ export class JevController {
       const message = error instanceof Error ? error.message : String(error)
       this.logger.warn('system2', `could not write the phase ledger ${path}: ${message}`)
     }
+  }
+
+  private modelRecoveryDrainAction(): CurrentAction | null {
+    return modelrecovery.modelRecoveryDrainAction(this.modelRecoveryHost)
   }
 
   private finish(stopped: RunSummary['stopped'], success: boolean): void {
