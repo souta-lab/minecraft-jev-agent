@@ -227,6 +227,13 @@ export type {
   KnownRetrieveDecisionInput,
   KnownRetrieveRetireInput,
 } from './legacy/retrieval-progress.ts'
+import type { KnownResourceVerdictLatch } from './legacy/candidate-diagnostics.ts'
+export {
+  formatKnownResourceFalsified,
+  formatKnownResourceResighted,
+  nextKnownResourceVerdict,
+} from './legacy/candidate-diagnostics.ts'
+export type { KnownResourceVerdict, KnownResourceVerdictLatch } from './legacy/candidate-diagnostics.ts'
 import * as reach from './vtr/reach-controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './vtr/reach-controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
@@ -1095,24 +1102,8 @@ export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | und
  * entity envelope) or `drop_absent` (the cell was remembered as the item itself
  * and nothing holds it). Typed truth, never a preference.
  */
-export function formatKnownResourceFalsified(
-  item: string,
-  name: string,
-  cell: Vec3Json,
-  reason: KnownResourceFalsifiedReason,
-): string {
-  return `KNOWN_RESOURCE_FALSIFIED item=${item} name=${name} cell=${cell.x},${cell.y},${cell.z} reason=${reason}`
-}
 
 /** `KNOWN_RESOURCE_RESIGHTED item=<item> name=<name> cell=<x,y,z> source=mob|drop`. */
-export function formatKnownResourceResighted(
-  item: string,
-  name: string,
-  cell: Vec3Json,
-  source: 'mob' | 'drop',
-): string {
-  return `KNOWN_RESOURCE_RESIGHTED item=${item} name=${name} cell=${cell.x},${cell.y},${cell.z} source=${source}`
-}
 
 /**
  * `KNOWN_RESOURCE_RETIRED item=<item> cell=<x,y,z> attempts=<n>`.
@@ -1124,17 +1115,7 @@ export function formatKnownResourceResighted(
  */
 
 /** Dedupe state for remembered-cell verdict lines (one per generation). */
-export interface KnownResourceVerdictLatch {
-  /** `<item>:<name>@<cell>:<reason>` already reported */
-  falsified: Set<string>
-  /** `<item>:<name>@<cell>` re-sight already reported */
-  resighted: Set<string>
-}
 
-export type KnownResourceVerdict =
-  | { kind: 'none' }
-  | { kind: 'falsified'; reason: KnownResourceFalsifiedReason }
-  | { kind: 'resighted'; source: 'mob' | 'drop' }
 
 /**
  * The report rule for one remembered-cell verdict, mutating the dedupe latch.
@@ -1148,43 +1129,7 @@ export type KnownResourceVerdict =
  *
  * Pure apart from the latch. No goal, action or ranking is involved.
  */
-export function nextKnownResourceVerdict(
-  latch: KnownResourceVerdictLatch,
-  evidence: Pick<KnownResourceEvidence, 'item' | 'name' | 'position' | 'status' | 'reason' | 'source'>,
-): KnownResourceVerdict {
-  const base = `${evidence.item}:${evidence.name}@${evidence.position.x},${evidence.position.y},${evidence.position.z}`
-  if (evidence.status === 'falsified') {
-    const reason: KnownResourceFalsifiedReason = evidence.reason ?? 'block_mined'
-    const key = `${base}:${reason}`
-    if (latch.falsified.has(key)) return { kind: 'none' }
-    latch.falsified.add(key)
-    latch.resighted.delete(base)
-    return { kind: 'falsified', reason }
-  }
-  if (evidence.status !== 'present' && evidence.status !== 'replaced') return { kind: 'none' }
-  const withheld = [...latch.falsified].some((key) => key.startsWith(`${base}:`))
-  for (const key of [...latch.falsified]) {
-    if (key.startsWith(`${base}:`)) latch.falsified.delete(key)
-  }
-  if (evidence.source === undefined || !withheld || latch.resighted.has(base)) return { kind: 'none' }
-  latch.resighted.add(base)
-  return { kind: 'resighted', source: evidence.source }
-}
 
-function knownResourceVerdictDetail(
-  evidence: KnownResourceEvidence,
-  reason: KnownResourceFalsifiedReason | null,
-): Record<string, unknown> {
-  return {
-    item: evidence.item,
-    name: evidence.name,
-    cell: evidence.position,
-    observed: evidence.observed,
-    claim: evidence.claim,
-    ...(reason === null ? {} : { reason }),
-    ...(evidence.source === undefined ? {} : { source: evidence.source }),
-  }
-}
 
 /** Item names whose VERIFIED placement registers a usable smelt station. */
 export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
@@ -10783,19 +10728,7 @@ export class JevController {
   }
 
   private logStaleKnownResources(state: WorldState): void {
-    for (const resource of staleKnownResources(state)) {
-      const at = `${resource.position.x},${resource.position.y},${resource.position.z}`
-      const key = `${resource.name}@${at}`
-      if (this.loggedStaleResources.has(key)) continue
-      this.loggedStaleResources.add(key)
-      this.logger.info(
-        'agent',
-        `KNOWN_RESOURCE_STALE item=${resource.name} at=${at}`,
-        { item: resource.name, at },
-        this.tickCounter,
-      )
-    }
-    this.logKnownResourceVerdicts(state)
+    return diagnostics.logStaleKnownResources(this.diagnosticsHost, state)
   }
 
   /**
@@ -10814,26 +10747,7 @@ export class JevController {
    * This is enumeration of world truth: no goal, action or ranking is decided.
    */
   private logKnownResourceVerdicts(state: WorldState): void {
-    for (const evidence of state.knownResourceEvidence ?? []) {
-      const verdict = nextKnownResourceVerdict(this.knownResourceVerdicts, evidence)
-      if (verdict.kind === 'falsified') {
-        this.logger.warn(
-          'agent',
-          formatKnownResourceFalsified(evidence.item, evidence.name, evidence.position, verdict.reason),
-          knownResourceVerdictDetail(evidence, verdict.reason),
-          this.tickCounter,
-        )
-        continue
-      }
-      if (verdict.kind === 'resighted') {
-        this.logger.info(
-          'agent',
-          formatKnownResourceResighted(evidence.item, evidence.name, evidence.position, verdict.source),
-          knownResourceVerdictDetail(evidence, null),
-          this.tickCounter,
-        )
-      }
-    }
+    return diagnostics.logKnownResourceVerdicts(this.diagnosticsHost, state)
   }
 
   /**
@@ -10971,70 +10885,7 @@ export class JevController {
   }
 
   private logCandidates(candidates: readonly Candidate[], state: WorldState): void {
-    const option = state.currentOption
-    const sensorBlocks = state.blocks
-      .filter((block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore')
-      .map((block) => ({
-        kind: block.kind,
-        name: block.name,
-        yield: block.yield ?? null,
-        position: block.position,
-        distance: block.distance,
-        diggable: block.diggable,
-        inReach: block.inReach,
-        visible: block.visible ?? null,
-        hasAdjacentStandable: block.hasAdjacentStandable,
-        adjacentStandable: block.adjacentStandable,
-      }))
-      .sort((left, right) =>
-        `${left.kind}|${left.name}|${left.position.x},${left.position.y},${left.position.z}`.localeCompare(
-          `${right.kind}|${right.name}|${right.position.x},${right.position.y},${right.position.z}`,
-        ),
-      )
-      .slice(0, 32)
-    const signature = JSON.stringify({
-      optionInstanceId: option?.instanceId ?? null,
-      optionTemplateId: option?.templateId ?? null,
-      allowedSkills: option?.allowedSkills ?? [],
-      queueRevision: this.queue.revision,
-      candidates: candidates.map((candidate) => ({
-        id: candidate.id,
-        optionSkill: candidate.meta.optionSkill ?? null,
-        prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
-        missingCapability: candidate.meta.missingCapability ?? null,
-      })),
-      sensorBlocks,
-    })
-    if (signature === this.lastCandidateSignature) return
-    this.lastCandidateSignature = signature
-    this.logger.info(
-      'candidates',
-      `generated ${candidates.length} executable candidate(s); skipped ${countBlockedLogs(state)} blocked log(s) (canDig=false, no walk-up access)`,
-      {
-        ids: candidates.map((candidate) => candidate.id),
-        detail: candidates.map((candidate) => candidate.label),
-        option: option === undefined || option === null
-          ? null
-          : {
-              instanceId: option.instanceId,
-              templateId: option.templateId,
-              allowedSkills: [...option.allowedSkills],
-              queueRevision: this.queue.revision,
-            },
-        candidateEvidence: candidates.map((candidate) => ({
-          id: candidate.id,
-          kind: candidate.kind,
-          optionSkill: candidate.meta.optionSkill ?? null,
-          prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
-          missingCapability: candidate.meta.missingCapability ?? null,
-          capabilityAcquisition: candidate.meta.capabilityAcquisition === true,
-          included: true,
-          exclusionReason: null,
-        })),
-        sensorBlocks,
-      },
-      this.tickCounter,
-    )
+    return diagnostics.logCandidates(this.diagnosticsHost, candidates, state)
   }
 
   /**
@@ -11053,114 +10904,7 @@ export class JevController {
    * state is one auditable line, matching the LOG_ROUTE convention.
    */
   private logFoodState(candidates: readonly Candidate[], state: WorldState, options: CandidateOptions): void {
-    const threshold = options.eatBelowFood
-    const food = state.self.food
-    const held = pickFood(state)
-    const routes = candidates.filter((candidate) => typeof candidate.meta.foodRoute === 'string')
-    const signature = [
-      food,
-      threshold,
-      held ?? 'none',
-      routes
-        .map((candidate) => `${String(candidate.meta.foodRoute)}:${String(candidate.meta.foodTarget)}`)
-        .sort()
-        .join(','),
-    ].join('|')
-    if (signature !== this.lastFoodMarkerSignature) {
-      this.lastFoodMarkerSignature = signature
-      if (food <= threshold) {
-        this.logger.info(
-          'food',
-          `FOOD_LOW food=${food} threshold=${threshold}`,
-          { food, threshold, heldFood: held },
-          this.tickCounter,
-        )
-      }
-      if (held !== null && food > threshold) {
-        this.logger.info(
-          'food',
-          // The reason lives in the MESSAGE, but the mirror (`mirroredEventToken`
-          // + the host renderer) keeps only the first token and the detail object,
-          // so `reason=full` never reached the run log: the observed line was
-          // `EAT_REFUSED food=15 threshold=18`, indistinguishable from the
-          // no_food case. The discriminator is carried in the detail too.
-          'EAT_REFUSED reason=full',
-          { food, threshold, heldFood: held, reason: 'full' },
-          this.tickCounter,
-        )
-      }
-      if (held === null && food <= threshold) {
-        this.logger.info(
-          'food',
-          'EAT_REFUSED reason=no_food',
-          { food, threshold, reason: 'no_food' },
-          this.tickCounter,
-        )
-      }
-      for (const candidate of routes) {
-        this.logger.info(
-          'food',
-          `FOOD_ROUTE kind=${String(candidate.meta.foodRoute)} target=${String(candidate.meta.foodTarget)}`,
-          {
-            candidate: candidate.id,
-            kind: candidate.meta.foodRoute,
-            target: candidate.meta.foodTarget,
-            // The SENSED source this route serves: the block for forage/acquire
-            // (`oak_leaves`), the item for a cook/hunt. Without it the mirrored
-            // line names the consumable but not what the body perceived.
-            source: candidate.targetName ?? null,
-            distance: candidate.meta.distance ?? null,
-          },
-          this.tickCounter,
-        )
-      }
-    }
-
-    // FOOD_ACQUIRED is an inventory delta, not a route fact. The first observed
-    // tick only seeds the baseline; a pre-existing stack is not an acquisition.
-    const current = new Map<string, number>()
-    for (const [name, count] of Object.entries(state.inventory.counts)) {
-      if (!isFoodItem(name)) continue
-      current.set(name, count)
-      if (this.lastFoodCounts === null) continue
-      const previous = this.lastFoodCounts.get(name) ?? 0
-      if (count > previous) {
-        this.logger.info(
-          'food',
-          `FOOD_ACQUIRED item=${name} count=${count}`,
-          { item: name, count, previous },
-          this.tickCounter,
-        )
-      }
-    }
-    // FOOD_EATEN is a BODY-state delta, not a route fact: the tick where the live
-    // hunger bar ROSE. It names the consumable that left the inventory, the food
-    // change and the health at that moment, so "the body ate and its food rose"
-    // is run evidence instead of an inference stitched from two other counters.
-    // Read BEFORE `lastFoodCounts` is advanced, so the delta is the eaten item.
-    const level = state.self.food
-    if (Number.isFinite(level) && this.lastFoodLevel !== null && level > this.lastFoodLevel) {
-      const eaten =
-        [...(this.lastFoodCounts ?? new Map<string, number>()).entries()].find(
-          ([name, count]) => (state.inventory.counts[name] ?? 0) < count,
-        )?.[0] ??
-        held ??
-        null
-      this.logger.info(
-        'food',
-        `FOOD_EATEN item=${eaten ?? 'unknown'} food=${this.lastFoodLevel}->${level} health=${state.self.health}`,
-        {
-          item: eaten,
-          from: this.lastFoodLevel,
-          to: level,
-          health: state.self.health,
-          threshold,
-        },
-        this.tickCounter,
-      )
-    }
-    if (Number.isFinite(level)) this.lastFoodLevel = level
-    this.lastFoodCounts = current
+    return diagnostics.logFoodState(this.diagnosticsHost, candidates, state, options)
   }
 
   /**
@@ -11171,17 +10915,7 @@ export class JevController {
    * `trigger=... -> action=...` line still records the action actually chosen.
    */
   private logLogRoute(candidates: readonly Candidate[]): void {
-    const route = logRouteOf(candidates)
-    if (route === null) return
-    const signature = `${route.mode}|${route.target.x},${route.target.y},${route.target.z}|${route.candidateId}`
-    if (signature === this.lastLogRouteSignature) return
-    this.lastLogRouteSignature = signature
-    this.logger.info(
-      'candidates',
-      formatLogRoute(route),
-      { mode: route.mode, target: route.target, candidateId: route.candidateId },
-      this.tickCounter,
-    )
+    return diagnostics.logLogRoute(this.diagnosticsHost, candidates)
   }
 
   /**
@@ -11195,16 +10929,7 @@ export class JevController {
     evaluated: readonly CandidateReachability[],
     withheld: readonly CandidateReachability[],
   ): void {
-    for (const entry of evaluated) {
-      const candidateId = entry.candidate.id
-      const signature = `reach:${entry.result.reachable}|${entry.result.reason}|${entry.fingerprint}`
-      this.logReachabilityOnce(candidateId, signature, !entry.result.reachable, entry)
-    }
-    for (const entry of withheld) {
-      const candidateId = entry.candidate.id
-      const signature = `withheld:${entry.result.reason}|${entry.fingerprint}|${entry.suppressed}`
-      this.logReachabilityOnce(`withheld:${candidateId}`, signature, true, entry)
-    }
+    return diagnostics.logReachability(this.diagnosticsHost, evaluated, withheld)
   }
 
   private logReachabilityOnce(
@@ -11213,75 +10938,7 @@ export class JevController {
     asWarning: boolean,
     entry: CandidateReachability,
   ): void {
-    if (this.reachabilityLogSignatures.get(key) === signature) return
-    this.reachabilityLogSignatures.set(key, signature)
-    const target = {
-      candidateId: entry.candidate.id,
-      kind: entry.candidate.kind,
-      position: entry.candidate.target,
-      barrier: null,
-    }
-    const detail = {
-      candidate: entry.candidate.id,
-      kind: entry.candidate.kind,
-      reachable: entry.result.reachable,
-      reason: entry.result.reason,
-      missing: entry.result.missingCapabilities.map(capabilityKey),
-      fingerprint: entry.fingerprint,
-      suppressed: entry.suppressed,
-    }
-    const line = formatReachability(target, entry.result)
-    if (asWarning) this.logger.warn('agent', line, detail, this.tickCounter)
-    else this.logger.info('agent', line, detail, this.tickCounter)
-    if (entry.withheld) {
-      this.logger.warn(
-        'agent',
-        formatCandidateWithheld(entry.candidate.id, entry.result.reason),
-        detail,
-        this.tickCounter,
-      )
-      const refusal = entry.candidate.meta.digAccessRefusal
-      const block = entry.candidate.target
-      if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
-        this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
-      }
-      // THE ACQUISITION ROUTE for this withheld fact: which grounded candidate(s)
-      // would remove the missing precondition, or - when nothing obtainable exists
-      // - the typed reason naming the item and count. Emitted with the withhold so
-      // the two facts can never be read apart.
-      for (const acquisition of entry.acquisition ?? []) {
-        const acquisitionDetail = { ...detail, acquisition }
-        this.logger.warn(
-          'agent',
-          acquisition.routes.length > 0
-            ? formatCandidateAcquisition(entry.candidate.id, acquisition)
-            : formatCandidateAcquisitionRefused(entry.candidate.id, acquisition),
-          acquisitionDetail,
-          this.tickCounter,
-        )
-      }
-      // THE STANCE REFUSAL, mirrored with the full geometry: the entity, the melee
-      // constant, the nearest stance the search examined and the fact that refused
-      // it. Without this the only evidence that the body could not hit the target
-      // would be a 0-swing `out_of_reach` / `verify_failed` lease later.
-      const stance = entry.candidate.attackStandRefusal
-      if (entry.result.reason === 'no_attack_stand' && stance !== undefined) {
-        this.logger.warn(
-          'agent',
-          formatNoAttackStand(stance),
-          {
-            ...detail,
-            marker: NO_ATTACK_STAND,
-            entityId: stance.entityId,
-            refusal: stance.refusal,
-            nearestStand: stance.nearest,
-            stand: stance.stand,
-            path: stance.path,
-          },
-          this.tickCounter,
-        )
-      }
-    }
+    return diagnostics.logReachabilityOnce(this.diagnosticsHost, key, signature, asWarning, entry)
   }
 
   /**
