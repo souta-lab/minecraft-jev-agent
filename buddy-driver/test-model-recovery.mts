@@ -420,17 +420,17 @@ describe('model authority recovery host policy', () => {
     expect(queue.revision).toBe(revisionBefore)
     expect(queue.state).toEqual(before)
 
-    const controller = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
-    const applyStart = controller.indexOf('const applyPlan = (): QueuedGoal[] => {', controller.indexOf('const answersTheHead'))
-    const applyEnd = controller.indexOf('\n        let added: QueuedGoal[]', applyStart)
-    const fenceCall = controller.indexOf('const fenced = applySystem2RecoveryFence(', applyEnd)
-    const mutations = controller.slice(applyStart, applyEnd)
+    const plane = readFileSync(new URL('../jev-agent/src/legacy/system2-plane.ts', import.meta.url), 'utf8')
+    const applyStart = plane.indexOf('const applyPlan = (): QueuedGoal[] => {', plane.indexOf('const answersTheHead'))
+    const applyEnd = plane.indexOf('let added: QueuedGoal[]', applyStart)
+    const fenceCall = plane.indexOf('const fenced = applySystem2RecoveryFence(', applyEnd)
+    const mutations = plane.slice(applyStart, applyEnd)
     expect(applyStart).toBeGreaterThanOrEqual(0)
     expect(applyEnd).toBeGreaterThan(applyStart)
     expect(fenceCall).toBeGreaterThan(applyEnd)
-    expect(mutations).toContain('this.queue.replaceAnsweredHead(')
-    expect(mutations).toContain('this.queue.applyPlan(')
-    expect(controller.slice(fenceCall, controller.indexOf('added = fenced.value', fenceCall))).toContain('}, applyPlan)')
+    expect(mutations).toContain('host.queue.replaceAnsweredHead(')
+    expect(mutations).toContain('host.queue.applyPlan(')
+    expect(plane.slice(fenceCall, plane.indexOf('added = fenced.value', fenceCall))).toContain('}, applyPlan)')
   })
 
   test('controller rejection leaves the queue unchanged, stops its generation, and host retry starts fresh', async () => {
@@ -879,7 +879,9 @@ describe('model authority recovery host policy', () => {
     const mercury = readFileSync(new URL('./mercury-system2.ts', import.meta.url), 'utf8')
     expect(mercury).toContain('if (cached !== undefined && !this.requireFreshProviderDecision)')
     const controller = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
-    expect(controller).toContain('provider: system2Authority.provider,\n            model: system2Authority.model,')
+    expect(
+      controller + readFileSync(new URL('../jev-agent/src/legacy/system2-plane.ts', import.meta.url), 'utf8'),
+    ).toMatch(/provider: system2Authority\.provider,\s*model: system2Authority\.model,/)
     const decisionStart = controller.indexOf('const result = await this.jev.decide({')
     const authorityCheck = controller.indexOf('assertRecoveryModelAuthority(', decisionStart)
     const recordDecision = controller.indexOf('this.lastDecision = result', decisionStart)
