@@ -16,7 +16,7 @@ const OTHER = 'run-m2-other'
 const SOURCE_SHA = 'c'.repeat(40)
 const VERIFIED_POLICY = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 2, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
-  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyProvider: 'typesafe-ai', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
   system2: {
     runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1,
     identityStatus: 'verified', identityReason: null,

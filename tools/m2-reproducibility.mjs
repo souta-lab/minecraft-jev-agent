@@ -1835,11 +1835,13 @@ const heartbeat = (rung, items, offset) =>
   \`[\${stamp(offset)}] HEARTBEAT pos=10,64,20 health=20 running=true rung=\${rung} inv=\${JSON.stringify(items)}\`
 const inventory = (items, offset) => \`[\${stamp(offset)}] INVENTORY items=\${JSON.stringify(items)} pos=10,64,20\`
 const ready = (offset, id) =>
-  \`[\${stamp(offset)}] GENERATION_READY id=gen-\${id} generationId=gen-\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev generation=1 policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false\`
+  \`[\${stamp(offset)}] GENERATION_READY id=gen-\${id} generationId=gen-\${id} runId=\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee system2ConfiguredProvider=typesafe-ai system2ConfiguredModel=typesafe-ai/jev generation=1 policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false\`
 const authorityInput = (offset, id) =>
-  \`[\${stamp(offset)}] SYSTEM2_AUTHORITY_INPUT generationId=gen-\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=queue_empty provider=typesafe-ai model=typesafe-ai/jev\`
+  \`[\${stamp(offset)}] SYSTEM2_AUTHORITY_INPUT generationId=gen-\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=queue_empty provider=typesafe-ai model=typesafe-ai/jev requestId=req-\${id}-1 runId=\${id}\`
 const authority = (offset, id) =>
-  \`[\${stamp(offset)}] SYSTEM2_AUTHORITY_DECISION generationId=gen-\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=queue_empty provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal goals=[front_nether_portal]\`
+  \`[\${stamp(offset)}] SYSTEM2_AUTHORITY_DECISION generationId=gen-\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee configuredProvider=typesafe-ai configuredModel=typesafe-ai/jev trigger=queue_empty provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal goals=[front_nether_portal] requestId=req-\${id}-1 runId=\${id}\`
+const applied = (offset, id) =>
+  \`[\${stamp(offset)}] SYSTEM2_PLAN_APPLIED requestId=req-\${id}-1 generationId=gen-\${id} sourceSha=\${source} buildHash=eeeeeeeeeeee runId=\${id} op=patch accepted=true applied=1\`
 const first = 'run-m2repstub-a'
 const second = 'run-m2repstub-b'
 const inventoryLines = [
@@ -1897,7 +1899,8 @@ const writeDecisions = (id, count) => {
     lines.push(JSON.stringify({
       record: 'decision', ts: stamp(3 + i), runId: id,
       generationId: \`gen-\${id}\`, sourceSha: source,
-      source: 'jev', kind: 'place', reason: \`rehearsal:model_authored_jev_decision_\${i}\`,
+      source: 'jev', kind: 'place', jev: { model: 'typesafe-ai/jev' },
+      reason: \`rehearsal:model_authored_jev_decision_\${i}\`,
     }))
   }
   writeFileSync(decisionsPath, lines.join('\\n') + '\\n')
@@ -1907,6 +1910,7 @@ const openRun = (id, offset) => {
   emit(ready(offset + 0.1, id))
   emit(authorityInput(offset + 0.15, id))
   emit(authority(offset + 0.2, id))
+  emit(applied(offset + 0.25, id))
 }
 openRun(first, 0)
 emit(heartbeat('stone_pickaxe', {}, 0.5))

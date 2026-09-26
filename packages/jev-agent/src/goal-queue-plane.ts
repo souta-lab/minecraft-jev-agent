@@ -555,7 +555,7 @@ trigger: DecisionTrigger): void {
       // this state, so mark it impossible and let System2 replace it instead of
       // the body pacing in the level-move set (the measured 48-minute loop).
       // The stale CAPABILITY_GAP marker is dropped here so the planner's
-      // forced-surface path (planner-legacy `forcedSurface`) cannot immediately
+      // forced-surface path (planner-deterministic `forcedSurface`) cannot immediately
       // re-issue the same impossible row; the durable log lines remain.
       const refusal = host.lastSurfaceAscentRefusal
       if (

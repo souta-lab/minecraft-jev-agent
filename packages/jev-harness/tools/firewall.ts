@@ -106,18 +106,6 @@ export const FIREWALL_DEBT: readonly FirewallDebtEntry[] = [
     migrationPhase: 'E',
     reason: 'legacy TypeSafeJevPolicy; Phase E deletes or migrates it deliberately',
   },
-  {
-    file: 'packages/buddy-driver/advisor.ts',
-    headIds: ['advisor_strategy_v1'],
-    migrationPhase: 'C',
-    reason: 'advisor strategy choice + durable cache + MAX_CACHE_REPLAYS; Phase C moves the choice behind the harness',
-  },
-  {
-    file: 'packages/buddy-driver/planner-legacy.ts',
-    headIds: ['system2_horizon_v1', 'system2_plan_fit_v1', 'system2_strategy_change_v1'],
-    migrationPhase: 'C',
-    reason: 'legacy System2 batched call; its `match ?? options[0] ?? FRONT_FALLBACK` fallback must become an explicit code-authority fallback',
-  },
 ]
 
 export interface ProductionRoot {

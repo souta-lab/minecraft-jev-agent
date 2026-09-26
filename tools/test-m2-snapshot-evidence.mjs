@@ -97,7 +97,8 @@ const BOOT_IDENTITY = { runId: RUN, bootSourceSha: BOOT_SHA, buildHash: BUILD_HA
 // run-bound policy fixture rather than allowing the snapshot to bypass D2.
 const POLICY_EVIDENCE = {
   decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 1, fallbackCount: 0, otherCount: 0, unclassifiableCount: 0 },
-  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe',
+    policyProvider: 'typesafe-ai', policyModel: 'typesafe-ai/jev' },
 }
 
 async function judge({ snap, identity = BOOT_IDENTITY, live = null, policyEvidence = POLICY_EVIDENCE } = {}) {

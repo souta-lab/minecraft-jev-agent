@@ -7,8 +7,8 @@
 //
 //   packages/jev-agent/src/jev/authority.ts:335   batched: action / abandon_option / danger / should_retreat
 //   packages/jev-agent/src/jev/client.ts:997      batched legacy: action / abandon_option / danger / should_retreat
-//   packages/buddy-driver/advisor.ts:367          choice: next_strategy over a declared strategy set
-//   packages/buddy-driver/planner-legacy.ts:3432  batched: horizon / plan_fit / strategy_change
+//   (retired) advisor.ts                         choice: next_strategy over a declared strategy set
+//   (retired) planner-legacy.ts                  batched: horizon / plan_fit / strategy_change
 //   (the former planner.ts choice was retired when System2 became the WHAT authority)
 //
 // A head is versioned as a whole: bumping the version means a NEW head id, and
@@ -117,7 +117,7 @@ export const DANGER_SCALE: ScoreScaleSpec = {
   levels: ['safe', 'minor risk', 'dangerous', 'lethal'],
 }
 
-/** PLAN_FIT_LEVELS from packages/buddy-driver/planner-legacy.ts. */
+/** PLAN_FIT_LEVELS from the retired planner-legacy.ts. */
 export const PLAN_FIT_SCALE: ScoreScaleSpec = {
   id: 'plan_fit_levels',
   version: 1,
@@ -126,7 +126,7 @@ export const PLAN_FIT_SCALE: ScoreScaleSpec = {
   levels: ['poor fit', 'weak fit', 'reasonable fit', 'good fit', 'excellent fit'],
 }
 
-/** ADVISOR_STRATEGIES from packages/buddy-driver/advisor.ts. */
+/** ADVISOR_STRATEGIES from the retired advisor.ts (vocabulary now lives in planner-ladder.ts). */
 export const ADVISOR_STRATEGY_IDS: readonly string[] = [
   'descend_to_y16',
   'explore_cave',
@@ -380,7 +380,7 @@ export const JEV_HEADS: readonly JevHead[] = [
     primitive: 'choice',
     owner: 'advisor',
     status: 'production',
-    deprecated: false,
+    deprecated: true,
     semanticQuestion: 'Which ONE declared strategy best removes the current blocker?',
     instructions: {
       status: 'harness_canonical',
@@ -402,16 +402,15 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: null,
-    allowedConsumers: ['packages/buddy-driver/advisor.ts', 'buddy-driver/planner.ts'],
-    sourceRefs: [{ file: 'packages/buddy-driver/advisor.ts', symbol: 'ADVISOR_STRATEGIES', lineHint: 367 }],
-    legacyPromptRef: { file: 'packages/buddy-driver/advisor.ts', symbol: 'STRATEGY_CRITERIA', lineHint: 43 },
+    allowedConsumers: [],
+    sourceRefs: [],
     notes:
-      'The closed set is the declared strategy enum, so the same closed-world rule applies without grounded candidates ' +
-      '(#438 section 3).',
+      'Retired: the advisor authority (packages/buddy-driver/advisor.ts) was deleted with the legacy LLM planner. ' +
+      'The strategy vocabulary itself survives as data in planner-ladder.ts (ADVISOR_STRATEGIES).',
   },
 
   // -------------------------------------------------------------------------
-  // planner-legacy.ts - the legacy System2 batched call
+  // planner-legacy.ts - the retired legacy System2 batched call
   // -------------------------------------------------------------------------
   {
     id: 'system2_horizon_v1',
@@ -433,13 +432,11 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'system2_legacy',
-    allowedConsumers: ['packages/buddy-driver/planner-legacy.ts'],
-    sourceRefs: [{ file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3432 }],
-    legacyPromptRef: { file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'HORIZON_INSTRUCTIONS', lineHint: 3411 },
+    allowedConsumers: [],
+    sourceRefs: [],
     notes:
-      'Legacy System2 WHAT head. Its current call site has a hidden fallback (`match ?? options[0] ?? FRONT_FALLBACK`); ' +
-      'the harness refuses that shape (#438 section 9) - Phase C/D must move the fallback decision to an explicit, ' +
-      'labelled code-authority path.',
+      'Retired: the legacy System2 batched call (planner-legacy.ts `askLlm`) was deleted. The deterministic ' +
+      'baseline planner never calls a model; System2 WHAT authority is Mercury, specified by system2-harness.',
   },
   {
     id: 'system2_plan_fit_v1',
@@ -460,10 +457,9 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'score_level_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'system2_legacy',
-    allowedConsumers: ['packages/buddy-driver/planner-legacy.ts'],
-    sourceRefs: [{ file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3432 }],
-    legacyPromptRef: { file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'PLAN_FIT_LEVELS', lineHint: 2450 },
-    notes: 'Shadow metric; the plan choice itself is the horizon head.',
+    allowedConsumers: [],
+    sourceRefs: [],
+    notes: 'Retired: deleted with the legacy planner LLM path (planner-legacy.ts `askLlm`).',
   },
   {
     id: 'system2_strategy_change_v1',
@@ -483,10 +479,10 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'strategy_change_threshold_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'system2_legacy',
-    allowedConsumers: ['packages/buddy-driver/planner-legacy.ts'],
-    sourceRefs: [{ file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'askLlm', lineHint: 3435 }],
-    legacyPromptRef: { file: 'packages/buddy-driver/planner-legacy.ts', symbol: 'resolveStrategyChangeThreshold', lineHint: 2497 },
-    notes: 'Threshold centralisation target: `resolveStrategyChangeThreshold()` becomes a registry calibration parameter.',
+    allowedConsumers: [],
+    sourceRefs: [],
+    notes:
+      'Retired: deleted with the legacy planner LLM path; the strategy_change threshold machinery went with it.',
   },
 
   // -------------------------------------------------------------------------

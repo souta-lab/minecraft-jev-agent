@@ -1490,7 +1490,11 @@ addCase('(vii) the controller feeds the rule the TRACKED-set truth and mirrors t
   // `marker` + the `detail` fields - the message body is NOT mirrored).
   const text =
     readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
+    readFileSync(new URL('./src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
+    // MOB_IDENTITY_CHURN registration lives in the diagnostics plane's marker
+    // registry; the formatter itself lives in the threat plane.
+    readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/threat.ts', import.meta.url), 'utf8')
   const call = text.indexOf('regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates, identityContext)')
   const helper = text.indexOf('private mobIdentityContext(')
   const tracked = text.indexOf('const live = this.bot.entities[entityId]', helper)

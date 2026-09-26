@@ -37,10 +37,8 @@ describe('#438 section 22 I1 - no direct Jev/provider access outside the harness
     expect(report.cleared.map((entry) => entry.file)).toEqual([])
   })
 
-  test('the debt allowlist is exactly the four remaining direct provider call sites', () => {
+  test('the debt allowlist is exactly the two remaining direct provider call sites', () => {
     expect(FIREWALL_DEBT.map((entry) => entry.file).sort()).toEqual([
-      'packages/buddy-driver/advisor.ts',
-      'packages/buddy-driver/planner-legacy.ts',
       'packages/jev-agent/src/jev/authority.ts',
       'packages/jev-agent/src/jev/client.ts',
     ])

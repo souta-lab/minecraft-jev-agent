@@ -1,5 +1,17 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+
+// Plain-bun runner: this file executes via `bun tools/<file>` from
+// bun-tests/repository.test.ts, so node:test's runner is never present.
+let failures = 0
+const test = (name, fn) => {
+  try {
+    fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
+}
 import { eventMessage, persistentActionIdentity, persistentSkillStartProof } from './vtr-reach-evidence-events.mjs'
 
 const row = (message, detail = {}) => ({ message, detail })
@@ -45,3 +57,5 @@ test('one VTR-selected SKILL_START binds the persistent action and starts before
   assert.equal(persistentSkillStartProof({ ...base, skillStartRows: [start, start] }).status, 'FAIL')
   assert.equal(persistentSkillStartProof({ ...base, skillStartRows: [row('SKILL_START selectedBy=vtr-transition')]}).status, 'INCOMPLETE')
 })
+
+if (failures > 0) process.exit(1)

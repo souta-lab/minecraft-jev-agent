@@ -545,9 +545,10 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
   // m2-policy-evidence reader requires. HOST_LOCK released bounds the run window.
   const runnerOutLines = [
     BOOT_LINE,
-    `[${stamp(1)}] GENERATION_READY id=${FIXTURE_GENERATION_ID} generationId=${FIXTURE_GENERATION_ID} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} system2ConfiguredProvider=${FIXTURE_SYSTEM2_PROVIDER} system2ConfiguredModel=${FIXTURE_SYSTEM2_MODEL} policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false`,
-    `[${stamp(1.5)}] SYSTEM2_AUTHORITY_INPUT ${fixtureSystem2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL}`,
-    `[${stamp(2)}] SYSTEM2_AUTHORITY_DECISION ${fixtureSystem2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL} chosen=front_nether_portal goals=[front_nether_portal]`,
+    `[${stamp(1)}] GENERATION_READY id=${FIXTURE_GENERATION_ID} generationId=${FIXTURE_GENERATION_ID} runId=${RUN_ID} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} system2ConfiguredProvider=${FIXTURE_SYSTEM2_PROVIDER} system2ConfiguredModel=${FIXTURE_SYSTEM2_MODEL} policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false`,
+    `[${stamp(1.5)}] SYSTEM2_AUTHORITY_INPUT ${fixtureSystem2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL} requestId=req-${RUN_ID}-1 runId=${RUN_ID}`,
+    `[${stamp(2)}] SYSTEM2_AUTHORITY_DECISION ${fixtureSystem2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL} chosen=front_nether_portal goals=[front_nether_portal] requestId=req-${RUN_ID}-1 runId=${RUN_ID}`,
+    `[${stamp(2.5)}] SYSTEM2_PLAN_APPLIED requestId=req-${RUN_ID}-1 generationId=${FIXTURE_GENERATION_ID} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} runId=${RUN_ID} op=patch accepted=true applied=1`,
     `[${stamp(30)}] HOST_LOCK released pid=4242 runId=${RUN_ID}`,
   ]
   const decisionsLines = [
@@ -559,6 +560,7 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
       sourceSha: FIXTURE_SOURCE_SHA,
       source: 'jev',
       kind: 'place',
+      jev: { model: 'typesafe-ai/jev' },
       reason: 'fixture:model_authored_jev_decision',
     }),
     JSON.stringify({
@@ -569,6 +571,7 @@ export function materializeSyntheticRun({ caseName, markerLines, portalTruthLine
       sourceSha: FIXTURE_SOURCE_SHA,
       source: 'jev',
       kind: 'place',
+      jev: { model: 'typesafe-ai/jev' },
       reason: 'fixture:model_authored_jev_decision',
     }),
   ]

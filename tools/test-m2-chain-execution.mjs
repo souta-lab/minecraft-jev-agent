@@ -165,8 +165,9 @@ const mergeDeltas = (id) => {
     'exactly one CRAFT_FAILED call site',
   )
   // …and both must be on the MIRRORED path, or a run-scoped artifact still
-  // cannot see them.
-  const controller = read('packages/jev-agent/src/controller-legacy.ts')
+  // cannot see them. The marker registry lives in the diagnostics plane since
+  // the legacy controller was split.
+  const controller = read('packages/jev-agent/src/candidate-diagnostics.ts')
   const mirror = /const MIRRORED_MARKERS[\s\S]*?\n\]\)/.exec(controller)
   assert.notEqual(mirror, null, 'MIRRORED_MARKERS block found')
   assert.match(mirror[0], /'CRAFT_DONE'/)

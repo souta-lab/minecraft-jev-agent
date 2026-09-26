@@ -51,6 +51,7 @@ import { generateGroundedCandidates, defaultCandidateOptions } from '../packages
 import { createRecipeIndex } from '../packages/jev-agent/src/crafting.ts'
 import { emptyGoalQueueState } from '../packages/jev-agent/src/goalQueue.ts'
 import { Executor, defaultExecutorOptions } from '../packages/jev-agent/src/executor.ts'
+import { fixtureClaimContext } from '../packages/jev-agent/test-claim-context.mts'
 import { EventLogger, JsonlWriter } from '../packages/jev-agent/src/jev.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from '../packages/jev-agent/src/state.ts'
 import {
@@ -875,7 +876,10 @@ async function driveLink(link, ctx) {
     const resolved = ctx.bot.recipesFor(itemIdValue, null, 1, candidate.meta?.requiresTable === true ? {} : null)[0]
     ctx.bot.pendingCraftRecipe = resolved ?? null
   }
-  const result = await ctx.executor.claim(candidate).completion
+  // Actuation requires kernel-admitted transition provenance (V4.1.2): the
+  // rehearsal drives mechanics under an explicit fixture identity, matching
+  // test-claim-context's deterministic fixture convention.
+  const result = await ctx.executor.claim(candidate, fixtureClaimContext(candidate)).completion
   ctx.bot.pendingCraftRecipe = null
   ctx.bot.currentWindow = null
   const after = Object.fromEntries(ctx.world.counts)

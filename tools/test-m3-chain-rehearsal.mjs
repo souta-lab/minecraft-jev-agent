@@ -173,7 +173,7 @@ const thresholds = checkThresholdsAndRungs()
   assert.equal(thresholds.facts.rodSurplus, 1, 'the 7-rod rung is a deliberate 1-rod surplus over the 6 exact')
   assert.equal(thresholds.facts.powderYield, 14)
   assert.equal(thresholds.facts.powderYield >= thresholds.facts.powderNeeded, true)
-  ok('ladder rung (planner-legacy.ts) == planner == gate on 12 eyes / 7 rods / 12 powder')
+  ok('ladder rung (planner-ladder.ts) == planner == gate on 12 eyes / 7 rods / 12 powder')
 }
 
 // ---------------------------------------------------------------------------
@@ -275,10 +275,10 @@ const report = runRehearsal()
 {
   for (const [key, value] of Object.entries(M3_CHAIN_SOURCES)) {
     assert.equal(typeof value, 'string')
-    assert.match(value, /^(buddy-driver|jev-agent|tools)\/[\w./-]+:\d+/, `${key} must name file:line`)
+    assert.match(value, /^(packages\/)?(buddy-driver|jev-agent|tools)\/[\w./-]+:\d+/, `${key} must name file:line`)
   }
   assert.match(M3_CHAIN_SOURCES.gate_eye_threshold, /tools\/milestone-predicates\.mjs:43/)
-  assert.match(M3_CHAIN_SOURCES.ladder_ender_eyes, /buddy-driver\/planner-legacy\.ts:685/)
+  assert.match(M3_CHAIN_SOURCES.ladder_ender_eyes, /buddy-driver\/planner-ladder\.ts:652/)
   ok('every threshold source names file:line on the ladder, planner and gate side')
 }
 

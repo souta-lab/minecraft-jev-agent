@@ -49,7 +49,7 @@ const checks = [
 ]
 
 // Advisor-layer cache loop detection (issue #15): consecutive identical cached strategies
-// mean the cache replays a label that never changes the body. The guard in advisor.ts /
+// mean the cache replays a label that never changes the body. The guard in
 // mercury-system2.ts caps a cached strategy at 2 replays and then emits ADVISOR_CACHE
 // bypass. By default only lines AFTER the first ADVISOR_CACHE_GUARD marker are
 // counted, so the check measures the guarded code path from its deploy boundary;

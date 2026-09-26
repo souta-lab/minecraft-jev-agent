@@ -869,7 +869,7 @@ export function rungGoalsWithPrereq(
   // `core` is the #55 "may not be dropped by a patch/replace" marker for the
   // MANDATORY road. Forcing it onto every goal erased the explicit `optional`
   // boundary: the live head was `g37:collect:food core=true` even though the
-  // food rung is declared `optional: true` (planner-legacy.ts RUNGS), so an
+  // food rung is declared `optional: true` (planner-ladder.ts RUNGS), so an
   // optional zero-semantic-progress row could hold the queue indefinitely and
   // the frontier's own entry goal waited behind it. The marker now survives the
   // compile: optional rungs keep `optional: true` and are NOT core-protected;

@@ -24,7 +24,7 @@
 //    and then STOPS (WAIT only), and that the multi-count `want` threading fixed
 //    in 30dec38 is what keeps a partial count offered. The exact sequence is
 //    reported (see M3_CHAIN_REHEARSAL_EYES).
-// 3. Cross-checks the real ladder rung (packages/buddy-driver/planner-legacy.ts), the real
+// 3. Cross-checks the real ladder rung (packages/buddy-driver/planner-ladder.ts), the real
 //    planner and the real gate on the SAME threshold (12 eyes / 7 rods / 12
 //    powder). Any disagreement is reported with file:line on both sides.
 // 4. Materializes a synthetic single-run fixture (BOOT boundary + INVENTORY
@@ -47,7 +47,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { RUNGS } from '../packages/buddy-driver/planner-legacy.ts'
+import { RUNGS } from '../packages/buddy-driver/planner-ladder.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from '../packages/jev-agent/src/candidates.ts'
 import { createRecipeIndex, planNextCraftStep } from '../packages/jev-agent/src/crafting.ts'
 import { loadGameData } from '../packages/jev-agent/src/gameData.ts'
@@ -118,7 +118,7 @@ export const M3_POST_POWDER_INVENTORY = Object.freeze({
   [BLAZE_POWDER]: BLAZE_ROD_REQUIRED * POWDER_PER_ROD,
 })
 
-/** The real terminal rung's goal, read from the ladder (`planner-legacy.ts:685-689`). */
+/** The real terminal rung's goal, read from the ladder (`planner-ladder.ts:652-655`). */
 export const M3_TERMINAL_GOAL = Object.freeze({
   kind: 'craft',
   targetItem: ENDER_EYE,
@@ -136,13 +136,13 @@ export const M3_TERMINAL_GOAL = Object.freeze({
  */
 export const M3_CHAIN_SOURCES = Object.freeze({
   ladder_blaze_rods:
-    'packages/buddy-driver/planner-legacy.ts:675-679 id=blaze_rods satisfied blaze_rod>=7 / goals collect 7 x blaze_rod',
+    'packages/buddy-driver/planner-ladder.ts:642-645 id=blaze_rods satisfied blaze_rod>=7 / goals collect 7 x blaze_rod',
   ladder_ender_pearls:
-    'packages/buddy-driver/planner-legacy.ts:680-684 id=ender_pearls satisfied ender_pearl>=12 / goals collect 12 x ender_pearl',
+    'packages/buddy-driver/planner-ladder.ts:647-650 id=ender_pearls satisfied ender_pearl>=12 / goals collect 12 x ender_pearl',
   ladder_ender_eyes:
-    'packages/buddy-driver/planner-legacy.ts:685-689 id=ender_eyes satisfied ender_eye>=12 / goals craft 12 x ender_eye',
+    'packages/buddy-driver/planner-ladder.ts:652-655 id=ender_eyes satisfied ender_eye>=12 / goals craft 12 x ender_eye',
   terminal_goal_want:
-    'packages/jev-agent/src/candidates.ts:5920-5924 craftGoalRequirement(current.requiredCount) -> planNextCraftStep want',
+    'packages/jev-agent/src/candidates.ts:7262-7266 craftGoalRequirement(current.requiredCount) -> planNextCraftStep want',
   planner_want_check:
     'packages/jev-agent/src/crafting.ts:201-208 planNextCraftStep(... want) + have(item, want)',
   gate_eye_threshold:
@@ -404,17 +404,19 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
     runnerOutLines.push(bootLine)
     if (includeAuthority) {
       const generationId = `fixture-${run.runId}`
+      const requestId = `req-${run.runId}-1`
       const system2Identity =
         `generationId=${generationId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
         `configuredProvider=${FIXTURE_SYSTEM2_PROVIDER} configuredModel=${FIXTURE_SYSTEM2_MODEL} trigger=queue_empty`
       runnerOutLines.push(
-        `[${stamp(base + 1)}] GENERATION_READY id=${generationId} generationId=${generationId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
+        `[${stamp(base + 1)}] GENERATION_READY id=${generationId} generationId=${generationId} runId=${run.runId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
           `system2ConfiguredProvider=${FIXTURE_SYSTEM2_PROVIDER} system2ConfiguredModel=${FIXTURE_SYSTEM2_MODEL} ` +
-          `generation=${index + 1} policy=typesafe model=typesafe-ai/jev ` +
+          `generation=${index + 1} policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev ` +
           `planner=llm deterministicFallbackEnabled=false`,
       )
       runnerOutLines.push(
-        `[${stamp(base + 1.5)}] SYSTEM2_AUTHORITY_INPUT ${system2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL}`,
+        `[${stamp(base + 1.5)}] SYSTEM2_AUTHORITY_INPUT ${system2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL} ` +
+          `requestId=${requestId} runId=${run.runId}`,
       )
     }
     run.samples.forEach((sample, sampleIndex) => {
@@ -439,12 +441,18 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
     }
     if (includeAuthority) {
       const generationId = `fixture-${run.runId}`
+      const requestId = `req-${run.runId}-1`
       const system2Identity =
         `generationId=${generationId} sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} ` +
         `configuredProvider=${FIXTURE_SYSTEM2_PROVIDER} configuredModel=${FIXTURE_SYSTEM2_MODEL} trigger=queue_empty`
       runnerOutLines.push(
         `[${stamp(base + 3)}] SYSTEM2_AUTHORITY_DECISION ${system2Identity} provider=${FIXTURE_SYSTEM2_PROVIDER} model=${FIXTURE_SYSTEM2_MODEL} chosen=craft` +
-          ` runId=${run.runId}`,
+          ` requestId=${requestId} runId=${run.runId}`,
+      )
+      runnerOutLines.push(
+        `[${stamp(base + 3.5)}] SYSTEM2_PLAN_APPLIED requestId=${requestId} generationId=${generationId} ` +
+          `sourceSha=${FIXTURE_SOURCE_SHA} buildHash=${FIXTURE_BUILD_HASH} runId=${run.runId} ` +
+          `op=patch accepted=true applied=1`,
       )
       decisionsLines.push(
         JSON.stringify({
@@ -455,6 +463,7 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
           sourceSha: FIXTURE_SOURCE_SHA,
           source: 'jev',
           kind: 'craft',
+          jev: { model: 'typesafe-ai/jev' },
           reason: 'fixture:model_authored_jev_decision',
         }),
       )
@@ -467,6 +476,7 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
           sourceSha: FIXTURE_SOURCE_SHA,
           source: 'jev',
           kind: 'craft',
+          jev: { model: 'typesafe-ai/jev' },
           reason: 'fixture:model_authored_jev_decision',
         }),
       )
@@ -517,6 +527,7 @@ export function runRealGate({
     ? null
     : {
         runId: boundRun.runId,
+        worldKey: { serverId: 'fixture:offline', dimension, worldEpoch: 1 },
         currentInventoryObservation: {
           record: 'current-inventory-observation',
           schemaVersion: 1,
