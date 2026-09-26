@@ -499,5 +499,5 @@ A future discovery in these classes should trigger architecture review rather th
 
 Executable prototype: `packages/kernel/v4.1/model.ts`.
 Executable acceptance tests: `packages/kernel/v4.1/model.test.ts`.
-Machine-oriented invariants: `docs/packages/kernel/v4.1/INVARIANTS.md`.
-Counterexample suite: `packages/kernel/v4.1/ADVERSARIAL-SCENARIOS.md`.
+Machine-oriented invariants: `docs/architecture/v4.1/INVARIANTS.md`.
+Counterexample suite: `docs/architecture/v4.1/ADVERSARIAL-SCENARIOS.md`.

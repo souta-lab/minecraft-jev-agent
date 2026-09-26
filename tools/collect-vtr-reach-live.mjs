@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Read-only collector for one already-running VTR Reach probe.
 //
 // The resident must already have been configured with BUDDY_VTR_REACH_PROBE=1
@@ -9,7 +9,7 @@
 // deterministic VTR_VERIFY row precedes the matching typed SUCCESS outcome.
 //
 // Example:
-//   node tools/collect-vtr-reach-live.mjs \
+//   bun tools/collect-vtr-reach-live.mjs \
 //     --host-log /path/to/buddy.log \
 //     --run-journal /path/to/run.jsonl \
 //     --jev-calls /path/to/jev-calls.jsonl \
@@ -32,7 +32,7 @@ const MODEL_ACTIVITY_RE = /SYSTEM2_(?:PLAN|DECISION|PROVIDER|LLM)|(?:JEV|SYSTEM2
 const VTR_TRANSITION_MODEL_METRICS = 'VTR_TRANSITION_MODEL_METRICS'
 const LEGACY_ACTUATION_RE = /(?:selectedBy=(?:jev|legacy|option|goalqueue)|LEGACY_ACTUATION|legacyActuation=true|authority=(?:legacy|option|goalqueue)|(?:GOAL_QUEUE|OPTION)_ACTUATION)/iu
 
-const HELP = `Usage: node tools/collect-vtr-reach-live.mjs --host-log <buddy.log> --run-journal <run.jsonl>
+const HELP = `Usage: bun tools/collect-vtr-reach-live.mjs --host-log <buddy.log> --run-journal <run.jsonl>
   --jev-calls <jev-calls.jsonl> --jev-decisions <decisions.jsonl>
   --system2-journal <system2.jsonl> --mission-file <mission.json>
   --source-sha <40-char-BOOT-sha> --output <capture.json>

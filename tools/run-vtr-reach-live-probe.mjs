@@ -999,8 +999,8 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
   const xdgConfig = join(home, '.config')
   const xdgCache = join(attemptRoot, 'cache', 'bun-install')
   const bunCache = join(attemptRoot, 'cache', 'bun-install-store')
-  const npmCache = join(attemptRoot, 'cache', 'npm-install')
-  for (const directory of [home, xdgConfig, xdgCache, bunCache, npmCache]) mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const depsCache = join(attemptRoot, 'cache', 'deps-install')
+  for (const directory of [home, xdgConfig, xdgCache, bunCache, depsCache]) mkdirSync(directory, { recursive: true, mode: 0o700 })
   const readinessBefore = inspectExactSourceDependencyReadiness(runtimeSource)
   const { lockPath, lockSha256 } = readinessBefore
   const installEnvironment = {
@@ -1012,8 +1012,8 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
     BUN_CONFIG_NO_ENV_FILE: '1',
     NPM_CONFIG_USERCONFIG: '/dev/null',
     npm_config_userconfig: '/dev/null',
-    NPM_CONFIG_CACHE: npmCache,
-    npm_config_cache: npmCache,
+    NPM_CONFIG_CACHE: depsCache,
+    npm_config_cache: depsCache,
     NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org/',
     npm_config_registry: 'https://registry.npmjs.org/',
   }
@@ -1050,7 +1050,7 @@ function runFrozenInstall(runtimeSource, attemptRoot) {
       xdgConfigHome: relative(attemptRoot, xdgConfig).split(sep).join('/'),
       xdgCacheHome: relative(attemptRoot, xdgCache).split(sep).join('/'),
       bunInstallCacheDir: relative(attemptRoot, bunCache).split(sep).join('/'),
-      npmCache: relative(attemptRoot, npmCache).split(sep).join('/'),
+      depsCache: relative(attemptRoot, depsCache).split(sep).join('/'),
       npmUserConfig: '/dev/null',
       registry: 'https://registry.npmjs.org/',
       envFileLoading: false,
@@ -2417,7 +2417,7 @@ async function startResident(options, sourceSha, attemptRoot, runtimeSource, run
     serverId: `127.0.0.1:${options.port}`,
     startupComplete: false,
   }
-  const handle = spawnCaptured('node', [guardScript, '--audit', auditPath, '--', process.execPath, '--no-env-file', residentScript], {
+  const handle = spawnCaptured('bun', [guardScript, '--audit', auditPath, '--', process.execPath, '--no-env-file', residentScript], {
     cwd: runtimeSource,
     env,
     logPath: guardLogPath,
@@ -3265,7 +3265,7 @@ function cleanupFailedRunSetup(sourceRoot, runtimeSource, attemptRoot) {
   const worktree = removePreflightWorktree(sourceRoot, runtimeSource)
   const caches = []
   for (const relativePath of [
-    'cache/bun-install', 'cache/bun-install-store', 'cache/npm-install',
+    'cache/bun-install', 'cache/bun-install-store', 'cache/deps-install',
     'home/bun-install', 'home/fixture-test', 'tmp/bun-install', 'tmp/fixture-test',
   ]) {
     const candidate = join(attemptRoot, relativePath)

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Normalize an already-stopped legacy Reach run into the comparator input.
 // This is read-only with respect to the legacy archive/repository and never
 // starts a Minecraft server or invents absent measurements.

@@ -17,6 +17,27 @@ aspirational fiction.
 | `packages/kernel/v4.1/` | The authority kernel (`kernel.ts`) + contract docs | `src/vtr/` was removed once empty: no cross-feature mechanism currently lives in jev-agent. |
 | flat `packages/jev-agent/src/*.ts` | Transitional modules (see §2) | Awaiting canonical addresses as host contracts shed backend types. |
 
+## 1b. Monorepo-level ownership (repo root)
+
+The repository root is a composition surface only. Every top-level path has
+exactly one owner class; `bun-tests/repo-layout.test.ts` guards it.
+
+| Path | Owner | Rule |
+|---|---|---|
+| `packages/jev-agent/` | Agent workspace (sensor/state/candidates/Jev/Skills/VERIFY, feature packages inside `src/`) | Runtime product code. |
+| `packages/buddy-driver/` | Resident HOST workspace | Runtime product code; sole kernel-internal wiring. |
+| `packages/jev-harness/` | Jev decision-policy harness | Typed questions/heads/import firewall. |
+| `packages/system2-harness/` | Sparse System2 reasoning harness | Proposal/compile/commit. |
+| `packages/kernel/` | Shared V4.1.2 executable kernel (`v4.1/` subtree) | Leaf package: imports only `node:`/`bun:test`; spec prose lives in `docs/architecture/v4.1/`. |
+| `packages/mcp-server/` | Bedrock MCP companion server + CLI + test | Self-contained; no sibling imports. |
+| `packages/mcbot/`, `packages/companion/` | Movement substrate / minimal companion bot | Independent workspaces. |
+| `tools/` | Repository automation (gates, evidence, orchestration) | Tooling only, no product code. |
+| `bun-tests/` | Repository-wide test battery (package suites + tool fixtures + `repo-layout.test.ts`) | Monorepo-level integration only; feature tests colocate with their package. |
+| `ops/` | Operator/runtime infrastructure (`launch/`, `deploy/`, `keydrop/`) | No production imports. |
+| `docs/` | All documentation; `docs/history/` for superseded material | No executable source. |
+| `runs/` | Generated run-output sink | Git-ignored; never tracked source. |
+| `ISSUE-*.json`, `MILESTONE-CONTRACT.json`, `OPERATOR-DECISIONS.json`, `AGENTS.md`, `README.md`, `package.json`, `bun.lock`, `.gitignore`, `.github/` | Root coordination/composition surface | Machine-readable frontier genuinely consumed by root-level tooling. |
+
 ## 2. Flat-file classification (transitional remainder)
 
 These files still live at `src/` root. The owner column is the canonical

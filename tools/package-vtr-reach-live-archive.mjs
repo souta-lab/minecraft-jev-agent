@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Package already-captured VTR Reach evidence for the read-only acceptance
 // validator. This adapter never starts a runtime, repairs an archive, or
 // manufactures absent input files.

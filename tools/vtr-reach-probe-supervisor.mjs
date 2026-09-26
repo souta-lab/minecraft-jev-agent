@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // HOST-side lifecycle coordinator for one isolated no-LLM VTR Reach probe.
 // It does not own VTR decisions or issue gameplay commands. Runtime lifecycle,
 // capture, collection, archive sealing and validation are explicit adapters.

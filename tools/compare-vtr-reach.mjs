@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Read-only comparison of an old-path Reach observation with a VTR Reach probe.
 //
 // Usage:
