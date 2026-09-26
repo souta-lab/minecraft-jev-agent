@@ -2300,11 +2300,16 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   syncPortalSiteMemory('generation-start')
   // Same for a Nether-structure site already in scan range at generation start.
   syncStructureSiteMemory('generation-start')
-  // V4.1.2 Phase-1 SHADOW ONLY: the host replays every observed mutation
-  // dispatch and the Reach Transition lifecycle through the V4.1.2 kernel as an
-  // observer. Kernel authority is OFF here: nothing the shadow decides can
-  // block, reroute, or authorize production actuation. Unmapped or
-  // transition-unattributed mutations are journaled as migration blockers.
+  // V4.1.2 kernel authority session.
+  // Default 'shadow': the host replays every observed mutation dispatch and the
+  // Reach Transition lifecycle through the V4.1.2 kernel as an observer only —
+  // kernel decisions cannot block, reroute, or authorize production actuation.
+  // `BUDDY_VTR_KERNEL_AUTHORITY=1` selects 'authority': the same kernel path
+  // runs causally BEFORE every gated Reach act and its verdict gates
+  // production; a denial fails closed and is journaled. In authority mode the
+  // same flag also installs the legacy-Reach kill-switch inside the controller
+  // (see JevAgentOptions.kernelAuthority), so a denied act never falls back.
+  const kernelAuthorityMode = process.env.BUDDY_VTR_KERNEL_AUTHORITY?.trim() === '1' ? 'authority' as const : 'shadow' as const
   const kernelShadow = createKernelShadowSession({
     world: {
       serverId: ctx.worldKey.serverId,
@@ -2313,7 +2318,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     },
     generationId: id,
     journalPath: join(ctx.logDir, 'kernel-shadow.jsonl'),
+    authorityMode: kernelAuthorityMode,
   })
+  ctx.log('KERNEL_AUTHORITY_MODE', { mode: kernelAuthorityMode, generationId: id })
   // Late-bound: the controller (and its executor projection) exists only after
   // the leased bot is built. The resolver reads the CURRENT claim at mutation
   // time, so dispatches are attributed to whichever authority holds the body.
@@ -3051,6 +3058,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     actuation: 'pathfinder',
     actuationPort,
     kernelShadow: kernelShadow.observe,
+    kernelAuthority: kernelShadow.authority ?? undefined,
     reach: 5,
     scanRadius: 48,
     verbose: true,
@@ -3130,8 +3138,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     id,
     journal: join(ctx.logDir, 'kernel-shadow.jsonl'),
     world: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
-    kernelAuthority: 'off',
-    phase: 'shadow-only',
+    kernelAuthority: kernelAuthorityMode === 'authority' ? 'on' : 'off',
+    legacyReachAuthority: kernelAuthorityMode === 'authority' ? 'off' : 'shadow-observed',
+    phase: kernelAuthorityMode === 'authority' ? 'production-authority' : 'shadow-only',
   })
   // The stock fallback has no DESCEND branch; without this wrapper a stalled
   // stone/iron goal whose only productive candidate is a descent step WAITs
@@ -3369,6 +3378,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           kernelDenied: shadowSummary.kernelDenied,
           blockers: shadowSummary.blockers.length,
           coverageComplete: shadowSummary.coverageComplete,
+          authorityMode: shadowSummary.authorityMode,
+          gateDenials: shadowSummary.gateDenials.length,
         })
         proposeLedger()
       })
@@ -3576,6 +3587,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         kernelDenied: shadowSummary.kernelDenied,
         blockers: shadowSummary.blockers.length,
         coverageComplete: shadowSummary.coverageComplete,
+        authorityMode: shadowSummary.authorityMode,
+        gateDenials: shadowSummary.gateDenials.length,
       })
     },
     status,

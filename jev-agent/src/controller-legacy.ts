@@ -184,7 +184,7 @@ import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
 import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
 import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
 import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
-import type { KernelShadowSink, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority, KernelShadowSink, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
 import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
 import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
 import { assessReachViability } from './vtr/reach-safety.ts'
@@ -457,6 +457,13 @@ export interface JevAgentOptions {
    * returns authority or gates a production decision.
    */
   kernelShadow?: KernelShadowSink
+  /**
+   * V4.1.2 Phase-2 production-authority gate. Presence IS the kill-switch:
+   * while set, legacy Reach scheduling for the Mission item is always
+   * withheld (no fallback), and the Reach runtime consults the kernel before
+   * every gated act. When absent the runtime stays in shadow-observe mode.
+   */
+  kernelAuthority?: KernelReachAuthority
   /** maximum time between decisions while idle (the fallback heartbeat) */
   heartbeatMs: number
   /** which world events may request a decision */
@@ -3067,6 +3074,7 @@ export class JevController {
       lastRouteDecision: this.reachVtrCells.lastRouteDecision,
       logger: this.logger,
       kernelShadow: this.options.kernelShadow,
+      kernelAuthority: this.options.kernelAuthority,
     }).runtime
   }
 
@@ -4800,7 +4808,11 @@ export class JevController {
       handoff.contractHash !== metadata.contractHash ||
       reportedOutcome.contractHash !== handoff.contractHash ||
       reportedState.contractHash !== handoff.contractHash ||
-      reportedOutcome.kind !== handoff.outcome.kind
+      // The kernel may downgrade a controller-reported SUCCESS to
+      // CONTRACT_VIOLATION when VERIFY_SUCCESS is denied; that divergence is
+      // the designed authority-denial outcome, not a handoff corruption.
+      (reportedOutcome.kind !== handoff.outcome.kind &&
+        !(reportedOutcome.kind === 'SUCCESS' && handoff.outcome.kind === 'CONTRACT_VIOLATION'))
     ) {
       this.logger.error(
         'vtr',
@@ -4822,7 +4834,11 @@ export class JevController {
     // SUCCESS is evidence-backed predicate verification, irrespective of which
     // runtime callback observed it. The validator and downstream journal use
     // this boundary to distinguish verified closure from an action/step result.
-    const terminalBoundary = outcome.kind === 'SUCCESS' ? 'verified-terminal' : boundary
+    // A kernel-denied SUCCESS arrives here already downgraded, so it must not
+    // inherit the caller's 'verified-terminal' label.
+    const terminalBoundary = outcome.kind === 'SUCCESS'
+      ? 'verified-terminal'
+      : boundary === 'verified-terminal' ? 'typed-terminal' : boundary
     let settleVerifiedAction = false
     if (action !== undefined) {
       const current = this.reachRuntimeAdapter.currentAction()
@@ -5256,18 +5272,23 @@ export class JevController {
       let candidates = grounded.candidates
       const vtrMission = this.options.vtrMission
       if (vtrMission !== null && vtrMission !== undefined) {
+        // Kill-switch: with the kernel authority gate installed, legacy Reach
+        // scheduling is OFF unconditionally — a denied/held VTR decision must
+        // never fall back into a same-body same-predicate legacy walk. In
+        // shadow mode the tick-scoped VTR ownership still governs.
+        const legacyReachOff = this.options.kernelAuthority !== undefined
         const legacyReachFilter = filterLegacyReachCandidates({
           candidates,
           world: state,
           missionItem: vtrMission.item,
           missionSourceNames: minecraftMissionSourceNames(vtrMission.item),
-          vtrOwnsReachMove: this.vtrOwnsReachMoveThisTick,
+          vtrOwnsReachMove: this.vtrOwnsReachMoveThisTick || legacyReachOff,
         })
         if (legacyReachFilter.withheld.length > 0) {
           this.logger.info(
             'vtr',
-            `VTR_LEGACY_REACH_MOVE_WITHHELD mission=${vtrMission.id} count=${legacyReachFilter.withheld.length}`,
-            { mission: vtrMission, candidates: legacyReachFilter.withheld.map((candidate) => candidate.id), authority: 'vtr-transition' },
+            `VTR_LEGACY_REACH_MOVE_WITHHELD mission=${vtrMission.id} count=${legacyReachFilter.withheld.length} killSwitch=${legacyReachOff}`,
+            { mission: vtrMission, candidates: legacyReachFilter.withheld.map((candidate) => candidate.id), authority: legacyReachOff ? 'v4.1.2-kernel' : 'vtr-transition' },
             this.tickCounter,
           )
         }
