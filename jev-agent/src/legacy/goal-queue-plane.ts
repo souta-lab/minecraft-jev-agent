@@ -12,29 +12,28 @@ import type { AbandonClassification, OptionAttemptTracker } from '../abandonPoli
 import { formatSurfaceAscentRefused, surfaceAscentRouteless } from '../candidates.ts'
 import type { NotExecutableHereBinding, SurfaceAscentRefusal } from '../candidates.ts'
 import { optionIdForGoal } from '../causal.ts'
-import { sensorOptions } from '../controller-shared.ts'
 import type { SensorOptionSlice } from '../controller-shared.ts'
 import type { DecisionLlmResummonLog, DecisionSubgoalLog } from '../decisionlog.ts'
-import { PICKAXE_TIER_ORDER, smeltInputFor } from '../gameData.ts'
+import { smeltInputFor } from '../gameData.ts'
 import { formatNonProgressEscalated, formatNonProgressYield, formatPlanIdentity, formatPlanIdentityChanged, formatRowDeferredNotExecutableHere, formatRowNotExecutableHere, notExecutableReplanRequest, planReplanRequest } from '../goalQueue.ts'
-import type { GoalQueue, PlanIdentity, PlannedGoal, QueuedGoal } from '../goalQueue.ts'
-import { evaluateGoalSuccess, verifiedBlockRecordsFromKnownResources } from '../goalSuccess.ts'
+import type { GoalQueue, PlanIdentity, QueuedGoal } from '../goalQueue.ts'
+import { evaluateGoalSuccess } from '../goalSuccess.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from '../predicateGoal.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from '../resourceClass.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from '../goalSuccess.ts'
 import { abandonRequested, decisionIdFrom } from '../jev.ts'
 import type { EventLogger, JevResult } from '../jev.ts'
 import type { JevSemanticProjection, PreviousDecisionFacts, SkillOutcomePacket } from '../jevSemanticProjection.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, OBSIDIAN, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED } from '../netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE } from '../netherPortalPlan.ts'
 import type { PortalFrameSite } from '../netherPortalPlan.ts'
-import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from '../optionSpec.ts'
+import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, queuedToPlanned } from '../optionSpec.ts'
 import type { CurrentOptionContext, OptionWorldSnapshot } from '../optionSpec.ts'
 import { formatAbandonReason, shouldAdoptAbandon } from '../placementGuard.ts'
 import type { AbandonReason, PrerequisiteProtection } from '../placementGuard.ts'
 import type { PredicateEvaluation } from '../predicateGoal.ts'
 import type { ActionFailureEscalation, ReplanInputs, WaitStreakEscalation } from '../replanThrottle.ts'
 import type { DecisionTrigger } from '../scheduler.ts'
-import { bodyStarving, distance, sensedPortalFrameSites } from '../state.ts'
+import { bodyStarving, distance } from '../state.ts'
 import type { AgentSignals, GoalState, Vec3Json, WorldState } from '../state.ts'
 import type { LlmSummonReason, System2Outcome } from '../system2.ts'
 import type { DigMemory } from '../worldMemory.ts'
@@ -727,112 +726,11 @@ export function consumeTransition(host: GoalQueuePlaneHost): DecisionSubgoalLog 
 }
 
 
-export function queuePreconditionSnapshot(host: GoalQueuePlaneHost): OptionWorldSnapshot {
-  const counts = host.inventorySnapshot()
-  let toolRank = 0
-  for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
-    const name = PICKAXE_TIER_ORDER[i]
-    if (name !== undefined && (counts[name] ?? 0) > 0) toolRank = i + 1
-  }
-  const knownStations = new Set<'crafting_table' | 'furnace'>()
-  if ((counts['crafting_table'] ?? 0) > 0) knownStations.add('crafting_table')
-  if ((counts['furnace'] ?? 0) > 0) knownStations.add('furnace')
-  for (const resource of host.options.knownResources ?? []) {
-    if (resource.name === 'furnace') knownStations.add('furnace')
-    if (resource.name === 'crafting_table') knownStations.add('crafting_table')
-  }
-  const position = host.bot.entity?.position
-  return makeOptionSnapshot({
-    inventory: counts,
-    dimension: host.bot.game?.dimension ?? null,
-    position: position === undefined ? null : { x: position.x, y: position.y, z: position.z },
-    health: host.bot.health ?? null,
-    toolRank,
-    knownStations: [...knownStations],
-    knownOres: [],
-  })
-}
-
-
-export function installDominatedPrerequisiteReason(host: GoalQueuePlaneHost): void {
-  const reason = host.options.dominatedGoalReason
-  if (reason === undefined) {
-    host.queue.setDominatedPrerequisiteReason(null)
-    return
-  }
-  host.queue.setDominatedPrerequisiteReason((goal) => reason(goal, host.inventorySnapshot()))
-}
-
-
 export function installGoalSuccessProbe(host: GoalQueuePlaneHost): void {
   host.queue.setGoalSuccessProbe(
     (goal) => evaluateGoalSuccess(goal, host.goalWorldProbe()),
     (line, detail) => host.logger?.warn('queue', line, detail, host.tickCounter),
   )
-}
-
-
-export function goalWorldProbe(host: GoalQueuePlaneHost): GoalSuccessWorldProbe {
-  const scratch = host.bot.entity?.position?.clone()
-  return {
-    dimension: host.bot.game?.dimension ?? null,
-    blockAt: (cell) => {
-      if (scratch === undefined) return null
-      try {
-        return host.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
-      } catch {
-        // An unreadable cell is unobservable world truth, never absence.
-        return null
-      }
-    },
-    recordedPortalSites: host.recordedPortalSites(),
-    verifiedBlockRecords: verifiedBlockRecordsFromKnownResources(host.options.knownResources),
-  }
-}
-
-
-export function protectedGoalRetireReason(host: GoalQueuePlaneHost,
-goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null {
-  // An `smelt:iron_ingot` row exists only to feed a craft that consumes the
-  // ingot. Once that craft is resolved — the bot holds the flint_and_steel it
-  // produced — and nothing live still wants an iron ingot, the row can only
-  // re-run a smelt with no consumer, while its own station precondition (a
-  // furnace) blocks the queue head indefinitely. Observed live: the queue head
-  // was `smelt 1 x iron_ingot` with
-  // `CANDIDATE_STARVATION blockedBy=precondition:station:furnace repeat=36`
-  // while the real next step, `collect 10 x obsidian`, sat behind it.
-  if (goal.kind === 'smelt' && goal.targetItem === IRON_INGOT) {
-    const stillWanted =
-      incoming.some((planned) => planned.targetItem === IRON_INGOT) ||
-      host.queue.state.goals.some(
-        (row) =>
-          row.id !== goal.id &&
-          row.status !== 'done' &&
-          row.status !== 'impossible' &&
-          row.targetItem === IRON_INGOT,
-      )
-    const reason = orphanedSmeltPrerequisiteReason({
-      kind: goal.kind,
-      item: goal.targetItem,
-      held: host.countItem(FLINT_AND_STEEL),
-      stillWanted,
-    })
-    if (reason !== null) return reason
-  }
-  if (goal.kind !== 'collect' || goal.targetItem !== OBSIDIAN) return null
-  const continuesPortalFrame = incoming.some(
-    (planned) =>
-      planned.kind === 'place' &&
-      planned.targetItem === OBSIDIAN &&
-      (planned.optionTemplateId === 'place:obsidian' || planned.description.toLowerCase().includes('portal frame')),
-  )
-  if (!continuesPortalFrame) return null
-  const sensedSites = sensedPortalFrameSites(host.bot, sensorOptions(host.options))
-  host.rememberPortalFrameSites(sensedSites, host.currentDimension())
-  const existing = Math.max(0, ...sensedSites.map((site) => site.existingFrame?.length ?? 0))
-  const held = host.countItem(OBSIDIAN)
-  if (existing + held < PORTAL_OBSIDIAN_REQUIRED) return null
-  return `portal frame coverage existing=${existing} held=${held} required=${PORTAL_OBSIDIAN_REQUIRED}`
 }
 
 

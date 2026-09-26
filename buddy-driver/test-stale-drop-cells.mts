@@ -511,11 +511,15 @@ addCase('(E) a contradicted target ends the skill with SKILL_END/SKILL_INTERRUPT
 })
 
 addCase('(E) the cancellation is wired into the tick, stops the running skill, and never re-targets', () => {
-  const source = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSource = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
+  const source =
+    controllerSource +
+    readFileSync(new URL('../jev-agent/src/legacy/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
+    readFileSync(new URL('../jev-agent/src/legacy/retrieval-progress.ts', import.meta.url), 'utf8')
   const wired = /this\.cancelContradictedSkillTarget\(state\)/.test(source)
   const cancels = /this\.executor\.cancelCurrent\(`contradicted target/.test(source)
   const falsifiedOnly = /evidence\.status === 'falsified' &&/.test(source)
-  const noRetarget = !/cancelContradictedSkillTarget[\s\S]{0,3000}RETRIEVAL_ESCALATION/.test(source)
+  const noRetarget = !/cancelContradictedSkillTarget[\s\S]{0,3000}RETRIEVAL_ESCALATION/.test(controllerSource)
   const markers = ["SKILL_END", "SKILL_INTERRUPT", "'KNOWN_RESOURCE_FALSIFIED'", "'KNOWN_RESOURCE_RETIRED'"].every(
     (token) => source.includes(token),
   )

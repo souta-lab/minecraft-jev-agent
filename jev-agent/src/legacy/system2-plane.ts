@@ -10,13 +10,11 @@ import { optionIdForGoal } from '../causal.ts'
 import type { DecisionLlmResummonLog } from '../decisionlog.ts'
 import type { Executor } from '../executor.ts'
 import { failureCount } from '../failureMemory.ts'
-import { PICKAXE_TIER_ORDER } from '../gameData.ts'
 import type { GoalQueue, HeadAnswerWarrant, PlannedGoal, QueuedGoal } from '../goalQueue.ts'
 import type { EventLogger } from '../jev.ts'
 import { airBand, buildJevSemanticProjection, buildSemanticCombatFacts, diffSemanticProjections, foodBand, healthBand, semanticOffhand, semanticWornArmor, threatBand } from '../jevSemanticProjection.ts'
 import type { GroundedFact, JevSemanticProjection, PreviousDecisionFacts, SemanticProgressFacts, SkillOutcomePacket } from '../jevSemanticProjection.ts'
 import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from '../modelFailure.ts'
-import { makeOptionSnapshot } from '../optionSpec.ts'
 import type { OptionWorldSnapshot } from '../optionSpec.ts'
 import { bestToolTier } from '../reachability.ts'
 import { formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled } from '../replanThrottle.ts'
@@ -310,52 +308,10 @@ export function buildSemanticProjection(host: System2PlaneHost,
 }
 
 
-export function objectiveState(host: System2PlaneHost): System2Objective {
-  return {
-    targetItem: host.goal.targetItem,
-    requiredCount: host.goal.requiredCount,
-    haveCount: host.goal.haveCount,
-    complete: host.goal.complete,
-  }
-}
-
-
 export function semanticOptionSnapshot(host: System2PlaneHost): OptionWorldSnapshot {
   return host.lastWorldState === null
     ? host.queuePreconditionSnapshot()
     : host.optionSnapshot(host.lastWorldState)
-}
-
-
-export function optionSnapshot(host: System2PlaneHost,
-state: WorldState): OptionWorldSnapshot {
-  const counts = host.inventorySnapshot()
-  let toolRank = 0
-  for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
-    const name = PICKAXE_TIER_ORDER[i]
-    if (name !== undefined && (counts[name] ?? 0) > 0) toolRank = i + 1
-  }
-  const knownStations = new Set<'crafting_table' | 'furnace'>()
-  if ((counts['crafting_table'] ?? 0) > 0) knownStations.add('crafting_table')
-  if ((counts['furnace'] ?? 0) > 0) knownStations.add('furnace')
-  if (state.craftingTables.length > 0) knownStations.add('crafting_table')
-  if ((state.furnaces?.length ?? 0) > 0) knownStations.add('furnace')
-  const knownOres: string[] = []
-  for (const resource of host.options.knownResources ?? []) {
-    if (resource.name === 'furnace') knownStations.add('furnace')
-    if (resource.name === 'crafting_table') knownStations.add('crafting_table')
-    if (resource.kind === 'ore') knownOres.push(resource.name)
-  }
-  const position = host.bot.entity?.position
-  return makeOptionSnapshot({
-    inventory: counts,
-    dimension: host.bot.game?.dimension ?? null,
-    position: position === undefined ? null : { x: position.x, y: position.y, z: position.z },
-    health: host.bot.health ?? null,
-    toolRank,
-    knownStations: [...knownStations],
-    knownOres,
-  })
 }
 
 

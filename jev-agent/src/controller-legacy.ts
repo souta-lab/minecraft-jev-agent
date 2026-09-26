@@ -25,7 +25,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -170,7 +170,7 @@ import { BODY_SUBMERGED, bodyStarving, buildWorldState, distance, entityVisibleF
 import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
-import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { resourceMatches } from './resourceClass.ts'
 import {
   filterLegacyReachCandidates,
   minecraftMissionSourceNames,
@@ -235,6 +235,8 @@ import * as queueplane from './legacy/goal-queue-plane.ts'
 import type { AbandonVerdict, GoalQueuePlaneHost } from './legacy/goal-queue-plane.ts'
 export { evaluateSurfaceRecovery, orphanedSmeltPrerequisiteReason, staleOreDescend } from './legacy/goal-queue-plane.ts'
 import type { System2PlaneHost } from './legacy/system2-plane.ts'
+import * as goalstate from './legacy/goal-state.ts'
+import type { GoalStateHost } from './legacy/goal-state.ts'
 import type { StallObserverHost } from './legacy/stall-observers.ts'
 import * as wedge from './legacy/wedge.ts'
 import type { WedgeHost } from './legacy/wedge.ts'
@@ -305,14 +307,13 @@ import type { MoveFailEntry, MoveFailurePathScope, MoveFailureReason } from './m
 // only observes and prunes.
 import { ACTION_REPEAT_EXHAUSTED_MARKER, ACTION_REPEAT_MARKER, ACTION_TARGET_RETIRED_MARKER, actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken, resolveRepeatedOutcomeLimit } from './repeatedOutcomeEscalation.ts'
 import type { RepeatedOutcomeEntryJson } from './repeatedOutcomeEscalation.ts'
-import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatAscentRefused, formatKnownResourceUnreachable, formatRetrieveStalled, pillarColumnUnsafeFromBlocks, planRetrievalEscalation, planVerticalApproachDetailed, resolveRetrievalStallTicks, selectPlaceableBlock } from './verticalPlan.ts'
+import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
 import { DIG_PATH_CAP, DigMemory } from './worldMemory.ts'
 import { formatContainerRefusal } from './containerAccess.ts'
 import type { ContainerRefusal } from './containerAccess.ts'
 import type { DigDir } from './worldMemory.ts'
-import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
 import {
   classifyAbandonReason,
@@ -2556,6 +2557,11 @@ export class JevController {
   /** DecisionEpochsHost view of this controller (same structural-cast pattern as reachHost). */
   private get epochsHost(): DecisionEpochsHost {
     return this as unknown as DecisionEpochsHost
+  }
+
+  /** GoalStateHost view of this controller (same structural-cast pattern as reachHost). */
+  private get goalStateHost(): GoalStateHost {
+    return this as unknown as GoalStateHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -5905,7 +5911,7 @@ export class JevController {
   // -------------------------------------------------------------------------
 
   private objectiveState(): System2Objective {
-    return system2plane.objectiveState(this.system2Host)
+    return goalstate.objectiveState(this.goalStateHost)
   }
 
   /**
@@ -5920,18 +5926,11 @@ export class JevController {
   }
 
   private predicateSnapshot(): { position: Vec3Json | null; dimension: string | null } {
-    const entity = this.bot.entity
-    if (entity === undefined) return { position: null, dimension: null }
-    return {
-      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-      dimension: this.bot.game?.dimension ?? null,
-    }
+    return goalstate.predicateSnapshot(this.goalStateHost)
   }
 
   private evaluateDescendGoal(goal: QueuedGoal): PredicateEvaluation | null {
-    const predicate = predicateForGoal(goal)
-    if (predicate === null) return null
-    return evaluateSpatialPredicate(predicate, this.predicateSnapshot())
+    return goalstate.evaluateDescendGoal(this.goalStateHost, goal)
   }
 
   /**
@@ -5958,35 +5957,7 @@ export class JevController {
     return portal.noteRouteExhaustion(this.portalHost, refusal)
   }
   private effectiveHave(): number {
-    const current = this.queue.current
-    if (current === null || current.targetItem === null) return 0
-    // M1 completion is inventory-verified: a subgoal only completes when the item
-    // is actually in the inventory. A dig whose drop was not picked up simply
-    // leaves the subgoal open and the bot mines another block. A wood goal counts
-    // every `*_log` the bot holds, so `birch_log` satisfies an `oak_log` goal.
-    // Issue #43: a fuel subgoal (`collect N x log (fuel)`) is satisfied by any
-    // accepted fuel item (log/planks/coal/charcoal/blaze_rod), not only logs. A
-    // smelt goal still counts its own output, never the fuel it consumes.
-    if (goalCollectsFuel(current)) return this.countFuelSubstitutes()
-    return this.countGoalCategory(current.targetItem)
-  }
-
-  private countFuelSubstitutes(): number {
-    let total = 0
-    for (const item of this.bot.inventory.items()) {
-      if (item.name === 'stick') continue
-      if (matchesResourceClass(item.name, 'fuel')) total += item.count
-    }
-    return total
-  }
-
-  private countGoalCategory(name: string): number {
-    if (!isResourceClass(name)) return this.countItem(name)
-    let total = 0
-    for (const item of this.bot.inventory.items()) {
-      if (matchesResourceClass(item.name, name)) total += item.count
-    }
-    return total
+    return goalstate.effectiveHave(this.goalStateHost)
   }
 
   private syncGoalToQueue(): void {
@@ -6002,18 +5973,11 @@ export class JevController {
   }
 
   private countItem(name: string): number {
-    const registry = this.bot.registry as { itemsByName?: Record<string, { id?: number }> } | undefined
-    const id = registry?.itemsByName?.[name]?.id
-    if (typeof id !== 'number') return 0
-    return this.bot.inventory.count(id, null)
+    return goalstate.countItem(this.goalStateHost, name)
   }
 
   private inventorySnapshot(): Record<string, number> {
-    const counts: Record<string, number> = {}
-    for (const item of this.bot.inventory.items()) {
-      counts[item.name] = (counts[item.name] ?? 0) + item.count
-    }
-    return counts
+    return goalstate.inventorySnapshot(this.goalStateHost)
   }
 
   private currentGoalPreconditionCause(state: WorldState): string | null {
@@ -6027,7 +5991,7 @@ export class JevController {
   }
 
   private optionSnapshot(state: WorldState): OptionWorldSnapshot {
-    return system2plane.optionSnapshot(this.system2Host, state)
+    return goalstate.optionSnapshot(this.goalStateHost, state)
   }
 
   /**
@@ -6036,7 +6000,7 @@ export class JevController {
    * the smelt item preconditions `staleOreDescend` inspects.
    */
   private queuePreconditionSnapshot(): OptionWorldSnapshot {
-    return queueplane.queuePreconditionSnapshot(this.queueHost)
+    return goalstate.queuePreconditionSnapshot(this.goalStateHost)
   }
 
   /**
@@ -6046,7 +6010,7 @@ export class JevController {
    * reload boundary.
    */
   private installDominatedPrerequisiteReason(): void {
-    return queueplane.installDominatedPrerequisiteReason(this.queueHost)
+    return goalstate.installDominatedPrerequisiteReason(this.goalStateHost)
   }
 
   /**
@@ -6067,7 +6031,7 @@ export class JevController {
 
   /** The live world facts the success-predicate probe may read. Plain reads only. */
   private goalWorldProbe(): GoalSuccessWorldProbe {
-    return queueplane.goalWorldProbe(this.queueHost)
+    return goalstate.goalWorldProbe(this.goalStateHost)
   }
 
   /**
@@ -6081,7 +6045,7 @@ export class JevController {
     return portal.recordedPortalSites(this.portalHost)
   }
   private protectedGoalRetireReason(goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null {
-    return queueplane.protectedGoalRetireReason(this.queueHost, goal, incoming)
+    return goalstate.protectedGoalRetireReason(this.goalStateHost, goal, incoming)
   }
 
   /**
@@ -6097,12 +6061,7 @@ export class JevController {
     return portal.rememberPortalFrameSites(this.portalHost, sites, dimension)
   }
   private logSubgoalStart(goal: QueuedGoal, inventory: Record<string, number>, cause: string): void {
-    this.logger.warn(
-      'queue',
-      `subgoal START [${goal.id}] ${goal.description} kind=${goal.kind} target=${goal.targetItem ?? 'none'} required=${goal.requiredCount} cause=${cause} inventory=${JSON.stringify(inventory)}`,
-      { id: goal.id, kind: goal.kind, targetItem: goal.targetItem, requiredCount: goal.requiredCount, cause },
-      this.tickCounter,
-    )
+    return goalstate.logSubgoalStart(this.goalStateHost, goal, inventory, cause)
   }
 
   /**
@@ -6309,25 +6268,7 @@ export class JevController {
    * remembered upper feature had no target at all, so the trap could not fire.
    */
   private capabilityTarget(): { y: number; key: string } | null {
-    const active = this.activeRetrieval
-    if (active !== null) return { y: active.target.y, key: this.retrievalKey(active) }
-    const entity = this.bot.entity
-    if (entity === undefined) return null
-    let best: KnownResource | null = null
-    for (const resource of this.signals.knownResources ?? []) {
-      if (resource.position.y <= entity.position.y) continue
-      if (best === null || resource.position.y > best.position.y) best = resource
-    }
-    const current = this.queue.current
-    const surfaceTargetY =
-      current?.kind === 'surface' && typeof current.targetY === 'number' && Number.isFinite(current.targetY)
-        ? current.targetY
-        : null
-    if (surfaceTargetY !== null && surfaceTargetY > entity.position.y && (best === null || surfaceTargetY > best.position.y)) {
-      return { y: surfaceTargetY, key: `surface:${current?.id ?? 'surface'}:${surfaceTargetY}` }
-    }
-    if (best === null) return null
-    return { y: best.position.y, key: `known:${best.name}@${best.position.x},${best.position.y},${best.position.z}` }
+    return goalstate.capabilityTarget(this.goalStateHost)
   }
 
   /**
@@ -6340,29 +6281,7 @@ export class JevController {
    * without spamming one line per tick.
    */
   private ascentRefusedByPlan(target: { y: number } | null): boolean {
-    const state = this.lastWorldState
-    const entity = this.bot.entity
-    if (state === null || entity === undefined || target === null) return false
-    if (this.lastWorldStateTick !== this.tickCounter - 1) return false
-    const decision = planVerticalApproachDetailed({
-      selfFeetY: entity.position.y,
-      selfPosition: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-      target: { x: entity.position.x, y: target.y, z: entity.position.z },
-      tunnel: state.signals.lastTunnel ?? null,
-      descent: state.descent,
-      stepCuts: state.stepCuts,
-      placeable: selectPlaceableBlock(state.inventory.counts),
-      columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-      inventory: state.inventory.counts,
-    })
-    const refusal = decision.ascentRefusal
-    if (decision.plan !== null || refusal === null) return false
-    const line = formatAscentRefused(refusal)
-    if (line !== this.lastAscentRefusalKey) {
-      this.lastAscentRefusalKey = line
-      this.logger.warn('agent', line, { ...refusal, goal: this.currentGoalKey() }, this.tickCounter)
-    }
-    return true
+    return goalstate.ascentRefusedByPlan(this.goalStateHost, target)
   }
 
   /**
