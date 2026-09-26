@@ -159,7 +159,7 @@ export function modelRecoveryDrainAction(host: ModelRecoveryHost): CurrentAction
   const recoveryReachId = host.modelRecoveryReachDrainTransitionId ?? null
   if (
     current !== null && current.status === 'running' &&
-    recoveryReachId !== null && current.authority === 'vtr-reach' && current.transitionId === recoveryReachId &&
+    recoveryReachId !== null && current.authorityLabel === 'vtr-reach' && current.transitionId === recoveryReachId &&
     host.reachTransition?.contract.transitionId === recoveryReachId && host.reachTransition.state.status === 'active'
   ) {
     return current

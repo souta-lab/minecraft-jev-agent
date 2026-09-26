@@ -12,6 +12,7 @@ import pathfinderModule from 'mineflayer-pathfinder'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import type { Candidate, Vec3Json } from './src/index.ts'
 import { forcedMoveTracker } from './src/executor.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 function opt(name: string, fallback: string): string {
   const index = process.argv.indexOf(`--${name}`)
@@ -108,7 +109,7 @@ async function runMove(
       collH: collidedHorizontally(),
     })
   }, 100)
-  const claim = executor.claim(candidate)
+  const claim = fixtureClaim(executor, candidate)
   const result = await Promise.race([
     claim.completion,
     sleep(budgetMs + 4000).then(() => null),

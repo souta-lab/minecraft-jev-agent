@@ -32,6 +32,7 @@ import { EventLogger } from './src/jev.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { ExecutionResult } from './src/executor.ts'
 import { classifyActionOutcome, truthfulActionOutcome } from './src/actionPostcondition.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -140,7 +141,7 @@ async function run(mode: AttackMode, goalDrop: string | null) {
     verifyTimeoutMs: 700,
     pickupPathTimeoutMs: 700,
   })
-  const result = await executor.claim(attackCandidate(goalDrop)).completion
+  const result = await fixtureClaim(executor, attackCandidate(goalDrop)).completion
   return { fixture, result }
 }
 

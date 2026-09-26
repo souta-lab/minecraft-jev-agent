@@ -14,7 +14,7 @@ import { createKernelAuthoritySession } from './kernel-authority-session.ts'
 import type { KernelAuthoritySession } from './kernel-authority-session.ts'
 import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
-import type { KernelReachAuthority } from '../jev-agent/src/reach/kernel-authority-map.ts'
+import type { KernelTransitionAuthority } from '../jev-agent/src/reach/kernel-authority-map.ts'
 
 interface Case {
   name: string
@@ -76,7 +76,7 @@ const vtrContext = {
   transitionContractHash: null,
 }
 
-function makeAuthoritySession(): { session: KernelAuthoritySession; gate: KernelReachAuthority } {
+function makeAuthoritySession(): { session: KernelAuthoritySession; gate: KernelTransitionAuthority } {
   const session = createKernelAuthoritySession({
     world: WORLD,
     generationId: 'gen-1',
@@ -93,7 +93,7 @@ function feedCommitPredicates(session: KernelAuthoritySession): void {
   session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
 }
 
-function admitAndActivate(gate: KernelReachAuthority, session: KernelAuthoritySession, transitionId: string): ReachTransitionContract {
+function admitAndActivate(gate: KernelTransitionAuthority, session: KernelAuthoritySession, transitionId: string): ReachTransitionContract {
   feedCommitPredicates(session)
   const contract = makeContract(transitionId)
   const admitted = gate.admitTransition(contract)

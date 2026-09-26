@@ -52,6 +52,7 @@ import {
 import type { StepLandingBlock, StepLandingReads } from './src/stepLanding.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 import type { Vec3Json } from './src/state.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -410,7 +411,7 @@ async function runLeg(feet: Vec3Json, grid: Grid, stubGuard = false): Promise<Le
     ;(executor as unknown as { guardStepLanding: () => void }).guardStepLanding = () => undefined
   }
   const start = fixture.position.clone()
-  const result = await executor.claim(retrieveCandidate(TARGET)).completion
+  const result = await fixtureClaim(executor, retrieveCandidate(TARGET)).completion
   const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
     .filter((line) => line.trim().length > 0)

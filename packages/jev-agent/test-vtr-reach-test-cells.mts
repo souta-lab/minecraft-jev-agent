@@ -34,7 +34,7 @@ export function installVtrReachTestRuntimePorts(controller: object): void {
       kind: action.kind,
       epoch: Number(action.epoch ?? 0),
       status: action.status,
-      authority: action.authority,
+      authorityLabel: action.authorityLabel,
       transitionId: action.transitionId,
       commitment: action.commitment,
     }
@@ -60,7 +60,7 @@ export function installVtrReachTestRuntimePorts(controller: object): void {
       try {
         const claim = fields.executor.claim(candidate, {
           liveStructureMembers: request.liveStructureMembers,
-          authority: 'vtr-reach',
+          authorityLabel: 'vtr-reach',
           transitionId: intent.transitionId,
           transitionContractHash: intent.contractHash,
           beforeMechanicalStep: request.beforeMechanicalStep,
@@ -81,8 +81,8 @@ export function installVtrReachTestRuntimePorts(controller: object): void {
       const count = fields.executor?.authorityConflictCount
       return typeof count === 'function' ? count.call(fields.executor) : Number(count ?? 0)
     },
-    nonVtrActuationCount: () => {
-      const count = fields.executor?.nonVtrActuationCount
+    nonReachTransitionActuationCount: () => {
+      const count = fields.executor?.nonReachTransitionActuationCount
       return typeof count === 'function' ? count.call(fields.executor) : Number(count ?? 0)
     },
   }

@@ -1,6 +1,6 @@
 // test-vtr-reach-kernel-authority.mts - V4.1.2 Phase-2 runtime gate wiring.
 //
-// Proves ReachMissionRuntime consults KernelReachAuthority causally BEFORE the
+// Proves ReachMissionRuntime consults KernelTransitionAuthority causally BEFORE the
 // gated production act, honors denials fail-closed, and never mints SUCCESS
 // the kernel refused. The gate is a recording stub here; the real kernel-side
 // semantics are proven in buddy-driver/test-kernel-authority.mts.
@@ -13,7 +13,7 @@ import {
   type ReachRuntimeSnapshot,
 } from './src/reach/controller.ts'
 import type { ReachIdentity, ReachTransitionContract } from './src/reach/transition.ts'
-import type { KernelReachAuthority } from './src/reach/kernel-authority-map.ts'
+import type { KernelTransitionAuthority } from './src/reach/kernel-authority-map.ts'
 import { RecordingKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 const identity: ReachIdentity = {
@@ -80,7 +80,7 @@ function makeSnapshot(contract: ReachTransitionContract, atMs: number, ensures: 
   }
 }
 
-function makeRuntime(authority: KernelReachAuthority): ReachMissionRuntime {
+function makeRuntime(authority: KernelTransitionAuthority): ReachMissionRuntime {
   return new ReachMissionRuntime({
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),

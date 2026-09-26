@@ -47,6 +47,7 @@ import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import * as executorModule from './src/executor.ts'
 import type { JsonlWriter } from './src/jev/client.ts'
 import type { Candidate, Vec3Json } from './src/index.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 /**
  * Namespace access (never a named import) so this fixture also RUNS on the
@@ -251,7 +252,7 @@ async function runMove(mode: LegMode) {
   })
   const target = moveCandidate(TARGET)
   const distanceBefore = fixture.position.distanceTo(TARGET)
-  const result = await executor.claim(target).completion
+  const result = await fixtureClaim(executor, target).completion
   return { result, fixture, distanceBefore, distanceAfter: fixture.position.distanceTo(TARGET) }
 }
 

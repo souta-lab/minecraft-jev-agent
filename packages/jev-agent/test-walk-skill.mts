@@ -46,8 +46,9 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import type { Candidate, CandidateKind } from './src/candidates.ts'
 import { ExecutionAuthorityConflict, Executor, defaultExecutorOptions } from './src/executor.ts'
-import type { ExecutionResult } from './src/executor.ts'
+import type { ExecutionClaimContext, ExecutionResult } from './src/executor.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
+import { fixtureClaimContext } from './test-claim-context.mts'
 import {
   MOVE_LEG_STOPPED,
 } from './src/stepLanding.ts'
@@ -517,7 +518,7 @@ interface MechanicalOwnershipObservation {
   leg: number
   effectKind: 'locomotion'
   actionId: string | null
-  authority: string | null
+  authorityLabel: string | null
   transitionId: string | null
   transitionContractHash: string | null
   commitmentId: string | null
@@ -565,7 +566,7 @@ async function runWalk(
     return {
       ...step,
       actionId: current?.id ?? null,
-      authority: current?.authority ?? null,
+      authorityLabel: current?.authorityLabel ?? null,
       transitionId: current?.transitionId ?? null,
       transitionContractHash: current?.transitionContractHash ?? null,
       commitmentId: current?.commitment?.commitmentId ?? null,
@@ -586,9 +587,8 @@ async function runWalk(
         return waypoint
       }
     : undefined
-  const claimContext = originalClaimContext === undefined && segmentResolver === undefined
-    ? undefined
-    : {
+  const claimContext: ExecutionClaimContext = {
+        ...fixtureClaimContext(candidate),
         ...(originalClaimContext ?? {}),
         ...(segmentResolver === undefined ? {} : { resolveVtrReachMechanicalWaypoint: segmentResolver }),
         ...(originalClaimContext?.beforeMechanicalStep === undefined ? {} : {
@@ -670,7 +670,7 @@ async function runWalk(
   let missingInitialContractHashRejected = false
   try {
     executor.claim(candidate, {
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId: 'transition:reach-test',
     } as unknown as Parameters<Executor['claim']>[1])
   } catch (error) {
@@ -682,39 +682,47 @@ async function runWalk(
     `rejected=${missingInitialContractHashRejected} active=${executor.current?.id ?? 'none'}`,
   )
   const vtr = executor.claim(candidate, {
-    authority: 'vtr-reach',
+    authorityLabel: 'vtr-reach',
     transitionId: 'transition:reach-test',
     transitionContractHash: 'contract:reach-test',
     beforeMechanicalStep: () => true,
   })
   check(
     '(vtr) one active executor lease records the VTR transition owner',
-    executor.current?.authority === 'vtr-reach' && executor.current.transitionId === 'transition:reach-test' &&
+    executor.current?.authorityLabel === 'vtr-reach' && executor.current.transitionId === 'transition:reach-test' &&
       executor.current.transitionContractHash === 'contract:reach-test',
-    `authority=${executor.current?.authority ?? 'none'} transition=${executor.current?.transitionId ?? 'none'} ` +
+    `authority=${executor.current?.authorityLabel ?? 'none'} transition=${executor.current?.transitionId ?? 'none'} ` +
       `contractHash=${executor.current?.transitionContractHash ?? 'none'}`,
   )
   let sameCandidateRejected = false
   try {
-    executor.claim(candidate, { authority: 'legacy' })
+    executor.claim(candidate, {
+      authorityLabel: 'fixture',
+      transitionId: 'transition:foreign-same-id',
+      transitionContractHash: 'contract:foreign-same-id',
+    })
   } catch (error) {
     sameCandidateRejected = error instanceof ExecutionAuthorityConflict
   }
   let competingActionRejected = false
   try {
-    executor.claim(moveCandidate({ x: 8, y: 64, z: 0 }), { authority: 'legacy' })
+    executor.claim(moveCandidate({ x: 8, y: 64, z: 0 }), {
+      authorityLabel: 'fixture',
+      transitionId: 'transition:foreign-competing',
+      transitionContractHash: 'contract:foreign-competing',
+    })
   } catch (error) {
     competingActionRejected = error instanceof ExecutionAuthorityConflict
   }
   check(
     '(vtr) neither same-id adoption nor a new legacy claim can steal an active VTR body lease',
-    sameCandidateRejected && competingActionRejected && executor.current?.authority === 'vtr-reach',
-    `sameIdRejected=${sameCandidateRejected} competingRejected=${competingActionRejected} still=${executor.current?.authority ?? 'none'}`,
+    sameCandidateRejected && competingActionRejected && executor.current?.authorityLabel === 'vtr-reach',
+    `sameIdRejected=${sameCandidateRejected} competingRejected=${competingActionRejected} still=${executor.current?.authorityLabel ?? 'none'}`,
   )
   let missingReattachContractHashRejected = false
   try {
     executor.claim(candidate, {
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId: 'transition:reach-test',
     } as unknown as Parameters<Executor['claim']>[1])
   } catch (error) {
@@ -726,7 +734,7 @@ async function runWalk(
     `rejected=${missingReattachContractHashRejected} retained=${executor.current?.transitionContractHash ?? 'none'}`,
   )
   const sameTransition = executor.claim(candidate, {
-    authority: 'vtr-reach',
+    authorityLabel: 'vtr-reach',
     transitionId: 'transition:reach-test',
     transitionContractHash: 'contract:reach-test',
   })
@@ -738,7 +746,7 @@ async function runWalk(
   let changedContractRejected = false
   try {
     executor.claim(candidate, {
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId: 'transition:reach-test',
       transitionContractHash: 'contract:other',
     })
@@ -767,7 +775,7 @@ async function runWalk(
     verifyReachAtCandidate: true,
     maxStepsPerWaypoint: 12,
     claimContext: {
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId: 'transition:reach-walk-fixture',
       transitionContractHash: 'contract:reach-walk-fixture',
       beforeMechanicalStep: () => {
@@ -806,7 +814,7 @@ async function runWalk(
   const sameMechanicalOwner = (rows: readonly MechanicalOwnershipObservation[]): boolean =>
     rows.length >= 3 && rows.every((row) =>
       row.actionId === 'MOVE:5_64_0' &&
-      row.authority === 'vtr-reach' &&
+      row.authorityLabel === 'vtr-reach' &&
       row.transitionId === 'transition:reach-walk-fixture' &&
       row.transitionContractHash === 'contract:reach-walk-fixture' &&
       row.commitmentId === commitmentId &&

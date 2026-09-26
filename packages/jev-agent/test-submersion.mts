@@ -67,6 +67,7 @@ import { defaultExecutorOptions, Executor } from './src/executor.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 import { airBand, buildJevSemanticProjection, foodBand, healthBand } from './src/jev/semantic-projection.ts'
 import type { SemanticProjectionInput } from './src/jev/semantic-projection.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -1068,7 +1069,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   const world = makeExecutorWorld({ feet: { x: 2, y: 64, z: 0 }, target, air: MAX_AIR, waterBody: false, refusePlace: true })
   const { logger, messages } = makeLogger()
   const executor = new Executor(world.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeCandidate(target)).completion
+  const result = await fixtureClaim(executor, placeCandidate(target)).completion
   const refusedLine = messages().find((line) => line.includes('FAILED'))
   const pass =
     result.status === 'failed' &&
@@ -1090,7 +1091,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   const world = makeExecutorWorld({ feet: { x: 2, y: 64, z: 0 }, target, air: MAX_AIR, waterBody: false, refusePlace: false })
   const { logger } = makeLogger()
   const executor = new Executor(world.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeCandidate(target)).completion
+  const result = await fixtureClaim(executor, placeCandidate(target)).completion
   const pass =
     result.status === 'done' &&
     result.verified === true &&
@@ -1111,7 +1112,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   const wet = makeExecutorWorld({ feet: { x: 2, y: 64, z: 0 }, target, air: 3, waterBody: true, refusePlace: false })
   const { logger, messages } = makeLogger()
   const executor = new Executor(wet.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const placed = await executor.claim(placeCandidate(target)).completion
+  const placed = await fixtureClaim(executor, placeCandidate(target)).completion
   const submergedLines = messages().filter((line) => line.startsWith('BODY_SUBMERGED'))
   const pass =
     placed.status === 'failed' &&
@@ -1198,10 +1199,10 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   }
   const { logger, messages } = makeLogger()
   const executor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(attack).completion
+  const result = await fixtureClaim(executor, attack).completion
   oxygenLevel = undefined
   const unknownExecutor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const unknownResult = await unknownExecutor.claim(attack).completion
+  const unknownResult = await fixtureClaim(unknownExecutor, attack).completion
   const submergedLines = messages().filter((line) => line.startsWith('BODY_SUBMERGED'))
   const pass =
     result.status === 'failed' &&
@@ -1303,7 +1304,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   }
   const { logger, messages } = makeLogger()
   const executor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const swimLines = messages().filter((line) => line.startsWith('SUBMERSION_SWIM'))
   const pass =
     result.status === 'done' &&
@@ -1398,7 +1399,7 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
   }
   const { logger, messages } = makeLogger()
   const executor = new Executor(bot as unknown as Bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const swimLine = messages().find((line) => line.startsWith('SUBMERSION_SWIM'))
   const pass =
     result.status === 'done' &&

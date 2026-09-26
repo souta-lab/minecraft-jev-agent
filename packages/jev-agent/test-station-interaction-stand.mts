@@ -28,6 +28,7 @@ import type { Bot } from 'mineflayer'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import * as executorModule from './src/executor.ts'
 import type { Candidate, Vec3Json } from './src/index.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -199,7 +200,7 @@ async function runCraft(feet: Vec3Json, blocks: Map<string, string>, withFloor: 
     packetStepMs: 1,
     maxStepsPerWaypoint: 5,
   })
-  const result = await executor.claim(craftCandidate()).completion
+  const result = await fixtureClaim(executor, craftCandidate()).completion
   return { fixture, result }
 }
 

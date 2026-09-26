@@ -50,6 +50,7 @@ import type { Candidate, CandidateOptions, ReachabilityGateOptions } from './src
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
 import { mirroredEventToken } from './src/controller-legacy.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')
@@ -479,7 +480,7 @@ const MAGMA = { id: 85793, name: 'magma_cube', position: { x: 2.5, y: 34, z: 0.5
     pickupPathTimeoutMs: 300,
   })
   const candidate = attack as Candidate
-  const completion = await executor.claim(candidate).completion
+  const completion = await fixtureClaim(executor, candidate).completion
   const leaseLines = logger.lines.filter((entry) => entry.startsWith('ATTACK_LEASE'))
   report(
     completion.status === 'done' && completion.verified === true && swings > 0 && leaseLines.length > 0,

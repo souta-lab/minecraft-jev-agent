@@ -23,6 +23,7 @@ import {
   makeGoal,
 } from '../src/index.ts'
 import type { AgentSignals, Candidate } from '../src/index.ts'
+import { fixtureClaim } from '../test-claim-context.mts'
 
 function opt(name: string, fallback: string): string {
   const index = process.argv.indexOf(`--${name}`)
@@ -200,7 +201,7 @@ async function main(): Promise<void> {
     return
   }
   const beforeBlock = bot.blockAt(bot.entity.position.clone().set(target.x, target.y, target.z))
-  const claim = executor.claim(step)
+  const claim = fixtureClaim(executor, step)
   const result = await Promise.race([claim.completion, sleep(20000).then(() => null)])
   if (result === null) executor.cancelCurrent('step-cut-test timeout')
   const afterBlock = bot.blockAt(bot.entity.position.clone().set(target.x, target.y, target.z))

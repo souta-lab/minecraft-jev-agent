@@ -329,7 +329,7 @@ function driveFrame(
     activeActionMatchesMissionReach: false,
     safeToStart: true,
     observedHealth: 20,
-    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0, nonVtrActuations: 0 },
+    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0, nonReachTransitionActuations: 0 },
     ...overrides,
   }
 }
@@ -439,7 +439,7 @@ test('production Mission drive revokes legacy Reach ownership before commit and 
   const plan = derive(runtime, { transitionId: 'transition-production-drive' })
   const legacyAction = {
     id: 'legacy-walk', kind: 'MOVE' as const, epoch: 5, status: 'running' as const,
-    authority: 'legacy' as const, transitionId: undefined,
+    authorityLabel: 'legacy' as const, transitionId: undefined,
   }
   const blocked = await runtime.driveMission(driveFrame(runtime, 1_000, {
     snapshot: makeSnapshot(plan.contract, 1_000, false),

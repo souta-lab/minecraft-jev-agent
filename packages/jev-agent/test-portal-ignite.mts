@@ -56,6 +56,7 @@ import {
   validatePortalFrame,
 } from './src/netherPortalPlan.ts'
 import type { PortalBlockPosition, PortalFrameValidation, PortalStep } from './src/netherPortalPlan.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -490,7 +491,7 @@ async function runIgnite(fixture: IgniteFixture, candidate: Candidate): Promise<
     actuation: 'pathfinder',
     actuationPort: fixture.port,
   })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   return { logPath, result }
 }
 

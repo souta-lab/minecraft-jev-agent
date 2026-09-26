@@ -78,6 +78,7 @@ import { isStandable } from './src/state.ts'
 import { PILLAR_LANDING_Y_TOLERANCE } from './src/pillarApex.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -852,7 +853,7 @@ async function runEntry(
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet', portalEnterTimeoutMs: 400 })
   installLocomotion(executor, fixture, transfer, strictGate)
   configure?.(executor)
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
     .filter((line) => line.trim().length > 0)

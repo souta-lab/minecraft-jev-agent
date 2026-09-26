@@ -13,6 +13,7 @@ import { emptyGoalQueueState } from '../src/goalQueue.ts'
 import { planVerticalApproach } from '../src/verticalPlan.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from '../src/state.ts'
 import type { AgentSignals, KnownResource, Vec3Json, WorldState } from '../src/state.ts'
+import { fixtureClaim } from '../test-claim-context.mts'
 
 const username = process.argv[2] ?? 'AI_M2V45'
 const host = process.argv[3] ?? '127.0.0.1'
@@ -164,7 +165,7 @@ bot.once('spawn', async () => {
       process.stdout.write('[verify45] BLOCKER: no vertical plan was produced for the below-level target\n')
       break
     }
-    const claim = bot.jev.agent.claim(retrieve)
+    const claim = fixtureClaim(bot.jev.agent, retrieve)
     let minY = before.y
     const tracker = setInterval(() => {
       minY = Math.min(minY, bot.entity.position.y)

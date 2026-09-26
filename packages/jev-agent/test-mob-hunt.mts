@@ -12,6 +12,7 @@ import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import type { Candidate } from './src/candidates.ts'
 import { classifyActionOutcome } from './src/actionPostcondition.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -105,7 +106,7 @@ async function run(mode: HuntMode) {
     verifyTimeoutMs: 700,
     pickupPathTimeoutMs: 700,
   })
-  const result = await executor.claim(huntCandidate()).completion
+  const result = await fixtureClaim(executor, huntCandidate()).completion
   return { fixture, result }
 }
 

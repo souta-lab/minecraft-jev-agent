@@ -20,7 +20,7 @@ import type {
   ReachTransitionState,
 } from './transition.ts'
 import type { ReachRuntimeActionSnapshot } from './ports.ts'
-import type { KernelReachAuthority } from '../reach/kernel-authority-map.ts'
+import type { KernelTransitionAuthority } from '../reach/kernel-authority-map.ts'
 
 export interface ReachMissionRuntimeSession {
   readonly mission: InventoryReachTransitionInput['mission']
@@ -31,7 +31,7 @@ export interface ReachMissionRuntimeSession {
   readonly jevCallsAtStart: number
   readonly system2CallsAtStart: number
   readonly authorityConflictsAtStart: number
-  readonly nonVtrActuationsAtStart: number
+  readonly nonReachTransitionActuationsAtStart: number
   duplicateAuthorityObserved: boolean
   lastHealth: number
 }
@@ -60,7 +60,7 @@ export interface ReachMissionRuntimeFrame {
     readonly jevCalls: number
     readonly system2Calls: number
     readonly authorityConflicts: number
-    readonly nonVtrActuations: number
+    readonly nonReachTransitionActuations: number
   }
 }
 
@@ -100,7 +100,7 @@ export interface ReachMissionRuntimeDependencies {
    * session the gates run on. There is no authority-less mode: Reach mutation,
    * terminal and SUCCESS authority are exactly the kernel.
    */
-  readonly kernelAuthority: KernelReachAuthority
+  readonly kernelAuthority: KernelTransitionAuthority
 }
 
 export interface ReachTerminalHandoff {
@@ -201,7 +201,7 @@ export class ReachMissionRuntime {
   private readonly controller: ReachController
   private readonly onTerminalHandoff: ReachMissionRuntimeDependencies['onTerminalHandoff']
   private readonly onTransitionNotCommitted: ReachMissionRuntimeDependencies['onTransitionNotCommitted']
-  private readonly kernelAuthority: KernelReachAuthority
+  private readonly kernelAuthority: KernelTransitionAuthority
   private terminalWitnessExclusion: TerminalWitnessExclusion | null = null
   private activeContractScope: ActiveContractScope | null = null
   private session: ReachMissionRuntimeSession | null = null
@@ -210,7 +210,7 @@ export class ReachMissionRuntime {
     if (dependencies.kernelAuthority === undefined || dependencies.kernelAuthority === null) {
       // Reach mutation/terminal/SUCCESS authority is exactly the kernel gate;
       // an authority-less runtime could still walk the body with no owner.
-      throw new Error('ReachMissionRuntime requires KernelReachAuthority')
+      throw new Error('ReachMissionRuntime requires KernelTransitionAuthority')
     }
     this.controller = new ReachController(dependencies.routePolicy, dependencies.commitFreshnessFence)
     this.onTerminalHandoff = dependencies.onTerminalHandoff
@@ -219,7 +219,7 @@ export class ReachMissionRuntime {
   }
 
   /** Feed the kernel fact store; a throwing observer is contained and never gates production. */
-  private feedObservation(input: Parameters<KernelReachAuthority['feedObservation']>[0]): void {
+  private feedObservation(input: Parameters<KernelTransitionAuthority['feedObservation']>[0]): void {
     try {
       this.kernelAuthority.feedObservation(input)
     } catch {
@@ -302,10 +302,10 @@ export class ReachMissionRuntime {
       }
       if (frame.activeAction !== null && (
         frame.activeAction.status === 'running' &&
-        (frame.activeAction.authority !== 'vtr-reach' || frame.activeAction.transitionId !== current.contract.transitionId)
+        (frame.activeAction.authorityLabel !== 'vtr-reach' || frame.activeAction.transitionId !== current.contract.transitionId)
       )) {
         session.duplicateAuthorityObserved = true
-        const currentOwner = frame.activeAction.authority === 'vtr-reach'
+        const currentOwner = frame.activeAction.authorityLabel === 'vtr-reach'
           ? `foreign VTR transition ${frame.activeAction.transitionId ?? 'missing'}`
           : `legacy action ${frame.activeAction.id}`
         const result = await this.supersede({
@@ -338,7 +338,7 @@ export class ReachMissionRuntime {
     }
 
     if (frame.activeAction !== null) {
-      if (frame.activeAction.authority === 'vtr-reach') {
+      if (frame.activeAction.authorityLabel === 'vtr-reach') {
         return { kind: 'revoke-action', reason: 'orphan-vtr-actuation-without-active-contract', transitionId: frame.activeAction.transitionId }
       }
       if (frame.activeActionMatchesMissionReach || frame.probe) {
@@ -382,7 +382,7 @@ export class ReachMissionRuntime {
       jevCallsAtStart: frame.counters.jevCalls,
       system2CallsAtStart: frame.counters.system2Calls,
       authorityConflictsAtStart: frame.counters.authorityConflicts,
-      nonVtrActuationsAtStart: frame.counters.nonVtrActuations,
+      nonReachTransitionActuationsAtStart: frame.counters.nonReachTransitionActuations,
       duplicateAuthorityObserved: false,
       lastHealth: frame.observedHealth,
     }

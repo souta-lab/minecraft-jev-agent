@@ -116,7 +116,7 @@ describe('VTR Reach production authority seam', () => {
     const reachEnd = reachPlane.indexOf('export function authorizeReachMechanicalStep(', reachStart)
     const reachTick = reachPlane.slice(reachStart, reachEnd)
     assert.ok(reachStart >= 0 && reachEnd > reachStart)
-    assert.match(reachMissionRuntime, /frame\.activeAction\.authority !== 'vtr-reach' \|\| frame\.activeAction\.transitionId !== current\.contract\.transitionId/)
+    assert.match(reachMissionRuntime, /frame\.activeAction\.authorityLabel !== 'vtr-reach' \|\| frame\.activeAction\.transitionId !== current\.contract\.transitionId/)
     assert.match(reachMissionRuntime, /this\.supersede\(/)
     assert.match(reachMissionRuntime, /session\.duplicateAuthorityObserved = true/)
     assert.match(reachTick, /activeAction: action/)
@@ -274,7 +274,7 @@ describe('VTR Reach production authority seam', () => {
     assert.match(runtimeAdapter.slice(guard, claim), /candidateIds: new Set\(\[candidate\.id\]\)/)
     assert.match(runtimeAdapter.slice(guard, claim), /canComputePath: \(position\) => request\.reachability\.pathProbe/)
     assert.match(runtimeAdapter.slice(guard, claim), /if \(!guard\.ok\)/)
-    assert.match(runtimeAdapter.slice(claim), /authority: 'vtr-reach'/)
+    assert.match(runtimeAdapter.slice(claim), /authorityLabel: 'vtr-reach'/)
     assert.match(runtimeAdapter.slice(claim), /transitionId: intent\.transitionId/)
     assert.match(runtimeAdapter.slice(claim), /transitionContractHash: intent\.contractHash/)
     assert.match(runtimeAdapter.slice(claim), /beforeMechanicalStep: request\.beforeMechanicalStep/)
@@ -288,7 +288,7 @@ describe('VTR Reach production authority seam', () => {
     const claimEnd = executor.indexOf('get activeCommitment', claimStart)
     const activeAction = executor.slice(activeActionStart, activeActionEnd)
     const conflictGate = executor.slice(claimStart, claimEnd)
-    assert.match(activeAction, /authority\?: 'legacy' \| 'vtr-reach'/)
+    assert.match(activeAction, /authorityLabel\?: string/)
     assert.match(activeAction, /transitionId\?: string/)
     assert.match(activeAction, /transitionContractHash\?: string/)
     assert.match(conflictGate, /running\.transitionContractHash !== context\.transitionContractHash/)
@@ -388,22 +388,22 @@ describe('VTR Reach production authority seam', () => {
     assert.match(scheduler, /host\.reachRuntime\.driveMission\(/)
   })
 
-  it('requires KernelReachAuthority by construction at every production seam', () => {
+  it('requires KernelTransitionAuthority by construction at every production seam', () => {
     // Static shape: the gate is a required field, never an optional mode.
     const controllerShared = readFileSync(new URL('./src/controller-shared.ts', import.meta.url), 'utf8')
-    assert.match(controllerShared, /\n  kernelAuthority: KernelReachAuthority\n/)
-    assert.doesNotMatch(controllerShared, /kernelAuthority\?:|kernelAuthority: KernelReachAuthority \| (undefined|null)/)
+    assert.match(controllerShared, /\n  kernelAuthority: KernelTransitionAuthority\n/)
+    assert.doesNotMatch(controllerShared, /kernelAuthority\?:|kernelAuthority: KernelTransitionAuthority \| (undefined|null)/)
     assert.match(controller, /options: Partial<JevAgentOptions> & Pick<JevAgentOptions, 'kernelAuthority'>/)
     assert.match(controller, /export type JevAgentOptionDefaults = Omit<JevAgentOptions, 'kernelAuthority'>/)
     assert.match(controller, /setOptions\(partial: Partial<Omit<JevAgentOptions, 'kernelAuthority'>>/)
-    assert.match(jevComposition, /readonly kernelAuthority: KernelReachAuthority/)
+    assert.match(jevComposition, /readonly kernelAuthority: KernelTransitionAuthority/)
     assert.doesNotMatch(jevComposition, /kernelAuthority\?:|kernelAuthority === null|kernelAuthority \?\?/)
-    assert.match(reachMissionRuntime, /private readonly kernelAuthority: KernelReachAuthority/)
+    assert.match(reachMissionRuntime, /private readonly kernelAuthority: KernelTransitionAuthority/)
     // The only authority-absent branch left is the fail-closed constructor
     // throw; no `if (authority) vtr else legacy` fork exists anywhere.
-    assert.match(reachMissionRuntime, /throw new Error\('ReachMissionRuntime requires KernelReachAuthority'\)/)
+    assert.match(reachMissionRuntime, /throw new Error\('ReachMissionRuntime requires KernelTransitionAuthority'\)/)
     assert.doesNotMatch(reachMissionRuntime, /kernelAuthority\?\.|kernelAuthority \?\?/)
-    assert.match(indexSource, /export function jevAgent\(bot: Bot, kernelAuthority: KernelReachAuthority\): void/)
+    assert.match(indexSource, /export function jevAgent\(bot: Bot, kernelAuthority: KernelTransitionAuthority\): void/)
     // Production generation hardcodes authority mode and throws when the
     // session cannot produce the gate — miswiring can never silently select
     // an observer-only or legacy Reach path.
@@ -414,7 +414,7 @@ describe('VTR Reach production authority seam', () => {
     // types throws closed instead of running Reach without an owner.
     assert.throws(
       () => new ReachMissionRuntime({ kernelAuthority: undefined } as unknown as ReachMissionRuntimeDependencies),
-      /requires KernelReachAuthority/,
+      /requires KernelTransitionAuthority/,
     )
   })
 })

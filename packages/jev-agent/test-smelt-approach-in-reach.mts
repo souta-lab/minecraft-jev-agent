@@ -50,6 +50,7 @@ import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import { deriveInteractionFace, interactionStandCandidates } from './src/executor.ts'
 import { faceDistanceFromEye } from './src/reachability.ts'
 import type { Candidate, Vec3Json } from './src/index.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -268,7 +269,7 @@ async function runSmelt(feet: Vec3Json): Promise<{ fixture: SmeltBotFixture; res
     packetStepMs: 1,
     maxStepsPerWaypoint: 5,
   })
-  const result = await executor.claim(smeltCandidate()).completion
+  const result = await fixtureClaim(executor, smeltCandidate()).completion
   return { fixture, result }
 }
 

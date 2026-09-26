@@ -13,6 +13,7 @@ import pathfinderModule from 'mineflayer-pathfinder'
 import { jevAgent } from '../src/index.ts'
 import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import type { Candidate, Vec3Json } from '../src/index.ts'
+import { fixtureClaim } from '../test-claim-context.mts'
 
 const username = process.argv[2] ?? 'AI_V1'
 const logDir = process.argv[3] ?? 'logs/vertical-port'
@@ -159,7 +160,7 @@ interface MoveEvidence {
 async function runMove(label: string, candidate: Candidate): Promise<MoveEvidence> {
   const start = pos()
   const forcedBefore = forced
-  const claim = bot.jev.agent.claim(candidate)
+  const claim = fixtureClaim(bot.jev.agent, candidate)
   const result = await claim.completion
   await sleep(1200)
   const end = pos()

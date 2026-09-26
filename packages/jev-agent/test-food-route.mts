@@ -51,6 +51,7 @@ import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
 import { starvationFact } from '../buddy-driver/planner.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const Vec3 = require('vec3')
@@ -942,7 +943,7 @@ addCase('(x) the canopy route leads to a real EAT: the executor consumes and foo
     actuation: 'pathfinder',
     actuationPort: fixture.port,
   })
-  const completion = await executor.claim(eat).completion
+  const completion = await fixtureClaim(executor, eat).completion
   return {
     pass: completion.status === 'done' && fixture.foodNow() > 15,
     detail: `forage=${forage.id} eat=${eat.id} status=${completion.status} food=15->${fixture.foodNow()}`,

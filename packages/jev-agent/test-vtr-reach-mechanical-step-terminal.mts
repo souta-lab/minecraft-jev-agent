@@ -212,7 +212,7 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
       jevCallsAtStart: 0,
       system2CallsAtStart: 0,
       authorityConflictsAtStart: 0,
-      nonVtrActuationsAtStart: 0,
+      nonReachTransitionActuationsAtStart: 0,
       duplicateAuthorityObserved: false,
       lastHealth: 20,
     },
@@ -268,7 +268,7 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
   })
   installVtrReachTestRuntimePorts(controller)
   const claim = executor.claim(candidate, {
-    authority: 'vtr-reach',
+    authorityLabel: 'vtr-reach',
     transitionId,
     transitionContractHash: contractHash,
     beforeMechanicalStep: (step) => authorizeReachMechanicalStep.call(controller, intentId, identity, step),

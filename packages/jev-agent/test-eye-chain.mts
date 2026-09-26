@@ -79,6 +79,7 @@ import type {
   WorldState,
 } from './src/state.ts'
 import type { GoalKind, GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')
@@ -552,7 +553,7 @@ addCase('(ii) an IDENTITY-LESS item entity is never offered (fail closed, no inv
 
 addCase('(ii) the body already inside the pickup volume: PICKUP lands the item (inventory delta)', async () => {
   const fixture = makeDropFixture('in-volume')
-  const result = await makeExecutor(fixture).claim(pickupCandidate()).completion
+  const result = await fixtureClaim(makeExecutor(fixture), pickupCandidate()).completion
   const pass =
     result.status === 'done' &&
     result.verified === true &&
@@ -569,7 +570,7 @@ addCase('(ii) the body already inside the pickup volume: PICKUP lands the item (
 
 addCase('(ii) the drop 4 blocks out: the stock collectblock walk collects it, delta-verified', async () => {
   const fixture = makeDropFixture('walk')
-  const result = await makeExecutor(fixture).claim(pickupCandidate()).completion
+  const result = await fixtureClaim(makeExecutor(fixture), pickupCandidate()).completion
   const pass =
     result.status === 'done' &&
     result.verified === true &&
@@ -593,7 +594,7 @@ addCase('(ii) both pickup markers are MIRRORED (they reach the run log, not just
 
 addCase('(ii) a drop that never lands is pickup_failed + PICKUP_NOT_ACQUIRED, never a banked item', async () => {
   const fixture = makeDropFixture('never')
-  const result = await makeExecutor(fixture).claim(pickupCandidate()).completion
+  const result = await fixtureClaim(makeExecutor(fixture), pickupCandidate()).completion
   const line = fixture.logger.matching('PICKUP_NOT_ACQUIRED')[0] ?? 'none'
   const pass =
     result.status === 'failed' &&

@@ -43,6 +43,7 @@ import {
 import { combatFailureCode, classifyCombatOutcome, formatCombatOutcome, HUNT_APPROACH_BUDGET } from './src/combatClosure.ts'
 import { weaponClass, carriedWeaponClasses, weaponHoldAlternatives, holdsCarriedWeapon } from './src/gearPlan.ts'
 import { targetIdentityOf, targetIdentityViolation, effectViolation, envelopeForCandidate } from './src/skillCommitment.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')
@@ -279,7 +280,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 
 {
   const fixture = makeFight({ carried: { iron_sword: 1 }, hitsToKill: 3 })
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const steps = fixture.logger.matching('SKILL_STEP')
   const commit = result.commitmentId ?? 'none'
   const pass =
@@ -310,7 +311,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   const fixture = makeFight({ carried: { iron_sword: 1 }, hitsToKill: 1 })
   // F: a second blaze, CLOSER than the committed one, appearing mid-lease.
   fixture.addEntity({ id: 77, name: 'blaze', kind: 'hostile', height: 1.8, isValid: true, position: new P(0.5, 64, 0) })
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const pass =
     result.status === 'done' &&
     result.entityDefeated === true &&
@@ -332,7 +333,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 {
   const fixture = makeFight({ carried: { iron_sword: 1 } })
   fixture.dropEntity(31)
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const combat = fixture.logger.matching('COMBAT_OUTCOME')
   const pass =
     result.status === 'failed' &&
@@ -393,7 +394,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 {
   // A producer whose drop reaches the inventory: kill + drop both verified.
   const fixture = makeFight({ carried: { iron_sword: 1 }, hitsToKill: 1, dropItem: 'blaze_rod' })
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   const combat = fixture.logger.matching('COMBAT_OUTCOME')
   const pass =
     result.status === 'done' &&
@@ -415,7 +416,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // The kill is proven but the drop never reaches the inventory: the collect half
   // of the postcondition is explicitly NOT claimed.
   const fixture = makeFight({ carried: { iron_sword: 1 }, hitsToKill: 1 })
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   const combat = fixture.logger.matching('COMBAT_OUTCOME')
   const truth = truthfulActionOutcome({
     kind: result.kind,
@@ -458,7 +459,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // (10) exactly ONE carried weapon class -> equip that exact item to the hand,
   // verified against the live held item, with no second selection.
   const fixture = makeFight({ carried: { iron_sword: 1, iron_pickaxe: 1 }, heldItem: 'iron_pickaxe' })
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const steps = fixture.logger.matching('SKILL_STEP')
   const pass =
     result.status === 'done' &&
@@ -476,7 +477,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 {
   // (11) the selected item is absent -> ITEM_UNAVAILABLE and no substitute.
   const fixture = makeFight({})
-  const result = await makeExecutor(fixture).claim(armorCandidate('iron_chestplate', 'torso')).completion
+  const result = await fixtureClaim(makeExecutor(fixture), armorCandidate('iron_chestplate', 'torso')).completion
   const pass =
     result.status === 'failed' &&
     result.failure === 'item_unavailable' &&
@@ -495,7 +496,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // (12) exact armour into the correct slot; no other slot touched and no
   // upgrade objective invented.
   const fixture = makeFight({ carried: { iron_chestplate: 1, diamond_chestplate: 1 } })
-  const result = await makeExecutor(fixture).claim(armorCandidate('iron_chestplate', 'torso')).completion
+  const result = await fixtureClaim(makeExecutor(fixture), armorCandidate('iron_chestplate', 'torso')).completion
   const filled = fixture.armorSlots.map((slot, index) => (slot === null ? null : index)).filter((index) => index !== null)
   const pass =
     result.status === 'done' &&
@@ -520,9 +521,10 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // the first, which settles LEASE_REVOKED and performs no further mutation.
   const fixture = makeFight({ carried: { iron_sword: 1 }, hitsToKill: 99 })
   const executor = makeExecutor(fixture)
-  const first = executor.claim(killCandidate(31))
+  const first = fixtureClaim(executor, killCandidate(31))
   const swingsAtSupersede = fixture.attacks()
-  const second = executor.claim(armorCandidate('iron_chestplate', 'torso'))
+  executor.cancelCurrent('superseded by next selection')
+  const second = fixtureClaim(executor, armorCandidate('iron_chestplate', 'torso'))
   const firstResult = await first.completion
   await second.completion
   const pass =
@@ -580,7 +582,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // TWO strategically distinct classes carried and nothing weapon-like in hand:
   // code must NOT rank a sword against an axe.
   const fixture = makeFight({ carried: { iron_sword: 1, stone_axe: 1 }, heldItem: 'cobblestone' })
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const pass =
     result.status === 'failed' &&
     result.failure === 'weapon_choice_required' &&
@@ -600,7 +602,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // The hand ALREADY holds a carried weapon: changing nothing is not a choice, so
   // the fight proceeds (and cannot loop on the boundary).
   const fixture = makeFight({ carried: { iron_sword: 1, stone_axe: 1 }, heldItem: 'iron_sword' })
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const pass =
     result.status === 'done' &&
     result.combatOutcome === 'KILL_VERIFIED' &&
@@ -620,7 +622,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // Same class, different tier: mechanically ordered by damage (no durability or
   // repair economy exists), so this stays HOW and never reaches Jev.
   const fixture = makeFight({ carried: { diamond_sword: 1, stone_sword: 1 }, heldItem: 'cobblestone' })
-  const result = await makeExecutor(fixture).claim(killCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), killCandidate(31)).completion
   const pass =
     result.status === 'done' &&
     fixture.held() === 'diamond_sword' &&

@@ -27,7 +27,8 @@ export interface ReachRuntimeActionSnapshot {
   readonly kind: Candidate['kind']
   readonly epoch: number
   readonly status: 'running' | 'done' | 'failed' | 'cancelled'
-  readonly authority?: 'legacy' | 'vtr-reach'
+  /** Evidence label naming the owning transition family (never an authority switch). */
+  readonly authorityLabel?: string
   readonly transitionId?: string
   readonly transitionContractHash?: string
   readonly commitment?: SkillCommitment
@@ -66,7 +67,7 @@ export interface ReachRuntimePorts {
   cancelCurrent(reason: string): boolean
   authorityConflictCount(): number
   /** Non-VTR claims that actually started an action (not conflict-rejected attempts). */
-  nonVtrActuationCount(): number
+  nonReachTransitionActuationCount(): number
 }
 
 export interface ReachMechanicalStep {

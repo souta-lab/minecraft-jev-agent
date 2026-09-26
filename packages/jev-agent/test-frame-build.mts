@@ -60,6 +60,7 @@ import {
   placedFrameCellLine,
 } from './src/executor.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -878,7 +879,7 @@ async function runFrameBuild(failPlacements: boolean, equipFailures = 0) {
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeFrameCandidate(ORDERED_FRAME, OBSIDIAN)).completion
+  const result = await fixtureClaim(executor, placeFrameCandidate(ORDERED_FRAME, OBSIDIAN)).completion
   const lines = readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)
@@ -893,7 +894,7 @@ async function runMinimalFrameBuild() {
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeFrameCandidate(ORDERED_FRAME, OBSIDIAN)).completion
+  const result = await fixtureClaim(executor, placeFrameCandidate(ORDERED_FRAME, OBSIDIAN)).completion
   const lines = readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)
@@ -914,7 +915,7 @@ async function runPartialFrameBuild() {
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeFrameCandidate(missing, OBSIDIAN)).completion
+  const result = await fixtureClaim(executor, placeFrameCandidate(missing, OBSIDIAN)).completion
   const lines = readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)
@@ -948,7 +949,7 @@ async function runReferenceApproachBuild() {
     approaches.push({ ...position })
     ;(fixture.bot.entity as unknown as { position: P }).position.set(position.x, position.y, position.z)
   }
-  const result = await executor.claim(placeFrameCandidate([target], 'cobblestone')).completion
+  const result = await fixtureClaim(executor, placeFrameCandidate([target], 'cobblestone')).completion
   const lines = readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)
@@ -1158,7 +1159,7 @@ async function runLiveFrameBuild(existing: readonly Vec3Json[], planned: readonl
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeFrameCandidate(planned, OBSIDIAN)).completion
+  const result = await fixtureClaim(executor, placeFrameCandidate(planned, OBSIDIAN)).completion
   const messages = readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)
@@ -1299,7 +1300,7 @@ async function runRegionFrameBuild(grid: Map<string, string>, planned: readonly 
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
-  const result = await executor.claim(placeFrameCandidate(planned, OBSIDIAN)).completion
+  const result = await fixtureClaim(executor, placeFrameCandidate(planned, OBSIDIAN)).completion
   const messages = readFileSync(logPath, 'utf8')
     .split('\n')
     .filter((line) => line.trim().length > 0)

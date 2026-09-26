@@ -13,7 +13,7 @@
 //   bot.jev.start()
 import type { Bot } from 'mineflayer'
 import { defaultJevAgentOptions, JevController } from './controller.ts'
-import type { KernelReachAuthority } from './reach/kernel-authority-map.ts'
+import type { KernelTransitionAuthority } from './reach/kernel-authority-map.ts'
 import type { EscalationReason, JevAgentOptions, RunSummary } from './controller.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, toVec3 } from './state.ts'
 import type { ActiveItemUseState, AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'
@@ -57,7 +57,7 @@ const registered = new WeakSet<Bot>()
  * plugin cannot mint one, so a plain `bot.loadPlugin(jevAgent)` is no longer a
  * valid semantic entry point (use the buddy-driver generation composition).
  */
-export function jevAgent(bot: Bot, kernelAuthority: KernelReachAuthority): void {
+export function jevAgent(bot: Bot, kernelAuthority: KernelTransitionAuthority): void {
   if (registered.has(bot)) return
   registered.add(bot)
   bot.jev = new JevController(bot, { ...defaultJevAgentOptions, kernelAuthority })

@@ -70,6 +70,7 @@ import { producerDropFor, producerMobForItem } from './src/candidates.ts'
 import { entityAimPoint, entityVisibleFromEye } from './src/state.ts'
 import type { Vec3Json } from './src/state.ts'
 import { MOB_DROP_PRODUCERS as PRODUCERS } from './src/state.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11') as {
@@ -507,7 +508,7 @@ addCase('(iii) kill an enderman -> its pearl drop -> the pearl in the inventory 
     distance: 1,
     producerMob: 'enderman',
   })
-  const completion = await executor.claim(candidate).completion
+  const completion = await fixtureClaim(executor, candidate).completion
   const outcomes = fixture.logger.matching('COMBAT_OUTCOME')
   const pass =
     completion.status === 'done' &&
@@ -550,7 +551,7 @@ addCase('(iii-b) a pearl drop the body never reaches is DROP_NOT_ACQUIRED, never
     distance: 1,
     producerMob: 'enderman',
   })
-  const completion = await executor.claim(candidate).completion
+  const completion = await fixtureClaim(executor, candidate).completion
   const outcomes = fixture.logger.matching('COMBAT_OUTCOME')
   const warned = fixture.logger.matching('HUNT_DROP_NOT_ACQUIRED')
   return {
@@ -601,7 +602,7 @@ addCase('(iv) the identical closure for an ordinary ground mob whose drop is not
     distance: 1,
     producerMob: 'zombie',
   })
-  const completion = await executor.claim(candidate).completion
+  const completion = await fixtureClaim(executor, candidate).completion
   return {
     pass:
       completion.status === 'done' &&

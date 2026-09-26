@@ -72,6 +72,7 @@ import type { StepLandingBlock, StepLandingReads } from './src/stepLanding.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './src/criticalDamage.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 import type { Vec3Json } from './src/state.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -549,7 +550,7 @@ async function runLeg(
     ;(executor as unknown as { guardStepLanding: () => void }).guardStepLanding = () => undefined
   }
   const start = fixture.position.clone()
-  const result = await executor.claim(legCandidate(TARGET, kind)).completion
+  const result = await fixtureClaim(executor, legCandidate(TARGET, kind)).completion
   const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
     .filter((line) => line.trim().length > 0)

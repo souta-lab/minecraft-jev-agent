@@ -19,7 +19,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import type { DecisionRecordProvenance } from './decisionlog.ts'
 import type { DecisionTrigger } from './scheduler.ts'
 import type { FatalModelError, ModelAuthorityIdentity } from './modelFailure.ts'
-import type { KernelReachAuthority } from './reach/kernel-authority-map.ts'
+import type { KernelTransitionAuthority } from './reach/kernel-authority-map.ts'
 import type { KnownResource } from './state.ts'
 import type { LocalOscillationRecordJson } from './localOscillation.ts'
 import type { MoveFailEntry } from './moveFailMemory.ts'
@@ -101,7 +101,7 @@ export interface JevAgentOptions {
    * Mission item is withheld unconditionally (no fallback); there is no
    * authority-less or observer-only Reach mode.
    */
-  kernelAuthority: KernelReachAuthority
+  kernelAuthority: KernelTransitionAuthority
   /** maximum time between decisions while idle (the fallback heartbeat) */
   heartbeatMs: number
   /** which world events may request a decision */

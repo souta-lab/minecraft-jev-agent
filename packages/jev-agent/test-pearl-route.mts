@@ -64,6 +64,7 @@ import type {
   WorldState,
 } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const RECIPES = createRecipeIndex(require('minecraft-data')('1.21.11') as unknown)
@@ -495,7 +496,7 @@ addCase('(a2) the hunt candidate is offered for a distant producer too, without 
 // adopted, because "zombie A disappears; attack skeleton B instead -> Jev pi".
 addCase('(b1) a teleporting hunt target is re-acquired by IDENTITY, never replaced by a sensed same-mob enderman', async () => {
   const fixture = makeHuntFixture('retarget')
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   return {
     pass:
       result.status === 'failed' &&
@@ -520,7 +521,7 @@ addCase('(b1) a teleporting hunt target is re-acquired by IDENTITY, never replac
 
 addCase('(b2) a hunt whose target teleports away with no replacement ends TYPED, never silently', async () => {
   const fixture = makeHuntFixture('lost')
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   const lost = fixture.logger.matching('HUNT_TARGET_LOST')
   const nearGoals = fixture.goalsSet().filter((goal) => goal !== null && goal !== undefined)
   return {
@@ -554,7 +555,7 @@ addCase('(b2) a hunt whose target teleports away with no replacement ends TYPED,
 // when the committed id leaves the tracked set - that would be a new WHICH.
 addCase('(b3) a vanished producer is NOT replaced by a closer SAME-mob producer (§9 no retarget)', async () => {
   const fixture = makeHuntFixture('retarget')
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   return {
     pass:
       result.status === 'failed' &&
@@ -574,7 +575,7 @@ addCase('(b3) a vanished producer is NOT replaced by a closer SAME-mob producer 
 
 addCase('(b4) a hunt whose target never enters melee ends with a typed out_of_range, not a bare throw', async () => {
   const fixture = makeHuntFixture('never-closes')
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   return {
     pass:
       result.status === 'failed' &&
@@ -602,7 +603,7 @@ addCase('(b5) the bounded re-acquisition never adopts a different mob', async ()
     isValid: true,
     position: new P(2, 64, 0),
   }
-  const result = await makeExecutor(fixture).claim(huntCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), huntCandidate(31)).completion
   return {
     pass:
       result.status === 'failed' &&
@@ -620,7 +621,7 @@ addCase('(b5) the bounded re-acquisition never adopts a different mob', async ()
 addCase('(b6) an ordinary ATTACK target that vanishes is the typed target_gone', async () => {
   const fixture = makeHuntFixture('lost')
   const plain: Candidate = { ...huntCandidate(31), meta: { tick: 1, entityId: 31, distance: 1 } }
-  const promise = makeExecutor(fixture).claim(plain).completion
+  const promise = fixtureClaim(makeExecutor(fixture), plain).completion
   // the target is gone at the first poll; the same-identity re-acquire runs (a
   // plain ATTACK has the same §9 identity contract) and ends typed.
   delete (fixture.bot.entities as Record<number, unknown>)[31]

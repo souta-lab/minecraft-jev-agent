@@ -68,6 +68,7 @@ import { ARMOR_SLOT_INDEX } from './src/gearPlan.ts'
 import type { ArmorSlot } from './src/gearPlan.ts'
 import type { BlockState, EntityState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -924,7 +925,7 @@ async function runAction(
     actuation: 'pathfinder',
     actuationPort: fixture.port,
   })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const messages = readFileSync(logPath, 'utf8')
     .trim()
     .split('\n')

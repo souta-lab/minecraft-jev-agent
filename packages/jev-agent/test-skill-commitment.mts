@@ -70,6 +70,7 @@ import {
   STALE_JEV_RESULT_DROPPED,
   terminalReasonFor,
 } from './src/jev/semantic-projection.ts'
+import { fixtureClaim, fixtureClaimContext } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')
@@ -506,7 +507,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
   const fixture = makeFixture({ held: null, extraItems: stack })
   ;(fixture.bot as unknown as Record<string, unknown>).blockAt = (): null => null
   const executor = makeExecutor(fixture)
-  const claim = executor.claim(measuredMoveCandidate(pillarMeta('cobblestone')))
+  const claim = fixtureClaim(executor, measuredMoveCandidate(pillarMeta('cobblestone')))
   const commitmentEnvelope = executor.current?.commitment?.allowedEffects ?? null
   const declaredLine = fixture.logger.matching('ROUTE_PLACE_DECLARED')[0] ?? 'none'
   // Let the committed leg reach its equip step (the measured PILLAR_UP equip
@@ -541,7 +542,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
   const equipsBefore = fixture.equips()
   stack.splice(0)
   const second = makeExecutor(fixture)
-  const secondClaim = second.claim(measuredMoveCandidate(pillarMeta('cobblestone')))
+  const secondClaim = fixtureClaim(second, measuredMoveCandidate(pillarMeta('cobblestone')))
   const secondEnvelope = second.current?.commitment?.allowedEffects ?? null
   const refused = await waitFor(() => fixture.logger.containing('is not in the inventory').length > 0)
   const equipsAfter = fixture.equips()
@@ -588,8 +589,9 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
   // typed refusal fires at the equip site and NO side effect is performed.
   const fixture = makeFixture({ held: null, extraItems: [{ name: 'cobblestone', count: 8, slot: 10 }] })
   ;(fixture.bot as unknown as Record<string, unknown>).blockAt = (): null => null
+  const mc = measuredMoveCandidate(pillarMeta('cobblestone'))
   const result = await makeExecutor(fixture, { envelopeOverride: { ...FULL_ENVELOPE } })
-    .claim(measuredMoveCandidate(pillarMeta('cobblestone'))).completion
+    .claim(mc, fixtureClaimContext(mc)).completion
   const violations = fixture.logger.matching('SKILL_ENVELOPE_VIOLATION')
   report(
     result.failure === 'effect_envelope_violation' &&
@@ -635,7 +637,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
     ],
   })
   const toolExecutor = makeExecutor(toolFixture)
-  const toolClaim = toolExecutor.claim(measuredRetrieveCandidate({ digRoute: true }))
+  const toolClaim = fixtureClaim(toolExecutor, measuredRetrieveCandidate({ digRoute: true }))
   const toolEnvelope = toolExecutor.current?.commitment?.allowedEffects ?? null
   toolExecutor.cancelCurrent('fixture 8d: read the undeclared route envelope only')
   await toolClaim.completion
@@ -666,7 +668,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<bool
     ],
   })
   const executor = makeExecutor(fixture)
-  const claim = executor.claim(bridge)
+  const claim = fixtureClaim(executor, bridge)
   const commitmentEnvelope = executor.current?.commitment?.allowedEffects ?? null
   executor.cancelCurrent('fixture 8e: read the bridge envelope only')
   await claim.completion
@@ -746,7 +748,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 
 {
   const fixture = makeFixture()
-  const result = await makeExecutor(fixture).claim(equipCandidate()).completion
+  const result = await fixtureClaim(makeExecutor(fixture), equipCandidate()).completion
   const steps = fixture.logger.matching('SKILL_STEP')
   const ends = fixture.logger.matching('SKILL_END')
   // The controller emits SKILL_COMMIT at the authorize site (section 3); the
@@ -796,7 +798,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 {
   const fixture = makeFixture()
   const executor = makeExecutor(fixture, { envelopeOverride: { ...FULL_ENVELOPE } })
-  const result = await executor.claim(equipCandidate()).completion
+  const result = await fixtureClaim(executor, equipCandidate()).completion
   const violation = fixture.logger.matching('SKILL_ENVELOPE_VIOLATION')
   const pass =
     result.status === 'failed' &&
@@ -920,9 +922,11 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 {
   const fixture = makeFixture()
   const executor = makeExecutor(fixture)
-  const first = executor.claim(attackCandidate(31))
-  // The second selection supersedes the first while it is still running.
-  const second = executor.claim(equipCandidate())
+  const first = fixtureClaim(executor, attackCandidate(31))
+  // The second selection supersedes the first while it is still running: the
+  // scheduler terminalizes the running transition before the new claim.
+  executor.cancelCurrent('superseded by next selection')
+  const second = fixtureClaim(executor, equipCandidate())
   const firstResult = await first.completion
   const secondResult = await second.completion
   const pass =
@@ -948,7 +952,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
 
 {
   const fixture = makeFixture({ armorWorn: 'iron_chestplate' })
-  const result = await makeExecutor(fixture).claim(equipCandidate()).completion
+  const result = await fixtureClaim(makeExecutor(fixture), equipCandidate()).completion
   const boundary = fixture.logger.matching('SKILL_POLICY_BOUNDARY')
   const pass =
     result.status === 'done' &&
@@ -967,7 +971,7 @@ process.stdout.write(`${'-'.repeat(84)}\n`)
   // A vanished target is a typed invalidity -> policy boundary.
   const fixture = makeFixture()
   delete (fixture.bot.entities as Record<number, unknown>)[31]
-  const result = await makeExecutor(fixture).claim(attackCandidate(31)).completion
+  const result = await fixtureClaim(makeExecutor(fixture), attackCandidate(31)).completion
   const packet = buildSkillOutcomePacket({
     decisionEpoch: PROVENANCE.decisionEpoch,
     commitmentId: result.commitmentId ?? 'none',
@@ -1085,7 +1089,8 @@ function targetIdentityKeyOf(identity: CausalTargetIdentity): string {
   // 4. (An ITEM target carries no world epoch by construction: it is not in the
   // world, so `commitmentInvalidation` correctly keeps it valid - see 7b.)
   const fixture = makeFixture()
-  const result = await makeExecutor(fixture, { observedWorldEpoch: () => 4 }).claim(attackCandidate(31)).completion
+  const ac = attackCandidate(31)
+  const result = await makeExecutor(fixture, { observedWorldEpoch: () => 4 }).claim(ac, fixtureClaimContext(ac)).completion
   const invalidated = fixture.logger.matching('SKILL_INVALIDATED')
   const pass =
     result.status === 'failed' &&
@@ -1113,7 +1118,7 @@ function targetIdentityKeyOf(identity: CausalTargetIdentity): string {
   candidate.meta = { ...candidate.meta }
   delete candidate.meta.worldEpoch
   const executor = makeExecutor(fixture, { observedWorldEpoch: () => 3 })
-  const claim = executor.claim(candidate)
+  const claim = fixtureClaim(executor, candidate)
   const target = executor.current?.commitment?.target
   const committedEpoch = target !== undefined && target.kind === 'position' ? target.worldEpoch : null
   const changedWorldInvalidation = fixture.logger

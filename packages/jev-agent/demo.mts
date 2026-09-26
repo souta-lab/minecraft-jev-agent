@@ -13,6 +13,7 @@ import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { DECISION_TRIGGERS, jevAgent } from './src/index.ts'
 import type { ActuationMode, Candidate, DecisionTrigger, RunSummary } from './src/index.ts'
 import { createStandaloneKernelAuthority } from './standalone-kernel-authority.mts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 interface Args {
   host: string
@@ -192,8 +193,8 @@ bot.once('spawn', async () => {
 async function runCancelProbe(): Promise<void> {
   const probeA = probeCandidate('WAIT#probeA', 5000)
   const probeB = probeCandidate('WAIT#probeB', 200)
-  const first = bot.jev.agent.claim(probeA)
-  const second = bot.jev.agent.claim(probeB)
+  const first = fixtureClaim(bot.jev.agent, probeA)
+  const second = fixtureClaim(bot.jev.agent, probeB)
   const firstResult = await first.completion
   const maxConcurrent = bot.jev.agent.maxConcurrentActions
   process.stdout.write(

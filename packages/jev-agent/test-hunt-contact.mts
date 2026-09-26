@@ -48,6 +48,7 @@ import {
 } from './src/combatClosure.ts'
 import type { ContactGeometryFacts } from './src/combatClosure.ts'
 import { mirroredEventToken } from './src/controller-legacy.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')
@@ -334,7 +335,7 @@ function runHunt(fixture: FightFixture, candidate: Candidate): Promise<Awaited<R
     pickupPathTimeoutMs: 300,
     huntReacquireMs: 250,
   })
-  return executor.claim(candidate).completion
+  return fixtureClaim(executor, candidate).completion
 }
 
 let total = 0

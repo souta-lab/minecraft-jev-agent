@@ -265,7 +265,7 @@ test('a running legacy walk for the configured Reach predicate is revoked before
   let currentAction: CurrentAction | null = {
     id: candidate.id, kind: 'MOVE', epoch: 8, startedAt: world.timestampMs,
     phase: 'pathing', status: 'running', detail: '', completion: new Promise(() => undefined),
-    authority: 'legacy',
+    authorityLabel: 'legacy',
     commitment: {
       commitmentId: 'legacy-commitment-reach', decisionEpoch: 7, optionInstanceId: 'legacy-option',
       decisionId: 'legacy-decision', candidateId: candidate.id, skillKind: 'walk_to',
@@ -307,7 +307,7 @@ tickCounter: world.tick,
         currentAction = {
           id: selected.id, kind: selected.kind, epoch: 9, startedAt: world.timestampMs,
           phase: 'pathing', status: 'running', detail: '', completion: new Promise(() => undefined),
-          authority: 'vtr-reach', transitionId: String(context.transitionId),
+          authorityLabel: 'vtr-reach', transitionId: String(context.transitionId),
           transitionContractHash: String(context.transitionContractHash),
         }
         return { kept: false, epoch: 9, completion: new Promise(() => undefined) }
@@ -346,12 +346,12 @@ tickCounter: world.tick,
   expect(legacyCancellations).toBe(1)
   expect(vtrClaims).toBe(1)
   expect(vtrClaimContext).toMatchObject({
-    authority: 'vtr-reach',
+    authorityLabel: 'vtr-reach',
     transitionId: expect.any(String),
     transitionContractHash: expect.any(String),
   })
   expect(currentAction).toMatchObject({
-    authority: 'vtr-reach',
+    authorityLabel: 'vtr-reach',
     transitionId: expect.any(String),
     transitionContractHash: expect.any(String),
   })

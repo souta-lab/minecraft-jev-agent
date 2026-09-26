@@ -74,6 +74,7 @@ import type { Capability } from './src/reachability.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import type { JsonlWriter } from './src/jev/client.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -510,7 +511,7 @@ function descentScaffoldCandidates(candidates: readonly Candidate[]): Candidate[
     pathTimeoutMs: 60,
     packetStepMs: 0,
   })
-  executor.claim(offered[0] ?? scaffoldCandidate(feet))
+  fixtureClaim(executor, offered[0] ?? scaffoldCandidate(feet))
   const done = await waitFor(() => logs.some((line) => line.message.startsWith(DESCEND_SCAFFOLD_END)))
   executor.cancelCurrent('descent scaffold fixture complete')
   const start = logs.find((line) => line.message.startsWith(DESCEND_SCAFFOLD_START))?.message ?? 'none'

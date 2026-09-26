@@ -472,8 +472,8 @@ export interface CurrentAction {
    * Persisted for the whole action lifetime and carried into the evidence.
    */
   commitment?: SkillCommitment
-  /** V4 controller ownership; absent means this is a legacy selected action. */
-  authority?: 'legacy' | 'vtr-reach'
+  /** Evidence label naming the owning transition family; never an authority switch. */
+  authorityLabel?: string
   /** Active Reach Transition that authorized this subordinate mechanical action. */
   transitionId?: string
   /** Immutable contract identity paired with `transitionId` for VTR-owned mechanics. */
@@ -536,22 +536,21 @@ interface ExecutionClaimContextFields {
   onBeforeRunStart?: (started: { id: string; epoch: number }) => void
 }
 
-export type ExecutionClaimContext = ExecutionClaimContextFields & (
-  | {
-      /** VTR is the authority for this mechanical action; legacy policy did not select it. */
-      authority: 'vtr-reach'
-      /** stable parent Transition identity for correlated evidence */
-      transitionId: string
-      /** exact committed Reach contract; a new contract cannot reuse this action's mechanics */
-      transitionContractHash: string
-    }
-  | {
-      /** absent means a legacy action claim */
-      authority?: 'legacy'
-      transitionId?: string
-      transitionContractHash?: string
-    }
-)
+export type ExecutionClaimContext = ExecutionClaimContextFields & {
+  /**
+   * Kernel-admitted transition identity. Every production actuation request is
+   * a subordinate mechanical leg of an admitted transition contract; there is
+   * no unowned 'legacy action' path.
+   */
+  transitionId: string
+  /** Exact committed transition contract hash paired with the transition id. */
+  transitionContractHash: string
+  /**
+   * Evidence label naming the owning transition family ('vtr-reach',
+   * 'controller:<skillKind>'). Provenance only - it selects no semantics.
+   */
+  authorityLabel?: string
+}
 
 export interface ClaimResult {
   /** true when the same action is already running and ownership was retained */
@@ -2120,7 +2119,7 @@ export class Executor {
   private owned = 0
   private maxConcurrent = 0
   private authorityConflicts = 0
-  private nonVtrActuations = 0
+  private nonReachTransitionActuations = 0
   private movementsReady = false
   private lastResultValue: ExecutionResult | null = null
   /** issue #436 section 4: the commitment of the running action, or null */
@@ -2218,13 +2217,14 @@ export class Executor {
   }
 
   /**
-   * Count of actions actually claimed under non-VTR authority. The Reach
-   * runtime adapter samples this at Transition start and terminal; the delta
-   * is the number of legacy actuations that ran concurrently with the
-   * Transition window. Conflict-rejected claims never reach this counter.
+   * Count of actions actually claimed under a non-Reach transition family.
+   * The Reach runtime adapter samples this at Transition start and terminal;
+   * the delta is the number of non-Reach actuations that ran concurrently
+   * with the Transition window. Conflict-rejected claims never reach this
+   * counter.
    */
-  get nonVtrActuationCount(): number {
-    return this.nonVtrActuations
+  get nonReachTransitionActuationCount(): number {
+    return this.nonReachTransitionActuations
   }
 
   /**
@@ -2287,34 +2287,30 @@ export class Executor {
    * cancelled first (this is the preemption log line). If the *same* action is
    * running, ownership is retained and the caller just re-attaches to it.
    */
-  claim(candidate: Candidate, context: ExecutionClaimContext = {}): ClaimResult {
+  claim(candidate: Candidate, context: ExecutionClaimContext): ClaimResult {
     const running = this.action
-    const requestedAuthority = context.authority ?? 'legacy'
-    if (requestedAuthority === 'vtr-reach' &&
-      (typeof context.transitionId !== 'string' || context.transitionId.trim().length === 0)) {
-      throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionId')
+    if (typeof context.transitionId !== 'string' || context.transitionId.trim().length === 0) {
+      throw new ExecutionAuthorityConflict('actuation requires a kernel-admitted transitionId')
     }
-    if (requestedAuthority === 'vtr-reach' &&
-      (typeof context.transitionContractHash !== 'string' || context.transitionContractHash.trim().length === 0)) {
-      throw new ExecutionAuthorityConflict('VTR Reach actuation requires a transitionContractHash')
+    if (typeof context.transitionContractHash !== 'string' || context.transitionContractHash.trim().length === 0) {
+      throw new ExecutionAuthorityConflict('actuation requires a transitionContractHash')
     }
     if (
       running !== null && running.status === 'running' &&
-      (running.authority !== requestedAuthority ||
-        (requestedAuthority === 'vtr-reach' && running.transitionId !== context.transitionId) ||
-        (requestedAuthority === 'vtr-reach' && running.transitionContractHash !== context.transitionContractHash))
+      (running.transitionId !== context.transitionId ||
+        running.transitionContractHash !== context.transitionContractHash)
     ) {
       this.authorityConflicts += 1
       const message =
-        `actuation authority conflict: running=${running.authority ?? 'legacy'}:${running.transitionId ?? running.id} ` +
-        `requested=${requestedAuthority}:${context.transitionId ?? candidate.id}:${context.transitionContractHash ?? 'hash-unspecified'}`
+        `actuation authority conflict: running=${running.authorityLabel ?? 'transition'}:${running.transitionId ?? running.id} ` +
+        `requested=${context.authorityLabel ?? 'transition'}:${context.transitionId ?? candidate.id}:${context.transitionContractHash ?? 'hash-unspecified'}`
       this.logger.error('executor', `ACTUATION_AUTHORITY_CONFLICT ${message}`, {
         runningActionId: running.id,
-        runningAuthority: running.authority ?? 'legacy',
+        runningAuthority: running.authorityLabel ?? 'transition',
         runningTransitionId: running.transitionId ?? null,
         runningTransitionContractHash: running.transitionContractHash ?? null,
         requestedActionId: candidate.id,
-        requestedAuthority,
+        requestedAuthority: context.authorityLabel ?? 'transition',
         requestedTransitionId: context.transitionId ?? null,
         requestedTransitionContractHash: context.transitionContractHash ?? null,
       })
@@ -2361,9 +2357,9 @@ export class Executor {
       detail: '',
       completion,
       commitment,
-      authority: context.authority ?? 'legacy',
-      ...(context.transitionId === undefined ? {} : { transitionId: context.transitionId }),
-      ...(context.transitionContractHash === undefined ? {} : { transitionContractHash: context.transitionContractHash }),
+      ...(context.authorityLabel === undefined ? {} : { authorityLabel: context.authorityLabel }),
+      transitionId: context.transitionId,
+      transitionContractHash: context.transitionContractHash,
       ...(context.beforeMechanicalStep === undefined ? {} : { beforeMechanicalStep: context.beforeMechanicalStep }),
       ...(context.afterMechanicalStep === undefined ? {} : { afterMechanicalStep: context.afterMechanicalStep }),
       ...(context.resolveVtrReachMechanicalWaypoint === undefined ? {} : { resolveVtrReachMechanicalWaypoint: context.resolveVtrReachMechanicalWaypoint }),
@@ -2374,7 +2370,7 @@ export class Executor {
     this.activeCommitment = commitment
     this.internalEffectSequence = 0
     this.stepLog.clear()
-    if (requestedAuthority !== 'vtr-reach') this.nonVtrActuations += 1
+    if (context.authorityLabel !== 'vtr-reach') this.nonReachTransitionActuations += 1
     // Movement pinning mutates pathfinder state and must happen under the
     // action's own authority, so it runs after `this.action` is established
     // and still before the first dispatch in runAction. A failure here must
@@ -2688,7 +2684,7 @@ export class Executor {
   }
 
   /** Build the first-class commitment for one policy-selected candidate. */
-  private buildCommitment(candidate: Candidate, context: ExecutionClaimContext = {}): SkillCommitment {
+  private buildCommitment(candidate: Candidate, context: ExecutionClaimContext): SkillCommitment {
     const dimension = this.observedDimension()
     // Candidate provenance may be absent on a VTR-owned action: it reaches
     // claim() directly and does not pass through the legacy selection stamper.
@@ -2738,7 +2734,7 @@ export class Executor {
       }),
       budget: { ms: this.budgetMsFor(candidate), steps: null, retries: 0 },
       selectedBy:
-        context.authority === 'vtr-reach'
+        context.authorityLabel === 'vtr-reach'
           ? 'vtr_transition'
           : selectedBy === 'hard_safety'
             ? 'hard_safety'
@@ -3996,7 +3992,7 @@ export class Executor {
     const activeAction = this.action
     const waypointResolver = this.options.actuation === 'pathfinder' &&
       activeAction?.epoch === epoch &&
-      activeAction.authority === 'vtr-reach'
+      activeAction.authorityLabel === 'vtr-reach'
       ? activeAction.resolveVtrReachMechanicalWaypoint
       : null
     const waypoint = waypointResolver?.(target) ?? null

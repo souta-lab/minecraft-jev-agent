@@ -6,6 +6,7 @@ import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { Executor, EventLogger, defaultExecutorOptions } from '../src/index.ts'
 import type { Candidate, Vec3Json } from '../src/index.ts'
+import { fixtureClaim } from '../test-claim-context.mts'
 
 const username = process.argv[2] ?? 'AI_Pos'
 const targetArg = process.argv[3] ?? '0,0,0'
@@ -71,7 +72,7 @@ bot.once('spawn', async () => {
     meta: { tick: 1, x: spot.x, y: spot.y, z: spot.z },
   }
   process.stdout.write(`[pos] start=${JSON.stringify(bot.entity.position)} goal=${JSON.stringify(spot)}\n`)
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const end = bot.entity.position
   process.stdout.write(
     `[pos] status=${result.status} failure=${result.failure} end=(${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)}) ` +

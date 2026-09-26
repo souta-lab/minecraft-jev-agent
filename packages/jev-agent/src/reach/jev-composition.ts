@@ -9,7 +9,7 @@ import type {
   ReachRouteDecisionInput,
 } from './controller.ts'
 import type { ReachIdentity } from './transition.ts'
-import type { KernelReachAuthority } from '../reach/kernel-authority-map.ts'
+import type { KernelTransitionAuthority } from '../reach/kernel-authority-map.ts'
 
 export interface JevReachMutableCell<T> {
   value: T
@@ -61,7 +61,7 @@ export interface JevReachVtrCompositionContext {
    * the corresponding production act; denials fail closed. The same gate also
    * carries verified world observations into the kernel fact store.
    */
-  readonly kernelAuthority: KernelReachAuthority
+  readonly kernelAuthority: KernelTransitionAuthority
 }
 
 export interface JevReachVtrComposition {

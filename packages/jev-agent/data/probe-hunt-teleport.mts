@@ -15,6 +15,7 @@ import type { Bot } from 'mineflayer'
 import { Executor, defaultExecutorOptions } from '../src/executor.ts'
 import { EventLogger } from '../src/jev.ts'
 import type { Candidate } from '../src/candidates.ts'
+import { fixtureClaim } from '../test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -104,7 +105,7 @@ for (const shape of ['after-hit', 'before-first-swing'] as const) {
     pickupPathTimeoutMs: 300,
   })
   const started = Date.now()
-  const result = await executor.claim(candidate()).completion
+  const result = await fixtureClaim(executor, candidate()).completion
   process.stdout.write(`\n== hunt shape: ${shape}\n`)
   process.stdout.write(
     `   status=${result.status} failure=${result.failure} phase=${result.phase} verified=${result.verified} ` +

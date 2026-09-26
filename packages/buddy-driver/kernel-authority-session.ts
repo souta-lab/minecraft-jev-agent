@@ -8,7 +8,7 @@
 // kernel denials and unmapped/unauthorized mutations are journaled migration
 // blockers, not gates.
 //
-// Mode 'authority': the session also exposes `authority`, a KernelReachAuthority
+// Mode 'authority': the session also exposes `authority`, a KernelTransitionAuthority
 // gate the production runtime MUST consult before actuation. The same kernel
 // command path runs causally BEFORE the gated act (admit -> activate -> issue
 // -> dispatch -> settle -> terminalize) and a denied verdict is journaled and
@@ -18,7 +18,7 @@
 // The session holds kernel-internal trusted capabilities because buddy-driver
 // is the host/wiring layer; production semantic code must never import this
 // module or `packages/kernel/kernel-internal/*` — it sees only the narrow
-// `KernelSessionSink`/`KernelReachAuthority` surfaces.
+// `KernelSessionSink`/`KernelTransitionAuthority` surfaces.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -29,8 +29,10 @@ import {
   resourceKey,
   resourcesOverlap,
   type CanonicalTransitionContract,
+  type EffectKind,
   type KernelCommand,
   type KernelResult,
+  type TransitionContractSpec,
   type KernelState,
   type ResourceLease,
   type WorldIdentity,
@@ -51,10 +53,11 @@ import {
 import {
   mapMutationSurface,
   reachContractToKernelSpec,
+  CONTROLLER_AUTHORITY_REGISTRY,
   REACH_AUTHORITY_REGISTRY,
   type KernelAuthorityMode,
   type KernelGateVerdict,
-  type KernelReachAuthority,
+  type KernelTransitionAuthority,
   type KernelSessionInput,
   type KernelWorldObservation,
   type MutationAuthorityContext,
@@ -156,9 +159,9 @@ export interface KernelAuthoritySession {
   /**
    * V4.1.2 production-authority gate; non-null only when the session was
    * created with `authorityMode: 'authority'`. Production code holds this via
-   * the narrow `KernelReachAuthority` interface (no capability access).
+   * the narrow `KernelTransitionAuthority` interface (no capability access).
    */
-  readonly authority: KernelReachAuthority | null
+  readonly authority: KernelTransitionAuthority | null
   readonly summary: () => KernelSessionSummary
   readonly blockers: () => readonly KernelSessionBlocker[]
   readonly state: () => KernelState
@@ -174,11 +177,12 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     missionPredicates: [],
     verifierRegistry: [REACH_AUTHORITY_REGISTRY.verifier],
     progressRegistry: [REACH_AUTHORITY_REGISTRY.progress],
-    contractCompilerRegistry: [REACH_AUTHORITY_REGISTRY.compiler],
+    contractCompilerRegistry: [REACH_AUTHORITY_REGISTRY.compiler, CONTROLLER_AUTHORITY_REGISTRY.compiler],
     missionAuthority: REACH_AUTHORITY_REGISTRY.missionAuthority,
   })
   const caps = {
     compiler: trustedContractCompiler(REACH_AUTHORITY_REGISTRY.compiler.id),
+    controllerCompiler: trustedContractCompiler(CONTROLLER_AUTHORITY_REGISTRY.compiler.id),
     scheduler: trustedScheduler(),
     dispatcher: trustedDispatcher(),
     verifier: trustedVerifier(REACH_AUTHORITY_REGISTRY.verifier.id),
@@ -324,6 +328,30 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     return hash === undefined ? null : state.contracts[hash] ?? null
   }
 
+  /** REGISTER_TRANSITION + mission authorization + ADMIT_TRANSITION on a canonical contract. */
+  const admitCanonical = (canonical: CanonicalTransitionContract, via: string): KernelGateVerdict => {
+    const registered = apply({
+      kind: 'REGISTER_TRANSITION',
+      contract: canonical,
+      compiler: canonical.family === 'vtr-reach' ? REACH_AUTHORITY_REGISTRY.compiler : CONTROLLER_AUTHORITY_REGISTRY.compiler,
+      capability: canonical.family === 'vtr-reach' ? caps.compiler : caps.controllerCompiler,
+    }, via, canonical.transitionId)
+    if (!registered.ok) return deny('admitContract', registered.reason)
+    if (state.transitions[canonical.transitionId] === undefined) return deny('admitContract', 'transition-not-registered')
+    if (!state.missionPredicates.includes(canonical.desiredPredicate)) {
+      const mission = apply({
+        kind: 'UPDATE_MISSION',
+        predicates: [...state.missionPredicates, canonical.desiredPredicate],
+        authority: REACH_AUTHORITY_REGISTRY.missionAuthority,
+        capability: caps.mission,
+      }, via, canonical.transitionId)
+      if (!mission.ok) return deny('admitContract', mission.reason)
+    }
+    const admitted = apply({ kind: 'ADMIT_TRANSITION', transitionId: canonical.transitionId, capability: caps.scheduler }, via, canonical.transitionId)
+    if (!admitted.ok) return deny('admitContract', admitted.reason)
+    return { ok: true }
+  }
+
   /** REGISTER_TRANSITION + mission authorization + ADMIT_TRANSITION. */
   const admitTransition = (contract: ReachTransitionContract, via: string): KernelGateVerdict => {
     const mapped = reachContractToKernelSpec(contract, config.world)
@@ -346,26 +374,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
       kernelContractHash: canonical.contractHash,
       desiredPredicate: canonical.desiredPredicate,
     })
-    const registered = apply({
-      kind: 'REGISTER_TRANSITION',
-      contract: canonical,
-      compiler: REACH_AUTHORITY_REGISTRY.compiler,
-      capability: caps.compiler,
-    }, via, contract.transitionId)
-    if (!registered.ok) return deny('admitTransition', registered.reason)
-    if (state.transitions[contract.transitionId] === undefined) return deny('admitTransition', 'transition-not-registered')
-    if (!state.missionPredicates.includes(canonical.desiredPredicate)) {
-      const mission = apply({
-        kind: 'UPDATE_MISSION',
-        predicates: [...state.missionPredicates, canonical.desiredPredicate],
-        authority: REACH_AUTHORITY_REGISTRY.missionAuthority,
-        capability: caps.mission,
-      }, via, contract.transitionId)
-      if (!mission.ok) return deny('admitTransition', mission.reason)
-    }
-    const admitted = apply({ kind: 'ADMIT_TRANSITION', transitionId: contract.transitionId, capability: caps.scheduler }, via, contract.transitionId)
-    if (!admitted.ok) return deny('admitTransition', admitted.reason)
-    return { ok: true }
+    return admitCanonical(canonical, via)
   }
 
   /**
@@ -576,10 +585,28 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     return { ok: true }
   }
 
+  const KERNEL_EFFECT_KINDS: readonly EffectKind[] = [
+    'MOVE', 'LOOK', 'INTERACT', 'ATTACK', 'INVENTORY_MUTATION', 'EQUIP',
+    'DIG', 'PLACE', 'CONSUME', 'CRAFT', 'STATION_MUTATION', 'COMMAND',
+  ]
   const stepIssued = (input: Extract<KernelSessionInput, { type: 'mechanical-step-issued' }>, authoritative = false): KernelGateVerdict => {
-    if (input.effectKind !== 'locomotion') {
-      block('unmapped-mutation-surface', `step effect kind ${input.effectKind} is not in the Reach map`, { transitionId: input.transitionId })
+    // The gate-level effectKind resolves to one kernel EffectKind; the exact
+    // permit scope is read from the transition's own declared contract so an
+    // issued effect can never exceed the envelope the kernel admitted.
+    const resolvedKind = input.effectKind === 'locomotion'
+      ? 'MOVE'
+      : (KERNEL_EFFECT_KINDS as readonly string[]).includes(input.effectKind)
+        ? input.effectKind as EffectKind
+        : null
+    if (resolvedKind === null) {
+      block('unmapped-mutation-surface', `step effect kind ${input.effectKind} is not in the kernel effect map`, { transitionId: input.transitionId })
       return authoritative ? deny('issueStepEffect', `unmapped-effect-kind:${input.effectKind}`) : { ok: true }
+    }
+    const liveContract = transitionRegistered(input.transitionId)
+    const permit = liveContract?.effects.find((p) => p.kind === resolvedKind)
+    if (permit === undefined) {
+      block('unmapped-mutation-surface', `transition ${input.transitionId} declares no ${resolvedKind} effect permit`, { transitionId: input.transitionId })
+      return authoritative ? deny('issueStepEffect', `effect-not-permitted:${resolvedKind}`) : { ok: true }
     }
     if (openEffects.has(input.stepId)) {
       block('kernel-command-denied', `duplicate dispatch for mechanical step ${input.stepId}`, { transitionId: input.transitionId })
@@ -607,8 +634,8 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     const issued = apply({
       kind: 'ISSUE_EFFECT',
       transitionId: input.transitionId,
-      effect: 'MOVE',
-      scope: 'reach:leg',
+      effect: permit.kind,
+      scope: permit.scope,
       ttlMs: 30_000,
       capability: controllerCap(input.transitionId),
     }, 'mechanical-step-issued', input.transitionId)
@@ -793,7 +820,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     }
   }
 
-  const authorityGate: KernelReachAuthority | null = authorityMode === 'authority'
+  const authorityGate: KernelTransitionAuthority | null = authorityMode === 'authority'
     ? {
         mode: 'authority',
         feedObservation(input: KernelWorldObservation): void {
@@ -801,6 +828,25 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         },
         admitTransition(contract: ReachTransitionContract): KernelGateVerdict {
           return admitTransition(contract, 'gate-admit')
+        },
+        admitContract(spec: TransitionContractSpec): { readonly ok: true; readonly contractHash: string } | { readonly ok: false; readonly reason: string } {
+          let canonical: CanonicalTransitionContract
+          try {
+            canonical = createTransitionContract(spec)
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            block('contract-mapping-failed', `${spec.transitionId}: ${reason}`, { transitionId: spec.transitionId })
+            return { ok: false, reason }
+          }
+          journal({
+            type: 'replay-contract',
+            transitionId: canonical.transitionId,
+            kernelContractHash: canonical.contractHash,
+            desiredPredicate: canonical.desiredPredicate,
+            family: canonical.family,
+          })
+          const admitted = admitCanonical(canonical, 'gate-admit-contract')
+          return admitted.ok ? { ok: true, contractHash: canonical.contractHash } : { ok: false, reason: admitted.reason }
         },
         activateTransition(transitionId: string, witness: ReachWitness | null): KernelGateVerdict {
           return activateTransition(transitionId, witness, true, 'gate-activate')

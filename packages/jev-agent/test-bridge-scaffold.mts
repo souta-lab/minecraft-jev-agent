@@ -70,6 +70,7 @@ import type { BridgeProbe, BridgeProbeCell, BridgeDir } from './src/bridgeRoute.
 import type { AgentSignals, DescentDir, DescentOption, DescentRefusalReason, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import { distance, probeBridgeDirection } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -1133,7 +1134,7 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
     block: 'cobblestone',
     remaining: 378,
   }
-  executor.claim(bridgeCandidateFor(plan))
+  fixtureClaim(executor, bridgeCandidateFor(plan))
   const done = await waitFor(() => logs.some((line) => line.message.startsWith('BRIDGE_END')))
   executor.cancelCurrent('bridge fixture complete')
   const steps = logs.filter((line) => line.message.startsWith('BRIDGE_STEP'))
@@ -1200,7 +1201,7 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
       pathTimeoutMs: 60,
       packetStepMs: 0,
     })
-    executor.claim({
+    fixtureClaim(executor, {
       ...bridgeCandidateFor(plan),
       meta: { ...bridgeCandidateFor(plan).meta, bridgeSelfLanding: true },
     })
@@ -1261,7 +1262,7 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
     block: 'cobblestone',
     remaining: 378,
   }
-  executor.claim(bridgeCandidateFor(plan))
+  fixtureClaim(executor, bridgeCandidateFor(plan))
   const armed = await waitFor(() => holdArmed)
   executor.cancelCurrent('bridge interruption fixture')
   releaseHold()
@@ -1631,7 +1632,7 @@ function twoLandmasses(gap: number): { terrain: Terrain; feet: Vec3Json; target:
     pathTimeoutMs: 60,
     packetStepMs: 0,
   })
-  if (plan.plan !== null) executor.claim(bridgeCandidateFor(plan.plan))
+  if (plan.plan !== null) fixtureClaim(executor, bridgeCandidateFor(plan.plan))
   const done = await waitFor(() => logs.some((line) => line.message.startsWith('BRIDGE_END')))
   executor.cancelCurrent('general move crossing fixture complete')
   const steps = logs.filter((line) => line.message.startsWith('BRIDGE_STEP')).map((line) => line.message)

@@ -224,7 +224,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
 
   try {
     const claim = executor.claim(moveCandidate(intent.target as { x: number; y: number; z: number }), {
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId: intent.transitionId,
       transitionContractHash: intent.contractHash,
     })
@@ -232,7 +232,7 @@ test('typed Reach terminal revokes its real Executor lease before scheduler hand
     const currentAction: CurrentAction | null = executor.current
     expect(currentAction).not.toBeNull()
     expect(currentAction?.status).toBe('running')
-    expect(currentAction?.authority).toBe('vtr-reach')
+    expect(currentAction?.authorityLabel).toBe('vtr-reach')
     expect(currentAction?.transitionId).toBe(intent.transitionId)
 
     // Infinity is rejected as typed progress evidence while the ensures remain

@@ -72,6 +72,7 @@ import type { LiveStructureMember } from './src/blockSafety.ts'
 import type { EffectEnvelope } from './src/skillCommitment.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, GoalState, InventoryState, StationEntry, Vec3Json, WorldState } from './src/state.ts'
+import { fixtureClaim, fixtureClaimContext } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -785,7 +786,7 @@ addCase('(B3) held -> placed -> opened -> withdrawn: the whole chain with the re
   const placeCandidate = generateCandidates(placeState, defaultCandidateOptions).find((candidate) => candidate.kind === 'PLACE')
   if (placeCandidate === undefined) return { pass: false, detail: 'no PLACE candidate for the held shulker_box' }
   const { executor, logger } = containerExecutor(fixture, { goalItem: 'iron_ingot' })
-  const placeResult = await executor.claim(placeCandidate).completion
+  const placeResult = await fixtureClaim(executor, placeCandidate).completion
   const readyLine = logger.lines.find((line) => line.startsWith('CONTAINER_READY '))
   const placedBlock = fixture.blocks.get(`${cell.x},${cell.y},${cell.z}`)
 
@@ -793,14 +794,14 @@ addCase('(B3) held -> placed -> opened -> withdrawn: the whole chain with the re
   //    builder the body uses), and the OPEN step appears with contents unknown.
   const placedState = worldState({ containers: [{ ...cell, source: 'sensed', name: 'shulker_box' }] })
   const openCandidate = containerCandidateAt(placedState, 'open')
-  const openResult = await executor.claim(openCandidate).completion
+  const openResult = await fixtureClaim(executor, openCandidate).completion
   const openLine = logger.lines.find((line) => line.startsWith('CONTAINER_OPEN '))
 
   // 3. The observation grounds the transfers; the body takes what the goal wants.
   const next = { ...placedState, containerContents: executor.containerContents() }
   const withdraws = withdrawCandidates(next)
   const ingot = withdraws.find((candidate) => candidate.itemName === 'iron_ingot')
-  const withdrawResult = ingot === undefined ? null : await executor.claim(ingot).completion
+  const withdrawResult = ingot === undefined ? null : await fixtureClaim(executor, ingot).completion
   const transferLine = logger.lines.find((line) => line.startsWith('CONTAINER_TRANSFER '))
   const held = fixture.inventorySlots.reduce((sum, slot) => (slot?.name === 'iron_ingot' ? sum + slot.count : sum), 0)
   const pass =
@@ -865,7 +866,7 @@ addCase('(C1) open -> observe -> withdraw: the real Executor transfers exactly t
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture)
-  const openResult = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const openResult = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const openLine = logger.lines.find((line) => line.startsWith('CONTAINER_OPEN '))
   // The observation is the ONLY thing that makes a withdraw groundable: the next
   // tick's state carries it, and the withdraw candidates appear from it.
@@ -873,7 +874,7 @@ addCase('(C1) open -> observe -> withdraw: the real Executor transfers exactly t
   const withdraws = withdrawCandidates(next)
   const ingot = withdraws.find((candidate) => candidate.itemName === 'iron_ingot')
   const planks = withdraws.find((candidate) => candidate.itemName === 'oak_planks')
-  const withdrawResult = ingot === undefined ? null : await executor.claim(ingot).completion
+  const withdrawResult = ingot === undefined ? null : await fixtureClaim(executor, ingot).completion
   const transferLine = logger.lines.find((line) => line.startsWith('CONTAINER_TRANSFER '))
   const remaining = fixture.containerSlots.find((slot) => slot?.name === 'iron_ingot')?.count ?? 0
   const held = fixture.inventorySlots.reduce((sum, slot) => (slot?.name === 'iron_ingot' ? sum + slot.count : sum), 0)
@@ -922,7 +923,7 @@ addCase('(C2) a container that grew after the observation is moved only by the D
   // Someone added 5 more while the body walked over: the envelope still declares
   // the 3 the selection observed, so only 3 move and 5 remain.
   fixture.containerSlots[0]!.count = 8
-  const result = await executor.claim(declared).completion
+  const result = await fixtureClaim(executor, declared).completion
   const transferLine = logger.lines.find((line) => line.startsWith('CONTAINER_TRANSFER '))
   const pass =
     result.status === 'done' &&
@@ -932,7 +933,7 @@ addCase('(C2) a container that grew after the observation is moved only by the D
   return { pass, detail: `result=${result.status}/${result.itemsGained} transfer="${transferLine ?? 'none'}" left=${fixture.containerSlots[0]!.count}` }
 })
 
-addCase('(C3) an OPEN selection has no transfer authority: a transfer outside the envelope takes nothing', async () => {
+addCase('(C3) an OPEN selection has no transfer authorityLabel: a transfer outside the envelope takes nothing', async () => {
   const fixture = makeContainerBot({
     feet: STAND_FEET,
     blocks: terrain({ '1,64,0': 'chest' }),
@@ -946,7 +947,7 @@ addCase('(C3) an OPEN selection has no transfer authority: a transfer outside th
   const { executor, logger } = containerExecutor(fixture, { effectEnvelopeOverride: openEnvelope })
   // A withdraw candidate forced through the OPEN envelope must fail closed.
   const withdrawCandidate = { ...containerCandidateAt(observed([{ name: 'iron_ingot', count: 3 }]), 'withdraw', 'iron_ingot') }
-  const result = await executor.claim(withdrawCandidate).completion
+  const result = await fixtureClaim(executor, withdrawCandidate).completion
   const transferLine = logger.lines.find((line) => line.startsWith('CONTAINER_TRANSFER '))
   const held = fixture.inventorySlots.reduce((sum, slot) => (slot?.name === 'iron_ingot' ? sum + slot.count : sum), 0)
   const pass =
@@ -971,7 +972,7 @@ addCase('(C4) a transfer declared for a DIFFERENT container is refused (the ref 
     mayTransferInventory: [{ itemName: 'iron_ingot', count: 3, container: 'chest@9,9,9' }],
   }
   const { executor } = containerExecutor(fixture, { effectEnvelopeOverride: elsewhere })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const held = fixture.inventorySlots.reduce((sum, slot) => (slot?.name === 'iron_ingot' ? sum + slot.count : sum), 0)
   const pass = result.status === 'failed' && result.failure === 'effect_envelope_violation' && held === 0 && fixture.withdrawCalls.length === 0
   return { pass, detail: `status=${result.status}/${result.failure} held=${held} withdrawCalls=${fixture.withdrawCalls.length}` }
@@ -989,7 +990,7 @@ addCase('(C5) a DIFFERENT container at the cell is refused: the envelope names t
   })
   const candidate = containerCandidateAt(observed([{ name: 'iron_ingot', count: 3 }]), 'withdraw', 'iron_ingot')
   const { executor, logger } = containerExecutor(fixture)
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const pass =
     result.status === 'failed' &&
     result.failure === 'effect_envelope_violation' &&
@@ -1019,7 +1020,7 @@ addCase('(E1) an EMPTY container is a typed empty observation, never a silent su
   const fixture = makeContainerBot({ feet: STAND_FEET, blocks: terrain({ '1,64,0': 'chest' }), containerSlots: [null, null, null] })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture)
-  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const result = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const openLine = logger.lines.find((line) => line.startsWith('CONTAINER_OPEN '))
   const emptyLine = logger.lines.find((line) => line.startsWith('CONTAINER_EMPTY '))
   // The observation resolves to a typed EMPTY fact on the planning side too: no
@@ -1063,7 +1064,7 @@ addCase('(F1) a container with no valid interaction stand fails typed and NEVER 
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor } = containerExecutor(fixture)
-  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const result = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const pass = result.status === 'failed' && result.failure === 'path_stuck' && fixture.openCalls.length === 0
   return { pass, detail: `status=${result.status}/${result.failure} openCalls=${fixture.openCalls.length} detail=${result.detail}` }
 })
@@ -1077,7 +1078,7 @@ addCase('(F2) an OCCLUDED container is refused with reason=occluded and never op
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture)
-  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const result = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const refusal = logger.warnings.find((line) => line.startsWith('CONTAINER_REFUSED '))
   const pass =
     result.status === 'failed' &&
@@ -1097,7 +1098,7 @@ addCase('(F3) a window that never opens inside the bound is a typed open_timeout
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture, { containerOpenTimeoutMs: 15 })
-  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const result = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const refusal = logger.warnings.find((line) => line.startsWith('CONTAINER_REFUSED '))
   await new Promise((resolve) => setTimeout(resolve, 120))
   const pass =
@@ -1117,7 +1118,7 @@ addCase('(F4) a cell that no longer holds a container is a typed target_gone wit
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture)
-  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const result = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const refusal = logger.warnings.find((line) => line.startsWith('CONTAINER_REFUSED '))
   const pass =
     result.status === 'failed' &&
@@ -1148,7 +1149,7 @@ addCase('(G) a placed container is refused at the dig boundary, never mined for 
     hasStandableAdjacent: true,
     meta: { tick: 1, x: 1, y: 64, z: 0 },
   }
-  const result = await executor.claim(mine).completion
+  const result = await fixtureClaim(executor, mine).completion
   const pass = result.status === 'failed' && result.failure === 'protected_station'
   return { pass, detail: `status=${result.status}/${result.failure} detail=${result.detail}` }
 })
@@ -1175,7 +1176,7 @@ addCase('(G2) a claimed live-structure member is refused before bot.dig, then be
     meta: { tick: 1, x: 1, y: 64, z: 0, yieldItem: 'dirt', requiresPickup: false },
   }
   const members: LiveStructureMember[] = [{ kind: 'synthetic_structure', position: { ...CONTAINER_CELL } }]
-  const firstClaim = executor.claim(mine, { liveStructureMembers: members })
+  const firstClaim = executor.claim(mine, { ...fixtureClaimContext(mine), liveStructureMembers: members })
   // The executor owns a claim-time copy, not this caller's mutable array.
   members[0]!.position.x = 99
   const refused = await firstClaim.completion
@@ -1184,7 +1185,7 @@ addCase('(G2) a claimed live-structure member is refused before bot.dig, then be
 
   // A new claim uses the next world truth. Once validation drops the member,
   // ordinary deconstruction remains available and the shared dig boundary acts.
-  const released = await executor.claim(mine, { liveStructureMembers: [] }).completion
+  const released = await executor.claim(mine, { ...fixtureClaimContext(mine), liveStructureMembers: [] }).completion
   return {
     pass:
       refused.status === 'failed' &&
@@ -1259,9 +1260,9 @@ addCase('(J1) every container marker is registered and mirrored, and the emitted
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture)
-  await executor.claim(containerCandidateAt(seed, 'open')).completion
+  await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const next = { ...seed, containerContents: executor.containerContents() }
-  await executor.claim(containerCandidateAt(next, 'withdraw', 'iron_ingot')).completion
+  await fixtureClaim(executor, containerCandidateAt(next, 'withdraw', 'iron_ingot')).completion
   // The refusals ride the same mirrored path.
   const occluded = makeContainerBot({
     feet: STAND_FEET,
@@ -1270,11 +1271,11 @@ addCase('(J1) every container marker is registered and mirrored, and the emitted
     canSeeBlock: () => false,
   })
   const refused = containerExecutor(occluded)
-  await refused.executor.claim(containerCandidateAt(seed, 'open')).completion
+  await fixtureClaim(refused.executor, containerCandidateAt(seed, 'open')).completion
   // The EMPTY observation rides the same path (its own registered marker).
   const emptyFixture = makeContainerBot({ feet: STAND_FEET, blocks: terrain({ '1,64,0': 'chest' }), containerSlots: [null] })
   const emptyRun = containerExecutor(emptyFixture)
-  await emptyRun.executor.claim(containerCandidateAt(seed, 'open')).completion
+  await fixtureClaim(emptyRun.executor, containerCandidateAt(seed, 'open')).completion
   const emitted = [
     ...logger.lines.filter((line) => line.startsWith('CONTAINER_')),
     ...emptyRun.logger.lines.filter((line) => line.startsWith('CONTAINER_')),
@@ -1458,7 +1459,7 @@ addCase('(L1) a container every stand is sight-blocked from is refused typed (oc
   })
   const seed = worldState({ containers: [SENSED_CHEST], goalQueue: queueWith({ ...queued('iron_ingot'), kind: 'collect' }) })
   const { executor, logger } = containerExecutor(fixture)
-  const result = await executor.claim(containerCandidateAt(seed, 'open')).completion
+  const result = await fixtureClaim(executor, containerCandidateAt(seed, 'open')).completion
   const refusal = logger.warnings.find((line) => line.startsWith('CONTAINER_REFUSED '))
   const pass =
     result.status === 'failed' &&

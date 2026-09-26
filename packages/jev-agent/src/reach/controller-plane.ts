@@ -266,7 +266,7 @@ export function beginModelRecoveryReachDrain(host: ReachPlaneHost, runtime: Acti
       const current = host.executor.current
       if (
         current !== null && current.status === 'running' &&
-        current.authority === 'vtr-reach' && current.transitionId === transitionId
+        current.authorityLabel === 'vtr-reach' && current.transitionId === transitionId
       ) {
         host.logger.warn(
           'agent',
@@ -282,7 +282,7 @@ export function beginModelRecoveryReachDrain(host: ReachPlaneHost, runtime: Acti
     const current = host.executor.current
     if (
       current !== null && current.status === 'running' &&
-      current.authority === 'vtr-reach' && current.transitionId === transitionId
+      current.authorityLabel === 'vtr-reach' && current.transitionId === transitionId
     ) {
       // The existing completion handler will continue the same contract. Do not
       // attach a second callback that would finish the generation after one leg.
@@ -309,7 +309,7 @@ export async function advanceModelRecoveryReachDrain(host: ReachPlaneHost, trans
     const current = host.executor.current
     if (
       current !== null && current.status === 'running' &&
-      current.authority === 'vtr-reach' && current.transitionId === transitionId
+      current.authorityLabel === 'vtr-reach' && current.transitionId === transitionId
     ) {
       return
     }
@@ -525,7 +525,7 @@ export async function dispatchReachIntent(host: ReachPlaneHost,
     }
     if (dispatched.status === 'claim-refused') {
       const message = dispatched.message
-      if (dispatched.activeAction !== null && dispatched.activeAction.authority !== 'vtr-reach') {
+      if (dispatched.activeAction !== null && dispatched.activeAction.authorityLabel !== 'vtr-reach') {
         host.noteReachAuthorityConflict()
         host.reachRuntimeAdapter.cancelCurrent('VTR Reach claim refused by active legacy lease')
       }
@@ -725,7 +725,7 @@ export async function tickReachTransition(host: ReachPlaneHost, trigger: Decisio
         jevCalls: host.jevCalls,
         system2Calls: host.runtimeLlmCalls + host.planCalls,
         authorityConflicts: host.reachRuntimeAdapter.authorityConflictCount(),
-        nonVtrActuations: host.reachRuntimeAdapter.nonVtrActuationCount(),
+        nonReachTransitionActuations: host.reachRuntimeAdapter.nonReachTransitionActuationCount(),
       },
     })
 
@@ -960,7 +960,7 @@ export function recordReachMechanicalOutcome(host: ReachPlaneHost,
       if (result.outcome.kind === 'SUCCESS') host.logReachVerification(result.outcome, snapshot)
       const current = host.reachRuntimeAdapter.currentAction()
       const actionCorrelation =
-        current?.authority === 'vtr-reach' && current.transitionId === active.contract.transitionId
+        current?.authorityLabel === 'vtr-reach' && current.transitionId === active.contract.transitionId
           ? { intentId, actionId: current.id }
           : undefined
       const closed = host.closeReachTransition(result.outcome, result.state, 'mechanical-step-outcome', result.cancelIntentId, actionCorrelation)
@@ -1118,7 +1118,7 @@ export function closeReachTransition(host: ReachPlaneHost,
     if (action !== undefined) {
       const current = host.reachRuntimeAdapter.currentAction()
       if (
-        current?.authority === 'vtr-reach' &&
+        current?.authorityLabel === 'vtr-reach' &&
         current.transitionId === metadata.transitionId &&
         current.id === action.actionId &&
         action.intentId.length > 0
@@ -1134,7 +1134,7 @@ export function closeReachTransition(host: ReachPlaneHost,
         host.logger.error(
           'vtr',
           `VTR_TERMINAL_ACTION_CORRELATION_REFUSED transition=${metadata.transitionId} reason=active-lease-mismatch`,
-          { transitionId: metadata.transitionId, intentId: action.intentId, actionId: action.actionId, currentActionId: current?.id ?? null, currentAuthority: current?.authority ?? null },
+          { transitionId: metadata.transitionId, intentId: action.intentId, actionId: action.actionId, currentActionId: current?.id ?? null, currentAuthority: current?.authorityLabel ?? null },
           host.tickCounter,
         )
       }
@@ -1149,7 +1149,7 @@ export function closeReachTransition(host: ReachPlaneHost,
     const cancelAfterWake = shouldCancelAction && action !== undefined
     if (shouldCancelAction && !cancelAfterWake) {
       const current = host.reachRuntimeAdapter.currentAction()
-      if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
+      if (current?.authorityLabel === 'vtr-reach' && current.transitionId === metadata.transitionId) {
         host.reachRuntimeAdapter.cancelCurrent(`VTR terminal ${outcome.kind}`)
       }
     }
@@ -1157,7 +1157,7 @@ export function closeReachTransition(host: ReachPlaneHost,
     const system2Calls = Math.max(0, host.runtimeLlmCalls + host.planCalls - metadata.system2CallsAtStart)
     const duplicateAuthorityConflicts = Math.max(0, host.reachRuntimeAdapter.authorityConflictCount() - metadata.authorityConflictsAtStart)
     const duplicateAuthority = metadata.duplicateAuthorityObserved || duplicateAuthorityConflicts > 0
-    const concurrentLegacyActuations = Math.max(0, host.reachRuntimeAdapter.nonVtrActuationCount() - metadata.nonVtrActuationsAtStart)
+    const concurrentLegacyActuations = Math.max(0, host.reachRuntimeAdapter.nonReachTransitionActuationCount() - metadata.nonReachTransitionActuationsAtStart)
     host.logger.info(
       'vtr',
       `VTR_TRANSITION_OUTCOME id=${metadata.transitionId} outcome=${outcome.kind} boundary=${terminalBoundary} mechanicalSteps=${state.usage.mechanicalSteps} jevCalls=${jevCalls} system2Calls=${system2Calls}`,
@@ -1200,7 +1200,7 @@ export function closeReachTransition(host: ReachPlaneHost,
     // after queuing, so the completion callback cannot schedule a duplicate wake.
     if (cancelAfterWake) {
       const current = host.reachRuntimeAdapter.currentAction()
-      if (current?.authority === 'vtr-reach' && current.transitionId === metadata.transitionId) {
+      if (current?.authorityLabel === 'vtr-reach' && current.transitionId === metadata.transitionId) {
         host.reachRuntimeAdapter.cancelCurrent(`VTR terminal ${outcome.kind}`)
       }
     }

@@ -25,7 +25,7 @@ import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
 
-const mission = { id: 'executor-authority:oak_log:1', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
+const mission = { id: 'executor-authorityLabel:oak_log:1', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
 const identity: ReachIdentity = {
   worldKey: '127.0.0.1:25569|minecraft:overworld|31',
   dimension: 'minecraft:overworld',
@@ -213,7 +213,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
   const legacyCandidate = oakMove('MOVE:oak-log-legacy')
   const claimCalls: Array<{
     readonly candidateId: string
-    readonly authority: string
+    readonly authorityLabel: string
     readonly transitionId: string | null
     readonly transitionContractHash: string | null
   }> = []
@@ -229,10 +229,10 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     readonly ms: unknown
   }> = []
   const realClaim = executor.claim.bind(executor)
-  executor.claim = ((candidate: Candidate, context: Parameters<Executor['claim']>[1] = {}) => {
+  executor.claim = ((candidate: Candidate, context: Parameters<Executor['claim']>[1]) => {
     claimCalls.push({
       candidateId: candidate.id,
-      authority: context.authority ?? 'legacy',
+      authorityLabel: context.authorityLabel ?? 'transition',
       transitionId: context.transitionId ?? null,
       transitionContractHash: context.transitionContractHash ?? null,
     })
@@ -323,7 +323,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     const vtrAction = executor.current
     assert.ok(vtrAction)
     assert.equal(vtrAction.status, 'running')
-    assert.equal(vtrAction.authority, 'vtr-reach')
+    assert.equal(vtrAction.authorityLabel, 'vtr-reach')
     assert.equal(vtrAction.transitionId, activeTransition.contract.transitionId)
     assert.equal(vtrAction.transitionContractHash, activeTransition.contract.contractHash)
     const waypoint = vtrAction.resolveVtrReachMechanicalWaypoint?.(vtrCandidate.target!)
@@ -334,14 +334,14 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     assert.ok(fixtureContractHash)
     assert.deepEqual(claimCalls, [{
       candidateId: vtrCandidate.id,
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId: activeTransition.contract.transitionId,
       transitionContractHash: activeTransition.contract.contractHash,
     }])
 
     pathfinderStartsBeforeLegacyClaim = fixture.goalStarts()
     let legacyRefusal: unknown = null
-    try { executor.claim(legacyCandidate, { authority: 'legacy' }) }
+    try { executor.claim(legacyCandidate, { authorityLabel: 'fixture', transitionId: 'transition:legacy-foreign', transitionContractHash: 'contract:legacy-foreign' }) }
     catch (error) { legacyRefusal = error }
     legacyClaimRejected = legacyRefusal instanceof ExecutionAuthorityConflict
     pathfinderStartsAfterLegacyClaim = fixture.goalStarts()
@@ -357,7 +357,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     assert.equal(fixture.goalStarts(), 1, 'the refused legacy claim cannot start a second pathfinder goal')
     assert.equal(executor.maxConcurrentActions, 1)
     assert.equal(executor.authorityConflictCount, 1)
-    assert.deepEqual(claimCalls.map(({ authority }) => authority), ['vtr-reach', 'legacy'])
+    assert.deepEqual(claimCalls.map(({ authorityLabel }) => authorityLabel), ['vtr-reach', 'fixture'])
 
     const active = reachRuntime.current
     assert.ok(active)
@@ -393,7 +393,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     const conflict = records.find(({ message }) => message.startsWith('ACTUATION_AUTHORITY_CONFLICT'))
     assert.ok(conflict, 'the real Executor must journal its authority conflict')
     assert.equal(conflict.detail.runningAuthority, 'vtr-reach')
-    assert.equal(conflict.detail.requestedAuthority, 'legacy')
+    assert.equal(conflict.detail.requestedAuthority, 'fixture')
     assert.equal(conflict.detail.runningTransitionId, active.contract.transitionId)
     assert.equal(conflict.detail.requestedActionId, legacyCandidate.id)
 

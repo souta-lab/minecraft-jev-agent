@@ -73,7 +73,7 @@ test('production Reach uses injected VTR authority through same-contract continu
     let offered = candidate(8, 7, observedWorld.tick)
     let currentAction: Record<string, unknown> | null = null
     const pendingCompletions: Array<(result: Record<string, unknown>) => void> = []
-    const claims: Array<{ candidate: string; authority: string; transitionId: string }> = []
+    const claims: Array<{ candidate: string; authorityLabel: string; transitionId: string }> = []
     const legOutcomes: boolean[] = []
     const events: string[] = []
     const reachRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
@@ -150,7 +150,7 @@ tickCounter: observedWorld.tick,
         cancelCurrent: () => { currentAction = null; return true },
         claim: (selected: Candidate, context: Record<string, any>) => {
           const transitionId = String(context.transitionId)
-          claims.push({ candidate: selected.id, authority: String(context.authority), transitionId })
+          claims.push({ candidate: selected.id, authorityLabel: String(context.authorityLabel), transitionId })
           const step = {
             stepId: `${selected.id}#${claims.length}:walk-leg-1`, leg: 1, effectKind: 'locomotion' as const,
           }
@@ -163,7 +163,7 @@ tickCounter: observedWorld.tick,
           advanceWorld(currentWorld.tick + 1, currentWorld.self.position.x, sourceX)
           legOutcomes.push(context.afterMechanicalStep(step))
 
-          currentAction = { id: selected.id, kind: 'MOVE', authority: 'vtr-reach', transitionId, status: 'running' }
+          currentAction = { id: selected.id, kind: 'MOVE', authorityLabel: 'vtr-reach', transitionId, status: 'running' }
           let resolve!: (result: Record<string, unknown>) => void
           const completion = new Promise<Record<string, unknown>>((done) => { resolve = done })
           pendingCompletions.push(resolve)
@@ -227,7 +227,7 @@ tickCounter: observedWorld.tick,
     expect(continued.state.temporaryWaypoint?.waypointId).toBe(offered.id)
     expect(continued.state.usage.mechanicalSteps).toBe(2)
     expect(legOutcomes).toEqual([true, true])
-    expect(claims.map((claim) => claim.authority)).toEqual(['vtr-reach', 'vtr-reach'])
+    expect(claims.map((claim) => claim.authorityLabel)).toEqual(['vtr-reach', 'vtr-reach'])
     expect(new Set(claims.map((claim) => claim.transitionId))).toEqual(new Set([transitionId]))
 
     // A second action-level "done" still cannot close the contract. The next

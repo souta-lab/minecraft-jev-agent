@@ -119,7 +119,7 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
     try {
       const claim = this.executor.claim(guard.candidate, {
         liveStructureMembers: request.liveStructureMembers,
-        authority: 'vtr-reach',
+        authorityLabel: 'vtr-reach',
         transitionId: intent.transitionId,
         transitionContractHash: intent.contractHash,
         beforeMechanicalStep: request.beforeMechanicalStep,
@@ -161,9 +161,9 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
     return this.executor.authorityConflictCount
   }
 
-  /** Non-VTR claims that actually started an action (not conflict-rejected attempts). */
-  nonVtrActuationCount(): number {
-    return this.executor.nonVtrActuationCount
+  /** Non-Reach-family claims that actually started an action (not conflict-rejected attempts). */
+  nonReachTransitionActuationCount(): number {
+    return this.executor.nonReachTransitionActuationCount
   }
 
   private projectAction(action: CurrentAction): ReachRuntimeActionSnapshot {
@@ -172,7 +172,7 @@ export class MineflayerReachRuntimeAdapter implements ReachRuntimePorts {
       kind: action.kind,
       epoch: action.epoch,
       status: action.status,
-      authority: action.authority,
+      authorityLabel: action.authorityLabel,
       transitionId: action.transitionId,
       transitionContractHash: action.transitionContractHash,
       commitment: action.commitment,

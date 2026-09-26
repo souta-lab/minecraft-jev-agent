@@ -40,6 +40,7 @@ import type { ArmorSlot, ArmorWorn } from './src/gearPlan.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, BlockState, EntityState, GoalState, InventoryState, SelfState, WorldState } from './src/state.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -379,7 +380,7 @@ async function runAction(
     actuation: 'pathfinder',
     actuationPort: fixture.port,
   })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const messages = readFileSync(logPath, 'utf8')
     .trim()
     .split('\n')
@@ -530,7 +531,7 @@ addCase('(a) an equip that does not stick fails verify_failed with no EQUIP_ARMO
     actuation: 'pathfinder',
     actuationPort: deaf,
   })
-  const result = await executor.claim(candidate).completion
+  const result = await fixtureClaim(executor, candidate).completion
   const messages = readFileSync(logPath, 'utf8')
     .trim()
     .split('\n')

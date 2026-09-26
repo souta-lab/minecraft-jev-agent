@@ -60,6 +60,7 @@ import { classifyMoveArrival, defaultExecutorOptions } from './src/executor.ts'
 import { guardCandidate } from './src/policy.ts'
 import type { Candidate } from './src/candidates.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -506,7 +507,7 @@ async function runEnter(transfer: boolean) {
     fixture.position.set(ENTER_CELL.x + 0.5, ENTER_CELL.y, ENTER_CELL.z + 0.5)
     if (transfer) fixture.bot.game.dimension = 'the_nether'
   }
-  const result = await executor.claim(enterCandidate()).completion
+  const result = await fixtureClaim(executor, enterCandidate()).completion
   const messages = (await Bun.file(logPath).text())
     .split('\n')
     .filter((line) => line.trim().length > 0)

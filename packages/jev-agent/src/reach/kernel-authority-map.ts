@@ -254,6 +254,18 @@ export const REACH_AUTHORITY_REGISTRY = {
   missionAuthority: REACH_MISSION_AUTHORITY,
 } as const
 
+const CONTROLLER_COMPILER = { id: 'vtr-controller-compiler', version: 'vtr-controller/v4' } as const
+const CONTROLLER_PROGRESS = { id: 'vtr-controller-progress', version: 'mechanical_outcome/v1' } as const
+const CONTROLLER_DEF = { id: 'vtr-controller', version: 'vtr-controller/v4' } as const
+const CONTROLLER_TERMINAL = { id: 'vtr-controller-terminal', version: 'vtr-controller/v1' } as const
+
+export const CONTROLLER_AUTHORITY_REGISTRY = {
+  compiler: CONTROLLER_COMPILER,
+  progress: CONTROLLER_PROGRESS,
+  controller: CONTROLLER_DEF,
+  terminal: CONTROLLER_TERMINAL,
+} as const
+
 /**
  * Reach admissible-effect kind -> kernel (claims, effect permit). The Reach
  * contract declares `locomotion` today; the table is explicit so a new effect
@@ -475,13 +487,19 @@ export type KernelWorldObservation = Omit<
  * A denied verdict is terminal for the gated act, never a request to try the
  * same thing through a legacy path.
  */
-export interface KernelReachAuthority {
+export interface KernelTransitionAuthority {
   /** Present only when the session runs in production-authority mode. */
   readonly mode: 'authority'
   /** Feed a verified world observation into the kernel fact store (no verdict). */
   feedObservation(input: KernelWorldObservation): void
   /** Contract legality + mission authorization + admission gate before production commit. */
   admitTransition(contract: ReachTransitionContract): KernelGateVerdict
+  /**
+   * Kernel-spec admission for non-Reach transition families (controller
+   * transitions). The caller compiles the spec; the gate performs legality,
+   * mission authorization and admission exactly as `admitTransition`.
+   */
+  admitContract(spec: TransitionContractSpec): { readonly ok: true; readonly contractHash: string } | { readonly ok: false; readonly reason: string }
   /** Proof/witness freshness + declared resource bundle acquisition before first dispatch. */
   activateTransition(transitionId: string, witness: ReachWitness | null): KernelGateVerdict
   /** One effect commit issued and dispatch-linearized before the physical leg runs. */
@@ -509,4 +527,176 @@ export interface KernelReachAuthority {
     readonly contractHash: string
     readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
   }): KernelGateVerdict
+}
+
+// ---------------------------------------------------------------------------
+// Controller transition -> kernel contract
+// ---------------------------------------------------------------------------
+
+/**
+ * Mutation surfaces a committed mechanical skill may emit. The envelope is
+ * declared per committed SkillKind so a controller transition holds exactly the
+ * resource leases its own mechanics need - no more, no less. An observed
+ * mutation outside the envelope is a hard session blocker, never silently
+ * attributed.
+ */
+const BODY_SURFACES: readonly string[] = [
+  'bot.setControlState',
+  'bot.clearControlStates',
+  'bot.look',
+  'bot.lookAt',
+  'bot.swingArm',
+  'bot.mount',
+  'bot.dismount',
+  'pathfinder.setGoal',
+  'pathfinder.setMovements',
+  'pathfinder.goto',
+  'pathfinder.stop',
+  'collectBlock.collect',
+  'entity.position.write',
+  'entity.yaw',
+  'entity.pitch',
+  'entity.onGround',
+]
+const WORLD_SURFACES: readonly string[] = [
+  'bot.dig',
+  'bot.stopDigging',
+  'bot.placeBlock',
+  'bot.useOn',
+  'bot.updateSign',
+  'bot.activateBlock',
+]
+const INVENTORY_SURFACES: readonly string[] = [
+  'bot.equip',
+  'bot.unequip',
+  'bot.toss',
+  'bot.tossStack',
+  'bot.setQuickBarSlot',
+  'bot.clickWindow',
+  'bot.transfer',
+  'bot.withdraw',
+  'bot.deposit',
+  'bot.putSelectedItemRange',
+  'window.withdraw',
+  'window.deposit',
+]
+const WINDOW_SURFACES: readonly string[] = [
+  'bot.openBlock',
+  'bot.openContainer',
+  'bot.openFurnace',
+  'bot.openEnchantmentTable',
+  'bot.openVillager',
+  'bot.openAnvil',
+  'bot.closeWindow',
+]
+const ITEM_SURFACES: readonly string[] = ['bot.activateItem', 'bot.deactivateItem', 'bot.consume']
+
+export const CONTROLLER_TRANSITION_SURFACES: Readonly<Record<string, readonly string[]>> = {
+  walk_to: BODY_SURFACES,
+  retreat: BODY_SURFACES,
+  enter_portal: BODY_SURFACES,
+  descend: [...BODY_SURFACES, ...WORLD_SURFACES],
+  step: [...BODY_SURFACES, ...WORLD_SURFACES],
+  retrieve: BODY_SURFACES,
+  mine: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...ITEM_SURFACES],
+  place: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...ITEM_SURFACES],
+  craft: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...WINDOW_SURFACES, 'bot.craft'],
+  smelt: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...WINDOW_SURFACES],
+  withdraw: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...WINDOW_SURFACES],
+  ignite: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...ITEM_SURFACES],
+  kill: [...BODY_SURFACES, ...INVENTORY_SURFACES, 'bot.attack'],
+  hunt_drop: [...BODY_SURFACES, ...INVENTORY_SURFACES, 'bot.attack'],
+  hold_item: INVENTORY_SURFACES,
+  equip_item: INVENTORY_SURFACES,
+  eat: [...INVENTORY_SURFACES, ...ITEM_SURFACES],
+  wait: [],
+  escalate: [],
+}
+
+export interface ControllerTransitionSpecInput {
+  readonly transitionId: string
+  /** Committed mechanical skill family (the transition family). */
+  readonly family: string
+  /** Kernel predicate identity of the skill's declared postcondition. */
+  readonly desiredPredicate: string
+  readonly world: WorldIdentity
+  readonly maxMechanicalSteps: number
+  readonly maxActiveMs: number
+}
+
+/**
+ * Compile a controller transition (a production-dispatched mechanical skill
+ * commitment) into a V4.1.2 TransitionContractSpec. The contract's resource
+ * claims are the union of every mutation surface the committed skill family
+ * may emit; each declared effect permit carries its own required resources so
+ * an effect can never execute outside the lease it names. `requires` and
+ * `invariants` are empty by construction: controller transitions fence
+ * actuation, they do not re-verify the scheduler's grounding (the guard and
+ * the deterministic VERIFY remain the truth boundary for precondition truth).
+ */
+export function controllerTransitionToKernelSpec(
+  input: ControllerTransitionSpecInput,
+): ReachKernelContractResult {
+  const surfaces = CONTROLLER_TRANSITION_SURFACES[input.family]
+  if (surfaces === undefined) {
+    return { ok: false, reason: `unmapped controller transition family ${input.family}` }
+  }
+  const claims: KernelResourceRequirement[] = []
+  const effects: Array<{ kind: EffectKind; scope: string; irreversible: boolean; maxCount: number; requiredResources: readonly KernelResourceRequirement[] }> = []
+  for (const surface of surfaces) {
+    const mapped = MUTATION_SURFACE_MAP[surface]
+    if (mapped === undefined) return { ok: false, reason: `unmapped mutation surface ${surface}` }
+    for (const resource of mapped.resources) {
+      const dedupeKey = `${resource.domain}|${resource.path.join('/')}|${resource.instance}`
+      if (!claims.some((existing) => `${existing.domain}|${existing.path.join('/')}|${existing.instance}` === dedupeKey)) claims.push(resource)
+    }
+    if (!effects.some((existing) => existing.kind === mapped.effect)) {
+      effects.push({
+        kind: mapped.effect,
+        scope: `controller:${mapped.scope}`,
+        irreversible: false,
+        maxCount: input.maxMechanicalSteps,
+        requiredResources: mapped.resources,
+      })
+    }
+  }
+  return {
+    ok: true,
+    spec: {
+      transitionId: input.transitionId,
+      family: input.family,
+      class: 'MISSION',
+      urgency: 0,
+      world: input.world,
+      desiredPredicate: input.desiredPredicate,
+      requires: [],
+      ensures: [input.desiredPredicate],
+      invariants: [],
+      claims: claims.map((claim) => ({
+        resource: toResourceId(claim, null),
+        mode: claim.mode,
+        preemptible: true,
+        resumable: true,
+      })),
+      effects: effects.map((effect) => ({
+        kind: effect.kind,
+        scope: effect.scope,
+        irreversible: effect.irreversible,
+        maxCount: effect.maxCount,
+        requiredResources: effect.requiredResources.map((r) => ({ resource: toResourceId(r, null), mode: r.mode })),
+      })),
+      budget: {
+        maxActiveMs: input.maxActiveMs,
+        deadlineAtMonoMs: null,
+        maxMechanicalSteps: input.maxMechanicalSteps,
+        resources: {},
+        risk: {},
+      },
+      progressDefinition: CONTROLLER_PROGRESS,
+      controllerDefinition: CONTROLLER_DEF,
+      verificationDefinition: REACH_VERIFIER,
+      terminalPolicy: CONTROLLER_TERMINAL,
+      witnessValidation: null,
+    },
+  }
 }

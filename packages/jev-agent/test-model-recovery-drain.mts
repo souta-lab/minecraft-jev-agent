@@ -270,7 +270,7 @@ async function makeReachRecoveryFixture(): Promise<{
     activeActionMatchesMissionReach: false,
     safeToStart: true,
     observedHealth: 20,
-    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0, nonVtrActuations: 0 },
+    counters: { jevCalls: 0, system2Calls: 0, authorityConflicts: 0, nonReachTransitionActuations: 0 },
   })
   if (committed.kind !== 'transition') {
     throw new Error(`Reach fixture failed to commit: ${JSON.stringify(committed)}`)
@@ -321,7 +321,7 @@ async function makeReachRecoveryFixture(): Promise<{
       jevCallsAtStart: 0,
       system2CallsAtStart: 0,
       authorityConflictsAtStart: 0,
-      nonVtrActuationsAtStart: 0,
+      nonReachTransitionActuationsAtStart: 0,
       duplicateAuthorityObserved: false,
       lastHealth: 20,
     },
@@ -365,7 +365,7 @@ async function makeReachRecoveryFixture(): Promise<{
         kind: active.kind,
         epoch: active.epoch,
         status: active.status,
-        authority: active.authority,
+        authorityLabel: active.authorityLabel,
         transitionId: active.transitionId,
         transitionContractHash: active.transitionContractHash,
       },
@@ -377,7 +377,7 @@ async function makeReachRecoveryFixture(): Promise<{
         return true
       },
       authorityConflictCount: () => 0,
-      nonVtrActuationCount: () => 0,
+      nonReachTransitionActuationCount: () => 0,
     },
     executor: {
       get current() { return active },
@@ -389,9 +389,9 @@ async function makeReachRecoveryFixture(): Promise<{
         active = null
         return true
       },
-      claim: (candidate: Candidate, context: { authority?: string; transitionId?: string; transitionContractHash?: string }) => {
+      claim: (candidate: Candidate, context: { authorityLabel?: string; transitionId?: string; transitionContractHash?: string }) => {
         if (
-          context.authority !== 'vtr-reach' || context.transitionId !== transitionId ||
+          context.authorityLabel !== 'vtr-reach' || context.transitionId !== transitionId ||
           context.transitionContractHash !== contract.contractHash
         ) {
           metrics.legacyActuations += 1
@@ -409,7 +409,7 @@ async function makeReachRecoveryFixture(): Promise<{
           status: 'running',
           detail: '',
           completion,
-          authority: 'vtr-reach',
+          authorityLabel: 'vtr-reach',
           transitionId: context.transitionId,
           transitionContractHash: context.transitionContractHash,
         }
@@ -443,7 +443,7 @@ async function makeReachRecoveryFixture(): Promise<{
       if (result.status !== 'active' || result.intent === undefined) throw new Error(`Reach controller did not issue next intent: ${JSON.stringify(result)}`)
       const candidate = candidateFor(actionCount + 1)
       const claim = (this as unknown as Record<string, any>).executor.claim(candidate, {
-        authority: 'vtr-reach',
+        authorityLabel: 'vtr-reach',
         transitionId,
         transitionContractHash: contract.contractHash,
       })
@@ -458,7 +458,7 @@ async function makeReachRecoveryFixture(): Promise<{
   const claimInitial = (controller as unknown as Record<string, any>).executor.claim
   const initialCandidate = candidateFor(0)
   const initial = claimInitial(initialCandidate, {
-    authority: 'vtr-reach',
+    authorityLabel: 'vtr-reach',
     transitionId,
     transitionContractHash: contract.contractHash,
   })
@@ -507,7 +507,7 @@ test('model recovery keeps one committed Reach transition through multiple actio
   }).finish
   finish.call(fixture.controller, 'max-runtime', false)
   expect(fixture.actions).toHaveLength(1)
-  expect(fixture.actions[0]?.authority).toBe('vtr-reach')
+  expect(fixture.actions[0]?.authorityLabel).toBe('vtr-reach')
   expect(fixture.actions[0]?.transitionId).toBe(fixture.transitionId)
   expect(fixture.metrics.cancellations).toBe(0)
 
@@ -533,7 +533,7 @@ test('model recovery keeps one committed Reach transition through multiple actio
   expect((fixture.controller as unknown as { jevCalls: number }).jevCalls).toBe(0)
   expect((fixture.controller as unknown as { runtimeLlmCalls: number }).runtimeLlmCalls).toBe(0)
   expect((fixture.controller as unknown as { planCalls: number }).planCalls).toBe(0)
-  expect(fixture.actions.every((action) => action.authority === 'vtr-reach' && action.transitionId === fixture.transitionId)).toBe(true)
+  expect(fixture.actions.every((action) => action.authorityLabel === 'vtr-reach' && action.transitionId === fixture.transitionId)).toBe(true)
   expect(fixture.metrics.schedulerStops).toBeGreaterThanOrEqual(1)
   expect(fixture.events.some((line) => line.includes(`VTR_TRANSITION_OUTCOME id=${fixture.transitionId} outcome=SUCCESS`))).toBe(true)
   expect(fixture.events.some((line) => line.includes(`MODEL_RECOVERY_DRAIN phase=terminal transitionId=${fixture.transitionId} outcome=typed-terminal`))).toBe(true)

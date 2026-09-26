@@ -12,6 +12,7 @@ import { ExecutionAuthorityConflict, Executor, defaultExecutorOptions } from './
 import type { CurrentAction } from './src/executor.ts'
 import type { EventLogger } from './src/jev.ts'
 import { EventLogger as JsonLogger, JsonlWriter } from './src/jev.ts'
+import { fixtureClaimContext } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -111,7 +112,7 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
   }
 }
 
-test('Executor serializes legacy and VTR MOVE authority across cancellation and cleanup', async () => {
+test('Executor serializes transition-owned MOVE authority across cancellation and cleanup', async () => {
   const fixture = makeBot()
   const logDir = mkdtempSync(join(tmpdir(), 'vtr-executor-authority-'))
   const logger = new JsonLogger(new JsonlWriter(join(logDir, 'executor.jsonl')), false) as EventLogger
@@ -122,44 +123,55 @@ test('Executor serializes legacy and VTR MOVE authority across cancellation and 
   })
 
   try {
-    const legacy = executor.claim(moveCandidate('MOVE:legacy-first', 20), { authority: 'legacy' })
-    await waitFor(() => fixture.goalStarts() === 1, 'the active legacy MOVE to reach pathfinder')
-    const legacyAction = executor.current
-    assert.ok(legacyAction)
-    assert.equal(legacyAction.authority, 'legacy')
-    assert.equal(legacyAction.status, 'running')
+    const first = executor.claim(moveCandidate('MOVE:first-transition', 20), fixtureClaimContext(moveCandidate('MOVE:first-transition', 20)))
+    await waitFor(() => fixture.goalStarts() === 1, 'the active first MOVE to reach pathfinder')
+    const firstAction = executor.current
+    assert.ok(firstAction)
+    assert.equal(firstAction.status, 'running')
 
-    assert.equal(executor.cancelCurrent('replace legacy movement with Reach Transition'), true)
-    const legacyResult = await legacy.completion
-    assert.equal(legacyResult.status, 'cancelled')
-    assert.equal(legacyAction.status, 'cancelled')
-    assert.equal(executor.current, null, 'the cancelled legacy lease is released before a VTR claim')
+    assert.equal(executor.cancelCurrent('replace first movement with Reach Transition'), true)
+    const firstResult = await first.completion
+    assert.equal(firstResult.status, 'cancelled')
+    assert.equal(firstAction.status, 'cancelled')
+    assert.equal(executor.current, null, 'the cancelled first lease is released before a VTR claim')
     assert.equal(fixture.goalClears(), 1)
     assert.equal(fixture.pathStops(), 1)
 
     const transitionId = 'transition:reach-authority-fixture'
     const vtr = executor.claim(moveCandidate('MOVE:vtr-transition', 30), {
-      authority: 'vtr-reach',
+      authorityLabel: 'vtr-reach',
       transitionId,
       transitionContractHash: 'contract:reach-authority-fixture',
     })
     await waitFor(() => fixture.goalStarts() === 2, 'the VTR-owned MOVE to reach pathfinder')
     const vtrAction = currentAction(executor)
     assert.ok(vtrAction)
-    assert.equal(vtrAction.authority, 'vtr-reach')
+    assert.equal(vtrAction.authorityLabel, 'vtr-reach')
     assert.equal(vtrAction.transitionId, transitionId)
     assert.equal(vtrAction.status, 'running')
 
-    let legacyRejected = false
+    let unprovenancedRejected = false
     try {
-      executor.claim(moveCandidate('MOVE:legacy-overlap', 40), { authority: 'legacy' })
+      executor.claim(moveCandidate('MOVE:overlap-no-provenance', 40), {} as never)
     } catch (error) {
-      legacyRejected = error instanceof ExecutionAuthorityConflict
+      unprovenancedRejected = error instanceof ExecutionAuthorityConflict
     }
-    assert.equal(legacyRejected, true, 'legacy cannot start while the Reach lease is active')
+    assert.equal(unprovenancedRejected, true, 'a claim without transition provenance is refused')
+
+    let foreignRejected = false
+    try {
+      executor.claim(moveCandidate('MOVE:overlap-foreign-transition', 40), {
+        authorityLabel: 'fixture',
+        transitionId: 'transition:foreign',
+        transitionContractHash: 'contract:foreign',
+      })
+    } catch (error) {
+      foreignRejected = error instanceof ExecutionAuthorityConflict
+    }
+    assert.equal(foreignRejected, true, 'a foreign transition cannot start while the Reach lease is active')
     assert.equal(currentAction(executor), vtrAction, 'the VTR action retains body authority after the refused claim')
     assert.equal(vtrAction.status, 'running')
-    assert.equal(fixture.goalStarts(), 2, 'a rejected legacy claim never reaches pathfinder')
+    assert.equal(fixture.goalStarts(), 2, 'a rejected claim never reaches pathfinder')
     assert.equal(executor.authorityConflictCount, 1)
     assert.equal(executor.maxConcurrentActions, 1)
 
@@ -171,11 +183,11 @@ test('Executor serializes legacy and VTR MOVE authority across cancellation and 
     assert.equal(fixture.goalClears(), 2)
     assert.equal(fixture.pathStops(), 2)
 
-    // A new legacy action may start only after the VTR completion promise has
-    // settled and Executor.current reflects that cleanup.
-    const afterCleanup = executor.claim(moveCandidate('MOVE:legacy-after-cleanup', 50), { authority: 'legacy' })
-    await waitFor(() => fixture.goalStarts() === 3, 'a post-cleanup legacy MOVE to reach pathfinder')
-    assert.equal(currentAction(executor)?.authority, 'legacy')
+    // A new transition-owned action may start only after the VTR completion
+    // promise has settled and Executor.current reflects that cleanup.
+    const afterCleanupCandidate = moveCandidate('MOVE:after-cleanup-transition', 50)
+    const afterCleanup = executor.claim(afterCleanupCandidate, fixtureClaimContext(afterCleanupCandidate))
+    await waitFor(() => fixture.goalStarts() === 3, 'a post-cleanup MOVE to reach pathfinder')
     assert.equal(currentAction(executor)?.status, 'running')
     assert.equal(executor.maxConcurrentActions, 1)
     assert.equal(executor.cancelCurrent('fixture cleanup'), true)

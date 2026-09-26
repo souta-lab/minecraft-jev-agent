@@ -55,6 +55,7 @@ import type {
   Vec3Json,
   WorldState,
 } from './src/state.ts'
+import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -346,7 +347,7 @@ addCase('a Jev-selected ASCEND pillar passes the decision guard and the executor
 
   // The selection becomes an executor claim carrying the same id and the
   // vertical meta the candidate was enumerated with.
-  const claim = executor.claim(ascent)
+  const claim = fixtureClaim(executor, ascent)
   const currentId = executor.current?.id ?? null
   const currentKind = executor.current?.kind ?? null
   const pillarRan = await waitFor(
@@ -568,7 +569,7 @@ addCase('the executor refusal for an unplaceable pillar leaves a typed PILLAR ma
     packetStepMs: 0,
     maxStepsPerWaypoint: 1,
   })
-  executor.claim(ascent)
+  fixtureClaim(executor, ascent)
   const typed = await waitFor(
     () =>
       logs.some(

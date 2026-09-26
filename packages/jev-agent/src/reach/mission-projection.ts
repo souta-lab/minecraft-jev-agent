@@ -209,7 +209,7 @@ export function isMissionReachWalkAction(
   sourceNames: readonly string[],
 ): boolean {
   const commitment = action.commitment
-  if (action.authority === 'vtr-reach' || action.kind !== 'MOVE' || commitment?.skillKind !== 'walk_to') return false
+  if (action.authorityLabel === 'vtr-reach' || action.kind !== 'MOVE' || commitment?.skillKind !== 'walk_to') return false
   const sourceName = commitment.params.targetName
   if (typeof sourceName !== 'string' || !missionResourceSourceMatches(item, sourceName, null, sourceNames)) return false
   return commitment.target.kind === 'position' &&
