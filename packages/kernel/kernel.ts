@@ -760,7 +760,15 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
     case 'CHANGE_GENERATION': {
       if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'runtime')) return failure(state, 'UNTRUSTED_RUNTIME_CAPABILITY'); assertId(command.generationId, 'generationId'); if (command.generationId === state.generationId) return failure(state, 'GENERATION_UNCHANGED')
       const affected = Object.values(state.transitions).filter((t) => t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED').map((t) => t.transitionId)
-      let next = state; for (const t of Object.values(state.transitions)) if (t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED') { next = releaseAllLeases(next, t.transitionId); next = quiesceTransitionEffects(next, t.transitionId); const current = next.transitions[t.transitionId]!; next = updateTransition(next, { ...current, lifecycle: 'SUSPENDED', heldLeaseIds: [], suspendReason: 'GENERATION_REBIND_REQUIRED', activeSinceMonoMs: null, lifecycleRevision: current.lifecycleRevision + 1 }, true) }
+      let next = state; for (const t of Object.values(state.transitions)) if (t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED') {
+        // A quiescing transition already has a requested terminal (a verified
+        // SUCCESS awaiting safe yield, or a cancel). The old generation can no
+        // longer acknowledge that yield, so the requested terminal is honored
+        // rather than suspending with pending control state.
+        if (t.pendingTerminalOutcome !== null) { next = terminalize(next, t.transitionId, t.pendingTerminalOutcome); continue }
+        if (t.cancelRequested) { next = terminalize(next, t.transitionId, { kind: 'CANCELED', reason: 'generation changed during cancel safe-yield' }); continue }
+        next = releaseAllLeases(next, t.transitionId); next = quiesceTransitionEffects(next, t.transitionId); const current = next.transitions[t.transitionId]!; next = updateTransition(next, { ...current, lifecycle: 'SUSPENDED', heldLeaseIds: [], suspendReason: 'GENERATION_REBIND_REQUIRED', activeSinceMonoMs: null, lifecycleRevision: current.lifecycleRevision + 1 }, true)
+      }
       const preemptions = Object.fromEntries(Object.entries(next.preemptions).map(([id, tx]) => [id, deepFreeze({ ...tx, status: 'STALE' as const })])); state = deepFreeze({ ...next, generationId: command.generationId, preemptions })
       return success(state, command, 'GENERATION_CHANGED', null, { generationId: command.generationId, affected }, affected)
     }

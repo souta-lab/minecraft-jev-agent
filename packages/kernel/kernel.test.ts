@@ -907,3 +907,61 @@ describe('V4.1.2 progress and Jev live-projection closure', () => {
     expect(admitJevDecision(s, frame, decision)).toEqual({ ok: false, reason: 'STALE_FRAME_STATE' })
   })
 })
+
+// Minimized adversarial traces from the V4.1.2 closure audit.
+//
+// K1 (preempting a victim that starts quiescing after the plan) is fenced:
+// REQUEST_CANCEL / VERIFY_SUCCESS bump registryRevision, which is part of the
+// plan's binding, so the transaction goes STALE and ACK/COMMIT fail closed.
+// These cases pin that dependency: removing registryRevision from the binding
+// (a tempting "over-fencing" cleanup) would re-open K1.
+//
+// K2 (generation change while a transition is quiescing) reached a state the
+// reducer's own `assertKernelInvariants` rejects; the fix honors the requested
+// terminal instead of suspending with pending control state.
+describe('V4.1.2 minimized counterexamples', () => {
+  function quiescingVictimSetup(): { s: KernelState; victim: CanonicalTransitionContract; requester: CanonicalTransitionContract; txId: string } {
+    const victim = contract('critical:quiesce', 'MISSION', [claim(inventory, 'EXCLUSIVE_WRITE', { preemptible: false, maxNonPreemptibleMs: 50 })])
+    const requester = contract('viability:quiesce', 'VIABILITY', [claim(inventory)])
+    let s = initial([victim, requester]); s = activate(s, victim); s = registerAdmit(s, requester)
+    s = apply(s, { kind: 'START_PREEMPTION', requesterId: requester.transitionId })
+    return { s, victim, requester, txId: Object.keys(s.preemptions)[0]! }
+  }
+
+  test('K1a: a victim that starts quiescing (cancel) after the preemption plan cannot be preempted mid critical section', () => {
+    const { s: planned, victim, txId } = quiescingVictimSetup()
+    const s = apply(planned, { kind: 'REQUEST_CANCEL', transitionId: victim.transitionId, reason: 'operator stop' })
+    expect(s.transitions[victim.transitionId]?.cancelRequested).toBe(true)
+    reject(s, { kind: 'ACK_PREEMPTION_YIELD', transactionId: txId, victimId: victim.transitionId, safeYield: true, atMonoMs: s.monotonicMs }, 'STALE_PREEMPTION')
+  })
+
+  test('K1b: a victim holding a pending verified SUCCESS cannot be preempted into SUSPENDED', () => {
+    const { s: planned, victim, txId } = quiescingVictimSetup()
+    let s = acceptFacts(planned, [{ predicateId: victim.desiredPredicate }])
+    s = apply(s, { kind: 'VERIFY_SUCCESS', transitionId: victim.transitionId, causalCredit: 'self' })
+    expect(s.transitions[victim.transitionId]?.pendingTerminalOutcome?.kind).toBe('SUCCESS')
+    reject(s, { kind: 'ACK_PREEMPTION_YIELD', transactionId: txId, victimId: victim.transitionId, safeYield: true, atMonoMs: s.monotonicMs }, 'STALE_PREEMPTION')
+  })
+
+  test('K1c: an already-acknowledged plan cannot commit once its victim starts quiescing', () => {
+    const { s: planned, victim, txId } = quiescingVictimSetup()
+    let s = apply(planned, { kind: 'ACK_PREEMPTION_YIELD', transactionId: txId, victimId: victim.transitionId, safeYield: true, atMonoMs: planned.monotonicMs })
+    s = apply(s, { kind: 'REQUEST_CANCEL', transitionId: victim.transitionId, reason: 'operator stop' })
+    reject(s, { kind: 'COMMIT_PREEMPTION', transactionId: txId }, 'STALE_PREEMPTION')
+  })
+
+  test('K2: a generation change honors a quiescing transition\'s requested terminal instead of suspending it', () => {
+    const cancelled = contract('critical:gen-cancel', 'MISSION', [claim(inventory, 'EXCLUSIVE_WRITE', { preemptible: false, maxNonPreemptibleMs: 50 })])
+    const verified = contract('critical:gen-verified', 'MISSION', [claim(locomotion, 'EXCLUSIVE_WRITE', { preemptible: false, maxNonPreemptibleMs: 50 })])
+    let s = initial([cancelled, verified]); s = activate(s, cancelled); s = activate(s, verified)
+    s = apply(s, { kind: 'REQUEST_CANCEL', transitionId: cancelled.transitionId, reason: 'operator stop' })
+    s = acceptFacts(s, [{ predicateId: verified.desiredPredicate }])
+    s = apply(s, { kind: 'VERIFY_SUCCESS', transitionId: verified.transitionId, causalCredit: 'self' })
+    s = apply(s, { kind: 'CHANGE_GENERATION', generationId: 'gen-b', capability: trustedWorldAdapter('runtime') })
+    expect(s.transitions[cancelled.transitionId]?.lifecycle).toBe('TERMINAL')
+    expect(s.transitions[cancelled.transitionId]?.terminalOutcome?.kind).toBe('CANCELED')
+    expect(s.transitions[verified.transitionId]?.lifecycle).toBe('TERMINAL')
+    expect(s.transitions[verified.transitionId]?.terminalOutcome?.kind).toBe('SUCCESS')
+    expect(Object.keys(s.leases)).toHaveLength(0)
+  })
+})
