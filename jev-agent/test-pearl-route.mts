@@ -50,7 +50,7 @@ import {
 import type { Candidate, MobDropSpawnContext, ReachabilityGateOptions } from './src/candidates.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
-import type { AgentLevel } from './src/jev-legacy.ts'
+import type { AgentLevel } from './src/jev/client.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { MOB_SPAWN_CONTEXTS, mobSpawnContextMet, sampleMobSpawnContext, scannedBlockNames } from './src/state.ts'
 import type {

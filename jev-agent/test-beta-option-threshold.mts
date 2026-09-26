@@ -1,6 +1,6 @@
 // #11 beta: raw P(abandon) is interpreted at the exact current Option boundary.
 import assert from 'node:assert/strict'
-import { authorityDecisionMeta } from './src/jev-authority.ts'
+import { authorityDecisionMeta } from './src/jev/authority.ts'
 import { abandonRequested } from './src/jev.ts'
 import type { JevAnswer, JevRequest, JevResult } from './src/jev.ts'
 

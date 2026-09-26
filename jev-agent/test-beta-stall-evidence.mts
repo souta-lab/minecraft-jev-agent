@@ -17,8 +17,8 @@
 //
 // These cases are pure (no bot, no model call).
 import assert from 'node:assert/strict'
-import { buildAuthorityQuestions } from './src/jev-authority.ts'
-import { authorityState } from './src/jev-authority.ts'
+import { buildAuthorityQuestions } from './src/jev/authority.ts'
+import { authorityState } from './src/jev/authority.ts'
 import type { StrategicStallEvidence } from './src/strategicStall.ts'
 
 const exhausted: StrategicStallEvidence = {

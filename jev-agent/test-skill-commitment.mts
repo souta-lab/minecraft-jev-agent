@@ -34,7 +34,7 @@ import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
-import type { AgentLevel } from './src/jev-legacy.ts'
+import type { AgentLevel } from './src/jev/client.ts'
 import type { Candidate } from './src/candidates.ts'
 import {
   commitmentInvalidation,
@@ -69,7 +69,7 @@ import {
   policyBoundary,
   STALE_JEV_RESULT_DROPPED,
   terminalReasonFor,
-} from './src/jevSemanticProjection.ts'
+} from './src/jev/semantic-projection.ts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')

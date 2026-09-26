@@ -65,8 +65,8 @@ import {
 import type { DecisionTrigger } from './src/scheduler.ts'
 import { defaultExecutorOptions, Executor } from './src/executor.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
-import { airBand, buildJevSemanticProjection, foodBand, healthBand } from './src/jevSemanticProjection.ts'
-import type { SemanticProjectionInput } from './src/jevSemanticProjection.ts'
+import { airBand, buildJevSemanticProjection, foodBand, healthBand } from './src/jev/semantic-projection.ts'
+import type { SemanticProjectionInput } from './src/jev/semantic-projection.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')

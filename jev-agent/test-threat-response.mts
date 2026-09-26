@@ -30,7 +30,7 @@ import {
   COMBAT_CANDIDATE_RANGE,
   THREAT_RESPONSE_RANGE,
 } from './src/candidates.ts'
-import { authorityState } from './src/jev-authority.ts'
+import { authorityState } from './src/jev/authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
 import { pickHigherPriority } from './src/controller-legacy.ts'
@@ -39,7 +39,7 @@ import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, BlockState, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
-import type { JevRequest } from './src/jev-legacy.ts'
+import type { JevRequest } from './src/jev/client.ts'
 
 const require = createRequire(import.meta.url)
 

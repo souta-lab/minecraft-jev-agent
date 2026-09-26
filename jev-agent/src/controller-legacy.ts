@@ -108,7 +108,7 @@ import {
   semanticOffhand,
   buildSemanticCombatFacts,
   projectionHash as semanticProjectionHash,
-} from './jevSemanticProjection.ts'
+} from './jev/semantic-projection.ts'
 import type {
   DecisionEpoch,
   GroundedFact,
@@ -119,7 +119,7 @@ import type {
   SemanticProgressFacts,
   SkillOutcomePacket,
   SkillTerminalReason,
-} from './jevSemanticProjection.ts'
+} from './jev/semantic-projection.ts'
 import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
 import type { ActuationMode, CurrentAction, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'

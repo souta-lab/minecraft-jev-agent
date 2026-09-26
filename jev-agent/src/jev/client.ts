@@ -33,9 +33,9 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync } from 'no
 import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
-import type { Candidate } from './candidates.ts'
-import { FatalModelError } from './modelFailure.ts'
-import type { WorldState } from './state.ts'
+import type { Candidate } from '../candidates.ts'
+import { FatalModelError } from '../modelFailure.ts'
+import type { WorldState } from '../state.ts'
 
 type EvaluateArgs = Parameters<typeof evaluate>[0]
 type EvaluationState = EvaluateArgs['state']

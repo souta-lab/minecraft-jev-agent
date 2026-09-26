@@ -66,7 +66,7 @@ import {
   SKILL_OUTCOME_PACKET,
   STALE_JEV_RESULT_DROPPED,
   terminalReasonFor,
-} from './src/jevSemanticProjection.ts'
+} from './src/jev/semantic-projection.ts'
 import type {
   Candidate,
   CandidateKind,
@@ -75,7 +75,7 @@ import type {
   JevSemanticProjection,
   SemanticProjectionInput,
   SkillOutcomePacket,
-} from './src/jevSemanticProjection.ts'
+} from './src/jev/semantic-projection.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
 import { LOW_AIR_LEVEL, MAX_AIR, observedAir } from './src/air.ts'
 

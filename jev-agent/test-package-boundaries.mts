@@ -25,16 +25,31 @@ import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
 
-type Owner = 'reach' | 'minecraft' | 'legacy' | 'vtr' | 'system2' | 'flat'
+type Owner =
+  | 'reach'
+  | 'minecraft'
+  | 'legacy'
+  | 'vtr'
+  | 'system2'
+  | 'jev'
+  | 'flat'
 
-const PACKAGE_DIRS: readonly Owner[] = ['reach', 'minecraft', 'legacy', 'vtr', 'system2']
+const PACKAGE_DIRS: readonly Owner[] = [
+  'reach',
+  'minecraft',
+  'legacy',
+  'vtr',
+  'system2',
+  'jev',
+]
 
 const FORBIDDEN: Readonly<Record<string, readonly Owner[]>> = {
   reach: ['minecraft', 'legacy'],
-  vtr: ['reach', 'minecraft', 'legacy', 'system2', 'flat'],
+  vtr: ['reach', 'minecraft', 'legacy', 'system2', 'jev', 'flat'],
   minecraft: ['legacy'],
   legacy: ['minecraft'],
   system2: ['minecraft', 'legacy'],
+  jev: ['minecraft', 'legacy'],
 }
 
 /** Flat transitional modules allowed to touch the raw backend. */

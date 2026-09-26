@@ -64,7 +64,7 @@ import {
 import type { AttackStandFact } from './src/combatClosure.ts'
 import { Executor, MELEE_ATTACK_RANGE, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
-import type { AgentLevel } from './src/jev-legacy.ts'
+import type { AgentLevel } from './src/jev/client.ts'
 import type { Candidate } from './src/candidates.ts'
 import { producerDropFor, producerMobForItem } from './src/candidates.ts'
 import { entityAimPoint, entityVisibleFromEye } from './src/state.ts'

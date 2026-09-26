@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
-import type { JevAnswer, JevPolicy, JevRequest, JevResult } from './src/jev-legacy.ts'
+import type { JevAnswer, JevPolicy, JevRequest, JevResult } from './src/jev/client.ts'
 import {
   buildJevReachIdentity,
   createJevReachVtrComposition,

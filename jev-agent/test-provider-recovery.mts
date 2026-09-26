@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { AuthorityJevPolicy, extractProviderErrorDiagnostics, isTransientProviderFailure } from './src/jev-authority.ts'
+import { AuthorityJevPolicy, extractProviderErrorDiagnostics, isTransientProviderFailure } from './src/jev/authority.ts'
 import { FatalModelError } from './src/modelFailure.ts'
 import type { Candidate } from './src/candidates.ts'
-import type { JevPolicyOptions, JevRequest } from './src/jev-legacy.ts'
+import type { JevPolicyOptions, JevRequest } from './src/jev/client.ts'
 
 assert.equal(isTransientProviderFailure({ statusCode: 503, message: 'unavailable' }), true)
 assert.equal(isTransientProviderFailure({ cause: { status: 502, message: 'bad gateway' } }), true)

@@ -44,7 +44,7 @@ import type { Bot } from 'mineflayer'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import type { Candidate } from './src/candidates.ts'
-import type { AgentLevel } from './src/jev-legacy.ts'
+import type { AgentLevel } from './src/jev/client.ts'
 import {
   MELEE_ATTACK_REACH,
   MELEE_REACH_UP,

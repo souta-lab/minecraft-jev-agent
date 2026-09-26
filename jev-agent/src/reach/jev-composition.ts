@@ -1,4 +1,4 @@
-import type { JevPolicy, JevResult } from '../jev-legacy.ts'
+import type { JevPolicy, JevResult } from '../jev/client.ts'
 import { JevReachRouteDecisionPolicy } from './route-policy.ts'
 import type { WorldState } from '../state.ts'
 import { ReachMissionRuntime } from './mission-runtime.ts'

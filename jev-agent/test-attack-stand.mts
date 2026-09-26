@@ -37,7 +37,7 @@ import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import { Executor, MELEE_ATTACK_RANGE, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
-import type { AgentLevel } from './src/jev-legacy.ts'
+import type { AgentLevel } from './src/jev/client.ts'
 import type { AttackStandFact, AttackStandWorld } from './src/combatClosure.ts'
 import {
   MELEE_ATTACK_REACH,

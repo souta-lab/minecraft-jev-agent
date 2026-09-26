@@ -10,12 +10,12 @@
 import { randomUUID } from 'node:crypto'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
-import type { Candidate } from './candidates.ts'
-import { FatalModelError } from './modelFailure.ts'
+import type { Candidate } from '../candidates.ts'
+import { FatalModelError } from '../modelFailure.ts'
 // §437 §1/§10: the model-visible half of the semantic projection (no raw telemetry,
 // and the exact top-level keys the projection hash covers).
-import { projectionModelView } from './jevSemanticProjection.ts'
-import type { JevSemanticProjection } from './jevSemanticProjection.ts'
+import { projectionModelView } from './semantic-projection.ts'
+import type { JevSemanticProjection } from './semantic-projection.ts'
 import type {
   JevAnswer,
   JevPolicy,
@@ -25,8 +25,8 @@ import type {
   JevUsage,
   KeyResolution,
   QuestionName,
-} from './jev-legacy.ts'
-import { ABANDON_THRESHOLD_DEFAULT, DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES } from './jev-legacy.ts'
+} from './client.ts'
+import { ABANDON_THRESHOLD_DEFAULT, DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES } from './client.ts'
 
 export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'You are Jev pi, the local policy head of an autonomous Minecraft agent. Choose exactly ONE id from the grounded ' +

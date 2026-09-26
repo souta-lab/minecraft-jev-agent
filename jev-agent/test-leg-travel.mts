@@ -45,7 +45,7 @@ import { fileURLToPath } from 'node:url'
 import type { Bot } from 'mineflayer'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import * as executorModule from './src/executor.ts'
-import type { JsonlWriter } from './src/jev-legacy.ts'
+import type { JsonlWriter } from './src/jev/client.ts'
 import type { Candidate, Vec3Json } from './src/index.ts'
 
 /**

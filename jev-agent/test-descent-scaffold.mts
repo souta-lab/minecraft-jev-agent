@@ -72,7 +72,7 @@ import type { GuardContext } from './src/policy.ts'
 import { capabilityKey } from './src/reachability.ts'
 import type { Capability } from './src/reachability.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
-import type { JsonlWriter } from './src/jev-legacy.ts'
+import type { JsonlWriter } from './src/jev/client.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
 
 const require = createRequire(import.meta.url)

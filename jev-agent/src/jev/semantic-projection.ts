@@ -45,8 +45,8 @@
 // fields. This module deliberately does NOT define envelopes, budgets or
 // authorization: it names the epoch/commitment an outcome closes.
 import { createHash } from 'node:crypto'
-import type { Candidate, CandidateKind } from './candidates.ts'
-import { LOW_AIR_LEVEL, MAX_AIR, observedAir } from './air.ts'
+import type { Candidate, CandidateKind } from '../candidates.ts'
+import { LOW_AIR_LEVEL, MAX_AIR, observedAir } from '../air.ts'
 
 // ---------------------------------------------------------------------------
 // §12 observability: the two planes and their markers

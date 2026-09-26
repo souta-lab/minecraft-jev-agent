@@ -23,7 +23,7 @@ import { isResourceClass, matchesResourceClass, resourceMatches } from '../resou
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from '../goalSuccess.ts'
 import { abandonRequested, decisionIdFrom } from '../jev.ts'
 import type { EventLogger, JevResult } from '../jev.ts'
-import type { JevSemanticProjection, PreviousDecisionFacts, SkillOutcomePacket } from '../jevSemanticProjection.ts'
+import type { JevSemanticProjection, PreviousDecisionFacts, SkillOutcomePacket } from '../jev/semantic-projection.ts'
 import { FLINT_AND_STEEL, IRON_INGOT, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE } from '../netherPortalPlan.ts'
 import type { PortalFrameSite } from '../netherPortalPlan.ts'
 import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, queuedToPlanned } from '../optionSpec.ts'

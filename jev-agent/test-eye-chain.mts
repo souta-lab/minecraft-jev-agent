@@ -69,7 +69,7 @@ import { MIRRORED_MARKERS } from './src/controller-legacy.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardDecision } from './src/policy.ts'
-import type { AgentLevel } from './src/jev-legacy.ts'
+import type { AgentLevel } from './src/jev/client.ts'
 import type {
   EntityState,
   GoalState,

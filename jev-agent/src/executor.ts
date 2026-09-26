@@ -158,7 +158,7 @@ import {
   targetIdentityKey,
   targetIdentityOf,
 } from './skillCommitment.ts'
-import type { SkillTerminalReason } from './jevSemanticProjection.ts'
+import type { SkillTerminalReason } from './jev/semantic-projection.ts'
 // issue #436 / OPERATOR DIRECTIVE 2026-09-23: the WALK_TO family is ONE harness-layer
 // Skill with a bounded closed loop (see `walkSkill.ts` for the measured symptom and
 // the contract). The loop decision is pure and lives there; this file only drives it.

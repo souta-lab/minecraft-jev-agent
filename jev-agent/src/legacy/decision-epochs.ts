@@ -43,7 +43,7 @@ import {
   mandatoryPolicyBoundary,
   repointReplayedChoice,
   semanticTargetRef,
-} from '../jevSemanticProjection.ts'
+} from '../jev/semantic-projection.ts'
 import type {
   DecisionEpoch,
   GroundedFact,
@@ -52,7 +52,7 @@ import type {
   SemanticCandidateView,
   SemanticDelta,
   SkillOutcomePacket,
-} from '../jevSemanticProjection.ts'
+} from '../jev/semantic-projection.ts'
 import { isTrackedMoveKind } from '../moveFailMemory.ts'
 import type { MoveFailureReason } from '../moveFailMemory.ts'
 import { formatSkillEnd, formatSkillInterrupt } from '../netherPortalPlan.ts'
@@ -77,7 +77,7 @@ import {
   dedupeSemanticCandidates,
   formatStaleResultDropped,
   projectionHash as semanticProjectionHash,
-} from '../jevSemanticProjection.ts'
+} from '../jev/semantic-projection.ts'
 import { stableStateHash } from '../decisionlog.ts'
 import { failureCount } from '../failureMemory.ts'
 import { questionNamesFor } from '../jev.ts'

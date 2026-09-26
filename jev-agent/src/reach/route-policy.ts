@@ -1,5 +1,5 @@
 import type { Candidate } from '../candidates.ts'
-import type { JevPolicy, JevResult } from '../jev-legacy.ts'
+import type { JevPolicy, JevResult } from '../jev/client.ts'
 import type { WorldState, Vec3Json } from '../state.ts'
 import type {
   ReachRouteDecision,

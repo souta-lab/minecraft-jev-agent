@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'bun:test'
 import { APICallError } from 'ai'
 import { APIError } from '@typesafe-ai/sdk'
-import { describeProviderError, extractProviderErrorDiagnostics } from './src/jev-authority.ts'
+import { describeProviderError, extractProviderErrorDiagnostics } from './src/jev/authority.ts'
 
 const vercelId = 'hnd1::cle1::audit-1234567890'
 const secret = 'super-secret-token-123456789'

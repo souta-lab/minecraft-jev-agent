@@ -40,7 +40,7 @@ import {
   formatSkillStepAuthority,
 } from './netherPortalPlan.ts'
 import type { SkillStepAuthority } from './netherPortalPlan.ts'
-import type { SkillTerminalReason } from './jevSemanticProjection.ts'
+import type { SkillTerminalReason } from './jev/semantic-projection.ts'
 import type { Vec3Json } from './state.ts'
 import { BRIDGE_BLOCK_META, BRIDGE_META, BRIDGE_PLACE_META } from './bridgeRoute.ts'
 import { declaredRoutePlaceBlocks } from './routePlaceDeclaration.ts'

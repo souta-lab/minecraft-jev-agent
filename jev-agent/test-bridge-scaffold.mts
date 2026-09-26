@@ -49,7 +49,7 @@ import { NETHER, PORTAL_ENTERED_PREDICATE } from './src/netherPortalPlan.ts'
 import { cellKey, observeZeroProgressRoute, routeSignature } from './src/zeroProgressRoute.ts'
 import { effectViolation, envelopeForCandidate } from './src/skillCommitment.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
-import type { JsonlWriter } from './src/jev-legacy.ts'
+import type { JsonlWriter } from './src/jev/client.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
 import {
   BRIDGE_AUTHORITY_META,

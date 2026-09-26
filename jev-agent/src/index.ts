@@ -134,7 +134,7 @@ export {
   SKILL_OUTCOME_PACKET,
   STALE_JEV_RESULT_DROPPED,
   terminalReasonFor,
-} from './jevSemanticProjection.ts'
+} from './jev/semantic-projection.ts'
 export type {
   CompactOutcome,
   SemanticCombatEscape,
@@ -154,7 +154,7 @@ export type {
   SkillOutcomePacket,
   SkillTerminalReason,
   VerificationSummary,
-} from './jevSemanticProjection.ts'
+} from './jev/semantic-projection.ts'
 export { GoalQueue, emptyGoalQueueState, toGoalQueueStateLog }
 export { StubSystem2, buildStubPlan, evaluateSummonConditions, LLM_SUMMON_REASONS, STUB_HORIZON_TAIL, STUB_SYSTEM2_MODEL }
 export { FixedPlanSystem2, SINGLE_SHOT_PLANNER_MODEL, M1_PLAN_JSON, planFromJson }

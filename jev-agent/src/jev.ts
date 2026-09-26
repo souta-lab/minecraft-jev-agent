@@ -4,24 +4,24 @@
 // deterministic/offline compatibility and shared DTO/logging helpers. Live Jev
 // model authority is owned by the small auditable kernel in jev-authority.ts.
 
-export * from './jev-legacy.ts'
+export * from './jev/client.ts'
 export {
   AuthorityJevPolicy,
   AUTHORITY_PRIMARY_INSTRUCTIONS,
   authorityDecisionMeta,
   buildAuthorityQuestions,
-} from './jev-authority.ts'
-export type { AuthorityDecisionMeta, AuthorityTaggedJevResult } from './jev-authority.ts'
+} from './jev/authority.ts'
+export type { AuthorityDecisionMeta, AuthorityTaggedJevResult } from './jev/authority.ts'
 
 import { FatalModelError } from './modelFailure.ts'
 import {
   abandonRequested as legacyAbandonRequested,
   createJevPolicy as createLegacyJevPolicy,
   resolveJevApiKey,
-} from './jev-legacy.ts'
-import type { JevPolicy, JevPolicyOptions, JevResult } from './jev-legacy.ts'
-import { AuthorityJevPolicy, AUTHORITY_PRIMARY_INSTRUCTIONS, buildAuthorityQuestions } from './jev-authority.ts'
-import type { AuthorityTaggedJevResult } from './jev-authority.ts'
+} from './jev/client.ts'
+import type { JevPolicy, JevPolicyOptions, JevResult } from './jev/client.ts'
+import { AuthorityJevPolicy, AUTHORITY_PRIMARY_INSTRUCTIONS, buildAuthorityQuestions } from './jev/authority.ts'
+import type { AuthorityTaggedJevResult } from './jev/authority.ts'
 
 /** Neutral public prompt: evidence is not silently upgraded into a hard ranking rule. */
 export const PRIMARY_INSTRUCTIONS = AUTHORITY_PRIMARY_INSTRUCTIONS
