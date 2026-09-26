@@ -3556,6 +3556,74 @@ export async function validateEvidenceArchive(archive, repo = null) {
     else if (!ladderModeIsObserver) incomplete('authority:ladder-not-applied', 'raw configuration/GENERATION_READY logs do not bind production authority to VTR with ladder observer-only mode', { hasProbeConfig: Boolean(probeConfiguredLine), hasVtrAuthorityReady: Boolean(vtrAuthorityReadyLine) })
     else pass('authority:ladder-not-applied', { productionAuthority: 'vtr-reach-probe', passiveLadderPrereqEvents: passiveLadderRows, ladderMode: 'observer-only', compatibilityRungMetadataPresent: /\brung(?:Index|Id)=/.test(vtrAuthorityReadyLine) })
 
+    // --- V4.1.2 production-authority cutover -------------------------------
+    // The probe must run with the real kernel gate ON (not shadow-only) and
+    // legacy Reach authority OFF, and the kernel journal must show the gated
+    // command path causally preceding actuation for this exact Transition.
+    const kernelAuthorityModeLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_MODE')
+    const kernelShadowReadyLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_SHADOW_READY')
+    const kernelShadowSummaryLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_SHADOW_SUMMARY')
+    const kernelModeOn = kernelAuthorityModeLines.some((line) => /\bmode=authority\b/.test(line)) &&
+      kernelShadowReadyLines.some((line) => /\bkernelAuthority=on\b/.test(line) && /\blegacyReachAuthority=off\b/.test(line))
+    const kernelModeOff = kernelAuthorityModeLines.some((line) => /\bmode=shadow\b/.test(line)) ||
+      kernelShadowReadyLines.some((line) => /\bkernelAuthority=off\b/.test(line))
+    if (kernelModeOff) fail('authority:kernel-mode-on', 'kernel authority session ran in shadow-only mode; production authority was OFF', { kernelAuthorityModeLines, kernelShadowReadyLines })
+    else if (!kernelModeOn) incomplete('authority:kernel-mode-on', 'KERNEL_AUTHORITY_MODE/KERNEL_SHADOW_READY rows do not bind kernelAuthority=on and legacyReachAuthority=off', { kernelAuthorityModeLines: kernelAuthorityModeLines.length, kernelShadowReadyLines: kernelShadowReadyLines.length })
+    else pass('authority:kernel-mode-on', { mode: 'authority', legacyReachAuthority: 'off' })
+
+    const shadowSummaryOk = kernelShadowSummaryLines.length > 0 && kernelShadowSummaryLines.every((line) =>
+      /\bauthorityMode=authority\b/.test(line) && /\bgateDenials=0\b/.test(line))
+    const shadowSummaryLine = kernelShadowSummaryLines[0] ?? null
+    const summaryMutationsDenied = shadowSummaryLine === null ? null : /mutationsDeniedByLease=0/.test(shadowSummaryLine)
+    const summaryKernelDenied = shadowSummaryLine === null ? null : /kernelDenied=0/.test(shadowSummaryLine)
+    const summaryCoverage = shadowSummaryLine === null ? null : /coverageComplete=true/.test(shadowSummaryLine)
+    if (!kernelShadowSummaryLines.length) incomplete('authority:kernel-summary', 'no KERNEL_SHADOW_SUMMARY row was archived', {})
+    else if (!shadowSummaryOk || summaryMutationsDenied !== true || summaryKernelDenied !== true || summaryCoverage !== true) fail('authority:kernel-summary', 'kernel summary does not assert authority mode, zero gate denials, zero lease/kernel denials, and complete mutation coverage', { authorityModeOk: shadowSummaryOk, mutationsDeniedByLeaseZero: summaryMutationsDenied, kernelDeniedZero: summaryKernelDenied, coverageComplete: summaryCoverage, line: shadowSummaryLine })
+    else pass('authority:kernel-summary', { mode: 'authority', gateDenials: 0, kernelDenied: 0, mutationsDeniedByLease: 0, coverageComplete: true })
+
+    const kernelJournalText = present.has('runner/kernel-shadow.jsonl') ? readText(archive, 'runner/kernel-shadow.jsonl') : null
+    if (kernelJournalText === null) {
+      incomplete('authority:kernel-gates-live', 'runner/kernel-shadow.jsonl is absent; the gated kernel command path cannot be bound to this Transition')
+    } else {
+      const kernelRows = parsedJsonLines(kernelJournalText, 'runner/kernel-shadow.jsonl')
+      const gateDeniedRows = kernelRows.filter((row) => row?.type === 'gate-denied')
+      const blockerRows = kernelRows.filter((row) => row?.type === 'blocker')
+      const transitionRows = kernelRows.filter((row) => row?.transitionId === transition.transitionId)
+      const commands = (via) => transitionRows.filter((row) => row?.type === 'kernel-command' && row?.via === via && row?.ok === true).map((row) => row.command)
+      const admitted = commands('gate-admit').includes('ADMIT_TRANSITION')
+      const activated = commands('gate-activate').includes('ACQUIRE_DECLARED_RESOURCES')
+      const issueCount = commands('mechanical-step-issued').filter((command) => command === 'ISSUE_EFFECT').length
+      const dispatchCount = commands('mechanical-step-issued').filter((command) => command === 'BEGIN_EFFECT_DISPATCH').length
+      const settleCount = commands('mechanical-step-settled').filter((command) => command === 'RECONCILE_EFFECT').length
+      const verified = transitionRows.some((row) => row?.type === 'kernel-command' && row?.via === 'transition-terminal' && row?.command === 'VERIFY_SUCCESS' && row?.ok === true)
+      const dispatches = transitionRows.filter((row) => row?.type === 'effect-dispatch' && row?.authority === true)
+      const verifyAttempts = transitionRows.filter((row) => row?.type === 'verify-attempt')
+      const verifyProvenance = transitionRows.filter((row) => row?.type === 'verify-provenance')
+      const missingObservedProof = verifyAttempts.every((row) => Array.isArray(row.missingObservedProof) && row.missingObservedProof.length === 0)
+      const problems = []
+      if (!admitted) problems.push('gate-admit:ADMIT_TRANSITION')
+      if (!activated) problems.push('gate-activate:ACQUIRE_DECLARED_RESOURCES')
+      if (issueCount !== reservations.length) problems.push(`issue count ${issueCount} != reservations ${reservations.length}`)
+      if (dispatchCount !== reservations.length) problems.push(`dispatch count ${dispatchCount} != reservations ${reservations.length}`)
+      if (dispatches.length !== dispatchCount) problems.push('effect-dispatch authority rows do not cover every dispatch')
+      if (settleCount !== reservations.length) problems.push(`settle count ${settleCount} != reservations ${reservations.length}`)
+      if (!verified) problems.push('transition-terminal:VERIFY_SUCCESS')
+      if (!missingObservedProof) problems.push('verify-attempt missingObservedProof is not empty')
+      if (!verifyProvenance.some((row) => Array.isArray(row.factIds) && row.factIds.length > 0)) problems.push('verify-provenance factIds empty')
+      if (gateDeniedRows.length > 0) problems.push(`gate-denied rows: ${gateDeniedRows.length}`)
+      if (blockerRows.length > 0) problems.push(`blocker rows: ${blockerRows.length}`)
+      const mechanicalStepCount = typeof transition.metrics?.mechanicalStepsPerTransition === 'number' ? transition.metrics.mechanicalStepsPerTransition : reservations.length
+      if (issueCount !== mechanicalStepCount || dispatchCount !== mechanicalStepCount) problems.push(`gated effect count ${dispatchCount} != terminal mechanicalSteps ${mechanicalStepCount}`)
+      if (problems.length) fail('authority:kernel-gates-live', 'kernel journal does not show the gated command path causally preceding every actuation for this Transition', { problems, transitionId: transition.transitionId })
+      else pass('authority:kernel-gates-live', {
+        transitionId: transition.transitionId,
+        gatedSequence: 'admit -> activate -> issue+dispatch x' + dispatchCount + ' -> settle x' + settleCount + ' -> VERIFY_SUCCESS -> terminalize',
+        dispatchAuthorityRows: dispatches.length,
+        verifyFactIds: verifyProvenance.at(-1)?.factIds ?? [],
+        gateDenials: 0,
+      })
+    }
+
     const terminalAt = Date.parse(outcomes[0]?.ts)
     if (Number.isFinite(terminalAt) && terminalAt <= times.shutdownAt) pass('run:terminal-before-shutdown', { terminalAt: outcomes[0].ts, shutdownAt: run.shutdownAt })
     else fail('run:terminal-before-shutdown', 'terminal outcome is absent, invalidly timed, or after shutdown')
