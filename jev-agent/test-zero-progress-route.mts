@@ -839,7 +839,8 @@ addCase("(d') a RETRIEVE with a path-stage failure obeys the identical rule (no 
 addCase('the live controller records the verdict and emits the typed markers', () => {
   const source =
     readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
+    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/outcome-ledgers.ts', import.meta.url), 'utf8')
   const diagSource = readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
   const portalSource = readFileSync(new URL('./src/legacy/portal-evidence.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')

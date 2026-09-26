@@ -253,6 +253,9 @@ export {
   registerPlacedStation,
 } from './legacy/outcome-accounting.ts'
 export type { MoveOutcome } from './legacy/outcome-accounting.ts'
+import * as ledgers from './legacy/outcome-ledgers.ts'
+import type { OutcomeLedgersHost } from './legacy/outcome-ledgers.ts'
+export { controllerUnreachableMoveReason } from './legacy/outcome-ledgers.ts'
 export type {
   WaitWedgeDecision,
   WaitWedgeInput,
@@ -913,17 +916,8 @@ export const MAX_BLOCK_REACH = 5
 /** Issue #41: a descend goal with no vertical progress for this many ticks escalates. */
 /** Issue #41: a descend goal with no executable descend candidate this long escalates. */
 /** Distance decrease (m) that counts as real retrieval progress. */
-/** Issue #8: failed attempts at one coordinate before it is blacklisted. */
-// Below this windowed locomotion efficiency a verified MOVE is mechanical success
-// without progress, so it must not clear the failure memory (issue #360).
-const MOVE_PROGRESS_EFFICIENCY_FLOOR = resolveEnvPositiveInt('BUDDY_MOVE_PROGRESS_EFFICIENCY_FLOOR', 20)
 /** #405: how many recently occupied cells the exploration fallback treats as visited. */
 const EXPLORED_CELLS_LIMIT = 512
-const MOVE_FAILMEM_LIMIT = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_LIMIT', 3)
-/** Issue #8: how long a blacklisted coordinate stays skipped. */
-const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLDOWN_MS', 30_000)
-/** Issue #8: bound on tracked coordinates (least-failed/oldest evicted first). */
-const MOVE_FAILMEM_MAX_ENTRIES = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_MAX_ENTRIES', 256)
 /** Issue #8: do not re-log the same oscillating pair more often than this. */
 /**
  * #oscillation-boundary: the size of the body's cell envelope and the bounded
@@ -931,13 +925,6 @@ const MOVE_FAILMEM_MAX_ENTRIES = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_MAX_E
  * the constants in `localOscillation.ts`; they are read once here like the
  * `MOVE_FAILMEM_*` pair above.
  */
-
-function resolveEnvPositiveInt(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (raw === undefined) return fallback
-  const parsed = Number.parseInt(raw, 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-}
 
 /** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
 export function guardMoveFailureReason(
@@ -1922,16 +1909,6 @@ class MirroringEventLogger extends EventLogger {
   }
 }
 
-/**
- * Keep controller failure-memory charging on the same mechanical predicate
- * as the affordance/policy gate. In particular, a generated vertical plan
- * is executable even when its target is more than the horizontal pathfinder
- * gap above the bot.
- */
-export function controllerUnreachableMoveReason(candidate: Candidate, state: WorldState): ReturnType<typeof unreachableMove> {
-  return unreachableMove(candidate, state)
-}
-
 /** Beta is semantic authority only when one canonical current Option exists. */
 export function canAuthoritativelyAbandonOption(optionId: string | null): optionId is string {
   return typeof optionId === 'string' && optionId.length > 0
@@ -1963,7 +1940,7 @@ export function betaAbandonProgressObserved(
   // move-failure memory uses. A state-recurring micro-move loop sits at ~0-6% and no
   // longer holds the Option open. An idle or not-yet-sampled window is not
   // locomotion evidence and therefore cannot keep the deferral alive either.
-  return isEfficientLocomotionProgress(locomotionObservation, MOVE_PROGRESS_EFFICIENCY_FLOOR)
+  return isEfficientLocomotionProgress(locomotionObservation, ledgers.MOVE_PROGRESS_EFFICIENCY_FLOOR)
 }
 
 export class JevController {
@@ -2323,7 +2300,7 @@ export class JevController {
    */
   private zeroProgressRoutes: ZeroProgressRoutes = {}
   /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
-  private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
+  private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: ledgers.MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
   private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
   /** gate facts (station/dig approach probes) resolved once per tick. */
@@ -2637,6 +2614,11 @@ export class JevController {
     return this as unknown as PathProbesHost
   }
 
+  /** OutcomeLedgersHost view of this controller (same structural-cast pattern as reachHost). */
+  private get ledgersHost(): OutcomeLedgersHost {
+    return this as unknown as OutcomeLedgersHost
+  }
+
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
   private get reachTransition(): ActiveReachTransition | null {
     const current = this.reachRuntime.activeMission
@@ -2909,48 +2891,15 @@ export class JevController {
   }
 
   private createMoveFailMemory(): MoveFailMemory {
-    return new MoveFailMemory({
-      failureLimit: MOVE_FAILMEM_LIMIT,
-      cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
-      maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
-      initialEntries: this.options.moveFailureEntries,
-    })
+    return ledgers.createMoveFailMemory(this.ledgersHost)
   }
 
-  /**
-   * The durable cross-action repeat ledger. `limit` comes from the module's ONE
-   * bound (`REPEATED_OUTCOME_LIMIT_DEFAULT`, overridable by
-   * `BUDDY_REPEATED_OUTCOME_LIMIT`); it is never re-derived here.
-   */
   private createRepeatedOutcomes(): RepeatedOutcomeEscalation {
-    return new RepeatedOutcomeEscalation({
-      limit: this.options.repeatedOutcomeLimit,
-      initialEntries: this.options.repeatedOutcomeEntries,
-    })
+    return ledgers.createRepeatedOutcomes(this.ledgersHost)
   }
 
-  /**
-   * Persist the ledger through the HOST-owned class-A store, deduped on the
-   * serialized form so an unchanged ledger proposes no delta at all. Mirrors
-   * `notifyMoveFailureMemory`.
-   */
   private notifyRepeatedOutcomes(): void {
-    const callback = this.options.onRepeatedOutcomeChange
-    if (callback === undefined) return
-    const snapshot = this.repeatedOutcomes.snapshot()
-    const serialized = JSON.stringify(snapshot)
-    if (serialized === this.repeatedOutcomesPersisted) return
-    this.repeatedOutcomesPersisted = serialized
-    try {
-      callback(snapshot)
-    } catch (error) {
-      this.logger.warn(
-        'agent',
-        'REPEATED_OUTCOME_PERSIST_FAILED',
-        { message: error instanceof Error ? error.message : String(error) },
-        this.tickCounter,
-      )
-    }
+    return ledgers.notifyRepeatedOutcomes(this.ledgersHost)
   }
 
   private buildScheduler(): DecisionScheduler {
@@ -6882,136 +6831,30 @@ export class JevController {
     return outcome.recordFailure(this.outcomeHost, code, detail)
   }
 
-  /**
-   * Issue #78 follow-up: bounded escalation for a typed ACTION failure that
-   * repeats identically. `recordFailure` charges every typed failure, but the
-   * local-recovery route failures (`path_stuck`, `path_no_path`, ...) are
-   * deliberately excluded from `same_failure_3x`, and the #44/#78 replan
-   * throttle only advances on suppressed replans. Nothing therefore bounded the
-   * loop where the SAME plan is re-offered and its action fails the SAME way.
-   *
-   * Counts consecutive identical `(plan, actionId, reason)` failures. On the Nth
-   * the failure is reclassified as a semantic boundary: `ACTION_FAILURE_EXHAUSTED`
-   * is logged and the existing `same_failure_3x -> action_impossible` escalation
-   * vocabulary is used. The pending streak is exposed through `replanInputs()`
-   * so the #44 throttle cannot suppress this one wake as `no_new_info`; that
-   * keeps it "exactly like #326" rather than a parallel wake path.
-   *
-   * The counter resets on a different plan/action/reason (in the counter), on
-   * any observed progress (in `onActionComplete`), and here after the escalation
-   * is handed off, so it cannot hot-loop. Failures already owned by another
-   * handler (a verified/done action, a scheduled PLACE retry, or an unverified
-   * postcondition handled by `onUnverifiedAction`) never reach this method.
-   */
   private noteTypedActionFailure(reason: string, actionId: string, pending: PendingDecision | undefined): void {
-    const planKey = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? this.currentGoalKey()
-    const decision = this.actionFailureEscalation.noteFailure(planKey, actionId, reason)
-    this.logger.warn(
-      'agent',
-      formatActionFailureRepeat(decision),
-      {
-        planId: planKey,
-        actionId,
-        reason,
-        count: decision.count,
-        limit: decision.limit,
-      },
-      this.tickCounter,
-    )
-    if (!decision.escalate) return
-    this.logger.warn(
-      'agent',
-      formatActionFailureExhausted(decision),
-      {
-        planId: planKey,
-        actionId,
-        reason,
-        count: decision.count,
-        limit: decision.limit,
-        boundary: 'semantic_boundary',
-      },
-      this.tickCounter,
-    )
-    // Reuse the existing escalation vocabulary. `replanInputs()` carries the
-    // exhausted streak, so the throttle releases this one wake; #78's own bound
-    // remains the backstop if the throttle still refuses it.
-    this.escalate(
-      'same_failure_3x',
-      `ACTION_FAILURE_EXHAUSTED plan=${planKey} action=${actionId} reason=${reason} count=${decision.count}/${decision.limit}`,
-    )
-    this.actionFailureEscalation.reset()
+    return ledgers.noteTypedActionFailure(this.ledgersHost, reason, actionId, pending)
   }
 
   private failureSnapshot(): Record<string, number> {
-    const now = Date.now()
-    const snapshot: Record<string, number> = {}
-    for (const [id, count] of this.candidateFailures) {
-      const age = now - (this.candidateFailureAt.get(id) ?? now)
-      const decayed = decayedFailureCount(count, age)
-      if (decayed > 0) snapshot[id] = decayed
-    }
-    return snapshot
+    return ledgers.failureSnapshot(this.ledgersHost)
   }
 
   private candidateFailureCount(candidateId: string): number {
-    return failureCount(this.failureSnapshot(), candidateId)
+    return ledgers.candidateFailureCount(this.ledgersHost, candidateId)
   }
 
+  /** controller.ts strangler seam binds this: keep the delegate, not just the plane fn. */
   private noteCandidateFailure(candidateId: string): void {
-    const now = Date.now()
-    this.candidateFailures.set(candidateId, (this.candidateFailures.get(candidateId) ?? 0) + 1)
-    this.candidateFailureAt.set(candidateId, now)
-    const spatial = spatialFailureKey(candidateId)
-    if (spatial !== null) {
-      this.candidateFailures.set(spatial, (this.candidateFailures.get(spatial) ?? 0) + 1)
-      this.candidateFailureAt.set(spatial, now)
-    }
-    this.signals.failedCandidates = this.failureSnapshot()
+    return ledgers.noteCandidateFailure(this.ledgersHost, candidateId)
   }
 
   private noteCandidateSuccess(candidateId: string): void {
-    this.candidateFailures.delete(candidateId)
-    this.candidateFailureAt.delete(candidateId)
-    const spatial = spatialFailureKey(candidateId)
-    if (spatial !== null) {
-      this.candidateFailures.delete(spatial)
-      this.candidateFailureAt.delete(spatial)
-    }
-    this.signals.failedCandidates = this.failureSnapshot()
+    return ledgers.noteCandidateSuccess(this.ledgersHost, candidateId)
   }
 
-  /**
-   * If every actionable candidate has exhausted its retries, escalate so System 2
-   * gets a chance to change the approach. Failure memory is NOT cleared: it decays
-   * on its own, and wiping it would let a nearby coordinate evade the spatial
-   * memory that #8a introduced.
-   */
+  /** controller.ts strangler seam binds this: keep the delegate, not just the plane fn. */
   private breakFailureDeadlock(candidates: readonly Candidate[]): void {
-    const actionable = candidates.filter(
-      (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
-    )
-    if (actionable.length === 0) return
-    const allExhausted = actionable.every(
-      (candidate) => this.candidateFailureCount(candidate.id) >= this.options.candidateFailureLimit,
-    )
-    if (!allExhausted) return
-    const localRouteOnly = actionable.every(
-      (candidate) => candidate.kind === 'MOVE' || candidate.kind === 'RETRIEVE' || candidate.kind === 'DESCEND' || candidate.kind === 'STEP',
-    )
-    if (localRouteOnly) {
-      this.logger.warn(
-        'agent',
-        `LOCAL_CANDIDATES_EXHAUSTED count=${actionable.length} system2=false grounded_recovery=true`,
-        { candidates: actionable.map((candidate) => candidate.id), limit: this.options.candidateFailureLimit },
-        this.tickCounter,
-      )
-      return
-    }
-    this.escalate(
-      'all_candidates_invalid',
-      `all ${actionable.length} actionable candidate(s) exceeded ${this.options.candidateFailureLimit} failures; letting decay/suppression reroute instead of clearing memory`,
-    )
-    this.recentEvents.push('all local candidates exhausted; waiting for decay/spatial suppression to reroute')
+    return ledgers.breakFailureDeadlock(this.ledgersHost, candidates)
   }
 
   private updateStallSignal(): void {
@@ -7337,61 +7180,9 @@ export class JevController {
     return retrieval.retireFailedKnownRetrieve(this.retrievalHost, candidate, result)
   }
 
-  /**
-   * The postcondition layer owns the verdict (`isZeroProgressOutcome` is a
-   * FAILURE). This owns what happens NEXT for the route families whose
-   * postcondition is a world change (RETRIEVE/DESCEND/STEP/ENTER_PORTAL):
-   *
-   *   - a completed action clears the zero-progress memory at its stand cell
-   *     (and for its target), so a transient blockage is never permanent;
-   *   - a route candidate that settled FAILED at any executor stage - the path
-   *     stage (`PATH_CALLBACK phase=failed outcome=noPath|stuck`) included - is
-   *     recorded as the exact route (kind, target, stand cell, route signature)
-   *     that just proved it cannot complete, even when the lease also produced
-   *     lenient body progress. The candidate layer withholds that exact repeat,
-   *     so the next attempt for the target must differ in a grounded way (a
-   *     different vertical plan, a different stand cell, or a travel/approach
-   *     leg);
-   *   - `ZERO_PROGRESS_STAND_ROUTE_LIMIT` distinct zero-progress routes at one
-   *     stand cell exhaust that family there (`DESCEND_RETIRED`), which forces a
-   *     route change instead of sampling new cells from the same blocked body
-   *     position;
-   *   - every route fact is mirrored as the typed `ROUTE_STAGE_FAILED` /
-   *     `ROUTE_SPENT` marker, and a route arm that can ground no alternative at
-   *     all reports `ROUTE_ESCALATE ... reason=all_routes_spent` (see
-   *     `noteRouteExhaustion`), so the resident log can never again show an
-   *     unchanged failing route being re-offered with no typed cause.
-   *
-   * Live evidence (run-muc3qbug-18vg3): 82 zero-observable chains in ten minutes,
-   * 75 of them `DESCEND:down:<dir>:b...` steps whose dig removed nothing
-   * (`outcome=noPath|stuck`), each with a fresh candidate id but the SAME body
-   * cell - a per-id failure memory can never see that as one failure.
-   *
-   * Live evidence (run-muc620xb-1d312): the route memory DID record
-   * `ACTION_ZERO_PROGRESS ... kind=ENTER_PORTAL retry=1..20 stand=10,54,25` with
-   * an UNCHANGED signature, but nothing consumed it for the entry arm, so
-   * `ENTER:26,67,9` was re-offered 669 times. The typed markers above make the
-   * next measurement of this shape unambiguous.
-   */
-  /**
-   * True when a MOVE candidate is a ROUTE (its own meta declares the mechanical
-   * work it does), as opposed to an ordinary walk. The route keys are the ones the
-   * candidate layer and the executor already use.
-   */
-  private static readonly ROUTE_MOVE_META_KEYS = [
-    'vertical',
-    'digRoute',
-    'digStep',
-    'bridgeBlock',
-    'bridge',
-    'levelScan',
-    'contactAscent',
-    'pillarPlaceName',
-    'submersionEscape',
-  ] as const
 
   private isRouteDeclaredMove(candidate: Candidate): boolean {
-    return JevController.ROUTE_MOVE_META_KEYS.some((key) => candidate.meta[key] !== undefined)
+    return ledgers.isRouteDeclaredMove(candidate)
   }
 
   private recordZeroProgressOutcome(
@@ -7399,128 +7190,7 @@ export class JevController {
     candidate: Candidate,
     truthful: ReturnType<typeof truthfulActionOutcome>,
   ): void {
-    if (!isZeroProgressRouteKind(result.kind)) return
-    // A plain WALK is not tracked here (its memory is `moveFailMemory` and the
-    // distance it closed is its progress). A MOVE that DECLARES a route is: its
-    // postcondition is a mechanical change (a pillar/dig/place/bridge/scan leg),
-    // and one that settles SUCCESS with nothing observable changed is spent -
-    // otherwise it re-offers forever from the same stand cell.
-    if (result.kind === 'MOVE' && !this.isRouteDeclaredMove(candidate)) return
-    const stand = this.actionStart
-    if (stand === null) return
-    const standKey = cellKey(stand)
-    const targetKey = candidate.target === null ? null : cellKey(candidate.target)
-    if (truthful.verified) {
-      const clearedStand = clearZeroProgressStand(this.zeroProgressRoutes, result.kind, standKey)
-      const clearedTarget =
-        targetKey === null ? clearedStand : clearZeroProgressTarget(clearedStand, result.kind, targetKey)
-      if (clearedTarget !== this.zeroProgressRoutes) {
-        this.zeroProgressRoutes = clearedTarget
-        this.signals.zeroProgressRoutes = clearedTarget
-      }
-      return
-    }
-    if (candidate.target === null) return
-    // A route candidate that settled FAILED at an executor stage is a spent
-    // route for its exact identity even when the lenient body-progress signal
-    // rode along with it: `PATH_CALLBACK phase=failed outcome=noPath|stuck`
-    // settles `failed`, but a lease that also nudged the body carries
-    // `progressed=true`, and that must not make the same route re-offerable from
-    // the same stand cell. A body that really moved stands in a different cell,
-    // which is a different identity and a fresh attempt.
-    const stage = result.status === 'failed' ? routeFailureStage(result.failure) : null
-    if (stage === null) {
-      if (!isZeroProgressOutcome(result)) return
-    }
-    const decision = observeZeroProgressRoute(this.zeroProgressRoutes, {
-      kind: result.kind,
-      targetKey: cellKey(candidate.target),
-      standKey,
-      routeSig: routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta }),
-      reason: result.failure ?? result.status,
-      nowMs: Date.now(),
-    })
-    this.zeroProgressRoutes = decision.routes
-    this.signals.zeroProgressRoutes = decision.routes
-    if (stage !== null) {
-      // The typed stage fact: WHERE the route broke, so a path-stage failure is
-      // never again only a `PATH_CALLBACK` line with an unchanged offer.
-      this.logger.warn(
-        'agent',
-        formatRouteStageFailed({
-          kind: result.kind,
-          target: candidate.target,
-          stand,
-          stage,
-          failure: result.failure,
-        }),
-        { actionId: result.actionId, kind: result.kind, target: candidate.target, stand, stage, failure: result.failure },
-        this.tickCounter,
-      )
-    }
-    if (decision.routeSpentNow) {
-      this.logger.warn(
-        'agent',
-        formatRouteSpent(result.kind, candidate.target, decision.attempts),
-        {
-          actionId: result.actionId,
-          kind: result.kind,
-          target: candidate.target,
-          attempts: decision.attempts,
-          routeSig: decision.entry.routeSig,
-        },
-        this.tickCounter,
-      )
-    }
-    this.logger.warn(
-      'agent',
-      formatActionZeroProgress({
-        action: result.actionId,
-        target: candidate.target,
-        kind: result.kind,
-        retry: decision.attempts,
-        routeChanged: decision.routeChanged,
-        stand,
-      }),
-      {
-        actionId: result.actionId,
-        kind: result.kind,
-        target: candidate.target,
-        stand,
-        retry: decision.attempts,
-        routeChanged: decision.routeChanged,
-        routeSig: decision.entry.routeSig,
-      },
-      this.tickCounter,
-    )
-    if (result.kind === 'DESCEND' && decision.familyExhausted) {
-      this.logger.warn(
-        'agent',
-        formatDescendRetired('zero_progress_exhausted', stand, decision.familyAttempts),
-        { stand, routes: decision.familyAttempts, limit: ZERO_PROGRESS_STAND_ROUTE_LIMIT },
-        this.tickCounter,
-      )
-    }
-    if (result.kind === 'RETRIEVE') {
-      if (decision.attempts >= KNOWN_RETRIEVE_RETIRE_LIMIT) {
-        this.logger.warn(
-          'agent',
-          formatRetrieveRetired('zero_progress_budget', candidate.target, decision.attempts),
-          { target: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
-          this.tickCounter,
-        )
-      }
-      if (candidate.meta.retrieval === 'known') {
-        // This exact route is now withheld from this stand cell: re-offering it
-        // would be the same action with unchanged preconditions.
-        this.logger.warn(
-          'agent',
-          formatRetrieveRouteBlocked('zero_progress_route_unchanged', candidate.target, stand),
-          { target: candidate.target, stand, retry: decision.attempts },
-          this.tickCounter,
-        )
-      }
-    }
+    return ledgers.recordZeroProgressOutcome(this.ledgersHost, result, candidate, truthful)
   }
 
   private checkWedge(actionId: string): void {
@@ -8241,328 +7911,62 @@ export class JevController {
     return evidence.logFuelSatisfaction(this.evidenceHost, state)
   }
 
-  /**
-   * Issue #43: a MOVE/RETRIEVE target above the climb limit is unreachable with
-   * `canDig=false`. Log it and charge the failure memory so repeated selection
-   * exhausts MOVE_FAILURE_LIMIT and the generator stops re-issuing it, letting
-   * another candidate (descend/explore/reachable target) win instead.
-   */
   private checkUnreachableMove(candidate: Candidate, state: WorldState): void {
-    const reason = controllerUnreachableMoveReason(candidate, state)
-    if (reason === null) return
-    const { target, dy } = reason
-    const key = `${candidate.id}:${dy}`
-    if (!this.loggedUnreachableMoves.has(key)) {
-      this.loggedUnreachableMoves.add(key)
-      this.logger.warn(
-        'agent',
-        formatMoveUnreachable(target, dy),
-        { actionId: candidate.id, dy, kind: candidate.kind, limit: MOVE_VERTICAL_GAP_LIMIT },
-        this.tickCounter,
-      )
-    }
-    this.noteCandidateFailure(candidate.id)
-    this.recordMoveFailure(candidate, 'unreachable')
+    return ledgers.checkUnreachableMove(this.ledgersHost, candidate, state)
   }
 
-  /**
-   * The cross-action bound. One settled action, one typed outcome, one target.
-   *
-   * The measured class this closes (`m3-live`, read-only): `ASCEND:habitat:p3_68_22`
-   * produced 184 typed failures (`PILLAR_FAIL step=apex reason=apex_missed` 160,
-   * `step=place reason=refused` 23, one timeout) across 161 attempts in 24m38s at
-   * ONE cell, interleaved with `PILLAR_UP_STEP` successes, with no
-   * `PILLAR_RETIRE`/`PILLAR_RELOCATE` and zero escalations of any kind.
-   *
-   * It is deliberately NOT gated on `progressKinds` containing `body`: the
-   * interleaved step reports `progress=body` while the same action keeps
-   * concluding the same typed outcome at the same cell, and per
-   * `buddy-driver/AGENTS.md` section 5 body motion is never completion. The
-   * streak is advanced only while the typed outcome AND the target's affordance
-   * fact signature are byte-identical, so a genuinely new fact still restarts it.
-   */
   private noteRepeatedOutcome(
     result: ExecutionResult,
     candidate: Candidate,
     verified: boolean,
     progressKinds: readonly string[],
   ): void {
-    if (!isRepeatTrackedKind(candidate.kind)) return
-    const dimension = this.currentDimension()
-    const actionShape = actionShapeOf(result.actionId)
-    const cell = repeatedOutcomeCell(dimension, candidate.target, this.bot.entity.position)
-    const outcome = repeatedOutcomeToken({ failure: result.failure, status: result.status, verified })
-    // The affordance fingerprint is the gate's own "did any fact that could
-    // re-open this target change?" digest; when the gate did not evaluate this
-    // candidate this tick, a stable world-identity token stands in - never the
-    // body position, which is what laundered the measured loop.
-    const affordanceFingerprint =
-      this.groundingFingerprints.get(candidate.id) ??
-      this.groundingFingerprints.get(result.actionId) ??
-      'no-affordance-evaluation'
-    const factSignature = repeatedOutcomeFactSignature({
-      affordanceFingerprint,
-      planIdentity: this.queue.current?.id ?? null,
-      worldKey: `${dimension}|epoch=${this.options.worldEpoch}`,
-    })
-    const decision = this.repeatedOutcomes.note({
-      actionId: result.actionId,
-      actionShape,
-      cell,
-      outcome,
-      failureCode: result.failure,
-      // `body` is mechanical motion, not semantic progress (`strategicStall.ts`
-      // keeps its window open across it, and the taxonomy's semantic kinds are
-      // `goal`/`search`). The measured runaway alternated a `progress=body`
-      // success with an `apex_missed` failure at ONE cell for 24m38s with
-      // `progressDelta=0` on both halves; reading the success half as new
-      // information is what kept every existing counter at 1.
-      semanticProgress: repeatedOutcomeSemanticProgress({
-        progressKinds,
-        itemsGained: result.itemsGained,
-        blockRemoved: result.blockRemoved === true,
-      }),
-      factSignature,
-      now: Date.now(),
-    })
-    if (decision.count > 1) {
-      this.logger.warn(
-        'agent',
-        formatActionRepeat(decision),
-        {
-          actionId: result.actionId,
-          kind: candidate.kind,
-          cell,
-          outcome,
-          count: decision.count,
-          limit: decision.limit,
-          restarted: decision.restarted,
-          escalated: decision.escalate,
-        },
-        this.tickCounter,
-      )
-    }
-    if (decision.escalate) {
-      this.logger.warn(
-        'agent',
-        // `decision.line` is the escalation form when `escalate` is true; it names
-        // the action, the shape, the cell, the repeated outcome, the count, the
-        // bound and the consequence. Mirrored, so it reaches the live record.
-        decision.line,
-        {
-          actionId: result.actionId,
-          kind: candidate.kind,
-          cell,
-          outcome,
-          count: decision.count,
-          limit: decision.limit,
-          bound: decision.limit,
-          consequence: 'retire_target',
-          boundary: 'mechanical_invalidity',
-        },
-        this.tickCounter,
-      )
-    }
-    if (decision.escalate || decision.restarted !== null) this.notifyRepeatedOutcomes()
+    return ledgers.noteRepeatedOutcome(this.ledgersHost, result, candidate, verified, progressKinds)
   }
 
-  /**
-   * The consequence of the cross-action bound: an `(action shape, cell)` proven
-   * unable to progress there leaves the offered set, which forces the offer onto
-   * a different target - the bounded relocation. Same mechanical-invalidity shape
-   * as `filterMoveCandidates`, and it never ranks or substitutes a semantic
-   * alternative: what remains is still offered to Jev unchanged.
-   */
   private filterRepeatedOutcomeCandidates(
     candidates: readonly Candidate[],
     state: WorldState,
     log = true,
   ): Candidate[] {
-    const { kept, withheld } = filterRetiredRepeats(
-      candidates,
-      this.repeatedOutcomes,
-      state.self.dimension,
-      this.bot.entity.position,
-    )
-    if (!log) return kept
-    for (const entry of withheld) {
-      // Deduped per retirement so a retired target is ONE typed line, not a
-      // per-tick flood. A re-retirement after a fact change carries a new count,
-      // so it logs again.
-      const dedupKey = `${entry.key}|${entry.outcome}|${entry.count}`
-      if (this.loggedRetiredRepeats.has(dedupKey)) continue
-      this.loggedRetiredRepeats.add(dedupKey)
-      this.logger.warn(
-        'agent',
-        formatActionTargetRetired({
-          actionId: entry.candidate.id,
-          actionShape: entry.actionShape,
-          cell: entry.cell,
-          outcome: entry.outcome,
-          count: entry.count,
-          limit: entry.limit,
-        }),
-        {
-          actionId: entry.candidate.id,
-          kind: entry.candidate.kind,
-          key: entry.key,
-          actionShape: entry.actionShape,
-          cell: entry.cell,
-          outcome: entry.outcome,
-          count: entry.count,
-          limit: entry.limit,
-          consequence: 'withheld_from_offer',
-        },
-        this.tickCounter,
-      )
-    }
-    return kept
+    return ledgers.filterRepeatedOutcomeCandidates(this.ledgersHost, candidates, state, log)
   }
 
-  /** #8: drop movement targets still inside their blacklist cooldown. */
+  /** controller.ts strangler seam binds this: keep the delegate, not just the plane fn. */
   private filterMoveCandidates(candidates: readonly Candidate[], state: WorldState, log = true): Candidate[] {
-    const dimension = state.self.dimension
-    const { kept, skipped } = filterBlacklistedMoves(
-      candidates,
-      this.moveFailMemory,
-      dimension,
-      this.movePathFailureScope(state),
-    )
-    if (!log) return kept
-    for (const entry of skipped) {
-      this.logger.warn(
-        'agent',
-        formatMoveTargetSkipped(entry.key, entry.attempts, entry.cooldownSeconds),
-        {
-          actionId: entry.candidate.id,
-          key: entry.key,
-          attempts: entry.attempts,
-          cooldown: entry.cooldownSeconds,
-          reason: entry.reason,
-        },
-        this.tickCounter,
-      )
-    }
-    return kept
+    return ledgers.filterMoveCandidates(this.ledgersHost, candidates, state, log)
   }
 
   private rememberMoveTarget(candidate: Candidate): void {
-    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
-    const previous = this.lastMoveTarget
-    if (previous !== null) this.previousMoveTarget = previous
-    this.lastMoveTarget = { dimension: this.currentDimension(), position: { ...candidate.target } }
+    return ledgers.rememberMoveTarget(this.ledgersHost, candidate)
   }
 
   private recordMoveFailure(candidate: Candidate, reason: MoveFailureReason): void {
-    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
-    const dimension = this.currentDimension()
-    const pathFailureScope = reason === 'no_path' ? this.movePathFailureScope() : null
-    const result =
-      pathFailureScope === null
-        ? this.moveFailMemory.record(dimension, candidate.target, reason)
-        : this.moveFailMemory.recordPathFailure(dimension, candidate.target, pathFailureScope)
-    const key = moveFailureKey(dimension, candidate.target)
-    this.logger.warn(
-      'agent',
-      formatMoveFailMem(key, result.entry.attempts, reason),
-      { actionId: candidate.id, key, attempts: result.entry.attempts, reason, kind: candidate.kind },
-      this.tickCounter,
-    )
-    this.notifyMoveFailureMemory()
-    if (!result.newlyBlacklisted) return
-    this.logger.warn(
-      'agent',
-      formatMoveTargetSkipped(key, result.entry.attempts, this.remainingCooldownSeconds(result.entry.blacklistedUntil)),
-      { actionId: candidate.id, key, attempts: result.entry.attempts, reason },
-      this.tickCounter,
-    )
+    return ledgers.recordMoveFailure(this.ledgersHost, candidate, reason)
   }
 
-  /** Complete witness for reusing a path refusal; null disables state-scoped suppression. */
   private movePathFailureScope(state?: WorldState | null): MoveFailurePathScope | null {
-    const worldRevision = this.scheduler.worldRevision
-    if (worldRevision === null) return null
-    const position = state?.self.position ?? this.bot.entity.position
-    if (![position.x, position.y, position.z].every(Number.isFinite)) return null
-    return {
-      origin: { x: position.x, y: position.y, z: position.z },
-      worldRevision,
-      generationId: this.movePathFailureGenerationId,
-    }
+    return ledgers.movePathFailureScope(this.ledgersHost, state)
   }
 
-  /**
-   * Telemetry truth for a skip: the cooldown actually in force, including the
-   * #360 oscillation escalation. Reporting the base cooldown would log
-   * `cooldown=30` for a 60 s/10 min escalated suppression, which is exactly the
-   * "skip logged, surface unchanged" shape this fix closes.
-   */
   private remainingCooldownSeconds(blacklistedUntil: number, now = Date.now()): number {
-    return Math.max(0, Math.ceil((blacklistedUntil - now) / 1000))
+    return ledgers.remainingCooldownSeconds(blacklistedUntil, now)
   }
 
   private recordMoveSuccess(candidate: Candidate): void {
-    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
-    this.resetDescendBudgetAfterWorldChange(candidate.id, 'verified_move')
-    const dimension = this.currentDimension()
-    const key = moveFailureKey(dimension, candidate.target)
-    // A verified MOVE inside an idle, unobserved or low-efficiency window is mechanical success, not
-    // progress. Resetting the failure memory there is exactly what let the live
-    // 48-minute A<->B loop undo every oscillation blacklist (issue #360: 401
-    // OSCILLATION_DETECTED vs 49 blacklists, 1533 blocks travelled in a one-block
-    // box). Keeping the memory means the loop's own cells stay suppressed and the body
-    // must change neighbourhood instead of re-winning the same step.
-    if (!isEfficientLocomotionProgress(this.lastLocomotionObservation, MOVE_PROGRESS_EFFICIENCY_FLOOR)) {
-      this.logger.info(
-        'agent',
-        `MOVE_FAILMEM_RESET_SKIPPED ${formatLocomotionObservation(this.lastLocomotionObservation)} reason=strategic_non_progress`,
-        { actionId: candidate.id, key, locomotion: this.lastLocomotionObservation },
-        this.tickCounter,
-      )
-      return
-    }
-    if (!this.moveFailMemory.reset(dimension, candidate.target)) return
-    if (this.lastMoveTarget !== null && this.lastMoveTarget.position.x === candidate.target.x && this.lastMoveTarget.position.z === candidate.target.z) {
-      this.lastMoveTarget = null
-    }
-    this.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, this.tickCounter)
-    this.notifyMoveFailureMemory()
+    return ledgers.recordMoveSuccess(this.ledgersHost, candidate)
   }
 
   private resetDescendBudgetAfterWorldChange(actionId: string, reason: 'verified_mine' | 'verified_move'): void {
-    const dig = this.digMemory.snapshot()
-    if (reason === 'verified_move' && dig.digDirCount >= DIG_PATH_CAP) {
-      this.digMemory.resetPath()
-      this.logger.info(
-        'agent',
-        `DIG_PATH_RESET reason=cap_after_verified_move count=${dig.digDirCount}`,
-        { actionId, previousCount: dig.digDirCount },
-        this.tickCounter,
-      )
-    }
-    if (!dig.descendLimitReached) return
-    this.digMemory.resetDescendBudget()
-    this.logger.info(
-      'agent',
-      `DESCEND_BUDGET_RESET actionId=${actionId} reason=${reason}`,
-      { actionId, previousNoProgress: dig.descendNoProgress, reason },
-      this.tickCounter,
-    )
+    return ledgers.resetDescendBudgetAfterWorldChange(this.ledgersHost, actionId, reason)
   }
 
   private notifyMoveFailureMemory(): void {
-    const callback = this.options.onMoveFailureMemoryChange
-    if (callback === undefined) return
-    try {
-      callback(this.moveFailMemory.snapshot().map((entry) => ({ ...entry })))
-    } catch (error) {
-      this.logger.warn('agent', 'MOVE_FAILMEM_PERSIST_FAILED', { message: error instanceof Error ? error.message : String(error) }, this.tickCounter)
-    }
+    return ledgers.notifyMoveFailureMemory(this.ledgersHost)
   }
 
   private currentDimension(): string {
-    const game = this.bot.game
-    return game === undefined ? 'overworld' : game.dimension
+    return ledgers.currentDimension(this.ledgersHost)
   }
 
   /**
