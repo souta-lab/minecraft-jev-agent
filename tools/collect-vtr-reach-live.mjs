@@ -110,7 +110,14 @@ function parseArgs(argv) {
 }
 
 function parseJsonValue(raw) {
-  try { return JSON.parse(raw) } catch { return raw }
+  try {
+    const value = JSON.parse(raw)
+    // A bare token that parses to a non-finite number is a hex-like string
+    // (e.g. a build hash such as "8113e9775003"), not a numeric field —
+    // Infinity would serialize back to null and corrupt identity binding.
+    if (typeof value === 'number' && !Number.isFinite(value)) return raw
+    return value
+  } catch { return raw }
 }
 
 /** Parse whitespace-delimited key=value fields while preserving compact JSON values. */
