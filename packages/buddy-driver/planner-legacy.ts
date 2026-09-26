@@ -77,11 +77,17 @@ export type Counts = Record<string, number>
 
 export type PlannerMode = 'llm' | 'deterministic'
 
-/** Explicit opt-in only: `BUDDY_PLANNER=llm|jev|on`; all other values fail closed. */
+/**
+ * Explicit selection only, mirroring the production resolver in `planner.ts`:
+ * the deterministic baseline may be entered only by an explicit
+ * `BUDDY_PLANNER=deterministic|off|fallback|none` and can never be seized by an
+ * unset or unrecognized value.
+ */
 export function resolvePlannerMode(): PlannerMode {
-  const raw = (process.env.BUDDY_PLANNER ?? 'deterministic').trim().toLowerCase()
-  if (raw === 'llm' || raw === 'jev' || raw === 'on') return 'llm'
-  return 'deterministic'
+  const raw = (process.env.BUDDY_PLANNER ?? '').trim().toLowerCase()
+  if (raw === 'deterministic' || raw === 'off' || raw === 'fallback' || raw === 'none') return 'deterministic'
+  if (raw === 'llm' || raw === 'jev' || raw === 'on' || raw === 'auto' || raw === 'model') return 'llm'
+  throw new Error(`invalid BUDDY_PLANNER=${JSON.stringify(process.env.BUDDY_PLANNER)}; the deterministic baseline requires an explicit selection`)
 }
 
 // ---------------------------------------------------------------------------

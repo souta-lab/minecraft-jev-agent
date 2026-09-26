@@ -2,10 +2,10 @@
 // Options before they are applied to the GoalQueue (#11/#21).
 //
 // The GoalQueue remains the EXECUTION LEDGER. Normal runs compile Options by
-// default; explicit `BUDDY_OPTION_COMPILER=off` is a rollback/A-B baseline.
+// default; the pre-compiler verbatim path is retired.
 import type { Bot } from 'mineflayer'
 import { randomUUID } from 'node:crypto'
-import { applyCompiledPlan, emitBlockedOptionLogs, resolveOptionCompilerEnabled, snapshotFromResident, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, emitBlockedOptionLogs, snapshotFromResident, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { bestPickaxeRank, inventoryCounts } from './planner.ts'
@@ -38,7 +38,7 @@ export class OptionCompilingSystem2 implements System2Brain {
     this.inner = inner
     this.log = options.log
     this.snapshot = options.snapshot
-    this.enabled = options.enabled ?? resolveOptionCompilerEnabled()
+    this.enabled = options.enabled ?? true
     this.maxDepth = options.maxDepth
   }
 

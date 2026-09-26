@@ -30,7 +30,6 @@ import {
   optionStartabilityTruth,
   orderGoalsByReadiness,
   queuedToPlanned,
-  resolveOptionCompilerEnabled,
   setPredicateUnknownSink,
   snapshotFromResident,
   stableOptionInstanceId,
@@ -447,17 +446,16 @@ addCase('compileGoalQueue compiles the current goal then every pending goal in o
   return { pass: ids(specs).join(',') === 'collect:log,craft:crafting_table,place:furnace', detail: `ids=[${ids(specs).join(',')}] depth=${queue.state.depth}` }
 })
 
-addCase('flag: BUDDY_OPTION_COMPILER is ON by default and explicit OFF is the baseline', () => {
+addCase('flag: Option compilation is unconditional; enabled:false remains an explicit fixture-only A/B knob', () => {
   const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }]
   const snapshot = makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 })
   const off = applyCompiledPlan(planned, snapshot, { enabled: false })
   const on = applyCompiledPlan(planned, snapshot, { enabled: true })
+  const defaulted = applyCompiledPlan(planned, snapshot)
   const offUnchanged = off.goals.length === 1 && sameGoal(planned[0] as PlannedGoal, off.goals[0] as PlannedGoal)
   const onExpanded = on.goals.some((goal) => goal.targetItem === 'raw_iron') && on.goals.length === 2
-  const envDefault = resolveOptionCompilerEnabled({})
-  const envOn = resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: '1' })
-  const envOff = resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: '0' })
-  return { pass: offUnchanged && onExpanded && envDefault && envOn && !envOff, detail: `offGoals=${off.goals.length} onGoals=[${on.goals.map((g) => g.targetItem).join(',')}] default=${envDefault} on=${envOn} off=${envOff}` }
+  const defaultExpanded = defaulted.goals.some((goal) => goal.targetItem === 'raw_iron') && defaulted.goals.length === 2
+  return { pass: offUnchanged && onExpanded && defaultExpanded, detail: `offGoals=${off.goals.length} onGoals=[${on.goals.map((g) => g.targetItem).join(',')}] defaultGoals=[${defaulted.goals.map((g) => g.targetItem).join(',')}]` }
 })
 
 addCase('snapshotFromResident maps WorldMemory stations into predicate state', () => {

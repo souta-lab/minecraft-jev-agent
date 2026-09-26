@@ -26,10 +26,8 @@
 //    spec: predicates are serialisable data evaluated against an
 //    `OptionWorldSnapshot` of plain JSON.
 //  * No model, no network: completion and initiation are pure code.
-//  * Additive + opt-in: `BUDDY_OPTION_COMPILER` (default OFF) decides whether the
-//    compiled goal chain replaces the planned goals. When off, `applyCompiledPlan`
-//    returns the input goals unchanged, and the GoalQueue stays the execution
-//    ledger exactly as before.
+//  * Unconditional: the compiled goal chain always replaces the planned goals;
+//    the pre-compiler verbatim-PlannedGoal path is retired.
 //
 // DEPENDENCY EXPANSION (#12 generalization)
 // -----------------------------------------
@@ -231,13 +229,7 @@ export function optionSkillEnvelope(skills: readonly string[]): string[] {
 /** The beta threshold used when a spec does not override it. */
 export const DEFAULT_ABORT_THRESHOLD = 0.5
 
-/** Env switch. Default OFF so current behavior is untouched until #20/#22 land. */
-export const OPTION_COMPILER_ENV = 'BUDDY_OPTION_COMPILER'
-
-export function resolveOptionCompilerEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
-  const raw = (env[OPTION_COMPILER_ENV] ?? '').trim().toLowerCase()
-  return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes'
-}
+/** The compiler is unconditional; the pre-compiler plain-PlannedGoal path is retired. */
 
 /** A plain-JSON projection of the world the predicates read. No bot, no classes. */
 export interface OptionWorldSnapshot {
@@ -2072,7 +2064,7 @@ export function applyCompiledPlan(
     onDedupe?: (record: OptionDedupeRecord) => void
   },
 ): OptionCompileResult {
-  const enabled = options?.enabled ?? resolveOptionCompilerEnabled()
+  const enabled = options?.enabled ?? true
   const specs: OptionSpec[] = []
   const order: string[] = []
   const counts = new Map<string, number>()

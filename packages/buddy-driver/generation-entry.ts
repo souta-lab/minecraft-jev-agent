@@ -22,7 +22,6 @@ import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForMo
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
-import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
 import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
 import { createDimensionProvenanceView, writeRefusal } from './dimension-provenance.ts'
@@ -3185,12 +3184,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     durableLadderProgress,
   })
 
-  // #21: opt-in Option compiler. OFF by default, so the planner output continues
-  // to enter the GoalQueue verbatim (the ledger and deterministic guarantees are
-  // untouched). When BUDDY_OPTION_COMPILER is enabled, every planned goal is
-  // compiled into a grounded OptionSpec and unmet preconditions are expanded into
-  // their prerequisite chain before the queue is seeded.
-  const optionCompilerEnabled = resolveOptionCompilerEnabled()
+  // Option compilation is unconditional: every planned goal is compiled into a
+  // grounded OptionSpec and unmet preconditions are expanded into their
+  // prerequisite chain before the queue is seeded. The pre-compiler
+  // verbatim-PlannedGoal path is retired, so there is no environment switch.
+  const optionCompilerEnabled = true
   const system2: System2Brain = optionCompilerEnabled
     ? new OptionCompilingSystem2(brain, {
         log: (event, detail) => ctx.log(event, detail),

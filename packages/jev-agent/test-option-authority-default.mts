@@ -1,18 +1,21 @@
 // #11/#56: normal execution must materialise first-class Options.
 import assert from 'node:assert/strict'
-import { resolveOptionCompilerEnabled } from './src/optionSpec.ts'
+import { readFileSync } from 'node:fs'
+import { applyCompiledPlan, makeOptionSnapshot } from './src/optionSpec.ts'
+import type { PlannedGoal } from './src/goalQueue.ts'
 
-assert.equal(resolveOptionCompilerEnabled({}), true, 'Option compiler must be ON when unset')
-for (const value of ['1', 'true', 'on', 'yes']) {
-  assert.equal(resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: value }), true, `${value} enables Options`)
-}
-for (const value of ['0', 'false', 'off', 'no']) {
-  assert.equal(resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: value }), false, `${value} is explicit rollback`)
-}
-assert.throws(
-  () => resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: 'auto' }),
-  /invalid BUDDY_OPTION_COMPILER/,
-  'ambiguous auto mode must not silently change semantic architecture',
-)
+// The compiler is unconditional: applyCompiledPlan compiles unless a caller
+// explicitly passes enabled:false for an A/B fixture, and no environment
+// switch can select the retired verbatim-PlannedGoal path.
+const optionSpecSource = readFileSync(new URL('./src/optionSpec.ts', import.meta.url), 'utf8')
+const legacySource = readFileSync(new URL('./src/optionSpec-legacy.ts', import.meta.url), 'utf8')
+assert.ok(!/BUDDY_OPTION_COMPILER/.test(optionSpecSource), 'optionSpec.ts must not read BUDDY_OPTION_COMPILER')
+assert.ok(!/BUDDY_OPTION_COMPILER/.test(legacySource), 'optionSpec-legacy.ts must not read BUDDY_OPTION_COMPILER')
+assert.ok(!/resolveOptionCompilerEnabled/.test(optionSpecSource + legacySource), 'no env resolver may remain')
+
+const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 1 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 1 }]
+const snapshot = makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 })
+const compiled = applyCompiledPlan(planned, snapshot)
+assert.ok(compiled.goals.length > 1 || compiled.goals.some((g) => g.targetItem !== 'iron_ingot'), 'default compilation must expand prerequisites')
 
 process.stdout.write('#11 first-class Option default: PASS\n')

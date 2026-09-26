@@ -1,6 +1,6 @@
 // test-option-ladder.mts - Issue #21 dry-run demonstration: the compiled Options
 // reproduce the historical iron-age lower-prerequisite ladder, and the
-// compiler is a no-op while BUDDY_OPTION_COMPILER is off. The current M2 is the
+// compiler is unconditional; the verbatim-PlannedGoal path is retired. The current M2 is the
 // diamond-to-Nether-gate contract in MILESTONE-CONTRACT.json. Pure: no bot, no
 // server.
 import { applyCompiledPlan, compilePlannedGoals, evaluatePredicates, optionSpecsToPlannedGoals, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
