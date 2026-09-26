@@ -205,6 +205,21 @@ addCase('admitTransition denies a contract whose world identity disagrees with t
   return { pass, detail: `admitted=${admitted.ok} reason=${!admitted.ok ? admitted.reason : 'none'}` }
 })
 
+addCase('generation change closes the transition; issueStepEffect after closure is denied', () => {
+  const { session, gate } = makeAuthoritySession()
+  const contract = admitAndActivate(gate, session, 't-gen')
+  // GENERATION_CHANGED reaches the kernel as an honest CHANGE_GENERATION: the
+  // kernel suspends for rebind and the projection closes the lifecycle through
+  // the kind-preserving stand-in. Either way the transition is no longer
+  // effect-eligible — the stale generation can never dispatch another effect.
+  const terminal = gate.terminalize({ transitionId: 't-gen', contractHash: contract.contractHash, outcome: { kind: 'GENERATION_CHANGED', observed: 'gen-2' } })
+  const closed = session.state().transitions['t-gen']
+  const issued = gate.issueStepEffect({ transitionId: 't-gen', intentId: 'i-9', stepId: 's-9', effectKind: 'locomotion' })
+  const pass = terminal.ok && closed?.lifecycle === 'TERMINAL' && !issued.ok &&
+    session.summary().gateDenials.some((d) => d.gate === 'issueStepEffect')
+  return { pass, detail: `terminal=${terminal.ok} lifecycle=${closed?.lifecycle ?? 'none'} outcome=${closed?.terminalOutcome?.kind ?? 'none'} issued=${issued.ok} reason=${!issued.ok ? issued.reason : 'none'}` }
+})
+
 addCase('terminalize SUCCESS without observed ensures facts is denied and never mints SUCCESS', () => {
   const { session, gate } = makeAuthoritySession()
   const contract = admitAndActivate(gate, session, 't-noverify')

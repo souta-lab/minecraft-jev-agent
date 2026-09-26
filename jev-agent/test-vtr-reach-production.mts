@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { describe, it } from 'bun:test'
-import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
+import type { Bot } from 'mineflayer'
+import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
+import { jevAgent } from './src/index.ts'
+import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+import type { ReachMissionRuntimeDependencies } from './src/vtr/reach-mission-runtime.ts'
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+const indexSource = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8')
 const runtimeAdapter = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-runtime-adapter.ts', import.meta.url), 'utf8')
 const minecraftReachProjection = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-mission-projection.ts', import.meta.url), 'utf8')
 const runtimePortsSource = readFileSync(new URL('./src/vtr/reach-runtime-ports.ts', import.meta.url), 'utf8')
@@ -344,7 +349,6 @@ describe('VTR Reach production authority seam', () => {
     const suppression = controller.slice(ownerFilter, filterEnd)
     assert.match(suppression, /missionItem: vtrMission\.item/)
     assert.match(suppression, /missionSourceNames: minecraftMissionSourceNames\(vtrMission\.item\)/)
-    assert.match(suppression, /vtrOwnsReachMove: true/)
     assert.match(suppression, /candidates = legacyReachFilter\.candidates/)
     assert.match(suppression, /VTR_LEGACY_REACH_MOVE_WITHHELD/)
 
@@ -354,7 +358,7 @@ describe('VTR Reach production authority seam', () => {
     assert.ok(tick.indexOf('filterLegacyReachCandidates({') < tick.indexOf('await this.decide(state, candidates'))
 
     const compatibility = minecraftReachProjection
-    assert.match(compatibility, /Temporary strangler boundary/)
+    assert.match(compatibility, /Strangler boundary at the legacy candidate\/claim edge/)
     assert.match(compatibility, /Delete this filter[\s\S]*?legacy candidate\/claim path no longer owns[\s\S]*?Mission semantics/)
     assert.match(compatibility, /missionResourceSourceMatches\(item, sourceName, null, sourceNames\)/)
     assert.match(compatibility, /world\.blocks\.some\(/)
@@ -368,4 +372,49 @@ describe('VTR Reach production authority seam', () => {
     assert.match(scheduler, /const projection = this\.projectReachMission\(/)
     assert.match(scheduler, /this\.reachRuntime\.driveMission\(/)
   })
+
+  it('requires KernelReachAuthority by construction at every production seam', () => {
+    // Static shape: the gate is a required field, never an optional mode.
+    assert.match(controller, /\n  kernelAuthority: KernelReachAuthority\n/)
+    assert.doesNotMatch(controller, /kernelAuthority\?:|kernelAuthority: KernelReachAuthority \| (undefined|null)/)
+    assert.match(controller, /options: Partial<JevAgentOptions> & Pick<JevAgentOptions, 'kernelAuthority'>/)
+    assert.match(controller, /export type JevAgentOptionDefaults = Omit<JevAgentOptions, 'kernelAuthority'>/)
+    assert.match(controller, /setOptions\(partial: Partial<Omit<JevAgentOptions, 'kernelAuthority'>>/)
+    assert.match(jevComposition, /readonly kernelAuthority: KernelReachAuthority/)
+    assert.doesNotMatch(jevComposition, /kernelAuthority\?:|kernelAuthority === null|kernelAuthority \?\?/)
+    assert.match(reachMissionRuntime, /private readonly kernelAuthority: KernelReachAuthority/)
+    // The only authority-absent branch left is the fail-closed constructor
+    // throw; no `if (authority) vtr else legacy` fork exists anywhere.
+    assert.match(reachMissionRuntime, /throw new Error\('ReachMissionRuntime requires KernelReachAuthority'\)/)
+    assert.doesNotMatch(reachMissionRuntime, /kernelAuthority\?\.|kernelAuthority \?\?/)
+    assert.match(indexSource, /export function jevAgent\(bot: Bot, kernelAuthority: KernelReachAuthority\): void/)
+    // Production generation hardcodes authority mode and throws when the
+    // session cannot produce the gate — miswiring can never silently select
+    // an observer-only or legacy Reach path.
+    assert.match(generationEntry, /const kernelAuthorityMode = 'authority' as const/)
+    assert.match(generationEntry, /if \(kernelAuthority === null\) \{\s*throw new Error\('V4\.1\.2 kernel authority session did not produce the production gate'\)/)
+
+    // Runtime level: even an authority-less construction forced past the
+    // types throws closed instead of running Reach without an owner.
+    assert.throws(
+      () => new ReachMissionRuntime({ kernelAuthority: undefined } as unknown as ReachMissionRuntimeDependencies),
+      /requires KernelReachAuthority/,
+    )
+  })
 })
+
+// Compile-time proof: these constructions must keep failing typecheck. The
+// function is never invoked — `bun x tsc --noEmit` is the gate.
+function authorityRequiredAtTypeLevel(): void {
+  const bot = null as unknown as Bot
+  // @ts-expect-error JevController construction requires the kernelAuthority pick
+  void new JevController(bot)
+  // @ts-expect-error an options literal without kernelAuthority is rejected
+  void new JevController(bot, {})
+  // @ts-expect-error the plugin entry requires the host-owned gate
+  jevAgent(bot)
+  const missingGate = {} as Omit<ReachMissionRuntimeDependencies, 'kernelAuthority'>
+  // @ts-expect-error ReachMissionRuntime dependencies require kernelAuthority
+  void new ReachMissionRuntime(missingGate)
+}
+void authorityRequiredAtTypeLevel
