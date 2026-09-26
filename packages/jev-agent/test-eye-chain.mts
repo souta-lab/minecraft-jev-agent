@@ -91,7 +91,7 @@ const BLAZE_POWDER = 'blaze_powder'
 const BLAZE_ROD = 'blaze_rod'
 const EYES_REQUIRED = 12
 const POWDER_PER_ROD = 2
-/** The ladder's own threshold (buddy-driver/planner-legacy.ts rung `blaze_rods`). */
+/** The ladder's own threshold (buddy-driver/planner-ladder.ts rung `blaze_rods`). */
 const LADDER_BLAZE_RODS = 7
 /** The exact rod minimum for 12 eyes: 12 powder / 2 per rod. */
 const RODS_EXACT = EYES_REQUIRED / POWDER_PER_ROD

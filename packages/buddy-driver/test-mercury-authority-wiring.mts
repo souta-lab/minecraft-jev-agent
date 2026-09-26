@@ -94,13 +94,11 @@ const planner = new PlannerBrain({
   generationId: 'gen-authority-wire',
   sourceSha: 'a'.repeat(40),
   buildHash: 'b'.repeat(12),
-  cachePath: join(dir, 'planner-cache.json'),
   mode: 'llm',
   mercury,
   maxAttempts: 1,
   // If the Mercury branch is bypassed this would fail loudly, proving the test
   // cannot accidentally pass through the Jev horizon selector.
-  resolveKey: () => null,
 })
 
 // Before a request no provider has actually owned a semantic choice yet, even

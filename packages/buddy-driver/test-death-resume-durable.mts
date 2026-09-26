@@ -421,14 +421,14 @@ addCase('(f) computeFrontier reports the same durable rung as the resume (one so
 // `syncPortalSiteMemory('generation-start')` (:1859) and only then composes the
 // durable record (:2087) used by `deriveResumeRung` (:2098). The record DID carry
 // the world half (13). The floor was destroyed afterwards, by the revocation cap in
-// `achievedRungFloor` (planner-legacy.ts, pre-fix lines 1371-1391; the cap is the
+// `achievedRungFloor` (planner-ladder.ts, pre-fix lines 1371-1391; the cap is the
 // `chainRungIndex` half of the fix): its chain loop breaks at index 1
 // (`crafting_table`, `worldOutcome`, no held table and 0 remembered tables), so the
 // independently proven rung 13 was dropped and the run re-entered the
 // stone/cobblestone/furnace stage.
 //
 // The world half is a DIRECT proof of its own rungs (probed with an empty
-// inventory, planner-legacy.ts:1342), never a chain claim, so the cap may not go
+// inventory, planner-ladder.ts:1342), never a chain claim, so the cap may not go
 // below it. These cases pin the measured shape.
 
 /** The archived memory at 02:55:31Z: the portal survived, every station was purged. */
@@ -649,7 +649,7 @@ addCase('(g) worldKey/epoch scoping: a foreign record cannot raise this floor, a
   // (:2104-2116), while `syncKnownPortalSites` (generation-entry.ts:531-540, run at
   // :1859 BEFORE the composer at :2087) drops any site whose epoch/dimension
   // disagrees with the live key. Residual asymmetry recorded, not changed here:
-  // `verifiedPortalSiteInWorld` (planner-legacy.ts:445-464) checks dimension but not
+  // `verifiedPortalSiteInWorld` (planner-ladder.ts:445-464) checks dimension but not
   // `site.worldEpoch`, so a hand-planted foreign-epoch site WOULD satisfy the rung;
   // no current caller can produce one (host keying + the start-of-init sync).
   //

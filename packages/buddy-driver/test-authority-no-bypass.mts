@@ -51,10 +51,8 @@ function brain(label: string, y = 20): PlannerBrain {
     bot: makeBot(y),
     world: emptyWorldMemory(),
     log: () => undefined,
-    cachePath: cachePath(label),
     mode: 'llm',
     maxAttempts: 1,
-    resolveKey: () => null,
   })
 }
 

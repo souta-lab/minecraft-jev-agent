@@ -70,14 +70,9 @@ const planner = new PlannerBrain({
   bot,
   world: emptyWorldMemory(),
   log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
-  cachePath: join(dir, 'planner-cache.json'),
   mode: 'local-mercury',
   mercury,
   maxAttempts: 1,
-  resolveKey: () => {
-    externalPlannerKeyLookups += 1
-    return null
-  },
 })
 
 assert.equal(planner.model, 'qwen3.5-9b-local')
@@ -196,14 +191,9 @@ const postDeathPlanner = new PlannerBrain({
   bot,
   world: emptyWorldMemory(),
   log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
-  cachePath: join(dir, 'post-death-planner-cache.json'),
   mode: 'local-mercury',
   mercury: postDeathMercury,
   maxAttempts: 1,
-  resolveKey: () => {
-    externalPlannerKeyLookups += 1
-    return null
-  },
 })
 
 const postDeathLogStart = logs.length
@@ -260,7 +250,6 @@ const stalePlanner = new PlannerBrain({
   bot,
   world: emptyWorldMemory(),
   log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
-  cachePath: join(dir, 'stale-planner-cache.json'),
   mode: 'local-mercury',
   mercury: staleMercury,
   maxAttempts: 1,
@@ -287,7 +276,6 @@ assert.throws(
     bot,
     world: emptyWorldMemory(),
     log: () => undefined,
-    cachePath: join(dir, 'missing-mercury-cache.json'),
     mode: 'local-mercury',
   }),
   /requires Mercury/,

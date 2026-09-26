@@ -10,8 +10,6 @@ import type { Bot } from 'mineflayer'
 import { JsonlWriter, createJevPolicy } from '../jev-agent/src/jev.ts'
 import { FatalModelError, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 import type { System2PlanRequest } from '../jev-agent/src/system2/service.ts'
-import { Advisor } from './advisor.ts'
-import type { AdvisorState } from './advisor.ts'
 import { MercurySystem2 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import { PlannerBrain } from './planner.ts'
@@ -75,25 +73,6 @@ function impossibleRequest(): System2PlanRequest {
     objective: { targetItem: 'iron_pickaxe', requiredCount: 1, haveCount: 0, complete: false },
     recentEvents: [],
     recentOutcomes: [],
-  }
-}
-
-function advisorState(): AdvisorState {
-  return {
-    rung: 'raw_iron',
-    rungIndex: 7,
-    position: { x: 10, y: 62, z: 10 },
-    dimension: 'minecraft:overworld',
-    inventory: {},
-    toolRank: 2,
-    stations: { craftingTables: 1, furnaces: 1 },
-    discoveredOres: ['iron_ore'],
-    queueCurrent: 'collect 3 x raw_iron',
-    queueDepth: 1,
-    queueDone: 3,
-    waitStreak: 8,
-    failedCandidates: { WAIT: 3 },
-    recentFailures: [],
   }
 }
 
@@ -167,10 +146,8 @@ addCase('PlannerBrain: repeated planner model failure fatals + terminates, no de
     bot: makeBot(),
     world: emptyWorldMemory(),
     log: hostLog(logs),
-    cachePath: tempPath('planner-cache.json'),
     mode: 'llm',
     maxAttempts: 3,
-    resolveKey: () => null,
     terminate: (): never => {
       terminated += 1
       throw new Error('resident-terminated')
@@ -196,40 +173,6 @@ addCase('PlannerBrain: repeated planner model failure fatals + terminates, no de
       fatal.includes('attempts=3') &&
       !degraded,
     detail: `terminated=${terminated} fatal=${fatal ?? 'none'} retries=${retries.length} degraded=${degraded}`,
-  }
-})
-
-addCase('Advisor: unresolvable key fatals + terminates, no deterministic decision', async () => {
-  const logs: string[] = []
-  let terminated = 0
-  const advisor = new Advisor({
-    log: hostLog(logs),
-    cachePath: tempPath('advisor-cache.json'),
-    mode: 'llm',
-    maxAttempts: 3,
-    resolveKey: () => null,
-    terminate: (): never => {
-      terminated += 1
-      throw new Error('resident-terminated')
-    },
-  })
-  let thrown: unknown = null
-  try {
-    await advisor.decide(advisorState(), 'wait_limit')
-  } catch (error) {
-    thrown = error
-  }
-  const fatal = logs.find((line) => line.startsWith('FATAL'))
-  const degraded = logs.some((line) => line.startsWith('ADVISOR ') && line.includes('source=fallback'))
-  return {
-    pass:
-      terminated === 1 &&
-      thrown instanceof Error &&
-      thrown.message === 'resident-terminated' &&
-      fatal !== undefined &&
-      fatal.includes('context=advisor-no-key') &&
-      !degraded,
-    detail: `terminated=${terminated} fatal=${fatal ?? 'none'} degraded=${degraded}`,
   }
 })
 

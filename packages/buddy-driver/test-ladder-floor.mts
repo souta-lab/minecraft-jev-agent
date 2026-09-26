@@ -131,7 +131,6 @@ addCase('(e) PlannerBrain answers queue_empty with PLAN source=ladder rung=iron_
     bot: botWith(ISSUE_INVENTORY),
     world: emptyWorldMemory(),
     log: hostLog(log),
-    cachePath: '/tmp/opencode/wt73-nonexistent-planner-cache-73.json',
     mode: 'deterministic',
   })
   const first = await brain.plan(request('queue_empty', 0))
@@ -191,7 +190,6 @@ addCase('(h) a capability gap forces the surface-return goal to the queue head (
     bot: botAt(10, ISSUE_INVENTORY),
     world,
     log: hostLog(log),
-    cachePath: '/tmp/opencode/wt-surface-nonexistent-planner-cache.json',
     mode: 'deterministic',
   })
   const gapRequest: System2PlanRequest = {
@@ -226,7 +224,6 @@ addCase('(i) without a capability gap the deterministic floor never emits the su
     bot: botAt(10, ISSUE_INVENTORY),
     world,
     log: hostLog(log),
-    cachePath: '/tmp/opencode/wt-surface-nonexistent-planner-cache.json',
     mode: 'deterministic',
   })
   const plan = await brain.plan(request('queue_empty', 0))

@@ -22,7 +22,6 @@ import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForMo
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
-import { Advisor, resolveAdvisorMode } from './advisor.ts'
 import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
 import { createDimensionProvenanceView, writeRefusal } from './dimension-provenance.ts'
 import type { DimensionProvenance } from '../jev-agent/src/state.ts'
@@ -74,7 +73,6 @@ import {
   deriveResumeRung,
   dominatedPrerequisiteReason,
   goalAlreadyMet,
-  goalsForStrategy,
   has,
   inventoryCounts,
   isMandatoryRung,
@@ -2790,20 +2788,6 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   // Durable caches (survive hot reloads; keyed by world-state hash).
   const cacheNamespace = worldCacheNamespace(ctx.worldKey)
-  const cachePath = fileURLToPath(new URL(`./planner-cache-${cacheNamespace}.json`, import.meta.url))
-  const advisorCachePath = fileURLToPath(new URL(`./advisor-cache-${cacheNamespace}.json`, import.meta.url))
-  const advisor = new Advisor({
-    log: (event, detail) => ctx.log(event, detail),
-    cachePath: advisorCachePath,
-    mode: resolveAdvisorMode(plannerMode),
-    terminate: terminateResident,
-    compile: (strategy, state) =>
-      goalsForStrategy(strategy, state.inventory, world, {
-        placedFurnacesNear: furnaces.length,
-        knownFurnaces: world.furnaces.length,
-      }),
-  })
-
   const postDeathRecovery = ctx.resetReason === 'death'
   const mercuryConfigPath = process.env.BUDDY_SYSTEM2_CONFIG ?? join(process.cwd(), 'system2.config.json')
   const mercuryEnablement = resolveMercuryEnablement(plannerMode, mercuryConfigPath)
@@ -3162,13 +3146,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     sourceSha: ctx.sourceSha ?? null,
     buildHash: ctx.buildHash ?? null,
     requireFreshProviderDecision: ctx.recoverySystem2Authority !== undefined && ctx.recoverySystem2Authority !== null,
-    cachePath,
-    worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
     mode: plannerMode,
-    advisor,
     mercury,
     terminate: terminateResident,
-    postDeathRecovery,
     refreshLiveFacts: () => refreshLiveFacts('system2-grounding'),
     durableLadderProgress,
   })
@@ -3209,10 +3189,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
     planner: brain.mode,
     plannerModel: brain.model,
-    plannerCache: cachePath,
     advisor: mercuryEnablement.enabled
       ? `${mercury?.provider ?? 'gateway-system2'}:${mercury?.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT}`
-      : resolveAdvisorMode(plannerMode),
+      : 'none',
     advisorSource: mercuryEnablement.source,
     optionCompiler: optionCompilerEnabled,
     futureRungs: ladder.futureRungIds,

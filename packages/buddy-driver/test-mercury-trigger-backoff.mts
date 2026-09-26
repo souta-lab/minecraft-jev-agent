@@ -293,11 +293,9 @@ addCase('planner: repeat wait_limit does not reach Mercury; progress does', asyn
     bot: fakeBot,
     world: emptyWorldMemory(),
     log: hostLog(logs),
-    cachePath: join(dir, 'planner-cache.json'),
     mode: 'llm',
     mercury,
     maxAttempts: 1,
-    resolveKey: () => null,
   })
   const capture = async (request: System2PlanRequest): Promise<FatalModelError | null> => {
     try {
@@ -358,11 +356,9 @@ addCase('recovery planner bypasses wait_limit cooldown and cached plan for a fre
     bot: fakeBot,
     world: emptyWorldMemory(),
     log: hostLog(logs),
-    cachePath: join(dir, 'planner-cache.json'),
     mode: 'llm',
     mercury: makeMercury(false),
     maxAttempts: 1,
-    resolveKey: () => null,
   })
   await ordinaryPlanner.plan(waitLimitRequest(0))
   assert.equal(providerCalls, 1)
@@ -371,11 +367,9 @@ addCase('recovery planner bypasses wait_limit cooldown and cached plan for a fre
     bot: fakeBot,
     world: emptyWorldMemory(),
     log: hostLog(logs),
-    cachePath: join(dir, 'recovery-planner-cache.json'),
     mode: 'llm',
     mercury: makeMercury(true),
     maxAttempts: 1,
-    resolveKey: () => null,
     requireFreshProviderDecision: true,
   })
   const recoveryLogStart = logs.length

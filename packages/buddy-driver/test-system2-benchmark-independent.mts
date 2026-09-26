@@ -84,11 +84,9 @@ const planner = new PlannerBrain({
   bot,
   world,
   log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
-  cachePath: join(dir, 'planner-cache.json'),
   mode: 'llm',
   mercury,
   maxAttempts: 1,
-  resolveKey: () => null,
 })
 
 const plan = await planner.plan(request)

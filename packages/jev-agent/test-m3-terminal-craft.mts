@@ -2,7 +2,7 @@
 //
 // M3's predicate is a single inventory threshold: `ender_eye >= 12`
 // (AGENTS.md section 5; tools/m3-gate.mjs ENDER_EYE_REQUIRED). The ladder's
-// terminal rung emits `craft 12 x ender_eye` (buddy-driver/planner-legacy.ts
+// terminal rung emits `craft 12 x ender_eye` (buddy-driver/planner-ladder.ts
 // RUNGS id=ender_eyes). This fixture pins the mechanics truth that chain rests
 // on, straight from the pinned minecraft-data registry the live Leaf 1.21.11
 // server makes mineflayer@4.39.0 load:
@@ -35,8 +35,8 @@ import { defaultCandidateOptions, generateGroundedCandidates } from './src/candi
 import { createRecipeIndex, planNextCraftStep } from './src/crafting.ts'
 import { loadGameData } from './src/gameData.ts'
 import type { GameDataRegistry } from './src/gameData.ts'
-import { RUNGS } from '../buddy-driver/planner-legacy.ts'
-import type { Rung } from '../buddy-driver/planner-legacy.ts'
+import { RUNGS } from '../buddy-driver/planner-ladder.ts'
+import type { Rung } from '../buddy-driver/planner-ladder.ts'
 import type {
   AgentSignals,
   GoalState,

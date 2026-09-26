@@ -16,7 +16,7 @@
 //
 // Run: bun test ./test-iron-ingot-rung.mts
 import { buildPlanOptions, computeFrontier, reachableUnsatisfiedRungs } from './planner.ts'
-import type { Counts } from './planner-legacy.ts'
+import type { Counts } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 
 interface Case {

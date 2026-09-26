@@ -12,7 +12,7 @@
 //                      opt=explore:cave
 //   actions: DESCEND:down:W:b24_64_10 ...
 //
-// `dominatedPrerequisiteReason` (buddy-driver/planner-legacy.ts) rejected every
+// `dominatedPrerequisiteReason` (buddy-driver/planner-ladder.ts) rejected every
 // row whose kind was not `collect`/`craft`/`smelt`, so the proof that already
 // retired `collect`/`smelt` iron rows never even ran for the measured
 // `descend:raw_iron` row - the same item, the same satisfied consumer, the same

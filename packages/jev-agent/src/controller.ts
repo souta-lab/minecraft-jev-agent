@@ -4055,7 +4055,7 @@ export class JevController {
    * lookup; the trap predicate itself is `evaluateCapabilityGap`.
    *
    * The surface goal is included because the planner's capability-gap handling
-   * forces exactly that goal (`buddy-driver/planner-legacy.ts`), and its
+   * forces exactly that goal (`buddy-driver/planner-ladder.ts`), and its
    * `targetY` is the Y the body must actually reach. Without it, a shaft with no
    * remembered upper feature had no target at all, so the trap could not fire.
    */
