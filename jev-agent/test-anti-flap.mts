@@ -308,7 +308,9 @@ addCase('the flap window resolves from env with a safe default', () => {
 })
 
 addCase('wiring: the controller reconciles protection with the abandonment ledger', () => {
-  const text = source('./src/controller-legacy.ts')
+  const text =
+    source('./src/controller-legacy.ts') +
+    source('./src/legacy/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')
   const missing = [
     'new AbandonmentLedger()',
     'reconcileProtection({',

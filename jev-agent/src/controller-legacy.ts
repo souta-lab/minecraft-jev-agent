@@ -43,9 +43,6 @@ import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, Station
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
-  classifyAbandonRequest,
-  formatAbandonEnforced,
-  formatAbandonSuppressed,
   OptionAttemptTracker,
   resolveAbandonCooldownMs,
   resolveUnproductiveAttemptLimit,
@@ -54,9 +51,7 @@ import {
 import type { AbandonClassification } from './abandonPolicy.ts'
 import {
   AbandonmentLedger,
-  formatProtectionAbandonConflict,
   PROTECTION_ABANDON_CONFLICT,
-  reconcileProtection,
 } from './protectionConflict.ts'
 import {
   ACTION_COMMIT,
@@ -237,6 +232,9 @@ export { evaluateSurfaceRecovery, orphanedSmeltPrerequisiteReason, staleOreDesce
 import type { System2PlaneHost } from './legacy/system2-plane.ts'
 import * as goalstate from './legacy/goal-state.ts'
 import type { GoalStateHost } from './legacy/goal-state.ts'
+import * as abandonlifecycle from './legacy/abandon-lifecycle.ts'
+import type { AbandonLifecycleHost } from './legacy/abandon-lifecycle.ts'
+export { canAuthoritativelyAbandonOption } from './legacy/abandon-lifecycle.ts'
 import type { StallObserverHost } from './legacy/stall-observers.ts'
 import * as wedge from './legacy/wedge.ts'
 import type { WedgeHost } from './legacy/wedge.ts'
@@ -316,13 +314,10 @@ import type { ContainerRefusal } from './containerAccess.ts'
 import type { DigDir } from './worldMemory.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
 import {
-  classifyAbandonReason,
   formatAbandonReason,
   isFurnacePrerequisiteOption,
   PLACE_RETRIES_EXHAUSTED,
   PlaceRetryLedger,
-  prerequisiteOptionName,
-  shouldAdoptAbandon,
 } from './placementGuard.ts'
 import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import {
@@ -1844,11 +1839,6 @@ class MirroringEventLogger extends EventLogger {
   }
 }
 
-/** Beta is semantic authority only when one canonical current Option exists. */
-export function canAuthoritativelyAbandonOption(optionId: string | null): optionId is string {
-  return typeof optionId === 'string' && optionId.length > 0
-}
-
 /**
  * Verified goal/body/search progress observed for the current decision. Used
  * only to reset the bounded beta-abandon deferral (a productive in-flight action
@@ -2562,6 +2552,11 @@ export class JevController {
   /** GoalStateHost view of this controller (same structural-cast pattern as reachHost). */
   private get goalStateHost(): GoalStateHost {
     return this as unknown as GoalStateHost
+  }
+
+  /** AbandonLifecycleHost view of this controller (same structural-cast pattern as reachHost). */
+  private get abandonLifecycleHost(): AbandonLifecycleHost {
+    return this as unknown as AbandonLifecycleHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -5081,110 +5076,11 @@ export class JevController {
    * verified=false && progress=0) is enforced regardless of `betaAuthority`.
    */
   private abandonVerdict(decision: JevResult, optionId: string | null, planId: string | null): AbandonVerdict {
-    const requested = abandonRequested(decision)
-    const now = Date.now()
-    // The wrapper calls this immediately before `betaTerminationBoundary`, so the
-    // deferral bound below is keyed on the same plan revision this verdict used.
-    this.betaAbandonPlanId = planId
-    if (!canAuthoritativelyAbandonOption(optionId)) {
-      const classification = classifyAbandonRequest({
-        abandonRequested: requested,
-        betaAuthority: false,
-        attempts: 0,
-        lastVerified: false,
-        lastProgressDelta: 0,
-        attemptLimit: this.options.unproductiveAttemptLimit,
-        alreadyAbandoned: false,
-      })
-      const vote = this.betaDecision(decision)
-      if (requested) {
-        this.logger.warn(
-          'heads',
-          `BETA_NONAUTHORITATIVE option=none reason=no_current_option beta=${decision.answers.abandon_option?.probability ?? 'null'}`,
-          { optionId: null, planId, reason: 'no_current_option', beta: decision.answers.abandon_option?.probability ?? null },
-          this.tickCounter,
-        )
-      }
-      return { adopt: false, enforced: false, suppressed: requested, classification, vote, optionId: null, planId }
-    }
-    const state = this.optionAttempts.stateFor(optionId, planId)
-    const classification = classifyAbandonRequest({
-      abandonRequested: requested,
-      betaAuthority: this.options.betaAuthority,
-      attempts: state.attempts,
-      lastVerified: state.verified,
-      lastProgressDelta: state.progressDelta,
-      attemptLimit: this.options.unproductiveAttemptLimit,
-      alreadyAbandoned: this.optionAttempts.isAbandoned(optionId, planId, now, this.options.abandonCooldownMs),
-    })
-    const vote = this.betaDecision(decision)
-    if (!requested) return { adopt: false, enforced: false, suppressed: false, classification, vote, optionId, planId }
-    if (classification.reason === 'unproductive') {
-      return { adopt: true, enforced: true, suppressed: false, classification, vote, optionId, planId }
-    }
-    if (classification.reason === 'authority') {
-      return { adopt: vote.adopt, enforced: false, suppressed: vote.shadowed, classification, vote, optionId, planId }
-    }
-    return { adopt: false, enforced: false, suppressed: classification.suppressed, classification, vote, optionId, planId }
+    return abandonlifecycle.abandonVerdict(this.abandonLifecycleHost, decision, optionId, planId)
   }
 
   private applyAbandon(result: JevResult, verdict: AbandonVerdict): boolean {
-    if (verdict.enforced) {
-      if (verdict.optionId === null) return false
-      const probability = result.answers.abandon_option?.probability ?? null
-      this.logger.warn(
-        'heads',
-        formatAbandonEnforced({
-          optionId: verdict.optionId,
-          attempts: verdict.classification.attempts,
-          verified: verdict.classification.verified,
-          progressDelta: verdict.classification.progressDelta,
-          betaAuthority: this.options.betaAuthority,
-          betaShadowed: verdict.vote.shadowed,
-          abandonRequested: true,
-        }),
-        {
-          optionId: verdict.optionId,
-          planId: verdict.planId,
-          attempts: verdict.classification.attempts,
-          betaAuthority: this.options.betaAuthority,
-          betaShadowed: verdict.vote.shadowed,
-          abandonRequested: true,
-          action: 'abandon',
-        },
-        this.tickCounter,
-      )
-      this.enforceUnproductiveAbandon(verdict.optionId, verdict.planId, verdict.classification.attempts, probability)
-      return true
-    }
-    if (verdict.optionId === null) return false
-    if (this.options.betaAuthority) {
-      if (!verdict.adopt) return false
-      const probability = result.answers.abandon_option?.probability ?? null
-      this.markOptionAbandoned(verdict.optionId, 'authority')
-      this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
-      return true
-    }
-    if (verdict.suppressed && abandonRequested(result)) {
-      this.logger.info(
-        'heads',
-        formatAbandonSuppressed({
-          optionId: verdict.optionId,
-          reason: verdict.classification.reason === 'cooldown' ? 'cooldown' : 'speculative',
-          attempts: verdict.classification.attempts,
-        }),
-        {
-          optionId: verdict.optionId,
-          planId: verdict.planId,
-          reason: verdict.classification.reason,
-          attempts: verdict.classification.attempts,
-          mode: 'shadow',
-          action: 'continue',
-        },
-        this.tickCounter,
-      )
-    }
-    return false
+    return abandonlifecycle.applyAbandon(this.abandonLifecycleHost, result, verdict)
   }
 
   /**
@@ -5226,12 +5122,7 @@ export class JevController {
 
   /** Why beta/controller chose abandon, from the deterministic failure signals. */
   private abandonReason(actionId: string, beta: number | null): AbandonReason {
-    return classifyAbandonReason({
-      beta,
-      lastFailureCode: this.signals.lastFailureCode,
-      candidateFailures: this.candidateFailureCount(actionId),
-      escalationRecommended: this.signals.escalationRecommended,
-    })
+    return abandonlifecycle.abandonReason(this.abandonLifecycleHost, actionId, beta)
   }
 
   /**
@@ -5301,7 +5192,7 @@ export class JevController {
   }
 
   private placeRetryExhausted(): boolean {
-    return this.placementRetries.anyExhausted()
+    return abandonlifecycle.placeRetryExhausted(this.abandonLifecycleHost)
   }
 
   /**
@@ -5357,26 +5248,11 @@ export class JevController {
    * contradiction is surfaced with the mirrored marker, and protection is off.
    */
   private reconciledProtection(protection: PrerequisiteProtection, reason: string): PrerequisiteProtection {
-    const abandonedReason = protection.protect
-      ? this.abandonedOptions.reasonUnder(protection.option, this.lastStateFingerprint)
-      : null
-    const reconciliation = reconcileProtection({ protection, abandonedReason })
-    if (reconciliation.conflictLine !== null && abandonedReason !== null) {
-      this.logProtectionAbandonConflict(protection.option, abandonedReason, reason)
-    }
-    return reconciliation.protect === protection.protect
-      ? protection
-      : { ...protection, protect: reconciliation.protect }
+    return abandonlifecycle.reconciledProtection(this.abandonLifecycleHost, protection, reason)
   }
 
   private logProtectionAbandonConflict(option: string, abandonedReason: string, reason: string): void {
-    if (!this.abandonedOptions.claimConflict(option, this.lastStateFingerprint)) return
-    this.logger.warn(
-      'heads',
-      formatProtectionAbandonConflict(option, 'abandoned', abandonedReason),
-      { option, action: 'abandoned', abandonedReason, reason, fingerprint: this.lastStateFingerprint },
-      this.tickCounter,
-    )
+    return abandonlifecycle.logProtectionAbandonConflict(this.abandonLifecycleHost, option, abandonedReason, reason)
   }
 
   /**
@@ -5385,16 +5261,7 @@ export class JevController {
    * contradiction is emitted once (the live defect A sequence).
    */
   private markOptionAbandoned(optionId: string | null, reason: string): void {
-    if (optionId === null) return
-    const option = prerequisiteOptionName(optionId)
-    const guard = shouldAdoptAbandon({
-      actionId: optionId,
-      goals: this.unfinishedGoals(),
-      placedFurnaceCount: this.lastPlacedFurnaceCount,
-      abandonRequested: true,
-    })
-    if (guard.protection.protect) this.logProtectionAbandonConflict(option, reason, 'abandoned')
-    this.abandonedOptions.markAbandoned(option, this.lastStateFingerprint, reason)
+    return abandonlifecycle.markOptionAbandoned(this.abandonLifecycleHost, optionId, reason)
   }
 
   private applyCandidateCommitment(
@@ -6796,28 +6663,11 @@ export class JevController {
   }
 
   private abandonedPrereqSet(goalKey: string, now: number): Set<PrereqPath> {
-    const bucket = this.abandonedPrereqPaths.get(goalKey)
-    const abandoned = new Set<PrereqPath>()
-    if (bucket === undefined) return abandoned
-    for (const [path, at] of bucket) {
-      if (now - at >= this.options.abandonCooldownMs) continue
-      if (this.abandonedPrereqFingerprints.get(`${goalKey}|${path}`) !== this.lastStateFingerprint) continue
-      abandoned.add(path)
-    }
-    return abandoned
+    return abandonlifecycle.abandonedPrereqSet(this.abandonLifecycleHost, goalKey, now)
   }
 
   private resetFurnacePrereq(): void {
-    this.prereqPlan = null
-    this.prereqForcedPath = null
-    this.prereqGoalKey = null
-    this.prereqLoggedKey = null
-    this.prereqStationKnownLoggedKey = null
-    this.prereqProgress = null
-    this.prereqChosenPath = null
-    this.abandonedRetrievePaths.clear()
-    this.abandonedPrereqFingerprints.clear()
-    this.retrieveUnverified = null
+    return abandonlifecycle.resetFurnacePrereq(this.abandonLifecycleHost)
   }
 
   /**
@@ -6827,33 +6677,7 @@ export class JevController {
    * is unchanged.
    */
   private abandonRetrieveOption(line: string, candidate: Candidate, unverified: number): void {
-    this.logger.warn(
-      'agent',
-      line,
-      { option: candidate.id, unverified, goal: this.currentGoalKey() },
-      this.tickCounter,
-    )
-    this.abandonedRetrievePaths.set('use_known_station', this.lastStateFingerprint)
-    if (candidate.target !== null) {
-      const knownName =
-        typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'station'
-      this.unreachableResources.add(this.retrievalKey({ knownName, target: candidate.target }))
-    }
-    this.noteCandidateFailure(candidate.id)
-    this.markOptionAbandoned(candidate.id, 'retrieve_unverified')
-    this.activeRetrieval = null
-    this.retrievalTrack = null
-    this.retrieveUnverified = null
-    this.prereqForcedPath = null
-    this.prereqProgress = null
-    this.prereqLoggedKey = null
-    this.retrievalEscalationPending = true
-    this.logger.warn(
-      'agent',
-      `LOCAL_RETRIEVE_RECOVERY candidate=${candidate.id} unverified=${unverified} system2=false`,
-      { candidate: candidate.id, unverified, boundary: 'local_recovery' },
-      this.tickCounter,
-    )
+    return abandonlifecycle.abandonRetrieveOption(this.abandonLifecycleHost, line, candidate, unverified)
   }
 
   private logStaleKnownResources(state: WorldState): void {
