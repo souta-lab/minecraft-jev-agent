@@ -580,7 +580,7 @@ function cleanStatus(root) {
 
 const WORKSPACE_PATHS = Object.freeze([
   'packages/jev-harness', 'packages/jev-agent', 'packages/buddy-driver', 'packages/mcbot', 'packages/mcbot/movement-test',
-  'packages/mcbot/movement-test/variants/A', 'packages/companion', 'packages/system2-harness',
+  'packages/mcbot/movement-test/variants/A', 'packages/companion', 'packages/system2-harness', 'packages/mcp-server',
 ])
 
 /**
