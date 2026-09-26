@@ -256,6 +256,9 @@ export type { MoveOutcome } from './legacy/outcome-accounting.ts'
 import * as ledgers from './legacy/outcome-ledgers.ts'
 import type { OutcomeLedgersHost } from './legacy/outcome-ledgers.ts'
 export { controllerUnreachableMoveReason } from './legacy/outcome-ledgers.ts'
+import * as epochs from './legacy/decision-epochs.ts'
+import type { DecisionEpochsHost } from './legacy/decision-epochs.ts'
+export { CRITICAL_TRIGGERS, guardMoveFailureReason } from './legacy/decision-epochs.ts'
 export type {
   WaitWedgeDecision,
   WaitWedgeInput,
@@ -840,30 +843,6 @@ export interface RunSummary {
 
 export { TRIGGER_PRIORITY }
 
-/** Safety-critical events: an incompatible threat makes the Jev answer stale. */
-export const CRITICAL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
-  'damage_taken',
-  'hp_changed',
-  'mob_appeared',
-  // Breath running out is the same class of safety event as an injury: a
-  // semantic WHAT decision taken before the body started drowning must not
-  // still authorize building/placing. It shares the `injury` family below
-  // because drowning IS injury damage in progress - the air gauge is simply an
-  // earlier, cheaper signal than the first drowning hit.
-  'low_air',
-  // A confirmed head-underwater reading with unavailable breath metadata is a
-  // separate sensor safety event, not synthetic damage.
-  'air_unknown_head_submerged',
-])
-
-type CriticalThreatFamily = 'injury' | 'breath' | 'mob'
-
-function criticalThreatFamily(trigger: DecisionTrigger): CriticalThreatFamily {
-  if (trigger === 'mob_appeared') return 'mob'
-  if (trigger === 'low_air' || trigger === 'air_unknown_head_submerged') return 'breath'
-  return 'injury'
-}
-
 const STALL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
   'path_stuck',
   'path_no_path',
@@ -872,7 +851,7 @@ const STALL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
 
 /** Pick the CORE + trigger-specific question set (P1-7). */
 export function questionSetForTrigger(trigger: DecisionTrigger): QuestionSetKind {
-  if (CRITICAL_TRIGGERS.has(trigger)) return 'threat'
+  if (epochs.CRITICAL_TRIGGERS.has(trigger)) return 'threat'
   if (STALL_TRIGGERS.has(trigger)) return 'stall'
   return 'core'
 }
@@ -925,15 +904,6 @@ const EXPLORED_CELLS_LIMIT = 512
  * the constants in `localOscillation.ts`; they are read once here like the
  * `MOVE_FAILMEM_*` pair above.
  */
-
-/** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
-export function guardMoveFailureReason(
-  candidate: Pick<Candidate, 'kind'> | undefined,
-  code: GuardCode,
-): MoveFailureReason | null {
-  if (candidate === undefined || !isTrackedMoveKind(candidate.kind)) return null
-  return code === 'NO_PATH' ? 'no_path' : null
-}
 
 /**
  * Zero-progress known-resource retrieves before the resource is retired.
@@ -2619,6 +2589,11 @@ export class JevController {
     return this as unknown as OutcomeLedgersHost
   }
 
+  /** DecisionEpochsHost view of this controller (same structural-cast pattern as reachHost). */
+  private get epochsHost(): DecisionEpochsHost {
+    return this as unknown as DecisionEpochsHost
+  }
+
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
   private get reachTransition(): ActiveReachTransition | null {
     const current = this.reachRuntime.activeMission
@@ -3647,7 +3622,7 @@ export class JevController {
       if (this.executor.current !== null) this.compressedSkillSteps += 1
       this.damageObservedThisTick = false
       this.triggerCounts[trigger] = (this.triggerCounts[trigger] ?? 0) + 1
-      if (CRITICAL_TRIGGERS.has(trigger)) this.criticalStateVersion += 1
+      if (epochs.CRITICAL_TRIGGERS.has(trigger)) this.criticalStateVersion += 1
       this.signals.maxConcurrentActions = this.executor.maxConcurrentActions
       this.signals.lastPathStatus = this.executor.lastPathStatus
       this.signals.consecutiveFailures = this.failureStreak
@@ -4938,17 +4913,7 @@ export class JevController {
   }
 
   private jevLog(decision: JevResult, dangerGate: GatedScore, trigger: DecisionTrigger): DecisionJevLog {
-    return {
-      policy: decision.policy,
-      source: decision.source,
-      model: decision.model,
-      callId: decision.callId,
-      latencyMs: decision.latencyMs,
-      usage: decision.usage,
-      answers: decision.answers,
-      dangerGate,
-      trigger,
-    }
+    return epochs.jevLog(this.epochsHost, decision, dangerGate, trigger)
   }
 
   /**
@@ -5504,246 +5469,49 @@ export class JevController {
     this.abandonedOptions.markAbandoned(option, this.lastStateFingerprint, reason)
   }
 
-  /**
-   * #11 v2 §7: one candidate until a fact changes. While a flap window is
-   * active the policy's raw choice is replaced by the cheap-feasible commitment;
-   * a deterministic rejection releases it to the next cheapest feasible.
-   */
   private applyCandidateCommitment(
     chosenId: string,
     candidates: readonly Candidate[],
     state: WorldState,
   ): string {
-    const progressed = this.progressEpoch !== this.commitmentProgressEpoch
-    this.commitmentProgressEpoch = this.progressEpoch
-    const offered: readonly FlapCandidate[] = candidates.map((candidate, index) => ({
-      id: candidate.id,
-      cost: this.candidateCommitCost(candidate, index),
-    }))
-    const decision = evaluateCandidateFlap({
-      previous: this.commitmentState,
-      chosenId,
-      fingerprint: this.lastStateFingerprint,
-      progressed,
-      candidates: offered,
-      invalid: this.deterministicInvalid(candidates, state),
-    })
-    this.commitmentState = decision.state
-    if (decision.line !== null) {
-      this.logger.warn(
-        'policy',
-        decision.line,
-        { chosenId, committedId: decision.state.committedId, fingerprint: this.lastStateFingerprint },
-        this.tickCounter,
-      )
-    }
-    if (decision.releaseLine !== null) {
-      this.logger.warn(
-        'policy',
-        decision.releaseLine,
-        { chosenId, committedId: decision.state.committedId },
-        this.tickCounter,
-      )
-    }
-    return decision.chosenId
+    return epochs.applyCandidateCommitment(this.epochsHost, chosenId, candidates, state)
   }
 
-  /** The caller's existing cost policy: a declared cost, else the generator order. */
   private candidateCommitCost(candidate: Candidate, index: number): number {
-    const cost = candidate.meta.cost
-    if (typeof cost === 'number') return cost
-    const prereqCost = candidate.meta.prereqCost
-    if (typeof prereqCost === 'number') return prereqCost
-    return index
+    return epochs.candidateCommitCost(this.epochsHost, candidate, index)
   }
 
-  /** Candidate ids deterministic feasibility has already rejected. */
   private deterministicInvalid(candidates: readonly Candidate[], state: WorldState): ReadonlySet<string> {
-    const invalid = new Set<string>(this.withheldCandidateIds)
-    for (const candidate of candidates) {
-      if (unreachableMove(candidate, state) !== null) invalid.add(candidate.id)
-    }
-    return invalid
+    return epochs.deterministicInvalid(this.epochsHost, candidates, state)
   }
 
-  /**
-   * Action-lifecycle commitment: hold the action the executor is ALREADY running
-   * for a bounded window instead of letting this decision cancel it via
-   * `Executor.claim` (which cancels any different in-flight action first).
-   *
-   * This is the same authority invariant as the flap commitment: it can only
-   * keep the action Jev already chose, or release to the raw choice - code never
-   * substitutes a different candidate. `ACTION_COMMIT` is logged when a switch is
-   * suppressed; `ACTION_PREEMPT` when the held action is released and replaced.
-   */
   private applyActionCommitment(
     chosenId: string,
     candidates: readonly Candidate[],
     state: WorldState,
   ): string {
-    const running = this.executor.current
-    const invalid = running === null ? null : this.deterministicInvalid(candidates, state)
-    // SAFE: in melee contact a threat response must execute now. Code owns only
-    // the contact fact and the kind test; the choice is still Jev's (the newer
-    // one). Without this, the measured fight held the in-flight RETREAT while
-    // Jev selected ATTACK three decisions in a row and the body never swung.
-    const chosen = candidates.find((candidate) => candidate.id === chosenId) ?? null
-    const contactThreatResponse =
-      chosen !== null &&
-      CONTACT_THREAT_KINDS.has(chosen.kind) &&
-      state.entities.some((entity) => entity.hostile && entity.distance <= MELEE_THREAT_REACH)
-    const decision = evaluateActionCommitment({
-      previous: this.actionCommitmentState,
-      inFlight:
-        running === null
-          ? null
-          : { id: running.id, epoch: running.epoch, startedAtMs: running.startedAt },
-      chosenId,
-      planKey: this.actionCommitmentPlanKey(state),
-      nowMs: Date.now(),
-      inFlightInvalid: running !== null && invalid !== null && invalid.has(running.id),
-      inFlightOffered: running !== null && candidates.some((candidate) => candidate.id === running.id),
-      contactThreatResponse,
-    })
-    this.actionCommitmentState = decision.state
-    if (decision.line !== null) {
-      this.logger.warn(
-        'policy',
-        decision.line,
-        { chosenId, heldId: decision.chosenId, planKey: this.actionCommitmentPlanKey(state) },
-        this.tickCounter,
-      )
-    }
-    if (decision.releaseLine !== null) {
-      this.logger.warn(
-        'policy',
-        decision.releaseLine,
-        { chosenId, heldId: null, planKey: this.actionCommitmentPlanKey(state) },
-        this.tickCounter,
-      )
-    }
-    return decision.chosenId
+    return epochs.applyActionCommitment(this.epochsHost, chosenId, candidates, state)
   }
 
-  /** Plan/goal identity for the action commitment; a change resets it. */
   private actionCommitmentPlanKey(state: WorldState): string {
-    const current = state.goalQueue?.current
-    return `${this.currentGoalKey()}|plan=${current?.id ?? 'none'}|rev=${state.goalQueue?.revision ?? this.queue.revision}`
+    return epochs.actionCommitmentPlanKey(this.epochsHost, state)
   }
 
-  /**
-   * #327 follow-up: bound the chosen no-op WAIT while real actionable candidates
-   * are offered. The policy model itself can keep choosing WAIT with several real
-   * actions on the table; no existing counter sees that (`LOCAL_RECOVERY_*` only
-   * advance on suppressed replans, `ACTION_FAILURE_*` only on typed action
-   * failures, and the #43 WAIT wedge is suppressed when the junk-inventory
-   * fingerprint churns every tick).
-   *
-   * On the Nth consecutive actionable WAIT the local recovery is exhausted:
-   * `WAIT_EXHAUSTED` is logged, `progress_stall` wakes System2 through the same
-   * `escalate()` path #326/#337 use, and WAIT is removed for exactly one decision
-   * so the policy must choose a real candidate. The streak clears on any non-WAIT
-   * choice, on `actionable === 0`, on a goal/plan change (inside the counter), on
-   * progress (in `onActionComplete`), and on the Nth decision - so the next
-   * escalation needs N fresh WAITs and no hot wake loop is possible. Its
-   * fingerprint is exposed through `replanInputs()` so the #44 throttle cannot
-   * swallow this one wake as `no_new_info`.
-   */
   private noteWaitStreak(chosenId: string, actionable: number): void {
-    const goalKey = this.currentGoalKey()
-    const decision = this.waitStreakEscalation.noteChoice(chosenId, actionable, goalKey)
-    if (decision.count === 0) return
-    const detail = {
-      goal: goalKey,
-      actionable,
-      count: decision.count,
-      limit: decision.limit,
-    }
-    if (!decision.escalate) {
-      this.logger.warn('policy', formatWaitStreak(decision), detail, this.tickCounter)
-      return
-    }
-    this.logger.warn('policy', formatWaitExhausted(decision), { ...detail, boundary: 'semantic_boundary' }, this.tickCounter)
-    // Force the next decision to choose a real candidate, then reset so the
-    // bound cannot hot-loop: N fresh WAITs are required before the next wake.
-    this.waitSuppressed = true
-    this.escalate(
-      'progress_stall',
-      `WAIT_EXHAUSTED count=${decision.count}/${decision.limit} goal=${goalKey} actionable=${actionable}`,
-    )
-    this.waitStreakEscalation.reset()
+    return epochs.noteWaitStreak(this.epochsHost, chosenId, actionable)
   }
 
-  /**
-   * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
-   * PLACE_RETRY while the bounded attempts remain, then RETIRE the candidate
-   * family with one typed `PLACE_RETRIES_EXHAUSTED` so it cannot be re-offered
-   * forever. The ledger clamps the ordinal at limit+1 and the retired item set
-   * is threaded into the candidate generator, which is what makes the limit
-   * authoritative instead of advisory (measured live: count=18 against limit=5).
-   */
+  /** OutcomeAccountingHost calls this through host.: keep the delegate, not just the plane fn. */
   private schedulePlaceRetry(result: ExecutionResult, candidate: Candidate): boolean {
-    const at =
-      candidate.target ??
-      ({
-        x: Math.floor(this.bot.entity.position.x),
-        y: Math.floor(this.bot.entity.position.y),
-        z: Math.floor(this.bot.entity.position.z),
-      } satisfies Vec3Json)
-    const item = candidate.itemName
-    const decision = this.placementRetries.noteFailure({
-      item,
-      actionId: result.actionId,
-      at,
-      reason: result.failure ?? 'place_failed',
-    })
-    if (!decision.retry) {
-      // The retire line is emitted exactly once by the ledger. If the ledger
-      // already announced this family, keep the existing `retry_exhausted` audit
-      // line for the repeated failure but never report the bound as still live.
-      const line =
-        decision.exhaustedLine ??
-        `${PLACE_RETRIES_EXHAUSTED} at=${at.x},${at.y},${at.z} item=${item ?? 'unknown'} count=${decision.count}/${decision.limit} actionId=${result.actionId} reason=${result.failure} (already retired)`
-      this.logger.warn(
-        'agent',
-        line,
-        {
-          actionId: result.actionId,
-          item,
-          count: decision.count,
-          limit: decision.limit,
-          reason: result.failure,
-          retired: this.placementRetries.isItemRetired(item),
-        },
-        this.tickCounter,
-      )
-      return false
-    }
-    this.logger.warn(
-      'agent',
-      decision.line,
-      { actionId: result.actionId, count: decision.count, limit: decision.limit, reason: result.failure },
-      this.tickCounter,
-    )
-    return true
+    return epochs.schedulePlaceRetry(this.epochsHost, result, candidate)
   }
 
   private criticalArrivedDuringFlight(trigger: DecisionTrigger): boolean {
-    const pending = this.pendingTrigger
-    const deferred = this.deferredTrigger
-    const critical = [pending, deferred].find((event) => event !== null && CRITICAL_TRIGGERS.has(event.trigger))
-    if (critical === undefined || critical === null) return false
-    if (!CRITICAL_TRIGGERS.has(trigger)) return true
-    return criticalThreatFamily(trigger) !== criticalThreatFamily(critical.trigger)
+    return epochs.criticalArrivedDuringFlight(this.epochsHost, trigger)
   }
 
   private hasCriticalTriggerDuringFlight(): boolean {
-    const pending = this.pendingTrigger
-    const deferred = this.deferredTrigger
-    return (
-      (pending !== null && CRITICAL_TRIGGERS.has(pending.trigger)) ||
-      (deferred !== null && CRITICAL_TRIGGERS.has(deferred.trigger))
-    )
+    return epochs.hasCriticalTriggerDuringFlight(this.epochsHost)
   }
 
   private async decide(
@@ -5946,11 +5714,6 @@ export class JevController {
     }
   }
 
-  /**
-   * §12: emit the three Jev-plane records for one decision - the epoch that owns
-   * it, the projection hash/version Jev saw, and the stable candidate identities
-   * offered. One line each, so the boundary is reconstructible from the log.
-   */
   private logBoundary(
     epoch: ReturnType<JevDecisionEpochs['begin']>,
     reason: string,
@@ -5960,67 +5723,15 @@ export class JevController {
     trigger: DecisionTrigger,
     sinceLastCallMs: number | null,
   ): void {
-    const change =
-      reason === 'semantic_state_changed' && this.lastSemanticProjection !== null
-        ? classifyProjectionChange(this.lastSemanticProjection, projection)
-        : null
-    // §6: `flap=true` means the semantic plane changed faster than
-    // `minJevIntervalMs` - the gate is working as designed (a real semantic change
-    // always re-queries) but the projection is quantized too finely for this
-    // situation if it stays true. Evidence only; it never suppresses a query,
-    // because replaying a genuinely changed semantic state would be exactly the
-    // hidden-staleness §6 forbids. This is what keeps `minJevIntervalMs` a live
-    // diagnostic instead of the dead rate-limit key it was before #437.
-    const flap = sinceLastCallMs !== null && sinceLastCallMs < this.options.minJevIntervalMs
-    this.logger.info(
-      'policy',
-      formatEpochStart(epoch, reason),
-      {
-        trigger,
-        projectionHash: hash,
-        ...(sinceLastCallMs === null ? {} : { sinceLastCallMs, flap }),
-        ...(change ?? {}),
-      },
-      this.tickCounter,
-    )
-    this.logger.info('policy', formatJevStateProjection(projection, hash), { trigger }, this.tickCounter)
-    this.logger.info('policy', formatJevCandidateSet(views), { trigger, offered: views.length }, this.tickCounter)
+    return epochs.logBoundary(this.epochsHost, epoch, reason, projection, hash, views, trigger, sinceLastCallMs)
   }
 
-  /**
-   * §12: exactly one `JEV_DECISION_EPOCH_END` per epoch. An epoch that is
-   * superseded by the next decision (rather than closed by an outcome packet)
-   * still gets its end record, so `START`/`END` balance in the run log.
-   */
   private logEpochSuperseded(previous: DecisionEpoch | null): void {
-    if (previous === null || !previous.closed) return
-    this.logger.info('policy', formatEpochEnd(previous), {}, this.tickCounter)
+    return epochs.logEpochSuperseded(this.epochsHost, previous)
   }
 
-  /**
-   * §4/§10: re-point a replayed decision at the current representative of the
-   * SAME semantic identity (see `repointReplayedChoice`). Returns null when the
-   * chosen identity is no longer offered, which means the semantic state really
-   * did change and the caller must re-query rather than replay. Never changes the
-   * choice: only its mechanical realization id.
-   */
   private repointReplay(result: JevResult, views: readonly SemanticCandidateView[]): JevResult | null {
-    const choice = repointReplayedChoice(
-      decisionIdFrom(result),
-      this.lastSemanticProjection?.candidates ?? [],
-      views,
-    )
-    if (choice.lost) return null
-    if (!choice.repointed || choice.chosenId === null) return result
-    const answer = result.answers.action
-    if (answer === undefined) return result
-    this.logger.info(
-      'policy',
-      `JEV_REPLAY_REPOINTED identity=${this.lastSemanticProjection?.candidates.find((view) => view.id === decisionIdFrom(result))?.identity ?? 'unknown'} from=${decisionIdFrom(result) ?? 'none'} to=${choice.chosenId}`,
-      { trigger: 'semantic_boundary' },
-      this.tickCounter,
-    )
-    return { ...result, answers: { ...result.answers, action: { ...answer, value: choice.chosenId } } }
+    return epochs.repointReplay(this.epochsHost, result, views)
   }
 
   /**
@@ -6053,11 +5764,7 @@ export class JevController {
     return system2plane.buildSemanticProjection(this.system2Host, state, candidates, mergedCandidates)
   }
 
-  /**
-   * §2/§12: compress a settled Skill into ONE typed SkillOutcomePacket, store it
-   * as the bounded previous-outcome context, and close the decision epoch it
-   * belongs to. Pure evidence: it never chooses anything.
-   */
+  /** OutcomeAccountingHost calls this through host.: keep the delegate, not just the plane fn. */
   private emitSkillOutcomePacket(input: {
     actionId: string
     kind: CandidateKind
@@ -6074,93 +5781,7 @@ export class JevController {
     candidate: Candidate | null
     verification: string
   }): SkillOutcomePacket {
-    const binding = input.leaseEpoch === null ? null : this.actionEpochByLease.get(input.leaseEpoch) ?? null
-    if (input.leaseEpoch !== null) this.actionEpochByLease.delete(input.leaseEpoch)
-    const option = this.currentOptionContext()
-    const target =
-      input.candidate === null
-        ? { kind: 'none' as const, key: input.targetName ?? 'unknown', label: input.actionId }
-        : semanticTargetRef(input.candidate)
-    const deltas: SemanticDelta[] = []
-    if (input.blockRemoved) {
-      deltas.push({ fact: 'block.removed', from: null, to: input.targetName ?? input.actionId })
-    }
-    if (input.itemsGained > 0) deltas.push({ fact: 'inventory.gained', from: 0, to: input.itemsGained })
-    if (input.entityDefeated) {
-      deltas.push({ fact: 'target.entity', from: `e${input.candidate?.targetEntityId ?? -1}`, to: 'dead' })
-    }
-    const facts: GroundedFact[] = []
-    if (input.failure === 'target_gone') {
-      facts.push({
-        kind: 'target',
-        key: target.key,
-        detail: 'the selected target is no longer present (TARGET_LOST, not killed)',
-      })
-    }
-    if (input.failure === 'drop_not_acquired' && input.entityDefeated) {
-      facts.push({
-        kind: 'target',
-        key: target.key,
-        detail: 'the selected entity was verified dead, but its declared HUNT_DROP item was not acquired',
-      })
-      const goalDrop = input.candidate?.meta.goalDrop
-      if (typeof goalDrop === 'string') {
-        facts.push({
-          kind: 'resource',
-          key: `inventory:${goalDrop}`,
-          detail: `this hunt lease gained no ${goalDrop} in the body inventory`,
-        })
-      }
-    }
-    const packet = buildSkillOutcomePacket({
-      decisionEpoch: binding?.epoch ?? this.decisionEpochs.active?.epoch ?? 0,
-      commitmentId:
-        binding?.commitmentId ??
-        (input.leaseEpoch === null
-          ? `g:${input.actionId}`
-          : commitmentRefFor({ candidateId: input.actionId, epoch: input.leaseEpoch })),
-      optionInstanceId: option?.instanceId ?? null,
-      selectedCandidateId: input.actionId,
-      skillKind: input.kind,
-      targetIdentity: target,
-      status: input.status,
-      failure: input.failure,
-      verified: input.verified,
-      postcondition: input.verification,
-      verificationDetail: input.verification,
-      progressDelta: input.verified ? Math.max(0, input.itemsGained + (input.blockRemoved ? 1 : 0)) : 0,
-      progressed: input.progressed,
-      searchProgress: input.failure === 'drop_not_acquired' && input.entityDefeated,
-      meaningfulWorldDelta: deltas,
-      newFacts: facts,
-      optionComplete: this.goal.complete === true,
-      compressedSteps: this.compressedSkillSteps,
-    })
-    this.recentSkillOutcomes.push(packet)
-    if (this.recentSkillOutcomes.length > 3) this.recentSkillOutcomes.shift()
-    this.lastSkillOutcome = packet
-    // §6: target/capability/safety/world/lease outcomes destroy the premise of the
-    // previous decision, so policy must be re-asked. A repeated mechanical blocker
-    // is carried by the projection instead (no per-retry Jev call).
-    this.skillOutcomeBoundary = mandatoryPolicyBoundary(packet.terminalReason)
-    this.compressedSkillSteps = 0
-    this.logger.info(
-      'agent',
-      formatSkillOutcomePacket(packet),
-      {
-        actionId: input.actionId,
-        terminalReason: packet.terminalReason,
-        progress: packet.semanticProgress.kind,
-        delta: packet.meaningfulWorldDelta.length,
-        nextDecisionRequired: packet.nextDecisionRequired,
-      },
-      this.tickCounter,
-    )
-    const closed = this.decisionEpochs.close({ epoch: packet.decisionEpoch, reason: packet.terminalReason })
-    if (closed !== null) {
-      this.logger.info('policy', formatEpochEnd(closed), { actionId: input.actionId }, this.tickCounter)
-    }
-    return packet
+    return epochs.emitSkillOutcomePacket(this.epochsHost, input)
   }
 
   private onGuardReject(
@@ -6169,174 +5790,19 @@ export class JevController {
     record: DecisionRecord,
     candidate: Candidate | undefined,
   ): void {
-    attachResult(record, {
-      actionId: guarded.candidateId,
-      success: false,
-      durationMs: 0,
-      damageTaken: 0,
-      progress: this.goal.progress,
-      status: 'guard-rejected',
-      failureCode: guarded.code,
-      verified: false,
-      blockRemoved: false,
-      dropObserved: false,
-    })
-    this.decisionWriter.write(record)
-    if (guarded.code === 'CONFLICT_IN_FLIGHT') {
-      // expected: the in-flight action keeps ownership, the new mine waits
-      this.conflictDeferrals += 1
-      this.logger.info(
-        'guard',
-        `deferred ${guarded.candidateId} -> ${guarded.reason}`,
-        { code: guarded.code, decisionCallId: decision.callId, chainId: record.chainId },
-        this.tickCounter,
-      )
-      return
-    }
-    this.guardRejections += 1
-    this.logger.warn(
-      'guard',
-      `REJECTED ${guarded.candidateId} code=${guarded.code} :: ${guarded.reason}`,
-      { code: guarded.code, policy: decision.policy, callId: decision.callId, chainId: record.chainId },
-      this.tickCounter,
-    )
-    // The `guard` category is not part of the mirrored agent stream, so without
-    // this line a selected candidate that the guard drops leaves no diagnosable
-    // trace at all (see ACTION_REJECTED in policy.ts). Emit the typed cause on
-    // the mirrored path with the same candidate id, code and reason.
-    this.logger.warn(
-      'agent',
-      formatActionRejected(guarded.candidateId, guarded.code, guarded.reason),
-      {
-        actionId: guarded.candidateId,
-        code: guarded.code,
-        reason: guarded.reason,
-        policy: decision.policy,
-        callId: decision.callId,
-        chainId: record.chainId,
-      },
-      this.tickCounter,
-    )
-    this.recentEvents.push(`guard ${guarded.code} on ${guarded.candidateId}`)
-    this.noteCandidateFailure(guarded.candidateId)
-    const movementFailure = guardMoveFailureReason(candidate, guarded.code)
-    if (candidate !== undefined && movementFailure !== null) this.recordMoveFailure(candidate, movementFailure)
-    if (candidate !== undefined) this.logSmeltStationRetry(candidate)
-    this.chargeGuardRejection(record, guarded.code)
-    this.recordFailure(guarded.code, guarded.reason)
-    // §2: a deterministic guard refusal is a settled typed outcome of THIS
-    // selection, so it crosses the boundary as a packet (never as a silent drop).
-    this.emitSkillOutcomePacket({
-      actionId: guarded.candidateId,
-      kind: candidate?.kind ?? 'WAIT',
-      leaseEpoch: null,
-      status: 'guard-rejected',
-      failure: guarded.code,
-      verified: false,
-      progressed: false,
-      itemsGained: 0,
-      blockRemoved: false,
-      entityDefeated: false,
-      targetName: candidate?.targetName ?? null,
-      candidate: candidate ?? null,
-      verification: 'rejected_before_execution',
-    })
+    return epochs.onGuardReject(this.epochsHost, guarded, decision, record, candidate)
   }
 
-  /**
-   * #79: a mechanical guard rejection is a settled zero-progress outcome for the
-   * option that was just chosen. A rejected candidate never reaches
-   * `onActionComplete`, which is the only other place the unproductive counter
-   * is fed, so without this a permanently rejected option stays at `attempts=0`
-   * and its abandon request is suppressed as "speculative" forever
-   * (`abandonEnforced=false`). Charging it here lets the bounded attempt limit
-   * retire the option with `reason=unproductive`.
-   */
   private chargeGuardRejection(record: DecisionRecord, code: GuardCode): void {
-    if (!guardRejectionChargesOption(code)) return
-    const optionId = record.optionId
-    if (optionId === null || optionId.length === 0) return
-    this.optionAttempts.noteOutcome(
-      {
-        optionId,
-        planId: record.goalQueueState.current?.id ?? null,
-        verified: false,
-        progressDelta: 0,
-      },
-      Date.now(),
-    )
+    return epochs.chargeGuardRejection(this.epochsHost, record, code)
   }
 
-  /**
-   * issue #436 section 4: stamp the selection provenance onto the candidate the
-   * executor will claim. `selectedBy` is honest about which policy chose it, the
-   * epoch ties the commitment to the decision that authorized it, and the world
-   * epoch is what a later lifecycle revalidation compares against.
-   */
   private stampSelectionProvenance(candidate: Candidate, decision: JevResult, record: DecisionRecord): Candidate {
-    const optionInstanceId = record.semanticOptionInstanceId ?? record.optionId ?? null
-    return {
-      ...candidate,
-      meta: {
-        ...candidate.meta,
-        decisionEpoch: this.decisionEpochs.active?.epoch ?? 0,
-        decisionId: decision.callId,
-        selectedBy: decision.policy === 'typesafe' ? 'jev' : 'deterministic',
-        stateFingerprint: record.stateHash,
-        worldEpoch: this.options.worldEpoch,
-        ...(optionInstanceId === null ? {} : { optionInstanceId }),
-      },
-    }
+    return epochs.stampSelectionProvenance(this.epochsHost, candidate, decision, record)
   }
 
-  /**
-   * issue #436 section 14/23: the running commitment's contract can be broken by
-   * the world it was grounded in, independently of any target-claim
-   * contradiction: the dimension changed, or the host's world epoch moved.
-   *
-   * This is deterministic cancellation, never a recovery: the commitment's
-   * `CausalTargetIdentity` is meaningless in another world, so the action is
-   * CANCELLED with the typed `WORLD_CHANGED` outcome (`SKILL_INVALIDATED`, then
-   * the ordinary `SKILL_OUTCOME_PACKET`/`SKILL_END` close it). Code does not pick
-   * a replacement target; the tick continues to Jev, which owns WHICH is next.
-   */
   private cancelInvalidCommitment(state: WorldState): void {
-    const running = this.executor.current
-    const commitment = running?.commitment ?? null
-    if (running === null || commitment === null) return
-    const observedDimension = typeof state.self.dimension === 'string' ? state.self.dimension : 'unknown'
-    const reason = commitmentInvalidation({
-      commitment,
-      observedDimension,
-      observedWorldEpoch: this.options.worldEpoch,
-      // The actuation lease is the HOST's: a revoked lease already aborts this
-      // action through `ensureOwned` and settles it LEASE_REVOKED.
-      leaseHeld: true,
-    })
-    if (reason === null) return
-    this.executor.cancelCurrent(`commitment ${commitment.commitmentId} invalidated (${reason})`)
-    this.logger.warn(
-      'agent',
-      formatSkillInvalidated({
-        commitmentId: commitment.commitmentId,
-        decisionEpoch: commitment.decisionEpoch,
-        skillKind: commitment.skillKind,
-        candidateId: commitment.candidateId,
-        reason,
-        targetKey: targetIdentityKey(commitment.target),
-        observedDimension,
-        observedWorldEpoch: this.options.worldEpoch,
-        detail: 'live commitment revalidation at the tick boundary',
-      }),
-      {
-        actionId: commitment.candidateId,
-        commitmentId: commitment.commitmentId,
-        reason,
-        observedDimension,
-        observedWorldEpoch: this.options.worldEpoch,
-      },
-      this.tickCounter,
-    )
+    return epochs.cancelInvalidCommitment(this.epochsHost, state)
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
@@ -6995,18 +6461,7 @@ export class JevController {
     decisionState: WorldState,
     freshState: WorldState,
   ): MobIdentityContext {
-    const entityId = chosen?.targetEntityId ?? null
-    let previousEntityTracked: boolean | null = null
-    if (entityId !== null) {
-      const live = this.bot.entities[entityId]
-      previousEntityTracked = live !== undefined && live.isValid !== false
-    }
-    return {
-      previousEntityTracked,
-      knownEntityIds: new Set(decisionState.entities.map((entity) => entity.id)),
-      chosenAtMs: decisionState.timestampMs,
-      nowMs: freshState.timestampMs,
-    }
+    return epochs.mobIdentityContext(this.epochsHost, chosen, decisionState, freshState)
   }
 
   private logGuardRejections(): void {
@@ -7056,26 +6511,7 @@ export class JevController {
     return threat.logEnvHazardBoundary(this.threatHost, state, candidates, inFlight)
   }
   private reflexDecision(candidate: Candidate): JevResult {
-    return {
-      callId: `reflex:${randomUUID()}`,
-      policy: 'reflex',
-      source: 'reflex',
-      model: 'hard_safety_reflex',
-      latencyMs: 0,
-      usage: null,
-      answers: {
-        action: {
-          name: 'action',
-          type: 'choice',
-          value: candidate.id,
-          probability: 1,
-          confidence: 1,
-          probabilities: null,
-          legend: null,
-          note: 'uniquely-determined hard-safety reflex (issue #436 section B)',
-        },
-      },
-    }
+    return epochs.reflexDecision(this.epochsHost, candidate)
   }
 
   /**
@@ -7602,74 +7038,8 @@ export class JevController {
     return diagnostics.logKnownResourceVerdicts(this.diagnosticsHost, state)
   }
 
-  /**
-   * #436 section E (deterministic cancellation / failure):
-   *
-   *   "observed world state contradicts the claimed postcondition -> never report
-   *    success"; "selected block changed into another block -> stop + re-observe";
-   *    "selected entity despawned / identity invalidated -> stop + typed
-   *    target-gone outcome"; "No deterministic failure branch may silently choose
-   *    a different semantic objective."
-   *
-   * The RUNNING known-resource skill is grounded on the remembered cell's claim
-   * (the block is there / a producer is there / the drop is there). When the state
-   * this tick PROVED that claim false, the skill is CANCELLED with a typed
-   * outcome - it is never silently re-pointed at another cell or another item.
-   * The tick then continues to Jev, which owns WHICH action comes next.
-   *
-   * The boundaries that keep this a truth rule and not a retry policy:
-   *   - only `falsified` (a real contradiction) cancels. `unknown` (unloaded
-   *     chunk / outside the entity envelope) is not a verdict and a merely
-   *     UNREACHABLE target keeps the existing bounded `decideKnownRetrieve`
-   *     retry/retire - a side-effect-free transient failure may be retried inside
-   *     its explicit bound;
-   *   - a cancelled skill is never restarted by code: the falsified cell is
-   *     withheld from `signals.knownResources`, so only a real re-sighting can
-   *     put it back in front of Jev;
-   *   - when the side-effect state is unknown, nothing here retries blindly.
-   */
   private cancelContradictedSkillTarget(state: WorldState): void {
-    const active = this.activeRetrieval
-    if (active === null) return
-    const running = this.executor.current
-    if (running === null || running.id !== active.id) return
-    const contradiction = (state.knownResourceEvidence ?? []).find(
-      (evidence) =>
-        evidence.status === 'falsified' &&
-        evidence.position.x === active.target.x &&
-        evidence.position.y === active.target.y &&
-        evidence.position.z === active.target.z,
-    )
-    if (contradiction === undefined) return
-    const reason: 'contradicted' | 'target_gone' =
-      contradiction.reason === 'mob_gone' ? 'contradicted' : 'target_gone'
-    const failure = contradiction.reason ?? 'falsified'
-    const cancelled = this.executor.cancelCurrent(`contradicted target ${active.id} (${failure})`)
-    this.logger.warn(
-      'agent',
-      // The canonical #436 vocabulary (netherPortalPlan.ts): a Skill that ended
-      // because the world contradicted the state its postcondition was grounded
-      // on, with the typed failure code.
-      formatSkillEnd(KNOWN_RETRIEVE_SKILL, 'cancelled', 'failed', `${contradiction.claim}_present`, failure),
-      {
-        actionId: active.id,
-        item: active.resource,
-        name: active.knownName,
-        cell: active.target,
-        claim: contradiction.claim,
-        observed: contradiction.observed,
-        cancelled,
-      },
-      this.tickCounter,
-    )
-    this.logger.warn(
-      'agent',
-      formatSkillInterrupt(KNOWN_RETRIEVE_SKILL, reason),
-      { actionId: active.id, item: active.resource, cell: active.target, reason: failure },
-      this.tickCounter,
-    )
-    this.activeRetrieval = null
-    this.retrievalTrack = null
+    return epochs.cancelContradictedSkillTarget(this.epochsHost, state)
   }
 
   private abortWedge(reason: string): void {

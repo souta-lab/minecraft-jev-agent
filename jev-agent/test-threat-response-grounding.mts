@@ -1488,7 +1488,9 @@ addCase('(vii) the controller feeds the rule the TRACKED-set truth and mirrors t
   // The rule is only as good as the facts the live controller hands it, and the
   // evidence only exists if it rides the mirrored path (`buddy.log` lines are
   // `marker` + the `detail` fields - the message body is NOT mirrored).
-  const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const text =
+    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
   const call = text.indexOf('regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates, identityContext)')
   const helper = text.indexOf('private mobIdentityContext(')
   const tracked = text.indexOf('const live = this.bot.entities[entityId]', helper)

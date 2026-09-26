@@ -596,7 +596,7 @@ async function main(): Promise<void> {
   // The wiring: the controller charges the option on a mechanical rejection and
   // the generator skips a proven-unreachable sensed furnace.
   {
-    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}\n${source('./src/legacy/decision-epochs.ts')}`
     const policy = source('./src/policy.ts')
     const candidates = source('./src/candidates.ts')
     const moveFail = source('./src/moveFailMemory.ts')

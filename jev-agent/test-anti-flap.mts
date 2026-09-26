@@ -323,7 +323,7 @@ addCase('wiring: the controller reconciles protection with the abandonment ledge
 })
 
 addCase('wiring: the controller commits to one Jev-selected candidate when the choice flaps', () => {
-  const text = source('./src/controller-legacy.ts')
+  const text = source('./src/controller-legacy.ts') + source('./src/legacy/decision-epochs.ts')
   const missing = [
     'evaluateCandidateFlap({',
     'applyCandidateCommitment(',
