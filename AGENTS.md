@@ -122,10 +122,10 @@ Do not enable V4.1.2 production authority until **every** condition holds:
 
 ## 8. Reach Phase-0 / legacy deletion
 
-- Reach **Phase-0 archive validation is FAIL** (latest attempt `9ddbadd`: capture PASS, archive validation failed on missing/invalid evidence).
+- Reach **Phase-0 archive validation is FAIL**; the referenced `9ddbadd` attempt root no longer exists on disk (see `docs/history/VTR-EVIDENCE-ARCHIVE-LINEAGE.md`).
 - **Legacy Reach authority deletion is prohibited** until a fresh Phase-0 archive validates.
 - Runtime multi-leg SUCCESS evidence and archive sealing are **distinct** proofs; do not conflate them.
-- Preserve `/home/s0u7a/vtr-evidence-archive` and the `9ddbadd` attempt root.
+- `/home/s0u7a/vtr-evidence-archive` was pruned 2026-09-26 to the latest accepted lineage; the full attempt lineage is recorded in `docs/history/VTR-EVIDENCE-ARCHIVE-LINEAGE.md`. Preserve the retained `vtr-reach-authority-83f44e5-01` + `vtr-reach-legacy-baseline-83f44e5-01` attempts and future sealed attempts.
 
 ## 9. Development rules
 
