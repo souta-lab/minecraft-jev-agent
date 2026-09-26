@@ -882,12 +882,14 @@ describe('model authority recovery host policy', () => {
     expect(
       controller + readFileSync(new URL('../jev-agent/src/legacy/system2-plane.ts', import.meta.url), 'utf8'),
     ).toMatch(/provider: system2Authority\.provider,\s*model: system2Authority\.model,/)
-    const decisionStart = controller.indexOf('const result = await this.jev.decide({')
-    const authorityCheck = controller.indexOf('assertRecoveryModelAuthority(', decisionStart)
-    const recordDecision = controller.indexOf('this.lastDecision = result', decisionStart)
+    const decisionEpochs = readFileSync(new URL('../jev-agent/src/legacy/decision-epochs.ts', import.meta.url), 'utf8')
+    const decisionSource = controller + decisionEpochs
+    const decisionStart = decisionSource.indexOf('const result = await host.jev.decide({')
+    const authorityCheck = decisionSource.indexOf('assertRecoveryModelAuthority(', decisionStart)
+    const recordDecision = decisionSource.indexOf('host.lastDecision = result', decisionStart)
     expect(authorityCheck).toBeGreaterThan(decisionStart)
     expect(authorityCheck).toBeLessThan(recordDecision)
-    expect(controller.slice(authorityCheck, recordDecision)).toContain('result.source')
+    expect(decisionSource.slice(authorityCheck, recordDecision)).toContain('result.source')
   })
 
   test('host quiesce drains the controller before revoking an incumbent lease', () => {

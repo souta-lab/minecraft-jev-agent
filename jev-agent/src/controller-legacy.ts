@@ -239,6 +239,7 @@ export { canAuthoritativelyAbandonOption } from './legacy/abandon-lifecycle.ts'
 export { betaAbandonProgressObserved } from './legacy/abandon-lifecycle.ts'
 export { filterFurnacePrerequisiteCandidates } from './legacy/abandon-lifecycle.ts'
 export { questionSetForTrigger } from './legacy/decision-epochs.ts'
+export { resolveBootstrapPlanOp } from './legacy/system2-plane.ts'
 import type { StallObserverHost } from './legacy/stall-observers.ts'
 import * as wedge from './legacy/wedge.ts'
 import type { WedgeHost } from './legacy/wedge.ts'
@@ -869,36 +870,6 @@ export const MAX_BLOCK_REACH = 5
  * stall track, so they must not clear this memory.
  */
 
-/**
- * The queue op the single-shot bootstrap plan is actually applied with.
- *
- * buddy-driver restores the durable host ledger into the controller queue
- * BEFORE `controller.start()` (`generation-entry.ts` -> `restoreLedgerIntoController`)
- * and resident mode passes `ledgerPath: null`, so the controller's own
- * post-plan `loadLedger()` cannot re-read it. When a plan with `op=replace`
- * arrived a non-empty queue was wiped anyway: live run-mu8kgmjm-ujwg restored
- * `current=smelt 3 x iron_ingot` and 74 ms later logged `QUEUE_DEPTH op=replace
- * reason=bootstrap`; the ladder's `craft 1 x iron_pickaxe` took the head and no
- * SMELT/FURNACE marker was ever emitted. A restored, not-yet-done goal is work
- * the bot already committed to, so bootstrap merges the ladder BEHIND it
- * (`continue`) instead of replacing it. Not smelt-specific: any restored head is
- * preserved. An empty queue (fresh bootstrap) keeps the requested op unchanged,
- * and an explicit `abort` is never overridden.
- */
-/**
- * Pure decision behind the orphaned-smelt prerequisite retirement. A
- * `smelt:iron_ingot` row exists only to feed a craft that consumes the ingot, so
- * it is obsolete once that craft's product is held (`held`) and nothing live
- * wants an iron ingot (`stillWanted`). Returns the audit reason, or null to keep
- * the normal #55 protection. Exported so the decision is fixture-testable
- * without a bot.
- */
-
-export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | undefined): PlanOp {
-  const op = requested ?? 'replace'
-  if (op === 'replace' && queue.current !== null) return 'continue'
-  return op
-}
 
 /** Drop resources the controller has proven unreachable for the current plan. */
 
@@ -2850,156 +2821,7 @@ export class JevController {
   }
 
   private async bootstrapPlan(): Promise<void> {
-    const before = this.queue.state
-    const requestId = randomUUID()
-    const semanticStateFingerprint = this.semanticStateFingerprint()
-    const successSnapshotBefore = this.semanticOptionSnapshot()
-    const requestContext: System2RequestContext = {
-      requestId,
-      queueRevision: this.queue.revision,
-      optionInstanceId: before.current?.semanticOptionInstanceId ?? before.current?.optionInstanceId ?? null,
-      optionTemplateId: before.current?.semanticOptionTemplateId ?? before.current?.optionTemplateId ?? null,
-      worldEpoch: this.options.worldEpoch,
-      stateFingerprint: this.lastStateFingerprint || 'unobserved',
-      semanticStateFingerprint,
-      ...this.system2ApplyIdentity(this.lastWorldState),
-      // Physical/search progress advances the general progress epoch, but does
-      // not by itself stale a long-horizon WHAT answer. Human intent and queue
-      // edits have their own fences; safety-critical triggers still advance this
-      // epoch and the sampled threat fingerprint below.
-      authorityEpoch: this.criticalStateVersion,
-    }
-    const request: System2PlanRequest = {
-      reason: 'queue_empty',
-      detail: 'single-shot bootstrap: supply the long-horizon plan once',
-      tick: this.tickCounter,
-      goalQueueState: before,
-      objective: this.objectiveState(),
-      recentEvents: [],
-      recentOutcomes: [],
-      recentSemanticOutcomes: this.recentSemanticOutcomes.slice(-SYSTEM2_SEMANTIC_HISTORY_LIMIT),
-      requestContext,
-    }
-    const plan = await this.system2.plan(request)
-    this.planCalls += 1
-    const depthBefore = this.queue.state.depth
-    const queueRevisionBeforeApply = this.queue.revision
-    const currentBeforeApply = this.queue.state.current
-    const restoredHead = this.queue.current !== null
-    const requestedOp = plan.op ?? 'replace'
-    const op = resolveBootstrapPlanOp(this.queue, plan.op)
-    let operationRejected = false
-    const added = this.queue.applyPlan(plan.goals, 'llm', op, {
-      reason: plan.note,
-      onProtection: (line) => {
-        // A protected empty plan is refused through this callback rather than
-        // `onOperationRejected`; retain that decision in the run-scoped marker.
-        if (line.startsWith('PROTECTED_GOAL_DROPPED_REJECTED ')) operationRejected = true
-        this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter)
-      },
-      onDuplicate: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
-      protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
-      onOperationRejected: (line) => {
-        operationRejected = true
-        this.logger.warn('system2', line, { requestId, op }, this.tickCounter)
-      },
-    })
-    const acceptedGoals = acceptedSystem2PlanGoals({
-      operation: op,
-      added,
-      currentBefore: currentBeforeApply,
-      currentAfter: this.queue.state.current,
-      applied: this.queue.revision > queueRevisionBeforeApply,
-    })
-    this.logQueueDepthDelta(depthBefore, op, `bootstrap`)
-    this.rememberSystem2PlanOutcome({
-      proposalId: requestId,
-      operation: op,
-      intentSource: plan.provenance?.intentSource ?? 'none',
-      intent: plan.provenance?.intent ?? plan.note,
-      requestedGoalsTotal: plan.goals.length,
-      acceptedGoals,
-      optionInstanceBefore: requestContext.optionInstanceId,
-      queueDoneBefore: before.done,
-      stateFingerprintBefore: semanticStateFingerprint,
-      blockersBefore: null,
-      successSnapshot: successSnapshotBefore,
-    })
-    const accepted = !operationRejected
-    const provenance = plan.provenance ?? null
-    const compiledRows = added.map((goal) => ({
-      id: goal.id,
-      kind: goal.kind,
-      targetItem: goal.targetItem ?? null,
-      targetY: goal.targetY ?? null,
-      dimension: goal.dimension ?? null,
-      description: goal.description,
-    }))
-    const system2Authority = this.system2AuthorityStack
-    this.logger.warn(
-      'system2',
-      formatSystem2PlanApplied({
-        requestId,
-        op,
-        accepted,
-        applied: added.length,
-        depth: this.queue.state.depth,
-        intentSource: provenance?.intentSource ?? 'unrecorded',
-        uncompiled: provenance?.uncompiled?.length ?? 0,
-        intent: provenance?.intent ?? plan.note,
-        rows: compiledRows,
-      }),
-      {
-        requestId,
-        provider: system2Authority.provider,
-        model: system2Authority.model,
-        op,
-        requestedOp,
-        accepted,
-        applied: added.length,
-        compiled: compiledRows,
-        uncompiled: provenance?.uncompiled ?? [],
-        intentSource: provenance?.intentSource ?? 'unrecorded',
-        intent: provenance?.intent ?? null,
-        note: plan.note,
-      },
-      this.tickCounter,
-    )
-    this.subgoalCount = Math.max(added.length, this.queue.size)
-    if (restoredHead && op !== requestedOp) {
-      this.logger.warn(
-        'system2',
-        `BOOTSTRAP_HEAD_PRESERVED current=${this.queue.current?.description ?? 'none'} op=${op} requested=${requestedOp} depth=${this.queue.state.depth}`,
-        { op, requested: requestedOp, depth: this.queue.state.depth, current: this.queue.current?.description ?? null },
-        0,
-      )
-    }
-    this.planSupplied = true
-    const restored = this.loadLedger()
-    if (restored !== null) {
-      this.queue.restore(restored)
-      this.subgoalCount = Math.max(this.subgoalCount, restored.goals.length)
-      this.logger.warn(
-        'system2',
-        `phase ledger restored: ${restored.goals.filter((goal) => goal.status === 'done').length} subgoal(s) already done; current=${this.queue.current?.description ?? 'none'}`,
-        { done: restored.goals.filter((goal) => goal.status === 'done').length, total: restored.goals.length },
-        0,
-      )
-    }
-    const current = this.queue.current
-    this.logger.warn(
-      'system2',
-      `bootstrap plan applied provider=${this.system2Provider} model=${this.system2Model} call=1 goals=${added.length} depth=${this.queue.state.depth} :: ${plan.note}`,
-      {
-        provider: this.system2Provider,
-        model: this.system2Model,
-        planCalls: this.planCalls,
-        goals: added.map((goal) => goal.description),
-        note: plan.note,
-      },
-      0,
-    )
-    if (current !== null) this.logSubgoalStart(current, this.inventorySnapshot(), 'bootstrap')
+    return system2plane.bootstrapPlan(this.system2Host)
   }
 
   stop(): void {
