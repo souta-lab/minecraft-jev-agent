@@ -206,13 +206,14 @@ addCase('the exhausted WAIT fingerprint changes the replan hash and changed-inpu
 
 addCase('wiring: the controller bounds the actionable WAIT streak and mirrors the markers', () => {
   const text = source('./src/controller-legacy.ts')
+  const queuePlaneText = source('./src/legacy/goal-queue-plane.ts')
   const missing = [
     'new WaitStreakEscalation(',
     'noteWaitStreak(',
     'this.waitSuppressed = true',
     'formatWaitExhausted(decision)',
     'waitStreakExhausted: this.waitStreakEscalation.pendingKey()',
-  ].filter((needle) => !text.includes(needle))
+  ].filter((needle) => !text.includes(needle) && !queuePlaneText.includes(needle.replace('this.', 'host.')))
   const mirrored = MIRRORED_MARKERS.has(WAIT_STREAK_MARKER) && MIRRORED_MARKERS.has(WAIT_EXHAUSTED_MARKER)
   return {
     pass: missing.length === 0 && mirrored,

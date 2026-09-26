@@ -685,10 +685,11 @@ const retiredMarkers = (markers: readonly string[]): string[] =>
     `retire=${mirroredEventToken(marker)} error=${mirroredEventToken(`${GOAL_SUCCESS_PROBE_ERROR} id=g1 message="x" action=not_retired`)}`,
   )
   const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const planeSource = readFileSync(new URL('./src/legacy/goal-queue-plane.ts', import.meta.url), 'utf8')
   const installs = source.match(/this\.installGoalSuccessProbe\(\)/g)?.length ?? 0
   check(
     '(vii-b) the controller wires the probe at both queue-construction sites (constructor + setOptions)',
-    installs >= 2 && source.includes('evaluateGoalSuccess(goal, this.goalWorldProbe())'),
+    installs >= 2 && planeSource.includes('evaluateGoalSuccess(goal, host.goalWorldProbe())'),
     `installs=${installs}`,
   )
 }
