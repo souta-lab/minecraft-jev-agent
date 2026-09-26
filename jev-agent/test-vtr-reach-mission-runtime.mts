@@ -1,14 +1,14 @@
 import { expect, test } from 'bun:test'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import type { ReachMissionRuntimeFrame } from './src/vtr/reach-mission-runtime.ts'
-import type { InventoryReachMission } from './src/vtr/reach-scheduler.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
+import type { ReachMissionRuntimeFrame } from './src/reach/mission-runtime.ts'
+import type { InventoryReachMission } from './src/reach/scheduler.ts'
 import {
   nearestGroundedReachRoutePolicy,
   type ReachRouteDecisionPolicy,
   type ReachRoute,
   type ReachRuntimeSnapshot,
-} from './src/vtr/reach-controller.ts'
-import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
+} from './src/reach/controller.ts'
+import type { ReachIdentity, ReachTransitionContract } from './src/reach/transition.ts'
 import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 

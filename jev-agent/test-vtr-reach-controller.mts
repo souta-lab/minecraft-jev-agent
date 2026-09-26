@@ -8,13 +8,13 @@ import {
   type ReachRouteDecision,
   type ReachRoute,
   type ReachRuntimeSnapshot,
-} from './src/vtr/reach-controller.ts'
+} from './src/reach/controller.ts'
 import {
   createReachTransitionContract,
   type ReachIdentity,
   type ReachObservation,
   type ReachTransitionContract,
-} from './src/vtr/reach.ts'
+} from './src/reach/transition.ts'
 
 const identity: ReachIdentity = {
   worldKey: 'probe-world-1',
@@ -558,7 +558,7 @@ describe('raw-client-free VTR Reach controller', () => {
   })
 
   it('keeps the controller core free of backend and legacy runtime types', async () => {
-    const source = await readFile(new URL('./src/vtr/reach-controller.ts', import.meta.url), 'utf8')
+    const source = await readFile(new URL('./src/reach/controller.ts', import.meta.url), 'utf8')
     assert.doesNotMatch(source, /from\s+['"](?:mineflayer|mineflayer-[^'"]*|vec3)['"]/, 'no backend imports')
     const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')
     assert.doesNotMatch(code, /\b(?:Bot|WorldState|Candidate|Executor)\b/, 'no raw or legacy runtime types')

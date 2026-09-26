@@ -20,8 +20,8 @@ import {
 } from './resident-safety.ts'
 import { mapMutationSurface } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
 import type { ShadowMutationContext } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
-import { createInventoryReachTransition } from '../jev-agent/src/vtr/reach-scheduler.ts'
-import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/vtr/reach.ts'
+import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
+import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
 
 interface Case {
   name: string

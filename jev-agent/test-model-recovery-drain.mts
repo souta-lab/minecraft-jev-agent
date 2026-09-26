@@ -7,16 +7,16 @@ import {
   nearestGroundedReachRoutePolicy,
   type ReachRoute,
   type ReachRuntimeSnapshot,
-} from './src/vtr/reach-controller.ts'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+} from './src/reach/controller.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
 import {
   type ReachIdentity,
   type ReachObservation,
   type ReachTerminalOutcome,
   type ReachTransitionContract,
   type ReachTransitionState,
-} from './src/vtr/reach.ts'
-import { createInventoryReachTransition } from './src/vtr/reach-scheduler.ts'
+} from './src/reach/transition.ts'
+import { createInventoryReachTransition } from './src/reach/scheduler.ts'
 import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 

@@ -61,7 +61,7 @@ import {
   formatRoutePlaceDeclared,
 } from './routePlaceDeclaration.ts'
 import type { BodySubmersion } from './state.ts'
-import type { ReachMechanicalWaypoint } from './vtr/reach-mechanical-waypoint.ts'
+import type { ReachMechanicalWaypoint } from './reach/mechanical-waypoint.ts'
 import {
   armorFallMitigation,
   classifyStepLanding,

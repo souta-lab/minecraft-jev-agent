@@ -11,9 +11,9 @@ import {
   minecraftMissionSourceNames,
   projectMinecraftReachRoutes,
   reachMoveFitsLocomotionContract,
-} from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
-import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
+} from './src/minecraft/reach-mission-projection.ts'
+import { nearestGroundedReachRoutePolicy } from './src/reach/controller.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 

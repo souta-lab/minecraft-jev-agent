@@ -1,6 +1,6 @@
-import type { JevReachRouteDecisionRecord } from './src/jev-reach-vtr-composition.ts'
+import type { JevReachRouteDecisionRecord } from './src/reach/jev-composition.ts'
 import type { WorldState } from './src/state.ts'
-import type { ReachActuationRequest, ReachRuntimeActionSnapshot, ReachRuntimePorts } from './src/vtr/reach-runtime-ports.ts'
+import type { ReachActuationRequest, ReachRuntimeActionSnapshot, ReachRuntimePorts } from './src/reach/ports.ts'
 
 /** Shared host cells for tests that construct JevController adapters via Object.create. */
 export function createVtrReachTestCells(input: {

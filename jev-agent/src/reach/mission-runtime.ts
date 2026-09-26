@@ -6,21 +6,21 @@ import {
   type ReachRouteDecisionPolicy,
   type ReachRuntimeSnapshot,
   type ReachStepAuthorization,
-} from './reach-controller.ts'
+} from './controller.ts'
 import {
   createInventoryReachTransition,
   type InventoryReachTransitionInput,
   type InventoryReachTransitionPlan,
-} from './reach-scheduler.ts'
+} from './scheduler.ts'
 import type {
   ReachIdentity,
   ReachMechanicalStepRequest,
   ReachTerminalOutcome,
   ReachTransitionContract,
   ReachTransitionState,
-} from './reach.ts'
-import type { ReachRuntimeActionSnapshot } from './reach-runtime-ports.ts'
-import type { KernelReachAuthority } from './kernel-shadow-map.ts'
+} from './transition.ts'
+import type { ReachRuntimeActionSnapshot } from './ports.ts'
+import type { KernelReachAuthority } from '../vtr/kernel-shadow-map.ts'
 
 export interface ReachMissionRuntimeSession {
   readonly mission: InventoryReachTransitionInput['mission']

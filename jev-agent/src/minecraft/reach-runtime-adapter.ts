@@ -10,13 +10,13 @@ import { createPositionFactCache } from '../positionFactCache.ts'
 import type { StateFingerprintMemory } from '../moveFailMemory.ts'
 import { buildWorldState } from '../state.ts'
 import type { SensorInput, SensorOptions, Vec3Json, WorldState } from '../state.ts'
-import { selectReachMechanicalWaypoint } from '../vtr/reach-mechanical-waypoint.ts'
+import { selectReachMechanicalWaypoint } from '../reach/mechanical-waypoint.ts'
 import type {
   ReachActuationRequest,
   ReachActuationResult,
   ReachRuntimeActionSnapshot,
   ReachRuntimePorts,
-} from '../vtr/reach-runtime-ports.ts'
+} from '../reach/ports.ts'
 
 const { goals } = pathfinderModule
 

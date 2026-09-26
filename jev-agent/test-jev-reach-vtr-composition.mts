@@ -5,11 +5,11 @@ import {
   buildJevReachIdentity,
   createJevReachVtrComposition,
   type JevReachVtrCompositionContext,
-} from './src/jev-reach-vtr-composition.ts'
+} from './src/reach/jev-composition.ts'
 import type { WorldState } from './src/state.ts'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import { createReachTransitionContract, type ReachIdentity, type ReachTransitionContract } from './src/vtr/reach.ts'
-import type { ReachRoute, ReachRouteDecisionInput, ReachRuntimeSnapshot } from './src/vtr/reach-controller.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
+import { createReachTransitionContract, type ReachIdentity, type ReachTransitionContract } from './src/reach/transition.ts'
+import type { ReachRoute, ReachRouteDecisionInput, ReachRuntimeSnapshot } from './src/reach/controller.ts'
 import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 const identity: ReachIdentity = {

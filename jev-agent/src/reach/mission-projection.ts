@@ -1,7 +1,7 @@
-import type { InventoryReachMission } from './reach-scheduler.ts'
-import type { ReachRuntimeSnapshot, ReachRoute } from './reach-controller.ts'
-import { countMissionInventoryResource, missionResourceSourceMatches } from './reach.ts'
-import type { ReachIdentity } from './reach.ts'
+import type { InventoryReachMission } from './scheduler.ts'
+import type { ReachRuntimeSnapshot, ReachRoute } from './controller.ts'
+import { countMissionInventoryResource, missionResourceSourceMatches } from './transition.ts'
+import type { ReachIdentity } from './transition.ts'
 
 /** Backend-independent coordinates used at the Reach projection boundary. */
 export interface ReachMissionPosition {

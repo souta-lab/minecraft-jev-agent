@@ -4,21 +4,21 @@ import { describe, it } from 'bun:test'
 import type { Bot } from 'mineflayer'
 import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
 import { jevAgent } from './src/index.ts'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import type { ReachMissionRuntimeDependencies } from './src/vtr/reach-mission-runtime.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
+import type { ReachMissionRuntimeDependencies } from './src/reach/mission-runtime.ts'
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
-const reachPlane = readFileSync(new URL('./src/vtr/reach-controller-plane.ts', import.meta.url), 'utf8')
+const reachPlane = readFileSync(new URL('./src/reach/controller-plane.ts', import.meta.url), 'utf8')
 const stallObservers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
 const indexSource = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8')
-const runtimeAdapter = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-runtime-adapter.ts', import.meta.url), 'utf8')
-const minecraftReachProjection = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-mission-projection.ts', import.meta.url), 'utf8')
-const runtimePortsSource = readFileSync(new URL('./src/vtr/reach-runtime-ports.ts', import.meta.url), 'utf8')
-const reachController = readFileSync(new URL('./src/vtr/reach-controller.ts', import.meta.url), 'utf8')
-const reachMissionRuntime = readFileSync(new URL('./src/vtr/reach-mission-runtime.ts', import.meta.url), 'utf8')
-const reachMissionProjection = readFileSync(new URL('./src/vtr/reach-mission-projection.ts', import.meta.url), 'utf8')
-const jevRoutePolicy = readFileSync(new URL('./src/jev-reach-route-policy.ts', import.meta.url), 'utf8')
-const jevComposition = readFileSync(new URL('./src/jev-reach-vtr-composition.ts', import.meta.url), 'utf8')
+const runtimeAdapter = readFileSync(new URL('./src/minecraft/reach-runtime-adapter.ts', import.meta.url), 'utf8')
+const minecraftReachProjection = readFileSync(new URL('./src/minecraft/reach-mission-projection.ts', import.meta.url), 'utf8')
+const runtimePortsSource = readFileSync(new URL('./src/reach/ports.ts', import.meta.url), 'utf8')
+const reachController = readFileSync(new URL('./src/reach/controller.ts', import.meta.url), 'utf8')
+const reachMissionRuntime = readFileSync(new URL('./src/reach/mission-runtime.ts', import.meta.url), 'utf8')
+const reachMissionProjection = readFileSync(new URL('./src/reach/mission-projection.ts', import.meta.url), 'utf8')
+const jevRoutePolicy = readFileSync(new URL('./src/reach/route-policy.ts', import.meta.url), 'utf8')
+const jevComposition = readFileSync(new URL('./src/reach/jev-composition.ts', import.meta.url), 'utf8')
 const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
 const generationEntry = readFileSync(new URL('../buddy-driver/generation-entry.ts', import.meta.url), 'utf8')
 
@@ -123,13 +123,16 @@ describe('VTR Reach production authority seam', () => {
   })
 
   it('keeps raw-client reads out of VTR core and behind the allowlisted typed runtime adapter', () => {
-    const vtrFiles = readdirSync(new URL('./src/vtr/', import.meta.url), { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
-    for (const entry of vtrFiles) {
-      const source = readFileSync(new URL(`./src/vtr/${entry.name}`, import.meta.url), 'utf8')
-      assert.doesNotMatch(source, /from ['"]mineflayer['"]|\bBot\b|this\.bot/, `${entry.name} is VTR core and must stay backend independent`)
+    const backendFreeDirs = ['./src/vtr/', './src/reach/']
+    for (const dir of backendFreeDirs) {
+      const vtrFiles = readdirSync(new URL(dir, import.meta.url), { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+      for (const entry of vtrFiles) {
+        const source = readFileSync(new URL(`${dir}${entry.name}`, import.meta.url), 'utf8')
+        assert.doesNotMatch(source, /from ['"]mineflayer['"]|\bBot\b|this\.bot/, `${entry.name} is VTR core and must stay backend independent`)
+      }
     }
-    assert.match(controller, /from ['"]\.\/runtime-adapters\/minecraft-reach-runtime-adapter\.ts['"]/)
+    assert.match(controller, /from ['"]\.\/minecraft\/reach-runtime-adapter\.ts['"]/)
     assert.match(runtimeAdapter, /import type \{ Bot \} from ['"]mineflayer['"]/, 'the dedicated Mineflayer adapter is the explicit Bot allowlist boundary')
     assert.match(runtimeAdapter, /return buildWorldState\(this\.bot, input, options\)/)
     assert.match(runtimeAdapter, /this\.bot\.pathfinder/)

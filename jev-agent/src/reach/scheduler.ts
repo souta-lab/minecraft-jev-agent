@@ -1,5 +1,5 @@
-import { createReachTransitionContract } from './reach.ts'
-import type { ReachIdentity, ReachPredicate, ReachTransitionContract } from './reach.ts'
+import { createReachTransitionContract } from './transition.ts'
+import type { ReachIdentity, ReachPredicate, ReachTransitionContract } from './transition.ts'
 
 /** Structural Mission input accepted by the VTR scheduler; benchmark ladders are intentionally absent. */
 export interface InventoryReachMission {

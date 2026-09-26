@@ -15,8 +15,8 @@ import { MODEL_RECOVERY_DRAIN_GRACE_MS } from '../controller-shared.ts'
 import type { DecisionScheduler } from '../scheduler.ts'
 import type { TriggerEvent } from '../scheduler.ts'
 import type { System2Brain } from '../system2.ts'
-import type { ReachTerminalOutcome, ReachTransitionState } from '../vtr/reach.ts'
-import type { ActiveReachTransition } from '../vtr/reach-controller-plane.ts'
+import type { ReachTerminalOutcome, ReachTransitionState } from '../reach/transition.ts'
+import type { ActiveReachTransition } from '../reach/controller-plane.ts'
 import type { RunSummary } from '../controller-legacy.ts'
 
 export interface ModelRecoveryHost {

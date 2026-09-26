@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
-import { createInventoryReachTransition } from './src/vtr/reach-scheduler.ts'
-import type { ReachIdentity } from './src/vtr/reach.ts'
+import { createInventoryReachTransition } from './src/reach/scheduler.ts'
+import type { ReachIdentity } from './src/reach/transition.ts'
 
 const identity: ReachIdentity = {
   worldKey: 'world-a|minecraft:overworld|9',
@@ -44,7 +44,7 @@ test('generic inventory Mission derives one bounded Reach contract from typed so
 })
 
 test('the Mission-to-Reach derivation is independent of benchmark rung order and M3 names', async () => {
-  const source = await Bun.file(new URL('./src/vtr/reach-scheduler.ts', import.meta.url)).text()
+  const source = await Bun.file(new URL('./src/reach/scheduler.ts', import.meta.url)).text()
   assert.doesNotMatch(source, /RUNGS|frontierRung|M2|M3|nether|ender_eye|blaze/)
   const left = createInventoryReachTransition({
     mission: { id: 'mission-one', kind: 'inventory_at_least', item: 'copper_ingot', count: 4 },

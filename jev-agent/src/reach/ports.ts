@@ -5,7 +5,7 @@ import type { Candidate, ReachabilityGateOptions } from '../candidates.ts'
 import type { GuardResult } from '../policy.ts'
 import type { SkillCommitment } from '../skillCommitment.ts'
 import type { SensorInput, SensorOptions, WorldState } from '../state.ts'
-import type { ReachMechanicalIntent } from './reach-controller.ts'
+import type { ReachMechanicalIntent } from './controller.ts'
 
 export interface ReachRuntimeActionSnapshot {
   readonly id: string

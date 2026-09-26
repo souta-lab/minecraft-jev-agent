@@ -17,14 +17,14 @@ import {
   ReachController,
   type ReachRoute,
   type ReachRuntimeSnapshot,
-} from './src/vtr/reach-controller.ts'
+} from './src/reach/controller.ts'
 import {
   createReachTransitionContract,
   type ReachIdentity,
   type ReachTerminalOutcome,
   type ReachTransitionState,
   type ReachTransitionContract,
-} from './src/vtr/reach.ts'
+} from './src/reach/transition.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')

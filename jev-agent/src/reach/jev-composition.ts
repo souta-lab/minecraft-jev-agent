@@ -1,15 +1,15 @@
-import type { JevPolicy, JevResult } from './jev-legacy.ts'
-import { JevReachRouteDecisionPolicy } from './jev-reach-route-policy.ts'
-import type { WorldState } from './state.ts'
-import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
+import type { JevPolicy, JevResult } from '../jev-legacy.ts'
+import { JevReachRouteDecisionPolicy } from './route-policy.ts'
+import type { WorldState } from '../state.ts'
+import { ReachMissionRuntime } from './mission-runtime.ts'
 import type {
   ReachCommitFreshnessFence,
   ReachCommitFreshnessInput,
   ReachCommitFreshnessResult,
   ReachRouteDecisionInput,
-} from './vtr/reach-controller.ts'
-import type { ReachIdentity } from './vtr/reach.ts'
-import type { KernelReachAuthority } from './vtr/kernel-shadow-map.ts'
+} from './controller.ts'
+import type { ReachIdentity } from './transition.ts'
+import type { KernelReachAuthority } from '../vtr/kernel-shadow-map.ts'
 
 export interface JevReachMutableCell<T> {
   value: T

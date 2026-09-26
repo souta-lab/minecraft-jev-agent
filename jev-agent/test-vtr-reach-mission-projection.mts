@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
-import { projectReachMissionSnapshot } from './src/vtr/reach-mission-projection.ts'
-import type { ReachMissionSnapshotInput } from './src/vtr/reach-mission-projection.ts'
-import type { ReachIdentity } from './src/vtr/reach.ts'
-import type { InventoryReachMission } from './src/vtr/reach-scheduler.ts'
+import { projectReachMissionSnapshot } from './src/reach/mission-projection.ts'
+import type { ReachMissionSnapshotInput } from './src/reach/mission-projection.ts'
+import type { ReachIdentity } from './src/reach/transition.ts'
+import type { InventoryReachMission } from './src/reach/scheduler.ts'
 
 const identity: ReachIdentity = {
   worldKey: 'projection-world',

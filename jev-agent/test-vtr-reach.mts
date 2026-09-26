@@ -22,7 +22,7 @@ import {
   type ReachPredicate,
   type ReachTransitionContract,
   type ReachTransitionState,
-} from './src/vtr/reach.ts'
+} from './src/reach/transition.ts'
 
 const identity: ReachIdentity = {
   worldKey: 'world:seed-7',

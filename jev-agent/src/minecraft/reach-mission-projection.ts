@@ -11,14 +11,14 @@ import {
 import { envelopeForCandidate } from '../skillCommitment.ts'
 import { scannedBlockNames } from '../state.ts'
 import type { WorldState } from '../state.ts'
-import { projectReachMissionSnapshot } from '../vtr/reach-mission-projection.ts'
-import type { ReachMissionRouteFact, ReachMissionSnapshotOptions } from '../vtr/reach-mission-projection.ts'
-import type { ReachRuntimeSnapshot } from '../vtr/reach-controller.ts'
-import type { ReachRuntimeActionSnapshot } from '../vtr/reach-runtime-ports.ts'
-import type { ReachIdentity, ReachTransitionContract } from '../vtr/reach.ts'
-import { countMissionInventoryResource } from '../vtr/reach.ts'
-import type { InventoryReachMission } from '../vtr/reach-scheduler.ts'
-import { missionResourceSourceMatches } from '../vtr/reach.ts'
+import { projectReachMissionSnapshot } from '../reach/mission-projection.ts'
+import type { ReachMissionRouteFact, ReachMissionSnapshotOptions } from '../reach/mission-projection.ts'
+import type { ReachRuntimeSnapshot } from '../reach/controller.ts'
+import type { ReachRuntimeActionSnapshot } from '../reach/ports.ts'
+import type { ReachIdentity, ReachTransitionContract } from '../reach/transition.ts'
+import { countMissionInventoryResource } from '../reach/transition.ts'
+import type { InventoryReachMission } from '../reach/scheduler.ts'
+import { missionResourceSourceMatches } from '../reach/transition.ts'
 
 /**
  * Mineflayer-era observation/candidate adapter for the production Reach slice.

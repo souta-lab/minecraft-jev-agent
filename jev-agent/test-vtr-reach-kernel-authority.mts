@@ -5,14 +5,14 @@
 // the kernel refused. The gate is a recording stub here; the real kernel-side
 // semantics are proven in buddy-driver/test-kernel-authority.mts.
 import { expect, test } from 'bun:test'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import type { InventoryReachMission } from './src/vtr/reach-scheduler.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
+import type { InventoryReachMission } from './src/reach/scheduler.ts'
 import {
   nearestGroundedReachRoutePolicy,
   type ReachRoute,
   type ReachRuntimeSnapshot,
-} from './src/vtr/reach-controller.ts'
-import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
+} from './src/reach/controller.ts'
+import type { ReachIdentity, ReachTransitionContract } from './src/reach/transition.ts'
 import type { KernelReachAuthority } from './src/vtr/kernel-shadow-map.ts'
 import { RecordingKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 

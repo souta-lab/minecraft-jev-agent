@@ -20,7 +20,7 @@ import type {
   WorldIdentity,
 } from '../../../architecture/v4.1/kernel.ts'
 import { resourceId, resourceKey } from '../../../architecture/v4.1/kernel.ts'
-import type { ReachTransitionContract, ReachWitness } from './reach.ts'
+import type { ReachTransitionContract, ReachWitness } from '../reach/transition.ts'
 
 /** Canonical resource requirement on one mapped mutation surface. */
 export interface ShadowResourceRequirement {

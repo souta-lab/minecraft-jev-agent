@@ -69,7 +69,7 @@ import {
 } from './src/walkSkill.ts'
 import type { WalkStop } from './src/walkSkill.ts'
 import type { Vec3Json } from './src/state.ts'
-import { selectReachMechanicalWaypoint } from './src/vtr/reach-mechanical-waypoint.ts'
+import { selectReachMechanicalWaypoint } from './src/reach/mechanical-waypoint.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')

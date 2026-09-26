@@ -170,23 +170,23 @@ import {
   filterLegacyReachCandidates,
   minecraftMissionSourceNames,
   projectMinecraftReachMission,
-} from './runtime-adapters/minecraft-reach-mission-projection.ts'
-import type { InventoryReachMission } from './vtr/reach-scheduler.ts'
-import { ReachMissionRuntime } from './vtr/reach-mission-runtime.ts'
-import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './vtr/reach-controller.ts'
-import type { ReachMissionRuntimeSession } from './vtr/reach-mission-runtime.ts'
+} from './minecraft/reach-mission-projection.ts'
+import type { InventoryReachMission } from './reach/scheduler.ts'
+import { ReachMissionRuntime } from './reach/mission-runtime.ts'
+import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './reach/controller.ts'
+import type { ReachMissionRuntimeSession } from './reach/mission-runtime.ts'
 import type { KernelReachAuthority, ShadowMutationContext } from './vtr/kernel-shadow-map.ts'
-import { MineflayerReachRuntimeAdapter } from './runtime-adapters/minecraft-reach-runtime-adapter.ts'
-import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './vtr/reach-runtime-ports.ts'
-import { createJevReachVtrComposition } from './jev-reach-vtr-composition.ts'
-import type { JevReachRouteDecisionRecord } from './jev-reach-vtr-composition.ts'
+import { MineflayerReachRuntimeAdapter } from './minecraft/reach-runtime-adapter.ts'
+import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './reach/ports.ts'
+import { createJevReachVtrComposition } from './reach/jev-composition.ts'
+import type { JevReachRouteDecisionRecord } from './reach/jev-composition.ts'
 import type {
   ReachIdentity,
   ReachTerminalOutcome,
   ReachTransitionContract,
   ReachTransitionState,
-} from './vtr/reach.ts'
-import type { ReachMissionSnapshotOptions } from './vtr/reach-mission-projection.ts'
+} from './reach/transition.ts'
+import type { ReachMissionSnapshotOptions } from './reach/mission-projection.ts'
 import { sensorOptions, candidateOptions, currentFocusItem, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
 import * as escalationplane from './legacy/escalation.ts'
 import type { EscalationHost } from './legacy/escalation.ts'
@@ -309,8 +309,8 @@ export {
   nextKnownResourceVerdict,
 } from './legacy/candidate-diagnostics.ts'
 export type { KnownResourceVerdict, KnownResourceVerdictLatch } from './legacy/candidate-diagnostics.ts'
-import * as reach from './vtr/reach-controller-plane.ts'
-import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './vtr/reach-controller-plane.ts'
+import * as reach from './reach/controller-plane.ts'
+import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './reach/controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'

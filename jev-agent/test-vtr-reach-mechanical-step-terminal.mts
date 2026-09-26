@@ -7,7 +7,7 @@ import { JevController } from './src/controller-legacy.ts'
 import type { Candidate } from './src/candidates.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
-import type { ReachIdentity, ReachTerminalOutcome } from './src/vtr/reach.ts'
+import type { ReachIdentity, ReachTerminalOutcome } from './src/reach/transition.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 
 const require = createRequire(import.meta.url)

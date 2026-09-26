@@ -8,9 +8,9 @@ import type { Bot } from 'mineflayer'
 import type { Candidate } from './src/candidates.ts'
 import { JevController } from './src/controller-legacy.ts'
 import type { JevResult } from './src/jev-legacy.ts'
-import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
-import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
-import type { ReachRoute, ReachRuntimeSnapshot } from './src/vtr/reach-controller.ts'
+import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
+import type { ReachIdentity, ReachTransitionContract } from './src/reach/transition.ts'
+import type { ReachRoute, ReachRuntimeSnapshot } from './src/reach/controller.ts'
 import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 

@@ -6,7 +6,7 @@ import { emptyGoalQueueState } from './src/goalQueue.ts'
 import { envelopeForCandidate } from './src/skillCommitment.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, SensorInput, Vec3Json, WorldState } from './src/state.ts'
-import { isMissionReachSourceCandidate } from './src/runtime-adapters/minecraft-reach-mission-projection.ts'
+import { isMissionReachSourceCandidate } from './src/minecraft/reach-mission-projection.ts'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)

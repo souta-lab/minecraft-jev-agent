@@ -1,11 +1,11 @@
-import type { Candidate } from './candidates.ts'
-import type { JevPolicy, JevResult } from './jev-legacy.ts'
-import type { WorldState, Vec3Json } from './state.ts'
+import type { Candidate } from '../candidates.ts'
+import type { JevPolicy, JevResult } from '../jev-legacy.ts'
+import type { WorldState, Vec3Json } from '../state.ts'
 import type {
   ReachRouteDecision,
   ReachRouteDecisionInput,
   ReachRouteDecisionPolicy,
-} from './vtr/reach-controller.ts'
+} from './controller.ts'
 
 const REACH_ROUTE_INSTRUCTIONS =
   'Choose exactly one currently grounded route for the active VTR Reach transition. Every offered route preserves the ' +

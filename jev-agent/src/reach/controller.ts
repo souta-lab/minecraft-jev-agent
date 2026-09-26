@@ -22,7 +22,7 @@ import {
   type ReachTransitionState,
   type ReachWitness,
   type ReachTemporaryWaypoint,
-} from './reach.ts'
+} from './transition.ts'
 
 /** A candidate realization of the same desired Reach predicate. No backend objects cross this port. */
 export interface ReachRoute {

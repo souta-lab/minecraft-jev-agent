@@ -28,7 +28,7 @@ import type { RecipeIndex } from '../crafting.ts'
 import type { DecisionRecordProvenance } from '../decisionlog.ts'
 import type { CurrentAction, Executor } from '../executor.ts'
 import type { GoalQueueState } from '../goalQueue.ts'
-import type { JevReachRouteDecisionRecord } from '../jev-reach-vtr-composition.ts'
+import type { JevReachRouteDecisionRecord } from './jev-composition.ts'
 import type { EventLogger } from '../jev.ts'
 import type { StateFingerprintMemory } from '../moveFailMemory.ts'
 import type { PlaceRetryLedger } from '../placementGuard.ts'
@@ -37,7 +37,7 @@ import {
   projectMinecraftReachMission,
   minecraftMissionSourceNames,
   isMissionReachWalkAction,
-} from '../runtime-adapters/minecraft-reach-mission-projection.ts'
+} from '../minecraft/reach-mission-projection.ts'
 import type { DecisionTrigger, TriggerEvent } from '../scheduler.ts'
 import { pickHigherPriority } from '../scheduler.ts'
 import {
@@ -53,19 +53,19 @@ import type {
 } from '../state.ts'
 import {
   countMissionInventoryResource,
-} from './reach.ts'
+} from './transition.ts'
 import type {
   ReachIdentity,
   ReachTerminalOutcome,
   ReachTransitionContract,
   ReachTransitionState,
-} from './reach.ts'
-import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './reach-controller.ts'
-import type { ReachMissionRuntime, ReachMissionRuntimeSession } from './reach-mission-runtime.ts'
-import type { ReachMissionSnapshotOptions } from './reach-mission-projection.ts'
-import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './reach-runtime-ports.ts'
-import type { InventoryReachMission } from './reach-scheduler.ts'
-import { assessReachViability } from './reach-safety.ts'
+} from './transition.ts'
+import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './controller.ts'
+import type { ReachMissionRuntime, ReachMissionRuntimeSession } from './mission-runtime.ts'
+import type { ReachMissionSnapshotOptions } from './mission-projection.ts'
+import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './ports.ts'
+import type { InventoryReachMission } from './scheduler.ts'
+import { assessReachViability } from './safety.ts'
 
 /** Local alias matching `controller-legacy.ts`'s exported `VtrInventoryMission`. */
 type VtrInventoryMission = InventoryReachMission

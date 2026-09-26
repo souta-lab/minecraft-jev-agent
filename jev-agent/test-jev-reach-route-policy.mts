@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'bun:test'
 import { AuthorityJevPolicy, authorityState, buildAuthorityQuestions } from './src/jev-authority.ts'
-import { JevReachRouteDecisionPolicy } from './src/jev-reach-route-policy.ts'
+import { JevReachRouteDecisionPolicy } from './src/reach/route-policy.ts'
 import type { JevAnswer, JevPolicy, JevPolicyOptions, JevRequest, JevResult } from './src/jev-legacy.ts'
-import { createReachTransitionContract } from './src/vtr/reach.ts'
-import type { ReachIdentity } from './src/vtr/reach.ts'
-import type { ReachRoute, ReachRouteDecisionInput } from './src/vtr/reach-controller.ts'
+import { createReachTransitionContract } from './src/reach/transition.ts'
+import type { ReachIdentity } from './src/reach/transition.ts'
+import type { ReachRoute, ReachRouteDecisionInput } from './src/reach/controller.ts'
 import type { WorldState } from './src/state.ts'
 
 const LEGACY_OPTION_BETA_METADATA_KEYS = [

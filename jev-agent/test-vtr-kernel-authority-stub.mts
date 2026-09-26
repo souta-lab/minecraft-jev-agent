@@ -11,7 +11,7 @@ import type {
   KernelReachAuthority,
   KernelWorldObservation,
 } from './src/vtr/kernel-shadow-map.ts'
-import type { ReachTransitionContract, ReachWitness } from './src/vtr/reach.ts'
+import type { ReachTransitionContract, ReachWitness } from './src/reach/transition.ts'
 
 export interface KernelGateCall {
   readonly gate: string
