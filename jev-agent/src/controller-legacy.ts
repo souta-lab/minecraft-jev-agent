@@ -222,6 +222,22 @@ export {
   shouldClearActiveRetrieval,
   shouldRetireKnownRetrieve,
 } from './legacy/retrieval-progress.ts'
+import * as wedge from './legacy/wedge.ts'
+import type { WedgeHost } from './legacy/wedge.ts'
+import type { WedgeSuppressReason } from './legacy/wedge.ts'
+export {
+  evaluateWaitWedge,
+  evaluateWedgeRepeat,
+  formatWedgeAbort,
+  formatWedgeSuppressed,
+} from './legacy/wedge.ts'
+export type {
+  WaitWedgeDecision,
+  WaitWedgeInput,
+  WedgeRepeatDecision,
+  WedgeRepeatInput,
+  WedgeSuppressReason,
+} from './legacy/wedge.ts'
 export type {
   KnownRetrieveDecision,
   KnownRetrieveDecisionInput,
@@ -865,7 +881,6 @@ function emptySignals(): AgentSignals {
 /** Mineflayer's own block-interaction cap: `canDigBlock` refuses beyond ~5.1 blocks. */
 export const MAX_BLOCK_REACH = 5
 /** A repeated WAIT becomes a bounded replan first (never an immediate wedge). */
-const WAIT_REPLAN_LIMIT = 4
 /**
  * A `surface` goal whose ascent plan is refused AND whose tick offers no
  * body-changing route at all is marked `impossible` after this many consecutive
@@ -1194,51 +1209,12 @@ function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
   }
 }
 
-export interface WaitWedgeInput {
-  actionId: string
-  goalKey: string
-  previousGoalKey: string | null
-  streak: number
-  waitLimit: number
-  replans: number
-  replanLimit: number
-}
 
-export interface WaitWedgeDecision {
-  outcome: 'not-wait' | 'below-limit' | 'replan' | 'wedge'
-  streak: number
-  goalKey: string
-  n: number
-}
 
-export function evaluateWaitWedge(input: WaitWedgeInput): WaitWedgeDecision {
-  if (input.actionId !== 'WAIT') return { outcome: 'not-wait', streak: 0, goalKey: input.goalKey, n: 0 }
-  const streak = input.goalKey === input.previousGoalKey ? input.streak + 1 : 1
-  if (streak < input.waitLimit) return { outcome: 'below-limit', streak, goalKey: input.goalKey, n: streak }
-  if (input.replans < input.replanLimit) return { outcome: 'replan', streak: 0, goalKey: input.goalKey, n: streak }
-  return { outcome: 'wedge', streak: 0, goalKey: input.goalKey, n: streak }
-}
 
 /** #11 v2 §7: a repeat is only a wedge when the world stands still under it. */
-export type WedgeSuppressReason = 'progressing' | 'in_flight' | 'fingerprint_changed'
 
-export interface WedgeRepeatInput {
-  actionId: string
-  previousActionId: string | null
-  fingerprint: string
-  previousFingerprint: string | null
-  inFlight: boolean
-  progressed: boolean
-  repeats: number
-}
 
-export interface WedgeRepeatDecision {
-  outcome: 'count' | 'suppress'
-  reason: WedgeSuppressReason | null
-  /** next consecutive count; 0 after a suppression, 1 on a window restart. */
-  repeats: number
-  restarted: boolean
-}
 
 /**
  * #11 v2 §7: termination is an event-boundary semantic decision, never a raw tick
@@ -1251,26 +1227,9 @@ export interface WedgeRepeatDecision {
  * travel route can never be aborted by wall-clock ticks. A genuinely frozen no-op
  * (same id, same fingerprint, no flight) still counts and aborts at the limit.
  */
-export function evaluateWedgeRepeat(input: WedgeRepeatInput): WedgeRepeatDecision {
-  if (input.progressed) return { outcome: 'suppress', reason: 'progressing', repeats: 0, restarted: false }
-  if (input.inFlight) return { outcome: 'suppress', reason: 'in_flight', repeats: 0, restarted: false }
-  if (input.previousActionId !== input.actionId) {
-    return { outcome: 'count', reason: null, repeats: 1, restarted: true }
-  }
-  if (input.previousFingerprint !== null && input.previousFingerprint !== input.fingerprint) {
-    return { outcome: 'suppress', reason: 'fingerprint_changed', repeats: 0, restarted: false }
-  }
-  return { outcome: 'count', reason: null, repeats: input.repeats + 1, restarted: false }
-}
 
-export function formatWedgeSuppressed(reason: WedgeSuppressReason, candidate: string, repeats: number): string {
-  return `WEDGE_SUPPRESSED reason=${reason} candidate=${candidate} repeats=${repeats}`
-}
 
 /** Kept byte-identical to the pre-fix genuine-wedge abort message. */
-export function formatWedgeAbort(actionId: string, repeats: number, limit: number): string {
-  return `action id ${actionId} chosen ${repeats}x with no verified progress (limit ${limit})`
-}
 
 interface PendingDecision {
   record: DecisionRecord
@@ -2879,6 +2838,11 @@ export class JevController {
   /** RetrievalProgressHost view of this controller (same structural-cast pattern as reachHost). */
   private get retrievalHost(): RetrievalProgressHost {
     return this as unknown as RetrievalProgressHost
+  }
+
+  /** WedgeHost view of this controller (same structural-cast pattern as reachHost). */
+  private get wedgeHost(): WedgeHost {
+    return this as unknown as WedgeHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -10172,110 +10136,15 @@ export class JevController {
   }
 
   private checkWedge(actionId: string): void {
-    const waitPath = actionId === 'WAIT' && !this.options.singleShotPlanner
-    const limit = waitPath ? this.options.waitLimit : this.options.wedgeRepeatLimit
-    const progressed = this.lastProgress > this.chosenCountsAtProgress
-    if (progressed) this.chosenCountsAtProgress = this.lastProgress
-    const previousRepeats = this.wedgeRepeats
-    const verdict = evaluateWedgeRepeat({
-      actionId,
-      previousActionId: this.wedgeWindowId,
-      fingerprint: this.lastStateFingerprint,
-      previousFingerprint: this.wedgeWindowFingerprint,
-      inFlight: this.inFlight() !== null,
-      progressed,
-      repeats: previousRepeats,
-    })
-    this.wedgeWindowId = actionId
-    this.wedgeWindowFingerprint = this.lastStateFingerprint
-    this.wedgeRepeats = verdict.repeats
-    if (verdict.outcome === 'suppress') {
-      if (previousRepeats >= limit) this.logWedgeSuppressed(verdict.reason ?? 'progressing', actionId, previousRepeats)
-      if (waitPath) {
-        this.waitStreak = 0
-        this.waitGoalKey = this.currentGoalKey()
-      }
-      return
-    }
-    if (waitPath) {
-      this.checkWaitWedge()
-      return
-    }
-    const count = this.wedgeRepeats
-    if (count <= this.options.wedgeRepeatLimit) return
-    // Issue #58: a protected furnace prerequisite is owned by the prereq path
-    // controller (which switches path after PREREQ_STALL_TICKS). Aborting here
-    // would abandon the parent smelt goal, so never wedge-abort it.
-    if (this.prereqPlan !== null && isFurnacePrerequisiteOption(actionId)) return
-    this.abortWedge(formatWedgeAbort(actionId, count, this.options.wedgeRepeatLimit))
+    return wedge.checkWedge(this.wedgeHost, actionId)
   }
 
   private logWedgeSuppressed(reason: WedgeSuppressReason, candidate: string, repeats: number): void {
-    this.logger.warn(
-      'agent',
-      formatWedgeSuppressed(reason, candidate, repeats),
-      { reason, candidate, repeats },
-      this.tickCounter,
-    )
+    return wedge.logWedgeSuppressed(this.wedgeHost, reason, candidate, repeats)
   }
 
   private checkWaitWedge(): void {
-    const actionId = 'WAIT'
-    const goalKey = this.currentGoalKey()
-    const wait = evaluateWaitWedge({
-      actionId,
-      goalKey,
-      previousGoalKey: this.waitGoalKey,
-      streak: this.waitStreak,
-      waitLimit: this.options.waitLimit,
-      replans: this.waitReplans,
-      replanLimit: WAIT_REPLAN_LIMIT,
-    })
-    this.waitStreak = wait.streak
-    this.waitGoalKey = wait.goalKey
-    if (wait.outcome === 'below-limit') return
-    if (wait.outcome === 'replan') {
-      const boundary = shouldWakeSystem2AfterLocalFailure({
-        failureCode: 'path_stuck',
-        activeOption: this.queue.current !== null,
-        semanticExhausted: false,
-        semanticInvalid: false,
-        semanticAbandoned: false,
-      })
-      // WAIT is a control outcome, not evidence that the current semantic
-      // Option should be replaced. Keep the local recovery loop bounded by
-      // candidate/state changes; a repeated WAIT cannot itself summon WHAT.
-      const summon = boundary.wake
-        ? this.summonLlm(
-            'no_progress',
-            `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; semantic boundary=${boundary.reason}`,
-          )
-        : null
-      const counted = summon?.triggered === true
-      if (counted) this.waitReplans += 1
-      this.waitStreak = 0
-      this.wedgeRepeats = 0
-      this.logger.warn(
-        'agent',
-        `${boundary.wake ? 'WAIT_LIMIT' : 'LOCAL_WAIT_RECOVERY'} n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}${counted ? '' : ' SYSTEM2=false'}`,
-        {
-          actionId,
-          count: wait.n,
-          goal: goalKey,
-          waitReplans: this.waitReplans,
-          llmSummoned: counted,
-          throttled: !counted,
-          boundary: boundary.reason,
-        },
-        this.tickCounter,
-      )
-      return
-    }
-    if (wait.outcome === 'wedge') {
-      this.abortWedge(
-        `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress after ${this.waitReplans} replan(s)`,
-      )
-    }
+    return wedge.checkWaitWedge(this.wedgeHost)
   }
 
   private currentOptionContext(): CurrentOptionContext | null {
@@ -10821,12 +10690,7 @@ export class JevController {
   }
 
   private abortWedge(reason: string): void {
-    if (this.wedgeAborted) return
-    this.wedgeAborted = true
-    this.wedgeReason = reason
-    this.logger.error('agent', `ABORT: wedge detected (${reason})`, { reason }, this.tickCounter)
-    process.stdout.write(`\n[agent] ABORT: wedge detected (${reason})\n`)
-    this.finish('wedge', false)
+    return wedge.abortWedge(this.wedgeHost, reason)
   }
 
   // -------------------------------------------------------------------------
