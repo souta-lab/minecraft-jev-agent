@@ -52,7 +52,7 @@ import {
 } from '../jev-agent/src/netherPortalPlan.ts'
 import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller.ts'
 
 const checks: { name: string; pass: boolean; detail: string }[] = []
 function check(name: string, pass: boolean, detail = ''): void {

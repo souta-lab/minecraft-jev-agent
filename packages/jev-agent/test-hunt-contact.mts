@@ -47,7 +47,7 @@ import {
   HUNT_CONTACT_UNREACHABLE,
 } from './src/combatClosure.ts'
 import type { ContactGeometryFacts } from './src/combatClosure.ts'
-import { mirroredEventToken } from './src/controller-legacy.ts'
+import { mirroredEventToken } from './src/controller.ts'
 import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)

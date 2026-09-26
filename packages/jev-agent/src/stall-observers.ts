@@ -1,5 +1,5 @@
 // Stall, oscillation and capability-gap observers extracted from
-// controller-legacy.ts. They watch motion/progress evidence and raise
+// controller.ts. They watch motion/progress evidence and raise
 // the existing signals (stall signal, oscillation memory, capability
 // gap latches, escalation). No authority moves: abort goes through
 // host.abortWedge and escalation through host.escalate.

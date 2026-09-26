@@ -1,5 +1,5 @@
 // decision-epochs.ts — the decision-epoch / commitment plumbing extracted
-// from controller-legacy.ts (issue #437 epoch machinery + #11 v2 §7 / #436
+// from controller.ts (issue #437 epoch machinery + #11 v2 §7 / #436
 // commitment surfaces).
 //
 // Owns the causal-isolation records around one policy decision: the epoch
@@ -977,7 +977,7 @@ const STALL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
 ])
 
 // ---------------------------------------------------------------------------
-// The decision epoch's own orchestration (moved from controller-legacy.ts):
+// The decision epoch's own orchestration (moved from controller.ts):
 // semantic-boundary classification, replay-vs-requery, the Jev policy call,
 // stale-epoch drop, verdict application and the low-confidence escalation.
 // The policy call itself (host.jev.decide) and every boundary verdict remain
@@ -1186,7 +1186,7 @@ export async function decide(
 }
 
 // ---------------------------------------------------------------------------
-// Trigger scheduling (moved from controller-legacy.ts): priority coalescing,
+// Trigger scheduling (moved from controller.ts): priority coalescing,
 // RETREAT/ATTACK lease defer/preempt, macrotask-spaced tick dispatch.
 // ---------------------------------------------------------------------------
 

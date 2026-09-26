@@ -67,7 +67,7 @@ check(
   detected.detected && detected.from !== null && detected.to !== null && detected.cycles >= 3,
   `detected=${detected.detected} cycles=${detected.cycles} from=${detected.from?.x},${detected.from?.z} to=${detected.to?.x},${detected.to?.z}`,
 )
-// This is what controller-legacy#detectMoveOscillation does with the detection.
+// This is what controller#detectMoveOscillation does with the detection.
 if (detected.from !== null) escapeMemory.blacklist(OVERWORLD, detected.from, 'no_progress')
 if (detected.to !== null) escapeMemory.blacklist(OVERWORLD, detected.to, 'no_progress')
 const escaped = filterBlacklistedMoves(loopCandidates, escapeMemory, OVERWORLD)

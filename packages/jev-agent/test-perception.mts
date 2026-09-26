@@ -576,7 +576,7 @@ addCase('(4) a normal state keeps its decision-critical perception fields', () =
 })
 
 addCase('(5) the SMELT_INPUT_PREREQ marker is mirrored and emitted from the tick', () => {
-  const source = `${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')}`
+  const source = `${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}`
   const mirrored = MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ')
   const wired = source.includes('this.logSmeltInputPrereq(state, groundingOptions)')
   const formatter = source.includes('formatSmeltInputPrereq')
@@ -584,7 +584,7 @@ addCase('(5) the SMELT_INPUT_PREREQ marker is mirrored and emitted from the tick
 })
 
 addCase('(6) the CRAFT_INGREDIENT_PREREQ marker is mirrored and emitted from the tick', () => {
-  const source = `${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')}`
+  const source = `${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}`
   const mirrored = MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')
   const wired = source.includes('this.logCraftIngredientPrereq(state, groundingOptions)')
   const formatter = source.includes('formatCraftIngredientPrereq')

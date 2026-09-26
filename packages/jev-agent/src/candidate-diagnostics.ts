@@ -1,6 +1,6 @@
 // candidate-diagnostics.ts — legacy candidate/skill execution log projection.
 //
-// Extracted from `controller-legacy.ts`. These functions only translate
+// Extracted from `controller.ts`. These functions only translate
 // candidates, results, and refusals into structured log rows; they own no
 // authority and mutate nothing except per-tick dedup keys on the host. They
 // are legacy evidence plumbing, not a semantic source of truth.
@@ -902,7 +902,7 @@ export function logReachabilityOnce(host: CandidateDiagnosticsHost,
 
 // ---------------------------------------------------------------------------
 // Candidate starvation / marker / goal-precondition projections (moved from
-// controller-legacy.ts). Pure transforms only: facts out, no authority.
+// controller.ts). Pure transforms only: facts out, no authority.
 // ---------------------------------------------------------------------------
 
 export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([

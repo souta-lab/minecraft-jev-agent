@@ -1,4 +1,4 @@
-// System2 decision plane extracted from controller-legacy.ts.
+// System2 decision plane extracted from controller.ts.
 // Owns the sparse System2 summon boundary and the semantic projection
 // it consumes (facts, fingerprints, apply-identity, outcome memory).
 // System2 stays a sparse repair service: it never actuates and never
@@ -1046,7 +1046,7 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
 }
 
 // ---------------------------------------------------------------------------
-// Single-shot System2 bootstrap plan (moved from controller-legacy.ts): one
+// Single-shot System2 bootstrap plan (moved from controller.ts): one
 // queue_empty plan request applied through the protected/duplicate guards,
 // journaled with its authority stack, then the phase ledger restored.
 // ---------------------------------------------------------------------------
@@ -1205,7 +1205,7 @@ export async function bootstrapPlan(host: System2PlaneHost): Promise<void> {
 }
 /**
  * The queue op the single-shot bootstrap plan is actually applied with (moved
- * from controller-legacy.ts; semantics in the doc above the function).
+ * from controller.ts; semantics in the doc above the function).
  * A restored, not-yet-done queue head is work the bot already committed to,
  * so bootstrap merges the ladder BEHIND it (`continue`); an empty queue keeps
  * the requested op, and an explicit `abort` is never overridden.

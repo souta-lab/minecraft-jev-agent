@@ -61,7 +61,7 @@ import {
   stanceMeleeDistance,
   stanceReachDistance,
 } from './src/combatClosure.ts'
-import { mirroredEventToken } from './src/controller-legacy.ts'
+import { mirroredEventToken } from './src/controller.ts'
 import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)

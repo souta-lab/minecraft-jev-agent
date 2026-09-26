@@ -4,7 +4,7 @@ import { describe, it } from 'bun:test'
 import { assessReachViability } from './src/reach/safety.ts'
 
 const controller =
-  readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+  readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
   readFileSync(new URL('./src/reach/controller-plane.ts', import.meta.url), 'utf8')
 
 describe('VTR Reach safety wakeups use current viability truth', () => {

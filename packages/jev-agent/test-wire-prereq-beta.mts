@@ -153,7 +153,7 @@ const heldDecision = planPrereqOptions(prereqInput)
 // --- 1. static wiring --------------------------------------------------------
 
 addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path', () => {
-  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}`
   const missing = [
     'const unreachableStations = this.unreachableStationKeys(state)',
     'candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)',
@@ -168,7 +168,7 @@ addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path'
 })
 
 addCase('#63: controller.ts invokes planPrereqOptions / formatPrereqSwitch / formatPrereqOptionFor', () => {
-  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
   const missing = ['planPrereqOptions(input)', 'formatPrereqSwitch(', 'formatPrereqOptionFor(decision, chosen)'].filter(
     (needle) => !text.includes(needle),
   )
@@ -182,7 +182,7 @@ addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.
 })
 
 addCase('#63: controller.ts gates beta adoption behind the verdict + betaAuthority', () => {
-  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
   const pass =
     text.includes('betaAuthorityDecision({') &&
     text.includes('classifyAbandonRequest({') &&

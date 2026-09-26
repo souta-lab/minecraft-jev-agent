@@ -11,7 +11,7 @@
 // Why the existing counters cannot see it:
 //   - `updateStallSignal` measures `Date.now() - lastProgressAt`, and every
 //     verified MOVE arrival is classified `progress=body`, which resets
-//     `lastProgressAt` (controller-legacy.ts onActionComplete);
+//     `lastProgressAt` (controller.ts onActionComplete);
 //   - `ActionFailureEscalation` needs a typed action FAILURE;
 //   - `WaitStreakEscalation` needs a chosen WAIT;
 //   - `ReplanThrottle` needs a replan to be attempted and suppressed.

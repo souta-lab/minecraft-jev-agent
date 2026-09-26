@@ -304,7 +304,7 @@ addCase('the bounds resolve from env with safe defaults', () => {
 
 addCase('wiring: the controller reads the evidence at the beta boundary', () => {
   const text =
-    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/abandon-lifecycle.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
   const missing = [

@@ -54,13 +54,34 @@ const FORBIDDEN: Readonly<Record<string, readonly Owner[]>> = {
 
 /** Flat transitional modules allowed to touch the raw backend. */
 const RAW_BACKEND_ALLOWLIST = new Set([
-  'controller-legacy.ts',
   'controller.ts',
   'craftWindow.ts',
   'executor.ts',
   'index.ts',
   'scheduler.ts',
   'state.ts',
+])
+
+/**
+ * Controller-extracted responsibility planes awaiting a canonical address.
+ * Transitional rule (same as the retired quarantine): `import type { Bot }`
+ * is allowed while host interfaces are being narrowed; value imports and
+ * live `this.bot` reads are not.
+ */
+const TYPE_ONLY_BACKEND_PLANES = new Set([
+  'system2-plane.ts',
+  'threat-observers.ts',
+  'goal-queue-plane.ts',
+  'goal-state.ts',
+  'path-probes.ts',
+  'retrieval-progress.ts',
+  'decision-epochs.ts',
+  'outcome-ledgers.ts',
+  'stall-observers.ts',
+  'portal-evidence.ts',
+  'candidate-diagnostics.ts',
+  'grounded-evidence.ts',
+  'outcome-accounting.ts',
 ])
 
 function srcFiles(): string[] {
@@ -129,9 +150,10 @@ describe('Packages-by-Feature dependency guard', () => {
       const owner = ownerOf(rel)
       const source = readFileSync(new URL(`./src/${rel}`, import.meta.url), 'utf8')
       const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, '')
-      // Quarantine rule: legacy Host interfaces may carry `import type { Bot }`
-      // while they are being narrowed; value imports and live bot reads are not.
-      if (owner === 'legacy') {
+      // Transitional rule: extracted Host interfaces may carry
+      // `import type { Bot }` while they are being narrowed; value imports and
+      // live bot reads are not.
+      if (owner === 'legacy' || TYPE_ONLY_BACKEND_PLANES.has(rel)) {
         const hits: string[] = []
         for (const match of code.matchAll(/from\s+['"]mineflayer['"]/g)) {
           const pos = match.index ?? 0
@@ -140,7 +162,7 @@ describe('Packages-by-Feature dependency guard', () => {
           if (!/^\s*import\s+type\b/.test(stmt)) hits.push('value-imports mineflayer')
         }
         if (/this\.bot\b/.test(code)) hits.push('reads this.bot')
-        for (const hit of hits) violations.push(`${rel} (legacy): ${hit}`)
+        for (const hit of hits) violations.push(`${rel} (${owner}): ${hit}`)
         continue
       }
       const hits: string[] = []

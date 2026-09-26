@@ -1275,7 +1275,7 @@ export interface SurvivalControlFallbackInput {
   freshCandidates: readonly { id: string; kind: string }[]
   /**
    * The code-owned ESCALATE the CALLER can still execute. Measured live
-   * (`controller-legacy.ts`, documented in-tree): a chosen survival action that
+   * (`controller.ts`, documented in-tree): a chosen survival action that
    * cannot be re-grounded at contact left the tick with nothing, because the
    * contact envelope had already filtered WAIT/ESCALATE out - while a reachable
    * ATTACK sat in the offer and the body was killed in the same second.

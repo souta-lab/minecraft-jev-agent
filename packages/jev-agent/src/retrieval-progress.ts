@@ -1,4 +1,4 @@
-// Retrieval/descend progress observers extracted from controller-legacy.ts.
+// Retrieval/descend progress observers extracted from controller.ts.
 // These functions watch retrieval/descend progress, retire unreachable
 // resources, and record surface-search coverage. They own no scheduling
 // authority: escalation and candidate withholding are still decided by

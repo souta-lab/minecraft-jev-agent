@@ -12,7 +12,7 @@
 //
 // Two EXISTING facts were computed and then erased before they could accumulate:
 //
-//   1. `controller-legacy.ts` resets the typed-action-failure streak on
+//   1. `controller.ts` resets the typed-action-failure streak on
 //      `progressKinds` containing `body`. A pillar STEP that rises and falls back
 //      reports `CAUSAL ... status=done progress=body`, so the identical
 //      `apex_missed` failure was charged as count=1 every time.

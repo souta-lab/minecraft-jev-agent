@@ -40,7 +40,7 @@ import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { createRecipeIndex } from './src/crafting.ts'
 import { combatKitGap, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
-import { mirroredEventToken } from './src/controller-legacy.ts'
+import { mirroredEventToken } from './src/controller.ts'
 import type { Candidate } from './src/candidates.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import {
@@ -333,7 +333,7 @@ addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable S
   // idle is what killed the body, so the ungrounded branch must also queue the fresh
   // offer for the next decision (`survival_reground`) - code still does not choose
   // fight-vs-flight (section 8), it only declines to stand still.
-  const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const text = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const guard = text.indexOf('const reground = regroundVanishedSurvivalChoice(')
   const reject = text.indexOf('this.guardRejections += 1', guard)
   // The ungrounded branch must (a) requeue the decision so the tick is never the

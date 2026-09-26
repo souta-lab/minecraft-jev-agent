@@ -723,7 +723,7 @@ addCase('(vii1) an unservable survival action at contact falls back to a code-ow
 })
 
 addCase('(vii2) the controller admits the code-owned control action into the guarded offer', () => {
-  const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const text = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const codeOwned = text.indexOf('const codeOwnedEscalate =')
   const passedIn = text.indexOf('{ codeOwnedEscalate }')
   const admit = text.indexOf('freshCandidates.push(codeOwnedEscalate)')

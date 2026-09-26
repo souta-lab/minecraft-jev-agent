@@ -48,7 +48,7 @@ export const FALLBACK_PILLAR_PLACE_NAME_META = 'fallbackPillarPlaceName'
  * The marker that makes the declaration run-scoped evidence. Without it the only
  * thing a reviewer sees after this fix is a DIFFERENT `SKILL_COMMIT
  * effectEnvelopeHash=` value - not WHICH block the route declared or where the
- * authority came from. Registered in `controller-legacy.ts#MIRRORED_MARKERS`,
+ * authority came from. Registered in `controller.ts#MIRRORED_MARKERS`,
  * because an unmirrored marker never reaches `buddy.log`.
  */
 export const ROUTE_PLACE_DECLARED = 'ROUTE_PLACE_DECLARED'

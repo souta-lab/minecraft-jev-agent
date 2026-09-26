@@ -1,6 +1,6 @@
 // portal-evidence.ts — legacy portal/dimension evidence projection.
 //
-// Extracted from `controller-legacy.ts`. Portal lit/entered truth reads live
+// Extracted from `controller.ts`. Portal lit/entered truth reads live
 // world state through the raw client (a legacy concern — VTR never sees the
 // Bot), turns remembered frame sites into sensor input, and logs/refuses
 // entry diagnostics. No authority: predicate truth is still decided by the

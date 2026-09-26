@@ -330,7 +330,7 @@ function columnDigs(candidates: readonly { id: string; meta: Record<string, unkn
 // (e) wiring: the generator owns the fact, Jev still owns the choice ------------
 {
   const candidates = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
-  const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controller = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const wired =
     candidates.includes('function columnDigBaseFor') &&
     candidates.includes('function columnDigMine') &&

@@ -37,7 +37,7 @@ import {
   SYSTEM2_PAYLOAD_LIMITS,
 } from '../jev-agent/src/system2/payload.ts'
 import { buildMercurySummary } from './generation-entry.ts'
-import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller.ts'
 import { MERCURY_DEATH_HISTORY_LIMIT, hashMercuryState, mercuryPayloadShape } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import { emptyWorldMemory } from './resident-types.ts'

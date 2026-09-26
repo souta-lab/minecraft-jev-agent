@@ -89,7 +89,7 @@ function trigger(triggerName: TriggerEvent['trigger'], priority: number): Trigge
 addCase('A. docs/history/architecture/ARCHITECTURE.md question names match the code and reference no phantom fields', () => {
   const doc = read('../../docs/history/architecture/ARCHITECTURE.md')
   const missing = QUESTION_NAMES.filter((name) => !doc.includes(name))
-  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}`
+  const controller = `${read('src/controller.ts')}\n${read('src/controller.ts')}`
   const referenced = new Set<string>()
   for (const match of controller.matchAll(/answers\.([a-z_]+)/g)) {
     if (match[1] !== undefined) referenced.add(match[1])
@@ -172,7 +172,7 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
   const normal = trigger('inventory_changed', 6)
   const keptCritical = pickHigherPriority(critical, normal)
   const promoted = pickHigherPriority(normal, critical)
-  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}\n${read('src/decision-epochs.ts')}`
+  const controller = `${read('src/controller.ts')}\n${read('src/controller.ts')}\n${read('src/decision-epochs.ts')}`
   const wired =
     controller.includes('criticalArrivedDuringFlight') &&
     controller.includes('hasCriticalTriggerDuringFlight') &&
@@ -325,7 +325,7 @@ addCase('H. stock pathfinder is the primary MOVE; actuator + headroom gate are t
   const stockMove = executor.includes('private async stockPathTo') && executor.includes('this.bot.pathfinder.setGoal(goal)')
   const stockFirst = executor.indexOf('await this.stockPathTo(target, epoch, signal, goalKind)') < executor.indexOf('await this.walkByControls(target, epoch, signal, {')
   const fallbackLogged = executor.includes('control-walk fallback')
-  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}`
+  const controller = `${read('src/controller.ts')}\n${read('src/controller.ts')}`
   const defaultPathfinder = /actuation: 'pathfinder',/.test(controller) && /actuation: 'pathfinder',/.test(executor)
   const stock = executor.includes('this.bot.collectBlock.collect')
   const pluginLoaded = read('m2.mts').includes("from 'mineflayer-collectblock'") && read('m2.mts').includes('collectBlockPlugin')
@@ -338,7 +338,7 @@ addCase('P2. Mineflayer is the stock published release (no git pin) and the 1.21
   const pkg = JSON.parse(read('package.json')) as { dependencies?: Record<string, string> }
   const pin = pkg.dependencies?.mineflayer ?? ''
   const arch = read('../../docs/history/architecture/ARCHITECTURE.md')
-  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}`
+  const controller = `${read('src/controller.ts')}\n${read('src/controller.ts')}`
   const released = /^\^\d+\.\d+\.\d+$/.test(pin) && !pin.includes('github:')
   const documented = arch.includes('1.21.11') && arch.includes('stock') && arch.includes('#4063')
   const lifecycle = controller.includes("this.bot.on('end'") && controller.includes("this.bot.on('kicked'") && controller.includes("this.bot.on('death'")

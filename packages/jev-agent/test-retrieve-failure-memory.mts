@@ -209,7 +209,7 @@ addCase('wiring: the RETRIEVE branch gates success on the completion decision, n
   // inspect both files so the wiring assertion follows the actual runtime path.
   const source =
     readFileSync(fileURLToPath(new URL('./src/controller.ts', import.meta.url)), 'utf8') +
-    readFileSync(fileURLToPath(new URL('./src/controller-legacy.ts', import.meta.url)), 'utf8') +
+    readFileSync(fileURLToPath(new URL('./src/controller.ts', import.meta.url)), 'utf8') +
     readFileSync(fileURLToPath(new URL('./src/outcome-accounting.ts', import.meta.url)), 'utf8')
   const usesCompletion = source.includes('retrieveCompleted(')
   const usesMemoryDecision = source.includes('decideRetrieveMemory(result,')

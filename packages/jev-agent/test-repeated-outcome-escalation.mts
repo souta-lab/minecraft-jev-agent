@@ -379,7 +379,7 @@ addCase('(iv-a) the bound is the module constant, reused by the resolver and the
 
 addCase('(iv-b) no other literal re-derives the bound in the ledger or the controller', () => {
   const ledgerSrc = readFileSync(new URL('./src/repeatedOutcomeEscalation.ts', import.meta.url), 'utf8')
-  const controllerSrc = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSrc = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const declarationCount = (ledgerSrc.match(/REPEATED_OUTCOME_LIMIT_DEFAULT\s*=\s*\d+/g) ?? []).length
   // The controller must consume the resolver, never a bare literal.
   const controllerUsesResolver = controllerSrc.includes('repeatedOutcomeLimit: resolveRepeatedOutcomeLimit()')
@@ -391,7 +391,7 @@ addCase('(iv-b) no other literal re-derives the bound in the ledger or the contr
 })
 
 addCase('(iv-c) the escalation markers are mirrored, so the escalation reaches the live record', () => {
-  const controllerSrc = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSrc = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   return ok(
     controllerSrc.includes('ACTION_REPEAT_MARKER,') &&
       controllerSrc.includes('ACTION_REPEAT_EXHAUSTED_MARKER,') &&
@@ -405,7 +405,7 @@ addCase('(iv-c) the escalation markers are mirrored, so the escalation reaches t
 // CONSEQUENCE in the candidate chain. A computed fact without both is the exact
 // defect class this lane exists to close.
 addCase('(iv-d) the controller OBSERVES at the settle site and PRUNES in the candidate chain', () => {
-  const src = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const outcomeSrc = readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8')
   const observed = outcomeSrc.includes('host.noteRepeatedOutcome(result, candidate, truth.verified, taxonomy.progressKinds)')
   const pruned = src.includes('candidates = this.filterRepeatedOutcomeCandidates(candidates, state)')

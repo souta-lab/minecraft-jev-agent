@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs'
 import { defaultCandidateOptions, formatSmeltRouteGap, formatSmeltStationRetry, generateGroundedCandidates, smeltRouteGap, smeltStationRetry } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
-import { orphanedSmeltPrerequisiteReason } from './src/controller-legacy.ts'
+import { orphanedSmeltPrerequisiteReason } from './src/controller.ts'
 import { guardCandidate } from './src/policy.ts'
 import { knownStationKey } from './src/prereqOption.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
@@ -525,7 +525,7 @@ function main(): void {
   // through the same starvation evidence the replan path consumes.
   {
     const candidates = source('./src/candidates.ts')
-    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+    const controller = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}`
     const wired =
       candidates.includes('function directSmeltFurnace') &&
       candidates.includes('function smeltRouteGap') &&

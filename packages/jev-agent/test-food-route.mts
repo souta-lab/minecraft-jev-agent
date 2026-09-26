@@ -49,7 +49,7 @@ import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
-import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
 import { starvationFact } from '../buddy-driver/planner.ts'
 import { fixtureClaim } from './test-claim-context.mts'
 

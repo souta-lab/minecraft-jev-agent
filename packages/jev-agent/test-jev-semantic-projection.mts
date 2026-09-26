@@ -7,7 +7,7 @@
 //
 // 239 pi calls bought one semantic option and 0.36 actions per decision, while the
 // body revisited the same floored cell 96.7% of the time. The cause is the
-// boundary, not the model: `controller-legacy.ts` re-asked pi whenever
+// boundary, not the model: `controller.ts` re-asked pi whenever
 // `stableStateHash(WorldState)` changed (`decisionlog.ts` hashes tick + raw float
 // position + entity distances), and `MOVE:p26_67_10` was re-minted as a "new"
 // candidate every few ticks while the semantic situation (walk to the one
@@ -267,7 +267,7 @@ function outcomePacket(
 }
 
 const SRC_CONTROLLER =
-  readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+  readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
   readFileSync(new URL('./src/system2-plane.ts', import.meta.url), 'utf8') +
   readFileSync(new URL('./src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +
   readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')

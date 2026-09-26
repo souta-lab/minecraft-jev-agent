@@ -1,6 +1,6 @@
 // grounded-evidence.ts — legacy grounded-candidate evidence mirroring plane.
 //
-// Extracted from `controller-legacy.ts`. These functions translate the
+// Extracted from `controller.ts`. These functions translate the
 // candidate generator's typed refusals, source/station/kit gaps, prereq
 // pictures and guard roll-ups into deduplicated log lines plus per-tick latch
 // state on the host. They own no authority: they never choose an action and

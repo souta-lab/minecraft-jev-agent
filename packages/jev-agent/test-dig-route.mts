@@ -674,7 +674,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   )
 
   // Exactly the clear the controller performs on a VERIFIED settle
-  // (`controller-legacy.ts#recordZeroProgressOutcome` -> `clearZeroProgressStand`).
+  // (`controller.ts#recordZeroProgressOutcome` -> `clearZeroProgressStand`).
   const cleared = clearZeroProgressStand(spentDig, 'DESCEND', cellKey(FEET))
   const reopenedTick = worldState({ feet: FEET, descent: shaftDescent(FEET), counts, enterCell: TARGET, routes: cleared })
   const reopened = entryCandidates(reopenedTick, options)
@@ -1322,7 +1322,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 // ---------------------------------------------------------------------------
 {
   const source =
-    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')

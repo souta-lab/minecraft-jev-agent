@@ -12,7 +12,7 @@
 // `nether_portal` rung as achieved (an INHERITED portal, M2 PASS on the
 // durable/standard basis), yet a row whose postcondition is "the portal exists"
 // kept the queue head. No existing completion path could fire, because every one
-// of them (the `markDone()` callers in controller-legacy.ts `syncQueue`) requires
+// of them (the `markDone()` callers in controller.ts `syncQueue`) requires
 // THIS generation to have run the action sequence: a `goto` within 2.5 m, a stale
 // smelt prerequisite, the portal's own ignite/verify postcondition, or the
 // per-tick spatial `predicateForGoal` level predicate. When the world truth is

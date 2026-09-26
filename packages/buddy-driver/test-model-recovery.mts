@@ -878,7 +878,7 @@ describe('model authority recovery host policy', () => {
     expect(runner).toContain('recoverySourceSha')
     const mercury = readFileSync(new URL('./mercury-system2.ts', import.meta.url), 'utf8')
     expect(mercury).toContain('if (cached !== undefined && !this.requireFreshProviderDecision)')
-    const controller = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
+    const controller = readFileSync(new URL('../jev-agent/src/controller.ts', import.meta.url), 'utf8')
     expect(
       controller + readFileSync(new URL('../jev-agent/src/system2-plane.ts', import.meta.url), 'utf8'),
     ).toMatch(/provider: system2Authority\.provider,\s*model: system2Authority\.model,/)

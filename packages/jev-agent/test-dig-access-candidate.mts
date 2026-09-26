@@ -38,7 +38,7 @@ function check(label: string, ok: boolean, detail: string): void {
 
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
 const runtimeControllerSource = (): string =>
-  `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+  `${source('./src/controller.ts')}\n${source('./src/controller.ts')}`
 
 // --- world builders ------------------------------------------------------------
 

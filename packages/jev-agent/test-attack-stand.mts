@@ -49,7 +49,7 @@ import {
 import type { Candidate, CandidateOptions, ReachabilityGateOptions } from './src/candidates.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
-import { mirroredEventToken } from './src/controller-legacy.ts'
+import { mirroredEventToken } from './src/controller.ts'
 import { fixtureClaim } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)

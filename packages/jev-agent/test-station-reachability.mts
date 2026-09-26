@@ -268,7 +268,7 @@ async function main(): Promise<void> {
   // the live #244 interaction-stand + bounded path verdict.
   {
     const candidates = source('./src/candidates.ts')
-    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}\n${source('./src/path-probes.ts')}`
+    const controller = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}\n${source('./src/path-probes.ts')}`
     const reachability = source('./src/reachability.ts')
     const wired =
       candidates.includes('function stationApproachReachable') &&

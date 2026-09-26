@@ -56,7 +56,7 @@ import { Vec3 } from 'vec3'
 import type { Bot } from 'mineflayer'
 import type { Candidate } from './src/candidates.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
-import { mirroredEventToken, moveFailureReason, MIRRORED_MARKERS } from './src/controller-legacy.ts'
+import { mirroredEventToken, moveFailureReason, MIRRORED_MARKERS } from './src/controller.ts'
 import {
   armorFallMitigation,
   classifyStepLanding,

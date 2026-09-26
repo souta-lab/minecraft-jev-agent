@@ -59,7 +59,7 @@ import {
   declaredRoutePlacements,
   ROUTE_PLACE_DECLARED,
 } from './src/routePlaceDeclaration.ts'
-import { MIRRORED_MARKERS } from './src/controller-legacy.ts'
+import { MIRRORED_MARKERS } from './src/controller.ts'
 import * as skillCommitment from './src/skillCommitment.ts'
 import {
   buildSkillOutcomePacket,

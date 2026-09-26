@@ -2,12 +2,12 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { describe, it } from 'bun:test'
 import type { Bot } from 'mineflayer'
-import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
+import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
 import { jevAgent } from './src/index.ts'
 import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
 import type { ReachMissionRuntimeDependencies } from './src/reach/mission-runtime.ts'
 
-const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+const controller = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
 const reachPlane = readFileSync(new URL('./src/reach/controller-plane.ts', import.meta.url), 'utf8')
 const stallObservers = readFileSync(new URL('./src/stall-observers.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
 const indexSource = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8')

@@ -11,28 +11,27 @@ const source = (relative: string): string => readFileSync(new URL(relative, impo
 
 const facade = source('./src/controller.ts')
 const legacy =
-  source('./src/controller-legacy.ts') +
+  source('./src/controller.ts') +
   source('./src/system2-plane.ts') +
   source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')
 const candidates = source('./src/candidates.ts')
 
-assert.match(facade, /export class JevController extends LegacyJevController/)
+assert.match(facade, /export class JevController/)
 assert.match(facade, /semantic authority=jev_pi/)
 assert.match(facade, /return \[\.\.\.candidates\]/)
 assert.match(facade, /authority=jev_pi_beta/)
-// #360 §11: semantic termination still has one owner. The facade may adopt
+// #360 §11: semantic termination still has one owner. The controller may adopt
 // beta's vote, or a code-owned state-recurrence exhaustion proof; it must not
 // introduce any other termination source (attempt counts, protection ladder,
 // deterministic ranking). The exhaustion proof itself is read from the
 // code-owned evidence block, never recomputed here.
-assert.match(facade, /const semanticExhausted = internals\.signals\?\.strategicNonProgress\?\.exhausted === true/)
-assert.match(facade, /const adopt = \(abandonRequested\(decision\) \|\| semanticExhausted\) && \(boundary\?\.adopt \?\? true\)/)
-assert.match(facade, /if \(!betaIsAuthoritative\(internals\)\) return baseline/)
-assert.match(facade, /if \(optionId === null\) return baseline/)
+assert.match(facade, /const semanticExhausted = this\.signals\.strategicNonProgress\?\.exhausted === true/)
+assert.match(facade, /const adopt = \(abandonRequested\(decision\) \|\| semanticExhausted\) && boundary\.adopt/)
+assert.match(facade, /if \(!this\.betaAuthoritative\(\) \|\| optionId === null\) return baseline/)
 assert.match(facade, /betaTerminationBoundary/)
 assert.match(facade, /BETA_DEFERRED option=/)
-assert.match(facade, /protectedReplanSuppressed = \(reason\)/)
-assert.match(facade, /return false\s*\n\s*}/)
+assert.match(facade, /private protectedReplanSuppressed\(reason/)
+assert.match(facade, /if \(this\.betaAuthoritative\(\)\) return false/)
 
 // The public REAL path must not contain the historical semantic selector calls.
 for (const forbidden of [

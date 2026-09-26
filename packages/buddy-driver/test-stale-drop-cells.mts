@@ -64,9 +64,9 @@ import {
   formatKnownResourceResighted,
   formatKnownResourceRetired,
   nextKnownResourceVerdict,
-} from '../jev-agent/src/controller-legacy.ts'
+} from '../jev-agent/src/controller.ts'
 import { formatSkillEnd, formatSkillInterrupt } from '../jev-agent/src/netherPortalPlan.ts'
-import type { KnownResourceVerdictLatch } from '../jev-agent/src/controller-legacy.ts'
+import type { KnownResourceVerdictLatch } from '../jev-agent/src/controller.ts'
 
 const require = createRequire(import.meta.url)
 const Vec3 = require('vec3')
@@ -511,7 +511,7 @@ addCase('(E) a contradicted target ends the skill with SKILL_END/SKILL_INTERRUPT
 })
 
 addCase('(E) the cancellation is wired into the tick, stops the running skill, and never re-targets', () => {
-  const controllerSource = readFileSync(new URL('../jev-agent/src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSource = readFileSync(new URL('../jev-agent/src/controller.ts', import.meta.url), 'utf8')
   const source =
     controllerSource +
     readFileSync(new URL('../jev-agent/src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.') +

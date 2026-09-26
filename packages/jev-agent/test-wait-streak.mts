@@ -205,7 +205,7 @@ addCase('the exhausted WAIT fingerprint changes the replan hash and changed-inpu
 })
 
 addCase('wiring: the controller bounds the actionable WAIT streak and mirrors the markers', () => {
-  const text = source('./src/controller-legacy.ts')
+  const text = source('./src/controller.ts')
   const queuePlaneText = source('./src/goal-queue-plane.ts')
   const epochsText = source('./src/decision-epochs.ts')
   const missing = [

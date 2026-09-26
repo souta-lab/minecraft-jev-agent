@@ -5,7 +5,7 @@
 //   - explicit shadow/off is the rollback/A-B baseline;
 //   - the historical betaAuthorityDecision helper is still tested as a legacy
 //     baseline primitive, but its prerequisite-protection veto is NOT the public
-//     real-Jev controller contract (controller.ts owns that strangler boundary).
+//     real-Jev controller contract (controller.ts owns that policy-evidence boundary).
 import { betaAuthorityDecision, formatJevHeads } from './src/betaAuthority.ts'
 import { betaShadowDecision, formatBetaShadow, resolveBetaAuthority } from './src/jev.ts'
 import type { GoalLike } from './src/placementGuard.ts'

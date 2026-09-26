@@ -1,6 +1,6 @@
 // threat-observers.ts — legacy threat/environmental-hazard observation.
 //
-// Extracted from `controller-legacy.ts`. These functions turn sensed threat,
+// Extracted from `controller.ts`. These functions turn sensed threat,
 // critical-damage, ranged-contact, and env-hazard evidence into tracker
 // updates (`ThreatTracker` / `CriticalDamageTracker` / `EnvHazardTracker`),
 // signal writes, dedup'd log rows, and typed escalation calls. They own no

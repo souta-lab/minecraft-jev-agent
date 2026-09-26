@@ -13,7 +13,7 @@
 // `nether_portal` rung as achieved (an INHERITED portal; M2 PASS on the
 // durable/standard basis), yet restored/planned M2 rows kept the head. Every
 // existing completion path needs THIS generation to have run the action
-// sequence (the five `markDone()` sites in controller-legacy.ts `syncQueue`,
+// sequence (the five `markDone()` sites in controller.ts `syncQueue`,
 // plus the per-tick spatial `predicateForGoal` path), so none of them can fire
 // when the world truth is already true.
 //
@@ -52,7 +52,7 @@ import {
   verifiedBlockRecordsFromKnownResources,
 } from './src/goalSuccess.ts'
 import type { GoalSuccessCell, GoalSuccessWorldProbe } from './src/goalSuccess.ts'
-import { mirroredEventToken } from './src/controller-legacy.ts'
+import { mirroredEventToken } from './src/controller.ts'
 import {
   NETHER,
   NETHER_PORTAL,
@@ -684,7 +684,7 @@ const retiredMarkers = (markers: readonly string[]): string[] =>
       mirroredEventToken(`${GOAL_SUCCESS_PROBE_ERROR} id=g1 message="x" action=not_retired`) === GOAL_SUCCESS_PROBE_ERROR,
     `retire=${mirroredEventToken(marker)} error=${mirroredEventToken(`${GOAL_SUCCESS_PROBE_ERROR} id=g1 message="x" action=not_retired`)}`,
   )
-  const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const planeSource = readFileSync(new URL('./src/goal-queue-plane.ts', import.meta.url), 'utf8')
   const installs = source.match(/this\.installGoalSuccessProbe\(\)/g)?.length ?? 0
   check(

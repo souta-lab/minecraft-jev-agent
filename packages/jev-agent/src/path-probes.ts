@@ -1,5 +1,5 @@
 // path-probes.ts — mechanical CAN/SAFE probes extracted from
-// controller-legacy.ts. These answer one question each from live block and
+// controller.ts. These answer one question each from live block and
 // pathfinder truth: can a route be computed, is a stance column hazardous,
 // is an entity visible from a stand, does a route cross a dimension-transfer
 // cell, where is the interaction stand for a station or dig target, and which

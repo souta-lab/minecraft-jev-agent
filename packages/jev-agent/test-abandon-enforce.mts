@@ -180,7 +180,7 @@ addCase('(e) #79: a never-attempted smelt option stays protected before its prer
 addCase('#79 wiring: the authority facade preserves the legacy attempt/enforcement mechanics', () => {
   const facade = source('./src/controller.ts')
   const mechanics =
-    source('./src/controller-legacy.ts') +
+    source('./src/controller.ts') +
     source('./src/decision-epochs.ts').replace(/\bhost\./g, 'this.') +
     source('./src/outcome-accounting.ts').replace(/\bhost\./g, 'this.') +
     source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')
@@ -191,12 +191,14 @@ addCase('#79 wiring: the authority facade preserves the legacy attempt/enforceme
     'formatAbandonSuppressed(',
     'enforceUnproductiveAbandon(',
   ].filter((needle) => !mechanics.includes(needle))
-  const facadeOwnsAuthority = facade.includes('abandonVerdict = (decision, optionId, planId)')
+  const controllerOwnsAuthority =
+    facade.includes('abandonVerdict(decision: JevResult') &&
+    facade.includes('this.betaTerminationBoundary(decision, optionId)')
   return {
-    pass: missing.length === 0 && facadeOwnsAuthority,
-    detail: missing.length === 0 && facadeOwnsAuthority
-      ? 'legacy attempt/enforcement mechanics + facade authority seam wired'
-      : `missing ${[...missing, ...(facadeOwnsAuthority ? [] : ['facade abandonVerdict seam'])].join(', ')}`,
+    pass: missing.length === 0 && controllerOwnsAuthority,
+    detail: missing.length === 0 && controllerOwnsAuthority
+      ? 'legacy attempt/enforcement mechanics + controller authority seam wired'
+      : `missing ${[...missing, ...(controllerOwnsAuthority ? [] : ['controller abandonVerdict seam'])].join(', ')}`,
   }
 })
 

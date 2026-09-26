@@ -54,7 +54,7 @@ import {
   setPrereqAuditSink,
 } from '../jev-agent/src/goalQueue.ts'
 import type { GoalQueueSnapshot, PlanIdentity, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller.ts'
 import { planIdentityFor, supersededPlanObsoleteProof } from './generation-entry.ts'
 import { goalQueueSnapshotFromState } from './state-snapshot.ts'
 import { emptyWorldMemory } from './resident-types.ts'
@@ -761,7 +761,7 @@ addCase('(vii) the identity-change line names both identities and both row sets'
 })
 
 addCase('(vii) the controller wires both reconciliations and the queue_empty gate is unchanged', async () => {
-  const source = await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()
+  const source = await Bun.file(new URL('./../jev-agent/src/controller.ts', import.meta.url)).text()
   const gates = [
     'this.reconcilePlanIdentity()',
     'this.reconcileHeadDimension()',
@@ -868,7 +868,7 @@ addCase('(viii) the durable field survives the host snapshot path and the JSON r
 })
 
 addCase('(viii) the controller uses the durable row bound and never resets it on a productive tick', async () => {
-  const source = await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()
+  const source = await Bun.file(new URL('./../jev-agent/src/controller.ts', import.meta.url)).text()
   const required = [
     'this.queue.noteStarvedHead()',
     'evaluateStarvedHeadBound({ count, limit: this.options.waitLimit })',
@@ -1075,7 +1075,7 @@ addCase('(ix) the warrant is bounded: a different head, a human head, or a value
 
 addCase('(ix) the controller arms the warrant only for a head-about summon and applies it only to a real plan', async () => {
   const source =
-    (await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()) +
+    (await Bun.file(new URL('./../jev-agent/src/controller.ts', import.meta.url)).text()) +
     (await Bun.file(new URL('./../jev-agent/src/system2-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
   const required = [
     "reason === 'action_impossible' || reason === 'no_progress'",
@@ -1319,7 +1319,7 @@ addCase('(x) the binding never empties the offer and never touches a row that ca
 
 addCase('(x) the controller binds the offer, remembers the fact, and interrupts an in-flight work action', async () => {
   const source =
-    (await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()) +
+    (await Bun.file(new URL('./../jev-agent/src/controller.ts', import.meta.url)).text()) +
     (await Bun.file(new URL('./../jev-agent/src/goal-queue-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
   const required = [
     'restrictCandidatesNotExecutableHere(',
@@ -1453,7 +1453,7 @@ addCase('(xi) goto keeps its own dimension guard and is never read as a transfer
 
 addCase('(xi) the controller only binds on escalate and cancels only body motion', async () => {
   const source =
-    (await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()) +
+    (await Bun.file(new URL('./../jev-agent/src/controller.ts', import.meta.url)).text()) +
     (await Bun.file(new URL('./../jev-agent/src/goal-queue-plane.ts', import.meta.url)).text()).replace(/\bhost\./g, 'this.')
   const required = [
     "result.action === 'escalate' && result.goalId !== null",

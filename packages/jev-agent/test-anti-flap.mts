@@ -309,7 +309,7 @@ addCase('the flap window resolves from env with a safe default', () => {
 
 addCase('wiring: the controller reconciles protection with the abandonment ledger', () => {
   const text =
-    source('./src/controller-legacy.ts') +
+    source('./src/controller.ts') +
     source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')
   const missing = [
     'new AbandonmentLedger()',
@@ -325,7 +325,7 @@ addCase('wiring: the controller reconciles protection with the abandonment ledge
 })
 
 addCase('wiring: the controller commits to one Jev-selected candidate when the choice flaps', () => {
-  const text = source('./src/controller-legacy.ts') + source('./src/decision-epochs.ts')
+  const text = source('./src/controller.ts') + source('./src/decision-epochs.ts')
   const missing = [
     'evaluateCandidateFlap({',
     'applyCandidateCommitment(',

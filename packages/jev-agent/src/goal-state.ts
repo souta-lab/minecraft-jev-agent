@@ -1,4 +1,4 @@
-// Goal-state snapshot helpers extracted from controller-legacy.ts, with the
+// Goal-state snapshot helpers extracted from controller.ts, with the
 // same read-only projection family consolidated out of the queue and System2
 // planes. Owns the live world/body truth those planes consult: objective and
 // inventory snapshots, the OptionWorldSnapshot projections, descend-goal

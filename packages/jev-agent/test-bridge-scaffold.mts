@@ -1351,7 +1351,7 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
 //       is what reaches the host log (unmirrored markers never arrive).
 // ===========================================================================
 {
-  const controllerSource = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSource = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   check(

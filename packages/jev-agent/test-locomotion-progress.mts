@@ -1,6 +1,6 @@
 // Regression for #442: a 0/0 locomotion window is idle evidence, never 100%.
 import assert from 'node:assert/strict'
-import { betaAbandonProgressObserved, JevController } from './src/controller-legacy.ts'
+import { betaAbandonProgressObserved, JevController } from './src/controller.ts'
 import { MoveFailMemory } from './src/moveFailMemory.ts'
 import {
   formatLocomotionObservation,

@@ -49,7 +49,7 @@
 // Run: bun test-resource-dimension-attribution.mts
 import { defaultCandidateOptions, generateGroundedCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
-import { registerPlacedStation } from '../jev-agent/src/controller-legacy.ts'
+import { registerPlacedStation } from '../jev-agent/src/controller.ts'
 import type { GoalQueueState } from '../jev-agent/src/goalQueue.ts'
 import type { AgentSignals, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 import {

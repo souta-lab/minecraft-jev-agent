@@ -16,8 +16,8 @@
 // i.e. the mechanics were fine and the problem was OWNERSHIP: one committed walk
 // was re-decided per primitive leg. `executor.ts#runMove` / `runRetrieve` returned
 // to policy after ONE bounded leg ("bounded chunk; next decision re-plans" /
-// travel-leg) and `controller-legacy.ts#onActionComplete` asked Jev again
-// (`requestDecision(completionTrigger)`, controller-legacy.ts:5574) for every
+// travel-leg) and `controller.ts#onActionComplete` asked Jev again
+// (`requestDecision(completionTrigger)`, controller.ts:5574) for every
 // settled action.
 //
 // THE CONTRACT THIS MODULE SERVES (issue #436 section 3):
@@ -49,7 +49,7 @@
 //   * it ranks nothing and enumerates no candidate alternatives: the grounded
 //     remedy list is owned by the layer that grounds candidates
 //     (`candidates.ts#approachRouteLegs` -> `meta.legPolicyBoundary`, logged by
-//     `controller-legacy.ts#logSkillPolicyBoundaries`). The executor names the typed
+//     `controller.ts#logSkillPolicyBoundaries`). The executor names the typed
 //     REASON it stopped, never the replacement (`formatWalkBoundary`);
 //   * it never widens the commitment's `EffectEnvelope` (section 16). Every step the
 //     loop takes still goes through `executor.assertEffect`, so a dig/place it was

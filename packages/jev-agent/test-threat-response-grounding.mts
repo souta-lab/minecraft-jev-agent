@@ -1489,7 +1489,7 @@ addCase('(vii) the controller feeds the rule the TRACKED-set truth and mirrors t
   // evidence only exists if it rides the mirrored path (`buddy.log` lines are
   // `marker` + the `detail` fields - the message body is NOT mirrored).
   const text =
-    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/decision-epochs.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
   const call = text.indexOf('regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates, identityContext)')
   const helper = text.indexOf('private mobIdentityContext(')

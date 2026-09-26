@@ -287,7 +287,7 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'choice_distribution_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_legacy',
-    allowedConsumers: ['jev-agent/src/controller-legacy.ts', 'packages/jev-agent/src/jev/client.ts'],
+    allowedConsumers: ['jev-agent/src/controller.ts', 'packages/jev-agent/src/jev/client.ts'],
     sourceRefs: [{ file: 'packages/jev-agent/src/jev/client.ts', symbol: 'buildQuestions', lineHint: 997 }],
     legacyPromptRef: legacyEvalRef('PRIMARY_INSTRUCTIONS', 356),
     notes:
@@ -314,7 +314,7 @@ export const JEV_HEADS: readonly JevHead[] = [
     calibration: { transformId: 'beta_threshold_v1', transformVersion: 1 },
     abstention: 'none',
     batchGroup: 'jev_legacy',
-    allowedConsumers: ['jev-agent/src/controller-legacy.ts', 'packages/jev-agent/src/jev/client.ts'],
+    allowedConsumers: ['jev-agent/src/controller.ts', 'packages/jev-agent/src/jev/client.ts'],
     sourceRefs: [{ file: 'packages/jev-agent/src/jev/client.ts', symbol: 'buildQuestions', lineHint: 997 }],
     legacyPromptRef: legacyEvalRef('buildQuestions', 368),
     notes: 'Deprecated legacy beta head.',

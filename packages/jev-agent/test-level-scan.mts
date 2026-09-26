@@ -1028,7 +1028,7 @@ function levelsUnobserved(state: WorldState): boolean {
 // ---------------------------------------------------------------------------
 {
   const source =
-    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')

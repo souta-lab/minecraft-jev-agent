@@ -184,7 +184,7 @@ function ascentOf(candidates: readonly Candidate[]): Candidate | null {
   return candidates.find((candidate) => candidate.meta.surfaceAscent === true) ?? null
 }
 
-/** Exactly the context the controller builds at commit time (controller-legacy.ts). */
+/** Exactly the context the controller builds at commit time (controller.ts). */
 function decisionGuard(candidate: Candidate, state: WorldState, ids: readonly string[], canComputePath: (p: Vec3Json) => boolean): GuardResult {
   return guardDecision(candidate.id, [candidate], state, {
     phase: 'decision',

@@ -1,4 +1,4 @@
-// Legacy outcome-accounting plane extracted from controller-legacy.ts.
+// Legacy outcome-accounting plane extracted from controller.ts.
 // Owns the settled-action bookkeeping cluster: typed outcome taxonomy -> causal
 // chain / decision-record completion, per-kind verified progress accounting,
 // unverified-outcome budgeting and furnace prerequisite-path switching, typed

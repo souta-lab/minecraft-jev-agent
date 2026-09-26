@@ -263,7 +263,7 @@ addCase('the markers are exactly ACTION_COMMIT / ACTION_PREEMPT with the documen
 })
 
 addCase('wiring: the controller holds the in-flight action and mirrors both markers', () => {
-  const text = source('./src/controller-legacy.ts') + source('./src/decision-epochs.ts')
+  const text = source('./src/controller.ts') + source('./src/decision-epochs.ts')
   const missing = ['evaluateActionCommitment({', 'applyActionCommitment(', 'actionCommitmentPlanKey('].filter(
     (needle) => !text.includes(needle),
   )

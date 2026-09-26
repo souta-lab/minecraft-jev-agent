@@ -1,4 +1,4 @@
-// Wedge/wait-repeat detection extracted from controller-legacy.ts.
+// Wedge/wait-repeat detection extracted from controller.ts.
 // Pure evaluators plus the small observer methods that latch repeat
 // counters and escalate to the existing abort/summon paths. No new
 // authority: abort still goes through host.finish and system2 wake

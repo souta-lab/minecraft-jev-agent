@@ -1,6 +1,6 @@
 // reach-controller-plane.ts — V4.1.2 Reach controller plane.
 //
-// Extracted from `controller-legacy.ts`. This module owns the Reach slice
+// Extracted from `controller.ts`. This module owns the Reach slice
 // orchestration: mission projection, admission/dispatch, mechanical-step
 // authorization and settlement, terminalization, verification logging, and the
 // model-recovery drain for a pre-committed transition.
@@ -65,7 +65,7 @@ import type { ReachMechanicalActionOutcome, ReachMissionProjection, ReachRuntime
 import type { InventoryReachMission } from './scheduler.ts'
 import { assessReachViability } from './safety.ts'
 
-/** Local alias matching `controller-legacy.ts`'s exported `VtrInventoryMission`. */
+/** Local alias matching `controller.ts`'s exported `VtrInventoryMission`. */
 type VtrInventoryMission = InventoryReachMission
 
 /** Session metadata projected read-only out of `ReachMissionRuntime`. */

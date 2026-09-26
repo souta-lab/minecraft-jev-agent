@@ -38,7 +38,7 @@ import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
 const require = createRequire(import.meta.url)
 // The live controller always passes `createRecipeIndex(bot.registry)`
-// (controller-legacy.ts candidateOptions -> generateGroundedCandidates), so the
+// (controller.ts candidateOptions -> generateGroundedCandidates), so the
 // fixture uses the same mechanics truth table.
 const RECIPES = createRecipeIndex(require('minecraft-data')('1.21.11') as unknown)
 

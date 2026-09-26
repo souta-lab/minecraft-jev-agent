@@ -65,7 +65,7 @@ import {
 } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { createRecipeIndex, planNextCraftStep } from './src/crafting.ts'
-import { MIRRORED_MARKERS } from './src/controller-legacy.ts'
+import { MIRRORED_MARKERS } from './src/controller.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardDecision } from './src/policy.ts'

@@ -10,7 +10,7 @@
 // BEFORE (measured, tools/skill-closure-metrics.mjs --run run-muaxgjed-15kew):
 //   jevDecisions 37 / actions 10  -> actionsPerDecision 0.27
 //   every MOVE settles `verified=true status=done` in 0.4-1.2 s and the controller
-//   asks Jev again for the next leg (controller-legacy.ts:5574).
+//   asks Jev again for the next leg (controller.ts:5574).
 //
 // This fixture pins the AFTER contract at the harness layer:
 //   one decision -> one commitment -> MANY mechanical legs -> one verified arrival.
@@ -1035,7 +1035,7 @@ const cell = (p: Vec3Json): string => `${Math.floor(p.x)},${Math.floor(p.y)},${M
     maxStepsPerWaypoint: 8,
     hook: (writes, _bot, executor) => {
       // the env-hazard reflex / a new decision cancels the in-flight commitment
-      // within the tick (controller-legacy.ts#cancelInvalidCommitment ->
+      // within the tick (controller.ts#cancelInvalidCommitment ->
       // executor.cancelCurrent)
       if (writes === 10 && cancelledAtStep === -1) {
         cancelledAtStep = writes

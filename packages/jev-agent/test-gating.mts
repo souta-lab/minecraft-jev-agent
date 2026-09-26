@@ -77,7 +77,7 @@ test('a high danger score remains evidence and cannot replace a valid Jev ATTACK
   const selectedId = decisionIdFrom(highDanger)
   assert.equal(selectedId, 'ATTACK:e7')
   assert.ok([attack.id, retreat.id].includes(selectedId ?? ''))
-  const controllerSource = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSource = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   assert.match(controllerSource, /const dangerGate = gateDanger\(decision\.answers\.danger\)/)
   assert.match(controllerSource, /let chosenId = heldId/)
   assert.match(controllerSource, /dangerOverride: null/)

@@ -33,7 +33,7 @@ import {
 import { authorityState } from './src/jev/authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
-import { pickHigherPriority } from './src/controller-legacy.ts'
+import { pickHigherPriority } from './src/controller.ts'
 import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'

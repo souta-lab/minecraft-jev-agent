@@ -11,7 +11,7 @@
 // `OSCILLATION_DETECTED`. The values were not merely stable: they were
 // behaviourally impossible.
 //
-// Traced cause (two independent sources, both in controller-legacy.ts):
+// Traced cause (two independent sources, both in controller.ts):
 //
 //   1. `goal_progress` came from the legacy scalar `state.goal.progress`
 //      (`Math.round(state.goal.progress * 4)`). `GoalState.progress` is only the

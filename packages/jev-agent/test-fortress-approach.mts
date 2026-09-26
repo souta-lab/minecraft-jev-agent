@@ -60,10 +60,10 @@
 //
 //        NAMED RESIDUAL (NOT fixed here, and deliberately not): when the chosen
 //        action was WORK, the tick can still end actionless while the in-flight dig
-//        keeps running - controller-legacy.ts:3408 looks the chosen id up in the
+//        keeps running - controller.ts:3408 looks the chosen id up in the
 //        RESTRICTED offer, threat.ts#survivalControlFallback answers
 //        `not_a_survival_action` for a null reground kind BEFORE it looks at
-//        contact, and controller-legacy.ts:3539 returns. That boundary is PINNED by
+//        contact, and controller.ts:3539 returns. That boundary is PINNED by
 //        another lane's invariant (test-combat-closure.mts case A3: "a non-survival
 //        choice is untouched by this rule", `otherFallback.reason ===
 //        'not_a_survival_action'` with threatInContact true), landed by

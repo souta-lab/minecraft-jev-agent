@@ -30,7 +30,7 @@ import {
   generateGroundedCandidates,
 } from './src/candidates.ts'
 import type { Candidate, CandidateAcquisition, CandidateReachability } from './src/candidates.ts'
-import { candidateStarvationLine, candidateStarvationMissing, MIRRORED_MARKERS } from './src/controller-legacy.ts'
+import { candidateStarvationLine, candidateStarvationMissing, MIRRORED_MARKERS } from './src/controller.ts'
 import { capabilityKey } from './src/reachability.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'

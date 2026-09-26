@@ -1,5 +1,5 @@
 // Abandon-verdict and prerequisite-lifecycle plane extracted from
-// controller-legacy.ts. Owns the beta-abandon verdict/apply cluster, the
+// controller.ts. Owns the beta-abandon verdict/apply cluster, the
 // protection-vs-abandonment reconciliation, the abandonment ledger write, and
 // the per-goal prerequisite path abandonment bookkeeping (furnace prereq
 // reset, abandoned-path sets, retrieve-option abandonment). No authority
@@ -343,7 +343,7 @@ line: string, candidate: Candidate, unverified: number): void {
 
 
 // ---------------------------------------------------------------------------
-// Beta verdict + shadow cluster (moved from controller-legacy.ts)
+// Beta verdict + shadow cluster (moved from controller.ts)
 // ---------------------------------------------------------------------------
 
 /**
@@ -487,7 +487,7 @@ export function logBetaShadow(host: AbandonLifecycleHost, optionId: string | nul
 
 // ---------------------------------------------------------------------------
 // Furnace-prerequisite path selection + unproductive-option enforcement
-// (moved from controller-legacy.ts; the path lifecycle belongs with the
+// (moved from controller.ts; the path lifecycle belongs with the
 // abandonment bookkeeping above)
 // ---------------------------------------------------------------------------
 

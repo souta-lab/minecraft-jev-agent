@@ -1,4 +1,4 @@
-// Escalation contract extracted from controller-legacy.ts: the typed reasons a
+// Escalation contract extracted from controller.ts: the typed reasons a
 // Jev decision epoch escalates to System2, and the Jev -> LLM summon bridge.
 // Pure contract data; no authority ownership.
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { JevController } from './src/controller-legacy.ts'
+import { JevController } from './src/controller.ts'
 import type { Candidate } from './src/candidates.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 

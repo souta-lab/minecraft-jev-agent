@@ -1,5 +1,5 @@
 // outcome-ledgers.ts — the settled-outcome ledgers extracted from
-// controller-legacy.ts: deterministic records of what already happened.
+// controller.ts: deterministic records of what already happened.
 // Owns the cross-action repeated-outcome ledger (one typed outcome repeating
 // at one cell), the coordinate move-failure memory and its blacklist filters,
 // the per-candidate failure counters, the typed action-failure streak, and

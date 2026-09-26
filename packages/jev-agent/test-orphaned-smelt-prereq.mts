@@ -11,7 +11,7 @@
 //
 //   bun ./test-orphaned-smelt-prereq.mts
 import assert from 'node:assert/strict'
-import { orphanedSmeltPrerequisiteReason } from './src/controller-legacy.ts'
+import { orphanedSmeltPrerequisiteReason } from './src/controller.ts'
 
 let failures = 0
 const check = (name: string, run: () => boolean, detail: () => string): void => {

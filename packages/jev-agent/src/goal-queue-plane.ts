@@ -1,4 +1,4 @@
-// Legacy GoalQueue lifecycle plane extracted from controller-legacy.ts.
+// Legacy GoalQueue lifecycle plane extracted from controller.ts.
 // Owns queue synchronization, head/dimension/identity reconciliation,
 // protected-goal retire reasons and queue diagnostics. In V4 the
 // GoalQueue is a compatibility/debug projection, not semantic truth -
@@ -977,7 +977,7 @@ export function subgoalState(goal: QueuedGoal, have: number): GoalState {
 }
 
 // ---------------------------------------------------------------------------
-// Human-intent queue lifecycle (moved from controller-legacy.ts): apply/clear
+// Human-intent queue lifecycle (moved from controller.ts): apply/clear
 // a human interrupt plan, bump the semantic generation, cancel the in-flight
 // action when ownership actually changes, and wake the decision plane.
 // ---------------------------------------------------------------------------

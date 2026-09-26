@@ -18,9 +18,9 @@
 // Why every existing counter misses exactly this shape (file:line in the message
 // this module was added with):
 //   - `LOCAL_PROGRESS_STALL` is diagnostic only; `boundary.wake` is never read and
-//     `system2=false` is a string literal (controller-legacy.ts:8111);
+//     `system2=false` is a string literal (controller.ts:8111);
 //   - `noProductiveSignature` embeds the ROUNDED POSITION, so a body that moves
-//     launders its own repeat counter (controller-legacy.ts:9645);
+//     launders its own repeat counter (controller.ts:9645);
 //   - `WaitStreakEscalation` only counts while `actionable > 0`, and the reported
 //     tick was `presented=1` (WAIT only) so the streak is cleared every tick;
 //   - `ActionFailureEscalation` is keyed `(plan, actionId, reason)`, so rotating

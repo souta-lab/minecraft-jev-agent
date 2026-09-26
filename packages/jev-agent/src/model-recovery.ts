@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Model-recovery drain (moved from controller-legacy.ts).
+// Model-recovery drain (moved from controller.ts).
 //
 // When the provider fails the controller must not abandon a bounded in-flight
 // escape Skill mid-step: stop accepting decisions, drain through the active
@@ -17,7 +17,7 @@ import type { TriggerEvent } from './scheduler.ts'
 import type { System2Brain } from './system2/service.ts'
 import type { ReachTerminalOutcome, ReachTransitionState } from './reach/transition.ts'
 import type { ActiveReachTransition } from './reach/controller-plane.ts'
-import type { RunSummary } from './controller-legacy.ts'
+import type { RunSummary } from './controller.ts'
 
 export interface ModelRecoveryHost {
   running: boolean

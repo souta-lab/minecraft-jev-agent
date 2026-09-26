@@ -6,7 +6,7 @@
 // ingredient to its raw producer and offers that route (the same producer
 // `completeStartablePrerequisites` names). These cases therefore pass the real
 // recipe index, exactly as production always does (`candidateOptions` in
-// controller-legacy.ts builds it from `bot.registry`).
+// controller.ts builds it from `bot.registry`).
 //
 // History: cases (1)/(2) used to call `generateGroundedCandidates` with
 // `defaultCandidateOptions` (`recipes: null`). In that degraded shape

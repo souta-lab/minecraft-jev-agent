@@ -55,7 +55,7 @@ import { Executor, defaultExecutorOptions } from './src/index.ts'
 import { combatKitGap, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions, GroundedCandidatesResult } from './src/candidates.ts'
 import { createRecipeIndex } from './src/crafting.ts'
-import { mirroredEventToken, MIRRORED_MARKERS } from './src/controller-legacy.ts'
+import { mirroredEventToken, MIRRORED_MARKERS } from './src/controller.ts'
 import {
   ARMOR_CRAFT,
   ARMOR_CRAFT_REFUSED,

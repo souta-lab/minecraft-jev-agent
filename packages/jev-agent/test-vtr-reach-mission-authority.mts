@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'bun:test'
-import { JevController } from './src/controller-legacy.ts'
+import { JevController } from './src/controller.ts'
 import { nearestGroundedReachRoutePolicy } from './src/reach/controller.ts'
 import { filterLegacyReachCandidates } from './src/minecraft/reach-mission-projection.ts'
 import { projectMinecraftReachRoutes } from './src/minecraft/reach-mission-projection.ts'
@@ -230,7 +230,7 @@ test('Reach contract uses configured Mission when ladder root and GoalQueue head
   assert.match(missionWire, /count: ctx\.goalCount/)
   assert.doesNotMatch(missionWire, /rootGoal|RUNGS|ladder/)
 
-  const controllerSource = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const controllerSource = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const vtrHandoff = controllerSource.indexOf('const handled = await this.tickReachTransition(trigger, detail)')
   const legacyQueueReconcile = controllerSource.indexOf('this.syncQueue(trigger)', vtrHandoff)
   assert.ok(vtrHandoff >= 0 && legacyQueueReconcile > vtrHandoff)
