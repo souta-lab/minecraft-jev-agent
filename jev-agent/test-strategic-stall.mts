@@ -303,10 +303,12 @@ addCase('the bounds resolve from env with safe defaults', () => {
 })
 
 addCase('wiring: the controller reads the evidence at the beta boundary', () => {
-  const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const text =
+    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
   const missing = [
     'StrategicStallTracker(',
-    'this.strategicStall.note(',
+    'host.strategicStall.note(',
     'this.strategicStall.acknowledgeExhaustion()',
     'formatStrategicNonProgressExhausted(',
     'semanticExhausted,',

@@ -837,14 +837,16 @@ addCase("(d') a RETRIEVE with a path-stage failure obeys the identical rule (no 
 // --- controller wiring (the markers must be reachable from the live loop) ---------
 
 addCase('the live controller records the verdict and emits the typed markers', () => {
-  const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const source =
+    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
   const diagSource = readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
   const portalSource = readFileSync(new URL('./src/legacy/portal-evidence.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const facade = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const routeSource = readFileSync(new URL('./src/zeroProgressRoute.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
-    ['recordZeroProgressOutcome call', /this\.recordZeroProgressOutcome\(result, candidate, truth\)/.test(source)],
+    ['recordZeroProgressOutcome call', /host\.recordZeroProgressOutcome\(result, candidate, truth\)/.test(source)],
     ['zero-progress verdict', /if \(!isZeroProgressOutcome\(result\)\) return/.test(source)],
     ['path-stage verdict', /routeFailureStage\(result\.failure\)/.test(source)],
     ['ACTION_ZERO_PROGRESS', /formatActionZeroProgress\(\{/.test(source)],

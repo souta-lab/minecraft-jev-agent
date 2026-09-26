@@ -238,6 +238,17 @@ export {
   formatWedgeAbort,
   formatWedgeSuppressed,
 } from './legacy/wedge.ts'
+import * as outcome from './legacy/outcome-accounting.ts'
+import type { OutcomeAccountingHost } from './legacy/outcome-accounting.ts'
+export {
+  classifyMoveOutcome,
+  decideRetrieveMemory,
+  formatStationRegisteredPlaced,
+  moveFailureReason,
+  PLACED_STATION_ITEMS,
+  registerPlacedStation,
+} from './legacy/outcome-accounting.ts'
+export type { MoveOutcome } from './legacy/outcome-accounting.ts'
 export type {
   WaitWedgeDecision,
   WaitWedgeInput,
@@ -924,46 +935,6 @@ function resolveEnvPositiveInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
-/**
- * Map an executor failure code onto a movement-failure reason.
- *
- * `unreachable` is a DURABLE claim: it feeds the reachability gate and resource
- * retirement, so it must only be recorded when the coordinate was actually shown
- * unreachable (`path_no_path`, a refused tunnel entry). A timeout (`dig_timeout`,
- * `smelt_timeout`, `path_timeout`) or an unrelated action error is a STALL, not a
- * proof of unreachability - recording it as `unreachable` masked the real reason
- * and blacklisted reachable coordinates.
- */
-export function moveFailureReason(failure: string | null): MoveFailureReason {
-  switch (failure) {
-    case 'path_no_path':
-      return 'no_path'
-    case 'path_stuck':
-    case 'path_timeout':
-    case 'action_timeout':
-    case 'dig_timeout':
-    case 'smelt_timeout':
-      return 'stuck'
-    case 'tunnel_entry_refused':
-      return 'unreachable'
-    default:
-      return 'no_progress'
-  }
-}
-
-export type MoveOutcome = 'arrived' | 'unverified' | 'no-progress'
-
-/**
- * A MOVE/RETREAT is an arrival only when the executor verified it. A
- * `done/verified=false` action that wandered ≥0.5m is NOT progress: it must keep
- * charging the coordinate failure memory, otherwise a JUMP_FAILing MOVE target
- * resets its own blacklist and is re-selected forever (the live pit loop).
- */
-export function classifyMoveOutcome(verified: boolean, moved: number): MoveOutcome {
-  if (!verified) return 'unverified'
-  return moved < 0.5 ? 'no-progress' : 'arrived'
-}
-
 /** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
 export function guardMoveFailureReason(
   candidate: Pick<Candidate, 'kind'> | undefined,
@@ -978,7 +949,6 @@ export function guardMoveFailureReason(
  * Bounded like UNVERIFIED_ACTION_LIMIT: the retrieve already proved it closed no
  * distance, gained no altitude and dug no step.
  */
-
 
 /**
  * A remembered resource can be PRESENT yet unreachable (a y=68 log from y=59
@@ -1009,7 +979,6 @@ export function guardMoveFailureReason(
 
 /** What `retireFailedKnownRetrieve` must do with one finished known-resource retrieve. */
 
-
 /**
  * Pure decision the controller applies to every finished known-resource
  * retrieve. A COMPLETED retrieve clears the per-resource counter; anything else
@@ -1036,37 +1005,6 @@ export function guardMoveFailureReason(
  * waypoints are a separate search frontier and never own an active resource
  * stall track, so they must not clear this memory.
  */
-
-/**
- * The one boundary between a finished RETRIEVE and the movement failure memory.
- *
- * A retrieve may reset the coordinate failure memory (`MOVE_FAILMEM_RESET`) only
- * when it COMPLETED. The executor's `verified` for a RETRIEVE means only that
- * the remaining distance decreased (or the target was entered); it is NOT
- * completion. The caller supplies `retrieveCompleted` - the target actually
- * arrived or the item was acquired (`retrieveCompleted` on the controller). A
- * partial distance closure, a vertical chunk or a dug staircase step is durable
- * `progressed`/`blockRemoved` evidence, never completion - it must not reset the
- * coordinate, and it must not be charged as zero progress either.
- *
- * Live M2 boundary (RC 42cb46e, target 36,56,41): the old gate was
- * `hasObservableProgress` alone, so
- * `arrival targetDistance=11.26m->11.25m y=59.5->58 vertical=reuse`
- * reset the coordinate while PATH_CALLBACK stayed `outcome=stuck`, the
- * inventory never gained raw_iron and HOP_PLAN / JUMP_ATTEMPT looped forever.
- * RC8 (run-mu8ue5dg-10amk) showed the same reset on a ~1 m closure of a 20 m
- * approach (`21.69m->20.42m`, no station arrival).
- * A `done`/`verified=false`/`progressDelta=0` retrieve with no observable change
- * is the #78 loop and charges the coordinate so it is eventually skipped.
- */
-export function decideRetrieveMemory(
-  result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>,
-  retrieveCompleted?: boolean,
-): { reset: boolean; charge: boolean } {
-  const completed = result.status === 'done' && result.verified
-  if (completed && (retrieveCompleted === undefined || retrieveCompleted)) return { reset: true, charge: false }
-  return { reset: false, charge: !completed && !hasObservableProgress(result) }
-}
 
 /**
  * The queue op the single-shot bootstrap plan is actually applied with.
@@ -1099,7 +1037,6 @@ export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | und
   return op
 }
 
-
 /** Drop resources the controller has proven unreachable for the current plan. */
 
 /**
@@ -1124,7 +1061,6 @@ export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | und
 
 /** Dedupe state for remembered-cell verdict lines (one per generation). */
 
-
 /**
  * The report rule for one remembered-cell verdict, mutating the dedupe latch.
  *
@@ -1137,56 +1073,6 @@ export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | und
  *
  * Pure apart from the latch. No goal, action or ranking is involved.
  */
-
-
-/** Item names whose VERIFIED placement registers a usable smelt station. */
-export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
-
-/**
- * The mirrored registration marker for a station this controller verified
- * placing. `source=placed` is deterministic truth: only the executor's strict
- * placement post-condition (the block exists at the target) reaches this path,
- * never a sensed or remembered coincidence.
- */
-export function formatStationRegisteredPlaced(kind: string, at: Vec3Json): string {
-  const x = Math.round(at.x)
-  const y = Math.round(at.y)
-  const z = Math.round(at.z)
-  return `STATION_REGISTERED kind=${kind} source=placed at=${x},${y},${z}`
-}
-
-/**
- * Register a verified placed station in the in-generation station list.
- * Idempotent per (item, cell): a repeated verified placement at the same cell is
- * recorded once, so the STATION_REGISTERED marker fires exactly once per placed
- * cell while the station stays selectable for the rest of the generation.
- */
-export function registerPlacedStation(
-  stations: KnownResource[],
-  item: string,
-  at: Vec3Json,
-  /**
-   * The world the placement was VERIFIED in. A placed station is a world fact
-   * like any remembered cell: without it the row is un-attributable and the
-   * fail-closed dimension gate (#14, `resourceDimensionMatches`) refuses it as a
-   * target in EVERY world. Optional only so a fixture can build the
-   * un-attributed shape deliberately.
-   */
-  dimension?: string,
-): { added: boolean; station: KnownResource } {
-  const station: KnownResource = {
-    name: item,
-    kind: 'station',
-    position: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) },
-    ...(dimension === undefined ? {} : { dimension }),
-  }
-  const cellKey = (entry: { name: string; position: Vec3Json }): string =>
-    `${entry.name}@${Math.round(entry.position.x)},${Math.round(entry.position.y)},${Math.round(entry.position.z)}`
-  const key = cellKey(station)
-  if (stations.some((entry) => cellKey(entry) === key)) return { added: false, station }
-  stations.push(station)
-  return { added: true, station }
-}
 
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750
@@ -1202,12 +1088,7 @@ function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
   }
 }
 
-
-
-
 /** #11 v2 §7: a repeat is only a wedge when the world stands still under it. */
-
-
 
 /**
  * #11 v2 §7: termination is an event-boundary semantic decision, never a raw tick
@@ -1221,10 +1102,9 @@ function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
  * (same id, same fingerprint, no flight) still counts and aborts at the limit.
  */
 
-
 /** Kept byte-identical to the pre-fix genuine-wedge abort message. */
 
-interface PendingDecision {
+export interface PendingDecision {
   record: DecisionRecord
   healthAtDecision: number
 }
@@ -2003,8 +1883,6 @@ function preconditionCauseName(predicate: Predicate): string {
   }
 }
 
-
-
 /**
  * The code-owned precondition that stops `goal` from starting, rendered as a
  * `blockedBy` cause (`precondition:pickaxe`), or null when it is startable. A
@@ -2018,7 +1896,6 @@ export function goalPreconditionCause(goal: PlannedGoal | null, snapshot: Option
   const first = unmet[0]
   return first === undefined ? null : `precondition:${preconditionCauseName(first)}`
 }
-
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
  * while still writing the full run JSONL. Lets the acceptance harness observe the
@@ -2057,17 +1934,6 @@ export function controllerUnreachableMoveReason(candidate: Candidate, state: Wor
 /** Beta is semantic authority only when one canonical current Option exists. */
 export function canAuthoritativelyAbandonOption(optionId: string | null): optionId is string {
   return typeof optionId === 'string' && optionId.length > 0
-}
-
-/** A selected route after one of these outcomes starts a fresh local trajectory. */
-function closesDescentRecoveryBoundary(reason: unknown): reason is string {
-  return (
-    reason === 'descent_budget_exhausted' ||
-    reason === 'recurrent_descent_trajectory' ||
-    reason === 'selected_path_budget_exhausted' ||
-    reason === 'selected_descent_blocked_or_spent' ||
-    reason === 'selected_column_descent_blocked_or_spent'
-  )
 }
 
 /**
@@ -2753,6 +2619,11 @@ export class JevController {
   /** WedgeHost view of this controller (same structural-cast pattern as reachHost). */
   private get wedgeHost(): WedgeHost {
     return this as unknown as WedgeHost
+  }
+
+  /** OutcomeAccountingHost view of this controller (same structural-cast pattern as reachHost). */
+  private get outcomeHost(): OutcomeAccountingHost {
+    return this as unknown as OutcomeAccountingHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -6509,558 +6380,7 @@ export class JevController {
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
-    // A settled action (done / failed / cancelled) releases the in-flight
-    // commitment immediately, so the next decision is free to choose again. The
-    // epoch match keeps a stale completion from clearing a newer action's hold.
-    if (
-      this.actionCommitmentState !== null &&
-      this.actionCommitmentState.actionId === result.actionId &&
-      this.actionCommitmentState.epoch === result.epoch
-    ) {
-      this.actionCommitmentState = null
-    }
-    const moved =
-      this.actionStart === null
-        ? 0
-        : Math.hypot(
-            this.bot.entity.position.x - this.actionStart.x,
-            this.bot.entity.position.y - this.actionStart.y,
-            this.bot.entity.position.z - this.actionStart.z,
-          )
-    const moveArrived =
-      (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
-    const surfaceSearchArrived = result.kind === 'RETRIEVE' && this.surfaceSearchArrived(candidate)
-    const exploreSearchArrived = result.kind === 'MOVE' && candidate.meta.explore === true && moveArrived
-    const searchArrived = surfaceSearchArrived || exploreSearchArrived
-    const retrieveArrived = result.kind === 'RETRIEVE' && !surfaceSearchArrived && this.retrievalArrived(candidate)
-    const retrieveDistanceClosed = result.kind === 'RETRIEVE' && !surfaceSearchArrived && result.distanceClosed
-    const truth = truthfulActionOutcome({
-      kind: result.kind,
-      status: result.status,
-      verified: result.verified,
-      itemsGained: result.itemsGained,
-      blockRemoved: result.blockRemoved,
-      progressed: result.progressed,
-      entityDefeated: result.entityDefeated,
-      damageObserved: result.damageObserved,
-      arrived: moveArrived || retrieveArrived,
-      distanceClosed: retrieveDistanceClosed,
-      searchArrived,
-      requiresPickup: candidate.meta.requiresPickup === true,
-    })
-    const semanticProgress =
-      result.itemsGained > 0 ||
-      (truth.verified && (result.kind === 'CRAFT' || result.kind === 'SMELT' || result.kind === 'PLACE' || result.kind === 'IGNITE'))
-    const taxonomy: ActionOutcomeTaxonomy = classifyActionOutcome({
-      kind: result.kind,
-      status: result.status,
-      verified: truth.verified,
-      itemsGained: result.itemsGained,
-      blockRemoved: result.blockRemoved,
-      progressed: result.progressed,
-      entityDefeated: result.entityDefeated,
-      damageObserved: result.damageObserved,
-      arrived: moveArrived || retrieveArrived || searchArrived,
-      distanceClosed: retrieveDistanceClosed,
-      searchArrived,
-      semanticProgress,
-      failureCode: result.failure,
-    })
-    if (surfaceSearchArrived && result.itemsGained === 0 && !result.blockRemoved) {
-      this.recordSurfaceSearch(candidate)
-    }
-    if (taxonomy.progressKinds.some((kind) => kind === 'body' || kind === 'search' || kind === 'goal')) {
-      this.progressEpoch += 1
-      this.semanticStateGeneration += 1
-      this.lastProgress += 1
-      this.lastProgressAt = Date.now()
-      // Observed progress (body/search/goal) resets the typed-action-failure
-      // streak: the same action failing again is no longer one unbroken run.
-      this.actionFailureEscalation.reset()
-      // Real progress also ends any actionable-WAIT streak (#327 follow-up).
-      this.waitStreakEscalation.reset()
-    }
-    this.recentOutcomes.push({
-      actionId: result.actionId,
-      status: result.status,
-      failure: result.failure,
-      verified: truth.verified,
-      detail: result.detail,
-      execution: taxonomy.execution,
-      verification: taxonomy.verification,
-      progress: taxonomy.progress,
-      progressKinds: taxonomy.progressKinds,
-      control: taxonomy.control,
-    })
-    if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
-    // The cross-action bound: one settled action, one typed outcome, one target.
-    // Deliberately NOT gated on `progressKinds` containing `body` - the measured
-    // runaway was laundered by exactly that (an interleaved PILLAR_UP_STEP reports
-    // `progress=body` while the same action keeps concluding `apex_missed` at the
-    // same cell), and per `buddy-driver/AGENTS.md` section 5 body motion is never
-    // completion. Only a changed TYPED OUTCOME or a changed grounding fact
-    // signature restarts the streak.
-    this.noteRepeatedOutcome(result, candidate, truth.verified, taxonomy.progressKinds)
-    this.noteAscendOutcome(result, candidate)
-    // #360: feed the settled decision to the state-recurrence evidence. This runs
-    // once per settled action (not per tick), and `body` progress deliberately
-    // does NOT clear the window: a successful MOVE is not semantic progress.
-    this.signals.strategicNonProgress = this.strategicStall.note({
-      optionInstanceId: this.currentOptionContext()?.instanceId ?? null,
-      stateKey: strategicStateKey(this.bot.entity.position),
-      progressKinds: taxonomy.progressKinds,
-    })
-    // #nonprogress-yield: a settled decision that showed `goal`/`search` progress
-    // clears the optional-head bound. `body`/`none` deliberately do not.
-    this.queue.noteSemanticProgress(taxonomy.progressKinds)
-    // #plan-reconciliation: the same settled semantic progress clears the durable
-    // no-productive-head bound (`noteSemanticProgress` above resets it on the row),
-    // so only a head that genuinely never advances is escalated.
-    // #oscillation-boundary: the BODY's own durable motion record. It is separate
-    // from the queue-head bound above on purpose: that one is about the QUEUE's
-    // head and is cleared by any tick that offers a productive candidate, while
-    // this one is about the BODY's cell envelope and is cleared only by a real
-    // change in the situation. It therefore also observes the ticks that the head
-    // bound deliberately resets on.
-    this.observeLocalMotion(result, candidate, taxonomy)
-
-    writeOutcome(this.jevWriter, {
-      callId: decision.callId,
-      policy: decision.policy,
-      actionId: result.actionId,
-      executed: result.status !== 'cancelled',
-      verified: truth.verified,
-      failureCode: result.failure,
-      goalProgress: result.goalItemCount,
-      note: `${result.status}/${result.phase}: ${result.detail}`,
-    })
-
-    // §2: the ONE semantic result that crosses back into policy. The raw trace
-    // (every swing/path node/hotbar step) stays in the run log; this packet is
-    // what the next decision consumes as the previous outcome.
-    this.emitSkillOutcomePacket({
-      actionId: result.actionId,
-      kind: result.kind,
-      leaseEpoch: result.epoch,
-      status: result.status,
-      failure: result.failure,
-      verified: truth.verified,
-      progressed: result.progressed === true,
-      itemsGained: result.itemsGained,
-      blockRemoved: result.blockRemoved,
-      entityDefeated: result.entityDefeated === true,
-      targetName: result.targetName ?? candidate.targetName,
-      candidate,
-      verification: result.unverifiedPostcondition ?? taxonomy.verification,
-    })
-
-    const pending = this.pendingDecisions.get(result.epoch)
-    this.recentSemanticOutcomes = recordSystem2SemanticAction(
-      this.recentSemanticOutcomes,
-      pending?.record.goalQueueState.current?.id ?? null,
-      taxonomy.progressKinds,
-    )
-    let completedOptionId: string | null = null
-    let completedPlanId: string | null = null
-    if (pending !== undefined) {
-      this.pendingDecisions.delete(result.epoch)
-      completedOptionId = pending.record.optionId
-      completedPlanId = pending.record.goalQueueState.current?.id ?? null
-      attachResult(pending.record, {
-        actionId: result.actionId,
-        success: truth.status === 'done' && truth.verified,
-        durationMs: result.ms,
-        damageTaken: Math.max(0, pending.healthAtDecision - this.bot.health),
-        progress: this.goal.progress,
-        status: result.status,
-        failureCode: result.failure,
-        verified: truth.verified,
-        blockRemoved: result.blockRemoved,
-        dropObserved: result.dropObserved,
-        damageObserved: result.damageObserved ?? false,
-      })
-      this.decisionWriter.write(pending.record)
-      const chain = completeCausalChain(
-        {
-          chainId: pending.record.chainId ?? 'unknown',
-          optionId: pending.record.optionId,
-          semanticOptionInstanceId: pending.record.semanticOptionInstanceId,
-          planId: pending.record.goalQueueState.current?.id ?? null,
-          strategy: pending.record.strategy,
-        },
-        {
-          candidateId: pending.record.chosenAction,
-          actionId: result.actionId,
-          verified: truth.verified,
-          status: truth.status,
-          resource: result.yieldItem ?? result.targetName ?? null,
-          progressDelta: result.itemsGained,
-          observable: truth.observableProgress,
-          taxonomy,
-        },
-      )
-      this.logger.info('causal', formatCausalLine(chain), causalRecord(chain), this.tickCounter)
-      if (truth.downgraded) {
-        this.logger.warn(
-          'agent',
-          `ACTION_ZERO_PROGRESS actionId=${result.actionId} kind=${result.kind} reason=verified_without_observable_progress rawStatus=${result.status}`,
-          { actionId: result.actionId, kind: result.kind, verified: result.verified, detail: result.detail },
-          this.tickCounter,
-        )
-      }
-    }
-
-    if (result.status === 'cancelled' || result.failure === 'cancelled') {
-      this.logger.info(
-        'agent',
-        `action#${result.epoch} ${result.actionId} ended cancelled (preempted) - ownership handover complete`,
-        { actionId: result.actionId, ms: result.ms },
-        this.tickCounter,
-      )
-      return
-    }
-
-    this.retireFailedKnownRetrieve(candidate, result)
-    this.recordZeroProgressOutcome(result, candidate, truth)
-    if (result.unverifiedPostcondition !== undefined) {
-      this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
-    } else if (truth.status === 'done' && truth.verified) {
-      const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
-      if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
-      // A verified success ends the run of typed failures for this plan/action.
-      this.actionFailureEscalation.reset()
-    }
-
-    if (completedOptionId !== null) {
-      this.optionAttempts.noteOutcome(
-        {
-          optionId: completedOptionId,
-          planId: completedPlanId,
-          verified: truth.verified,
-          // Beta's option productivity is semantic/goal progress only. Body or
-          // search progress remains visible in the typed taxonomy and resets the
-          // strategic stall clock, but it must not masquerade as Option DONE.
-          progressDelta: taxonomy.progress === 'goal' ? 1 : 0,
-        },
-        Date.now(),
-      )
-    }
-
-    if (result.status === 'done') {
-      if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
-        this.placementRetries.noteVerified(candidate.itemName)
-        if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
-          const registered = registerPlacedStation(
-            this.placedStations,
-            candidate.itemName,
-            candidate.target,
-            this.currentDimension(),
-          )
-          if (registered.added) {
-            this.logger.info(
-              'agent',
-              formatStationRegisteredPlaced('furnace', candidate.target),
-              {
-                kind: 'furnace',
-                source: 'placed',
-                at: `${Math.round(candidate.target.x)},${Math.round(candidate.target.y)},${Math.round(candidate.target.z)}`,
-              },
-              this.tickCounter,
-            )
-          }
-        }
-        if (candidate.meta.furnaceSource === 'held' && candidate.target !== null) {
-          this.signals.heldFurnacePlacedAt = blockId('b', candidate.target)
-        }
-      }
-      if (result.kind === 'MINE' && truth.verified) {
-        if (result.blockRemoved) this.resetDescendBudgetAfterWorldChange(result.actionId, 'verified_mine')
-        this.noteCandidateSuccess(result.actionId)
-        this.verifiedDigs += 1
-        if (result.blockRemoved) this.blocksRemoved += 1
-        if (result.dropObserved) this.dropObservations += 1
-        this.itemsCollected += result.itemsGained
-        // A MINE only counts as one obtained goal item when the truth layer
-        // verified it: a collect MINE whose drop was not picked up is a typed
-        // failure (`pickup_failed`), never a completed collection.
-        const current = this.queue.current
-        if (result.blockRemoved && current !== null && result.yieldItem === current.targetItem) {
-          this.harvestedGoalCount += 1
-        }
-        this.goal = goalWithHave(this.goal, this.effectiveHave())
-        if (this.goal.progress > this.lastProgress) {
-          this.lastProgress = this.goal.progress
-          this.lastProgressAt = Date.now()
-        }
-        this.recentEvents.push(
-          `dug ${result.actionId}; ${this.goal.targetItem} ${this.goal.haveCount}/${this.goal.requiredCount}`,
-        )
-        this.logger.info(
-          'agent',
-          `VERIFIED ${result.actionId} removed=${result.blockRemoved} gained=${result.itemsGained} goal=${this.goal.haveCount}/${this.goal.requiredCount} progress=${Math.round(this.goal.progress * 100)}%`,
-          { actionId: result.actionId, ms: result.ms },
-          this.tickCounter,
-        )
-        if (this.goal.complete && this.queue.current?.kind !== 'descend' && !this.options.singleShotPlanner) {
-          this.onObjectiveComplete()
-          return
-        }
-      }
-      if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
-      // The dig route's own progress assertion: the step CLAIMED it lands closer
-      // to the goal's target, so a settled step re-measures the distance. Only a
-      // real decrease is reported.
-      if (candidate.meta.digRoute === true) this.logDigRouteProgress(result, candidate)
-      // The level-scan descent's own measured half: the level actually reached and the
-      // distance to the target after the step. Only a real downward move is reported.
-      if (candidate.meta.levelScan === true) this.logLevelScanStep(result, candidate)
-      if (result.kind === 'RETRIEVE') {
-        if (result.blockRemoved) this.onRetrievalDescent(candidate)
-        // Only a COMPLETED retrieval - the target actually arrived or the item
-        // was acquired - retires the active target and resets the coordinate
-        // failure memory. A measured distance closure or a vertical chunk is
-        // `progressed` evidence, NOT completion: RC8 (run-mu8ue5dg-10amk) closed
-        // ~1 m of a 20 m approach and still reset `MOVE_FAILMEM`, re-arming the
-        // live horizontal dead end (`outcome=stuck` + `MOVE_FAILMEM_RESET`).
-        const retrieveMemory = decideRetrieveMemory(result, this.retrieveCompleted(candidate, result))
-        if (truth.resetsFailureMemory && retrieveMemory.reset) {
-          this.activeRetrieval = null
-          this.retrievalTrack = null
-          this.noteCandidateSuccess(result.actionId)
-          this.recordMoveSuccess(candidate)
-        } else if (!truth.replanProgress && !truth.observableProgress) {
-          // A retrieval that reports completion while producing nothing
-          // observable must charge the coordinate failure memory so it is
-          // eventually skipped, and it must never be recorded as a verified
-          // success (`status=done verified=false progressDelta=0`). Bounded
-          // body progress (`replanProgress`) is not zero progress.
-          this.recordMoveFailure(candidate, 'no_progress')
-        }
-        if (truth.status === 'unreached') {
-          this.logger.warn(
-            'agent',
-            `ACTION_RETRIEVE_UNREACHED actionId=${result.actionId} progressed=${result.progressed} blockRemoved=${result.blockRemoved} (progressed without closure)`,
-            { actionId: result.actionId, target: candidate.target, progressed: result.progressed },
-            this.tickCounter,
-          )
-        }
-        if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
-          const outcome = evaluateRetrieveAbandon({
-            actionId: result.actionId,
-            verified: truth.verified,
-            progressDelta: result.itemsGained,
-            previous: this.retrieveUnverified,
-          })
-          this.retrieveUnverified = outcome.state
-          if (outcome.abandon && outcome.line !== null) {
-            this.abandonRetrieveOption(outcome.line, candidate, outcome.state.unverified)
-          }
-        }
-      }
-      if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
-        const outcome = classifyMoveOutcome(result.verified, moved)
-        switch (outcome) {
-          case 'arrived':
-            this.recordMoveSuccess(candidate)
-            break
-          case 'unverified':
-          case 'no-progress': {
-            if (moved < 0.5) {
-              const p = this.bot.entity.position
-              const region = `${Math.floor(p.x)}_${Math.floor(p.y)}_${Math.floor(p.z)}`
-              const value = Math.round(moved * 100) / 100
-              this.logger.warn(
-                'agent',
-                `MOVE_OSCILLATE travelled=${value} net=${value} progress=0 region=${region} -> spatial_failure`,
-                { actionId: result.actionId, region },
-                this.tickCounter,
-              )
-            }
-            this.noteCandidateFailure(result.actionId)
-            this.recordMoveFailure(candidate, 'no_progress')
-            break
-          }
-        }
-      }
-      this.actionStart = null
-      if (!truth.downgraded && result.kind !== 'WAIT' && result.kind !== 'ESCALATE') {
-        this.failureStreak = 0
-        this.signals.consecutiveFailures = 0
-      }
-    } else if (result.kind === 'PLACE' && this.schedulePlaceRetry(result, candidate)) {
-      this.noteCandidateFailure(result.actionId)
-    } else {
-      if (result.kind !== 'ESCALATE' && result.kind !== 'WAIT') {
-        this.noteCandidateFailure(result.actionId)
-        this.recordMoveFailure(candidate, moveFailureReason(result.failure))
-        this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
-        // #78 follow-up: bound the OTHER loop - the same plan re-offered with its
-        // action failing the same typed way. `onUnverifiedAction` owns unverified
-        // postconditions with its own budget, and a PLACE retry was handled above,
-        // so neither reaches here as an unhandled typed failure.
-        if (result.unverifiedPostcondition === undefined && result.failure !== null) {
-          this.noteTypedActionFailure(result.failure, result.actionId, pending)
-        }
-      } else {
-        this.logger.info(
-          'agent',
-          `CONTROL_OUTCOME kind=${result.kind} status=${result.status} failure=${result.failure ?? 'null'} not_charged_as_physical_failure`,
-          { actionId: result.actionId, status: result.status, failure: result.failure, control: result.kind === 'ESCALATE' ? 'escalate' : 'wait' },
-          this.tickCounter,
-        )
-      }
-    }
-
-    const completionTrigger: DecisionTrigger = isActionTimeout(result) ? 'action_timeout' : 'action_completed'
-    const deferred = this.deferredTrigger
-    this.deferredTrigger = null
-    if (result.kind === 'ESCALATE') {
-      const candidateReason =
-        typeof candidate.meta.reason === 'string' ? candidate.meta.reason.slice(0, 120) : 'selected_by_jev'
-      const capabilities =
-        typeof candidate.meta.capabilities === 'string' ? candidate.meta.capabilities.slice(0, 180) : ''
-      const reason: LlmSummonReason = this.queue.current === null ? 'queue_empty' : 'action_impossible'
-      const detail =
-        `Jev selected ESCALATE actionId=${result.actionId} leaseEpoch=${result.epoch} ` +
-        `candidateReason=${candidateReason}${capabilities.length > 0 ? ` capabilities=${capabilities}` : ''}`
-      const handoff = submitSystem2Handoff({ reason, detail }, (summonReason, summonDetail) =>
-        this.summonLlm(summonReason, summonDetail),
-      )
-      if (handoff.status === 'submitted') {
-        this.logger.warn(
-          'system2',
-          `ESCALATE_HANDOFF status=submitted actionId=${result.actionId} leaseEpoch=${result.epoch} requestId=${handoff.requestId ?? 'unknown'} reason=${handoff.reason}`,
-          {
-            status: handoff.status,
-            actionId: result.actionId,
-            leaseEpoch: result.epoch,
-            requestId: handoff.requestId,
-            reason: handoff.reason,
-            detail: handoff.detail,
-          },
-          this.tickCounter,
-        )
-      } else {
-        this.logger.error(
-          'system2',
-          `ESCALATE_HANDOFF status=unavailable actionId=${result.actionId} leaseEpoch=${result.epoch} reason=${handoff.reason} blocker=${handoff.blocker}`,
-          {
-            status: handoff.status,
-            actionId: result.actionId,
-            leaseEpoch: result.epoch,
-            reason: handoff.reason,
-            detail: handoff.detail,
-            blocker: handoff.blocker,
-          },
-          this.tickCounter,
-        )
-      }
-      // ESCALATE is a control-plane request, not a physical Skill completion.
-      // The System2 response schedules the next decision after dispatch. If the
-      // request is suppressed, wait for a separate wake instead of immediately
-      // asking Jev to select ESCALATE again from unchanged facts. Preserve any
-      // independent trigger that arrived while the control action settled; when
-      // dispatch succeeds it coalesces with the System2 response, and when it is
-      // unavailable it becomes the explicit next wake. Safety triggers therefore
-      // retain their normal priority without manufacturing an action-completed
-      // retry from the ESCALATE request itself.
-      if (deferred !== null) {
-        if (handoff.status === 'submitted') {
-          this.pendingTrigger = pickHigherPriority(this.pendingTrigger, deferred)
-        } else {
-          this.requestDecision(deferred.trigger, deferred.detail)
-        }
-      }
-      return
-    }
-    const next = selectPostActionTrigger(deferred, {
-      trigger: completionTrigger,
-      detail: { actionId: result.actionId, status: result.status, failure: result.failure },
-      ts: Date.now(),
-    })
-    this.requestDecision(next.trigger, next.detail)
-  }
-
-  /**
-   * #79: a `done`/`verified=false`/`progressDelta=0` action is a FAILURE. Log
-   * ACTION_UNVERIFIED with the plan/strategy/post-condition, charge the failure,
-   * advance the furnace prerequisite path so the plan is never re-queued
-   * unchanged, and after UNVERIFIED_ACTION_LIMIT attempts for one planId emit
-   * `ABANDON_REASON=action_unverified` and wake System 2 for a different option.
-   */
-  private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
-    const planId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
-    const strategy = pending?.record.strategy ?? null
-    const key = planId ?? result.actionId
-    const attempts = (this.actionUnverified.get(key) ?? 0) + 1
-    this.actionUnverified.set(key, attempts)
-    this.logger.warn(
-      'agent',
-      formatActionUnverified({ planId, actionId: result.actionId, strategy, postcondition }),
-      { planId, actionId: result.actionId, strategy, attempts, postcondition, progressDelta: result.itemsGained, detail: result.detail },
-      this.tickCounter,
-    )
-    this.noteCandidateFailure(result.actionId)
-    this.recordFailure('verify_failed', `${result.actionId} unverified: ${result.detail}`)
-
-    const switched = this.advancePrereqAfterUnverified()
-    const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
-    if (budget.abandon) {
-      this.markOptionAbandoned(result.actionId, 'action_unverified')
-      this.logger.warn(
-        'agent',
-        budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
-        { planId: key, attempts, strategy, switched, postcondition },
-        this.tickCounter,
-      )
-    }
-    if (budget.abandon) {
-      // This is now a semantic boundary: the current Option exhausted its
-      // code-owned postcondition budget. A single local verification miss is
-      // evidence for Jev/Skill recovery, not a new System2 mission.
-      this.summonLlm(
-        'action_impossible',
-        `semantic option exhausted after unverified outcome planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
-      )
-    } else if (switched) {
-      this.logger.info(
-        'agent',
-        `LOCAL_PREREQ_RECOVERY planId=${key} attempts=${attempts} next_path_selected=true system2=false`,
-        { planId: key, attempts, strategy, postcondition },
-        this.tickCounter,
-      )
-    } else {
-      this.logger.info(
-        'agent',
-        `LOCAL_VERIFY_RECOVERY planId=${key} attempts=${attempts} system2=false`,
-        { planId: key, attempts, strategy, postcondition },
-        this.tickCounter,
-      )
-    }
-  }
-
-  /**
-   * #79/#58: an unverified prerequisite attempt must not repeat the same path.
-   * Advance the scored furnace-prerequisite plan to the next feasible option
-   * (place_held -> use_known_station -> craft_and_place). The parent goal is
-   * never abandoned here.
-   */
-  private advancePrereqAfterUnverified(): boolean {
-    if (this.prereqPlan === null) return false
-    const current = this.prereqForcedPath ?? this.prereqPlan.chosen
-    if (current === null) return false
-    const next = nextPrereqPath(this.prereqPlan, current)
-    if (next === null) return false
-    this.prereqForcedPath = next
-    this.prereqProgress = null
-    this.prereqLoggedKey = null
-    this.logger.warn(
-      'agent',
-      `PREREQ_SWITCH from=${current} to=${next} reason=action_unverified`,
-      { from: current, to: next, reason: 'action_unverified', goal: this.currentGoalKey() },
-      this.tickCounter,
-    )
-    return true
+    return outcome.onActionComplete(this.outcomeHost, result, decision, candidate)
   }
 
   private syncTerrainSignals(state: WorldState): void {
@@ -7215,125 +6535,7 @@ export class JevController {
     return diagnostics.logDescendPlan(this.diagnosticsHost, candidate)
   }
   private onDescendComplete(result: ExecutionResult, candidate: Candidate): void {
-    const recoveryBoundaryReason = candidate.meta.recoveryBoundaryReason
-    if (closesDescentRecoveryBoundary(recoveryBoundaryReason)) {
-      // Jev has selected a grounded route after the previous trajectory reached
-      // its typed boundary. Give that new route its own bounded mechanical
-      // continuation budget; otherwise the exhausted latch would evict the
-      // newly selected heading/mode again on every following dig.
-      this.digMemory.beginSelectedRecoveryPath()
-      this.digOscillationReported = false
-      this.logger.info(
-        'agent',
-        `DESCEND_RECOVERY_SELECTED reason=${recoveryBoundaryReason} action=${result.actionId}`,
-        {
-          actionId: result.actionId,
-          reason: recoveryBoundaryReason,
-          dir: candidate.meta.dir ?? null,
-          mode: candidate.meta.mode ?? null,
-          target: candidate.target,
-          outcome: candidate.meta.skillOutcome ?? null,
-          authority: 'jev_pi',
-        },
-        this.tickCounter,
-      )
-    }
-    const target = candidate.target
-    const dir = candidate.meta.dir
-    if (target !== null && (dir === 'E' || dir === 'W' || dir === 'N' || dir === 'S' || dir === 'D')) {
-      this.digMemory.record({
-        x: target.x,
-        y: target.y,
-        z: target.z,
-        dir,
-        mode: candidate.meta.mode === 'down' ? 'down' : 'level',
-        target: typeof candidate.meta.focusItem === 'string' ? candidate.meta.focusItem : null,
-        atMs: Date.now(),
-      })
-    }
-    const have = this.effectiveHave()
-    const delta = have - this.descendHaveBaseline
-    const y = this.bot.entity.position.y
-    const yProgressed = this.actionStart !== null && y < this.actionStart.y - 0.5
-    const descending = this.queue.current?.kind === 'descend'
-    if (delta > 0 || (descending && yProgressed)) {
-      this.descendHaveBaseline = have
-      // Predicate descent has already made monotone Y progress inside its current
-      // Skill. Reset its no-progress budget, while keeping the chosen heading and
-      // mode so the next safe step remains a mechanical continuation. A collected
-      // resource changes the search state, so that separate semantic progress
-      // starts with a fresh path.
-      if (descending && yProgressed) this.digMemory.resetDescendBudget()
-      else this.digMemory.markResourceProgress()
-      // A descending predicate goal makes progress by losing altitude, not by
-      // gaining items, so a verified drop must also reset the progress-stall clock.
-      if (descending && yProgressed) this.lastProgressAt = Date.now()
-    } else {
-      // No resource delta is evidence about this trajectory, not a mandate to
-      // switch to lateral search. Keep the active path contract intact; when the
-      // bounded budget is exhausted, grounding returns distinct alternatives to
-      // Jev instead of installing one recovery strategy here.
-      const budgetAlreadyExhausted = this.digMemory.snapshot().descendLimitReached
-      const budget = this.digMemory.markDescend(false)
-      this.logger.info(
-        'agent',
-        `DESCEND_NO_PROGRESS action=${result.actionId} resourceDelta=${delta} streak=${budget.noProgress}`,
-        { actionId: result.actionId, resourceDelta: delta, noProgress: budget.noProgress },
-        this.tickCounter,
-      )
-      this.logger.info(
-        'agent',
-        `DESCEND_PROGRESS actionSuccess=true resourceDelta=${delta} streak=${budget.noProgress}`,
-        { actionId: result.actionId, noProgress: budget.noProgress },
-        this.tickCounter,
-      )
-      if (budget.limitReached && !budgetAlreadyExhausted) {
-        this.skillOutcomeBoundary = true
-        this.logger.warn(
-          'agent',
-          `DESCEND_LIMIT depth=${this.digMemory.depth} noProgress=${budget.noProgress} outcome=BUDGET_EXHAUSTED recovery=policy_boundary`,
-          { actionId: result.actionId, outcome: 'BUDGET_EXHAUSTED', recoveryAuthority: 'jev_pi' },
-          this.tickCounter,
-        )
-        this.signals.descendLimitReached = true
-      }
-      if (budget.limitReached) this.signals.descendLimitReached = true
-    }
-    const oscillating = this.digMemory.isOscillating()
-    if (oscillating && !this.digOscillationReported) {
-      this.skillOutcomeBoundary = true
-      const net = Math.round(this.digMemory.netDisplacement() * 100) / 100
-      this.logger.warn(
-        'agent',
-        `DIG_OSCILLATE net=${net} outcome=RECURRENT_STATE recovery=policy_boundary`,
-        { actionId: result.actionId, dir: this.digMemory.dir, outcome: 'RECURRENT_STATE', recoveryAuthority: 'jev_pi' },
-        this.tickCounter,
-      )
-    }
-    this.digOscillationReported = oscillating
-  }
-
-  /**
-   * Issue #45: a RETRIEVE that dug its own staircase records the new tunnel cell
-   * so the next retrieval can prefer `REUSE_TUNNEL` over digging a fresh one.
-   */
-  private onRetrievalDescent(candidate: Candidate): void {
-    if (candidate.meta.vertical !== 'staircase') return
-    const x = candidate.meta.stairStepX
-    const y = candidate.meta.stairStepY
-    const z = candidate.meta.stairStepZ
-    const dir = candidate.meta.stairDir
-    if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return
-    if (typeof dir !== 'string') return
-    this.digMemory.record({
-      x,
-      y,
-      z,
-      dir: dir as DigDir,
-      mode: 'down',
-      target: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : null,
-      atMs: Date.now(),
-    })
+    return outcome.onDescendComplete(this.outcomeHost, result, candidate)
   }
 
   // -------------------------------------------------------------------------
@@ -7652,50 +6854,7 @@ export class JevController {
   }
 
   private recordFailure(code: FailureCode | GuardCode | string | null, detail: string): void {
-    this.failureStreak += 1
-    this.signals.consecutiveFailures = this.failureStreak
-    this.signals.lastFailureCode = code
-    this.recentEvents.push(`failure ${code ?? 'unknown'}: ${detail}`)
-    this.logger.warn(
-      'agent',
-      `failure streak ${this.failureStreak}/${this.options.failureStreakLimit} code=${code ?? 'unknown'}`,
-      { detail },
-      this.tickCounter,
-    )
-    const boundary = shouldWakeSystem2AfterLocalFailure({
-      failureCode: code,
-      activeOption: this.queue.current !== null,
-      semanticExhausted: false,
-      semanticInvalid: false,
-      semanticAbandoned: false,
-    })
-    const localRouteFailure = code === 'path_no_path' || code === 'path_stuck' || code === 'no_path' || code === 'no_standable_approach' || code === 'open_path'
-    if (localRouteFailure && !boundary.wake && boundary.reason === 'local_recovery') {
-      // A local route failure is evidence for grounded Jev/Skill recovery. It is
-      // not a semantic mission boundary and must not summon System2 by itself.
-      this.logger.info(
-        'agent',
-        `LOCAL_ROUTE_FAILURE code=${code ?? 'unknown'} system2=false detail=${detail}`,
-        { code, detail, failureStreak: this.failureStreak, boundary: boundary.reason },
-        this.tickCounter,
-      )
-    } else if (code === 'unknown_event') this.escalate('unknown_event', detail)
-    else if (code === 'verify_failed') {
-      this.logger.info('agent', `LOCAL_VERIFY_FAILURE system2=false detail=${detail}`, { code, detail }, this.tickCounter)
-    }
-    // `verify_failed` used to be excluded here on the theory that the unverified
-    // ACTION budget bounds it instead. Measured live: that budget is keyed per plan
-    // (falling back to the action id) and both rotate as the body re-decides - the log
-    // shows `ACTION_UNVERIFIED planId=null ... attempts=1` every time and
-    // `ABANDON_REASON=action_unverified` ZERO times in the whole run, while one ATTACK
-    // ended `MECHANICALLY_BLOCKED failure=verify_failed` three times in a row (30 such
-    // attacks: the single most common ATTACK outcome). The operator saw the result
-    // directly - "ずっと攻撃モードになってて次の行動を再開しない", stuck in attack mode and
-    // never resuming. A repeated verification failure is exactly what this streak bound
-    // exists for, so it is no longer excluded.
-    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure) {
-      this.escalate('same_failure_3x', `${code ?? 'unknown'} failed ${this.failureStreak}x: ${detail}`)
-    }
+    return outcome.recordFailure(this.outcomeHost, code, detail)
   }
 
   /**
@@ -10368,10 +9527,6 @@ export class JevController {
 // from this module's historical location. Definition lives in `scheduler.ts`.
 export { pickHigherPriority }
 
-function isActionTimeout(result: ExecutionResult): boolean {
-  return result.failure === 'path_timeout' || result.failure === 'dig_timeout'
-}
-
 /** Prefer the `need_llm` resummon for the record; otherwise the tick's first one. */
 function pickResummon(
   log: readonly DecisionLlmResummonLog[],
@@ -10383,17 +9538,6 @@ function pickResummon(
   }
   const first = log[0]
   return first ?? { triggered: false, reason: null, detail: null }
-}
-
-
-function goalWithHave(goal: GoalState, have: number): GoalState {
-  const required = Math.max(1, goal.requiredCount)
-  return {
-    ...goal,
-    haveCount: have,
-    progress: Math.min(1, have / required),
-    complete: have >= required,
-  }
 }
 
 function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler): ExecutorOptions {

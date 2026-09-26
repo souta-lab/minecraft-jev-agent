@@ -611,11 +611,11 @@ check(
 check(
   '(wiring) onActionComplete feeds the BODY cell, the movement ATTEMPT cell and the progress kinds',
   () => {
-    const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+    const outcome = readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
     const observers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8')
-    const complete = /private onActionComplete\([\s\S]*?\n  private [a-zA-Z]/.exec(source)?.[0] ?? ''
+    const complete = /export function onActionComplete\([\s\S]*?\nexport function [a-zA-Z]/.exec(outcome)?.[0] ?? ''
     return (
-      complete.includes('this.observeLocalMotion(result, candidate, taxonomy)') &&
+      complete.includes('host.observeLocalMotion(result, candidate, taxonomy)') &&
       /observeLocalOscillation\(/.test(observers) &&
       /isTrackedMoveKind\(result\.kind\) && candidate\.target !== null/.test(observers) &&
       /semanticProgress: taxonomy\.progressKinds\.some\(\(kind\) => kind === 'goal' \|\| kind === 'search'\)/.test(observers) &&

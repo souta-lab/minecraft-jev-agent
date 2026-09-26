@@ -1323,14 +1323,15 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 {
   const source =
     readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
+    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
     ['DIG_ROUTE logged when selected', /if \(guarded\.candidate\.meta\.digRoute === true\) \{\s*\n\s*this\.logDigRoute\(guarded\.candidate\)/.test(source)],
     ['dig route selection is a canonical SKILL_STEP', /'dig_route',\s*\n\s*formatSkillStepAuthority\(\s*\n\s*'MECHANICAL_CONTINUATION'/.test(source)],
     ['policy boundary logged', /private logSkillPolicyBoundaries/.test(source) && /SKILL_POLICY_BOUNDARY/.test(source)],
-    ['DIG_ROUTE_PROGRESS on a settled step', /if \(candidate\.meta\.digRoute === true\) this\.logDigRouteProgress\(result, candidate\)/.test(source)],
+    ['DIG_ROUTE_PROGRESS on a settled step', /if \(candidate\.meta\.digRoute === true\) host\.logDigRouteProgress\(result, candidate\)/.test(source)],
     ['DIG_ROUTE_REFUSED from the offer', /this\.logDigRouteRefusals\(grounded\.digRefusals\)/.test(source)],
     ['DIG_ROUTE mirrored', /const MIRRORED_MARKERS[\s\S]*?'DIG_ROUTE'/.test(source)],
     ['DIG_ROUTE_REFUSED mirrored', /const MIRRORED_MARKERS[\s\S]*?'DIG_ROUTE_REFUSED'/.test(source)],

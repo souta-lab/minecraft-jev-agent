@@ -406,7 +406,8 @@ addCase('(iv-c) the escalation markers are mirrored, so the escalation reaches t
 // defect class this lane exists to close.
 addCase('(iv-d) the controller OBSERVES at the settle site and PRUNES in the candidate chain', () => {
   const src = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
-  const observed = src.includes('this.noteRepeatedOutcome(result, candidate, truth.verified, taxonomy.progressKinds)')
+  const outcomeSrc = readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
+  const observed = outcomeSrc.includes('host.noteRepeatedOutcome(result, candidate, truth.verified, taxonomy.progressKinds)')
   const pruned = src.includes('candidates = this.filterRepeatedOutcomeCandidates(candidates, state)')
   // The observation must use the TARGET signature (no body-relative gap), never
   // the full fingerprint whose `gap` term alternated 122x/115x in the live record.

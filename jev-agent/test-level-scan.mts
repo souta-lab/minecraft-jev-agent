@@ -1029,12 +1029,13 @@ function levelsUnobserved(state: WorldState): boolean {
 {
   const source =
     readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
+    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const policySource = readFileSync(new URL('./src/policy.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
     ['LEVEL_SCAN logged when selected', /if \(guarded\.candidate\.meta\.levelScan === true\) this\.logLevelScan\(guarded\.candidate\)/.test(source)],
-    ['LEVEL_SCAN_STEP on a settled descent', /if \(candidate\.meta\.levelScan === true\) this\.logLevelScanStep\(result, candidate\)/.test(source)],
+    ['LEVEL_SCAN_STEP on a settled descent', /if \(candidate\.meta\.levelScan === true\) host\.logLevelScanStep\(result, candidate\)/.test(source)],
     ['LEVEL_SCAN mirrored', /const MIRRORED_MARKERS[\s\S]*?'LEVEL_SCAN'/.test(source)],
     ['LEVEL_SCAN_STEP mirrored', /const MIRRORED_MARKERS[\s\S]*?'LEVEL_SCAN_STEP'/.test(source)],
     ['the §7 layer half rides SKILL_STEP', /step: 'level_scan'/.test(source)],

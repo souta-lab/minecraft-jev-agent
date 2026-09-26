@@ -57,7 +57,7 @@ describe('typed Jev to System2 escalation handoff', () => {
   })
 
   it('wires ESCALATE settlement to the dispatcher and never queues the same completion decision', () => {
-    const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+    const controller = readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
     const executor = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
     const candidates = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
     const completionTrigger = controller.indexOf('const completionTrigger: DecisionTrigger =')
@@ -69,13 +69,13 @@ describe('typed Jev to System2 escalation handoff', () => {
     const branch = controller.slice(start, ordinaryDispatch)
 
     assert.match(branch, /submitSystem2Handoff\(/)
-    assert.match(branch, /this\.summonLlm\(summonReason, summonDetail\)/)
+    assert.match(branch, /host\.summonLlm\(summonReason, summonDetail\)/)
     assert.match(branch, /ESCALATE_HANDOFF status=submitted/)
     assert.match(branch, /ESCALATE_HANDOFF status=unavailable/)
     assert.match(branch, /\breturn\b/)
     assert.doesNotMatch(branch, /selectPostActionTrigger\(/)
     assert.doesNotMatch(branch, /requestDecision\(completionTrigger/)
-    assert.match(branch, /pendingTrigger = pickHigherPriority\(this\.pendingTrigger, deferred\)/)
+    assert.match(branch, /pendingTrigger = pickHigherPriority\(host\.pendingTrigger, deferred\)/)
     assert.match(branch, /requestDecision\(deferred\.trigger, deferred\.detail\)/)
     assert.doesNotMatch(executor, /'escalating', 'handed to System 2'/)
     assert.match(executor, /handoff_request_staged/)
