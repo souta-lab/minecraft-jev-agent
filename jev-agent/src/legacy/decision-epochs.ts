@@ -22,7 +22,7 @@ import type { Bot } from 'mineflayer'
 import type { OptionAttemptTracker } from '../abandonPolicy.ts'
 import { evaluateActionCommitment, evaluateCandidateFlap } from '../candidateCommitment.ts'
 import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from '../candidateCommitment.ts'
-import { CONTACT_THREAT_KINDS, KNOWN_RETRIEVE_SKILL } from '../candidates.ts'
+import { CONTACT_THREAT_KINDS, CRITICAL_COMBAT_HEALTH, KNOWN_RETRIEVE_SKILL } from '../candidates.ts'
 import type { Candidate, CandidateKind } from '../candidates.ts'
 import { attachResult } from '../decisionlog.ts'
 import type { DecisionJevLog, DecisionRecord } from '../decisionlog.ts'
@@ -64,6 +64,7 @@ import type { GuardCode, GuardResult } from '../policy.ts'
 import { formatWaitExhausted, formatWaitStreak } from '../replanThrottle.ts'
 import type { WaitStreakEscalation } from '../replanThrottle.ts'
 import { commitmentInvalidation, formatSkillInvalidated, targetIdentityKey } from '../skillCommitment.ts'
+import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease } from '../scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from '../scheduler.ts'
 import type { GoalState, Vec3Json, WorldState } from '../state.ts'
 import { MELEE_THREAT_REACH } from '../threat.ts'
@@ -203,7 +204,17 @@ export interface DecisionEpochsHost {
   logEpochSuperseded(previous: DecisionEpoch | null): void
   buildSemanticProjection(state: WorldState, candidates: readonly Candidate[], mergedCandidates: number): JevSemanticProjection
   repointReplay(result: JevResult, views: readonly SemanticCandidateView[]): JevResult | null
+  running: boolean
+  modelRecoveryStopping: boolean
+  ticking: boolean
+  decisionTimer: NodeJS.Timeout | null
+  lastTickAt: number
+  liveAir(): number | null
+  tick(trigger: DecisionTrigger, detail: Record<string, unknown>): Promise<void>
+  requestDecision(trigger: DecisionTrigger, detail: Record<string, unknown>): void
+  scheduleTick(event: TriggerEvent): void
 }
+
 
 /** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
 export function guardMoveFailureReason(
@@ -1171,4 +1182,116 @@ export async function decide(
     const fatal = error instanceof FatalModelError ? error : new FatalModelError('jev-policy', 1, describeFailure(error))
     return failLoud(fatal, (event, detail) => host.logger.error('policy', event, { trigger, ...(detail ?? {}) }, host.tickCounter), host.options.terminateOnModelFailure)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Trigger scheduling (moved from controller-legacy.ts): priority coalescing,
+// RETREAT/ATTACK lease defer/preempt, macrotask-spaced tick dispatch.
+// ---------------------------------------------------------------------------
+
+export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigger, detail: Record<string, unknown>): void {
+  if (!host.running || host.modelRecoveryStopping) return
+  const event: TriggerEvent = { trigger, detail, ts: Date.now() }
+  if (host.ticking) {
+    if (trigger !== 'heartbeat') host.pendingTrigger = pickHigherPriority(host.pendingTrigger, event)
+    return
+  }
+  const inFlight = host.executor.current
+  if (inFlight !== null) {
+    // A RETREAT is already the selected safety response. Controller-only
+    // reground requests and real hit/health events wait for its bounded Skill
+    // to finish; action completion will either supersede stale repair or
+    // replay real damage with its normal preemptive priority.
+    if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind)) {
+      host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
+      host.logger.info(
+        'scheduler',
+        `trigger=${trigger} deferred during RETREAT lease#${inFlight.epoch} ${inFlight.id}`,
+        detail,
+        host.tickCounter,
+      )
+      return
+    }
+    if (PREEMPTIVE_TRIGGERS.has(trigger)) {
+      // ATTACK is a Jev-selected combat lease.  Damage/entity events are
+      // expected while the selected attack is being aimed and delivered;
+      // asking Jev again on every hit cancels the attack before its next
+      // cooldown and lets a nearby zombie turn the agent into a MOVE/WAIT
+      // loop.  Keep the selected attack mechanics together and replay the
+      // highest-priority threat trigger immediately after the short lease.
+      if (inFlight.kind === 'ATTACK') {
+        const air = host.liveAir()
+        if (shouldPreemptActiveActionLease(trigger, inFlight.kind, host.bot.health, CRITICAL_COMBAT_HEALTH, air)) {
+          host.logger.warn(
+            'scheduler',
+            `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${host.bot.health} air=${air}`,
+            detail,
+            host.tickCounter,
+          )
+          host.scheduleTick(event)
+          return
+        }
+        host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
+        host.logger.info(
+          'scheduler',
+          `trigger=${trigger} deferred during ATTACK lease#${inFlight.epoch} ${inFlight.id}`,
+          detail,
+        )
+        return
+      }
+      host.logger.info(
+        'scheduler',
+        `trigger=${trigger} preempts action#${inFlight.epoch} ${inFlight.id}`,
+        detail,
+        host.tickCounter,
+      )
+      host.scheduleTick(event)
+      return
+    }
+    host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
+    host.logger.info(
+      'scheduler',
+      `trigger=${trigger} deferred while action#${inFlight.epoch} ${inFlight.id} is in flight`,
+      detail,
+      host.tickCounter,
+    )
+    return
+  }
+  host.scheduleTick(event)
+}
+
+export function scheduleTick(host: DecisionEpochsHost, event: TriggerEvent): void {
+  if (host.decisionTimer !== null) {
+    host.pendingTrigger = pickHigherPriority(host.pendingTrigger, event)
+    return
+  }
+  const elapsed = Date.now() - host.lastTickAt
+  const delay = Math.max(0, host.options.minDecisionIntervalMs - elapsed)
+  host.decisionTimer = setTimeout(() => {
+    host.decisionTimer = null
+    const queued = host.pendingTrigger
+    host.pendingTrigger = null
+    const next = queued === null ? event : pickHigherPriority(event, queued)
+    void host.tick(next.trigger, next.detail)
+  }, delay)
+}
+
+export function clearDecisionTimer(host: DecisionEpochsHost): void {
+  if (host.decisionTimer !== null) {
+    clearTimeout(host.decisionTimer)
+    host.decisionTimer = null
+  }
+}
+
+export function drainPending(host: DecisionEpochsHost): void {
+  if (!host.running) return
+  const pending = host.pendingTrigger
+  host.pendingTrigger = null
+  if (pending !== null) {
+    host.requestDecision(pending.trigger, pending.detail)
+    return
+  }
+  const deferred = host.deferredTrigger
+  host.deferredTrigger = null
+  if (deferred !== null) host.requestDecision(deferred.trigger, deferred.detail)
 }

@@ -3094,74 +3094,7 @@ export class JevController {
    * triggers may interrupt. While a tick is already running, triggers coalesce.
    */
   private requestDecision(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
-    if (!this.running || this.modelRecoveryStopping) return
-    const event: TriggerEvent = { trigger, detail, ts: Date.now() }
-    if (this.ticking) {
-      if (trigger !== 'heartbeat') this.pendingTrigger = pickHigherPriority(this.pendingTrigger, event)
-      return
-    }
-    const inFlight = this.executor.current
-    if (inFlight !== null) {
-      // A RETREAT is already the selected safety response. Controller-only
-      // reground requests and real hit/health events wait for its bounded Skill
-      // to finish; action completion will either supersede stale repair or
-      // replay real damage with its normal preemptive priority.
-      if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind)) {
-        this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
-        this.logger.info(
-          'scheduler',
-          `trigger=${trigger} deferred during RETREAT lease#${inFlight.epoch} ${inFlight.id}`,
-          detail,
-          this.tickCounter,
-        )
-        return
-      }
-      if (PREEMPTIVE_TRIGGERS.has(trigger)) {
-        // ATTACK is a Jev-selected combat lease.  Damage/entity events are
-        // expected while the selected attack is being aimed and delivered;
-        // asking Jev again on every hit cancels the attack before its next
-        // cooldown and lets a nearby zombie turn the agent into a MOVE/WAIT
-        // loop.  Keep the selected attack mechanics together and replay the
-        // highest-priority threat trigger immediately after the short lease.
-        if (inFlight.kind === 'ATTACK') {
-          const air = this.liveAir()
-          if (shouldPreemptActiveActionLease(trigger, inFlight.kind, this.bot.health, CRITICAL_COMBAT_HEALTH, air)) {
-            this.logger.warn(
-              'scheduler',
-              `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${this.bot.health} air=${air}`,
-              detail,
-              this.tickCounter,
-            )
-            this.scheduleTick(event)
-            return
-          }
-          this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
-          this.logger.info(
-            'scheduler',
-            `trigger=${trigger} deferred during ATTACK lease#${inFlight.epoch} ${inFlight.id}`,
-            detail,
-          )
-          return
-        }
-        this.logger.info(
-          'scheduler',
-          `trigger=${trigger} preempts action#${inFlight.epoch} ${inFlight.id}`,
-          detail,
-          this.tickCounter,
-        )
-        this.scheduleTick(event)
-        return
-      }
-      this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
-      this.logger.info(
-        'scheduler',
-        `trigger=${trigger} deferred while action#${inFlight.epoch} ${inFlight.id} is in flight`,
-        detail,
-        this.tickCounter,
-      )
-      return
-    }
-    this.scheduleTick(event)
+    epochs.requestDecision(this.epochsHost, trigger, detail)
   }
 
   /**
@@ -3171,39 +3104,15 @@ export class JevController {
    * run watchdog) and the loop spins thousands of times per second.
    */
   private scheduleTick(event: TriggerEvent): void {
-    if (this.decisionTimer !== null) {
-      this.pendingTrigger = pickHigherPriority(this.pendingTrigger, event)
-      return
-    }
-    const elapsed = Date.now() - this.lastTickAt
-    const delay = Math.max(0, this.options.minDecisionIntervalMs - elapsed)
-    this.decisionTimer = setTimeout(() => {
-      this.decisionTimer = null
-      const queued = this.pendingTrigger
-      this.pendingTrigger = null
-      const next = queued === null ? event : pickHigherPriority(event, queued)
-      void this.tick(next.trigger, next.detail)
-    }, delay)
+    epochs.scheduleTick(this.epochsHost, event)
   }
 
   private clearDecisionTimer(): void {
-    if (this.decisionTimer !== null) {
-      clearTimeout(this.decisionTimer)
-      this.decisionTimer = null
-    }
+    epochs.clearDecisionTimer(this.epochsHost)
   }
 
   private drainPending(): void {
-    if (!this.running) return
-    const pending = this.pendingTrigger
-    this.pendingTrigger = null
-    if (pending !== null) {
-      this.requestDecision(pending.trigger, pending.detail)
-      return
-    }
-    const deferred = this.deferredTrigger
-    this.deferredTrigger = null
-    if (deferred !== null) this.requestDecision(deferred.trigger, deferred.detail)
+    epochs.drainPending(this.epochsHost)
   }
 
   private reachIdentity(state: WorldState): ReachIdentity | null {
