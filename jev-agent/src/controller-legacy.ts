@@ -25,7 +25,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -344,9 +344,8 @@ import {
   selectPrereqPath,
 } from './prereqOption.ts'
 import type { PrereqDecision, PrereqPath, PrereqProgress, PrereqRankPolicy, RetrieveUnverifiedState } from './prereqOption.ts'
-import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
-import { formatLocomotionObservation, isEfficientLocomotionProgress, LOCOMOTION_WINDOW_SIZE, NO_LOCOMOTION_OBSERVATION, observeLocomotion } from './locomotion.ts'
+import { isEfficientLocomotionProgress, NO_LOCOMOTION_OBSERVATION } from './locomotion.ts'
 import type { LocomotionObservation } from './locomotion.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
@@ -857,8 +856,6 @@ export const MAX_BLOCK_REACH = 5
 /** Issue #41: a descend goal with no vertical progress for this many ticks escalates. */
 /** Issue #41: a descend goal with no executable descend candidate this long escalates. */
 /** Distance decrease (m) that counts as real retrieval progress. */
-/** #405: how many recently occupied cells the exploration fallback treats as visited. */
-const EXPLORED_CELLS_LIMIT = 512
 /** Issue #8: do not re-log the same oscillating pair more often than this. */
 /**
  * #oscillation-boundary: the size of the body's cell envelope and the bounded
@@ -4949,16 +4946,7 @@ export class JevController {
    * next changed fact emits, so suppressing the repeats never loses the count.
    */
   private resetNotExecutableDedupe(): void {
-    if (this.notExecutableRepeats > 0 && this.notExecutableKey !== null) {
-      this.logger.info(
-        'agent',
-        `ROW_NOT_EXECUTABLE_HERE_REPEATS suppressed=${this.notExecutableRepeats} key=${this.notExecutableKey}`,
-        { suppressed: this.notExecutableRepeats, key: this.notExecutableKey },
-        this.tickCounter,
-      )
-    }
-    this.notExecutableKey = null
-    this.notExecutableRepeats = 0
+    return stall.resetNotExecutableDedupe(this.stallHost)
   }
 
   /**
@@ -5220,25 +5208,7 @@ export class JevController {
    * world/inventory/topology change clears it.
    */
   private stateFingerprint(state: WorldState): string {
-    const inventory = Object.entries(state.inventory.counts)
-      .filter(([, count]) => count > 0)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, count]) => `${name}=${count}`)
-      .join(',')
-    const position = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
-    const stations = (state.signals.knownResources ?? [])
-      .filter((resource) => resource.kind === 'station')
-      .map((resource) => `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`)
-      .sort()
-      .join(';')
-    const furnaces = (state.furnaces ?? [])
-      .filter(isSensedStation)
-      .map((station) => `${station.x},${station.y},${station.z}`)
-      .sort()
-      .join(';')
-    const current = state.goalQueue?.current
-    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}|revision=${state.goalQueue?.revision ?? this.queue.revision}|optionInstance=${current?.semanticOptionInstanceId ?? current?.optionInstanceId ?? 'none'}|optionTemplate=${current?.semanticOptionTemplateId ?? current?.optionTemplateId ?? 'none'}`
-    return `fp2|epoch=${this.options.worldEpoch}|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
+    return stall.stateFingerprint(this.stallHost, state)
   }
 
   /**
@@ -5619,56 +5589,11 @@ export class JevController {
   }
 
   private syncTerrainSignals(state: WorldState): void {
-    // Use the same typed observation that produced this snapshot when scoping
-    // coordinate memory. Going back through the legacy `digMemory` getter here
-    // would resample Mineflayer's live dimension during VTR fact construction.
-    this.bindDigMemoryScope(state.self.dimension)
-    const feetY = Math.floor(state.self.position.y)
-    let deepest: number | null = null
-    for (const block of state.blocks) {
-      if (block.kind !== 'stone' && block.kind !== 'ore') continue
-      if (block.position.y >= feetY) continue
-      if (deepest === null || block.position.y < deepest) deepest = block.position.y
-    }
-    if (deepest !== null) this.digMemoryState.observeStoneY(deepest)
-    const memory = this.digMemoryState.snapshot()
-    this.signals.digDir = memory.digDir
-    this.signals.digMode = memory.digMode
-    this.signals.digDirCount = memory.digDirCount
-    this.signals.digDepth = memory.digDepth
-    this.signals.digOscillate = memory.digOscillate
-    this.signals.knownStoneY = memory.knownStoneY
-    this.signals.lastTunnel = memory.lastTunnel
-    this.signals.descendNoProgress = memory.descendNoProgress
-    this.signals.descendLimitReached = memory.descendLimitReached
+    return stall.syncTerrainSignals(this.stallHost, state)
   }
 
   private sampleMovement(position: Vec3Json): void {
-    this.positionWindow.push({ x: position.x, y: position.y, z: position.z })
-    while (this.positionWindow.length > LOCOMOTION_WINDOW_SIZE) this.positionWindow.shift()
-    const cellKey = exploredCellKey(position)
-    this.exploredCells.delete(cellKey)
-    this.exploredCells.add(cellKey)
-    while (this.exploredCells.size > EXPLORED_CELLS_LIMIT) {
-      const oldest = this.exploredCells.values().next().value
-      if (oldest === undefined) break
-      this.exploredCells.delete(oldest)
-    }
-    this.signals.exploredCells = this.exploredCells
-    this.detectOscillation(position)
-    if (this.positionWindow.length < LOCOMOTION_WINDOW_SIZE) return
-    const first = this.positionWindow[0]
-    const last = this.positionWindow[this.positionWindow.length - 1]
-    if (first === undefined || last === undefined) return
-    const observation = observeLocomotion(this.positionWindow)
-    this.lastLocomotionObservation = observation
-    this.logger.info(
-      'agent',
-      `MOVE_EFFICIENCY samples=${LOCOMOTION_WINDOW_SIZE} ${formatLocomotionObservation(observation)}`,
-      { ...observation, windowStart: first, windowEnd: last },
-      this.tickCounter,
-    )
-    this.detectMoveOscillation()
+    return stall.sampleMovement(this.stallHost, position)
   }
 
   private oscillationSignature(): string {
@@ -5681,49 +5606,11 @@ export class JevController {
    * escalate) instead of walking between two cells forever.
    */
   private detectOscillation(position: Vec3Json): void {
-    const decision = evaluateOscillation({
-      position: positionKey(position),
-      signature: this.oscillationSignature(),
-      previous: this.oscillationState,
-      // The goal key is passed separately so junk pickups (which change the
-      // inventory part of the signature) cannot re-arm the loop detector.
-      goal: this.currentGoalKey(),
-    })
-    this.oscillationState = decision.state
-    if (!decision.detected || decision.line === null) return
-    // #360: cumulative detection count for the active Option, so the semantic
-    // layer can see 401 oscillation events that no longer change behaviour.
-    this.signals.oscillationsDetected = (this.signals.oscillationsDetected ?? 0) + 1
-    this.logger.warn(
-      'agent',
-      decision.line,
-      { cycles: decision.state.cycles, pair: decision.state.pair, goal: this.currentGoalKey() },
-      this.tickCounter,
-    )
-    this.escapeOscillation(decision.state)
+    return stall.detectOscillation(this.stallHost, position)
   }
 
   private escapeOscillation(state: OscillationState): void {
-    this.oscillationState = null
-    this.abandonedRetrievePaths.set('use_known_station', this.lastStateFingerprint)
-    if (this.activeRetrieval !== null) {
-      this.unreachableResources.add(this.retrievalKey(this.activeRetrieval))
-      this.noteCandidateFailure(this.activeRetrieval.id)
-    }
-    if (this.lastDecisionId !== null) this.noteCandidateFailure(this.lastDecisionId)
-    this.activeRetrieval = null
-    this.retrievalTrack = null
-    this.retrieveUnverified = null
-    this.prereqForcedPath = null
-    this.prereqProgress = null
-    this.prereqLoggedKey = null
-    this.retrievalEscalationPending = true
-    this.logger.warn(
-      'agent',
-      `LOCAL_OSCILLATION_ESCAPE pair=${state.pair ?? 'pair'} cycles=${state.cycles} system2=false`,
-      { pair: state.pair, cycles: state.cycles, boundary: 'local_recovery' },
-      this.tickCounter,
-    )
+    return stall.escapeOscillation(this.stallHost, state)
   }
 
   /**
@@ -6104,23 +5991,7 @@ export class JevController {
 
   /** Write the durable half through the HOST callback; never throws into the tick. */
   private persistLocalOscillation(): void {
-    const signature = localOscillationPersistKey(this.localOscillation)
-    if (signature === this.localOscillationPersisted) return
-    this.localOscillationPersisted = signature
-    const callback = this.options.onLocalOscillationChange
-    if (callback === undefined) return
-    try {
-      callback(
-        this.localOscillation === null ? null : { ...this.localOscillation, cells: [...this.localOscillation.cells] },
-      )
-    } catch (error) {
-      this.logger.warn(
-        'agent',
-        'LOCAL_OSCILLATION_PERSIST_FAILED',
-        { message: error instanceof Error ? error.message : String(error) },
-        this.tickCounter,
-      )
-    }
+    return stall.persistLocalOscillation(this.stallHost)
   }
 
   /**
@@ -7021,23 +6892,7 @@ export class JevController {
   }
 
   private bindDigMemoryScope(dimension: string): void {
-    const change = this.digMemoryState.bindScope({
-      serverId: this.options.serverId,
-      dimension,
-      worldEpoch: this.options.worldEpoch,
-    })
-    if (change.changed) this.digOscillationReported = false
-    if (!change.changed || change.previous === null) return
-    this.logger.warn(
-      'agent',
-      `DIG_MEMORY_SCOPE_RESET previous=${change.previous.serverId}|${change.previous.dimension}@${change.previous.worldEpoch} current=${change.current.serverId}|${change.current.dimension}@${change.current.worldEpoch}`,
-      {
-        previous: change.previous,
-        current: change.current,
-        cleared: ['direction', 'tunnelCoordinates', 'oscillationWindow', 'knownStoneY', 'descendBudget'],
-      },
-      this.tickCounter,
-    )
+    return stall.bindDigMemoryScope(this.stallHost, dimension)
   }
 
   /**

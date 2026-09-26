@@ -9,6 +9,7 @@ import type { ReachMissionRuntimeDependencies } from './src/vtr/reach-mission-ru
 
 const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
 const reachPlane = readFileSync(new URL('./src/vtr/reach-controller-plane.ts', import.meta.url), 'utf8')
+const stallObservers = readFileSync(new URL('./src/legacy/stall-observers.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
 const indexSource = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8')
 const runtimeAdapter = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-runtime-adapter.ts', import.meta.url), 'utf8')
 const minecraftReachProjection = readFileSync(new URL('./src/runtime-adapters/minecraft-reach-mission-projection.ts', import.meta.url), 'utf8')
@@ -217,8 +218,8 @@ describe('VTR Reach production authority seam', () => {
       assert.doesNotMatch(method(name), /(?:this|host)\.bot|(?:this|host)\.currentDimension\(\)/, `${name} must consume typed observations only`)
     }
     assert.doesNotMatch(method('projectReachMission'), /generateGroundedCandidates|WorldState\.blocks|reach\.resource-source|reach\.waypoint/)
-    assert.match(method('syncTerrainSignals'), /this\.bindDigMemoryScope\(state\.self\.dimension\)/)
-    assert.doesNotMatch(method('syncTerrainSignals'), /this\.digMemory(?:\.|\s)/)
+    assert.match(method('syncTerrainSignals') + stallObservers, /this\.bindDigMemoryScope\(state\.self\.dimension\)/)
+    assert.doesNotMatch(method('syncTerrainSignals') + stallObservers, /this\.digMemory(?:\.|\s)/)
     assert.match(runtimeAdapter, /bodyAvailable\(\): boolean\s*\{\s*return this\.bot\.entity !== undefined/)
     assert.match(runtimeAdapter, /currentHealth\(\): number\s*\{\s*return this\.bot\.health \?\? 0/)
   })
