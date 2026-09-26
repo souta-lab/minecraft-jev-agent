@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "experiment-result.schema.json",
+  "title": "Bounded experiment result",
+  "description": "The machine-readable record every bounded experiment must emit. One record per scenario execution. The comparator (docs/development/EXPERIMENT-PROTOCOL.md §5) consumes verdict, failureClass, and metrics; tools/validate-experiment-result.mjs enforces the shape.",
+  "type": "object",
+  "required": ["schemaVersion", "experimentId", "baseSha", "candidateSha", "scenario", "command", "status", "failureClass", "metrics", "evidence", "verdict", "frozenZoneTouched"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "experimentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,80}$" },
+    "baseSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidateSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "scenario": {
+      "type": "string",
+      "description": "Registry key from EXPERIMENT-PROTOCOL.md §4, or a path-qualified fixture command."
+    },
+    "command": {
+      "type": "string",
+      "description": "The exact command that produced this result. Must be re-runnable."
+    },
+    "status": { "enum": ["PASS", "FAIL", "UNKNOWN", "ERROR"] },
+    "failureClass": {
+      "enum": [
+        "none",
+        "GROUNDING_REFUSAL",
+        "VERIFY_FAIL",
+        "LEASE_DENY",
+        "STALE_FENCE",
+        "BUDGET_EXHAUST",
+        "MODEL_UNAVAILABLE",
+        "MECHANICAL_FAIL",
+        "NO_PROGRESS",
+        "AUTHORITY_VIOLATION",
+        "INFRA"
+      ],
+      "description": "Canonical outcome class; 'none' iff status=PASS. Maps to the emitted typed markers, never a free-text reason."
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Scenario-declared measurements, e.g. verifiedTransitions, modelCalls, wallMs. Keys declared in the scenario row; unknown keys are allowed but ignored by the comparator.",
+      "additionalProperties": { "type": "number" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Repo-relative paths to run-scoped artifacts (log, snapshot, decisions.jsonl)."
+    },
+    "verdict": {
+      "enum": ["KEEP", "REVERT", "ESCALATE"],
+      "description": "Comparator decision per §5. KEEP requires status=PASS on every declared scenario plus zero new failureClass vs the base record set."
+    },
+    "frozenZoneTouched": {
+      "type": "boolean",
+      "description": "True iff the diff touches any §2 frozen-zone path. A true value forces verdict=ESCALATE."
+    },
+    "notes": { "type": "string", "maxLength": 2000 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "PASS" } } },
+      "then": { "properties": { "failureClass": { "const": "none" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "FAIL" } } },
+      "then": { "properties": { "failureClass": { "not": { "const": "none" } } } }
+    },
+    {
+      "if": { "properties": { "frozenZoneTouched": { "const": true } } },
+      "then": { "properties": { "verdict": { "const": "ESCALATE" } } }
+    }
+  ]
+}

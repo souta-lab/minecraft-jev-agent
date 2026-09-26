@@ -220,6 +220,10 @@ Lesson: a marker named `BETA_SHADOW` is NOT proof that beta was shadow-only. Iss
 reopened for exactly this. The marker must be validated against the authority flag
 (`betaAuthority=false`) and the actual decision (`JEV_HEADS -> continue`), not its name.
 
+Post-V4.1.2 note: the `BUDDY_BETA_AUTHORITY` selector and `resolveBetaAuthority()` were
+deleted in the selector-removal cutover — beta is structurally shadow-only now, not
+flag-gated. Treat the IMPLEMENTED citations above as historical.
+
 #### Worked example 2 — the listener leak (#13) is not closed by a marker observation
 
 ```

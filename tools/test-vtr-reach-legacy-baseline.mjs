@@ -3,7 +3,18 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import test from 'node:test'
+// Plain-bun runner: this file executes via `bun tools/<file>` from
+// bun-tests/repository.test.ts, so node:test's runner is never present.
+let failures = 0
+const test = (name, fn) => {
+  try {
+    fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
+}
 import { collectVtrReachLegacyBaseline } from './collect-vtr-reach-legacy-baseline.mjs'
 import { normalizeLegacyCollectMissionCommand } from './vtr-reach-legacy-baseline.mjs'
 import { inspectLegacyReachArchive } from './validate-vtr-reach-evidence.mjs'
@@ -249,3 +260,5 @@ test('rejects provider-call summaries that contradict raw Jev activity and unkno
     assert.throws(() => inspectLegacyReachArchive(contradicted.archive), /derive jevProviderModelCalls=0, contradicting the run summary 1/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+if (failures > 0) process.exit(1)

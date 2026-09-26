@@ -13,7 +13,6 @@ aspirational fiction.
 | `packages/jev-agent/src/minecraft/` | Backend implementations of consumer ports: `reach-runtime-adapter`, `reach-mission-projection` | Only package allowed raw Mineflayer outside the flat allowlist. |
 | `packages/jev-agent/src/jev/` | Jev decision policy: `client` (legacy policy+harness+logging), `authority` (auditable live-policy kernel), `semantic-projection` (#437 epoch/packet machinery) | Root `src/jev.ts` stays a thin facade. |
 | `packages/jev-agent/src/system2/` | Sparse reasoning service: `service`, `payload`, `authority`, `escalation`, `causal-history`, `handoff` | Exception-driven; no motor commands. |
-| `packages/jev-agent/src/legacy/` | Quarantined controller planes behind Host contracts | Temporary layer; each file's deletion condition is documented in its header. Not a permanent home. |
 | `packages/kernel/` | The authority kernel (`kernel.ts`, `kernel-internal/`, tests) | Versioned path suffix was removed: the kernel is the sole canonical runtime. |
 | flat `packages/jev-agent/src/*.ts` | Transitional modules (see §2) | Awaiting canonical addresses as host contracts shed backend types. |
 
@@ -44,18 +43,25 @@ These files still live at `src/` root. The owner column is the canonical
 target; moving each requires its consumers to reach it through typed ports or
 to accept the edge as transitional.
 
-- **App/composition shell** — `controller-legacy.ts`, `controller.ts`,
-  `index.ts`, `controller-shared.ts`, `jev.ts` (facade). `controller-legacy`
-  is the integration shell (~5.3k lines) with a documented shrink condition;
-  `controller-shared` owns the options contract (`JevAgentOptions`,
-  `SensorOptionSlice`, `CandidateOptionSlice`, drain grace).
+- **App/composition shell** — `controller.ts`, `index.ts`,
+  `controller-shared.ts`, `jev.ts` (facade), plus the extracted controller
+  planes (`system2-plane.ts`, `candidate-diagnostics.ts`,
+  `decision-epochs.ts`, `threat-observers.ts`, `goal-queue-plane.ts`,
+  `outcome-accounting.ts`, `outcome-ledgers.ts`, `stall-observers.ts`,
+  `wedge.ts`, `abandon-lifecycle.ts`, `retrieval-progress.ts`,
+  `controller-transitions.ts`). `controller-shared` owns the options contract
+  (`JevAgentOptions`, `SensorOptionSlice`, `CandidateOptionSlice`, drain
+  grace). The former `legacy/` quarantine and `controller-legacy.ts` were
+  burned down in the V4.1.2 selector/planner removal; the `legacy/` boundary
+  rules in `test-package-boundaries.mts` remain as anti-reintroduction
+  guards.
 - **Minecraft mechanical substrate** (backend impl not yet behind ports —
   `executor.ts`, `state.ts`, `candidates.ts`, `containerAccess.ts`,
   `craftWindow.ts`, `worldMemory.ts`, `positionFactCache.ts`). Target:
   `minecraft/` once callers cross ports; today they are the transitional
   mechanical layer the legacy plane still consumes directly.
-- **Legacy decision/goal plane** (quarantine-bound as V4 slices retire it) —
-  `goalQueue.ts`, `optionSpec.ts`, `optionSpec-legacy.ts`, `goalSuccess.ts`,
+- **Legacy decision/goal plane** (transitional; retires as V4 slices land) —
+  `goalQueue.ts`, `optionSpec.ts`, `goalSuccess.ts`,
   `predicateGoal.ts`, `protectedGoals.ts`, `causal.ts`, `scheduler.ts`,
   `decisionlog.ts`, `gating.ts`, `policy.ts`, `abandonPolicy.ts`,
   `betaAuthority.ts`, `betaHysteresis.ts`, `candidateCommitment.ts`,
@@ -112,8 +118,9 @@ controller ownership, lease/generation fencing.
    callers are gone, migrate `Object.create(JevController.prototype)` fixtures
    (13 files) toward explicit adapters, reduce accidental exports.
 2. Flat remainder → canonical addresses per §2, gated on port tightening.
-3. `legacy/` burn-down: each plane file carries a deletion condition; remove
-   as slices retire (never leave permanent dual authority).
+3. Flat-plane burn-down continues: the `legacy/` quarantine is empty; each
+   remaining flat file retires when its Transition slice is proven and cut
+   over (never leave permanent dual authority).
 
 ## 5. Bounded-AI-improvement readiness
 
@@ -125,13 +132,13 @@ Goal: a weaker future model can change one feature safely.
   `test-vtr-reach-production.mts` + the package guard.
 - Verification ladder per change: typecheck → focused fixture → package
   guard → legacy/buddy-driver suites → (authority-sensitive) live proof.
-- Improvement loop roadmap (not implemented here):
-  observe (run artifacts/journal) → classify (failure taxonomy vs typed
-  terminal outcomes) → hypothesize (single causal boundary) → patch (one
-  package, one reason to change) → test (deterministic fixture + comparator)
-  → compare (legacy-baseline vs VTR on same seed/geometry) → keep/revert →
-  record (evidence archive under `vtr-evidence-archive/`).
+- Improvement loop: implemented as `docs/development/EXPERIMENT-PROTOCOL.md`
+  (frozen/open zones, typed failure taxonomy, scenario registry, result
+  schema + comparator, keep/revert, escalation). The machine-readable result
+  contract is `docs/development/experiment-result.schema.json`, enforced by
+  `tools/validate-experiment-result.mjs` and pinned by
+  `bun-tests/experiment-contract.test.ts`.
 - Next enablers, in order: deterministic fixture coverage per feature
   package; failure-taxonomy regression corpus (`docs/development/
-  REGRESSION-CORPUS.md` extension); automated comparator/adoption gates on
-  live evidence; then bounded continuous improvement with V4.1.2 frozen.
+  REGRESSION-CORPUS.md` extension); same-SHA live comparators on the scenario
+  registry; then bounded continuous improvement with V4.1.2 frozen.

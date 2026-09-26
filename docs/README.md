@@ -7,7 +7,9 @@ The constitutional entrypoints remain at the repository root: `README.md` and `A
   `architecture/v4.1/` holds the kernel contract prose mirroring `packages/kernel/` code.
 - `decision/` — planner/Jev decision-plane boundaries and the observer read-model.
 - `development/` — development method, definition of done, regression corpus,
-  package-ownership map and bounded-improvement roadmap (`PBF-OWNERSHIP-MAP.md`).
+  package-ownership map (`PBF-OWNERSHIP-MAP.md`), and the bounded-experiment
+  substrate (`EXPERIMENT-PROTOCOL.md` + `experiment-result.schema.json`
+  enforced by `tools/validate-experiment-result.mjs`).
 - `history/` — superseded and dated material retained for provenance:
   `architecture/` (old architecture versions and authority models),
   `incidents/` (dated incident/defect reports),
