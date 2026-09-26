@@ -419,7 +419,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
         result: 'PASS',
         sourceSha,
         test: {
-          path: 'jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
+          path: 'packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts',
           name: 'production Reach dispatch and legacy Executor claim cannot overlap body authority',
           sourceSha256: createHash('sha256').update(testSource).digest('hex'),
         },
