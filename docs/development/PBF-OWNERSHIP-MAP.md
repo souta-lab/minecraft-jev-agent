@@ -9,7 +9,7 @@ aspirational fiction.
 
 | Package | Contents | Notes |
 |---|---|---|
-| `packages/jev-agent/src/reach/` | Reach feature: `transition`, `controller`, `controller-plane`, `scheduler`, `mission-runtime`, `mission-projection`, `ports`, `safety`, `route-policy`, `jev-composition`, `mechanical-waypoint`, `kernel-shadow-map` | Backend-independent. `kernel-shadow-map` is the Reach-slice kernel gate (`KernelReachAuthority` + shadow map). |
+| `packages/jev-agent/src/reach/` | Reach feature: `transition`, `controller`, `controller-plane`, `scheduler`, `mission-runtime`, `mission-projection`, `ports`, `safety`, `route-policy`, `jev-composition`, `mechanical-waypoint`, `kernel-authority-map` | Backend-independent. `kernel-authority-map` is the kernel gate boundary (`KernelReachAuthority` + mutation-surface authority map). |
 | `packages/jev-agent/src/minecraft/` | Backend implementations of consumer ports: `reach-runtime-adapter`, `reach-mission-projection` | Only package allowed raw Mineflayer outside the flat allowlist. |
 | `packages/jev-agent/src/jev/` | Jev decision policy: `client` (legacy policy+harness+logging), `authority` (auditable live-policy kernel), `semantic-projection` (#437 epoch/packet machinery) | Root `src/jev.ts` stays a thin facade. |
 | `packages/jev-agent/src/system2/` | Sparse reasoning service: `service`, `payload`, `authority`, `escalation`, `causal-history`, `handoff` | Exception-driven; no motor commands. |

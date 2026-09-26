@@ -10,7 +10,7 @@ import type {
   KernelGateVerdict,
   KernelReachAuthority,
   KernelWorldObservation,
-} from './src/reach/kernel-shadow-map.ts'
+} from './src/reach/kernel-authority-map.ts'
 import type { ReachTransitionContract, ReachWitness } from './src/reach/transition.ts'
 
 export interface KernelGateCall {

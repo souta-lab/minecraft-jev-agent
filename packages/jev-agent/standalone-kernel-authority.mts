@@ -4,11 +4,11 @@
 // session-backed KernelReachAuthority. World identity matches the standalone
 // defaults (serverId 'local', worldEpoch 0); Reach is only gated when a
 // script explicitly configures vtrMission.
-import { createKernelShadowSession } from '../buddy-driver/kernel-shadow-session.ts'
-import type { KernelReachAuthority } from './src/reach/kernel-shadow-map.ts'
+import { createKernelAuthoritySession } from '../buddy-driver/kernel-authority-session.ts'
+import type { KernelReachAuthority } from './src/reach/kernel-authority-map.ts'
 
 export function createStandaloneKernelAuthority(generationId: string): KernelReachAuthority {
-  const session = createKernelShadowSession({
+  const session = createKernelAuthoritySession({
     world: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 0 },
     generationId,
     journalPath: null,

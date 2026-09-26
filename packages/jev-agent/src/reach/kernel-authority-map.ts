@@ -1,10 +1,10 @@
-// kernel-shadow-map.ts - V4.1.2 Phase-1 shadow authority mapping.
+// kernel-authority-map.ts - V4.1.2 kernel authority mapping.
 //
 // This module is the CANONICAL map from observed production mutation surfaces
 // to V4.1.2 kernel authority concepts (resource bundle + effect permit), built
 // from `docs/architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md`. It is pure: it
 // imports only the public kernel types and performs no side effects, so both
-// the host-side shadow session and tests can depend on it without minting
+// the host-side kernel session and tests can depend on it without minting
 // trusted capabilities.
 //
 // Authority semantics: a surface is "mapped" only when it resolves to one
@@ -23,7 +23,7 @@ import { resourceId, resourceKey } from '../../../kernel/kernel.ts'
 import type { ReachTransitionContract, ReachWitness } from '../reach/transition.ts'
 
 /** Canonical resource requirement on one mapped mutation surface. */
-export interface ShadowResourceRequirement {
+export interface KernelResourceRequirement {
   readonly domain: ResourceDomain
   readonly path: readonly string[]
   /** 'arg' scopes the instance to the mutation argument (coordinate/entity). */
@@ -33,32 +33,32 @@ export interface ShadowResourceRequirement {
 
 export interface MappedMutationSurface {
   readonly surface: string
-  readonly resources: readonly ShadowResourceRequirement[]
+  readonly resources: readonly KernelResourceRequirement[]
   readonly effect: EffectKind
   readonly scope: string
   /** True when the surface's physical side effect bypasses the guarded bot proxy. */
   readonly bypassesGuardedProxy: boolean
 }
 
-const ew = (domain: ResourceDomain, path: readonly string[] = [], instance: ShadowResourceRequirement['instance'] = null): ShadowResourceRequirement =>
+const ew = (domain: ResourceDomain, path: readonly string[] = [], instance: KernelResourceRequirement['instance'] = null): KernelResourceRequirement =>
   ({ domain, path, instance, mode: 'EXCLUSIVE_WRITE' })
-const locomotion: ShadowResourceRequirement = ew('body', ['locomotion'])
-const orientation: ShadowResourceRequirement = ew('body', ['orientation'])
-const pose: ShadowResourceRequirement = ew('body', ['pose'])
-const interaction: ShadowResourceRequirement = ew('interaction')
-const inventory: ShadowResourceRequirement = ew('inventory')
-const equipment: ShadowResourceRequirement = ew('equipment')
-const windowResource: ShadowResourceRequirement = ew('window')
-const containerAtArg: ShadowResourceRequirement = ew('container', [], 'arg')
-const stationAtArg: ShadowResourceRequirement = ew('station', [], 'arg')
-const entityAtArg: ShadowResourceRequirement = ew('entity', [], 'arg')
-const worldBlockAtArg: ShadowResourceRequirement = ew('world', ['blocks'], 'arg')
-const commandChannel: ShadowResourceRequirement = ew('command')
+const locomotion: KernelResourceRequirement = ew('body', ['locomotion'])
+const orientation: KernelResourceRequirement = ew('body', ['orientation'])
+const pose: KernelResourceRequirement = ew('body', ['pose'])
+const interaction: KernelResourceRequirement = ew('interaction')
+const inventory: KernelResourceRequirement = ew('inventory')
+const equipment: KernelResourceRequirement = ew('equipment')
+const windowResource: KernelResourceRequirement = ew('window')
+const containerAtArg: KernelResourceRequirement = ew('container', [], 'arg')
+const stationAtArg: KernelResourceRequirement = ew('station', [], 'arg')
+const entityAtArg: KernelResourceRequirement = ew('entity', [], 'arg')
+const worldBlockAtArg: KernelResourceRequirement = ew('world', ['blocks'], 'arg')
+const commandChannel: KernelResourceRequirement = ew('command')
 
 /**
  * Every bot.* / nested surface reachable from production code. Surfaces that
  * are not generation-guarded today (`attack`, `openFurnace`, `stopDigging`,
- * ...) are still listed: the shadow must see and map them BEFORE authority is
+ * ...) are still listed: the session must see and map them BEFORE authority is
  * enabled, and the map is the audit source for the unguarded-wrap list.
  */
 export const MUTATION_SURFACE_MAP: Readonly<Record<string, MappedMutationSurface>> = {
@@ -134,7 +134,7 @@ export const MUTATION_SURFACE_MAP: Readonly<Record<string, MappedMutationSurface
 }
 
 /** Protocol packet-name map for the `_client.write` surface. */
-const PACKET_BUNDLES: Readonly<Record<string, readonly ShadowResourceRequirement[]>> = {
+const PACKET_BUNDLES: Readonly<Record<string, readonly KernelResourceRequirement[]>> = {
   position: [locomotion],
   position_look: [locomotion, orientation],
   look: [orientation],
@@ -228,7 +228,7 @@ export function mapMutationSurface(surface: string, instanceHint: string | null)
   }
 }
 
-function toResourceId(requirement: ShadowResourceRequirement, instance: string | null): ResourceId {
+function toResourceId(requirement: KernelResourceRequirement, instance: string | null): ResourceId {
   return resourceId(requirement.domain, requirement.path, requirement.instance === 'arg' ? instance : requirement.instance)
 }
 
@@ -236,31 +236,31 @@ function toResourceId(requirement: ShadowResourceRequirement, instance: string |
 // Reach contract -> kernel contract
 // ---------------------------------------------------------------------------
 
-const SHADOW_COMPILER = { id: 'vtr-reach-compiler', version: 'vtr-reach/v4' } as const
-const SHADOW_VERIFIER = { id: 'vtr-deterministic-verify', version: 'vtr-verify/v1' } as const
-const SHADOW_PROGRESS = { id: 'vtr-reach-progress', version: 'predicate_distance/v1' } as const
-const SHADOW_CONTROLLER = { id: 'vtr-reach-controller', version: 'vtr-reach/v4' } as const
-const SHADOW_TERMINAL = { id: 'vtr-reach-terminal', version: 'vtr-reach/v1' } as const
-const SHADOW_WITNESS = { id: 'vtr-reach-witness', version: 'vtr-witness/v1' } as const
-const SHADOW_MISSION_AUTHORITY = { id: 'host-mission-authority', version: 'v1' } as const
+const REACH_COMPILER = { id: 'vtr-reach-compiler', version: 'vtr-reach/v4' } as const
+const REACH_VERIFIER = { id: 'vtr-deterministic-verify', version: 'vtr-verify/v1' } as const
+const REACH_PROGRESS = { id: 'vtr-reach-progress', version: 'predicate_distance/v1' } as const
+const REACH_CONTROLLER = { id: 'vtr-reach-controller', version: 'vtr-reach/v4' } as const
+const REACH_TERMINAL = { id: 'vtr-reach-terminal', version: 'vtr-reach/v1' } as const
+const REACH_WITNESS = { id: 'vtr-reach-witness', version: 'vtr-witness/v1' } as const
+const REACH_MISSION_AUTHORITY = { id: 'host-mission-authority', version: 'v1' } as const
 
-export const SHADOW_REGISTRY = {
-  compiler: SHADOW_COMPILER,
-  verifier: SHADOW_VERIFIER,
-  progress: SHADOW_PROGRESS,
-  controller: SHADOW_CONTROLLER,
-  terminal: SHADOW_TERMINAL,
-  witness: SHADOW_WITNESS,
-  missionAuthority: SHADOW_MISSION_AUTHORITY,
+export const REACH_AUTHORITY_REGISTRY = {
+  compiler: REACH_COMPILER,
+  verifier: REACH_VERIFIER,
+  progress: REACH_PROGRESS,
+  controller: REACH_CONTROLLER,
+  terminal: REACH_TERMINAL,
+  witness: REACH_WITNESS,
+  missionAuthority: REACH_MISSION_AUTHORITY,
 } as const
 
 /**
  * Reach admissible-effect kind -> kernel (claims, effect permit). The Reach
  * contract declares `locomotion` today; the table is explicit so a new effect
- * kind fails closed at shadow registration instead of silently mapping.
+ * kind fails closed at session registration instead of silently mapping.
  */
 const REACH_EFFECT_MAP: Readonly<Record<string, {
-  readonly claims: readonly ShadowResourceRequirement[]
+  readonly claims: readonly KernelResourceRequirement[]
   readonly permit: { readonly kind: EffectKind; readonly scope: string; readonly irreversible: boolean }
 }>> = {
   locomotion: {
@@ -307,8 +307,8 @@ export function reachContractToKernelSpec(
   if (contract.admissibleEffects.length === 0) {
     return { ok: false, reason: 'contract declares no admissible effects' }
   }
-  const claims: ShadowResourceRequirement[] = []
-  const effects: Array<{ kind: EffectKind; scope: string; irreversible: boolean; maxCount: number; requiredResources: readonly ShadowResourceRequirement[] }> = []
+  const claims: KernelResourceRequirement[] = []
+  const effects: Array<{ kind: EffectKind; scope: string; irreversible: boolean; maxCount: number; requiredResources: readonly KernelResourceRequirement[] }> = []
   for (const effect of contract.admissibleEffects) {
     const mapped = REACH_EFFECT_MAP[effect.kind]
     if (mapped === undefined) return { ok: false, reason: `unmapped admissible effect kind ${effect.kind}` }
@@ -354,22 +354,22 @@ export function reachContractToKernelSpec(
         resources: { ...contract.budget.resources },
         risk: { ...contract.budget.risk },
       },
-      progressDefinition: SHADOW_PROGRESS,
-      controllerDefinition: SHADOW_CONTROLLER,
-      verificationDefinition: SHADOW_VERIFIER,
-      terminalPolicy: SHADOW_TERMINAL,
-      witnessValidation: SHADOW_WITNESS,
+      progressDefinition: REACH_PROGRESS,
+      controllerDefinition: REACH_CONTROLLER,
+      verificationDefinition: REACH_VERIFIER,
+      terminalPolicy: REACH_TERMINAL,
+      witnessValidation: REACH_WITNESS,
     },
   }
 }
 
 // ---------------------------------------------------------------------------
-// Shadow observer input contract (emitted by semantic code and the mutation
-// boundary; consumed only by the host-side shadow session)
+// Kernel session input contract (emitted by semantic code and the mutation
+// boundary; consumed only by the host-side kernel session)
 // ---------------------------------------------------------------------------
 
 /** Executor action context at the moment a mutation dispatch was observed. */
-export interface ShadowMutationContext {
+export interface MutationAuthorityContext {
   readonly actionId: string | null
   readonly epoch: number | null
   readonly authority: string | null
@@ -384,7 +384,7 @@ export interface ShadowMutationContext {
   readonly hostScope?: { readonly category: string; readonly label: string }
 }
 
-export type KernelShadowInput =
+export type KernelSessionInput =
   | {
       readonly type: 'world-observation'
       readonly observedAtMs: number
@@ -425,11 +425,11 @@ export type KernelShadowInput =
       readonly leaseOutcome: 'granted' | 'denied'
       readonly argsSignature: readonly string[]
       readonly instanceHint: string | null
-      readonly context: ShadowMutationContext | null
+      readonly context: MutationAuthorityContext | null
     }
 
 /** Narrow sink the semantic runtime may hold; the host owns the implementation. */
-export type KernelShadowSink = (input: KernelShadowInput) => void
+export type KernelSessionSink = (input: KernelSessionInput) => void
 
 // ---------------------------------------------------------------------------
 // V4.1.2 production-authority gate (Phase-2 cutover)
@@ -437,23 +437,23 @@ export type KernelShadowSink = (input: KernelShadowInput) => void
 
 export type KernelGateVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string }
 
-export type KernelAuthorityMode = 'shadow' | 'authority'
+export type KernelAuthorityMode = 'replay' | 'authority'
 
 /**
  * One verified world observation fed into the kernel fact store. The authority
  * gate consumes these unconditionally (they are what VERIFY reads), so this is
  * the observation half of the same session the verdict gates run on — not a
- * fire-and-forget shadow replay input.
+ * fire-and-forget replay input.
  */
 export type KernelWorldObservation = Omit<
-  Extract<KernelShadowInput, { type: 'world-observation' }>,
+  Extract<KernelSessionInput, { type: 'world-observation' }>,
   'type'
 >
 
 /**
  * Host-owned kernel gate for V4.1.2 Reach production authority.
  *
- * Unlike the fire-and-forget `KernelShadowSink`, every call here returns the
+ * Unlike the fire-and-forget `KernelSessionSink`, every call here returns the
  * real kernel verdict and the caller MUST honor a denial by not performing the
  * production act it gates. Ordering contract, enforced by call sequence:
  *

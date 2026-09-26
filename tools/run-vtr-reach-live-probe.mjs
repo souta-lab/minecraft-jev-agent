@@ -2832,7 +2832,7 @@ function archiveInputManifest({ attemptRoot, runtimeSource, server, observer, pa
   const regionName = freshWorld.regionPath ? relative(join(server.worldRoot, 'region'), freshWorld.regionPath).split(sep).join('/') : null
   if (regionName) add(`server/world/region/${regionName}`, freshWorld.regionPath)
   add('runner/mercury-calls.jsonl', paths['mercury-calls'])
-  add('runner/kernel-shadow.jsonl', join(runtimeSource, 'packages/buddy-driver', 'logs', 'jev', 'kernel-shadow.jsonl'))
+  add('runner/kernel-authority.jsonl', join(runtimeSource, 'packages/buddy-driver', 'logs', 'jev', 'kernel-authority.jsonl'))
   const manifestPath = join(runner, 'archive-input-manifest.json')
   writeJsonExclusive(manifestPath, { schema: 'vtr-reach-live-archive-input/v1', files })
   return { manifestPath, files }

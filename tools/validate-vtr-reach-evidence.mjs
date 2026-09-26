@@ -3561,31 +3561,31 @@ export async function validateEvidenceArchive(archive, repo = null) {
     // legacy Reach authority OFF, and the kernel journal must show the gated
     // command path causally preceding actuation for this exact Transition.
     const kernelAuthorityModeLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_MODE')
-    const kernelShadowReadyLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_SHADOW_READY')
-    const kernelShadowSummaryLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_SHADOW_SUMMARY')
+    const kernelReadyLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_READY')
+    const kernelSummaryLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_SUMMARY')
     const kernelModeOn = kernelAuthorityModeLines.some((line) => /\bmode=authority\b/.test(line)) &&
-      kernelShadowReadyLines.some((line) => /\bkernelAuthority=on\b/.test(line) && /\blegacyReachAuthority=off\b/.test(line))
+      kernelReadyLines.some((line) => /\bkernelAuthority=on\b/.test(line) && /\blegacyReachAuthority=off\b/.test(line))
     const kernelModeOff = kernelAuthorityModeLines.some((line) => /\bmode=shadow\b/.test(line)) ||
-      kernelShadowReadyLines.some((line) => /\bkernelAuthority=off\b/.test(line))
-    if (kernelModeOff) fail('authority:kernel-mode-on', 'kernel authority session ran in shadow-only mode; production authority was OFF', { kernelAuthorityModeLines, kernelShadowReadyLines })
-    else if (!kernelModeOn) incomplete('authority:kernel-mode-on', 'KERNEL_AUTHORITY_MODE/KERNEL_SHADOW_READY rows do not bind kernelAuthority=on and legacyReachAuthority=off', { kernelAuthorityModeLines: kernelAuthorityModeLines.length, kernelShadowReadyLines: kernelShadowReadyLines.length })
+      kernelReadyLines.some((line) => /\bkernelAuthority=off\b/.test(line))
+    if (kernelModeOff) fail('authority:kernel-mode-on', 'kernel authority session ran in shadow-only mode; production authority was OFF', { kernelAuthorityModeLines, kernelReadyLines })
+    else if (!kernelModeOn) incomplete('authority:kernel-mode-on', 'KERNEL_AUTHORITY_MODE/KERNEL_AUTHORITY_READY rows do not bind kernelAuthority=on and legacyReachAuthority=off', { kernelAuthorityModeLines: kernelAuthorityModeLines.length, kernelReadyLines: kernelReadyLines.length })
     else pass('authority:kernel-mode-on', { mode: 'authority', legacyReachAuthority: 'off' })
 
-    const shadowSummaryOk = kernelShadowSummaryLines.length > 0 && kernelShadowSummaryLines.every((line) =>
+    const kernelSummaryOk = kernelSummaryLines.length > 0 && kernelSummaryLines.every((line) =>
       /\bauthorityMode=authority\b/.test(line) && /\bgateDenials=0\b/.test(line))
-    const shadowSummaryLine = kernelShadowSummaryLines[0] ?? null
-    const summaryMutationsDenied = shadowSummaryLine === null ? null : /mutationsDeniedByLease=0/.test(shadowSummaryLine)
-    const summaryKernelDenied = shadowSummaryLine === null ? null : /kernelDenied=0/.test(shadowSummaryLine)
-    const summaryCoverage = shadowSummaryLine === null ? null : /coverageComplete=true/.test(shadowSummaryLine)
-    if (!kernelShadowSummaryLines.length) incomplete('authority:kernel-summary', 'no KERNEL_SHADOW_SUMMARY row was archived', {})
-    else if (!shadowSummaryOk || summaryMutationsDenied !== true || summaryKernelDenied !== true || summaryCoverage !== true) fail('authority:kernel-summary', 'kernel summary does not assert authority mode, zero gate denials, zero lease/kernel denials, and complete mutation coverage', { authorityModeOk: shadowSummaryOk, mutationsDeniedByLeaseZero: summaryMutationsDenied, kernelDeniedZero: summaryKernelDenied, coverageComplete: summaryCoverage, line: shadowSummaryLine })
+    const kernelSummaryLine = kernelSummaryLines[0] ?? null
+    const summaryMutationsDenied = kernelSummaryLine === null ? null : /mutationsDeniedByLease=0/.test(kernelSummaryLine)
+    const summaryKernelDenied = kernelSummaryLine === null ? null : /kernelDenied=0/.test(kernelSummaryLine)
+    const summaryCoverage = kernelSummaryLine === null ? null : /coverageComplete=true/.test(kernelSummaryLine)
+    if (!kernelSummaryLines.length) incomplete('authority:kernel-summary', 'no KERNEL_AUTHORITY_SUMMARY row was archived', {})
+    else if (!kernelSummaryOk || summaryMutationsDenied !== true || summaryKernelDenied !== true || summaryCoverage !== true) fail('authority:kernel-summary', 'kernel summary does not assert authority mode, zero gate denials, zero lease/kernel denials, and complete mutation coverage', { authorityModeOk: kernelSummaryOk, mutationsDeniedByLeaseZero: summaryMutationsDenied, kernelDeniedZero: summaryKernelDenied, coverageComplete: summaryCoverage, line: kernelSummaryLine })
     else pass('authority:kernel-summary', { mode: 'authority', gateDenials: 0, kernelDenied: 0, mutationsDeniedByLease: 0, coverageComplete: true })
 
-    const kernelJournalText = listing.files.includes('runner/kernel-shadow.jsonl') ? readText(archive, 'runner/kernel-shadow.jsonl') : null
+    const kernelJournalText = listing.files.includes('runner/kernel-authority.jsonl') ? readText(archive, 'runner/kernel-authority.jsonl') : null
     if (kernelJournalText === null) {
-      incomplete('authority:kernel-gates-live', 'runner/kernel-shadow.jsonl is absent; the gated kernel command path cannot be bound to this Transition')
+      incomplete('authority:kernel-gates-live', 'runner/kernel-authority.jsonl is absent; the gated kernel command path cannot be bound to this Transition')
     } else {
-      const kernelRows = parsedJsonLines(kernelJournalText, 'runner/kernel-shadow.jsonl')
+      const kernelRows = parsedJsonLines(kernelJournalText, 'runner/kernel-authority.jsonl')
       const gateDeniedRows = kernelRows.filter((row) => row?.type === 'gate-denied')
       const blockerRows = kernelRows.filter((row) => row?.type === 'blocker')
       const transitionRows = kernelRows.filter((row) => row?.transitionId === transition.transitionId)

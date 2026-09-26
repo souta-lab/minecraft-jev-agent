@@ -10,11 +10,11 @@
 //      terminal, duplicate dispatch, wrong-world contract, SUCCESS without
 //      observed ensures facts) is denied and journaled — never silently
 //      accepted, never a legacy fallback.
-import { createKernelShadowSession } from './kernel-shadow-session.ts'
-import type { KernelShadowSession } from './kernel-shadow-session.ts'
+import { createKernelAuthoritySession } from './kernel-authority-session.ts'
+import type { KernelAuthoritySession } from './kernel-authority-session.ts'
 import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
-import type { KernelReachAuthority } from '../jev-agent/src/reach/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from '../jev-agent/src/reach/kernel-authority-map.ts'
 
 interface Case {
   name: string
@@ -76,8 +76,8 @@ const vtrContext = {
   transitionContractHash: null,
 }
 
-function makeAuthoritySession(): { session: KernelShadowSession; gate: KernelReachAuthority } {
-  const session = createKernelShadowSession({
+function makeAuthoritySession(): { session: KernelAuthoritySession; gate: KernelReachAuthority } {
+  const session = createKernelAuthoritySession({
     world: WORLD,
     generationId: 'gen-1',
     journalPath: null,
@@ -89,11 +89,11 @@ function makeAuthoritySession(): { session: KernelShadowSession; gate: KernelRea
   return { session, gate: session.authority }
 }
 
-function feedCommitPredicates(session: KernelShadowSession): void {
+function feedCommitPredicates(session: KernelAuthoritySession): void {
   session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
 }
 
-function admitAndActivate(gate: KernelReachAuthority, session: KernelShadowSession, transitionId: string): ReachTransitionContract {
+function admitAndActivate(gate: KernelReachAuthority, session: KernelAuthoritySession, transitionId: string): ReachTransitionContract {
   feedCommitPredicates(session)
   const contract = makeContract(transitionId)
   const admitted = gate.admitTransition(contract)
@@ -108,10 +108,10 @@ function admitAndActivate(gate: KernelReachAuthority, session: KernelShadowSessi
 // --------------------------------------------------------------------------
 
 addCase('authority mode exposes the gate; shadow mode does not', () => {
-  const shadow = createKernelShadowSession({ world: WORLD, generationId: 'gen-1', journalPath: null })
+  const shadow = createKernelAuthoritySession({ world: WORLD, generationId: 'gen-1', journalPath: null })
   const { session } = makeAuthoritySession()
   const pass = shadow.authority === null && session.authority !== null &&
-    shadow.summary().authorityMode === 'shadow' && session.summary().authorityMode === 'authority'
+    shadow.summary().authorityMode === 'replay' && session.summary().authorityMode === 'authority'
   return { pass, detail: `shadowGate=${shadow.authority !== null} authorityGate=${session.authority !== null} modes=${shadow.summary().authorityMode}/${session.summary().authorityMode}` }
 })
 
@@ -253,7 +253,7 @@ addCase('non-SUCCESS terminal kind-preserving closure is not a blocker in author
   const summary = session.summary()
   const pass = terminal.ok &&
     state?.lifecycle === 'TERMINAL' &&
-    !summary.blockers.some((b) => b.kind === 'shadow-projection-limitation')
+    !summary.blockers.some((b) => b.kind === 'replay-projection-limitation')
   return { pass, detail: `terminal=${terminal.ok} outcome=${state?.terminalOutcome?.kind ?? 'none'} limitations=${summary.projectionLimitationKinds.join(',') || 'none'}` }
 })
 

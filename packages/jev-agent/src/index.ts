@@ -13,7 +13,7 @@
 //   bot.jev.start()
 import type { Bot } from 'mineflayer'
 import { defaultJevAgentOptions, JevController } from './controller.ts'
-import type { KernelReachAuthority } from './reach/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from './reach/kernel-authority-map.ts'
 import type { EscalationReason, JevAgentOptions, RunSummary } from './controller.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, toVec3 } from './state.ts'
 import type { ActiveItemUseState, AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'

@@ -1,4 +1,4 @@
-// test-kernel-shadow.mts - V4.1.2 Phase-1 shadow observer coverage.
+// test-kernel-authority-session.mts - V4.1.2 kernel authority session coverage.
 //
 // Pure: no bot connection, no socket, no network, journalPath=null unless a
 // case explicitly writes to a tmp file. Proves:
@@ -12,14 +12,14 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createKernelShadowSession } from './kernel-shadow-session.ts'
-import type { KernelShadowSession, ShadowBlocker } from './kernel-shadow-session.ts'
+import { createKernelAuthoritySession } from './kernel-authority-session.ts'
+import type { KernelAuthoritySession, KernelSessionBlocker } from './kernel-authority-session.ts'
 import {
   MUTATING_BOT_METHODS,
   OBSERVED_UNGUARDED_BOT_METHODS,
 } from './resident-safety.ts'
-import { mapMutationSurface } from '../jev-agent/src/reach/kernel-shadow-map.ts'
-import type { ShadowMutationContext } from '../jev-agent/src/reach/kernel-shadow-map.ts'
+import { mapMutationSurface } from '../jev-agent/src/reach/kernel-authority-map.ts'
+import type { MutationAuthorityContext } from '../jev-agent/src/reach/kernel-authority-map.ts'
 import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
 
@@ -71,11 +71,11 @@ const COMMIT_PREDICATES = {
   'reach.resource-source': { truth: 'false' as const, evidenceId: 'verify:0:no-interaction-reach-source' },
 }
 
-function makeSession(context: () => ShadowMutationContext | null = () => null): {
-  session: KernelShadowSession
-  blockers: () => readonly ShadowBlocker[]
+function makeSession(context: () => MutationAuthorityContext | null = () => null): {
+  session: KernelAuthoritySession
+  blockers: () => readonly KernelSessionBlocker[]
 } {
-  const session = createKernelShadowSession({
+  const session = createKernelAuthoritySession({
     world: WORLD,
     generationId: 'gen-1',
     journalPath: null,
@@ -85,7 +85,7 @@ function makeSession(context: () => ShadowMutationContext | null = () => null): 
   return { session, blockers: session.blockers }
 }
 
-const vtrContext: ShadowMutationContext = {
+const vtrContext: MutationAuthorityContext = {
   actionId: 'a1',
   epoch: 1,
   authority: 'vtr-reach',
@@ -141,7 +141,7 @@ addCase('a wholly unknown surface resolves to null (fail-closed)', () => {
 /**
  * Static mutation-surface scan: extract every `bot.<mutator>(` / nested
  * capability call site in production sources and prove each emits an observed,
- * mapped shadow surface. Anything missing here is a coverage hole the live
+ * mapped authority surface. Anything missing here is a coverage hole the live
  * observer cannot see.
  */
 addCase('static scan: every production mutation call site is an observed mapped surface', () => {
@@ -152,7 +152,7 @@ addCase('static scan: every production mutation call site is an observed mapped 
       if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
-      else if (/\.(ts|mts)$/.test(entry.name) && !entry.name.startsWith('test-') && !entry.name.includes('kernel-shadow')) sources.push(path)
+      else if (/\.(ts|mts)$/.test(entry.name) && !entry.name.startsWith('test-') && !entry.name.includes('kernel-authority-map')) sources.push(path)
     }
   }
   walk(join(root, 'jev-agent', 'src'))
@@ -248,7 +248,7 @@ addCase('SUCCESS terminal without observed ensures facts refuses to mint truth',
   session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
   session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
   // No verification-time observation flips 'reach.resource-source' to true:
-  // the kernel must refuse VERIFY_SUCCESS and the shadow must record it.
+  // the kernel must refuse VERIFY_SUCCESS and the session must record it.
   session.observe({ type: 'transition-terminal', transitionId: 't-noverify', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
   const summary = session.summary()
   const blockerKinds = blockers().map((b) => b.kind)
@@ -276,7 +276,7 @@ addCase('transition committed already-terminal replays VERIFY_SUCCESS without ac
 addCase('namespaced kernel world accepts the bare Reach dimension convention', () => {
   // Live proof regression: the host world identity carries 'minecraft:' while
   // Reach identities are bare. Registration must agree under normalization.
-  const session = createKernelShadowSession({
+  const session = createKernelAuthoritySession({
     world: { serverId: 'srv', dimension: 'minecraft:overworld', worldEpoch: 7 },
     generationId: 'gen-1',
     journalPath: null,
@@ -304,7 +304,7 @@ addCase('non-success terminal closes via stand-in and records the projection lim
     terminal.terminalOutcome?.kind === 'CANCELED' &&
     summary.projectionLimitations === 1 &&
     summary.projectionLimitationKinds.includes('PROVEN_INFEASIBLE') &&
-    blockers().some((b) => b.kind === 'shadow-projection-limitation')
+    blockers().some((b) => b.kind === 'replay-projection-limitation')
   return { pass, detail: `lifecycle=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} limitations=${summary.projectionLimitationKinds.join(',') || 'none'} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
 })
 
@@ -373,7 +373,7 @@ addCase('lease-denied dispatch is counted and still observed', () => {
 })
 
 addCase('an observer that throws cannot break the session', () => {
-  const session = createKernelShadowSession({ world: WORLD, generationId: 'gen-1', journalPath: null, now: () => 1_000 })
+  const session = createKernelAuthoritySession({ world: WORLD, generationId: 'gen-1', journalPath: null, now: () => 1_000 })
   session.bindActuationContext(() => { throw new Error('resolver exploded') })
   session.observeMutation({ surface: 'bot.dig', guarded: true, leaseOutcome: 'granted', argsSignature: [], instanceHint: null })
   const hasObserverError = session.blockers().some((b) => b.kind === 'observer-error')
@@ -381,7 +381,7 @@ addCase('an observer that throws cannot break the session', () => {
 })
 
 let failures = 0
-process.stdout.write('kernel shadow (V4.1.2 Phase-1) - surface map + lifecycle replay + hard blockers\n')
+process.stdout.write('kernel authority session (V4.1.2) - surface map + lifecycle replay + hard blockers\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()
@@ -390,5 +390,5 @@ for (const testCase of cases) {
   process.stdout.write(`      ${observed.detail}\n`)
 }
 process.stdout.write('-'.repeat(72) + '\n')
-process.stdout.write(`${cases.length - failures}/${cases.length} kernel-shadow cases passed\n`)
+process.stdout.write(`${cases.length - failures}/${cases.length} kernel-authority-session cases passed\n`)
 if (failures > 0) process.exit(1)

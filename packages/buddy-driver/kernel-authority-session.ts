@@ -1,10 +1,10 @@
-// kernel-shadow-session.ts - V4.1.2 kernel authority session (shadow + authority modes).
+// kernel-authority-session.ts - V4.1.2 kernel authority session (replay + authority modes).
 //
 // The host owns this session and drives the V4.1.2 executable kernel
 // (`applyKernelCommand`) against observed production mutation dispatches and
 // the Reach Transition lifecycle.
 //
-// Mode 'shadow' (default): OBSERVER ONLY. No result reaches production code;
+// Mode 'replay' (default): OBSERVER ONLY. No result reaches production code;
 // kernel denials and unmapped/unauthorized mutations are journaled migration
 // blockers, not gates.
 //
@@ -18,7 +18,7 @@
 // The session holds kernel-internal trusted capabilities because buddy-driver
 // is the host/wiring layer; production semantic code must never import this
 // module or `packages/kernel/kernel-internal/*` — it sees only the narrow
-// `KernelShadowSink`/`KernelReachAuthority` surfaces.
+// `KernelSessionSink`/`KernelReachAuthority` surfaces.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -51,17 +51,17 @@ import {
 import {
   mapMutationSurface,
   reachContractToKernelSpec,
-  SHADOW_REGISTRY,
+  REACH_AUTHORITY_REGISTRY,
   type KernelAuthorityMode,
   type KernelGateVerdict,
   type KernelReachAuthority,
-  type KernelShadowInput,
+  type KernelSessionInput,
   type KernelWorldObservation,
-  type ShadowMutationContext,
-} from '../jev-agent/src/reach/kernel-shadow-map.ts'
+  type MutationAuthorityContext,
+} from '../jev-agent/src/reach/kernel-authority-map.ts'
 import type { ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
 
-export type ShadowBlockerKind =
+export type KernelSessionBlockerKind =
   | 'unmapped-mutation-surface'
   | 'unguarded-mutation-surface'
   | 'mutation-without-transition-authority'
@@ -69,25 +69,25 @@ export type ShadowBlockerKind =
   | 'kernel-command-denied'
   | 'contract-mapping-failed'
   | 'verify-proof-not-observed'
-  | 'shadow-projection-limitation'
+  | 'replay-projection-limitation'
   | 'observer-error'
 
-export interface ShadowBlocker {
-  readonly kind: ShadowBlockerKind
+export interface KernelSessionBlocker {
+  readonly kind: KernelSessionBlockerKind
   readonly atMonoMs: number
   readonly detail: string
   readonly surface?: string
   readonly transitionId?: string | null
 }
 
-export interface ShadowSessionConfig {
+export interface KernelAuthoritySessionConfig {
   readonly world: WorldIdentity
   readonly generationId: string
-  /** Append-only JSONL destination for shadow records; null disables file IO. */
+  /** Append-only JSONL destination for session records; null disables file IO. */
   readonly journalPath: string | null
   readonly now?: () => number
   /**
-   * 'shadow' (default): observer only; denials are journaled migration
+   * 'replay' (default): observer only; denials are journaled migration
    * blockers. 'authority': the session exposes `authority`, a verdict-
    * returning gate the production runtime must consult before actuation;
    * kernel denials gate production and remain journaled as hard evidence.
@@ -95,7 +95,7 @@ export interface ShadowSessionConfig {
   readonly authorityMode?: KernelAuthorityMode
 }
 
-export interface ShadowCoverageSummary {
+export interface KernelSessionSummary {
   readonly mutationsObserved: number
   readonly mutationsMapped: number
   readonly mutationsDeniedByLease: number
@@ -115,16 +115,16 @@ export interface ShadowCoverageSummary {
   readonly typedTerminals: number
   /**
    * Reach terminal kinds with no command-reachable kernel outcome. Each is a
-   * named 'shadow-projection-limitation' blocker and a cutover blocker; the
+   * named 'replay-projection-limitation' blocker and a cutover blocker; the
    * kernel-side lifecycle is closed with an explicit CANCELED stand-in whose
    * reason preserves the Reach outcome kind.
    */
   readonly projectionLimitations: number
   readonly projectionLimitationKinds: readonly string[]
-  readonly blockers: readonly ShadowBlocker[]
+  readonly blockers: readonly KernelSessionBlocker[]
   /** True only when every observed mutation mapped and carried authority. */
   readonly coverageComplete: boolean
-  /** 'shadow' = observer only; 'authority' = kernel gates Reach actuation. */
+  /** 'replay' = observer only; 'authority' = kernel gates Reach actuation. */
   readonly authorityMode: KernelAuthorityMode
   /** Gate calls the kernel refused under authority mode (also journaled). */
   readonly gateDenials: readonly { readonly gate: string; readonly reason: string }[]
@@ -140,9 +140,9 @@ interface OpenEffect {
   readonly transitionId: string
 }
 
-export interface KernelShadowSession {
+export interface KernelAuthoritySession {
   /** Sink for semantic lifecycle/step inputs (ReachMissionRuntime). */
-  readonly observe: (input: KernelShadowInput) => void
+  readonly observe: (input: KernelSessionInput) => void
   /** Sink for the mutation boundary (withActuationLease/createActuationPort). */
   readonly observeMutation: (record: {
     readonly surface: string
@@ -152,39 +152,39 @@ export interface KernelShadowSession {
     readonly instanceHint?: string | null
   }) => void
   /** Late-bind the actuation-context resolver (executor.current projection). */
-  bindActuationContext(resolve: () => ShadowMutationContext | null): void
+  bindActuationContext(resolve: () => MutationAuthorityContext | null): void
   /**
    * V4.1.2 production-authority gate; non-null only when the session was
    * created with `authorityMode: 'authority'`. Production code holds this via
    * the narrow `KernelReachAuthority` interface (no capability access).
    */
   readonly authority: KernelReachAuthority | null
-  readonly summary: () => ShadowCoverageSummary
-  readonly blockers: () => readonly ShadowBlocker[]
+  readonly summary: () => KernelSessionSummary
+  readonly blockers: () => readonly KernelSessionBlocker[]
   readonly state: () => KernelState
 }
 
-export function createKernelShadowSession(config: ShadowSessionConfig): KernelShadowSession {
-  const authorityMode: KernelAuthorityMode = config.authorityMode ?? 'shadow'
+export function createKernelAuthoritySession(config: KernelAuthoritySessionConfig): KernelAuthoritySession {
+  const authorityMode: KernelAuthorityMode = config.authorityMode ?? 'replay'
   const now = config.now ?? (() => Date.now())
   const t0 = now()
   let state: KernelState = createKernelState({
     world: config.world,
     generationId: config.generationId,
     missionPredicates: [],
-    verifierRegistry: [SHADOW_REGISTRY.verifier],
-    progressRegistry: [SHADOW_REGISTRY.progress],
-    contractCompilerRegistry: [SHADOW_REGISTRY.compiler],
-    missionAuthority: SHADOW_REGISTRY.missionAuthority,
+    verifierRegistry: [REACH_AUTHORITY_REGISTRY.verifier],
+    progressRegistry: [REACH_AUTHORITY_REGISTRY.progress],
+    contractCompilerRegistry: [REACH_AUTHORITY_REGISTRY.compiler],
+    missionAuthority: REACH_AUTHORITY_REGISTRY.missionAuthority,
   })
   const caps = {
-    compiler: trustedContractCompiler(SHADOW_REGISTRY.compiler.id),
+    compiler: trustedContractCompiler(REACH_AUTHORITY_REGISTRY.compiler.id),
     scheduler: trustedScheduler(),
     dispatcher: trustedDispatcher(),
-    verifier: trustedVerifier(SHADOW_REGISTRY.verifier.id),
-    mission: trustedMissionAuthority(SHADOW_REGISTRY.missionAuthority.id),
-    witness: trustedWitnessValidator(SHADOW_REGISTRY.witness.id),
-    progress: trustedProgressEvaluator(SHADOW_REGISTRY.progress.id),
+    verifier: trustedVerifier(REACH_AUTHORITY_REGISTRY.verifier.id),
+    mission: trustedMissionAuthority(REACH_AUTHORITY_REGISTRY.missionAuthority.id),
+    witness: trustedWitnessValidator(REACH_AUTHORITY_REGISTRY.witness.id),
+    progress: trustedProgressEvaluator(REACH_AUTHORITY_REGISTRY.progress.id),
     worldAdapter: trustedWorldAdapter('world'),
     runtimeAdapter: trustedWorldAdapter('runtime'),
     clock: trustedWorldAdapter('clock'),
@@ -194,8 +194,8 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   const openEffects = new Map<string, OpenEffect>()
   const witnessRevisions = new Map<string, number>()
   const witnessByTransition = new Map<string, ReachWitness>()
-  const blockers: ShadowBlocker[] = []
-  let resolveContext: (() => ShadowMutationContext | null) | null = null
+  const blockers: KernelSessionBlocker[] = []
+  let resolveContext: (() => MutationAuthorityContext | null) | null = null
   let lastFactSignature = ''
   // The most recent verified world observation, cached so commit/step commands
   // can re-establish proof freshness after mission/registry revisions.
@@ -224,13 +224,13 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         mkdirSync(dirname(config.journalPath), { recursive: true })
         appendFileSync(config.journalPath, `${line}\n`)
       } catch {
-        // Shadow journaling is best-effort: never fail production over it.
+        // Journal writes are best-effort: never fail production over it.
       }
     }
   }
 
-  const block = (kind: ShadowBlockerKind, detail: string, extra: Record<string, unknown> = {}): void => {
-    const blocker: ShadowBlocker = { kind, atMonoMs: mono(), detail, ...extra }
+  const block = (kind: KernelSessionBlockerKind, detail: string, extra: Record<string, unknown> = {}): void => {
+    const blocker: KernelSessionBlocker = { kind, atMonoMs: mono(), detail, ...extra }
     blockers.push(blocker)
     journal({ type: 'blocker', ...blocker })
   }
@@ -304,7 +304,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     const signature = sha(facts.map((fact) => [fact.predicateId, fact.truth]))
     apply((at) => ({
       kind: 'ACCEPT_VERIFIED_SNAPSHOT',
-      verifier: SHADOW_REGISTRY.verifier,
+      verifier: REACH_AUTHORITY_REGISTRY.verifier,
       facts,
       materialChange: signature !== lastFactSignature,
       observedAtMonoMs: at,
@@ -340,7 +340,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       return deny('admitTransition', reason)
     }
     journal({
-      type: 'shadow-contract',
+      type: 'replay-contract',
       transitionId: contract.transitionId,
       reachContractHash: contract.contractHash,
       kernelContractHash: canonical.contractHash,
@@ -349,7 +349,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     const registered = apply({
       kind: 'REGISTER_TRANSITION',
       contract: canonical,
-      compiler: SHADOW_REGISTRY.compiler,
+      compiler: REACH_AUTHORITY_REGISTRY.compiler,
       capability: caps.compiler,
     }, via, contract.transitionId)
     if (!registered.ok) return deny('admitTransition', registered.reason)
@@ -358,7 +358,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
       const mission = apply({
         kind: 'UPDATE_MISSION',
         predicates: [...state.missionPredicates, canonical.desiredPredicate],
-        authority: SHADOW_REGISTRY.missionAuthority,
+        authority: REACH_AUTHORITY_REGISTRY.missionAuthority,
         capability: caps.mission,
       }, via, contract.transitionId)
       if (!mission.ok) return deny('admitTransition', mission.reason)
@@ -371,7 +371,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   /**
    * Re-establish proof + witness freshness after registration changed the
    * RuntimeBinding, then acquire the declared resource bundle -> ACTIVE.
-   * `acquire: false` leaves the transition RUNNABLE (shadow replay of a
+   * `acquire: false` leaves the transition RUNNABLE (replay of a
    * contract that committed directly to terminal).
    */
   const activateTransition = (transitionId: string, witness: ReachWitness | null, acquire: boolean, via: string): KernelGateVerdict => {
@@ -390,7 +390,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         witnessRevision: revision,
         witnessRefHash: sha({ witnessId: witness.witnessId, evidenceId: witness.evidenceId }),
         relationId: 'reach-route-witness',
-        validator: SHADOW_REGISTRY.witness,
+        validator: REACH_AUTHORITY_REGISTRY.witness,
         capability: caps.witness,
       }, via, transitionId)
       if (!accepted.ok) return deny('activateTransition', accepted.reason)
@@ -407,7 +407,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     activateTransition(contract.transitionId, witness, lifecycle === 'active', 'transition-committed')
   }
 
-  const terminalTransition = (input: Extract<KernelShadowInput, { type: 'transition-terminal' }>, authoritative = false): KernelGateVerdict => {
+  const terminalTransition = (input: Extract<KernelSessionInput, { type: 'transition-terminal' }>, authoritative = false): KernelGateVerdict => {
     const transition = state.transitions[input.transitionId]
     if (transition === undefined) {
       block('kernel-command-denied', `terminal for unregistered transition ${input.transitionId}`, { transitionId: input.transitionId })
@@ -445,7 +445,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         kind: 'VERIFY_SUCCESS',
         transitionId: input.transitionId,
         causalCredit: 'self',
-        verifier: SHADOW_REGISTRY.verifier,
+        verifier: REACH_AUTHORITY_REGISTRY.verifier,
         capability: caps.verifier,
       }, 'transition-terminal', input.transitionId)
       successVerified = verified.ok
@@ -456,7 +456,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         journal({
           type: 'verify-provenance',
           transitionId: input.transitionId,
-          verifier: SHADOW_REGISTRY.verifier,
+          verifier: REACH_AUTHORITY_REGISTRY.verifier,
           factIds: verifyFactIds,
         })
       }
@@ -537,17 +537,17 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
             // type; the record is evidence, not a migration blocker.
             journal({ type: 'terminal-projection-limitation', transitionId: input.transitionId, reachOutcomeKind: kind, detail: limitation })
           } else {
-            block('shadow-projection-limitation', `${kind}: ${limitation}`, { transitionId: input.transitionId })
+            block('replay-projection-limitation', `${kind}: ${limitation}`, { transitionId: input.transitionId })
           }
         }
         // The kernel cannot express this Reach terminal kind; CANCELED is the
-        // mechanical stand-in that closes the shadow lifecycle. The reason
+        // mechanical stand-in that closes the replayed lifecycle. The reason
         // preserves the Reach kind and the projection-limitation blocker
         // above marks it as a cutover blocker — never a semantic cancel.
         apply({
           kind: 'REQUEST_CANCEL',
           transitionId: input.transitionId,
-          reason: authoritative ? `authority-terminal:${kind}` : `shadow-terminal:${kind}`,
+          reason: authoritative ? `authority-terminal:${kind}` : `replay-terminal:${kind}`,
           capability: caps.scheduler,
         }, 'transition-terminal', input.transitionId)
         const pending = state.transitions[input.transitionId]
@@ -576,7 +576,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     return { ok: true }
   }
 
-  const stepIssued = (input: Extract<KernelShadowInput, { type: 'mechanical-step-issued' }>, authoritative = false): KernelGateVerdict => {
+  const stepIssued = (input: Extract<KernelSessionInput, { type: 'mechanical-step-issued' }>, authoritative = false): KernelGateVerdict => {
     if (input.effectKind !== 'locomotion') {
       block('unmapped-mutation-surface', `step effect kind ${input.effectKind} is not in the Reach map`, { transitionId: input.transitionId })
       return authoritative ? deny('issueStepEffect', `unmapped-effect-kind:${input.effectKind}`) : { ok: true }
@@ -600,7 +600,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         witnessRevision: Math.max(1, revision),
         witnessRefHash: sha({ witnessId: witness.witnessId, evidenceId: witness.evidenceId }),
         relationId: 'reach-route-witness',
-        validator: SHADOW_REGISTRY.witness,
+        validator: REACH_AUTHORITY_REGISTRY.witness,
         capability: caps.witness,
       }, 'mechanical-step-issued', input.transitionId)
     }
@@ -629,7 +629,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     return { ok: true }
   }
 
-  const stepSettled = (input: Extract<KernelShadowInput, { type: 'mechanical-step-settled' }>): void => {
+  const stepSettled = (input: Extract<KernelSessionInput, { type: 'mechanical-step-settled' }>): void => {
     const open = openEffects.get(input.stepId)
     openEffects.delete(input.stepId)
     if (state.transitions[input.transitionId]?.lifecycle === 'ACTIVE') {
@@ -658,7 +658,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         commitId: open.commitId,
         observation: factId === undefined ? 'UNKNOWN' : 'OCCURRED',
         factIds: factId === undefined ? [] : [factId],
-        verifier: SHADOW_REGISTRY.verifier,
+        verifier: REACH_AUTHORITY_REGISTRY.verifier,
         capability: caps.verifier,
       }, 'mechanical-step-settled', input.transitionId)
     } else {
@@ -667,7 +667,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
         commitId: open.commitId,
         observation: 'UNKNOWN',
         factIds: [],
-        verifier: SHADOW_REGISTRY.verifier,
+        verifier: REACH_AUTHORITY_REGISTRY.verifier,
         capability: caps.verifier,
       }, 'mechanical-step-settled', input.transitionId)
     }
@@ -765,7 +765,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
     }
   }
 
-  const observe = (input: KernelShadowInput): void => {
+  const observe = (input: KernelSessionInput): void => {
     try {
       switch (input.type) {
         case 'world-observation':
@@ -828,7 +828,7 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
           readonly contractHash: string
           readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
         }): KernelGateVerdict {
-          return terminalTransition({ type: 'transition-terminal', ...input } as Extract<KernelShadowInput, { type: 'transition-terminal' }>, true)
+          return terminalTransition({ type: 'transition-terminal', ...input } as Extract<KernelSessionInput, { type: 'transition-terminal' }>, true)
         },
       }
     : null
@@ -836,11 +836,11 @@ export function createKernelShadowSession(config: ShadowSessionConfig): KernelSh
   return {
     observe,
     observeMutation,
-    bindActuationContext(resolve: () => ShadowMutationContext | null): void {
+    bindActuationContext(resolve: () => MutationAuthorityContext | null): void {
       resolveContext = resolve
     },
     authority: authorityGate,
-    summary(): ShadowCoverageSummary {
+    summary(): KernelSessionSummary {
       const hardBlockers = blockers.filter((b) =>
         b.kind === 'unmapped-mutation-surface' ||
         b.kind === 'mutation-without-transition-authority' ||

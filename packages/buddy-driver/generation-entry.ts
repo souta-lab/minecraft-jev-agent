@@ -52,8 +52,8 @@ import {
 import type { System2RouteMemoryInput } from '../jev-agent/src/system2/payload.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
-import { createKernelShadowSession } from './kernel-shadow-session.ts'
-import type { ShadowMutationContext } from '../jev-agent/src/reach/kernel-shadow-map.ts'
+import { createKernelAuthoritySession } from './kernel-authority-session.ts'
+import type { MutationAuthorityContext } from '../jev-agent/src/reach/kernel-authority-map.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import { isContainerBlockName, normalizeBlockName } from '../jev-agent/src/containerAccess.ts'
 import { NETHER_PORTAL, PORTAL_VERIFIED, portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
@@ -2308,20 +2308,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // is no observer-only/shadow production mode — that would leave legacy Reach
   // scheduling as a second live authority.
   const kernelAuthorityMode = 'authority' as const
-  const kernelShadow = createKernelShadowSession({
+  const kernelSession = createKernelAuthoritySession({
     world: {
       serverId: ctx.worldKey.serverId,
       dimension: ctx.worldKey.dimension,
       worldEpoch: ctx.worldKey.worldEpoch,
     },
     generationId: id,
-    journalPath: join(ctx.logDir, 'kernel-shadow.jsonl'),
+    journalPath: join(ctx.logDir, 'kernel-authority.jsonl'),
     authorityMode: kernelAuthorityMode,
   })
   // Fail closed at generation construction: the production controller requires
   // the verdict-returning gate; an authority-less session must never produce
   // a generation whose Reach work runs without a kernel owner.
-  const kernelAuthority = kernelShadow.authority
+  const kernelAuthority = kernelSession.authority
   if (kernelAuthority === null) {
     throw new Error('V4.1.2 kernel authority session did not produce the production gate')
   }
@@ -2329,13 +2329,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // Late-bound: the controller (and its executor projection) exists only after
   // the leased bot is built. The resolver reads the CURRENT claim at mutation
   // time, so dispatches are attributed to whichever authority holds the body.
-  let actuationAuthoritySource: { currentActuationAuthority(): ShadowMutationContext | null } | null = null
-  kernelShadow.bindActuationContext(() => actuationAuthoritySource?.currentActuationAuthority() ?? null)
-  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log, kernelShadow.observeMutation)
+  let actuationAuthoritySource: { currentActuationAuthority(): MutationAuthorityContext | null } | null = null
+  kernelSession.bindActuationContext(() => actuationAuthoritySource?.currentActuationAuthority() ?? null)
+  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log, kernelSession.observeMutation)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
   // surface check proves the nested capabilities are guarded, not raw.
-  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log, kernelShadow.observeMutation)
+  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log, kernelSession.observeMutation)
   const surface = assertActuationSurfaceCovered(bot, ctx.log)
   ctx.log('ACTUATION_PORT_READY', {
     id,
@@ -3138,9 +3138,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const controller = new JevController(bot, options)
   controllerForRecovery = controller
   actuationAuthoritySource = controller
-  ctx.log('KERNEL_SHADOW_READY', {
+  ctx.log('KERNEL_AUTHORITY_READY', {
     id,
-    journal: join(ctx.logDir, 'kernel-shadow.jsonl'),
+    journal: join(ctx.logDir, 'kernel-authority.jsonl'),
     world: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
     kernelAuthority: 'on',
     legacyReachAuthority: 'off',
@@ -3370,20 +3370,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           subgoalCount: result.subgoalCount,
           jevCalls: result.jevCalls,
         })
-        const shadowSummary = kernelShadow.summary()
-        ctx.log('KERNEL_SHADOW_SUMMARY', {
+        const kernelSummary = kernelSession.summary()
+        ctx.log('KERNEL_AUTHORITY_SUMMARY', {
           id,
-          mutationsObserved: shadowSummary.mutationsObserved,
-          mutationsMapped: shadowSummary.mutationsMapped,
-          mutationsDeniedByLease: shadowSummary.mutationsDeniedByLease,
-          mutationsAttributedToTransition: shadowSummary.mutationsAttributedToTransition,
-          mutationsUnguarded: shadowSummary.mutationsUnguarded,
-          lifecycleCommands: shadowSummary.lifecycleCommands,
-          kernelDenied: shadowSummary.kernelDenied,
-          blockers: shadowSummary.blockers.length,
-          coverageComplete: shadowSummary.coverageComplete,
-          authorityMode: shadowSummary.authorityMode,
-          gateDenials: shadowSummary.gateDenials.length,
+          mutationsObserved: kernelSummary.mutationsObserved,
+          mutationsMapped: kernelSummary.mutationsMapped,
+          mutationsDeniedByLease: kernelSummary.mutationsDeniedByLease,
+          mutationsAttributedToTransition: kernelSummary.mutationsAttributedToTransition,
+          mutationsUnguarded: kernelSummary.mutationsUnguarded,
+          lifecycleCommands: kernelSummary.lifecycleCommands,
+          kernelDenied: kernelSummary.kernelDenied,
+          blockers: kernelSummary.blockers.length,
+          coverageComplete: kernelSummary.coverageComplete,
+          authorityMode: kernelSummary.authorityMode,
+          gateDenials: kernelSummary.gateDenials.length,
         })
         proposeLedger()
       })
@@ -3579,20 +3579,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       } catch {
         // best effort
       }
-      const shadowSummary = kernelShadow.summary()
-      ctx.log('KERNEL_SHADOW_SUMMARY', {
+      const kernelSummary = kernelSession.summary()
+      ctx.log('KERNEL_AUTHORITY_SUMMARY', {
         id,
-        mutationsObserved: shadowSummary.mutationsObserved,
-        mutationsMapped: shadowSummary.mutationsMapped,
-        mutationsDeniedByLease: shadowSummary.mutationsDeniedByLease,
-        mutationsAttributedToTransition: shadowSummary.mutationsAttributedToTransition,
-        mutationsUnguarded: shadowSummary.mutationsUnguarded,
-        lifecycleCommands: shadowSummary.lifecycleCommands,
-        kernelDenied: shadowSummary.kernelDenied,
-        blockers: shadowSummary.blockers.length,
-        coverageComplete: shadowSummary.coverageComplete,
-        authorityMode: shadowSummary.authorityMode,
-        gateDenials: shadowSummary.gateDenials.length,
+        mutationsObserved: kernelSummary.mutationsObserved,
+        mutationsMapped: kernelSummary.mutationsMapped,
+        mutationsDeniedByLease: kernelSummary.mutationsDeniedByLease,
+        mutationsAttributedToTransition: kernelSummary.mutationsAttributedToTransition,
+        mutationsUnguarded: kernelSummary.mutationsUnguarded,
+        lifecycleCommands: kernelSummary.lifecycleCommands,
+        kernelDenied: kernelSummary.kernelDenied,
+        blockers: kernelSummary.blockers.length,
+        coverageComplete: kernelSummary.coverageComplete,
+        authorityMode: kernelSummary.authorityMode,
+        gateDenials: kernelSummary.gateDenials.length,
       })
     },
     status,

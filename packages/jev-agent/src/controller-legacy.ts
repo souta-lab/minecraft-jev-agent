@@ -175,7 +175,7 @@ import type { InventoryReachMission } from './reach/scheduler.ts'
 import { ReachMissionRuntime } from './reach/mission-runtime.ts'
 import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './reach/controller.ts'
 import type { ReachMissionRuntimeSession } from './reach/mission-runtime.ts'
-import type { KernelReachAuthority, ShadowMutationContext } from './reach/kernel-shadow-map.ts'
+import type { KernelReachAuthority, MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import { MineflayerReachRuntimeAdapter } from './minecraft/reach-runtime-adapter.ts'
 import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './reach/ports.ts'
 import { createJevReachVtrComposition } from './reach/jev-composition.ts'
@@ -1553,7 +1553,7 @@ export class JevController {
    * when no action is in flight; the host-side shadow treats unattributed
    * mutations as migration blockers, not as silent evidence.
    */
-  currentActuationAuthority(): ShadowMutationContext | null {
+  currentActuationAuthority(): MutationAuthorityContext | null {
     const scoped = this.executor.currentAuthorityScope
     if (scoped !== null) return scoped
     const action = this.executor.current

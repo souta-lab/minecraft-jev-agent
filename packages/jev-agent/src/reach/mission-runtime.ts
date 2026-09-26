@@ -20,7 +20,7 @@ import type {
   ReachTransitionState,
 } from './transition.ts'
 import type { ReachRuntimeActionSnapshot } from './ports.ts'
-import type { KernelReachAuthority } from '../reach/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from '../reach/kernel-authority-map.ts'
 
 export interface ReachMissionRuntimeSession {
   readonly mission: InventoryReachTransitionInput['mission']
