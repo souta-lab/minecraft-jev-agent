@@ -53,7 +53,7 @@ import type { System2RouteMemoryInput } from '../jev-agent/src/system2Payload.ts
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { createKernelShadowSession } from './kernel-shadow-session.ts'
-import type { ShadowMutationContext } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
+import type { ShadowMutationContext } from '../jev-agent/src/reach/kernel-shadow-map.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import { isContainerBlockName, normalizeBlockName } from '../jev-agent/src/containerAccess.ts'
 import { NETHER_PORTAL, PORTAL_VERIFIED, portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'

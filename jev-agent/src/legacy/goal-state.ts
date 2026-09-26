@@ -9,7 +9,7 @@
 import { goalCollectsFuel } from '../candidates.ts'
 import { sensorOptions } from '../controller-shared.ts'
 import type { SensorOptionSlice } from '../controller-shared.ts'
-import type { JevAgentOptions } from '../controller-legacy.ts'
+import type { JevAgentOptions } from '../controller-shared.ts'
 import { PICKAXE_TIER_ORDER } from '../gameData.ts'
 import type { GoalQueue, PlannedGoal, QueuedGoal } from '../goalQueue.ts'
 import { verifiedBlockRecordsFromKnownResources } from '../goalSuccess.ts'

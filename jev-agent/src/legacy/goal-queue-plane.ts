@@ -6,7 +6,7 @@
 // No authority moves: System2 summon still crosses host.summonLlm and
 // world truth still crosses the narrow evaluator methods on the host.
 import { formatJevHeads } from '../betaAuthority.ts'
-import type { JevAgentOptions } from '../controller-legacy.ts'
+import type { JevAgentOptions } from '../controller-shared.ts'
 import type { BetaAuthorityDecision } from '../betaAuthority.ts'
 import type { AbandonClassification, OptionAttemptTracker } from '../abandonPolicy.ts'
 import { formatSurfaceAscentRefused, surfaceAscentRouteless } from '../candidates.ts'

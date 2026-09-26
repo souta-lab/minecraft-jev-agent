@@ -56,7 +56,7 @@ import type {
 } from '../candidates.ts'
 import { formatContactUnreachable } from '../combatClosure.ts'
 import { candidateOptions, sensorOptions } from '../controller-shared.ts'
-import type { JevAgentOptions } from '../controller-legacy.ts'
+import type { JevAgentOptions } from '../controller-shared.ts'
 import { formatContainerRefusal } from '../containerAccess.ts'
 import type { ContainerRefusal } from '../containerAccess.ts'
 import type { RecipeIndex } from '../crafting.ts'

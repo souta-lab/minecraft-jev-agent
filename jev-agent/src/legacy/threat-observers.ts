@@ -71,7 +71,7 @@ import {
   weaponFacts,
 } from '../threat.ts'
 import type { MobIdentityContext } from '../threat.ts'
-import type { EscalationReason } from '../controller-legacy.ts'
+import type { EscalationReason } from './escalation.ts'
 
 /** Narrow host surface for the threat/env-hazard observer slice. */
 export interface ThreatObserverHost {

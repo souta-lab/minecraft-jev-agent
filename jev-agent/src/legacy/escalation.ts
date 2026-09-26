@@ -47,7 +47,7 @@ import type { EventLogger } from '../jev.ts'
 import type { DecisionLlmResummonLog } from '../decisionlog.ts'
 import type { GoalQueue } from '../goalQueue.ts'
 import type { GoalState, AgentSignals } from '../state.ts'
-import type { JevAgentOptions } from '../controller-legacy.ts'
+import type { JevAgentOptions } from '../controller-shared.ts'
 
 /**
  * Escalation bookkeeping plane: the cooldown-gated typed escalation emit and

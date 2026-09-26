@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { describe, it } from 'bun:test'
 import type { Bot } from 'mineflayer'
 import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller-legacy.ts'
@@ -125,6 +125,7 @@ describe('VTR Reach production authority seam', () => {
   it('keeps raw-client reads out of VTR core and behind the allowlisted typed runtime adapter', () => {
     const backendFreeDirs = ['./src/vtr/', './src/reach/']
     for (const dir of backendFreeDirs) {
+      if (!existsSync(new URL(dir, import.meta.url))) continue
       const vtrFiles = readdirSync(new URL(dir, import.meta.url), { withFileTypes: true })
         .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
       for (const entry of vtrFiles) {
@@ -389,8 +390,9 @@ describe('VTR Reach production authority seam', () => {
 
   it('requires KernelReachAuthority by construction at every production seam', () => {
     // Static shape: the gate is a required field, never an optional mode.
-    assert.match(controller, /\n  kernelAuthority: KernelReachAuthority\n/)
-    assert.doesNotMatch(controller, /kernelAuthority\?:|kernelAuthority: KernelReachAuthority \| (undefined|null)/)
+    const controllerShared = readFileSync(new URL('./src/controller-shared.ts', import.meta.url), 'utf8')
+    assert.match(controllerShared, /\n  kernelAuthority: KernelReachAuthority\n/)
+    assert.doesNotMatch(controllerShared, /kernelAuthority\?:|kernelAuthority: KernelReachAuthority \| (undefined|null)/)
     assert.match(controller, /options: Partial<JevAgentOptions> & Pick<JevAgentOptions, 'kernelAuthority'>/)
     assert.match(controller, /export type JevAgentOptionDefaults = Omit<JevAgentOptions, 'kernelAuthority'>/)
     assert.match(controller, /setOptions\(partial: Partial<Omit<JevAgentOptions, 'kernelAuthority'>>/)

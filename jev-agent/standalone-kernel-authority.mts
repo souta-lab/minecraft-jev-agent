@@ -5,7 +5,7 @@
 // defaults (serverId 'local', worldEpoch 0); Reach is only gated when a
 // script explicitly configures vtrMission.
 import { createKernelShadowSession } from '../buddy-driver/kernel-shadow-session.ts'
-import type { KernelReachAuthority } from './src/vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from './src/reach/kernel-shadow-map.ts'
 
 export function createStandaloneKernelAuthority(generationId: string): KernelReachAuthority {
   const session = createKernelShadowSession({

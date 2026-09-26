@@ -18,8 +18,8 @@ import {
   MUTATING_BOT_METHODS,
   OBSERVED_UNGUARDED_BOT_METHODS,
 } from './resident-safety.ts'
-import { mapMutationSurface } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
-import type { ShadowMutationContext } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
+import { mapMutationSurface } from '../jev-agent/src/reach/kernel-shadow-map.ts'
+import type { ShadowMutationContext } from '../jev-agent/src/reach/kernel-shadow-map.ts'
 import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
 

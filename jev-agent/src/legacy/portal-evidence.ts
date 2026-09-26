@@ -29,7 +29,7 @@ import { sensorOptions } from '../controller-shared.ts'
 import { isStandable, liveStructureMembersForSites, sensedPortalFrameSites } from '../state.ts'
 import type { DimensionProvenance, KnownResource, WorldState } from '../state.ts'
 import { ROUTE_ALL_SPENT_REASON } from '../zeroProgressRoute.ts'
-import type { EscalationReason } from '../controller-legacy.ts'
+import type { EscalationReason } from './escalation.ts'
 
 /** Narrow host surface for the portal-evidence slice. */
 export interface PortalEvidenceHost {

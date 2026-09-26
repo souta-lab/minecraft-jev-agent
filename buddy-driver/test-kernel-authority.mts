@@ -14,7 +14,7 @@ import { createKernelShadowSession } from './kernel-shadow-session.ts'
 import type { KernelShadowSession } from './kernel-shadow-session.ts'
 import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
-import type { KernelReachAuthority } from '../jev-agent/src/vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from '../jev-agent/src/reach/kernel-shadow-map.ts'
 
 interface Case {
   name: string

@@ -69,7 +69,8 @@ import type { DecisionTrigger, TriggerEvent } from '../scheduler.ts'
 import type { GoalState, Vec3Json, WorldState } from '../state.ts'
 import { MELEE_THREAT_REACH } from '../threat.ts'
 import type { MobIdentityContext } from '../threat.ts'
-import type { EscalationReason, JevAgentOptions } from '../controller-legacy.ts'
+import type { JevAgentOptions } from '../controller-shared.ts'
+import type { EscalationReason } from './escalation.ts'
 import type { JevPolicy } from '../jev.ts'
 import {
   classifySemanticBoundary,

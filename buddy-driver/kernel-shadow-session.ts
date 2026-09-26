@@ -58,7 +58,7 @@ import {
   type KernelShadowInput,
   type KernelWorldObservation,
   type ShadowMutationContext,
-} from '../jev-agent/src/vtr/kernel-shadow-map.ts'
+} from '../jev-agent/src/reach/kernel-shadow-map.ts'
 import type { ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
 
 export type ShadowBlockerKind =

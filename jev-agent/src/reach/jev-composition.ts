@@ -9,7 +9,7 @@ import type {
   ReachRouteDecisionInput,
 } from './controller.ts'
 import type { ReachIdentity } from './transition.ts'
-import type { KernelReachAuthority } from '../vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from '../reach/kernel-shadow-map.ts'
 
 export interface JevReachMutableCell<T> {
   value: T
