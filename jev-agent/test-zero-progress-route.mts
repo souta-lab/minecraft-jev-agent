@@ -838,6 +838,8 @@ addCase("(d') a RETRIEVE with a path-stage failure obeys the identical rule (no 
 
 addCase('the live controller records the verdict and emits the typed markers', () => {
   const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const diagSource = readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
+  const portalSource = readFileSync(new URL('./src/legacy/portal-evidence.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const facade = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
   const routeSource = readFileSync(new URL('./src/zeroProgressRoute.ts', import.meta.url), 'utf8')
@@ -849,11 +851,11 @@ addCase('the live controller records the verdict and emits the typed markers', (
     ['DESCEND_RETIRED', /formatDescendRetired\('zero_progress_exhausted'/.test(source)],
     ['RETRIEVE_RETIRED', /formatRetrieveRetired\('zero_progress_budget'/.test(source)],
     ['RETRIEVE_ROUTE_BLOCKED', /formatRetrieveRouteBlocked\('zero_progress_route_unchanged'/.test(source)],
-    ['APPROACH_LEG', /formatApproachLeg\(reason, target\)/.test(source)],
+    ['APPROACH_LEG', /formatApproachLeg\(reason, target\)/.test(diagSource)],
     ['ROUTE_STAGE_FAILED marker', /formatRouteStageFailed\(\{/.test(source)],
     ['ROUTE_SPENT marker', /formatRouteSpent\(result\.kind/.test(source)],
     ['ROUTE_ESCALATE handling', /this\.noteRouteExhaustion\(grounded\.entryRefusal\)/.test(source)],
-    ['route_exhausted escalation', /this\.escalate\('route_exhausted', refusal\.line\)/.test(source)],
+    ['route_exhausted escalation', /host\.escalate\('route_exhausted', refusal\.line\)/.test(portalSource)],
     ['typed escalation reason', /route_exhausted: 'action_impossible'/.test(source)],
     // The route markers must be MIRRORED, or the resident log shows an unchanged
     // failing route and zero spent-route evidence (the run-muc620xb measurement).

@@ -152,9 +152,9 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
-import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, recordedPortalSitesFromKnownResources, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
+import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -195,6 +195,8 @@ import type { ReachMissionSnapshotOptions } from './vtr/reach-mission-projection
 import { sensorOptions, candidateOptions, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
 import * as diagnostics from './legacy/candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './legacy/candidate-diagnostics.ts'
+import * as portal from './legacy/portal-evidence.ts'
+import type { PortalEvidenceHost } from './legacy/portal-evidence.ts'
 import * as reach from './vtr/reach-controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './vtr/reach-controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
@@ -284,7 +286,6 @@ import {
   observeZeroProgressRoute,
   routeFailureStage,
   routeSignature,
-  ROUTE_ALL_SPENT_REASON,
   ZERO_PROGRESS_STAND_ROUTE_LIMIT,
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
@@ -2978,6 +2979,11 @@ export class JevController {
   /** CandidateDiagnosticsHost view of this controller (same structural-cast pattern as reachHost). */
   private get diagnosticsHost(): CandidateDiagnosticsHost {
     return this as unknown as CandidateDiagnosticsHost
+  }
+
+  /** PortalEvidenceHost view of this controller (same structural-cast pattern as reachHost). */
+  private get portalHost(): PortalEvidenceHost {
+    return this as unknown as PortalEvidenceHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -8275,143 +8281,23 @@ export class JevController {
    * Re-sense the frame and require every live interior cell to be a portal.
    */
   private portalLitTruth(goal: QueuedGoal): boolean {
-    if (goal.targetPredicate !== PORTAL_LIT_PREDICATE) return false
-    const actualDimension = this.bot.game?.dimension ?? null
-    const expectedDimension = goal.dimension ?? OVERWORLD
-    const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
-    if (actualDimension === null || normalize(actualDimension) !== normalize(expectedDimension)) return false
-    const sites = sensedPortalFrameSites(this.bot, sensorOptions(this.options))
-    const scratch = this.bot.entity?.position?.clone()
-    if (scratch === undefined) return false
-    const samples: string[] = []
-    const lit = sites.some((site) => {
-      const blocks = site.existingFrame?.length ?? 0
-      if (blocks < PORTAL_OBSIDIAN_REQUIRED) {
-        samples.push(`origin=${site.origin.x},${site.origin.y},${site.origin.z} blocks=${blocks} <required`)
-        return false
-      }
-      const layout = portalFrameLayout(site.origin, site.widthAxis)
-      const interior = layout.interior.map(
-        (cell) => this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? 'null',
-      )
-      const ok = isPortalIgnitionPostconditionMet(layout.interior, (cell) => this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null, NETHER_PORTAL)
-      samples.push(`origin=${site.origin.x},${site.origin.y},${site.origin.z} blocks=${blocks} interior=[${interior.join(',')}] ok=${ok}`)
-      return ok
-    })
-    // Live diagnosis for the M2 hand-off: the portal is `PORTAL_VERIFIED` yet the
-    // queue's light row kept re-igniting hundreds of times, so the queue never
-    // emptied and the ladder never advanced to `enter_nether`. This records the
-    // exact world truth the predicate saw (dimension, sites, interior cells).
-    this.logger.info(
-      'agent',
-      `PORTAL_LIT_TRUTH goal=${goal.id} dimension=${actualDimension} expected=${expectedDimension} sites=${sites.length} lit=${lit} ${samples.join(' | ')}`,
-      { actionId: goal.id },
-    )
-    return lit
+    return portal.portalLitTruth(this.portalHost, goal)
   }
-
-  /**
-   * Ground the dimension-transfer plan for the active `portal_entered` goal from
-   * LIVE world truth only: the interior must currently be `nether_portal` and at
-   * least one interior cell must be standable by the GENERIC locomotion rule
-   * (the same `isStandable` the terrain sensor and MOVE guard use). Returns null
-   * when the active goal does not request entry. Never silent: a requested entry
-   * with no lit/standable portal returns the pure module's typed refusal.
-   */
   private portalEntryPlan(state: WorldState): PortalEntryPlan | null {
-    const current = state.goalQueue?.current ?? null
-    if (current === null) return null
-    if (current.kind !== 'place' || current.targetPredicate !== PORTAL_ENTERED_PREDICATE) return null
-    const entity = this.bot.entity
-    if (entity === undefined) return null
-    const scratch = entity.position.clone()
-    const blockAt = (cell: { x: number; y: number; z: number }): string | null =>
-      this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
-    const sites = state.portalFrameSites ?? []
-    const dimension = current.dimension ?? NETHER
-    const self = {
-      x: Math.floor(state.self.position.x),
-      y: Math.floor(state.self.position.y),
-      z: Math.floor(state.self.position.z),
-    }
-    let refusal: PortalEntryPlan | null = null
-    for (const site of sites) {
-      const plan = planPortalEntry({
-        site,
-        self,
-        blockAt,
-        isStandable: (cell) => isStandable(this.bot, cell),
-        fromDimension: state.self.dimension,
-        dimension,
-      })
-      if (plan.ok) return plan
-      if (refusal === null) refusal = plan
-    }
-    return (
-      refusal ?? {
-        ok: false,
-        refused: true,
-        reason: 'no_known_site',
-        // With ZERO sites examined there is no observation at all, so claiming
-        // `portal_not_lit` would be a fabricated world fact (live
-        // run-muc3qbug-18vg3 emitted exactly that while the run's own durable
-        // record said the gate was lit and verified). Name what is missing.
-        line: formatPortalEntryNoKnownSite(),
-      }
-    )
+    return portal.portalEntryPlan(this.portalHost, state)
   }
-
-  /**
-   * The remembered-site approach marker: the entry route targets a portal whose
-   * lit interior could not be observed from here, so the walk is offered and the
-   * executor re-verifies the `nether_portal` interior at arrival. Distinct from
-   * `logEntryRefusal` (which owns the refusals) and deduped by line so a stable
-   * unverified route is one run-scoped fact, not a per-tick flood.
-   */
   private logEntryUnverified(plan: PortalEntryPlan | null): void {
-    const line = plan !== null && plan.ok && plan.candidate.unverified === true ? plan.candidate.line : null
-    if (line === this.lastEntryUnverifiedKey) return
-    this.lastEntryUnverifiedKey = line
-    if (line === null) return
-    this.logger.info('agent', line, { reason: 'site_not_observed', enter: line }, this.tickCounter)
+    return portal.logEntryUnverified(this.portalHost, plan)
   }
-
-  /**
-   * World truth for the dimension-transfer predicate. The row is complete ONLY
-   * when the bot's own live dimension equals the goal's target; no inventory
-   * count can substitute for it (`nether_portal` is not an item).
-   */
   private portalEnteredTruth(goal: QueuedGoal): boolean {
-    if (goal.targetPredicate !== PORTAL_ENTERED_PREDICATE) return false
-    const actual = this.bot.game?.dimension ?? null
-    if (actual === null) return false
-    const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
-    return normalize(actual) === normalize(goal.dimension ?? NETHER)
+    return portal.portalEnteredTruth(this.portalHost, goal)
   }
-
   private logEntryRefusal(refusal: PortalEntryRefusal | null): void {
-    const key = refusal === null ? null : refusal.line
-    if (key === this.lastEntryRefusalKey) return
-    this.lastEntryRefusalKey = key
-    if (refusal === null) return
-    this.logger.warn('agent', refusal.line, { reason: refusal.reason }, this.tickCounter)
+    return portal.logEntryRefusal(this.portalHost, refusal)
   }
-
-  /**
-   * A route arm that reports `all_routes_spent` has proved a STRUCTURAL
-   * capability boundary: every route it can ground from this body cell to the
-   * goal's target is spent, and no grounded approach leg changes the stand cell.
-   * That is exactly the WHAT-next boundary System2 owns, so it goes through the
-   * ordinary bounded escalation (`escalationCooldownMs` / `escalationWindowMs`
-   * and the `ESCALATION_TO_SUMMON` mapping) instead of re-offering the dead
-   * route. Code still owns the fact (CAN/TRUE); Jev still chooses WHICH among
-   * the remaining grounded offers; System2 owns WHAT comes next.
-   */
   private noteRouteExhaustion(refusal: PortalEntryRefusal | null): void {
-    if (refusal === null || refusal.reason !== ROUTE_ALL_SPENT_REASON) return
-    this.escalate('route_exhausted', refusal.line)
+    return portal.noteRouteExhaustion(this.portalHost, refusal)
   }
-
   private effectiveHave(): number {
     const current = this.queue.current
     if (current === null || current.targetItem === null) return 0
@@ -8660,15 +8546,8 @@ export class JevController {
    * `PORTAL_VERIFIED`); this reader neither adds nor revokes one.
    */
   private recordedPortalSites(): RecordedPortalSite[] {
-    return recordedPortalSitesFromKnownResources(this.options.knownResources)
+    return portal.recordedPortalSites(this.portalHost)
   }
-
-  /**
-   * Retire a stale protected prerequisite that world truth has already made
-   * unnecessary. This is a world-truth/lifecycle reconciliation, not a semantic
-   * preference: every other protected goal keeps the normal #55 reinsertion
-   * guarantee.
-   */
   private protectedGoalRetireReason(goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null {
     // An `smelt:iron_ingot` row exists only to feed a craft that consumes the
     // ingot. Once that craft is resolved — the bot holds the flint_and_steel it
@@ -8719,62 +8598,11 @@ export class JevController {
    * live block and post-condition checks.
    */
   private mergeRememberedPortalFrame(state: WorldState): WorldState {
-    const dimension = state.self.dimension
-    if (this.rememberedPortalFrameDimension !== dimension) {
-      this.rememberedPortalFrameDimension = dimension
-      this.rememberedPortalFrameSites.clear()
-      this.rememberedPortalFrame = null
-    }
-    this.rememberPortalFrameSites(state.portalFrameSites ?? [], dimension)
-    if (state.portalFrame?.shape === 'ok') this.rememberedPortalFrame = state.portalFrame
-    if (this.rememberedPortalFrameSites.size === 0 && this.rememberedPortalFrame === null) return state
-
-    const merged: PortalFrameSite[] = []
-    const seen = new Set<string>()
-    // LIVE sites win over remembered copies: the live functional-core fact
-    // (`coreIntact`) is current world truth, and a remembered geometry-only copy
-    // must never shadow it. Memory only fills sites the sensor did not observe
-    // this tick, matching `mergePortalFrameSites` in the sensor.
-    for (const site of [...(state.portalFrameSites ?? []), ...this.rememberedPortalFrameSites.values()]) {
-      const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      merged.push(site)
-    }
-    return {
-      ...state,
-      portalFrameSites: merged,
-      portalFrame: state.portalFrame ?? this.rememberedPortalFrame,
-      // Re-derive the source-protection membership from the MERGED sites: the
-      // sensor computed it from the sites it saw this tick, and a frame that
-      // only this generation's memory still holds must stay protected too.
-      liveStructureMembers: liveStructureMembersForSites(merged),
-    }
+    return portal.mergeRememberedPortalFrame(this.portalHost, state)
   }
-
   private rememberPortalFrameSites(sites: readonly PortalFrameSite[], dimension: string): void {
-    if (this.rememberedPortalFrameDimension !== dimension) {
-      this.rememberedPortalFrameDimension = dimension
-      this.rememberedPortalFrameSites.clear()
-      this.rememberedPortalFrame = null
-    }
-    for (const site of sites) {
-      if ((site.existingFrame?.length ?? 0) === 0) continue
-      const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
-      // Durable memory keeps geometry only. `coreIntact` is a volatile live-world
-      // verdict (the portal's lit interior) and must be re-observed, never
-      // replayed, or a destroyed portal's obsidian would stay protected forever.
-      this.rememberedPortalFrameSites.set(key, {
-        origin: { ...site.origin },
-        widthAxis: site.widthAxis,
-        safe: site.safe,
-        reachable: site.reachable,
-        temporarySupportRequired: site.temporarySupportRequired,
-        existingFrame: site.existingFrame === undefined ? undefined : site.existingFrame.map((cell) => ({ ...cell })),
-      })
-    }
+    return portal.rememberPortalFrameSites(this.portalHost, sites, dimension)
   }
-
   private logSubgoalStart(goal: QueuedGoal, inventory: Record<string, number>, cause: string): void {
     this.logger.warn(
       'queue',
