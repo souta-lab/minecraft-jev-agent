@@ -266,7 +266,9 @@ function outcomePacket(
   })
 }
 
-const SRC_CONTROLLER = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+const SRC_CONTROLLER =
+  readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+  readFileSync(new URL('./src/legacy/system2-plane.ts', import.meta.url), 'utf8')
 
 addCase('(0) air bands share the sensor scale, reject invalid readings, and use normalized state air', () => {
   const values = [0, LOW_AIR_LEVEL, LOW_AIR_LEVEL + 1, MAX_AIR]
@@ -371,7 +373,7 @@ addCase('(3) tiny body jitter does not change semantic identity or projection ha
   // The raw churn (tick, float position, yaw, path node, swing count) is NOT part
   // of the projection input at all - that is the point, and it is a structural
   // property of the controller's builder, so it is checked against the source.
-  const builder = SRC_CONTROLLER.slice(SRC_CONTROLLER.indexOf('private buildSemanticProjection('))
+  const builder = SRC_CONTROLLER.slice(SRC_CONTROLLER.indexOf('export function buildSemanticProjection('))
   const body = builder.slice(0, builder.indexOf('\n  }\n'))
   const rawChurnAbsent = !body.includes('self.position') && !body.includes('state.tick') && !body.includes('yaw')
   const empty = diffSemanticProjections(a, b)

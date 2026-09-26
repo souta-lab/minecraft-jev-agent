@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
 import { assessReachViability } from './src/vtr/reach-safety.ts'
 
-const controller = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+const controller =
+  readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+  readFileSync(new URL('./src/vtr/reach-controller-plane.ts', import.meta.url), 'utf8')
 
 describe('VTR Reach safety wakeups use current viability truth', () => {
   it('does not interrupt a safe active contract for a stale damage or breath event', () => {

@@ -1027,7 +1027,9 @@ function levelsUnobserved(state: WorldState): boolean {
 // offer itself are all checked against the real sources.
 // ---------------------------------------------------------------------------
 {
-  const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const source =
+    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const policySource = readFileSync(new URL('./src/policy.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [

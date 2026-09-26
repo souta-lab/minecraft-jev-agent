@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
 
 const facade = source('./src/controller.ts')
-const legacy = source('./src/controller-legacy.ts')
+const legacy = source('./src/controller-legacy.ts') + source('./src/legacy/system2-plane.ts')
 const candidates = source('./src/candidates.ts')
 
 assert.match(facade, /export class JevController extends LegacyJevController/)

@@ -1321,7 +1321,9 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 // distance gain (the measured run showed none of them).
 // ---------------------------------------------------------------------------
 {
-  const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const source =
+    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/candidate-diagnostics.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
