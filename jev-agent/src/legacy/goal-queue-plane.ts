@@ -16,7 +16,7 @@ import type { SensorOptionSlice } from '../controller-shared.ts'
 import type { DecisionLlmResummonLog, DecisionSubgoalLog } from '../decisionlog.ts'
 import { smeltInputFor } from '../gameData.ts'
 import { formatNonProgressEscalated, formatNonProgressYield, formatPlanIdentity, formatPlanIdentityChanged, formatRowDeferredNotExecutableHere, formatRowNotExecutableHere, notExecutableReplanRequest, planReplanRequest } from '../goalQueue.ts'
-import type { GoalQueue, PlanIdentity, QueuedGoal } from '../goalQueue.ts'
+import type { GoalQueue, PlannedGoal, PlanIdentity, QueuedGoal } from '../goalQueue.ts'
 import { evaluateGoalSuccess } from '../goalSuccess.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from '../predicateGoal.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from '../resourceClass.ts'
@@ -95,6 +95,9 @@ export interface GoalQueuePlaneHost {
   readonly tickCounter: number
   unfinishedGoals(): QueuedGoal[]
   readonly waitStreakEscalation: WaitStreakEscalation
+  readonly executor: import('../executor.ts').Executor
+  semanticStateGeneration: number
+  requestDecision(trigger: import('../scheduler.ts').DecisionTrigger, detail: Record<string, unknown>): void
 }
 
 export function logHeads(host: GoalQueuePlaneHost,
@@ -971,4 +974,46 @@ export function subgoalState(goal: QueuedGoal, have: number): GoalState {
     complete: have >= required,
     startedAtMs: goal.createdAt,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Human-intent queue lifecycle (moved from controller-legacy.ts): apply/clear
+// a human interrupt plan, bump the semantic generation, cancel the in-flight
+// action when ownership actually changes, and wake the decision plane.
+// ---------------------------------------------------------------------------
+
+export function submitHumanPlan(host: GoalQueuePlaneHost, goals: readonly PlannedGoal[], requestedBy: string): QueuedGoal[] {
+  const previous = host.queue.current
+  const added = host.queue.interruptWithHumanPlan(goals, {
+    onDuplicate: (line) => host.logger.info('human', line, { requestedBy }, host.tickCounter),
+  })
+  if (added.length === 0) return []
+  host.semanticStateGeneration += 1
+  if (previous !== null && previous.origin !== 'human') {
+    host.executor.cancelCurrent(`human intent from ${requestedBy}`)
+  }
+  host.logger.warn(
+    'human',
+    `HUMAN_INTENT_APPLIED requestedBy=${requestedBy} goals=${added.length}`,
+    { requestedBy, goals: added.map((goal) => goal.description), queueDepth: host.queue.state.depth },
+    host.tickCounter,
+  )
+  host.requestDecision('human_intent', { requestedBy, goals: added.map((goal) => goal.id) })
+  return added
+}
+
+export function clearHumanPlan(host: GoalQueuePlaneHost, requestedBy: string, reason = 'free'): QueuedGoal[] {
+  const currentWasHuman = host.queue.current?.origin === 'human'
+  const cleared = host.queue.clearHumanInterrupts(reason)
+  if (cleared.length === 0) return []
+  host.semanticStateGeneration += 1
+  if (currentWasHuman) host.executor.cancelCurrent(`human ${reason} from ${requestedBy}`)
+  host.logger.warn(
+    'human',
+    `HUMAN_INTENT_CLEARED requestedBy=${requestedBy} reason=${reason} goals=${cleared.length}`,
+    { requestedBy, reason, goals: cleared.map((goal) => goal.id), queueDepth: host.queue.state.depth },
+    host.tickCounter,
+  )
+  host.requestDecision('human_intent', { requestedBy, reason, cleared: cleared.map((goal) => goal.id) })
+  return cleared
 }

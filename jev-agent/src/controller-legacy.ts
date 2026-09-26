@@ -1874,40 +1874,12 @@ export class JevController {
    * The autonomous mission is preserved behind the human interrupt queue.
    */
   submitHumanPlan(goals: readonly PlannedGoal[], requestedBy: string): QueuedGoal[] {
-    const previous = this.queue.current
-    const added = this.queue.interruptWithHumanPlan(goals, {
-      onDuplicate: (line) => this.logger.info('human', line, { requestedBy }, this.tickCounter),
-    })
-    if (added.length === 0) return []
-    this.semanticStateGeneration += 1
-    if (previous !== null && previous.origin !== 'human') {
-      this.executor.cancelCurrent(`human intent from ${requestedBy}`)
-    }
-    this.logger.warn(
-      'human',
-      `HUMAN_INTENT_APPLIED requestedBy=${requestedBy} goals=${added.length}`,
-      { requestedBy, goals: added.map((goal) => goal.description), queueDepth: this.queue.state.depth },
-      this.tickCounter,
-    )
-    this.requestDecision('human_intent', { requestedBy, goals: added.map((goal) => goal.id) })
-    return added
+    return queueplane.submitHumanPlan(this.queueHost, goals, requestedBy)
   }
 
   /** Clear only human-owned unfinished rows and resume the preserved mission. */
   clearHumanPlan(requestedBy: string, reason = 'free'): QueuedGoal[] {
-    const currentWasHuman = this.queue.current?.origin === 'human'
-    const cleared = this.queue.clearHumanInterrupts(reason)
-    if (cleared.length === 0) return []
-    this.semanticStateGeneration += 1
-    if (currentWasHuman) this.executor.cancelCurrent(`human ${reason} from ${requestedBy}`)
-    this.logger.warn(
-      'human',
-      `HUMAN_INTENT_CLEARED requestedBy=${requestedBy} reason=${reason} goals=${cleared.length}`,
-      { requestedBy, reason, goals: cleared.map((goal) => goal.id), queueDepth: this.queue.state.depth },
-      this.tickCounter,
-    )
-    this.requestDecision('human_intent', { requestedBy, reason, cleared: cleared.map((goal) => goal.id) })
-    return cleared
+    return queueplane.clearHumanPlan(this.queueHost, requestedBy, reason)
   }
 
   /** Must be called before start(). Rebuilds every derived object. */
