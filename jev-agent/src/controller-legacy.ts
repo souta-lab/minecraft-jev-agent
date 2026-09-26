@@ -5320,45 +5320,6 @@ export class JevController {
     return { escalate: false, reason: 'no semantic escalation' }
   }
 
-  /**
-   * The only semantic replan trigger: an `abandon_option` vote that has explicit
-   * `betaAuthority` and clears the deterministic prerequisite guard (#22/#46).
-   * In the default shadow mode the controller never reaches here.
-   */
-  private adoptAbandon(decision: JevResult): boolean {
-    if (!abandonRequested(decision)) return false
-    const current = this.queue.current
-    const optionId = current === null ? null : optionIdForGoal(current)
-    if (!canAuthoritativelyAbandonOption(optionId)) {
-      this.logger.warn(
-        'heads',
-        'BETA_NONAUTHORITATIVE option=none reason=no_current_option',
-        { optionId: null, reason: 'no_current_option', beta: decision.answers.abandon_option?.probability ?? null },
-        this.tickCounter,
-      )
-      return false
-    }
-    const vote = this.betaDecision(decision)
-    const probability = decision.answers.abandon_option?.probability ?? null
-    if (vote.adopt) {
-      this.markOptionAbandoned(optionId, 'authority')
-      this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
-      return true
-    }
-    const protection = this.reconciledProtection(vote.protection, optionId)
-    if (protection.protect && !this.placeRetryExhausted()) {
-      this.logger.warn(
-        'heads',
-        protection.line,
-        { option: protection.option, because: protection.because, actionId: decisionIdFrom(decision), abandon: probability },
-        this.tickCounter,
-      )
-      return false
-    }
-    this.markOptionAbandoned(optionId, 'authority')
-    this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
-    return true
-  }
 
   /**
    * #46: a required precondition is deterministic code, not a model vote. When
@@ -5383,9 +5344,6 @@ export class JevController {
     return observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
   }
 
-  private placeRetryCount(item: string | null): number {
-    return this.placementRetries.countFor(item)
-  }
 
   /** Unfinished goals in plan order; the protection guard spans the whole plan. */
   private unfinishedGoals(): QueuedGoal[] {
@@ -7384,29 +7342,6 @@ export class JevController {
     return stall.detectMoveOscillation(this.stallHost)
   }
 
-  private syntheticWait(): JevResult {
-    const callId = randomUUID()
-    return {
-      callId,
-      policy: this.jev.kind,
-      source: this.jev.kind === 'typesafe' ? 'jev' : 'fallback',
-      model: this.jev.model,
-      latencyMs: 0,
-      usage: null,
-      answers: {
-        action: {
-          name: 'action',
-          type: 'choice',
-          value: 'WAIT',
-          probability: 1,
-          confidence: null,
-          probabilities: { WAIT: 1 },
-          legend: null,
-          note: 'synthetic WAIT after a policy failure',
-        },
-      },
-    }
-  }
 
   private runSuccess(): boolean {
     if (this.options.singleShotPlanner && this.subgoalCount > 0) {

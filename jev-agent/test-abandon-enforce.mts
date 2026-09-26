@@ -179,7 +179,10 @@ addCase('(e) #79: a never-attempted smelt option stays protected before its prer
 
 addCase('#79 wiring: the authority facade preserves the legacy attempt/enforcement mechanics', () => {
   const facade = source('./src/controller.ts')
-  const mechanics = source('./src/controller-legacy.ts')
+  const mechanics =
+    source('./src/controller-legacy.ts') +
+    source('./src/legacy/decision-epochs.ts').replace(/\bhost\./g, 'this.') +
+    source('./src/legacy/outcome-accounting.ts').replace(/\bhost\./g, 'this.')
   const missing = [
     'classifyAbandonRequest({',
     'optionAttempts.noteOutcome(',
