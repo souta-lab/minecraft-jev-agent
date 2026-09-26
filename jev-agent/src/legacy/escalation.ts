@@ -42,3 +42,65 @@ export const ESCALATION_TO_SUMMON: Record<EscalationReason, LlmSummonReason> = {
   unknown_event: 'unknown_situation',
   policy_error: 'unknown_situation',
 }
+
+import type { EventLogger } from '../jev.ts'
+import type { DecisionLlmResummonLog } from '../decisionlog.ts'
+import type { GoalQueue } from '../goalQueue.ts'
+import type { GoalState, AgentSignals } from '../state.ts'
+import type { JevAgentOptions } from '../controller-legacy.ts'
+
+/**
+ * Escalation bookkeeping plane: the cooldown-gated typed escalation emit and
+ * the objective-complete terminal escalation. No authority moves — the System2
+ * wake still crosses host.summonLlm and goal completion still crosses
+ * host.finish.
+ */
+export interface EscalationHost {
+  readonly lastEscalationAt: Map<EscalationReason, number>
+  lastEscalationMs: number
+  readonly escalations: EscalationReason[]
+  signals: AgentSignals
+  readonly queue: Pick<GoalQueue, 'markProgress' | 'state'>
+  readonly goal: GoalState
+  logger: EventLogger
+  options: Pick<JevAgentOptions, 'escalationCooldownMs' | 'finishOnObjectiveComplete'>
+  readonly tickCounter: number
+  finish(reason: string, success: boolean): void
+  summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null
+}
+
+export function onObjectiveComplete(host: EscalationHost): void {
+  host.queue.markProgress(host.goal.haveCount)
+  host.escalations.push('goal_complete')
+  host.signals.escalationRecommended = true
+  const queueState = host.queue.state
+  host.logger.warn(
+    'system2',
+    `objective complete: ${host.goal.description}; goal queue depth=${queueState.depth} current=${queueState.current?.description ?? 'none'}`,
+    { queueDepth: queueState.depth, currentGoal: queueState.current?.description ?? null },
+    host.tickCounter,
+  )
+  if (host.options.finishOnObjectiveComplete) {
+    host.finish('goal-complete', true)
+    return
+  }
+  host.summonLlm('queue_empty', 'objective complete; the queue needs its next horizon')
+}
+
+export function escalate(host: EscalationHost, reason: EscalationReason, detail: string): void {
+  const now = Date.now()
+  const last = host.lastEscalationAt.get(reason) ?? 0
+  if (now - last < host.options.escalationCooldownMs) return
+  host.lastEscalationAt.set(reason, now)
+  host.lastEscalationMs = now
+  host.escalations.push(reason)
+  host.signals.escalationRecommended = true
+  const summonReason = ESCALATION_TO_SUMMON[reason]
+  host.logger.warn(
+    'escalate',
+    `-> System 2: reason=${reason} summon=${summonReason} detail=${detail}`,
+    { reason, summonReason, detail },
+    host.tickCounter,
+  )
+  host.summonLlm(summonReason, `${reason}: ${detail}`)
+}

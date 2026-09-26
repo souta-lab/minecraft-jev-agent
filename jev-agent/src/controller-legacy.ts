@@ -188,7 +188,8 @@ import type {
 } from './vtr/reach.ts'
 import type { ReachMissionSnapshotOptions } from './vtr/reach-mission-projection.ts'
 import { sensorOptions, candidateOptions, currentFocusItem, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
-import { ESCALATION_TO_SUMMON } from './legacy/escalation.ts'
+import * as escalationplane from './legacy/escalation.ts'
+import type { EscalationHost } from './legacy/escalation.ts'
 import type { EscalationReason } from './legacy/escalation.ts'
 import type { PendingDecision } from './legacy/decision-epochs.ts'
 import * as diagnostics from './legacy/candidate-diagnostics.ts'
@@ -2477,6 +2478,10 @@ export class JevController {
   /** AbandonLifecycleHost view of this controller (same structural-cast pattern as reachHost). */
   private get abandonLifecycleHost(): AbandonLifecycleHost {
     return this as unknown as AbandonLifecycleHost
+  }
+
+  private get escalationHost(): EscalationHost {
+    return this as unknown as EscalationHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -5693,21 +5698,7 @@ export class JevController {
   }
 
   private onObjectiveComplete(): void {
-    this.queue.markProgress(this.goal.haveCount)
-    this.escalations.push('goal_complete')
-    this.signals.escalationRecommended = true
-    const queueState = this.queue.state
-    this.logger.warn(
-      'system2',
-      `objective complete: ${this.goal.description}; goal queue depth=${queueState.depth} current=${queueState.current?.description ?? 'none'}`,
-      { queueDepth: queueState.depth, currentGoal: queueState.current?.description ?? null },
-      this.tickCounter,
-    )
-    if (this.options.finishOnObjectiveComplete) {
-      this.finish('goal-complete', true)
-      return
-    }
-    this.summonLlm('queue_empty', 'objective complete; the queue needs its next horizon')
+    return escalationplane.onObjectiveComplete(this.escalationHost)
   }
 
   // -------------------------------------------------------------------------
@@ -5715,21 +5706,7 @@ export class JevController {
   // -------------------------------------------------------------------------
 
   private escalate(reason: EscalationReason, detail: string): void {
-    const now = Date.now()
-    const last = this.lastEscalationAt.get(reason) ?? 0
-    if (now - last < this.options.escalationCooldownMs) return
-    this.lastEscalationAt.set(reason, now)
-    this.lastEscalationMs = now
-    this.escalations.push(reason)
-    this.signals.escalationRecommended = true
-    const summonReason = ESCALATION_TO_SUMMON[reason]
-    this.logger.warn(
-      'escalate',
-      `-> System 2: reason=${reason} summon=${summonReason} detail=${detail}`,
-      { reason, summonReason, detail },
-      this.tickCounter,
-    )
-    this.summonLlm(summonReason, `${reason}: ${detail}`)
+    return escalationplane.escalate(this.escalationHost, reason, detail)
   }
 
   private recordFailure(code: FailureCode | GuardCode | string | null, detail: string): void {
