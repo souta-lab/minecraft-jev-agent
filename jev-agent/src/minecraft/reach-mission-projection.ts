@@ -13,8 +13,7 @@ import { scannedBlockNames } from '../state.ts'
 import type { WorldState } from '../state.ts'
 import { projectReachMissionSnapshot } from '../reach/mission-projection.ts'
 import type { ReachMissionRouteFact, ReachMissionSnapshotOptions } from '../reach/mission-projection.ts'
-import type { ReachRuntimeSnapshot } from '../reach/controller.ts'
-import type { ReachRuntimeActionSnapshot } from '../reach/ports.ts'
+import type { ReachMissionProjection } from '../reach/ports.ts'
 import type { ReachIdentity, ReachTransitionContract } from '../reach/transition.ts'
 import { countMissionInventoryResource } from '../reach/transition.ts'
 import type { InventoryReachMission } from '../reach/scheduler.ts'
@@ -47,16 +46,8 @@ export interface MinecraftReachMissionRouteProjectionInput extends Omit<Minecraf
   readonly inadmissibleCandidates?: readonly Candidate[]
 }
 
-export interface MinecraftReachMissionProjection {
-  readonly snapshot: ReachRuntimeSnapshot
-  /** Candidate DTOs whose route/witness facts survived pure projection. */
-  readonly candidates: readonly Candidate[]
-  readonly sourceCandidates: readonly Candidate[]
-  readonly inadmissibleCandidates: readonly Candidate[]
-  readonly missionSourceNames: readonly string[]
-  readonly missionSatisfiedEvidenceId?: string
-  readonly ensuresAlreadyTrueEvidenceId?: string
-}
+/** The adapter returns the consumer-owned `ReachMissionProjection` contract. */
+export type MinecraftReachMissionProjection = ReachMissionProjection
 
 function distance(a: { readonly x: number; readonly y: number; readonly z: number }, b: { readonly x: number; readonly y: number; readonly z: number }): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
@@ -133,22 +124,6 @@ export function filterLegacyReachCandidates(input: {
     else candidates.push(candidate)
   }
   return { candidates, withheld }
-}
-
-export function isMissionReachWalkAction(
-  action: ReachRuntimeActionSnapshot,
-  item: string,
-  dimension: string,
-  worldEpoch: number,
-  sourceNames: readonly string[],
-): boolean {
-  const commitment = action.commitment
-  if (action.authority === 'vtr-reach' || action.kind !== 'MOVE' || commitment?.skillKind !== 'walk_to') return false
-  const sourceName = commitment.params.targetName
-  if (typeof sourceName !== 'string' || !missionResourceSourceMatches(item, sourceName, null, sourceNames)) return false
-  return commitment.target.kind === 'position' &&
-    commitment.target.dimension === dimension &&
-    commitment.target.worldEpoch === worldEpoch
 }
 
 function routeFact(candidate: Candidate): ReachMissionRouteFact {

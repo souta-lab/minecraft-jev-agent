@@ -5,7 +5,22 @@ import type { Candidate, ReachabilityGateOptions } from '../candidates.ts'
 import type { GuardResult } from '../policy.ts'
 import type { SkillCommitment } from '../skillCommitment.ts'
 import type { SensorInput, SensorOptions, WorldState } from '../state.ts'
-import type { ReachMechanicalIntent } from './controller.ts'
+import type { ReachMechanicalIntent, ReachRuntimeSnapshot } from './controller.ts'
+
+/**
+ * Consumer-owned Reach mission projection result. The Minecraft adapter in
+ * `../minecraft/reach-mission-projection.ts` returns this shape; Reach code
+ * depends only on this contract, never on the concrete adapter.
+ */
+export interface ReachMissionProjection {
+  readonly snapshot: ReachRuntimeSnapshot
+  readonly candidates: readonly Candidate[]
+  readonly sourceCandidates: readonly Candidate[]
+  readonly inadmissibleCandidates: readonly Candidate[]
+  readonly missionSourceNames: readonly string[]
+  readonly missionSatisfiedEvidenceId?: string
+  readonly ensuresAlreadyTrueEvidenceId?: string
+}
 
 export interface ReachRuntimeActionSnapshot {
   readonly id: string

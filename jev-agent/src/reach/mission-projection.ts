@@ -1,5 +1,6 @@
 import type { InventoryReachMission } from './scheduler.ts'
 import type { ReachRuntimeSnapshot, ReachRoute } from './controller.ts'
+import type { ReachRuntimeActionSnapshot } from './ports.ts'
 import { countMissionInventoryResource, missionResourceSourceMatches } from './transition.ts'
 import type { ReachIdentity } from './transition.ts'
 
@@ -192,4 +193,26 @@ export function projectReachMissionSnapshot(input: ReachMissionSnapshotInput): R
     ...(missionSatisfiedEvidenceId === undefined ? {} : { missionSatisfiedEvidenceId }),
     ...(ensuresAlreadyTrueEvidenceId === undefined ? {} : { ensuresAlreadyTrueEvidenceId }),
   }
+}
+
+/**
+ * Whether a still-running legacy walk action is reaching for the same mission
+ * source this Reach contract owns. Operates on the backend-neutral action
+ * snapshot only; it is the same-mission duplicate-authority guard, not a
+ * legacy scheduling permission.
+ */
+export function isMissionReachWalkAction(
+  action: ReachRuntimeActionSnapshot,
+  item: string,
+  dimension: string,
+  worldEpoch: number,
+  sourceNames: readonly string[],
+): boolean {
+  const commitment = action.commitment
+  if (action.authority === 'vtr-reach' || action.kind !== 'MOVE' || commitment?.skillKind !== 'walk_to') return false
+  const sourceName = commitment.params.targetName
+  if (typeof sourceName !== 'string' || !missionResourceSourceMatches(item, sourceName, null, sourceNames)) return false
+  return commitment.target.kind === 'position' &&
+    commitment.target.dimension === dimension &&
+    commitment.target.worldEpoch === worldEpoch
 }

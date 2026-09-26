@@ -2219,7 +2219,29 @@ export class JevController {
     contract: ReachTransitionContract | null = null,
     snapshotOptions: ReachMissionSnapshotOptions = {},
   ): ReturnType<typeof projectMinecraftReachMission> {
-    return reach.projectReachMission(this.reachHost, mission, state, identity, contract, snapshotOptions)
+    this.reachRouteDecisionWorld = state
+    const options = candidateOptions(
+      this.options,
+      this.recipeIndex,
+      this.unreachableStationKeys(state),
+      this.reachRuntimeAdapter.reachabilityGateOptions(this.tickCounter, this.reachabilityProofs),
+      this.blacklistedMoveTargets(state),
+      state.portalFrame,
+      this.searchedSurfaceTargets,
+      null,
+      this.placementRetries.retiredItemSet(),
+    )
+    return projectMinecraftReachMission({
+      mission,
+      world: state,
+      candidateOptions: options,
+      identity,
+      witnessIdentity: this.reachIdentity(state),
+      contract,
+      previousFrontierId: this.reachRuntime.current?.state.progress.frontierId ?? null,
+      previousActionFailure: this.lastReachActionFailure,
+      snapshotOptions,
+    })
   }
 
   private currentVtrReachRouteDecision(): typeof this.lastVtrReachRouteDecision {

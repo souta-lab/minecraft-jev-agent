@@ -23,7 +23,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Candidate } from '../candidates.ts'
 import { CRITICAL_COMBAT_HEALTH } from '../candidates.ts'
-import { sensorOptions, candidateOptions, MODEL_RECOVERY_DRAIN_GRACE_MS } from '../controller-shared.ts'
+import { sensorOptions, MODEL_RECOVERY_DRAIN_GRACE_MS } from '../controller-shared.ts'
 import type { RecipeIndex } from '../crafting.ts'
 import type { DecisionRecordProvenance } from '../decisionlog.ts'
 import type { CurrentAction, Executor } from '../executor.ts'
@@ -34,10 +34,8 @@ import type { StateFingerprintMemory } from '../moveFailMemory.ts'
 import type { PlaceRetryLedger } from '../placementGuard.ts'
 import type { PrereqRankPolicy } from '../prereqOption.ts'
 import {
-  projectMinecraftReachMission,
-  minecraftMissionSourceNames,
   isMissionReachWalkAction,
-} from '../minecraft/reach-mission-projection.ts'
+} from './mission-projection.ts'
 import type { DecisionTrigger, TriggerEvent } from '../scheduler.ts'
 import { pickHigherPriority } from '../scheduler.ts'
 import {
@@ -63,7 +61,7 @@ import type {
 import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './controller.ts'
 import type { ReachMissionRuntime, ReachMissionRuntimeSession } from './mission-runtime.ts'
 import type { ReachMissionSnapshotOptions } from './mission-projection.ts'
-import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './ports.ts'
+import type { ReachMechanicalActionOutcome, ReachMissionProjection, ReachRuntimePorts } from './ports.ts'
 import type { InventoryReachMission } from './scheduler.ts'
 import { assessReachViability } from './safety.ts'
 
@@ -163,7 +161,7 @@ export interface ReachPlaneHost {
     identity: ReachIdentity,
     contract?: ReachTransitionContract | null,
     snapshotOptions?: ReachMissionSnapshotOptions,
-  ): ReturnType<typeof projectMinecraftReachMission>
+  ): ReachMissionProjection
   currentVtrReachRouteDecision(): JevReachRouteDecisionRecord | null
   dispatchReachIntent(
     result: ReachControllerResult,
@@ -466,38 +464,6 @@ export function buildReachWorldState(host: ReachPlaneHost, mission: VtrInventory
     return state
   }
 
-export function projectReachMission(host: ReachPlaneHost, 
-    mission: VtrInventoryMission,
-    state: WorldState,
-    identity: ReachIdentity,
-    contract: ReachTransitionContract | null = null,
-    snapshotOptions: ReachMissionSnapshotOptions = {},
-  ): ReturnType<typeof projectMinecraftReachMission> {
-    host.reachRouteDecisionWorld = state
-    const options = candidateOptions(
-      host.options,
-      host.recipeIndex,
-      host.unreachableStationKeys(state),
-      host.reachRuntimeAdapter.reachabilityGateOptions(host.tickCounter, host.reachabilityProofs),
-      host.blacklistedMoveTargets(state),
-      state.portalFrame,
-      host.searchedSurfaceTargets,
-      null,
-      host.placementRetries.retiredItemSet(),
-    )
-    return projectMinecraftReachMission({
-      mission,
-      world: state,
-      candidateOptions: options,
-      identity,
-      witnessIdentity: host.reachIdentity(state),
-      contract,
-      previousFrontierId: host.reachRuntime.current?.state.progress.frontierId ?? null,
-      previousActionFailure: host.lastReachActionFailure,
-      snapshotOptions,
-    })
-  }
-
 export function currentVtrReachRouteDecision(host: ReachPlaneHost): JevReachRouteDecisionRecord | null {
     return host.lastVtrReachRouteDecision
   }
@@ -669,9 +635,6 @@ export async function tickReachTransition(host: ReachPlaneHost, trigger: Decisio
     const active = host.reachRuntime.activeMission
     const runtimeMission = active?.mission ?? configuredMission
     const action = host.reachRuntimeAdapter.currentAction()
-    const sourceNames = minecraftMissionSourceNames(configuredMission.item)
-    const legacyReachAction = active === null && action !== null &&
-      isMissionReachWalkAction(action, configuredMission.item, state.self.dimension, host.options.worldEpoch, sourceNames)
 
     const health = state.self.health
     const threat = state.signals.threat
@@ -724,6 +687,11 @@ export async function tickReachTransition(host: ReachPlaneHost, trigger: Decisio
     const rejectedReachRoutes = projection.inadmissibleCandidates
     const missionSatisfiedEvidenceId = projection.missionSatisfiedEvidenceId
     const ensureAlreadyTrueEvidenceId = active === null ? projection.ensuresAlreadyTrueEvidenceId : undefined
+    // The projection already resolved this mission's source names; when no
+    // contract is active `runtimeMission === configuredMission`, so the same
+    // names apply to the legacy duplicate-authority guard.
+    const legacyReachAction = active === null && action !== null &&
+      isMissionReachWalkAction(action, configuredMission.item, state.self.dimension, host.options.worldEpoch, projection.missionSourceNames)
     const safeToStart = health > CRITICAL_COMBAT_HEALTH &&
       !bodyNeedsBreathEscape(state.self) &&
       state.self.envHazard?.active !== true &&
