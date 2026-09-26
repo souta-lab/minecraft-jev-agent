@@ -75,14 +75,8 @@ import {
   postconditionHash,
   targetIdentityKey,
 } from './skillCommitment.ts'
-import { controllerTransitionToKernelSpec } from './reach/kernel-authority-map.ts'
+import { ControllerTransitions } from './controller-transitions.ts'
 
-/** Kernel EffectKind for each candidate-declared internal effect type. */
-const INTERNAL_EFFECT_KERNEL_KIND = {
-  dig: 'DIG',
-  place: 'PLACE',
-  equip: 'EQUIP',
-} as const
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionRecordProvenance, DecisionSubgoalLog } from './decisionlog.ts'
 // Issue #437: the Skill <-> Jev semantic boundary (projection, decision epochs,
 // stable candidate identity, typed SkillOutcomePacket). Raw mechanical telemetry
@@ -367,7 +361,7 @@ import type { LocomotionObservation } from './locomotion.ts'
 import { formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
 import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, isZeroProgressOutcome, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
-import type { ActionOutcomeTaxonomy } from './actionPostcondition.ts'
+import type { ActionOutcomeTaxonomy, TruthfulOutcome } from './actionPostcondition.ts'
 import {
   cellKey,
   clearZeroProgressStand,
@@ -795,6 +789,20 @@ export class JevController {
   private logger: EventLogger
   private jev: JevPolicy
   private executor: Executor
+  /**
+   * Kernel transition ownership for controller dispatch. Reads the current
+   * executor/options lazily so a setOptions rebuild never strands it on a
+   * replaced executor or authority.
+   */
+  private readonly transitions: ControllerTransitions = ((controller: JevController) => new ControllerTransitions({
+    get authority() { return controller.options.kernelAuthority },
+    executor: {
+      get current() { return controller.executor.current },
+      cancelCurrent: (reason: string) => controller.executor.cancelCurrent(reason),
+    },
+    world: () => ({ serverId: controller.options.serverId, worldEpoch: controller.options.worldEpoch }),
+    log: (level, message, detail) => controller.logger[level]('policy', message, detail ?? {}, controller.tickCounter),
+  }))(this)
   private scheduler: DecisionScheduler
   private system2: System2Brain
   private queue: GoalQueue
@@ -1568,10 +1576,29 @@ export class JevController {
   }
 
   /**
-   * V4.1.2 Phase-1 shadow projection: the executor's current actuation
-   * authority at the moment a mutation dispatch was observed. Returns null
-   * when no action is in flight; the host-side shadow treats unattributed
-   * mutations as migration blockers, not as silent evidence.
+   * Run a HOST control-plane mutation (e.g. a chat reply to a human) under a
+   * typed host scope so the kernel session attributes it to the host plane,
+   * never to whichever transition happens to own the body.
+   */
+  withHostScope<T>(label: string, fn: () => T): T {
+    return this.executor.withAuthorityScope(
+      {
+        actionId: null,
+        epoch: null,
+        authority: 'host-control-plane',
+        transitionId: null,
+        transitionContractHash: null,
+        hostScope: { category: 'host-control-plane', label },
+      },
+      fn,
+    )
+  }
+
+  /**
+   * The executor's current actuation authority at the moment a mutation
+   * dispatch was observed. Returns null when no action is in flight; the
+   * kernel session records unattributed mutations as hard blockers, never as
+   * silent evidence.
    */
   currentActuationAuthority(): MutationAuthorityContext | null {
     const scoped = this.executor.currentAuthorityScope
@@ -3311,66 +3338,31 @@ export class JevController {
       // the decision id, the semantic Option instance, the state fingerprint, the
       // world epoch and WHO selected it. Additive meta only; the id is untouched.
       const stampedCandidate = this.stampSelectionProvenance(guarded.candidate, decision, record)
+      // Scheduler-directed supersession: a different running controller action
+      // is cancelled AND its kernel transition closed BEFORE the replacement is
+      // admitted. The replacement then acquires its resource bundle from a
+      // kernel that no longer holds the incumbent's leases; nothing is ever
+      // silently stolen by a claim.
+      this.transitions.supersedeRunning(stampedCandidate.id, `superseded by controller selection ${stampedCandidate.id}`)
       // V4.1.2: the executor may only run a mechanical leg under a
       // kernel-admitted transition contract. A kernel denial is terminal for
       // this dispatch - there is no legacy actuation path to fall back to.
-      const admission = this.admitControllerTransition(stampedCandidate, freshState.self.dimension)
+      const admission = this.transitions.admit(stampedCandidate, freshState.self.dimension)
       if (admission === null) return
-      const transitionId = admission.transitionId
-      // Scheduler-directed preemption: a different running action is never
-      // silently stolen by the next claim. Its transition is terminalized by
-      // its own completion handler (ACTION_CANCELLED) and the lease released
-      // before this dispatch claims the body.
-      const running = this.executor.current
-      if (running !== null && running.status === 'running' && running.id !== stampedCandidate.id) {
-        this.executor.cancelCurrent(`superseded by controller transition ${transitionId}`)
-      }
-      const claim = this.executor.claim(
-        stampedCandidate,
-        {
+      let claim: ReturnType<Executor['claim']>
+      try {
+        claim = this.executor.claim(stampedCandidate, {
           liveStructureMembers: freshState.liveStructureMembers ?? [],
-          transitionId,
-          transitionContractHash: admission.contractHash,
-          authorityLabel: `controller:${admission.family}`,
-          beforeMechanicalStep: (step) =>
-            this.options.kernelAuthority.issueStepEffect({
-              transitionId,
-              intentId: transitionId,
-              stepId: step.stepId,
-              effectKind: 'locomotion',
-            }).ok,
-          afterMechanicalStep: (step) => {
-            this.options.kernelAuthority.settleStepEffect({
-              transitionId,
-              intentId: transitionId,
-              stepId: step.stepId,
-              status: 'active',
-              verified: false,
-              progressed: true,
-            })
-            return true
-          },
-          internalEffectCallbacks: {
-            before: (reservation) =>
-              this.options.kernelAuthority.issueStepEffect({
-                transitionId,
-                intentId: transitionId,
-                stepId: reservation.effectId,
-                effectKind: INTERNAL_EFFECT_KERNEL_KIND[reservation.effect.type],
-              }).ok,
-            after: (settlement) => {
-              this.options.kernelAuthority.settleStepEffect({
-                transitionId,
-                intentId: transitionId,
-                stepId: settlement.effectId,
-                status: settlement.outcome.status,
-                verified: false,
-                progressed: true,
-              })
-            },
-          },
-        },
-      )
+          ...this.transitions.claimProvenance(admission),
+        })
+      } catch (error) {
+        // A freshly admitted transition whose claim never started must not
+        // hold its resource bundle: close it before propagating.
+        if (!admission.reused) {
+          this.transitions.close(admission, 'ACTION_FAILED', `claim-failed:${error instanceof Error ? error.message : String(error)}`)
+        }
+        throw error
+      }
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
       if (claim.kept) {
         this.logger.info(
@@ -3383,6 +3375,19 @@ export class JevController {
         return
       }
       this.pendingDecisions.set(claim.epoch, { record, healthAtDecision: this.bot.health })
+      // Every admitted transition has exactly one terminalizer - the
+      // completion of the claim it authorized - attached before any further
+      // fallible step so no early return can orphan the kernel transition.
+      void claim.completion
+        .then((result) => {
+          const truth = this.onActionComplete(result, decision, guarded.candidate)
+          this.transitions.terminalize(admission, result, truth)
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          this.logger.error('agent', `action completion handler failed: ${message}`, {}, this.tickCounter)
+          this.transitions.close(admission, 'ACTION_FAILED', `completion-handler-failed:${message}`)
+        })
       // §3: bind the action lease to the decision epoch that authorized it, so
       // the outcome packet names the epoch/commitment it closes instead of
       // guessing after the fact. A lease claimed when no epoch is active (bootstrap
@@ -3414,6 +3419,9 @@ export class JevController {
             { candidateId: guarded.candidate.id, leaseEpoch: claim.epoch },
             this.tickCounter,
           )
+          // A stale epoch must not keep acting: cancel the claim it produced.
+          // Its completion handler (attached above) closes the transition.
+          this.executor.cancelCurrent(`stale decision epoch ${authorizing.epoch}: ${verdict.reason}`)
           return
         }
         this.actionEpochByLease.set(claim.epoch, { epoch: authorizing.epoch, commitmentId, identity })
@@ -3440,15 +3448,6 @@ export class JevController {
           this.tickCounter,
         )
       }
-      void claim.completion
-        .then((result) => {
-          this.onActionComplete(result, decision, guarded.candidate)
-          this.terminalizeControllerTransition(admission, result)
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error)
-          this.logger.error('agent', `action completion handler failed: ${message}`, {}, this.tickCounter)
-        })
     } catch (error) {
       if (error instanceof ModelRecoveryRequested) return
       const message = error instanceof Error ? error.message : String(error)
@@ -3933,168 +3932,8 @@ export class JevController {
     return epochs.cancelInvalidCommitment(this.epochsHost, state)
   }
 
-  /** Per-dispatch sequence keeping kernel controller transition ids unique. */
-  private controllerTransitionSeq = 0
-
-  private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+  private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOutcome {
     return outcome.onActionComplete(this.outcomeHost, result, decision, candidate)
-  }
-
-  /**
-   * V4.1.2: admit a production mechanical dispatch as a kernel transition.
-   *
-   * Every executor claim runs as a subordinate mechanical leg of a
-   * kernel-admitted transition contract. The compiled contract declares the
-   * committed skill family's full mutation-surface envelope; the kernel owns
-   * admission, resource acquisition, per-effect commits and terminalization.
-   * A denial is terminal for this dispatch - there is no fallback path.
-   * Re-attaching to an already-running action under its admitted transition
-   * does not re-admit.
-   */
-  private admitControllerTransition(candidate: Candidate, dimension: string | null): {
-    readonly transitionId: string
-    readonly contractHash: string
-    readonly family: string
-    readonly predicateId: string
-  } | null {
-    const authority = this.options.kernelAuthority
-    const family = committedSkillKind(candidate)
-    const predicateId = `controller:${family}:${postconditionHash(declaredPostconditions(candidate))}`
-    const running = this.executor.current
-    if (
-      running !== null && running.id === candidate.id &&
-      running.transitionId !== undefined && running.transitionContractHash !== undefined
-    ) {
-      return {
-        transitionId: running.transitionId,
-        contractHash: running.transitionContractHash,
-        family,
-        predicateId,
-      }
-    }
-    // The candidate id is reused across retries; the admission sequence keeps
-    // every kernel transition identity unique per claimed dispatch.
-    const transitionId = `controller:${candidate.id}:${++this.controllerTransitionSeq}`
-    const compiled = controllerTransitionToKernelSpec({
-      transitionId,
-      family,
-      desiredPredicate: predicateId,
-      world: {
-        serverId: this.options.serverId,
-        dimension: dimension ?? 'minecraft:overworld',
-        worldEpoch: this.options.worldEpoch,
-      },
-      maxMechanicalSteps: 512,
-      maxActiveMs: 15 * 60_000,
-    })
-    if (!compiled.ok) {
-      this.logger.warn(
-        'policy',
-        `KERNEL_TRANSITION_DENIED stage=compile transition=${transitionId} family=${family} reason=${compiled.reason}`,
-        { candidateId: candidate.id },
-        this.tickCounter,
-      )
-      return null
-    }
-    const admitted = authority.admitContract(compiled.spec)
-    if (!admitted.ok) {
-      this.logger.warn(
-        'policy',
-        `KERNEL_TRANSITION_DENIED stage=admit transition=${transitionId} family=${family} reason=${admitted.reason}`,
-        { candidateId: candidate.id },
-        this.tickCounter,
-      )
-      return null
-    }
-    const activated = authority.activateTransition(transitionId, null)
-    if (!activated.ok) {
-      authority.terminalize({
-        transitionId,
-        contractHash: admitted.contractHash,
-        outcome: {
-          kind: 'CONTRACT_SUPERSEDED',
-          contractHash: admitted.contractHash,
-          reason: `kernel-activation-denied:${activated.reason}`,
-          evidenceId: `kernel-activation-denied:${transitionId}`,
-        },
-      })
-      this.logger.warn(
-        'policy',
-        `KERNEL_TRANSITION_DENIED stage=activate transition=${transitionId} family=${family} reason=${activated.reason}`,
-        { candidateId: candidate.id },
-        this.tickCounter,
-      )
-      return null
-    }
-    this.logger.info(
-      'policy',
-      `KERNEL_TRANSITION_ADMITTED transition=${transitionId} family=${family} contract=${admitted.contractHash} predicate=${predicateId}`,
-      { candidateId: candidate.id },
-      this.tickCounter,
-    )
-    return { transitionId, contractHash: admitted.contractHash, family, predicateId }
-  }
-
-  /**
-   * Close the kernel transition an admitted controller dispatch ran under.
-   * A verified action result feeds its declared postcondition fact and asks
-   * the kernel for VERIFY_SUCCESS; an unverified/failed/cancelled result gets
-   * a typed closure. The kernel's verdict is authoritative - a refused SUCCESS
-   * is logged as an authority violation, never retried through another path.
-   */
-  private terminalizeControllerTransition(
-    admission: {
-      readonly transitionId: string
-      readonly contractHash: string
-      readonly family: string
-      readonly predicateId: string
-    },
-    result: ExecutionResult,
-  ): void {
-    const authority = this.options.kernelAuthority
-    if (result.verified === true) {
-      authority.feedObservation({
-        observedAtMs: Date.now(),
-        predicates: {
-          [admission.predicateId]: {
-            truth: 'true',
-            evidenceId: `controller-transition:${admission.transitionId}`,
-          },
-        },
-      })
-      const verdict = authority.terminalize({
-        transitionId: admission.transitionId,
-        contractHash: admission.contractHash,
-        outcome: { kind: 'SUCCESS' },
-      })
-      if (!verdict.ok) {
-        this.logger.error(
-          'policy',
-          `KERNEL_TRANSITION_TERMINAL_DENIED transition=${admission.transitionId} outcome=SUCCESS reason=${verdict.reason}`,
-          {},
-          this.tickCounter,
-        )
-      }
-      return
-    }
-    const verdict = authority.terminalize({
-      transitionId: admission.transitionId,
-      contractHash: admission.contractHash,
-      outcome: {
-        kind: result.status === 'cancelled' ? 'ACTION_CANCELLED' : 'ACTION_FAILED',
-        contractHash: admission.contractHash,
-        reason: result.failure ?? result.status,
-        evidenceId: `controller-transition:${admission.transitionId}`,
-      },
-    })
-    if (!verdict.ok) {
-      this.logger.error(
-        'policy',
-        `KERNEL_TRANSITION_TERMINAL_DENIED transition=${admission.transitionId} outcome=${result.status} reason=${verdict.reason}`,
-        {},
-        this.tickCounter,
-      )
-    }
   }
 
   private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {

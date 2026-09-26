@@ -374,11 +374,34 @@ export const MUTATING_BOT_METHODS: ReadonlySet<string> = new Set<string>([
   'updateSign',
   'useOn',
   'swingArm',
+  // Mineflayer's private look-free placement primitive (pillar steps).
+  '_placeBlockWithOptions',
+  // Actuators that were observation-only before V4.1.2 closure: a revoked
+  // generation must not be able to swing, abort a dig, open a station or
+  // move items through them.
+  'attack',
+  'stopDigging',
+  'openFurnace',
+  'openEnchantmentTable',
+  'openVillager',
+  'openAnvil',
+  'activateEntity',
+  'activateEntityAt',
+  'placeEntity',
+  'sleep',
+  'wake',
+  'fish',
+  'mount',
+  'dismount',
+  'transfer',
+  'withdraw',
+  'deposit',
 ])
 
 /**
- * One observed mutation dispatch at the lease boundary. Emitted to the V4.1.2
- * kernel shadow observer (Phase 1); never gates the call.
+ * One observed mutation dispatch at the lease boundary. Emitted to the kernel
+ * authority session as mutation evidence; the lease assert (not the observer)
+ * is what gates the call.
  */
 export interface MutationObservation {
   /** e.g. `bot.setControlState`, `pathfinder.setGoal`, `_client.write`, `entity.yaw`. */
@@ -395,35 +418,47 @@ export interface MutationObservation {
 export type MutationObserver = (observation: MutationObservation) => void
 
 /**
- * Bot methods that mutate server-side state but are NOT in the generation
- * guard today (`attack`, `openFurnace`, `stopDigging`, ... - see
- * docs/architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md §3). They are wrapped
- * observation-only: the shadow sees the dispatch while production behaviour is
- * exactly unchanged. Presence in this list is itself a migration blocker.
+ * Bot methods that change client/server state but are HOST lifecycle, not
+ * generation actuation (`respawn` after death, client `setSettings`). They are
+ * observed without a lease assert so the kernel journal still sees them; each
+ * observation is recorded as unguarded evidence.
  */
 export const OBSERVED_UNGUARDED_BOT_METHODS: ReadonlySet<string> = new Set<string>([
-  'attack',
-  'stopDigging',
+  'respawn',
+  'setSettings',
+])
+
+/** Bot methods whose promise resolves to a live Mineflayer window. */
+const WINDOW_RETURNING_BOT_METHODS: ReadonlySet<string> = new Set<string>([
+  'openBlock',
+  'openContainer',
   'openFurnace',
   'openEnchantmentTable',
   'openVillager',
   'openAnvil',
-  'activateEntity',
-  'activateEntityAt',
-  'placeEntity',
-  'sleep',
-  'wake',
-  'fish',
-  'respawn',
-  'mount',
-  'dismount',
-  'setSettings',
-  'transfer',
-  'withdraw',
-  'deposit',
 ])
 
-/** Compact per-argument signature for shadow records; reads properties, never calls methods. */
+/**
+ * Window methods that move items or close the window. They write through the
+ * raw client captured inside the Mineflayer window object, so the bot proxy
+ * alone cannot see them: every window returned by a guarded `bot.open*` is
+ * itself wrapped.
+ */
+export const MUTATING_WINDOW_METHODS: ReadonlySet<string> = new Set<string>([
+  'withdraw',
+  'deposit',
+  'putInput',
+  'putFuel',
+  'takeInput',
+  'takeFuel',
+  'takeOutput',
+  'close',
+])
+
+/** Bot fields whose direct assignment changes live physics state. */
+export const MUTATING_BOT_FIELDS: ReadonlySet<string> = new Set<string>(['physicsEnabled'])
+
+/** Compact per-argument signature for mutation evidence; reads properties, never calls methods. */
 function mutationArgsSignature(args: readonly unknown[]): readonly string[] {
   return args.map((arg) => {
     if (arg === null) return 'null'
@@ -591,10 +626,10 @@ export function withActuationLease(
   observe?: MutationObserver,
 ): Bot {
   const assert = makeLeaseAssert(lease, id, log)
-  // V4.1.2 Phase-1 shadow observation: every mutation dispatch at this
-  // boundary is reported to the kernel shadow observer. Observation never
-  // gates the call; a thrown observer is impossible by contract but still
-  // contained so an observer bug can never change production behaviour.
+  // Every mutation dispatch at this boundary is reported to the kernel
+  // authority session as attribution evidence. Observation itself never gates
+  // the call (the lease assert does); a thrown observer is impossible by
+  // contract but still contained so an observer bug cannot change actuation.
   const see = (surface: string, guarded: boolean, leaseOutcome: 'granted' | 'denied', args: readonly unknown[]): void => {
     if (observe === undefined) return
     try {
@@ -610,6 +645,8 @@ export function withActuationLease(
   let entityProxy: object | null = null
   let positionProxy: object | null = null
   let positionTarget: object | null = null
+  let velocityProxy: object | null = null
+  let velocityTarget: object | null = null
   const trackedBot = resources === undefined ? null : wrapEmitterResources(bot, resources)
 
   const guardPosition = (position: object): object => {
@@ -647,12 +684,46 @@ export function withActuationLease(
     return positionProxy
   }
 
+  const guardVelocity = (velocity: object): object => {
+    // Same replace-per-tick semantics as `entity.position` (see guardPosition).
+    if (velocityProxy !== null && velocityTarget === velocity) return velocityProxy
+    velocityTarget = velocity
+    const guardAxisOrMethod = (what: string, args: readonly unknown[]): void => {
+      try {
+        assert(`bot.entity.velocity.${what}`)
+      } catch (error) {
+        see(`entity.velocity.${what}`, true, 'denied', args)
+        throw error
+      }
+      see(`entity.velocity.${what}`, true, 'granted', args)
+    }
+    velocityProxy = new Proxy(velocity, {
+      get(vTarget, vProp, vRecv): unknown {
+        const vValue = Reflect.get(vTarget, vProp, vRecv) as unknown
+        if (typeof vProp === 'string' && typeof vValue === 'function' && MUTATING_VEC3_METHODS.has(vProp)) {
+          return (...args: unknown[]): unknown => {
+            guardAxisOrMethod(vProp, args)
+            return (vValue as (...a: unknown[]) => unknown).apply(vTarget, args)
+          }
+        }
+        return vValue
+      },
+      set(vTarget, vProp, vValue, vRecv): boolean {
+        if (vProp === 'x' || vProp === 'y' || vProp === 'z') guardAxisOrMethod(vProp, [vValue])
+        return Reflect.set(vTarget, vProp, vValue, vRecv)
+      },
+    })
+    GUARDED_OBJECTS.add(velocityProxy)
+    return velocityProxy
+  }
+
   const guardEntity = (entity: object): object => {
     if (entityProxy !== null) return entityProxy
     entityProxy = new Proxy(entity, {
       get(eTarget, eProp, eRecv): unknown {
         const eValue = Reflect.get(eTarget, eProp, eRecv) as unknown
         if (eProp === 'position' && eValue !== null && typeof eValue === 'object') return guardPosition(eValue)
+        if (eProp === 'velocity' && eValue !== null && typeof eValue === 'object') return guardVelocity(eValue)
         return eValue
       },
       set(eTarget, eProp, eValue, eRecv): boolean {
@@ -672,7 +743,43 @@ export function withActuationLease(
     return entityProxy
   }
 
+  const guardWindow = (window: unknown): unknown => {
+    if (window === null || typeof window !== 'object') return window
+    const proxy = new Proxy(window, {
+      get(wTarget, wProp, wRecv): unknown {
+        const wValue = Reflect.get(wTarget, wProp, wRecv) as unknown
+        if (typeof wProp === 'string' && typeof wValue === 'function' && MUTATING_WINDOW_METHODS.has(wProp)) {
+          return (...args: unknown[]): unknown => {
+            try {
+              assert(`window.${wProp}`)
+            } catch (error) {
+              see(`window.${wProp}`, true, 'denied', args)
+              throw error
+            }
+            see(`window.${wProp}`, true, 'granted', args)
+            return (wValue as (...a: unknown[]) => unknown).apply(wTarget, args)
+          }
+        }
+        return wValue
+      },
+    })
+    GUARDED_OBJECTS.add(proxy)
+    return proxy
+  }
+
   const guarded = new Proxy(bot, {
+    set(target, prop, value, receiver): boolean {
+      if (typeof prop === 'string' && MUTATING_BOT_FIELDS.has(prop)) {
+        try {
+          assert(`bot.${prop}`)
+        } catch (error) {
+          see(`bot.${prop}`, true, 'denied', [value])
+          throw error
+        }
+        see(`bot.${prop}`, true, 'granted', [value])
+      }
+      return Reflect.set(target, prop, value, receiver)
+    },
     get(target, prop, receiver): unknown {
       const value = Reflect.get(target, prop, receiver) as unknown
       if (trackedBot !== null && typeof prop === 'string' && (TRACKED_EMITTER_METHODS.has(prop) || UNTRACKED_EMITTER_METHODS.has(prop))) {
@@ -691,12 +798,16 @@ export function withActuationLease(
             throw error
           }
           see(`bot.${prop}`, true, 'granted', args)
-          return (value as (...a: unknown[]) => unknown).apply(target, args)
+          const result = (value as (...a: unknown[]) => unknown).apply(target, args)
+          if (WINDOW_RETURNING_BOT_METHODS.has(prop) && result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+            return (result as Promise<unknown>).then(guardWindow)
+          }
+          return result
         }
       }
       if (typeof prop === 'string' && typeof value === 'function' && OBSERVED_UNGUARDED_BOT_METHODS.has(prop)) {
-        // Shadow-only wrap: no lease assert (behaviour identical to today),
-        // but the dispatch is recorded as an unguarded migration blocker.
+        // HOST lifecycle surface: observed without a lease assert and recorded
+        // as unguarded evidence.
         return (...args: unknown[]): unknown => {
           see(`bot.${prop}`, false, 'granted', args)
           return (value as (...a: unknown[]) => unknown).apply(target, args)
@@ -912,7 +1023,7 @@ export function createActuationPort(bot: Bot, lease: ActuationLease, id: string,
       // `window.withdraw` reaches the raw client captured inside the Mineflayer
       // window object, so the guarded-bot proxy never sees the physical write.
       // The port is the semantic dispatch boundary: report the bypass-level
-      // mutation here so the shadow audit has complete coverage.
+      // mutation here so the kernel mutation evidence has complete coverage.
       see('window.withdraw', [itemName, count])
       const slots =
         typeof window.itemsRange === 'function' && typeof window.inventoryStart === 'number'

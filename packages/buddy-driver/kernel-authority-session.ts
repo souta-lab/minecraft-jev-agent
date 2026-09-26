@@ -1,24 +1,22 @@
-// kernel-authority-session.ts - V4.1.2 kernel authority session (replay + authority modes).
+// kernel-authority-session.ts - the V4.1.2 kernel authority session.
 //
-// The host owns this session and drives the V4.1.2 executable kernel
-// (`applyKernelCommand`) against observed production mutation dispatches and
-// the Reach Transition lifecycle.
+// The host owns this session and drives the executable kernel
+// (`applyKernelCommand`). It exposes exactly one runtime authority surface,
+// `authority` (KernelTransitionAuthority), which production MUST consult
+// before actuation. The kernel command path runs causally BEFORE every gated
+// act (admit -> activate -> issue -> dispatch -> settle -> terminalize); a
+// denied verdict is journaled and returned so production fails closed. There
+// is no observer-only mode and no alternative lifecycle input path.
 //
-// Mode 'replay' (default): OBSERVER ONLY. No result reaches production code;
-// kernel denials and unmapped/unauthorized mutations are journaled migration
-// blockers, not gates.
-//
-// Mode 'authority': the session also exposes `authority`, a KernelTransitionAuthority
-// gate the production runtime MUST consult before actuation. The same kernel
-// command path runs causally BEFORE the gated act (admit -> activate -> issue
-// -> dispatch -> settle -> terminalize) and a denied verdict is journaled and
-// returned so production fails closed; a denial never triggers a legacy
-// fallback because the legacy path is disabled by the same mode flag.
+// `observeMutation` is the evidence half: every leased mutation dispatch is
+// attributed to the kernel transition that owns the body (or a declared host
+// scope) and unattributed/unmapped/lease-uncovered dispatches are journaled as
+// hard blockers.
 //
 // The session holds kernel-internal trusted capabilities because buddy-driver
 // is the host/wiring layer; production semantic code must never import this
 // module or `packages/kernel/kernel-internal/*` — it sees only the narrow
-// `KernelSessionSink`/`KernelTransitionAuthority` surfaces.
+// `KernelTransitionAuthority` surface.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -55,10 +53,8 @@ import {
   reachContractToKernelSpec,
   CONTROLLER_AUTHORITY_REGISTRY,
   REACH_AUTHORITY_REGISTRY,
-  type KernelAuthorityMode,
   type KernelGateVerdict,
   type KernelTransitionAuthority,
-  type KernelSessionInput,
   type KernelWorldObservation,
   type MutationAuthorityContext,
 } from '../jev-agent/src/reach/kernel-authority-map.ts'
@@ -72,8 +68,29 @@ export type KernelSessionBlockerKind =
   | 'kernel-command-denied'
   | 'contract-mapping-failed'
   | 'verify-proof-not-observed'
-  | 'replay-projection-limitation'
   | 'observer-error'
+
+interface TerminalInput {
+  readonly transitionId: string
+  readonly contractHash: string
+  readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
+}
+
+interface StepIssuedInput {
+  readonly transitionId: string
+  readonly intentId: string
+  readonly stepId: string
+  readonly effectKind: string
+}
+
+interface StepSettledInput {
+  readonly transitionId: string
+  readonly intentId: string
+  readonly stepId: string
+  readonly status: string
+  readonly verified: boolean
+  readonly progressed: boolean
+}
 
 export interface KernelSessionBlocker {
   readonly kind: KernelSessionBlockerKind
@@ -89,13 +106,6 @@ export interface KernelAuthoritySessionConfig {
   /** Append-only JSONL destination for session records; null disables file IO. */
   readonly journalPath: string | null
   readonly now?: () => number
-  /**
-   * 'replay' (default): observer only; denials are journaled migration
-   * blockers. 'authority': the session exposes `authority`, a verdict-
-   * returning gate the production runtime must consult before actuation;
-   * kernel denials gate production and remain journaled as hard evidence.
-   */
-  readonly authorityMode?: KernelAuthorityMode
 }
 
 export interface KernelSessionSummary {
@@ -117,24 +127,47 @@ export interface KernelSessionSummary {
   /** Reach terminals projected onto an exact typed kernel outcome. */
   readonly typedTerminals: number
   /**
-   * Reach terminal kinds with no command-reachable kernel outcome. Each is a
-   * named 'replay-projection-limitation' blocker and a cutover blocker; the
-   * kernel-side lifecycle is closed with an explicit CANCELED stand-in whose
-   * reason preserves the Reach outcome kind.
+   * Terminal kinds with no command-reachable kernel outcome. The kernel-side
+   * lifecycle is closed with an explicit CANCELED stand-in whose reason
+   * preserves the terminal kind; each occurrence is journaled as evidence.
    */
   readonly projectionLimitations: number
   readonly projectionLimitationKinds: readonly string[]
   readonly blockers: readonly KernelSessionBlocker[]
   /** True only when every observed mutation mapped and carried authority. */
   readonly coverageComplete: boolean
-  /** 'replay' = observer only; 'authority' = kernel gates Reach actuation. */
-  readonly authorityMode: KernelAuthorityMode
-  /** Gate calls the kernel refused under authority mode (also journaled). */
+  /** Evidence constant: the kernel gates every actuation (there is no other mode). */
+  readonly authorityMode: 'authority'
+  /** Gate calls the kernel refused (also journaled). */
   readonly gateDenials: readonly { readonly gate: string; readonly reason: string }[]
 }
 
 function sha(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+/**
+ * Upper bound on how old a cached verified observation may be when it is
+ * re-attested for a new RuntimeBinding. Production feeds observations every
+ * decision tick (heartbeat <= 3 s), so this only ever withholds truth that is
+ * genuinely stale.
+ */
+export const MAX_REATTEST_AGE_MS = 30_000
+
+/**
+ * The host world key spells dimensions with the `minecraft:` namespace while
+ * runtime observations use the bare spelling. A namespace-only difference is
+ * the same world; the spec is rebound to the kernel's spelling. A real
+ * mismatch (another dimension/server/epoch) is left intact and the kernel
+ * refuses it with CONTRACT_WORLD_MISMATCH.
+ */
+function canonicalWorldSpelling(spec: TransitionContractSpec, world: WorldIdentity): TransitionContractSpec {
+  const bare = (dimension: string): string => dimension.replace(/^minecraft:/, '')
+  const sameWorld =
+    spec.world.serverId === world.serverId &&
+    spec.world.worldEpoch === world.worldEpoch &&
+    bare(spec.world.dimension) === bare(world.dimension)
+  return sameWorld && spec.world.dimension !== world.dimension ? { ...spec, world: { ...world } } : spec
 }
 
 interface OpenEffect {
@@ -144,8 +177,6 @@ interface OpenEffect {
 }
 
 export interface KernelAuthoritySession {
-  /** Sink for semantic lifecycle/step inputs (ReachMissionRuntime). */
-  readonly observe: (input: KernelSessionInput) => void
   /** Sink for the mutation boundary (withActuationLease/createActuationPort). */
   readonly observeMutation: (record: {
     readonly surface: string
@@ -157,18 +188,16 @@ export interface KernelAuthoritySession {
   /** Late-bind the actuation-context resolver (executor.current projection). */
   bindActuationContext(resolve: () => MutationAuthorityContext | null): void
   /**
-   * V4.1.2 production-authority gate; non-null only when the session was
-   * created with `authorityMode: 'authority'`. Production code holds this via
-   * the narrow `KernelTransitionAuthority` interface (no capability access).
+   * The V4.1.2 runtime authority gate. Production code holds this via the
+   * narrow `KernelTransitionAuthority` interface (no capability access).
    */
-  readonly authority: KernelTransitionAuthority | null
+  readonly authority: KernelTransitionAuthority
   readonly summary: () => KernelSessionSummary
   readonly blockers: () => readonly KernelSessionBlocker[]
   readonly state: () => KernelState
 }
 
 export function createKernelAuthoritySession(config: KernelAuthoritySessionConfig): KernelAuthoritySession {
-  const authorityMode: KernelAuthorityMode = config.authorityMode ?? 'replay'
   const now = config.now ?? (() => Date.now())
   const t0 = now()
   let state: KernelState = createKernelState({
@@ -198,12 +227,19 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
   const openEffects = new Map<string, OpenEffect>()
   const witnessRevisions = new Map<string, number>()
   const witnessByTransition = new Map<string, ReachWitness>()
+  // The caller-facing contract hash each admitted transition is bound to (the
+  // Reach contract hash for Reach, the canonical kernel hash for admitContract).
+  // Mutation attribution and terminalization must present exactly this hash.
+  const boundContractHashes = new Map<string, string>()
   const blockers: KernelSessionBlocker[] = []
   let resolveContext: (() => MutationAuthorityContext | null) | null = null
   let lastFactSignature = ''
   // The most recent verified world observation, cached so commit/step commands
-  // can re-establish proof freshness after mission/registry revisions.
+  // can re-establish proof freshness after mission/registry revisions. It is
+  // re-attested only while younger than MAX_REATTEST_AGE_MS and is discarded
+  // on any world/generation change: stale truth never becomes fresh proof.
   let lastPredicates: Readonly<Record<string, { readonly truth: 'true' | 'false' | 'unknown'; readonly evidenceId: string | null }>> = {}
+  let lastObservedMono: number | null = null
   let seq = 0
   let mutationsObserved = 0
   let mutationsMapped = 0
@@ -317,6 +353,31 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     lastFactSignature = signature
   }
 
+  /**
+   * Re-attest the cached observation for a new RuntimeBinding (registry /
+   * mission revisions stale proofs without changing the observed world). Only
+   * an observation younger than MAX_REATTEST_AGE_MS may be re-attested; an
+   * older one is withheld so the kernel denies for lack of fresh proof.
+   */
+  const reattestLastObservation = (via: string, transitionId?: string): void => {
+    if (lastObservedMono === null) return
+    const age = mono() - lastObservedMono
+    if (age > MAX_REATTEST_AGE_MS) {
+      journal({ type: 'stale-observation-not-reattested', via, ageMs: age, ...(transitionId === undefined ? {} : { transitionId }) })
+      return
+    }
+    feedSnapshot(lastPredicates, via, undefined, transitionId)
+  }
+
+  /** Observed world truth and witnesses never survive a world/generation boundary. */
+  const forgetObservedWorld = (): void => {
+    lastPredicates = {}
+    lastObservedMono = null
+    lastFactSignature = ''
+    witnessByTransition.clear()
+    witnessRevisions.clear()
+  }
+
   const deny = (gate: string, reason: string): KernelGateVerdict => {
     gateDenials.push({ gate, reason })
     journal({ type: 'gate-denied', gate, reason })
@@ -354,7 +415,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
 
   /** REGISTER_TRANSITION + mission authorization + ADMIT_TRANSITION. */
   const admitTransition = (contract: ReachTransitionContract, via: string): KernelGateVerdict => {
-    const mapped = reachContractToKernelSpec(contract, config.world)
+    const mapped = reachContractToKernelSpec(contract, state.world)
     if (!mapped.ok) {
       block('contract-mapping-failed', `${contract.transitionId}: ${mapped.reason}`, { transitionId: contract.transitionId })
       return deny('admitTransition', mapped.reason)
@@ -368,13 +429,15 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
       return deny('admitTransition', reason)
     }
     journal({
-      type: 'replay-contract',
+      type: 'admitted-contract',
       transitionId: contract.transitionId,
       reachContractHash: contract.contractHash,
       kernelContractHash: canonical.contractHash,
       desiredPredicate: canonical.desiredPredicate,
     })
-    return admitCanonical(canonical, via)
+    const admitted = admitCanonical(canonical, via)
+    if (admitted.ok) boundContractHashes.set(contract.transitionId, contract.contractHash)
+    return admitted
   }
 
   /**
@@ -388,7 +451,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     // every command above just invalidated the freshness of earlier proofs and
     // witnesses. Re-establish them NOW, in order, before activation: the same
     // verified observation the production commit consumed, then the witness.
-    feedSnapshot(lastPredicates, via, undefined, transitionId)
+    reattestLastObservation(via, transitionId)
     if (witness !== null) {
       witnessByTransition.set(transitionId, witness)
       const revision = Math.max(1, witnessRevisions.get(transitionId) ?? 0)
@@ -410,17 +473,16 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     return { ok: true }
   }
 
-  const commitTransition = (contract: ReachTransitionContract, witness: ReachWitness | null, lifecycle: 'active' | 'terminal'): void => {
-    const admitted = admitTransition(contract, 'transition-committed')
-    if (!admitted.ok || state.transitions[contract.transitionId] === undefined) return
-    activateTransition(contract.transitionId, witness, lifecycle === 'active', 'transition-committed')
-  }
-
-  const terminalTransition = (input: Extract<KernelSessionInput, { type: 'transition-terminal' }>, authoritative = false): KernelGateVerdict => {
+  const terminalTransition = (input: TerminalInput): KernelGateVerdict => {
     const transition = state.transitions[input.transitionId]
     if (transition === undefined) {
       block('kernel-command-denied', `terminal for unregistered transition ${input.transitionId}`, { transitionId: input.transitionId })
       return deny('terminalize', `unregistered-transition:${input.transitionId}`)
+    }
+    const boundHash = boundContractHashes.get(input.transitionId)
+    if (boundHash !== undefined && boundHash !== input.contractHash) {
+      block('kernel-command-denied', `terminal for ${input.transitionId} presents contract ${input.contractHash} but it is bound to ${boundHash}`, { transitionId: input.transitionId })
+      return deny('terminalize', `contract-hash-mismatch:${input.transitionId}`)
     }
     if (transition.lifecycle === 'TERMINAL') return { ok: true }
     let successVerified: boolean | null = null
@@ -431,11 +493,12 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         // observed (the last verified world-observation, which is the
         // observation the production verifier consumed for this outcome).
         // SUCCESS must never mint truth: if an ensures/invariants predicate
-        // was not observed 'true', the kernel MUST refuse and the miss is a
-        // hard blocker, not a synthesized proof.
-        feedSnapshot(lastPredicates, 'transition-terminal', undefined, input.transitionId)
+        // was not observed 'true' in a still-fresh observation, the kernel
+        // MUST refuse and the miss is a hard blocker, not a synthesized proof.
+        reattestLastObservation('transition-terminal', input.transitionId)
+        const fresh = lastObservedMono !== null && mono() - lastObservedMono <= MAX_REATTEST_AGE_MS ? lastPredicates : {}
         const missing = [...contract.ensures, ...contract.invariants].filter(
-          (predicateId) => lastPredicates[predicateId]?.truth !== 'true')
+          (predicateId) => fresh[predicateId]?.truth !== 'true')
         journal({
           type: 'verify-attempt',
           transitionId: input.transitionId,
@@ -492,6 +555,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
               ? { ...state.world, worldEpoch: Number(input.outcome.observed) }
               : { ...state.world, serverId: String(input.outcome.observed) }
         apply({ kind: 'CHANGE_WORLD', world: observed, capability: caps.worldAdapter }, 'transition-terminal', input.transitionId)
+        forgetObservedWorld()
         typedTerminals += 1
         journal({ type: 'terminal-projection', transitionId: input.transitionId, reachOutcomeKind: kind, kernelOutcome: 'WORLD_CHANGED', derived: true })
       } else if (kind === 'GENERATION_CHANGED' && typeof input.outcome.observed !== 'undefined') {
@@ -503,6 +567,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
           generationId: String(input.outcome.observed),
           capability: caps.runtimeAdapter,
         }, 'transition-terminal', input.transitionId)
+        forgetObservedWorld()
         limitation = 'kernel suspends for generation rebind; no GENERATION_CHANGED terminal outcome'
       } else if (kind === 'BUDGET_EXHAUSTED') {
         // Honest typed derivation: the kernel's own budget sweep in
@@ -540,23 +605,17 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
       ) {
         if (limitation !== null) {
           projectionLimitationKinds.push(kind)
-          if (authoritative) {
-            // In authority mode the kind-preserving CANCELED stand-in IS the
-            // designed kernel closure for Reach outcomes the kernel cannot
-            // type; the record is evidence, not a migration blocker.
-            journal({ type: 'terminal-projection-limitation', transitionId: input.transitionId, reachOutcomeKind: kind, detail: limitation })
-          } else {
-            block('replay-projection-limitation', `${kind}: ${limitation}`, { transitionId: input.transitionId })
-          }
+          // The kind-preserving CANCELED stand-in IS the designed kernel
+          // closure for terminal kinds the kernel cannot type; the record is
+          // evidence, not a blocker.
+          journal({ type: 'terminal-projection-limitation', transitionId: input.transitionId, reachOutcomeKind: kind, detail: limitation })
         }
-        // The kernel cannot express this Reach terminal kind; CANCELED is the
-        // mechanical stand-in that closes the replayed lifecycle. The reason
-        // preserves the Reach kind and the projection-limitation blocker
-        // above marks it as a cutover blocker — never a semantic cancel.
+        // CANCELED is the mechanical stand-in that closes the lifecycle; the
+        // reason preserves the terminal kind — never a semantic cancel.
         apply({
           kind: 'REQUEST_CANCEL',
           transitionId: input.transitionId,
-          reason: authoritative ? `authority-terminal:${kind}` : `replay-terminal:${kind}`,
+          reason: `authority-terminal:${kind}`,
           capability: caps.scheduler,
         }, 'transition-terminal', input.transitionId)
         const pending = state.transitions[input.transitionId]
@@ -574,7 +633,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     for (const [commitId, open] of openEffects) {
       if (open.transitionId === input.transitionId) openEffects.delete(commitId)
     }
-    if (!authoritative) return { ok: true }
+    retireControllerMissionPredicate(input.transitionId)
     if (input.outcome.kind === 'SUCCESS' && successVerified !== true) {
       return deny('terminalize', `kernel-verify-success-denied:${input.transitionId}`)
     }
@@ -585,11 +644,36 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     return { ok: true }
   }
 
+  /**
+   * A controller transition's desired predicate is scoped to that dispatch.
+   * Once no live transition desires it, it leaves the kernel Mission so the
+   * predicate set tracks live intent instead of growing for the whole run.
+   * Reach predicates are Mission-owned and are never retired here.
+   */
+  const retireControllerMissionPredicate = (transitionId: string): void => {
+    const contract = transitionRegistered(transitionId)
+    if (contract === null || contract.family === 'vtr-reach') return
+    if (state.transitions[transitionId]?.lifecycle !== 'TERMINAL') return
+    const predicate = contract.desiredPredicate
+    if (!state.missionPredicates.includes(predicate)) return
+    const stillDesired = Object.values(state.transitions).some((other) =>
+      other.transitionId !== transitionId &&
+      other.lifecycle !== 'TERMINAL' &&
+      transitionRegistered(other.transitionId)?.desiredPredicate === predicate)
+    if (stillDesired) return
+    apply({
+      kind: 'UPDATE_MISSION',
+      predicates: state.missionPredicates.filter((existing) => existing !== predicate),
+      authority: REACH_AUTHORITY_REGISTRY.missionAuthority,
+      capability: caps.mission,
+    }, 'transition-terminal', transitionId)
+  }
+
   const KERNEL_EFFECT_KINDS: readonly EffectKind[] = [
     'MOVE', 'LOOK', 'INTERACT', 'ATTACK', 'INVENTORY_MUTATION', 'EQUIP',
     'DIG', 'PLACE', 'CONSUME', 'CRAFT', 'STATION_MUTATION', 'COMMAND',
   ]
-  const stepIssued = (input: Extract<KernelSessionInput, { type: 'mechanical-step-issued' }>, authoritative = false): KernelGateVerdict => {
+  const stepIssued = (input: StepIssuedInput): KernelGateVerdict => {
     // The gate-level effectKind resolves to one kernel EffectKind; the exact
     // permit scope is read from the transition's own declared contract so an
     // issued effect can never exceed the envelope the kernel admitted.
@@ -600,23 +684,23 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         : null
     if (resolvedKind === null) {
       block('unmapped-mutation-surface', `step effect kind ${input.effectKind} is not in the kernel effect map`, { transitionId: input.transitionId })
-      return authoritative ? deny('issueStepEffect', `unmapped-effect-kind:${input.effectKind}`) : { ok: true }
+      return deny('issueStepEffect', `unmapped-effect-kind:${input.effectKind}`)
     }
     const liveContract = transitionRegistered(input.transitionId)
     const permit = liveContract?.effects.find((p) => p.kind === resolvedKind)
     if (permit === undefined) {
       block('unmapped-mutation-surface', `transition ${input.transitionId} declares no ${resolvedKind} effect permit`, { transitionId: input.transitionId })
-      return authoritative ? deny('issueStepEffect', `effect-not-permitted:${resolvedKind}`) : { ok: true }
+      return deny('issueStepEffect', `effect-not-permitted:${resolvedKind}`)
     }
     if (openEffects.has(input.stepId)) {
       block('kernel-command-denied', `duplicate dispatch for mechanical step ${input.stepId}`, { transitionId: input.transitionId })
-      return authoritative ? deny('issueStepEffect', `duplicate-step-dispatch:${input.stepId}`) : { ok: true }
+      return deny('issueStepEffect', `duplicate-step-dispatch:${input.stepId}`)
     }
     // ISSUE_EFFECT re-checks activationPreconditions against the CURRENT
     // RuntimeBinding: any snapshot/registry/mission revision since activation
     // stales the proofs and witness. Re-establish both before issuing, mirroring
     // the commit-time freshness fence the production controller already passed.
-    feedSnapshot(lastPredicates, 'mechanical-step-issued', undefined, input.transitionId)
+    reattestLastObservation('mechanical-step-issued', input.transitionId)
     const witness = witnessByTransition.get(input.transitionId)
     const live = state.transitions[input.transitionId]
     if (witness !== undefined && live !== undefined) {
@@ -639,25 +723,31 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
       ttlMs: 30_000,
       capability: controllerCap(input.transitionId),
     }, 'mechanical-step-issued', input.transitionId)
-    if (!issued.ok) return authoritative ? deny('issueStepEffect', issued.reason) : { ok: true }
+    if (!issued.ok) return deny('issueStepEffect', issued.reason)
     const commitId = (issued.events[0]?.data.commitId as string | undefined) ?? null
     if (commitId === null) {
       block('observer-error', 'ISSUE_EFFECT succeeded without a commitId event')
-      return authoritative ? deny('issueStepEffect', 'missing-commit-id') : { ok: true }
+      return deny('issueStepEffect', 'missing-commit-id')
     }
     const dispatched = apply({
       kind: 'BEGIN_EFFECT_DISPATCH',
       commitId,
       capability: caps.dispatcher,
     }, 'mechanical-step-issued', input.transitionId)
-    if (!dispatched.ok) return authoritative ? deny('issueStepEffect', dispatched.reason) : { ok: true }
+    if (!dispatched.ok) return deny('issueStepEffect', dispatched.reason)
     openEffects.set(input.stepId, { commitId, stepId: input.stepId, transitionId: input.transitionId })
-    journal({ type: 'effect-dispatch', transitionId: input.transitionId, stepId: input.stepId, commitId, authority: authoritative })
+    journal({ type: 'effect-dispatch', transitionId: input.transitionId, stepId: input.stepId, commitId, authority: true })
     return { ok: true }
   }
 
-  const stepSettled = (input: Extract<KernelSessionInput, { type: 'mechanical-step-settled' }>): void => {
+  const stepSettled = (input: StepSettledInput): void => {
     const open = openEffects.get(input.stepId)
+    if (open === undefined || open.transitionId !== input.transitionId) {
+      // Never debit or reconcile a step the kernel did not issue for this
+      // transition (double settle, settle after terminal, foreign step id).
+      block('observer-error', `settled step ${input.stepId} had no open kernel effect commit for ${input.transitionId}`, { transitionId: input.transitionId })
+      return
+    }
     openEffects.delete(input.stepId)
     if (state.transitions[input.transitionId]?.lifecycle === 'ACTIVE') {
       apply({
@@ -667,10 +757,6 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         mechanicalSteps: 1,
         capability: controllerCap(input.transitionId),
       }, 'mechanical-step-settled', input.transitionId)
-    }
-    if (open === null || open === undefined) {
-      block('observer-error', `settled step ${input.stepId} had no open kernel effect commit`, { transitionId: input.transitionId })
-      return
     }
     if (input.status === 'continuing' || input.status === 'active' || (input.status === 'terminal' && input.verified)) {
       feedSnapshot({
@@ -726,7 +812,10 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
           transitionId: context?.transitionId ?? null,
         })
       }
-      const transitionId = context?.authority === 'vtr-reach' ? context.transitionId ?? null : null
+      // Attribution keys on kernel transition identity (id + canonical contract
+      // hash), never on a provenance label: every executor claim carries the
+      // identity the kernel admitted.
+      const transitionId = context?.transitionId ?? null
       const hostScope = context?.hostScope ?? null
       let authorityState: string
       if (mapped === null) {
@@ -738,9 +827,9 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         mutationsHostScoped += 1
       } else if (transitionId === null) {
         authorityState = 'unattributed'
-        block('mutation-without-transition-authority', `surface ${record.surface} fired outside a VTR transition context`, {
+        block('mutation-without-transition-authority', `surface ${record.surface} fired outside a kernel transition context`, {
           surface: record.surface,
-          transitionId: context?.transitionId ?? null,
+          transitionId: null,
         })
       } else {
         mutationsAttributed += 1
@@ -749,6 +838,12 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         if (transition === undefined || contract === null || transition.lifecycle !== 'ACTIVE') {
           authorityState = 'transition-not-active'
           block('mutation-without-transition-authority', `surface ${record.surface} attributed to ${transitionId} which is not ACTIVE in the kernel`, {
+            surface: record.surface,
+            transitionId,
+          })
+        } else if (context?.transitionContractHash !== boundContractHashes.get(transitionId)) {
+          authorityState = 'contract-mismatch'
+          block('mutation-without-transition-authority', `surface ${record.surface} carries contract ${context?.transitionContractHash ?? 'none'} but ${transitionId} is bound to ${boundContractHashes.get(transitionId) ?? 'none'}`, {
             surface: record.surface,
             transitionId,
           })
@@ -792,95 +887,58 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
     }
   }
 
-  const observe = (input: KernelSessionInput): void => {
+  const observeWorld = (input: KernelWorldObservation): void => {
     try {
-      switch (input.type) {
-        case 'world-observation':
-          lastPredicates = input.predicates
-          feedSnapshot(input.predicates, 'world-observation')
-          return
-        case 'transition-committed':
-          commitTransition(input.contract, input.witness, input.lifecycle)
-          return
-        case 'transition-terminal':
-          terminalTransition(input)
-          return
-        case 'mechanical-step-issued':
-          stepIssued(input)
-          return
-        case 'mechanical-step-settled':
-          stepSettled(input)
-          return
-        case 'mutation':
-          observeMutation(input)
-          return
-      }
+      lastPredicates = input.predicates
+      lastObservedMono = mono()
+      feedSnapshot(input.predicates, 'world-observation')
     } catch (error) {
-      block('observer-error', `input ${input.type}: ${error instanceof Error ? error.message : String(error)}`)
+      block('observer-error', `world-observation: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  const authorityGate: KernelTransitionAuthority | null = authorityMode === 'authority'
-    ? {
-        mode: 'authority',
-        feedObservation(input: KernelWorldObservation): void {
-          observe({ type: 'world-observation', ...input })
-        },
-        admitTransition(contract: ReachTransitionContract): KernelGateVerdict {
-          return admitTransition(contract, 'gate-admit')
-        },
-        admitContract(spec: TransitionContractSpec): { readonly ok: true; readonly contractHash: string } | { readonly ok: false; readonly reason: string } {
-          let canonical: CanonicalTransitionContract
-          try {
-            canonical = createTransitionContract(spec)
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error)
-            block('contract-mapping-failed', `${spec.transitionId}: ${reason}`, { transitionId: spec.transitionId })
-            return { ok: false, reason }
-          }
-          journal({
-            type: 'replay-contract',
-            transitionId: canonical.transitionId,
-            kernelContractHash: canonical.contractHash,
-            desiredPredicate: canonical.desiredPredicate,
-            family: canonical.family,
-          })
-          const admitted = admitCanonical(canonical, 'gate-admit-contract')
-          return admitted.ok ? { ok: true, contractHash: canonical.contractHash } : { ok: false, reason: admitted.reason }
-        },
-        activateTransition(transitionId: string, witness: ReachWitness | null): KernelGateVerdict {
-          return activateTransition(transitionId, witness, true, 'gate-activate')
-        },
-        issueStepEffect(input: {
-          readonly transitionId: string
-          readonly intentId: string
-          readonly stepId: string
-          readonly effectKind: string
-        }): KernelGateVerdict {
-          return stepIssued({ type: 'mechanical-step-issued', ...input }, true)
-        },
-        settleStepEffect(input: {
-          readonly transitionId: string
-          readonly intentId: string
-          readonly stepId: string
-          readonly status: string
-          readonly verified: boolean
-          readonly progressed: boolean
-        }): void {
-          stepSettled({ type: 'mechanical-step-settled', ...input })
-        },
-        terminalize(input: {
-          readonly transitionId: string
-          readonly contractHash: string
-          readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
-        }): KernelGateVerdict {
-          return terminalTransition({ type: 'transition-terminal', ...input } as Extract<KernelSessionInput, { type: 'transition-terminal' }>, true)
-        },
+  const authorityGate: KernelTransitionAuthority = {
+    feedObservation(input: KernelWorldObservation): void {
+      observeWorld(input)
+    },
+    admitTransition(contract: ReachTransitionContract): KernelGateVerdict {
+      return admitTransition(contract, 'gate-admit')
+    },
+    admitContract(spec: TransitionContractSpec): { readonly ok: true; readonly contractHash: string } | { readonly ok: false; readonly reason: string } {
+      let canonical: CanonicalTransitionContract
+      try {
+        canonical = createTransitionContract(canonicalWorldSpelling(spec, state.world))
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        block('contract-mapping-failed', `${spec.transitionId}: ${reason}`, { transitionId: spec.transitionId })
+        return { ok: false, reason }
       }
-    : null
+      journal({
+        type: 'admitted-contract',
+        transitionId: canonical.transitionId,
+        kernelContractHash: canonical.contractHash,
+        desiredPredicate: canonical.desiredPredicate,
+        family: canonical.family,
+      })
+      const admitted = admitCanonical(canonical, 'gate-admit-contract')
+      if (admitted.ok) boundContractHashes.set(canonical.transitionId, canonical.contractHash)
+      return admitted.ok ? { ok: true, contractHash: canonical.contractHash } : { ok: false, reason: admitted.reason }
+    },
+    activateTransition(transitionId: string, witness: ReachWitness | null): KernelGateVerdict {
+      return activateTransition(transitionId, witness, true, 'gate-activate')
+    },
+    issueStepEffect(input: StepIssuedInput): KernelGateVerdict {
+      return stepIssued(input)
+    },
+    settleStepEffect(input: StepSettledInput): void {
+      stepSettled(input)
+    },
+    terminalize(input: TerminalInput): KernelGateVerdict {
+      return terminalTransition(input)
+    },
+  }
 
   return {
-    observe,
     observeMutation,
     bindActuationContext(resolve: () => MutationAuthorityContext | null): void {
       resolveContext = resolve
@@ -907,7 +965,7 @@ export function createKernelAuthoritySession(config: KernelAuthoritySessionConfi
         projectionLimitationKinds: [...projectionLimitationKinds],
         blockers: [...blockers],
         coverageComplete: mutationsObserved > 0 && hardBlockers.length === 0,
-        authorityMode,
+        authorityMode: 'authority',
         gateDenials: [...gateDenials],
       }
     },

@@ -2847,11 +2847,25 @@ export class Executor {
   ): Promise<T> {
     this.assertEffect(effect, false)
     const action = this.action
-    const callbacks = action?.internalEffectCallbacks
-    if (action === null || action === undefined || callbacks === undefined) {
+    if (action === null || action === undefined) {
+      // No claimed action owns this effect (a direct mechanics call, or a
+      // continuation that outlived its claim). It is not kernel-issued: make it
+      // loudly visible here; the kernel session also records the resulting
+      // mutation as an unattributed hard blocker.
+      this.logger.warn('executor', `INTERNAL_EFFECT_WITHOUT_CLAIM effect=${effect.type}`, { effect: effect.type })
       const commitment = this.activeCommitment
       if (commitment !== null) this.noteMechanicalStep(commitment, effect)
       return await actuator()
+    }
+    const callbacks = action.internalEffectCallbacks
+    if (callbacks === undefined) {
+      // Fail closed: a claim that carries no kernel effect gate cannot perform
+      // an irreversible/internal effect. The owning transition's contract must
+      // permit and issue it.
+      throw new ExecutorError(
+        'effect_reservation_refused',
+        `${effect.type} effect refused: claim ${action.transitionId ?? action.id} carries no kernel effect gate`,
+      )
     }
 
     const effectId = `${action.id}:epoch:${action.epoch}:effect:${++this.internalEffectSequence}`

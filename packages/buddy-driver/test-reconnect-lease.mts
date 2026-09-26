@@ -12,7 +12,7 @@ import {
 
 interface Case {
   name: string
-  run: () => { pass: boolean; detail: string }
+  run: () => { pass: boolean; detail: string } | Promise<{ pass: boolean; detail: string }>
 }
 
 const cases: Case[] = []
@@ -182,6 +182,73 @@ addCase('#28 the actuator proxy blocks a stale generation side effect', () => {
   return { pass, detail: `activeDig=${activeResult} denied=${denied}` }
 })
 
+addCase('V4.1.2 closure: former escape surfaces are lease-denied for a stale generation and observed when granted', () => {
+  const manager = new ActuationLeaseManager()
+  const calls: string[] = []
+  const furnaceWindow = {
+    putInput: async () => { calls.push('putInput') },
+    putFuel: async () => { calls.push('putFuel') },
+    takeOutput: async () => { calls.push('takeOutput') },
+    close: () => { calls.push('close') },
+  }
+  const raw = {
+    attack: () => calls.push('attack'),
+    stopDigging: () => calls.push('stopDigging'),
+    _placeBlockWithOptions: async () => { calls.push('_placeBlockWithOptions') },
+    openFurnace: async () => furnaceWindow,
+    physicsEnabled: true,
+    entity: { velocity: { x: 0, y: 0, z: 0 }, position: { x: 0, y: 64, z: 0, set() {} }, yaw: 0, pitch: 0, onGround: true },
+  }
+  const observed: string[] = []
+  const bot = withActuationLease(raw as unknown as Bot, manager, 'g1', undefined, undefined, (o) => observed.push(`${o.surface}:${o.guarded ? 'guarded' : 'unguarded'}:${o.leaseOutcome}`)) as unknown as typeof raw
+  manager.acquire('g1')
+  bot.attack()
+  bot.stopDigging()
+  void bot._placeBlockWithOptions()
+  bot.physicsEnabled = false
+  bot.entity.velocity.y = 0.42
+  const grantedSurfaces = ['bot.attack:guarded:granted', 'bot.stopDigging:guarded:granted', 'bot._placeBlockWithOptions:guarded:granted', 'bot.physicsEnabled:guarded:granted', 'entity.velocity.y:guarded:granted']
+  const grantedOk = grantedSurfaces.every((surface) => observed.includes(surface))
+  manager.revoke('error')
+  const denied = [
+    throwsMessage(() => bot.attack()),
+    throwsMessage(() => bot.stopDigging()),
+    throwsMessage(() => { void bot._placeBlockWithOptions() }),
+    throwsMessage(() => { bot.physicsEnabled = true }),
+    throwsMessage(() => { bot.entity.velocity.y = 1 }),
+  ]
+  const allDenied = denied.every((message) => message !== null && message.includes('ACTUATION_LEASE_DENIED'))
+  const stateUnchanged = raw.physicsEnabled === false && raw.entity.velocity.y === 0.42
+  return { pass: grantedOk && allDenied && stateUnchanged, detail: `observed=[${observed.join(' | ')}] allDenied=${allDenied} stateUnchanged=${stateUnchanged}` }
+})
+
+addCase('V4.1.2 closure: a window returned by a guarded open is itself lease-guarded and observed', async () => {
+  const manager = new ActuationLeaseManager()
+  const calls: string[] = []
+  const furnaceWindow = {
+    putInput: async () => { calls.push('putInput') },
+    takeOutput: async () => { calls.push('takeOutput') },
+    close: () => { calls.push('close') },
+    type: 'minecraft:furnace',
+  }
+  const raw = { openFurnace: async () => furnaceWindow }
+  const observed: string[] = []
+  const bot = withActuationLease(raw as unknown as Bot, manager, 'g1', undefined, undefined, (o) => observed.push(`${o.surface}:${o.leaseOutcome}`)) as unknown as typeof raw
+  manager.acquire('g1')
+  const furnace = await bot.openFurnace()
+  await furnace.putInput()
+  const readable = furnace.type === 'minecraft:furnace'
+  manager.revoke('error')
+  const denied = throwsMessage(() => { void furnace.takeOutput() })
+  const pass =
+    readable &&
+    calls.join(',') === 'putInput' &&
+    observed.includes('bot.openFurnace:granted') &&
+    observed.includes('window.putInput:granted') &&
+    denied !== null && denied.includes('what=window.takeOutput')
+  return { pass, detail: `calls=${calls.join(',')} observed=[${observed.join(' | ')}] denied=${denied}` }
+})
+
 addCase('#28 scripted disconnect: LEASE_REVOKED -> bounded backoff -> LEASE_ACQUIRED', () => {
   const manager = new ActuationLeaseManager()
   const ledger = new ReconnectLedger({ random: noJitter, now: () => 1 })
@@ -222,7 +289,7 @@ let failures = 0
 process.stdout.write('resident-safety - reconnect backoff (#27) + lease revoke (#28)\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
-  const observed = testCase.run()
+  const observed = await testCase.run()
   if (!observed.pass) failures += 1
   process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
   process.stdout.write(`      ${observed.detail}\n`)

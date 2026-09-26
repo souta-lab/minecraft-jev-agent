@@ -2299,14 +2299,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   syncPortalSiteMemory('generation-start')
   // Same for a Nether-structure site already in scan range at generation start.
   syncStructureSiteMemory('generation-start')
-  // V4.1.2 kernel authority session — production authority is unconditional:
-  // the kernel path runs causally BEFORE every gated Reach act and its verdict
-  // gates production; a denial fails closed and is journaled. Installing the
-  // gate also installs the legacy-Reach kill-switch inside the controller (see
-  // JevAgentOptions.kernelAuthority), so a denied act never falls back. There
-  // is no observer-only/shadow production mode — that would leave legacy Reach
-  // scheduling as a second live authority.
-  const kernelAuthorityMode = 'authority' as const
+  // V4.1.2 kernel authority session — the kernel is the only runtime authority:
+  // its command path runs causally BEFORE every gated act and its verdict
+  // gates production; a denial fails closed and is journaled. The session has
+  // no observer-only mode, so there is nothing to select here.
   const kernelSession = createKernelAuthoritySession({
     world: {
       serverId: ctx.worldKey.serverId,
@@ -2315,16 +2311,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     },
     generationId: id,
     journalPath: join(ctx.logDir, 'kernel-authority.jsonl'),
-    authorityMode: kernelAuthorityMode,
   })
-  // Fail closed at generation construction: the production controller requires
-  // the verdict-returning gate; an authority-less session must never produce
-  // a generation whose Reach work runs without a kernel owner.
   const kernelAuthority = kernelSession.authority
-  if (kernelAuthority === null) {
-    throw new Error('V4.1.2 kernel authority session did not produce the production gate')
-  }
-  ctx.log('KERNEL_AUTHORITY_MODE', { mode: kernelAuthorityMode, generationId: id })
+  ctx.log('KERNEL_AUTHORITY_MODE', { mode: 'authority', generationId: id })
   // Late-bound: the controller (and its executor projection) exists only after
   // the leased bot is built. The resolver reads the CURRENT claim at mutation
   // time, so dispatches are attributed to whichever authority holds the body.
@@ -3240,7 +3229,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   const replyToHuman = (username: string, message: string): void => {
     if (!ctx.lease.isActive(id)) return
-    bot.chat(`/tell ${username} ${message}`)
+    controller.withHostScope('human-intent-reply', () => bot.chat(`/tell ${username} ${message}`))
     ctx.log('HUMAN_INTENT_REPLY', { username, message })
   }
 

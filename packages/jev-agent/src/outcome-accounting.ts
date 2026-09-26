@@ -299,7 +299,7 @@ export function goalWithHave(goal: GoalState, have: number): GoalState {
 
 
 export function onActionComplete(host: OutcomeAccountingHost,
-result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOutcome {
   // A settled action (done / failed / cancelled) releases the in-flight
   // commitment immediately, so the next decision is free to choose again. The
   // epoch match keeps a stale completion from clearing a newer action's hold.
@@ -508,7 +508,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
       { actionId: result.actionId, ms: result.ms },
       host.tickCounter,
     )
-    return
+    return truth
   }
 
   host.retireFailedKnownRetrieve(candidate, result)
@@ -594,7 +594,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
       )
       if (host.goal.complete && host.queue.current?.kind !== 'descend' && !host.options.singleShotPlanner) {
         host.onObjectiveComplete()
-        return
+        return truth
       }
     }
     if (result.kind === 'DESCEND') host.onDescendComplete(result, candidate)
@@ -762,7 +762,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
         host.requestDecision(deferred.trigger, deferred.detail)
       }
     }
-    return
+    return truth
   }
   const next = selectPostActionTrigger(deferred, {
     trigger: completionTrigger,
@@ -770,6 +770,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
     ts: Date.now(),
   })
   host.requestDecision(next.trigger, next.detail)
+  return truth
 }
 
 

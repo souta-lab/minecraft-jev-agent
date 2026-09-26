@@ -6,6 +6,11 @@
  * deterministic fixture transition identity derived from the candidate so that
  * re-claiming the same candidate keeps ownership while a different candidate
  * is rejected by the authority-conflict gate exactly as production intends.
+ *
+ * The fixture effect gate is explicitly permissive (the executor refuses
+ * internal effects on a claim without one). Gate denial semantics are proven
+ * against the real kernel session in test-controller-transitions.mts and
+ * buddy-driver/test-kernel-authority*.mts.
  */
 import type { Candidate } from './src/candidates.ts'
 import type { ClaimResult, ExecutionClaimContext, Executor } from './src/executor.ts'
@@ -16,6 +21,10 @@ export function fixtureClaimContext(candidate: Candidate): ExecutionClaimContext
     transitionId: `fixture-transition:${id}`,
     transitionContractHash: `fixture-contract:${id}`,
     authorityLabel: 'fixture',
+    internalEffectCallbacks: {
+      before: () => true,
+      after: () => {},
+    },
   }
 }
 

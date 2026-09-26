@@ -20,7 +20,6 @@ export interface KernelGateCall {
 }
 
 export class RecordingKernelAuthority implements KernelTransitionAuthority {
-  readonly mode = 'authority' as const
   readonly calls: KernelGateCall[] = []
   admitVerdict: KernelGateVerdict = { ok: true }
   activateVerdict: KernelGateVerdict = { ok: true }

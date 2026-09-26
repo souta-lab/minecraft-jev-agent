@@ -6,6 +6,8 @@ import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/contr
 import { jevAgent } from './src/index.ts'
 import { ReachMissionRuntime } from './src/reach/mission-runtime.ts'
 import type { ReachMissionRuntimeDependencies } from './src/reach/mission-runtime.ts'
+import type { KernelAuthoritySession } from '../buddy-driver/kernel-authority-session.ts'
+import type { KernelTransitionAuthority } from './src/reach/kernel-authority-map.ts'
 
 const controller = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
 const reachPlane = readFileSync(new URL('./src/reach/controller-plane.ts', import.meta.url), 'utf8')
@@ -404,11 +406,16 @@ describe('VTR Reach production authority seam', () => {
     assert.match(reachMissionRuntime, /throw new Error\('ReachMissionRuntime requires KernelTransitionAuthority'\)/)
     assert.doesNotMatch(reachMissionRuntime, /kernelAuthority\?\.|kernelAuthority \?\?/)
     assert.match(indexSource, /export function jevAgent\(bot: Bot, kernelAuthority: KernelTransitionAuthority\): void/)
-    // Production generation hardcodes authority mode and throws when the
-    // session cannot produce the gate — miswiring can never silently select
-    // an observer-only or legacy Reach path.
-    assert.match(generationEntry, /const kernelAuthorityMode = 'authority' as const/)
-    assert.match(generationEntry, /if \(kernelAuthority === null\) \{\s*throw new Error\('V4\.1\.2 kernel authority session did not produce the production gate'\)/)
+    // Production generation cannot select a kernel mode: the session has no
+    // observer-only mode and its gate is non-nullable (type-level proof below),
+    // so miswiring can never select an observer-only or legacy Reach path.
+    const sessionCall = generationEntry.slice(
+      generationEntry.indexOf('createKernelAuthoritySession({'),
+      generationEntry.indexOf('const kernelAuthority = kernelSession.authority'),
+    )
+    assert.ok(sessionCall.length > 0 && !sessionCall.includes('authorityMode'), 'the production session construction passes no mode selector')
+    assert.match(generationEntry, /const kernelAuthority = kernelSession\.authority/)
+    assert.match(generationEntry, /KERNEL_AUTHORITY_MODE', \{ mode: 'authority'/)
 
     // Runtime level: even an authority-less construction forced past the
     // types throws closed instead of running Reach without an owner.
@@ -429,6 +436,10 @@ function authorityRequiredAtTypeLevel(): void {
   void new JevController(bot, {})
   // @ts-expect-error the plugin entry requires the host-owned gate
   jevAgent(bot)
+  // The host session's gate is non-nullable: there is no authority-less session.
+  const session = null as unknown as KernelAuthoritySession
+  const gate: KernelTransitionAuthority = session.authority
+  void gate
   const missingGate = {} as Omit<ReachMissionRuntimeDependencies, 'kernelAuthority'>
   // @ts-expect-error ReachMissionRuntime dependencies require kernelAuthority
   void new ReachMissionRuntime(missingGate)

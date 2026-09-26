@@ -4,21 +4,22 @@
 // case explicitly writes to a tmp file. Proves:
 //   1. every mutation surface the production guard/observer can emit maps to a
 //      canonical V4.1.2 resource bundle + effect permit (the inventory gate);
-//   2. a well-formed Reach lifecycle replays through the executable kernel
-//      (REGISTER -> ADMIT -> proofs -> witness -> ACQUIRE -> ISSUE -> DISPATCH
-//      -> RECONCILE -> VERIFY) with zero blockers;
+//   2. a well-formed lifecycle runs through the authority gate (REGISTER ->
+//      ADMIT -> proofs -> witness -> ACQUIRE -> ISSUE -> DISPATCH -> RECONCILE
+//      -> VERIFY) with zero blockers, and adversarial inputs (forged hashes,
+//      unissued settles, stale or cross-world truth) fail closed;
 //   3. unmapped / unguarded / transition-unattributed mutations are recorded
-//      as hard migration blockers, never silently accepted.
+//      as hard blockers, never silently accepted.
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createKernelAuthoritySession } from './kernel-authority-session.ts'
+import { createKernelAuthoritySession, MAX_REATTEST_AGE_MS } from './kernel-authority-session.ts'
 import type { KernelAuthoritySession, KernelSessionBlocker } from './kernel-authority-session.ts'
 import {
   MUTATING_BOT_METHODS,
   OBSERVED_UNGUARDED_BOT_METHODS,
 } from './resident-safety.ts'
-import { mapMutationSurface } from '../jev-agent/src/reach/kernel-authority-map.ts'
+import { controllerTransitionToKernelSpec, mapMutationSurface } from '../jev-agent/src/reach/kernel-authority-map.ts'
 import type { MutationAuthorityContext } from '../jev-agent/src/reach/kernel-authority-map.ts'
 import { createInventoryReachTransition } from '../jev-agent/src/reach/scheduler.ts'
 import type { ReachIdentity, ReachTransitionContract, ReachWitness } from '../jev-agent/src/reach/transition.ts'
@@ -200,77 +201,86 @@ addCase('static scan: every production mutation call site is an observed mapped 
 })
 
 // --------------------------------------------------------------------------
-// 2. Full Reach lifecycle replay through the executable kernel.
+// 2. Full lifecycle through the authority gate (the only lifecycle path).
 // --------------------------------------------------------------------------
 
-addCase('committed Reach transition replays commit/step/terminal with zero blockers', () => {
-  const { session, blockers } = makeSession(() => vtrContext)
+const RESOURCE_IN_REACH = { ...COMMIT_PREDICATES, 'reach.resource-source': { truth: 'true' as const, evidenceId: 'verify:0:in-reach' } }
+
+function controllerSpec(transitionId: string, dimension = 'overworld') {
+  const compiled = controllerTransitionToKernelSpec({
+    transitionId,
+    family: 'walk_to',
+    desiredPredicate: `controller:walk_to:${transitionId}`,
+    world: { serverId: WORLD.serverId, dimension, worldEpoch: WORLD.worldEpoch },
+    maxMechanicalSteps: 8,
+    maxActiveMs: 60_000,
+  })
+  if (!compiled.ok) throw new Error(compiled.reason)
+  return compiled.spec
+}
+
+addCase('Reach transition runs admit/activate/issue/settle/terminalize through the gate with zero blockers', () => {
   const contract = makeContract('t-1')
-  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
-  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
-  const registered = session.state().transitions['t-1']
-  const activeOk = registered?.lifecycle === 'ACTIVE'
-  session.observe({ type: 'mechanical-step-issued', transitionId: 't-1', intentId: 'i-1', stepId: 's-1', effectKind: 'locomotion' })
+  const { session, blockers } = makeSession(() => ({ ...vtrContext, transitionContractHash: contract.contractHash }))
+  const gate = session.authority
+  gate.feedObservation({ observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  const admitted = gate.admitTransition(contract)
+  const activated = gate.activateTransition('t-1', makeWitness(contract))
+  const activeOk = session.state().transitions['t-1']?.lifecycle === 'ACTIVE'
+  const issued = gate.issueStepEffect({ transitionId: 't-1', intentId: 'i-1', stepId: 's-1', effectKind: 'locomotion' })
   session.observeMutation({ surface: 'pathfinder.setGoal', guarded: true, leaseOutcome: 'granted', argsSignature: ['vec3(1,64,2)'], instanceHint: null })
   session.observeMutation({ surface: 'pathfinder.goto', guarded: true, leaseOutcome: 'granted', argsSignature: ['object'], instanceHint: null })
-  session.observe({ type: 'mechanical-step-settled', transitionId: 't-1', intentId: 'i-1', stepId: 's-1', status: 'active', verified: false, progressed: true })
-  // The verification-time observation: the production verifier saw the
-  // ensures predicate true with real evidence; VERIFY replays from those
-  // observed facts only — never from the SUCCESS signal itself.
-  session.observe({
-    type: 'world-observation',
-    observedAtMs: 1100,
-    predicates: { ...COMMIT_PREDICATES, 'reach.resource-source': { truth: 'true', evidenceId: 'verify:0:in-reach' } },
-  })
-  session.observe({ type: 'transition-terminal', transitionId: 't-1', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
-  const terminal = session.state().transitions['t-1']
+  gate.settleStepEffect({ transitionId: 't-1', intentId: 'i-1', stepId: 's-1', status: 'active', verified: false, progressed: true })
+  // VERIFY consumes only the verification-time observation - never the
+  // SUCCESS signal itself.
+  gate.feedObservation({ observedAtMs: 1100, predicates: RESOURCE_IN_REACH })
+  const terminal = gate.terminalize({ transitionId: 't-1', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
+  const closed = session.state().transitions['t-1']
   const summary = session.summary()
   const pass =
-    activeOk &&
-    terminal?.lifecycle === 'TERMINAL' &&
-    terminal.terminalOutcome?.kind === 'SUCCESS' &&
+    admitted.ok && activated.ok && issued.ok && terminal.ok && activeOk &&
+    closed?.lifecycle === 'TERMINAL' &&
+    closed.terminalOutcome?.kind === 'SUCCESS' &&
     summary.mutationsObserved === 2 &&
-    summary.mutationsMapped === 2 &&
     summary.mutationsAttributedToTransition === 2 &&
     summary.coverageComplete &&
     summary.verifyFactIds.length > 0 &&
-    summary.typedTerminals === 1 &&
+    summary.authorityMode === 'authority' &&
     blockers().length === 0
   return {
     pass,
-    detail: `active=${activeOk} terminal=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} mapped=${summary.mutationsMapped}/${summary.mutationsObserved} attributed=${summary.mutationsAttributedToTransition} factIds=${summary.verifyFactIds.length} blockers=${blockers().map((b) => b.kind).join(',') || 'none'}`,
+    detail: `terminal=${closed?.lifecycle}/${closed?.terminalOutcome?.kind} attributed=${summary.mutationsAttributedToTransition}/${summary.mutationsObserved} factIds=${summary.verifyFactIds.length} blockers=${blockers().map((b) => b.kind).join(',') || 'none'}`,
   }
 })
 
-addCase('SUCCESS terminal without observed ensures facts refuses to mint truth', () => {
-  const { session, blockers } = makeSession(() => vtrContext)
+addCase('SUCCESS without observed ensures facts is denied and never mints truth', () => {
   const contract = makeContract('t-noverify')
-  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
-  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
-  // No verification-time observation flips 'reach.resource-source' to true:
-  // the kernel must refuse VERIFY_SUCCESS and the session must record it.
-  session.observe({ type: 'transition-terminal', transitionId: 't-noverify', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
-  const summary = session.summary()
-  const blockerKinds = blockers().map((b) => b.kind)
+  const { session, blockers } = makeSession(() => vtrContext)
+  const gate = session.authority
+  gate.feedObservation({ observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  gate.admitTransition(contract)
+  gate.activateTransition('t-noverify', makeWitness(contract))
+  const verdict = gate.terminalize({ transitionId: 't-noverify', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
+  const closed = session.state().transitions['t-noverify']
+  const kinds = blockers().map((b) => b.kind)
   const pass =
-    summary.kernelDenied > 0 &&
-    blockerKinds.includes('verify-proof-not-observed') &&
-    blockerKinds.includes('kernel-command-denied')
-  return {
-    pass,
-    detail: `kernelDenied=${summary.kernelDenied} blockers=${blockerKinds.join(',') || 'none'}`,
-  }
+    !verdict.ok &&
+    closed?.terminalOutcome?.kind !== 'SUCCESS' &&
+    kinds.includes('verify-proof-not-observed') &&
+    kinds.includes('kernel-command-denied')
+  return { pass, detail: `verdict=${JSON.stringify(verdict)} outcome=${closed?.terminalOutcome?.kind} blockers=${kinds.join(',')}` }
 })
 
-addCase('transition committed already-terminal replays VERIFY_SUCCESS without activation', () => {
-  const { session, blockers } = makeSession(() => vtrContext)
+addCase('admitted-but-never-activated transition verifies SUCCESS only from observed facts', () => {
   const contract = makeContract('t-term')
-  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: { ...COMMIT_PREDICATES, 'reach.resource-source': { truth: 'true', evidenceId: 'verify:0:in-reach' } } })
-  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'terminal' })
-  session.observe({ type: 'transition-terminal', transitionId: 't-term', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
-  const terminal = session.state().transitions['t-term']
-  const pass = terminal?.lifecycle === 'TERMINAL' && terminal.terminalOutcome?.kind === 'SUCCESS' && blockers().length === 0
-  return { pass, detail: `lifecycle=${terminal?.lifecycle} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+  const { session, blockers } = makeSession(() => vtrContext)
+  const gate = session.authority
+  gate.feedObservation({ observedAtMs: 1000, predicates: RESOURCE_IN_REACH })
+  gate.admitTransition(contract)
+  const verdict = gate.terminalize({ transitionId: 't-term', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
+  const closed = session.state().transitions['t-term']
+  const pass = verdict.ok && closed?.lifecycle === 'TERMINAL' && closed.terminalOutcome?.kind === 'SUCCESS' && blockers().length === 0
+  return { pass, detail: `lifecycle=${closed?.lifecycle} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
 })
 
 addCase('namespaced kernel world accepts the bare Reach dimension convention', () => {
@@ -283,29 +293,148 @@ addCase('namespaced kernel world accepts the bare Reach dimension convention', (
   })
   session.bindActuationContext(() => vtrContext)
   const contract = makeContract('t-ns')
-  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
-  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
-  const registered = session.state().transitions['t-ns']
-  const blockers = session.blockers()
-  const pass = registered !== undefined && blockers.length === 0
-  return { pass, detail: `registered=${registered?.lifecycle ?? 'none'} blockers=${blockers.map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+  session.authority.feedObservation({ observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  const admitted = session.authority.admitTransition(contract)
+  const activated = session.authority.activateTransition('t-ns', makeWitness(contract))
+  const pass = admitted.ok && activated.ok && session.blockers().length === 0
+  return { pass, detail: `admit=${JSON.stringify(admitted)} activate=${JSON.stringify(activated)} blockers=${session.blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
 })
 
-addCase('non-success terminal closes via stand-in and records the projection limitation', () => {
-  const { session, blockers } = makeSession(() => vtrContext)
+addCase('controller contract with the bare runtime dimension is admitted by a namespaced host world', () => {
+  // Production regression: HOST world keys are namespaced while the sensor's
+  // self.dimension is bare. A namespace-only difference is the same world.
+  const session = createKernelAuthoritySession({
+    world: { serverId: 'srv', dimension: 'minecraft:overworld', worldEpoch: 7 },
+    generationId: 'gen-1',
+    journalPath: null,
+  })
+  const admitted = session.authority.admitContract(controllerSpec('controller:c-ns:1', 'overworld'))
+  const activated = admitted.ok ? session.authority.activateTransition('controller:c-ns:1', null) : { ok: false as const, reason: 'not-admitted' }
+  const otherWorld = session.authority.admitContract(controllerSpec('controller:c-nether:2', 'the_nether'))
+  const pass = admitted.ok && activated.ok && !otherWorld.ok && otherWorld.reason === 'CONTRACT_WORLD_MISMATCH'
+  return { pass, detail: `admit=${JSON.stringify(admitted)} activate=${JSON.stringify(activated)} nether=${JSON.stringify(otherWorld)}` }
+})
+
+addCase('non-success terminal closes via the kind-preserving stand-in as evidence, not a blocker', () => {
   const contract = makeContract('t-fail')
-  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
-  session.observe({ type: 'transition-committed', contract, witness: makeWitness(contract), lifecycle: 'active' })
-  session.observe({ type: 'transition-terminal', transitionId: 't-fail', contractHash: contract.contractHash, outcome: { kind: 'PROVEN_INFEASIBLE', reason: 'no-path' } })
-  const terminal = session.state().transitions['t-fail']
+  const { session, blockers } = makeSession(() => vtrContext)
+  const gate = session.authority
+  gate.feedObservation({ observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  gate.admitTransition(contract)
+  gate.activateTransition('t-fail', makeWitness(contract))
+  const verdict = gate.terminalize({ transitionId: 't-fail', contractHash: contract.contractHash, outcome: { kind: 'PROVEN_INFEASIBLE', reason: 'no-path' } })
+  const closed = session.state().transitions['t-fail']
   const summary = session.summary()
   const pass =
-    terminal?.lifecycle === 'TERMINAL' &&
-    terminal.terminalOutcome?.kind === 'CANCELED' &&
+    verdict.ok &&
+    closed?.lifecycle === 'TERMINAL' &&
+    closed.terminalOutcome?.kind === 'CANCELED' &&
     summary.projectionLimitations === 1 &&
     summary.projectionLimitationKinds.includes('PROVEN_INFEASIBLE') &&
-    blockers().some((b) => b.kind === 'replay-projection-limitation')
-  return { pass, detail: `lifecycle=${terminal?.lifecycle}/${terminal?.terminalOutcome?.kind} limitations=${summary.projectionLimitationKinds.join(',') || 'none'} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+    blockers().length === 0 &&
+    Object.keys(session.state().leases).length === 0
+  return { pass, detail: `lifecycle=${closed?.lifecycle}/${closed?.terminalOutcome?.kind} limitations=${summary.projectionLimitationKinds.join(',') || 'none'} leases=${Object.keys(session.state().leases).length} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+})
+
+// --------------------------------------------------------------------------
+// 2b. Adversarial authority cases (real session, not a stub).
+// --------------------------------------------------------------------------
+
+addCase('controller-transition mutations are attributed by kernel identity, not by label', () => {
+  let hash: string | null = null
+  const { session, blockers } = makeSession(() => ({
+    actionId: 'a1', epoch: 1, authority: 'controller:walk_to', transitionId: 'controller:c1:1', transitionContractHash: hash,
+  }))
+  const admitted = session.authority.admitContract(controllerSpec('controller:c1:1'))
+  if (admitted.ok) hash = admitted.contractHash
+  session.authority.activateTransition('controller:c1:1', null)
+  session.observeMutation({ surface: 'pathfinder.setGoal', guarded: true, leaseOutcome: 'granted', argsSignature: ['vec3(1,64,2)'], instanceHint: null })
+  const summary = session.summary()
+  const pass = admitted.ok && summary.mutationsAttributedToTransition === 1 && blockers().length === 0 && summary.coverageComplete
+  return { pass, detail: `attributed=${summary.mutationsAttributedToTransition} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+})
+
+addCase('a mutation presenting a foreign contract hash is a hard blocker', () => {
+  const { session, blockers } = makeSession(() => ({
+    actionId: 'a1', epoch: 1, authority: 'controller:walk_to', transitionId: 'controller:c2:1', transitionContractHash: 'forged-hash',
+  }))
+  session.authority.admitContract(controllerSpec('controller:c2:1'))
+  session.authority.activateTransition('controller:c2:1', null)
+  session.observeMutation({ surface: 'pathfinder.setGoal', guarded: true, leaseOutcome: 'granted', argsSignature: ['vec3(1,64,2)'], instanceHint: null })
+  const found = blockers().filter((b) => b.kind === 'mutation-without-transition-authority')
+  return { pass: found.length === 1 && !session.summary().coverageComplete, detail: `blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|')}` }
+})
+
+addCase('terminalize presenting a mismatched contract hash is denied and leaves the transition live', () => {
+  const { session } = makeSession()
+  const admitted = session.authority.admitContract(controllerSpec('controller:c3:1'))
+  session.authority.activateTransition('controller:c3:1', null)
+  const verdict = session.authority.terminalize({ transitionId: 'controller:c3:1', contractHash: 'forged-hash', outcome: { kind: 'ACTION_FAILED', reason: 'x' } })
+  const live = session.state().transitions['controller:c3:1']
+  const pass = admitted.ok && !verdict.ok && verdict.reason.startsWith('contract-hash-mismatch') && live?.lifecycle === 'ACTIVE'
+  return { pass, detail: `verdict=${JSON.stringify(verdict)} lifecycle=${live?.lifecycle}` }
+})
+
+addCase('a settle for a step the kernel never issued neither debits budget nor reconciles', () => {
+  const { session, blockers } = makeSession()
+  const admitted = session.authority.admitContract(controllerSpec('controller:c4:1'))
+  session.authority.activateTransition('controller:c4:1', null)
+  const before = JSON.stringify(session.state().transitions['controller:c4:1']?.usage ?? null)
+  session.authority.settleStepEffect({ transitionId: 'controller:c4:1', intentId: 'i', stepId: 'never-issued', status: 'active', verified: true, progressed: true })
+  const after = JSON.stringify(session.state().transitions['controller:c4:1']?.usage ?? null)
+  const pass = admitted.ok && before === after && blockers().some((b) => b.kind === 'observer-error')
+  return { pass, detail: `budgetUnchanged=${before === after} blockers=${blockers().map((b) => b.kind).join(',')}` }
+})
+
+addCase('a controller transition\'s mission predicate retires once it is terminal', () => {
+  const { session } = makeSession()
+  const spec = controllerSpec('controller:c5:1')
+  const admitted = session.authority.admitContract(spec)
+  session.authority.activateTransition('controller:c5:1', null)
+  const whileLive = session.state().missionPredicates.includes(spec.desiredPredicate)
+  if (admitted.ok) session.authority.terminalize({ transitionId: 'controller:c5:1', contractHash: admitted.contractHash, outcome: { kind: 'ACTION_FAILED', reason: 'x' } })
+  const afterTerminal = session.state().missionPredicates.includes(spec.desiredPredicate)
+  return { pass: admitted.ok && whileLive && !afterTerminal, detail: `whileLive=${whileLive} afterTerminal=${afterTerminal}` }
+})
+
+addCase('a stale cached observation is never re-attested as fresh SUCCESS proof', () => {
+  let clock = 1_000
+  const session = createKernelAuthoritySession({ world: WORLD, generationId: 'gen-1', journalPath: null, now: () => clock })
+  session.bindActuationContext(() => vtrContext)
+  const contract = makeContract('t-stale')
+  const gate = session.authority
+  gate.feedObservation({ observedAtMs: 1000, predicates: RESOURCE_IN_REACH })
+  gate.admitTransition(contract)
+  gate.activateTransition('t-stale', makeWitness(contract))
+  clock += MAX_REATTEST_AGE_MS + 1
+  const verdict = gate.terminalize({ transitionId: 't-stale', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
+  const outcome = session.state().transitions['t-stale']?.terminalOutcome?.kind
+  const pass = !verdict.ok && outcome !== 'SUCCESS' && session.blockers().some((b) => b.kind === 'verify-proof-not-observed')
+  return { pass, detail: `verdict=${JSON.stringify(verdict)} outcome=${outcome}` }
+})
+
+addCase('observed truth does not survive a world change into the next contract', () => {
+  const { session } = makeSession(() => vtrContext)
+  const gate = session.authority
+  const overworld = makeContract('t-ow')
+  gate.feedObservation({ observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  gate.admitTransition(overworld)
+  gate.activateTransition('t-ow', makeWitness(overworld))
+  gate.terminalize({ transitionId: 't-ow', contractHash: overworld.contractHash, outcome: { kind: 'WORLD_CHANGED', field: 'dimension', observed: 'the_nether' } })
+  const netherIdentity: ReachIdentity = { ...IDENTITY, worldKey: 'srv|the_nether|7', dimension: 'the_nether' }
+  const nether = createInventoryReachTransition({
+    mission: { id: 'm:oak_log:1', kind: 'inventory_at_least', item: 'oak_log', count: 1 },
+    interactionReach: 5,
+    sourceNames: ['oak_log'],
+    identity: netherIdentity,
+    transitionId: 't-nether',
+  }).contract
+  const admitted = gate.admitTransition(nether)
+  // No post-change observation was fed: the overworld facts must not be
+  // re-attested, so activation cannot prove its requires.
+  const activated = gate.activateTransition('t-nether', { ...makeWitness(nether), observedIdentity: netherIdentity })
+  const pass = session.state().world.dimension === 'the_nether' && admitted.ok && !activated.ok
+  return { pass, detail: `world=${session.state().world.dimension} admit=${JSON.stringify(admitted)} activate=${JSON.stringify(activated)}` }
 })
 
 // --------------------------------------------------------------------------
@@ -327,8 +456,8 @@ addCase('unguarded mutation surface is a hard blocker even when mapped', () => {
   return { pass: found.length === 1 && summary.mutationsUnguarded === 1 && !summary.coverageComplete, detail: `unguarded=${summary.mutationsUnguarded} blockers=${found.length}` }
 })
 
-addCase('mutation outside vtr-reach authority is a hard blocker', () => {
-  const { session, blockers } = makeSession(() => ({ ...vtrContext, authority: 'legacy' }))
+addCase('a mutation attributed to a transition the kernel never admitted is a hard blocker', () => {
+  const { session, blockers } = makeSession(() => ({ ...vtrContext, authority: 'unknown-label' }))
   session.observeMutation({ surface: 'pathfinder.setGoal', guarded: true, leaseOutcome: 'granted', argsSignature: ['vec3(1,64,2)'], instanceHint: null })
   const found = blockers().filter((b) => b.kind === 'mutation-without-transition-authority')
   return { pass: found.length === 1, detail: `blockers=${blockers().map((b) => b.kind).join(',')}` }
@@ -381,7 +510,7 @@ addCase('an observer that throws cannot break the session', () => {
 })
 
 let failures = 0
-process.stdout.write('kernel authority session (V4.1.2) - surface map + lifecycle replay + hard blockers\n')
+process.stdout.write('kernel authority session (V4.1.2) - surface map + gated lifecycle + hard blockers\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()

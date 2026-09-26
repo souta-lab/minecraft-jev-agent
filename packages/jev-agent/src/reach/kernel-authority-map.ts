@@ -80,6 +80,8 @@ export const MUTATION_SURFACE_MAP: Readonly<Record<string, MappedMutationSurface
   'bot.dig': { surface: 'bot.dig', resources: [worldBlockAtArg, orientation], effect: 'DIG', scope: 'dig', bypassesGuardedProxy: false },
   'bot.stopDigging': { surface: 'bot.stopDigging', resources: [worldBlockAtArg], effect: 'DIG', scope: 'abort-dig', bypassesGuardedProxy: false },
   'bot.placeBlock': { surface: 'bot.placeBlock', resources: [worldBlockAtArg, interaction, orientation, inventory], effect: 'PLACE', scope: 'place-block', bypassesGuardedProxy: false },
+  // Mineflayer's private look-free placement primitive (pillar steps).
+  'bot._placeBlockWithOptions': { surface: 'bot._placeBlockWithOptions', resources: [worldBlockAtArg, interaction, orientation, inventory], effect: 'PLACE', scope: 'place-block', bypassesGuardedProxy: false },
   'bot.updateSign': { surface: 'bot.updateSign', resources: [worldBlockAtArg, interaction], effect: 'PLACE', scope: 'update-sign', bypassesGuardedProxy: false },
   'bot.useOn': { surface: 'bot.useOn', resources: [interaction, worldBlockAtArg], effect: 'INTERACT', scope: 'use-on', bypassesGuardedProxy: false },
 
@@ -124,11 +126,22 @@ export const MUTATION_SURFACE_MAP: Readonly<Record<string, MappedMutationSurface
   'entity.yaw': { surface: 'entity.yaw', resources: [orientation], effect: 'LOOK', scope: 'pose-write', bypassesGuardedProxy: false },
   'entity.pitch': { surface: 'entity.pitch', resources: [orientation], effect: 'LOOK', scope: 'pose-write', bypassesGuardedProxy: false },
   'entity.onGround': { surface: 'entity.onGround', resources: [locomotion], effect: 'MOVE', scope: 'pose-write', bypassesGuardedProxy: false },
+  // Direct physics-state writes (pillar take-off impulse, portal hop).
+  'entity.velocity.write': { surface: 'entity.velocity.write', resources: [locomotion], effect: 'MOVE', scope: 'velocity-write', bypassesGuardedProxy: false },
+  'bot.physicsEnabled': { surface: 'bot.physicsEnabled', resources: [locomotion], effect: 'MOVE', scope: 'physics-toggle', bypassesGuardedProxy: false },
 
-  // --- bypass-level evidence -------------------------------------------------
-  // `window.withdraw`/`window.deposit` mutate on the raw client captured inside
-  // the Mineflayer window object; they never traverse the guarded bot proxy.
-  // The ActuationPort emits these records at the semantic dispatch boundary.
+  // --- window transfers (guarded window proxy returned by bot.open*) --------
+  'window.putInput': { surface: 'window.putInput', resources: [windowResource, inventory, stationAtArg], effect: 'STATION_MUTATION', scope: 'furnace-put-input', bypassesGuardedProxy: false },
+  'window.putFuel': { surface: 'window.putFuel', resources: [windowResource, inventory, stationAtArg], effect: 'STATION_MUTATION', scope: 'furnace-put-fuel', bypassesGuardedProxy: false },
+  'window.takeInput': { surface: 'window.takeInput', resources: [windowResource, inventory, stationAtArg], effect: 'STATION_MUTATION', scope: 'furnace-take-input', bypassesGuardedProxy: false },
+  'window.takeFuel': { surface: 'window.takeFuel', resources: [windowResource, inventory, stationAtArg], effect: 'STATION_MUTATION', scope: 'furnace-take-fuel', bypassesGuardedProxy: false },
+  'window.takeOutput': { surface: 'window.takeOutput', resources: [windowResource, inventory, stationAtArg], effect: 'STATION_MUTATION', scope: 'furnace-take-output', bypassesGuardedProxy: false },
+  'window.close': { surface: 'window.close', resources: [windowResource], effect: 'INTERACT', scope: 'close-window', bypassesGuardedProxy: false },
+
+  // --- container transfers ----------------------------------------------------
+  // Observed on the guarded window proxy (executor container path) and at the
+  // ActuationPort dispatch boundary (whose raw window write the bot proxy
+  // cannot see - hence `bypassesGuardedProxy`).
   'window.withdraw': { surface: 'window.withdraw', resources: [windowResource, inventory, containerAtArg], effect: 'INVENTORY_MUTATION', scope: 'window-withdraw', bypassesGuardedProxy: true },
   'window.deposit': { surface: 'window.deposit', resources: [windowResource, inventory, containerAtArg], effect: 'INVENTORY_MUTATION', scope: 'window-deposit', bypassesGuardedProxy: true },
 }
@@ -193,6 +206,17 @@ export interface ResolvedMutationAuthority {
  * treat null as a hard migration blocker, never as "harmless".
  */
 export function mapMutationSurface(surface: string, instanceHint: string | null): ResolvedMutationAuthority | null {
+  if (surface.startsWith('entity.velocity.')) {
+    const base = MUTATION_SURFACE_MAP['entity.velocity.write']
+    if (base === undefined) return null
+    return {
+      surface: 'entity.velocity.write',
+      resources: base.resources.map((r) => toResourceId(r, null)),
+      effect: base.effect,
+      scope: base.scope,
+      bypassesGuardedProxy: base.bypassesGuardedProxy,
+    }
+  }
   if (surface.startsWith('entity.position.')) {
     const base = MUTATION_SURFACE_MAP['entity.position.write']
     if (base === undefined) return null
@@ -396,77 +420,26 @@ export interface MutationAuthorityContext {
   readonly hostScope?: { readonly category: string; readonly label: string }
 }
 
-export type KernelSessionInput =
-  | {
-      readonly type: 'world-observation'
-      readonly observedAtMs: number
-      readonly predicates: Readonly<Record<string, { readonly truth: 'true' | 'false' | 'unknown'; readonly evidenceId: string | null }>>
-    }
-  | {
-      readonly type: 'transition-committed'
-      readonly contract: ReachTransitionContract
-      readonly witness: ReachWitness | null
-      readonly lifecycle: 'active' | 'terminal'
-    }
-  | {
-      readonly type: 'transition-terminal'
-      readonly transitionId: string
-      readonly contractHash: string
-      readonly outcome: { readonly kind: string } & Readonly<Record<string, unknown>>
-    }
-  | {
-      readonly type: 'mechanical-step-issued'
-      readonly transitionId: string
-      readonly intentId: string
-      readonly stepId: string
-      readonly effectKind: string
-    }
-  | {
-      readonly type: 'mechanical-step-settled'
-      readonly transitionId: string
-      readonly intentId: string
-      readonly stepId: string
-      readonly status: string
-      readonly verified: boolean
-      readonly progressed: boolean
-    }
-  | {
-      readonly type: 'mutation'
-      readonly surface: string
-      readonly guarded: boolean
-      readonly leaseOutcome: 'granted' | 'denied'
-      readonly argsSignature: readonly string[]
-      readonly instanceHint: string | null
-      readonly context: MutationAuthorityContext | null
-    }
-
-/** Narrow sink the semantic runtime may hold; the host owns the implementation. */
-export type KernelSessionSink = (input: KernelSessionInput) => void
-
 // ---------------------------------------------------------------------------
-// V4.1.2 production-authority gate (Phase-2 cutover)
+// V4.1.2 kernel authority gate
 // ---------------------------------------------------------------------------
 
 export type KernelGateVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string }
 
-export type KernelAuthorityMode = 'replay' | 'authority'
-
 /**
  * One verified world observation fed into the kernel fact store. The authority
- * gate consumes these unconditionally (they are what VERIFY reads), so this is
- * the observation half of the same session the verdict gates run on — not a
- * fire-and-forget replay input.
+ * gate consumes these unconditionally: they are the only facts VERIFY reads.
  */
-export type KernelWorldObservation = Omit<
-  Extract<KernelSessionInput, { type: 'world-observation' }>,
-  'type'
->
+export interface KernelWorldObservation {
+  readonly observedAtMs: number
+  readonly predicates: Readonly<Record<string, { readonly truth: 'true' | 'false' | 'unknown'; readonly evidenceId: string | null }>>
+}
 
 /**
- * Host-owned kernel gate for V4.1.2 Reach production authority.
+ * Host-owned kernel gate: the only runtime authority for transition lifecycle,
+ * resources, effects and SUCCESS.
  *
- * Unlike the fire-and-forget `KernelSessionSink`, every call here returns the
- * real kernel verdict and the caller MUST honor a denial by not performing the
+ * Every call returns the real kernel verdict and the caller MUST honor a denial by not performing the
  * production act it gates. Ordering contract, enforced by call sequence:
  *
  *   admitTransition (REGISTER + mission authorize + ADMIT)
@@ -488,8 +461,6 @@ export type KernelWorldObservation = Omit<
  * same thing through a legacy path.
  */
 export interface KernelTransitionAuthority {
-  /** Present only when the session runs in production-authority mode. */
-  readonly mode: 'authority'
   /** Feed a verified world observation into the kernel fact store (no verdict). */
   feedObservation(input: KernelWorldObservation): void
   /** Contract legality + mission authorization + admission gate before production commit. */
@@ -557,11 +528,14 @@ const BODY_SURFACES: readonly string[] = [
   'entity.yaw',
   'entity.pitch',
   'entity.onGround',
+  'entity.velocity.write',
+  'bot.physicsEnabled',
 ]
 const WORLD_SURFACES: readonly string[] = [
   'bot.dig',
   'bot.stopDigging',
   'bot.placeBlock',
+  'bot._placeBlockWithOptions',
   'bot.useOn',
   'bot.updateSign',
   'bot.activateBlock',
@@ -588,6 +562,12 @@ const WINDOW_SURFACES: readonly string[] = [
   'bot.openVillager',
   'bot.openAnvil',
   'bot.closeWindow',
+  'window.putInput',
+  'window.putFuel',
+  'window.takeInput',
+  'window.takeFuel',
+  'window.takeOutput',
+  'window.close',
 ]
 const ITEM_SURFACES: readonly string[] = ['bot.activateItem', 'bot.deactivateItem', 'bot.consume']
 
@@ -625,6 +605,14 @@ export interface ControllerTransitionSpecInput {
 }
 
 /**
+ * Effects the body can undo without changing world/inventory truth. Every other
+ * kind (dig, place, craft, consume, attack, container/station/inventory
+ * mutation, interact, command) is declared irreversible so the kernel's
+ * crash-ambiguity rules treat an unreconciled dispatch as possibly happened.
+ */
+const REVERSIBLE_EFFECT_KINDS: ReadonlySet<EffectKind> = new Set<EffectKind>(['MOVE', 'LOOK', 'EQUIP'])
+
+/**
  * Compile a controller transition (a production-dispatched mechanical skill
  * commitment) into a V4.1.2 TransitionContractSpec. The contract's resource
  * claims are the union of every mutation surface the committed skill family
@@ -654,7 +642,7 @@ export function controllerTransitionToKernelSpec(
       effects.push({
         kind: mapped.effect,
         scope: `controller:${mapped.scope}`,
-        irreversible: false,
+        irreversible: !REVERSIBLE_EFFECT_KINDS.has(mapped.effect),
         maxCount: input.maxMechanicalSteps,
         requiredResources: mapped.resources,
       })

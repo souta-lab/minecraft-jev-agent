@@ -1,9 +1,9 @@
-// test-kernel-authority.mts - V4.1.2 Phase-2 production-authority gate.
+// test-kernel-authority.mts - V4.1.2 production-authority gate.
 //
 // Pure: no bot connection, no socket, no network, journalPath=null. Proves the
-// authority-mode kernel session gates Reach production acts through the real
-// V4.1.2 kernel command path, causally BEFORE the gated act:
-//   1. the gate exists only in authority mode and returns real verdicts;
+// kernel session gates Reach production acts through the real V4.1.2 kernel
+// command path, causally BEFORE the gated act:
+//   1. the session exposes exactly one authority surface and no mode selector;
 //   2. the happy path admit -> activate -> issue -> dispatch -> settle ->
 //      VERIFY_SUCCESS -> terminalize runs with zero denials and zero blockers;
 //   3. every ordering violation (issue before activation, issue after
@@ -68,34 +68,37 @@ const VERIFIED_PREDICATES = {
   'reach.resource-source': { truth: 'true' as const, evidenceId: 'verify:0:in-reach' },
 }
 
-const vtrContext = {
+// The executor projection carries the caller-facing contract hash the kernel
+// bound at admission; the happy path records it once the contract exists.
+let boundHash: string | null = null
+const vtrContext = () => ({
   actionId: 'a1',
   epoch: 1,
   authority: 'vtr-reach',
   transitionId: 't-1',
-  transitionContractHash: null,
-}
+  transitionContractHash: boundHash,
+})
 
 function makeAuthoritySession(): { session: KernelAuthoritySession; gate: KernelTransitionAuthority } {
+  boundHash = null
   const session = createKernelAuthoritySession({
     world: WORLD,
     generationId: 'gen-1',
     journalPath: null,
     now: () => 1_000,
-    authorityMode: 'authority',
   })
-  session.bindActuationContext(() => vtrContext)
-  if (session.authority === null) throw new Error('authority mode must expose the gate')
+  session.bindActuationContext(vtrContext)
   return { session, gate: session.authority }
 }
 
 function feedCommitPredicates(session: KernelAuthoritySession): void {
-  session.observe({ type: 'world-observation', observedAtMs: 1000, predicates: COMMIT_PREDICATES })
+  session.authority.feedObservation({ observedAtMs: 1000, predicates: COMMIT_PREDICATES })
 }
 
 function admitAndActivate(gate: KernelTransitionAuthority, session: KernelAuthoritySession, transitionId: string): ReachTransitionContract {
   feedCommitPredicates(session)
   const contract = makeContract(transitionId)
+  boundHash = contract.contractHash
   const admitted = gate.admitTransition(contract)
   if (!admitted.ok) throw new Error(`admit unexpectedly denied: ${admitted.reason}`)
   const activated = gate.activateTransition(transitionId, makeWitness(contract))
@@ -107,12 +110,19 @@ function admitAndActivate(gate: KernelTransitionAuthority, session: KernelAuthor
 // 1. Mode exposure and summary record
 // --------------------------------------------------------------------------
 
-addCase('authority mode exposes the gate; shadow mode does not', () => {
-  const shadow = createKernelAuthoritySession({ world: WORLD, generationId: 'gen-1', journalPath: null })
-  const { session } = makeAuthoritySession()
-  const pass = shadow.authority === null && session.authority !== null &&
-    shadow.summary().authorityMode === 'replay' && session.summary().authorityMode === 'authority'
-  return { pass, detail: `shadowGate=${shadow.authority !== null} authorityGate=${session.authority !== null} modes=${shadow.summary().authorityMode}/${session.summary().authorityMode}` }
+addCase('the session exposes exactly one authority surface and no mode selector', () => {
+  const session = createKernelAuthoritySession({ world: WORLD, generationId: 'gen-1', journalPath: null })
+  // Negative type test: an observer-only/replay selector must not exist. If
+  // `authorityMode` is ever re-added to the config, this expectation fails tsc.
+  // @ts-expect-error there is no kernel authority mode selector
+  const withSelector = createKernelAuthoritySession({ world: WORLD, generationId: 'gen-1', journalPath: null, authorityMode: 'replay' })
+  const pass =
+    typeof session.authority.admitContract === 'function' &&
+    typeof withSelector.authority.admitContract === 'function' &&
+    !('observe' in session) &&
+    session.summary().authorityMode === 'authority' &&
+    withSelector.summary().authorityMode === 'authority'
+  return { pass, detail: `gate=${typeof session.authority} replayInput=${'observe' in session} mode=${session.summary().authorityMode}` }
 })
 
 // --------------------------------------------------------------------------
@@ -129,7 +139,7 @@ addCase('authority happy path: admit->activate->issue->dispatch->settle->VERIFY_
   session.observeMutation({ surface: 'pathfinder.setGoal', guarded: true, leaseOutcome: 'granted', argsSignature: ['vec3(1,64,2)'], instanceHint: null })
   session.observeMutation({ surface: 'pathfinder.goto', guarded: true, leaseOutcome: 'granted', argsSignature: ['object'], instanceHint: null })
   gate.settleStepEffect({ transitionId: 't-1', intentId: 'i-1', stepId: 's-1', status: 'active', verified: false, progressed: true })
-  session.observe({ type: 'world-observation', observedAtMs: 1100, predicates: VERIFIED_PREDICATES })
+  session.authority.feedObservation({ observedAtMs: 1100, predicates: VERIFIED_PREDICATES })
   const terminal = gate.terminalize({ transitionId: 't-1', contractHash: contract.contractHash, outcome: { kind: 'SUCCESS' } })
   const state = session.state().transitions['t-1']
   const summary = session.summary()
@@ -174,7 +184,7 @@ addCase('issueStepEffect before activation is denied (transition not ACTIVE)', (
 addCase('issueStepEffect after terminalize is denied (terminal transition is not effect-eligible)', () => {
   const { session, gate } = makeAuthoritySession()
   const contract = admitAndActivate(gate, session, 't-dead')
-  session.observe({ type: 'world-observation', observedAtMs: 1100, predicates: VERIFIED_PREDICATES })
+  session.authority.feedObservation({ observedAtMs: 1100, predicates: VERIFIED_PREDICATES })
   const terminal = gate.terminalize({ transitionId: 't-dead', contractHash: contract.contractHash, outcome: { kind: 'PROVEN_INFEASIBLE', reason: 'no-path' } })
   const issued = gate.issueStepEffect({ transitionId: 't-dead', intentId: 'i-1', stepId: 's-1', effectKind: 'locomotion' })
   const pass = terminal.ok && !issued.ok && session.summary().gateDenials.some((d) => d.gate === 'issueStepEffect')
@@ -241,7 +251,7 @@ addCase('terminalize SUCCESS without observed ensures facts is denied and never 
   }
 })
 
-addCase('non-SUCCESS terminal kind-preserving closure is not a blocker in authority mode', () => {
+addCase('non-SUCCESS terminal kind-preserving closure is evidence, not a blocker', () => {
   const { session, gate } = makeAuthoritySession()
   const contract = admitAndActivate(gate, session, 't-infeasible')
   const terminal = gate.terminalize({
@@ -253,7 +263,8 @@ addCase('non-SUCCESS terminal kind-preserving closure is not a blocker in author
   const summary = session.summary()
   const pass = terminal.ok &&
     state?.lifecycle === 'TERMINAL' &&
-    !summary.blockers.some((b) => b.kind === 'replay-projection-limitation')
+    summary.projectionLimitationKinds.includes('PROVEN_INFEASIBLE') &&
+    summary.blockers.length === 0
   return { pass, detail: `terminal=${terminal.ok} outcome=${state?.terminalOutcome?.kind ?? 'none'} limitations=${summary.projectionLimitationKinds.join(',') || 'none'}` }
 })
 
