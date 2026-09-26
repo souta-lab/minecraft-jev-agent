@@ -112,7 +112,7 @@ setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 
 Do not use broad `pkill -f` patterns. Intentional host/server shutdown/restart follows the root HARD STOP rules.
 
-Hot reload may update the reloadable generation only when the contract version is compatible. A contract mismatch requires the host-level procedure defined by `RESIDENT-MODE.md`.
+Hot reload may update the reloadable generation only when the contract version is compatible. A contract mismatch requires the host-level procedure defined by `docs/operations/RESIDENT-MODE.md`.
 
 Never print or commit API keys/secrets. Secret material lives outside the repo.
 

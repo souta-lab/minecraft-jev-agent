@@ -625,7 +625,7 @@ export function planPrepare({
   }
   const operatorCommands = buildOperatorCommands({ container: resolve(container), runDir, levelName: levelName2, levelSeed, sourceSha: frozenSha ?? resolvedDoc.values.sourceSha, descriptorSha256: resolvedDescriptorSha256, root, recipePath: join(runDir, 'ACCEPTANCE-RECIPE.md'), milestone, serverImplementation: resolvedDoc.values.serverImplementation })
   files.push({ path: join(runDir, 'operator-commands.txt'), content: `${operatorCommands.join('\n')}\n`, note: 'the exact ordered commands for the clean attempt' })
-  const recipeSource = milestone === 'M3' ? join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md') : null
+  const recipeSource = milestone === 'M3' ? join(REPO_ROOT, 'docs', 'operations', 'CLEAN-RUN-ACCEPTANCE.md') : null
   if (recipeSource !== null && existsSync(recipeSource)) files.push({ path: join(runDir, 'ACCEPTANCE-RECIPE.md'), content: readFileSync(recipeSource, 'utf8'), note: 'copy of the acceptance recipe, next to the run evidence' })
 
   const fullWritePathIssues = plannedPathIssues([resolve(container), ...plannedPaths, ...files.map((file) => file.path), manifestPath, attemptsPath])

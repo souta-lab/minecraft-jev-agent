@@ -164,7 +164,7 @@ export interface MercuryWaitLimitTriggerInput {
  * `{ item, count }` (kind inferred locally, backward compatible) OR an explicit
  * typed goal `{ kind, ... }`. Free-form coordinates are NOT part of the schema:
  * `goto`/`goto_resource` reference a known resource, never an x/z position
- * (PLANNERS.md forbids model-generated coordinates). The kind is code-owned and
+ * (docs/decision/PLANNERS.md forbids model-generated coordinates). The kind is code-owned and
  * capability-grounded in `validateMercuryPlan`, so the model cannot smuggle in
  * motor semantics or an unsupported verb x target pair.
  */

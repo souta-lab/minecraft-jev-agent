@@ -3,7 +3,7 @@
 > This file is a retained run log for the former furnace/charcoal/iron ladder.
 > It is not the current M2 definition or acceptance gate. Current M2 is the
 > diamond-to-Nether-gate loop defined in `MILESTONE-CONTRACT.json` and
-> `MILESTONES.md`.
+> `docs/status/MILESTONES.md`.
 Started: 2026-09-17 ~10:14 UTC. Timebox: 45 min. Bots: AI_M2a / AI_M2b (never AI_Bot/s0u7a).
 
 ## S0 — recon (started)

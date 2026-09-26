@@ -15,8 +15,8 @@ The original `/home/s0u7a/mc-ai` working tree was not modified. It was dirty at 
 ## Repository surfaces re-read
 
 - `AGENTS.md`
-- historical `ARCHITECTURE.md`, `RESIDENT-MODE.md`, `PLANNERS.md`
-- untracked V4 design document in the original working tree: `NEW-ARCHITECTURE-V4.md`
+- historical `docs/history/architecture/ARCHITECTURE.md`, `docs/operations/RESIDENT-MODE.md`, `docs/decision/PLANNERS.md`
+- V4 design document (untracked in the original working tree): `docs/history/architecture/NEW-ARCHITECTURE-V4.md`
 - legacy controller/scheduler/executor/GoalQueue/Option implementation
 - Jev harness contract, identity fencing, calibration/result algebra, batch harness
 - HOST world epoch and generation/lease swap logic
@@ -31,7 +31,7 @@ Repository search found the actual production/harness pattern rather than relyin
 - `jev-harness/harness.ts`: `evaluateBatch`, closed candidate sets, projection hashing, typed failure algebra, stale re-verification, artifact provenance.
 - `jev-harness/identity.ts`: decision/world/generation stale fencing.
 - historical/runtime docs and controller code: Jev π for grounded local choice, β for historical Option termination, and batched decision questions.
-- `ARCHITECTURE.md`: AI SDK call shape `experimental_evaluate({ model: 'typesafe-ai/jev', state, questions })`.
+- `docs/history/architecture/ARCHITECTURE.md`: AI SDK call shape `experimental_evaluate({ model: 'typesafe-ai/jev', state, questions })`.
 
 External example search on 2026-09-25 found the same call shape in multiple public implementations: shared state plus a map of typed questions, including several questions in one call, with structured probability/choice/score results. Examples inspected included `jev-cli`, `jev-playground`, and `jev-evals` public repositories.
 

@@ -7,9 +7,9 @@ The canonical production architecture is **V4.1.2 Concurrent Verified Transition
 Normative references, in precedence order:
 
 1. current source and live server truth
-2. `architecture/v4.1/kernel.ts` implementation + `NEW-ARCHITECTURE-V4.1.2.md`, `architecture/v4.1/V4.1.2-HARDENING.md`, `architecture/v4.1/INVARIANTS.md`, `architecture/v4.1/KERNEL-EVENTS.md`
+2. `architecture/v4.1/kernel.ts` implementation + `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`, `architecture/v4.1/V4.1.2-HARDENING.md`, `architecture/v4.1/INVARIANTS.md`, `architecture/v4.1/KERNEL-EVENTS.md`
 3. `architecture/v4.1/RESOURCE-AUTHORITY-INVENTORY.md` + the static mutation scan — the authority-closure source of truth for every mutating surface
-4. `NEW-ARCHITECTURE-V4.md`, `NEW-ARCHITECTURE-V4.1.md`, `NEW-ARCHITECTURE-V4.1.1.md` — semantic lineage docs
+4. `docs/history/architecture/NEW-ARCHITECTURE-V4.md`, `docs/history/architecture/NEW-ARCHITECTURE-V4.1.md`, `docs/history/architecture/NEW-ARCHITECTURE-V4.1.1.md` — semantic lineage docs
 5. current deterministic tests / probes / exact-run evidence
 6. historical docs/issues (#11, #308, Option/Jev/System2 history) — evidence only, never constitutional authority
 

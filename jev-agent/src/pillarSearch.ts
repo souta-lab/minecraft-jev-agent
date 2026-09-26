@@ -1,6 +1,6 @@
 // pillarSearch.ts - the localized search/cost/retry policy for PILLAR_UP.
 //
-// Audit M2-HEURISTIC-AUDIT.md: the pillar step cap, relocation budget, headroom
+// Audit docs/history/milestones/M2-HEURISTIC-AUDIT.md: the pillar step cap, relocation budget, headroom
 // attempt bound, held-block priority and fallback-column ranking were implicit
 // constants spread across verticalPlan.ts and executor.ts with no structured
 // decision line. They are all SEARCH/COST/RETRY heuristics - allowed, but owned

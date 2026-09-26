@@ -45,7 +45,7 @@
 //   proving the earlier transient facts, matching the live gate's FAIL>UNKNOWN
 //   rule after all same-run evidence is joined.
 //
-// MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
+// docs/status/MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
 // HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
 // belongs to the SEPARATE M3 acceptance defined below (`M3_CRITERIA` /
 // `runM3Acceptance`, CLI `--m3`) and is never consulted by the M2 pass/fail

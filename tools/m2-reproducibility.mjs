@@ -647,7 +647,7 @@ export async function checkPreconditions(config, { mode }) {
   if (config.serverRoot !== LIVE_CONTAINER) {
     blockers.push(
       `server_root_is_not_the_live_container: agent-runner.mts serverSeed() reads ${LIVE_CONTAINER}/server.properties verbatim, ` +
-        `so a world served from ${config.serverRoot} would attest the WRONG seed (CLEAN-RUN-EXECUTION.md §4). Live trials must use ${LIVE_CONTAINER}.`,
+        `so a world served from ${config.serverRoot} would attest the WRONG seed (docs/operations/CLEAN-RUN-EXECUTION.md §4). Live trials must use ${LIVE_CONTAINER}.`,
     )
   }
   if (observations.freeBytes !== null && observations.freeBytes < config.minFreeBytes) {
@@ -2189,7 +2189,7 @@ async function runOneTrial(config, trialIndex, log) {
     row.failureKind = 'durable_state_not_pristine'
     row.reasons = [
       `the driver tree carries durable state before the trial started: ${durableStateAtStart.map((entry) => entry.rel).join(', ')}`,
-      'a live trial must start from a tree with no memory of another world (CLEAN-RUN-EXECUTION.md §1)',
+      'a live trial must start from a tree with no memory of another world (docs/operations/CLEAN-RUN-EXECUTION.md §1)',
     ]
     row.terminal = true
     return finishRow(config, row, { log })

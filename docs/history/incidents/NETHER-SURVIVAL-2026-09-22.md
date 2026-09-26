@@ -1,5 +1,7 @@
 # Nether survival: keep a usable weapon, keep armour on, eat when hurt, and be honest about a damage race
 
+> **Historical lane report (2026-09-22).** Dated live-log investigation retained as evidence, not as current instruction.
+
 Lane: `task/nether-survival`. Owning layer: the **candidate layer** (`jev-agent/src/candidates.ts`
 enumeration + the contact threat envelope), the **gear-truth module** (`jev-agent/src/gearPlan.ts`),
 the **executor**'s equip action (`jev-agent/src/executor.ts`), the **guard** that admits an EQUIP
@@ -296,7 +298,7 @@ when the hand already holds the best carried weapon.
 * **Corpus commands of the form `bun test ./test-x.mts` run 0 tests and exit 0** (Bun requires
   `.test`/`.spec` in the filename), so any acceptance evidence quoted from that form is a false
   green. The correct form is `bun ./test-x.mts` (or `bun test ./bun-tests`). This lane's battery uses
-  the correct form; several `REGRESSION-CORPUS.md` rows do not, which is a repo-wide evidence-integrity
+  the correct form; several `docs/development/REGRESSION-CORPUS.md` rows do not, which is a repo-wide evidence-integrity
   item outside this lane's file ownership.
 * **No live acceptance run** was performed from this lane (resident control is H4): the evidence is
   the replayed measurement plus deterministic fixtures.

@@ -2,7 +2,7 @@
 
 Resident agent for the local **Leaf / Minecraft Java 1.21.11** server
 (`127.0.0.1:25565`, offline, peaceful). One long-lived Mineflayer connection; the
-intelligence is hot-swappable without reconnecting. Spec: `../RESIDENT-MODE.md`.
+intelligence is hot-swappable without reconnecting. Spec: `../docs/operations/RESIDENT-MODE.md`.
 
 ## Runtime decision (recorded per §0-A)
 
@@ -91,7 +91,7 @@ QUARANTINED (`STATE_QUARANTINED`, moved aside as `state-quarantine-*.json`) befo
 the default snapshot is used in memory; if it cannot be moved aside the HOST refuses
 to boot instead of replacing it (`STATE_QUARANTINE_FAILED`). Known legacy versions
 (1/2) log `STATE_MIGRATED` with no quarantine. The durable-write, quarantine, lock
-and fatal invariants are canonical in `RESIDENT-MODE.md` §4-F. Cache writes stay best-effort
+and fatal invariants are canonical in `../docs/operations/RESIDENT-MODE.md` §4-F. Cache writes stay best-effort
 (try/catch) so a read-only or corrupt cache can never fail a generation.
 
 ## Control channel (§6)

@@ -1,5 +1,7 @@
 # BUDDY 欠陥票（ユーザー実プレイ・フィードバック）
 
+> **Historical incident report (2026-09-18).** Dated user-play defect tickets against the then-running resident; retained for provenance.
+
 > 対象: 常駐エージェント `AI_Buddy`（`/home/s0u7a/mc-ai/buddy-driver/agent-runner.mts`, pid 150528 で稼働中）
 > 記録時刻: 2026-09-18 00:0x JST / 証拠はすべて一次ログ（推測なし）
 > 注入先: buddy-driver のセッション（実行中はゲートで弾かれるため、空き次第）
@@ -58,7 +60,7 @@ RELOAD ok=false trigger=source-changed ms=313 message=smoke test failed: empty p
 - **作業台**: 既存（約20個）をスキャン→再利用。新規設置は皆無時のみ。撤去しない。
 - **バンドラ**: Bun.build 既定。residentの世代bundleはBun 1.4.2で生成する。
 - **クラフト**: `bot.openContainer(tableBlock)` の window/`craftingTable` を `bot.craft(recipe,count,table)` に渡す。材料・レシピを事前検証し、失敗時は wedge せずクリーンに失敗。
-- 常駐アーキテクチャ・状態持ち越し・制御チャネル・凍結/再開の詳細は `/home/s0u7a/mc-ai/RESIDENT-MODE.md`。
+- 常駐アーキテクチャ・状態持ち越し・制御チャネル・凍結/再開の詳細は `/home/s0u7a/mc-ai/docs/operations/RESIDENT-MODE.md`。
 
 ---
 

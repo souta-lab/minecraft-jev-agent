@@ -1,7 +1,7 @@
 // test-package-boundaries.mts — Packages-by-Feature dependency guard.
 //
 // Static scan of every `from '...'` edge under `src/`. Encodes the canonical
-// direction matrix from TYPESCRIPT-PACKAGE-ARCHITECTURE.md so boundary
+// direction matrix from docs/architecture/TYPESCRIPT-PACKAGE-ARCHITECTURE.md so boundary
 // violations fail mechanically instead of being rediscovered by review.
 //
 // Package owners (shallow, feature-oriented):

@@ -1,5 +1,7 @@
 # Architecture Reset
 
+> **Superseded by `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`.** Retained as semantic lineage (root `AGENTS.md` §0 precedence item 4), not as current instruction.
+
 ## Grounded Option OS を終わらせ、Verified Transition Runtime へ
 
 **Repository:** `souta-lab/minecraft-jev-agent`
@@ -522,7 +524,7 @@ Minecraftの「次に必要なもの」はqueueから読むべきではない。
 
 # 12. Nether survivalは「candidate selection」の問題ではない
 
-`NETHER-SURVIVAL-2026-09-22.md` はさらに重要である。
+`docs/history/incidents/NETHER-SURVIVAL-2026-09-22.md` はさらに重要である。
 
 33時間超のauditでは、
 
@@ -1380,7 +1382,7 @@ Benchmarkは、
 
 # 35. Prior workから見てもこの方向が整合する
 
-Repository自身の `PRIOR-WORK.md` が調べている先行研究を見ると、
+Repository自身の `docs/history/investigations/PRIOR-WORK.md` が調べている先行研究を見ると、
 
 重要なのは特定のLLM architectureではない。
 
@@ -1699,11 +1701,11 @@ mechanicsが悪かったのではない。
 
 ### Architecture / authority
 
-* `AI-AUTHORITY.md`
-* `ARCHITECTURE.md`
-* `RESIDENT-MODE.md`
-* `PLANNERS.md`
-* `PRIOR-WORK.md`
+* `docs/history/architecture/AI-AUTHORITY.md`
+* `docs/history/architecture/ARCHITECTURE.md`
+* `docs/operations/RESIDENT-MODE.md`
+* `docs/decision/PLANNERS.md`
+* `docs/history/investigations/PRIOR-WORK.md`
 * Issue #11
 * Issue #308
 * Issue #359
@@ -1737,9 +1739,9 @@ mechanicsが悪かったのではない。
 * Issue #421
 * Issue #442
 * Issue #471
-* `NETHER-SURVIVAL-2026-09-22.md`
-* `M2-HEURISTIC-AUDIT.md`
-* `M2-PROGRESS.md`
+* `docs/history/incidents/NETHER-SURVIVAL-2026-09-22.md`
+* `docs/history/milestones/M2-HEURISTIC-AUDIT.md`
+* `docs/history/milestones/M2-PROGRESS.md`
 * `runs/m3-live/acceptance-bundle-run-mufel6fc-v84z/metrics.json`
 
 ### Capability/evaluation direction

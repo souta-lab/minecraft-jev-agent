@@ -442,7 +442,7 @@ export function buildChecks(record, mercuryModel = null) {
   if (!record) {
     push(
       'acceptance_record_present',
-      'DEVELOPMENT-METHOD.md §4: every acceptance claim must be backed by a run-scoped AcceptanceRecord.',
+      'docs/development/DEVELOPMENT-METHOD.md §4: every acceptance claim must be backed by a run-scoped AcceptanceRecord.',
       'buddy-driver/agent-runner.mts:1166-1211 writeAcceptance().',
       'no acceptance-<runId>.json under buddy-driver/data/resident/.',
       'UNKNOWN',
@@ -479,7 +479,7 @@ export function buildChecks(record, mercuryModel = null) {
   const grew = Object.keys(baseline).filter((e) => (current[e] ?? 0) > (baseline[e] ?? 0))
   push(
     'listener_stability',
-    'RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across reloads; listenerLeak must be false.',
+    'docs/operations/RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across reloads; listenerLeak must be false.',
     'buddy-driver/agent-runner.mts:518-527 listenerCounts()/listenerLeak(); baseline set at :667-668; recorded at :1201-1203.',
     `listenerLeak=${record.listenerLeak} grew=[${grew.join(',')}] baseline=${JSON.stringify(baseline)} current=${JSON.stringify(current)}`,
     record.listenerLeak === false && grew.length === 0 ? 'PASS' : 'FAIL',
@@ -487,7 +487,7 @@ export function buildChecks(record, mercuryModel = null) {
   )
   push(
     'reconnect_free',
-    'RESIDENT-MODE.md §13-0 P1: the run must complete with reconnect 0.',
+    'docs/operations/RESIDENT-MODE.md §13-0 P1: the run must complete with reconnect 0.',
     'buddy-driver/resident-types.ts:308 stats.reconnects; recorded at buddy-driver/agent-runner.mts:1195.',
     `reconnects=${record.reconnects}`,
     record.reconnects === 0 ? 'PASS' : 'FAIL',
@@ -495,7 +495,7 @@ export function buildChecks(record, mercuryModel = null) {
   )
   push(
     'reload_hash_churn',
-    'RESIDENT-MODE.md §13-0 P1: at least 5 real reloads with a changed generation hash (skipped=unchanged does not count).',
+    'docs/operations/RESIDENT-MODE.md §13-0 P1: at least 5 real reloads with a changed generation hash (skipped=unchanged does not count).',
     'buddy-driver/agent-runner.mts:1249,1283 increment stats.reloadsChangedHash; recorded at :1197.',
     `reloadsChangedHash=${record.reloadsChangedHash} reloadsSkippedUnchanged=${record.reloadsSkippedUnchanged} reloadsFailed=${record.reloadsFailed}`,
     record.reloadsChangedHash >= 5 ? 'PASS' : 'FAIL',
@@ -598,8 +598,8 @@ export async function captureRun(runId, { log = BUDDY_LOG, force = false, withMe
     generatedAt: new Date().toISOString(),
     evidenceSource: 'run-scoped',
     policyRefs: [
-      'DEVELOPMENT-METHOD.md §3 (POLICY/IMPLEMENTED/OBSERVED/COMPLIANCE)',
-      'RESIDENT-MODE.md §13-0 P1',
+      'docs/development/DEVELOPMENT-METHOD.md §3 (POLICY/IMPLEMENTED/OBSERVED/COMPLIANCE)',
+      'docs/operations/RESIDENT-MODE.md §13-0 P1',
       'root AGENTS.md §2',
     ],
     window,

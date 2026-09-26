@@ -1,7 +1,7 @@
 # PLANNERS.md — planner / Option / Jev の責務分離
 
 > このプロジェクトには名前が似た判断層が複数あり、混同すると設計が崩れる。ここで境界を確定する。
-> 関連: `RESIDENT-MODE.md` §14（Grounded Options）、`AGENTS.md`（優先順）、issue #11 / #20-#24 / #35 / #41
+> 関連: `docs/operations/RESIDENT-MODE.md` §14（Grounded Options）、`AGENTS.md`（優先順）、issue #11 / #20-#24 / #35 / #41
 
 ## 1. 層と責務
 ```

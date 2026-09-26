@@ -1,5 +1,7 @@
 # Minecraft Jev Agent Architecture V4.1.2
 
+**Status: CURRENT canonical architecture.** The V4.1.2 authority constitution is enforced by root `AGENTS.md` §0. Superseded versions (V4, V4.1, V4.1.1) live under `docs/history/architecture/` as semantic lineage only.
+
 ## Production-Grade Executable Authority Kernel
 
 V4.1.2 keeps the semantic architecture of V4.1/V4.1.1 — concurrent verified Transitions, persistent controllers, explicit resource/effect ownership, deterministic VERIFY, bounded Jev, sparse System2 — and hardens the executable model into one authority kernel suitable for production shadow-wiring.

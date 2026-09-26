@@ -1259,7 +1259,7 @@ ok(`E1. ${CONTRADICTIONS.length} run-evidence contradictions are caught (each na
   assert.match(operatorCommands, /agent-runner\.mts/)
   assert.doesNotMatch(operatorCommands, /resident-supervisor\.mjs|Restart=on-failure/)
   assert.ok(operatorCommands.indexOf('clean-run-resident-control.mjs') < operatorCommands.indexOf('clean-run-server-launch.mjs'), 'legacy resident shutdown must precede clean Leaf startup')
-  const acceptanceRecipe = readFileSync(join(REPO_ROOT, 'CLEAN-RUN-ACCEPTANCE.md'), 'utf8')
+  const acceptanceRecipe = readFileSync(join(REPO_ROOT, 'docs', 'operations', 'CLEAN-RUN-ACCEPTANCE.md'), 'utf8')
   assert.match(acceptanceRecipe, /clean-run-resident-control\.mjs/)
   assert.match(acceptanceRecipe, /clean-run-acceptance-refresh\.mjs/)
   assert.match(acceptanceRecipe, /--unit=ai-buddy-clean-leaf/)

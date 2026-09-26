@@ -48,7 +48,7 @@ Bunの互換層で最大のリスクは **mineflayer / minecraft-protocol**（`n
 | `/home/s0u7a/mc-ai/jev-agent/` | 単一の編集者（現: M2セッション） | 他は読み取りのみ |
 | `/home/s0u7a/mc-ai/buddy-driver/` | AI_Buddy 常駐ドライバ | 常駐化の実装場所（推奨） |
 | `/home/s0u7a/mc-ai/companion/` | 簡易buddy（終了予定） | AI_Buddy名は明け渡す |
-| `/home/s0u7a/mc-ai/` 直下の md | 各タスクが追記 | `ARCHITECTURE.md` `MILESTONES.md` `M2-PROGRESS.md` |
+| `/home/s0u7a/mc-ai/docs/` 配下の md | 各タスクが追記 | `history/architecture/ARCHITECTURE.md` `status/MILESTONES.md` `history/milestones/M2-PROGRESS.md` |
 
 - サーバー停止・再設定禁止／人間 `s0u7a` に干渉しない。
 - `canDig=true` 禁止／テレポート禁止／sudo・apt禁止／コミット禁止／`any`・`@ts-ignore` 禁止／APIキー出力禁止。
@@ -101,7 +101,7 @@ STATE_SCHEMA_VERSION = 3
   - `buddy-driver/agent-runner.mts`（HOST。native TS stripping のため import せず、起動時に自分の定数として焼き込む）
 - **STATE_SCHEMA_VERSION の code 正典**: `buddy-driver/state-snapshot.ts` の `AGENT_SNAPSHOT_SCHEMA_VERSION`
   （`agent-runner.mts` は `const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION` で別名を持つ）。
-- 他の文書（`ARCHITECTURE.md` / `buddy-driver/AGENTS.md` / root `AGENTS.md` など）は**この節を参照し、数値を再掲しない**。
+- 他の文書（`docs/history/architecture/ARCHITECTURE.md` / `buddy-driver/AGENTS.md` / root `AGENTS.md` など）は**この節を参照し、数値を再掲しない**。
   再掲は `check-contract-docs.mjs` の duplicate 検査で FAIL になる。
 
 ### 4-B. ライフサイクル（`resident-types.ts` の `ResidentGeneration`）
@@ -324,7 +324,7 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 
 > この節は §13（LLM誘導プランナを先に）を **supersede** する。LLM プランナ（Jev shadow → authority）は **P5**。それまでは決定論フォールバックを維持し、常駐の原子性を先に証明する。上位段の gate を満たすまで次に進まない。
 >
-> **正典順位（root `AGENTS.md` §0.7 / `DEVELOPMENT-METHOD.md` §1.1）**: 本文書は design/evidence document であり、root `AGENTS.md` を supersede しない。この「SUPERSEDE §13」は同一ファイル内の §13 を置き換える意味に限る。ここでの P0-P6 が root `AGENTS.md` §2 の現行優先順（P0 = #63 methodology/evidence integrity → P1 safety/durability → #11 Grounded Options skeleton → shadow/eval → …）と衝突する場合は root `AGENTS.md` §2 を優先する。
+> **正典順位（root `AGENTS.md` §0.7 / `docs/development/DEVELOPMENT-METHOD.md` §1.1）**: 本文書は design/evidence document であり、root `AGENTS.md` を supersede しない。この「SUPERSEDE §13」は同一ファイル内の §13 を置き換える意味に限る。ここでの P0-P6 が root `AGENTS.md` §2 の現行優先順（P0 = #63 methodology/evidence integrity → P1 safety/durability → #11 Grounded Options skeleton → shadow/eval → …）と衝突する場合は root `AGENTS.md` §2 を優先する。
 
 - **P0（gate）: ビルドを緑に戻す。** `typecheck` clean / `audit-test` 9/9 / `step-pipeline-test` 6/6 / `guard-test` 12/12 / `gating-test` 6/6 / `loop-test` 7/7 / `m1-test` 5/5 / `movement-patch:check` ok。緑でない限り、他の検証は意味を持たない。
 - **P1: 常駐 generation swap を原子的にする。**

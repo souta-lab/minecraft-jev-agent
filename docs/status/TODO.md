@@ -47,7 +47,7 @@
    VLM系（MineDojo・MineCLIP / VPT / STEVE-1）、ベンチマーク（MineDojo, MineRL BASALT/Diamond）、
    Options階層制御の文献、失敗モード（振動・停止・戦略が身体に伝わらない・キャッシュ/古い計画・
    preconditionデッドロック・無制限降下・死亡/リスポン・次元変更・termination評価）
-   成果物: PRIOR-WORK.md（引用付き・アーキ比較表・ロードマップへの含意・既知のデッドエンド警告）
+   成果物: docs/history/investigations/PRIOR-WORK.md（引用付き・アーキ比較表・ロードマップへの含意・既知のデッドエンド警告）
 #37 M3/M4 ロードマップ（goal templates + 必要プリミティブ）
 ```
 

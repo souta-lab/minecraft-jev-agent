@@ -1826,7 +1826,7 @@ function cleanRunServerConfigCondition({ descriptor, artifact, runId, descriptor
 /**
  * The worlds an observed level.dat measurement reports, for the "the live world
  * is NOT the target" proof. `observed` is the JSON produced by the measurement
- * script (see CLEAN-RUN-ACCEPTANCE.md); unknown shapes yield an empty list.
+ * script (see docs/operations/CLEAN-RUN-ACCEPTANCE.md); unknown shapes yield an empty list.
  */
 export function observedWorlds(observed) {
   const worlds = isPlainObject(observed?.worlds) ? observed.worlds : {}

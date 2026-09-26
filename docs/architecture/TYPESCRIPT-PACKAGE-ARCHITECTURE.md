@@ -467,21 +467,21 @@ When a document moves, update inbound links in the same change. Avoid leaving du
 
 Documentation refactors must preserve provenance: do not rewrite historical evidence merely to make the tree prettier.
 
-### 10.6 Repository-specific migration examples
+### 10.6 Repository-specific migration map
 
-The current root contains documents from several classes. Their eventual homes should follow purpose rather than filename age. For example:
+The repository root originally contained documents from several classes. They have been migrated into `docs/` under role-based homes, keeping their original filenames for link stability:
 
 ```text
-NEW-ARCHITECTURE-V4.1.2.md -> docs/architecture/versions/v4.1.2.md
-DEVELOPMENT-METHOD.md      -> docs/development/method.md
-DEFINITION-OF-DONE.md      -> docs/development/definition-of-done.md
-M3-ACCEPTANCE-RUNBOOK.md   -> docs/operations/m3-acceptance.md
-CURRENT-STATUS.md          -> docs/status/current.md
-MILESTONES.md              -> docs/status/milestones.md
-PRIOR-WORK.md              -> docs/history/prior-work.md
+NEW-ARCHITECTURE-V4.1.2.md -> docs/architecture/NEW-ARCHITECTURE-V4.1.2.md
+DEVELOPMENT-METHOD.md      -> docs/development/DEVELOPMENT-METHOD.md
+DEFINITION-OF-DONE.md      -> docs/development/DEFINITION-OF-DONE.md
+M3-ACCEPTANCE-RUNBOOK.md   -> docs/operations/M3-ACCEPTANCE-RUNBOOK.md
+CURRENT-STATUS.md          -> docs/status/CURRENT-STATUS.md
+MILESTONES.md              -> docs/status/MILESTONES.md
+PRIOR-WORK.md              -> docs/history/investigations/PRIOR-WORK.md
 ```
 
-These are examples, not automatic rename commands. Before moving a document, inspect inbound links, authority references, scripts, tooling, and whether the document is truly current or historical.
+`docs/README.md` records the full area map. Before moving a document, inspect inbound links, authority references, scripts, tooling, and whether the document is truly current or historical.
 
 `AGENTS.md` remains at the repository root because it is an agent-facing constitutional entrypoint. `README.md` remains at the root because it is the repository-facing entrypoint.
 

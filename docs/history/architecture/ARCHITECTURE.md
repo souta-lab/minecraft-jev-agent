@@ -1,12 +1,14 @@
 # Jev-agent / AI_Buddy architecture (as-built), external review handoff
 
+> **Historical snapshot (2026-09-18).** Timestamped as-built review handoff retained as evidence. It is not the current architecture; see `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md` and root `AGENTS.md`.
+
 対象読者: 外部シニアレビュア（Sol）。目的は宣伝ではなく、現状の実装・動いているもの・壊れているもの・詰まっているもの・次の一手を、証拠付きで渡して軌道修正してもらうこと。
 
 読み方に関する注意:
 - 本ドキュメントは 2026-09-18 00:03 JST 時点のスナップショット。この時点で **リポジトリは赤い**（typecheck が通らない、2 つのテストがロード不能）。同時に **常駐ホストが生きたプロセスとして走っている**（移行前ランタイム、PID 150528）。つまり「実装中」の状態を写している。現在の起動方法は下記のBun移行記録に従う。
 - 検証できなかった主張は `UNVERIFIED: ...` と明記した。プロンプト側の主張でも、実ファイルと食い違うものは実測を優先し、差分を本文に書いた。
 - ファイルパスは `/home/s0u7a/mc-ai/` 起点。ログは `jev-agent/logs/` 起点。
-- **優先順位は `RESIDENT-MODE.md` §13-0（P0 green build → P1 atomic swap → P2 freeze/resume → P3 M1 golden → P4 2-block fixture → P5 Jev shadow→authority → P6 M2 ladder）が正典であり、本文書 §7 の順序に優先する。**
+- **優先順位は `docs/operations/RESIDENT-MODE.md` §13-0（P0 green build → P1 atomic swap → P2 freeze/resume → P3 M1 golden → P4 2-block fixture → P5 Jev shadow→authority → P6 M2 ladder）が正典であり、本文書 §7 の順序に優先する。**
 
 ---
 
@@ -30,7 +32,7 @@ historical M2 evidence として保持するが、現在のM2 acceptanceでは�
 | M3 | ender_eye×12（Nether blaze rods + enderman pearls） | 未着手 |
 | M4 | stronghold → End → THE DRAGON | 後回し |
 
-優先順位（ユーザー最終指示、`RESIDENT-MODE.md` §0）: **M2 ラダーの完走より常駐化（resident + hot-reload）を先に着地させる**。バッチ型ループ（接続 → 200 s 走行 → 切断 → 修正 → 再接続 → 状態ゼロ再構築）がボトルネックであり、同一接続を保ったまま方針だけ差し替えるのが本命。
+優先順位（ユーザー最終指示、`docs/operations/RESIDENT-MODE.md` §0）: **M2 ラダーの完走より常駐化（resident + hot-reload）を先に着地させる**。バッチ型ループ（接続 → 200 s 走行 → 切断 → 修正 → 再接続 → 状態ゼロ再構築）がボトルネックであり、同一接続を保ったまま方針だけ差し替えるのが本命。
 
 ---
 
@@ -81,7 +83,7 @@ locomotion, actuator, dig/pickup, craft/smelt を担当。主要なもの:
 - boolean は `probability` のみ（信頼度なし）。0.30/0.70 の不確実帯で読む。
 - score の信頼度は `providerMetadata.typesafe.confidence`。`DANGER_CONFIDENCE_THRESHOLD = 0.4`、未満は `preserveCurrentSafeAction()`。
 - 実測: コストは入力 $0.04/1M、実 run 平均 ~$0.00018/call（`logs/jev-calls.jsonl`, n=12: mean 4419 input tokens, p50 4901 => 平均 ~$0.000177、p50 ~$0.000196）。レイテンシ p50 ~410〜720 ms。
-- **決定論モードの絶対条件**: `llm.called==false`。常駐ホストは現状 `policy=fallback model=deterministic-local-fallback` で走っており、この条件を満たす。`createJevPolicy` は構築時に種別固定のため、mode 切替はフルリロードで行う（`RESIDENT-MODE.md` §6）。
+- **決定論モードの絶対条件**: `llm.called==false`。常駐ホストは現状 `policy=fallback model=deterministic-local-fallback` で走っており、この条件を満たす。`createJevPolicy` は構築時に種別固定のため、mode 切替はフルリロードで行う（`docs/operations/RESIDENT-MODE.md` §6）。
 
 ### 2.4 変更しないもの（by design）
 
@@ -96,7 +98,7 @@ locomotion, actuator, dig/pickup, craft/smelt を担当。主要なもの:
 |---|---|
 | `agent-runner.mts` (689 行) | HOST。`mineflayer.createBot` + plugin、再接続 backoff、logger 所有、`buddy-state.json` の原子的ミラー、Unix socket 制御サーバ、reload 調停、source watcher |
 | `generation-entry.ts` (404 行) | RELOADABLE 層の入口。`JevController` + `FixedPlanSystem2` をラップ。Bun.build で 1 本の hash 付きファイルに束ねる |
-| `resident-types.ts` | HOST ↔ generation 契約。`ResidentWorldMemory`、`ResidentState`、`ResidentGeneration`（`attach`/`start`/`quiesce`/`dispose`/`status`/`structuralSmoke`/`missionPreflight`/`stopReason`/`hasStopped`）。`CONTRACT_VERSION` の code 正典（値は `RESIDENT-MODE.md` §4-A） |
+| `resident-types.ts` | HOST ↔ generation 契約。`ResidentWorldMemory`、`ResidentState`、`ResidentGeneration`（`attach`/`start`/`quiesce`/`dispose`/`status`/`structuralSmoke`/`missionPreflight`/`stopReason`/`hasStopped`）。`CONTRACT_VERSION` の code 正典（値は `docs/operations/RESIDENT-MODE.md` §4-A） |
 | `build.mts` (90 行) | Bun.build ビルド出力 `data/resident/gen-<sha12>.mjs` |
 | `data/resident/control.sock` | mode 0600 の制御チャネル（実在を確認） |
 | `buddy-state.json` | durable mirror（`worldMemory`, `ledger`, `generations`, `reloads`, `recoveries`） |
@@ -127,7 +129,7 @@ WORLD リセットの履歴（枯渇対策）:
 
 人間クライアント:
 - PrismLauncher AppImage + Fabulously Optimized 1.21.11 instance（`Fabulously Optimized(1)`）。`s0u7a` で参加。プロセス実測で PrismLauncher の Java 21 runtime が起動中。
-- 簡易 buddy（`companion/buddy.cjs`）は `s0u7a` を追従。`companion/buddy.log` 実測: `SPAWN pos=(-3.5,73.0,6.5)` → `HEARTBEAT target=s0u7a dist=3.0` まで接近後、`dist=3.5〜10.3` で停滞（`REPATH_DISTANCE=5` + `GoalNear` の既知の追従失敗モード。`RESIDENT-MODE.md` §12）。
+- 簡易 buddy（`companion/buddy.cjs`）は `s0u7a` を追従。`companion/buddy.log` 実測: `SPAWN pos=(-3.5,73.0,6.5)` → `HEARTBEAT target=s0u7a dist=3.0` まで接近後、`dist=3.5〜10.3` で停滞（`REPATH_DISTANCE=5` + `GoalNear` の既知の追従失敗モード。`docs/operations/RESIDENT-MODE.md` §12）。
 
 ---
 
@@ -165,7 +167,7 @@ WORLD リセットの履歴（枯渇対策）:
 - 接触前ジャンプ（`scanAhead` 0.8〜2.8 m, 接地かつ非衝突で forward 保持のまま jump）。
 - `STEP` / `stepCuts` stair-cut: 実測 `STEP:E:b0_71_-8 status=done blockRemoved=true before=grass_block after=air`、結果の step は `landing=true headroom=true`、`wedge=done`。climb 実測 `climbed=2.25m`。
 - ceiling-clear MINE for canopy pockets: `headroomCuts` + `headroomCandidates` + `guardMine` + `runMine(clearance)`。live 実測 `logs/m2-phase1d-console.log`: `no jump headroom at (0,72,-6)` → `MINE:b-1_74_-6` → `VERIFIED ... removed=true gained=0` → `STEP:W:b-2_74_-6` で経路が開く。`m2-phase1e` の 3 log 回収はこの修正で初めて成立した。
-- これは `RESIDENT-MODE.md` §12 の「2-block 面は原理的に登れない（jump apex 1.2522）」制約への正しい対処の片翼。
+- これは `docs/operations/RESIDENT-MODE.md` §12 の「2-block 面は原理的に登れない（jump apex 1.2522）」制約への正しい対処の片翼。
 
 ### 5.3 Pickup
 
@@ -260,7 +262,7 @@ stock の `bot.craft` のまま（実証済み）。失敗時は recipe/delta/in
 - 同一壁への反復ジャンプを wedge として扱い `CLIMB_FAIL wallHeight=2 attempts=N` を出し、その面を候補から除外する仕組みが無い（`src/` に `CLIMB_FAIL` / `CLIMB_ATTEMPT` / `DETOUR` の文字列は存在しない）。
 - 結果、可視化なしに無言で登り続け、最後は wedge detector が止めている。ユーザーには「まだ直っていない」と映る。
 
-要件（`RESIDENT-MODE.md` §12 再報告）: (a) 迂回経路探索、(b) STEP/stepCuts による階段化（掘削が許される resource class のみ）、(c) 同一壁の反復ジャンプを wedge 扱いにして面を除外、(d) ログで可視化。迂回か階段化のみが正解。
+要件（`docs/operations/RESIDENT-MODE.md` §12 再報告）: (a) 迂回経路探索、(b) STEP/stepCuts による階段化（掘削が許される resource class のみ）、(c) 同一壁の反復ジャンプを wedge 扱いにして面を除外、(d) ログで可視化。迂回か階段化のみが正解。
 
 ### 6.4 symptom: world に作業台が約 20 個（根本原因はバッチ型の状態健忘）
 
@@ -272,7 +274,7 @@ stock の `bot.craft` のまま（実証済み）。失敗時は recipe/delta/in
 - 注意: プロンプトの「56 crafting_table placement events」は実測では「56 log files contain the string」であり、event 数ではない。ここは訂正する。
 - `UNVERIFIED: 現在の world 内の crafting_table ブロックの正確な個数`（ブロックスキャンをしていない）。ただし常駐ホストの起動時 WorldMemory scan は `craftingTables=9` を検出した（`buddy.log` 2026-09-18 00:02:20）。これは修正が実際に効き始めた証拠。
 
-対策（実装要件、`RESIDENT-MODE.md` §0.4）: 起動時/再接続時に既存作業台をスキャンして `WorldMemory.discoveredStations`（実装では `craftingTables`）に登録し、以後優先使用。設置は周囲に 1 つも無い場合のみ。設置したら store に永続化し、世代交代・再接続をまたいで再利用。既存作業台は撤去しない。
+対策（実装要件、`docs/operations/RESIDENT-MODE.md` §0.4）: 起動時/再接続時に既存作業台をスキャンして `WorldMemory.discoveredStations`（実装では `craftingTables`）に登録し、以後優先使用。設置は周囲に 1 つも無い場合のみ。設置したら store に永続化し、世代交代・再接続をまたいで再利用。既存作業台は撤去しない。
 
 ### 6.5 Hot reload: 実装済み、ただし atomic swap は未成立
 
@@ -361,10 +363,10 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 
 | パス | 内容 |
 |---|---|
-| `/home/s0u7a/mc-ai/ARCHITECTURE.md` | 本ドキュメント（2026-09-18 00:30 JST 版） |
-| `/home/s0u7a/mc-ai/RESIDENT-MODE.md` | 常駐化の正典要件（所有権、bundling 訂正、generation 契約、state store、制御チャネル、freeze/resume、検証、運用ノート） |
-| `/home/s0u7a/mc-ai/MILESTONES.md` | M0〜M4 のマイルストーン台帳（559 行） |
-| `/home/s0u7a/mc-ai/M2-PROGRESS.md` | M2 の全試行履歴（649 行） |
+| `/home/s0u7a/mc-ai/docs/history/architecture/ARCHITECTURE.md` | 本ドキュメント（2026-09-18 00:30 JST 版） |
+| `/home/s0u7a/mc-ai/docs/operations/RESIDENT-MODE.md` | 常駐化の正典要件（所有権、bundling 訂正、generation 契約、state store、制御チャネル、freeze/resume、検証、運用ノート） |
+| `/home/s0u7a/mc-ai/docs/status/MILESTONES.md` | M0〜M4 のマイルストーン台帳（559 行） |
+| `/home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md` | M2 の全試行履歴（649 行） |
 | `/home/s0u7a/mc-ai/jev-agent/src/` | 決定層 + motor + LLM の全実装（`craftWindow.ts` 含む 15 ファイル） |
 | `/home/s0u7a/mc-ai/jev-agent/logs/m1-fresh2-console.log` | M1 PASS 4/4（fresh world, `llm.called==false 0/40`, verifiedDigs=22, wedge 0） |
 | `/home/s0u7a/mc-ai/jev-agent/logs/m2-phase1e-console.log` | craft-at-station が gained 0 で wedge した full run（2/14, wedge 64546ms） |
@@ -381,7 +383,7 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 | `/home/s0u7a/mc-ai/jev-agent/scripts/apply-movement-patch.mjs` | postinstall 適用 + `--check`（実測 4/4 ok） |
 | `/home/s0u7a/mc-ai/buddy-driver/agent-runner.mts` | 常駐 HOST（接続、reconnect、制御 socket、reload 調停、state mirror） |
 | `/home/s0u7a/mc-ai/buddy-driver/generation-entry.ts` | RELOADABLE 層の入口（JevController + ladder planner） |
-| `/home/s0u7a/mc-ai/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION` の code 正典。値は `RESIDENT-MODE.md` §4-A） |
+| `/home/s0u7a/mc-ai/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION` の code 正典。値は `docs/operations/RESIDENT-MODE.md` §4-A） |
 | `/home/s0u7a/mc-ai/buddy-driver/build.mts` | Bun.build バンドラ |
 | `/home/s0u7a/mc-ai/buddy-driver/buddy.log` | BOOT / BUILD / SPAWN / GENERATION_READY / RELOAD(ok=false) / SHUTDOWN |
 | `/home/s0u7a/mc-ai/buddy-driver/runner.out` | generation の agent ログ（DESCEND dig_error, smoke 失敗の文脈） |
@@ -479,7 +481,7 @@ heads, `action` (Choice over grounded candidate ids = pi) and `abandon_option` (
 physical truth, preconditions I(o), success predicates success(s,o) and completion checks; `Mineflayer` executes.
 The older semantic questions (`goal_progress`, `plan_still_valid`, `situation_understood`, `goal_blocked`,
 `strategy_change_needed`) must be demoted to shadow metrics that are logged but never steer. An `abandon_option`
-above a threshold requests a System2 replan. See `RESIDENT-MODE.md` section 14.
+above a threshold requests a System2 replan. See `docs/operations/RESIDENT-MODE.md` section 14.
 
 ## Operating facts for whoever picks this up
 - One-shot health dashboard: `bun tools/buddy-status.mjs` (`--json` for machine-readable). It prints host count,

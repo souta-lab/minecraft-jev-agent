@@ -3,7 +3,7 @@
 //
 // Re-applies the local movement patches after `bun install`. Two dependency
 // defects make a Leaf 1.21.11 server reject the bot's movement while it is in
-// contact with terrain (see ~/mc-ai/ARCHITECTURE.md section 9 and the read-only
+// contact with terrain (see ~/mc-ai/docs/history/architecture/ARCHITECTURE.md section 9 and the read-only
 // harness ~/mc-ai/mcbot/movement-test/README.md sections 7-9):
 //
 //   patches/mineflayer-4.39.0-locomotion.patch

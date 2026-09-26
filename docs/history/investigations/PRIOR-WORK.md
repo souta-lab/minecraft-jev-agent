@@ -1,5 +1,7 @@
 # PRIOR-WORK.md — prior-work survey for the Jev/Mercury Minecraft agent
 
+> **Historical survey (2026-09-18).** Literature positioning retained for provenance; it does not state current architecture.
+
 Issue: `souta-lab/minecraft-jev-agent#42`. Scope: literature positioning for an embodied Minecraft
 Java agent whose System One (Jev) holds sole action authority over **grounded candidate sets**, whose
 System Two (Mercury) is an **exception-driven** plan/Option repair layer, with a **resident host**
@@ -243,7 +245,7 @@ exists; the switching-penalty idea maps onto our proposed hysteresis/cooldown fo
    vs. time mean we must publish wall-clock + inventory predicates + world seed.
 
 **Reject**
-1. **Free-form code / coordinates / entity ids from the model** (already rejected in PLANNERS.md §5).
+1. **Free-form code / coordinates / entity ids from the model** (already rejected in docs/decision/PLANNERS.md §5).
    Voyager succeeds with it but pays GPT-4 cost and hits hallucination and API errors.
 2. **Unified VLA tokenization / imitation learning** (OmniJARVIS, STEVE-1, VPT): needs huge labeled
    gameplay data and a GPU budget; also removes the interpretable layer we want for safety.
@@ -300,22 +302,22 @@ Mapping to our issues (verified titles fetched from the tracker):
 
 **Claims in our docs flagged as known dead ends / risks**
 
-1. **A purely static, item-ordered ladder with no feasibility signal** (`PLANNERS.md` §1(1),
+1. **A purely static, item-ordered ladder with no feasibility signal** (`docs/decision/PLANNERS.md` §1(1),
    `AGENTS.md` roadmap) matches DEPS's stated failure mode #2 (plans infeasible because achievability
    is ignored). Not a whole dead end — but the *ordering policy* should be declared known-incomplete
    and moved under #41/#29. Flagged.
 2. **"Mercury cache hit plan replay" (#15)** as currently described is blind plan reuse. The memory-
    confabulation and stale-memory results show stored plans must be re-validated against fresh state.
-   Flagged as a known dead end unless replay is epoch/hash-gated. `PLANNERS.md` §4 already lists #15 as
+   Flagged as a known dead end unless replay is epoch/hash-gated. `docs/decision/PLANNERS.md` §4 already lists #15 as
    a correctness bug — good; this survey says it is also a literature-recognized failure.
 3. **Any plan to let self-reported semantic scores (`goal_progress`, `plan_still_valid`,
-   `situation_understood`) steer actions** is the Reflexion/self-correction dead end; `ARCHITECTURE.md`
+   `situation_understood`) steer actions** is the Reflexion/self-correction dead end; `docs/history/architecture/ARCHITECTURE.md`
    (update 2026-09-18 §"Design direction") already demotes them to shadow metrics. This survey
    **endorses** that change; if any code path still acts on them, that path is the dead end.
 4. **Giving Jev β authority before calibration** would repeat the progress-mirage error (a
-   self-graded loop accepting non-progress). `AGENTS.md`/`PLANNERS.md` already require replay/calibration
+   self-graded loop accepting non-progress). `AGENTS.md`/`docs/decision/PLANNERS.md` already require replay/calibration
    first — endorsed; do not shortcut it.
-5. **Free-form coordinate/entity/skill-parameter generation** (rejected in `PLANNERS.md` §5) is
+5. **Free-form coordinate/entity/skill-parameter generation** (rejected in `docs/decision/PLANNERS.md` §5) is
    confirmed as high-risk by Voyager hallucinations; maintained rejection.
 
 ---

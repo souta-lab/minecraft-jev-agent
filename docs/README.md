@@ -1,0 +1,15 @@
+# docs/
+
+Repository documentation, organized by role per `architecture/TYPESCRIPT-PACKAGE-ARCHITECTURE.md` §10.
+The constitutional entrypoints remain at the repository root: `README.md` and `AGENTS.md`.
+
+- `architecture/` — current normative architecture. Canonical: `architecture/NEW-ARCHITECTURE-V4.1.2.md`.
+- `decision/` — planner/Jev decision-plane boundaries and the observer read-model.
+- `development/` — development method, definition of done, regression corpus.
+- `history/` — superseded and dated material retained for provenance:
+  `architecture/` (old architecture versions and authority models),
+  `incidents/` (dated incident/defect reports),
+  `investigations/` (surveys and audits), `milestones/` (closed-milestone evidence).
+- `jev/` — what Jev is and what the live evidence does and does not prove.
+- `operations/` — resident runtime spec, acceptance runbooks, clean-run procedure, benches.
+- `status/` — current status snapshot, TODOs, milestone ledger.

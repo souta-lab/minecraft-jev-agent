@@ -1,5 +1,7 @@
 # AI Authority Kernel
 
+> **Superseded.** The Jev π/β / WHAT authority split below is the pre-kernel model; the current authority constitution is the V4.1.2 kernel (root `AGENTS.md`, `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`). Retained as lineage evidence.
+
 This document is normative for the resident AI path introduced by the authority overhaul.
 
 ## One owner per decision

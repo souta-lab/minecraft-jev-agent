@@ -3,7 +3,7 @@
 Scope: a factual, reviewable description of the development *process* for `minecraft-jev-agent`
 (`/home/s0u7a/mc-ai`), so an external reviewer can critique the methodology, not the code.
 
-Evidence basis: `AGENTS.md`, `TODO.md`, `PLANNERS.md`, `ARCHITECTURE.md`, `RESIDENT-MODE.md`,
+Evidence basis: `AGENTS.md`, `docs/status/TODO.md`, `docs/decision/PLANNERS.md`, `docs/history/architecture/ARCHITECTURE.md`, `docs/operations/RESIDENT-MODE.md`,
 `tools/*.mjs`, `git log --oneline` (all branches), `git worktree list`, `git branch -r`,
 `git ls-remote origin`, and live markers grepped from `buddy-driver/buddy.log`.
 
@@ -28,23 +28,23 @@ auditing it.
 
 | Actor | Identity / venue | What it does | Authority | Evidence |
 |---|---|---|---|---|
-| Human user | `s0u7a`, owner of the local world and server | Sets standing orders and the final objective (M4: kill the Ender Dragon); mostly absent; protects the live host | Highest: can change the mission, the model/budget policy, and the priority order | `AGENTS.md` §0, `TODO.md` lines 117-128 |
-| Supervising agent | Sisyphus / OpenCode at the repo root | Reads standing orders, picks the next lane from open issues, launches sub-agents, verifies lane evidence, merges one lane at a time, files new issues on live evidence | Operational lead; cannot inject goals into the live resident | `AGENTS.md` §0, §4; `ARCHITECTURE.md` line 485 (goal/milestone cannot be injected) |
-| Delegated sub-agents | task categories `deep`, `quick`, `unspecified-*`, `writing`; plus `explore`, `librarian`, `oracle` | Implement a single lane inside a dedicated worktree; produce evidence per §3 | Scoped to the declared files of their lane | `TODO.md` lines 88, 112, 137; this task itself (lane `task/dev-method-doc`) |
-| External reviewer "Sol" | Issues and PRs on the GitHub remote (`souta-lab/minecraft-jev-agent`) | Files code-level issues with root causes, audits architecture, merges via PRs | Advisory: drives the backlog and the canonical priority order | `ARCHITECTURE.md` lines 3, 180, 344-353; `RESIDENT-MODE.md` §13-0 line 195; branch `origin/sol/system2-ci-mercury`; PRs #2, #47, #51, #53 |
+| Human user | `s0u7a`, owner of the local world and server | Sets standing orders and the final objective (M4: kill the Ender Dragon); mostly absent; protects the live host | Highest: can change the mission, the model/budget policy, and the priority order | `AGENTS.md` §0, `docs/status/TODO.md` lines 117-128 |
+| Supervising agent | Sisyphus / OpenCode at the repo root | Reads standing orders, picks the next lane from open issues, launches sub-agents, verifies lane evidence, merges one lane at a time, files new issues on live evidence | Operational lead; cannot inject goals into the live resident | `AGENTS.md` §0, §4; `docs/history/architecture/ARCHITECTURE.md` line 485 (goal/milestone cannot be injected) |
+| Delegated sub-agents | task categories `deep`, `quick`, `unspecified-*`, `writing`; plus `explore`, `librarian`, `oracle` | Implement a single lane inside a dedicated worktree; produce evidence per §3 | Scoped to the declared files of their lane | `docs/status/TODO.md` lines 88, 112, 137; this task itself (lane `task/dev-method-doc`) |
+| External reviewer "Sol" | Issues and PRs on the GitHub remote (`souta-lab/minecraft-jev-agent`) | Files code-level issues with root causes, audits architecture, merges via PRs | Advisory: drives the backlog and the canonical priority order | `docs/history/architecture/ARCHITECTURE.md` lines 3, 180, 344-353; `docs/operations/RESIDENT-MODE.md` §13-0 line 195; branch `origin/sol/system2-ci-mercury`; PRs #2, #47, #51, #53 |
 
 Notes on role boundaries:
 
 - The supervising agent is explicitly told not to wait for the user and to find work when idle
   (`AGENTS.md` §0.2). See §6 for the failure this rule exists to correct.
-- The external reviewer is named in `ARCHITECTURE.md` ("外部シニアレビュア（Sol）") and its
-  recommendations influenced the priority order (`RESIDENT-MODE.md` §13-0 "外部レビュー改訂"
+- The external reviewer is named in `docs/history/architecture/ARCHITECTURE.md` ("外部シニアレビュア（Sol）") and its
+  recommendations influenced the priority order (`docs/operations/RESIDENT-MODE.md` §13-0 "外部レビュー改訂"
   supersedes §13). This is a *design/evidence* document, not policy: see §1.1. It is a separate
   AI reviewer/context, not an independent human or blind external lab, so correlated blind spots
   remain possible; multiple AI agents improve coverage but are not independent replication.
-- Sub-agent categories are named in `TODO.md` line 88 (`quick/unspecified-low`, `deep/oracle`)
+- Sub-agent categories are named in `docs/status/TODO.md` line 88 (`quick/unspecified-low`, `deep/oracle`)
   and line 112. `quick` has a recorded failure history (see §8.7).
-- `explore`, `librarian`, `oracle` appear in `TODO.md` line 89 and line 113 as delegation targets
+- `explore`, `librarian`, `oracle` appear in `docs/status/TODO.md` line 89 and line 113 as delegation targets
   for large research, to protect main-context budget. Their use is a budget measure, not a
   correctness measure.
 
@@ -56,16 +56,16 @@ The canonical order, highest first. A lower document MUST NOT silently supersede
 human explicit instruction
 > root AGENTS.md
 > nearest scoped AGENTS.md (e.g. buddy-driver/AGENTS.md)
-> current operational queue / TODO (TODO.md)
-> design / evidence docs (PLANNERS.md / RESIDENT-MODE.md / ARCHITECTURE.md / PRIOR-WORK.md)
+> current operational queue / TODO (docs/status/TODO.md)
+> design / evidence docs (docs/decision/PLANNERS.md / docs/operations/RESIDENT-MODE.md / docs/history/architecture/ARCHITECTURE.md / docs/history/investigations/PRIOR-WORK.md)
 > historical / superseded sections
 ```
 
 Rules:
 
 1. Root `AGENTS.md` §0 and §0.7 are the root policy and win over any design or scoped document.
-2. `RESIDENT-MODE.md` §13-0 is a design/evidence document. Its "SUPERSEDE §13" note only
-   supersedes `RESIDENT-MODE.md` §13 (the LLM-planner-first ordering inside the same file). It
+2. `docs/operations/RESIDENT-MODE.md` §13-0 is a design/evidence document. Its "SUPERSEDE §13" note only
+   supersedes `docs/operations/RESIDENT-MODE.md` §13 (the LLM-planner-first ordering inside the same file). It
    does **not** outrank root `AGENTS.md`. Where §13-0's P0-P6 ladder conflicts with the current
    root `AGENTS.md` §2 order — which now puts P0 methodology/evidence integrity (#63) first and
    the Grounded-Options skeleton ahead of LLM-planner authority — `AGENTS.md` §2 wins.
@@ -138,23 +138,23 @@ tree, and that a branch fix is not live until merged. Therefore "landed" is defi
 
 `UNVERIFIED`: the precise shell history of past lanes. The repository text and merge commits
 strongly indicate the loop above, but raw shell transcripts are not retained in the repo
-(`ARCHITECTURE.md` §6.7 notes this evidence gap explicitly).
+(`docs/history/architecture/ARCHITECTURE.md` §6.7 notes this evidence gap explicitly).
 
 ---
 
 ## 3. Evidence standards
 
-The rule is stated in `TODO.md` lines 136-137: each task must prove, with the following five
+The rule is stated in `docs/status/TODO.md` lines 136-137: each task must prove, with the following five
 elements, or state clearly that it is incomplete ("成功偽装の禁止", faking success is forbidden).
 `AGENTS.md` §0.4 requires primary evidence (log lines, inventory, commits), not opinion.
 
 | # | Required proof | Concrete command / source | Example found in repo |
 |---|---|---|---|
-| a | Code exists at the changed location | `grep -rn '<symbol>' <file>` | `TODO.md` line 136 mandates it; commits cite file+symbol |
-| b | Full test suite green, with counts | `bun run typecheck`, `guard-test`, `gating-test`, `loop-test`, `m1-test`, `audit-test`, `step-pipeline-test`, `movement-patch:check` (`jev-agent/package.json`) | `TODO.md` line 167: `typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10` |
+| a | Code exists at the changed location | `grep -rn '<symbol>' <file>` | `docs/status/TODO.md` line 136 mandates it; commits cite file+symbol |
+| b | Full test suite green, with counts | `bun run typecheck`, `guard-test`, `gating-test`, `loop-test`, `m1-test`, `audit-test`, `step-pipeline-test`, `movement-patch:check` (`jev-agent/package.json`) | `docs/status/TODO.md` line 167: `typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10` |
 | c | Branch actually pushed | `git ls-remote origin` | `AGENTS.md` line 136 mandates it; lane branches present under `refs/heads/task/*` |
 | d | Live log lines for behaviour changes | grep `buddy-driver/buddy.log` for the named marker | see marker table below |
-| e | Explicit statement of what remains | lane report must say if incomplete | `TODO.md` line 136; `ARCHITECTURE.md` lines 406-409 |
+| e | Explicit statement of what remains | lane report must say if incomplete | `docs/status/TODO.md` line 136; `docs/history/architecture/ARCHITECTURE.md` lines 406-409 |
 
 Marker vocabulary used as live proof (counts read from `buddy-driver/buddy.log` on 2026-09-18):
 
@@ -202,7 +202,7 @@ Rules:
 
 ```
 POLICY      #22 / #24: `abandon_option` beta is shadow-only by default; it may never, by itself,
-            cause a replan. Source: root AGENTS.md §0.1, PLANNERS.md §3, RESIDENT-MODE.md §14.
+            cause a replan. Source: root AGENTS.md §0.1, docs/decision/PLANNERS.md §3, docs/operations/RESIDENT-MODE.md §14.
 IMPLEMENTED `jev-agent/src/betaAuthority.ts:45-54` — with `betaAuthority:false` the decision is
             `{adopt:false, shadowed:true}`; `jev-agent/src/jev.ts:577-580` `resolveBetaAuthority()`
             defaults OFF (only `BUDDY_BETA_AUTHORITY=1` opts in); default wired at
@@ -223,7 +223,7 @@ reopened for exactly this. The marker must be validated against the authority fl
 #### Worked example 2 — the listener leak (#13) is not closed by a marker observation
 
 ```
-POLICY      RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across
+POLICY      docs/operations/RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across
             reloads; `listenerLeak` must be false.
 IMPLEMENTED `buddy-driver/agent-runner.mts:518-527` listenerCounts()/listenerLeak(); baseline at
             `:667-668`; recorded at `:1201-1203`.
@@ -258,13 +258,13 @@ a whole.
 Why "reported success without evidence" is treated as failure:
 
 1. The loop is autonomous and long-running; a false "done" silently poisons the backlog and the
-   next lane. `ARCHITECTURE.md` §6.7 records delegated tasks cancelled after six minutes with no
+   next lane. `docs/history/architecture/ARCHITECTURE.md` §6.7 records delegated tasks cancelled after six minutes with no
    artifact.
 2. The resident host cannot be driven by external goal injection
-   (`ARCHITECTURE.md` line 485: "Goal/milestone CANNOT be injected externally: the only way to
+   (`docs/history/architecture/ARCHITECTURE.md` line 485: "Goal/milestone CANNOT be injected externally: the only way to
    unstick the agent is a code fix"). So a lane that claims a fix but does not prove a live
    behaviour change leaves the agent stuck while appearing fixed.
-3. Historical false positives are documented: `ARCHITECTURE.md` line 416 records a "STALE CLAIM"
+3. Historical false positives are documented: `docs/history/architecture/ARCHITECTURE.md` line 416 records a "STALE CLAIM"
    correction where "hot reload not delivered" and "all tests green" were both wrong.
 
 ---
@@ -292,7 +292,7 @@ Gate design flaws found and fixed (each is a real commit):
 | Judging on all-time history | Pre-fix 1-tick stops poisoned the verdict forever | `5592f90` | Judge on a recent 10-minute window |
 | Treating no generation stops as failure | A long-lived (healthy) generation produced an empty window, which failed the check | `b3d1f9c` | "No stops in window" is healthy; use all-time `maxTicks` as fallback |
 | Treating 0 churn as failure | The goal (no churn) registered as FAIL | `ce62256` | `churn_reduced` passes at 0 generations per 5 min |
-| Over-strict smoke test | `RELOAD ok=false ... smoke test failed: empty plan and no completed goals` blocked hot reload | `ARCHITECTURE.md` lines 284-285; `RESIDENT-MODE.md` §13-0 P1 | Split structural smoke (must pass with empty plan) from mission preflight |
+| Over-strict smoke test | `RELOAD ok=false ... smoke test failed: empty plan and no completed goals` blocked hot reload | `docs/history/architecture/ARCHITECTURE.md` lines 284-285; `docs/operations/RESIDENT-MODE.md` §13-0 P1 | Split structural smoke (must pass with empty plan) from mission preflight |
 | Cache-loop window not anchored | All-time counts included the pre-fix loop | `a663d08` | Anchor counting after the first `ADVISOR_CACHE_GUARD` marker |
 | Verifier spread of a huge timestamp array | `verify-issue12` could exhaust the stack on a multi-MB log | `5689214` (PR #53) | Reduce the timestamp array instead of spreading it |
 | Missing-ledger crash on resume | Reload crash when no ledger snapshot existed | `20b6092`, merged in `8265aeb` | Guard the missing ledger in the resume path |
@@ -368,17 +368,17 @@ regressions. Record the baseline in the lane report; never silently drop a faili
 |---|---|---|
 | Shared-tree HEAD must be `main`; never checkout/merge/cherry-pick there | The live host rebuilds the bundle from the work tree, and a reset moves the current branch; the guard fails with `SYNC_HEAD_WRONG` before a non-main branch can be rewritten | `AGENTS.md` §4.0; `tools/sync-shared-tree.mjs`; issue #90 |
 | Host-layer lanes serialized | Only one lane at a time may touch `buddy-driver/agent-runner.mts`, `buddy-driver/resident-types.ts`, or `buddy-driver/package.json` | `AGENTS.md` §4.0-A; commit `f53d7ee`; conflict precedent #26/#34 vs #27/#28 |
-| Abort and delegate on conflict | Resolve conflicts inside the lane worktree, report the merged branch, then land one at a time | `AGENTS.md` lines 104-105; `git cherry-pick --abort` in `TODO.md` line 147 |
+| Abort and delegate on conflict | Resolve conflicts inside the lane worktree, report the merged branch, then land one at a time | `AGENTS.md` lines 104-105; `git cherry-pick --abort` in `docs/status/TODO.md` line 147 |
 | No force-push, no history rewrite | Explicitly forbidden | `AGENTS.md` line 128 |
 | No secrets | Never print anything under `/home/s0u7a/.config/kimaki-secrets/`; tools are "read-only, no secrets printed" | `AGENTS.md` line 148; headers of `verify-mercury.mjs`, `buddy-status.mjs`, `agent-report.mjs` |
-| No `any`, no `@ts-ignore` | Forbidden in the resident code | `RESIDENT-MODE.md` §13-0 line 214; `AGENTS.md` line 56 of `RESIDENT-MODE.md` §1 |
+| No `any`, no `@ts-ignore` | Forbidden in the resident code | `docs/operations/RESIDENT-MODE.md` §13-0 line 214; `AGENTS.md` line 56 of `docs/operations/RESIDENT-MODE.md` §1 |
 | One host process | `tools/buddy-status.mjs` asserts `hostCount === 1`; kill by PID only, because `pkill -f` self-matches | `AGENTS.md` lines 139, 146; `buddy-status.mjs` lines 19-27, 80 |
-| `simdeath` never used against the resident | A rehearsal rewinds live progress, so use a separate bot or a non-destructive mode | `TODO.md` line 138; commit `90d57f8` (soft mode default, `--hard` opt-in) |
-| Destructive ops forbidden | No server stop, world deletion, history rewrite, or force push while unattended; `worldreset` is not used | `AGENTS.md` §0.6, lines 146; `ARCHITECTURE.md` line 486 |
+| `simdeath` never used against the resident | A rehearsal rewinds live progress, so use a separate bot or a non-destructive mode | `docs/status/TODO.md` line 138; commit `90d57f8` (soft mode default, `--hard` opt-in) |
+| Destructive ops forbidden | No server stop, world deletion, history rewrite, or force push while unattended; `worldreset` is not used | `AGENTS.md` §0.6, lines 146; `docs/history/architecture/ARCHITECTURE.md` line 486 |
 
 Observed rollback proof (the discipline rule that paid off):
 
-`TODO.md` lines 142-151 record a real incident. A lane commit was `git cherry-pick`ed into the
+`docs/status/TODO.md` lines 142-151 record a real incident. A lane commit was `git cherry-pick`ed into the
 shared tree, produced conflict markers, and the host rejected the broken bundle:
 
 ```
@@ -389,7 +389,7 @@ RELOAD ok=false trigger=source-changed ms=12 message=Build failed:
 The host kept the old generation running, so downtime was zero. Recovery was
 `git cherry-pick --abort`, return to `beac6f6`, `typecheck ok`, then
 `RELOAD ok=true skipped=unchanged`. The recorded lesson: never cherry-pick or merge in the main
-tree; always do integration in a worktree. Earlier, `ARCHITECTURE.md` lines 282-284 also show the
+tree; always do integration in a worktree. Earlier, `docs/history/architecture/ARCHITECTURE.md` lines 282-284 also show the
 host rejecting bad generations (`pos.floored is not a function`, smoke-test failures) while
 staying up.
 
@@ -401,7 +401,7 @@ recorded.
 
 ## 6. Autonomy and its limits
 
-Standing orders (`AGENTS.md` §0, `TODO.md` lines 117-128):
+Standing orders (`AGENTS.md` §0, `docs/status/TODO.md` lines 117-128):
 
 - Final goal is M4 (Ender Dragon). Current M2 is the diamond-to-Nether-gate
   waypoint; the former iron ladder is retained as historical evidence.
@@ -415,13 +415,13 @@ Standing orders (`AGENTS.md` §0, `TODO.md` lines 117-128):
 
 Recorded failure of "monitoring-only" periods:
 
-`TODO.md` lines 130-135 and commit `eaa2c3c` record that between 05:00 and 07:30 there were no
+`docs/status/TODO.md` lines 130-135 and commit `eaa2c3c` record that between 05:00 and 07:30 there were no
 additional commits: after a fuel fix landed, the loop only watched the descent. The corrective
 action was to launch four lanes at once (`#26/#34`, `#27/#28`, `#30/#33`, `#40`), and to add the
 rule "never let commits stall; always start the next lane". This is an honest process defect: the
 autonomy rule was not followed by the supervising agent, not a missing capability.
 
-Model and budget constraint (`TODO.md` lines 94-115):
+Model and budget constraint (`docs/status/TODO.md` lines 94-115):
 
 - Active model: `opencode-go/deepseek-v4.1-flash` for both `model` and `small_model`
   (`/home/s0u7a/.config/opencode/opencode.jsonc`).
@@ -431,13 +431,13 @@ Model and budget constraint (`TODO.md` lines 94-115):
 - Token frugality while limited: no polling (start a task and wait for notification), short
   replies, delegate large research to `librarian`/`explore`, collapse gate checks into one
   `tools/*.mjs` command, do not read long transcripts (verify from artifact files).
-- Explicit constraint: frugality must not reduce quality (`TODO.md` line 81: only save cost in
+- Explicit constraint: frugality must not reduce quality (`docs/status/TODO.md` line 81: only save cost in
   ways that do not lower capability or correctness).
 
 Limits of autonomy:
 
 - The agent cannot be steered by injecting goals; only a code fix unsticks it
-  (`ARCHITECTURE.md` line 485).
+  (`docs/history/architecture/ARCHITECTURE.md` line 485).
 - Exactly one host process is allowed; two hosts cause mutual disconnects (§8.1).
 - The host must not be reloaded while WIP exists in the tree it builds from.
 - `UNVERIFIED`: whether the 16-hour budget window was actually respected end to end; the config
@@ -449,15 +449,15 @@ Limits of autonomy:
 
 The backlog is issue-driven, and the external reviewer supplies code-level root causes.
 
-- `ARCHITECTURE.md` §5.5 lists "Sol audit derived applied items" (bounded question sets, boolean
+- `docs/history/architecture/ARCHITECTURE.md` §5.5 lists "Sol audit derived applied items" (bounded question sets, boolean
   uncertainty band, action-only authority, trigger priority, epoch/hash staleness checks,
   monotonic subgoal ledger, `PlanOp`).
-- `ARCHITECTURE.md` §8 lists seven open questions for the reviewer to redirect.
-- `RESIDENT-MODE.md` §13-0 is titled "外部レビュー改訂" and supersedes §13 *within that file*. It
+- `docs/history/architecture/ARCHITECTURE.md` §8 lists seven open questions for the reviewer to redirect.
+- `docs/operations/RESIDENT-MODE.md` §13-0 is titled "外部レビュー改訂" and supersedes §13 *within that file*. It
   does not outrank root `AGENTS.md`; see §1.1 and the correction below.
 - PRs are opened from `souta-lab` branches (`Merge pull request #47`, `#51`, `#53`); one open PR is
   `#2` (CI + bounded Mercury adapter), recorded as mergeable but blocked on red CI
-  (`ARCHITECTURE.md` line 492).
+  (`docs/history/architecture/ARCHITECTURE.md` line 492).
 
 Canonical priority order (root policy; see §1.1):
 
@@ -467,11 +467,11 @@ Canonical priority order (root policy; see §1.1):
    Grounded-Options skeleton, then shadow/eval, then Mercury correctness, then #24, M2, #35, #41,
    M3/M4.
 3. Nearest scoped `AGENTS.md` (`buddy-driver/AGENTS.md`), read as an elaboration of root policy.
-4. Current operational queue (`TODO.md`).
-5. Design/evidence docs: `PLANNERS.md`, `RESIDENT-MODE.md`, `ARCHITECTURE.md`, `PRIOR-WORK.md`.
+4. Current operational queue (`docs/status/TODO.md`).
+5. Design/evidence docs: `docs/decision/PLANNERS.md`, `docs/operations/RESIDENT-MODE.md`, `docs/history/architecture/ARCHITECTURE.md`, `docs/history/investigations/PRIOR-WORK.md`.
 
-Correction: an earlier revision of this document listed `RESIDENT-MODE.md` §13-0 as canonical
-priority #1, ahead of root `AGENTS.md`. That was wrong. `RESIDENT-MODE.md` §13-0 is a
+Correction: an earlier revision of this document listed `docs/operations/RESIDENT-MODE.md` §13-0 as canonical
+priority #1, ahead of root `AGENTS.md`. That was wrong. `docs/operations/RESIDENT-MODE.md` §13-0 is a
 design/evidence document; its "SUPERSEDE §13" note only supersedes §13 inside the same file. Its
 P0-P6 ladder predates the Grounded-Options reordering and yields to `AGENTS.md` §2 where they
 conflict.
@@ -480,11 +480,11 @@ How issues are closed or kept open:
 
 | Issue | Outcome | Evidence |
 |---|---|---|
-| `#15` cached-strategy loop | Claim was "closed as green"; GitHub state stayed OPEN at the #63 audit. Run-scoped re-check on 2026-09-18 is FAIL: `no_cached_strategy_loop` reports `maxConsecutiveSameStrategy=9` for `run-mu5qd4ah-3xdh`. | `bun tools/verify-mercury.mjs --run run-mu5qd4ah-3xdh`; `TODO.md` lines 178-184 |
+| `#15` cached-strategy loop | Claim was "closed as green"; GitHub state stayed OPEN at the #63 audit. Run-scoped re-check on 2026-09-18 is FAIL: `no_cached_strategy_loop` reports `maxConsecutiveSameStrategy=9` for `run-mu5qd4ah-3xdh`. | `bun tools/verify-mercury.mjs --run run-mu5qd4ah-3xdh`; `docs/status/TODO.md` lines 178-184 |
 | `#13` listener leak | OPEN. `listenerLeak=false` observed on some reloads, but the run-scoped `run-mu5qd4ah-3xdh` record shows `listenerLeak=true` (physicsTick 2 -> 3). Observation != closure. | `runs/run-mu5qd4ah-3xdh/acceptance.json`; `verify-issue13.mjs` is the gate |
-| `#12` precondition chain | Kept open | `TODO.md` line 151: gate 5/6, only `raw_iron_obtained` remains |
-| `#44` replan spin | Landed (churn 27 -> 1) | `TODO.md` lines 163-169 |
-| `#14` known-resource retrieval | Landed, but iron not obtained | `TODO.md` lines 153-159, gate 5/6 |
+| `#12` precondition chain | Kept open | `docs/status/TODO.md` line 151: gate 5/6, only `raw_iron_obtained` remains |
+| `#44` replan spin | Landed (churn 27 -> 1) | `docs/status/TODO.md` lines 163-169 |
+| `#14` known-resource retrieval | Landed, but iron not obtained | `docs/status/TODO.md` lines 153-159, gate 5/6 |
 
 Issue state is recorded as five separate fields, never collapsed (issue #63 §6):
 
@@ -506,7 +506,7 @@ RESEARCH hypothesis to test
 ```
 
 Examples: `#43` was opened from a live observation that inventory already held `charcoal:1` while
-the plan still scheduled charcoal (`TODO.md` lines 188-189); `#40`, `#48`, `#50`, `#54`, `#56`,
+the plan still scheduled charcoal (`docs/status/TODO.md` lines 188-189); `#40`, `#48`, `#50`, `#54`, `#56`,
 `#57`, `#59` came from static or architecture review.
 
 ---
@@ -535,24 +535,24 @@ the mitigation is verified.
 
 - Symptom: the advisor replayed the same cached strategy forever, so the body never moved; the
   agent looked alive but issued no new action.
-- Evidence: `TODO.md` line 9 ("同一cached戦略が112回連続"); `verify-mercury.mjs` reproduces the
+- Evidence: `docs/status/TODO.md` line 9 ("同一cached戦略が112回連続"); `verify-mercury.mjs` reproduces the
   historical loop with `--all`.
 - Mitigation: `ADVISOR_CACHE_GUARD`, bypass of repeated no-progress strategies, grounding refusals
   of inapplicable strategies (`#15/#29`), plus a temporary config escape
   (`system2.config.json` `{"mercury": true}`).
-- Verified: yes. `TODO.md` lines 178-184: `verify-mercury` PASS 5/5, `maxConsecutiveSameStrategy=2`
+- Verified: yes. `docs/status/TODO.md` lines 178-184: `verify-mercury` PASS 5/5, `maxConsecutiveSameStrategy=2`
   after the guard, `bypasses=5`, `refusals=9`.
 
 ### 8.3 WAIT limit that became a replan loop (churn 1 -> 27 per 5 min)
 
 - Symptom: a WAIT-cooldown counter turned each WAIT into a replan, which re-emitted WAIT, producing
   generation churn and no progress.
-- Evidence: `TODO.md` line 173 (`gensLast5min は 1→7→17→27 と悪化`, `generations=401`,
+- Evidence: `docs/status/TODO.md` line 173 (`gensLast5min は 1→7→17→27 と悪化`, `generations=401`,
   `recoveries=206`, `POS` unchanged), and a manual `FREEZE`.
 - Mitigation: issue `#44`: replan throttle (same `(reason, stateHash)` at most once per 10 s
   window), a new-information gate, a body-delta requirement, and grounding of known-resource
   retrieval. Live counter `REPLAN_THROTTLED=18635`.
-- Verified: yes for the loop. `TODO.md` line 165: `gensLast5min=1 (27 -> 1)`; issue #12 gate
+- Verified: yes for the loop. `docs/status/TODO.md` line 165: `gensLast5min=1 (27 -> 1)`; issue #12 gate
   recovered to 4/6 and then 5/6.
 
 ### 8.4 Generations dying after 1 tick
@@ -560,13 +560,13 @@ the mitigation is verified.
 - Symptom: the plan head required a precondition (for example `smelt 3 x iron_ingot` needing a
   furnace and `raw_iron`) that was missing, so the generation stopped after a tick and the host
   recovered it into the same impossible goal, a roughly 10-15 s rotation.
-- Evidence: `ARCHITECTURE.md` update lines 461-470: `PRECONDITION_MISSING=133 LADDER_PREREQ=0`,
+- Evidence: `docs/history/architecture/ARCHITECTURE.md` update lines 461-470: `PRECONDITION_MISSING=133 LADDER_PREREQ=0`,
   `generations=213 recoveries=88`, `TOOL_CHOICE/DIG_PATH/JUMP_ATTEMPT/DESCEND_LIMIT` all zero.
 - Mitigation: issue `#12` replaces the plan with the prerequisite chain from live inventory
   (`LADDER_PREREQ goal=... need=... -> replace goals=[...]`), stops only when provably
   unsatisfiable, and does not stop again for at least 20 ticks.
 - Verified: partially. Positive: `LADDER_PREREQ=176`, `PRECONDITION_PROTECTED=102`,
-  `maxTicks=794` (`TODO.md` line 158). Negative: `TODO.md` line 210 says the 1-tick stop
+  `maxTicks=794` (`docs/status/TODO.md` line 158). Negative: `docs/status/TODO.md` line 210 says the 1-tick stop
   "remains", and `raw_iron_obtained` is still failing.
 
 ### 8.5 A simdeath rehearsal reset the live ladder to wood
@@ -579,7 +579,7 @@ the mitigation is verified.
 - Mitigation: commit `90d57f8` adds a soft `simdeath` mode (default) that snapshots the ledger,
   milestone, and hazard memory, exercises the death path, then restores them; `--hard` keeps the
   old destructive semantics and is opt-in. Simulated hazards are written to a non-durable
-  rehearsal namespace with `HAZARD_SKIPPED source=simulation`. `TODO.md` line 138 forbids
+  rehearsal namespace with `HAZARD_SKIPPED source=simulation`. `docs/status/TODO.md` line 138 forbids
   rehearsals against the resident at all. Commit `826cb4e` makes ladder resume inventory-aware so
   materials held are not lost ("never restart at wood with materials held").
 - Verified: mitigations present and merged (`PR #47`). The restore path is logged
@@ -603,7 +603,7 @@ the mitigation is verified.
 ### 8.7 `quick`-category lanes returning empty
 
 - Symptom: `quick` sub-agent lanes sometimes produced no artifact.
-- Evidence: `TODO.md` line 137: "quickカテゴリは空振り実績があるためコード変更はdeepを使う"
+- Evidence: `docs/status/TODO.md` line 137: "quickカテゴリは空振り実績があるためコード変更はdeepを使う"
   (quick has a history of empty results, so code changes use deep).
 - Mitigation: route code changes to `deep`; delegate only cheap work to `quick`.
 - Verified: operationally as a routing policy; there is no tracked count of empty quick lanes
@@ -615,7 +615,7 @@ the mitigation is verified.
   re-integration work; one collision produced a broken shared tree and a failed reload.
 - Evidence: `AGENTS.md` §4.0-A lines 100-102 cites `#26/#34` and `#27/#28` colliding on
   `agent-runner.mts` and `package.json`, forcing a merge abort. The cherry-pick incident in
-  `TODO.md` lines 142-151 produced `<<<<<<<` markers and `RELOAD ok=false`.
+  `docs/status/TODO.md` lines 142-151 produced `<<<<<<<` markers and `RELOAD ok=false`.
 - Mitigation: serialize host-layer lanes, declare owned files before starting, integrate inside a
   worktree, keep `main` buildable, and never merge in the shared tree. The host's generation
   contract (build, import, smoke, then swap) turns a bad bundle into a rejected reload instead of
@@ -629,14 +629,14 @@ the mitigation is verified.
 
 | Metric | Definition | Source / command | Observed value |
 |---|---|---|---|
-| Generation churn | `GENERATION_START` count in the last 5 minutes, target `<= 3` | `tools/verify-issue12.mjs` (`gensLast5min`); `buddy-status.mjs` | 27 before #44, 1 after (`TODO.md` lines 165, 173) |
-| Ticks per generation | `ticks=N` in `GENERATION_STOP` | `verify-issue12.mjs` lines 36-40 | `maxTicks=794` (`TODO.md` line 158); 1-tick residual still noted |
-| Reconnect count | `stats.reconnects` and `reconnectsLastHour` from the control socket | `buddy-status.mjs` lines 87-88 | 77 `RECONNECT` markers in `buddy.log`; `#27` recorded `reconnects=65` (`TODO.md` line 31) |
-| Listener-leak flag | `listenerLeak` boolean plus per-event listener counts vs baseline | `tools/verify-issue13.mjs`; `buddy-status.mjs` line 93 | `listenerLeak=false` (`TODO.md` line 210); `RELOAD` lines show `listeners={"physicsTick":2,...} listenerLeak=false` |
+| Generation churn | `GENERATION_START` count in the last 5 minutes, target `<= 3` | `tools/verify-issue12.mjs` (`gensLast5min`); `buddy-status.mjs` | 27 before #44, 1 after (`docs/status/TODO.md` lines 165, 173) |
+| Ticks per generation | `ticks=N` in `GENERATION_STOP` | `verify-issue12.mjs` lines 36-40 | `maxTicks=794` (`docs/status/TODO.md` line 158); 1-tick residual still noted |
+| Reconnect count | `stats.reconnects` and `reconnectsLastHour` from the control socket | `buddy-status.mjs` lines 87-88 | 77 `RECONNECT` markers in `buddy.log`; `#27` recorded `reconnects=65` (`docs/status/TODO.md` line 31) |
+| Listener-leak flag | `listenerLeak` boolean plus per-event listener counts vs baseline | `tools/verify-issue13.mjs`; `buddy-status.mjs` line 93 | `listenerLeak=false` (`docs/status/TODO.md` line 210); `RELOAD` lines show `listeners={"physicsTick":2,...} listenerLeak=false` |
 | Gate pass counts | pass/total from each verifier | `verify-issue12/13/mercury.mjs` | #12 `5/6`; #13 is 2 checks; Mercury `5/5` |
-| Cost per Mercury call | `cost` field in `mercury-calls.jsonl` | `tools/verify-mercury.mjs` reads it | `cost=0.000281`, `cost=0.000289`, `cost=0.000329` (`TODO.md` line 11; `ARCHITECTURE.md` line 444) |
-| Jev call cost | mean cost per Jev call from `jev-calls.jsonl` | `ARCHITECTURE.md` lines 80 | about `$0.00018/call`, p50 latency 410-720 ms |
-| M1 milestone | 4/4 subgoals, `llm.called==false`, wedge 0 | `README.md`; `jev-agent/logs/m1-fresh2-console.log`; `ARCHITECTURE.md` §5.1 | `planned=4 done=4`, `with_llm_called_true=0`, `verifiedDigs=22` |
+| Cost per Mercury call | `cost` field in `mercury-calls.jsonl` | `tools/verify-mercury.mjs` reads it | `cost=0.000281`, `cost=0.000289`, `cost=0.000329` (`docs/status/TODO.md` line 11; `docs/history/architecture/ARCHITECTURE.md` line 444) |
+| Jev call cost | mean cost per Jev call from `jev-calls.jsonl` | `docs/history/architecture/ARCHITECTURE.md` lines 80 | about `$0.00018/call`, p50 latency 410-720 ms |
+| M1 milestone | 4/4 subgoals, `llm.called==false`, wedge 0 | `README.md`; `jev-agent/logs/m1-fresh2-console.log`; `docs/history/architecture/ARCHITECTURE.md` §5.1 | `planned=4 done=4`, `with_llm_called_true=0`, `verifiedDigs=22` |
 | Historical iron-age M2 evidence | iron obtained, proven by inventory | `buddy.log` `LADDER_RESUME ... inventory={...,"raw_iron":8,...}` and `HEARTBEAT ... inv={...,"raw_iron":8,...}` | `raw_iron:8`, charcoal smelted 2026-09-18 00:13 JST (`README.md`); `FURNACE_READY=0`, `SMELT_DONE=0` |
 | Stuck heuristics | movement < 5 blocks, action repeats >= 8, no inventory change >= 10 min, abandons >= 3 in a 30-min window | `tools/agent-report.mjs` lines 34-41 | tool exists; VERDICT output is its gate |
 
@@ -684,10 +684,10 @@ frozen rather than productive, which is why `#44` used `FREEZE` deliberately and
 | Item | Path |
 |---|---|
 | Standing orders | `AGENTS.md` §0, §2, §4 |
-| Backlog / current critical path | `TODO.md` |
-| Layer responsibilities | `PLANNERS.md` |
-| As-built architecture and evidence | `ARCHITECTURE.md` |
-| Resident-mode canonical requirements | `RESIDENT-MODE.md` |
+| Backlog / current critical path | `docs/status/TODO.md` |
+| Layer responsibilities | `docs/decision/PLANNERS.md` |
+| As-built architecture and evidence | `docs/history/architecture/ARCHITECTURE.md` |
+| Resident-mode canonical requirements | `docs/operations/RESIDENT-MODE.md` |
 | Gate tools | `tools/buddy-status.mjs`, `tools/verify-issue12.mjs`, `tools/verify-issue13.mjs`, `tools/verify-mercury.mjs`, `tools/replay.mjs`, `tools/agent-report.mjs`, `tools/test-replay.mjs`, `tools/test-agent-report.mjs` |
 | Lane tests | `jev-agent/test-*.mts`, `jev-agent/data/step-pipeline-test.mts` |
 | Live host log | `buddy-driver/buddy.log` |

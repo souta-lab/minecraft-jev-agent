@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// current-status: derive a CURRENT-STATUS.md snapshot from real evidence only.
+// current-status: derive a docs/status/CURRENT-STATUS.md snapshot from real evidence only.
 // Usage: bun tools/current-status.mjs [--write] [--runtime-root <tree>]
-//   --write         write CURRENT-STATUS.md to the current working directory.
+//   --write         write docs/status/CURRENT-STATUS.md under the current working directory.
 //   --runtime-root  inspect a resident rooted in another worktree.
 // Every section is labeled EVIDENCE or UNKNOWN. Values are never invented: if a
 // command fails, the section is UNKNOWN and the failure is shown verbatim.
@@ -14,7 +14,7 @@
 // never omitted (silent) and never rendered as a code FAIL. tools/ci-classify.mjs
 // owns that classification; this file only renders it.
 import { execFile } from 'node:child_process'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -319,7 +319,8 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   const { markdown } = await deriveStatus(statusOptions)
   let written = null
   if (argv.includes('--write')) {
-    written = join(cwd, 'CURRENT-STATUS.md')
+    written = join(cwd, 'docs', 'status', 'CURRENT-STATUS.md')
+    mkdirSync(dirname(written), { recursive: true })
     writeFileSync(written, markdown)
   }
   return { markdown, written }

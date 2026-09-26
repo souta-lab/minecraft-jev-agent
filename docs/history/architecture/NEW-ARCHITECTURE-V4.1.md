@@ -1,23 +1,19 @@
-# NEW ARCHITECTURE V4.1.1 — Concurrent Verified Transition Runtime
+# NEW ARCHITECTURE V4.1 — Concurrent Verified Transition Runtime
+
+> **Superseded by `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`.** Retained as semantic lineage (root `AGENTS.md` §0 precedence item 4), not as current instruction.
 
 Status: architecture contract and executable model, not production migration.
-V4.1 base: `cea0237702bedd8c978b63879b7b3fa13b25065c`; original repository audit base: `origin/main` at `355a26796c4891ecf68ab8ef70cfdd2b626df225`, with the Reach VTR acceptance integration read-only snapshot noted by V4.1.
-Fresh V4.1.1 worktree: `/home/s0u7a/vtr-worktrees/v411-model-hardening-20260925-2203`.
-Branch: `arch/v4.1.1-model-hardening-20260925`.
+Source audited: `origin/main` at `355a26796c4891ecf68ab8ef70cfdd2b626df225` plus read-only Reach VTR acceptance integration at `ed6e4ddb6a57e20b72a833e9e2b3e69227f09e34`.
+Fresh worktree: `/home/s0u7a/vtr-worktrees/v41-architecture-redesign-sol-20260925-2100`.
+Branch: `arch/v4.1-concurrent-transition-runtime-sol-20260925-2100`.
 
 This document is standalone. It does not assume V4 is correct; it preserves only properties that survived repository, runtime, concurrency, control, and Minecraft-specific review.
-
-## 0.1 V4.1.1 hardening delta
-
-V4.1.1 is a model-hardening revision before production migration. It closes ten executable-spec gaps found by adversarial review of V4.1: hierarchical resource overlap, typed resume proof, contract-bound VERIFY, mission/registry resume fencing, monotonic fact revision, transactional safe-yield preemption, bounded non-preemptible sections, full Jev binding equality, world/generation/lease/effect-bound commit tokens, and revisioned ATR mutation APIs. The semantic architecture is unchanged; the executable contract is stricter.
-
-A boolean such as `freshRevalidation=true` is not evidence. Resume/VERIFY now require typed proof whose exact contract identity, live world, live runtime binding, predicate evidence revision/world, witness revision, and Mission/registry authorization are mechanically checked.
 
 ## 1. Problem statement
 
 A long-running Minecraft agent is not a serial action classifier. It is a hybrid control system with asynchronous server truth, partial observation, irreversible effects, continuous body mechanics, moving entities, long-running world processes, health/hunger/air constraints, and multiple simultaneously relevant desired predicates.
 
-V4 correctly moved the semantic unit from primitive action to verified world-state Transition, but its first Reach slice still has a single-active-Transition bias: one controller, one active contract, one body owner, and safety interruption as a terminal outcome. V4.1/V4.1.1 remove that bias without turning the runtime into a general-purpose operating system.
+V4 correctly moved the semantic unit from primitive action to verified world-state Transition, but its first Reach slice still has a single-active-Transition bias: one controller, one active contract, one body owner, and safety interruption as a terminal outcome. V4.1 removes that bias without turning the runtime into a general-purpose operating system.
 
 The central requirement is: **multiple semantic Transitions may remain live concurrently, while only compatible effects/resources may execute concurrently, and temporary mechanical preemption must not silently destroy semantic ownership.**
 
@@ -36,7 +32,7 @@ The central requirement is: **multiple semantic Transitions may remain live conc
 
 ## 3. Non-goals
 
-V4.1.1 is not a production Reach rewrite, not a benchmark-specific planner, not a huge God Scheduler, not a universal lock manager, and not a claim that every Minecraft activity should be a separate Transition. It does not replace Mineflayer mechanical control, and it does not make Jev or System2 responsible for Minecraft truth.
+V4.1 is not a production Reach rewrite, not a benchmark-specific planner, not a huge God Scheduler, not a universal lock manager, and not a claim that every Minecraft activity should be a separate Transition. It does not replace Mineflayer mechanical control, and it does not make Jev or System2 responsible for Minecraft truth.
 
 It also does not promise maximal parallelism. Concurrency is admitted only when resource/effect claims are compatible and observation/verification remain causally attributable.
 
@@ -91,7 +87,7 @@ A canonical contract contains semantic identity and bounds: `transitionId`, `con
 
 **The contract hash excludes temporary leases, controller generation, scheduler epoch, current witness, current waypoint, and fact revision.** Those are runtime bindings. This is required for legitimate suspend/resume and generation rebinding without semantic identity laundering.
 
-Irreversible effects are two-stage: the contract admits an effect class/scope; immediately before dispatch, the runtime issues a short-lived `EffectCommitToken` bound to transition, contract, world identity, exact runtime binding (generation/fact/registry/Mission revisions), current lease fingerprint, exact effect permit, and expiry. Any binding/world/lease/permit change or cancellation invalidates an unused token.
+Irreversible effects are two-stage: the contract admits an effect class/scope; immediately before dispatch, the runtime issues a short-lived `EffectCommitToken` bound to transition, contract, current fact revision, effect, scope, and expiry. A fact revision change or cancellation invalidates an unused token.
 
 ## 9. Transition Lifecycle
 
@@ -115,15 +111,15 @@ The ATR is the authoritative set of nonterminal Transition instances. It stores 
 
 Multiple active/observing Transitions are normal: Reach + passive Search, exploration + smelting observation, combat threat tracking + navigation, or world-model appenders alongside a foreground mission.
 
-ATR mutations occur only through revisioned put/mutate/remove APIs and advance `registryRevision`. A mutation cannot change a live Transition's `transitionId` or `contractHash`. Jev frames, resume proofs, VERIFY proofs, and effect commits bind to registry/fact/Mission revisions so late artifacts cannot be applied to a different active set.
+ATR mutations advance `registryRevision`. Jev frames and effect commits bind to this revision/fact revision so late answers cannot be applied to a different active set.
 
 ## 11. Resource / Effect Ownership
 
 V4.1 uses a small hierarchical namespace rather than a global mutex: `body.locomotion`, `body.orientation`, `interaction`, `attack`, `inventory`, `equipment`, `world.blocks`, `entity:<id>`, `observation.world`, `memory.worldModel`, `station:<identity>`, `container:<identity>`, and `command`.
 
-Modes are `SHARED_READ`, `APPEND`, and `EXCLUSIVE_WRITE`. APPEND is permitted only on append-only/merge-defined stores such as observation journals; it is not generic shared mutation. Exclusive WRITE conflicts with any other claim on an overlapping hierarchical resource path. `body` overlaps `body.locomotion`; `inventory` overlaps `inventory.slot.*`; `station:furnace` overlaps a concrete `station:furnace@...`. Sibling paths do not overlap unless an ancestor is claimed.
+Modes are `SHARED_READ`, `APPEND`, and `EXCLUSIVE_WRITE`. APPEND is permitted only on append-only/merge-defined stores such as observation journals; it is not generic shared mutation. Exclusive WRITE conflicts with any other claim on the same resource.
 
-Resource keys are parsed as canonical paths and conflict by ancestor/descendant overlap, not raw string equality. Claims are acquired as one canonical bundle, ordered by resource key, or not acquired at all. Controllers never hold resource A while waiting for B. This removes hold-and-wait deadlock from the normal path. Long waits must release scarce leases and move to OBSERVING/BLOCKED.
+Claims are acquired as one canonical bundle, ordered by resource key, or not acquired at all. Controllers never hold resource A while waiting for B. This removes hold-and-wait deadlock from the normal path. Long waits must release scarce leases and move to OBSERVING/BLOCKED.
 
 Semantic ownership and actuation ownership are independent. A suspended Reach keeps its transitionId, contractHash, progress, history, and budgets while Viability temporarily owns locomotion.
 
@@ -156,7 +152,7 @@ Controller state is reconstructible from contract + verified facts + journal che
 
 Mechanical controllers receive typed setpoints and short-lived resource/effect authority. They may execute continuous loops between semantic decision epochs, but every side effect must pass the Runtime Adapter/lease boundary. Mechanical completion returns evidence, never Transition SUCCESS.
 
-A mechanical loop may be non-preemptible only for a tightly bounded critical section where interruption would make state less safe or corrupt protocol state, e.g. one inventory click sequence. The bound and cleanup semantics are part of the effect implementation. In V4.1.1, every non-preemptible resource claim must declare a finite positive `maxNonPreemptibleMs`; malformed unbounded claims fail before a lease is granted.
+A mechanical loop may be non-preemptible only for a tightly bounded critical section where interruption would make state less safe or corrupt protocol state, e.g. one inventory click sequence. The bound and cleanup semantics are part of the effect implementation.
 
 ## 16. Viability Runtime
 
@@ -174,7 +170,7 @@ A `JevDecisionFrameV41` contains bounded verified facts, Mission frontier, enabl
 
 Jev may return grounded Transition/tactic ids, rankings, bounded booleans, scores, and risk/utility estimates. It may not return world truth, SUCCESS, raw actuator commands, arbitrary coordinates, lease grants, or unconditional termination authority.
 
-Concurrency split: deterministic code constructs the conflict graph and enforces hard claims; Jev may rank otherwise-admissible contenders or tactics. If exactly one admissible answer remains, code need not call Jev. A late answer is dropped unless frame hash and scheduler epoch match and `frame.binding == decision.binding == live.binding` across generation, factRevision, registryRevision, and missionRevision.
+Concurrency split: deterministic code constructs the conflict graph and enforces hard claims; Jev may rank otherwise-admissible contenders or tactics. If exactly one admissible answer remains, code need not call Jev. A late answer is dropped unless frame hash, scheduler epoch, generation, factRevision, registryRevision, and missionRevision still match.
 
 External Jev usage examples audited on 2026-09-25 consistently use one shared `state` plus typed `questions` (`choice`, `boolean`/`noul`, `score`) and return structured probabilities. Batch questions are useful because the scheduler can ask several independent bounded judgments in one semantic epoch, but each answer must remain independently grounded and guarded.
 
@@ -194,7 +190,7 @@ Observation adapters are separate capabilities. Passive observers may read senso
 
 ## 20. Verification
 
-Only deterministic VERIFY can emit `SUCCESS`. VERIFY first proves `state.transitionId == contract.transitionId == evidence.transitionId`, identical `contractHash`, exact current runtime binding, same world, current fact revision, and complete requires/invariant coverage; only then may it evaluate the desired predicate. It is legal for a Transition to succeed because another Transition, another player, or the environment made its desired predicate true; causal credit is recorded as `self`, `shared`, or `external` rather than fabricating authorship.
+Only deterministic VERIFY can emit `SUCCESS`. Verification reads fresh facts against the contract's desired predicate and invariants. It is legal for a Transition to succeed because another Transition, another player, or the environment made its desired predicate true; causal credit is recorded as `self`, `shared`, or `external` rather than fabricating authorship.
 
 Verification is idempotent and monotonic with respect to accepted fact revisions. An older sample may not close a newer Transition state. Multiple Transitions targeting the same predicate may all observe closure, but the journal records one verified fact and separate causal links.
 
@@ -225,9 +221,9 @@ A typed failure is not automatically a Mission failure. The smallest authority l
 
 ## 23. Preemption / Suspend / Resume
 
-Preemption is an explicit state machine: `PREEMPT_REQUESTED` -> controller `YIELD_ACKNOWLEDGED` at a safe yield point -> old leases revoked -> old Transition SUSPENDED -> new bundle GRANTED. A non-preemptible conflicting lease enters `WAITING_BOUNDED_SECTION`, inherits requester priority only for finishing that declared bounded section, and still requires safe-yield acknowledgement. Deadline expiry is a typed fault; it never force-revokes an unsafe critical section. No interval may contain two exclusive WRITE owners.
+Preemption is a transaction: scheduler identifies the new owner -> old controller is asked to reach a bounded safe yield point -> old leases are revoked -> old Transition enters SUSPENDED with semantic state intact -> new owner receives leases. No interval may contain two exclusive WRITE owners.
 
-Resume is never a blind state flip and accepts no boolean freshness flag. It requires a typed `ResumeProof` bound to the same transitionId/contractHash, observed world, exact new runtime binding, and complete prerequisite/invariant verification. factRevision, registryRevision, and missionRevision are monotonic and may never regress; generation changes are allowed only through such a proof. A world/dimension/epoch change terminalizes or forces explicit contract repair; a generation change alone may rebind the same semantic contract after fresh validation.
+Resume is never a blind state flip. It requires fresh observation and revalidation of world identity, contract prerequisites/invariants, deadline/budgets, witness validity, Mission revision, and the new generation binding. A world/dimension/epoch change terminalizes or forces explicit contract repair; a generation change alone may rebind the same semantic contract after fresh validation.
 
 Cancellation revokes leases and unused effect tokens immediately, asks in-flight bounded mechanical work to quiesce, then records what irreversible effects already happened. Cancellation cannot pretend to roll back world mutation. Cleanup work is a new explicitly authorized Transition when needed.
 
@@ -255,7 +251,7 @@ Cancellation revokes leases and unused effect tokens immediately, asks in-flight
 
 ## 26. Acceptance criteria
 
-Architecture-level acceptance requires executable proof of V4.1.1 hardening plus at least: compatible parallel transitions; exclusive WRITE conflict; explicit preemption; suspend/resume with stable contract identity; stale world rejection; generation rebind only after fresh validation; atomic bundle deadlock prevention; starvation mitigation; deterministic SUCCESS; Viability temporary ownership; passive Search concurrency; long-running OBSERVING process; stale Jev result drop; and stale irreversible-effect commit rejection.
+Architecture-level acceptance requires executable proof of at least: compatible parallel transitions; exclusive WRITE conflict; explicit preemption; suspend/resume with stable contract identity; stale world rejection; generation rebind only after fresh validation; atomic bundle deadlock prevention; starvation mitigation; deterministic SUCCESS; Viability temporary ownership; passive Search concurrency; long-running OBSERVING process; stale Jev result drop; and stale irreversible-effect commit rejection.
 
 Production migration is not accepted merely because the type model passes. Each migrated family must add adapter-level evidence that no raw Mineflayer mutation bypasses leases, no action completion can issue Transition SUCCESS, and runtime logs permit replay of ownership changes.
 
@@ -273,7 +269,7 @@ The model in `architecture/v4.1/model.test.ts` exercises these and additional co
 
 **Phase 0 — Reach proof closure:** leave current Reach acceptance branch unchanged and treat it as the single-Transition VTR kernel proof.
 
-**Phase 1 — V4.1.1 model contracts:** land ATR/resource/effect/lifecycle model and pure tests with zero production authority.
+**Phase 1 — V4.1 model contracts:** land ATR/resource/effect/lifecycle model and pure tests with zero production authority.
 
 **Phase 2 — Reach under ATR:** wrap the production Reach contract/controller in the registry while preserving its existing adapter and verification boundary; still allow only one Mission Transition initially.
 
@@ -458,7 +454,7 @@ Concurrency residual risk: external Mineflayer/plugin code may mutate through an
 6. **Experience-model concurrency:** writes are deferred to append-only causal records; online learned parameter updates need a separate consistency contract.
 7. **Very long external processes:** chunk unloading, furnace simulation rules, crop growth, and dropped-item expiry need family-specific observation/wake contracts.
 8. **Death semantics across Mission structure:** which semantic contracts survive death is intentionally family-specific and not globally guessed.
-9. **Resource alias canonicalization:** hierarchical ancestor/descendant overlap is now executable, but semantically related names such as `hand`, `equipment`, inventory hotbar slots, and plugin-specific window resources may still need an explicit alias/canonicalization table before production concurrency.
+9. **Resource hierarchy aliases:** `inventory`, `equipment`, `hand`, and window slots may require hierarchical conflict expansion rather than exact string equality in production.
 10. **Effect compensation:** V4.1 records irreversible effects after cancellation but does not define generic rollback/compensation because Minecraft effects are not uniformly reversible.
 
 These are not claims of completeness. Each is an explicit place where future Search, Acquisition, Combat, Building, Smelting, Portal, or Viability work may force refinement.
@@ -491,7 +487,7 @@ A future discovery in these classes should trigger architecture review rather th
 
 **Changed from V4 / Reach proof:** single active contract -> Active Transition Registry; safety terminal -> suspend/Viability/resume when recoverable; lease/generation removed from semantic contract identity; global actuation ownership -> resource/effect bundles; one decision timescale -> four explicit scales; transition SUCCESS causality -> verification plus `self/shared/external` credit; long-running waiting -> OBSERVING/BLOCKED lifecycle; scheduler priority -> priority + urgency/deadline + fairness + preemption rules.
 
-**Repository evidence inspected:** `AGENTS.md`; historical `ARCHITECTURE.md`, `RESIDENT-MODE.md`, `PLANNERS.md`; `jev-harness/{contract,identity,harness}.ts`; `jev-agent/src/{controller-legacy,executor,goalQueue,optionSpec,scheduler,actuationPort,worldMemory,combatClosure,crafting,containerAccess,netherPortalPlan,prereqOption}.ts`; HOST world/generation fencing; and the read-only Reach VTR acceptance integration including `vtr/reach*.ts` and its Minecraft runtime adapter.
+**Repository evidence inspected:** `AGENTS.md`; historical `docs/history/architecture/ARCHITECTURE.md`, `docs/operations/RESIDENT-MODE.md`, `docs/decision/PLANNERS.md`; `jev-harness/{contract,identity,harness}.ts`; `jev-agent/src/{controller-legacy,executor,goalQueue,optionSpec,scheduler,actuationPort,worldMemory,combatClosure,crafting,containerAccess,netherPortalPlan,prereqOption}.ts`; HOST world/generation fencing; and the read-only Reach VTR acceptance integration including `vtr/reach*.ts` and its Minecraft runtime adapter.
 
 **Jev usage audit:** repository code and external examples were searched before defining the V4.1 frame. Observed usage consistently supplies shared structured state and typed bounded questions, can batch questions, and returns structured probabilities/choices/scores. V4.1 therefore treats Jev as a fast typed judgment plane whose outputs remain stale-fenced and deterministically admitted.
 

@@ -1,6 +1,6 @@
 // hopPolicy.ts - the localized movement-skill policy for the vertical hop.
 //
-// Audit M2-HEURISTIC-AUDIT.md: the hop timings (VERTICAL_HOP_RISE_MS/PUSH_MS)
+// Audit docs/history/milestones/M2-HEURISTIC-AUDIT.md: the hop timings (VERTICAL_HOP_RISE_MS/PUSH_MS)
 // and the hold-forward choice were implicit executor constants. They are a
 // movement RECIPE (TIMEOUT/search class) - allowed, but owned by one policy
 // object that can log `{ chosen, rise_ms, push_ms, alternatives, reason }` so

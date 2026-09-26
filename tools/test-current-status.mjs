@@ -206,7 +206,7 @@ const offlineResident = async () => null
   ok('readCi:false omits the CI section on explicit opt-out')
 }
 
-// 3. --write writes CURRENT-STATUS.md including the evidence-commands section.
+// 3. --write writes docs/status/CURRENT-STATUS.md including the evidence-commands section.
 {
   const dir = mkdtempSync(join(tmpdir(), 'current-status-'))
   try {
@@ -215,8 +215,8 @@ const offlineResident = async () => null
       run: makeRunner(),
       readResident: offlineResident,
     })
-    assert.equal(written, join(dir, 'CURRENT-STATUS.md'))
-    const file = readFileSync(join(dir, 'CURRENT-STATUS.md'), 'utf8')
+    assert.equal(written, join(dir, 'docs', 'status', 'CURRENT-STATUS.md'))
+    const file = readFileSync(join(dir, 'docs', 'status', 'CURRENT-STATUS.md'), 'utf8')
     assert.match(file, /## Evidence commands — EVIDENCE/)
     assert.match(file, /git log -1 --format=%H%n%s%n%cI origin\/main/)
     assert.match(file, /gh pr list --state open --limit 1000 --json number,title,headRefName/)

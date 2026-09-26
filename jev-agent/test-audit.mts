@@ -86,8 +86,8 @@ function trigger(triggerName: TriggerEvent['trigger'], priority: number): Trigge
 }
 
 // A. Architecture consistency -------------------------------------------------
-addCase('A. ARCHITECTURE.md question names match the code and reference no phantom fields', () => {
-  const doc = read('../ARCHITECTURE.md')
+addCase('A. docs/history/architecture/ARCHITECTURE.md question names match the code and reference no phantom fields', () => {
+  const doc = read('../docs/history/architecture/ARCHITECTURE.md')
   const missing = QUESTION_NAMES.filter((name) => !doc.includes(name))
   const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}`
   const referenced = new Set<string>()
@@ -337,7 +337,7 @@ addCase('H. stock pathfinder is the primary MOVE; actuator + headroom gate are t
 addCase('P2. Mineflayer is the stock published release (no git pin) and the 1.21.11 findings are documented', () => {
   const pkg = JSON.parse(read('package.json')) as { dependencies?: Record<string, string> }
   const pin = pkg.dependencies?.mineflayer ?? ''
-  const arch = read('../ARCHITECTURE.md')
+  const arch = read('../docs/history/architecture/ARCHITECTURE.md')
   const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}`
   const released = /^\^\d+\.\d+\.\d+$/.test(pin) && !pin.includes('github:')
   const documented = arch.includes('1.21.11') && arch.includes('stock') && arch.includes('#4063')

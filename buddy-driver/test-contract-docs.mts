@@ -130,8 +130,8 @@ addCase('c3. report/status, acceptance and generation status expose contractVers
 })
 
 // (d) migration procedure documented (incl. mandatory restart) ---------------
-addCase('d. RESIDENT-MODE.md documents the canonical value, refusal and restart migration', () => {
-  const doc = read('RESIDENT-MODE.md')
+addCase('d. docs/operations/RESIDENT-MODE.md documents the canonical value, refusal and restart migration', () => {
+  const doc = read('docs/operations/RESIDENT-MODE.md')
   const code = codeValue()
   const canonical = doc.includes(`CONTRACT_VERSION = ${code}`)
   const schemaBlock = /^STATE_SCHEMA_VERSION = \d+$/m.test(doc)

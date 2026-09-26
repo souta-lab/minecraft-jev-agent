@@ -65,7 +65,7 @@ when it has a genuinely distinct acceptance boundary.
   state and an actuation lease are implemented.
 
 Runtime position, current rung, active queue, open PR/issue counts, and other time-sensitive facts
-belong in `CURRENT-STATUS.md` / `bun run current-status`, not in this README.
+belong in `docs/status/CURRENT-STATUS.md` / `bun run current-status`, not in this README.
 
 ## Execution modes
 
@@ -144,17 +144,18 @@ keep it small so causality and rollback remain clear.
 
 ## Docs
 
+Durable documentation lives under `docs/` (see `docs/README.md` for the area map). Entry points:
+
 | File | Contents |
 | --- | --- |
-| `CURRENT-STATUS.md` | Generated/derived operational evidence snapshot; may be regenerated at any time. |
-| `DEVELOPMENT-METHOD.md` | Evidence standards, authority hierarchy, autonomous development process. |
-| `ARCHITECTURE.md` | As-built/review evidence; timestamped sections may be historical. |
-| `MILESTONES.md` | M0-M4 ladder and acceptance criteria. |
-| `M2-PROGRESS.md` | Historical M2 run log / failure analysis. |
-| `M2-HEURISTIC-AUDIT.md` | Heuristic/truth authority audit and migration evidence. |
-| `PRIOR-WORK.md` | Prior-work survey and architecture implications. |
-| `RESIDENT-MODE.md` | Resident persistence/hot-reload/state-ownership specification. |
-| `AI-OBSERVER.md` | Read-only observer API, Jev decision evidence and run-binding limits. |
+| `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md` | Current canonical architecture (V4.1.2 authority kernel). |
+| `docs/architecture/TYPESCRIPT-PACKAGE-ARCHITECTURE.md` | Normative source/documentation organization guideline. |
+| `docs/status/CURRENT-STATUS.md` | Generated/derived operational evidence snapshot; may be regenerated at any time. |
+| `docs/development/DEVELOPMENT-METHOD.md` | Evidence standards, authority hierarchy, autonomous development process. |
+| `docs/status/MILESTONES.md` | M0-M4 ladder and acceptance criteria. |
+| `docs/operations/RESIDENT-MODE.md` | Resident persistence/hot-reload/state-ownership specification. |
+| `docs/decision/AI-OBSERVER.md` | Read-only observer API, Jev decision evidence and run-binding limits. |
+| `docs/history/` | Superseded/dated material: old architecture versions (`history/architecture/`), incident reports (`history/incidents/`), surveys and closed-milestone evidence (`history/investigations/`, `history/milestones/`). |
 
 ## Notes
 

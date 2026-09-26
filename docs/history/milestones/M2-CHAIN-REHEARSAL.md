@@ -1,5 +1,7 @@
 # M2 chain — the offline end-to-end rehearsal
 
+> **Historical milestone evidence.** Rehearsal statement for the completed M2 milestone; the harness (`tools/m2-chain-execution*.mjs`) remains runnable for regression.
+
 This document is the link-by-link statement of what a **fresh, no-assist M2 run
 must do, in order**, what evidence each link emits, and which links are
 **rehearsed** (driven, offline, through the real machinery) versus merely

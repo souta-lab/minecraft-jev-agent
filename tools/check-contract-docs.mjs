@@ -11,7 +11,7 @@
 //      (`export const CONTRACT_VERSION`) and asserts every other code definition
 //      site carries the same number;
 //   2. reads the canonical DOC value from the machine-readable block in
-//      `RESIDENT-MODE.md` (`CONTRACT_VERSION = <n>`) and asserts it equals code;
+//      `docs/operations/RESIDENT-MODE.md` (`CONTRACT_VERSION = <n>`) and asserts it equals code;
 //   3. does the same for `STATE_SCHEMA_VERSION` (code source
 //      `buddy-driver/state-snapshot.ts`);
 //   4. fails loudly with both numbers and the file:line of each when they differ,
@@ -36,13 +36,13 @@ export const CODE_VERSION_SOURCES = [
 ]
 
 /** Canonical doc definition block. */
-export const DOC_VERSION_SOURCE = { path: 'RESIDENT-MODE.md', regex: /^CONTRACT_VERSION = (\d+)$/m }
+export const DOC_VERSION_SOURCE = { path: 'docs/operations/RESIDENT-MODE.md', regex: /^CONTRACT_VERSION = (\d+)$/m }
 
 export const CODE_SCHEMA_SOURCES = [
   { path: 'buddy-driver/state-snapshot.ts', regex: /export const AGENT_SNAPSHOT_SCHEMA_VERSION = (\d+)/, canonical: true },
 ]
 
-export const DOC_SCHEMA_SOURCE = { path: 'RESIDENT-MODE.md', regex: /^STATE_SCHEMA_VERSION = (\d+)$/m }
+export const DOC_SCHEMA_SOURCE = { path: 'docs/operations/RESIDENT-MODE.md', regex: /^STATE_SCHEMA_VERSION = (\d+)$/m }
 
 /**
  * The exact mismatch text the host raises. Kept next to the checker so the test
@@ -177,7 +177,7 @@ export function findRepoRoot(start) {
   let dir = resolve(start)
   for (let i = 0; i < 8; i += 1) {
     try {
-      statSync(join(dir, 'RESIDENT-MODE.md'))
+      statSync(join(dir, 'docs', 'operations', 'RESIDENT-MODE.md'))
       statSync(join(dir, 'tools'))
       return dir
     } catch {
@@ -187,7 +187,7 @@ export function findRepoRoot(start) {
     if (parent === dir) break
     dir = parent
   }
-  throw new Error(`repo root (RESIDENT-MODE.md + tools/) not found above ${start}`)
+  throw new Error(`repo root (docs/operations/RESIDENT-MODE.md + tools/) not found above ${start}`)
 }
 
 function formatSource(entry) {
@@ -213,7 +213,7 @@ export function formatReport(result) {
   const passed = result.checks.filter((c) => c.pass).length
   lines.push('-'.repeat(72))
   lines.push(`${passed}/${result.checks.length} contract-docs checks passed`)
-  if (!result.ok) lines.push('DRIFT DETECTED: docs must match the code value. See RESIDENT-MODE.md §4-A.')
+  if (!result.ok) lines.push('DRIFT DETECTED: docs must match the code value. See docs/operations/RESIDENT-MODE.md §4-A.')
   return lines.join('\n')
 }
 

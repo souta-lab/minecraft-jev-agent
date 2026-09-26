@@ -1,5 +1,7 @@
 # M2 heuristic audit — authority classification and fixes
 
+> **Historical audit (2026-09-18).** Completed M2-critical-path audit retained as evidence; M2 is closed.
+
 Base: `f834867` (`merge: task/m2-headroom`), 2026-09-18. Scope: the heuristics
 added on the M2 critical path (git log since `07465cf`) in
 

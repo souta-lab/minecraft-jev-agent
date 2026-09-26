@@ -228,7 +228,7 @@ The following sections document the old furnace/charcoal/iron-pickaxe milestone.
 They remain useful regression evidence but are not the current M2 definition.
 
 ### Historical M2 - IN PROGRESS, blocker = drop pickup / packet locomotion
-Evidence: /home/s0u7a/mc-ai/M2-PROGRESS.md, runs in jev-agent/logs/m2-s1-m1{,b,c}/, logs/m2-s2-resource-probe.log, logs/m2-s3-ladder/.
+Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md, runs in jev-agent/logs/m2-s1-m1{,b,c}/, logs/m2-s2-resource-probe.log, logs/m2-s3-ladder/.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5):
   - WEDGE DETECTOR in controller: abort when one action id is chosen >5x or goal progress stays 0 >60s;
@@ -252,7 +252,7 @@ lava n=0 near spawn. So iron/diamond legs additionally need proven vertical MINE
 end to end. M4 (Ender Dragon) stays deferred.
 
 ## M2 S3 (STOCK-FIRST MOVEMENT + R2/R3 attempt)
-Evidence: /home/s0u7a/mc-ai/M2-PROGRESS.md "AUDIT S3" section; logs in jev-agent/logs/stock-move/ and logs/m2-r2r3/.
+Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md "AUDIT S3" section; logs in jev-agent/logs/stock-move/ and logs/m2-r2r3/.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9):
   - MOVEMENT IS STOCK-FIRST (user's standing rule): default actuation is `pathfinder`; `Executor.pathTo`
@@ -274,7 +274,7 @@ subgoals were never offered. Jev calls=6 (llm.called=0/6, runtimeCalls=0 planCal
 ($0.000110/call), wedgeAborts=1.
 
 ## M2 S4 (LOCOMOTION HEADROOM/STEP-UP FIX - landed; R2/R3 still blocked on candidate reachability)
-Evidence: /home/s0u7a/mc-ai/M2-PROGRESS.md "AUDIT S4"; live runs jev-agent/logs/m2-r2r3-fix{,2,3}/ and
+Evidence: /home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md "AUDIT S4"; live runs jev-agent/logs/m2-r2r3-fix{,2,3}/ and
 jev-agent/logs/dep-escape-agent.log; agent-level test movement-agent-test.mts.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9):
@@ -532,7 +532,7 @@ step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present
 
 ## M2 three-blocker fix round (2026-09-18) — canopy clearance + pickup + phased ledger
 
-Evidence: `/home/s0u7a/mc-ai/M2-PROGRESS.md` "THREE-BLOCKER FIX ROUND"; runs in
+Evidence: `/home/s0u7a/mc-ai/docs/history/milestones/M2-PROGRESS.md` "THREE-BLOCKER FIX ROUND"; runs in
 `jev-agent/logs/m2-phase1{,b,c,d,e}/` and the M1 attempts `logs/m1-phase-check{,2}/`.
 
 ### Fix 1 — canopy-pocket ceiling MINE (LIVE-PROVEN)

@@ -42,4 +42,4 @@ Live acceptance required by the linked issue? **yes / no**
 - [ ] linked issue evidence state reconciled; merge alone was not treated as live acceptance
 - [ ] remaining gap/follow-up is explicit
 
-See `DEFINITION-OF-DONE.md`. Keep this template factual; do not turn it into a second design document.
+See `docs/development/DEFINITION-OF-DONE.md`. Keep this template factual; do not turn it into a second design document.
