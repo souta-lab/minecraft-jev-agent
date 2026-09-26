@@ -46,18 +46,27 @@ Superseded by the attempt-format archive.
 Old `AGENTS.md` §8 required preserving a `9ddbadd` Phase-0 attempt root
 (capture PASS / archive-validation FAIL). As of 2026-09-26 no such attempt
 root exists anywhere under `~/vtr-evidence-archive` or `~` — only a stale
-`/tmp/live-run-9ddbadd.log`. Phase-0 archive validation therefore remains
-**FAIL with no inspectable artifact**; legacy Reach authority deletion stays
-prohibited until a fresh Phase-0 archive validates.
+`/tmp/live-run-9ddbadd.log`.
+
+**Superseded 2026-09-26 (later session):** a fresh Phase-0 pair validates —
+`vtr-reach-authority-d781f54-01` (140/140 PASS) + its origin/main legacy
+baseline `vtr-reach-legacy-baseline-d781f54-01`. The `9ddbadd` gate is
+satisfied by this fresh archive; the note above is retained as history.
 
 ## Retained (still on disk)
 
 | Path | Contents |
 |---|---|
-| `attempts/vtr-reach-authority-83f44e5-01` | Latest accepted VTR Reach proof: source `83f44e5d`, run `run-muihx1lv-1lzff`, seed `3215552101730736439`, transition `bafec343-c139-407d-80d3-284411e82490`, validator **140/140 PASS / 0 fail / 0 incomplete**, `migrationMilestoneStatus: PASS` |
+| `attempts/vtr-reach-authority-d781f54-01` | Fresh Phase-0 VTR Reach proof at the V4.1.2-cutover HEAD: source `d781f540`, run `run-muiunurn-1zhcf`, seed `-2934812588978707767`, transition `750ba461-3fec-495d-9d4f-c029ec8c834e` (SUCCESS), validator **140/140 PASS / 0 fail / 0 incomplete** including `comparison/legacy-baseline.json`, `migrationMilestoneStatus: PASS`. `archive/` holds the packaged bundle with the comparison; `archive-pre-comparison/` preserves the pre-comparison package. |
+| `attempts/vtr-reach-legacy-baseline-d781f54-01` | Same-seed/geometry legacy collect run `run-muiv2ndg-1zizy` on origin/main `46a6c5d4` consumed by the archive's `comparison/legacy-baseline.json` (v3 comparator: **PASS**, `acceptanceEligible: true`, `evidenceClass: run-scoped-raw-events`). Driver: `runner/drive-legacy-baseline.mjs`; slicer: `runner/slice-reach-evidence.mjs` (derives `runner/reach-slice-evidence.json` from raw journals). |
+| `attempts/vtr-reach-authority-83f44e5-01` | Earlier accepted VTR Reach proof: source `83f44e5d`, run `run-muihx1lv-1lzff`, seed `3215552101730736439`, transition `bafec343-c139-407d-80d3-284411e82490`, validator **140/140 PASS / 0 fail / 0 incomplete**, `migrationMilestoneStatus: PASS` |
 | `attempts/vtr-reach-legacy-baseline-83f44e5-01` | Same-seed/geometry legacy collect run `run-muii3j63-1mdew` consumed by the retained archive's `comparison/legacy-baseline.json` (`acceptanceEligible: true`, `evidenceClass: run-scoped-raw-events`) |
 
 Regeneration path for a deleted-era proof: `git checkout <sha>` +
 `bun tools/run-vtr-reach-live-probe.mjs --run` (see
 `tools/run-vtr-reach-live-probe.mjs` HELP) + the legacy-baseline driver recipe
-archived under the retained baseline attempt's `runner/drive-legacy-baseline.mjs`.
+archived under the retained baseline attempts' `runner/drive-legacy-baseline.mjs`
++ `runner/slice-reach-evidence.mjs`, then
+`tools/collect-vtr-reach-legacy-baseline.mjs` → `tools/compare-vtr-reach.mjs` →
+repackage with `comparison/legacy-baseline.json` in the archive-input manifest →
+`tools/validate-vtr-reach-evidence.mjs --archive <archive> --repo <checkout>`.
