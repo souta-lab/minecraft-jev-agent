@@ -331,12 +331,13 @@ function columnDigs(candidates: readonly { id: string; meta: Record<string, unkn
 {
   const candidates = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const controller = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const evidencePlane = readFileSync(new URL('./src/grounded-evidence.ts', import.meta.url), 'utf8')
   const wired =
     candidates.includes('function columnDigBaseFor') &&
     candidates.includes('function columnDigMine') &&
     candidates.includes('function columnLandingFor') &&
     candidates.includes('export function altitudeRouteOnOffer') &&
-    controller.includes('altitudeRouteOnOffer') &&
+    evidencePlane.includes('altitudeRouteOnOffer(') &&
     controller.includes('noteColumnDig')
   await check(
     '(e) the column-dig generator, the altitude-route predicate and the controller wiring are present',

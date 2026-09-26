@@ -579,7 +579,8 @@ addCase('(5) the SMELT_INPUT_PREREQ marker is mirrored and emitted from the tick
   const source = `${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}`
   const mirrored = MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ')
   const wired = source.includes('this.logSmeltInputPrereq(state, groundingOptions)')
-  const formatter = source.includes('formatSmeltInputPrereq')
+  const evidencePlane = readFileSync(new URL('./src/grounded-evidence.ts', import.meta.url), 'utf8')
+  const formatter = evidencePlane.includes('formatSmeltInputPrereq')
   return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
 })
 
@@ -587,7 +588,8 @@ addCase('(6) the CRAFT_INGREDIENT_PREREQ marker is mirrored and emitted from the
   const source = `${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}\n${readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')}`
   const mirrored = MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')
   const wired = source.includes('this.logCraftIngredientPrereq(state, groundingOptions)')
-  const formatter = source.includes('formatCraftIngredientPrereq')
+  const evidencePlane = readFileSync(new URL('./src/grounded-evidence.ts', import.meta.url), 'utf8')
+  const formatter = evidencePlane.includes('formatCraftIngredientPrereq')
   return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
 })
 

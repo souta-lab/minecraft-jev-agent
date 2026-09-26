@@ -391,11 +391,11 @@ addCase('(iv-b) no other literal re-derives the bound in the ledger or the contr
 })
 
 addCase('(iv-c) the escalation markers are mirrored, so the escalation reaches the live record', () => {
-  const controllerSrc = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const diagnosticsSrc = readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8')
   return ok(
-    controllerSrc.includes('ACTION_REPEAT_MARKER,') &&
-      controllerSrc.includes('ACTION_REPEAT_EXHAUSTED_MARKER,') &&
-      controllerSrc.includes('ACTION_TARGET_RETIRED_MARKER,'),
+    diagnosticsSrc.includes('ACTION_REPEAT_MARKER,') &&
+      diagnosticsSrc.includes('ACTION_REPEAT_EXHAUSTED_MARKER,') &&
+      diagnosticsSrc.includes('ACTION_TARGET_RETIRED_MARKER,'),
     'ACTION_REPEAT / ACTION_REPEAT_EXHAUSTED / ACTION_TARGET_RETIRED must all be in MIRRORED_MARKERS',
   )
 })

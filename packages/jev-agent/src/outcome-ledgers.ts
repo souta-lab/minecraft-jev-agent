@@ -262,40 +262,6 @@ export function noteTypedActionFailure(host: OutcomeLedgersHost, reason: string,
 }
 
 /**
- * If every actionable candidate has exhausted its retries, escalate so System 2
- * gets a chance to change the approach. Failure memory is NOT cleared: it decays
- * on its own, and wiping it would let a nearby coordinate evade the spatial
- * memory that #8a introduced.
- */
-export function breakFailureDeadlock(host: OutcomeLedgersHost, candidates: readonly Candidate[]): void {
-  const actionable = candidates.filter(
-    (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
-  )
-  if (actionable.length === 0) return
-  const allExhausted = actionable.every(
-    (candidate) => host.candidateFailureCount(candidate.id) >= host.options.candidateFailureLimit,
-  )
-  if (!allExhausted) return
-  const localRouteOnly = actionable.every(
-    (candidate) => candidate.kind === 'MOVE' || candidate.kind === 'RETRIEVE' || candidate.kind === 'DESCEND' || candidate.kind === 'STEP',
-  )
-  if (localRouteOnly) {
-    host.logger.warn(
-      'agent',
-      `LOCAL_CANDIDATES_EXHAUSTED count=${actionable.length} system2=false grounded_recovery=true`,
-      { candidates: actionable.map((candidate) => candidate.id), limit: host.options.candidateFailureLimit },
-      host.tickCounter,
-    )
-    return
-  }
-  host.escalate(
-    'all_candidates_invalid',
-    `all ${actionable.length} actionable candidate(s) exceeded ${host.options.candidateFailureLimit} failures; letting decay/suppression reroute instead of clearing memory`,
-  )
-  host.recentEvents.push('all local candidates exhausted; waiting for decay/spatial suppression to reroute')
-}
-
-/**
  * The postcondition layer owns the verdict (`isZeroProgressOutcome` is a
  * FAILURE). This owns what happens NEXT for the route families whose
  * postcondition is a world change (RETRIEVE/DESCEND/STEP/ENTER_PORTAL):
@@ -670,33 +636,6 @@ export function checkUnreachableMove(host: OutcomeLedgersHost, candidate: Candid
   }
   host.noteCandidateFailure(candidate.id)
   host.recordMoveFailure(candidate, 'unreachable')
-}
-
-/** #8: drop movement targets still inside their blacklist cooldown. */
-export function filterMoveCandidates(host: OutcomeLedgersHost, candidates: readonly Candidate[], state: WorldState, log = true): Candidate[] {
-  const dimension = state.self.dimension
-  const { kept, skipped } = filterBlacklistedMoves(
-    candidates,
-    host.moveFailMemory,
-    dimension,
-    host.movePathFailureScope(state),
-  )
-  if (!log) return kept
-  for (const entry of skipped) {
-    host.logger.warn(
-      'agent',
-      formatMoveTargetSkipped(entry.key, entry.attempts, entry.cooldownSeconds),
-      {
-        actionId: entry.candidate.id,
-        key: entry.key,
-        attempts: entry.attempts,
-        cooldown: entry.cooldownSeconds,
-        reason: entry.reason,
-      },
-      host.tickCounter,
-    )
-  }
-  return kept
 }
 
 export function rememberMoveTarget(host: OutcomeLedgersHost, candidate: Candidate): void {

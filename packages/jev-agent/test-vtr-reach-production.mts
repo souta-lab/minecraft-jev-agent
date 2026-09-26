@@ -361,7 +361,7 @@ describe('VTR Reach production authority seam', () => {
 
   it('withholds same-Mission resource MOVE from the legacy decision plane while VTR owns Reach', () => {
     const ownerFilter = controller.indexOf('const legacyReachFilter = filterLegacyReachCandidates({')
-    const filterEnd = controller.indexOf('candidates = this.applyFurnacePrereq', ownerFilter)
+    const filterEnd = controller.indexOf('candidates = this.filterRepeatedOutcomeCandidates', ownerFilter)
     assert.ok(ownerFilter >= 0 && filterEnd > ownerFilter)
     const suppression = controller.slice(ownerFilter, filterEnd)
     assert.match(suppression, /missionItem: vtrMission\.item/)

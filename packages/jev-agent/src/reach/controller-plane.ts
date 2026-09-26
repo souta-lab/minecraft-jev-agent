@@ -26,37 +26,19 @@ import { CRITICAL_COMBAT_HEALTH } from '../candidates.ts'
 import { sensorOptions, MODEL_RECOVERY_DRAIN_GRACE_MS } from '../controller-shared.ts'
 import type { RecipeIndex } from '../crafting.ts'
 import type { DecisionRecordProvenance } from '../decisionlog.ts'
-import type { CurrentAction, Executor } from '../executor.ts'
+import type { Executor } from '../executor.ts'
 import type { GoalQueueState } from '../goalQueue.ts'
 import type { JevReachRouteDecisionRecord } from './jev-composition.ts'
 import type { EventLogger } from '../jev.ts'
 import type { StateFingerprintMemory } from '../moveFailMemory.ts'
 import type { PlaceRetryLedger } from '../placementGuard.ts'
-import {
-  isMissionReachWalkAction,
-} from './mission-projection.ts'
+import { isMissionReachWalkAction } from './mission-projection.ts'
 import type { DecisionTrigger, TriggerEvent } from '../scheduler.ts'
 import { pickHigherPriority } from '../scheduler.ts'
-import {
-  bodyNeedsBreathEscape,
-} from '../state.ts'
-import type {
-  AgentSignals,
-  DimensionProvenance,
-  GoalState,
-  KnownResource,
-  Vec3Json,
-  WorldState,
-} from '../state.ts'
-import {
-  countMissionInventoryResource,
-} from './transition.ts'
-import type {
-  ReachIdentity,
-  ReachTerminalOutcome,
-  ReachTransitionContract,
-  ReachTransitionState,
-} from './transition.ts'
+import { bodyNeedsBreathEscape } from '../state.ts'
+import type { AgentSignals, DimensionProvenance, GoalState, KnownResource, Vec3Json, WorldState } from '../state.ts'
+import { countMissionInventoryResource } from './transition.ts'
+import type { ReachIdentity, ReachTerminalOutcome, ReachTransitionContract, ReachTransitionState } from './transition.ts'
 import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './controller.ts'
 import type { ReachMissionRuntime, ReachMissionRuntimeSession } from './mission-runtime.ts'
 import type { ReachMissionSnapshotOptions } from './mission-projection.ts'
@@ -208,8 +190,6 @@ export interface ReachPlaneHost {
   observeThreatState(state: WorldState): void
   observeUnansweredRangedThreat(state: WorldState): void
   observeEnvHazard(state: WorldState): void
-  unreachableStationKeys(state: WorldState): ReadonlySet<string>
-  blacklistedMoveTargets(state: WorldState): ReadonlySet<string>
   requestDecision(trigger: DecisionTrigger, detail: Record<string, unknown>): void
   noteCandidateFailure(candidateId: string): void
   noteCandidateSuccess(candidateId: string): void

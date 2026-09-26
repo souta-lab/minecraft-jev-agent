@@ -18,7 +18,6 @@ const candidates = source('./src/candidates.ts')
 
 assert.match(facade, /export class JevController/)
 assert.match(facade, /semantic authority=jev_pi/)
-assert.match(facade, /return \[\.\.\.candidates\]/)
 assert.match(facade, /authority=jev_pi_beta/)
 // #360 §11: semantic termination still has one owner. The controller may adopt
 // beta's vote, or a code-owned state-recurrence exhaustion proof; it must not
@@ -48,12 +47,10 @@ for (const forbidden of [
   assert.ok(!facade.includes(forbidden), `public controller facade must not own semantic selector ${forbidden}`)
 }
 
-// The deterministic mechanics that remain must still be on the decision path:
-// prerequisite enumeration, selection over the abandoned set, stall evidence,
-// and the unproductive-abandon classifier.
-assert.ok(legacy.includes('planPrereqOptions(input)'))
-assert.ok(legacy.includes('selectPrereqPath(decision, abandoned)'))
-assert.ok(legacy.includes('evaluatePrereqStall({'))
+// The deterministic mechanics that remain live at generation/classification:
+// prerequisite enumeration tags candidates, and the abandon classifier still
+// gates the beta vote. Neither may hide grounded alternatives from pi.
+assert.ok(candidates.includes('planPrereqOptions(input)'))
 assert.ok(legacy.includes('classifyAbandonRequest({'))
 
 // Candidate generation itself must enumerate every feasible prerequisite path;

@@ -358,14 +358,14 @@ async function main(): Promise<void> {
       candidates.includes('digApproach') &&
       candidates.includes('ACCESS:') &&
       controller.includes('digApproach') &&
-      controller.includes('formatDigAccessRetired') &&
+      source('./src/candidate-diagnostics.ts').includes('formatDigAccessRetired') &&
       reach.includes('export function formatDigAccessRetired') &&
       reach.includes('export function interactionFaceDistance') &&
       executor.includes("from './reachability.ts'")
     await check(
       '(e) dig-access generation, #244 stand geometry and retirement logging are wired',
       wired,
-      `derive=${candidates.includes('function digAccessFor')} probe=${candidates.includes('digApproach')} ctl=${controller.includes('digApproach')} marker=${controller.includes('formatDigAccessRetired')} face=${reach.includes('export function interactionFaceDistance')}`,
+      `derive=${candidates.includes('function digAccessFor')} probe=${candidates.includes('digApproach')} ctl=${controller.includes('digApproach')} marker=${source('./src/candidate-diagnostics.ts').includes('formatDigAccessRetired')} face=${reach.includes('export function interactionFaceDistance')}`,
     )
   }
 

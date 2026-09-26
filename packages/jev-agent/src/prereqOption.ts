@@ -348,10 +348,6 @@ export function prereqRank(path: PrereqPath): number {
   }
 }
 
-export function isInventorySourced(path: PrereqPath): boolean {
-  return prereqSource(path) === 'inventory'
-}
-
 /**
  * The exact instrumentation required by issue #78:
  * `PREREQ_OPTION resource=<r> option=<path> reason=<why> qty=<n>`.

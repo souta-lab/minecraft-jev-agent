@@ -18,7 +18,6 @@ import type { MoveFailMemory } from './moveFailMemory.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
-import type { PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
 import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy } from './replanThrottle.ts'
 import type { CapabilityGapState } from './replanThrottle.ts'
 import { isSensedStation } from './state.ts'
@@ -37,9 +36,7 @@ const EXPLORED_CELLS_LIMIT = 512
 
 export interface StallObserverHost {
   abortWedge(reason: string): void
-  readonly abandonedRetrievePaths: Map<PrereqPath, string>
   actionStart: Vec3Json | null
-  activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null
   ascendRefusedSinceObservation: boolean
   ascentRefusedByPlan(target: { y: number } | null): boolean
   bindDigMemoryScope(dimension: string): void
@@ -61,7 +58,6 @@ export interface StallObserverHost {
   readonly exploredCells: Set<string>
   goal: GoalState
   inventorySnapshot(): Record<string, number>
-  lastDecisionId: string | null
   lastLocomotionObservation: LocomotionObservation
   lastMoveTarget: { dimension: string; position: Vec3Json } | null
   lastOscillationAt: number
@@ -75,29 +71,20 @@ export interface StallObserverHost {
   moveFailMemory: MoveFailMemory
   notExecutableKey: string | null
   notExecutableRepeats: number
-  noteCandidateFailure(candidateId: string): void
   notifyMoveFailureMemory(): void
   options: Pick<JevAgentOptions, 'onLocalOscillationChange' | 'serverId' | 'stallMs' | 'wedgeStallMs' | 'worldEpoch'>
   oscillationSignature(): string
   oscillationState: OscillationState | null
   persistLocalOscillation(): void
   positionWindow: Vec3Json[]
-  prereqForcedPath: PrereqPath | null
-  prereqLoggedKey: string | null
-  prereqProgress: PrereqProgress | null
   previousMoveTarget: { dimension: string; position: Vec3Json } | null
   queue: GoalQueue
   recentEvents: string[]
   remainingCooldownSeconds(blacklistedUntil: number, now?: number): number
-  retrievalEscalationPending: boolean
-  retrievalKey(active: { knownName: string; target: Vec3Json }): string
-  retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null
-  retrieveUnverified: RetrieveUnverifiedState | null
   signals: AgentSignals
   readonly strategicStall: StrategicStallTracker
   strategicStallOptionId: string | null
   readonly tickCounter: number
-  readonly unreachableResources: Set<string>
 }
 
 export function updateStallSignal(host: StallObserverHost): void {
@@ -131,7 +118,6 @@ export function updateStallSignal(host: StallObserverHost): void {
     host.abortWedge(`goal progress stayed 0 for ${stalledMs}ms`)
   }
 }
-
 
 export function observeLocalMotion(host: StallObserverHost,
 
@@ -221,7 +207,6 @@ export function observeLocalMotion(host: StallObserverHost,
   )
 }
 
-
 export function observeCapabilityGap(host: StallObserverHost): void {
   const entity = host.bot.entity
   if (entity === undefined) return
@@ -287,14 +272,12 @@ export function observeCapabilityGap(host: StallObserverHost): void {
   )
 }
 
-
 export function ensureCapabilityGapSignal(host: StallObserverHost,
 marker: string): void {
   const last = host.recentEvents[host.recentEvents.length - 1]
   if (last === marker) return
   host.recentEvents.push(marker)
 }
-
 
 export function detectMoveOscillation(host: StallObserverHost): void {
   const detection = detectMoveFailOscillation(host.positionWindow)
@@ -353,7 +336,6 @@ export function detectMoveOscillation(host: StallObserverHost): void {
   )
 }
 
-
 export function syncTerrainSignals(host: StallObserverHost, state: WorldState): void {
   // Use the same typed observation that produced this snapshot when scoping
   // coordinate memory. Going back through the legacy `digMemory` getter here
@@ -379,7 +361,6 @@ export function syncTerrainSignals(host: StallObserverHost, state: WorldState): 
   host.signals.descendLimitReached = memory.descendLimitReached
 }
 
-
 export function bindDigMemoryScope(host: StallObserverHost, dimension: string): void {
   const change = host.digMemoryState.bindScope({
     serverId: host.options.serverId,
@@ -399,7 +380,6 @@ export function bindDigMemoryScope(host: StallObserverHost, dimension: string): 
     host.tickCounter,
   )
 }
-
 
 export function sampleMovement(host: StallObserverHost, position: Vec3Json): void {
   host.positionWindow.push({ x: position.x, y: position.y, z: position.z })
@@ -429,7 +409,6 @@ export function sampleMovement(host: StallObserverHost, position: Vec3Json): voi
   host.detectMoveOscillation()
 }
 
-
 export function detectOscillation(host: StallObserverHost, position: Vec3Json): void {
   const decision = evaluateOscillation({
     position: positionKey(position),
@@ -453,31 +432,6 @@ export function detectOscillation(host: StallObserverHost, position: Vec3Json): 
   host.escapeOscillation(decision.state)
 }
 
-
-export function escapeOscillation(host: StallObserverHost, state: OscillationState): void {
-  host.oscillationState = null
-  host.abandonedRetrievePaths.set('use_known_station', host.lastStateFingerprint)
-  if (host.activeRetrieval !== null) {
-    host.unreachableResources.add(host.retrievalKey(host.activeRetrieval))
-    host.noteCandidateFailure(host.activeRetrieval.id)
-  }
-  if (host.lastDecisionId !== null) host.noteCandidateFailure(host.lastDecisionId)
-  host.activeRetrieval = null
-  host.retrievalTrack = null
-  host.retrieveUnverified = null
-  host.prereqForcedPath = null
-  host.prereqProgress = null
-  host.prereqLoggedKey = null
-  host.retrievalEscalationPending = true
-  host.logger.warn(
-    'agent',
-    `LOCAL_OSCILLATION_ESCAPE pair=${state.pair ?? 'pair'} cycles=${state.cycles} system2=false`,
-    { pair: state.pair, cycles: state.cycles, boundary: 'local_recovery' },
-    host.tickCounter,
-  )
-}
-
-
 export function stateFingerprint(host: StallObserverHost, state: WorldState): string {
   const inventory = Object.entries(state.inventory.counts)
     .filter(([, count]) => count > 0)
@@ -500,7 +454,6 @@ export function stateFingerprint(host: StallObserverHost, state: WorldState): st
   return `fp2|epoch=${host.options.worldEpoch}|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
 }
 
-
 export function persistLocalOscillation(host: StallObserverHost): void {
   const signature = localOscillationPersistKey(host.localOscillation)
   if (signature === host.localOscillationPersisted) return
@@ -520,7 +473,6 @@ export function persistLocalOscillation(host: StallObserverHost): void {
     )
   }
 }
-
 
 export function resetNotExecutableDedupe(host: StallObserverHost): void {
   if (host.notExecutableRepeats > 0 && host.notExecutableKey !== null) {

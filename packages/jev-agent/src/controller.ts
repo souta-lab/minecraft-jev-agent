@@ -21,156 +21,62 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, formatCandidateAcquisition, formatCandidateAcquisitionRefused, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
-import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
-import { MOVE_LEG_STOPPED } from './stepLanding.ts'
+import { ENV_HAZARD, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
-import { formatArmorCraft, formatArmorCraftRefusal, formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
-import { contactGapY, formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, meleeHorizontalBudget, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
-import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
+import type { AttackStandFact } from './combatClosure.ts'
 import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPlan.ts'
-import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
+import { FOOD_SOURCE_NONE } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
-import { bestToolTier, capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
-import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, StationApproachFact, StationApproachProbe, StationApproachRefusal, StationKindName } from './reachability.ts'
-import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
+import { capabilityKey } from './reachability.ts'
+import type { DigApproachProbe, DimensionTransferRoute, StationApproachProbe, StationApproachRefusal, StationKindName } from './reachability.ts'
+import { makeCausalStamp, makeChainId } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
-import {
-  OptionAttemptTracker,
-  resolveAbandonCooldownMs,
-  resolveUnproductiveAttemptLimit,
-  selectLadderOption,
-} from './abandonPolicy.ts'
-import type { AbandonClassification } from './abandonPolicy.ts'
-import {
-  AbandonmentLedger,
-  PROTECTION_ABANDON_CONFLICT,
-} from './protectionConflict.ts'
-import {
-  ACTION_COMMIT,
-  ACTION_PREEMPT,
-  CANDIDATE_COMMIT_RELEASED,
-  CANDIDATE_FLAP,
-  evaluateActionCommitment,
-  evaluateCandidateFlap,
-} from './candidateCommitment.ts'
-import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
+import { OptionAttemptTracker, resolveAbandonCooldownMs, resolveUnproductiveAttemptLimit } from './abandonPolicy.ts'
+import { AbandonmentLedger } from './protectionConflict.ts'
+import type { ActionCommitmentState, CandidateFlapState } from './candidateCommitment.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
-import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
+import { makeDecisionRecord, stableStateHash } from './decisionlog.ts'
 // Issue #436 Phase 1: the structural SkillCommitment / CausalTargetIdentity /
 // EffectEnvelope contract. This module owns the decision EPOCH and the outcome
 // PACKET (see jevSemanticProjection.ts); the commitment module owns what a
 // selection is allowed to DO and feeds its real id + contract hashes here.
-import {
-  commitmentInvalidation,
-  committedSkillKind,
-  declaredPostconditions,
-  envelopeForCandidate,
-  effectEnvelopeHash,
-  formatSkillInvalidated,
-  postconditionHash,
-  targetIdentityKey,
-} from './skillCommitment.ts'
+import { effectEnvelopeHash, postconditionHash, targetIdentityKey } from './skillCommitment.ts'
 import { ControllerTransitions } from './controller-transitions.ts'
 
-import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionRecordProvenance, DecisionSubgoalLog } from './decisionlog.ts'
+import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
 // Issue #437: the Skill <-> Jev semantic boundary (projection, decision epochs,
 // stable candidate identity, typed SkillOutcomePacket). Raw mechanical telemetry
 // stays on the log plane; only these objects cross into policy.
-import {
-  buildJevSemanticProjection,
-  buildSkillOutcomePacket,
-  classifySemanticBoundary,
-  classifyProjectionChange,
-  commitmentRefFor,
-  dedupeSemanticCandidates,
-  diffSemanticProjections,
-  formatEpochEnd,
-  formatEpochStart,
-  formatJevCandidateSet,
-  formatJevStateProjection,
-  formatSkillCommit,
-  formatSkillOutcomePacket,
-  formatStaleResultDropped,
-  JevDecisionEpochs,
-  mandatoryPolicyBoundary,
-  repointReplayedChoice,
-  semanticTargetRef,
-  foodBand,
-  threatBand,
-  airBand,
-  healthBand,
-  semanticWornArmor,
-  semanticOffhand,
-  buildSemanticCombatFacts,
-  projectionHash as semanticProjectionHash,
-} from './jev/semantic-projection.ts'
-import type {
-  DecisionEpoch,
-  GroundedFact,
-  JevSemanticProjection,
-  PreviousDecisionFacts,
-  SemanticCandidateView,
-  SemanticDelta,
-  SemanticProgressFacts,
-  SkillOutcomePacket,
-  SkillTerminalReason,
-} from './jev/semantic-projection.ts'
-import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
-import type { ActuationMode, CurrentAction, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
-import type { ActuationPort } from './actuationPort.ts'
-import { gateBoolean, gateDanger } from './gating.ts'
+import { commitmentRefFor, formatSkillCommit, formatStaleResultDropped, JevDecisionEpochs } from './jev/semantic-projection.ts'
+import type { DecisionEpoch, GroundedFact, JevSemanticProjection, PreviousDecisionFacts, SemanticCandidateView, SkillOutcomePacket } from './jev/semantic-projection.ts'
+import { ActionCancelled, defaultExecutorOptions, Executor } from './executor.ts'
+import type { CurrentAction, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
+import { gateDanger } from './gating.ts'
 import type { GatedScore } from './gating.ts'
-import {
-  PLAN_IDENTITY_CHANGED,
-  PLAN_ROW_RETIRED,
-  PLAN_HEAD_REPLACED,
-  ROW_DEFERRED_NOT_EXECUTABLE_HERE,
-  ROW_NOT_EXECUTABLE_HERE,
-  formatNonProgressEscalated,
-  formatNonProgressYield,
-  formatPlanIdentity,
-  formatPlanIdentityChanged,
-  formatRowDeferredNotExecutableHere,
-  formatRowNotExecutableHere,
-  GoalQueue,
-  evaluateStarvedHeadBound,
-  notExecutableReplanRequest,
-  planReplanRequest,
-  toGoalQueueStateLog,
-} from './goalQueue.ts'
-import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, HeadAnswerWarrant, PlanIdentity, PlanObsoleteProof, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
-import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
+import { ROW_NOT_EXECUTABLE_HERE, GoalQueue, evaluateStarvedHeadBound, toGoalQueueStateLog } from './goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, HeadAnswerWarrant, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import { queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
-import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock } from './netherPortalPlan.ts'
-import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
-import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
+import { NETHER, OBSIDIAN, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatSkillStep, formatSkillStepAuthority } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
-import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, writeOutcome } from './jev.ts'
+import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
-import { FatalModelError, ModelRecoveryRequested, assertRecoveryModelAuthority, describeFailure, failLoud } from './modelFailure.ts'
-import type { ModelAuthorityIdentity } from './modelFailure.ts'
-import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
-import { guardCandidate, guardDecision, guardRejectionChargesOption } from './policy.ts'
-import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
+import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
+import type { JevPolicy, JevResult } from './jev.ts'
+import { guardDecision } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, pickHigherPriority, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyStarving, buildWorldState, distance, entityVisibleFromEye, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, scannedBlockNames, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, DimensionProvenance, GoalState, HarvestTool, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, Vec3Json, WorldState } from './state.ts'
-import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
+import { buildWorldState, distance, isSensedStation, makeGoal } from './state.ts'
+import type { AgentSignals, GoalState, KnownResource, Vec3Json, WorldState } from './state.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
-import { resourceMatches } from './resourceClass.ts'
-import {
-  filterLegacyReachCandidates,
-  minecraftMissionSourceNames,
-  projectMinecraftReachMission,
-} from './minecraft/reach-mission-projection.ts'
+import { filterLegacyReachCandidates, minecraftMissionSourceNames, projectMinecraftReachMission } from './minecraft/reach-mission-projection.ts'
 import type { InventoryReachMission } from './reach/scheduler.ts'
 import { ReachMissionRuntime } from './reach/mission-runtime.ts'
 import type { ReachControllerResult, ReachMechanicalIntent, ReachRuntimeSnapshot } from './reach/controller.ts'
@@ -180,29 +86,16 @@ import { MineflayerReachRuntimeAdapter } from './minecraft/reach-runtime-adapter
 import type { ReachMechanicalActionOutcome, ReachRuntimePorts } from './reach/ports.ts'
 import { createJevReachVtrComposition } from './reach/jev-composition.ts'
 import type { JevReachRouteDecisionRecord } from './reach/jev-composition.ts'
-import type {
-  ReachIdentity,
-  ReachTerminalOutcome,
-  ReachTransitionContract,
-  ReachTransitionState,
-} from './reach/transition.ts'
+import type { ReachIdentity, ReachTerminalOutcome, ReachTransitionContract, ReachTransitionState } from './reach/transition.ts'
 import type { ReachMissionSnapshotOptions } from './reach/mission-projection.ts'
-import { sensorOptions, candidateOptions, currentFocusItem, MODEL_RECOVERY_DRAIN_GRACE_MS } from './controller-shared.ts'
+import { sensorOptions, candidateOptions, currentFocusItem } from './controller-shared.ts'
 import type { JevAgentOptions } from './controller-shared.ts'
 import * as escalationplane from './escalation.ts'
 import type { EscalationHost } from './escalation.ts'
 import type { EscalationReason } from './escalation.ts'
 import type { PendingDecision } from './decision-epochs.ts'
 import * as diagnostics from './candidate-diagnostics.ts'
-import {
-  candidateStarvationLine,
-  candidateStarvationMissing,
-  ensureCraftStepActionable,
-  goalPreconditionCause,
-  goalStarvationBlockedBy,
-  mirroredEventToken,
-  withheldToolGaps,
-} from './candidate-diagnostics.ts'
+import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalPreconditionCause, goalStarvationBlockedBy, mirroredEventToken, withheldToolGaps } from './candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './candidate-diagnostics.ts'
 import * as evidence from './grounded-evidence.ts'
 import type { GroundedEvidenceHost } from './grounded-evidence.ts'
@@ -214,18 +107,7 @@ import * as threat from './threat-observers.ts'
 import type { ThreatObserverHost } from './threat-observers.ts'
 import * as retrieval from './retrieval-progress.ts'
 import type { RetrievalProgressHost } from './retrieval-progress.ts'
-import {
-  DESCEND_NO_CANDIDATE_TICKS,
-  DESCEND_STALL_TICKS,
-  KNOWN_RETRIEVE_RETIRE_LIMIT,
-  RETRIEVAL_PROGRESS_EPSILON,
-  RETRIEVAL_STALL_TICKS,
-  decideKnownRetrieve,
-  filterKnownResources,
-  formatKnownResourceRetired,
-  resourceKey,
-  shouldClearActiveRetrieval,
-} from './retrieval-progress.ts'
+import { DESCEND_STALL_TICKS, KNOWN_RETRIEVE_RETIRE_LIMIT, RETRIEVAL_STALL_TICKS, decideKnownRetrieve, filterKnownResources, formatKnownResourceRetired, shouldClearActiveRetrieval } from './retrieval-progress.ts'
 export {
   KNOWN_RETRIEVE_RETIRE_LIMIT,
   decideKnownRetrieve,
@@ -249,7 +131,6 @@ import * as abandonlifecycle from './abandon-lifecycle.ts'
 import type { AbandonLifecycleHost } from './abandon-lifecycle.ts'
 export { canAuthoritativelyAbandonOption } from './abandon-lifecycle.ts'
 export { betaAbandonProgressObserved } from './abandon-lifecycle.ts'
-export { filterFurnacePrerequisiteCandidates } from './abandon-lifecycle.ts'
 export { questionSetForTrigger } from './decision-epochs.ts'
 export {
   MIRRORED_MARKERS,
@@ -265,8 +146,6 @@ export {
 } from './candidate-diagnostics.ts'
 export { resolveBootstrapPlanOp } from './system2-plane.ts'
 import type { StallObserverHost } from './stall-observers.ts'
-import * as wedge from './wedge.ts'
-import type { WedgeHost } from './wedge.ts'
 import type { WedgeSuppressReason } from './wedge.ts'
 export {
   evaluateWaitWedge,
@@ -312,136 +191,40 @@ export {
 export type { KnownResourceVerdict, KnownResourceVerdictLatch } from './candidate-diagnostics.ts'
 import * as reach from './reach/controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './reach/controller-plane.ts'
-import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
+import { ActionFailureEscalation, BetaAbandonDeferral, evaluateCapabilityGap, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
-import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
-import { createPositionFactCache } from './positionFactCache.ts'
-import {
-  detectOscillation,
-  filterBlacklistedMoves,
-  formatMoveFailMem,
-  formatMoveFailMemReset,
-  formatMoveTargetSkipped,
-  formatOscillationDetected,
-  isTrackedMoveKind,
-  MoveFailMemory,
-  moveFailureKey,
-  StateFingerprintMemory,
-} from './moveFailMemory.ts'
-import type { MoveFailEntry, MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
+import { detectOscillation, MoveFailMemory, StateFingerprintMemory } from './moveFailMemory.ts'
+import type { MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
 // The durable cross-action bound on one action's own typed outcome repeating
 // identically at the same target. The module owns the ONE bound; the controller
 // only observes and prunes.
-import { ACTION_REPEAT_EXHAUSTED_MARKER, ACTION_REPEAT_MARKER, ACTION_TARGET_RETIRED_MARKER, actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken, resolveRepeatedOutcomeLimit } from './repeatedOutcomeEscalation.ts'
-import type { RepeatedOutcomeEntryJson } from './repeatedOutcomeEscalation.ts'
-import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
-import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
+import { RepeatedOutcomeEscalation, resolveRepeatedOutcomeLimit } from './repeatedOutcomeEscalation.ts'
 import type { DescendProgressState } from './descendPlan.ts'
-import { DIG_PATH_CAP, DigMemory } from './worldMemory.ts'
-import { formatContainerRefusal } from './containerAccess.ts'
+import { DigMemory } from './worldMemory.ts'
 import type { ContainerRefusal } from './containerAccess.ts'
-import type { DigDir } from './worldMemory.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
-import {
-  formatAbandonReason,
-  isFurnacePrerequisiteOption,
-  PLACE_RETRIES_EXHAUSTED,
-  PlaceRetryLedger,
-} from './placementGuard.ts'
-import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
-import {
-  PREREQ_STATION_ALREADY_KNOWN,
-  resolvePrereqStallTicks,
-} from './prereqOption.ts'
-import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
+import { PLACE_RETRIES_EXHAUSTED, PlaceRetryLedger } from './placementGuard.ts'
+import type { AbandonReason } from './placementGuard.ts'
 import type { OscillationState } from './oscillation.ts'
 import { NO_LOCOMOTION_OBSERVATION } from './locomotion.ts'
 import type { LocomotionObservation } from './locomotion.ts'
-import { formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
-import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, isZeroProgressOutcome, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import type { ActionOutcomeTaxonomy, TruthfulOutcome } from './actionPostcondition.ts'
-import {
-  cellKey,
-  clearZeroProgressStand,
-  clearZeroProgressTarget,
-  formatActionZeroProgress,
-  formatDescendRetired,
-  formatRetrieveRetired,
-  formatRetrieveRouteBlocked,
-  formatRouteSpent,
-  formatRouteStageFailed,
-  isZeroProgressRouteKind,
-  observeZeroProgressRoute,
-  routeFailureStage,
-  routeSignature,
-  ZERO_PROGRESS_STAND_ROUTE_LIMIT,
-} from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
-import { StubSystem2, System2RequestCancelledError } from './system2/service.ts'
-import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2/service.ts'
-import {
-  buildSystem2BlockerFacts,
-  emptySystem2PayloadShape,
-  formatSystem2PayloadAbsentLine,
-  formatSystem2PayloadLine,
-  formatSystem2PayloadRefusedLine,
-  SYSTEM2_PAYLOAD,
-  SYSTEM2_PAYLOAD_ABSENT,
-  SYSTEM2_PAYLOAD_REFUSED,
-} from './system2/payload.ts'
-import {
-  applySystem2RecoveryFence,
-  evaluateSystem2Apply,
-  formatCompiledGoalRows,
-  formatSystem2Discard,
-  formatSystem2PlanApplied,
-  system2BodyOwned,
-} from './system2/authority.ts'
-import type { System2ApplyState, System2RecoveryFenceRejection, System2RequestContext } from './system2/authority.ts'
-import {
-  acceptedSystem2PlanGoals,
-  createSystem2SemanticOutcome,
-  finalizeSystem2SemanticOutcomes,
-  recordSystem2SemanticAction,
-  system2SemanticBlocker,
-  system2SemanticFingerprint,
-  SYSTEM2_SEMANTIC_HISTORY_LIMIT,
-} from './system2/causal-history.ts'
-import { submitSystem2Handoff } from './system2/handoff.ts'
-import {
-  evaluateCandidateStarvationBoundary,
-  evaluateLocalMotionBoundary,
-  shouldWakeSystem2AfterLocalFailure,
-} from './system2/escalation.ts'
+import { StubSystem2 } from './system2/service.ts'
+import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2/service.ts'
+import { buildSystem2BlockerFacts, SYSTEM2_PAYLOAD_ABSENT } from './system2/payload.ts'
+import type { System2RequestContext } from './system2/authority.ts'
+import { evaluateCandidateStarvationBoundary } from './system2/escalation.ts'
 import type { BetaTerminationBoundaryDecision } from './system2/escalation.ts'
-import {
-  formatLocalOscillationCleared,
-  isNotableLocalOscillation,
-  localOscillationCell,
-  localOscillationPersistKey,
-  observeLocalOscillation,
-  resolveLocalOscillationRecentCells,
-  resolveLocalOscillationReturnLimit,
-  restoreLocalOscillationRecord,
-} from './localOscillation.ts'
+import { isNotableLocalOscillation, localOscillationPersistKey, restoreLocalOscillationRecord } from './localOscillation.ts'
 import type { LocalOscillationRecordJson } from './localOscillation.ts'
-import {
-  resolveStrategicStallHorizon,
-  resolveStrategicStallMaxDistinctStates,
-  resolveStrategicStallMinBodyProgress,
-  StrategicStallTracker,
-} from './strategicStall.ts'
-import {
-  CriticalDamageTracker,
-  resolveCriticalDamageLimit,
-  } from './criticalDamage.ts'
+import { resolveStrategicStallHorizon, resolveStrategicStallMaxDistinctStates, resolveStrategicStallMinBodyProgress, StrategicStallTracker } from './strategicStall.ts'
+import { CriticalDamageTracker, resolveCriticalDamageLimit } from './criticalDamage.ts'
 import { computeShadowMetrics } from './shadowMetrics.ts'
-
-
-
 
 /** Mission shape consumed by the VTR-owned reach slice. */
 export type VtrInventoryMission = InventoryReachMission
@@ -546,7 +329,6 @@ export interface RunSummary {
 
 export { TRIGGER_PRIORITY }
 
-
 /** Pick the CORE + trigger-specific question set (P1-7). */
 
 function emptySignals(): AgentSignals {
@@ -629,8 +411,6 @@ export const MAX_BLOCK_REACH = 5
  * retirement counter must agree with it.
  */
 
-/** What `retireFailedKnownRetrieve` must do with one finished known-resource retrieve. */
-
 /**
  * Pure decision the controller applies to every finished known-resource
  * retrieve. A COMPLETED retrieve clears the per-resource counter; anything else
@@ -657,7 +437,6 @@ export const MAX_BLOCK_REACH = 5
  * waypoints are a separate search frontier and never own an active resource
  * stall track, so they must not clear this memory.
  */
-
 
 /** Drop resources the controller has proven unreachable for the current plan. */
 
@@ -695,7 +474,6 @@ export const MAX_BLOCK_REACH = 5
  *
  * Pure apart from the latch. No goal, action or ranking is involved.
  */
-
 
 function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
   return {
@@ -757,7 +535,6 @@ class MirroringEventLogger extends EventLogger {
     if (token !== null) this.sink(token, detail)
   }
 }
-
 
 /**
  * Local failure/path signals that remain bounded policy evidence for the
@@ -929,10 +706,6 @@ export class JevController {
   private lastAbandonAdopted = false
   /** #79: per-option unproductive-attempt counter (reset on verified progress). */
   private readonly optionAttempts = new OptionAttemptTracker()
-  /** #79: prereq paths retired by enforcement, keyed by goal then path. */
-  private readonly abandonedPrereqPaths = new Map<string, Map<PrereqPath, number>>()
-  /** #79: the prereq path chosen on the last tick, retired on enforcement. */
-  private prereqChosenPath: PrereqPath | null = null
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastLogRouteSignature = ''
@@ -947,13 +720,6 @@ export class JevController {
   private lastProgressAt = Date.now()
 
   private chosenCountsAtProgress = -1
-  private wedgeWindowId: string | null = null
-  private wedgeWindowFingerprint: string | null = null
-  private wedgeRepeats = 0
-  private wedgeAborted = false
-  private waitReplans = 0
-  private waitStreak = 0
-  private waitGoalKey: string | null = null
   private noProductiveRepeats = 0
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
@@ -1009,7 +775,6 @@ export class JevController {
    * instead of asserting a refusal the body may have already escaped.
    */
   private withheldFactsFingerprint = ''
-  private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   /**
    * Issue #78 follow-up: bounded counter for the SAME typed action failure being
@@ -1243,21 +1008,8 @@ export class JevController {
   private lastCraftIngredientPrereqLine: string | null = null
   /** Last mirrored `CRAFT_STATION_ALREADY_KNOWN` line, so a stable state logs it once. */
   private lastCraftStationGapLine: string | null = null
-  /** #58: the last scored furnace-prerequisite plan and its selected path. */
-  private prereqPlan: PrereqDecision | null = null
-  private prereqForcedPath: PrereqPath | null = null
-  private prereqGoalKey: string | null = null
-  private prereqLoggedKey: string | null = null
-  /** goal|line key of the last `FURNACE_PREREQ_ALREADY_SATISFIED` observation logged */
-  private prereqSatisfiedLoggedKey: string | null = null
-  /** goal|line key of the last `PREREQ_STATION_ALREADY_KNOWN` line logged. */
-  private prereqStationKnownLoggedKey: string | null = null
-  private prereqProgress: PrereqProgress | null = null
-  private readonly prereqStallTicks = resolvePrereqStallTicks()
-  /** #78: options excluded for the current goal after repeated unverified failure (path -> fingerprint). */
-  private readonly abandonedRetrievePaths = new Map<PrereqPath, string>()
+  private lastPrereqStationKnownLine: string | null = null
   /** #78: consecutive `verified=false progressDelta=0` retrieve outcomes. */
-  private retrieveUnverified: RetrieveUnverifiedState | null = null
   /** #78: last quantized position / swap pair / state signature. */
   private oscillationState: OscillationState | null = null
   /**
@@ -1357,9 +1109,6 @@ export class JevController {
   private lastStateFingerprint = ''
   /** Monotonic semantic authority generation used to invalidate stale System2 responses. */
   private semanticStateGeneration = 0
-  /** The fingerprint that produced each abandoned prerequisite-path fact. */
-  private readonly abandonedPrereqFingerprints = new Map<string, string>()
-
   /**
    * Same-run memory of a code-sensed partial/full portal frame. The site is a
    * verified world fact, not a semantic target: candidate grounding still
@@ -1438,10 +1187,7 @@ export class JevController {
     return this as unknown as GoalQueuePlaneHost
   }
 
-  /** WedgeHost view of this controller (same structural-cast pattern as reachHost). */
-  private get wedgeHost(): WedgeHost {
-    return this as unknown as WedgeHost
-  }
+
 
   /** OutcomeAccountingHost view of this controller (same structural-cast pattern as reachHost). */
   private get outcomeHost(): OutcomeAccountingHost {
@@ -1894,7 +1640,6 @@ export class JevController {
     if (this.completion !== null) return this.completion
     return Promise.resolve(this.summary('stopped-by-caller', this.runSuccess()))
   }
-
 
   // -------------------------------------------------------------------------
   // bot lifecycle
@@ -2390,6 +2135,7 @@ export class JevController {
       this.noteFoodHabitat(grounded.foodHabitatRefusal)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logSmeltRouteGap(state, groundingOptions)
+      this.logPrereqStationKnown(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       // The gate derives its capability recovery from the withheld retrieves of
       // THIS pass; the mirrored gap must read the same set, or the log would
@@ -2423,8 +2169,6 @@ export class JevController {
         }
         candidates = legacyReachFilter.candidates
       }
-      candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
-      candidates = this.filterMoveCandidates(candidates, state)
       // The cross-action bound's consequence runs beside the coordinate failure
       // memory's: a target this action provably cannot progress at is pruned the
       // same mechanical way, which forces the offer onto a different target.
@@ -2919,7 +2663,6 @@ export class JevController {
       let chosenId = heldId
       this.noteWaitStreak(chosenId, actionable)
       this.checkWedge(chosenId)
-      if (this.wedgeAborted) return
 
       if (this.criticalArrivedDuringFlight(trigger)) {
         // §3: this is the live "late async model result" case in this
@@ -2985,7 +2728,7 @@ export class JevController {
           this.placementRetries.retiredItemSet(),
         ),
       )
-      const freshBeforeThreat = this.filterMoveCandidates(freshGrounded.candidates, freshState, false)
+      const freshBeforeThreat = [...freshGrounded.candidates]
       const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
       const freshCandidates = restrictCandidatesDuringEnvHazard(
         freshState,
@@ -3544,19 +3287,6 @@ export class JevController {
   }
 
   /**
-   * Selector state, not world truth. Clearing prevents a retired prerequisite
-   * route from silently re-asserting itself after the decision policy owns the
-   * grounded alternative set.
-   */
-  private clearLegacyPrereqSelection(): void {
-    this.prereqPlan = null
-    this.prereqForcedPath = null
-    this.prereqChosenPath = null
-    this.prereqProgress = null
-    this.prereqLoggedKey = null
-  }
-
-  /**
    * A beta vote is semantic, but a control tick, a local route miss, or recent
    * body/search progress is not semantic abandonment. Keep this boundary pure
    * and auditable; it never selects the next Option.
@@ -3635,11 +3365,9 @@ export class JevController {
   }
 
   /**
-   * #79: retire the unproductive option and advance the ladder. A smelt
-   * prerequisite retires its current path so `applyFurnacePrereq` selects the
-   * next feasible rung (place_held -> use_known_station -> craft_and_place ->
-   * escalate) instead of re-selecting the abandoned one. Otherwise the existing
-   * exception-driven replan is the abandon action.
+   * #79: retire the unproductive option and hand the planning boundary to
+   * System2. The abandoned option stays retired for this goal key; the next
+   * decision still sees every grounded alternative plus failure history.
    */
   private enforceUnproductiveAbandon(
     optionId: string,
@@ -3695,7 +3423,6 @@ export class JevController {
     return { escalate: false, reason: 'local safety/recovery remains Jev pi + deterministic guard' }
   }
 
-
   private placeRetryExhausted(): boolean {
     return abandonlifecycle.placeRetryExhausted(this.abandonLifecycleHost)
   }
@@ -3709,7 +3436,6 @@ export class JevController {
   private liveAir(): number | null {
     return observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
   }
-
 
   /** Unfinished goals in plan order; the protection guard spans the whole plan. */
   private unfinishedGoals(): QueuedGoal[] {
@@ -3931,13 +3657,6 @@ export class JevController {
       },
       this.tickCounter,
     )
-  }
-
-  private advancePrereqAfterUnverified(): boolean {
-    // A zero-progress/unverified action is evidence for the decision policy,
-    // not permission for code to select the next semantic prerequisite path.
-    this.clearLegacyPrereqSelection()
-    return false
   }
 
   private onRetrievalDescent(candidate: Candidate): void {
@@ -4516,26 +4235,6 @@ export class JevController {
     return retrieval.dropUnreachableResource(this.retrievalHost, active, current)
   }
 
-  /**
-   * A known-resource RETRIEVE that did NOT complete (no arrival, no acquired
-   * item) charges a per-resource counter. After KNOWN_RETRIEVE_RETIRE_LIMIT the
-   * resource is dropped as unreachable and removed from `signals.knownResources`,
-   * so the generator stops re-offering the same present-but-unreachable cell and
-   * the plan advances to the next resource or the branch-mine route instead of
-   * looping forever. `decideKnownRetrieve` owns the boundary; the executor's
-   * lenient `verified` flag is deliberately not trusted (a sub-metre nudge and a
-   * partial 20 m approach both satisfy it - the live iron-ore and RC8 loops).
-   */
-  private retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void {
-    // No fixed-attempt semantic retirement. Hard world-truth staleness and
-    // current deterministic reachability still live in their own subsystems;
-    // count/cooldown history stays evidence only.
-    this.pushPolicyEvidence(
-      `known retrieve outcome: ${candidate.id} status=${result.status} verified=${result.verified} progress=${result.itemsGained}`,
-    )
-  }
-
-
   private isRouteDeclaredMove(candidate: Candidate): boolean {
     return ledgers.isRouteDeclaredMove(candidate)
   }
@@ -4554,14 +4253,6 @@ export class JevController {
     if (actionId === 'WAIT') {
       this.pushPolicyEvidence('Jev pi selected WAIT with no verified progress yet')
     }
-  }
-
-  private logWedgeSuppressed(reason: WedgeSuppressReason, candidate: string, repeats: number): void {
-    return wedge.logWedgeSuppressed(this.wedgeHost, reason, candidate, repeats)
-  }
-
-  private checkWaitWedge(): void {
-    return wedge.checkWaitWedge(this.wedgeHost)
   }
 
   private currentOptionContext(): CurrentOptionContext | null {
@@ -4709,20 +4400,6 @@ export class JevController {
     return new Set<string>()
   }
 
-  private applyFurnacePrereq(
-    state: WorldState,
-    candidates: readonly Candidate[],
-    unreachableStations: ReadonlySet<string>,
-  ): Candidate[] {
-    void state
-    void unreachableStations
-    // place-held vs known-station vs craft-and-place are co-equal grounded
-    // alternatives for the SAME furnace prerequisite. Do not collapse them
-    // to one cost/rank winner before the decision policy sees the set.
-    this.clearLegacyPrereqSelection()
-    return [...candidates]
-  }
-
   private furnacePrereqCandidateOptions(state: WorldState, unreachableStations: ReadonlySet<string>): CandidateOptions {
     return candidateOptions(
       this.options,
@@ -4732,46 +4409,6 @@ export class JevController {
       this.blacklistedMoveTargets(state),
       null,
       this.searchedSurfaceTargets,
-    )
-  }
-
-  /** The next feasible prereq path that has not been abandoned for this goal. */
-  private nextUsablePrereqPath(
-    decision: PrereqDecision,
-    current: PrereqPath,
-    abandoned: ReadonlySet<PrereqPath>,
-  ): PrereqPath | null {
-    return abandonlifecycle.nextUsablePrereqPath(this.abandonLifecycleHost, decision, current, abandoned)
-  }
-
-  private abandonedPrereqSet(goalKey: string, now: number): Set<PrereqPath> {
-    return abandonlifecycle.abandonedPrereqSet(this.abandonLifecycleHost, goalKey, now)
-  }
-
-  private resetFurnacePrereq(): void {
-    return abandonlifecycle.resetFurnacePrereq(this.abandonLifecycleHost)
-  }
-
-  /**
-   * #78: the same known-station retrieve finished unverified with zero progress
-   * past the bound, so abandon that option for the current goal and let the next
-   * scored path run. The abandoned path is never re-selected while the goal key
-   * is unchanged.
-   */
-  private abandonRetrieveOption(line: string, candidate: Candidate, unverified: number): void {
-    // Preserve the observation but do not convert N failures into a local
-    // route switch or a System2 escalation. The next settled decision gives
-    // the policy the same grounded alternatives plus failure history.
-    this.retrieveUnverified = null
-    this.noteCandidateFailure(candidate.id)
-    this.pushPolicyEvidence(
-      `local retrieve unverified: ${candidate.id} attempts=${unverified}; semantic authority=jev_pi`,
-    )
-    this.logger.warn(
-      'agent',
-      `JEV_LOCAL_FAILURE action=${candidate.id} source=retrieve_unverified attempts=${unverified} authority=pi`,
-      { actionId: candidate.id, attempts: unverified, legacyLine: line },
-      this.tickCounter,
     )
   }
 
@@ -4972,6 +4609,10 @@ export class JevController {
     return evidence.logCraftStationGap(this.evidenceHost, state, options)
   }
 
+  private logPrereqStationKnown(state: WorldState, options: CandidateOptions): void {
+    return evidence.logPrereqStationKnown(this.evidenceHost, state, options)
+  }
+
   private logSmeltRouteGap(state: WorldState, options: CandidateOptions): void {
     return evidence.logSmeltRouteGap(this.evidenceHost, state, options)
   }
@@ -5065,15 +4706,6 @@ export class JevController {
     return ledgers.filterRepeatedOutcomeCandidates(this.ledgersHost, candidates, state, log)
   }
 
-  private filterMoveCandidates(candidates: readonly Candidate[], state: WorldState, log = true): Candidate[] {
-    // Move failure count/cooldown memory remains evidence, but it cannot hide
-    // otherwise-grounded alternatives from the decision policy. Current hard
-    // reachability is still enforced by grounded generation + Guard.
-    void state
-    void log
-    return [...candidates]
-  }
-
   private rememberMoveTarget(candidate: Candidate): void {
     return ledgers.rememberMoveTarget(this.ledgersHost, candidate)
   }
@@ -5134,7 +4766,6 @@ export class JevController {
   private detectMoveOscillation(): void {
     return stall.detectMoveOscillation(this.stallHost)
   }
-
 
   private runSuccess(): boolean {
     if (this.options.singleShotPlanner && this.subgoalCount > 0) {

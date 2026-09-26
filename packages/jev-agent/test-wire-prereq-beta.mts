@@ -153,27 +153,26 @@ const heldDecision = planPrereqOptions(prereqInput)
 
 // --- 1. static wiring --------------------------------------------------------
 
-addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path', () => {
-  const text = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}`
-  const missing = [
-    'const unreachableStations = this.unreachableStationKeys(state)',
-    'candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)',
-  ].filter((needle) => !text.includes(needle))
+addCase('#63: controller.ts has no code-owned prereq collapse on the tick path', () => {
+  const text = `${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts')}`
+  const forbidden = ['applyFurnacePrereq', 'prereqForcedPath', 'nextUsablePrereqPath', 'abandonedPrereqSet'].filter(
+    (needle) => text.includes(needle),
+  )
   return {
-    pass: missing.length === 0,
+    pass: forbidden.length === 0,
     detail:
-      missing.length === 0
-        ? 'tick calls applyFurnacePrereq(state, candidates, unreachableStations)'
-        : `call site missing ${missing.join(', ')}`,
+      forbidden.length === 0
+        ? 'no controller-side forced-path/stall-switch ladder remains'
+        : `superseded prereq selector still present: ${forbidden.join(', ')}`,
   }
 })
 
-addCase('#63: controller.ts invokes planPrereqOptions / formatPrereqSwitch / formatPrereqOptionFor', () => {
-  const text = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
-  const missing = ['planPrereqOptions(input)', 'formatPrereqSwitch(', 'formatPrereqOptionFor(decision, chosen)'].filter(
-    (needle) => !text.includes(needle),
+addCase('#63: prereq switching is exposed to the policy as candidates, not forced by code', () => {
+  const text = `${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts')}`
+  const missing = ['formatPrereqSwitch(', 'formatPrereqOptionFor(decision, chosen)'].filter(
+    (needle) => text.includes(needle),
   )
-  return { pass: missing.length === 0, detail: missing.length === 0 ? 'all prereqOption call sites present' : `missing ${missing.join(', ')}` }
+  return { pass: missing.length === 0, detail: missing.length === 0 ? 'no forced switch/offered-line remains' : `present ${missing.join(', ')}` }
 })
 
 addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.prereqPath', () => {

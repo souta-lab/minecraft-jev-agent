@@ -29,7 +29,7 @@ import type { PortalFrameSite } from './netherPortalPlan.ts'
 import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, queuedToPlanned } from './optionSpec.ts'
 import type { CurrentOptionContext, OptionWorldSnapshot } from './optionSpec.ts'
 import { formatAbandonReason } from './placementGuard.ts'
-import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
+import type { AbandonReason } from './placementGuard.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
 import type { ActionFailureEscalation, ReplanInputs, WaitStreakEscalation } from './replanThrottle.ts'
 import type { DecisionTrigger } from './scheduler.ts'
@@ -58,7 +58,6 @@ export interface GoalQueuePlaneHost {
   harvestedGoalCount: number
   inventorySnapshot(): Record<string, number>
   lastDecisionId: string | null
-  lastPlacedFurnaceCount: number
   lastProgress: number
   lastProgressAt: number
   lastSemanticProjection: JevSemanticProjection | null
@@ -75,7 +74,6 @@ export interface GoalQueuePlaneHost {
   readonly optionAttempts: OptionAttemptTracker
   options: Pick<JevAgentOptions, 'dominatedGoalReason' | 'knownResources' | 'planIdentity' | 'supersededGoalReason'> & SensorOptionSlice
   pendingTransition: DecisionSubgoalLog | null
-  placeRetryExhausted(): boolean
   readonly policyProvider: string
   portalEnteredTruth(goal: QueuedGoal): boolean
   portalLitTruth(goal: QueuedGoal): boolean
@@ -84,15 +82,12 @@ export interface GoalQueuePlaneHost {
   queuePreconditionSnapshot(): OptionWorldSnapshot
   recentEvents: string[]
   recentOutcomes: System2Outcome[]
-  recordedPortalSites(): RecordedPortalSite[]
-  rememberPortalFrameSites(sites: readonly PortalFrameSite[], dimension: string): void
   resetNotExecutableDedupe(): void
   signals: AgentSignals
   summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null
   surfaceAscentRefusalStreak: number
   surfaceAscentRefusalStreakKey: string | null
   readonly tickCounter: number
-  unfinishedGoals(): QueuedGoal[]
   readonly waitStreakEscalation: WaitStreakEscalation
   readonly executor: import('./executor.ts').Executor
   semanticStateGeneration: number
@@ -131,7 +126,6 @@ result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void
     }
   }
 }
-
 
 export function reconcilePlanIdentity(host: GoalQueuePlaneHost): void {
   const provider = host.options.planIdentity
@@ -191,7 +185,6 @@ export function reconcilePlanIdentity(host: GoalQueuePlaneHost): void {
   if (request === null) return
   host.summonLlm(request.reason, request.detail)
 }
-
 
 export function reconcileHeadDimension(host: GoalQueuePlaneHost): void {
   if (host.queue.isEmpty) {
@@ -263,7 +256,6 @@ export function reconcileHeadDimension(host: GoalQueuePlaneHost): void {
   host.summonLlm(request.reason, request.detail)
 }
 
-
 export function reconcileNonProgressingOptionalHead(host: GoalQueuePlaneHost): void {
   if (host.queue.isEmpty) return
   const critical = bodyStarving({
@@ -289,11 +281,9 @@ export function reconcileNonProgressingOptionalHead(host: GoalQueuePlaneHost): v
   }
 }
 
-
 export function unfinishedGoals(host: GoalQueuePlaneHost): QueuedGoal[] {
   return host.queue.state.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
 }
-
 
 export function previousDecisionFacts(host: GoalQueuePlaneHost): PreviousDecisionFacts | null {
   const outcome = host.lastSkillOutcome
@@ -313,7 +303,6 @@ export function previousDecisionFacts(host: GoalQueuePlaneHost): PreviousDecisio
     progressKind: outcome?.semanticProgress.kind ?? null,
   }
 }
-
 
 export function syncQueue(host: GoalQueuePlaneHost,
 trigger: DecisionTrigger): void {
@@ -636,7 +625,6 @@ trigger: DecisionTrigger): void {
   }
 }
 
-
 export function syncGoalToQueue(host: GoalQueuePlaneHost): void {
   const current = host.queue.current
   if (current === null) return
@@ -694,13 +682,11 @@ export function syncGoalToQueue(host: GoalQueuePlaneHost): void {
   host.goal = subgoalState(current, have)
 }
 
-
 export function consumeTransition(host: GoalQueuePlaneHost): DecisionSubgoalLog | null {
   const transition = host.pendingTransition
   host.pendingTransition = null
   return transition
 }
-
 
 export function installGoalSuccessProbe(host: GoalQueuePlaneHost): void {
   host.queue.setGoalSuccessProbe(
@@ -708,7 +694,6 @@ export function installGoalSuccessProbe(host: GoalQueuePlaneHost): void {
     (line, detail) => host.logger?.warn('queue', line, detail, host.tickCounter),
   )
 }
-
 
 export function currentOptionContext(host: GoalQueuePlaneHost): CurrentOptionContext | null {
   const current = host.queue.state.current
@@ -722,7 +707,6 @@ export function currentOptionContext(host: GoalQueuePlaneHost): CurrentOptionCon
   })
 }
 
-
 export function verifyQueuedGoalComplete(host: GoalQueuePlaneHost,
 goal: QueuedGoal): boolean {
   const snapshot = host.queuePreconditionSnapshot()
@@ -735,7 +719,6 @@ goal: QueuedGoal): boolean {
   return false
 }
 
-
 export function currentGoalKey(host: GoalQueuePlaneHost): string {
   const current = host.queue.state.current
   if (current !== null) {
@@ -743,7 +726,6 @@ export function currentGoalKey(host: GoalQueuePlaneHost): string {
   }
   return `objective:${host.goal.targetItem}:${host.goal.requiredCount}`
 }
-
 
 export function logQueueDepthDelta(host: GoalQueuePlaneHost,
 before: number, op: string, reason: string): void {
@@ -759,7 +741,6 @@ before: number, op: string, reason: string): void {
   )
 }
 
-
 export function noProductiveSignature(host: GoalQueuePlaneHost,
 state: WorldState): string {
   const inventory = Object.entries(state.inventory.counts)
@@ -770,7 +751,6 @@ state: WorldState): string {
   const position = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
   return `${host.currentGoalKey()}|${position}|${inventory}`
 }
-
 
 export function replanInputs(host: GoalQueuePlaneHost): ReplanInputs {
   const inventory: Record<string, number> = {}
@@ -816,7 +796,6 @@ export function replanInputs(host: GoalQueuePlaneHost): ReplanInputs {
     waitStreakExhausted: host.waitStreakEscalation.pendingKey(),
   }
 }
-
 
 export const SURFACE_ASCENT_IMPOSSIBLE_STREAK = 3
 /** Issue #45: an active RETRIEVE that stops closing distance for this many ticks escalates. */

@@ -578,6 +578,7 @@ function main(): void {
   {
     const candidates = source('./src/candidates.ts')
     const controller = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
+    const evidencePlane = source('./src/grounded-evidence.ts')
     const prereq = source('./src/prereqOption.ts')
     const wired =
       candidates.includes('function stationWorldTruth') &&
@@ -593,13 +594,14 @@ function main(): void {
       prereq.includes('export function prereqWithheldCraft') &&
       prereq.includes('export function formatPrereqStationKnown') &&
       prereq.includes('STATION_ALREADY_KNOWN_REASON') &&
-      controller.includes('prereqWithheldCraft(decision)') &&
-      controller.includes('formatPrereqStationKnown(') &&
+      evidencePlane.includes('prereqWithheldCraft(decision)') &&
+      evidencePlane.includes('formatPrereqStationKnown(') &&
+      controller.includes('logPrereqStationKnown(') &&
       MIRRORED_MARKERS.has(PREREQ_STATION_ALREADY_KNOWN)
     check(
       '(f) the rule, the typed fact and the controller mirror are wired',
       wired,
-      `truth=${candidates.includes('function stationWorldTruth')} allowed=${candidates.includes('function stationCraftAllowed')} planStep=${candidates.includes('function planStepCraftsKnownStation')} gap=${candidates.includes('export function craftStationGap')} ladder=${candidates.includes('function stationAcquisitionCandidates')} durable=${candidates.includes('remembered: nearestFirst')} log=${controller.includes('logCraftStationGap(')} withheld=${controller.includes('prereqWithheldCraft(decision)')} mirrored=${MIRRORED_MARKERS.has(PREREQ_STATION_ALREADY_KNOWN)}`,
+      `truth=${candidates.includes('function stationWorldTruth')} allowed=${candidates.includes('function stationCraftAllowed')} planStep=${candidates.includes('function planStepCraftsKnownStation')} gap=${candidates.includes('export function craftStationGap')} ladder=${candidates.includes('function stationAcquisitionCandidates')} durable=${candidates.includes('remembered: nearestFirst')} log=${controller.includes('logCraftStationGap(')} withheld=${evidencePlane.includes('prereqWithheldCraft(decision)')} wired=${controller.includes('logPrereqStationKnown(')} mirrored=${MIRRORED_MARKERS.has(PREREQ_STATION_ALREADY_KNOWN)}`,
     )
   }
 

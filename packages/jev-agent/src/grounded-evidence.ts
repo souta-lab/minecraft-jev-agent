@@ -36,7 +36,15 @@ import {
   smeltRouteGap,
   smeltStationRetry,
   surfaceAscentRouteless,
+  furnacePrereqInputFromState,
 } from './candidates.ts'
+import {
+  formatPrereqStationKnown,
+  planPrereqOptions,
+  prereqSubjectForGoal,
+  prereqWithheldCraft,
+  selectPrereqPath,
+} from './prereqOption.ts'
 import type {
   Candidate,
   CandidateOptions,
@@ -115,6 +123,7 @@ export interface GroundedEvidenceHost {
   lastSmeltInputPrereqLine: string | null
   lastCraftIngredientPrereqLine: string | null
   lastCraftStationGapLine: string | null
+  lastPrereqStationKnownLine: string | null
   smeltRouteGapThisTick: SmeltRouteGap | null
   lastSmeltRouteGapLine: string | null
   lastSmeltStationRetryLine: string | null
@@ -649,6 +658,31 @@ export function logCraftStationGap(host: GroundedEvidenceHost, state: WorldState
   host.lastCraftStationGapLine = line
   if (gap === null || line === null) return
   host.logger.warn('agent', line, { ...gap }, host.tickCounter)
+}
+
+/**
+ * Mirror `PREREQ_STATION_ALREADY_KNOWN` once per distinct line. When the world
+ * already holds a usable station, generation withholds the duplicate craft —
+ * without this line the offered set silently lacks it and the evidence gap the
+ * marker was created for returns.
+ */
+export function logPrereqStationKnown(host: GroundedEvidenceHost, state: WorldState, options: CandidateOptions): void {
+  const subject = prereqSubjectForGoal(state.goalQueue?.current ?? null)
+  if (subject === null) {
+    host.lastPrereqStationKnownLine = null
+    return
+  }
+  const input = furnacePrereqInputFromState(state, options)
+  const decision = planPrereqOptions(input)
+  const withheld = prereqWithheldCraft(decision)
+  const line =
+    withheld === null || input.knownStation === null
+      ? null
+      : formatPrereqStationKnown(input.knownStation, input.heldCount, selectPrereqPath(decision))
+  if (line === host.lastPrereqStationKnownLine) return
+  host.lastPrereqStationKnownLine = line
+  if (line === null) return
+  host.logger.warn('agent', line, { ...withheld }, host.tickCounter)
 }
 
 /**

@@ -5,7 +5,7 @@
 // failure streaks and the System2 wake boundary they feed. No authority moves:
 // semantic termination still returns through the scheduler trigger and System2
 // still crosses host.summonLlm.
-import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { classifyActionOutcome, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import type { ActionOutcomeTaxonomy, TruthfulOutcome } from './actionPostcondition.ts'
 import type { OptionAttemptTracker } from './abandonPolicy.ts'
 import type { ActionCommitmentState } from './candidateCommitment.ts'
@@ -26,8 +26,6 @@ import type { MoveFailureReason } from './moveFailMemory.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { PlaceRetryLedger } from './placementGuard.ts'
 import type { GuardCode } from './policy.ts'
-import { evaluateRetrieveAbandon, nextPrereqPath } from './prereqOption.ts'
-import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
 import type { ActionFailureEscalation, WaitStreakEscalation } from './replanThrottle.ts'
 import { pickHigherPriority, selectPostActionTrigger } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
@@ -42,7 +40,6 @@ import type { DigDir, DigMemory } from './worldMemory.ts'
 import type { Bot } from 'mineflayer'
 
 export interface OutcomeAccountingHost {
-  abandonRetrieveOption(line: string, candidate: Candidate, unverified: number): void
   actionCommitmentState: ActionCommitmentState | null
   readonly actionFailureEscalation: ActionFailureEscalation
   actionStart: Vec3Json | null
@@ -99,7 +96,6 @@ export interface OutcomeAccountingHost {
   ): void
   noteTypedActionFailure(reason: string, actionId: string, pending: PendingDecision | undefined): void
   onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void
-  advancePrereqAfterUnverified(): boolean
   observeLocalMotion(result: ExecutionResult, candidate: Candidate, taxonomy: ActionOutcomeTaxonomy): void
   onObjectiveComplete(): void
   readonly optionAttempts: OptionAttemptTracker
@@ -108,10 +104,6 @@ export interface OutcomeAccountingHost {
   pendingTrigger: TriggerEvent | null
   readonly placedStations: KnownResource[]
   readonly placementRetries: PlaceRetryLedger
-  prereqForcedPath: PrereqPath | null
-  prereqLoggedKey: string | null
-  prereqPlan: PrereqDecision | null
-  prereqProgress: PrereqProgress | null
   progressEpoch: number
   queue: GoalQueue
   recentEvents: string[]
@@ -123,11 +115,9 @@ export interface OutcomeAccountingHost {
   recordZeroProgressOutcome(result: ExecutionResult, candidate: Candidate, truthful: TruthfulOutcome): void
   requestDecision(trigger: DecisionTrigger, detail: Record<string, unknown>): void
   resetDescendBudgetAfterWorldChange(actionId: string, reason: 'verified_mine' | 'verified_move'): void
-  retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void
   retrievalArrived(candidate: Candidate): boolean
   retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null
   retrieveCompleted(candidate: Candidate, result: ExecutionResult): boolean
-  retrieveUnverified: RetrieveUnverifiedState | null
   schedulePlaceRetry(result: ExecutionResult, candidate: Candidate): boolean
   semanticStateGeneration: number
   signals: AgentSignals
@@ -170,9 +160,7 @@ export function moveFailureReason(failure: string | null): MoveFailureReason {
   }
 }
 
-
 export type MoveOutcome = 'arrived' | 'unverified' | 'no-progress'
-
 
 /**
  * A MOVE/RETREAT is an arrival only when the executor verified it. A
@@ -184,7 +172,6 @@ export function classifyMoveOutcome(verified: boolean, moved: number): MoveOutco
   if (!verified) return 'unverified'
   return moved < 0.5 ? 'no-progress' : 'arrived'
 }
-
 
 /**
  * The one boundary between a finished RETRIEVE and the movement failure memory.
@@ -217,10 +204,8 @@ export function decideRetrieveMemory(
   return { reset: false, charge: !completed && !hasObservableProgress(result) }
 }
 
-
 /** Item names whose VERIFIED placement registers a usable smelt station. */
 export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
-
 
 /**
  * The mirrored registration marker for a station this controller verified
@@ -234,7 +219,6 @@ export function formatStationRegisteredPlaced(kind: string, at: Vec3Json): strin
   const z = Math.round(at.z)
   return `STATION_REGISTERED kind=${kind} source=placed at=${x},${y},${z}`
 }
-
 
 /**
  * Register a verified placed station in the in-generation station list.
@@ -269,7 +253,6 @@ export function registerPlacedStation(
   return { added: true, station }
 }
 
-
 /** A selected route after one of these outcomes starts a fresh local trajectory. */
 export function closesDescentRecoveryBoundary(reason: unknown): reason is string {
   return (
@@ -281,11 +264,9 @@ export function closesDescentRecoveryBoundary(reason: unknown): reason is string
   )
 }
 
-
 export function isActionTimeout(result: ExecutionResult): boolean {
   return result.failure === 'path_timeout' || result.failure === 'dig_timeout'
 }
-
 
 export function goalWithHave(goal: GoalState, have: number): GoalState {
   const required = Math.max(1, goal.requiredCount)
@@ -296,7 +277,6 @@ export function goalWithHave(goal: GoalState, have: number): GoalState {
     complete: have >= required,
   }
 }
-
 
 export function onActionComplete(host: OutcomeAccountingHost,
 result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOutcome {
@@ -511,7 +491,6 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOut
     return truth
   }
 
-  host.retireFailedKnownRetrieve(candidate, result)
   host.recordZeroProgressOutcome(result, candidate, truth)
   if (result.unverifiedPostcondition !== undefined) {
     host.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
@@ -634,18 +613,6 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOut
           { actionId: result.actionId, target: candidate.target, progressed: result.progressed },
           host.tickCounter,
         )
-      }
-      if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
-        const outcome = evaluateRetrieveAbandon({
-          actionId: result.actionId,
-          verified: truth.verified,
-          progressDelta: result.itemsGained,
-          previous: host.retrieveUnverified,
-        })
-        host.retrieveUnverified = outcome.state
-        if (outcome.abandon && outcome.line !== null) {
-          host.abandonRetrieveOption(outcome.line, candidate, outcome.state.unverified)
-        }
       }
     }
     if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && host.actionStart !== null) {
@@ -773,7 +740,6 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOut
   return truth
 }
 
-
 /**
  * #79: a `done`/`verified=false`/`progressDelta=0` action is a FAILURE. Log
  * ACTION_UNVERIFIED with the plan/strategy/post-condition, charge the failure,
@@ -781,84 +747,6 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOut
  * unchanged, and after UNVERIFIED_ACTION_LIMIT attempts for one planId emit
  * `ABANDON_REASON=action_unverified` and wake System 2 for a different option.
  */
-export function onUnverifiedAction(host: OutcomeAccountingHost,
-result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
-  const planId = pending?.record.goalQueueState.current?.id ?? host.queue.current?.id ?? null
-  const strategy = pending?.record.strategy ?? null
-  const key = planId ?? result.actionId
-  const attempts = (host.actionUnverified.get(key) ?? 0) + 1
-  host.actionUnverified.set(key, attempts)
-  host.logger.warn(
-    'agent',
-    formatActionUnverified({ planId, actionId: result.actionId, strategy, postcondition }),
-    { planId, actionId: result.actionId, strategy, attempts, postcondition, progressDelta: result.itemsGained, detail: result.detail },
-    host.tickCounter,
-  )
-  host.noteCandidateFailure(result.actionId)
-  host.recordFailure('verify_failed', `${result.actionId} unverified: ${result.detail}`)
-
-  const switched = host.advancePrereqAfterUnverified()
-  const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
-  if (budget.abandon) {
-    host.markOptionAbandoned(result.actionId, 'action_unverified')
-    host.logger.warn(
-      'agent',
-      budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
-      { planId: key, attempts, strategy, switched, postcondition },
-      host.tickCounter,
-    )
-  }
-  if (budget.abandon) {
-    // This is now a semantic boundary: the current Option exhausted its
-    // code-owned postcondition budget. A single local verification miss is
-    // evidence for Jev/Skill recovery, not a new System2 mission.
-    host.summonLlm(
-      'action_impossible',
-      `semantic option exhausted after unverified outcome planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
-    )
-  } else if (switched) {
-    host.logger.info(
-      'agent',
-      `LOCAL_PREREQ_RECOVERY planId=${key} attempts=${attempts} next_path_selected=true system2=false`,
-      { planId: key, attempts, strategy, postcondition },
-      host.tickCounter,
-    )
-  } else {
-    host.logger.info(
-      'agent',
-      `LOCAL_VERIFY_RECOVERY planId=${key} attempts=${attempts} system2=false`,
-      { planId: key, attempts, strategy, postcondition },
-      host.tickCounter,
-    )
-  }
-}
-
-
-/**
- * #79/#58: an unverified prerequisite attempt must not repeat the same path.
- * Advance the scored furnace-prerequisite plan to the next feasible option
- * (place_held -> use_known_station -> craft_and_place). The parent goal is
- * never abandoned here.
- */
-export function advancePrereqAfterUnverified(host: OutcomeAccountingHost): boolean {
-  if (host.prereqPlan === null) return false
-  const current = host.prereqForcedPath ?? host.prereqPlan.chosen
-  if (current === null) return false
-  const next = nextPrereqPath(host.prereqPlan, current)
-  if (next === null) return false
-  host.prereqForcedPath = next
-  host.prereqProgress = null
-  host.prereqLoggedKey = null
-  host.logger.warn(
-    'agent',
-    `PREREQ_SWITCH from=${current} to=${next} reason=action_unverified`,
-    { from: current, to: next, reason: 'action_unverified', goal: host.currentGoalKey() },
-    host.tickCounter,
-  )
-  return true
-}
-
-
 export function onDescendComplete(host: OutcomeAccountingHost,
 result: ExecutionResult, candidate: Candidate): void {
   const recoveryBoundaryReason = candidate.meta.recoveryBoundaryReason
@@ -959,7 +847,6 @@ result: ExecutionResult, candidate: Candidate): void {
   host.digOscillationReported = oscillating
 }
 
-
 /**
  * Issue #45: a RETRIEVE that dug its own staircase records the new tunnel cell
  * so the next retrieval can prefer `REUSE_TUNNEL` over digging a fresh one.
@@ -983,7 +870,6 @@ candidate: Candidate): void {
     atMs: Date.now(),
   })
 }
-
 
 export function recordFailure(host: OutcomeAccountingHost,
 code: FailureCode | GuardCode | string | null, detail: string): void {
