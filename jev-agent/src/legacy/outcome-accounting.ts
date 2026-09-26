@@ -96,6 +96,8 @@ export interface OutcomeAccountingHost {
     progressKinds: readonly string[],
   ): void
   noteTypedActionFailure(reason: string, actionId: string, pending: PendingDecision | undefined): void
+  onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void
+  advancePrereqAfterUnverified(): boolean
   observeLocalMotion(result: ExecutionResult, candidate: Candidate, taxonomy: ActionOutcomeTaxonomy): void
   onObjectiveComplete(): void
   readonly optionAttempts: OptionAttemptTracker
@@ -507,7 +509,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
   host.retireFailedKnownRetrieve(candidate, result)
   host.recordZeroProgressOutcome(result, candidate, truth)
   if (result.unverifiedPostcondition !== undefined) {
-    onUnverifiedAction(host, result, result.unverifiedPostcondition, pending)
+    host.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
   } else if (truth.status === 'done' && truth.verified) {
     const settledPlanId = pending?.record.goalQueueState.current?.id ?? host.queue.current?.id ?? null
     if (settledPlanId !== null) host.actionUnverified.delete(settledPlanId)
@@ -789,7 +791,7 @@ result: ExecutionResult, postcondition: string, pending: PendingDecision | undef
   host.noteCandidateFailure(result.actionId)
   recordFailure(host, 'verify_failed', `${result.actionId} unverified: ${result.detail}`)
 
-  const switched = advancePrereqAfterUnverified(host)
+  const switched = host.advancePrereqAfterUnverified()
   const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
   if (budget.abandon) {
     host.markOptionAbandoned(result.actionId, 'action_unverified')

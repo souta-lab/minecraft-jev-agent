@@ -6383,6 +6383,20 @@ export class JevController {
     return outcome.onActionComplete(this.outcomeHost, result, decision, candidate)
   }
 
+  /** controller.ts strangler seam binds this: keep the delegate, not just the plane fn. */
+  private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
+    return outcome.onUnverifiedAction(this.outcomeHost, result, postcondition, pending)
+  }
+
+  /** controller.ts strangler seam binds this: keep the delegate, not just the plane fn. */
+  private advancePrereqAfterUnverified(): boolean {
+    return outcome.advancePrereqAfterUnverified(this.outcomeHost)
+  }
+
+  private onRetrievalDescent(candidate: Candidate): void {
+    return outcome.onRetrievalDescent(this.outcomeHost, candidate)
+  }
+
   private syncTerrainSignals(state: WorldState): void {
     // Use the same typed observation that produced this snapshot when scoping
     // coordinate memory. Going back through the legacy `digMemory` getter here
