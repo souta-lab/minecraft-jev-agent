@@ -46,7 +46,7 @@ import {
 } from './zeroProgressRoute.ts'
 import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
-import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
+import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.ts'
 import { descentHeadingObstruction, formatDescentHeading } from './descendPlan.ts'
 import type { DescentHeadingChangeReason, DescentHeadingObstruction, DescentHeadingPlan } from './descendPlan.ts'
 import { digRouteBearing, DIG_ROUTE_ARRIVE_DISTANCE, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
@@ -1505,12 +1505,6 @@ export interface CandidateOptions {
   retiredPlaceItems?: ReadonlySet<string>
   /** affordance gate facts: pathfinder probe + state-fingerprint suppression memory */
   reachability?: ReachabilityGateOptions | null
-  /**
-   * #11 v2: ordering policy for the furnace prerequisite ladder (`cost` default,
-   * `rank` for A/B). Shared by the generator and the controller so both agree on
-   * which path the candidate set represents.
-   */
-  prereqRankPolicy?: PrereqRankPolicy
   /**
    * The validated Nether portal frame the current goal refers to, when one has
    * been sensed/validated. Present + tool held + a `nether_portal` place goal is
@@ -9128,7 +9122,6 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     knownStation: reachableFurnace ?? furnaces[0] ?? null,
     unreachableStations,
     self: state.self.position,
-    rankPolicy: options.prereqRankPolicy,
   }
 }
 

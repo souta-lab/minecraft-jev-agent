@@ -31,7 +31,7 @@ import { Executor, defaultExecutorOptions } from './executor.ts'
 import type { ActuationMode, ClaimResult, CurrentAction, ExecutionResult, ExecutorHooks, ExecutorOptions, FailureCode, PathCompletedEvent, PathFailedEvent } from './executor.ts'
 import { DANGER_CONFIDENCE_THRESHOLD, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
-import { abandonRequested, AUTHORITATIVE_QUESTION_NAMES, betaShadowDecision, booleanEstimate, booleanEstimates, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, QUESTION_NAMES, resolveBetaAuthority, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, shouldRetreatFrom, writeOutcome } from './jev.ts'
+import { abandonRequested, AUTHORITATIVE_QUESTION_NAMES, betaShadowDecision, booleanEstimate, booleanEstimates, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, shouldRetreatFrom, writeOutcome } from './jev.ts'
 import type { BooleanEstimate, BetaShadow, JevAnswer, JevCallRecord, JevOutcomeRecord, JevPolicy, JevQuestionType, JevRequest, JevResult, JevSource, JevUsage, QuestionName, QuestionSetKind } from './jev.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision, BetaAuthorityInput } from './betaAuthority.ts'
@@ -81,7 +81,7 @@ export {
 export { guardCandidate, guardDecision }
 export { createJevPolicy, EventLogger, JsonlWriter, writeOutcome, decisionIdFrom }
 export { QUESTION_NAMES, AUTHORITATIVE_QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, questionNamesFor, shouldRetreatFrom, abandonRequested }
-export { booleanEstimate, booleanEstimates, betaShadowDecision, formatBetaShadow, resolveBetaAuthority }
+export { booleanEstimate, booleanEstimates, betaShadowDecision, formatBetaShadow }
 export { betaAuthorityDecision, formatJevHeads }
 export { makeChainId, makeCausalStamp, completeCausalChain, optionIdForGoal, formatCausalLine, causalRecord }
 export type { BooleanEstimate, BetaShadow, CausalChain, CausalGoalRef, CausalStamp }

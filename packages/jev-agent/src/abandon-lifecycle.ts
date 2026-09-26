@@ -77,7 +77,7 @@ export interface AbandonLifecycleHost {
   markOptionAbandoned(optionId: string | null, reason: string): void
   noteCandidateFailure(candidateId: string): void
   readonly optionAttempts: OptionAttemptTracker
-  options: Pick<JevAgentOptions, 'abandonCooldownMs' | 'betaAuthority' | 'unproductiveAttemptLimit'>
+  options: Pick<JevAgentOptions, 'abandonCooldownMs' | 'unproductiveAttemptLimit'>
   readonly placementRetries: PlaceRetryLedger
   prereqChosenPath: PrereqPath | null
   prereqForcedPath: PrereqPath | null
@@ -123,7 +123,6 @@ decision: JevResult, optionId: string | null, planId: string | null): AbandonVer
   if (!canAuthoritativelyAbandonOption(optionId)) {
     const classification = classifyAbandonRequest({
       abandonRequested: requested,
-      betaAuthority: false,
       attempts: 0,
       lastVerified: false,
       lastProgressDelta: 0,
@@ -144,7 +143,6 @@ decision: JevResult, optionId: string | null, planId: string | null): AbandonVer
   const state = host.optionAttempts.stateFor(optionId, planId)
   const classification = classifyAbandonRequest({
     abandonRequested: requested,
-    betaAuthority: host.options.betaAuthority,
     attempts: state.attempts,
     lastVerified: state.verified,
     lastProgressDelta: state.progressDelta,
@@ -157,7 +155,7 @@ decision: JevResult, optionId: string | null, planId: string | null): AbandonVer
     return { adopt: true, enforced: true, suppressed: false, classification, vote, optionId, planId }
   }
   if (classification.reason === 'authority') {
-    return { adopt: vote.adopt, enforced: false, suppressed: vote.shadowed, classification, vote, optionId, planId }
+    return { adopt: vote.adopt, enforced: false, suppressed: false, classification, vote, optionId, planId }
   }
   return { adopt: false, enforced: false, suppressed: classification.suppressed, classification, vote, optionId, planId }
 }
@@ -175,16 +173,12 @@ result: JevResult, verdict: AbandonVerdict): boolean {
         attempts: verdict.classification.attempts,
         verified: verdict.classification.verified,
         progressDelta: verdict.classification.progressDelta,
-        betaAuthority: host.options.betaAuthority,
-        betaShadowed: verdict.vote.shadowed,
         abandonRequested: true,
       }),
       {
         optionId: verdict.optionId,
         planId: verdict.planId,
         attempts: verdict.classification.attempts,
-        betaAuthority: host.options.betaAuthority,
-        betaShadowed: verdict.vote.shadowed,
         abandonRequested: true,
         action: 'abandon',
       },
@@ -194,19 +188,18 @@ result: JevResult, verdict: AbandonVerdict): boolean {
     return true
   }
   if (verdict.optionId === null) return false
-  if (host.options.betaAuthority) {
-    if (!verdict.adopt) return false
+  if (verdict.adopt) {
     const probability = result.answers.abandon_option?.probability ?? null
     host.markOptionAbandoned(verdict.optionId, 'authority')
     host.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
     return true
   }
-  if (verdict.suppressed && abandonRequested(result)) {
+  if (verdict.suppressed && verdict.classification.reason === 'cooldown' && abandonRequested(result)) {
     host.logger.info(
       'heads',
       formatAbandonSuppressed({
         optionId: verdict.optionId,
-        reason: verdict.classification.reason === 'cooldown' ? 'cooldown' : 'speculative',
+        reason: 'cooldown',
         attempts: verdict.classification.attempts,
       }),
       {
@@ -214,7 +207,6 @@ result: JevResult, verdict: AbandonVerdict): boolean {
         planId: verdict.planId,
         reason: verdict.classification.reason,
         attempts: verdict.classification.attempts,
-        mode: 'shadow',
         action: 'continue',
       },
       host.tickCounter,
@@ -237,21 +229,6 @@ actionId: string, beta: number | null): AbandonReason {
 
 export function placeRetryExhausted(host: AbandonLifecycleHost): boolean {
   return host.placementRetries.anyExhausted()
-}
-
-
-export function reconciledProtection(host: AbandonLifecycleHost,
-protection: PrerequisiteProtection, reason: string): PrerequisiteProtection {
-  const abandonedReason = protection.protect
-    ? host.abandonedOptions.reasonUnder(protection.option, host.lastStateFingerprint)
-    : null
-  const reconciliation = reconcileProtection({ protection, abandonedReason })
-  if (reconciliation.conflictLine !== null && abandonedReason !== null) {
-    host.logProtectionAbandonConflict(protection.option, abandonedReason, reason)
-  }
-  return reconciliation.protect === protection.protect
-    ? protection
-    : { ...protection, protect: reconciliation.protect }
 }
 
 
@@ -377,20 +354,25 @@ export function betaAbandonProgressObserved(
 
 export function betaDecision(host: AbandonLifecycleHost, decision: JevResult): BetaAuthorityDecision {
   const vote = betaAuthorityDecision({
-    betaAuthority: host.options.betaAuthority,
     abandonRequested: abandonRequested(decision),
     actionId: decisionIdFrom(decision),
     goals: host.unfinishedGoals(),
     placedFurnaceCount: host.lastPlacedFurnaceCount,
   })
   if (!vote.protection.protect) return vote
+  // A protection claim and a live abandonment fact are mutually exclusive under
+  // one fingerprint; the abandonment (the observed fact) wins via the shared
+  // reconciliation rule. Once released, the beta vote itself decides.
   const abandonedReason = host.abandonedOptions.reasonUnder(vote.protection.option, host.lastStateFingerprint)
-  if (abandonedReason === null) return vote
-  host.logProtectionAbandonConflict(vote.protection.option, abandonedReason, 'authority')
+  const reconciliation = reconcileProtection({ protection: vote.protection, abandonedReason })
+  if (reconciliation.conflictLine !== null && abandonedReason !== null) {
+    host.logProtectionAbandonConflict(vote.protection.option, abandonedReason, 'authority')
+  }
+  if (reconciliation.protect === vote.protection.protect) return vote
   return {
     ...vote,
-    adopt: host.options.betaAuthority && !vote.shadowed,
-    protection: { ...vote.protection, protect: false },
+    adopt: abandonRequested(decision),
+    protection: { ...vote.protection, protect: reconciliation.protect },
   }
 }
 
@@ -477,9 +459,7 @@ export function logBetaShadow(host: AbandonLifecycleHost, optionId: string | nul
     formatBetaShadow(shadow),
     {
       ...shadow,
-      mode: host.options.betaAuthority ? 'authority' : 'shadow',
-      betaAuthority: host.options.betaAuthority,
-      shadowed: vote.shadowed,
+      adopted: vote.adopt,
     },
     host.tickCounter,
   )

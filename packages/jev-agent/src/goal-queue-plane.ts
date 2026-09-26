@@ -28,7 +28,7 @@ import { FLINT_AND_STEEL, IRON_INGOT, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDI
 import type { PortalFrameSite } from './netherPortalPlan.ts'
 import { compilePlannedGoal, currentOptionContextForQueuedGoal, evaluatePredicates, queuedToPlanned } from './optionSpec.ts'
 import type { CurrentOptionContext, OptionWorldSnapshot } from './optionSpec.ts'
-import { formatAbandonReason, shouldAdoptAbandon } from './placementGuard.ts'
+import { formatAbandonReason } from './placementGuard.ts'
 import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
 import type { ActionFailureEscalation, ReplanInputs, WaitStreakEscalation } from './replanThrottle.ts'
@@ -73,7 +73,7 @@ export interface GoalQueuePlaneHost {
   notExecutableKey: string | null
   notExecutableRepeats: number
   readonly optionAttempts: OptionAttemptTracker
-  options: Pick<JevAgentOptions, 'betaAuthority' | 'dominatedGoalReason' | 'knownResources' | 'planIdentity' | 'supersededGoalReason'> & SensorOptionSlice
+  options: Pick<JevAgentOptions, 'dominatedGoalReason' | 'knownResources' | 'planIdentity' | 'supersededGoalReason'> & SensorOptionSlice
   pendingTransition: DecisionSubgoalLog | null
   placeRetryExhausted(): boolean
   readonly policyProvider: string
@@ -84,7 +84,6 @@ export interface GoalQueuePlaneHost {
   queuePreconditionSnapshot(): OptionWorldSnapshot
   recentEvents: string[]
   recentOutcomes: System2Outcome[]
-  reconciledProtection(protection: PrerequisiteProtection, reason: string): PrerequisiteProtection
   recordedPortalSites(): RecordedPortalSite[]
   rememberPortalFrameSites(sites: readonly PortalFrameSite[], dimension: string): void
   resetNotExecutableDedupe(): void
@@ -113,8 +112,6 @@ result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void
       abandon,
       decision: verdict.adopt ? 'replan' : 'continue',
       abandonRequested: abandonRequested(result),
-      betaAuthority: host.options.betaAuthority,
-      betaShadowed: vote.shadowed,
       abandonEnforced: verdict.enforced,
       abandonSuppressed: verdict.suppressed,
       attempts: verdict.classification.attempts,
@@ -290,30 +287,6 @@ export function reconcileNonProgressingOptionalHead(host: GoalQueuePlaneHost): v
   } else if (result.action === 'escalate') {
     host.logger.warn('agent', formatNonProgressEscalated(result), detail, host.tickCounter)
   }
-}
-
-
-export function protectedReplanSuppressed(host: GoalQueuePlaneHost,
-reason: LlmSummonReason): boolean {
-  if (host.capabilityGapActive) return false
-  if (reason !== 'no_progress' && reason !== 'action_impossible' && reason !== 'unknown_situation') return false
-  const guard = shouldAdoptAbandon({
-    actionId: host.lastDecisionId,
-    goals: host.unfinishedGoals(),
-    placedFurnaceCount: host.lastPlacedFurnaceCount,
-    abandonRequested: true,
-  })
-  if (guard.adopt) return false
-  const protection = host.reconciledProtection(guard.protection, reason)
-  if (!protection.protect) return false
-  if (host.placeRetryExhausted()) return false
-  host.logger.warn(
-    'heads',
-    protection.line,
-    { option: protection.option, because: protection.because, reason },
-    host.tickCounter,
-  )
-  return true
 }
 
 

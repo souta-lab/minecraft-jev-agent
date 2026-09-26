@@ -73,21 +73,11 @@ export const PREREQ_COSTS = {
 } as const
 
 /**
- * #11 v2: the source-class ranking (`prereqRank`) is a transition-only semantic
- * policy. In `cost` mode (default) the cheapest FEASIBLE path is chosen and the
- * rank order is logged as a shadow baseline; `rank` mode restores the #78
- * ordering for A/B comparison. `BUDDY_PREREQ_RANK_POLICY=rank` selects it.
+ * #11 v2: the cheapest FEASIBLE path is chosen (ties broken by source-class
+ * rank). The pure rank order is logged alongside as `rankBaseline` evidence;
+ * it is never a selectable ordering.
  */
-export type PrereqRankPolicy = 'cost' | 'rank'
-
-export const PREREQ_RANK_POLICY_DEFAULT: PrereqRankPolicy = 'cost'
-
-/** `BUDDY_PREREQ_RANK_POLICY` override; anything but `rank` keeps the default. */
-export function resolvePrereqRankPolicy(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): PrereqRankPolicy {
-  return env.BUDDY_PREREQ_RANK_POLICY === 'rank' ? 'rank' : PREREQ_RANK_POLICY_DEFAULT
-}
+export type PrereqRankPolicy = 'cost'
 
 /**
  * Cobblestone-equivalent units the 3x3 furnace recipe needs, derived from
@@ -159,11 +149,6 @@ export interface PrereqInput {
    */
   unreachableStations?: ReadonlySet<string>
   self: Vec3Json
-  /**
-   * #11 v2 ordering policy for the feasible ladder. Omitted = cost (default);
-   * `rank` restores the #78 source-class order for A/B (`BUDDY_PREREQ_RANK_POLICY`).
-   */
-  rankPolicy?: PrereqRankPolicy
 }
 
 export interface PrereqOption {
@@ -568,12 +553,11 @@ function craftAndPlaceOption(input: PrereqInput): PrereqOption {
  * head. Infeasible options are kept (with the reason they lost) after the
  * feasible ones so the log shows what was considered and why it was rejected.
  *
- * #11 v2: `rankPolicy: 'cost'` (default) orders by cost and ties by rank;
- * `'rank'` restores the #78 source-class order. Either way `rankBaseline` names
- * what the rank order would have chosen, so the controller can shadow-log it.
+ * #11 v2: options are ordered by cost with ties broken by rank; `rankBaseline`
+ * names what the pure rank order would have chosen, as logged evidence.
  */
 export function planPrereqOptions(input: PrereqInput): PrereqDecision {
-  const policy = input.rankPolicy ?? PREREQ_RANK_POLICY_DEFAULT
+  const policy: PrereqRankPolicy = 'cost'
   const options: PrereqOption[] = [placeHeldOption(input), knownStationOption(input), craftAndPlaceOption(input)]
   const byCost = (a: PrereqOption, b: PrereqOption): number =>
     a.cost - b.cost || prereqRank(a.path) - prereqRank(b.path)
@@ -581,7 +565,7 @@ export function planPrereqOptions(input: PrereqInput): PrereqDecision {
     prereqRank(a.path) - prereqRank(b.path) || a.cost - b.cost
   const feasible = options
     .filter((option) => option.feasible)
-    .sort(policy === 'rank' ? byRank : byCost)
+    .sort(byCost)
   const infeasible = options.filter((option) => !option.feasible)
   const ordered = [...feasible, ...infeasible]
   const chosen = feasible[0] ?? null

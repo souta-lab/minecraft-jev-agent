@@ -13,7 +13,6 @@ import type { RecipeIndex } from './crafting.ts'
 import type { GoalState } from './state.ts'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
-import type { PrereqRankPolicy } from './prereqOption.ts'
 import type { ActuationMode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { DecisionRecordProvenance } from './decisionlog.ts'
@@ -50,7 +49,6 @@ export function sensorOptions(options: SensorOptionSlice, worldRevision: number 
 
 export interface CandidateOptionSlice {
   readonly reach: number
-  readonly prereqRankPolicy: PrereqRankPolicy
 }
 
 export function candidateOptions(
@@ -75,7 +73,6 @@ export function candidateOptions(
     portalFrame,
     portalEntry,
     retiredPlaceItems,
-    prereqRankPolicy: options.prereqRankPolicy,
   }
 }
 
@@ -165,16 +162,9 @@ export interface JevAgentOptions {
   /** Host-owned backoff/restart transition for an unproven recovered System2 answer. */
   rejectSystem2RecoveryPlan?: (rejection: System2RecoveryFenceRejection) => never
   /**
-   * #22: `false` (default) keeps `abandon_option` shadow-only: it is recorded
-   * as a `BETA_SHADOW` vote and can never, by itself, cause a replan/abandon.
-   * `true` is the explicit #24 opt-in that lets a threshold-crossing beta drive
-   * a replan, still subject to the deterministic prerequisite guard.
-   */
-  betaAuthority: boolean
-  /**
    * #79: after this many settled attempts with `verified=false && progress=0`,
-   * an abandon request is enforced even while `betaAuthority=false` (shadow).
-   * A never-attempted option stays protected (speculative suppression).
+   * the Option is recorded as demonstrably unproductive (code-owned evidence
+   * attached to the abandon verdict).
    */
   unproductiveAttemptLimit: number
   /** #79: how long an enforced option stays retired before it may be retried. */
@@ -307,12 +297,6 @@ export interface JevAgentOptions {
    * `BUDDY_BETA_ABANDON_DEFER_CYCLES` overrides it.
    */
   betaAbandonDeferCycles: number
-  /**
-   * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
-   * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
-   * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
-  */
-  prereqRankPolicy: PrereqRankPolicy
   /** server identifier from the resident world key captured for this generation */
   serverId: string
   /** resident world epoch captured when this controller generation was created */

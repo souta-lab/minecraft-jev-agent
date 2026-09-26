@@ -532,7 +532,6 @@ async function main(): Promise<void> {
     }
     const enforced = classifyAbandonRequest({
       abandonRequested: true,
-      betaAuthority: false,
       attempts: tracker.attemptsFor(optionId, planId),
       lastVerified: false,
       lastProgressDelta: 0,
@@ -544,8 +543,6 @@ async function main(): Promise<void> {
       attempts: enforced.attempts,
       verified: false,
       progressDelta: 0,
-      betaAuthority: false,
-      betaShadowed: true,
       abandonRequested: true,
     })
     await check(
@@ -560,7 +557,6 @@ async function main(): Promise<void> {
 
     const suppressed = classifyAbandonRequest({
       abandonRequested: true,
-      betaAuthority: false,
       attempts: 0,
       lastVerified: false,
       lastProgressDelta: 0,
@@ -568,8 +564,8 @@ async function main(): Promise<void> {
       alreadyAbandoned: false,
     })
     await check(
-      '(b5) control: with no charged attempts the request stays speculative/abandonEnforced=false (the old oscillation)',
-      suppressed.action === 'continue' && suppressed.enforced === false && suppressed.reason === 'speculative',
+      '(b5) control: with no charged attempts an abandon vote still stands (authority, not shadow)',
+      suppressed.action === 'abandon' && suppressed.enforced === false && suppressed.reason === 'authority',
       `action=${suppressed.action} enforced=${suppressed.enforced} reason=${suppressed.reason}`,
     )
 

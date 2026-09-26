@@ -1,35 +1,17 @@
-// abandonPolicy.ts - issue #79: distinguish SPECULATIVE from DEMONSTRABLY
-// UNPRODUCTIVE abandon requests so beta shadow mode stops blocking legitimate
-// abandons.
+// abandonPolicy.ts - issue #79: distinguish a DEMONSTRABLY UNPRODUCTIVE Option
+// from an ordinary abandon vote.
 //
-// Measured 2026-09-18 10:23 JST (host pid=441190, contract v3, main 10698f9):
-//
-//   JEV_HEADS action=ESCALATE abandon=1 decision=continue abandonRequested=true
-//             betaAuthority=false betaShadowed=true   (repeats)
-//   CAUSAL ... optionId=smelt:iron_ingot planId=g41:smelt:iron_ingot
-//          candidateId=ESCALATE actionId=ESCALATE verified=false status=done
-//          resource=null progressDelta=0
-//
-// The policy already requested abandonment (abandonRequested=true) but
-// `betaAuthority=false` forced `decision=continue`, so the same zero-progress
-// option was retried forever. The #22 rule ("shadow mode may not abandon") was
-// written for the SPECULATIVE case (abandon `smelt:iron_ingot` before its
-// prerequisite path has run). It must not suppress an abandon when the option
-// has actually been attempted N times with verified=false && progressDelta=0.
-//
-// This module is the deterministic, pure rule set:
+// The decision policy's abandon vote ends the current Option (subject to the
+// prerequisite guard). Independently, an Option that has been attempted N
+// times with verified=false && progressDelta=0 is demonstrably unproductive:
+// that code-owned evidence is recorded with the verdict so the typed log names
+// why the Option ended. Neither path selects WHAT comes next.
 //
 //   1. ATTEMPTS  - a per-option (per optionId, keyed by planId) counter of
 //                  unproductive settled outcomes (verified=false && progress=0).
 //                  Any verified/progress outcome resets it.
-//   2. CLASSIFY  - `speculative` (attempts < limit) is suppressible in shadow
-//                  mode; `unproductive` (attempts >= limit) is enforced even
-//                  with `betaAuthority=false`; `authority` keeps the existing
-//                  #22 opt-in path (still subject to the prerequisite guard).
-//   3. LADDER    - after enforcement the next feasible rung (place_held ->
-//                  use_known_station -> craft_and_place -> escalate) is chosen
-//                  and the abandoned one is only retryable after a cooldown or a
-//                  plan/state change.
+//   2. CLASSIFY  - `unproductive` (attempts >= limit), `authority` (the vote
+//                  stands), `cooldown` (already retired) or `not_requested`.
 //
 // No imports from the controller, no bot, no clock: `now` is injected, so the
 // whole policy is unit-testable.
@@ -147,13 +129,13 @@ export class OptionAttemptTracker {
   }
 }
 
-export type AbandonReason79 = 'unproductive' | 'speculative' | 'authority' | 'cooldown' | 'not_requested'
+export type AbandonReason79 = 'unproductive' | 'authority' | 'cooldown' | 'not_requested'
 
 export interface AbandonClassification {
   action: 'abandon' | 'continue'
-  /** honored despite shadow mode because the option is demonstrably unproductive. */
+  /** the option is demonstrably unproductive (code-owned evidence). */
   enforced: boolean
-  /** shadow mode suppressed the request (speculative / cooling down). */
+  /** the request was suppressed because the option is cooling down. */
   suppressed: boolean
   reason: AbandonReason79
   attempts: number
@@ -163,7 +145,6 @@ export interface AbandonClassification {
 
 export interface AbandonClassifyInput {
   abandonRequested: boolean
-  betaAuthority: boolean
   attempts: number
   lastVerified: boolean
   lastProgressDelta: number
@@ -173,10 +154,8 @@ export interface AbandonClassifyInput {
 }
 
 /**
- * The #79 decision: a request is SPECULATIVE while `attempts < limit` (shadow
- * mode may suppress it), DEMONSTRABLY UNPRODUCTIVE once `attempts >= limit`
- * with verified=false && progress=0 (enforced even with `betaAuthority=false`),
- * or an `authority` opt-in (existing #22 behavior).
+ * The #79 classification: DEMONSTRABLY UNPRODUCTIVE once `attempts >= limit`
+ * with verified=false && progress=0, otherwise the vote stands (`authority`).
  */
 export function classifyAbandonRequest(input: AbandonClassifyInput): AbandonClassification {
   const limit = input.attemptLimit ?? UNPRODUCTIVE_ATTEMPT_LIMIT_DEFAULT
@@ -195,10 +174,7 @@ export function classifyAbandonRequest(input: AbandonClassifyInput): AbandonClas
   if (input.attempts >= limit && unproductive) {
     return { action: 'abandon', enforced: true, suppressed: false, reason: 'unproductive', ...base }
   }
-  if (input.betaAuthority) {
-    return { action: 'abandon', enforced: false, suppressed: false, reason: 'authority', ...base }
-  }
-  return { action: 'continue', enforced: false, suppressed: true, reason: 'speculative', ...base }
+  return { action: 'abandon', enforced: false, suppressed: false, reason: 'authority', ...base }
 }
 
 export interface AbandonEnforcedLog {
@@ -206,8 +182,6 @@ export interface AbandonEnforcedLog {
   attempts: number
   verified: boolean
   progressDelta: number
-  betaAuthority: boolean
-  betaShadowed: boolean
   abandonRequested: boolean
 }
 
@@ -215,14 +189,14 @@ export interface AbandonEnforcedLog {
 export function formatAbandonEnforced(input: AbandonEnforcedLog): string {
   return (
     `ABANDON_ENFORCED optionId=${input.optionId} reason=unproductive attempts=${input.attempts} ` +
-    `verified=${input.verified} progress=${input.progressDelta} betaAuthority=${input.betaAuthority} ` +
-    `betaShadowed=${input.betaShadowed} abandonRequested=${input.abandonRequested} action=abandon`
+    `verified=${input.verified} progress=${input.progressDelta} ` +
+    `abandonRequested=${input.abandonRequested} action=abandon`
   )
 }
 
 export interface AbandonSuppressedLog {
   optionId: string
-  reason: 'speculative' | 'cooldown'
+  reason: 'cooldown'
   attempts: number
 }
 
@@ -230,7 +204,7 @@ export interface AbandonSuppressedLog {
 export function formatAbandonSuppressed(input: AbandonSuppressedLog): string {
   return (
     `ABANDON_SUPPRESSED optionId=${input.optionId} reason=${input.reason} ` +
-    `attempts=${input.attempts} mode=shadow action=continue`
+    `attempts=${input.attempts} action=continue`
   )
 }
 

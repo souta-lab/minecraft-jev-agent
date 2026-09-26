@@ -32,7 +32,6 @@ import type { JevReachRouteDecisionRecord } from './jev-composition.ts'
 import type { EventLogger } from '../jev.ts'
 import type { StateFingerprintMemory } from '../moveFailMemory.ts'
 import type { PlaceRetryLedger } from '../placementGuard.ts'
-import type { PrereqRankPolicy } from '../prereqOption.ts'
 import {
   isMissionReachWalkAction,
 } from './mission-projection.ts'
@@ -90,7 +89,6 @@ export interface ReachPlaneOptions {
   readonly scanRadius: number
   readonly maxCandidateAgeTicks: number
   readonly dimensionProvenance?: DimensionProvenance | null
-  readonly prereqRankPolicy: PrereqRankPolicy
   readonly vtrMission?: InventoryReachMission | null
   readonly vtrReachProbe?: boolean
   readonly decisionProvenance: Readonly<DecisionRecordProvenance>

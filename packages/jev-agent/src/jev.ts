@@ -30,19 +30,6 @@ export const PRIMARY_INSTRUCTIONS = AUTHORITY_PRIMARY_INSTRUCTIONS
 export const buildQuestions = buildAuthorityQuestions
 
 /**
- * Jev beta owns WHETHER the current Option ends by default. Shadow beta remains
- * available only as an explicit experiment/debug switch.
- */
-export function resolveBetaAuthority(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  const raw = (env.BUDDY_BETA_AUTHORITY ?? '').trim().toLowerCase()
-  if (raw === '' || raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes' || raw === 'authority') return true
-  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no' || raw === 'shadow') return false
-  throw new Error(`invalid BUDDY_BETA_AUTHORITY=${JSON.stringify(env.BUDDY_BETA_AUTHORITY)}; expected authority|shadow`)
-}
-
-/**
  * Public beta adoption gate.
  *
  * The real authority policy stamps the exact Option instance's threshold and the

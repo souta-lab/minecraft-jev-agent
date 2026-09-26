@@ -1,13 +1,11 @@
-// test-beta-authority.mts - #11/#22 beta authority contract.
+// test-beta-authority.mts - the beta abandon-vote gate (V4.1.2).
 //
-// Public resident semantics:
-//   - beta authority is ON by default;
-//   - explicit shadow/off is the rollback/A-B baseline;
-//   - the historical betaAuthorityDecision helper is still tested as a legacy
-//     baseline primitive, but its prerequisite-protection veto is NOT the public
-//     real-Jev controller contract (controller.ts owns that policy-evidence boundary).
+// The decision policy's vote to end the current Option is policy input: it is
+// adopted only when the deterministic prerequisite guard clears it. There is
+// no shadow/authority selector: no env switch, no option, no resolver.
+import * as jevModule from './src/jev.ts'
 import { betaAuthorityDecision, formatJevHeads } from './src/betaAuthority.ts'
-import { betaShadowDecision, formatBetaShadow, resolveBetaAuthority } from './src/jev.ts'
+import { betaShadowDecision, formatBetaShadow } from './src/jev.ts'
 import type { GoalLike } from './src/placementGuard.ts'
 
 interface Case {
@@ -23,71 +21,51 @@ const addCase = (name: string, run: Case['run']): void => {
 const smeltGoal: GoalLike = { kind: 'smelt', targetItem: 'iron_ingot' }
 const collectGoal: GoalLike = { kind: 'collect', targetItem: 'diamond' }
 
-addCase('#11: public beta authority defaults ON; shadow is explicit', () => {
-  const defaults = resolveBetaAuthority({})
-  const authority = resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'authority' })
-  const shadow = resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' })
-  const off = resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: '0' })
-  let invalid = false
-  try {
-    resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'auto' })
-  } catch {
-    invalid = true
-  }
-  return {
-    pass: defaults && authority && !shadow && !off && invalid,
-    detail: `default=${defaults} authority=${authority} shadow=${shadow} off=${off} invalidThrows=${invalid}`,
-  }
+addCase('there is no beta authority selector to resolve', () => {
+  const exported = Object.keys(jevModule)
+  const pass = !exported.includes('resolveBetaAuthority')
+  return { pass, detail: `resolveBetaAuthority exported=${exported.includes('resolveBetaAuthority')}` }
 })
 
-addCase('explicit shadow baseline: beta=1 does NOT adopt', () => {
+addCase('an unprotected beta=1 is adopted and the heads line reports the replan', () => {
   const vote = betaAuthorityDecision({
-    betaAuthority: false,
-    abandonRequested: true,
-    actionId: 'MINE:b10_64_0',
-    goals: [collectGoal],
-    placedFurnaceCount: 0,
-  })
-  const shadow = betaShadowDecision({ optionId: 'collect:diamond', beta: 1, actualReplan: vote.adopt })
-  const line = formatBetaShadow(shadow)
-  return {
-    pass: vote.adopt === false && vote.shadowed === true && line.endsWith('actual=continue'),
-    detail: `adopt=${vote.adopt} shadowed=${vote.shadowed} ${line}`,
-  }
-})
-
-addCase('legacy primitive baseline: authority=true permits an unprotected beta=1', () => {
-  const vote = betaAuthorityDecision({
-    betaAuthority: true,
     abandonRequested: true,
     actionId: 'MINE:b10_64_0',
     goals: [collectGoal],
     placedFurnaceCount: 0,
   })
   const heads = formatJevHeads('MINE:b10_64_0', 1, vote.adopt)
+  const telemetry = formatBetaShadow(betaShadowDecision({ optionId: 'collect:diamond', beta: 1, actualReplan: vote.adopt }))
   return {
-    pass: vote.adopt === true && vote.shadowed === false && heads.endsWith('-> replan'),
-    detail: `adopt=${vote.adopt} shadowed=${vote.shadowed} ${heads}`,
+    pass: vote.adopt === true && heads.endsWith('-> replan') && telemetry.endsWith('actual=abandon'),
+    detail: `adopt=${vote.adopt} ${heads} | ${telemetry}`,
   }
 })
 
-addCase('legacy primitive baseline retains prerequisite protection for A/B only', () => {
+addCase('a vote below threshold is never adopted', () => {
+  const vote = betaAuthorityDecision({
+    abandonRequested: false,
+    actionId: 'MINE:b10_64_0',
+    goals: [collectGoal],
+    placedFurnaceCount: 0,
+  })
+  return { pass: vote.adopt === false, detail: `adopt=${vote.adopt}` }
+})
+
+addCase('the prerequisite guard protects the unplaced furnace path from beta=1', () => {
   const place = betaAuthorityDecision({
-    betaAuthority: true,
     abandonRequested: true,
     actionId: 'PLACE:furnace:p29_61_35',
     goals: [smeltGoal],
     placedFurnaceCount: 0,
   })
   const craft = betaAuthorityDecision({
-    betaAuthority: true,
     abandonRequested: true,
     actionId: 'CRAFT:furnace',
     goals: [smeltGoal],
     placedFurnaceCount: 0,
   })
   const retrieve = betaAuthorityDecision({
-    betaAuthority: true,
     abandonRequested: true,
     actionId: 'RETRIEVE:known:station:furnace:b29_61_35',
     goals: [smeltGoal],
@@ -101,9 +79,8 @@ addCase('legacy primitive baseline retains prerequisite protection for A/B only'
   }
 })
 
-addCase('legacy primitive baseline releases prerequisite protection after placement', () => {
+addCase('prerequisite protection releases once the furnace is placed', () => {
   const vote = betaAuthorityDecision({
-    betaAuthority: true,
     abandonRequested: true,
     actionId: 'PLACE:furnace:p29_61_35',
     goals: [smeltGoal],
@@ -116,7 +93,7 @@ addCase('legacy primitive baseline releases prerequisite protection after placem
 })
 
 let failures = 0
-process.stdout.write('#11 beta authority default + explicit shadow baseline\n')
+process.stdout.write('beta abandon-vote gate (no selector)\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()

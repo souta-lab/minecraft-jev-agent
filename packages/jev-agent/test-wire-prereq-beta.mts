@@ -6,18 +6,19 @@
 //
 //   1. STATIC  - the controller/candidates sources actually invoke
 //                `planPrereqOptions` / `formatPrereqSwitch` / `formatPrereqOptionFor`
-//                and `betaAuthorityDecision`, and gate adoption behind
-//                `options.betaAuthority`.
+//                and `betaAuthorityDecision`; the vote is authoritative (no
+//                shadow/authority selector exists).
 //   2. #58     - a held furnace chooses `place_held` and the logged line names
 //                the path the controller actually follows (not the cost-optimal
 //                one it overrode after a `PREREQ_SWITCH`).
-//   3. #22     - with `betaAuthority:false`, beta=1 records `BETA_SHADOW ...
-//                actual=continue` and can NEVER adopt, even unprotected.
+//   3. #22     - the deterministic prerequisite guard is the only veto on a
+//                beta=1 vote: protected actions can never adopt; unprotected
+//                votes adopt directly and `BETA_SHADOW` remains telemetry.
 //
 // Pure: no bot, no network, no model.
 import { readFileSync } from 'node:fs'
 import { betaAuthorityDecision, formatJevHeads } from './src/betaAuthority.ts'
-import { betaShadowDecision, formatBetaShadow, resolveBetaAuthority } from './src/jev.ts'
+import { betaShadowDecision, formatBetaShadow } from './src/jev.ts'
 import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from './src/candidates.ts'
 import {
   evaluatePrereqStall,
@@ -181,16 +182,18 @@ addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.
   return { pass, detail: pass ? 'candidates.ts wires planPrereqOptions + prereqPath' : 'candidates wiring missing' }
 })
 
-addCase('#63: controller.ts gates beta adoption behind the verdict + betaAuthority', () => {
+addCase('#63: controller.ts runs the beta vote gate; no shadow/authority selector remains', () => {
   const text = `${source('./src/controller.ts')}\n${source('./src/controller.ts')}\n${source('./src/abandon-lifecycle.ts').replace(/\bhost\./g, 'this.')}`
   const pass =
     text.includes('betaAuthorityDecision({') &&
     text.includes('classifyAbandonRequest({') &&
     text.includes('private abandonVerdict(') &&
     text.includes('private applyAbandon(') &&
-    text.includes('this.options.betaAuthority') &&
+    !text.includes('options.betaAuthority') &&
+    !text.includes('resolveBetaAuthority') &&
+    !text.includes('BUDDY_BETA_AUTHORITY') &&
     text.includes('return { adopt: vote.adopt')
-  return { pass, detail: pass ? 'betaAuthorityDecision + abandonVerdict + authority path present' : 'beta gate missing' }
+  return { pass, detail: pass ? 'betaAuthorityDecision + abandonVerdict + authority path present; no selector' : 'beta gate wiring drifted' }
 })
 
 // --- 2. #58 prereq path ------------------------------------------------------
@@ -235,9 +238,8 @@ addCase('#58: a stalled place_held switches to use_known_station instead of repe
 
 // --- 3. #22 beta shadow ------------------------------------------------------
 
-addCase('#22: betaAuthority=false means beta=1 can never adopt (protected path)', () => {
+addCase('#22: a protected beta=1 vote is vetoed by the prerequisite guard', () => {
   const vote = betaAuthorityDecision({
-    betaAuthority: resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' }),
     abandonRequested: true,
     actionId: 'RETRIEVE:known:station:furnace:b29_61_35',
     goals: [smeltGoal],
@@ -249,39 +251,30 @@ addCase('#22: betaAuthority=false means beta=1 can never adopt (protected path)'
   const heads = formatJevHeads('RETRIEVE:known:station:furnace:b29_61_35', 1, vote.adopt)
   const pass =
     vote.adopt === false &&
-    vote.shadowed === true &&
+    vote.protection.protect === true &&
     line === expected &&
     heads === 'JEV_HEADS action=RETRIEVE:known:station:furnace:b29_61_35 abandon=1 -> continue'
-  return { pass, detail: `adopt=${vote.adopt} shadowed=${vote.shadowed} | ${line}` }
+  return { pass, detail: `adopt=${vote.adopt} protected=${vote.protection.protect} | ${line}` }
 })
 
-addCase('#22: betaAuthority=false means beta=1 cannot adopt even unprotected', () => {
+addCase('#22: an unprotected beta=1 vote adopts; BETA_SHADOW records actual=abandon', () => {
   const vote = betaAuthorityDecision({
-    betaAuthority: resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' }),
     abandonRequested: true,
     actionId: 'MINE:b10_64_0',
     goals: [collectGoal],
     placedFurnaceCount: 0,
   })
   const shadow = betaShadowDecision({ optionId: 'collect:raw_iron', beta: 1, actualReplan: vote.adopt })
-  const pass = vote.adopt === false && vote.shadowed === true && formatBetaShadow(shadow).endsWith('actual=continue')
-  return { pass, detail: `adopt=${vote.adopt} shadowed=${vote.shadowed} | ${formatBetaShadow(shadow)}` }
-})
-
-addCase('#22: the same unprotected vote WOULD adopt only with explicit authority', () => {
-  const vote = betaAuthorityDecision({
-    betaAuthority: true,
-    abandonRequested: true,
-    actionId: 'MINE:b10_64_0',
-    goals: [collectGoal],
-    placedFurnaceCount: 0,
-  })
-  const pass = vote.adopt === true && vote.shadowed === false && formatJevHeads('MINE:b10_64_0', 1, vote.adopt).endsWith('-> replan')
-  return { pass, detail: `adopt=${vote.adopt} shadowed=${vote.shadowed}` }
+  const pass =
+    vote.adopt === true &&
+    vote.protection.protect === false &&
+    formatBetaShadow(shadow).endsWith('actual=abandon') &&
+    formatJevHeads('MINE:b10_64_0', 1, vote.adopt).endsWith('-> replan')
+  return { pass, detail: `adopt=${vote.adopt} protected=${vote.protection.protect} | ${formatBetaShadow(shadow)}` }
 })
 
 let failures = 0
-process.stdout.write('#63 wiring guard: prereqOption + betaAuthority are on the decision path (#58/#22)\n')
+process.stdout.write('#63 wiring guard: prereqOption + beta vote gate on the decision path (#58/#22)\n')
 process.stdout.write('-'.repeat(78) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()

@@ -1,14 +1,14 @@
 // test-ai-authority-overhaul.mts - architectural swap-point invariants.
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   JsonlWriter,
   PRIMARY_INSTRUCTIONS,
   createJevPolicy,
-  resolveBetaAuthority,
 } from '../jev-agent/src/jev.ts'
+import * as jevModule from '../jev-agent/src/jev.ts'
 import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 import { resolvePlannerMode } from './planner.ts'
 
@@ -18,11 +18,12 @@ assert.equal(resolvePlannerMode({ BUDDY_PLANNER: 'deterministic' }), 'determinis
 assert.equal(resolvePlannerMode({ BUDDY_PLANNER: 'local-mercury' }), 'local-mercury')
 assert.throws(() => resolvePlannerMode({ BUDDY_PLANNER: 'typo' }))
 
-assert.equal(resolveBetaAuthority({}), true, 'Jev beta must own WHETHER by default')
-assert.equal(resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'authority' }), true)
-assert.equal(resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' }), false)
-assert.equal(resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'off' }), false)
-assert.throws(() => resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'maybe' }))
+// Jev beta owns WHETHER by default; there is no shadow/authority selector.
+assert.ok(!('resolveBetaAuthority' in jevModule), 'BUDDY_BETA_AUTHORITY selector must not exist')
+assert.ok(
+  !readFileSync(new URL('../jev-agent/src/jev.ts', import.meta.url), 'utf8').includes('BUDDY_BETA_AUTHORITY'),
+  'jev.ts must not read BUDDY_BETA_AUTHORITY',
+)
 
 const prompt = PRIMARY_INSTRUCTIONS.toLowerCase()
 assert.ok(!prompt.includes('prefer an id with no recorded failures'))

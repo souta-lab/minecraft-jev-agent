@@ -86,7 +86,6 @@ export interface System2PlaneHost {
   presentedCandidateFacts: System2GroundedAlternative[]
   previousDecisionFacts(): PreviousDecisionFacts | null
   protectedGoalRetireReason(goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null
-  protectedReplanSuppressed(reason: LlmSummonReason): boolean
   queue: GoalQueue
   queuePreconditionSnapshot(): OptionWorldSnapshot
   recentEvents: string[]
@@ -554,9 +553,6 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
       host.tickCounter,
     )
     return { triggered: false, reason, detail: 'human intent owns WHAT until the interrupt completes or is cleared' }
-  }
-  if (host.protectedReplanSuppressed(reason)) {
-    return { triggered: false, reason, detail: 'protected prerequisite: replan suppressed (#46)' }
   }
   if (host.options.singleShotPlanner && host.planSupplied) {
     host.logger.warn(

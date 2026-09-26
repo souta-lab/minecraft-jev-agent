@@ -57,7 +57,6 @@ function classify(
   const state = tracker.stateFor(OPTION, PLAN)
   return classifyAbandonRequest({
     abandonRequested: true,
-    betaAuthority: false,
     attempts: state.attempts,
     lastVerified: state.verified,
     lastProgressDelta: state.progressDelta,
@@ -67,21 +66,23 @@ function classify(
   })
 }
 
-addCase('(a) #79: a speculative (0-attempt) request is suppressed in shadow mode', () => {
+addCase('(a) #79: a first-attempt abandon vote stands; only cooldown suppresses it', () => {
   const tracker = new OptionAttemptTracker()
   const classification = classify(tracker)
-  const line = formatAbandonSuppressed({ optionId: OPTION, reason: 'speculative', attempts: classification.attempts })
-  const expected = `ABANDON_SUPPRESSED optionId=${OPTION} reason=speculative attempts=0 mode=shadow action=continue`
+  const cooling = classify(tracker, { alreadyAbandoned: true })
+  const line = formatAbandonSuppressed({ optionId: OPTION, reason: 'cooldown', attempts: cooling.attempts })
+  const expected = `ABANDON_SUPPRESSED optionId=${OPTION} reason=cooldown attempts=0 action=continue`
   const pass =
-    classification.action === 'continue' &&
-    classification.suppressed === true &&
+    classification.action === 'abandon' &&
     classification.enforced === false &&
-    classification.reason === 'speculative' &&
+    classification.reason === 'authority' &&
+    cooling.action === 'continue' &&
+    cooling.reason === 'cooldown' &&
     line === expected
-  return { pass, detail: `${line} | action=${classification.action} reason=${classification.reason}` }
+  return { pass, detail: `${line} | first=${classification.action}/${classification.reason}` }
 })
 
-addCase('(b) #79: after N unverified zero-progress attempts the abandon is enforced despite betaAuthority=false', () => {
+addCase('(b) #79: after N unverified zero-progress attempts the Option is recorded as demonstrably unproductive', () => {
   const tracker = new OptionAttemptTracker()
   unproductive(tracker, LIMIT)
   const state = tracker.stateFor(OPTION, PLAN)
@@ -91,13 +92,11 @@ addCase('(b) #79: after N unverified zero-progress attempts the abandon is enfor
     attempts: classification.attempts,
     verified: classification.verified,
     progressDelta: classification.progressDelta,
-    betaAuthority: false,
-    betaShadowed: true,
     abandonRequested: true,
   })
   const expected =
     `ABANDON_ENFORCED optionId=${OPTION} reason=unproductive attempts=${LIMIT} verified=false progress=0 ` +
-    `betaAuthority=false betaShadowed=true abandonRequested=true action=abandon`
+    `abandonRequested=true action=abandon`
   const pass =
     state.attempts === LIMIT &&
     classification.action === 'abandon' &&
@@ -147,8 +146,8 @@ addCase('(d) #79: the counter resets after verified progress', () => {
     before === LIMIT &&
     afterVerified.attempts === 0 &&
     afterVerified.abandonedAtMs === null &&
-    resetClassification.action === 'continue' &&
-    resetClassification.reason === 'speculative' &&
+    resetClassification.enforced === false &&
+    resetClassification.reason === 'authority' &&
     progressOnly.attemptsFor(OPTION, PLAN) === 0
   return {
     pass,
@@ -159,7 +158,6 @@ addCase('(d) #79: the counter resets after verified progress', () => {
 addCase('(e) #79: a never-attempted smelt option stays protected before its prereq runs', () => {
   const smeltGoal: GoalLike = { kind: 'smelt', targetItem: 'iron_ingot' }
   const vote = betaAuthorityDecision({
-    betaAuthority: false,
     abandonRequested: true,
     actionId: 'PLACE:furnace:p29_61_35',
     goals: [smeltGoal],
@@ -170,8 +168,6 @@ addCase('(e) #79: a never-attempted smelt option stays protected before its prer
   const pass =
     vote.protection.protect === true &&
     vote.adopt === false &&
-    vote.shadowed === true &&
-    classification.action === 'continue' &&
     classification.enforced === false &&
     classification.attempts === 0
   return { pass, detail: `protect=${vote.protection.protect} adopt=${vote.adopt} enforced=${classification.enforced}` }
@@ -203,7 +199,7 @@ addCase('#79 wiring: the authority facade preserves the legacy attempt/enforceme
 })
 
 let failures = 0
-process.stdout.write('#79 abandon enforce: honor unproductive abandons in shadow mode\n')
+process.stdout.write('#79 abandon enforcement: unproductive evidence + guarded vote\n')
 process.stdout.write('-'.repeat(78) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()

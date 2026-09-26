@@ -151,7 +151,7 @@ import { FLINT_AND_STEEL, IRON_INGOT, NETHER, OBSIDIAN, OVERWORLD, PORTAL_ENTERE
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
 import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
-import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
+import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, ModelRecoveryRequested, assertRecoveryModelAuthority, describeFailure, failLoud } from './modelFailure.ts'
 import type { ModelAuthorityIdentity } from './modelFailure.ts'
@@ -351,10 +351,9 @@ import {
 import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import {
   PREREQ_STATION_ALREADY_KNOWN,
-  resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
 } from './prereqOption.ts'
-import type { PrereqDecision, PrereqPath, PrereqProgress, PrereqRankPolicy, RetrieveUnverifiedState } from './prereqOption.ts'
+import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
 import type { OscillationState } from './oscillation.ts'
 import { NO_LOCOMOTION_OBSERVATION } from './locomotion.ts'
 import type { LocomotionObservation } from './locomotion.ts'
@@ -487,7 +486,6 @@ export const defaultJevAgentOptions: JevAgentOptionDefaults = {
   jevRateLimitBaseDelayMs: 7000,
   logDir: 'logs',
   forceFallbackPolicy: false,
-  betaAuthority: resolveBetaAuthority(),
   unproductiveAttemptLimit: resolveUnproductiveAttemptLimit(),
   abandonCooldownMs: resolveAbandonCooldownMs(),
   verbose: true,
@@ -504,7 +502,6 @@ export const defaultJevAgentOptions: JevAgentOptionDefaults = {
   waitStreakEscalateCycles: resolveWaitStreakEscalateCycles(),
   repeatedOutcomeLimit: resolveRepeatedOutcomeLimit(),
   betaAbandonDeferCycles: resolveBetaAbandonDeferCycles(),
-  prereqRankPolicy: resolvePrereqRankPolicy(),
   serverId: 'local',
   worldEpoch: 0,
   decisionProvenance: { runId: null, generationId: null, sourceSha: null },
@@ -2861,7 +2858,6 @@ export class JevController {
           )
         }
       }
-      this.breakFailureDeadlock(candidates)
 
       const planGoal: CausalGoalRef | null = state.goalQueue.current
       const causalStamp = makeCausalStamp({ chainId: makeChainId(), goal: planGoal })
@@ -3539,19 +3535,6 @@ export class JevController {
     return queueplane.reconcileNonProgressingOptionalHead(this.queueHost)
   }
 
-  /**
-   * Model-backed decision policy is active. An explicitly configured
-   * `fallback`/offline policy keeps the deterministic baseline semantics so
-   * fixtures and offline runs stay runnable.
-   */
-  private realJevPolicy(): boolean {
-    return this.jev?.kind !== 'fallback'
-  }
-
-  private betaAuthoritative(): boolean {
-    return this.realJevPolicy() && this.options.betaAuthority === true
-  }
-
   /** Bounded in-memory evidence feed consumed by the decision policy. */
   private pushPolicyEvidence(event: string): void {
     this.recentEvents.push(event)
@@ -3609,7 +3592,7 @@ export class JevController {
    */
   private abandonVerdict(decision: JevResult, optionId: string | null, planId: string | null): AbandonVerdict {
     const baseline = abandonlifecycle.abandonVerdict(this.abandonLifecycleHost, decision, optionId, planId)
-    if (!this.betaAuthoritative() || optionId === null) return baseline
+    if (optionId === null) return baseline
 
     const boundary = this.betaTerminationBoundary(decision, optionId)
     if (abandonRequested(decision) && !boundary.adopt) {
@@ -3625,7 +3608,7 @@ export class JevController {
         adopt: false,
         enforced: false,
         suppressed: true,
-        vote: { ...baseline.vote, adopt: false, shadowed: false },
+        vote: { ...baseline.vote, adopt: false },
       }
     }
 
@@ -3643,7 +3626,7 @@ export class JevController {
       adopt,
       enforced: false,
       suppressed: false,
-      vote: { ...baseline.vote, adopt, shadowed: false },
+      vote: { ...baseline.vote, adopt },
     }
   }
 
@@ -3706,31 +3689,12 @@ export class JevController {
     this.logger.info('shadow', `SHADOW_METRICS ${JSON.stringify(this.shadowMetrics(state))}`, this.shadowMetrics(state), this.tickCounter)
   }
 
-  private semanticEscalation(decision: JevResult): { escalate: boolean; reason: string } {
-    if (this.realJevPolicy()) {
-      // should_retreat is local safety/recovery evidence. Guard/policy can
-      // retreat; it is not itself a request for a different long-horizon WHAT.
-      return { escalate: false, reason: 'local safety/recovery remains Jev pi + deterministic guard' }
-    }
-    const retreat = gateBoolean(decision.answers.should_retreat)
-    if (retreat.band === 'strong_true') {
-      return { escalate: true, reason: `strong semantic signal: should_retreat ${retreat.reason}` }
-    }
-    return { escalate: false, reason: 'no semantic escalation' }
+  private semanticEscalation(_decision: JevResult): { escalate: boolean; reason: string } {
+    // should_retreat is local safety/recovery evidence. Guard/policy can
+    // retreat; it is not itself a request for a different long-horizon WHAT.
+    return { escalate: false, reason: 'local safety/recovery remains Jev pi + deterministic guard' }
   }
 
-
-  /**
-   * #46: a required precondition is deterministic code, not a model vote. When
-   * the last chosen action is the furnace prerequisite of the ready smelt, a
-   * replan is suppressed (and logged) until the bounded placement retries run out.
-   */
-  private protectedReplanSuppressed(reason: LlmSummonReason): boolean {
-    // Once the decision policy explicitly ended the Option, a queue-level
-    // prerequisite protection heuristic must not veto the System2 handoff.
-    if (this.betaAuthoritative()) return false
-    return queueplane.protectedReplanSuppressed(this.queueHost, reason)
-  }
 
   private placeRetryExhausted(): boolean {
     return abandonlifecycle.placeRetryExhausted(this.abandonLifecycleHost)
@@ -3770,10 +3734,6 @@ export class JevController {
    * abandonment ledger retired for the same fingerprint, the fact wins, the
    * contradiction is surfaced with the mirrored marker, and protection is off.
    */
-  private reconciledProtection(protection: PrerequisiteProtection, reason: string): PrerequisiteProtection {
-    return abandonlifecycle.reconciledProtection(this.abandonLifecycleHost, protection, reason)
-  }
-
   private logProtectionAbandonConflict(option: string, abandonedReason: string, reason: string): void {
     return abandonlifecycle.logProtectionAbandonConflict(this.abandonLifecycleHost, option, abandonedReason, reason)
   }
@@ -3937,10 +3897,6 @@ export class JevController {
   }
 
   private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
-    if (!this.realJevPolicy()) {
-      return outcome.onUnverifiedAction(this.outcomeHost, result, postcondition, pending)
-    }
-
     const planId = pending?.record?.goalQueueState?.current?.id ?? this.queue.current?.id ?? null
     const strategy = pending?.record?.strategy ?? null
     const key = planId ?? result.actionId
@@ -3978,9 +3934,6 @@ export class JevController {
   }
 
   private advancePrereqAfterUnverified(): boolean {
-    if (!this.realJevPolicy()) {
-      return outcome.advancePrereqAfterUnverified(this.outcomeHost)
-    }
     // A zero-progress/unverified action is evidence for the decision policy,
     // not permission for code to select the next semantic prerequisite path.
     this.clearLegacyPrereqSelection()
@@ -4012,10 +3965,7 @@ export class JevController {
     return stall.detectOscillation(this.stallHost, position)
   }
 
-  private escapeOscillation(state: OscillationState): void {
-    if (!this.realJevPolicy()) {
-      return stall.escapeOscillation(this.stallHost, state)
-    }
+  private escapeOscillation(_state: OscillationState): void {
     // Oscillation is an observation. No auto-abandon of a retrieval, no
     // prerequisite route switch, no System2 wake. Expose it to the policy.
     this.oscillationState = null
@@ -4309,7 +4259,7 @@ export class JevController {
   // -------------------------------------------------------------------------
 
   private escalate(reason: EscalationReason, detail: string): void {
-    if (this.realJevPolicy() && LOCAL_POLICY_ESCALATIONS.has(reason)) {
+    if (LOCAL_POLICY_ESCALATIONS.has(reason)) {
       // Local path/stall/confidence/failure signals are compact policy memory;
       // they do not change WHAT. Structural reasons still reach the System2
       // handoff below.
@@ -4341,16 +4291,6 @@ export class JevController {
 
   private noteCandidateSuccess(candidateId: string): void {
     return ledgers.noteCandidateSuccess(this.ledgersHost, candidateId)
-  }
-
-  private breakFailureDeadlock(candidates: readonly Candidate[]): void {
-    if (this.realJevPolicy()) {
-      // "all candidates exceeded N failures" is not proof that the Option or
-      // candidate set is structurally invalid. failedCandidates is already in
-      // the decision frame; the policy decides from that evidence.
-      return
-    }
-    return ledgers.breakFailureDeadlock(this.ledgersHost, candidates)
   }
 
   private updateStallSignal(): void {
@@ -4587,9 +4527,6 @@ export class JevController {
    * partial 20 m approach both satisfy it - the live iron-ore and RC8 loops).
    */
   private retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void {
-    if (!this.realJevPolicy()) {
-      return retrieval.retireFailedKnownRetrieve(this.retrievalHost, candidate, result)
-    }
     // No fixed-attempt semantic retirement. Hard world-truth staleness and
     // current deterministic reachability still live in their own subsystems;
     // count/cooldown history stays evidence only.
@@ -4612,9 +4549,6 @@ export class JevController {
   }
 
   private checkWedge(actionId: string): void {
-    if (!this.realJevPolicy()) {
-      return wedge.checkWedge(this.wedgeHost, actionId)
-    }
     // Repeated WAIT is history for the decision policy, not
     // "N waits -> System2/abort".
     if (actionId === 'WAIT') {
@@ -4760,8 +4694,8 @@ export class JevController {
     // Failure-count station blacklists cannot hide otherwise-grounded
     // alternatives from the decision policy; hard reachability is still
     // enforced by grounded candidate generation + Guard.
-    if (this.realJevPolicy()) return new Set<string>()
-    return retrieval.unreachableStationKeys(this.retrievalHost, state)
+    void state
+    return new Set<string>()
   }
 
   /**
@@ -4771,8 +4705,8 @@ export class JevController {
    * target that filterMoveCandidates immediately removes, leaving only WAIT.
    */
   private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
-    if (this.realJevPolicy()) return new Set<string>()
-    return retrieval.blacklistedMoveTargets(this.retrievalHost, state)
+    void state
+    return new Set<string>()
   }
 
   private applyFurnacePrereq(
@@ -4780,14 +4714,13 @@ export class JevController {
     candidates: readonly Candidate[],
     unreachableStations: ReadonlySet<string>,
   ): Candidate[] {
-    if (this.realJevPolicy()) {
-      // place-held vs known-station vs craft-and-place are co-equal grounded
-      // alternatives for the SAME furnace prerequisite. Do not collapse them
-      // to one cost/rank winner before the decision policy sees the set.
-      this.clearLegacyPrereqSelection()
-      return [...candidates]
-    }
-    return abandonlifecycle.applyFurnacePrereq(this.abandonLifecycleHost, state, candidates, unreachableStations)
+    void state
+    void unreachableStations
+    // place-held vs known-station vs craft-and-place are co-equal grounded
+    // alternatives for the SAME furnace prerequisite. Do not collapse them
+    // to one cost/rank winner before the decision policy sees the set.
+    this.clearLegacyPrereqSelection()
+    return [...candidates]
   }
 
   private furnacePrereqCandidateOptions(state: WorldState, unreachableStations: ReadonlySet<string>): CandidateOptions {
@@ -4826,9 +4759,6 @@ export class JevController {
    * is unchanged.
    */
   private abandonRetrieveOption(line: string, candidate: Candidate, unverified: number): void {
-    if (!this.realJevPolicy()) {
-      return abandonlifecycle.abandonRetrieveOption(this.abandonLifecycleHost, line, candidate, unverified)
-    }
     // Preserve the observation but do not convert N failures into a local
     // route switch or a System2 escalation. The next settled decision gives
     // the policy the same grounded alternatives plus failure history.
@@ -4873,9 +4803,6 @@ export class JevController {
   }
 
   private abortWedge(reason: string): void {
-    if (!this.realJevPolicy()) {
-      return wedge.abortWedge(this.wedgeHost, reason)
-    }
     // Wall-clock/count based no-progress is not a deterministic proof that the
     // process should abort. Preserve the evidence; termination ownership stays
     // with the decision policy and hard safety/lifecycle failures elsewhere.
@@ -5142,8 +5069,9 @@ export class JevController {
     // Move failure count/cooldown memory remains evidence, but it cannot hide
     // otherwise-grounded alternatives from the decision policy. Current hard
     // reachability is still enforced by grounded generation + Guard.
-    if (this.realJevPolicy()) return [...candidates]
-    return ledgers.filterMoveCandidates(this.ledgersHost, candidates, state, log)
+    void state
+    void log
+    return [...candidates]
   }
 
   private rememberMoveTarget(candidate: Candidate): void {

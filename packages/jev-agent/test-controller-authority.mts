@@ -27,11 +27,15 @@ assert.match(facade, /authority=jev_pi_beta/)
 // code-owned evidence block, never recomputed here.
 assert.match(facade, /const semanticExhausted = this\.signals\.strategicNonProgress\?\.exhausted === true/)
 assert.match(facade, /const adopt = \(abandonRequested\(decision\) \|\| semanticExhausted\) && boundary\.adopt/)
-assert.match(facade, /if \(!this\.betaAuthoritative\(\) \|\| optionId === null\) return baseline/)
+assert.match(facade, /if \(optionId === null\) return baseline/)
 assert.match(facade, /betaTerminationBoundary/)
 assert.match(facade, /BETA_DEFERRED option=/)
-assert.match(facade, /private protectedReplanSuppressed\(reason/)
-assert.match(facade, /if \(this\.betaAuthoritative\(\)\) return false/)
+// No shadow/authority fork may survive: the beta vote gate is the only
+// prerequisite-protection site, so a queue-level replan veto (and the
+// realJevPolicy/betaAuthority switches that armed it) must be gone.
+for (const forbidden of ['betaAuthoritative(', 'realJevPolicy(', 'protectedReplanSuppressed', 'options.betaAuthority', 'resolveBetaAuthority', 'BUDDY_BETA_AUTHORITY', 'BUDDY_PREREQ_RANK_POLICY', 'prereqRankPolicy']) {
+  assert.ok(!facade.includes(forbidden) && !legacy.includes(forbidden), `pre-V4.1.2 semantic selector survived: ${forbidden}`)
+}
 
 // The public REAL path must not contain the historical semantic selector calls.
 for (const forbidden of [
@@ -44,13 +48,13 @@ for (const forbidden of [
   assert.ok(!facade.includes(forbidden), `public controller facade must not own semantic selector ${forbidden}`)
 }
 
-// The old behavior is deliberately preserved only as an explicit fallback/A-B
-// baseline, not deleted before evidence exists (#11 migration plan).
+// The deterministic mechanics that remain must still be on the decision path:
+// prerequisite enumeration, selection over the abandoned set, stall evidence,
+// and the unproductive-abandon classifier.
 assert.ok(legacy.includes('planPrereqOptions(input)'))
 assert.ok(legacy.includes('selectPrereqPath(decision, abandoned)'))
 assert.ok(legacy.includes('evaluatePrereqStall({'))
 assert.ok(legacy.includes('classifyAbandonRequest({'))
-assert.ok(legacy.includes('protectedReplanSuppressed(reason)'))
 
 // Candidate generation itself must enumerate every feasible prerequisite path;
 // the Jev facade can only be authoritative if those alternatives survive to pi.

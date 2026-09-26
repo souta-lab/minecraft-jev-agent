@@ -15,16 +15,15 @@ import {
   nextPrereqPath,
   planPrereqOptions,
   preferPrereqPath,
-  PREREQ_RANK_POLICY_DEFAULT,
   prereqProgressSignature,
   prereqSubjectForGoal,
-  resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
   selectPrereqPath,
   PREREQ_STALL_TICKS_DEFAULT,
 } from './src/prereqOption.ts'
 import type { PrereqInput, PrereqPath, PrereqProgress } from './src/prereqOption.ts'
 import { prerequisiteProtection, shouldAdoptAbandon } from './src/placementGuard.ts'
+import * as prereqModule from './src/prereqOption.ts'
 
 interface Case {
   name: string
@@ -150,26 +149,22 @@ addCase('(a5) #11 v2: with the duplicate craft ineligible the cost order and sha
   return { pass, detail: `${decision.line} | ${shadow} | craft=${craft?.reason ?? 'missing'} known=${known?.cost ?? 'none'}` }
 })
 
-addCase('(a6) #11 v2: cost and rank diverge -> cost decides, rank shadow-logged, env restores rank', () => {
+addCase('(a6) #11 v2: cost and rank diverge -> cost decides; rank survives only as logged evidence', () => {
   const diverging = input({
     heldCount: 1,
     placementSpot: { x: 5, y: 0, z: 0 },
     knownStation: { name: 'furnace', position: { x: 0, y: 0, z: 0 } },
   })
   const costDecision = planPrereqOptions(diverging)
-  const rankDecision = planPrereqOptions({ ...diverging, rankPolicy: 'rank' })
   const shadow = formatPrereqRankShadow(costDecision, costDecision.chosen)
+  const exported = Object.keys(prereqModule)
   const pass =
     costDecision.chosen === 'use_known_station' &&
     costDecision.rankBaseline === 'place_held' &&
     shadow === 'PREREQ_RANK_SHADOW policy=cost cost_choice=use_known_station rank_choice=place_held agree=false' &&
-    rankDecision.chosen === 'place_held' &&
-    rankDecision.rankBaseline === 'place_held' &&
-    resolvePrereqRankPolicy({}) === PREREQ_RANK_POLICY_DEFAULT &&
-    PREREQ_RANK_POLICY_DEFAULT === 'cost' &&
-    resolvePrereqRankPolicy({ BUDDY_PREREQ_RANK_POLICY: 'rank' }) === 'rank' &&
-    resolvePrereqRankPolicy({ BUDDY_PREREQ_RANK_POLICY: 'nope' }) === 'cost'
-  return { pass, detail: `${shadow} | cost_choice=${costDecision.chosen} rank_choice=${rankDecision.chosen}` }
+    !exported.includes('resolvePrereqRankPolicy') &&
+    !exported.includes('PREREQ_RANK_POLICY_DEFAULT')
+  return { pass, detail: `${shadow} | rankBaseline=${costDecision.rankBaseline} selector_exports=${exported.filter((n) => /[Rr]ank[Pp]olicy/.test(n)).join(',') || 'none'}` }
 })
 
 addCase('(2) selectPrereqPath never returns null while a feasible option exists', () => {
