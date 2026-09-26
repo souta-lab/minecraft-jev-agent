@@ -1124,7 +1124,7 @@ export interface DominatedPrerequisite {
  * `collect`/`craft`/`smelt` put that item into the inventory. `descend` and
  * `explore` carry it as the item the row exists to REACH (Mercury's
  * `explore:cave` compiles to `descend` + `targetItem:'raw_iron'`; see
- * `optionSpec-legacy.ts` `rowSatisfiesPredicate`, which calls it a navigation
+ * `optionSpec.ts` `rowSatisfiesPredicate`, which calls it a navigation
  * hint) - and that reach-a-source purpose is exactly what this proof reasons
  * about, so a descent for an item whose every consumer is already satisfied is
  * obsolete work.

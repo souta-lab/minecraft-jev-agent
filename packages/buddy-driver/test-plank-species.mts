@@ -8,7 +8,7 @@
 //   inventory {oak_log:42, birch_log:24, ...} - no acacia log, ever
 //   done=7 flat while the body mined/moved (body motion, no semantic progress)
 //
-// OWNING LAYER: `selectCraftIngredients` (jev-agent/src/optionSpec-legacy.ts)
+// OWNING LAYER: `selectCraftIngredients` (jev-agent/src/optionSpec.ts)
 // ranked the 12 interchangeable `crafting_table` recipe variants by recipe
 // signature, i.e. alphabetically first species = `acacia_planks`, and reported
 // `inventoryAtLeast{acacia_planks,4}` as the craft's initiation precondition.

@@ -8,9 +8,9 @@ import type { PlannedGoal } from './src/goalQueue.ts'
 // explicitly passes enabled:false for an A/B fixture, and no environment
 // switch can select the retired verbatim-PlannedGoal path.
 const optionSpecSource = readFileSync(new URL('./src/optionSpec.ts', import.meta.url), 'utf8')
-const legacySource = readFileSync(new URL('./src/optionSpec-legacy.ts', import.meta.url), 'utf8')
+const legacySource = readFileSync(new URL('./src/optionSpec.ts', import.meta.url), 'utf8')
 assert.ok(!/BUDDY_OPTION_COMPILER/.test(optionSpecSource), 'optionSpec.ts must not read BUDDY_OPTION_COMPILER')
-assert.ok(!/BUDDY_OPTION_COMPILER/.test(legacySource), 'optionSpec-legacy.ts must not read BUDDY_OPTION_COMPILER')
+assert.ok(!/BUDDY_OPTION_COMPILER/.test(legacySource), 'optionSpec.ts must not read BUDDY_OPTION_COMPILER')
 assert.ok(!/resolveOptionCompilerEnabled/.test(optionSpecSource + legacySource), 'no env resolver may remain')
 
 const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 1 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 1 }]

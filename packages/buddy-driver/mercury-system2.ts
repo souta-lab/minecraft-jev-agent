@@ -888,7 +888,7 @@ export function validateMercuryPlanAgainstState(
 // this defect is about.
 //
 // Three outcomes, in the existing tri-state shape (`PredicateTruth` in
-// `optionSpec-legacy.ts`); `unknown` is first-class and never collapsed:
+// `optionSpec.ts`); `unknown` is first-class and never collapsed:
 //
 //   executable          the state measured refusals and none refuses this goal's
 //                       executor -> install exactly as today, byte-identical
