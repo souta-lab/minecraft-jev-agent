@@ -16,7 +16,7 @@ import {
   validateMercuryPlan,
 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 

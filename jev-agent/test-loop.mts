@@ -13,8 +13,8 @@ import type { Candidate } from './src/candidates.ts'
 import { buildQuestions, AUTHORITATIVE_QUESTION_NAMES, QUESTION_NAMES, questionNamesFor, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES } from './src/jev.ts'
 import type { JevAnswer, JevQuestionType, JevResult } from './src/jev.ts'
 import { DUPLICATE_GOAL_SKIPPED, GoalQueue } from './src/goalQueue.ts'
-import { buildStubPlan, evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2.ts'
-import type { System2PlanRequest } from './src/system2.ts'
+import { buildStubPlan, evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2/service.ts'
+import type { System2PlanRequest } from './src/system2/service.ts'
 
 interface Case {
   name: string

@@ -30,7 +30,7 @@ import type {
   MercuryTransport,
   MercuryTransportRepair,
 } from './mercury-system2.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 
 const args = process.argv.slice(2)

@@ -26,7 +26,7 @@ import type { AgentSignals, GoalState, Vec3Json, WorldState } from '../state.ts'
 import type { StrategicStallTracker } from '../strategicStall.ts'
 import type { JevAgentOptions } from '../controller-shared.ts'
 import type { EscalationReason } from './escalation.ts'
-import { evaluateLocalMotionBoundary, shouldWakeSystem2AfterLocalFailure } from '../system2Escalation.ts'
+import { evaluateLocalMotionBoundary, shouldWakeSystem2AfterLocalFailure } from '../system2/escalation.ts'
 import type { DigMemory } from '../worldMemory.ts'
 import type { Bot } from 'mineflayer'
 

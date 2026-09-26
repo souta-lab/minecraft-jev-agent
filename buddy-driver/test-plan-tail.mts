@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import {
   PLANNER_CACHE_SCHEMA_VERSION,

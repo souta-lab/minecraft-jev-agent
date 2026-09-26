@@ -19,7 +19,7 @@ import { enforceSmeltPriority } from './planner.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 
 interface Case {
   name: string

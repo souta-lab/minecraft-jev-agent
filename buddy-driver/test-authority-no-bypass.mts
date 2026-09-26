@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
-import type { System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { PlannerBrain } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 

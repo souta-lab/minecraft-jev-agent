@@ -9,13 +9,13 @@ import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-leg
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, currentOptionContextForQueuedGoal, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { buildAuthorityQuestions } from '../jev-agent/src/jev-authority.ts'
-import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2Authority.ts'
+import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2/authority.ts'
 import {
   evaluateBetaTerminationBoundary,
   evaluateCandidateStarvationBoundary,
   shouldWakeSystem2AfterLocalFailure,
-} from '../jev-agent/src/system2Escalation.ts'
-import { system2AuthorityIdentity } from '../jev-agent/src/system2.ts'
+} from '../jev-agent/src/system2/escalation.ts'
+import { system2AuthorityIdentity } from '../jev-agent/src/system2/service.ts'
 import { compileMercuryGoal, validateMercuryPlan } from './mercury-system2.ts'
 import { augmentPlannerWorldWithLiveStations, PlannerBrain } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'

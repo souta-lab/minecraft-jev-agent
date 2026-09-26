@@ -19,8 +19,8 @@ import {
   MERCURY_WAIT_LIMIT_BACKOFF_MAX_MS_DEFAULT,
   resolveMercuryWaitLimitBackoffBaseMs,
   resolveMercuryWaitLimitBackoffMaxMs,
-} from './src/system2Escalation.ts'
-import type { MercuryWaitLimitBackoffState } from './src/system2Escalation.ts'
+} from './src/system2/escalation.ts'
+import type { MercuryWaitLimitBackoffState } from './src/system2/escalation.ts'
 
 interface Case {
   name: string

@@ -34,7 +34,7 @@ import {
   strategicStallRequiredWindow,
   strategicStateKey,
 } from './src/strategicStall.ts'
-import { evaluateBetaTerminationBoundary } from './src/system2Escalation.ts'
+import { evaluateBetaTerminationBoundary } from './src/system2/escalation.ts'
 import { JevController } from './src/controller.ts'
 import type { JevResult } from './src/jev.ts'
 

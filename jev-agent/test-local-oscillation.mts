@@ -35,7 +35,7 @@ import {
   restoreLocalOscillationRecord,
 } from './src/localOscillation.ts'
 import type { LocalOscillationRecordJson } from './src/localOscillation.ts'
-import { evaluateLocalMotionBoundary } from './src/system2Escalation.ts'
+import { evaluateLocalMotionBoundary } from './src/system2/escalation.ts'
 
 let failures = 0
 let cases = 0

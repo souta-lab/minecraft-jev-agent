@@ -10,8 +10,8 @@ import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { jevAgent } from '../src/index.ts'
 import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import { JsonlWriter } from '../src/jev.ts'
-import { FixedPlanSystem2, planFromJson } from '../src/system2.ts'
-import type { PlanJson } from '../src/system2.ts'
+import { FixedPlanSystem2, planFromJson } from '../src/system2/service.ts'
+import type { PlanJson } from '../src/system2/service.ts'
 
 function opt(name: string, fallback: string): string {
   const index = process.argv.indexOf(`--${name}`)

@@ -21,10 +21,10 @@ import { stableStateHash } from './src/decisionlog.ts'
 import { gateBoolean } from './src/gating.ts'
 import { GoalQueue } from './src/goalQueue.ts'
 import { headroomSufficient } from './src/executor.ts'
-import { evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2.ts'
+import { evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2/service.ts'
 import { isResourceClass, matchesResourceClass, resolveToAvailable, resourceMatches } from './src/resourceClass.ts'
 import type { Candidate } from './src/candidates.ts'
-import type { System2PlanRequest } from './src/system2.ts'
+import type { System2PlanRequest } from './src/system2/service.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 
 interface Case {

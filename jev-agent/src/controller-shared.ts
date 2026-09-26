@@ -25,7 +25,7 @@ import type { LocalOscillationRecordJson } from './localOscillation.ts'
 import type { MoveFailEntry } from './moveFailMemory.ts'
 import type { DominatedPrerequisiteDecision, PlanIdentity, PlanObsoleteProof, QueuedGoal } from './goalQueue.ts'
 import type { RepeatedOutcomeEntryJson } from './repeatedOutcomeEscalation.ts'
-import type { System2RecoveryFenceRejection } from './system2Authority.ts'
+import type { System2RecoveryFenceRejection } from './system2/authority.ts'
 import type { InventoryReachMission as VtrInventoryMission } from './reach/scheduler.ts'
 
 

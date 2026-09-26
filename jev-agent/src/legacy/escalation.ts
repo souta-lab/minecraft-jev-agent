@@ -2,7 +2,7 @@
 // Jev decision epoch escalates to System2, and the Jev -> LLM summon bridge.
 // Pure contract data; no authority ownership.
 
-import type { LlmSummonReason } from '../system2.ts'
+import type { LlmSummonReason } from '../system2/service.ts'
 
 export type EscalationReason =
   | 'low_confidence'

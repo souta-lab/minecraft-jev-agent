@@ -14,7 +14,7 @@ import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { jevAgent } from '../src/index.ts'
 import type { RunSummary } from '../src/index.ts'
 import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
-import type { System2Brain } from '../src/system2.ts'
+import type { System2Brain } from '../src/system2/service.ts'
 
 const phase = process.argv.includes('--retrieve') ? 'retrieve' : 'wait'
 const username = 'AI_M1W43'

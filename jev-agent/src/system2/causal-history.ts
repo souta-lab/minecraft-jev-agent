@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
-import type { QueuedGoal, PlanOp } from './goalQueue.ts'
-import { evaluatePredicateTruth } from './optionSpec.ts'
-import type { OptionWorldSnapshot, Predicate, PredicateTruth } from './optionSpec.ts'
+import type { QueuedGoal, PlanOp } from '../goalQueue.ts'
+import { evaluatePredicateTruth } from '../optionSpec.ts'
+import type { OptionWorldSnapshot, Predicate, PredicateTruth } from '../optionSpec.ts'
 import type {
   System2BlockerFacts,
   System2SemanticAcceptedGoal,
   System2SemanticBlocker,
   System2SemanticOutcome,
-} from './system2.ts'
+} from './service.ts'
 
 export const SYSTEM2_SEMANTIC_HISTORY_LIMIT = 4
 export const SYSTEM2_SEMANTIC_GOAL_LIMIT = 8

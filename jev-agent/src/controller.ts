@@ -25,7 +25,7 @@ import { formatActionUnverified } from './actionPostcondition.ts'
 import { abandonRequested } from './jev.ts'
 import type { JevResult } from './jev.ts'
 import type { WorldState } from './state.ts'
-import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
+import type { BetaTerminationBoundaryDecision } from './system2/escalation.ts'
 
 type ApplyFurnacePrereq = (
   state: WorldState,

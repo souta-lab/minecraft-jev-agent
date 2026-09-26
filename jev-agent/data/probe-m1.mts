@@ -7,7 +7,7 @@ import { createRecipeIndex } from '../src/crafting.ts'
 import { GoalQueue } from '../src/goalQueue.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from '../src/state.ts'
 import type { AgentSignals } from '../src/state.ts'
-import { M1_PLAN_JSON, planFromJson } from '../src/system2.ts'
+import { M1_PLAN_JSON, planFromJson } from '../src/system2/service.ts'
 
 const bot = mineflayer.createBot({ host: '127.0.0.1', port: 25565, username: process.argv[2] ?? 'AI_M1Probe', auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)

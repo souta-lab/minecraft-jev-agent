@@ -14,7 +14,7 @@ import { jevAgent } from './src/index.ts'
 import type { RunSummary } from './src/index.ts'
 import { createStandaloneKernelAuthority } from './standalone-kernel-authority.mts'
 import { JsonlWriter } from './src/jev.ts'
-import { FixedPlanSystem2, M2_PLAN_JSON, planFromJson } from './src/system2.ts'
+import { FixedPlanSystem2, M2_PLAN_JSON, planFromJson } from './src/system2/service.ts'
 
 function opt(name: string, fallback: string): string {
   const index = process.argv.indexOf(`--${name}`)

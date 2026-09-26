@@ -64,9 +64,9 @@ import type {
   System2PlanRequest,
   System2SemanticOutcome,
   System2WithheldCandidate,
-} from '../jev-agent/src/system2.ts'
-import { System2RequestCancelledError } from '../jev-agent/src/system2.ts'
-import type { System2PayloadShape } from '../jev-agent/src/system2Payload.ts'
+} from '../jev-agent/src/system2/service.ts'
+import { System2RequestCancelledError } from '../jev-agent/src/system2/service.ts'
+import type { System2PayloadShape } from '../jev-agent/src/system2/payload.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
@@ -75,11 +75,11 @@ import {
   mercuryWaitLimitBackoffDelayMs,
   resolveMercuryWaitLimitBackoffBaseMs,
   resolveMercuryWaitLimitBackoffMaxMs,
-} from '../jev-agent/src/system2Escalation.ts'
+} from '../jev-agent/src/system2/escalation.ts'
 import type {
   MercuryWaitLimitBackoffDecision,
   MercuryWaitLimitBackoffState,
-} from '../jev-agent/src/system2Escalation.ts'
+} from '../jev-agent/src/system2/escalation.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import {
   NETHER,

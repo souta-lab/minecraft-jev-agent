@@ -22,7 +22,7 @@ import { booleanEstimates } from './jev.ts'
 import type { BooleanEstimate, JevAnswer, JevPolicyKind, JevQuestionType, JevSource, JevUsage } from './jev.ts'
 import type { DecisionTrigger } from './scheduler.ts'
 import type { WorldState } from './state.ts'
-import type { LlmSummonReason } from './system2.ts'
+import type { LlmSummonReason } from './system2/service.ts'
 
 export interface DecisionCandidateLog {
   id: string

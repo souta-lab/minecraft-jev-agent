@@ -9,8 +9,8 @@ import type { EventLogger } from '../jev.ts'
 import { isFurnacePrerequisiteOption } from '../placementGuard.ts'
 import type { InFlightAction } from '../policy.ts'
 import type { PrereqDecision } from '../prereqOption.ts'
-import type { LlmSummonReason } from '../system2.ts'
-import { shouldWakeSystem2AfterLocalFailure } from '../system2Escalation.ts'
+import type { LlmSummonReason } from '../system2/service.ts'
+import { shouldWakeSystem2AfterLocalFailure } from '../system2/escalation.ts'
 
 const WAIT_REPLAN_LIMIT = 4
 

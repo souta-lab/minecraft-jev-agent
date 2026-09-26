@@ -10,8 +10,8 @@ import { createRequire } from 'node:module'
 import { createRecipeIndex, planNextCraftStep } from './src/crafting.ts'
 import type { CraftOp } from './src/crafting.ts'
 import { GoalQueue } from './src/goalQueue.ts'
-import { FixedPlanSystem2, M1_PLAN_JSON, planFromJson } from './src/system2.ts'
-import type { System2PlanRequest } from './src/system2.ts'
+import { FixedPlanSystem2, M1_PLAN_JSON, planFromJson } from './src/system2/service.ts'
+import type { System2PlanRequest } from './src/system2/service.ts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11') as unknown

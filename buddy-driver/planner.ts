@@ -9,7 +9,7 @@
 export * from './planner-legacy.ts'
 
 import type { Bot } from 'mineflayer'
-import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
 import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'

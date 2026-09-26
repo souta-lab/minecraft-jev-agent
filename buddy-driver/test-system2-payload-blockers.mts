@@ -22,7 +22,7 @@
 
 import assert from 'node:assert/strict'
 import type { Bot } from 'mineflayer'
-import type { System2BlockerFacts, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2BlockerFacts, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import {
   buildSystem2BlockerFacts,
   emptySystem2PayloadShape,
@@ -35,7 +35,7 @@ import {
   payloadFactsChars,
   projectSystem2PayloadFacts,
   SYSTEM2_PAYLOAD_LIMITS,
-} from '../jev-agent/src/system2Payload.ts'
+} from '../jev-agent/src/system2/payload.ts'
 import { buildMercurySummary } from './generation-entry.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
 import { MERCURY_DEATH_HISTORY_LIMIT, hashMercuryState, mercuryPayloadShape } from './mercury-system2.ts'

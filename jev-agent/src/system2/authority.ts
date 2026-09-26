@@ -5,8 +5,8 @@
 // still current.  This module is deliberately pure so the request/apply race is
 // regression-tested without a Mineflayer connection or a model call.
 
-import { modelAuthorityIdentityMismatch } from './modelFailure.ts'
-import type { ModelAuthorityIdentity, ModelAuthorityMismatch } from './modelFailure.ts'
+import { modelAuthorityIdentityMismatch } from '../modelFailure.ts'
+import type { ModelAuthorityIdentity, ModelAuthorityMismatch } from '../modelFailure.ts'
 
 export interface System2RecoveryFenceInput {
   expectedAuthority: ModelAuthorityIdentity

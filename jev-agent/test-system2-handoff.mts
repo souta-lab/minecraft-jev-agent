@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
-import { submitSystem2Handoff } from './src/system2Handoff.ts'
+import { submitSystem2Handoff } from './src/system2/handoff.ts'
 
 describe('typed Jev to System2 escalation handoff', () => {
   it('invokes the System2 dispatcher once and returns its concrete request id', () => {

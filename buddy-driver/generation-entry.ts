@@ -21,7 +21,7 @@ import { FatalModelError, ModelRecoveryRequested } from '../jev-agent/src/modelF
 import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForModelRecovery } from './model-recovery.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
 import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
@@ -42,14 +42,14 @@ import {
 } from './mercury-system2.ts'
 import { MERCURY_DEATH_HISTORY_LIMIT } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
-import { SYSTEM2_SEMANTIC_HISTORY_LIMIT } from '../jev-agent/src/system2CausalHistory.ts'
+import { SYSTEM2_SEMANTIC_HISTORY_LIMIT } from '../jev-agent/src/system2/causal-history.ts'
 import {
   formatSystem2PayloadAbsentLine,
   formatSystem2PayloadLine,
   formatSystem2PayloadRefusedLine,
   projectSystem2PayloadFacts,
-} from '../jev-agent/src/system2Payload.ts'
-import type { System2RouteMemoryInput } from '../jev-agent/src/system2Payload.ts'
+} from '../jev-agent/src/system2/payload.ts'
+import type { System2RouteMemoryInput } from '../jev-agent/src/system2/payload.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { createKernelShadowSession } from './kernel-shadow-session.ts'

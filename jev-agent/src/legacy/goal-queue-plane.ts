@@ -35,7 +35,7 @@ import type { ActionFailureEscalation, ReplanInputs, WaitStreakEscalation } from
 import type { DecisionTrigger } from '../scheduler.ts'
 import { bodyStarving, distance } from '../state.ts'
 import type { AgentSignals, GoalState, Vec3Json, WorldState } from '../state.ts'
-import type { LlmSummonReason, System2Outcome } from '../system2.ts'
+import type { LlmSummonReason, System2Outcome } from '../system2/service.ts'
 import type { DigMemory } from '../worldMemory.ts'
 import type { Bot } from 'mineflayer'
 import { join } from 'node:path'

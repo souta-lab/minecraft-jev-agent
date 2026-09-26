@@ -5,7 +5,7 @@
 // server.
 import { applyCompiledPlan, compilePlannedGoals, evaluatePredicates, optionSpecsToPlannedGoals, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { bestPickaxeRank, buildPlanOptions, rungGoalsWithPrereq, RUNGS } from './planner.ts'
-import { M2_PLAN_JSON, planFromJson } from '../jev-agent/src/system2.ts'
+import { M2_PLAN_JSON, planFromJson } from '../jev-agent/src/system2/service.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'

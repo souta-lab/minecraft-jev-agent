@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
-import type { System2BlockerFacts, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2BlockerFacts, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import {
   buildMercurySummary,

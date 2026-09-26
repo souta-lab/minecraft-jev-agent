@@ -47,7 +47,7 @@ import type {
   System2ToolGap,
   System2ToolTruth,
   System2WithheldCandidate,
-} from './system2.ts'
+} from './service.ts'
 
 /**
  * The payload's size budget. Every list is clamped and every clamp is reported:

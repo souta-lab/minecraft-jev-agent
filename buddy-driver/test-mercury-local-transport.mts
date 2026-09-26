@@ -16,7 +16,7 @@ import {
   resolveMercuryLocalEndpoint,
 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 
 interface Case {
   name: string

@@ -56,7 +56,7 @@ import {
   makeGoal,
 } from './src/state.ts'
 import type { AgentSignals, KnownResource, Vec3Json, WorldState } from './src/state.ts'
-import { evaluateCandidateStarvationBoundary } from './src/system2Escalation.ts'
+import { evaluateCandidateStarvationBoundary } from './src/system2/escalation.ts'
 import { evaluatePillarStep } from './src/verticalPlan.ts'
 
 const require = createRequire(import.meta.url)

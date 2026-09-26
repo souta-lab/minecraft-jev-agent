@@ -13,7 +13,7 @@ import {
   type ReachRuntimeSnapshot,
 } from './src/reach/controller.ts'
 import type { ReachIdentity, ReachTransitionContract } from './src/reach/transition.ts'
-import type { KernelReachAuthority } from './src/vtr/kernel-shadow-map.ts'
+import type { KernelReachAuthority } from './src/reach/kernel-shadow-map.ts'
 import { RecordingKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 const identity: ReachIdentity = {

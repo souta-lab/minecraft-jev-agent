@@ -17,7 +17,7 @@ import {
 import { planNetherPortal } from '../jev-agent/src/netherPortalPlan.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import type { LlmSummonReason, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { LlmSummonReason, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 
 interface Case {
   name: string

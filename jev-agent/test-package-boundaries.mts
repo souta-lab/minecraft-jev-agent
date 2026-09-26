@@ -25,15 +25,16 @@ import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'bun:test'
 
-type Owner = 'reach' | 'minecraft' | 'legacy' | 'vtr' | 'flat'
+type Owner = 'reach' | 'minecraft' | 'legacy' | 'vtr' | 'system2' | 'flat'
 
-const PACKAGE_DIRS: readonly Owner[] = ['reach', 'minecraft', 'legacy', 'vtr']
+const PACKAGE_DIRS: readonly Owner[] = ['reach', 'minecraft', 'legacy', 'vtr', 'system2']
 
 const FORBIDDEN: Readonly<Record<string, readonly Owner[]>> = {
   reach: ['minecraft', 'legacy'],
-  vtr: ['reach', 'minecraft', 'legacy', 'flat'],
+  vtr: ['reach', 'minecraft', 'legacy', 'system2', 'flat'],
   minecraft: ['legacy'],
   legacy: ['minecraft'],
+  system2: ['minecraft', 'legacy'],
 }
 
 /** Flat transitional modules allowed to touch the raw backend. */
@@ -68,8 +69,7 @@ function ownerOf(rel: string): Owner {
   return 'flat'
 }
 
-function resolveImport(fromRel: string, specifier: string): string | null {
-  if (!specifier.startsWith('.')) return null
+function resolveImport(fromRel: string, specifier: string): string {
   const parts = fromRel.split('/')
   parts.pop()
   for (const seg of specifier.split('/')) {
@@ -77,14 +77,12 @@ function resolveImport(fromRel: string, specifier: string): string | null {
     if (seg === '..') parts.pop()
     else parts.push(seg)
   }
-  const joined = parts.join('/')
-  // Imports resolve only inside src/ for this guard; ../architecture is kernel source.
-  return joined.startsWith('../') || joined.startsWith('./') ? joined : joined
+  return parts.join('/')
 }
 
 function importsOf(rel: string, source: string): string[] {
   const out: string[] = []
-  for (const match of source.matchAll(/from\s+['"]([^'"]+)['"]/g)) out.push(match[1])
+  for (const match of source.matchAll(/from\s+['"]([^'"]+)['"]/g)) out.push(match[1]!)
   return out
 }
 
@@ -121,8 +119,9 @@ describe('Packages-by-Feature dependency guard', () => {
       if (owner === 'legacy') {
         const hits: string[] = []
         for (const match of code.matchAll(/from\s+['"]mineflayer['"]/g)) {
-          const stmtStart = code.lastIndexOf('import', match.index)
-          const stmt = code.slice(stmtStart === -1 ? match.index : stmtStart, match.index + 1)
+          const pos = match.index ?? 0
+          const stmtStart = code.lastIndexOf('import', pos)
+          const stmt = code.slice(stmtStart === -1 ? pos : stmtStart, pos + 1)
           if (!/^\s*import\s+type\b/.test(stmt)) hits.push('value-imports mineflayer')
         }
         if (/this\.bot\b/.test(code)) hits.push('reads this.bot')

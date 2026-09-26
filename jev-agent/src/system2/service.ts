@@ -27,10 +27,10 @@
 //     [ collect_logs(n), craft_table, craft_pickaxe, mine_cobblestone(16) ]
 //
 // so the queue is exercised end to end today without a live model.
-import type { GoalQueueState, PlanOp, PlannedGoal } from './goalQueue.ts'
-import type { JsonlWriter } from './jev.ts'
-import type { System2RequestContext } from './system2Authority.ts'
-import type { OptionWorldSnapshot, Predicate, PredicateTruth } from './optionSpec.ts'
+import type { GoalQueueState, PlanOp, PlannedGoal } from '../goalQueue.ts'
+import type { JsonlWriter } from '../jev.ts'
+import type { System2RequestContext } from './authority.ts'
+import type { OptionWorldSnapshot, Predicate, PredicateTruth } from '../optionSpec.ts'
 
 /** Why the long-horizon layer was woken up. */
 export type LlmSummonReason =

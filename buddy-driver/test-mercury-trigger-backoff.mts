@@ -27,10 +27,10 @@ import {
   mercuryWaitLimitBackoffDelayMs,
   MERCURY_WAIT_LIMIT_BACKOFF_BASE_MS_DEFAULT,
   MERCURY_WAIT_LIMIT_BACKOFF_MAX_MS_DEFAULT,
-} from '../jev-agent/src/system2Escalation.ts'
-import type { MercuryWaitLimitBackoffState } from '../jev-agent/src/system2Escalation.ts'
+} from '../jev-agent/src/system2/escalation.ts'
+import type { MercuryWaitLimitBackoffState } from '../jev-agent/src/system2/escalation.ts'
 import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { isBudgetExhaustedError, MercurySystem2 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import { PlannerBrain } from './planner.ts'

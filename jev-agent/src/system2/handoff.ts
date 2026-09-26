@@ -1,5 +1,5 @@
-import type { DecisionLlmResummonLog } from './decisionlog.ts'
-import type { LlmSummonReason } from './system2.ts'
+import type { DecisionLlmResummonLog } from '../decisionlog.ts'
+import type { LlmSummonReason } from './service.ts'
 
 export type System2HandoffResult =
   | {

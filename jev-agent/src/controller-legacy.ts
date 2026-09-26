@@ -381,8 +381,8 @@ import {
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
-import { StubSystem2, System2RequestCancelledError } from './system2.ts'
-import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2.ts'
+import { StubSystem2, System2RequestCancelledError } from './system2/service.ts'
+import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2/service.ts'
 import {
   buildSystem2BlockerFacts,
   emptySystem2PayloadShape,
@@ -392,7 +392,7 @@ import {
   SYSTEM2_PAYLOAD,
   SYSTEM2_PAYLOAD_ABSENT,
   SYSTEM2_PAYLOAD_REFUSED,
-} from './system2Payload.ts'
+} from './system2/payload.ts'
 import {
   applySystem2RecoveryFence,
   evaluateSystem2Apply,
@@ -400,8 +400,8 @@ import {
   formatSystem2Discard,
   formatSystem2PlanApplied,
   system2BodyOwned,
-} from './system2Authority.ts'
-import type { System2ApplyState, System2RecoveryFenceRejection, System2RequestContext } from './system2Authority.ts'
+} from './system2/authority.ts'
+import type { System2ApplyState, System2RecoveryFenceRejection, System2RequestContext } from './system2/authority.ts'
 import {
   acceptedSystem2PlanGoals,
   createSystem2SemanticOutcome,
@@ -410,14 +410,14 @@ import {
   system2SemanticBlocker,
   system2SemanticFingerprint,
   SYSTEM2_SEMANTIC_HISTORY_LIMIT,
-} from './system2CausalHistory.ts'
-import { submitSystem2Handoff } from './system2Handoff.ts'
+} from './system2/causal-history.ts'
+import { submitSystem2Handoff } from './system2/handoff.ts'
 import {
   evaluateCandidateStarvationBoundary,
   evaluateLocalMotionBoundary,
   shouldWakeSystem2AfterLocalFailure,
-} from './system2Escalation.ts'
-import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
+} from './system2/escalation.ts'
+import type { BetaTerminationBoundaryDecision } from './system2/escalation.ts'
 import {
   formatLocalOscillationCleared,
   isNotableLocalOscillation,

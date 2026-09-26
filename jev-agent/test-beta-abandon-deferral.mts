@@ -34,7 +34,7 @@ import {
   formatBetaAbandonReleased,
   resolveBetaAbandonDeferCycles,
 } from './src/replanThrottle.ts'
-import { evaluateBetaTerminationBoundary } from './src/system2Escalation.ts'
+import { evaluateBetaTerminationBoundary } from './src/system2/escalation.ts'
 import { JevController, MIRRORED_MARKERS } from './src/controller.ts'
 import type { JevResult } from './src/jev.ts'
 

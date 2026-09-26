@@ -50,7 +50,7 @@ import {
   PORTAL_LIT_PREDICATE,
   netherPortalEntryGoal,
 } from '../jev-agent/src/netherPortalPlan.ts'
-import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { MIRRORED_MARKERS, mirroredEventToken } from '../jev-agent/src/controller-legacy.ts'
 

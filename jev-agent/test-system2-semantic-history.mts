@@ -6,11 +6,11 @@ import {
   recordSystem2SemanticAction,
   system2SemanticBlocker,
   system2SemanticFingerprint,
-} from './src/system2CausalHistory.ts'
+} from './src/system2/causal-history.ts'
 import { compilePlannedGoal, makeOptionSnapshot } from './src/optionSpec.ts'
 import type { QueuedGoal, PlanOp } from './src/goalQueue.ts'
 import type { OptionWorldSnapshot } from './src/optionSpec.ts'
-import type { System2BlockerFacts } from './src/system2.ts'
+import type { System2BlockerFacts } from './src/system2/service.ts'
 
 const goal = (id: string, targetItem = 'diamond'): QueuedGoal => {
   const planned = { kind: 'collect' as const, description: `collect ${targetItem}`, targetItem, requiredCount: 1 }

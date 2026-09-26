@@ -4,7 +4,7 @@ import { generateCandidates, defaultCandidateOptions } from '../jev-agent/src/ca
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { makeGoal } from '../jev-agent/src/state.ts'
 import type { AgentSignals, WorldState } from '../jev-agent/src/state.ts'
-import type { System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { buildMercurySummary } from './generation-entry.ts'
 import {
   hashMercuryState,

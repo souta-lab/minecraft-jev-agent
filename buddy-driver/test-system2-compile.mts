@@ -29,10 +29,10 @@ import {
 } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTransport } from './mercury-system2.ts'
 import { applyCompiledPlan, isOptionComplete, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
-import { formatCompiledGoalRows, formatSystem2PlanApplied } from '../jev-agent/src/system2Authority.ts'
+import { formatCompiledGoalRows, formatSystem2PlanApplied } from '../jev-agent/src/system2/authority.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { OptionCompilingSystem2 } from './option-brain.ts'
-import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 
 interface Case {
   name: string

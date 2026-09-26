@@ -39,8 +39,8 @@ import { causalRecord, completeCausalChain, formatCausalLine, makeCausalStamp, m
 import type { CausalChain, CausalGoalRef, CausalStamp } from './causal.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions } from './scheduler.ts'
 import type { DecisionTrigger, SchedulerOptions as JevSchedulerOptions, TriggerEvent } from './scheduler.ts'
-import { buildStubPlan, evaluateSummonConditions, FixedPlanSystem2, LLM_SUMMON_REASONS, M1_PLAN_JSON, planFromJson, SINGLE_SHOT_PLANNER_MODEL, STUB_HORIZON_TAIL, STUB_SYSTEM2_MODEL, StubSystem2 } from './system2.ts'
-import type { LlmSummonReason, PlanJson, PlanSubgoalJson, System2Brain, System2Objective, System2Outcome, System2Plan, System2PlanRecord, System2PlanRequest, SummonConditions } from './system2.ts'
+import { buildStubPlan, evaluateSummonConditions, FixedPlanSystem2, LLM_SUMMON_REASONS, M1_PLAN_JSON, planFromJson, SINGLE_SHOT_PLANNER_MODEL, STUB_HORIZON_TAIL, STUB_SYSTEM2_MODEL, StubSystem2 } from './system2/service.ts'
+import type { LlmSummonReason, PlanJson, PlanSubgoalJson, System2Brain, System2Objective, System2Outcome, System2Plan, System2PlanRecord, System2PlanRequest, SummonConditions } from './system2/service.ts'
 
 declare module 'mineflayer' {
   interface Bot {

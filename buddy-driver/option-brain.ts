@@ -7,7 +7,7 @@ import type { Bot } from 'mineflayer'
 import { randomUUID } from 'node:crypto'
 import { applyCompiledPlan, emitBlockedOptionLogs, resolveOptionCompilerEnabled, snapshotFromResident, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
-import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
 import { bestPickaxeRank, inventoryCounts } from './planner.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 
