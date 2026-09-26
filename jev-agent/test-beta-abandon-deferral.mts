@@ -125,7 +125,7 @@ interface Harness {
 
 function makeHarness(planId: string | null, limit: number): Harness {
   const lines: string[] = []
-  const fake = {
+  const fake = Object.assign(Object.create(JevController.prototype) as Record<string, unknown>, {
     recentOutcomes: [] as unknown[],
     logger: {
       info: (_channel: string, message: string): void => {
@@ -143,7 +143,13 @@ function makeHarness(planId: string | null, limit: number): Harness {
     // locomotion. Idle/unobserved body evidence is covered in
     // test-locomotion-progress.mts and does not hold the beta deferral open.
     lastLocomotionObservation: { kind: 'moving', samples: 40, traveled: 10, net: 10, efficiency: 100 } as const,
-  }
+    signals: {},
+    strategicStall: { acknowledgeExhaustion: () => ({}) },
+    currentGoalKey: () => GOAL,
+  })
+  // Own data property so the prototype's tickCounter accessor (which reads
+  // reachVtrCells on a real controller) is shadowed on this bare fixture.
+  Object.defineProperty(fake, 'tickCounter', { value: 0, writable: true, configurable: true })
   return {
     lines,
     plan(id: string | null): void {
@@ -353,7 +359,9 @@ addCase('the deferral bound resolves from env with safe defaults', () => {
 })
 
 addCase('wiring: the controller owns the bound and mirrors the markers', () => {
-  const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const text =
+    readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/abandon-lifecycle.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
   const missing = [
     'new BetaAbandonDeferral(',
     'betaAbandonDeferral.note(',

@@ -305,7 +305,8 @@ addCase('the bounds resolve from env with safe defaults', () => {
 addCase('wiring: the controller reads the evidence at the beta boundary', () => {
   const text =
     readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8') +
-    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8')
+    readFileSync(new URL('./src/legacy/outcome-accounting.ts', import.meta.url), 'utf8') +
+    readFileSync(new URL('./src/legacy/abandon-lifecycle.ts', import.meta.url), 'utf8').replace(/\bhost\./g, 'this.')
   const missing = [
     'StrategicStallTracker(',
     'host.strategicStall.note(',
@@ -365,7 +366,7 @@ addCase('(e) the live production boundary ends the Option on code-proven exhaust
   replayPocket(tracker, 4)
   const evidence = tracker.evidence()
   const lines: string[] = []
-  const fake = {
+  const fake = Object.assign(Object.create(JevController.prototype) as Record<string, unknown>, {
     recentOutcomes: [
       { execution: 'success', verification: 'verified', progress: 'body', progressKinds: ['body'], control: 'none', failure: null },
     ] as unknown[],
@@ -384,8 +385,10 @@ addCase('(e) the live production boundary ends the Option on code-proven exhaust
     signals: { strategicNonProgress: evidence },
     strategicStall: tracker,
     currentGoalKey: (): string => 'g2:surface:log',
-    tickCounter: 1,
-  }
+  })
+  // Own data property: the prototype tickCounter accessor reads reachVtrCells on
+  // a real controller, so it must be shadowed rather than assigned.
+  Object.defineProperty(fake, 'tickCounter', { value: 1, writable: true, configurable: true })
   const boundary = realBoundary.call(fake, betaDecision(0.25), OPTION)
   return {
     pass:
@@ -400,7 +403,7 @@ addCase('(e) the live production boundary ends the Option on code-proven exhaust
 
 addCase('(e) the same production boundary still defers a healthy body-progress vote', () => {
   const lines: string[] = []
-  const fake = {
+  const fake = Object.assign(Object.create(JevController.prototype) as Record<string, unknown>, {
     recentOutcomes: [
       { execution: 'success', verification: 'verified', progress: 'body', progressKinds: ['body'], control: 'none', failure: null },
     ] as unknown[],
@@ -419,8 +422,10 @@ addCase('(e) the same production boundary still defers a healthy body-progress v
     signals: { strategicNonProgress: { exhausted: false } },
     strategicStall: new StrategicStallTracker(4, 3, 2),
     currentGoalKey: (): string => 'g2:surface:log',
-    tickCounter: 1,
-  }
+  })
+  // Own data property: the prototype tickCounter accessor reads reachVtrCells on
+  // a real controller, so it must be shadowed rather than assigned.
+  Object.defineProperty(fake, 'tickCounter', { value: 1, writable: true, configurable: true })
   const boundary = realBoundary.call(fake, betaDecision(0.25), OPTION)
   return {
     pass: boundary.adopt === false && boundary.wake === false,

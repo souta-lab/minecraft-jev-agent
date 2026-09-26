@@ -8,20 +8,30 @@
 // host.summonLlm.
 import { classifyAbandonRequest, formatAbandonEnforced, formatAbandonSuppressed } from '../abandonPolicy.ts'
 import type { OptionAttemptTracker } from '../abandonPolicy.ts'
+import { betaAuthorityDecision } from '../betaAuthority.ts'
 import type { BetaAuthorityDecision } from '../betaAuthority.ts'
 import type { Candidate } from '../candidates.ts'
 import type { JevAgentOptions } from '../controller-legacy.ts'
 import type { DecisionLlmResummonLog } from '../decisionlog.ts'
-import type { QueuedGoal } from '../goalQueue.ts'
-import { abandonRequested } from '../jev.ts'
+import type { GoalQueue, QueuedGoal } from '../goalQueue.ts'
+import { abandonRequested, betaShadowDecision, decisionIdFrom, formatBetaShadow } from '../jev.ts'
 import type { EventLogger, JevResult } from '../jev.ts'
+import { isEfficientLocomotionProgress, NO_LOCOMOTION_OBSERVATION } from '../locomotion.ts'
+import type { LocomotionObservation } from '../locomotion.ts'
 import { classifyAbandonReason, prerequisiteOptionName, shouldAdoptAbandon } from '../placementGuard.ts'
 import type { AbandonReason, PlaceRetryLedger, PrerequisiteProtection } from '../placementGuard.ts'
 import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from '../prereqOption.ts'
 import { formatProtectionAbandonConflict, reconcileProtection } from '../protectionConflict.ts'
 import type { AbandonmentLedger } from '../protectionConflict.ts'
+import { formatBetaAbandonDeferred, formatBetaAbandonReleased } from '../replanThrottle.ts'
+import type { BetaAbandonDeferral } from '../replanThrottle.ts'
 import type { AgentSignals, Vec3Json } from '../state.ts'
-import type { LlmSummonReason } from '../system2.ts'
+import { formatStrategicNonProgressExhausted } from '../strategicStall.ts'
+import type { StrategicStallTracker } from '../strategicStall.ts'
+import type { LlmSummonReason, System2Outcome } from '../system2.ts'
+import { evaluateBetaTerminationBoundary } from '../system2Escalation.ts'
+import type { BetaTerminationBoundaryDecision } from '../system2Escalation.ts'
+import { MOVE_PROGRESS_EFFICIENCY_FLOOR } from './outcome-ledgers.ts'
 import type { AbandonVerdict } from './goal-queue-plane.ts'
 
 export interface AbandonLifecycleHost {
@@ -30,11 +40,14 @@ export interface AbandonLifecycleHost {
   readonly abandonedPrereqPaths: Map<string, Map<PrereqPath, number>>
   readonly abandonedRetrievePaths: Map<PrereqPath, string>
   activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null
+  readonly betaAbandonDeferral: BetaAbandonDeferral
   betaAbandonPlanId: string | null
   betaDecision(decision: JevResult): BetaAuthorityDecision
   candidateFailureCount(candidateId: string): number
   currentGoalKey(): string
   enforceUnproductiveAbandon(optionId: string, planId: string | null, attempts: number, probability: number | null): void
+  lastAbandonAdopted: boolean
+  lastLocomotionObservation: LocomotionObservation
   lastPlacedFurnaceCount: number
   lastStateFingerprint: string
   logger: EventLogger
@@ -51,11 +64,14 @@ export interface AbandonLifecycleHost {
   prereqPlan: PrereqDecision | null
   prereqProgress: PrereqProgress | null
   prereqStationKnownLoggedKey: string | null
+  queue: GoalQueue
+  recentOutcomes: System2Outcome[]
   retrievalEscalationPending: boolean
   retrievalKey(active: { knownName: string; target: Vec3Json }): string
   retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null
   retrieveUnverified: RetrieveUnverifiedState | null
   signals: AgentSignals
+  readonly strategicStall: StrategicStallTracker
   summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null
   readonly tickCounter: number
   unfinishedGoals(): QueuedGoal[]
@@ -292,6 +308,150 @@ line: string, candidate: Candidate, unverified: number): void {
     'agent',
     `LOCAL_RETRIEVE_RECOVERY candidate=${candidate.id} unverified=${unverified} system2=false`,
     { candidate: candidate.id, unverified, boundary: 'local_recovery' },
+    host.tickCounter,
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// Beta verdict + shadow cluster (moved from controller-legacy.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verified goal/body/search progress observed for the current decision. Used
+ * only to reset the bounded beta-abandon deferral (a productive in-flight action
+ * keeps its deferral); it never selects an action.
+ */
+export function betaAbandonProgressObserved(
+  reason: string,
+  outcome: System2Outcome | null,
+  locomotionObservation: LocomotionObservation = NO_LOCOMOTION_OBSERVATION,
+): boolean {
+  const kinds = outcome?.progressKinds ?? []
+  const progress = outcome?.progress ?? null
+  if (progress === 'goal' || progress === 'search' || kinds.includes('goal') || kinds.includes('search')) return true
+  const bodyProgress =
+    outcome === null
+      ? reason === 'body_or_search_progress'
+      : progress === 'body' || kinds.includes('body') || reason === 'body_or_search_progress'
+  if (!bodyProgress) return false
+  // Issue #360 sections 8 and 11: body motion kept the bounded beta-abandon deferral
+  // alive every cycle, so Jev beta's abandon vote (measured live at 0.68-0.73 against a
+  // 0.5 threshold) was deferred forever and the Option never ended. Walking is still
+  // legitimate progress, so the deferral is kept only when the body is actually going
+  // somewhere: the windowed locomotion efficiency must be above the same floor the
+  // move-failure memory uses. A state-recurring micro-move loop sits at ~0-6% and no
+  // longer holds the Option open. An idle or not-yet-sampled window is not
+  // locomotion evidence and therefore cannot keep the deferral alive either.
+  return isEfficientLocomotionProgress(locomotionObservation, MOVE_PROGRESS_EFFICIENCY_FLOOR)
+}
+
+export function betaDecision(host: AbandonLifecycleHost, decision: JevResult): BetaAuthorityDecision {
+  const vote = betaAuthorityDecision({
+    betaAuthority: host.options.betaAuthority,
+    abandonRequested: abandonRequested(decision),
+    actionId: decisionIdFrom(decision),
+    goals: host.unfinishedGoals(),
+    placedFurnaceCount: host.lastPlacedFurnaceCount,
+  })
+  if (!vote.protection.protect) return vote
+  const abandonedReason = host.abandonedOptions.reasonUnder(vote.protection.option, host.lastStateFingerprint)
+  if (abandonedReason === null) return vote
+  host.logProtectionAbandonConflict(vote.protection.option, abandonedReason, 'authority')
+  return {
+    ...vote,
+    adopt: host.options.betaAuthority && !vote.shadowed,
+    protection: { ...vote.protection, protect: false },
+  }
+}
+
+export function betaTerminationBoundary(host: AbandonLifecycleHost, decision: JevResult, optionId: string | null): BetaTerminationBoundaryDecision {
+  const outcome = host.recentOutcomes.at(-1) ?? null
+  const evidence = host.signals?.strategicNonProgress ?? null
+  const semanticExhausted = evidence !== null && evidence.exhausted
+  if (semanticExhausted) {
+    host.logger.warn(
+      'agent',
+      formatStrategicNonProgressExhausted(host.currentGoalKey(), evidence),
+      {
+        option: optionId,
+        windowSize: evidence.windowSize,
+        horizon: evidence.horizon,
+        distinctStates: evidence.distinctStates,
+        bodyProgressDecisions: evidence.bodyProgressDecisions,
+        exhaustedRepeats: evidence.exhaustedRepeats,
+        boundary: 'semantic_exhausted',
+      },
+      host.tickCounter,
+    )
+    // Clear the consumed window but leave `signals.strategicNonProgress` as the
+    // exhausted snapshot for this decision, so the authority facade can see it.
+    host.strategicStall.acknowledgeExhaustion()
+  }
+  const boundary = evaluateBetaTerminationBoundary({
+    optionId,
+    requested: abandonRequested(decision),
+    decisionActionId: decisionIdFrom(decision),
+    latestOutcome: outcome,
+    semanticExhausted,
+    semanticInvalid: false,
+  })
+  if (!abandonRequested(decision) || boundary.adopt) {
+    // A vote that is honored (or not requested) ends the deferred streak.
+    host.betaAbandonDeferral.reset()
+    return boundary
+  }
+  const action = decisionIdFrom(decision) ?? 'WAIT'
+  const progressed = betaAbandonProgressObserved(boundary.reason, outcome, host.lastLocomotionObservation)
+  const bounded = host.betaAbandonDeferral.note({
+    plan: host.betaAbandonPlanId,
+    action,
+    reason: boundary.reason,
+    progressed,
+  })
+  if (bounded.defer) {
+    host.logger.info(
+      'heads',
+      formatBetaAbandonDeferred(bounded),
+      {
+        count: bounded.count,
+        limit: bounded.limit,
+        planId: bounded.plan,
+        action: bounded.action,
+        reason: bounded.reason,
+        progressed,
+      },
+      host.tickCounter,
+    )
+    return boundary
+  }
+  const probability = decision.answers.abandon_option?.probability ?? null
+  host.logger.warn(
+    'heads',
+    formatBetaAbandonReleased(bounded.plan, bounded.action, bounded.reason, probability),
+    { planId: bounded.plan, action: bounded.action, reason: bounded.reason, beta: probability },
+    host.tickCounter,
+  )
+  // Beta already voted to end the Option; the deferral budget is spent, so
+  // honor that vote. The released abandon still runs through the ordinary
+  // `markOptionAbandoned` + System2 handoff — this layer never picks WHAT next.
+  return { adopt: true, wake: true, reason: 'semantic_abandon' }
+}
+
+export function logBetaShadow(host: AbandonLifecycleHost, optionId: string | null, decision: JevResult, actualReplanAdopted: boolean): void {
+  const beta = decision.answers.abandon_option?.probability ?? null
+  const vote = host.betaDecision(decision)
+  const actualReplan = actualReplanAdopted || host.queue.isEmpty || host.lastAbandonAdopted
+  const shadow = betaShadowDecision({ optionId, beta, actualReplan })
+  host.logger.info(
+    'beta-shadow',
+    formatBetaShadow(shadow),
+    {
+      ...shadow,
+      mode: host.options.betaAuthority ? 'authority' : 'shadow',
+      betaAuthority: host.options.betaAuthority,
+      shadowed: vote.shadowed,
+    },
     host.tickCounter,
   )
 }
