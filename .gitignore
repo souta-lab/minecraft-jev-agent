@@ -40,6 +40,28 @@ mc-server/
 launch/data/
 launch/data-*/
 launch/game-*/
+ops/launch/data/
+ops/launch/data-*/
+ops/launch/game-*/
+
+# A Leaf/vanilla server accidentally run at the repository root generates these
+# top-level dirs; the canonical server lives outside the repo (~/mc-server/).
+/config/
+/eula.txt
+/plugins/
+/libraries/
+/versions/
+/cache/
+/banned-ips.json
+/banned-players.json
+/bukkit.yml
+/commands.yml
+/help.yml
+/ops.json
+/permissions.yml
+/purpur.yml
+/spigot.yml
+/console.fifo
 
 # OS / editor
 .DS_Store
