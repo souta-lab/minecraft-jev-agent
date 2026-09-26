@@ -104,7 +104,7 @@ function fixture() {
     liveReachIdentity: () => identity,
     projectReachMission: () => ({
       snapshot: verificationSnapshot,
-      candidates: [], sourceCandidates: [], inadmissibleCandidates: [], missionSourceNames: [], hasObservedMissionSource: true,
+      candidates: [], sourceCandidates: [], inadmissibleCandidates: [], missionSourceNames: [],
     }),
     noteCandidateSuccess: () => undefined,
     requestDecision: (trigger: string, detail: Record<string, unknown>) => decisions.push({ trigger, detail }),

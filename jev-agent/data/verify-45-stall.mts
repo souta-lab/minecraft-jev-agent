@@ -6,6 +6,7 @@
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { jevAgent } from '../src/index.ts'
+import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import type { KnownResource } from '../src/state.ts'
 
 const username = process.argv[2] ?? 'AI_M2S45'
@@ -14,7 +15,7 @@ const port = Number(process.argv[4] ?? '25565')
 
 const bot = mineflayer.createBot({ host, port, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-verify-45'))
 
 let shuttingDown = false
 function shutdown(reason: string, code: number): void {

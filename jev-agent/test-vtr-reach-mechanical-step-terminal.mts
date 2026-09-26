@@ -232,7 +232,7 @@ function makeFixture(terminalOutcome: ReachTerminalOutcome, arrived: boolean): F
     liveReachIdentity: () => identity,
     projectReachMission: () => ({
       snapshot: { observation: { identity, observedAtMs: 100, predicates: {} }, routes: [], progress: {} },
-      candidates: [], sourceCandidates: [], inadmissibleCandidates: [], missionSourceNames: [], hasObservedMissionSource: false,
+      candidates: [], sourceCandidates: [], inadmissibleCandidates: [], missionSourceNames: [],
     }),
     logReachVerification: () => undefined,
     logger: {

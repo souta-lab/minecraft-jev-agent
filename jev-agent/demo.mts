@@ -12,6 +12,7 @@ import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { DECISION_TRIGGERS, jevAgent } from './src/index.ts'
 import type { ActuationMode, Candidate, DecisionTrigger, RunSummary } from './src/index.ts'
+import { createStandaloneKernelAuthority } from './standalone-kernel-authority.mts'
 
 interface Args {
   host: string
@@ -100,7 +101,7 @@ const bot = mineflayer.createBot({
 
 bot.loadPlugin(pathfinderModule.pathfinder)
 bot.loadPlugin(collectBlockPlugin)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-demo'))
 
 /** Server `position` packets = rubber-band repositioning (mineflayer `forcedMove`). */
 let forcedRepositions = 0

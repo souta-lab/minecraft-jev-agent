@@ -12,6 +12,7 @@ import type { Bot } from 'mineflayer'
 import type { System2Brain } from '../jev-agent/src/system2.ts'
 import { MercurySystem2 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
+import { createTestKernelAuthority } from '../jev-agent/test-vtr-kernel-authority-stub.mts'
 import {
   MODEL_RECOVERY_ACTIVE_GENERATION_POLL_MS,
   MODEL_RETRY_BASE_DELAY_MS,
@@ -92,6 +93,7 @@ describe('model authority recovery host policy', () => {
       goalCount: 12,
       logDir: dir,
       forceFallbackPolicy: true,
+      kernelAuthority: createTestKernelAuthority(),
       eventSink: (event, detail) => {
         if (event === 'SYSTEM2_PLAN_APPLIED') appliedMarkers.push(detail)
       },
@@ -487,6 +489,7 @@ describe('model authority recovery host policy', () => {
       goalCount: 12,
       logDir: dir,
       forceFallbackPolicy: true,
+      kernelAuthority: createTestKernelAuthority(),
       recoverySystem2Authority: expectedAuthority,
       recoverySourceSha: SOURCE_SHA,
       generationSourceSha: SOURCE_SHA,
@@ -549,6 +552,7 @@ describe('model authority recovery host policy', () => {
       goalCount: 12,
       logDir: dir,
       forceFallbackPolicy: true,
+      kernelAuthority: createTestKernelAuthority(),
       recoverySystem2Authority: expectedAuthority,
       recoverySourceSha: SOURCE_SHA,
       generationSourceSha: SOURCE_SHA,
@@ -620,6 +624,7 @@ describe('model authority recovery host policy', () => {
       goalCount: 12,
       logDir: dir,
       forceFallbackPolicy: true,
+      kernelAuthority: createTestKernelAuthority(),
       recoverySystem2Authority: expectedAuthority,
       recoverySourceSha: SOURCE_SHA,
       generationSourceSha: SOURCE_SHA,

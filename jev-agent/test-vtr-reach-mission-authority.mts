@@ -9,6 +9,8 @@ import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
 import type { Candidate } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 const configuredMission = {
   id: 'run-mission:oak_log:1',
@@ -127,7 +129,7 @@ function makeController(input: {
   const requestedDecisions: string[] = []
   const world = worldWithOakSource()
   const reachCandidateCalls: Array<{ missionItem: string; worldGoalItem: string | null }> = []
-  const reachRuntime = new ReachMissionRuntime({
+  const reachRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),
   })
@@ -323,21 +325,8 @@ test('normal mode reconciles a non-admitted Mission source so legacy cannot repl
     world: declinedWorld,
     missionItem: configuredMission.item,
     missionSourceNames: ['oak_log'],
-    vtrOwnsReachMove: true,
   })
   assert.deepEqual(afterVtrDecline.withheld.map((candidate) => candidate.id), ['MOVE:oak_log@8,64,0'])
   assert.deepEqual(afterVtrDecline.candidates.map((candidate) => candidate.id), ['MOVE:iron_ore@24,64,0'])
   assert.equal(afterVtrDecline.candidates[0]?.id, unrelated.id, 'the unrelated candidate remains eligible to legacy policy')
-
-  const legacyOwnsNoSamePredicateTick = filterLegacyReachCandidates({
-    candidates: [moveToOakLog(), unrelated],
-    world: declinedWorld,
-    missionItem: configuredMission.item,
-    missionSourceNames: ['oak_log'],
-    vtrOwnsReachMove: false,
-  })
-  assert.deepEqual(legacyOwnsNoSamePredicateTick.candidates.map((candidate) => candidate.id), [
-    'MOVE:oak_log@8,64,0',
-    'MOVE:iron_ore@24,64,0',
-  ])
 })

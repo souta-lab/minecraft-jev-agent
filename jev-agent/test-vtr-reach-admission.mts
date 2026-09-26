@@ -15,9 +15,11 @@ import {
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 function newReachRuntime(): ReachMissionRuntime {
-  return new ReachMissionRuntime({
+  return new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),
   })

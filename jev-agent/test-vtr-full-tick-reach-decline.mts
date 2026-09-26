@@ -11,6 +11,8 @@ import type { JevResult } from './src/jev-legacy.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
 import type { ReachRoute, ReachRuntimeSnapshot } from './src/vtr/reach-controller.ts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 const require = createRequire(import.meta.url)
 const Vec3 = require('vec3')
@@ -163,6 +165,7 @@ test('real full tick hands only unrelated grounded candidates to legacy policy a
   let controller: JevController | null = null
   try {
     controller = new JevController(makeBot(), {
+      kernelAuthority: createTestKernelAuthority(),
       vtrMission: mission,
       goalItem: 'oak_log',
       goalCount: 1,
@@ -177,7 +180,7 @@ test('real full tick hands only unrelated grounded candidates to legacy policy a
       verbose: false,
       eventSink: (event, detail) => events.push({ event, detail }),
     })
-    const runtime = new ReachMissionRuntime({
+    const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
       routePolicy: { async chooseRoute() { return { status: 'unavailable', reason: 'fixture' } } },
       commitFreshnessFence: () => ({ status: 'current' }),
     })

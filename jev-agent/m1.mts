@@ -10,6 +10,7 @@ import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { jevAgent } from './src/index.ts'
 import type { RunSummary } from './src/index.ts'
+import { createStandaloneKernelAuthority } from './standalone-kernel-authority.mts'
 import { JsonlWriter } from './src/jev.ts'
 import { FixedPlanSystem2, M1_PLAN_JSON, planFromJson } from './src/system2.ts'
 
@@ -32,7 +33,7 @@ const clean = !process.argv.includes('--no-clean')
 const bot = mineflayer.createBot({ host, port, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
 bot.loadPlugin(collectBlockPlugin)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-m1'))
 
 let shuttingDown = false
 

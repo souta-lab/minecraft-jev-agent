@@ -19,6 +19,8 @@ import { projectMinecraftReachRoutes } from './src/runtime-adapters/minecraft-re
 import type { ReachIdentity, ReachTerminalOutcome, ReachTransitionState } from './src/vtr/reach.ts'
 import { MineflayerReachRuntimeAdapter } from './src/runtime-adapters/minecraft-reach-runtime-adapter.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -200,7 +202,7 @@ test('production Reach dispatch and legacy Executor claim cannot overlap body au
     pathTimeoutMs: 10_000,
   })
   const reachRuntimeAdapter = new MineflayerReachRuntimeAdapter(fixture.bot, executor)
-  const reachRuntime = new ReachMissionRuntime({
+  const reachRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),
   })

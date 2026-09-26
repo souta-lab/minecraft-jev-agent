@@ -9,6 +9,8 @@ import {
   type ReachRuntimeSnapshot,
 } from './src/vtr/reach-controller.ts'
 import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 const identity: ReachIdentity = {
   worldKey: 'mission-runtime-world',
@@ -116,7 +118,7 @@ function derive(runtime: ReachMissionRuntime, overrides: {
 
 test('Mission-to-Reach derives a generic resource predicate without benchmark ladder input', async () => {
   let freshnessChecks = 0
-  const runtime = new ReachMissionRuntime({
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: ({ contract }) => {
       freshnessChecks += 1
@@ -142,7 +144,7 @@ test('Mission-to-Reach derives a generic resource predicate without benchmark la
 })
 
 test('stale commit fence prevents the VTR Mission runtime from acquiring Reach ownership', async () => {
-  const runtime = new ReachMissionRuntime({
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'stale', reason: 'observation_advanced', currentObservedAtMs: 2_000 }),
   })
@@ -154,7 +156,7 @@ test('stale commit fence prevents the VTR Mission runtime from acquiring Reach o
 
 test('committed Reach continues the same contract through policy outage and succeeds only on verified predicate', async () => {
   let policyCalls = 0
-  const runtime = new ReachMissionRuntime({
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: {
       async chooseRoute() {
         policyCalls += 1
@@ -223,7 +225,7 @@ test('committed Reach continues the same contract through policy outage and succ
 
 test('same mission and world exclude the prior terminal witness before route policy selection', async () => {
   const offeredRouteIds: string[][] = []
-  const runtime = new ReachMissionRuntime({
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: {
       async chooseRoute({ routes }) {
         offeredRouteIds.push(routes.map(({ routeId }) => routeId))
@@ -259,7 +261,7 @@ test('same mission and world exclude the prior terminal witness before route pol
 
 test('changed Mission or world scope allows a route to reuse the prior witness id', async () => {
   const setupRuntimeWithExcludedWitness = async (suffix: string) => {
-    const runtime = new ReachMissionRuntime({
+    const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
       routePolicy: {
         async chooseRoute({ routes }) {
           return { status: 'selected', routeId: routes[0]!.routeId }
@@ -334,7 +336,7 @@ function driveFrame(
 
 test('production Mission drive owns one active Transition through outage and verifies SUCCESS only from ensures', async () => {
   let policyCalls = 0
-  const runtime = new ReachMissionRuntime({
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: { async chooseRoute() { policyCalls += 1; throw new Error('Jev unavailable') } },
     commitFreshnessFence: () => ({ status: 'current' }),
   })
@@ -384,14 +386,14 @@ test('production Mission drive owns one active Transition through outage and ver
 })
 
 test('production Mission drive returns typed stale-world and lease-loss boundaries', async () => {
-  const mismatchRuntime = new ReachMissionRuntime({ routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
+  const mismatchRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(), routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
   const leaseMismatch = await mismatchRuntime.driveMission(driveFrame(mismatchRuntime, 1_000, {
     actuationLease: { status: 'owned', leaseId: 'different-lease' },
   }))
   expect(leaseMismatch).toMatchObject({ kind: 'declined', reason: 'lease-identity-mismatch' })
   expect(mismatchRuntime.current).toBeNull()
 
-  const worldRuntime = new ReachMissionRuntime({ routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
+  const worldRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(), routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
   const started = await worldRuntime.driveMission(driveFrame(worldRuntime, 1_000))
   if (started.kind !== 'transition' || started.result.status !== 'active') throw new Error('expected active Transition')
   const changedIdentity: ReachIdentity = { ...identity, worldKey: 'mission-runtime-next-world', worldEpoch: identity.worldEpoch + 1 }
@@ -404,7 +406,7 @@ test('production Mission drive returns typed stale-world and lease-loss boundari
   if (staleWorld.kind !== 'transition' || staleWorld.result.status !== 'terminal') throw new Error('expected world identity terminal')
   expect(staleWorld.result.outcome.kind).toBe('WORLD_CHANGED')
 
-  const leaseRuntime = new ReachMissionRuntime({ routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
+  const leaseRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(), routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
   const leaseStart = await leaseRuntime.driveMission(driveFrame(leaseRuntime, 1_000))
   if (leaseStart.kind !== 'transition' || leaseStart.result.status !== 'active') throw new Error('expected active Transition')
   const leaseLost = await leaseRuntime.driveMission(driveFrame(leaseRuntime, 2_000, {
@@ -420,7 +422,7 @@ test('production Mission drive returns typed stale-world and lease-loss boundari
   if (leaseLost.kind !== 'transition' || leaseLost.result.status !== 'terminal') throw new Error('expected lease terminal')
   expect(leaseLost.result.outcome.kind).toBe('LEASE_LOST')
 
-  const budgetRuntime = new ReachMissionRuntime({ routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
+  const budgetRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(), routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
   const budgetStart = await budgetRuntime.driveMission(driveFrame(budgetRuntime, 1_000))
   if (budgetStart.kind !== 'transition' || budgetStart.result.status !== 'active') throw new Error('expected active Transition')
   const exhausted = await budgetRuntime.driveMission(driveFrame(budgetRuntime, 2_000, {
@@ -433,7 +435,7 @@ test('production Mission drive returns typed stale-world and lease-loss boundari
 })
 
 test('production Mission drive revokes legacy Reach ownership before commit and terminalizes foreign active authority', async () => {
-  const runtime = new ReachMissionRuntime({ routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(), routePolicy: nearestGroundedReachRoutePolicy, commitFreshnessFence: () => ({ status: 'current' }) })
   const plan = derive(runtime, { transitionId: 'transition-production-drive' })
   const legacyAction = {
     id: 'legacy-walk', kind: 'MOVE' as const, epoch: 5, status: 'running' as const,
@@ -462,7 +464,7 @@ test('production Mission drive revokes legacy Reach ownership before commit and 
 })
 
 test('a missing Jev admission choice stays a typed VTR hold with no legacy semantic fallback', async () => {
-  const runtime = new ReachMissionRuntime({
+  const runtime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: { async chooseRoute() { throw new Error('Jev provider unavailable') } },
     commitFreshnessFence: () => ({ status: 'current' }),
   })

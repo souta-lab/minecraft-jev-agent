@@ -8,6 +8,7 @@ import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { jevAgent } from '../src/index.ts'
+import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import { JsonlWriter } from '../src/jev.ts'
 import { FixedPlanSystem2, planFromJson } from '../src/system2.ts'
 import type { PlanJson } from '../src/system2.ts'
@@ -32,7 +33,7 @@ const plan: PlanJson = {
 const bot = mineflayer.createBot({ host, port, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
 bot.loadPlugin(collectBlockPlugin)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-descend-live'))
 
 let shuttingDown = false
 function shutdown(reason: string, code: number): void {

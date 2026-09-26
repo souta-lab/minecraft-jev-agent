@@ -10,6 +10,7 @@ import type { WorldState } from './src/state.ts'
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { createReachTransitionContract, type ReachIdentity, type ReachTransitionContract } from './src/vtr/reach.ts'
 import type { ReachRoute, ReachRouteDecisionInput, ReachRuntimeSnapshot } from './src/vtr/reach-controller.ts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 const identity: ReachIdentity = {
   worldKey: 'composition-world|minecraft:overworld|4',
@@ -108,6 +109,7 @@ function makeContext(policy: JevPolicy, state = worldState()): { context: JevRea
     policy: { value: policy }, cachedWorldState: { value: state },
     counters: { jevCalls: { value: 0 }, lastJevAt: { value: 0 }, tickCounter: { value: 42 } },
     lastRouteDecision: { value: null },
+    kernelAuthority: createTestKernelAuthority(),
     logger: {
       info: (_source, message, detail) => logs.push({ level: 'info', message, detail }),
       warn: (_source, message, detail) => logs.push({ level: 'warn', message, detail }),

@@ -13,6 +13,7 @@ import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { jevAgent } from '../src/index.ts'
 import type { RunSummary } from '../src/index.ts'
+import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import type { System2Brain } from '../src/system2.ts'
 
 const phase = process.argv.includes('--retrieve') ? 'retrieve' : 'wait'
@@ -30,7 +31,7 @@ const noPlannerBrain: System2Brain = {
 const bot = mineflayer.createBot({ host: '127.0.0.1', port: 25565, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
 bot.loadPlugin(collectBlockPlugin)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-probe-issue43'))
 
 bot.on('error', (error) => {
   process.stdout.write(`[probe] error: ${error.message}\n`)

@@ -12,8 +12,9 @@ import {
   type ReachRoute,
   type ReachRuntimeSnapshot,
 } from './src/vtr/reach-controller.ts'
-import type { ReachIdentity, ReachTransitionContract, ReachWitness } from './src/vtr/reach.ts'
-import type { KernelGateVerdict, KernelReachAuthority } from './src/vtr/kernel-shadow-map.ts'
+import type { ReachIdentity, ReachTransitionContract } from './src/vtr/reach.ts'
+import type { KernelReachAuthority } from './src/vtr/kernel-shadow-map.ts'
+import { RecordingKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
 
 const identity: ReachIdentity = {
   worldKey: 'authority-world',
@@ -30,41 +31,7 @@ const mission: InventoryReachMission = {
   count: 4,
 }
 
-interface GateCall {
-  readonly gate: string
-  readonly transitionId: string
-}
-
-class RecordingAuthority implements KernelReachAuthority {
-  readonly mode = 'authority' as const
-  readonly calls: GateCall[] = []
-  admitVerdict: KernelGateVerdict = { ok: true }
-  activateVerdict: KernelGateVerdict = { ok: true }
-  issueVerdict: KernelGateVerdict = { ok: true }
-  terminalizeVerdict: KernelGateVerdict = { ok: true }
-  lastSettled: { stepId: string; status: string; progressed: boolean } | null = null
-
-  admitTransition(contract: ReachTransitionContract): KernelGateVerdict {
-    this.calls.push({ gate: 'admitTransition', transitionId: contract.transitionId })
-    return this.admitVerdict
-  }
-  activateTransition(transitionId: string, _witness: ReachWitness | null): KernelGateVerdict {
-    this.calls.push({ gate: 'activateTransition', transitionId })
-    return this.activateVerdict
-  }
-  issueStepEffect(input: { transitionId: string; intentId: string; stepId: string; effectKind: string }): KernelGateVerdict {
-    this.calls.push({ gate: 'issueStepEffect', transitionId: input.transitionId })
-    return this.issueVerdict
-  }
-  settleStepEffect(input: { transitionId: string; intentId: string; stepId: string; status: string; verified: boolean; progressed: boolean }): void {
-    this.calls.push({ gate: 'settleStepEffect', transitionId: input.transitionId })
-    this.lastSettled = { stepId: input.stepId, status: input.status, progressed: input.progressed }
-  }
-  terminalize(input: { transitionId: string; contractHash: string; outcome: { kind: string } }): KernelGateVerdict {
-    this.calls.push({ gate: 'terminalize', transitionId: input.transitionId })
-    return this.terminalizeVerdict
-  }
-}
+class RecordingAuthority extends RecordingKernelAuthority {}
 
 function makeRoute(contract: ReachTransitionContract, atMs: number): ReachRoute {
   const evidenceId = `grounding:r1:${atMs}`
@@ -113,7 +80,7 @@ function makeSnapshot(contract: ReachTransitionContract, atMs: number, ensures: 
   }
 }
 
-function makeRuntime(authority: KernelReachAuthority | undefined): ReachMissionRuntime {
+function makeRuntime(authority: KernelReachAuthority): ReachMissionRuntime {
   return new ReachMissionRuntime({
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),

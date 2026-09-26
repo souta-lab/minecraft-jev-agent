@@ -6,6 +6,8 @@ import { projectMinecraftReachRoutes } from './src/runtime-adapters/minecraft-re
 import { ReachMissionRuntime } from './src/vtr/reach-mission-runtime.ts'
 import { nearestGroundedReachRoutePolicy } from './src/vtr/reach-controller.ts'
 import { createVtrReachTestCells, installVtrReachTestRuntimePorts } from './test-vtr-reach-test-cells.mts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 const mission = { id: 'runtime-reach-oak', kind: 'inventory_at_least' as const, item: 'oak_log', count: 1 }
 const identity = {
@@ -74,7 +76,7 @@ test('production Reach uses injected VTR authority through same-contract continu
     const claims: Array<{ candidate: string; authority: string; transitionId: string }> = []
     const legOutcomes: boolean[] = []
     const events: string[] = []
-    const reachRuntime = new ReachMissionRuntime({
+    const reachRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
       routePolicy: nearestGroundedReachRoutePolicy,
       commitFreshnessFence: () => ({ status: 'current' }),
     })

@@ -18,6 +18,8 @@ import {
 } from './src/vtr/reach.ts'
 import { createInventoryReachTransition } from './src/vtr/reach-scheduler.ts'
 import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
+import { createTestKernelAuthority } from './test-vtr-kernel-authority-stub.mts'
+
 
 interface Fixture {
   controller: JevController
@@ -251,7 +253,7 @@ async function makeReachRecoveryFixture(): Promise<{
   const { contract, identity } = makeReachContract()
   const transitionId = contract.transitionId
   let observedAt = startedAt
-  const reachRuntime = new ReachMissionRuntime({
+  const reachRuntime = new ReachMissionRuntime({ kernelAuthority: createTestKernelAuthority(),
     routePolicy: nearestGroundedReachRoutePolicy,
     commitFreshnessFence: () => ({ status: 'current' }),
   })
@@ -355,7 +357,7 @@ async function makeReachRecoveryFixture(): Promise<{
     projectReachMission: (_mission: unknown, world: { timestampMs: number }) => ({
       snapshot: makeReachSnapshot(contract, identity, world.timestampMs, false),
       candidates: [candidateFor(actions.length)], sourceCandidates: [candidateFor(actions.length)],
-      inadmissibleCandidates: [], missionSourceNames: ['oak_log'], hasObservedMissionSource: true,
+      inadmissibleCandidates: [], missionSourceNames: ['oak_log'],
     }),
     reachRuntimeAdapter: {
       currentAction: () => active === null ? null : {

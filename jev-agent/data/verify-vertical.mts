@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { jevAgent } from '../src/index.ts'
+import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import type { Candidate, Vec3Json } from '../src/index.ts'
 
 const username = process.argv[2] ?? 'AI_V1'
@@ -19,7 +20,7 @@ const PLACEABLE = /^(dirt|grass_block|coarse_dirt|podzol|cobblestone|stone|andes
 
 const bot = mineflayer.createBot({ host: '127.0.0.1', port: 25565, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-verify-vertical'))
 
 let forced = 0
 bot.on('forcedMove', () => {

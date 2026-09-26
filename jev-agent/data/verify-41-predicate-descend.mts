@@ -8,6 +8,7 @@ import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { jevAgent } from '../src/index.ts'
+import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import { JsonlWriter } from '../src/jev.ts'
 import { FixedPlanSystem2 } from '../src/system2.ts'
 import type { PlannedGoal } from '../src/goalQueue.ts'
@@ -29,7 +30,7 @@ const KNOWN_IRON: KnownResource[] = [
 const bot = mineflayer.createBot({ host, port, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
 bot.loadPlugin(collectBlockPlugin)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-verify-41'))
 
 let shuttingDown = false
 function shutdown(reason: string, code: number): void {

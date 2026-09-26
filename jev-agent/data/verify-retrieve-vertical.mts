@@ -6,6 +6,7 @@
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { jevAgent } from '../src/index.ts'
+import { createStandaloneKernelAuthority } from '../standalone-kernel-authority.mts'
 import { defaultCandidateOptions, generateCandidates } from '../src/candidates.ts'
 import type { Candidate } from '../src/candidates.ts'
 import { emptyGoalQueueState } from '../src/goalQueue.ts'
@@ -20,7 +21,7 @@ const MAX_STEPS = 5
 
 const bot = mineflayer.createBot({ host, port, username, auth: 'offline' })
 bot.loadPlugin(pathfinderModule.pathfinder)
-bot.loadPlugin(jevAgent)
+jevAgent(bot, createStandaloneKernelAuthority('standalone-retrieve-vertical'))
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
