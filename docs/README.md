@@ -5,7 +5,8 @@ The constitutional entrypoints remain at the repository root: `README.md` and `A
 
 - `architecture/` — current normative architecture. Canonical: `architecture/NEW-ARCHITECTURE-V4.1.2.md`.
 - `decision/` — planner/Jev decision-plane boundaries and the observer read-model.
-- `development/` — development method, definition of done, regression corpus.
+- `development/` — development method, definition of done, regression corpus,
+  package-ownership map and bounded-improvement roadmap (`PBF-OWNERSHIP-MAP.md`).
 - `history/` — superseded and dated material retained for provenance:
   `architecture/` (old architecture versions and authority models),
   `incidents/` (dated incident/defect reports),
