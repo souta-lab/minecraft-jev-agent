@@ -197,6 +197,8 @@ import * as diagnostics from './legacy/candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './legacy/candidate-diagnostics.ts'
 import * as evidence from './legacy/grounded-evidence.ts'
 import type { GroundedEvidenceHost } from './legacy/grounded-evidence.ts'
+import * as probes from './legacy/path-probes.ts'
+import type { PathProbesHost } from './legacy/path-probes.ts'
 import * as portal from './legacy/portal-evidence.ts'
 import type { PortalEvidenceHost } from './legacy/portal-evidence.ts'
 import * as threat from './legacy/threat-observers.ts'
@@ -1076,9 +1078,6 @@ export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | und
  * Pure apart from the latch. No goal, action or ranking is involved.
  */
 
-/** A guard path probe is synchronous; this caps how long it may think. */
-const PATH_PROBE_TIMEOUT_MS = 750
-const { goals } = pathfinderModule
 
 function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
   return {
@@ -2631,6 +2630,11 @@ export class JevController {
   /** GroundedEvidenceHost view of this controller (same structural-cast pattern as reachHost). */
   private get evidenceHost(): GroundedEvidenceHost {
     return this as unknown as GroundedEvidenceHost
+  }
+
+  /** PathProbesHost view of this controller (same structural-cast pattern as reachHost). */
+  private get probesHost(): PathProbesHost {
+    return this as unknown as PathProbesHost
   }
 
   /** Read-only evidence projection; Mission session and Reach state live in VTR. */
@@ -8013,48 +8017,11 @@ export class JevController {
   }
 
   private canComputePath(position: Vec3Json): boolean {
-    if (this.bot.pathfinder === undefined) return false
-    try {
-      const goal = new goals.GoalBlock(position.x, position.y, position.z)
-      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
-      // `timeout` is not a usable route fact. The exact M2 wedge was a
-      // GoalBlock timeout followed by a control-walk with no jump headroom;
-      // treating a partial search as reachable re-admitted the same MOVE.
-      return plan.status === 'success'
-    } catch {
-      return false
-    }
+    return probes.canComputePath(this.probesHost, position)
   }
 
-  /**
-   * CAN fact for a plain ATTACK lease. The executor follows until the body's own
-   * upper half is inside `MELEE_ATTACK_RANGE` of the target; probing GoalBlock is
-   * stricter than the real action and can falsely reject a perfectly hittable
-   * target, so use the same near radius.
-   *
-   * The goal is a 3-D BALL, so the radius must be the ball whose restriction to the
-   * body's own level is the horizontal melee budget for THIS vertical gap
-   * (`meleeHorizontalBudget`). Probing the bare reach against a target hovering
-   * above the body is unsatisfiable by construction - radius 2.9 around a target 4
-   * blocks up contains no cell the body can stand in - so the probe reported
-   * `no_path` for a fight the body could actually win. For a level target the goal
-   * is the same cell and the same radius as before, unchanged.
-   *
-   * Timeout is UNKNOWN/non-executable for this short lease, exactly like the
-   * ordinary reachability probe: only a complete path is a current CAN proof.
-   */
   private canComputeMeleePath(position: Vec3Json): boolean {
-    if (this.bot.pathfinder === undefined) return false
-    try {
-      const feet = this.bot.entity.position
-      const gapY = contactGapY(feet.y, position.y)
-      const radius = Math.max(1, Math.hypot(meleeHorizontalBudget(gapY), Math.abs(gapY)) - 0.2)
-      const goal = new goals.GoalNear(position.x, position.y, position.z, radius)
-      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
-      return plan.status === 'success'
-    } catch {
-      return false
-    }
+    return probes.canComputeMeleePath(this.probesHost, position)
   }
 
   private logCandidates(candidates: readonly Candidate[], state: WorldState): void {
@@ -8210,278 +8177,52 @@ export class JevController {
     return evidence.logSmeltStationRetry(this.evidenceHost, candidate)
   }
 
-  /** Gate facts, shared by both candidate generations in one tick. */
   private reachabilityGateOptions(): ReachabilityGateOptions {
-    if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
-    // One plan per destination, two facts out of it: whether the body can walk
-    // there at all, and whether the route it would walk stands it in a
-    // dimension-transfer cell. Computing the plan twice would double the
-    // pathfinder cost of the whole gate.
-    const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
-    const pathFacts = createPositionFactCache((position) => this.computePathFacts(position))
-    this.gateOptions = {
-      memory: this.reachabilityProofs,
-      pathProbe: (position) => pathFacts(position).probe,
-      dimensionTransferProbe: (position) => pathFacts(position).transfer,
-      attackPathProbe: (position) => {
-        const key = `${position.x},${position.y},${position.z}`
-        const cached = attackPathCache.get(key)
-        if (cached !== undefined) return cached
-        const result = this.canComputeMeleePath(position) ? 'reachable' : 'no_path'
-        attackPathCache.set(key, result)
-        return result
-      },
-      stationApproach: this.stationApproachProbe(),
-      digApproach: this.digApproachProbe(),
-      attackStandProbe: this.attackStandProbe(),
-    }
-    this.gateOptionsTick = this.tickCounter
-    return this.gateOptions
+    return probes.reachabilityGateOptions(this.probesHost)
   }
 
-  /**
-   * THE STANCE PROBE: the live world questions `combatClosure.selectAttackStand`
-   * asks, answered from real block truth - the sensor's own standability rule,
-   * the `envHazard` classes, and the SAME `bot.world.raycast` the threat-cover
-   * logic casts (`state.ts threatSightLineBlocked`). No parallel geometry: the
-   * only thing added here is the eye origin the cover logic already uses, moved
-   * to a stance the body is not standing in yet.
-   *
-   * This is the fact the melee path probe cannot answer. `GoalNear(entity, 2.9)`
-   * proves a route to WITHIN 2.9 m of the entity's feet; it says nothing about
-   * whether a cell there is a legal stance or whether the entity is visible from
-   * it. Measured live: a magma cube embedded in the wall beside the body (every
-   * stance occluded, every swing `verify_failed`) and an enderman at 6.11 m whose
-   * `GoalFollow` never closed while the distance froze for ~47 s with zero swings.
-   *
-   * Cached per entity per tick (the gate options themselves are tick-cached), and
-   * `null` when the live entity's own height cannot be read: no verdict, so the
-   * gate keeps its previous behaviour rather than refusing on a missing fact.
-   */
   private attackStandProbe(): (query: { entityId: number; position: Vec3Json }) => AttackStandFact | null {
-    const cache = new Map<number, AttackStandFact | null>()
-    return (query) => {
-      const cached = cache.get(query.entityId)
-      if (cached !== undefined) return cached
-      const entity = this.bot.entities[query.entityId]
-      const height = entity === undefined ? Number.NaN : (entity as { height?: number }).height ?? Number.NaN
-      if (!Number.isFinite(height) || height <= 0) {
-        // The aim point is `position + height / 2` (the SAME point `runAttack`
-        // looks at). Without it there is no visibility question to answer, so the
-        // fact is UNKNOWN - never an invented stance.
-        cache.set(query.entityId, null)
-        return null
-      }
-      const fact = selectAttackStand({
-        entity: { position: query.position, height },
-        feet: { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z },
-        reach: MELEE_ATTACK_REACH,
-        world: {
-          standable: (x, y, z) => isStandable(this.bot, { x, y, z }),
-          hazard: (x, y, z) => this.botStandColumnHazardAt(x, y, z),
-          visible: (x, y, z) => this.botSeesEntityFrom(x, y, z, query.position, height),
-        },
-      })
-      cache.set(query.entityId, fact)
-      return fact
-    }
+    return probes.attackStandProbe(this.probesHost)
   }
 
-  /**
-   * Is the 1x2 stance column at this cell a hazard? The same classification the
-   * `envHazard` layer owns (`envHazardKindOfBlock`) for the stance's own feet,
-   * head and support cells, plus the `envHazard` lava proximity margin for a
-   * lava-class neighbour - the same two rules `reachabilityWorldFor` applies to
-   * a locomotion destination (`HAZARD_PROXIMITY` IS `ENV_LAVA_PROXIMITY`).
-   */
   private botStandColumnHazardAt(x: number, y: number, z: number): boolean {
-    const scratch = this.bot.entity.position.clone()
-    const nameAt = (cx: number, cy: number, cz: number): string | null => {
-      const block = this.bot.blockAt(scratch.set(cx, cy, cz))
-      return block === null || block === undefined ? null : (block.name ?? null)
-    }
-    // The stance's OWN body column: fire/lava the body would be inside.
-    if (envHazardKindOfBlock(nameAt(x, y, z)) !== null) return true
-    if (envHazardKindOfBlock(nameAt(x, y + 1, z)) !== null) return true
-    if (envHazardKindOfBlock(nameAt(x, y - 1, z)) !== null) return true
-    // A lava-class neighbour inside the shared margin: standing there means
-    // standing in it (`envHazardProximityDenied(false, name)` semantics). A cell
-    // whose offset has any component >= 2 is at least 2 away, so it can never be
-    // inside a 1.5 margin: `floor` is the exact bound, not a truncation.
-    const span = Math.floor(ENV_LAVA_PROXIMITY)
-    for (let dx = -span; dx <= span; dx += 1) {
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dz = -span; dz <= span; dz += 1) {
-          const cx = x + dx
-          const cy = y + dy
-          const cz = z + dz
-          if (!isLavaClassBlock(nameAt(cx, cy, cz))) continue
-          if (Math.hypot(cx - x, cy - y, cz - z) <= ENV_LAVA_PROXIMITY) return true
-        }
-      }
-    }
-    return false
+    return probes.botStandColumnHazardAt(this.probesHost, x, y, z)
   }
 
-  /**
-   * Can a body standing on this stance see the entity? Delegated to the sensor's
-   * own `entityVisibleFromEye` so the stance verdict and `EntityState.lineOfSight`
-   * answer with ONE implementation of one ray, to ONE point (the entity's aim
-   * point, `position + height / 2`). Two copies of this geometry is how the
-   * sensor could report `los=false` while the stance search found the mob plainly
-   * visible.
-   *
-   * Absence of a raycast (a structural double, a fixture) answers `true`: "not
-   * occluded" is the fail-open direction here, so a missing world never refutes a
-   * visible mob - which is exactly the previous behaviour of this method.
-   */
   private botSeesEntityFrom(x: number, y: number, z: number, entityPosition: Vec3Json, height: number): boolean {
-    if (this.bot.world === undefined || typeof this.bot.world.raycast !== 'function') return true
-    const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
-    return (
-      entityVisibleFromEye(
-        this.bot,
-        { x: x + 0.5, y: y + eyeHeight, z: z + 0.5 },
-        { position: entityPosition, height },
-      ) !== false
-    )
+    return probes.botSeesEntityFrom(this.probesHost, x, y, z, entityPosition, height)
   }
 
-  /**
-   * SAFE/CAN: the route facts for one destination, from ONE plan.
-   *
-   * `probe` keeps the exact semantics `canComputePath` had (a `timeout` is not a
-   * usable route fact, an exception is `no_path`), so no existing verdict moves.
-   * `transfer` is the route-side half of the dimension-transfer invariant: does
-   * the path the body would actually walk stand it in a lit portal block?
-   * `unknown` when no plan exists (nothing is refused on an unavailable probe).
-   */
   private computePathFacts(position: Vec3Json): { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute } {
-    if (this.bot.pathfinder === undefined) return { probe: 'no_path', transfer: 'unknown' }
-    try {
-      const goal = new goals.GoalBlock(position.x, position.y, position.z)
-      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
-      if (plan.status !== 'success') return { probe: 'no_path', transfer: 'unknown' }
-      return { probe: 'reachable', transfer: this.routeCrossesDimensionTransfer(plan.path) }
-    } catch {
-      return { probe: 'no_path', transfer: 'unknown' }
-    }
+    return probes.computePathFacts(this.probesHost, position)
   }
 
-  /**
-   * Does this planned route stand the body in a dimension-transfer cell? Every
-   * path node is a cell the executor will occupy (feet), so the body's feet or
-   * head being portal material at any node is exactly the transfer condition the
-   * executor's own walk-in mechanic waits for.
-   */
   private routeCrossesDimensionTransfer(path: readonly { x: number; y: number; z: number }[]): DimensionTransferRoute {
-    for (const node of path) {
-      if (this.botStandsInDimensionTransfer({ x: node.x, y: node.y, z: node.z })) return 'crosses'
-    }
-    return 'clear'
+    return probes.routeCrossesDimensionTransfer(this.probesHost, path)
   }
 
-  /** Live block truth: would standing with the feet at this cell transfer the body? */
   private botStandsInDimensionTransfer(feet: Vec3Json): boolean {
-    const scratch = this.bot.entity.position.clone()
-    const feetBlock = this.bot.blockAt(scratch.set(feet.x, feet.y, feet.z))
-    if (isDimensionTransferBlock(feetBlock?.name)) return true
-    const headBlock = this.bot.blockAt(scratch.set(feet.x, feet.y + 1, feet.z))
-    return isDimensionTransferBlock(headBlock?.name)
+    return probes.botStandsInDimensionTransfer(this.probesHost, feet)
   }
 
-  /**
-   * The #244 interaction stand, generalised from stations to blocked dig targets.
-   * A blocked target's sensor adjacency fact only samples 12 neighbours; a stand
-   * one stance away can still make the block diggable. The stand is resolved with
-   * the SAME live passable+support+face-reach machinery the station path uses.
-   * The expensive `canDig=false` path probe is budgeted per tick; beyond it the
-   * verdict is left unknown and the guard's own path probe still gates the MOVE.
-   */
   private digApproachProbe(): DigApproachProbe {
-    const cache = new Map<string, DigApproachFact>()
-    let pathProbes = 0
-    const pathProbeBudget = 4
-    return (block) => {
-      const cacheKey = `${block.x},${block.y},${block.z}`
-      const cached = cache.get(cacheKey)
-      if (cached !== undefined) return cached
-      const feet = this.bot.entity.position
-      const stands = interactionStandCandidates(
-        block,
-        { x: feet.x, y: feet.y, z: feet.z },
-        {
-          passable: (x, y, z) => this.botPassableAt(x, y, z),
-          solidSupport: (x, y, z) => this.botSolidSupportAt(x, y, z),
-        },
-        this.options.reach,
-      )
-      const stand = stands[0] ?? null
-      let fact: DigApproachFact
-      if (stand === null) {
-        fact = { approach: null, path: null }
-      } else if (pathProbes < pathProbeBudget) {
-        pathProbes += 1
-        fact = { approach: stand, path: this.canComputePathNear(stand) ? 'reachable' : 'no_path' }
-      } else {
-        fact = { approach: stand, path: null }
-      }
-      cache.set(cacheKey, fact)
-      return fact
-    }
+    return probes.digApproachProbe(this.probesHost)
   }
 
   private stationApproachProbe(): StationApproachProbe {
-    const cache = new Map<string, StationApproachFact>()
-    return (station, kind) => {
-      const cacheKey = `${kind}:${station.x},${station.y},${station.z}`
-      const cached = cache.get(cacheKey)
-      if (cached !== undefined) return cached
-      const feet = this.bot.entity.position
-      const stands = interactionStandCandidates(
-        station,
-        { x: feet.x, y: feet.y, z: feet.z },
-        {
-          passable: (x, y, z) => this.botPassableAt(x, y, z),
-          solidSupport: (x, y, z) => this.botSolidSupportAt(x, y, z),
-        },
-        this.options.reach,
-      )
-      const stand = stands[0] ?? null
-      let fact: StationApproachFact
-      if (stand === null) {
-        this.noteStationUnreachable(kind, station, 'no_interaction_stand')
-        fact = { approach: null, path: null }
-      } else {
-        const path = this.canComputePathNear(stand) ? 'reachable' : 'no_path'
-        if (path === 'no_path') this.noteStationUnreachable(kind, station, 'no_path_to_stand')
-        else this.forgetStationUnreachable(kind, station)
-        fact = { approach: stand, path }
-      }
-      cache.set(cacheKey, fact)
-      return fact
-    }
+    return probes.stationApproachProbe(this.probesHost)
   }
 
   private botPassableAt(x: number, y: number, z: number): boolean {
-    const block = this.bot.blockAt(this.bot.entity.position.clone().set(x, y, z))
-    return block === null || block.boundingBox === 'empty'
+    return probes.botPassableAt(this.probesHost, x, y, z)
   }
 
   private botSolidSupportAt(x: number, y: number, z: number): boolean {
-    const block = this.bot.blockAt(this.bot.entity.position.clone().set(x, y, z))
-    return block !== null && block.boundingBox === 'block'
+    return probes.botSolidSupportAt(this.probesHost, x, y, z)
   }
 
   private canComputePathNear(position: Vec3Json): boolean {
-    if (this.bot.pathfinder === undefined) return false
-    try {
-      const goal = new goals.GoalNear(position.x, position.y, position.z, 1)
-      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
-      return plan.status !== 'noPath'
-    } catch {
-      return false
-    }
+    return probes.canComputePathNear(this.probesHost, position)
   }
 
   private noteStationUnreachable(
@@ -8489,16 +8230,11 @@ export class JevController {
     station: Vec3Json,
     reason: StationApproachRefusal,
   ): void {
-    const key = formatStationUnreachable(kind, station, reason)
-    if (this.stationApproachLogged.has(key)) return
-    this.stationApproachLogged.add(key)
-    this.logger.warn('agent', key, { kind, station, reason }, this.tickCounter)
+    return probes.noteStationUnreachable(this.probesHost, kind, station, reason)
   }
 
   private forgetStationUnreachable(kind: StationKindName, station: Vec3Json): void {
-    for (const reason of ['no_interaction_stand', 'no_path_to_stand'] as const) {
-      this.stationApproachLogged.delete(formatStationUnreachable(kind, station, reason))
-    }
+    return probes.forgetStationUnreachable(this.probesHost, kind, station)
   }
 
   private logFuelSatisfaction(state: WorldState): void {
