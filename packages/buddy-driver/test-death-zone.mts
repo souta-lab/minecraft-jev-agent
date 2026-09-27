@@ -140,10 +140,12 @@ function zoneEscapeFixture(
   standable: Array<{ x: number; y: number; z: number }>,
   hazards: readonly DeathHazard[],
   escapeCells: Array<{ x: number; y: number; z: number }> = [],
+  exploredCells: ReadonlySet<string> = new Set(),
 ): { state: WorldState; options: CandidateOptions } {
   const state = {
     self: { position: selfPos, dimension: DIM },
     terrain: { standable, escapeCells },
+    signals: { exploredCells },
     tick: 1,
   } as unknown as WorldState
   const options = {
@@ -207,6 +209,30 @@ addCase('death-zone exits: local ring all in-zone, escape ring reaches outside (
   )
   return {
     pass: offers.length === 2 && allOutside && targets[0] === '3225,64,2825',
+    detail: `offers=[${targets.join(' | ')}] allOutside=${allOutside}`,
+  }
+})
+
+addCase('death-zone exits: explored cells are stable proven exits (portal-p10 vanish)', () => {
+  // p10 measured: a committed MOVE:dangerzone "vanished between the Jev answer
+  // and execution" because escapeCells re-sort with threat motion. Cells the
+  // body already occupied are append-only, so their offer cannot churn - and
+  // they exist with no live threat, where the escape ring is empty.
+  const hazards = [production(3219, 63, 2812, 1, DIM), production(3233, 67, 2803, 1, DIM)]
+  const { state, options } = zoneEscapeFixture(
+    { x: 3224, y: 64, z: 2809 },
+    [{ x: 3223, y: 64, z: 2808 }], // local ring all in-zone
+    hazards,
+    [], // no live threat -> escapeCells empty
+    new Set(['p3214_64_2818', 'p3230_64_2805', 'p3190_64_2830']),
+  )
+  const offers = zoneEscapes(state, options)
+  const targets = offers.map((entry) => `${entry.target?.x},${entry.target?.y},${entry.target?.z}`)
+  const allOutside = offers.every(
+    (entry) => entry.target !== null && isInDeathZone(hazards, entry.target, DIM) === null,
+  )
+  return {
+    pass: offers.length === 2 && allOutside && targets[0] === '3214,64,2818',
     detail: `offers=[${targets.join(' | ')}] allOutside=${allOutside}`,
   }
 })

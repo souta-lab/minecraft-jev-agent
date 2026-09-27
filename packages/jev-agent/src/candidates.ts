@@ -1421,8 +1421,19 @@ export function deathZoneEscapeCandidates(
   // every scanned cell was still inside the pocket, so the offer was empty
   // while the body camped at an in-zone respawn anchor. `escapeCells` is the
   // sensor's wider stand-verified ring (the same keep-distance destinations a
-  // RETREAT walks to), so the exit set is its union with the local ring.
-  const cells = [...(state.terrain.escapeCells ?? []), ...state.terrain.standable]
+  // RETREAT walks to). Cells the body already stood on (`exploredCells`) are
+  // proven-standable, append-only across ticks and threat-independent - their
+  // ids cannot churn out of the offer mid-commit the way threat-relative
+  // escapeCells did (measured portal-p10: a committed exit "vanished between
+  // the Jev answer and execution" when the ring re-sorted).
+  const cells: Vec3Json[] = [...(state.terrain.escapeCells ?? []), ...state.terrain.standable]
+  for (const key of state.signals?.exploredCells ?? []) {
+    const parts = key.slice(1).split('_')
+    const x = Number(parts[0])
+    const y = Number(parts[1])
+    const z = Number(parts[2])
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) cells.push({ x, y, z })
+  }
   const seen = new Set<string>()
   const exits = cells
     .filter((cell) => {
