@@ -1597,6 +1597,62 @@ addCase('(vii) the controller feeds the rule the TRACKED-set truth and mirrors t
   }
 })
 
+// ---------------------------------------------------------------------------
+// (vii) a distant tracker gets legs that can actually break its engagement
+//       (portal-p4: drowned at ~37 m, every leg bounded by a 6 m scan)
+// ---------------------------------------------------------------------------
+
+addCase('(vii1) a sensed distant tracker is offered destinations beyond the old 6m window', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(5.5, 59, -0.5)
+  const bot = {
+    username: 'AI_P4_DROWNED',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 4,
+    food: 6,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: -64, height: 384 },
+    time: { isDay: false },
+    registry: null,
+    entities: { 7: { id: 7, name: 'drowned', kind: 'hostile', position: new Vec3(5.5, 59, 20), isValid: true, heldItem: null } },
+    inventory: { items: () => [] },
+    // flat open ground: solid support at y=58, air above - every scanned cell is
+    // standable, so the ONLY bound on the offer is the scan window itself
+    blockAt: (p: { x: number; y: number; z: number }) =>
+      p.y < 59 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' },
+    canSeeBlock: () => false,
+    findBlocks: () => [],
+  } as never
+  const state = buildWorldState(
+    bot,
+    {
+      tick: 9,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      // the measured shape, inside the 24 m response envelope: it hit the body
+      // and kept tracking (portal-p4's drowned engaged at ~10-38 m)
+      signals: signals({ lastDamage: { atMs: Date.now() - 400, health: 4, sourceId: 7, sourceName: 'drowned' } }),
+    },
+    defaultSensorOptions,
+  )
+  const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+  const escape = state.terrain.escapeCells ?? []
+  const horizon = Math.max(...escape.map((cell) => Math.hypot(cell.x - feet.x, cell.z - feet.z)))
+  return {
+    pass:
+      // the tracker is response-worthy at 30 m: it damaged the body
+      state.entities.length === 1 &&
+      state.entities[0]?.attackedSelf === true &&
+      // and the offer reaches past the old 6 m scan's ~8.5 m diagonal: a leg that
+      // buys ~15-20 m of separation now exists (portal-p4 deaths: hops of <=6 m
+      // could never leave the drowned's ~38 m follow range)
+      escape.length > 0 &&
+      horizon > 10,
+    detail: `entities=${state.entities.length} escape=${escape.length} horizon=${Math.round(horizon * 100) / 100}m`,
+  }
+})
+
 let failures = 0
 process.stdout.write('threat response grounding - engaged attacker answerable, no dimension-crossing realization\n')
 process.stdout.write('-'.repeat(96) + '\n')

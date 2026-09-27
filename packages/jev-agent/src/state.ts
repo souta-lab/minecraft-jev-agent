@@ -25,6 +25,7 @@ import {
   retreatPreservesThreatSeparation,
   THREAT_ESCAPE_DY,
   THREAT_ESCAPE_MAX_CELLS,
+  THREAT_ESCAPE_RADIUS,
   THREAT_MEMORY_MS,
   threatStandoffRange,
   UNSENSED_MIN_KEEP_DISTANCE_GAIN,
@@ -1188,7 +1189,7 @@ export const defaultSensorOptions: SensorOptions = {
   hostileRadius: 48,
   maxStoneBlocks: 16,
   maxPlacementSpots: 6,
-  escapeRadius: 6,
+  escapeRadius: THREAT_ESCAPE_RADIUS,
   maxEscapeCells: 12,
   maxThreatCoverRays: 48,
 }

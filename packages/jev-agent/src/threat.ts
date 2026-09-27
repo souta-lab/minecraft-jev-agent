@@ -84,8 +84,20 @@ export const THREAT_STANDOFF_RANGE = 4
  */
 export const MIN_KEEP_DISTANCE_GAIN = 2
 
-/** Sensor window (blocks) for threat escape cells. */
-export const THREAT_ESCAPE_RADIUS = 6
+/**
+ * Sensor window (blocks) for threat escape cells.
+ *
+ * Measured live (`portal-p4`, overworld coastal pocket): a drowned tracked the
+ * body from ~37 m (`THREAT_RANGED_UNANSWERED distance=37.65`) while every
+ * RETREAT destination came from a 6 m scan - each leg gained at most ~6 m of
+ * separation and the tracker re-closed it before the next epoch, so four
+ * respawns died inside the same ~15 m pocket in 3.5 min. Hostile follow range
+ * is ~35-40 m, so a keep-distance leg has to reach cells far enough away that
+ * separation can grow past the tracker's engagement instead of orbiting inside
+ * it. 16 m keeps a melee skirmish honest (a 2 m zombie still only needs ~6 m of
+ * room) while giving a distant tracker legs that buy ~15-20 m at a time.
+ */
+export const THREAT_ESCAPE_RADIUS = 16
 
 /** Vertical half-window of the escape scan, matching `buildTerrain`. */
 export const THREAT_ESCAPE_DY = 1
