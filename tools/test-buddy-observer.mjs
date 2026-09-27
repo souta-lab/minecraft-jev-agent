@@ -1607,4 +1607,76 @@ try {
   rmSync(httpObserverRuntimeDir, { recursive: true, force: true })
 }
 
+// Campaign registry mode: the canonical observer follows the capability run's
+// active-run.json rather than a fixed directory. Three states are exercised:
+// missing registry, stale registry (recorded pids dead), and a live registry
+// entry whose runtime dir has no resident socket (run booting).
+const registryDir = mkdtempSync(join(tmpdir(), 'buddy-observer-registry-'))
+const registryPath = join(registryDir, 'active-run.json')
+const registryObserver = createObserver({ registryPath })
+try {
+  // Missing registry -> explicit no-active-run, never stale state.
+  const absent = buildVtrObserverReadModel(await registryObserver.snapshot(), { now: Date.now() })
+  assert.equal(absent.status.available, false)
+  assert.equal(absent.status.connected, false)
+  assert.equal(absent.status.availabilityReason, 'no_active_campaign_run')
+  assert.equal(absent.run.id, null)
+  const absentSnapshot = await registryObserver.snapshot()
+  assert.equal(absentSnapshot.campaign.status, 'no_active_campaign_run')
+  const absentProbe = await registryObserver.worldProbe()
+  assert.equal(absentProbe.error, 'no_active_campaign_run')
+
+  // Stale registry: pids that cannot exist stay dead -> still no_active_campaign_run.
+  const staleRuntime = join(registryDir, 'stale-runtime')
+  mkdirSync(staleRuntime, { recursive: true })
+  writeFileSync(registryPath, JSON.stringify({
+    record: 'capability-active-run',
+    runId: 'stale-run-1',
+    runtimeDir: staleRuntime,
+    runnerPid: 4194303,
+    residentPid: 4194304,
+  }))
+  const stale = await registryObserver.snapshot()
+  assert.equal(stale.campaign.status, 'no_active_campaign_run')
+  assert.equal(stale.campaign.staleRegistryRunId, 'stale-run-1')
+
+  // Live registry (this process stands in as the runner pid) -> observer binds
+  // to the recorded runtime dir and reports the run identity even before the
+  // resident socket answers.
+  const liveRuntime = join(registryDir, 'live-runtime')
+  mkdirSync(liveRuntime, { recursive: true })
+  writeFileSync(registryPath, JSON.stringify({
+    record: 'capability-active-run',
+    runId: 'cohort-run-9',
+    runtimeDir: liveRuntime,
+    runnerPid: process.pid,
+    residentPid: process.pid,
+    sha: 'feedface',
+    seed: '777001',
+    port: 26601,
+    mission: { id: 'inventory_at_least(log,1)' },
+    protocolVersion: 'v2',
+    start: { x: 128, y: 70, z: -256 },
+    startedAt: new Date().toISOString(),
+  }))
+  const live = await registryObserver.snapshot()
+  assert.equal(live.campaign.status, 'active')
+  assert.equal(live.campaign.runId, 'cohort-run-9')
+  assert.equal(live.campaign.protocolVersion, 'v2')
+  assert.deepEqual(live.campaign.start, { x: 128, y: 70, z: -256 })
+  assert.equal(live.campaign.mission.id, 'inventory_at_least(log,1)')
+  assert.equal(registryObserver.currentRuntimeDir(), liveRuntime)
+  const liveReadModel = buildVtrObserverReadModel(live, { now: Date.now() })
+  assert.equal(liveReadModel.status.connected, false, 'no resident socket yet -> not connected')
+  assert.ok(liveReadModel.unknown.includes('resident_report_unavailable'))
+
+  // Registry cleared again -> immediately back to no-active, no cached identity.
+  rmSync(registryPath)
+  const cleared = await registryObserver.snapshot()
+  assert.equal(cleared.campaign.status, 'no_active_campaign_run')
+  assert.equal(cleared.campaign.staleRegistryRunId, undefined)
+} finally {
+  rmSync(registryDir, { recursive: true, force: true })
+}
+
 console.log('buddy-observer: PASS')

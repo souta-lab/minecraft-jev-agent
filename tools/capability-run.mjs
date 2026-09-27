@@ -17,8 +17,17 @@
 //
 // Anti-gaming: the seed is predeclared by the caller and pinned into
 // server.properties; the world container is created empty. Never reuses a
-// generated world. Never issues operator commands to the world.
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from 'node:fs'
+// generated world. Never issues operator commands to the world once the
+// resident is launched — the one allowed fixture is `--start` placement
+// (setworldspawn + spawnRadius 0), issued over server stdin after level
+// prepare and before the resident's first join, so the measured run begins
+// already at the declared coordinate.
+//
+// Campaign protocol v2 (2026-09-27): ONE live mutating capability run at a
+// time (registry + process guard), canonical seed with a predeclared
+// coordinate cohort; protocol v1 was per-run fresh seeds with parallel
+// worlds — the two result sets are labelled separately and never mixed.
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs'
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
@@ -26,7 +35,15 @@ import { fileURLToPath } from 'node:url'
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(TOOL_DIR, '..')
-const RUNS_ROOT = join(REPO_ROOT, 'runs/capability-campaign/runs')
+const CAMPAIGN_DIR = join(REPO_ROOT, 'runs/capability-campaign')
+const RUNS_ROOT = join(CAMPAIGN_DIR, 'runs')
+/**
+ * The live-run registry the campaign observer follows. Exactly one mutating
+ * capability run owns this file at a time (protocol v2: sequential single-world
+ * cohorts); tools/capability-observer.mjs and buddy-observer.mjs resolve the
+ * current runtime dir from it instead of scanning for runtime state.
+ */
+const ACTIVE_RUN_REGISTRY = join(CAMPAIGN_DIR, 'active-run.json')
 const LEAF_JAR = '/home/s0u7a/mc-server/leaf-1.21.11-178.jar'
 const JAVA = '/usr/lib/jvm/java-21-openjdk-amd64/bin/java'
 const RESIDENT_ENV = '/home/s0u7a/.config/mc-ai/resident.env'
@@ -52,6 +69,17 @@ Options:
                         capability predicate, evaluated on the resident's own
                         live inventory observation (report.currentInventoryObservation).
   --username <name>     bot username (default AI_Cap)
+  --start <x>,<y>,<z>   protocol-v2 fixture spawn coordinate (pre-run
+                        placement via setworldspawn + gamerule spawnRadius 0
+                        over server stdin before the resident joins). Y is the
+                        surface block of the declared cohort record — never
+                        guessed by this tool. Marks the run protocolVersion=v2;
+                        without it the run is v1 (per-run fresh seed).
+  --allow-concurrent    escape hatch: launch even though another campaign run
+                        is live (records concurrentOverride in the plan; the
+                        registry is still written so the observer follows the
+                        newest run). The default is a hard refusal — protocol v2
+                        is sequential single-world for host stability.
   --keep-worktree       keep the exact-source worktree after the run
   --source-dir <path>   reuse an existing prepared worktree (no install)
   --no-server           skip server launch (attach to an existing world; debug only)
@@ -59,7 +87,7 @@ Options:
 `
 
 function parseArgs(argv) {
-  const options = { sha: null, seed: null, runId: null, port: 26601, timeoutMin: 60, missionItem: 'log', missionCount: '1', accept: 'log', username: 'AI_Cap', keepWorktree: false, sourceDir: null, noServer: false, dryRun: false }
+  const options = { sha: null, seed: null, runId: null, port: 26601, timeoutMin: 60, missionItem: 'log', missionCount: '1', accept: 'log', username: 'AI_Cap', start: null, allowConcurrent: false, keepWorktree: false, sourceDir: null, noServer: false, dryRun: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return null
@@ -72,6 +100,14 @@ function parseArgs(argv) {
     else if (arg === '--mission-count') options.missionCount = argv[++i]
     else if (arg === '--accept') options.accept = argv[++i]
     else if (arg === '--username') options.username = argv[++i]
+    else if (arg === '--start') {
+      const parts = String(argv[++i] ?? '').split(',').map((p) => Number(p.trim()))
+      if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n))) throw new Error('--start must be <x>,<y>,<z> integers')
+      const [x, y, z] = parts
+      if (Math.abs(x) > 29_999_999 || Math.abs(z) > 29_999_999 || y < -64 || y > 320) throw new Error('--start out of world bounds')
+      options.start = { x, y, z }
+    }
+    else if (arg === '--allow-concurrent') options.allowConcurrent = true
     else if (arg === '--keep-worktree') options.keepWorktree = true
     else if (arg === '--source-dir') options.sourceDir = argv[++i]
     else if (arg === '--no-server') options.noServer = true
@@ -173,18 +209,108 @@ function extractLevelSeed(serverDir) {
   return existsSync(join(serverDir, 'level.dat')) || existsSync(join(serverDir, 'world', 'level.dat'))
 }
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'EPERM' }
+}
+
+function readActiveRunRegistry(path = ACTIVE_RUN_REGISTRY) {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'))
+    return value !== null && typeof value === 'object' && value.record === 'capability-active-run' && typeof value.runId === 'string' ? value : null
+  } catch { return null }
+}
+
+function writeActiveRunRegistry(value, path = ACTIVE_RUN_REGISTRY) {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+/** Clear only when the entry still names THIS run — a newer run's claim is never clobbered by a stale cleanup. */
+function clearActiveRunRegistry(runId, path = ACTIVE_RUN_REGISTRY) {
+  const current = readActiveRunRegistry(path)
+  if (current !== null && current.runId === runId) {
+    try { unlinkSync(path) } catch { /* already gone */ }
+  }
+}
+
+/**
+ * Other live campaign runs visible to the process table (covers runs launched
+ * before the registry existed — their server JVM carries the run path in argv).
+ */
+function liveCampaignProcesses() {
+  const out = spawnSync('pgrep', ['-fa', 'runs/capability-campaign/runs/'], { encoding: 'utf8' })
+  if (out.status !== 0 || typeof out.stdout !== 'string') return []
+  // Exclude self and the direct parent: a `bash -c 'nohup bun … > runs/…/x.log &'`
+  // launch wrapper carries the run path in its own cmdline for its ~ms lifetime.
+  const selfPids = new Set([process.pid, process.ppid])
+  return out.stdout.split('\n').map((line) => line.trim())
+    .filter((line) => line !== '' && !selfPids.has(Number(line.split(/\s+/u, 1)[0])))
+}
+
+/** Sequential-cohort guard: refuse a second live mutating run unless explicitly overridden. */
+function assertSingleLiveRun(options) {
+  const registry = readActiveRunRegistry()
+  const blockers = []
+  if (registry !== null && pidAlive(registry.runnerPid)) {
+    blockers.push(`registry names live run ${registry.runId} (runner pid ${registry.runnerPid})`)
+  }
+  const stray = liveCampaignProcesses()
+  if (stray.length > 0) blockers.push(`live campaign processes: ${stray.join(' | ').slice(0, 400)}`)
+  if (blockers.length > 0 && !options.allowConcurrent) {
+    throw new Error(`protocol v2 is sequential: ${blockers.join('; ')}. Wait for it to finish or pass --allow-concurrent.`)
+  }
+  return { priorRegistry: registry, concurrentOverride: blockers.length > 0 }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2))
   if (options === null) { process.stdout.write(HELP); return 0 }
   const runId = options.runId
   const runDir = join(RUNS_ROOT, runId)
   if (existsSync(runDir)) throw new Error(`run dir already exists: ${runDir}`)
+  const protocolVersion = options.start === null ? 'v1' : 'v2'
+  // Dry-run is a non-mutating plan preview; the sequential guard binds only real launches.
+  const { priorRegistry, concurrentOverride } = options.dryRun
+    ? { priorRegistry: readActiveRunRegistry(), concurrentOverride: false }
+    : assertSingleLiveRun(options)
   mkdirSync(runDir, { recursive: true })
+  // Claim the active slot immediately: the full entry (runtimeDir, resident
+  // pid, mission) is written after resident launch. This closes the staging
+  // window where a second launch could otherwise pass the process guard.
+  if (!options.dryRun) {
+    writeActiveRunRegistry({
+      record: 'capability-active-run',
+      schemaVersion: 1,
+      status: 'claiming',
+      runId,
+      runDir,
+      runnerPid: process.pid,
+      sha: options.sha,
+      seed: options.seed,
+      port: options.port,
+      protocolVersion,
+      ...(options.start !== null ? { start: options.start } : {}),
+      claimedAt: new Date().toISOString(),
+    })
+  }
 
   const levelName = `cap-${runId}`
   const serverDir = join(runDir, 'server')
   const wtDir = options.sourceDir ?? join(runDir, 'src')
-  const plan = { runId, sha: options.sha, seed: options.seed, port: options.port, levelName, runDir, serverDir, worktree: wtDir, timeoutMin: options.timeoutMin, mission: `inventory_at_least(${options.missionItem},${options.missionCount})` }
+  const plan = {
+    runId, sha: options.sha, seed: options.seed, port: options.port, levelName, runDir, serverDir, worktree: wtDir, timeoutMin: options.timeoutMin,
+    mission: `inventory_at_least(${options.missionItem},${options.missionCount})`,
+    protocolVersion,
+    ...(options.start === null ? {} : {
+      fixture: {
+        start: options.start,
+        method: 'setworldspawn+gamerule-spawnRadius-0',
+        timing: 'pre-resident-join, after level prepare',
+      },
+    }),
+    ...(concurrentOverride ? { concurrentOverride: true } : {}),
+  }
   writeFileSync(join(runDir, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`)
 
   // --- stage world container ---
@@ -207,6 +333,7 @@ async function main() {
 
   const procs = []
   const cleanup = async () => {
+    clearActiveRunRegistry(runId)
     for (const p of procs.reverse()) {
       try { if (p.stdin && !p.stdin.destroyed) p.stdin.write('stop\n') } catch { /* ignore */ }
       try { process.kill(-p.pid, 'SIGTERM') } catch { try { p.kill('SIGTERM') } catch { /* ignore */ } }
@@ -230,6 +357,18 @@ async function main() {
         await new Promise((r) => setTimeout(r, 2000))
       }
       if (!ready) throw new Error('server did not finish preparing the level within 180s')
+
+      // Protocol-v2 start fixture: place the world's spawn at the declared
+      // cohort coordinate BEFORE the resident joins (spawnRadius 0 makes the
+      // first join land exactly on it). This is the only console command the
+      // run ever issues; the measured clock starts after resident launch.
+      if (options.start !== null) {
+        const { x, y, z } = options.start
+        serverProc.stdin.write('gamerule spawnRadius 0\n')
+        serverProc.stdin.write(`setworldspawn ${x} ${y} ${z}\n`)
+        // Let the console apply it before the bot's first login resolves spawn.
+        await new Promise((r) => setTimeout(r, 1500))
+      }
     }
 
     // --- resident (production V4.1.2 path; no probe mode) ---
@@ -247,6 +386,32 @@ async function main() {
     }
     const residentProc = spawnLogged('bun', ['agent-runner.mts'], { cwd: join(wtDir, 'packages/buddy-driver'), env: residentEnv, logPath: join(runDir, 'resident-stdout.log') })
     procs.push(residentProc)
+
+    // The canonical campaign pointer: the observer (tools/buddy-observer.mjs
+    // registry mode) and rung bookkeeping follow this file instead of scanning
+    // for runtime state. Cleared by cleanup() only while it still names this run.
+    writeActiveRunRegistry({
+      record: 'capability-active-run',
+      schemaVersion: 1,
+      status: 'active',
+      runId,
+      runDir,
+      runtimeDir: join(wtDir, 'packages/buddy-driver'),
+      serverLog: join(runDir, 'server.log'),
+      residentStdout: join(runDir, 'resident-stdout.log'),
+      port: options.port,
+      runnerPid: process.pid,
+      residentPid: residentProc.pid,
+      sha: options.sha,
+      seed: options.seed,
+      username: options.username,
+      mission: plan.mission,
+      protocolVersion,
+      ...(options.start !== null ? { start: options.start } : {}),
+      ...(concurrentOverride ? { concurrentOverride: true } : {}),
+      ...(priorRegistry !== null ? { reclaimedStaleRegistryFrom: priorRegistry.runId } : {}),
+      startedAt: new Date().toISOString(),
+    })
 
     // --- poll for mission completion ---
     // Success = the rung predicate holds in the resident's OWN live inventory
@@ -348,6 +513,13 @@ async function main() {
         }
       }
     }
+    // Fixture verification (protocol v2): the resident's own first SPAWN line is
+    // the evidence the declared start coordinate is where the measured run began.
+    const firstSpawn = /SPAWN pos=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/u.exec(buddyLog)
+    const actualSpawn = firstSpawn === null ? null : { x: Number(firstSpawn[1]), y: Number(firstSpawn[2]), z: Number(firstSpawn[3]) }
+    const fixtureDisplacement = options.start !== null && actualSpawn !== null
+      ? Math.hypot(actualSpawn.x - (options.start.x + 0.5), actualSpawn.z - (options.start.z + 0.5))
+      : null
     const markers = countMarkers(buddyLog, {
       DEATH: 0, RECOVERY: 0, RECONNECT: 0, QUIT: 0, ERROR: 0, WARN: 0,
       MISSION_PREFLIGHT: 0, PROPOSALS_COMMITTED: 0, PROPOSALS_DISCARDED: 0,
@@ -365,6 +537,11 @@ async function main() {
       record: 'capability-run-result', schemaVersion: 2,
       runId, sha: options.sha, seed: String(options.seed), port: options.port, levelName,
       mission: plan.mission, accept: options.accept ?? acceptItem, username: options.username,
+      protocolVersion,
+      ...(options.start === null ? {} : {
+        fixture: { start: options.start, actualSpawn, fixtureDisplacementBlocks: fixtureDisplacement },
+      }),
+      ...(concurrentOverride ? { concurrentOverride: true } : {}),
       outcome, residentAliveAtEnd, worldPresent: extractLevelSeed(serverDir),
       objectiveCompleteAtMs, inventoryAtCompletion, finalInventory: lastInventory,
       wallClockMs: Date.now() - startedAt,

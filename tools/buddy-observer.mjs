@@ -2620,12 +2620,63 @@ export function buildAiSummary(snapshot, { now = Date.now() } = {}) {
   })
 }
 
-export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = DEFAULT_INTERVAL_MS } = {}) {
-  const socketPath = join(runtimeDir, 'data', 'resident', 'control.sock')
-  const logPath = join(runtimeDir, 'buddy.log')
-  const jevCallsPath = join(runtimeDir, 'logs', 'jev', 'jev-calls.jsonl')
-  const vtrRunLogPath = join(runtimeDir, 'logs', 'jev', 'run.jsonl')
-  const runnerOutPath = join(runtimeDir, 'runner.out')
+/**
+ * One resolved observation target. `registryPath` mode (the canonical campaign
+ * observer, tools/capability-observer): every request re-reads the capability
+ * run's own `active-run.json` and binds to the runtimeDir it names, so the
+ * endpoint follows sequential run turnover with no observer restart. When the
+ * registry is absent or its recorded pids are dead, `paths` is null and the
+ * snapshot reports `no_active_campaign_run` instead of stale probe state.
+ */
+function observerPaths(runtimeDir) {
+  return {
+    runtimeDir,
+    socketPath: join(runtimeDir, 'data', 'resident', 'control.sock'),
+    logPath: join(runtimeDir, 'buddy.log'),
+    jevCallsPath: join(runtimeDir, 'logs', 'jev', 'jev-calls.jsonl'),
+    vtrRunLogPath: join(runtimeDir, 'logs', 'jev', 'run.jsonl'),
+    runnerOutPath: join(runtimeDir, 'runner.out'),
+  }
+}
+
+function readActiveRunRegistry(registryPath) {
+  if (registryPath === null) return null
+  try {
+    const value = JSON.parse(readFileSync(registryPath, 'utf8'))
+    if (value === null || typeof value !== 'object' || value.record !== 'capability-active-run') return null
+    if (typeof value.runtimeDir !== 'string' || !existsSync(value.runtimeDir)) return null
+    return value
+  } catch {
+    return null
+  }
+}
+
+function registryRunAlive(entry) {
+  const alive = (pid) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'EPERM' }
+  }
+  return alive(entry.runnerPid) || alive(entry.residentPid)
+}
+
+export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = DEFAULT_INTERVAL_MS, registryPath = null } = {}) {
+  const binding = () => {
+    if (registryPath === null) return { paths: observerPaths(runtimeDir), registry: null }
+    const entry = readActiveRunRegistry(registryPath)
+    if (entry === null || !registryRunAlive(entry)) {
+      return { paths: null, registry: entry === null ? null : { ...entry, stale: true } }
+    }
+    return { paths: observerPaths(entry.runtimeDir), registry: entry }
+  }
+  const noRunSnapshot = (registry) => ({
+    ...buildObserverSnapshot({ report: null, events: [], mission: null, runBoot: null, runBuild: null, runMetadata: null, runGenerationReady: null, jevCalls: [] }),
+    campaign: {
+      status: 'no_active_campaign_run',
+      registryPath,
+      ...(registry === null ? {} : { staleRegistryRunId: registry.runId ?? null }),
+    },
+    runtimeFailure: { ts: null, event: 'CAMPAIGN_REGISTRY', detail: { code: 'no_active_campaign_run' } },
+  })
 
   // Summary requests also expose the on-demand live probe. Multiple readers
   // asking for the same radius at once must share its report -> state -> report
@@ -2634,9 +2685,22 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   // miss its caller's deadline.
   const worldProbeInFlight = new Map()
   const worldProbe = async ({ radius = 6, verticalRadius = 3 } = {}) => {
+    const bound = binding()
+    if (bound.paths === null) {
+      return redactSecrets({
+        schemaVersion: 1,
+        kind: 'ai-buddy-world-probe',
+        observedAt: new Date().toISOString(),
+        readOnly: true,
+        status: 'unavailable',
+        error: 'no_active_campaign_run',
+        unknown: ['live_world_probe_unavailable'],
+      })
+    }
     const horizontal = Number.isFinite(radius) ? Math.max(1, Math.min(8, Math.floor(radius))) : 6
     const vertical = Number.isFinite(verticalRadius) ? Math.max(1, Math.min(4, Math.floor(verticalRadius))) : 3
-    const key = `${horizontal}:${vertical}`
+    const { socketPath, runtimeDir: boundDir } = bound.paths
+    const key = `${boundDir}:${horizontal}:${vertical}`
     const existing = worldProbeInFlight.get(key)
     if (existing !== undefined) return await existing
 
@@ -2660,7 +2724,23 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
   let cachedGenerationId = null
   let cachedGenerationReady = null
   let cachedWorldKey = null
+  let cachedBoundDir = null
   const snapshot = async () => {
+    const bound = binding()
+    if (bound.paths === null) return noRunSnapshot(bound.registry)
+    // Turnover drops the previous run's cache: a cached BOOT/GENERATION_READY
+    // from the last run must never bind a different runtime dir's report.
+    if (bound.paths.runtimeDir !== cachedBoundDir) {
+      cachedBoundDir = bound.paths.runtimeDir
+      cachedRunId = null
+      cachedRunBoot = null
+      cachedRunBuild = null
+      cachedRunMetadata = null
+      cachedGenerationId = null
+      cachedGenerationReady = null
+      cachedWorldKey = null
+    }
+    const { socketPath, logPath, jevCallsPath, vtrRunLogPath, runnerOutPath, runtimeDir: boundRuntimeDir } = bound.paths
     if (snapshotInFlight !== null) return await snapshotInFlight
     snapshotInFlight = Promise.all([
       callControlSocket(socketPath, 'report'),
@@ -2688,7 +2768,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
           : readRunEvent(logPath, 'BOOT', currentRunId)
         cachedRunBuild = readRunEvent(logPath, 'BUILD', currentRunId)
       }
-      const runMetadata = currentRunId === null ? null : readRunMetadata(runtimeDir, currentRunId)
+      const runMetadata = currentRunId === null ? null : readRunMetadata(boundRuntimeDir, currentRunId)
       let candidateGenerationReady = [...events].reverse().find((entry) => entry.event === 'GENERATION_READY'
         && entry.detail?.runId === currentRunId
         && entry.detail?.id === currentGenerationId) ?? null
@@ -2714,7 +2794,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         const rightTs = Date.parse(right.ts ?? '')
         return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0)
       })
-      return buildObserverSnapshot({
+      const built = buildObserverSnapshot({
         report,
         events: combinedEvents,
         // Mission is derived below only from run-bound structured runtime evidence.
@@ -2725,12 +2805,34 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         runGenerationReady,
         jevCalls,
       })
+      if (bound.registry !== null) {
+        built.campaign = {
+          status: 'active',
+          runId: bound.registry.runId ?? null,
+          protocolVersion: bound.registry.protocolVersion ?? null,
+          seed: bound.registry.seed ?? null,
+          start: bound.registry.start ?? null,
+          mission: bound.registry.mission ?? null,
+          sourceSha: bound.registry.sha ?? null,
+          startedAt: bound.registry.startedAt ?? null,
+        }
+      }
+      return built
     })
       .finally(() => { snapshotInFlight = null })
     return await snapshotInFlight
   }
 
   const recentChoiceOutcomes = async ({ limit = 12, maxBytes = DEFAULT_RECENT_CHOICE_LOG_BYTES } = {}) => {
+    const bound = binding()
+    if (bound.paths === null) {
+      return {
+        status: 'unknown',
+        binding: { runId: null, directRunId: false, generationId: null, method: 'runId+generationId+GENERATION_READY', confidence: 'unknown' },
+        entries: [],
+        unknown: ['no_active_campaign_run'],
+      }
+    }
     const runId = cachedRunId
     const generationId = cachedGenerationId
     const generationReady = cachedGenerationReady
@@ -2748,7 +2850,7 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
         unknown: ['current_run_generation_boundary_unavailable'],
       }
     }
-    const events = readLogTail(logPath, boundedMaxBytes)
+    const events = readLogTail(bound.paths.logPath, boundedMaxBytes)
       .filter((entry) => TRACE_EVENTS.has(entry.event) && eventBelongsToRunGeneration(entry, {
         runId,
         generationId,
@@ -2786,7 +2888,16 @@ export function createObserver({ runtimeDir = DEFAULT_RUNTIME_DIR, intervalMs = 
     })
   }
 
-  return { runtimeDir, socketPath, logPath, jevCallsPath, vtrRunLogPath, runnerOutPath, mission: null, intervalMs, snapshot, worldProbe, recentChoiceOutcomes }
+  return {
+    intervalMs,
+    registryPath,
+    runtimeDir: registryPath === null ? runtimeDir : null,
+    currentRuntimeDir: () => binding().paths?.runtimeDir ?? null,
+    mission: null,
+    snapshot,
+    worldProbe,
+    recentChoiceOutcomes,
+  }
 }
 
 export function startObserverServer(options = {}) {
@@ -2867,12 +2978,18 @@ export function startObserverServer(options = {}) {
 }
 
 if (import.meta.main) {
+  // Canonical campaign mode: the observer follows the active capability run's
+  // registry entry (tools/capability-run.mjs writes it on resident launch and
+  // clears it on cleanup), so sequential run turnover needs no restart.
+  // BUDDY_OBSERVER_REGISTRY=none restores the fixed-dir debug mode.
+  const rawRegistry = process.env.BUDDY_OBSERVER_REGISTRY ?? join(REPO, 'runs/capability-campaign/active-run.json')
+  const registryPath = rawRegistry === 'none' || rawRegistry === '' ? null : resolve(rawRegistry)
   const runtimeDir = resolve(process.env.BUDDY_OBSERVER_RUNTIME_DIR ?? DEFAULT_RUNTIME_DIR)
   const hostname = process.env.BUDDY_OBSERVER_HOST?.trim() || DEFAULT_HOST
   const rawPort = Number(process.env.BUDDY_OBSERVER_PORT ?? DEFAULT_PORT)
   const port = Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : DEFAULT_PORT
   const rawInterval = Number(process.env.BUDDY_OBSERVER_INTERVAL_MS ?? DEFAULT_INTERVAL_MS)
   const intervalMs = Number.isFinite(rawInterval) && rawInterval >= 250 ? rawInterval : DEFAULT_INTERVAL_MS
-  const { url, observer } = startObserverServer({ runtimeDir, hostname, port, intervalMs })
-  process.stdout.write(`AI_BUDDY_OBSERVER url=${url} runtime=${observer.runtimeDir} mode=read-only\n`)
+  const { url, observer } = startObserverServer({ runtimeDir, hostname, port, intervalMs, registryPath })
+  process.stdout.write(`AI_BUDDY_OBSERVER url=${url} runtime=${observer.runtimeDir ?? 'registry'} registry=${registryPath ?? 'none'} mode=read-only\n`)
 }
