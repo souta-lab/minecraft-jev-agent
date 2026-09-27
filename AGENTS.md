@@ -114,6 +114,127 @@ This repository already has a large test surface. **Do not let capability work t
 
 A good capability KEEP should normally have a small proof footprint relative to the production behavior/evidence it protects. "More tests" is not a success metric; **better verified Minecraft capability with unchanged V4.1.2 safety is the metric.**
 
+## 1B. Canonical unattended campaign program
+
+This section makes the former long `/goal-mode` prompt durable. **A future goal prompt may be only `continue`.** In that case, do not treat the short prompt as a new underspecified task: read this `AGENTS.md`, `runs/capability-campaign/state.json`, git/process/world state, and referenced experiment records, then resume the next falsifiable campaign action.
+
+Context compaction, a new Devin session, a subagent finishing, a status report, a commit, or one successful rung are **not completion**. Reload durable state and continue while useful in-constitution work exists.
+
+### Campaign bootstrap / P0
+
+At the beginning of a fresh unattended campaign or after a hard reset of campaign state:
+
+1. Fetch first; confirm the working tree and exact `HEAD`/`origin/main` relationship. Never force-push or rewrite shared history.
+2. Record campaign start time, start SHA, disk free space, active server/resident state, and model/provider availability **without printing secret values**.
+3. Create or resume `runs/capability-campaign/state.json` and `STATUS.md`. They must identify at least: campaign id, `startedAt`, start/trusted/last-KEEP SHAs, current rung/status, task predicate, promotion criterion, dev seeds, holdout seeds, baseline/result refs, active failure clusters, falsified hypotheses, active experiment/worktree/processes, blocked/deferred lanes, and next actions.
+4. Inspect and reuse current clean-run/live-run tooling, supervisor/watchdog, world-state tools, experiment-result schema, and existing capability evidence. Do not build a second framework unless a measured blocker proves the existing one insufficient.
+5. Establish a reproducible capability-run protocol before tuning behavior. Live evidence must bind exact source SHA, world/seed, task predicate, run identity, and final verified outcome.
+6. Isolate campaign worlds from sealed acceptance evidence and user worlds. Never let two mutating experiments own the same server/world concurrently.
+
+### Rung evaluation and promotion
+
+Before tuning each rung, predeclare its verified success predicate, terminal failure conditions, primary/secondary metrics, dev seeds, holdout seeds, and promotion rule. Holdout seeds are evaluation-only; never tune specifically against their coordinates or outcomes.
+
+When no stricter existing gate applies, the default robust-promotion rule is:
+
+- focused/deterministic checks required by the real fix are green;
+- zero `AUTHORITY_VIOLATION`;
+- at least **4/5 clean live successes** across the predeclared dev+holdout cohort when five trials are practical, including at least one holdout success;
+- no material regression on retained earlier-rung samples;
+- no pathological System2/model-call increase merely buying success.
+
+If run cost or infrastructure prevents five valid trials, label confidence **LOW** and do not call the rung robust. A single lucky seed proves possibility, not robustness.
+
+The first frontier for a new campaign is honest autonomous wood acquisition from a clean start unless durable state already proves that rung robust. Historical M1 evidence is not automatically the current baseline. Measure current production behavior again when protocol/source meaningfully changes.
+
+For failed runs, capture the **first causal failure**, not just the last error. Prioritize repeated clusters by frequency × severity × downstream blocking value, subject to the permanent architecture lock and open-zone rules. Do not keep polishing instrumentation once it answers the causal question well enough to run the next experiment.
+
+### Bounded experiment contract
+
+For each selected failure cluster:
+
+1. State one falsifiable hypothesis and the exact expected metric or failure-signature change.
+2. Isolate risky candidates in a `cap-<rung>-<experiment>` branch/worktree based on an exact trusted SHA.
+3. Add only the minimum deterministic regression needed for a **real reproduced failure**; obey the test-surface discipline above.
+4. Make the smallest generic V4.1.2-conformant production change. No seed coordinates, benchmark route scripts, or hard-coded action sequences.
+5. Run focused checks, touched-package typecheck, and applicable architecture/authority guards.
+6. Commit the candidate before provenance-sensitive live evaluation so evidence binds an exact SHA.
+7. Use progressive sampling: smallest dev run that can falsify -> full declared dev cohort -> holdout/promotion cohort.
+8. If the hypothesis fails causally, REVERT/DEFER early rather than burning the full cohort.
+9. KEEP only when declared capability evidence improves (or primary holds while a declared secondary materially improves), no new failure class/authority violation appears, and lower-rung regressions remain acceptable. Ambiguous/noisy results require more evidence, not guessing.
+10. Before production-code integration: fetch, reconcile safely, inspect the diff, run the required focused/full gates and typecheck, then push a small coherent KEEP normally.
+11. Update experiment records and campaign state, retire disposable worktrees when safe, and immediately continue to the next cluster/rung.
+
+Verdicts mean:
+
+- **KEEP** — causal evidence + declared metrics support the candidate; required guards are green.
+- **REVERT** — regression, new failure class, worse verified success, unbounded retries/model use, or falsified hypothesis.
+- **DEFER/ESCALATE** — frozen surface, constitutional impossibility, unavailable dependency, or exhausted bounded hypotheses. Preserve evidence and switch lanes; this does not authorize architecture change and does not require waiting for the operator.
+- **INFRA** — only with evidence. Reproduce against a control/base when practical; infrastructure failures do not count as product wins or losses.
+
+A candidate that wins by weakening verification, changing the task after baseline, using assists, hiding failures, or silently changing evidence semantics is an automatic REVERT.
+
+### Long-run reliability / self-recovery
+
+- Use bounded timeouts for tests, servers, probes, and live runs. A hung process is an infrastructure failure to diagnose, not a reason to wait forever.
+- Reuse the resident supervisor/watchdog and clean-run process controls; do not invent unsafe process control when existing mechanisms suffice.
+- Periodically check free disk, stale/zombie servers, worktree count, run-artifact growth, and port/world ownership.
+- Preserve sealed accepted evidence and committed experiment records. Prune only disposable/reproducible artifacts after their causal summary is durable. Never delete user worlds or accepted VTR archives.
+- On disk pressure, remove transient caches/build output/completed disposable worktrees/reproducible failed runs first and record what was removed.
+- On provider outage, record `MODEL_UNAVAILABLE`; do not add fallback authority or change semantics. Switch to mechanical, deterministic, observability, recovery, or provider-independent lanes until service returns.
+- If run identity, source binding, server configuration, or world provenance becomes uncertain, invalidate the run and start clean. Never repair evidence by hand.
+
+### Git/main health and time allocation
+
+`main` represents validated KEEP checkpoints, not speculative candidates. Never reset away unrelated work, delete another lane's unmerged branch/worktree, amend pushed shared commits, or force-push. Push each validated coherent KEEP so a machine/session failure loses little work.
+
+Spend the clear majority of productive time on **measured gameplay capability**. Campaign infrastructure/tooling should normally remain below roughly one quarter of productive effort unless a concrete blocker requires more. Prefer cheap deterministic reproduction before expensive live repetition. While long gates/runs execute, use only non-conflicting work for analysis or next-experiment preparation.
+
+### Campaign memory / resume contract
+
+Update `runs/capability-campaign/state.json` after each baseline cohort, candidate verdict, KEEP integration, rung promotion, and blocker/lane switch. Store evidence paths instead of giant pasted logs.
+
+After a restart, durable state must make these questions answerable without chat memory:
+
+- What exact SHA is trusted main, and what exact SHA did each live run boot?
+- What rung/predicate/promotion criterion is active?
+- Which seeds are dev vs holdout, and which outcomes have already influenced tuning?
+- What is the current baseline distribution and best accepted candidate distribution?
+- What are the top failure clusters, their counts/signatures, and already-falsified hypotheses?
+- What candidate/worktree/process/world is active now?
+- What was the last fully green KEEP SHA, and which earlier-rung regressions must be sampled next?
+- Which lanes are blocked/deferred, and why?
+
+If the goal/session says only `continue`, **reconcile AGENTS.md + state.json + git log/status + actual processes/world identity first, then resume the next falsifiable action. Do not ask the operator to restate the campaign.**
+
+### Anti-gaming / anti-overfitting
+
+- Never change a seed cohort after seeing candidate results merely to improve the score.
+- Never count a run twice or discard a valid failed run because it is inconvenient.
+- Never call a gameplay failure `INFRA` without evidence.
+- Never make success easier by changing the predicate, acceptance criterion, world premise, or postcondition after baseline.
+- Never encode known seed coordinates, block locations, benchmark action sequences, or the capability ladder as a giant production script.
+- Never turn System2 into a continuous motor/planner loop; its sparse WHAT role remains constitutional.
+- Never hide retries/stalls by resetting counters or minting a fresh transition without causal justification.
+- Prefer improvements that generalize across seeds, biomes, target instances, partial states, and novel recovery situations.
+
+### End-of-campaign condition
+
+For a campaign explicitly requested to run for about seven days, use `state.json.startedAt` as the clock. Near the end, finish the current bounded experiment safely and integrate it only if it satisfies KEEP. Then write a durable final campaign report containing:
+
+- campaign start/end time and start/final `origin/main` SHAs;
+- every KEEP grouped by capability rung and measured causal failure;
+- baseline vs final per-rung metrics, seed cohorts, sample sizes, confidence limits, and holdout results;
+- capability frontier reached and the first unsolved rung;
+- top remaining failure clusters and next falsifiable experiments;
+- regressions found/fixed;
+- Jev/System2 usage and cost trend where observable;
+- reproducible run/evidence/result paths;
+- infrastructure failures distinguished from product failures;
+- confirmation that V4.1.2 remained untouched and architecture guards stayed green.
+
+Do not stop early merely because one rung passes. Until the explicit campaign end condition or a genuine all-lanes blocker, completion of one slice means **continue**.
+
 ## 2. Role constitution
 
 - **Jev** — the production-default fast System-One decision policy. Semantic/tactical decision **only**: choose/rank/score among grounded enabled Transitions and in-contract tactics. Jev does **not** own world truth, SUCCESS, the actuation lease, resource authority, or effect authorization. A Jev output is policy input that the kernel validates; it is never permission for a primitive call.
