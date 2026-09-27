@@ -108,6 +108,14 @@ export function hasReachableMissionSource(
  * — a denied/held VTR decision must never fall back into a same-body
  * same-predicate legacy walk.
  *
+ * The Phase-0 gate for legacy Reach deletion is satisfied by the d781f54
+ * archive: this withhold IS the deletion of legacy same-predicate locomotion
+ * scheduling. The boundary is deliberately locomotion-only: a Reach contract's
+ * `admissibleEffects` cannot harvest, so mission-source MINE/RETRIEVE/PICKUP
+ * (the not-yet-migrated collection family) and remembered-source approach legs
+ * (the not-yet-migrated exploration family) still cross this edge. Withholding
+ * those would strand `inventory_at_least` with no VTR path that can satisfy it.
+ *
  * Delete this filter when the legacy candidate/claim path no longer owns
  * Mission semantics and scheduler dispatch crosses only typed runtime ports.
  */

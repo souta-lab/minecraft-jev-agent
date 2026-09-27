@@ -330,3 +330,64 @@ test('normal mode reconciles a non-admitted Mission source so legacy cannot repl
   assert.deepEqual(afterVtrDecline.candidates.map((candidate) => candidate.id), ['MOVE:iron_ore@24,64,0'])
   assert.equal(afterVtrDecline.candidates[0]?.id, unrelated.id, 'the unrelated candidate remains eligible to legacy policy')
 })
+
+test('the legacy-Reach withhold stays locomotion-scoped: mission harvest and remembered-source legs still cross', () => {
+  // The Reach contract's admissibleEffects is locomotion-only — VTR cannot
+  // satisfy `inventory_at_least` itself. The collection family (MINE/RETRIEVE/
+  // PICKUP against the mission item) and remembered-source approach legs are
+  // not legacy Reach machinery: withholding them would strand the mission.
+  const mineMissionSource: Candidate = {
+    id: 'MINE:oak_log@8,64,0',
+    kind: 'MINE',
+    label: 'dig the mission oak_log source',
+    targetName: 'oak_log',
+    target: sourcePosition,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { resource: 'oak_log' },
+  }
+  const retrieveMissionSource: Candidate = {
+    id: 'RETRIEVE:known:oak_log:8,64,0',
+    kind: 'RETRIEVE',
+    label: 'return to the remembered mission oak_log source',
+    targetName: 'oak_log',
+    target: sourcePosition,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { retrieval: 'known', resource: 'oak_log', knownName: 'oak_log', x: 8, y: 64, z: 0 },
+  }
+  const pickupMissionDrop: Candidate = {
+    id: 'PICKUP:e42',
+    kind: 'PICKUP',
+    label: 'pick up a dropped mission oak_log',
+    targetName: 'oak_log',
+    target: { x: 3, y: 64, z: 0 },
+    targetEntityId: 42,
+    itemName: 'oak_log',
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { pickupItem: 'oak_log', pickupEntityId: 42 },
+  }
+  const result = filterLegacyReachCandidates({
+    candidates: [moveToOakLog(), mineMissionSource, retrieveMissionSource, pickupMissionDrop],
+    world: worldWithOakSource(),
+    missionItem: configuredMission.item,
+    missionSourceNames: ['oak_log'],
+  })
+  assert.deepEqual(result.withheld.map((candidate) => candidate.id), ['MOVE:oak_log@8,64,0'])
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.id),
+    ['MINE:oak_log@8,64,0', 'RETRIEVE:known:oak_log:8,64,0', 'PICKUP:e42'],
+    'the unmigrated collection family still crosses the edge; only pure locomotion is withheld',
+  )
+})
