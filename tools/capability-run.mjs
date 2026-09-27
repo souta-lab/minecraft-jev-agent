@@ -64,10 +64,15 @@ Options:
                         pale_oak_log sensed and every MINE filtered by the
                         exact-name match, presented=[WAIT] forever)
   --mission-count <n>   mission count (default 1)
-  --accept <spec>       success accept spec: 'log' (any *_log item) or a literal
-                        item id; default = literal --mission-item. The rung's
+  --accept <spec>       success accept spec: 'log' (any *_log item), a literal
+                        item id, or 'dimension:<name>' (portal-entry acceptance:
+                        resident/world dimension normalized equals <name>, polled
+                        from report.dimension/worldKey.dimension with resident
+                        dimension-transition log + milestone nether_reached
+                        fallback); default = literal --mission-item. The rung's
                         capability predicate, evaluated on the resident's own
-                        live inventory observation (report.currentInventoryObservation).
+                        live observation (report.currentInventoryObservation /
+                        report.dimension).
   --username <name>     bot username (default AI_Cap)
   --start <x>,<y>,<z>   protocol-v2 fixture spawn coordinate (pre-run
                         placement via setworldspawn + gamerule spawnRadius 0
@@ -437,12 +442,26 @@ async function main() {
     // so the generation never stops on objective; the verified inventory delta is
     // the honest capability evidence.
     const acceptLog = options.accept === 'log'
-    const acceptItem = options.accept === null ? options.missionItem : options.accept
+    const acceptDimension = typeof options.accept === 'string' && options.accept.startsWith('dimension:')
+      ? options.accept.slice('dimension:'.length).trim()
+      : null
+    const acceptItem = acceptDimension === null && options.accept !== null ? options.accept : options.missionItem
     const acceptCount = Number(options.missionCount)
+    const normalizeDimensionName = (value) => {
+      if (typeof value !== 'string') return null
+      const trimmed = value.trim().toLowerCase()
+      if (trimmed === '') return null
+      return trimmed.startsWith('minecraft:') ? trimmed.slice('minecraft:'.length) : trimmed
+    }
     const accepts = (counts) => {
       if (counts === null || typeof counts !== 'object') return false
       if (acceptLog) return Object.entries(counts).some(([name, n]) => name.endsWith('_log') && Number(n) >= acceptCount)
       return Number(counts[acceptItem] ?? 0) >= acceptCount
+    }
+    const acceptsDimension = (report) => {
+      if (acceptDimension === null || report === null || typeof report !== 'object') return false
+      const observed = normalizeDimensionName(report.dimension ?? report.worldKey?.dimension ?? null)
+      return observed !== null && observed === acceptDimension
     }
     const sock = join(wtDir, 'packages/buddy-driver/data/resident/control.sock')
     const buddyLogPath = join(wtDir, 'packages/buddy-driver/buddy.log')
@@ -470,6 +489,40 @@ async function main() {
       }
       return null
     }
+    // Dimension-acceptance fallback for when the control socket starves (same
+    // class of starvation as the inventory poll): resident dimension-transition
+    // markers in stdout/buddy.log, then the host-recorded milestone predicate
+    // artifact (nether_reached PASS).
+    const dimensionEvidenceInLogs = () => {
+      if (acceptDimension === null) return false
+      const wanted = acceptDimension
+      const marks = [
+        new RegExp(`WORLD_KEY_CHANGED[^\\n]*"to"\\s*:\\s*"(?:minecraft:)?${wanted}"`, 'u'),
+        new RegExp(`WORLD_KEY_CHANGED[^\\n]*to=(?:minecraft:)?${wanted}\\b`, 'u'),
+        new RegExp(`dimension=(?:minecraft:)?${wanted}\\b`, 'u'),
+        /portal_entered|PORTAL_ENTERED/u,
+      ]
+      for (const path of [stdoutLogPath, buddyLogPath]) {
+        try {
+          if (!existsSync(path)) continue
+          const tail = readFileSync(path, 'utf8').slice(-4_000_000)
+          if (marks.some((m) => m.test(tail))) return true
+        } catch { /* not readable yet */ }
+      }
+      try {
+        const dir = join(wtDir, 'packages/buddy-driver/data/resident')
+        for (const f of readdirSync(dir).filter((n) => n.startsWith('milestone-predicates-') && n.endsWith('.json'))) {
+          const rows = JSON.parse(readFileSync(join(dir, f), 'utf8'))
+          const list = Array.isArray(rows) ? rows : (Array.isArray(rows?.predicates) ? rows.predicates : [])
+          for (const row of list) {
+            const id = typeof row?.id === 'string' ? row.id : row?.predicate ?? ''
+            const status = typeof row?.status === 'string' ? row.status : (row?.satisfied === true ? 'PASS' : '')
+            if (id === 'nether_reached' && /pass|satisfied|true/iu.test(status)) return true
+          }
+        }
+      } catch { /* artifact absent or unparsable */ }
+      return false
+    }
     const deadline = Date.now() + options.timeoutMin * 60_000
     const startedAt = Date.now()
     let outcome = 'TIMEOUT'
@@ -489,7 +542,10 @@ async function main() {
       const polled = reply.ok === true ? (reply.data?.currentInventoryObservation?.counts ?? null) : null
       const live = polled ?? tailedInventory()
       if (live !== null) lastInventory = live
-      if (accepts(live)) {
+      const satisfied = acceptDimension !== null
+        ? acceptsDimension(reply.ok === true ? reply.data : null) || dimensionEvidenceInLogs()
+        : accepts(live)
+      if (satisfied) {
         objectiveCompleteAtMs = Date.now() - startedAt
         inventoryAtCompletion = live
         outcome = 'OBJECTIVE_SATISFIED'
@@ -515,6 +571,12 @@ async function main() {
       try { heartbeatInv = JSON.parse(m[2]) } catch { /* partial line */ }
     }
     if (lastInventory === null && heartbeatInv !== null) lastInventory = heartbeatInv
+    // dimension acceptance at harvest: the transition may have landed while the
+    // control socket starved — re-check logs/predicate artifact before TIMEOUT.
+    if (objectiveCompleteAtMs === null && outcome === 'TIMEOUT' && acceptDimension !== null && dimensionEvidenceInLogs()) {
+      objectiveCompleteAtMs = Date.now() - startedAt
+      outcome = 'OBJECTIVE_SATISFIED_LATE_OBSERVED'
+    }
     // first-satisfaction recovery for runs launched before report-polling existed:
     // scan HEARTBEAT lines in order for the first inv satisfying the accept spec.
     if (objectiveCompleteAtMs === null && outcome === 'TIMEOUT') {
