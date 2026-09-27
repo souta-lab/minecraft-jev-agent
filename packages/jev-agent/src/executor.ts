@@ -23,7 +23,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, buildArmor, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
 import {
   BRIDGE_BLOCK_META,
   BRIDGE_DIR_META,
@@ -77,7 +77,7 @@ import type {
   StepLandingBlock,
   StepLandingReads,
 } from './stepLanding.ts'
-import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
+import { faceDistanceFromEye, interactionFaceDistance } from './reachability.ts'
 import { selectClearanceTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import {
@@ -1104,16 +1104,13 @@ export function blockSightFromStand(
   return hit.x === block.x && hit.y === block.y && hit.z === block.z
 }
 
-function standDistanceFromFeet(stand: Vec3Json, feet: Vec3Json): number {
-  return Math.hypot(stand.x + 0.5 - feet.x, stand.z + 0.5 - feet.z)
-}
-
 /**
- * The valid interaction stands for `block`: each of the four horizontal
- * neighbours at the block's level, one above and one below, whose feet+head
- * cells are passable, which rests on solid support, and from whose eye position
- * the block's own AABB face is within `reach`. Ordered nearest-first from
- * `feet`, so a bot that already stands on a valid cell gets it as candidate[0].
+ * The valid interaction stands for `block`: every feet cell inside the reach
+ * envelope that is passable with a passable head, rests on solid support, and
+ * from whose eye position the block's own AABB face is within `reach`. Ordered
+ * nearest-first from `feet`, so a bot that already stands on a valid cell gets
+ * it as candidate[0]. Delegates to the sensor's `interactionStandCells` so the
+ * probe and the `adjacentStandable` fact enumerate ONE stand space.
  *
  * This is the generic station-approach geometry. Live RC9 evidence
  * (`craftAtTable` at CRAFT:stone_pickaxe, table `-50,79,-7`, bot below/offset):
@@ -1127,19 +1124,7 @@ export function interactionStandCandidates(
   probe: InteractionStandProbe,
   reach: number,
 ): Vec3Json[] {
-  const candidates: Vec3Json[] = []
-  for (const offset of INTERACTION_STAND_OFFSETS) {
-    for (const dy of INTERACTION_STAND_DY) {
-      const spot = { x: block.x + offset.x, y: block.y + dy, z: block.z + offset.z }
-      if (!probe.passable(spot.x, spot.y, spot.z)) continue
-      if (!probe.passable(spot.x, spot.y + 1, spot.z)) continue
-      if (!probe.solidSupport(spot.x, spot.y - 1, spot.z)) continue
-      if (interactionFaceDistance(spot, block) > reach) continue
-      candidates.push(spot)
-    }
-  }
-  candidates.sort((a, b) => standDistanceFromFeet(a, feet) - standDistanceFromFeet(b, feet))
-  return candidates
+  return interactionStandCells(block, feet, probe, reach)
 }
 
 /**
@@ -11965,14 +11950,14 @@ export class Executor {
 
   /**
    * The block's face as seen from the body's LIVE position, when the feet
-   * already sit on a valid interaction stance that is not one of the orthogonal
-   * `interactionStandCandidates` cells: the feet cell is at one of the block's
-   * `INTERACTION_STAND_DY` levels, passable with a passable head cell and solid
-   * support, and the live eyes are within `reach` of the block AABB. Returns
-   * that feet cell, or null when the body must still move to a stand.
+   * already sit on a valid interaction stance that is not one of the enumerated
+   * `interactionStandCandidates` cells: the feet cell is passable with a
+   * passable head cell and solid support, and the live eyes are within `reach`
+   * of the block AABB. Returns that feet cell, or null when the body must still
+   * move to a stand.
    *
    * This is the same geometry the stand search uses, evaluated from where the
-   * body actually is instead of from the four enumerated neighbours, so a
+   * body actually is instead of from the enumerated box, so a
    * diagonal-but-interactable station needs no path at all.
    *
    * `requireSight` additionally demands that this live cell can SEE the block:
@@ -11987,7 +11972,6 @@ export class Executor {
       y: Math.floor(position.y + 1e-3),
       z: Math.floor(position.z + 1e-3),
     }
-    if (!INTERACTION_STAND_DY.includes(cell.y - block.y)) return null
     if (!this.passableAt(cell.x, cell.y, cell.z)) return null
     if (!this.passableAt(cell.x, cell.y + 1, cell.z)) return null
     if (!this.solidSupportAt(cell.x, cell.y - 1, cell.z)) return null

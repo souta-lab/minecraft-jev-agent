@@ -274,7 +274,10 @@ addCase('(c) deriveInteractionFace returns the outward face normal for each stan
   return { pass, detail: JSON.stringify(observed) }
 })
 
-// (d) the stand filter: passable + supported + face in reach.
+// (d) the stand filter: passable + supported + face in reach. The search is the
+// reach envelope, not a fixed 12-cell adjacency: diagonal and farther cells are
+// valid stands when they are passable, supported and in face reach (live v2-n1:
+// trunks withheld as standable_approach while open floor stood inside reach).
 addCase('(d) interactionStandCandidates requires passable, supported cells and an in-reach face', () => {
   const candidates = executorModule.interactionStandCandidates
   if (typeof candidates !== 'function') return { pass: false, detail: 'interactionStandCandidates is not exported' }
@@ -286,8 +289,36 @@ addCase('(d) interactionStandCandidates requires passable, supported cells and a
   }
   const near = candidates(table, feet, probe, 4.5)
   const farReach = candidates(table, feet, probe, 0.1)
-  const pass = near.some((stand) => stand.x === 0 && stand.y === 64 && stand.z === 0) && !near.some((stand) => stand.z === 1) && farReach.length === 0
+  const pass =
+    near.some((stand) => stand.x === 0 && stand.y === 64 && stand.z === 0) &&
+    near.some((stand) => stand.x === 0 && stand.y === 64 && stand.z === 1) &&
+    near.some((stand) => stand.x === 3 && stand.y === 64 && stand.z === 0) &&
+    !near.some((stand) => stand.x === 1 && stand.y === 64 && stand.z === 1) &&
+    farReach.length === 0
   return { pass, detail: `near=[${near.map((s) => `${s.x},${s.y},${s.z}`).join(' ')}] farReach=${farReach.length}` }
+})
+
+// (f) Regression (live v2-n1, seed 20260927): a trunk rooted on a rise whose
+// ring-1 cells are all covered by a canopy skirt has NO stand under the old
+// 12-cell adjacency - every sensed log withheld as `standable_approach` while
+// open floor two levels below sat inside face reach. The reach-envelope search
+// must return that floor stand.
+addCase('(f) a floor stand inside face reach is found when every ring-1 cell is blocked', () => {
+  const candidates = executorModule.interactionStandCandidates
+  if (typeof candidates !== 'function') return { pass: false, detail: 'interactionStandCandidates is not exported' }
+  const trunk: Vec3Json = { x: 10, y: 64, z: 0 }
+  const feet: Vec3Json = { x: 10.5, y: 62, z: 3.5 }
+  const ring1 = new Set<string>()
+  for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    for (const dy of [0, 1, -1] as const) ring1.add(`${10 + ox},${64 + dy},${0 + oz}`)
+  }
+  const probe = {
+    passable: (x: number, y: number, z: number) => !(x === trunk.x && z === trunk.z && y >= trunk.y - 1) && !ring1.has(`${x},${y},${z}`),
+    solidSupport: (x: number, y: number, z: number) => y === 61 || (ring1.has(`${x},${y + 1},${z}`) && y >= 62),
+  }
+  const near = candidates(trunk, feet, probe, 4.5)
+  const pass = near.some((stand) => stand.x === 10 && stand.y === 62 && stand.z === 2)
+  return { pass, detail: `near=[${near.map((s) => `${s.x},${s.y},${s.z}`).join(' ')}]` }
 })
 
 // (e) the wiring: the stand is established and its face reaches openBlock.

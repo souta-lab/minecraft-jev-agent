@@ -114,33 +114,9 @@ export function horizontalDistance(a: Vec3Json, b: Vec3Json): number {
   return Math.hypot(a.x - b.x, a.z - b.z)
 }
 
-/**
- * Eye→block-AABB distance from an explicit eye position (the reach test). The
- * #244 interaction-stand geometry, shared here so the station approach
- * (executor) and the dig-access search (candidates) use ONE implementation.
- */
-export function faceDistanceFromEye(eye: Vec3Json, block: Vec3Json): number {
-  const x = Math.max(block.x, Math.min(eye.x, block.x + 1))
-  const y = Math.max(block.y, Math.min(eye.y, block.y + 1))
-  const z = Math.max(block.z, Math.min(eye.z, block.z + 1))
-  return Math.hypot(eye.x - x, eye.y - y, eye.z - z)
-}
-
-/** Eye→block-AABB distance from a candidate stand's eyes (its interaction reach). */
-export function interactionFaceDistance(stand: Vec3Json, block: Vec3Json): number {
-  return faceDistanceFromEye({ x: stand.x + 0.5, y: stand.y + 1.62, z: stand.z + 0.5 }, block)
-}
-
-/** The four horizontal interaction offsets the #244 stand search examines. */
-export const INTERACTION_STAND_OFFSETS: readonly Vec3Json[] = [
-  { x: 1, y: 0, z: 0 },
-  { x: -1, y: 0, z: 0 },
-  { x: 0, y: 0, z: 1 },
-  { x: 0, y: 0, z: -1 },
-]
-
-/** The three stances (feet levels) the #244 stand search examines per offset. */
-export const INTERACTION_STAND_DY: readonly number[] = [0, 1, -1]
+// The eye→block-AABB reach math lives with the sensor's stand search in
+// `state.ts`; re-exported so the executor/candidates keep a single source.
+export { faceDistanceFromEye, interactionFaceDistance } from './state.ts'
 
 /** Something the body lacks that would make a target reachable if acquired. */
 export type Capability =

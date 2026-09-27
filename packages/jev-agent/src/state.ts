@@ -1859,35 +1859,82 @@ export function isUsableStandFromBlocks(
   return isPassable(feetBlock) && isPassable(headBlock) && isUsableGroundSupport(supportBlock)
 }
 
-/** The 8 neighbours the executor could stand on to reach a block, best first. */
-function findAdjacentStandable(bot: Bot, target: Vec3Json): Vec3Json | null {
-  const offsets: Array<[number, number, number]> = [
-    [1, 0, 0],
-    [-1, 0, 0],
-    [0, 0, 1],
-    [0, 0, -1],
-    [1, 0, 1],
-    [-1, 0, 1],
-    [1, 0, -1],
-    [-1, 0, -1],
-    [1, -1, 0],
-    [-1, -1, 0],
-    [0, -1, 1],
-    [0, -1, -1],
-  ]
-  const here = vecJson(bot.entity.position)
-  let best: Vec3Json | null = null
-  let bestDistance = Number.POSITIVE_INFINITY
-  for (const [dx, dy, dz] of offsets) {
-    const feet: Vec3Json = { x: target.x + dx, y: target.y + dy, z: target.z + dz }
-    if (!isStandable(bot, feet)) continue
-    const d = distance(feet, here)
-    if (d < bestDistance) {
-      bestDistance = d
-      best = feet
+/**
+ * Eye→block-AABB distance (the interaction reach test). The ONE implementation:
+ * the sensor's stand search, the reachability contract and the executor's stand
+ * logic all decide "can this block be touched from that cell" with this math.
+ */
+export function faceDistanceFromEye(eye: Vec3Json, block: Vec3Json): number {
+  const x = Math.max(block.x, Math.min(eye.x, block.x + 1))
+  const y = Math.max(block.y, Math.min(eye.y, block.y + 1))
+  const z = Math.max(block.z, Math.min(eye.z, block.z + 1))
+  return Math.hypot(eye.x - x, eye.y - y, eye.z - z)
+}
+
+/** Eye→block-AABB distance from a candidate stand's eyes (its interaction reach). */
+export function interactionFaceDistance(stand: Vec3Json, block: Vec3Json): number {
+  return faceDistanceFromEye({ x: stand.x + 0.5, y: stand.y + 1.62, z: stand.z + 0.5 }, block)
+}
+
+/** Live/passable probe pair the stand search reads the world through. */
+export interface InteractionStandProbe {
+  passable: (x: number, y: number, z: number) => boolean
+  solidSupport: (x: number, y: number, z: number) => boolean
+}
+
+/**
+ * Every legal interaction stand for `block`: feet cells inside the reach
+ * envelope that are passable with a passable head and solid support, ordered
+ * nearest `self` first. The reach filter is applied BEFORE any world read, so
+ * the box costs arithmetic, not blockAt calls.
+ *
+ * A block needs SOME legal stance inside the reach envelope, not a cell glued
+ * to it: a trunk rooted on a rise or ringed by a canopy skirt is mined from the
+ * ordinary floor a few cells away, with the eye still inside face reach of the
+ * trunk. The old four-neighbour probe withheld every such block as
+ * `no_standable_approach` even while open floor stood inside reach (live
+ * v2-n1, seed 20260927, `ACCESS:b3233_69_2797:standable_approach` on grassland).
+ */
+export function interactionStandCells(
+  block: Vec3Json,
+  self: Vec3Json,
+  probe: InteractionStandProbe,
+  reach: number,
+): Vec3Json[] {
+  const span = Math.ceil(reach) + 1
+  const candidates: Vec3Json[] = []
+  for (let dx = -span; dx <= span; dx += 1) {
+    for (let dz = -span; dz <= span; dz += 1) {
+      if (dx === 0 && dz === 0) continue
+      for (let dy = -span; dy <= span; dy += 1) {
+        const spot = { x: block.x + dx, y: block.y + dy, z: block.z + dz }
+        if (interactionFaceDistance(spot, block) > reach) continue
+        if (!probe.passable(spot.x, spot.y, spot.z)) continue
+        if (!probe.passable(spot.x, spot.y + 1, spot.z)) continue
+        if (!probe.solidSupport(spot.x, spot.y - 1, spot.z)) continue
+        candidates.push(spot)
+      }
     }
   }
-  return best
+  candidates.sort(
+    (a, b) =>
+      Math.hypot(a.x + 0.5 - self.x, a.z + 0.5 - self.z) - Math.hypot(b.x + 0.5 - self.x, b.z + 0.5 - self.z),
+  )
+  return candidates
+}
+
+/**
+ * The cell the executor could stand on to reach `block`, nearest the body.
+ * Same interaction geometry as `interactionStandCells`; the sensor answers the
+ * closest such stance so a MOVE can be targeted at it.
+ */
+function findAdjacentStandable(bot: Bot, target: Vec3Json, reach: number): Vec3Json | null {
+  const probe: InteractionStandProbe = {
+    passable: (x, y, z) => isPassable(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
+    solidSupport: (x, y, z) => isSolidSupport(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
+  }
+  const stands = interactionStandCells(target, vecJson(bot.entity.position), probe, reach)
+  return stands[0] ?? null
 }
 
 function buildSelf(bot: Bot): SelfState {
@@ -2666,8 +2713,8 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState, focus
     count: 256,
   })
   // Resolve the cheap, world-read-free facts first, cut to the kept list, and
-  // only then probe the 12 stand neighbours. `findAdjacentStandable` costs 36
-  // block reads per target, and the old order ran it for up to 256 logs before
+  // only then probe the stand envelope. `findAdjacentStandable` reads the
+  // in-reach cells per target, and the old order ran it for up to 256 logs before
   // `slice(0, maxLogs)` threw ~240 of them away. Distance then y establishes
   // deterministic nearest-first order within the focused and general pools.
   const rows: Array<{ block: Exclude<ReturnType<Bot['blockAt']>, null>; pos: Vec3Json; distance: number; harvest: ReturnType<typeof resolveBlockHarvest> }> = []
@@ -2699,7 +2746,7 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState, focus
     ...rows.filter((row) => !focusedCells.has(`${row.pos.x},${row.pos.y},${row.pos.z}`)),
   ].slice(0, options.maxLogs)
   return retained.map((row) => {
-    const adjacentStandable = findAdjacentStandable(bot, row.pos)
+    const adjacentStandable = findAdjacentStandable(bot, row.pos, options.reach)
     return {
       kind: 'log' as const,
       name: row.block.name,
@@ -2773,7 +2820,7 @@ function buildStoneBlocks(
         if (!seen.has(key)) {
           seen.add(key)
           const pos = { x, y, z }
-          const adjacentStandable = findAdjacentStandable(bot, pos)
+          const adjacentStandable = findAdjacentStandable(bot, pos, options.reach)
           out.push({
             kind: 'stone',
             name: block.name,
@@ -2825,7 +2872,7 @@ function buildBuriedStoneBlocks(
     const harvest = resolveBlockHarvest(bot, block.name)
     if (focusItem !== null && !resourceMatches(harvest.yield, focusItem)) continue
     if (distance(pos, self.position) <= options.reach) continue
-    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const adjacentStandable = findAdjacentStandable(bot, pos, options.reach)
     out.push({
       kind: 'stone',
       name: block.name,
@@ -2870,7 +2917,7 @@ function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: S
     const harvest = resolveBlockHarvest(bot, block.name)
     if (typeof harvest.yield !== 'string' || !PILLAR_PLACE_PRIORITY.includes(harvest.yield)) continue
     const inReach = distance(pos, self.eyePosition) <= options.reach
-    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const adjacentStandable = findAdjacentStandable(bot, pos, options.reach)
     out.push({
       kind: 'stone',
       name: block.name,
@@ -2917,7 +2964,7 @@ function buildScannedResourceBlocks(
     const block = sensorBlockAt(bot, position, 'resource-scan')
     if (block === null) continue
     const pos = vecJson(position)
-    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const adjacentStandable = findAdjacentStandable(bot, pos, options.reach)
     const harvest = resolveBlockHarvest(bot, block.name)
     out.push({
       kind: 'ore',
@@ -2965,7 +3012,7 @@ function buildFoodSourceBlocks(bot: Bot, options: SensorOptions, self: SelfState
     count: 48,
   })
   // Resolve the cheap facts only for the NEAREST cells: `findAdjacentStandable`
-  // costs 36 block reads per target, so probing all 48 candidates to keep 24 is
+  // reads the in-reach cells per target, so probing all 48 candidates to keep 24 is
   // the same waste the log scan was optimized out of.
   const nearest = [...positions]
     .sort((a, b) => distance(vecJson(a), self.position) - distance(vecJson(b), self.position))
@@ -2977,7 +3024,7 @@ function buildFoodSourceBlocks(bot: Bot, options: SensorOptions, self: SelfState
     const spec = specs.get(block.name)
     if (spec === undefined) continue
     const pos = vecJson(position)
-    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const adjacentStandable = findAdjacentStandable(bot, pos, options.reach)
     const harvest = resolveBlockHarvest(bot, block.name)
     out.push({
       kind: 'ore',

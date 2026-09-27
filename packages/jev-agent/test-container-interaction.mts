@@ -1447,9 +1447,19 @@ addCase('(K2) a container 26 m away (outside the 16 m near-field scan) is offere
 })
 
 addCase('(L1) a container every stand is sight-blocked from is refused typed (occluded / no_stand_with_line_of_sight) and never opened', async () => {
-  // A LIDDED container: a solid block in the cell above it intercepts the eye
-  // ray of every same-level interaction stand, so no stand can SEE the container.
-  const blocks = terrain({ '1,64,0': 'chest', '1,65,0': 'stone' })
+  // A WALLED-IN container: the chest sits inside a ring-1 shell of solid cells
+  // with a lid above it, so every legal interaction stand lies outside the
+  // shell and its eye ray to the chest centre hits a wall cell (or the lid)
+  // before the chest - no stand can SEE it. The shell must span ring-1 because
+  // the stand search is the reach envelope, not a fixed 12-cell adjacency.
+  const cells: Record<string, string> = { '1,64,0': 'chest', '1,65,0': 'stone' }
+  for (const x of [0, 1, 2])
+    for (const z of [-1, 0, 1])
+      for (const y of [64, 65, 66, 67]) {
+        if (x === 1 && z === 0) continue
+        cells[`${x},${y},${z}`] = 'stone'
+      }
+  const blocks = terrain(cells)
   const fixture = makeContainerBot({
     feet: { x: 6.5, y: 64, z: 0.5 },
     blocks,

@@ -360,7 +360,8 @@ async function main(): Promise<void> {
       controller.includes('digApproach') &&
       source('./src/candidate-diagnostics.ts').includes('formatDigAccessRetired') &&
       reach.includes('export function formatDigAccessRetired') &&
-      reach.includes('export function interactionFaceDistance') &&
+      reach.includes('interactionFaceDistance') &&
+      source('./src/state.ts').includes('export function interactionStandCells') &&
       executor.includes("from './reachability.ts'")
     await check(
       '(e) dig-access generation, #244 stand geometry and retirement logging are wired',
