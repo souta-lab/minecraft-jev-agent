@@ -1562,7 +1562,7 @@ function inspectReportedAlignment(legacyRaw, vtrRaw, proof, claimsAcceptance) {
 }
 
 /** Independently checks a comparator artifact and its embedded raw run evidence. */
-export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha = null) {
+export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha = null, repo = null) {
   const incomplete = (reason, details = {}) => ({ status: 'INCOMPLETE', reason, ...details })
   const fail = (reason, details = {}) => ({ status: 'FAIL', reason, ...details })
   if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return fail('comparison artifact is not an object')
@@ -1603,12 +1603,20 @@ export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expect
     return incomplete('raw comparison capture is incomplete', { rawStatus: raw?.status ?? null })
   }
   if (proof.evidenceClass !== 'run-scoped-raw-events') return fail('raw comparison bundle is PASS but top-level evidenceClass denies or mislabels it')
+  let baselineStaleness = null
   try {
     if (typeof legacy.recordedOriginMainSha !== 'string' || !SHA_RE.test(legacy.recordedOriginMainSha)) {
       throw new Error('legacy baseline does not record a full origin/main source SHA')
     }
-    if (legacy.recordedOriginMainSha.toLowerCase() !== legacy.sourceSha.toLowerCase() ||
-        legacy.recordedOriginMainSha.toLowerCase() !== expectedLegacyOriginMainSha.toLowerCase()) {
+    if (legacy.recordedOriginMainSha.toLowerCase() !== legacy.sourceSha.toLowerCase()) {
+      throw new Error('legacy source SHA differs from the recorded origin/main baseline SHA')
+    }
+    if (repo !== null) {
+      let onMainline = false
+      try { gitOutput(repo, ['merge-base', '--is-ancestor', legacy.recordedOriginMainSha, 'origin/main']); onMainline = true } catch {}
+      if (!onMainline) throw new Error('recorded origin/main baseline SHA is not on the current mainline ancestry')
+      try { baselineStaleness = Number(gitOutput(repo, ['rev-list', '--count', `${legacy.recordedOriginMainSha}..origin/main`])) } catch {}
+    } else if (legacy.recordedOriginMainSha.toLowerCase() !== expectedLegacyOriginMainSha.toLowerCase()) {
       throw new Error('legacy source SHA differs from the current origin/main baseline SHA')
     }
     const legacyExpected = { sourceSha: legacy.sourceSha, buildHash: legacy.buildHash, runId: legacy.runId, generationId: legacy.generationId }
@@ -1691,7 +1699,7 @@ export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expect
   }
   if (proof.comparisonStatus !== 'PASS' || !aligned) return incomplete('comparison Mission, fixture, or environment is not fully aligned', { comparisonStatus: proof.comparisonStatus ?? null, alignment: proof.alignment ?? null })
   if (proof.noNetworkProfile?.status !== 'PASS') return fail('acceptance-eligible comparison lacks a PASS no-network profile', { noNetworkProfileStatus: proof.noNetworkProfile?.status ?? null })
-  return { status: 'PASS', reason: 'source-bound raw comparison evidence independently validates both aligned run artifacts' }
+  return { status: 'PASS', reason: 'source-bound raw comparison evidence independently validates both aligned run artifacts', ...(baselineStaleness !== null ? { baselineStaleness } : {}) }
 }
 
 /** Evidence gate for source-emitted mechanical SUCCESS boundaries. */
@@ -3846,7 +3854,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
               if (SHA_RE.test(observed)) expectedLegacyOriginMainSha = observed
             } catch {}
           }
-          const comparisonCheck = inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha)
+          const comparisonCheck = inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha, repo)
           if (comparisonCheck.status === 'PASS') pass(`milestone:${path}`, { reason: comparisonCheck.reason })
           else if (comparisonCheck.status === 'FAIL') fail(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
           else incomplete(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)

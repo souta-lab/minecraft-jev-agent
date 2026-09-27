@@ -1144,6 +1144,31 @@ try {
     rehashArchiveFile(archive, 'runner/buddy.log')
   })
   assert.equal(statusOf(duplicateBoot, 'run:boot-line'), 'FAIL', 'a second BOOT line for the probe runId is rejected')
+
+  const syntheticBaseline = makeFixture(join(tempRoot, 'synthetic-baseline'))
+  const syntheticOrigin = makeOriginMainRepo(join(tempRoot, 'synthetic-baseline'))
+  const syntheticComparison = {
+    schema: 'vtr-reach-fixture-comparison/v3',
+    comparisonStatus: 'INCOMPLETE', acceptanceEligible: false, acceptanceStatus: 'RAW_EVIDENCE_INCOMPLETE',
+    evidenceClass: 'summary-only',
+    alignment: { missionInput: 'INCOMPLETE', fixture: 'INCOMPLETE', environment: 'INCOMPLETE' },
+    lineage: {
+      legacy: { sourceSha: 'f'.repeat(40), recordedOriginMainSha: 'f'.repeat(40), runId: 'run-old-f1', generationId: 'gen-old-f1', buildHash: 'old-build' },
+      vtr: { sourceSha: SOURCE, runId: RUN, generationId: GENERATION, buildHash: syntheticBaseline.collectorReport.observed.generationReady.buildHash, worldKey: WORLD },
+    },
+    rawComparisonEvidence: { status: 'INCOMPLETE' },
+  }
+  const syntheticComparisonSource = writeJson(join(tempRoot, 'synthetic-baseline', 'comparison.json'), syntheticComparison)
+  const syntheticManifest = JSON.parse(readFileSync(syntheticBaseline.manifestPath, 'utf8'))
+  syntheticManifest.files['comparison/legacy-baseline.json'] = syntheticComparisonSource
+  writeJson(syntheticBaseline.manifestPath, syntheticManifest)
+  const syntheticBaselineResult = packageVtrReachArchive({ collectorReportPath: syntheticBaseline.collectorPath, manifestPath: syntheticBaseline.manifestPath,
+    archivePath: syntheticBaseline.archive, repoPath: syntheticOrigin.repo })
+  assert.equal(syntheticBaselineResult.report.checks.find((entry) => entry.id === 'comparison:legacy-baseline')?.status, 'INCOMPLETE',
+    'an incomplete comparison remains INCOMPLETE at package time')
+  const syntheticBaselineValidation = await validateEvidenceArchive(syntheticBaseline.archive, syntheticOrigin.repo)
+  assert.equal(statusOf(syntheticBaselineValidation, 'milestone:comparison/legacy-baseline.json'), 'INCOMPLETE',
+    'an incomplete comparison stays INCOMPLETE at archive validation')
 } finally {
   rmSync(tempRoot, { recursive: true, force: true })
 }

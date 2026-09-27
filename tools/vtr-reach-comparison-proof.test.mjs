@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { classifyProviderActivity } from './capture-vtr-provider-activity.mjs'
 import { inspectLiveSkillOwnership, inspectReachComparisonProof, inspectNoDoubleAuthorityFixtureProof, inspectLifecycleCapture, summarizeValidationStatuses, validationExitCode } from './validate-vtr-reach-evidence.mjs'
@@ -653,11 +657,11 @@ test('keeps a passing Reach probe independent from missing full-migration compar
     { id: 'proof:no-double-authority-fixture', status: 'PASS' },
     { id: 'milestone:comparison/legacy-baseline.json', status: 'INCOMPLETE' },
   ])
-  assert.equal(summary.probeStatus, 'PASS')
-  assert.equal(summary.status, 'PASS', 'Reach validator CLI status reflects the Reach slice')
+  assert.equal(summary.probeStatus, 'PASS', 'the Reach-slice verdict is preserved for reporting')
+  assert.equal(summary.status, 'INCOMPLETE', 'aggregate status is the strictest verdict; probe PASS cannot mask milestone incompleteness')
   assert.equal(summary.migrationMilestoneStatus, 'INCOMPLETE')
   assert.equal(summary.overallStatus, 'INCOMPLETE', 'full P0 acceptance remains incomplete without the comparison')
-  assert.equal(validationExitCode(summary), 0, 'Reach validator CLI exits successfully when probe checks pass')
+  assert.equal(validationExitCode(summary), 2, 'the CLI exit code fails closed on any non-PASS check')
 })
 
 test('keeps the exact-source legacy-claim fixture inside Reach probe acceptance', () => {
@@ -675,8 +679,9 @@ test('keeps the exact-source legacy-claim fixture inside Reach probe acceptance'
     { id: 'milestone:comparison/legacy-baseline.json', status: 'INCOMPLETE' },
   ])
   assert.equal(fixtureValidButComparisonMissing.probeStatus, 'PASS')
+  assert.equal(fixtureValidButComparisonMissing.status, 'INCOMPLETE', 'a valid probe cannot green the aggregate while acceptance evidence is missing')
   assert.equal(fixtureValidButComparisonMissing.migrationMilestoneStatus, 'INCOMPLETE')
-  assert.equal(validationExitCode(fixtureValidButComparisonMissing), 0)
+  assert.equal(validationExitCode(fixtureValidButComparisonMissing), 2)
 })
 
 test('requires observed process exit and exact TCP listener closure in the Reach validator', () => {
@@ -843,6 +848,33 @@ test('rejects a forged no-double-authority artifact and a non-origin legacy line
   const baseResult = inspectReachComparisonProof(wrongBase, VTR.sourceSha, 'c'.repeat(40))
   assert.equal(baseResult.status, 'FAIL')
   assert.match(baseResult.reason, /legacy source SHA differs from the current origin\/main/)
+})
+
+test('binds the recorded baseline to the mainline ancestry when a repository is available', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'vtr-mainline-repo-'))
+  try {
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repo, stdio: 'pipe' })
+    writeFileSync(join(repo, 'seed.txt'), 'seed\n')
+    execFileSync('git', ['add', 'seed.txt'], { cwd: repo, stdio: 'pipe' })
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'seed'], { cwd: repo, stdio: 'pipe' })
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', head], { cwd: repo, stdio: 'pipe' })
+
+    const foreign = rawProof()
+    foreign.lineage.legacy.sourceSha = 'f'.repeat(40)
+    foreign.lineage.legacy.recordedOriginMainSha = 'f'.repeat(40)
+    const foreignResult = inspectReachComparisonProof(foreign, VTR.sourceSha, head, repo)
+    assert.equal(foreignResult.status, 'FAIL')
+    assert.match(foreignResult.reason, /mainline ancestry/u)
+
+    const drifted = rawProof()
+    drifted.lineage.legacy.sourceSha = head
+    drifted.lineage.legacy.recordedOriginMainSha = head
+    const driftedResult = inspectReachComparisonProof(drifted, VTR.sourceSha, head, repo)
+    assert.equal(driftedResult.status, 'FAIL')
+    assert.doesNotMatch(driftedResult.reason, /mainline ancestry|baseline SHA/u,
+      'an on-mainline baseline clears the ancestry gate and only fails downstream raw identity binding')
+  } finally { rmSync(repo, { recursive: true, force: true }) }
 })
 
 test('recomputes geometry and environment from both run-bound artifacts', () => {
