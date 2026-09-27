@@ -61,6 +61,43 @@ Mineflayer / server side effect
 
 M2/M3/M4 are proof corpora, not the production brain. An M3 PASS that preserves the wrong control architecture is not project completion.
 
+
+## 1A. Unattended capability campaign mode
+
+This repository is expected to support **multi-day autonomous capability campaigns with no routine human approval loop**. When a task explicitly requests unattended operation (for example a ~7 day capability campaign), the agent must keep doing useful, reversible, constitution-preserving work instead of stopping for ordinary decisions.
+
+Operating rules:
+
+- **Never ask for routine permission.** Investigation, bounded product edits in open zones, tests, clean live runs, server/test-world restarts, evidence analysis, disposable worktrees, small validated commits, and pushes of proven KEEP changes are pre-authorized when they serve the campaign.
+- When several valid choices exist, choose the **most conservative reversible option that yields information**. Record the choice; do not wait for a human preference.
+- `ESCALATE` in `EXPERIMENT-PROTOCOL.md` means **stop that candidate, preserve its evidence, mark it deferred/escalated, and move to another permitted hypothesis or lane** during unattended operation. It never grants permission to touch a frozen zone, and it is not by itself a reason to stop the campaign.
+- If one lane is blocked by provider outage, flaky infra, missing credentials, a frozen surface, or repeated REVERTs, **switch to another independent capability/measurement/fix lane**. Only idle when all useful in-constitution lanes are exhausted or the execution environment itself prevents further work.
+- Never weaken a gate, acceptance rule, clean-run premise, seed attestation, VERIFY requirement, or evidence schema to make a candidate win. Never use `/give`, `/tp`, `/setblock`, assisted inventory/world edits, or reused dirty worlds as capability evidence; such commands are fixture-only.
+- Keep accepted/sealed evidence. Transient failed runs, disposable worktrees, caches, and generated artifacts may be pruned only after their machine-readable summary and causal evidence are preserved. Never delete user worlds or sealed acceptance archives.
+- Never force-push or rewrite shared history. Before each push: fetch, confirm the candidate is based on current `origin/main` or cleanly rebased, run required gates, review the diff, commit a small coherent KEEP checkpoint, and push normally. If remote integration conflicts, preserve the candidate on a named branch/worktree and continue another lane rather than destroying work.
+- Maintain resumable state under `runs/capability-campaign/` (current rung, exact base SHA, seed cohort, latest experiment/result paths, active failure clusters, blocked/deferred lanes). After each accepted KEEP, also leave a concise durable summary in the normal experiment-result/docs trail so a restarted agent can reconstruct the campaign without chat history.
+
+### Capability optimization doctrine
+
+The permanent ladder is:
+
+`wood -> stone tools -> iron -> food/survival -> cave recovery -> smelting -> portal -> Nether traversal -> fortress/blaze -> pearls -> stronghold -> End`
+
+This is an **evaluation ladder, not a giant deterministic planner**. Improve generic mechanics/policy/controller behavior that causes the measured failure. Do not encode the expected route as production authority.
+
+For each rung:
+
+1. Predeclare the task predicate, metrics, development seed cohort, and holdout seed cohort **before** candidate tuning. Prefer at least 3 development seeds + 2 holdout seeds when live-run cost permits; if less is practical, record the sample-size limitation explicitly.
+2. Establish a clean exact-SHA baseline. Existing milestone/clean-run rules remain authoritative where applicable.
+3. Cluster failures by typed first cause (`GROUNDING_REFUSAL`, `VERIFY_FAIL`, `LEASE_DENY`, `STALE_FENCE`, `BUDGET_EXHAUST`, `MODEL_UNAVAILABLE`, `MECHANICAL_FAIL`, `NO_PROGRESS`, `AUTHORITY_VIOLATION`, `INFRA`) and by repeated concrete signature.
+4. Pick the **highest-impact frequent causal cluster that is fixable in an open zone**. One experiment = one hypothesis = one causal change.
+5. Run deterministic/focused tests first, then the smallest live development cohort that can falsify the hypothesis, then the full declared development cohort.
+6. A candidate can KEEP only if architecture/authority guards stay green and it improves the declared primary metric or preserves it while improving declared secondary metrics, without a material regression on already-earned lower rungs. Track model/System2 cost: a candidate that merely buys success with unbounded model calls is not an automatic win.
+7. Validate promising KEEP candidates on holdout seeds before promoting the rung. Never tune against holdout outcomes; if holdout reveals a new failure cluster, return it to the development queue with new predeclared seeds.
+8. After a rung is robust under its predeclared criterion, **move immediately to the next rung** while retaining a regression sample of earlier rungs. Do not spend days polishing an already-solved rung for tiny metric gains while a later rung is unsolved.
+
+Core live metrics, when observable: verified task success, wall-clock time-to-success, mechanical actions/steps, deaths, damage/food/air emergencies, recovery success, stall count/duration, resource waste, replans, candidate refusals, Jev decisions/rejections, System2 invocation count/rate/token-or-cost proxy, model-unavailable events, and cross-seed/biome/novel-state failures. Prefer verified world predicates over log vibes.
+
 ## 2. Role constitution
 
 - **Jev** — the production-default fast System-One decision policy. Semantic/tactical decision **only**: choose/rank/score among grounded enabled Transitions and in-contract tactics. Jev does **not** own world truth, SUCCESS, the actuation lease, resource authority, or effect authorization. A Jev output is policy input that the kernel validates; it is never permission for a primitive call.
@@ -113,34 +150,31 @@ Replayed or audited history can **never** be promoted into live authority. Crash
 - VTR core (Mission, World Model, Graph, Scheduler, Controllers, Viability, Jev, System2) must not receive, retain, import, or call a raw Mineflayer `Bot` or backend-specific live client.
 - HOST may own the raw client for lifecycle/lease/adapter wiring only; it must not perform semantic/mechanical actions outside the adapter.
 
-## 6. Phase-1 status: SHADOW ONLY
+## 6. Migration/cutover status — CLOSED
 
-- **Kernel authority is OFF.** The Phase-1 shadow observer replays production lifecycle/mutation facts into the executable kernel and journals `kernel-shadow.jsonl`. It **never gates or reroutes production behavior**.
-- Current counters/gates: unmapped mutations, unguarded mutations, unattributed mutations, lease-uncovered mutations, and kernel-denied conditions are **hard migration blockers** — recorded, not silently accepted.
-- Static mutation scan (current): 134 production files, 27 distinct surfaces, **0 unmapped** — a coverage gate, not live conformance proof.
+The V4.1.2 migration, authority cutover, adversarial closure, and proof hardening are **complete historical work**. The validated architectural checkpoint is `092a5b38`; the permanent lock is defined at the top of this file.
 
-## 7. Authority-cutover conditions (all required)
+- Kernel authority is production authority; old SHADOW-only/cutover instructions are not active work.
+- Reach Phase-0/deletion/evidence lineage remains preserved as proof history, not as the next milestone.
+- Sealed VTR evidence archives and their validators remain protected evidence infrastructure.
+- Do not reopen migration, dual-authority, or successor-architecture projects. If a capability run exposes a correctness bug, fix it inside V4.1.2 or record a permanent known limitation.
 
-Do not enable V4.1.2 production authority until **every** condition holds:
+## 7. Capability evidence rules
 
-- static conformance: full mutation-surface inventory mapped
-- adapter conformance: every mutation crosses ActuationPort
-- live conformance from an actual Reach run:
-  - `coverageComplete == true`
-  - `mutationsObserved > 0`
-  - `mutationsMapped == mutationsObserved`
-  - `mutationsAttributedToTransition == mutationsObserved` (host control-plane writes like `bot.chat`/`/tell` require an explicit typed authority/resource/effect category with documented rationale — never fake-attributed to Reach)
-  - `mutationsUnguarded == 0`, `kernelDenied == 0`, hard blockers == 0
-- no double authority (shadow + legacy never both actuate)
-- world/generation fencing proof
-- crash/replay proof
+Capability claims require real task evidence, not architecture evidence. Architecture guards prove constitutional preservation; they do **not** prove the bot is good at Minecraft.
 
-## 8. Reach Phase-0 / legacy deletion
+For capability work:
 
-- Reach **Phase-0 archive validation is PASS** at `d781f540` (`vtr-reach-authority-d781f54-01`: 140/140 PASS, `migrationMilestoneStatus: PASS`, including the origin/main `46a6c5d4` legacy-baseline raw comparison). The older `9ddbadd` attempt root never reached disk; see `docs/history/VTR-EVIDENCE-ARCHIVE-LINEAGE.md`.
-- The legacy Reach **deletion gate is satisfied by the d781f54 Phase-0 archive**. The dedicated deletion slice audited the full executable surface: legacy same-predicate locomotion scheduling was already permanently deleted by the unconditional withhold (`filterLegacyReachCandidates`), and no residual dispatch/commitment path exists — the withhold IS the deletion, and `legacy-reach-handoff` revocation stays as the fail-closed tripwire for stale in-flight walks. Deliberately retained: mission-source MINE/RETRIEVE/PICKUP (unmigrated collection family — a Reach contract's `admissibleEffects` is locomotion-only, so suppressing them would strand `inventory_at_least`), remembered-source approach legs (unmigrated exploration), the `vtrReachProbe` evidence path, and all sealed evidence/comparator tooling.
-- Runtime multi-leg SUCCESS evidence and archive sealing are **distinct** proofs; do not conflate them.
-- `/home/s0u7a/vtr-evidence-archive` was pruned 2026-09-26 to the latest accepted lineage; the full attempt lineage is recorded in `docs/history/VTR-EVIDENCE-ARCHIVE-LINEAGE.md`. Preserve the sealed `vtr-reach-authority-*` + `vtr-reach-legacy-baseline-*` attempts.
+- prefer clean, reproducible, exact-SHA live runs on predeclared seed cohorts;
+- keep fixture/mechanical probes separate from autonomous task success;
+- never count assisted worlds, seeded inventory, teleporting, setblock scaffolds, or manual intervention as autonomous capability;
+- compare candidates against a same-protocol baseline and preserve run identity/source/seed provenance;
+- retain earlier-rung regression checks as the ladder advances;
+- treat `AUTHORITY_VIOLATION` as an automatic candidate rejection, never as a performance tradeoff.
+
+## 8. Legacy/evidence lineage
+
+The accepted Reach and clean-run evidence described in `docs/history/` and `docs/development/P8-CLOSURE-REPORT.md` is historical proof infrastructure. Preserve sealed artifacts and provenance. Historical baseline tricks, legacy authority paths, migration selectors, and shadow-mode instructions are **not** templates for new capability code.
 
 ## 9. Development rules
 
@@ -154,14 +188,15 @@ Do not enable V4.1.2 production authority until **every** condition holds:
 
 ## 10. Work classification
 
-Classify active work into exactly one bucket:
+Classify active capability work into exactly one bucket:
 
-- **A. V4_MIGRATION_CRITICAL** — directly establishes/unblocks the next V4.1.2 milestone (currently: live conformance proof → authority cutover).
-- **B. V4_CORRECTNESS_BLOCKER** — truth, safety, lifecycle, durability, provenance, effect-envelope, or evidence defects that would invalidate V4.1.2 results.
-- **C. PROOF** — tests, no-LLM probes, live validation, ablation, exact-run artifacts for A/B.
-- **D. DEFER** — cosmetic cleanup, unrelated mechanics, speculative features, legacy perfection.
+- **A. CAPABILITY_CRITICAL** — directly improves or measures the lowest unsolved capability rung or a regression on an already-earned rung.
+- **B. CAPABILITY_CORRECTNESS** — in-constitution truth, mechanics, controller, recovery, lifecycle-use, durability, provenance, or verification bugs that invalidate capability results.
+- **C. MEASUREMENT_PROOF** — deterministic scenarios, live probes, seed cohorts, result records, comparators, observability, and regression tests needed to trust A/B.
+- **D. CAMPAIGN_INFRA** — bounded work that keeps unattended experimentation running: watchdogs, resumable state, run cleanup, disk recovery, flaky-test isolation, reproducibility tooling.
+- **E. DEFER** — architecture work (forbidden), cosmetic cleanup, unrelated refactors, speculative features without a measured failure, or micro-optimization on a solved rung while a later rung is blocked.
 
-Prefer A/B/C. Record why when evidence reorders the migration plan.
+Prefer A/B/C. D is justified only when it removes a real campaign blocker. Never convert E into work merely because the primary experiment is difficult.
 
 ## 11. Testing and proof hierarchy
 
@@ -182,26 +217,30 @@ A capability probe PASS proves mechanics only. It does not prove autonomous comp
 A benchmark PASS proves an end-to-end outcome only. It does not prove architectural generality.
 A green shadow journal proves observation coverage only. It does not grant authority.
 
-## 12. Live loop
+## 12. Capability improvement loop
 
-For migration work, prefer this loop:
+For autonomous capability work, use this loop:
 
 ```text
-exact origin/main SHA
--> inspect current kernel/legacy ownership boundary
--> tests/typecheck/probes
--> run the smallest causal experiment that can distinguish hypotheses
--> identify the first contract/fact/controller failure
--> implement the generic V4.1.2-conformant fix
--> regression + no-double-authority tests
--> integrate
--> fresh exact-source run/probe
--> compare world-state progress, model-call rate, controller closure and typed outcomes
--> remove superseded compatibility authority when evidence is sufficient
+clean origin/main + exact base SHA
+-> select the lowest unsolved rung / highest-severity regression
+-> predeclare task predicate + metrics + dev/holdout seeds
+-> establish or load same-protocol baseline
+-> cluster first causal failures
+-> choose one open-zone hypothesis
+-> deterministic/focused regression first
+-> implement the smallest generic V4.1.2-conformant change
+-> architecture/authority guards + focused tests
+-> development-seed live cohort
+-> compare against baseline
+-> REVERT, DEFER/ESCALATE-and-switch-lane, or KEEP
+-> holdout cohort for promising KEEP
+-> small coherent commit + push
+-> retain lower-rung regression sample
+-> next failure cluster or next rung
 ```
 
-Do not treat "the bot moved" as progress. Ask which verified predicate changed and which Transition owned it.
-Do not shotgun speculative fixes into one run.
+Do not shotgun speculative fixes into one run. Do not infer success from movement or plausible logs: name the verified predicate that changed. A lucky single-seed run is evidence of possibility, not robustness.
 
 ## 13. Runtime evidence to inspect
 
@@ -226,55 +265,44 @@ Model calls per verified Transition and mechanical steps per model call are impo
 
 ## 14. Parallel work / subagents
 
-Use subagents and independent worktrees aggressively when available for large migration tasks.
+Use subagents and independent disposable worktrees aggressively when they increase throughput, especially during unattended campaigns.
 
 Rules:
 
-- one mutation owner per subsystem/blocker;
-- do not give multiple agents the same implementation;
-- parallelize audits, tests, probes, history analysis, contract design and independent controller families;
-- while subagents run, continue a separate useful lane yourself;
-- review and integrate subagent results yourself;
+- one mutation owner per subsystem/experiment;
+- do not give multiple agents the same implementation; independent audits and alternate hypotheses are fine;
+- keep `main` clean; prefer disposable `cap-*` worktrees for risky candidates and integrate only validated KEEP results;
+- while long live runs/tests execute, continue a separate non-conflicting useful lane (analysis, fixture, observability, next failure cluster, docs/result synthesis);
+- personally reconcile subagent findings before landing code;
 - never reset/overwrite concurrent worktrees or another lane's unmerged work;
-- retire superseded worktrees instead of accumulating them indefinitely.
+- retire stale disposable worktrees after preserving results; do not let week-long operation exhaust disk.
 
-Good parallel lanes for V4.1.2 Phase-1 → cutover:
+Good parallel capability lanes include:
 
-- A. live conformance proof harness and kernel-shadow instrumentation
-- B. host control-plane mutation authority model (`bot.chat`/`/tell` class)
-- C. verified world-model / fact-frontier audit
-- D. no-LLM probe harness and fixtures
-- E. legacy authority/double-actuation audit
-- F. viability runtime design/evidence
-- G. tests and property/invariant checks
-- H. live metrics / exact-run evidence
-- I. issue/history reconciliation
-- J. deletion map for superseded Option/Jev/GoalQueue/legacy-Reach authority
+- A. current-rung baseline/holdout live execution and metrics
+- B. failure-cluster/root-cause analysis from completed runs
+- C. focused mechanical/controller candidate in a disposable worktree
+- D. regression/scenario additions for the observed failure
+- E. Jev ranking/projection quality inside grounded candidates
+- F. sparse System2 quality/cost and provider-failure behavior
+- G. recovery/viability robustness
+- H. reproducibility/clean-run/campaign watchdog and disk hygiene
 
-## 15. Issues and PRs
+Never create an architecture-design lane.
 
-Do not create one issue/PR per tiny symptom.
-Create or reuse an issue when there is a distinct causal boundary, migration invariant, durable acceptance criterion, or live-evidenced failure.
+## 15. Issues, commits, and integration
 
-Migration issues should describe:
+Do not create one issue/PR per tiny symptom. A durable issue is justified by a repeated causal failure cluster, a capability acceptance criterion, a reproducibility blocker, or a correctness defect that spans experiments.
 
-- old authority being replaced
-- new kernel/contract owner
-- compatibility period
-- proof required before deletion
-- deletion/retirement condition
+For unattended work, do not wait for PR review when the campaign explicitly authorizes direct integration. A KEEP checkpoint may be committed and pushed to `main` after required tests/evidence are green, the diff is reviewed, `origin/main` integration is safe, and the commit is small/coherent. Never force-push.
 
-Historical #11-era issues should be relabeled/reframed/superseded when their requested direction conflicts with V4.1.2. Do not blindly finish them because they are open.
+Commit messages and experiment records should name: rung/scenario, hypothesis or failure cluster, result/verdict, and the relevant evidence path. REVERT/ESCALATE candidates should normally remain out of main; preserve only their result record/root-cause evidence when useful.
 
-## 16. M3 and generality under V4.1.2
+## 16. Long-horizon capability and M3
 
-M3 remains `ender_eye >= 12` under the canonical run-scoped gate unless the milestone contract itself changes.
-Use M3 as an integration proof that migrated Transition families compose across long-horizon acquisition, crafting/stations, survival, navigation/search, Nether transition, hostile-mob drops, and durable recovery.
+M3 (`ender_eye >= 12` under its canonical run-scoped gate) is a valuable long-horizon composition test, but it is **one capability benchmark, not the project architecture and not the only objective**. Use the capability ladder to expose missing mechanics and policy weaknesses earlier and more cheaply.
 
-Do not optimize the architecture around the expected M3 route.
-A fresh M3 PASS is valuable only if production intent remains benchmark-independent and kernel-admitted authority is visible in the run artifact.
-
-After a credible V4.1.2 path reaches M3, test changed seeds, partial-start states, benchmark-absent missions and unsupported predicates before calling the architecture general.
+A fresh M3 PASS matters only when it comes from an honest clean-run premise with production V4.1.2 authority visible in the artifact. Continue changed-seed, partial-start, benchmark-absent, and unsupported-predicate testing before calling a behavior robust. Do not optimize production policy around the expected M3 route or hard-code a speedrun script.
 
 ## 17. Explicit anti-goals
 
@@ -305,6 +333,6 @@ Architecture autonomy is narrower: the V4.1.2 authority constitution is **perman
 
 Continue until the current requested milestone is actually proven, or until an external blocker makes further useful work impossible. If blocked, leave exact evidence and the next falsifiable experiment.
 
-The current milestone is **live V4.1.2 conformance proof** (shadow counters in §7 on a real Reach run), then Phase-0 archive re-validation, then authority cutover — not "finish #11" and not "M3 at any cost".
+The current and permanent milestone family is **measurable Minecraft capability**. Start at the lowest rung without a robust current baseline (initially wood acquisition), improve one measured causal failure cluster at a time, retain regression coverage, and advance toward End. Architecture/migration work is not a fallback task when capability work is hard.
 
-When a migrated slice is proven and cutover conditions are met, remove or disable the semantic authority it replaces instead of leaving a permanent dual-control architecture.
+When a capability slice is proven KEEP, land it as a small validated checkpoint, preserve its experiment evidence, and immediately continue to the next highest-value failure cluster or ladder rung. During unattended campaigns, completion of one slice is a trigger to continue, not to wait for an operator.
