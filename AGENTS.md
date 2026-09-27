@@ -79,13 +79,25 @@ Operating rules:
 
 ### Capability optimization doctrine
 
-The permanent ladder is:
+The permanent diagnostic ladder is:
 
 `wood -> stone tools -> iron -> food/survival -> cave recovery -> smelting -> portal -> Nether traversal -> fortress/blaze -> pearls -> stronghold -> End`
 
-This is an **evaluation ladder, not a giant deterministic planner**. Improve generic mechanics/policy/controller behavior that causes the measured failure. Do not encode the expected route as production authority.
+This is an **evaluation/decomposition ladder, not a sequence of mandatory promotion gates and not a giant deterministic planner**. Improve generic mechanics/policy/controller behavior that causes the measured failure. Do not encode the expected route as production authority.
 
-For each rung:
+### Portal-first campaign objective
+
+Until V4.1.2 has produced its first clean verified autonomous Nether portal entry, the campaign's **primary optimization target is the end-to-end portal objective**, not independent robustness of wood, stone, iron, food, or smelting. The pre-portal rungs are diagnostic checkpoints inside the portal run.
+
+- Run the longest honest portal-directed attempt that current capability can support. When it fails, identify the earliest/highest-impact blocking checkpoint, make the smallest generic fix, and **return immediately to a portal-directed run**.
+- Do **not** require `4/5` robustness, a full holdout promotion, or exhaustive polish of each pre-portal checkpoint before allowing the agent to attempt later checkpoints. A checkpoint only needs to work well enough to expose the next real blocker.
+- The first verified portal entry is a **possibility proof**, not a robustness claim. It must be from a clean unassisted run, bind exact source/world/run identity, satisfy normal authority/VERIFY rules, and use no benchmark-specific production hard-coding.
+- After the first portal success, switch the primary objective to **portal reliability** across the declared dev+holdout cohort. The default robust criterion is at least `4/5` clean portal successes including at least one holdout success when five trials are practical.
+- After portal reliability is established, switch the primary objective to **portal speed/efficiency**: minimize verified time-to-portal while tracking deaths, stalls, recovery quality, mechanical actions, resource waste, replans, Jev/System2 usage, and regressions.
+- Pre-portal checkpoint metrics remain useful for localization and regression, but they must not become local optimization targets that delay the next end-to-end portal attempt.
+- Once portal reliability/speed work is healthy, continue the same pattern beyond the portal toward Nether traversal and later milestones.
+
+For each diagnostic checkpoint or selected blocker:
 
 1. Predeclare the task predicate, metrics, development seed cohort, and holdout seed cohort **before** candidate tuning. Prefer at least 3 development seeds + 2 holdout seeds when live-run cost permits; if less is practical, record the sample-size limitation explicitly.
 2. Establish a clean exact-SHA baseline. Existing milestone/clean-run rules remain authoritative where applicable.
@@ -93,8 +105,8 @@ For each rung:
 4. Pick the **highest-impact frequent causal cluster that is fixable in an open zone**. One experiment = one hypothesis = one causal change.
 5. Run deterministic/focused tests first, then the smallest live development cohort that can falsify the hypothesis, then the full declared development cohort.
 6. A candidate can KEEP only if architecture/authority guards stay green and it improves the declared primary metric or preserves it while improving declared secondary metrics, without a material regression on already-earned lower rungs. Track model/System2 cost: a candidate that merely buys success with unbounded model calls is not an automatic win.
-7. Validate promising KEEP candidates on holdout seeds before promoting the rung. Never tune against holdout outcomes; if holdout reveals a new failure cluster, return it to the development queue with new predeclared seeds.
-8. After a rung is robust under its predeclared criterion, **move immediately to the next rung** while retaining a regression sample of earlier rungs. Do not spend days polishing an already-solved rung for tiny metric gains while a later rung is unsolved.
+7. Before the first portal possibility proof, use the smallest live sample that falsifies or supports the blocker fix; **do not burn a full holdout campaign merely to promote an intermediate checkpoint**. Holdouts remain evaluation-only and become mandatory for the portal reliability phase.
+8. As soon as a blocker is sufficiently improved to expose later portal progress, **resume the end-to-end portal attempt** while retaining a small regression sample for the fixed behavior. Do not spend days polishing an intermediate checkpoint for tiny metric gains while the portal remains unachieved.
 
 Core live metrics, when observable: verified task success, wall-clock time-to-success, mechanical actions/steps, deaths, damage/food/air emergencies, recovery success, stall count/duration, resource waste, replans, candidate refusals, Jev decisions/rejections, System2 invocation count/rate/token-or-cost proxy, model-unavailable events, and cross-seed/biome/novel-state failures. Prefer verified world predicates over log vibes.
 
@@ -131,21 +143,19 @@ At the beginning of a fresh unattended campaign or after a hard reset of campaig
 5. Establish a reproducible capability-run protocol before tuning behavior. Live evidence must bind exact source SHA, world/seed, task predicate, run identity, and final verified outcome.
 6. Isolate campaign worlds from sealed acceptance evidence and user worlds. Never let two mutating experiments own the same server/world concurrently.
 
-### Rung evaluation and promotion
+### Portal-first evaluation, reliability, and promotion
 
-Before tuning each rung, predeclare its verified success predicate, terminal failure conditions, primary/secondary metrics, dev seeds, holdout seeds, and promotion rule. Holdout seeds are evaluation-only; never tune specifically against their coordinates or outcomes.
+Before the first verified portal entry, predeclare the **portal objective** and use wood/stone/iron/food/cave/smelting only as diagnostic checkpoint predicates. Holdout locations remain evaluation-only; never tune specifically against their coordinates or outcomes.
 
-When no stricter existing gate applies, the default robust-promotion rule is:
+The campaign has three ordered phases:
 
-- focused/deterministic checks required by the real fix are green;
-- zero `AUTHORITY_VIOLATION`;
-- at least **4/5 clean live successes** across the predeclared dev+holdout cohort when five trials are practical, including at least one holdout success;
-- no material regression on retained earlier-rung samples;
-- no pathological System2/model-call increase merely buying success.
+1. **Possibility:** achieve one clean verified autonomous Nether portal entry as fast as practical. Intermediate checkpoints do not need `4/5` promotion. Fix the blocking failure, then rerun toward portal.
+2. **Reliability:** after one portal success, run the declared dev+holdout portal cohort. When no stricter gate applies, robust portal promotion requires focused checks green, zero `AUTHORITY_VIOLATION`, at least **4/5 clean portal successes** including at least one holdout success when five trials are practical, no material regression, and no pathological System2/model-call increase.
+3. **Speed:** after reliable portal success, optimize verified time-to-portal and efficiency without weakening reliability, safety, authority, or proof. Compare exact-SHA runs and keep slower-but-safer behavior unless the faster candidate preserves the declared reliability criterion.
 
-If run cost or infrastructure prevents five valid trials, label confidence **LOW** and do not call the rung robust. A single lucky seed proves possibility, not robustness.
+If run cost or infrastructure prevents five valid reliability trials, label confidence **LOW** and do not call portal capability robust. A single portal success proves possibility, not robustness.
 
-The first frontier for a new campaign is honest autonomous wood acquisition from a clean start unless durable state already proves that rung robust. Historical M1 evidence is not automatically the current baseline. Measure current production behavior again when protocol/source meaningfully changes.
+The first frontier for a new campaign is therefore an **honest end-to-end portal-directed run from a clean start**. Wood is the first diagnostic checkpoint, not the campaign's terminal objective. Historical portal evidence from older architectures is a useful speed/capability reference but does not count as V4.1.2 proof. Measure current production behavior again whenever protocol/source meaningfully changes.
 
 For failed runs, capture the **first causal failure**, not just the last error. Prioritize repeated clusters by frequency × severity × downstream blocking value, subject to the permanent architecture lock and open-zone rules. Do not keep polishing instrumentation once it answers the causal question well enough to run the next experiment.
 
