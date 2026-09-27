@@ -254,6 +254,82 @@ assert.equal(system2BodyOwned(null), false)
   assert.notEqual(withResource.worldFactsFingerprint, baseline.worldFactsFingerprint)
 }
 
+// portal-p3 regression (2026-09-27): benign in-flight deltas still killed
+// authored plans. Inventory pickups during the model round-trip churned
+// `inventory_changed`, and fractional health ticks plus routine work equips
+// churned `survival_state_changed` - both explore/iron plans were discarded and
+// the queue regressed to log collection that walked the body into a spawn-camp
+// swarm (4 deaths in 39s). Direction and materiality now fence these fields.
+{
+  // Gains cannot break a plan's resource basis; losses still invalidate.
+  const gained = evaluateSystem2Apply(request, {
+    ...request,
+    inventoryFingerprint: 'oak_log=5,cobblestone=11,oak_sapling=2',
+    actionInFlight: false,
+  })
+  assert.equal(gained.apply, true, `inventory gain reasons=${gained.reasons.join(',')}`)
+  const gainedCount = evaluateSystem2Apply(request, {
+    ...request,
+    inventoryFingerprint: 'oak_log=9',
+    actionInFlight: false,
+  })
+  assert.equal(gainedCount.apply, true, `count gain reasons=${gainedCount.reasons.join(',')}`)
+  const lostOther = evaluateSystem2Apply(request, {
+    ...request,
+    inventoryFingerprint: 'oak_log=5,bread=3',
+    actionInFlight: false,
+  })
+  assert.equal(lostOther.apply, true, `unrelated gain reasons=${lostOther.reasons.join(',')}`)
+  const lost = evaluateSystem2Apply(request, {
+    ...request,
+    inventoryFingerprint: 'oak_log=3,cobblestone=11',
+    actionInFlight: false,
+  })
+  assert.equal(lost.apply, false)
+  assert.ok(lost.reasons.includes('inventory_changed'))
+
+  const host = {
+    objectiveState: () => ({ goal: 'dragon' }),
+    inventorySnapshot: () => ({ oak_log: 2 }),
+    bot: { game: { dimension: 'minecraft:overworld' } },
+    scheduler: { blockRevision: 30 },
+    lastWorldState: null,
+  }
+  const world = (selfOverrides: Record<string, unknown>) => ({
+    inventory: { counts: { oak_log: 2 } },
+    entities: [],
+    blocks: [],
+    signals: { knownResources: [], threat: null },
+    craftingTables: [],
+    furnaces: [],
+    self: {
+      dimension: 'minecraft:overworld',
+      envHazard: null,
+      health: 20,
+      food: 20,
+      air: null,
+      heldItem: null,
+      offhand: null,
+      armor: null,
+      activeItemUse: null,
+      ...selfOverrides,
+    },
+  })
+  const identityFor = (w: unknown) =>
+    system2ApplyIdentity(host as never, w as never)
+  const base = identityFor(world({}))
+  // In-band health jitter and an equip do not change the survival basis.
+  assert.equal(identityFor(world({ health: 17.5 })).survivalFingerprint, base.survivalFingerprint)
+  assert.equal(identityFor(world({ heldItem: 'stone_pickaxe' })).survivalFingerprint, base.survivalFingerprint)
+  // Crossing the health band, a food-band drop, or a live hazard remains material.
+  assert.notEqual(identityFor(world({ health: 9 })).survivalFingerprint, base.survivalFingerprint)
+  assert.notEqual(identityFor(world({ food: 5 })).survivalFingerprint, base.survivalFingerprint)
+  assert.notEqual(
+    identityFor(world({ envHazard: { active: true, inFire: false, inLava: false, onFire: false, drowning: false, headInWater: false, adjacentLava: true, kinds: ['adjacent_lava'] } })).survivalFingerprint,
+    base.survivalFingerprint,
+  )
+}
+
 // 2. Body/search progress is evidence even when the semantic goal is unchanged.
 const descend = classifyActionOutcome({
   kind: 'DESCEND',

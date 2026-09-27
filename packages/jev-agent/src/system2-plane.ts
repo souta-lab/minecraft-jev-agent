@@ -493,10 +493,16 @@ state: WorldState | null): Pick<
         },
   })
   result.survivalFingerprint = JSON.stringify({
-    health: world.self.health,
-    food: world.self.food,
-    air: world.self.air ?? null,
-    heldItem: world.self.heldItem ?? null,
+    // Bands, not raw vitals, and no held-item: a fractional health/food tick or
+    // a work equip during the model round-trip cannot change what the plan
+    // should be, yet it churned the raw fingerprint and discarded authored plans
+    // (portal-p3, 2026-09-27: `survival_state_changed` fired on 0.5hp damage
+    // ticks and routine tool equips, killing the explore/iron plans). Material
+    // transitions still invalidate - crossing a health/food/air band, an armor
+    // or offhand change, and any live environmental hazard.
+    health: healthBand(world.self.health),
+    food: foodBand(world.self.food),
+    air: airBand(observedAir(world.self.air)),
     offhand: world.self.offhand ?? null,
     armor: world.self.armor ?? null,
     activeItemUse: world.self.activeItemUse ?? null,

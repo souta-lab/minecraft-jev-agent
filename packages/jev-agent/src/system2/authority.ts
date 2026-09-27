@@ -136,6 +136,38 @@ export function system2BodyOwned(actionKind: string | null): boolean {
 }
 
 /**
+ * Direction-aware inventory freshness. A plan's basis is the resource floor it
+ * was authored against: pickups landing while the model answers cannot break
+ * that basis, only losses/consumption can. Portal-p3 evidence (2026-09-27):
+ * raw fingerprint equality churned on every cobblestone pickup and discarded
+ * the very explore/iron plans whose execution produced those gains. Fingerprints
+ * are `item=count` CSV; an unparsable or absent current side falls back to the
+ * conservative changed-verdict.
+ */
+function parseInventoryCounts(fingerprint: string): Map<string, number> {
+  const counts = new Map<string, number>()
+  if (fingerprint.length === 0) return counts
+  for (const entry of fingerprint.split(',')) {
+    const sep = entry.lastIndexOf('=')
+    if (sep <= 0) continue
+    const count = Number(entry.slice(sep + 1))
+    if (Number.isFinite(count)) counts.set(entry.slice(0, sep), count)
+  }
+  return counts
+}
+
+function inventoryBasisLost(requestFingerprint: string, currentFingerprint: string | undefined): boolean {
+  if (currentFingerprint === requestFingerprint) return false
+  if (currentFingerprint === undefined) return true
+  const requested = parseInventoryCounts(requestFingerprint)
+  const current = parseInventoryCounts(currentFingerprint)
+  for (const [item, count] of requested) {
+    if ((current.get(item) ?? 0) < count) return true
+  }
+  return false
+}
+
+/**
  * Prove that a response still describes the state it was requested against.
  * Every mismatch is retained in the result: a discard is evidence, and the
  * reason must not be hidden behind a generic "stale" label.
@@ -155,7 +187,7 @@ export function evaluateSystem2Apply(
   ) reasons.push('objective_changed')
   if (
     request.inventoryFingerprint !== undefined &&
-    current.inventoryFingerprint !== request.inventoryFingerprint
+    inventoryBasisLost(request.inventoryFingerprint, current.inventoryFingerprint)
   ) reasons.push('inventory_changed')
   if (request.dimension !== undefined && current.dimension !== request.dimension) reasons.push('dimension_changed')
   if (
