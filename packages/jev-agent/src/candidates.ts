@@ -8363,34 +8363,51 @@ function reachableSensedFurnace(state: WorldState, options: CandidateOptions): S
  */
 export const STATION_WALK_PROBE_BUDGET = 6
 
-function stationUnreachableSet(state: WorldState, options: CandidateOptions): ReadonlySet<string> {
-  const explicit = options.unreachableStations ?? EMPTY_STATIONS
+/**
+ * The union of every reachability fact that retires a station cell, evaluated
+ * against an arbitrary cell list: the explicit `options.unreachableStations`,
+ * the move-failure/death-zone blacklist, and the live path probe (budgeted to
+ * the nearest out-of-reach cells, same rule as the furnace-only
+ * `stationUnreachableSet` it generalizes).
+ *
+ * portal-p14 measured the gap this closes: the probe retirement was computed
+ * for furnaces only, while `stationWorldTruth`/`stationAcquisitionCandidates`
+ * filtered remembered crafting tables by the always-empty explicit set - so a
+ * durable table cell a `RETRIEVE` could never reach (`no_path`) suppressed the
+ * 2x2 `CRAFT:crafting_table` replacement craft forever.
+ */
+function unreachableStationKeysFor(
+  state: WorldState,
+  options: CandidateOptions,
+  stations: readonly KnownStationLike[],
+): ReadonlySet<string> {
+  const out = new Set<string>(options.unreachableStations ?? EMPTY_STATIONS)
   const blacklisted = options.blacklistedMoveTargets
-  let extended: Set<string> | null = null
-  for (const entry of state.furnaces ?? []) {
-    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
-    const key = knownStationKey({ name: 'furnace', position })
-    if (!isBlacklistedMoveTarget(state, blacklisted, position)) continue
-    extended ??= new Set(explicit)
-    extended.add(key)
+  for (const station of stations) {
+    if (isBlacklistedMoveTarget(state, blacklisted, station.position)) out.add(knownStationKey(station))
   }
   const probe = options.reachability?.pathProbe ?? null
-  if (probe === null) return extended ?? explicit
-  const walkable: { position: Vec3Json; key: string; walk: number }[] = []
-  for (const entry of state.furnaces ?? []) {
-    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
-    const walk = distance(position, state.self.eyePosition)
-    if (walk <= options.reach) continue
-    walkable.push({ position, key: knownStationKey({ name: 'furnace', position }), walk })
-  }
-  walkable.sort((a, b) => a.walk - b.walk)
+  if (probe === null) return out
+  const walkable = stations
+    .filter((station) => distance(station.position, state.self.eyePosition) > options.reach)
+    .sort((a, b) => distance(a.position, state.self.eyePosition) - distance(b.position, state.self.eyePosition))
   for (const station of walkable.slice(0, STATION_WALK_PROBE_BUDGET)) {
-    if (explicit.has(station.key) || extended?.has(station.key)) continue
-    if (probe(station.position) !== 'no_path') continue
-    extended ??= new Set(explicit)
-    extended.add(station.key)
+    const key = knownStationKey(station)
+    if (out.has(key)) continue
+    if (probe(station.position) === 'no_path') out.add(key)
   }
-  return extended ?? explicit
+  return out
+}
+
+function stationUnreachableSet(state: WorldState, options: CandidateOptions): ReadonlySet<string> {
+  return unreachableStationKeysFor(
+    state,
+    options,
+    (state.furnaces ?? []).map((entry) => ({
+      name: 'furnace',
+      position: { x: entry.x, y: entry.y, z: entry.z },
+    })),
+  )
 }
 
 /**
@@ -8856,8 +8873,16 @@ export interface StationWorldTruth {
    * craft only while it is USABLE (not in `unreachable`); see `stationCraftAllowed`.
    */
   remembered: KnownStationLike[]
-  /** the cells of `cells` the explicit reachability blacklist retired */
+  /** the cells of `cells` the reachability evidence retired (explicit + probe) */
   unreachable: KnownStationLike[]
+  /**
+   * `knownStationKey`s of every retired cell in `cells`: the explicit
+   * `options.unreachableStations` unioned with the same probe/blacklist
+   * retirement `stationUnreachableSet` computes, evaluated against THIS kind's
+   * cell list. Without it a remembered-but-unreachable cell suppresses a
+   * replacement station craft forever (measured portal-p14).
+   */
+  unreachableKeys: ReadonlySet<string>
   /** stations of this kind the near-field sensor can see this tick */
   sensed: number
   /** how many of the station ITEM the bot holds */
@@ -8901,7 +8926,6 @@ export function stationWorldTruth(
   kind: StationKind,
   item: string = kind,
 ): StationWorldTruth {
-  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
   const projection = STATION_KIND_PROJECTIONS.find((entry) => entry.kind === kind)
   const cells = new Map<string, KnownStationLike>()
   const remembered = new Map<string, KnownStationLike>()
@@ -8931,10 +8955,12 @@ export function stationWorldTruth(
       (a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position),
     )
   const all = nearestFirst(cells.values())
+  const unreachableKeys = unreachableStationKeysFor(state, options, all)
   return {
     cells: all,
     remembered: nearestFirst(remembered.values()),
-    unreachable: all.filter((station) => unreachableStations.has(knownStationKey(station))),
+    unreachable: all.filter((station) => unreachableKeys.has(knownStationKey(station))),
+    unreachableKeys,
     sensed,
     held: state.inventory.counts[item] ?? 0,
   }
@@ -9118,7 +9144,6 @@ function craftingTableSource(
   state: WorldState,
   options: CandidateOptions,
 ): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
-  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
   const placeSpotRetryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
   // Sensed stations use the same explicit reachability blacklist and path-failure
   // memory as remembered stations: a stale sensor result must not bypass
@@ -9130,7 +9155,9 @@ function craftingTableSource(
   )
   const sensedInReach = sensed !== undefined && distance(sensed, state.self.eyePosition) <= options.reach
   if (sensed !== undefined && sensedInReach) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
-  const remembered = knownStations(state, 'crafting_table').find(
+  const rememberedStations = knownStations(state, 'crafting_table')
+  const unreachableStations = unreachableStationKeysFor(state, options, rememberedStations)
+  const remembered = rememberedStations.find(
     (station) => !unreachableStations.has(knownStationKey(station)),
   )
   if (remembered !== undefined) return { kind: 'remembered', station: remembered }
@@ -9194,9 +9221,8 @@ function stationAcquisitionCandidates(
   station: StationKind,
   purpose: string,
 ): CraftCandidatesResult {
-  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
   const truth = stationWorldTruth(state, options, station, item)
-  const known = truth.remembered.find((cell) => !unreachableStations.has(knownStationKey(cell)))
+  const known = truth.remembered.find((cell) => !truth.unreachableKeys.has(knownStationKey(cell)))
   if (truth.held > 0) {
     const placement = heldStationPlacement(state, options, item, purpose)
     if (placement.spot !== null) {

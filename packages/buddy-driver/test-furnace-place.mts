@@ -1127,6 +1127,72 @@ addCase('fixture: protected PLACE leads to a SMELT candidate and SMELT_DONE', as
   return { pass, detail: `smelt=${smelt.id} target=${smelt.target?.x},${smelt.target?.y},${smelt.target?.z} | ${done ?? 'no SMELT_DONE'}` }
 })
 
+// --- portal-p14: an unreachable REMEMBERED station must not poison replacement
+// crafting -----------------------------------------------------------
+//
+// Measured post-death rebuild shape: naked body rebuilt to planks+sticks, the
+// world model remembered one crafting_table at 3234,67,2804, and every
+// `RETRIEVE:known:station` to it was refused `no_path` ~129x while the
+// `craft:crafting_table` goal starved to WAIT/ESCALATE. A crafting_table is a
+// 2x2 inventory craft needing no station; a cell the path probe cannot reach
+// is evidence, not a mandatory dependency. The probe-based retirement existed
+// only for furnaces (`stationUnreachableSet`); `stationWorldTruth` and the
+// acquisition ladder read only the always-empty explicit set, so the escape
+// hatch `stationCraftAllowed` could never open for tables.
+
+function unreachableProbeOptions(verdict: 'reachable' | 'no_path'): CandidateOptions {
+  return {
+    ...craftOptions,
+    reachability: { pathProbe: () => verdict },
+  }
+}
+
+addCase('(p14) unreachable remembered table does not suppress the 2x2 replacement craft', () => {
+  const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 3234, y: 67, z: 2804 } }
+  const state = worldState({
+    position: { x: 3230, y: 69, z: 2810 },
+    inventory: inventory({ oak_planks: 6, stick: 4 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    current: craftCurrent('crafting_table'),
+  })
+  const candidates = generateCandidates(state, unreachableProbeOptions('no_path'))
+  const craft = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const pass = craft !== undefined && retrieve === undefined
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(p14) a REACHABLE remembered table still wins the station-use ladder over a duplicate craft', () => {
+  const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 3234, y: 67, z: 2804 } }
+  const state = worldState({
+    position: { x: 3230, y: 69, z: 2810 },
+    inventory: inventory({ oak_planks: 6, stick: 4 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    current: craftCurrent('crafting_table'),
+  })
+  const candidates = generateCandidates(state, unreachableProbeOptions('reachable'))
+  const craft = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const pass = craft === undefined && retrieve !== undefined
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(p14) craft:wooden_pickaxe with an unreachable remembered table falls through to the replacement-table craft', () => {
+  const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 3234, y: 67, z: 2804 } }
+  const state = worldState({
+    position: { x: 3230, y: 69, z: 2810 },
+    inventory: inventory({ oak_planks: 6, stick: 4 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    current: craftCurrent('wooden_pickaxe'),
+  })
+  const candidates = generateCandidates(state, unreachableProbeOptions('no_path'))
+  const craftTable = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const pass = craftTable !== undefined && retrieve === undefined && productive.length > 0
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 let failures = 0
 process.stdout.write('furnace placement protection + retry (#46)\n')
 process.stdout.write('-'.repeat(72) + '\n')
