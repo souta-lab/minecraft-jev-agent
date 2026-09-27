@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "exp-host-orphan-scan",
+  "baseSha": "f6179102219c794388f0bf8d10a4b3da3574a9ef",
+  "candidateSha": "cd63f37d18ee5c71f99fb2efbdcbcca25764c368",
+  "scenario": "bun-tests/host-surface.test.ts",
+  "command": "bun test bun-tests/host-surface.test.ts",
+  "status": "PASS",
+  "failureClass": "none",
+  "metrics": {
+    "wallMs": 242,
+    "bunMs": 236,
+    "testsPass": 4,
+    "expectCalls": 22
+  },
+  "evidence": [
+    "docs/development/experiment-results/exp-host-orphan-scan/candidate.log"
+  ],
+  "verdict": "KEEP",
+  "frozenZoneTouched": false,
+  "notes": "Comparator vs base record: status PASS on the touched scenario; wallMs/bunMs improved (5.3x); testsPass/expectCalls equal; failureClass none == base none; architecture guard bun-tests/v412-architecture.test.ts green (7/7); frozenZoneTouched=false (open zone: bun-tests/host-surface.test.ts is not a \u00a72 frozen path)."
+}
