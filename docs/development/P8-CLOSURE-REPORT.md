@@ -1,7 +1,7 @@
 # P8 Closure Report — V4.1.2 Architecture Red-Team
 
 **Control SHA:** `c73b74e2` (post-frontier checkpoint, clean HEAD == origin/main at start of pass)
-**Final SHAs:** `d6aa847` (preemption integrity slice) + final closure commit (see footer)
+**Final SHAs:** `d6aa847` (preemption integrity slice) → **`092a5b38` (freeze checkpoint; pushed to origin/main)**
 **Verdict:** **V4.1.2 SURVIVED** the final red-team. **No constitutional counterexample was produced.** Every defect admitted an ownership-preserving fix; every remaining open item is a bounded mechanic or designed semantics, never an authority relocation.
 
 **V4.1.2 ARCHITECTURE FROZEN** at the final validated checkpoint. Future routine work improves PBF, scenarios, proof coverage, and Minecraft capability. The constitution may only be reopened by a new minimized executable counterexample proving that the existing ownership/authority model cannot express a correct solution.
