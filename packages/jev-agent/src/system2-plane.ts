@@ -135,10 +135,6 @@ export interface System2PlaneHost {
   tickLlmCalls: number
   tickResummonLog: DecisionLlmResummonLog[]
   verifyQueuedGoalComplete(goal: QueuedGoal): boolean
-  waitReplans: number
-  wedgeRepeats: number
-  wedgeWindowFingerprint: string | null
-  wedgeWindowId: string | null
   withheldCandidateFacts: System2WithheldCandidate[]
   withheldFactsFingerprint: string
   withheldToolGaps: System2ToolGap[]
@@ -902,11 +898,7 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
         blockersBefore: blockers,
         successSnapshot: successSnapshotBefore,
       })
-      host.waitReplans = 0
       if (added.length > 0) {
-        host.wedgeWindowId = null
-        host.wedgeWindowFingerprint = null
-        host.wedgeRepeats = 0
         host.chosenCountsAtProgress = host.lastProgress
         host.lastProgressAt = Date.now()
       }

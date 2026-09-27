@@ -1,8 +1,8 @@
 # Post-frontier program status
 
-Control checkpoint: `51af6bed` (main == origin/main, clean). V4.1.2 sole architecture; Phase-0 gate satisfied at `d781f54`.
+Historical control checkpoint: `51af6bed` (program start). V4.1.2 sole architecture; Phase-0 gate satisfied at `d781f54`.
 
-Current HEAD: `e1ad56e7` == origin/main, clean tree.
+Current HEAD: `846b38cd` == origin/main, clean tree.
 
 ## Program orders (in priority order)
 
@@ -10,8 +10,8 @@ Current HEAD: `e1ad56e7` == origin/main, clean tree.
 2. [done] Kernel/concurrency crash adversarial exploration — `c6d614ad` (K3–K19) + `1554d8c6` (hardening + K20–K33)
 3. [done] Red-team validators/comparators/packaging — `76be08fb` + `e1ad56e7`
 4. [done] Deterministic scenario lab — `45da2131` (10 kernel traces + 6 regression pointers, registry digest-pinned)
-5. [ ] Machine-checkable feature authority map (9 domains)
-6. [ ] PBF/god-surface reduction along ownership boundaries
+5. [done] Machine-checkable feature authority map — `846b38cd` (9 domains + control; union coverage, dispatch table, surface envelopes, canonical resource/effect derivation all test-bound)
+6. [in progress] PBF/god-surface reduction — host-cast coupling mapped; carcass deletion + binding gate
 7. [ ] One demonstrated bounded experiment (KEEP/REVERT/ESCALATE, machine-readable)
 8. [ ] V4.1.2 architecture red-team (after 2–5 strengthen evidence)
 
@@ -68,3 +68,13 @@ Current HEAD: `e1ad56e7` == origin/main, clean tree.
 - bun-tests gate suite: 174/174 (incl. tool fixtures). kernel: 140/140. buddy-driver+jev-agent consumer suites: 78/78 (previous run). `bun x tsc --noEmit` clean.
 - Real archives: d781f54 142/142; 83f44e5 139/0/3.
 - Next: P5 feature authority map → P6 PBF reduction → P7 bounded-experiment demo → P8 red-team (inputs: F-K3..K14 findings, kernel semantic findings, comparison-helper audit residue).
+
+### P5 — feature authority map (done, `846b38cd`)
+- `docs/development/FEATURE-AUTHORITY-MAP.json`: 9 ordered feature domains + non-actuating control domain; every one of 18 CandidateKinds assigned exactly once; per-domain owner/dispatch/admission/kernel-admission/surface-envelope/resource-domain/effect/observation/verification/cancellation/terminalization.
+- `bun-tests/feature-authority-map.test.ts` binds it mechanically (7 checks, 456 assertions): CandidateKind union coverage; runActionBody dispatch table extracted and compared (fallthrough-aware); every declared surface resolves via `mapMutationSurface`; resourceDomains/effects equal canonical derivation; transitive `this.*` helper-closure spelling scan proves dispatch-reachable mutation spellings never escape declared envelopes; every `this.bot.*` call covered by a domain or the pinned read-only allowlist; kernel-admission flags honest (only navigation may claim reach modules).
+
+### P6 — PBF/god-surface reduction, slice 1 (in progress)
+- Finding: `private` on JevController is theater — ~340 members are reachable through `this as unknown as XHost` structural casts to 16 extracted-plane host interfaces. That coupling IS the god-surface; deleting fields is unsafe without host-interface accounting (verified: 106/107 naive dead-field candidates were live host members).
+- Deleted carcasses: `furnacePrereqCandidateOptions`, `uncertainStreaks`, and 4 write-only System2PlaneHost members (`waitReplans`, `wedgeRepeats`, `wedgeWindowFingerprint`, `wedgeWindowId`) whose writes minted unread dynamic properties.
+- `bun-tests/host-surface.test.ts`: binding-integrity gate — every Host member must resolve to a real JevController declaration (a host member with no backing reads `undefined` at runtime through the cast — now a test failure); every member must be referenced somewhere; structural casts enumerated + ratcheted; exposed-private count ratcheted (may shrink, must not grow past ceiling).
+- jev-agent suite: 207/207; typecheck clean.

@@ -658,7 +658,6 @@ export class JevController {
   private lastLlmSummonAt = new Map<LlmSummonReason, number>()
   private llmNotes: string[] = []
   private needLlmDecisions = 0
-  private uncertainStreaks = new Map<string, number>()
   private tickResummonLog: DecisionLlmResummonLog[] = []
 
   private policyEpoch = 0
@@ -4398,18 +4397,6 @@ export class JevController {
   private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
     void state
     return new Set<string>()
-  }
-
-  private furnacePrereqCandidateOptions(state: WorldState, unreachableStations: ReadonlySet<string>): CandidateOptions {
-    return candidateOptions(
-      this.options,
-      this.recipeIndex,
-      unreachableStations,
-      this.reachabilityGateOptions(),
-      this.blacklistedMoveTargets(state),
-      null,
-      this.searchedSurfaceTargets,
-    )
   }
 
   private logStaleKnownResources(state: WorldState): void {
