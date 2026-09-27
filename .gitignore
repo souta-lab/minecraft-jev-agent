@@ -66,3 +66,4 @@ Thumbs.db
 
 # symlinked node_modules dirs (pattern with slash does not match symlinks)
 node_modules
+*.tsbuildinfo
