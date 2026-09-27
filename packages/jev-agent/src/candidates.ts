@@ -12024,6 +12024,11 @@ function pickupCandidates(
       const item = entity.droppedItem
       if (typeof item !== 'string' || item.length === 0) return false
       if (!pickupDropAdvancesFocus(focusItem, item, recipes)) return false
+      // A drop inside a proven death zone is a corpse-loot pull: portal-p7
+      // measured the bot vacuuming its own death loot back into the kill
+      // pocket (PICKUP:e1950 at 3220.5,63,2808.3). Same CAN/SAFE withholding
+      // as every other move-target family.
+      if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, entity.position)) return false
       if (failureCount(state.signals.failedCandidates, `PICKUP:e${entity.id}`) >= failureLimit) return false
       return true
     })
