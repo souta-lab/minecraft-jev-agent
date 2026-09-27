@@ -1562,7 +1562,7 @@ function inspectReportedAlignment(legacyRaw, vtrRaw, proof, claimsAcceptance) {
 }
 
 /** Independently checks a comparator artifact and its embedded raw run evidence. */
-export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha = null, repo = null) {
+export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha = null, repo = null, expectedVtrIdentity = null) {
   const incomplete = (reason, details = {}) => ({ status: 'INCOMPLETE', reason, ...details })
   const fail = (reason, details = {}) => ({ status: 'FAIL', reason, ...details })
   if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return fail('comparison artifact is not an object')
@@ -1590,6 +1590,23 @@ export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expect
   if (proof.comparisonStatus === 'PASS' && !aligned) return fail('comparison reports PASS while one or more alignment dimensions are not PASS', { alignment: proof.alignment ?? null })
   const raw = proof.rawComparisonEvidence
   const claimsAcceptance = proof.comparisonStatus === 'PASS' || proof.acceptanceEligible === true
+  // The proof embeds the bytes it validates, so its VTR lineage and Transition
+  // binding must be anchored to an externally known live-probe identity when
+  // one is supplied - otherwise a comparison for a different run/transition
+  // can be grafted under an honest source SHA. An asserted field that
+  // mismatches is a rejection; an unclaimed field only matters when the
+  // artifact claims acceptance (the downstream checks then require it).
+  if (expectedVtrIdentity !== null) {
+    const reachBoundary = proof.metrics?.reachBoundary?.vtr ?? {}
+    for (const [field, expected] of Object.entries(expectedVtrIdentity)) {
+      if (typeof expected !== 'string' || expected.length === 0) continue
+      const observed = field === 'transitionId' || field === 'contractHash' ? reachBoundary[field] : vtr[field]
+      if (observed === undefined && !claimsAcceptance) continue
+      if (observed !== expected) {
+        return fail(`comparison VTR ${field} does not match the externally bound live probe`, { field, expected, observed: observed ?? null })
+      }
+    }
+  }
   const claimsRaw = proof.evidenceClass === 'run-scoped-raw-events' || raw?.status === 'PASS' || raw?.evidenceClass === 'run-scoped-raw-events'
   if (!claimsRaw) {
     if (claimsAcceptance) return fail('comparison claims acceptance without run-scoped raw evidence')
@@ -3854,10 +3871,19 @@ export async function validateEvidenceArchive(archive, repo = null) {
               if (SHA_RE.test(observed)) expectedLegacyOriginMainSha = observed
             } catch {}
           }
-          const comparisonCheck = inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha, repo)
-          if (comparisonCheck.status === 'PASS') pass(`milestone:${path}`, { reason: comparisonCheck.reason })
-          else if (comparisonCheck.status === 'FAIL') fail(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
-          else incomplete(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
+          const probeWorldKey = probe?.record === 'vtr-reach-live-probe' ? probe.transition?.commit?.identity?.worldKey : probe?.run?.worldKey
+          const comparisonCheck = inspectReachComparisonProof(proof, expectedLiveSourceSha, expectedLegacyOriginMainSha, repo, {
+            runId: probe?.run?.runId,
+            generationId: probe?.run?.generationId,
+            buildHash: probe?.source?.buildHash,
+            worldKey: probeWorldKey,
+            transitionId: probe?.transition?.transitionId,
+            contractHash: probe?.transition?.contractHash,
+          })
+          if (comparisonCheck.status !== 'PASS') {
+            if (comparisonCheck.status === 'FAIL') fail(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
+            else incomplete(`milestone:${path}`, comparisonCheck.reason, comparisonCheck)
+          } else pass(`milestone:${path}`, { reason: comparisonCheck.reason, baselineStaleness: comparisonCheck.baselineStaleness ?? null })
         }
       } catch (error) { fail(`milestone:${path}`, error.message) }
     }

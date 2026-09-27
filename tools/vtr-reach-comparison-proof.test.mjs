@@ -457,6 +457,35 @@ test('accepts a fully source-bound raw proof with one deterministic Jev frame an
   })
 })
 
+test('rejects a grafted comparison whose VTR lineage names a different run, generation, world, or Transition', () => {
+  const bound = {
+    runId: VTR.runId,
+    generationId: VTR.generationId,
+    buildHash: VTR.buildHash,
+    worldKey,
+    transitionId: VTR.transitionId,
+    contractHash: VTR.contractHash,
+  }
+  const honest = inspectReachComparisonProof(rawProof(), VTR.sourceSha, LEGACY.sourceSha, null, bound)
+  assert.equal(honest.status, 'PASS', 'a comparison bound to the archived probe identity passes the graft gate')
+  for (const [field, foreign] of Object.entries({
+    runId: 'run-vtr-foreign', generationId: 'gen-vtr-foreign', buildHash: 'vtr-build-foreign', worldKey: '127.0.0.1:9|minecraft:overworld|1',
+  })) {
+    const grafted = rawProof()
+    grafted.lineage.vtr[field] = foreign
+    const result = inspectReachComparisonProof(grafted, VTR.sourceSha, LEGACY.sourceSha, null, bound)
+    assert.equal(result.status, 'FAIL', `grafted VTR lineage ${field} must fail`)
+    assert.match(result.reason, /does not match the externally bound live probe/u)
+  }
+  for (const [field, foreign] of Object.entries({ transitionId: 'transition-foreign', contractHash: 'contract-foreign' })) {
+    const grafted = rawProof()
+    grafted.metrics.reachBoundary.vtr[field] = foreign
+    const result = inspectReachComparisonProof(grafted, VTR.sourceSha, LEGACY.sourceSha, null, bound)
+    assert.equal(result.status, 'FAIL', `grafted reach-boundary ${field} must fail`)
+    assert.match(result.reason, /does not match the externally bound live probe/u)
+  }
+})
+
 test('requires a source/run/window-bound USERSPACE_ONLY egress guard audit', () => {
   const missing = rawProof()
   missing.rawComparisonEvidence.vtr.files = missing.rawComparisonEvidence.vtr.files.filter((entry) => entry.path !== 'runner/no-llm-egress-audit.json')

@@ -367,7 +367,7 @@ describe('V4.1.2 adversarial ordering, fencing, and replay edges', () => {
     expect(state.transitions[c.transitionId]!.progressRevision).toBe(1)
   })
 
-  test('K14 characterizes: witness proofs are journaled for a TERMINAL transition', () => {
+  test('K14 fences: witness proofs are refused for TERMINAL and quiescing transitions', () => {
     const c = contract('mission:walk', 'MISSION', [claim()], [], { witnessValidation: witnessValidator })
     let state = initial([c])
     state = apply(state, { kind: 'REGISTER_TRANSITION', contract: c })
@@ -377,8 +377,10 @@ describe('V4.1.2 adversarial ordering, fencing, and replay edges', () => {
     state = acceptFacts(state, [{ predicateId: c.desiredPredicate }])
     state = apply(state, { kind: 'VERIFY_SUCCESS', transitionId: c.transitionId, causalCredit: 'self' })
     expect(state.transitions[c.transitionId]!.lifecycle).toBe('TERMINAL')
-    state = apply(state, { kind: 'ACCEPT_WITNESS_PROOF', transitionId: c.transitionId, witnessRevision: 5, witnessRefHash: 'w:5', relationId: 'r:1', validator: witnessValidator })
-    expect(state.transitions[c.transitionId]!.witnessRevision).toBe(5)
+    // A witness minted after terminalization could never be consumed; the
+    // command now refuses rather than journaling dead proof state.
+    reject(state, { kind: 'ACCEPT_WITNESS_PROOF', transitionId: c.transitionId, witnessRevision: 5, witnessRefHash: 'w:5', relationId: 'r:1', validator: witnessValidator }, 'TRANSITION_NOT_WITNESS_ELIGIBLE')
+    expect(state.transitions[c.transitionId]!.witnessRevision).toBe(0)
   })
 
   test('K15 fences: stale yield acknowledgements are rejected at every quiescing edge', () => {
@@ -699,7 +701,7 @@ describe('V4.1.2 adversarial semantic characterizations (pinned for architecture
     expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
   })
 
-  test('K30 characterizes: reusing a generation id re-arms controller capabilities minted under the earlier era', () => {
+  test('K30 fences: reusing a generation id is refused; era-one capabilities stay stale forever', () => {
     const c = contract('mission:walk', 'MISSION', [claim()], [effect('MOVE', 'scope:v')])
     let state = initial([c])
     state = activate(state, c)
@@ -713,13 +715,13 @@ describe('V4.1.2 adversarial semantic characterizations (pinned for architecture
     expect(staleAttempt.ok).toBe(false)
     if (!staleAttempt.ok) expect(staleAttempt.reason).toBe('UNTRUSTED_CONTROLLER')
 
-    state = apply(state, { kind: 'CHANGE_GENERATION', generationId: 'gen-a', capability: trustedWorldAdapter('runtime') })
-    state = apply(state, { kind: 'RESUME_TRANSITION', transitionId: c.transitionId })
-    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: c.transitionId })
-    // Capabilities bind to the generationId string; cycling back re-arms the
-    // era-one capability even though it was minted before the gen-b era.
-    const rearmed = applyKernelCommand(state, { kind: 'ISSUE_EFFECT', transitionId: c.transitionId, effect: 'MOVE', scope: 'scope:v', ttlMs: 100, capability: eraOneCap })
-    expect(rearmed.ok).toBe(true)
+    // Cycling back to gen-a is refused outright — generation ids are one-use,
+    // so no re-arm window exists for capabilities minted under an earlier era.
+    reject(state, { kind: 'CHANGE_GENERATION', generationId: 'gen-a', capability: trustedWorldAdapter('runtime') }, 'GENERATION_ALREADY_USED')
+    // The original era capability remains fenced under the surviving generation.
+    const stillStale = applyKernelCommand(state, { kind: 'ISSUE_EFFECT', transitionId: c.transitionId, effect: 'MOVE', scope: 'scope:v', ttlMs: 100, capability: eraOneCap })
+    expect(stillStale.ok).toBe(false)
+    if (!stillStale.ok) expect(stillStale.reason).toBe('UNTRUSTED_CONTROLLER')
   })
 
   test('K31 characterizes: resumability and yield deadlines are computed from conflicting leases only', () => {
@@ -873,5 +875,86 @@ describe('V4.1.2 preemption transaction integrity (K3/K4/K5 fixes)', () => {
     expect(state.preemptions[plan.transactionId]!.status).toBe('STALE')
     reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'STALE_PREEMPTION')
     reject(state, { kind: 'CANCEL_PREEMPTION', transactionId: plan.transactionId, reason: 'generation fenced' }, 'PREEMPTION_ALREADY_RESOLVED')
+  })
+
+  test('K37 fences: a forced yield cannot truncate a non-conflicting bounded critical section', () => {
+    // Victim holds a preemptible locomotion lease AND a non-preemptible
+    // world-blocks lease with a 5000ms bound. The requester conflicts only on
+    // locomotion. Forcing the yield before the blocks bound expires would
+    // release a declared critical section early.
+    const bigBudget = { maxActiveMs: 2_000_000, deadlineAtMonoMs: null, maxMechanicalSteps: 10_000_000, resources: {}, risk: {} }
+    const victim = contract('victim:mixed', 'MISSION', [claim(), claim(worldBlocks, 'EXCLUSIVE_WRITE', { preemptible: false, resumable: true, maxNonPreemptibleMs: 5000 })], [], { budget: bigBudget })
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100, budget: bigBudget })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    // The recorded deadline is the blocks lease's own bound, not the 50ms
+    // preemptible pseudo-deadline.
+    expect(state.preemptions[plan.transactionId]!.victims[0]!.hardYieldDeadlineMonoMs).toBe(5000)
+    state = advance(state, 100)
+    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'PREEMPTION_NOT_READY')
+    state = advance(state, 5_001)
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
+    expect(state.transitions[requester.transitionId]!.lifecycle).toBe('ACTIVE')
+  })
+
+  test('K38 fences: generation and world changes cannot rewrite or erase a resolved transaction record', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
+    state = apply(state, { kind: 'CHANGE_GENERATION', generationId: 'gen-b', capability: trustedWorldAdapter('runtime') })
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
+    state = apply(state, { kind: 'CHANGE_WORLD', world: { serverId: 'local', dimension: 'minecraft:overworld', worldEpoch: 8 }, capability: trustedWorldAdapter('world') })
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
+    expect(state.preemptions[plan.transactionId]!.victims[0]!.safeYieldAcknowledged).toBe(true)
+  })
+
+  test('K39 fences: REPORT_PROGRESS is gated for transaction-owned and quiescing transitions', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+    // A yield-acknowledged victim is transaction-owned: progress claims about
+    // its execution window must not accrue into the journal mid-commit.
+    reject(state, { kind: 'REPORT_PROGRESS', transitionId: victim.transitionId, evaluator: progress, progressRevision: 1, valueHash: 'h1', observedAtMonoMs: state.monotonicMs, capability: trustedProgressEvaluator(progress.id) }, 'TRANSITION_NOT_PROGRESS_ELIGIBLE')
+    // Commit resolves the transaction; the suspended victim may report again.
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    state = apply(state, { kind: 'REPORT_PROGRESS', transitionId: victim.transitionId, evaluator: progress, progressRevision: 1, valueHash: 'h1', observedAtMonoMs: state.monotonicMs, capability: trustedProgressEvaluator(progress.id) })
+    expect(state.transitions[victim.transitionId]!.progressRevision).toBe(1)
+  })
+
+  test('K40 fences: a quiescing victim cannot ack a preemption yield', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    // REQUEST_CANCEL bumps the registry revision, which stales the plan first;
+    // the quiesce gate is the durable backstop if the fence is ever narrowed.
+    state = apply(state, { kind: 'REQUEST_CANCEL', transitionId: victim.transitionId, reason: 'victim exiting' })
+    reject(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs }, 'STALE_PREEMPTION')
+  })
+
+  test('K41 fences: a verified fact cannot cite a never-dispatched effect token as causal evidence', () => {
+    const c = contract('mission:dig', 'MISSION', [claim(worldBlocks)], [effect('DIG', 'scope:dig', worldBlocks)])
+    let state = initial([c])
+    state = activate(state, c)
+    const issued = issue(state, c, 'DIG', 'scope:dig'); state = issued.state
+    reject(state, { kind: 'ACCEPT_VERIFIED_SNAPSHOT', verifier, facts: [{ predicateId: 'p:dig-done', truth: 'true', valueHash: 'h', effectCommitId: issued.commitId }], materialChange: true, observedAtMonoMs: 0, capability: trustedVerifier(verifier.id) }, 'EFFECT_EVIDENCE_NEVER_DISPATCHED')
+    state = apply(state, { kind: 'BEGIN_EFFECT_DISPATCH', commitId: issued.commitId })
+    state = apply(state, { kind: 'ACCEPT_VERIFIED_SNAPSHOT', verifier, facts: [{ predicateId: 'p:dig-done', truth: 'true', valueHash: 'h', effectCommitId: issued.commitId }], materialChange: true, observedAtMonoMs: 0, capability: trustedVerifier(verifier.id) })
+    expect(Object.values(state.facts).some((f) => f.effectCommitId === issued.commitId)).toBe(true)
   })
 })

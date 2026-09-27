@@ -110,6 +110,8 @@ export interface KernelState {
   readonly transitions: Readonly<Record<TransitionId, TransitionState>>; readonly leases: Readonly<Record<string, ResourceLease>>; readonly effects: Readonly<Record<string, EffectCommitRecord>>
   readonly effectUsage: Readonly<Record<string, number>>; readonly facts: Readonly<Record<string, VerifiedFactRecord>>; readonly witnesses: Readonly<Record<string, WitnessProofRecord>>
   readonly preemptions: Readonly<Record<string, PreemptionTransaction>>; readonly missionPredicates: readonly PredicateId[]; readonly verifierRegistry: Readonly<Record<string, DefinitionIdentity>>; readonly progressRegistry: Readonly<Record<string, DefinitionIdentity>>
+  /** Every generationId this kernel has ever used; capabilities minted under an old era can never be re-armed by id reuse. */
+  readonly usedGenerationIds: readonly string[]
   readonly appendStores: Readonly<Record<string, AppendStoreState>>; readonly appendResourceKeys: readonly string[]; readonly minResidencyMs: number; readonly preemptibleYieldBudgetMs: number
   readonly contractCompilerRegistry: Readonly<Record<string, DefinitionIdentity>>; readonly missionAuthority: DefinitionIdentity
   readonly nextLeaseId: number; readonly nextCommitId: number; readonly nextPreemptionId: number; readonly nextFactId: number; readonly nextWitnessId: number
@@ -327,6 +329,7 @@ export function createKernelState(config: KernelConfig): KernelState {
     world: { ...config.world }, generationId: config.generationId, monotonicMs: 0, factRevision: 0, registryRevision: 0, missionRevision: 0, schedulerEpoch: 0, materialRevision: 0, budgetRevision: 0, leaseRevision: 0, effectRevision: 0, journalSequence: 0, transitionSequences: {},
     contracts: {}, transitionContracts: {}, transitions: {}, leases: {}, effects: {}, effectUsage: {}, facts: {}, witnesses: {}, preemptions: {}, missionPredicates: uniqSorted(config.missionPredicates), verifierRegistry: verifierMap(config.verifierRegistry), progressRegistry: verifierMap(config.progressRegistry ?? []), contractCompilerRegistry: verifierMap(config.contractCompilerRegistry), missionAuthority: normalizeDefinition(config.missionAuthority, 'missionAuthority'), appendStores, appendResourceKeys,
     minResidencyMs, preemptibleYieldBudgetMs,
+    usedGenerationIds: [config.generationId],
     nextLeaseId: 1, nextCommitId: 1, nextPreemptionId: 1, nextFactId: 1, nextWitnessId: 1,
   })
 }
@@ -549,6 +552,9 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
           assertId(input.effectCommitId, 'effectCommitId')
           const effect = state.effects[input.effectCommitId]
           if (effect === undefined || !sameWorld(effect.world, state.world)) return failure(inputState, 'UNKNOWN_EFFECT_EVIDENCE_TARGET')
+          // A fact can only derive from an effect that actually dispatched;
+          // never-dispatched tokens produced nothing to attest.
+          if (effect.status === 'ISSUED' || effect.status === 'REVOKED' || effect.status === 'EXPIRED') return failure(inputState, 'EFFECT_EVIDENCE_NEVER_DISPATCHED')
         }
         if (seenPredicates.has(input.predicateId)) return failure(inputState, 'DUPLICATE_PREDICATE_IN_SNAPSHOT')
         seenPredicates.add(input.predicateId)
@@ -561,6 +567,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
     }
     case 'ACCEPT_WITNESS_PROOF': {
       const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION')
+      if (t.lifecycle === 'TERMINAL' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(inputState, 'TRANSITION_NOT_WITNESS_ELIGIBLE')
       if (c.witnessValidation === null || c.witnessValidation.id !== command.validator.id || c.witnessValidation.version !== command.validator.version) return failure(inputState, 'WITNESS_VALIDATOR_MISMATCH')
       if (!replay && !isTrustedCapability(command.capability, 'WITNESS_VALIDATOR', command.validator.id)) return failure(inputState, 'UNTRUSTED_WITNESS_CAPABILITY')
       if (!Number.isInteger(command.witnessRevision) || command.witnessRevision < 0) return failure(inputState, 'INVALID_WITNESS_REVISION'); if (command.witnessRevision < t.witnessRevision) return failure(inputState, 'WITNESS_REVISION_REGRESSION')
@@ -627,7 +634,13 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
         const conflictLeases = conflicts.filter((l) => l.owner === victimId); const victimPriority = effectivePriority(state, victimId)
         if (requesterPriority < victimPriority) return failure(inputState, 'LOWER_PRIORITY_CANNOT_PREEMPT')
         if (requesterPriority === victimPriority && vt.activeSinceMonoMs !== null && state.monotonicMs - vt.activeSinceMonoMs < state.minResidencyMs && state.materialRevision === vt.materialRevisionAtActivation) return failure(inputState, 'RESIDENCY_HYSTERESIS')
-        const nonPreemptible = conflictLeases.filter((l) => !l.preemptible); const hard = nonPreemptible.length > 0 ? Math.min(...nonPreemptible.map((l) => l.hardYieldDeadlineMonoMs!)) : state.monotonicMs + state.preemptibleYieldBudgetMs
+        const nonPreemptible = conflictLeases.filter((l) => !l.preemptible)
+        // A committed preemption releases every victim lease, so a forced yield
+        // is only lawful once every non-preemptible critical section the victim
+        // declared has expired - not merely the sections the requester
+        // conflicts on. Forcing earlier would truncate a declared bound.
+        const victimNonPreemptible = leasesFor(state, victimId).filter((l) => !l.preemptible)
+        const hard = victimNonPreemptible.length > 0 ? Math.max(...victimNonPreemptible.map((l) => l.hardYieldDeadlineMonoMs!)) : state.monotonicMs + state.preemptibleYieldBudgetMs
         victims.push(deepFreeze({ transitionId: victimId, contractHash: vc.contractHash, conflictingLeaseIds: conflictLeases.map((l) => l.leaseGrantId).sort(), allLeaseIdsAtPlan: leasesFor(state, victimId).map((l) => l.leaseGrantId), safeYieldAcknowledged: false, acknowledgedAtMonoMs: null, lateYield: false, deadlineViolated: false, inheritedPriority: nonPreemptible.length > 0 && requesterPriority > victimPriority ? requesterPriority : null, resumable: conflictLeases.every((l) => l.resumable), hardYieldDeadlineMonoMs: hard }))
       }
       const id = `preempt:${state.nextPreemptionId}`; const schedulerEpoch = state.schedulerEpoch + 1
@@ -639,6 +652,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       if (!controllerAuthorized(command.victimId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
       const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(inputState, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(inputState, 'STALE_PREEMPTION')
       const vi = tx.victims.findIndex((v) => v.transitionId === command.victimId); if (vi < 0) return failure(inputState, 'UNKNOWN_PREEMPTION_VICTIM')
+      const vt0 = state.transitions[command.victimId]; if (vt0 !== undefined && (vt0.cancelRequested || vt0.pendingTerminalOutcome !== null)) return failure(inputState, 'VICTIM_QUIESCING')
       const victim = tx.victims[vi]!; const currentIds = leasesFor(state, victim.transitionId).map((l) => l.leaseGrantId).sort(); if (canonicalJson(currentIds) !== canonicalJson(victim.allLeaseIdsAtPlan)) return failure(inputState, 'STALE_PREEMPTION_LEASES')
       if (!command.safeYield) return failure(inputState, 'SAFE_YIELD_NOT_REACHED')
       if (command.atMonoMs !== state.monotonicMs) return failure(inputState, 'STALE_YIELD_ACK')
@@ -663,6 +677,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       const plannedVictimIds = new Set(tx.victims.map((v) => v.transitionId)); const conflicts = conflictsFor(state, requester.transitionId, rc.claims); if (conflicts.some((l) => !plannedVictimIds.has(l.owner))) return failure(inputState, 'UNPLANNED_CONFLICT')
       for (const v of tx.victims) {
         const vt = state.transitions[v.transitionId]; const vc = contractFor(state, v.transitionId); if (vt === undefined || vc === null || vt.lifecycle !== 'ACTIVE' || vc.contractHash !== v.contractHash) return failure(inputState, 'STALE_VICTIM')
+        if (vt.cancelRequested || vt.pendingTerminalOutcome !== null) return failure(inputState, 'VICTIM_QUIESCING')
         if (canonicalJson(leasesFor(state, v.transitionId).map((l) => l.leaseGrantId)) !== canonicalJson(v.allLeaseIdsAtPlan)) return failure(inputState, 'STALE_PREEMPTION_LEASES')
       }
       let next = state
@@ -732,7 +747,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
     }
     case 'REPORT_PROGRESS': {
       const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION')
-      if (t.lifecycle === 'TERMINAL') return failure(inputState, 'TRANSITION_NOT_PROGRESS_ELIGIBLE')
+      if (t.lifecycle === 'TERMINAL' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(inputState, 'TRANSITION_NOT_PROGRESS_ELIGIBLE')
       if (command.evaluator.id !== c.progressDefinition.id || command.evaluator.version !== c.progressDefinition.version) return failure(inputState, 'PROGRESS_DEFINITION_MISMATCH')
       const registered = state.progressRegistry[command.evaluator.id]; if (registered === undefined || registered.version !== command.evaluator.version) return failure(inputState, 'UNKNOWN_PROGRESS_EVALUATOR')
       if (!replay && !isTrustedCapability(command.capability, 'PROGRESS', command.evaluator.id)) return failure(inputState, 'UNTRUSTED_PROGRESS_CAPABILITY')
@@ -811,6 +826,9 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
     }
     case 'CHANGE_GENERATION': {
       if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'runtime')) return failure(inputState, 'UNTRUSTED_RUNTIME_CAPABILITY'); assertId(command.generationId, 'generationId'); if (command.generationId === state.generationId) return failure(inputState, 'GENERATION_UNCHANGED')
+      // Generation ids are one-use: reusing an id would re-arm capabilities
+      // minted under the old era for any transition that survived rebind.
+      if (state.usedGenerationIds.includes(command.generationId)) return failure(inputState, 'GENERATION_ALREADY_USED')
       const affected = Object.values(state.transitions).filter((t) => t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED').map((t) => t.transitionId)
       let next = state; for (const t of Object.values(state.transitions)) if (t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED') {
         // A quiescing transition already has a requested terminal (a verified
@@ -821,13 +839,20 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
         if (t.cancelRequested) { next = terminalize(next, t.transitionId, { kind: 'CANCELED', reason: 'generation changed during cancel safe-yield' }); continue }
         next = releaseAllLeases(next, t.transitionId); next = quiesceTransitionEffects(next, t.transitionId); const current = next.transitions[t.transitionId]!; next = updateTransition(next, { ...current, lifecycle: 'SUSPENDED', heldLeaseIds: [], suspendReason: 'GENERATION_REBIND_REQUIRED', activeSinceMonoMs: null, lifecycleRevision: current.lifecycleRevision + 1 }, true)
       }
-      const preemptions = Object.fromEntries(Object.entries(next.preemptions).map(([id, tx]) => [id, deepFreeze({ ...tx, status: 'STALE' as const })])); state = deepFreeze({ ...next, generationId: command.generationId, preemptions })
+      // The generation fence resolves live transactions to STALE; resolved
+      // records (COMMITTED/CANCELED/STALE) are durable verdicts and must not be
+      // rewritten by the fence.
+      const preemptions = Object.fromEntries(Object.entries(next.preemptions).map(([id, tx]) => [id, tx.status === 'PLANNED' || tx.status === 'READY' ? deepFreeze({ ...tx, status: 'STALE' as const }) : tx])); state = deepFreeze({ ...next, generationId: command.generationId, usedGenerationIds: [...next.usedGenerationIds, command.generationId], preemptions })
       return success(state, command, 'GENERATION_CHANGED', null, { generationId: command.generationId, affected }, affected)
     }
     case 'CHANGE_WORLD': {
       if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'world')) return failure(inputState, 'UNTRUSTED_WORLD_CAPABILITY'); assertId(command.world.serverId, 'world.serverId'); assertId(command.world.dimension, 'world.dimension'); assertNonNegativeInteger(command.world.worldEpoch, 'world.worldEpoch'); if (sameWorld(command.world, state.world)) return failure(inputState, 'WORLD_UNCHANGED')
       const oldWorld = state.world; const affected = Object.values(state.transitions).filter((t) => t.lifecycle !== 'TERMINAL').map((t) => t.transitionId); let next = state; for (const t of Object.values(state.transitions)) if (t.lifecycle !== 'TERMINAL') next = terminalize(next, t.transitionId, { kind: 'WORLD_CHANGED', expected: contractFor(next, t.transitionId)?.world ?? oldWorld, observed: command.world })
-      state = deepFreeze({ ...next, world: deepFreeze({ ...command.world }), factRevision: next.factRevision + 1, facts: {}, witnesses: {}, preemptions: {}, leases: {}, effects: Object.fromEntries(Object.entries(next.effects).map(([id, token]) => [id, token.status === 'ISSUED' ? deepFreeze({ ...token, status: 'REVOKED' as const }) : token.status === 'DISPATCHING' ? deepFreeze({ ...token, status: 'UNKNOWN' as const, observation: 'UNKNOWN' as const }) : token])), leaseRevision: next.leaseRevision + 1, effectRevision: next.effectRevision + 1 })
+      // Live transactions die with the world that created them (their binding
+      // is permanently uncurrent), but their records stay durable as STALE;
+      // resolved records (COMMITTED/CANCELED/STALE) are verdicts and survive.
+      const preemptions = Object.fromEntries(Object.entries(next.preemptions).map(([id, tx]) => [id, tx.status === 'PLANNED' || tx.status === 'READY' ? deepFreeze({ ...tx, status: 'STALE' as const }) : tx]))
+      state = deepFreeze({ ...next, world: deepFreeze({ ...command.world }), factRevision: next.factRevision + 1, facts: {}, witnesses: {}, preemptions, leases: {}, effects: Object.fromEntries(Object.entries(next.effects).map(([id, token]) => [id, token.status === 'ISSUED' ? deepFreeze({ ...token, status: 'REVOKED' as const }) : token.status === 'DISPATCHING' ? deepFreeze({ ...token, status: 'UNKNOWN' as const, observation: 'UNKNOWN' as const }) : token])), leaseRevision: next.leaseRevision + 1, effectRevision: next.effectRevision + 1 })
       return success(state, command, 'WORLD_CHANGED', null, { from: oldWorld, to: command.world, affected }, affected)
     }
     case 'APPEND_RECORD': {
@@ -940,6 +965,7 @@ export function admitJevDecision(state: KernelState, frame: JevDecisionFrameV412
 }
 
 export function assertKernelInvariants(state: KernelState): void {
+  if (new Set(state.usedGenerationIds).size !== state.usedGenerationIds.length || !state.usedGenerationIds.includes(state.generationId) || state.usedGenerationIds[state.usedGenerationIds.length - 1] !== state.generationId) throw new Error('usedGenerationIds diverged from generation history')
   for (const [hash, contract] of Object.entries(state.contracts)) {
     if (hash !== contract.contractHash || !canonicalContractHashValid(contract)) throw new Error(`invalid canonical contract ${hash}`)
   }

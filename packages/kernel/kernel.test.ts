@@ -492,7 +492,10 @@ describe('V4.1.2 additional authority, liveness, and replay hardening', () => {
     const oldFrame = buildJevDecisionFrame(s, { [b.transitionId]: ['wait'] })
     const changed = { ...world, dimension: 'minecraft:the_nether', worldEpoch: 8 }
     s = apply(s, { kind: 'CHANGE_WORLD', world: changed, capability: trustedWorldAdapter('world') })
-    expect(Object.values(s.leases)).toHaveLength(0); expect(Object.values(s.preemptions)).toHaveLength(0); expect(Object.values(s.facts)).toHaveLength(0); expect(Object.values(s.witnesses)).toHaveLength(0)
+    // The live transaction dies with its world: terminalizing its participants
+    // resolves it CANCELED through the durable cleanup path, and the record is
+    // preserved rather than erased.
+    expect(Object.values(s.leases)).toHaveLength(0); expect(Object.values(s.preemptions)).toHaveLength(1); expect(Object.values(s.preemptions)[0]?.status).toBe('CANCELED'); expect(Object.values(s.facts)).toHaveLength(0); expect(Object.values(s.witnesses)).toHaveLength(0)
     expect(s.effects[issued.commitId]?.status).toBe('REVOKED')
     const decision = { frameHash: oldFrame.frameHash, schedulerEpoch: oldFrame.schedulerEpoch, world: oldFrame.world, binding: oldFrame.binding, rankedTransitionIds: [b.transitionId], tacticChoices: { [b.transitionId]: 'wait' } }
     expect(admitJevDecision(s, oldFrame, decision)).toEqual({ ok: false, reason: 'STALE_WORLD' })
@@ -673,7 +676,7 @@ describe('V4.1.2 five-pass adversarial closure', () => {
     expect(s.transitions[c.transitionId]?.terminalOutcome?.kind).toBe('MISSION_SUPERSEDED')
   })
 
-  test('multi-critical preemption uses earliest hard yield deadline', () => {
+  test('multi-critical preemption waits for the last declared bound before a forced yield is lawful', () => {
     const station = resourceId('station', ['furnace'], '1,2,3')
     const victim = contract('critical:two-bounds', 'MISSION', [
       claim(inventory, 'EXCLUSIVE_WRITE', { preemptible: false, maxNonPreemptibleMs: 10 }),
@@ -682,7 +685,10 @@ describe('V4.1.2 five-pass adversarial closure', () => {
     const requester = contract('viability:two-bounds', 'VIABILITY', [claim(inventory), claim(station)])
     let s = initial([victim, requester]); s = activate(s, victim); s = registerAdmit(s, requester)
     s = apply(s, { kind: 'START_PREEMPTION', requesterId: requester.transitionId })
-    expect(Object.values(s.preemptions)[0]?.victims[0]?.hardYieldDeadlineMonoMs).toBe(10)
+    // A forced commit releases every victim lease; forcing before the latest
+    // bound would truncate a critical section the victim still legitimately
+    // holds (the 25ms station section).
+    expect(Object.values(s.preemptions)[0]?.victims[0]?.hardYieldDeadlineMonoMs).toBe(25)
   })
 
   test('audit replay result cannot be promoted to live authority', () => {

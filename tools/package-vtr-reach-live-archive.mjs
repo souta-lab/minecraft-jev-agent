@@ -343,7 +343,14 @@ function inspectLegacyBaselineArtifact(bytes, { identity, transition, repoPath }
   let proof
   try { proof = JSON.parse(bytes.toString('utf8')) }
   catch (error) { return { status: 'FAIL', reason: `comparison artifact is invalid JSON: ${error.message}` } }
-  const assessment = inspectReachComparisonProof(proof, identity.sourceSha, originMainSha)
+  const assessment = inspectReachComparisonProof(proof, identity.sourceSha, originMainSha, repoPath, {
+    runId: identity.runId,
+    generationId: identity.generationId,
+    buildHash: identity.buildHash,
+    worldKey: worldKeyString(identity.worldKey),
+    transitionId: transition?.transitionId,
+    contractHash: transition?.contractHash,
+  })
   if (assessment.status !== 'PASS') return assessment
 
   const vtr = proof.lineage?.vtr ?? {}

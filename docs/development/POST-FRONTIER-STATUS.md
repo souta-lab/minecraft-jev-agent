@@ -85,3 +85,11 @@ Current HEAD: `846b38cd` == origin/main, clean tree.
 - Both records schema-validated via `tools/validate-experiment-result.mjs`; `frozenZoneTouched=false` (diff confined to `bun-tests/host-surface.test.ts`, not a §2 frozen path).
 - Convention established: durable records + logs committed under `docs/development/experiment-results/<id>/`; bulky artifacts stay in gitignored `runs/`.
 - Full gate suite: 568/568 tests (490s) — no regressions.
+
+### P8 — architecture red-team + closure (done; `d6aa847` + closure commit; report `docs/development/P8-CLOSURE-REPORT.md`)
+- Control `c73b74e2`; independent kernel + comparator audits reconciled and reproduced; findings classified into MUST_FIX_BEFORE_FREEZE_CHECKPOINT / FIXABLE_UNDER_FREEZE / KNOWN_LIMITATION / ARCHITECTURE_REOPEN_TRIGGER.
+- MUST_FIX (all landed): F-K3 forced-yield commit after contract deadline; F-K4 participant pause fence around live preemptions; F-K5 `CANCEL_PREEMPTION` + durable resolved-tx records; forced-yield deadline over all non-preemptible bounds; quiesce gates on ACK/COMMIT/REPORT_PROGRESS/ACCEPT_WITNESS_PROOF; `EFFECT_EVIDENCE_NEVER_DISPATCHED`; `GENERATION_ALREADY_USED` (`usedGenerationIds`, replay-stable).
+- Proof-system MUST_FIX (all landed): comparator graft gate — comparison proofs bound to archive `probe.json` identity (runId/generationId/buildHash/worldKey/transitionId/contractHash); exit-code strictest-verdict; `originMainAtCollection` ancestry wiring + `baselineStaleness`; ambiguous journal alternatives embedded; `concurrentLegacyActuations` passthrough.
+- DEFERRED under freeze (recorded, bounded): scoped binding fences (Audit-F1/F3), kernel-terminalization journal attribution, tx-expiry/anti-thrash bounds, comparator F2/F6 residue, TTL ceiling, audit minors. Environmental comparator CLI spawn failures (11) reproduce on baseline — infra, not semantic.
+- **Verdict: V4.1.2 SURVIVED — ARCHITECTURE FROZEN** at the validated checkpoint. No constitutional counterexample produced; every defect resolved inside existing ownership. Reopen only on a new minimized executable counterexample.
+- Next objective: measurable Minecraft capability (bounded experiments + capability ladder wood→…→End; success rate, steps, deaths, stalls, recovery, replans, waste, Jev/System2 quality, cross-seed/biome, novel-state recovery). One measured failure cluster at a time.

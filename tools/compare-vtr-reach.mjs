@@ -371,14 +371,20 @@ function captureRawSide(root, identity, requirements) {
   const invalid = []
   for (const requirement of requirements) {
     const alternatives = Array.isArray(requirement) ? requirement : [requirement]
-    let found = null
+    const present = []
     for (const relativePath of alternatives) {
       const result = captureRawFile(root, relativePath)
-      if (result.file) { found = result.file; break }
+      if (result.file) present.push(result.file)
       if (result.invalid) invalid.push(result.invalid)
     }
-    if (found) files.push(found)
-    else if (alternatives.every((path) => !existsSync(join(root, path)))) missing.push(alternatives)
+    if (present.length === 1) files.push(present[0])
+    else if (present.length > 1) {
+      // More than one alternative exists: embed them all so downstream
+      // validators see the true file set and refuse the ambiguity, rather than
+      // letting capture order silently select one journal.
+      files.push(...present)
+      invalid.push({ path: alternatives.join('|'), reason: 'ambiguous alternatives present in archive' })
+    } else if (alternatives.every((path) => !existsSync(join(root, path)))) missing.push(alternatives)
   }
   return { identity, files, missing, invalid, status: missing.length === 0 && invalid.length === 0 ? 'PASS' : 'INCOMPLETE' }
 }
@@ -703,9 +709,13 @@ function parseLegacy(raw, sourceText, legacyPath) {
     return {
       schema: input.schema,
       sourceSha,
-      // The raw comparator result can qualify only while the captured source
-      // itself is the exact origin/main commit visible to this comparison run.
-      expectedSourceSha: sourceSha === CURRENT_ORIGIN_MAIN_SHA ? CURRENT_ORIGIN_MAIN_SHA : null,
+      // The raw comparator result is bound to the origin/main pin the collector
+      // recorded at collection time under a clean-checkout check. Older
+      // artifacts without that binding qualify only while their captured source
+      // is still the exact tip visible to this comparison run.
+      expectedSourceSha: typeof input.sourceBinding?.originMainAtCollection === 'string' && SHA_RE.test(input.sourceBinding.originMainAtCollection)
+        ? input.sourceBinding.originMainAtCollection.toLowerCase()
+        : sourceSha === CURRENT_ORIGIN_MAIN_SHA ? CURRENT_ORIGIN_MAIN_SHA : null,
       buildHash: text(input.buildHash, 'legacy.buildHash'),
       runId,
       generationId: text(input.generationId, 'legacy.generationId'),
@@ -921,7 +931,7 @@ function adaptArchivedVtrProbe(raw, archiveRoot) {
       ensures: commit.ensures,
       worldIdentity: identity,
       modelMetricsEvidence,
-      metrics: { ...metrics, concurrentLegacyActuations: 0 },
+      metrics: { concurrentLegacyActuations: 0, ...metrics },
       outcome: { kind: terminalOutcome.kind, boundary: terminal.boundary, evidenceIds: terminalOutcome.evidenceIds },
       precommitUnknownSourceHolds,
       actionSkillReportedSuccessWasNotUsedAsTransitionTerminal: typedTerminalProof,
@@ -1493,11 +1503,13 @@ if (rawAcceptanceCheck.status !== 'PASS') {
   output.evidenceClass = 'summary-only'
 }
 if (output.acceptanceEligible && rawAcceptanceCheck.status !== 'PASS') {
-  output.comparisonStatus = 'INCOMPLETE'
-  output.classification = 'raw event evidence failed the independent acceptance parser'
+  output.comparisonStatus = rawAcceptanceCheck.status === 'FAIL' ? 'FAIL' : 'INCOMPLETE'
+  output.classification = rawAcceptanceCheck.status === 'FAIL'
+    ? 'raw event evidence contradicts itself under the independent acceptance parser'
+    : 'raw event evidence failed the independent acceptance parser'
   output.acceptanceEligible = false
   output.acceptanceStatus = 'RAW_EVIDENCE_INCOMPLETE'
 }
 
 console.log(JSON.stringify(output, null, 2))
-process.exitCode = noNetworkProfileStatus === 'FAIL' ? 1 : comparisonStatus === 'PASS' ? 0 : 2
+process.exitCode = noNetworkProfileStatus === 'FAIL' || output.comparisonStatus === 'FAIL' ? 1 : output.comparisonStatus === 'PASS' ? 0 : 2
