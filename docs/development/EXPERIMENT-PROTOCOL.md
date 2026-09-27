@@ -60,6 +60,14 @@ table. When in doubt, treat the path as frozen.
 An experiment measures itself against deterministic scenarios. Pick the row
 whose surface the diff touches; run the full row.
 
+The machine-readable index is `docs/development/SCENARIO-REGISTRY.json`
+(regenerate: `bun tools/emit-scenario-registry.mjs`). It carries stable
+scenario ids, origins (real historical failures), expected outcomes,
+forbidden events, and per-definition SHA-256. Two row kinds: `kernelTrace`
+(data-driven traces executed by `bun test packages/kernel/kernel.scenarios.test.ts`
+against the real reducer) and `regression` (pointer rows to existing
+deterministic test files on non-kernel surfaces).
+
 | Surface | Command (from repo root) |
 |---|---|
 | Architecture invariants (always run) | `bun test bun-tests/` |

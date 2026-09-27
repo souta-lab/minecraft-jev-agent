@@ -1,0 +1,223 @@
+{
+  "schema": "vtr-scenario-registry/v1",
+  "generatedFrom": [
+    "packages/kernel/scenarios.ts",
+    "tools/emit-scenario-registry.mjs"
+  ],
+  "definitionsSha256": "2b1e79bfbca2d146fa4039caecf0447c04d8cc744416c820918377db605182fd",
+  "scenarios": [
+    {
+      "id": "sc-k-quiesce-generation",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "commit 4747029e — real bug: a generation change during a quiescing transition dropped the pending terminal",
+      "hypothesis": "a cancel-pending critical section is terminalized with its requested outcome when the generation changes; it must not be suspended with pending control state",
+      "defSha256": "130ad03aeec6cd7153ac1dac02a09cd569b200d0754739437dd97c1907768a99",
+      "expect": {
+        "terminalOutcomes": {
+          "mission:critical": "CANCELED"
+        },
+        "forbiddenEvents": []
+      }
+    },
+    {
+      "id": "sc-k-reordered-completion",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "stale/reordered completion class — effect completion arriving before dispatch linearization",
+      "hypothesis": "a reconcile that precedes BEGIN_EFFECT_DISPATCH is rejected; a commit can never dispatch twice",
+      "defSha256": "449c19c51e1d56f734246965a3e88fea5c76140b7a032ea6b72275238969edce",
+      "expect": {
+        "effectStatuses": {
+          "commit:1": "DISPATCHING"
+        }
+      }
+    },
+    {
+      "id": "sc-k-duplicate-irreversible",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "duplicate irreversible effect class — a dispatched commit must be single-use even when the world effect failed",
+      "hypothesis": "dispatch linearization is the irreversible act; a NOT_OCCURRED reconcile still consumes the permit and a replacement issue is refused",
+      "defSha256": "2daed3fb2f09c41fe786e856e936f5af237b94cbd24c49fc66e6f242d0a2e7a0",
+      "expect": {
+        "effectStatuses": {
+          "commit:1": "OBSERVED"
+        }
+      }
+    },
+    {
+      "id": "sc-k-orphan-zombie",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "orphan transition class — a superseded mission predicate must not leave a resumable authority shell",
+      "hypothesis": "a superseded-then-restored predicate cannot resurrect the terminalized transition; frontier re-derivation requires a fresh transition",
+      "defSha256": "013ba4a7cd65910e6556a9116f74a3ecf0e2896f30094420b9c0cca92b6778c1",
+      "expect": {
+        "terminalOutcomes": {
+          "mission:walk": "MISSION_SUPERSEDED"
+        },
+        "lifecycles": {
+          "mission:other": "RUNNABLE"
+        }
+      }
+    },
+    {
+      "id": "sc-k-preempt-wedge",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "finding F-K3 — cooperative safe-yield bound is observational, not enforced",
+      "hypothesis": "CHARACTERIZATION: a preemptible victim that never yields wedges a higher-priority preemptor past the yield deadline; the only kernel recourse is victim terminalization",
+      "defSha256": "2946be61135f465e2cae39898918529b65e3133936927c1036848eafa0527115",
+      "expect": {
+        "terminalOutcomes": {
+          "victim:walk": "CANCELED"
+        },
+        "lifecycles": {
+          "requester:urgent": "ACTIVE"
+        }
+      }
+    },
+    {
+      "id": "sc-k-ready-abort",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "finding F-K4 — PAUSE_ACTIVE/ACK_PAUSE_YIELD do not gate on preemptionYielded",
+      "hypothesis": "CHARACTERIZATION: an acknowledged victim can be paused out of a READY transaction, releasing leases outside the atomic commit and leaving an unresolvable STALE plan",
+      "defSha256": "afc2b6808873dd77d77b4a603326021f0b9331c0485e5cc6ac63cb955c138add",
+      "expect": {
+        "lifecycles": {
+          "victim:walk": "OBSERVING"
+        }
+      }
+    },
+    {
+      "id": "sc-k-world-discards-success",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "finding F-K8 — world change vs generation change asymmetry for pending verified outcomes",
+      "hypothesis": "CHARACTERIZATION: a world change discards a pending verified SUCCESS and records WORLD_CHANGED, while a generation change would honor it — old-world verify cannot certify the new world",
+      "defSha256": "3472b4e668d80632070c93c045835bfc8dd506bb8e510b9eba302280e83e9015",
+      "expect": {
+        "terminalOutcomes": {
+          "mission:critical": "WORLD_CHANGED"
+        }
+      }
+    },
+    {
+      "id": "sc-k-gen-rebind",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "generation rebind during an acknowledged preemption — mechanical authority must not survive the rebind",
+      "hypothesis": "a generation change mid-READY-preemption stales the plan, suspends both parties, and requires fresh lease identities to reactivate",
+      "defSha256": "f146f3f9bac2b2e6a5bf45c7df7ad98bc761a6aaacd0ad6c281812c570f698c1",
+      "expect": {
+        "lifecycles": {
+          "victim:walk": "ACTIVE",
+          "requester:urgent": "SUSPENDED"
+        }
+      }
+    },
+    {
+      "id": "sc-k-stale-acks",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "stale completion class — yield acknowledgements must be bound to the current monotonic instant",
+      "hypothesis": "every quiescing edge rejects an acknowledgement recorded for an older instant",
+      "defSha256": "b3ced92dee815a345e1d921e965bdf9f7a47eaf35c3037dd134efa5f5c439cbd",
+      "expect": {
+        "lifecycles": {
+          "mission:critical": "ACTIVE"
+        }
+      }
+    },
+    {
+      "id": "sc-k-crash-replay",
+      "kind": "kernelTrace",
+      "surface": "packages/kernel",
+      "origin": "crash/replay class — the journaled protocol must reproduce exactly after a mid-protocol crash",
+      "hypothesis": "a journal cut after a dispatch and a preemption plan replays to the identical semantic state and continues the protocol under trusted recovery",
+      "defSha256": "f5d549f109c26da7cd628b97a5a93fc99e7c628ac9ef5aaa7af96fedf4e26045",
+      "expect": {
+        "effectStatuses": {
+          "commit:1": "UNKNOWN"
+        },
+        "lifecycles": {
+          "victim:walk": "ACTIVE"
+        }
+      }
+    },
+    {
+      "id": "sc-r-threat-grounding",
+      "surface": "packages/jev-agent",
+      "origin": "docs/history/incidents/NETHER-SURVIVAL-2026-09-22.md — threat contact with wrong gear and ungrounded response (94% of Nether expeditions lost the body)",
+      "hypothesis": "a contact threat must produce a grounded survival response, not ungrounded candidate churn",
+      "command": "bun test packages/jev-agent/test-threat-response-grounding.mts",
+      "files": [
+        "packages/jev-agent/test-threat-response-grounding.mts"
+      ],
+      "kind": "regression",
+      "defSha256": "9c045684eb9210b0d27721dbff15976d8b89d463a2a865808ebcda03c18f7cd9"
+    },
+    {
+      "id": "sc-r-move-stuck-stale",
+      "surface": "packages/jev-agent",
+      "origin": "docs/history/incidents/BUDDY-DEFECTS.md defect A — no-progress motion loop dominated the queue while nothing verified",
+      "hypothesis": "stuck/stale movement must terminalize as a typed failure instead of wedging the queue",
+      "command": "bun test packages/jev-agent/test-move-stuck-stale.mts",
+      "files": [
+        "packages/jev-agent/test-move-stuck-stale.mts"
+      ],
+      "kind": "regression",
+      "defSha256": "d87d7b4261894c32b5be35069568d8a9a9d9b812f636a56cd68c04f6b9e7c1af"
+    },
+    {
+      "id": "sc-r-dig-ground-truth",
+      "surface": "packages/jev-agent",
+      "origin": "docs/history/incidents/BUDDY-DEFECTS.md defects B/C — dig interrupted before block broke; wrong tool for the resource class",
+      "hypothesis": "dig completion and tool choice are bound to ground truth, not candidate claims",
+      "command": "bun test packages/jev-agent/test-dig-ground-truth.mts",
+      "files": [
+        "packages/jev-agent/test-dig-ground-truth.mts"
+      ],
+      "kind": "regression",
+      "defSha256": "c23c2030c757b7be60cbe00fcc29d1c31b1652fc88ca96a38f38f87746992e57"
+    },
+    {
+      "id": "sc-r-stale-drop-cells",
+      "surface": "packages/buddy-driver",
+      "origin": "live regression — remembered drop/resource cells went stale and drove approaches to dead locations",
+      "hypothesis": "stale remembered cells are fenced before they can ground an approach",
+      "command": "bun test packages/buddy-driver/test-stale-drop-cells.mts",
+      "files": [
+        "packages/buddy-driver/test-stale-drop-cells.mts"
+      ],
+      "kind": "regression",
+      "defSha256": "425caa5f44b3c816d87ce8702e01e564d1c8514b5666bc2550220492044724a7"
+    },
+    {
+      "id": "sc-r-double-authority",
+      "surface": "packages/jev-agent",
+      "origin": "migration invariant — legacy Executor claim must never overlap VTR body authority",
+      "hypothesis": "the legacy claim path refuses while a VTR transition owns the body",
+      "command": "bun test packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts",
+      "files": [
+        "packages/jev-agent/test-vtr-reach-executor-dispatch-authority.mts"
+      ],
+      "kind": "regression",
+      "defSha256": "83efd3f9660151d7041acb0462fec2a14cb6296493639103d3d4291781f9710d"
+    },
+    {
+      "id": "sc-r-reach-mission-authority",
+      "surface": "packages/jev-agent",
+      "origin": "P1 boundary pin — legacy Reach locomotion to a mission source is withheld while VTR owns the mission",
+      "hypothesis": "the strangler withholds same-predicate locomotion and nothing else",
+      "command": "bun test packages/jev-agent/test-vtr-reach-mission-authority.mts",
+      "files": [
+        "packages/jev-agent/test-vtr-reach-mission-authority.mts"
+      ],
+      "kind": "regression",
+      "defSha256": "2e73d9e979d92d910f6f9c51bfe371a44807f5c3a02f0d8d38d1e333ce860f0e"
+    }
+  ]
+}
