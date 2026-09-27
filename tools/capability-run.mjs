@@ -38,8 +38,19 @@ const HELP = `Usage:
 Options:
   --port <n>            isolated loopback server port (default 26601)
   --timeout-min <n>     capability timeout (default 60)
-  --mission-item <id>   mission item id (default oak_log)
+  --mission-item <id>   mission item id (default 'log', the declared rung
+                        predicate class: inventory_at_least counts any *_log —
+                        a literal species like 'oak_log' makes the resident's
+                        internal objective unsatisfiable on seeds whose only
+                        trees are another species; measured live 2026-09-27 on
+                        dev-424242-cand1: stranded on a pale_oak canopy with 93
+                        pale_oak_log sensed and every MINE filtered by the
+                        exact-name match, presented=[WAIT] forever)
   --mission-count <n>   mission count (default 1)
+  --accept <spec>       success accept spec: 'log' (any *_log item) or a literal
+                        item id; default = literal --mission-item. The rung's
+                        capability predicate, evaluated on the resident's own
+                        live inventory observation (report.currentInventoryObservation).
   --username <name>     bot username (default AI_Cap)
   --keep-worktree       keep the exact-source worktree after the run
   --source-dir <path>   reuse an existing prepared worktree (no install)
@@ -48,7 +59,7 @@ Options:
 `
 
 function parseArgs(argv) {
-  const options = { sha: null, seed: null, runId: null, port: 26601, timeoutMin: 60, missionItem: 'oak_log', missionCount: '1', username: 'AI_Cap', keepWorktree: false, sourceDir: null, noServer: false, dryRun: false }
+  const options = { sha: null, seed: null, runId: null, port: 26601, timeoutMin: 60, missionItem: 'log', missionCount: '1', accept: 'log', username: 'AI_Cap', keepWorktree: false, sourceDir: null, noServer: false, dryRun: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return null
@@ -59,6 +70,7 @@ function parseArgs(argv) {
     else if (arg === '--timeout-min') options.timeoutMin = Number(argv[++i])
     else if (arg === '--mission-item') options.missionItem = argv[++i]
     else if (arg === '--mission-count') options.missionCount = argv[++i]
+    else if (arg === '--accept') options.accept = argv[++i]
     else if (arg === '--username') options.username = argv[++i]
     else if (arg === '--keep-worktree') options.keepWorktree = true
     else if (arg === '--source-dir') options.sourceDir = argv[++i]
@@ -237,18 +249,41 @@ async function main() {
     procs.push(residentProc)
 
     // --- poll for mission completion ---
+    // Success = the rung predicate holds in the resident's OWN live inventory
+    // observation (currentInventoryObservation.counts). stats.goalComplete is
+    // intentionally not the gate: resident mode runs finishOnObjectiveComplete=false,
+    // so the generation never stops on objective; the verified inventory delta is
+    // the honest capability evidence.
+    const acceptLog = options.accept === 'log'
+    const acceptItem = options.accept === null ? options.missionItem : options.accept
+    const acceptCount = Number(options.missionCount)
+    const accepts = (counts) => {
+      if (counts === null || typeof counts !== 'object') return false
+      if (acceptLog) return Object.entries(counts).some(([name, n]) => name.endsWith('_log') && Number(n) >= acceptCount)
+      return Number(counts[acceptItem] ?? 0) >= acceptCount
+    }
     const sock = join(wtDir, 'packages/buddy-driver/data/resident/control.sock')
     const deadline = Date.now() + options.timeoutMin * 60_000
+    const startedAt = Date.now()
     let outcome = 'TIMEOUT'
     let lastStatus = null
+    let lastInventory = null
+    let objectiveCompleteAtMs = null
+    let inventoryAtCompletion = null
     let residentAliveAtEnd = false
     while (Date.now() < deadline) {
       if (residentProc.exitCode !== null) { outcome = `RESIDENT_EXIT_${residentProc.exitCode}`; break }
-      const reply = await control(sock, 'status')
+      const reply = await control(sock, 'report')
       if (reply.ok === true) {
         lastStatus = reply.data
-        if (reply.data?.stats?.goalComplete === true) { outcome = 'GOAL_COMPLETE'; break }
-        if (reply.data?.connected === false && reply.data?.stats?.generations > 0) { /* keep polling: reconnect may be in flight */ }
+        const counts = reply.data?.currentInventoryObservation?.counts ?? null
+        if (counts !== null) lastInventory = counts
+        if (accepts(counts)) {
+          objectiveCompleteAtMs = Date.now() - startedAt
+          inventoryAtCompletion = counts
+          outcome = 'OBJECTIVE_SATISFIED'
+          break
+        }
       }
       await new Promise((r) => setTimeout(r, 10_000))
     }
@@ -261,6 +296,30 @@ async function main() {
     await new Promise((r) => setTimeout(r, 5000))
 
     const buddyLog = existsSync(join(wtDir, 'packages/buddy-driver/buddy.log')) ? readFileSync(join(wtDir, 'packages/buddy-driver/buddy.log'), 'utf8') : ''
+    // last-resort inventory source: HEARTBEAT inv={...} lines (used when the
+    // control socket is already gone at harvest time)
+    let heartbeatInv = null
+    let heartbeatInvAt = null
+    for (const m of buddyLog.matchAll(/\[([0-9T:.Z-]+)\] HEARTBEAT [^\n]*?inv=(\{[^\n]*?\})/gu)) {
+      heartbeatInvAt = m[1]
+      try { heartbeatInv = JSON.parse(m[2]) } catch { /* partial line */ }
+    }
+    if (lastInventory === null && heartbeatInv !== null) lastInventory = heartbeatInv
+    // first-satisfaction recovery for runs launched before report-polling existed:
+    // scan HEARTBEAT lines in order for the first inv satisfying the accept spec.
+    if (objectiveCompleteAtMs === null && outcome === 'TIMEOUT') {
+      for (const m of buddyLog.matchAll(/\[([0-9T:.Z-]+)\] HEARTBEAT [^\n]*?inv=(\{[^\n]*?\})/gu)) {
+        let counts = null
+        try { counts = JSON.parse(m[2]) } catch { continue }
+        if (accepts(counts)) {
+          const t = Date.parse(m[1].replace(/Z$/, 'Z'))
+          objectiveCompleteAtMs = Number.isFinite(t) ? t - startedAt : null
+          inventoryAtCompletion = counts
+          outcome = 'OBJECTIVE_SATISFIED_LATE_OBSERVED'
+          break
+        }
+      }
+    }
     const markers = countMarkers(buddyLog, {
       DEATH: 0, RECOVERY: 0, RECONNECT: 0, QUIT: 0, ERROR: 0, WARN: 0,
       MISSION_PREFLIGHT: 0, PROPOSALS_COMMITTED: 0, PROPOSALS_DISCARDED: 0,
@@ -275,11 +334,12 @@ async function main() {
     if (existsSync(jevDecisionsDir)) for (const f of readdirSync(jevDecisionsDir).filter((f) => f.startsWith('decisions') && f.endsWith('.jsonl'))) jevDecisionCount += readFileSync(join(jevDecisionsDir, f), 'utf8').split('\n').filter((l) => l.trim().length > 0).length
 
     const result = {
-      record: 'capability-run-result', schemaVersion: 1,
+      record: 'capability-run-result', schemaVersion: 2,
       runId, sha: options.sha, seed: String(options.seed), port: options.port, levelName,
-      mission: plan.mission, username: options.username,
+      mission: plan.mission, accept: options.accept ?? acceptItem, username: options.username,
       outcome, residentAliveAtEnd, worldPresent: extractLevelSeed(serverDir),
-      wallClockMs: options.timeoutMin * 60_000 - Math.max(0, deadline - Date.now()),
+      objectiveCompleteAtMs, inventoryAtCompletion, finalInventory: lastInventory,
+      wallClockMs: Date.now() - startedAt,
       finishedAt: new Date().toISOString(),
       markers, jevDecisionCount,
       stats: lastStatus?.stats ?? null,
@@ -297,8 +357,8 @@ async function main() {
     if (!options.keepWorktree && options.sourceDir === null) {
       spawnSync('git', ['-C', REPO_ROOT, 'worktree', 'remove', '--force', wtDir], { encoding: 'utf8' })
     }
-    process.stdout.write(`${JSON.stringify({ runId, outcome, goalComplete: latestAcceptance?.goalComplete ?? false, runDir }, null, 2)}\n`)
-    return outcome === 'GOAL_COMPLETE' ? 0 : outcome.startsWith('RESIDENT_EXIT') ? 2 : 1
+    process.stdout.write(`${JSON.stringify({ runId, outcome, objectiveCompleteAtMs, inventory: inventoryAtCompletion ?? lastInventory, runDir }, null, 2)}\n`)
+    return outcome === 'OBJECTIVE_SATISFIED' ? 0 : outcome.startsWith('RESIDENT_EXIT') ? 2 : 1
   } catch (error) {
     await cleanup()
     writeFileSync(join(runDir, 'error.txt'), `${error instanceof Error ? error.stack : String(error)}\n`)
