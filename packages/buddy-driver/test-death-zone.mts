@@ -11,6 +11,7 @@
 import { DEATH_ZONE_DEATHS, DEATH_ZONE_RADIUS, isInDeathZone } from '../jev-agent/src/moveFailMemory.ts'
 import { DescendAwarePolicy, pickDescend } from './system-one-policy.ts'
 import { applyThreatRestriction, deathZoneEscapeCandidates as zoneEscapes } from '../jev-agent/src/candidates.ts'
+import { guardCandidate } from '../jev-agent/src/policy.ts'
 import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
 import type { DeathHazard } from './resident-types.ts'
 import type { JevPolicy, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
@@ -290,6 +291,50 @@ addCase('death-zone exits: the exit survives the bounded danger-state offer (por
   const ids = offer.candidates.map((entry) => entry.id)
   const pass = ids.includes(exit.id) && ids.includes(retreat.id) && !ids.includes(work.id)
   return { pass, detail: `offered=[${ids.join(',')}]` }
+})
+
+// Measured portal-p12: Jev committed `MOVE:dangerzone:p3233_67_2802` (the exit
+// is in the offer now), then the admission guard dropped it NO_SUPPORT - the
+// explored-cell target sits in neither `terrain.standable` nor
+// `terrain.escapeCells`. A cell the body already stood on is proven standable,
+// so the guard unions exploredCells the same way the emit side does.
+function guardFixture(explored: ReadonlySet<string>): WorldState {
+  return {
+    tick: 1,
+    self: { position: { x: 3224, y: 64, z: 2809 }, dimension: DIM },
+    goal: { id: 'g1', description: 'x', complete: false },
+    goalQueue: { current: null },
+    terrain: { standable: [], escapeCells: [] },
+    entities: [],
+    blocks: [],
+    signals: { exploredCells: explored },
+  } as unknown as WorldState
+}
+
+addCase('death-zone exits: a committed explored-cell exit survives the admission guard (portal-p12)', () => {
+  const exit = candidate('MOVE:dangerzone:p3214_64_2818', 'MOVE', { x: 3214, y: 64, z: 2818 })
+  const result = guardCandidate(exit, guardFixture(new Set(['p3214_64_2818'])), {
+    phase: 'decision',
+    candidateIds: new Set([exit.id]),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 20,
+  })
+  const pass = result.ok === true || (result.code !== 'NO_SUPPORT' && result.code !== 'UNKNOWN_CANDIDATE')
+  return { pass, detail: `result=${JSON.stringify(result.ok ? 'ok' : { code: result.code, reason: result.reason })}` }
+})
+
+addCase('death-zone exits: an unrecorded far cell is still denied NO_SUPPORT', () => {
+  const exit = candidate('MOVE:dangerzone:p3214_64_2818', 'MOVE', { x: 3214, y: 64, z: 2818 })
+  const result = guardCandidate(exit, guardFixture(new Set()), {
+    phase: 'decision',
+    candidateIds: new Set([exit.id]),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 20,
+  })
+  const pass = result.ok === false && result.code === 'NO_SUPPORT'
+  return { pass, detail: `result=${JSON.stringify(result.ok ? 'ok' : { code: result.code, reason: result.reason })}` }
 })
 
 addCase('DescendAwarePolicy strips in-zone move targets before the inner policy sees them', async () => {

@@ -10,7 +10,7 @@
 //   'decision' - validating the chosen candidate before the executor starts
 //   'dig'      - re-validating at the moment of the dig, after pathing moved us
 import type { Candidate, CandidateKind } from './candidates.ts'
-import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META } from './candidates.ts'
+import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META, exploredCellKey } from './candidates.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 import type { Vec3Json, WorldState } from './state.ts'
@@ -376,10 +376,16 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
     // scan, which applies the same `isStandable` predicate over a wider window
     // (`state.terrain.escapeCells`). The ordinary 5x5x3 window can never contain
     // a destination outside melee reach, so validating only against it would
-    // reject every real retreat the candidate layer can ground.
+    // reject every real retreat the candidate layer can ground. A cell the body
+    // already stood on (`signals.exploredCells`, bounded LRU) is the strongest
+    // standable evidence of all - that is what `MOVE:dangerzone:*` exits target
+    // in quiet respawn states (measured portal-p12: Jev committed the exit,
+    // the guard then dropped it NO_SUPPORT because the cell was not in either
+    // sensor ring).
     const standable =
       state.terrain.standable.some((spot) => samePosition(spot, target)) ||
-      (state.terrain.escapeCells ?? []).some((spot) => samePosition(spot, target))
+      (state.terrain.escapeCells ?? []).some((spot) => samePosition(spot, target)) ||
+      (state.signals?.exploredCells?.has(exploredCellKey(target)) ?? false)
     if (!standable) {
       return deny(
         candidate.id,
