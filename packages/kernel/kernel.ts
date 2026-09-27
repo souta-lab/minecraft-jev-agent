@@ -291,6 +291,24 @@ function canonicalContractHashValid(contract: CanonicalTransitionContract): bool
   return contract.contractHash === sha(semantic)
 }
 function canonicalContractValid(contract: CanonicalTransitionContract): boolean { return CANONICAL_CONTRACTS.has(contract) && canonicalContractHashValid(contract) }
+// Replay cannot consult the CANONICAL_CONTRACTS WeakSet (journals survive process
+// boundaries), so it re-runs full constructor semantics and compares canonical bytes.
+function canonicalContractSemanticallyValid(contract: CanonicalTransitionContract): boolean {
+  try {
+    const rebuilt = createTransitionContract({
+      transitionId: contract.transitionId, family: contract.family, class: contract.class, urgency: contract.urgency, world: contract.world,
+      desiredPredicate: contract.desiredPredicate, requires: contract.requires, ensures: contract.ensures, invariants: contract.invariants,
+      claims: contract.claims.map((c) => ({ resource: c.resource, mode: c.mode, preemptible: c.preemptible, resumable: c.resumable, maxNonPreemptibleMs: c.maxNonPreemptibleMs })),
+      effects: contract.effects.map((e) => ({ kind: e.kind, scope: e.scope, irreversible: e.irreversible, maxCount: e.maxCount, requiredResources: e.requiredResources.map((r) => ({ resource: r.resource, mode: r.mode })) })),
+      budget: contract.budget,
+      progressDefinition: contract.progressDefinition, controllerDefinition: contract.controllerDefinition, verificationDefinition: contract.verificationDefinition, terminalPolicy: contract.terminalPolicy,
+      witnessValidation: contract.witnessValidation,
+    })
+    return canonicalJson(rebuilt) === canonicalJson(contract)
+  } catch {
+    return false
+  }
+}
 
 function emptyUsage(): TransitionUsage { return deepFreeze({ activeMs: 0, mechanicalSteps: 0, resources: {}, risk: {} }) }
 function verifierMap(defs: readonly DefinitionIdentity[]): Readonly<Record<string, DefinitionIdentity>> {
@@ -383,7 +401,7 @@ function quiesceTransitionEffects(state: KernelState, transitionId: TransitionId
 }
 function cleanupPreemptions(state: KernelState, transitionId: TransitionId): KernelState {
   const preemptions = cloneRecord(state.preemptions); let changed = false
-  for (const [id, tx] of Object.entries(preemptions)) if (tx.requesterId === transitionId || tx.victims.some((v) => v.transitionId === transitionId)) { preemptions[id] = deepFreeze({ ...tx, status: 'CANCELED' }); changed = true }
+  for (const [id, tx] of Object.entries(preemptions)) if ((tx.status === 'PLANNED' || tx.status === 'READY') && (tx.requesterId === transitionId || tx.victims.some((v) => v.transitionId === transitionId))) { preemptions[id] = deepFreeze({ ...tx, status: 'CANCELED' }); changed = true }
   return changed ? deepFreeze({ ...state, preemptions }) : state
 }
 function hasBoundedNonPreemptibleLease(state: KernelState, transitionId: TransitionId): boolean {
@@ -486,14 +504,14 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
   switch (command.kind) {
     case 'REGISTER_TRANSITION': {
       const compiler = state.contractCompilerRegistry[command.compiler.id]
-      if (compiler === undefined || compiler.version !== command.compiler.version) return failure(state, 'UNKNOWN_CONTRACT_COMPILER')
-      if (!replay && !isTrustedCapability(command.capability, 'CONTRACT_COMPILER', command.compiler.id)) return failure(state, 'UNTRUSTED_CONTRACT_COMPILER')
-      if (!(replay ? canonicalContractHashValid(command.contract) : canonicalContractValid(command.contract))) return failure(state, 'NON_CANONICAL_CONTRACT')
+      if (compiler === undefined || compiler.version !== command.compiler.version) return failure(inputState, 'UNKNOWN_CONTRACT_COMPILER')
+      if (!replay && !isTrustedCapability(command.capability, 'CONTRACT_COMPILER', command.compiler.id)) return failure(inputState, 'UNTRUSTED_CONTRACT_COMPILER')
+      if (!(replay ? canonicalContractSemanticallyValid(command.contract) : canonicalContractValid(command.contract))) return failure(inputState, 'NON_CANONICAL_CONTRACT')
       const acceptedContract = replay ? deepFreeze(command.contract) : command.contract
-      if (!sameWorld(acceptedContract.world, state.world)) return failure(state, 'CONTRACT_WORLD_MISMATCH')
-      if (state.transitions[acceptedContract.transitionId] !== undefined) return failure(state, 'DUPLICATE_TRANSITION_ID')
+      if (!sameWorld(acceptedContract.world, state.world)) return failure(inputState, 'CONTRACT_WORLD_MISMATCH')
+      if (state.transitions[acceptedContract.transitionId] !== undefined) return failure(inputState, 'DUPLICATE_TRANSITION_ID')
       const existingHash = state.contracts[acceptedContract.contractHash]
-      if (existingHash !== undefined && canonicalJson(existingHash) !== canonicalJson(acceptedContract)) return failure(state, 'CONTRACT_HASH_COLLISION_OR_FORGERY')
+      if (existingHash !== undefined && canonicalJson(existingHash) !== canonicalJson(acceptedContract)) return failure(inputState, 'CONTRACT_HASH_COLLISION_OR_FORGERY')
       const contracts = cloneRecord(state.contracts); contracts[acceptedContract.contractHash] = acceptedContract
       const tc = cloneRecord(state.transitionContracts); tc[acceptedContract.transitionId] = acceptedContract.contractHash
       const transitions = cloneRecord(state.transitions); transitions[acceptedContract.transitionId] = deepFreeze({ transitionId: acceptedContract.transitionId, contractHash: acceptedContract.contractHash, lifecycle: 'ENABLED', heldLeaseIds: [], starvationAge: 0, usage: emptyUsage(), suspendReason: null, blockReason: null, terminalOutcome: null, pendingTerminalOutcome: null, cancelRequested: false, activeSinceMonoMs: null, materialRevisionAtActivation: state.materialRevision, witnessRevision: 0, lifecycleRevision: 0, progressRevision: 0, progressValueHash: null, progressObservedAtMonoMs: null })
@@ -501,29 +519,29 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, 'TRANSITION_REGISTERED', acceptedContract.transitionId, { contractHash: acceptedContract.contractHash })
     }
     case 'ADMIT_TRANSITION': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION')
-      if (t.lifecycle !== 'ENABLED') return failure(state, 'ILLEGAL_LIFECYCLE_EDGE')
-      if (!state.missionPredicates.includes(c.desiredPredicate)) return failure(state, 'MISSION_NOT_AUTHORIZED')
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION')
+      if (t.lifecycle !== 'ENABLED') return failure(inputState, 'ILLEGAL_LIFECYCLE_EDGE')
+      if (!state.missionPredicates.includes(c.desiredPredicate)) return failure(inputState, 'MISSION_NOT_AUTHORIZED')
       state = updateTransition(state, { ...t, lifecycle: 'RUNNABLE', lifecycleRevision: t.lifecycleRevision + 1 }, true)
       return success(state, command, 'TRANSITION_ADMITTED', command.transitionId, {})
     }
     case 'ACCEPT_VERIFIED_SNAPSHOT': {
-      if (!replay && !isTrustedCapability(command.capability, 'VERIFIER', command.verifier.id)) return failure(state, 'UNTRUSTED_VERIFIER_CAPABILITY')
-      if (getVerifier(command.verifier) === null) return failure(state, 'UNKNOWN_VERIFIER')
-      if (!Number.isFinite(command.observedAtMonoMs) || command.observedAtMonoMs < 0) return failure(state, 'INVALID_OBSERVATION_TIME'); if (command.observedAtMonoMs > state.monotonicMs) return failure(state, 'FUTURE_OBSERVATION')
+      if (!replay && !isTrustedCapability(command.capability, 'VERIFIER', command.verifier.id)) return failure(inputState, 'UNTRUSTED_VERIFIER_CAPABILITY')
+      if (getVerifier(command.verifier) === null) return failure(inputState, 'UNKNOWN_VERIFIER')
+      if (!Number.isFinite(command.observedAtMonoMs) || command.observedAtMonoMs < 0) return failure(inputState, 'INVALID_OBSERVATION_TIME'); if (command.observedAtMonoMs > state.monotonicMs) return failure(inputState, 'FUTURE_OBSERVATION')
       const latestObservedAt = Object.values(state.facts).reduce((max, fact) => Math.max(max, fact.observedAtMonoMs), -Infinity)
-      if (command.observedAtMonoMs < latestObservedAt) return failure(state, 'OBSERVATION_TIME_REGRESSION')
+      if (command.observedAtMonoMs < latestObservedAt) return failure(inputState, 'OBSERVATION_TIME_REGRESSION')
       const seenPredicates = new Set<string>()
       for (const input of command.facts) {
         assertId(input.predicateId, 'predicateId'); assertId(input.valueHash, 'valueHash')
-        if (!['true', 'false', 'unknown'].includes(input.truth)) return failure(state, 'INVALID_FACT_TRUTH')
+        if (!['true', 'false', 'unknown'].includes(input.truth)) return failure(inputState, 'INVALID_FACT_TRUTH')
         if (input.effectCommitId !== undefined && input.effectCommitId !== null) {
           assertId(input.effectCommitId, 'effectCommitId')
           const effect = state.effects[input.effectCommitId]
-          if (effect === undefined || !sameWorld(effect.world, state.world)) return failure(state, 'UNKNOWN_EFFECT_EVIDENCE_TARGET')
+          if (effect === undefined || !sameWorld(effect.world, state.world)) return failure(inputState, 'UNKNOWN_EFFECT_EVIDENCE_TARGET')
         }
-        if (seenPredicates.has(input.predicateId)) return failure(state, 'DUPLICATE_PREDICATE_IN_SNAPSHOT')
+        if (seenPredicates.has(input.predicateId)) return failure(inputState, 'DUPLICATE_PREDICATE_IN_SNAPSHOT')
         seenPredicates.add(input.predicateId)
       }
       const nextRevision = state.factRevision + 1; const facts = cloneRecord(state.facts); let nextFactId = state.nextFactId
@@ -533,10 +551,10 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, 'VERIFIED_SNAPSHOT_ACCEPTED', null, { factRevision: nextRevision, count: command.facts.length, materialChange: command.materialChange })
     }
     case 'ACCEPT_WITNESS_PROOF': {
-      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION')
-      if (c.witnessValidation === null || c.witnessValidation.id !== command.validator.id || c.witnessValidation.version !== command.validator.version) return failure(state, 'WITNESS_VALIDATOR_MISMATCH')
-      if (!replay && !isTrustedCapability(command.capability, 'WITNESS_VALIDATOR', command.validator.id)) return failure(state, 'UNTRUSTED_WITNESS_CAPABILITY')
-      if (!Number.isInteger(command.witnessRevision) || command.witnessRevision < 0) return failure(state, 'INVALID_WITNESS_REVISION'); if (command.witnessRevision < t.witnessRevision) return failure(state, 'WITNESS_REVISION_REGRESSION')
+      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION')
+      if (c.witnessValidation === null || c.witnessValidation.id !== command.validator.id || c.witnessValidation.version !== command.validator.version) return failure(inputState, 'WITNESS_VALIDATOR_MISMATCH')
+      if (!replay && !isTrustedCapability(command.capability, 'WITNESS_VALIDATOR', command.validator.id)) return failure(inputState, 'UNTRUSTED_WITNESS_CAPABILITY')
+      if (!Number.isInteger(command.witnessRevision) || command.witnessRevision < 0) return failure(inputState, 'INVALID_WITNESS_REVISION'); if (command.witnessRevision < t.witnessRevision) return failure(inputState, 'WITNESS_REVISION_REGRESSION')
       assertId(command.witnessRefHash, 'witnessRefHash'); assertId(command.relationId, 'relationId')
       const id = `witness:${state.nextWitnessId}`; const witnesses = cloneRecord(state.witnesses); witnesses[id] = deepFreeze({ proofId: id, transitionId: t.transitionId, contractHash: c.contractHash, witnessRevision: command.witnessRevision, witnessRefHash: command.witnessRefHash, relationId: command.relationId, world: state.world, binding: bindingOf(state), validator: command.validator })
       state = deepFreeze({ ...state, witnesses, nextWitnessId: state.nextWitnessId + 1 })
@@ -544,58 +562,60 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, 'WITNESS_PROOF_ACCEPTED', command.transitionId, { proofId: id, witnessRevision: command.witnessRevision })
     }
     case 'ACQUIRE_DECLARED_RESOURCES': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const granted = grantDeclared(state, command.transitionId); if (typeof granted === 'string') return failure(state, granted); state = granted
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const granted = grantDeclared(state, command.transitionId); if (typeof granted === 'string') return failure(inputState, granted); state = granted
       return success(state, command, 'RESOURCE_BUNDLE_GRANTED', command.transitionId, { leaseIds: state.transitions[command.transitionId]!.heldLeaseIds })
     }
     case 'PAUSE_ACTIVE': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const t = state.transitions[command.transitionId]; if (t === undefined) return failure(state, 'UNKNOWN_TRANSITION'); if (t.lifecycle !== 'ACTIVE') return failure(state, 'ILLEGAL_LIFECYCLE_EDGE'); if (!currentLeaseSetMatchesTransition(state, t)) return failure(state, 'LEASE_STATE_DIVERGENCE')
-      if (t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(state, 'TRANSITION_QUIESCING')
-      if (hasDispatchInFlight(state, t.transitionId)) return failure(state, 'EFFECT_DISPATCH_IN_FLIGHT')
-      if (hasBoundedNonPreemptibleLease(state, t.transitionId)) return failure(state, 'SAFE_YIELD_REQUIRED')
+      if (command.to !== 'OBSERVING' && command.to !== 'BLOCKED') return failure(inputState, 'INVALID_PAUSE_TARGET')
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const t = state.transitions[command.transitionId]; if (t === undefined) return failure(inputState, 'UNKNOWN_TRANSITION'); if (t.lifecycle !== 'ACTIVE') return failure(inputState, 'ILLEGAL_LIFECYCLE_EDGE'); if (!currentLeaseSetMatchesTransition(state, t)) return failure(inputState, 'LEASE_STATE_DIVERGENCE')
+      if (t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(inputState, 'TRANSITION_QUIESCING')
+      if (hasDispatchInFlight(state, t.transitionId)) return failure(inputState, 'EFFECT_DISPATCH_IN_FLIGHT')
+      if (hasBoundedNonPreemptibleLease(state, t.transitionId)) return failure(inputState, 'SAFE_YIELD_REQUIRED')
       state = releaseAllLeases(state, t.transitionId); state = quiesceTransitionEffects(state, t.transitionId)
       state = updateTransition(state, { ...t, lifecycle: command.to, heldLeaseIds: [], activeSinceMonoMs: null, blockReason: command.to === 'BLOCKED' ? command.reason : null, suspendReason: null, lifecycleRevision: t.lifecycleRevision + 1 }, true)
       return success(state, command, command.to === 'OBSERVING' ? 'TRANSITION_OBSERVING' : 'TRANSITION_BLOCKED', t.transitionId, { reason: command.reason })
     }
     case 'ACK_PAUSE_YIELD': {
-      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE') return failure(state, 'ILLEGAL_LIFECYCLE_EDGE')
-      if (t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(state, 'TRANSITION_QUIESCING')
-      if (hasDispatchInFlight(state, t.transitionId)) return failure(state, 'EFFECT_DISPATCH_IN_FLIGHT')
-      if (command.atMonoMs !== state.monotonicMs) return failure(state, 'STALE_YIELD_ACK')
-      if (!currentLeaseSetMatchesTransition(state, t)) return failure(state, 'LEASE_STATE_DIVERGENCE')
+      if (command.to !== 'OBSERVING' && command.to !== 'BLOCKED') return failure(inputState, 'INVALID_PAUSE_TARGET')
+      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE') return failure(inputState, 'ILLEGAL_LIFECYCLE_EDGE')
+      if (t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(inputState, 'TRANSITION_QUIESCING')
+      if (hasDispatchInFlight(state, t.transitionId)) return failure(inputState, 'EFFECT_DISPATCH_IN_FLIGHT')
+      if (command.atMonoMs !== state.monotonicMs) return failure(inputState, 'STALE_YIELD_ACK')
+      if (!currentLeaseSetMatchesTransition(state, t)) return failure(inputState, 'LEASE_STATE_DIVERGENCE')
       const late = leasesFor(state, t.transitionId).some((l) => !l.preemptible && command.atMonoMs > l.hardYieldDeadlineMonoMs!)
       state = releaseAllLeases(state, t.transitionId); state = quiesceTransitionEffects(state, t.transitionId)
       state = updateTransition(state, { ...t, lifecycle: command.to, heldLeaseIds: [], activeSinceMonoMs: null, blockReason: command.to === 'BLOCKED' ? command.reason : null, suspendReason: null, lifecycleRevision: t.lifecycleRevision + 1 }, true)
       return success(state, command, late ? 'PAUSE_LATE_YIELD_COMPLETED' : (command.to === 'OBSERVING' ? 'TRANSITION_OBSERVING' : 'TRANSITION_BLOCKED'), t.transitionId, { reason: command.reason, deadlineViolated: late })
     }
     case 'RESUME_TRANSITION': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION')
-      if (!['SUSPENDED', 'OBSERVING', 'BLOCKED'].includes(t.lifecycle)) return failure(state, 'ILLEGAL_LIFECYCLE_EDGE')
-      if (leasesFor(state, t.transitionId).length !== 0) return failure(state, 'NONACTIVE_TRANSITION_HAS_LEASE')
-      const pre = activationPreconditions(state, t, c); if (pre !== null) return failure(state, pre)
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION')
+      if (!['SUSPENDED', 'OBSERVING', 'BLOCKED'].includes(t.lifecycle)) return failure(inputState, 'ILLEGAL_LIFECYCLE_EDGE')
+      if (leasesFor(state, t.transitionId).length !== 0) return failure(inputState, 'NONACTIVE_TRANSITION_HAS_LEASE')
+      const pre = activationPreconditions(state, t, c); if (pre !== null) return failure(inputState, pre)
       state = updateTransition(state, { ...t, lifecycle: 'RUNNABLE', suspendReason: null, blockReason: null, lifecycleRevision: t.lifecycleRevision + 1 }, true)
       return success(state, command, 'TRANSITION_RESUMED_TO_RUNNABLE', t.transitionId, {})
     }
     case 'AGE_RUNNABLE': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const t = state.transitions[command.transitionId]; if (t === undefined) return failure(state, 'UNKNOWN_TRANSITION'); if (t.lifecycle !== 'RUNNABLE') return failure(state, 'ONLY_RUNNABLE_AGES')
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const t = state.transitions[command.transitionId]; if (t === undefined) return failure(inputState, 'UNKNOWN_TRANSITION'); if (t.lifecycle !== 'RUNNABLE') return failure(inputState, 'ONLY_RUNNABLE_AGES')
       state = updateTransition(state, { ...t, starvationAge: Math.min(199, t.starvationAge + 1) }, false)
       return success(state, command, 'RUNNABLE_AGED', t.transitionId, { age: state.transitions[t.transitionId]!.starvationAge })
     }
     case 'START_PREEMPTION': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const requester = state.transitions[command.requesterId]; const c = contractFor(state, command.requesterId); if (requester === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION'); if (requester.lifecycle !== 'RUNNABLE') return failure(state, 'REQUESTER_NOT_RUNNABLE')
-      const pre = activationPreconditions(state, requester, c); if (pre !== null) return failure(state, pre)
-      const conflicts = conflictsFor(state, requester.transitionId, c.claims); if (conflicts.length === 0) return failure(state, 'NO_PREEMPTION_NEEDED')
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const requester = state.transitions[command.requesterId]; const c = contractFor(state, command.requesterId); if (requester === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION'); if (requester.lifecycle !== 'RUNNABLE') return failure(inputState, 'REQUESTER_NOT_RUNNABLE')
+      const pre = activationPreconditions(state, requester, c); if (pre !== null) return failure(inputState, pre)
+      const conflicts = conflictsFor(state, requester.transitionId, c.claims); if (conflicts.length === 0) return failure(inputState, 'NO_PREEMPTION_NEEDED')
       const requesterPriority = effectivePriority(state, requester.transitionId); const victimIds = uniqSorted(conflicts.map((l) => l.owner)); const victims: PreemptionVictimPlan[] = []
       for (const victimId of victimIds) {
-        const vt = state.transitions[victimId]; const vc = contractFor(state, victimId); if (vt === undefined || vc === null || vt.lifecycle !== 'ACTIVE') return failure(state, 'CONFLICT_OWNER_NOT_ACTIVE'); if (vt.cancelRequested || vt.pendingTerminalOutcome !== null) return failure(state, 'CONFLICT_OWNER_QUIESCING')
+        const vt = state.transitions[victimId]; const vc = contractFor(state, victimId); if (vt === undefined || vc === null || vt.lifecycle !== 'ACTIVE') return failure(inputState, 'CONFLICT_OWNER_NOT_ACTIVE'); if (vt.cancelRequested || vt.pendingTerminalOutcome !== null) return failure(inputState, 'CONFLICT_OWNER_QUIESCING')
         const conflictLeases = conflicts.filter((l) => l.owner === victimId); const victimPriority = effectivePriority(state, victimId)
-        if (requesterPriority < victimPriority) return failure(state, 'LOWER_PRIORITY_CANNOT_PREEMPT')
-        if (requesterPriority === victimPriority && vt.activeSinceMonoMs !== null && state.monotonicMs - vt.activeSinceMonoMs < state.minResidencyMs && state.materialRevision === vt.materialRevisionAtActivation) return failure(state, 'RESIDENCY_HYSTERESIS')
+        if (requesterPriority < victimPriority) return failure(inputState, 'LOWER_PRIORITY_CANNOT_PREEMPT')
+        if (requesterPriority === victimPriority && vt.activeSinceMonoMs !== null && state.monotonicMs - vt.activeSinceMonoMs < state.minResidencyMs && state.materialRevision === vt.materialRevisionAtActivation) return failure(inputState, 'RESIDENCY_HYSTERESIS')
         const nonPreemptible = conflictLeases.filter((l) => !l.preemptible); const hard = nonPreemptible.length > 0 ? Math.min(...nonPreemptible.map((l) => l.hardYieldDeadlineMonoMs!)) : state.monotonicMs + state.preemptibleYieldBudgetMs
         victims.push(deepFreeze({ transitionId: victimId, contractHash: vc.contractHash, conflictingLeaseIds: conflictLeases.map((l) => l.leaseGrantId).sort(), allLeaseIdsAtPlan: leasesFor(state, victimId).map((l) => l.leaseGrantId), safeYieldAcknowledged: false, acknowledgedAtMonoMs: null, lateYield: false, deadlineViolated: false, inheritedPriority: nonPreemptible.length > 0 && requesterPriority > victimPriority ? requesterPriority : null, resumable: conflictLeases.every((l) => l.resumable), hardYieldDeadlineMonoMs: hard }))
       }
@@ -605,13 +625,13 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, 'PREEMPTION_PLANNED', requester.transitionId, { transactionId: id, victims: victimIds })
     }
     case 'ACK_PREEMPTION_YIELD': {
-      if (!controllerAuthorized(command.victimId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(state, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(state, 'STALE_PREEMPTION')
-      const vi = tx.victims.findIndex((v) => v.transitionId === command.victimId); if (vi < 0) return failure(state, 'UNKNOWN_PREEMPTION_VICTIM')
-      const victim = tx.victims[vi]!; const currentIds = leasesFor(state, victim.transitionId).map((l) => l.leaseGrantId).sort(); if (canonicalJson(currentIds) !== canonicalJson(victim.allLeaseIdsAtPlan)) return failure(state, 'STALE_PREEMPTION_LEASES')
-      if (!command.safeYield) return failure(state, 'SAFE_YIELD_NOT_REACHED')
-      if (command.atMonoMs !== state.monotonicMs) return failure(state, 'STALE_YIELD_ACK')
-      if (hasDispatchInFlight(state, victim.transitionId)) return failure(state, 'EFFECT_DISPATCH_IN_FLIGHT')
+      if (!controllerAuthorized(command.victimId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(inputState, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(inputState, 'STALE_PREEMPTION')
+      const vi = tx.victims.findIndex((v) => v.transitionId === command.victimId); if (vi < 0) return failure(inputState, 'UNKNOWN_PREEMPTION_VICTIM')
+      const victim = tx.victims[vi]!; const currentIds = leasesFor(state, victim.transitionId).map((l) => l.leaseGrantId).sort(); if (canonicalJson(currentIds) !== canonicalJson(victim.allLeaseIdsAtPlan)) return failure(inputState, 'STALE_PREEMPTION_LEASES')
+      if (!command.safeYield) return failure(inputState, 'SAFE_YIELD_NOT_REACHED')
+      if (command.atMonoMs !== state.monotonicMs) return failure(inputState, 'STALE_YIELD_ACK')
+      if (hasDispatchInFlight(state, victim.transitionId)) return failure(inputState, 'EFFECT_DISPATCH_IN_FLIGHT')
       const late = command.atMonoMs > victim.hardYieldDeadlineMonoMs; const victims = [...tx.victims]; victims[vi] = deepFreeze({ ...victim, safeYieldAcknowledged: true, acknowledgedAtMonoMs: command.atMonoMs, lateYield: late, deadlineViolated: victim.deadlineViolated || late })
       const ready = victims.every((v) => v.safeYieldAcknowledged); const preemptions = cloneRecord(state.preemptions); preemptions[tx.transactionId] = deepFreeze({ ...tx, victims, status: ready ? 'READY' : 'PLANNED' })
       state = revokeUnusedEffects(state, victim.transitionId)
@@ -619,100 +639,101 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, late ? 'PREEMPTION_LATE_YIELD_ACKNOWLEDGED' : 'PREEMPTION_YIELD_ACKNOWLEDGED', victim.transitionId, { transactionId: tx.transactionId, deadlineViolated: late, ready })
     }
     case 'COMMIT_PREEMPTION': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(state, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(state, 'STALE_PREEMPTION'); if (tx.status !== 'READY') return failure(state, 'PREEMPTION_NOT_READY')
-      const requester = state.transitions[tx.requesterId]; const rc = contractFor(state, tx.requesterId); if (requester === undefined || rc === null || requester.lifecycle !== 'RUNNABLE') return failure(state, 'REQUESTER_NOT_RUNNABLE')
-      if (rc.contractHash !== tx.requesterContractHash || claimFingerprint(rc.claims) !== tx.requesterClaimFingerprint) return failure(state, 'REQUESTER_BUNDLE_CHANGED')
-      const plannedVictimIds = new Set(tx.victims.map((v) => v.transitionId)); const conflicts = conflictsFor(state, requester.transitionId, rc.claims); if (conflicts.some((l) => !plannedVictimIds.has(l.owner))) return failure(state, 'UNPLANNED_CONFLICT')
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(inputState, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(inputState, 'STALE_PREEMPTION'); if (tx.status !== 'READY') return failure(inputState, 'PREEMPTION_NOT_READY')
+      const requester = state.transitions[tx.requesterId]; const rc = contractFor(state, tx.requesterId); if (requester === undefined || rc === null || requester.lifecycle !== 'RUNNABLE') return failure(inputState, 'REQUESTER_NOT_RUNNABLE')
+      if (rc.contractHash !== tx.requesterContractHash || claimFingerprint(rc.claims) !== tx.requesterClaimFingerprint) return failure(inputState, 'REQUESTER_BUNDLE_CHANGED')
+      const plannedVictimIds = new Set(tx.victims.map((v) => v.transitionId)); const conflicts = conflictsFor(state, requester.transitionId, rc.claims); if (conflicts.some((l) => !plannedVictimIds.has(l.owner))) return failure(inputState, 'UNPLANNED_CONFLICT')
       for (const v of tx.victims) {
-        const vt = state.transitions[v.transitionId]; const vc = contractFor(state, v.transitionId); if (vt === undefined || vc === null || vt.lifecycle !== 'ACTIVE' || vc.contractHash !== v.contractHash) return failure(state, 'STALE_VICTIM')
-        if (canonicalJson(leasesFor(state, v.transitionId).map((l) => l.leaseGrantId)) !== canonicalJson(v.allLeaseIdsAtPlan)) return failure(state, 'STALE_PREEMPTION_LEASES')
+        const vt = state.transitions[v.transitionId]; const vc = contractFor(state, v.transitionId); if (vt === undefined || vc === null || vt.lifecycle !== 'ACTIVE' || vc.contractHash !== v.contractHash) return failure(inputState, 'STALE_VICTIM')
+        if (canonicalJson(leasesFor(state, v.transitionId).map((l) => l.leaseGrantId)) !== canonicalJson(v.allLeaseIdsAtPlan)) return failure(inputState, 'STALE_PREEMPTION_LEASES')
       }
       let next = state
       for (const v of tx.victims) { next = releaseAllLeases(next, v.transitionId); next = quiesceTransitionEffects(next, v.transitionId) }
       const transitions = cloneRecord(next.transitions)
       for (const v of tx.victims) { const vt = transitions[v.transitionId]!; transitions[v.transitionId] = v.resumable ? deepFreeze({ ...vt, lifecycle: 'SUSPENDED', heldLeaseIds: [], suspendReason: `PREEMPTED_BY:${tx.requesterId}`, activeSinceMonoMs: null, lifecycleRevision: vt.lifecycleRevision + 1 }) : deepFreeze({ ...vt, lifecycle: 'TERMINAL', heldLeaseIds: [], terminalOutcome: { kind: 'PREEMPTED_NONRESUMABLE', by: tx.requesterId }, activeSinceMonoMs: null, lifecycleRevision: vt.lifecycleRevision + 1 }) }
       next = deepFreeze({ ...next, transitions, registryRevision: next.registryRevision + 1 })
-      const grant = grantDeclared(next, tx.requesterId, true); if (typeof grant === 'string') return failure(state, `ATOMIC_PREEMPTION_GRANT_FAILED:${grant}`); next = grant
+      const grant = grantDeclared(next, tx.requesterId, true); if (typeof grant === 'string') return failure(inputState, `ATOMIC_PREEMPTION_GRANT_FAILED:${grant}`); next = grant
       const preemptions = cloneRecord(next.preemptions); preemptions[tx.transactionId] = deepFreeze({ ...tx, status: 'COMMITTED' }); next = deepFreeze({ ...next, preemptions })
       state = next
       return success(state, command, 'PREEMPTION_COMMITTED', tx.requesterId, { transactionId: tx.transactionId, victims: tx.victims.map((v) => v.transitionId), deadlineViolations: tx.victims.filter((v) => v.deadlineViolated).map((v) => v.transitionId) }, [tx.requesterId, ...tx.victims.map((v) => v.transitionId)])
     }
     case 'ISSUE_EFFECT': {
-      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION'); if (t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(state, 'TRANSITION_NOT_EFFECT_ELIGIBLE'); if (!currentLeaseSetMatchesTransition(state, t)) return failure(state, 'LEASE_STATE_DIVERGENCE')
-      const currentPreconditions = activationPreconditions(state, t, c); if (currentPreconditions !== null) return failure(state, currentPreconditions)
-      const permit = c.effects.find((p) => p.kind === command.effect && p.scope === command.scope); if (permit === undefined) return failure(state, 'EFFECT_NOT_PERMITTED')
-      const usageKey = `${t.transitionId}|${permit.key}`; if ((state.effectUsage[usageKey] ?? 0) >= permit.maxCount) return failure(state, 'EFFECT_MAX_COUNT_EXHAUSTED')
-      const required = requiredLeasesForPermit(state, t.transitionId, permit); if (required === null || required.length === 0) return failure(state, 'REQUIRED_EFFECT_LEASE_MISSING')
-      if (!Number.isFinite(command.ttlMs) || command.ttlMs <= 0) return failure(state, 'INVALID_EFFECT_TTL')
+      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION'); if (t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(inputState, 'TRANSITION_NOT_EFFECT_ELIGIBLE'); if (!currentLeaseSetMatchesTransition(state, t)) return failure(inputState, 'LEASE_STATE_DIVERGENCE')
+      const currentPreconditions = activationPreconditions(state, t, c); if (currentPreconditions !== null) return failure(inputState, currentPreconditions)
+      const permit = c.effects.find((p) => p.kind === command.effect && p.scope === command.scope); if (permit === undefined) return failure(inputState, 'EFFECT_NOT_PERMITTED')
+      const usageKey = `${t.transitionId}|${permit.key}`; if ((state.effectUsage[usageKey] ?? 0) >= permit.maxCount) return failure(inputState, 'EFFECT_MAX_COUNT_EXHAUSTED')
+      const required = requiredLeasesForPermit(state, t.transitionId, permit); if (required === null || required.length === 0) return failure(inputState, 'REQUIRED_EFFECT_LEASE_MISSING')
+      if (!Number.isFinite(command.ttlMs) || command.ttlMs <= 0) return failure(inputState, 'INVALID_EFFECT_TTL')
       const id = `commit:${state.nextCommitId}`; const effects = cloneRecord(state.effects); effects[id] = deepFreeze({ commitId: id, transitionId: t.transitionId, contractHash: c.contractHash, permitKey: permit.key, effect: permit.kind, scope: permit.scope, world: state.world, binding: bindingOf(state), generationId: state.generationId, leaseGrantIds: required.map((l) => l.leaseGrantId), issuedAtMonoMs: state.monotonicMs, expiresAtMonoMs: state.monotonicMs + command.ttlMs, status: 'ISSUED', irreversible: permit.irreversible, dispatchEventSeq: null, observation: null, factIds: [] })
       state = deepFreeze({ ...state, effects, nextCommitId: state.nextCommitId + 1, effectRevision: state.effectRevision + 1 })
       return success(state, command, 'EFFECT_COMMIT_ISSUED', t.transitionId, { commitId: id, permitKey: permit.key })
     }
     case 'BEGIN_EFFECT_DISPATCH': {
-      if (!replay && !isTrustedCapability(command.capability, 'DISPATCHER', 'runtime')) return failure(state, 'UNTRUSTED_DISPATCHER')
-      const token = state.effects[command.commitId]; if (token === undefined) return failure(state, 'UNKNOWN_EFFECT_COMMIT'); if (token.status !== 'ISSUED') return failure(state, 'EFFECT_COMMIT_NOT_ISSUED'); if (state.monotonicMs > token.expiresAtMonoMs) return failure(state, 'EFFECT_COMMIT_EXPIRED')
-      const t = state.transitions[token.transitionId]; const c = contractFor(state, token.transitionId); if (t === undefined || c === null || t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(state, 'TRANSITION_NOT_EFFECT_ELIGIBLE'); if (c.contractHash !== token.contractHash || !sameWorld(token.world, state.world) || !bindingEqual(token.binding, bindingOf(state)) || token.generationId !== state.generationId) return failure(state, 'STALE_EFFECT_COMMIT')
-      const permit = c.effects.find((p) => p.key === token.permitKey); if (permit === undefined) return failure(state, 'PERMIT_REMOVED'); const required = requiredLeasesForPermit(state, t.transitionId, permit); if (required === null || canonicalJson(required.map((l) => l.leaseGrantId).sort()) !== canonicalJson([...token.leaseGrantIds].sort())) return failure(state, 'EFFECT_LEASE_BINDING_CHANGED')
-      const usageKey = `${t.transitionId}|${permit.key}`; const used = state.effectUsage[usageKey] ?? 0; if (used >= permit.maxCount) return failure(state, 'EFFECT_MAX_COUNT_EXHAUSTED')
+      if (!replay && !isTrustedCapability(command.capability, 'DISPATCHER', 'runtime')) return failure(inputState, 'UNTRUSTED_DISPATCHER')
+      const token = state.effects[command.commitId]; if (token === undefined) return failure(inputState, 'UNKNOWN_EFFECT_COMMIT'); if (token.status !== 'ISSUED') return failure(inputState, 'EFFECT_COMMIT_NOT_ISSUED'); if (state.monotonicMs > token.expiresAtMonoMs) return failure(inputState, 'EFFECT_COMMIT_EXPIRED')
+      const t = state.transitions[token.transitionId]; const c = contractFor(state, token.transitionId); if (t === undefined || c === null || t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(inputState, 'TRANSITION_NOT_EFFECT_ELIGIBLE'); if (c.contractHash !== token.contractHash || !sameWorld(token.world, state.world) || !bindingEqual(token.binding, bindingOf(state)) || token.generationId !== state.generationId) return failure(inputState, 'STALE_EFFECT_COMMIT')
+      const permit = c.effects.find((p) => p.key === token.permitKey); if (permit === undefined) return failure(inputState, 'PERMIT_REMOVED'); const required = requiredLeasesForPermit(state, t.transitionId, permit); if (required === null || canonicalJson(required.map((l) => l.leaseGrantId).sort()) !== canonicalJson([...token.leaseGrantIds].sort())) return failure(inputState, 'EFFECT_LEASE_BINDING_CHANGED')
+      const usageKey = `${t.transitionId}|${permit.key}`; const used = state.effectUsage[usageKey] ?? 0; if (used >= permit.maxCount) return failure(inputState, 'EFFECT_MAX_COUNT_EXHAUSTED')
       const effects = cloneRecord(state.effects); effects[token.commitId] = deepFreeze({ ...token, status: 'DISPATCHING', dispatchEventSeq: state.journalSequence + 1 }); const effectUsage = cloneRecord(state.effectUsage); effectUsage[usageKey] = used + 1
       state = deepFreeze({ ...state, effects, effectUsage, effectRevision: state.effectRevision + 1 })
       return success(state, command, 'EFFECT_DISPATCH_LINEARIZED', t.transitionId, { commitId: token.commitId, usage: used + 1, maxCount: permit.maxCount })
     }
     case 'RECONCILE_EFFECT': {
-      const token = state.effects[command.commitId]; if (token === undefined) return failure(state, 'UNKNOWN_EFFECT_COMMIT'); if (!['DISPATCHING', 'UNKNOWN'].includes(token.status)) return failure(state, 'EFFECT_NOT_RECONCILABLE')
-      if (!replay && !isTrustedCapability(command.capability, 'VERIFIER', command.verifier.id)) return failure(state, 'UNTRUSTED_VERIFIER_CAPABILITY'); if (getVerifier(command.verifier) === null) return failure(state, 'UNKNOWN_VERIFIER')
+      if (command.observation !== 'OCCURRED' && command.observation !== 'NOT_OCCURRED' && command.observation !== 'UNKNOWN') return failure(inputState, 'INVALID_OBSERVATION')
+      const token = state.effects[command.commitId]; if (token === undefined) return failure(inputState, 'UNKNOWN_EFFECT_COMMIT'); if (!['DISPATCHING', 'UNKNOWN'].includes(token.status)) return failure(inputState, 'EFFECT_NOT_RECONCILABLE')
+      if (!replay && !isTrustedCapability(command.capability, 'VERIFIER', command.verifier.id)) return failure(inputState, 'UNTRUSTED_VERIFIER_CAPABILITY'); if (getVerifier(command.verifier) === null) return failure(inputState, 'UNKNOWN_VERIFIER')
       const reconciledFactIds = uniqSorted(command.factIds)
       if (command.observation !== 'UNKNOWN') {
-        if (!sameWorld(token.world, state.world)) return failure(state, 'EFFECT_WORLD_NOT_RECONCILABLE')
-        if (reconciledFactIds.length === 0) return failure(state, 'RECONCILIATION_FACT_REQUIRED')
+        if (!sameWorld(token.world, state.world)) return failure(inputState, 'EFFECT_WORLD_NOT_RECONCILABLE')
+        if (reconciledFactIds.length === 0) return failure(inputState, 'RECONCILIATION_FACT_REQUIRED')
         const liveBinding = bindingOf(state)
         let directEffectEvidence = false
         for (const factId of reconciledFactIds) {
           const fact = state.facts[factId]
-          if (fact === undefined || !sameWorld(fact.world, state.world) || !bindingEqual(fact.binding, liveBinding) || fact.verifier.id !== command.verifier.id || fact.verifier.version !== command.verifier.version) return failure(state, 'UNTRUSTED_RECONCILIATION_FACT')
+          if (fact === undefined || !sameWorld(fact.world, state.world) || !bindingEqual(fact.binding, liveBinding) || fact.verifier.id !== command.verifier.id || fact.verifier.version !== command.verifier.version) return failure(inputState, 'UNTRUSTED_RECONCILIATION_FACT')
           if (fact.effectCommitId === token.commitId) directEffectEvidence = true
         }
-        if (!directEffectEvidence) return failure(state, 'EFFECT_CAUSAL_EVIDENCE_REQUIRED')
+        if (!directEffectEvidence) return failure(inputState, 'EFFECT_CAUSAL_EVIDENCE_REQUIRED')
       }
       const effects = cloneRecord(state.effects); effects[token.commitId] = deepFreeze({ ...token, status: command.observation === 'UNKNOWN' ? 'UNKNOWN' : 'OBSERVED', observation: command.observation, factIds: reconciledFactIds }); state = deepFreeze({ ...state, effects, effectRevision: state.effectRevision + 1 })
       return success(state, command, command.observation === 'UNKNOWN' ? 'EFFECT_RECONCILIATION_UNKNOWN' : 'EFFECT_RECONCILED', token.transitionId, { commitId: token.commitId, observation: command.observation })
     }
     case 'REPORT_PROGRESS': {
-      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION')
-      if (t.lifecycle === 'TERMINAL') return failure(state, 'TRANSITION_NOT_PROGRESS_ELIGIBLE')
-      if (command.evaluator.id !== c.progressDefinition.id || command.evaluator.version !== c.progressDefinition.version) return failure(state, 'PROGRESS_DEFINITION_MISMATCH')
-      const registered = state.progressRegistry[command.evaluator.id]; if (registered === undefined || registered.version !== command.evaluator.version) return failure(state, 'UNKNOWN_PROGRESS_EVALUATOR')
-      if (!replay && !isTrustedCapability(command.capability, 'PROGRESS', command.evaluator.id)) return failure(state, 'UNTRUSTED_PROGRESS_CAPABILITY')
-      if (!Number.isInteger(command.progressRevision) || command.progressRevision !== t.progressRevision + 1) return failure(state, 'PROGRESS_REVISION_NOT_NEXT')
+      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION')
+      if (t.lifecycle === 'TERMINAL') return failure(inputState, 'TRANSITION_NOT_PROGRESS_ELIGIBLE')
+      if (command.evaluator.id !== c.progressDefinition.id || command.evaluator.version !== c.progressDefinition.version) return failure(inputState, 'PROGRESS_DEFINITION_MISMATCH')
+      const registered = state.progressRegistry[command.evaluator.id]; if (registered === undefined || registered.version !== command.evaluator.version) return failure(inputState, 'UNKNOWN_PROGRESS_EVALUATOR')
+      if (!replay && !isTrustedCapability(command.capability, 'PROGRESS', command.evaluator.id)) return failure(inputState, 'UNTRUSTED_PROGRESS_CAPABILITY')
+      if (!Number.isInteger(command.progressRevision) || command.progressRevision !== t.progressRevision + 1) return failure(inputState, 'PROGRESS_REVISION_NOT_NEXT')
       assertId(command.valueHash, 'progress valueHash')
-      if (!Number.isFinite(command.observedAtMonoMs) || command.observedAtMonoMs < 0 || command.observedAtMonoMs > state.monotonicMs) return failure(state, 'INVALID_PROGRESS_TIME')
-      if (t.progressObservedAtMonoMs !== null && command.observedAtMonoMs < t.progressObservedAtMonoMs) return failure(state, 'PROGRESS_TIME_REGRESSION')
+      if (!Number.isFinite(command.observedAtMonoMs) || command.observedAtMonoMs < 0 || command.observedAtMonoMs > state.monotonicMs) return failure(inputState, 'INVALID_PROGRESS_TIME')
+      if (t.progressObservedAtMonoMs !== null && command.observedAtMonoMs < t.progressObservedAtMonoMs) return failure(inputState, 'PROGRESS_TIME_REGRESSION')
       state = updateTransition(state, { ...t, progressRevision: command.progressRevision, progressValueHash: command.valueHash, progressObservedAtMonoMs: command.observedAtMonoMs }, false)
       return success(state, command, 'PROGRESS_RECORDED', t.transitionId, { progressRevision: command.progressRevision, valueHash: command.valueHash })
     }
     case 'DEBIT_USAGE': {
-      if (!controllerAuthorized(command.actorTransitionId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      if (command.actorTransitionId !== command.targetTransitionId) return failure(state, 'CROSS_TRANSITION_DEBIT_FORBIDDEN'); const t = state.transitions[command.targetTransitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(state, 'TRANSITION_NOT_DEBITABLE')
-      const debitContract = contractFor(state, t.transitionId); if (debitContract === null) return failure(state, 'UNKNOWN_TRANSITION')
-      let usage = t.usage; if (command.mechanicalSteps !== undefined) { if (!Number.isInteger(command.mechanicalSteps) || command.mechanicalSteps < 0) return failure(state, 'INVALID_MECHANICAL_STEP_DEBIT'); usage = { ...usage, mechanicalSteps: usage.mechanicalSteps + command.mechanicalSteps } }
-      if (command.resource !== undefined) { assertId(command.resource.key, 'resource debit key'); if (debitContract.budget.resources[command.resource.key] === undefined) return failure(state, 'UNDECLARED_RESOURCE_BUDGET'); assertFiniteNonNegative(command.resource.amount, 'resource debit'); usage = { ...usage, resources: { ...usage.resources, [command.resource.key]: (usage.resources[command.resource.key] ?? 0) + command.resource.amount } } }
-      if (command.risk !== undefined) { assertId(command.risk.key, 'risk debit key'); if (debitContract.budget.risk[command.risk.key] === undefined) return failure(state, 'UNDECLARED_RISK_BUDGET'); assertFiniteNonNegative(command.risk.amount, 'risk debit'); usage = { ...usage, risk: { ...usage.risk, [command.risk.key]: (usage.risk[command.risk.key] ?? 0) + command.risk.amount } } }
+      if (!controllerAuthorized(command.actorTransitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      if (command.actorTransitionId !== command.targetTransitionId) return failure(inputState, 'CROSS_TRANSITION_DEBIT_FORBIDDEN'); const t = state.transitions[command.targetTransitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(inputState, 'TRANSITION_NOT_DEBITABLE')
+      const debitContract = contractFor(state, t.transitionId); if (debitContract === null) return failure(inputState, 'UNKNOWN_TRANSITION')
+      let usage = t.usage; if (command.mechanicalSteps !== undefined) { if (!Number.isInteger(command.mechanicalSteps) || command.mechanicalSteps < 0) return failure(inputState, 'INVALID_MECHANICAL_STEP_DEBIT'); usage = { ...usage, mechanicalSteps: usage.mechanicalSteps + command.mechanicalSteps } }
+      if (command.resource !== undefined) { assertId(command.resource.key, 'resource debit key'); if (debitContract.budget.resources[command.resource.key] === undefined) return failure(inputState, 'UNDECLARED_RESOURCE_BUDGET'); assertFiniteNonNegative(command.resource.amount, 'resource debit'); usage = { ...usage, resources: { ...usage.resources, [command.resource.key]: (usage.resources[command.resource.key] ?? 0) + command.resource.amount } } }
+      if (command.risk !== undefined) { assertId(command.risk.key, 'risk debit key'); if (debitContract.budget.risk[command.risk.key] === undefined) return failure(inputState, 'UNDECLARED_RISK_BUDGET'); assertFiniteNonNegative(command.risk.amount, 'risk debit'); usage = { ...usage, risk: { ...usage.risk, [command.risk.key]: (usage.risk[command.risk.key] ?? 0) + command.risk.amount } } }
       state = updateTransition(state, { ...t, usage: deepFreeze(usage) }, false); state = deepFreeze({ ...state, budgetRevision: state.budgetRevision + 1 }); state = enforceBudgets(state)
       return success(state, command, 'USAGE_DEBITED', t.transitionId, { terminal: state.transitions[t.transitionId]?.lifecycle === 'TERMINAL' })
     }
     case 'ADVANCE_TIME': {
-      if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'clock')) return failure(state, 'UNTRUSTED_CLOCK_CAPABILITY'); if (!Number.isFinite(command.toMonoMs) || command.toMonoMs < state.monotonicMs) return failure(state, 'MONOTONIC_TIME_REGRESSION')
+      if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'clock')) return failure(inputState, 'UNTRUSTED_CLOCK_CAPABILITY'); if (!Number.isFinite(command.toMonoMs) || command.toMonoMs < state.monotonicMs) return failure(inputState, 'MONOTONIC_TIME_REGRESSION')
       const delta = command.toMonoMs - state.monotonicMs; const transitions = cloneRecord(state.transitions); let changed = false
       for (const [id, t] of Object.entries(transitions)) if (t.lifecycle === 'ACTIVE') { transitions[id] = deepFreeze({ ...t, usage: deepFreeze({ ...t.usage, activeMs: t.usage.activeMs + delta }) }); changed = true }
       state = deepFreeze({ ...state, monotonicMs: command.toMonoMs, transitions, budgetRevision: state.budgetRevision + (changed ? 1 : 0) }); state = preprocess(state)
       return success(state, command, 'MONOTONIC_TIME_ADVANCED', null, { toMonoMs: command.toMonoMs })
     }
     case 'REQUEST_CANCEL': {
-      if (!schedulerAuthorized(command.capability)) return failure(state, 'UNTRUSTED_SCHEDULER')
-      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle === 'TERMINAL') return failure(state, 'TRANSITION_NOT_CANCELABLE')
-      if (t.pendingTerminalOutcome !== null) return failure(state, 'TERMINAL_OUTCOME_PENDING')
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle === 'TERMINAL') return failure(inputState, 'TRANSITION_NOT_CANCELABLE')
+      if (t.pendingTerminalOutcome !== null) return failure(inputState, 'TERMINAL_OUTCOME_PENDING')
       state = quiesceTransitionEffects(state, t.transitionId)
       const live = state.transitions[t.transitionId]!
       const nonPreemptible = hasBoundedNonPreemptibleLease(state, t.transitionId)
@@ -720,34 +741,35 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       state = terminalize(state, live.transitionId, { kind: 'CANCELED', reason: command.reason }); return success(state, command, 'TRANSITION_CANCELED', live.transitionId, { reason: command.reason })
     }
     case 'ACK_CANCEL_YIELD': {
-      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      const t = state.transitions[command.transitionId]; if (t === undefined || !t.cancelRequested || t.lifecycle !== 'ACTIVE') return failure(state, 'NO_PENDING_CANCEL')
-      if (command.atMonoMs !== state.monotonicMs) return failure(state, 'STALE_YIELD_ACK')
+      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      const t = state.transitions[command.transitionId]; if (t === undefined || !t.cancelRequested || t.lifecycle !== 'ACTIVE') return failure(inputState, 'NO_PENDING_CANCEL')
+      if (command.atMonoMs !== state.monotonicMs) return failure(inputState, 'STALE_YIELD_ACK')
       const late = leasesFor(state, t.transitionId).some((l) => !l.preemptible && command.atMonoMs > l.hardYieldDeadlineMonoMs!); state = terminalize(state, t.transitionId, { kind: 'CANCELED', reason: late ? 'cancel safe-yield after critical-section deadline' : 'cancel safe-yield' })
       return success(state, command, late ? 'CANCEL_LATE_YIELD_COMPLETED' : 'CANCEL_YIELD_COMPLETED', t.transitionId, { deadlineViolated: late })
     }
     case 'ACK_TERMINAL_YIELD': {
-      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE' || t.pendingTerminalOutcome === null) return failure(state, 'NO_PENDING_TERMINAL')
-      if (command.atMonoMs !== state.monotonicMs) return failure(state, 'STALE_YIELD_ACK')
+      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE' || t.pendingTerminalOutcome === null) return failure(inputState, 'NO_PENDING_TERMINAL')
+      if (command.atMonoMs !== state.monotonicMs) return failure(inputState, 'STALE_YIELD_ACK')
       const late = leasesFor(state, t.transitionId).some((l) => !l.preemptible && command.atMonoMs > l.hardYieldDeadlineMonoMs!)
       const outcome = t.pendingTerminalOutcome; state = terminalize(state, t.transitionId, outcome)
       return success(state, command, late ? 'TERMINAL_LATE_YIELD_COMPLETED' : 'TERMINAL_YIELD_COMPLETED', t.transitionId, { deadlineViolated: late, outcome: outcome.kind })
     }
     case 'VERIFY_SUCCESS': {
-      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(state, 'UNKNOWN_TRANSITION'); if (t.lifecycle === 'TERMINAL' || t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(state, 'TRANSITION_NOT_VERIFIABLE')
-      if (command.verifier.id !== c.verificationDefinition.id || command.verifier.version !== c.verificationDefinition.version) return failure(state, 'VERIFICATION_DEFINITION_MISMATCH')
-      if (getVerifier(command.verifier) === null) return failure(state, 'UNKNOWN_VERIFIER')
-      if (!replay && !isTrustedCapability(command.capability, 'VERIFIER', command.verifier.id)) return failure(state, 'UNTRUSTED_VERIFIER_CAPABILITY')
-      const proofs = proofsCurrentFor(state, [...c.ensures, ...c.invariants], command.verifier); if (!proofs.ok) return failure(state, 'TRUSTED_VERIFY_PROOF_MISSING')
+      if (command.causalCredit !== 'self' && command.causalCredit !== 'shared' && command.causalCredit !== 'external') return failure(inputState, 'INVALID_CAUSAL_CREDIT')
+      const t = state.transitions[command.transitionId]; const c = contractFor(state, command.transitionId); if (t === undefined || c === null) return failure(inputState, 'UNKNOWN_TRANSITION'); if (t.lifecycle === 'TERMINAL' || t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(inputState, 'TRANSITION_NOT_VERIFIABLE')
+      if (command.verifier.id !== c.verificationDefinition.id || command.verifier.version !== c.verificationDefinition.version) return failure(inputState, 'VERIFICATION_DEFINITION_MISMATCH')
+      if (getVerifier(command.verifier) === null) return failure(inputState, 'UNKNOWN_VERIFIER')
+      if (!replay && !isTrustedCapability(command.capability, 'VERIFIER', command.verifier.id)) return failure(inputState, 'UNTRUSTED_VERIFIER_CAPABILITY')
+      const proofs = proofsCurrentFor(state, [...c.ensures, ...c.invariants], command.verifier); if (!proofs.ok) return failure(inputState, 'TRUSTED_VERIFY_PROOF_MISSING')
       const outcome: TerminalOutcome = { kind: 'SUCCESS', factIds: proofs.factIds, causalCredit: command.causalCredit }
       state = requestTerminal(state, t.transitionId, outcome)
       const pending = state.transitions[t.transitionId]?.pendingTerminalOutcome !== null
       return success(state, command, pending ? 'VERIFY_SUCCESS_PENDING_SAFE_YIELD' : 'TRANSITION_VERIFIED_SUCCESS', t.transitionId, { factIds: proofs.factIds, ensures: c.ensures, verifier: command.verifier, pendingSafeYield: pending })
     }
     case 'UPDATE_MISSION': {
-      if (command.authority.id !== state.missionAuthority.id || command.authority.version !== state.missionAuthority.version) return failure(state, 'MISSION_AUTHORITY_MISMATCH')
-      if (!replay && !isTrustedCapability(command.capability, 'MISSION', command.authority.id)) return failure(state, 'UNTRUSTED_MISSION_AUTHORITY')
+      if (command.authority.id !== state.missionAuthority.id || command.authority.version !== state.missionAuthority.version) return failure(inputState, 'MISSION_AUTHORITY_MISMATCH')
+      if (!replay && !isTrustedCapability(command.capability, 'MISSION', command.authority.id)) return failure(inputState, 'UNTRUSTED_MISSION_AUTHORITY')
       for (const predicate of command.predicates) assertId(predicate, 'mission predicate'); const predicates = uniqSorted(command.predicates); state = deepFreeze({ ...state, missionPredicates: predicates, missionRevision: state.missionRevision + 1 })
       const superseded: string[] = []
       for (const t of Object.values(state.transitions)) {
@@ -758,7 +780,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, 'MISSION_UPDATED', null, { missionRevision: state.missionRevision, predicates, superseded }, superseded)
     }
     case 'CHANGE_GENERATION': {
-      if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'runtime')) return failure(state, 'UNTRUSTED_RUNTIME_CAPABILITY'); assertId(command.generationId, 'generationId'); if (command.generationId === state.generationId) return failure(state, 'GENERATION_UNCHANGED')
+      if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'runtime')) return failure(inputState, 'UNTRUSTED_RUNTIME_CAPABILITY'); assertId(command.generationId, 'generationId'); if (command.generationId === state.generationId) return failure(inputState, 'GENERATION_UNCHANGED')
       const affected = Object.values(state.transitions).filter((t) => t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED').map((t) => t.transitionId)
       let next = state; for (const t of Object.values(state.transitions)) if (t.lifecycle !== 'TERMINAL' && t.lifecycle !== 'ENABLED') {
         // A quiescing transition already has a requested terminal (a verified
@@ -773,26 +795,30 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       return success(state, command, 'GENERATION_CHANGED', null, { generationId: command.generationId, affected }, affected)
     }
     case 'CHANGE_WORLD': {
-      if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'world')) return failure(state, 'UNTRUSTED_WORLD_CAPABILITY'); assertId(command.world.serverId, 'world.serverId'); assertId(command.world.dimension, 'world.dimension'); assertNonNegativeInteger(command.world.worldEpoch, 'world.worldEpoch'); if (sameWorld(command.world, state.world)) return failure(state, 'WORLD_UNCHANGED')
+      if (!replay && !isTrustedCapability(command.capability, 'WORLD_ADAPTER', 'world')) return failure(inputState, 'UNTRUSTED_WORLD_CAPABILITY'); assertId(command.world.serverId, 'world.serverId'); assertId(command.world.dimension, 'world.dimension'); assertNonNegativeInteger(command.world.worldEpoch, 'world.worldEpoch'); if (sameWorld(command.world, state.world)) return failure(inputState, 'WORLD_UNCHANGED')
       const oldWorld = state.world; const affected = Object.values(state.transitions).filter((t) => t.lifecycle !== 'TERMINAL').map((t) => t.transitionId); let next = state; for (const t of Object.values(state.transitions)) if (t.lifecycle !== 'TERMINAL') next = terminalize(next, t.transitionId, { kind: 'WORLD_CHANGED', expected: contractFor(next, t.transitionId)?.world ?? oldWorld, observed: command.world })
       state = deepFreeze({ ...next, world: deepFreeze({ ...command.world }), factRevision: next.factRevision + 1, facts: {}, witnesses: {}, preemptions: {}, leases: {}, effects: Object.fromEntries(Object.entries(next.effects).map(([id, token]) => [id, token.status === 'ISSUED' ? deepFreeze({ ...token, status: 'REVOKED' as const }) : token.status === 'DISPATCHING' ? deepFreeze({ ...token, status: 'UNKNOWN' as const, observation: 'UNKNOWN' as const }) : token])), leaseRevision: next.leaseRevision + 1, effectRevision: next.effectRevision + 1 })
       return success(state, command, 'WORLD_CHANGED', null, { from: oldWorld, to: command.world, affected }, affected)
     }
     case 'APPEND_RECORD': {
-      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(state, 'UNTRUSTED_CONTROLLER')
-      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(state, 'APPEND_OWNER_NOT_ACTIVE'); const key = resourceKey(command.resource); if (!state.appendResourceKeys.includes(key)) return failure(state, 'RESOURCE_NOT_REGISTERED_APPEND_SAFE')
-      const lease = leasesFor(state, t.transitionId).find((l) => l.mode === 'APPEND' && resourcesOverlap(l.resource, command.resource)); if (lease === undefined) return failure(state, 'APPEND_LEASE_REQUIRED')
-      assertId(command.operationId, 'operationId'); assertId(command.payloadHash, 'payloadHash'); const store = state.appendStores[key]!; const existingAppend = store.records.find((r) => r.operationId === command.operationId); if (existingAppend !== undefined) { if (existingAppend.payloadHash !== command.payloadHash) return failure(state, 'APPEND_OPERATION_ID_COLLISION'); return success(state, command, 'APPEND_DUPLICATE_SUPPRESSED', t.transitionId, { operationId: command.operationId, revision: store.revision }) }
+      if (!controllerAuthorized(command.transitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')
+      const t = state.transitions[command.transitionId]; if (t === undefined || t.lifecycle !== 'ACTIVE' || t.cancelRequested || t.pendingTerminalOutcome !== null || preemptionYielded(state, t.transitionId)) return failure(inputState, 'APPEND_OWNER_NOT_ACTIVE'); const key = resourceKey(command.resource); if (!state.appendResourceKeys.includes(key)) return failure(inputState, 'RESOURCE_NOT_REGISTERED_APPEND_SAFE')
+      const lease = leasesFor(state, t.transitionId).find((l) => l.mode === 'APPEND' && resourceSubsumes(l.resource, command.resource)); if (lease === undefined) return failure(inputState, 'APPEND_LEASE_REQUIRED')
+      assertId(command.operationId, 'operationId'); assertId(command.payloadHash, 'payloadHash'); const store = state.appendStores[key]!; const existingAppend = store.records.find((r) => r.operationId === command.operationId); if (existingAppend !== undefined) { if (existingAppend.payloadHash !== command.payloadHash) return failure(inputState, 'APPEND_OPERATION_ID_COLLISION'); return success(state, command, 'APPEND_DUPLICATE_SUPPRESSED', t.transitionId, { operationId: command.operationId, revision: store.revision }) }
       const record: AppendRecord = deepFreeze({ operationId: command.operationId, payloadHash: command.payloadHash, transitionId: t.transitionId, eventSeq: state.journalSequence + 1 }); const records = [...store.records, record].sort((a, b) => a.operationId.localeCompare(b.operationId)); const appendStores = cloneRecord(state.appendStores); appendStores[key] = deepFreeze({ resourceKey: key, revision: store.revision + 1, records }); state = deepFreeze({ ...state, appendStores })
       return success(state, command, 'APPEND_MERGED', t.transitionId, { operationId: command.operationId, revision: store.revision + 1 })
     }
-    default: return failure(state, 'UNKNOWN_COMMAND')
+    default: return failure(inputState, 'UNKNOWN_COMMAND')
   }
 }
 
 export function applyKernelCommand(state: KernelState, command: KernelCommand): KernelResult {
   if (!KERNEL_STATES.has(state)) return { ok: false, state, reason: 'UNTRUSTED_KERNEL_STATE', events: [] }
-  return applyInternal(state, command, false)
+  try {
+    return applyInternal(state, command)
+  } catch (error) {
+    return { ok: false, state, reason: `MALFORMED_KERNEL_COMMAND:${error instanceof Error ? error.message : 'non-error throw'}`, events: [] }
+  }
 }
 
 export function replayKernelEvents(initial: KernelState, events: readonly KernelEvent[]): KernelState {
@@ -889,7 +915,10 @@ export function assertKernelInvariants(state: KernelState): void {
   }
   const leasesByOwner = new Map<string, ResourceLease[]>(); for (const lease of Object.values(state.leases)) { const a = leasesByOwner.get(lease.owner) ?? []; a.push(lease); leasesByOwner.set(lease.owner, a); const t = state.transitions[lease.owner]; if (t === undefined || t.lifecycle !== 'ACTIVE') throw new Error(`lease owned by non-ACTIVE ${lease.owner}`); const c = contractFor(state, lease.owner); if (c === null || c.contractHash !== lease.ownerContractHash || !sameWorld(lease.world, state.world) || lease.generationId !== state.generationId) throw new Error(`stale lease ${lease.leaseGrantId}`) }
   const leases = Object.values(state.leases); for (let i = 0; i < leases.length; i += 1) for (let j = i + 1; j < leases.length; j += 1) if (leases[i]!.owner !== leases[j]!.owner && resourcesOverlap(leases[i]!.resource, leases[j]!.resource) && modesConflict(leases[i]!.mode, leases[j]!.mode)) throw new Error('overlapping exclusive authority')
+  const LIFECYCLES = new Set<TransitionLifecycle>(['ENABLED', 'RUNNABLE', 'ACTIVE', 'SUSPENDED', 'OBSERVING', 'BLOCKED', 'TERMINAL'])
   for (const t of Object.values(state.transitions)) {
+    if (!LIFECYCLES.has(t.lifecycle)) throw new Error(`invalid lifecycle ${String(t.lifecycle)} on ${t.transitionId}`)
+    if (t.lifecycle === 'TERMINAL' && t.terminalOutcome === null) throw new Error(`terminal without outcome ${t.transitionId}`)
     if (state.transitionContracts[t.transitionId] !== t.contractHash || state.contracts[t.contractHash] === undefined) throw new Error(`transition contract binding divergence ${t.transitionId}`)
     const ownedLeases = leasesByOwner.get(t.transitionId) ?? []; const owned = ownedLeases.map((l) => l.leaseGrantId).sort(); if (t.lifecycle === 'ACTIVE' && canonicalJson(owned) !== canonicalJson([...t.heldLeaseIds].sort())) throw new Error(`ACTIVE lease divergence ${t.transitionId}`)
     if (t.lifecycle !== 'ACTIVE' && owned.length > 0) throw new Error(`non-ACTIVE owns leases ${t.transitionId}`)

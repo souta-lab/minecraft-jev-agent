@@ -494,3 +494,280 @@ describe('V4.1.2 adversarial ordering, fencing, and replay edges', () => {
     reject(state, { kind: 'REGISTER_TRANSITION', contract: c }, 'DUPLICATE_TRANSITION_ID')
   })
 })
+
+import { createHash } from 'node:crypto'
+
+describe('V4.1.2 adversarial command-validation and audit-integrity edges', () => {
+  test('K20 fences: pause commands cannot inject an arbitrary lifecycle', () => {
+    const c = contract('mission:walk', 'MISSION', [claim()])
+    let state = initial([c])
+    state = activate(state, c)
+    // Before the fix, lifecycle: command.to was written verbatim: to:'TERMINAL'
+    // produced a TERMINAL transition with terminalOutcome null (falsified journal:
+    // the emitted event was TRANSITION_OBSERVING) and to:'GARBAGE' produced a
+    // zombie unreachable by most commands.
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: c.transitionId, to: 'TERMINAL', reason: 'inject' }, 'INVALID_PAUSE_TARGET')
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: c.transitionId, to: 'GARBAGE', reason: 'inject' }, 'INVALID_PAUSE_TARGET')
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: c.transitionId, to: 'SUSPENDED', reason: 'inject' }, 'INVALID_PAUSE_TARGET')
+    reject(state, { kind: 'ACK_PAUSE_YIELD', transitionId: c.transitionId, to: 'TERMINAL', reason: 'inject', atMonoMs: state.monotonicMs }, 'INVALID_PAUSE_TARGET')
+    state = apply(state, { kind: 'PAUSE_ACTIVE', transitionId: c.transitionId, to: 'OBSERVING', reason: 'legit' })
+    expect(state.transitions[c.transitionId]!.lifecycle).toBe('OBSERVING')
+  })
+
+  test('K21 fences: malformed commands fail closed at the authority boundary instead of throwing', () => {
+    const c = contract('mission:walk', 'MISSION', [claim()], [], { witnessValidation: witnessValidator })
+    let state = initial([c])
+    state = registerAdmit(state, c)
+
+    const malformed = (command: LooseCommand): void => {
+      const r = applyKernelCommand(state, authorize(state, command))
+      expect(r.ok).toBe(false)
+      if (r.ok) return
+      expect(r.reason).toMatch(/^MALFORMED_KERNEL_COMMAND:/)
+      expect(r.state).toBe(state)
+      expect(r.events).toEqual([])
+    }
+    // assertId/assertFiniteNonNegative inside applyInternal threw raw Errors
+    // through the sole authority path; non-iterable fields threw TypeErrors.
+    malformed({ kind: 'ACCEPT_WITNESS_PROOF', transitionId: c.transitionId, witnessRevision: 0, witnessRefHash: '', relationId: 'r:1', validator: witnessValidator })
+    malformed({ kind: 'ACCEPT_VERIFIED_SNAPSHOT', verifier, materialChange: true, observedAtMonoMs: state.monotonicMs, facts: 'not-an-array', capability: trustedVerifier(verifier.id) })
+    malformed({ kind: 'ACCEPT_VERIFIED_SNAPSHOT', verifier: null, materialChange: true, observedAtMonoMs: state.monotonicMs, facts: [], capability: trustedVerifier('x') })
+
+    state = apply(state, { kind: 'ACCEPT_WITNESS_PROOF', transitionId: c.transitionId, witnessRevision: 0, witnessRefHash: 'w:0', relationId: 'r:1', validator: witnessValidator })
+    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: c.transitionId })
+    malformed({ kind: 'DEBIT_USAGE', actorTransitionId: c.transitionId, targetTransitionId: c.transitionId, resource: { key: '', amount: 1 } })
+    malformed({ kind: 'REPORT_PROGRESS', transitionId: c.transitionId, progressRevision: 1, valueHash: '', observedAtMonoMs: state.monotonicMs, evaluator: progress })
+  })
+
+  test('K22 fences: a command failure returns the caller state even when preprocess mutated internally', () => {
+    const c = contract('mission:doomed', 'MISSION', [claim()], [], { budget: { maxActiveMs: 1_000, deadlineAtMonoMs: 5, maxMechanicalSteps: 10, resources: {}, risk: {} } })
+    let state = initial([c])
+    state = advance(state, 10)
+    state = apply(state, { kind: 'REGISTER_TRANSITION', contract: c })
+    // preprocess terminalizes the deadline-expired ENABLED transition inside
+    // applyInternal; before the fix the failing command returned that mutated
+    // (unmarked, unusable) state instead of the caller-visible input.
+    const input = state
+    expect(input.transitions[c.transitionId]!.lifecycle).toBe('ENABLED')
+    const r = applyKernelCommand(input, authorize(input, { kind: 'ADMIT_TRANSITION', transitionId: c.transitionId }))
+    expect(r.ok).toBe(false)
+    if (r.ok) throw new Error('unreachable')
+    expect(r.reason).toBe('ILLEGAL_LIFECYCLE_EDGE')
+    expect(r.state).toBe(input)
+    // The returned state is still trusted: the caller can keep operating on it.
+    const r2 = applyKernelCommand(r.state, authorize(r.state, { kind: 'ADMIT_TRANSITION', transitionId: c.transitionId }))
+    expect(r2.ok).toBe(false)
+    if (!r2.ok) expect(r2.reason).toBe('ILLEGAL_LIFECYCLE_EDGE')
+  })
+
+  test('K23 fences: an APPEND lease on a narrower resource does not authorize writes to a broader store', () => {
+    const store = resourceId('memory', ['x'])
+    const narrower = resourceId('memory', ['x', 'y'])
+    const narrowClaim = claim(narrower, 'APPEND')
+    const c = contract('mission:writer', 'MISSION', [narrowClaim])
+    const rootClaim = claim(resourceId('memory'), 'APPEND')
+    const c2 = contract('mission:writer2', 'MISSION', [rootClaim])
+    let state = createKernelState({ world, generationId: 'gen-a', missionPredicates: [c.desiredPredicate, c2.desiredPredicate], verifierRegistry: [verifier], progressRegistry: [progress], contractCompilerRegistry: [compiler], missionAuthority, appendResources: [store], minResidencyMs: 250, preemptibleYieldBudgetMs: 50 })
+    state = activate(state, c)
+    // resourcesOverlap(memory/x/y, memory/x) is true (prefix match either
+    // direction), so the old symmetric check authorized the write; the lease
+    // must instead subsume the targeted store.
+    reject(state, { kind: 'APPEND_RECORD', transitionId: c.transitionId, resource: store, operationId: 'op:1', payloadHash: 'h:1' }, 'APPEND_LEASE_REQUIRED')
+
+    // Positive control: a lease on the parent resource covers the child store.
+    state = registerAdmit(state, c2)
+    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: c2.transitionId })
+    state = apply(state, { kind: 'APPEND_RECORD', transitionId: c2.transitionId, resource: store, operationId: 'op:2', payloadHash: 'h:2' })
+    expect(state.appendStores['memory/x']!.records).toHaveLength(1)
+  })
+
+  test('K24 fences: journal replay re-validates full contract semantics, not just hash self-consistency', () => {
+    const c = contract('mission:walk')
+    const start = initial([c])
+    const events: KernelEvent[] = []
+    apply(start, { kind: 'REGISTER_TRANSITION', contract: c }, events)
+
+    // Forge a contract that is hash-self-consistent but fails constructor
+    // semantics: desiredPredicate removed from ensures, hash recomputed.
+    const forged = JSON.parse(JSON.stringify(c)) as Record<string, unknown>
+    forged['desiredPredicate'] = 'goal:evil'
+    const { contractHash: _ignored, ...semantic } = forged
+    const stableLocal = (v: unknown): unknown =>
+      Array.isArray(v) ? v.map(stableLocal)
+        : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, stableLocal(x)]))
+          : v
+    forged['contractHash'] = createHash('sha256').update(JSON.stringify(stableLocal(semantic))).digest('hex')
+    const tamperedEvents = JSON.parse(JSON.stringify(events)) as KernelEvent[]
+    const replayCmd = tamperedEvents[0]!.replay.command as unknown as Record<string, unknown>
+    replayCmd['contract'] = forged
+
+    // Before the fix, replay only required canonicalContractHashValid: the
+    // forged contract registered and entered recovered live state.
+    expect(() => replayKernelEvents(start, tamperedEvents)).toThrow('NON_CANONICAL_CONTRACT')
+    // The unforged journal still replays.
+    expect(kernelSemanticDigest(replayKernelEvents(start, events))).toBeDefined()
+  })
+
+  test('K25 fences: a committed preemption record survives participant terminalization as COMMITTED', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
+
+    // The requester then terminalizes; cleanupPreemptions previously rewrote
+    // the COMMITTED audit record to CANCELED, falsifying durable history.
+    state = apply(state, { kind: 'REQUEST_CANCEL', transitionId: requester.transitionId, reason: 'requester done' })
+    expect(state.transitions[requester.transitionId]!.lifecycle).toBe('TERMINAL')
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
+  })
+
+  test('K26 fences: observation and causal-credit fields are validated against their unions', () => {
+    const c = contract('mission:dig', 'MISSION', [claim(worldBlocks)], [effect('DIG', 'scope:dig', worldBlocks)])
+    let state = initial([c])
+    state = activate(state, c)
+    const issued = issue(state, c, 'DIG', 'scope:dig'); state = issued.state
+    state = apply(state, { kind: 'BEGIN_EFFECT_DISPATCH', commitId: issued.commitId })
+    reject(state, { kind: 'RECONCILE_EFFECT', commitId: issued.commitId, observation: 'GARBAGE', factIds: [], verifier, capability: trustedVerifier(verifier.id) }, 'INVALID_OBSERVATION')
+    state = acceptFacts(state, [{ predicateId: c.desiredPredicate }])
+    reject(state, { kind: 'VERIFY_SUCCESS', transitionId: c.transitionId, causalCredit: 'GARBAGE' }, 'INVALID_CAUSAL_CREDIT')
+    state = apply(state, { kind: 'VERIFY_SUCCESS', transitionId: c.transitionId, causalCredit: 'self' })
+    expect(state.transitions[c.transitionId]!.lifecycle).toBe('TERMINAL')
+  })
+})
+
+describe('V4.1.2 adversarial semantic characterizations (pinned for architecture review)', () => {
+  test('K27 characterizes: a pending terminal sticks - a later deadline cannot override it, and ensures are never revalidated', () => {
+    const c = contract('mission:critical', 'MISSION', [criticalClaim()])
+    let state = initial([c])
+    state = activate(state, c)
+    state = acceptFacts(state, [{ predicateId: c.desiredPredicate }])
+    state = apply(state, { kind: 'VERIFY_SUCCESS', transitionId: c.transitionId, causalCredit: 'self' })
+    expect(state.transitions[c.transitionId]!.pendingTerminalOutcome?.kind).toBe('SUCCESS')
+
+    // The contract deadline passes while the transition awaits safe yield:
+    // requestTerminal early-returns on the existing pending outcome.
+    state = advance(state, 20_000)
+    // An intervening ensures-false fact does not reopen the pending verify.
+    state = acceptFacts(state, [{ predicateId: c.desiredPredicate, truth: 'false' }], state.monotonicMs)
+    state = apply(state, { kind: 'ACK_TERMINAL_YIELD', transitionId: c.transitionId, atMonoMs: state.monotonicMs })
+    expect(state.transitions[c.transitionId]!.terminalOutcome?.kind).toBe('SUCCESS')
+  })
+
+  test('K28 characterizes: cancel + deadline expiry arm two terminal paths whose outcome is decided by ack order', () => {
+    const c = contract('mission:critical', 'MISSION', [criticalClaim()])
+    let state = initial([c])
+    state = activate(state, c)
+    state = apply(state, { kind: 'REQUEST_CANCEL', transitionId: c.transitionId, reason: 'operator cancel' })
+    expect(state.transitions[c.transitionId]!.cancelRequested).toBe(true)
+
+    // The deadline then expires: requestTerminal checks pendingTerminalOutcome
+    // (null) but not cancelRequested, so a second quiescing path arms.
+    state = advance(state, 20_000)
+    const quiescing = state.transitions[c.transitionId]!
+    expect(quiescing.cancelRequested).toBe(true)
+    expect(quiescing.pendingTerminalOutcome?.kind).toBe('DEADLINE_EXPIRED')
+
+    const terminalFirst = applyKernelCommand(state, authorize(state, { kind: 'ACK_TERMINAL_YIELD', transitionId: c.transitionId, atMonoMs: state.monotonicMs }))
+    expect(terminalFirst.ok).toBe(true)
+    if (terminalFirst.ok) expect(terminalFirst.state.transitions[c.transitionId]!.terminalOutcome?.kind).toBe('DEADLINE_EXPIRED')
+    const cancelFirst = applyKernelCommand(state, authorize(state, { kind: 'ACK_CANCEL_YIELD', transitionId: c.transitionId, atMonoMs: state.monotonicMs }))
+    expect(cancelFirst.ok).toBe(true)
+    if (cancelFirst.ok) expect(cancelFirst.state.transitions[c.transitionId]!.terminalOutcome?.kind).toBe('CANCELED')
+    // Same quiescing state, two legal but different terminal outcomes.
+  })
+
+  test('K29 characterizes: a DISPATCHING effect never expires and wedges the owner until reconcile/cancel/generation resolves it', () => {
+    const bigBudget = { maxActiveMs: 2_000_000, deadlineAtMonoMs: null, maxMechanicalSteps: 10_000_000, resources: {}, risk: {} }
+    const victim = contract('victim:dig', 'MISSION', [claim(worldBlocks)], [effect('DIG', 'scope:dig', worldBlocks)], { budget: bigBudget })
+    const requester = contract('requester:urgent', 'MISSION', [claim(worldBlocks)], [], { urgency: 100, budget: bigBudget })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const issued = issue(state, victim, 'DIG', 'scope:dig'); state = issued.state
+    state = apply(state, { kind: 'BEGIN_EFFECT_DISPATCH', commitId: issued.commitId })
+
+    state = advance(state, 1_000_000)
+    expect(state.effects[issued.commitId]!.status).toBe('DISPATCHING')
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'pause' }, 'EFFECT_DISPATCH_IN_FLIGHT')
+    const plan = planPreemption(state, requester); state = plan.state
+    reject(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs }, 'EFFECT_DISPATCH_IN_FLIGHT')
+    // Only explicit verifier reconciliation (UNKNOWN), cancel, or a
+    // generation/world change unblocks the wedge.
+    state = apply(state, { kind: 'RECONCILE_EFFECT', commitId: issued.commitId, observation: 'UNKNOWN', factIds: [], verifier, capability: trustedVerifier(verifier.id) })
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+    expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
+  })
+
+  test('K30 characterizes: reusing a generation id re-arms controller capabilities minted under the earlier era', () => {
+    const c = contract('mission:walk', 'MISSION', [claim()], [effect('MOVE', 'scope:v')])
+    let state = initial([c])
+    state = activate(state, c)
+    const eraOneCap = trustedController(c.transitionId, c.contractHash, 'gen-a')
+
+    state = apply(state, { kind: 'CHANGE_GENERATION', generationId: 'gen-b', capability: trustedWorldAdapter('runtime') })
+    state = apply(state, { kind: 'RESUME_TRANSITION', transitionId: c.transitionId })
+    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: c.transitionId })
+    // Under gen-b the era-one capability is stale: fenced.
+    const staleAttempt = applyKernelCommand(state, { kind: 'ISSUE_EFFECT', transitionId: c.transitionId, effect: 'MOVE', scope: 'scope:v', ttlMs: 100, capability: eraOneCap })
+    expect(staleAttempt.ok).toBe(false)
+    if (!staleAttempt.ok) expect(staleAttempt.reason).toBe('UNTRUSTED_CONTROLLER')
+
+    state = apply(state, { kind: 'CHANGE_GENERATION', generationId: 'gen-a', capability: trustedWorldAdapter('runtime') })
+    state = apply(state, { kind: 'RESUME_TRANSITION', transitionId: c.transitionId })
+    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: c.transitionId })
+    // Capabilities bind to the generationId string; cycling back re-arms the
+    // era-one capability even though it was minted before the gen-b era.
+    const rearmed = applyKernelCommand(state, { kind: 'ISSUE_EFFECT', transitionId: c.transitionId, effect: 'MOVE', scope: 'scope:v', ttlMs: 100, capability: eraOneCap })
+    expect(rearmed.ok).toBe(true)
+  })
+
+  test('K31 characterizes: resumability and yield deadlines are computed from conflicting leases only', () => {
+    const victim = contract('victim:dig', 'MISSION', [claim(), claim(worldBlocks, 'EXCLUSIVE_WRITE', { resumable: false })])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    const victimPlan = state.preemptions[plan.transactionId]!.victims.find((v) => v.transitionId === victim.transitionId)!
+    // The victim also declared a resumable:false claim on worldBlocks, which
+    // the requester does not conflict with: the plan's resumable flag only
+    // inspects conflicting leases, so the victim is marked resumable and will
+    // be SUSPENDED with its non-resumable claim silently released.
+    expect(victimPlan.resumable).toBe(true)
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
+    expect(Object.values(state.leases).filter((l) => l.owner === victim.transitionId)).toHaveLength(0)
+  })
+
+  test('K32 characterizes: VERIFY_SUCCESS can terminalize a transition that never executed', () => {
+    const c = contract('mission:preordained')
+    let state = initial([c])
+    state = apply(state, { kind: 'REGISTER_TRANSITION', contract: c })
+    expect(state.transitions[c.transitionId]!.lifecycle).toBe('ENABLED')
+    state = acceptFacts(state, [{ predicateId: c.desiredPredicate }])
+    state = apply(state, { kind: 'VERIFY_SUCCESS', transitionId: c.transitionId, causalCredit: 'external' })
+    const t = state.transitions[c.transitionId]!
+    expect(t.lifecycle).toBe('TERMINAL')
+    expect(t.terminalOutcome?.kind).toBe('SUCCESS')
+    // The ensures-already-true terminal is journaled as SUCCESS with no
+    // activation, actuation, or progress - the verifier's attestation alone
+    // is the authority.
+  })
+
+  test('K33 characterizes: an unbounded ttlMs issues a token that can never expire', () => {
+    const c = contract('mission:dig', 'MISSION', [claim(worldBlocks)], [effect('DIG', 'scope:dig', worldBlocks, 2)], { budget: { maxActiveMs: 2_000_000_000, deadlineAtMonoMs: null, maxMechanicalSteps: 10_000_000_000, resources: {}, risk: {} } })
+    let state = initial([c])
+    state = activate(state, c)
+    const issued = issue(state, c, 'DIG', 'scope:dig', Number.MAX_VALUE); state = issued.state
+    state = advance(state, 1_000_000_000)
+    expect(state.effects[issued.commitId]!.status).toBe('ISSUED')
+    // The token is effectively permanent while the binding holds; ttl only
+    // bounds the dispatch window and there is no cap on it.
+  })
+})
