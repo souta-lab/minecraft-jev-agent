@@ -1,5 +1,7 @@
 # V4.1.2 Kernel commands, events, and replay
 
+> **PERMANENT ARCHITECTURE LOCK:** V4.1.2 is permanently locked (`AGENTS.md` PERMANENT ARCHITECTURE LOCK; checkpoint `092a5b38`). New commands/events are allowed only when authority ownership stays unchanged — never as steps toward a successor architecture.
+
 ## Authority rule
 
 A production semantic caller does not mutate ATR, leases, effects, revisions, budgets, or journal state directly. It submits a typed command to `applyKernelCommand`. Privileged commands additionally carry a runtime-branded capability created by the HOST-side internal adapter.

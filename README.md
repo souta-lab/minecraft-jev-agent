@@ -1,21 +1,33 @@
 # minecraft-jev-agent
 
-An embodied Minecraft Java agent. An **LLM planner answers bounded questions**; a **System One
-policy** (Jev, a TypeSafe semantic-judgement model) holds **sole action authority**; **Mineflayer
-is the motor/reflex layer**. The three layers are separated by how far ahead they reason, not by a
-fixed tick rate. There is **no Mineflayer fork** — stock `mineflayer@4.39.0` plus a single local
-movement patch under `packages/jev-agent/patches/`.
+> **PERMANENT ARCHITECTURE LOCK:** the canonical and permanent architecture is
+> **V4.1.2 Concurrent Verified Transition Runtime** (`AGENTS.md`,
+> `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`, validated checkpoint
+> `092a5b38`). It is never replaced, reopened, superseded, or redesigned in
+> this repository — there is no V4.1.3/V4.2/V5 and no successor architecture.
+> Diagrams and issue references below describing the older Option/Jev-πβ
+> authority split are historical lineage, not the current authority model:
+> Jev owns semantic WHICH/WHETHER policy only; the Kernel owns lifecycle,
+> leases, effects, verified facts, and SUCCESS.
 
-Perception loop:
+An embodied Minecraft Java agent. An **LLM planner answers bounded questions**; a **System One
+policy** (Jev, a TypeSafe semantic-judgement model) selects among grounded Transitions under
+Kernel authority; **Mineflayer is the motor/reflex layer** behind the runtime adapter. The layers
+are separated by how far ahead they reason, not by a fixed tick rate. There is **no Mineflayer
+fork** — stock `mineflayer@4.39.0` plus a single local movement patch under
+`packages/jev-agent/patches/`.
+
+Perception loop (V4.1.2):
 
 ```text
-sensor -> WorldModel(JSON) -> deterministic grounded candidates
-       -> Jev (bounded semantic policy)
-       -> deterministic guard -> fresh sensor re-validation
-       -> Executor / Skill -> VERIFY -> loop
+sensor -> Verified World Model -> grounded enabled Transitions
+       -> Jev (WHICH/WHETHER policy, kernel-admitted)
+       -> Kernel admission + leases -> persistent Transition Controller
+       -> Runtime Adapter -> VERIFY_SUCCESS over fresh facts -> frontier re-derivation
 ```
 
-The target architecture is tracked in **Issue #11 (Grounded Options)**:
+The *historical* target architecture was tracked in **Issue #11 (Grounded Options)** — superseded
+by V4.1.2, which removed generic model-owned termination and moved SUCCESS to VERIFY:
 
 ```text
 Code      = CAN / TRUE / SAFE / DONE

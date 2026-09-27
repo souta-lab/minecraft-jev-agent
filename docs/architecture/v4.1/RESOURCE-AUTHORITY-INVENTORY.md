@@ -1,5 +1,7 @@
 # V4.1.2 Production Resource / Mutation Inventory
 
+> **PERMANENT ARCHITECTURE LOCK:** V4.1.2 is permanently locked (`AGENTS.md` PERMANENT ARCHITECTURE LOCK; checkpoint `092a5b38`). New surfaces get mapped into this inventory and the canonical adapter boundary — authority never moves to a new architecture.
+
 This inventory is derived from the live repository surfaces, not only from the architecture document. Its purpose is to define the resource/effect authority that Phase 1 must shadow before any VTR kernel authority reaches production. Candidate resources below are hypotheses to validate at the adapter boundary, not claims that Mineflayer aliases are already proven.
 
 ## Audited source surfaces

@@ -1,8 +1,10 @@
-# EXPERIMENT-PROTOCOL.md — bounded improvement under a frozen architecture
+# EXPERIMENT-PROTOCOL.md — bounded improvement under a permanently locked architecture
 
 Purpose: let a substantially weaker worker improve this repository through
 **bounded experiments** without reopening architecture questions. The V4.1.2
-constitution (root `AGENTS.md`) is closed; this document is the only contract a
+constitution (root `AGENTS.md`, `PERMANENT ARCHITECTURE LOCK`) is permanently
+locked — not frozen-pending-anything — and can never be reopened, replaced, or
+redesigned in this repository; this document is the only contract a
 worker needs to change product code safely.
 
 If a change cannot be expressed as an experiment under this protocol, it is not

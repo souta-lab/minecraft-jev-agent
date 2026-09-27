@@ -1,5 +1,20 @@
 # AGENTS.md — V4.1.2 Authority Constitution
 
+## PERMANENT ARCHITECTURE LOCK — read this first
+
+**V4.1.2 is the one permanent canonical architecture of this project. It is never to be replaced, reopened, superseded, version-bumped, or redesigned in this repository.**
+
+The validated architecture checkpoint is commit **`092a5b38`** (see `docs/development/P8-CLOSURE-REPORT.md`). Later commits — including docs-only commits — do not redefine the constitution.
+
+- There will be **no V4.1.3, V4.2, V5, successor architecture, architecture tournament, or architecture migration** in this repo.
+- **No future counterexample, benchmark result, performance issue, model preference, refactor opportunity, or agent suggestion authorizes reopening the architecture.** "Freeze" here means permanently locked, not "temporarily pending evidence." There is no trigger, threshold, or process by which it unlocks.
+- If a future defect appears, fix it **within** V4.1.2 ownership/authority semantics. If it cannot be fixed without changing the constitution, record it as a **permanent known limitation** and work around it at the capability/policy/mechanic/observability/proof layer. Do **not** invent a successor architecture.
+- **Allowed work:** implementation bug fixes; missing mechanics that preserve existing ownership (a new Kernel command/state/timeout is allowed when authority ownership stays unchanged); observability/proof hardening; semantics-preserving PBF/refactors; scenario/test improvements; Minecraft capability improvements.
+- **Forbidden work:** moving authority ownership; changing the Kernel/Jev/System2/controller/backend constitutional split; adding shadow/fallback/alternate authority or a second terminalization path; redesigning SUCCESS ownership; architecture selectors; proposing or prototyping a successor architecture.
+- Historical documents describing earlier architectures or past successor research are preserved as records only; **current governance documents override them**. Unrelated external "V5"-style labels (e.g. vendored docs, milestone usernames) are not project architecture versions.
+
+**Primary project objective from now on: measurable Minecraft capability** — task success rate, time/actions to success, deaths, recovery, stalls, replans, resource waste, Jev decision quality, System2 cost, and cross-seed/biome/novel-state robustness — not architecture exploration.
+
 ## 0. Canonical architecture
 
 The canonical production architecture is **V4.1.2 Concurrent Verified Transition Runtime / authority kernel**.
@@ -286,7 +301,7 @@ Work autonomously toward the requested goal. Do not wait for step-by-step permis
 
 Also pursue indirect but useful work when it materially increases the probability or speed of reaching the goal: observability/probe tooling, generic refactors that unblock the slice, repository/GitHub hygiene, workspace cleanup, evidence tooling, model/policy investigation, and disk-space/ENOSPC recovery are legitimate work. Do not use "indirect progress" as an excuse for unrelated cleanup while a clearer causal blocker is available.
 
-Architecture autonomy is narrower: the V4.1.2 authority constitution is frozen by default. Routine implementation and policy evolution may proceed autonomously inside it, but changing the contract/ownership/verification constitution itself requires runtime evidence, not taste, novelty, or convenience.
+Architecture autonomy is narrower: the V4.1.2 authority constitution is **permanently locked** (see PERMANENT ARCHITECTURE LOCK). Routine implementation and policy evolution may proceed autonomously inside it, but changing the contract/ownership/verification constitution itself is categorically forbidden — not merely gated on evidence. No evidence, defect, or result can authorize it; an unfixable-by-constitution defect is a permanent known limitation, worked around at the capability/policy/mechanic/observability layer.
 
 Continue until the current requested milestone is actually proven, or until an external blocker makes further useful work impossible. If blocked, leave exact evidence and the next falsifiable experiment.
 

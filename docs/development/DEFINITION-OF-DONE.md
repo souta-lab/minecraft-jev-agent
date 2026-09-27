@@ -40,6 +40,8 @@ Live evidence is not required unless the issue explicitly asks for it.
 
 ### 2. Architecture / refactor
 
+**Scope limit — PERMANENT ARCHITECTURE LOCK:** "architecture/refactor" work means structural work *inside* the permanently locked V4.1.2 constitution (`AGENTS.md` PERMANENT ARCHITECTURE LOCK; checkpoint `092a5b38`). It can never change authority ownership, the Kernel/Jev/System2/controller/backend split, or SUCCESS ownership, and it never produces or gates on a successor architecture.
+
 Examples: state ownership boundary, Option/Skill contract, controller extraction, event schema.
 
 Done when:

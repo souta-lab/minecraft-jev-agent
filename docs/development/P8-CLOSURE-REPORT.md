@@ -4,14 +4,16 @@
 **Final SHAs:** `d6aa847` (preemption integrity slice) → **`092a5b38` (freeze checkpoint; pushed to origin/main)**
 **Verdict:** **V4.1.2 SURVIVED** the final red-team. **No constitutional counterexample was produced.** Every defect admitted an ownership-preserving fix; every remaining open item is a bounded mechanic or designed semantics, never an authority relocation.
 
-**V4.1.2 ARCHITECTURE FROZEN** at the final validated checkpoint. Future routine work improves PBF, scenarios, proof coverage, and Minecraft capability. The constitution may only be reopened by a new minimized executable counterexample proving that the existing ownership/authority model cannot express a correct solution.
+**V4.1.2 ARCHITECTURE FROZEN — and subsequently made PERMANENT** (see the `PERMANENT ARCHITECTURE LOCK` section of `AGENTS.md`, which this report defers to). The validated architecture checkpoint is `092a5b38`. V4.1.2 is never to be replaced, reopened, superseded, or redesigned in this repository: **no future counterexample, benchmark, defect, or suggestion authorizes reopening it.** A defect that cannot be fixed within V4.1.2 ownership/authority semantics is recorded as a permanent known limitation and worked around at the capability/policy/mechanic/observability/proof layer — never by a successor architecture.
 
 ## Findings classification taxonomy
+
+The P8 pass classified findings into four categories. Under the permanent lock, the fourth category is retired permanently — no finding, present or future, can reopen the constitution.
 
 - **MUST_FIX_BEFORE_FREEZE_CHECKPOINT** — correctness/evidence defect fixed before this report froze.
 - **FIXABLE_UNDER_FREEZE** — bounded mechanic inside the constitution; recorded and deferred to dedicated slices.
 - **KNOWN_LIMITATION** — designed/pinned semantics; adversarially re-verified, no counterexample.
-- **ARCHITECTURE_REOPEN_TRIGGER** — none found. Zero constitutional limitations were proven.
+- **CONSTITUTIONAL LIMITATION (permanently empty)** — the pass searched for a minimized executable counterexample proving V4.1.2 cannot express a correct solution and produced none. Under the PERMANENT ARCHITECTURE LOCK this category admits no future members either: an unprovable-in-constitution defect would be recorded as a permanent KNOWN_LIMITATION and worked around, never as grounds for a successor architecture.
 
 ---
 
@@ -80,13 +82,15 @@
 | K32 | `VERIFY_SUCCESS` terminalizes a never-executed transition when fresh facts satisfy the predicate — VERIFY is the sole SUCCESS authority; correct by design. |
 | Audit-F12 | Proof format is self-certifying at the operator trust boundary — graft-binding mitigations landed; optional input hash-binding recorded under F6. |
 
-## ARCHITECTURE_REOPEN_TRIGGER
+## Constitutional-limitation search (closed — permanently empty class)
 
-**None.** The strongest constitutional candidates were attacked directly:
+**None found.** The strongest constitutional candidates were attacked directly:
 
 - Preemption liveness/atomicity/staleness resolved with one new scheduler command plus deadline/quiesce gates — no authority moved.
 - The binding-fence questions (F1/F3) are permissiveness fixes *inside* the same fence model, not arguments the model is wrong.
 - No trace demonstrated a correctness goal the constitution cannot express.
+
+Under the PERMANENT ARCHITECTURE LOCK (`AGENTS.md`), this search is closed for good: there is no criterion under which a future finding reopens the constitution.
 
 ## Unresolved ambiguity
 
@@ -107,9 +111,9 @@
 | **Full repository gate `bun test` (final tree)** | **798 pass / 0 fail** — 115,775 assertions, 34 files, 503 s |
 | Comparator CLI fixture suite `compare-vtr-reach.test.mjs` | 11 fail — **pre-existing environmental spawn failures, identical on control baseline** (0/11 on `c73b74e2` too); recorded as infra issue, not a regression |
 
-## Post-P8 bounded tasks (architecture frozen)
+## Post-P8 bounded tasks (architecture permanently locked)
 
 1. Fence-narrowing slice (Audit-F1/F3): scoped tx/token bindings + revalidation/rebind; includes the empty-snapshot freshness decision.
 2. Journal attribution events for kernel-initiated terminalizations (Audit-F5).
 3. Comparator hardening residue (F2 fixture alignment, F6 archiveRoot digest).
-4. **Pivot to measurable Minecraft capability** — the primary objective. Capability ladder wood → stone tools → iron → food/survival → cave recovery → smelting → portal → Nether traversal → fortress/blaze → pearls → stronghold → End, via bounded experiments + deterministic/live scenarios. Metrics per bounded experiment: task success rate, time/actions to success, deaths, recovery rate, stalls, resource waste, replans, Jev decision quality, System2 invocation rate/cost, cross-seed and cross-biome robustness, novel-state recovery. Attack one measured failure cluster at a time; architecture stays frozen.
+4. **Pivot to measurable Minecraft capability** — the primary and permanent objective. Capability ladder wood → stone tools → iron → food/survival → cave recovery → smelting → portal → Nether traversal → fortress/blaze → pearls → stronghold → End, via bounded experiments + deterministic/live scenarios. Metrics per bounded experiment: task success rate, time/actions to success, deaths, recovery rate, stalls, resource waste, replans, Jev decision quality, System2 invocation rate/cost, cross-seed and cross-biome robustness, novel-state recovery. Attack one measured failure cluster at a time; the architecture is permanently locked (`PERMANENT ARCHITECTURE LOCK`, `AGENTS.md`).

@@ -1,5 +1,7 @@
 # V4.1 Architecture Invariants
 
+> **PERMANENT ARCHITECTURE LOCK:** these invariants are permanent constitutional law for this repository (`AGENTS.md` PERMANENT ARCHITECTURE LOCK; checkpoint `092a5b38`). Tests may grow stricter; ownership semantics may not be relaxed or replaced.
+
 Each invariant is intended to become a pure/property/adapter test. `M` = already exercised by `model.test.ts`; `P` = required during production migration.
 
 | ID | Invariant | Proof hook |

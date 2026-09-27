@@ -6,7 +6,7 @@ Historical incidents, timestamped blockers, and old phase plans are intentionall
 
 ## 1. Precedence and current work
 
-This file inherits the repository-root `AGENTS.md`; root rules have higher precedence.
+This file inherits the repository-root `AGENTS.md`; root rules have higher precedence. In particular the root `PERMANENT ARCHITECTURE LOCK` binds all work here: V4.1.2 is permanent; no successor architecture, no reopening the authority constitution under any evidence.
 
 Current work is selected from repository-root `ISSUE-ROUTING.json` only. Before modifying runtime code:
 

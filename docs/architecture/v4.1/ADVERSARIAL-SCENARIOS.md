@@ -1,5 +1,7 @@
 # V4.1 Counterexample / Adversarial Scenario Suite
 
+> **PERMANENT ARCHITECTURE LOCK:** V4.1.2 is permanently locked (`AGENTS.md` PERMANENT ARCHITECTURE LOCK; checkpoint `092a5b38`). "Counterexample" here means *implementation/mechanics* counterexamples used to falsify and fix defects inside the constitution — never grounds for reopening or replacing the architecture, which no future finding can authorize.
+
 The purpose is to falsify the architecture, not to showcase it. Each row states the expected lifecycle, resource/effect ownership, and verification boundary.
 
 | # | Scenario | Expected lifecycle | Ownership | Verification / required evidence |

@@ -107,9 +107,12 @@ tightening lands — that is the blocker, not the filename.
 - Backend-free scan inside the production test covers `src/reach/` (and
   `src/vtr/` if it reappears) for `mineflayer`/`Bot`/`this.bot`.
 
-Frozen V4.1.2 areas (do not open without runtime evidence): kernel authority
-path, contract/commit admission, VERIFY_SUCCESS semantics, transition
-controller ownership, lease/generation fencing.
+Permanently locked V4.1.2 areas (`PERMANENT ARCHITECTURE LOCK`, root
+`AGENTS.md`; checkpoint `092a5b38`): kernel authority path, contract/commit
+admission, VERIFY_SUCCESS semantics, transition controller ownership,
+lease/generation fencing. **No evidence ever opens them** — defects here are
+fixed only inside existing ownership semantics or recorded as permanent known
+limitations. There is no successor architecture; do not propose one.
 
 ## 4. Remaining structural work (ordered)
 

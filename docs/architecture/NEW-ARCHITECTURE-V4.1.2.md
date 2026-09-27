@@ -1,6 +1,8 @@
 # Minecraft Jev Agent Architecture V4.1.2
 
-**Status: CURRENT canonical architecture.** The V4.1.2 authority constitution is enforced by root `AGENTS.md` §0. Superseded versions (V4, V4.1, V4.1.1) live under `docs/history/architecture/` as semantic lineage only.
+> **PERMANENT ARCHITECTURE LOCK:** V4.1.2 is the one permanent canonical architecture — never replaced, reopened, superseded, or redesigned in this repository (validated checkpoint `092a5b38`; policy: `AGENTS.md` PERMANENT ARCHITECTURE LOCK). No future finding authorizes reopening it; constitution-level defects become permanent known limitations worked around at the capability/policy/mechanic/observability layer.
+
+**Status: CURRENT canonical architecture — permanently locked.** The V4.1.2 authority constitution is enforced by root `AGENTS.md`. Superseded versions (V4, V4.1, V4.1.1) live under `docs/history/architecture/` as semantic lineage only — there will be no V4.1.3/V4.2/V5 or successor architecture in this repo.
 
 ## Production-Grade Executable Authority Kernel
 
