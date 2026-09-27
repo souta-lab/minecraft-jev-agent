@@ -1410,6 +1410,14 @@ export function envHazardEscapeCandidates(
  */
 const DEATH_ZONE_EXIT_OFFERS = 3
 
+/**
+ * Measured no-progress duration before the sealed-pocket escape affordance
+ * may be offered. Matches the scheduler's own `stallMs` boundary
+ * (controller.ts) so the offer appears exactly when LOCAL_PROGRESS_STALL
+ * would fire - and never on a transient empty tick between plans.
+ */
+export const SEALED_ESCAPE_STALL_MS = 25_000
+
 export function deathZoneEscapeCandidates(
   state: WorldState,
   options: CandidateOptions,
@@ -4804,6 +4812,39 @@ function generateRawCandidates(
         outcome: 'RECURRENT_STATE',
         label: 'hand control to System 2 (the only safe column descent is recurrent)',
       }),
+    )
+  }
+
+  // The symmetric escape affordance to the stranded down-step above: a body
+  // sealed BELOW the surface band (no locomotion candidate at all, and the
+  // bounded down-step found nothing either) has one physical route left - dig
+  // or climb back out. `ascentRouteTo` already plans that: a tunnel reuse, a
+  // pillar when blocks are carried, or a staircase clearance dig that needs no
+  // tool (harvest tier gates drops, never breakability). Measured portal-p10:
+  // a body at y56 with inv={gravel:1} under goto/explore/descend goals collapsed
+  // to WAIT/ESCALATE for ~25 min because this arm only existed for `surface`
+  // goals. Same CAN envelope rule: offered only when nothing else locomotes;
+  // Jev still owns whether to take it over WAIT. A `surface` goal already gets
+  // the same machinery via `surfaceAscentCandidates` above. The stall gate is
+  // the scheduler's own boundary (`stallMs`, controller.ts): a transient
+  // candidate-starved tick between plans must not see a routine "climb out"
+  // offer - the affordance appears only once no-progress is a measured fact.
+  if (
+    !hasLocomotionCandidate &&
+    columnDescent.candidates.length === 0 &&
+    (state.signals?.stalledMs ?? 0) >= SEALED_ESCAPE_STALL_MS &&
+    current?.kind !== 'surface' &&
+    normalizeDimensionId(state.self.dimension) === 'overworld' &&
+    state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
+  ) {
+    candidates.push(
+      ...ascentRouteTo(state, options, {
+        targetY: ANIMAL_HABITAT_SEA_LEVEL + 1,
+        goalId: current?.id ?? 'sealed-escape',
+        idPrefix: 'ASCEND:escape:',
+        label: 'dig or climb back out of the sealed pocket toward the surface',
+        extraMeta: { escapeAscent: true },
+      }).candidates,
     )
   }
 
