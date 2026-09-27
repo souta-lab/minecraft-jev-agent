@@ -28,7 +28,7 @@ import { applySystem2RecoveryFence, evaluateSystem2Apply, formatCompiledGoalRows
 import type { System2ApplyState, System2RequestContext } from './system2/authority.ts'
 import { SYSTEM2_SEMANTIC_HISTORY_LIMIT, acceptedSystem2PlanGoals, createSystem2SemanticOutcome, finalizeSystem2SemanticOutcomes, system2SemanticBlocker, system2SemanticFingerprint } from './system2/causal-history.ts'
 import { buildSystem2BlockerFacts, emptySystem2PayloadShape, formatSystem2PayloadAbsentLine, formatSystem2PayloadLine, formatSystem2PayloadRefusedLine } from './system2/payload.ts'
-import { bodySurvivalFacts } from './threat.ts'
+import { bodySurvivalFacts, isDangerousThreat } from './threat.ts'
 import type { Bot } from 'mineflayer'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
@@ -383,6 +383,10 @@ export function semanticStateFingerprint(host: System2PlaneHost): string {
 }
 
 
+/** Bounded hold a fresh plan gets while a body-owned action is still in flight. */
+const SYSTEM2_APPLY_DEFER_ATTEMPTS = 3
+const SYSTEM2_APPLY_DEFER_MS = 1500
+
 export function system2ApplyIdentity(host: System2PlaneHost,
 state: WorldState | null): Pick<
   System2RequestContext,
@@ -415,26 +419,24 @@ state: WorldState | null): Pick<
     inventoryFingerprint,
     dimension: host.bot.game?.dimension ?? world?.self.dimension ?? null,
   }
-  const topologyRevision = host.scheduler.blockRevision
-  if (topologyRevision !== null) result.worldTopologyRevision = topologyRevision
+  // `scheduler.blockRevision` is a packet-level revision: every block update in
+  // the loaded world - including the resident's own digging and passive scans -
+  // bumps it. Measured live (portal-p1, 2026-09-27): that alone discards plans
+  // that are still correct, because the world never holds still across the
+  // model round-trip. The durable facts below carry the semantic basis a plan
+  // can name; a raw packet revision cannot distinguish a material change from
+  // noise, so it is deliberately not part of the freshness identity.
   if (world === null) return result
 
   // Do not include distance, inReach, visible, adjacent-stand geometry or
   // position. They are body-relative affordances and are recomputed by the
   // live sensor / Option compiler when the answer is applied. Preserve the
-  // sensed resource identity and actual block truth so a changed/removed/new
-  // source cannot inherit an old plan.
-  const blocks = world.blocks
-    .map((block) => ({
-      kind: block.kind,
-      name: block.name,
-      at: [block.position.x, block.position.y, block.position.z],
-      diggable: block.diggable,
-      yield: block.yield ?? null,
-      harvestTool: block.harvestTool ?? null,
-      harvestTier: block.harvestTier ?? null,
-    }))
-    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+  // durable resource/station identity so a changed/removed/new source cannot
+  // inherit an old plan. The raw sensed-block snapshot is intentionally left
+  // out: the sensed volume churns with the resident's own motion and scans
+  // (portal-p1/v2-n5: `world_facts_changed` on benign rescan churn discarded
+  // every authored plan), while execution re-grounds source blocks per
+  // candidate anyway.
   const resources = (world.signals.knownResources ?? [])
     .map((resource) => ({
       kind: resource.kind,
@@ -445,7 +447,6 @@ state: WorldState | null): Pick<
     }))
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
   result.worldFactsFingerprint = JSON.stringify({
-    blocks,
     resources,
     stations: world.craftingTables
       .map((station) => [station.x, station.y, station.z])
@@ -457,8 +458,13 @@ state: WorldState | null): Pick<
   const threat = world.signals.threat ?? null
   const hazard = world.self.envHazard
   result.threatFingerprint = JSON.stringify({
+    // Threat-relevant hostiles only: `isDangerousThreat` is the same 8m danger
+    // boundary the candidate/survival layers use, and `attackedSelf` keeps a
+    // hitting mob material at any distance. A zombie twitching far outside the
+    // envelope cannot change what the plan should be - measured live (v2-n5,
+    // portal-p1): it discarded every authored plan via `threat_state_changed`.
     hostiles: world.entities
-      .filter((entity) => entity.hostile)
+      .filter((entity) => entity.hostile && (isDangerousThreat(entity) || entity.attackedSelf === true))
       .map((entity) => ({
         id: entity.id,
         name: entity.name,
@@ -734,8 +740,8 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
 
   void host.system2
     .plan(request)
-    .then((plan) => {
-      if (!host.running || host.modelRecoveryStopping) {
+    .then(async (plan) => {
+      const staleDiscard = () => {
         host.logger.warn(
           'system2',
           `SYSTEM2_STALE_DISCARD reason=${host.modelRecoveryStopping ? 'authority_withdrawn' : 'controller_stopped'}`,
@@ -743,20 +749,55 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
           host.tickCounter,
         )
         host.llmInFlight = false
+      }
+      if (!host.running || host.modelRecoveryStopping) {
+        staleDiscard()
         return
       }
-      const current = host.queue.state
-      const currentContext: System2ApplyState = {
-        queueRevision: host.queue.revision,
-        optionInstanceId: current.current?.semanticOptionInstanceId ?? current.current?.optionInstanceId ?? null,
-        optionTemplateId: current.current?.semanticOptionTemplateId ?? current.current?.optionTemplateId ?? null,
-        worldEpoch: host.options.worldEpoch,
-        stateFingerprint: host.lastStateFingerprint || 'unobserved',
-        ...host.system2ApplyIdentity(host.lastWorldState),
-        authorityEpoch: host.criticalStateVersion,
-        actionInFlight: system2BodyOwned(host.executor.current?.kind ?? null),
+      const buildCurrentContext = (): System2ApplyState => {
+        const current = host.queue.state
+        return {
+          queueRevision: host.queue.revision,
+          optionInstanceId: current.current?.semanticOptionInstanceId ?? current.current?.optionInstanceId ?? null,
+          optionTemplateId: current.current?.semanticOptionTemplateId ?? current.current?.optionTemplateId ?? null,
+          worldEpoch: host.options.worldEpoch,
+          stateFingerprint: host.lastStateFingerprint || 'unobserved',
+          ...host.system2ApplyIdentity(host.lastWorldState),
+          authorityEpoch: host.criticalStateVersion,
+          actionInFlight: system2BodyOwned(host.executor.current?.kind ?? null),
+        }
       }
-      const validity = evaluateSystem2Apply(requestContext, currentContext)
+      let currentContext = buildCurrentContext()
+      let validity = evaluateSystem2Apply(requestContext, currentContext)
+      // A body-owned action in flight is the ONE transient apply fence: the plan
+      // is still authored against this exact queue/world, so hold it briefly for
+      // the mechanical continuation to land rather than paying a fresh model
+      // call whose answer races the same fence again (measured: portal-p1 and
+      // v2-n5 discarded every authored plan while STEP/DESCEND legs ran under an
+      // empty queue). Every other reason - queue/objective/inventory/dimension/
+      // epoch/threat/facts - still discards immediately.
+      for (
+        let deferAttempt = 0;
+        deferAttempt < SYSTEM2_APPLY_DEFER_ATTEMPTS &&
+          !validity.apply &&
+          validity.reasons.every((deferReason) => deferReason === 'action_in_flight');
+        deferAttempt += 1
+      ) {
+        host.logger.info(
+          'system2',
+          `SYSTEM2_APPLY_DEFER attempt=${deferAttempt + 1}/${SYSTEM2_APPLY_DEFER_ATTEMPTS} reason=action_in_flight`,
+          { requestId: requestContext.requestId, deferMs: SYSTEM2_APPLY_DEFER_MS },
+          host.tickCounter,
+        )
+        await new Promise((resolveDefer) => setTimeout(resolveDefer, SYSTEM2_APPLY_DEFER_MS))
+        if (!host.running || host.modelRecoveryStopping) break
+        currentContext = buildCurrentContext()
+        validity = evaluateSystem2Apply(requestContext, currentContext)
+      }
+      if (!host.running || host.modelRecoveryStopping) {
+        staleDiscard()
+        return
+      }
       if (!validity.apply) {
         const line = formatSystem2Discard(requestContext, validity.reasons)
         host.logger.warn(

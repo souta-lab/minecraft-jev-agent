@@ -10,6 +10,7 @@ import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, currentOptionContextForQueuedGoal, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { buildAuthorityQuestions } from '../jev-agent/src/jev/authority.ts'
 import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2/authority.ts'
+import { system2ApplyIdentity } from '../jev-agent/src/system2-plane.ts'
 import {
   evaluateBetaTerminationBoundary,
   evaluateCandidateStarvationBoundary,
@@ -172,6 +173,86 @@ assert.equal(system2BodyOwned('WAIT'), false)
 assert.equal(system2BodyOwned('ESCALATE'), false)
 assert.equal(system2BodyOwned('MINE'), true)
 assert.equal(system2BodyOwned(null), false)
+
+// portal-p1/v2-n5 regression (2026-09-27): every authored plan was discarded
+// because the apply identity hashed world-scale churn the plan could not name -
+// hostiles far outside the danger envelope, the raw sensed-block snapshot, and
+// the packet-level block revision. The identity must stay stable across that
+// noise while still fencing the durable basis a plan is authored against.
+{
+  const hostile = (id: number, distance: number, attackedSelf = false) => ({
+    id,
+    name: 'zombie',
+    kind: 'Hostile mobs',
+    username: null,
+    position: { x: distance, y: 64, z: 0 },
+    distance,
+    hostile: true,
+    lineOfSight: true,
+    heldItem: null,
+    activeItemUse: null,
+    health: 20,
+    attackedSelf,
+  })
+  const world = (overrides: Record<string, unknown>) => ({
+    inventory: { counts: { oak_log: 2 } },
+    entities: [],
+    blocks: [],
+    signals: { knownResources: [], threat: null },
+    craftingTables: [],
+    furnaces: [],
+    self: {
+      dimension: 'minecraft:overworld',
+      envHazard: null,
+      health: 20,
+      food: 20,
+      air: null,
+      heldItem: null,
+      offhand: null,
+      armor: null,
+      activeItemUse: null,
+    },
+    ...overrides,
+  })
+  const host = {
+    objectiveState: () => ({ goal: 'dragon' }),
+    inventorySnapshot: () => ({ oak_log: 2 }),
+    bot: { game: { dimension: 'minecraft:overworld' } },
+    scheduler: { blockRevision: 30 },
+    lastWorldState: null,
+  }
+  const identityFor = (w: unknown) =>
+    system2ApplyIdentity(host as never, w as never)
+  const baseline = identityFor(world({}))
+  // Packet-level block revision is not part of the freshness identity.
+  assert.equal('worldTopologyRevision' in baseline, false)
+  // Distant hostile spawn/move outside the 8m danger envelope: identical threat fingerprint.
+  const distant = identityFor(world({ entities: [hostile(1, 120.5)] }))
+  const distantMoved = identityFor(world({ entities: [hostile(1, 118.2)] }))
+  assert.equal(distant.threatFingerprint, baseline.threatFingerprint)
+  assert.equal(distantMoved.threatFingerprint, baseline.threatFingerprint)
+  // A hostile inside the danger radius IS material: the fingerprint must change.
+  const near = identityFor(world({ entities: [hostile(2, 6.5)] }))
+  assert.notEqual(near.threatFingerprint, baseline.threatFingerprint)
+  // An actively-attacking hostile is material at any distance.
+  const attacker = identityFor(world({ entities: [hostile(3, 30, true)] }))
+  assert.notEqual(attacker.threatFingerprint, baseline.threatFingerprint)
+  // The sensed-block snapshot is execution-time input, not plan basis.
+  const scanned = identityFor(
+    world({ blocks: [{ kind: 'log', name: 'oak_log', position: { x: 3, y: 64, z: 9 }, diggable: true }] }),
+  )
+  assert.equal(scanned.worldFactsFingerprint, baseline.worldFactsFingerprint)
+  // Durable resources/stations remain fenced: a changed waypoint must invalidate.
+  const remembered = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 3, y: 64, z: 9 },
+    dimension: 'minecraft:overworld',
+    worldEpoch: 1,
+  }
+  const withResource = identityFor(world({ signals: { knownResources: [remembered], threat: null } }))
+  assert.notEqual(withResource.worldFactsFingerprint, baseline.worldFactsFingerprint)
+}
 
 // 2. Body/search progress is evidence even when the semantic goal is unchanged.
 const descend = classifyActionOutcome({
