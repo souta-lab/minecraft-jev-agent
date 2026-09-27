@@ -94,8 +94,10 @@ Until V4.1.2 has produced its first clean verified autonomous Nether portal entr
 - The first verified portal entry is a **possibility proof**, not a robustness claim. It must be from a clean unassisted run, bind exact source/world/run identity, satisfy normal authority/VERIFY rules, and use no benchmark-specific production hard-coding.
 - After the first portal success, switch the primary objective to **portal reliability** across the declared dev+holdout cohort. The default robust criterion is at least `4/5` clean portal successes including at least one holdout success when five trials are practical.
 - After portal reliability is established, switch the primary objective to **portal speed/efficiency**: minimize verified time-to-portal while tracking deaths, stalls, recovery quality, mechanical actions, resource waste, replans, Jev/System2 usage, and regressions.
+- After speed work is healthy, enter **Generalize**: prove the capability transfers beyond the exact training/evaluation setup to unseen seeds, ordinary biomes/terrain, changed local state, and equivalent goals expressed through different natural-language instructions. The long-term direction is an interactive agent that can receive a user request in chat, interpret the requested Minecraft outcome, compose existing generic capabilities, execute it autonomously, report progress/results, and ask only when genuinely blocked by missing intent or unavailable capability.
+- Generalization must come from reusable mechanics, world understanding, planning/decomposition, recovery, and instruction interpretation—not seed coordinates, memorized benchmark routes, phrase-specific hacks, or hidden task selectors.
 - Pre-portal checkpoint metrics remain useful for localization and regression, but they must not become local optimization targets that delay the next end-to-end portal attempt.
-- Once portal reliability/speed work is healthy, continue the same pattern beyond the portal toward Nether traversal and later milestones.
+- Once portal reliability/speed/generalization work is healthy, continue the same pattern beyond the portal toward Nether traversal and later milestones.
 
 For each diagnostic checkpoint or selected blocker:
 
@@ -147,11 +149,12 @@ At the beginning of a fresh unattended campaign or after a hard reset of campaig
 
 Before the first verified portal entry, predeclare the **portal objective** and use wood/stone/iron/food/cave/smelting only as diagnostic checkpoint predicates. Holdout locations remain evaluation-only; never tune specifically against their coordinates or outcomes.
 
-The campaign has three ordered phases:
+The campaign has four ordered phases:
 
 1. **Possibility:** achieve one clean verified autonomous Nether portal entry as fast as practical. Intermediate checkpoints do not need `4/5` promotion. Fix the blocking failure, then rerun toward portal.
 2. **Reliability:** after one portal success, run the declared dev+holdout portal cohort. When no stricter gate applies, robust portal promotion requires focused checks green, zero `AUTHORITY_VIOLATION`, at least **4/5 clean portal successes** including at least one holdout success when five trials are practical, no material regression, and no pathological System2/model-call increase.
 3. **Speed:** after reliable portal success, optimize verified time-to-portal and efficiency without weakening reliability, safety, authority, or proof. Compare exact-SHA runs and keep slower-but-safer behavior unless the faster candidate preserves the declared reliability criterion.
+4. **Generalize:** after portal behavior is reliable and reasonably efficient, test transfer to unseen seeds/terrain/state and to semantically equivalent goals phrased differently in natural language. Prefer end-to-end instruction-following trials where the requested outcome is supplied as user-style text and the agent must interpret, decompose, execute, recover, and report using the same generic capability stack. Generalization evidence must not rely on benchmark-specific route scripts, coordinate memorization, wording-specific branches, or architecture changes.
 
 If run cost or infrastructure prevents five valid reliability trials, label confidence **LOW** and do not call portal capability robust. A single portal success proves possibility, not robustness.
 
