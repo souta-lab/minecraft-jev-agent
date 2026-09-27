@@ -1417,8 +1417,20 @@ export function deathZoneEscapeCandidates(
   const blacklisted = options.blacklistedMoveTargets
   if (blacklisted === undefined) return []
   if (!isBlacklistedMoveTarget(state, blacklisted, state.self.position)) return []
-  const exits = state.terrain.standable
-    .filter((cell) => !isBlacklistedMoveTarget(state, blacklisted, cell))
+  // The ±2 m `standable` ring can never leave a 14 m zone - measured portal-p9:
+  // every scanned cell was still inside the pocket, so the offer was empty
+  // while the body camped at an in-zone respawn anchor. `escapeCells` is the
+  // sensor's wider stand-verified ring (the same keep-distance destinations a
+  // RETREAT walks to), so the exit set is its union with the local ring.
+  const cells = [...(state.terrain.escapeCells ?? []), ...state.terrain.standable]
+  const seen = new Set<string>()
+  const exits = cells
+    .filter((cell) => {
+      const key = blockId('p', cell)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return !isBlacklistedMoveTarget(state, blacklisted, cell)
+    })
     .map((cell) => ({ spot: cell, d: distance(cell, state.self.position) }))
     .filter((entry) => entry.d > 0.5)
     .sort((a, b) => a.d - b.d)

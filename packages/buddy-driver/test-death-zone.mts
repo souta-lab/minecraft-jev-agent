@@ -139,10 +139,11 @@ function zoneEscapeFixture(
   selfPos: { x: number; y: number; z: number },
   standable: Array<{ x: number; y: number; z: number }>,
   hazards: readonly DeathHazard[],
+  escapeCells: Array<{ x: number; y: number; z: number }> = [],
 ): { state: WorldState; options: CandidateOptions } {
   const state = {
     self: { position: selfPos, dimension: DIM },
-    terrain: { standable },
+    terrain: { standable, escapeCells },
     tick: 1,
   } as unknown as WorldState
   const options = {
@@ -178,6 +179,38 @@ addCase('death-zone exits: standing in-zone offers nearest out-of-zone cells', (
   }
 })
 
+addCase('death-zone exits: local ring all in-zone, escape ring reaches outside (portal-p9 shape)', () => {
+  // p9 measured: the respawn anchor sat inside the pocket, every +-2 m standable
+  // cell was still in-zone, and the offer was empty for the whole camp window.
+  // The exits must come from the wider stand-verified escape ring.
+  const hazards = [production(3219, 63, 2812, 1, DIM), production(3233, 67, 2803, 1, DIM)]
+  const { state, options } = zoneEscapeFixture(
+    { x: 3224, y: 64, z: 2809 },
+    // the +-2 m ring: every cell still inside the zone
+    [
+      { x: 3223, y: 64, z: 2808 },
+      { x: 3225, y: 64, z: 2810 },
+      { x: 3224, y: 64, z: 2807 },
+    ],
+    hazards,
+    // escapeCells: the 16 m ring carrying genuinely out-of-zone cells
+    [
+      { x: 3208, y: 63, z: 2790 }, // out of zone, ~26m
+      { x: 3225, y: 64, z: 2825 }, // out of zone, ~16m -> nearest offer
+      { x: 3230, y: 64, z: 2805 }, // in-zone -> withheld
+    ],
+  )
+  const offers = zoneEscapes(state, options)
+  const targets = offers.map((entry) => `${entry.target?.x},${entry.target?.y},${entry.target?.z}`)
+  const allOutside = offers.every(
+    (entry) => entry.target !== null && isInDeathZone(hazards, entry.target, DIM) === null,
+  )
+  return {
+    pass: offers.length === 2 && allOutside && targets[0] === '3225,64,2825',
+    detail: `offers=[${targets.join(' | ')}] allOutside=${allOutside}`,
+  }
+})
+
 addCase('death-zone exits: no offers while the body stands outside the zone', () => {
   const hazards = [production(3219, 63, 2812, 1, DIM), production(3233, 67, 2803, 1, DIM)]
   const { state, options } = zoneEscapeFixture(
@@ -203,7 +236,7 @@ addCase('DescendAwarePolicy strips in-zone move targets before the inner policy 
       return Promise.resolve({
         callId: 't',
         policy: 'fallback',
-        source: 'test',
+        source: 'fallback',
         model: 'stub',
         latencyMs: 0,
         usage: null,
