@@ -99,6 +99,17 @@ Until V4.1.2 has produced its first clean verified autonomous Nether portal entr
 - Pre-portal checkpoint metrics remain useful for localization and regression, but they must not become local optimization targets that delay the next end-to-end portal attempt.
 - Once portal reliability/speed/generalization work is healthy, continue the same pattern beyond the portal toward Nether traversal and later milestones.
 
+### P-series end-to-end development loop
+
+Portal-first capability development uses a monotonically increasing end-to-end attempt series: `portal-p1`, `portal-p2`, `portal-p3`, ... . **The p-number is the development spine.** Do not treat these as disposable run names.
+
+- Every `pN` is an immutable evidence point bound to its exact source SHA, seed/world/start fixture, mission/accept predicate, model/provider configuration, run artifacts, and verified outcome. Never overwrite or silently rerun an old p-number with different code.
+- After each `pN`, audit both capability and AI behavior: milestone/checkpoint times, inventory/tool progression, deaths/damage/food, stalls and repeated actions, resource over-collection/waste, Jev decisions/latency/rejections, System2 intents/applied/discarded plans/latency, recovery behavior, authority/effect failures, and the earliest causal blocker.
+- `pN+1` must explicitly inherit the useful evidence from `pN`. State what `pN` taught us, what causal behavior is being changed, and what observable signature should improve. Prefer the smallest generic fix that unlocks deeper end-to-end progress.
+- Keep the comparison legible: preserve prior artifacts, record the exact delta between adjacent p-runs, and compare time-to-checkpoint as well as final depth. A later p that reaches farther but introduces pathological deaths, loops, model cost, or authority violations is not automatically better.
+- Do not spend the interval between p-runs polishing tooling. Once the causal question is answered and focused guards are green, launch the next p-run. The normal rhythm is **run pN -> inspect evidence -> smallest causal fix -> run pN+1**.
+- AI inefficiencies are valid p-series defects even when the run is technically progressing. Examples include gathering far beyond the amount needed for the next tool, rebuilding resources unnecessarily, repeating already-satisfied subgoals, failing to upgrade tools when prerequisites are present, or choosing a much slower acquisition strategy without a state-based reason. Fix these as generic planning/grounding behavior, never as a hard-coded benchmark route.
+
 For each diagnostic checkpoint or selected blocker:
 
 1. Predeclare the task predicate, metrics, development seed cohort, and holdout seed cohort **before** candidate tuning. Prefer at least 3 development seeds + 2 holdout seeds when live-run cost permits; if less is practical, record the sample-size limitation explicitly.
