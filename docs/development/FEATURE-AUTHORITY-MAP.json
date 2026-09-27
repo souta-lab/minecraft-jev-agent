@@ -1,0 +1,562 @@
+{
+  "schema": "feature-authority-map/v1",
+  "purpose": "Machine-checkable map from feature domains to their actual production authority surfaces. Checked by bun-tests/feature-authority-map.test.ts against candidates.ts, executor.ts and reach/kernel-authority-map.ts. A surface listed here is an authority ENVELOPE: the domain's candidate paths may reach it; a surface not listed here must not be reachable from that domain's dispatch path.",
+  "admissionKinds": {
+    "flat-candidate": "QueuedGoal candidate admitted by executor.claim; mutation through the generation-leased actuation boundary only; terminalization via flat buildResult(done|failed|cancelled). NOT kernel-admitted.",
+    "kernel-transition-contract": "VTR TransitionContract admitted via applyKernelCommand; mutation gated by kernel leases + single-use effect tokens; terminalization via kernel TERMINAL only."
+  },
+  "domains": {
+    "navigation": {
+      "owner": "executor.ts locomotion skills + packages/jev-agent/src/reach/ kernel-admitted reach contract",
+      "candidateKinds": [
+        "MOVE",
+        "DESCEND",
+        "STEP"
+      ],
+      "dispatch": {
+        "MOVE": "runMove",
+        "DESCEND": "runDescend",
+        "STEP": "runStep"
+      },
+      "admission": "mixed",
+      "kernelAdmitted": "partial",
+      "kernelModules": [
+        "reach/transition.ts",
+        "reach/controller.ts",
+        "reach/kernel-authority-map.ts"
+      ],
+      "contract": "mission-source reach walks: ReachTransitionContract (admissibleEffects=[locomotion] -> claims body.locomotion+body.orientation, MOVE permit reach:leg). Other locomotion: flat Candidate.",
+      "mutationSurfaces": [
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "bot.look",
+        "bot.lookAt",
+        "bot.dig",
+        "bot.stopDigging",
+        "bot.placeBlock",
+        "bot._placeBlockWithOptions",
+        "bot.useOn",
+        "bot.equip",
+        "bot.unequip",
+        "entity.position.write",
+        "entity.yaw",
+        "entity.pitch",
+        "entity.onGround",
+        "entity.velocity.write",
+        "bot.physicsEnabled",
+        {
+          "surface": "_client.write",
+          "instance": "position"
+        },
+        {
+          "surface": "_client.write",
+          "instance": "position_look"
+        },
+        {
+          "surface": "_client.write",
+          "instance": "look"
+        },
+        {
+          "surface": "_client.write",
+          "instance": "flying"
+        }
+      ],
+      "resourceDomains": [
+        "body",
+        "world",
+        "interaction",
+        "equipment",
+        "inventory"
+      ],
+      "effects": [
+        "MOVE",
+        "LOOK",
+        "DIG",
+        "PLACE",
+        "INTERACT",
+        "EQUIP"
+      ],
+      "observation": "path progress deltas, position/closing evidence, worldMemory cell state; kernel-admitted legs additionally record verified facts",
+      "verification": "flat: per-skill verified progress flags + buildResult; reach legs: kernel VERIFY_SUCCESS over fresh facts",
+      "cancellation": "AbortSignal + epoch fencing -> ActionCancelled -> cancelled result; pathfinder.stop quiesces in-flight motion",
+      "terminalization": "flat buildResult(done|failed|cancelled) for executor legs; kernel TERMINAL for reach-contract legs"
+    },
+    "mining": {
+      "owner": "executor.ts:runMine",
+      "candidateKinds": [
+        "MINE"
+      ],
+      "dispatch": {
+        "MINE": "runMine"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate grounded by candidates.ts (tool family, requiresTool, block identity)",
+      "mutationSurfaces": [
+        "bot.dig",
+        "bot.stopDigging",
+        "bot.look",
+        "bot.lookAt",
+        "bot.equip",
+        "bot.unequip",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop",
+        "collectBlock.collect",
+        "entity.position.write",
+        "entity.yaw",
+        "entity.pitch",
+        "entity.onGround",
+        "bot.physicsEnabled"
+      ],
+      "resourceDomains": [
+        "body",
+        "world",
+        "equipment",
+        "inventory",
+        "entity"
+      ],
+      "effects": [
+        "DIG",
+        "LOOK",
+        "EQUIP",
+        "MOVE"
+      ],
+      "observation": "blockRemoved + dropObserved + goalItemCount deltas re-read from world state",
+      "verification": "runMine done requires verified block removal; drop pickup is a separate PICKUP/RETRIEVE concern",
+      "cancellation": "AbortSignal + stopDigging quiesce; epoch fencing",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "placement/building": {
+      "owner": "executor.ts:runPlace (runPlaceCells for multi-cell frames/scaffolds)",
+      "candidateKinds": [
+        "PLACE"
+      ],
+      "dispatch": {
+        "PLACE": "runPlace"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming the exact item + placement cells/support",
+      "mutationSurfaces": [
+        "bot.placeBlock",
+        "bot._placeBlockWithOptions",
+        "bot.useOn",
+        "bot.updateSign",
+        "bot.dig",
+        "bot.stopDigging",
+        "bot.equip",
+        "bot.unequip",
+        "bot.look",
+        "bot.lookAt",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop",
+        "entity.position.write",
+        "entity.yaw",
+        "entity.pitch",
+        "entity.onGround",
+        "bot.physicsEnabled"
+      ],
+      "resourceDomains": [
+        "body",
+        "world",
+        "interaction",
+        "equipment",
+        "inventory"
+      ],
+      "effects": [
+        "PLACE",
+        "DIG",
+        "LOOK",
+        "EQUIP",
+        "MOVE",
+        "INTERACT"
+      ],
+      "observation": "placed-cell world reads, support/footing validation, placement cells verified present",
+      "verification": "placed block(s) observed at declared cells before done",
+      "cancellation": "AbortSignal + epoch fencing; partially placed cells remain world mutations (no rollback)",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "crafting": {
+      "owner": "executor.ts:runCraft",
+      "candidateKinds": [
+        "CRAFT"
+      ],
+      "dispatch": {
+        "CRAFT": "runCraft"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming recipe/item; table use grounded by world presence",
+      "mutationSurfaces": [
+        "bot.craft",
+        "bot.openBlock",
+        "bot.activateBlock",
+        "bot.closeWindow",
+        "window.close",
+        "bot.equip",
+        "bot.unequip",
+        "bot.look",
+        "bot.lookAt",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop"
+      ],
+      "resourceDomains": [
+        "body",
+        "equipment",
+        "interaction",
+        "inventory",
+        "station",
+        "window",
+        "world"
+      ],
+      "effects": [
+        "CRAFT",
+        "INTERACT",
+        "EQUIP",
+        "MOVE",
+        "LOOK"
+      ],
+      "observation": "inventory count deltas for recipe inputs/outputs",
+      "verification": "crafted item count increase observed in inventory",
+      "cancellation": "AbortSignal + epoch fencing; window closed on abort",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "inventory/equip": {
+      "owner": "executor.ts:runEquip (+ runEquipWeapon weapon selection)",
+      "candidateKinds": [
+        "EQUIP"
+      ],
+      "dispatch": {
+        "EQUIP": "runEquip"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming the exact item + destination",
+      "mutationSurfaces": [
+        "bot.equip",
+        "bot.unequip",
+        "bot.toss",
+        "bot.tossStack",
+        "bot.setQuickBarSlot",
+        "bot.putSelectedItemRange",
+        "bot.clickWindow"
+      ],
+      "resourceDomains": [
+        "inventory",
+        "equipment",
+        "window"
+      ],
+      "effects": [
+        "EQUIP",
+        "INVENTORY_MUTATION"
+      ],
+      "observation": "held/equipped slot state + inventory counts",
+      "verification": "destination slot observed holding the declared item",
+      "cancellation": "AbortSignal + epoch fencing",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "containers/stations": {
+      "owner": "executor.ts:runContainer + runSmelt (station process)",
+      "candidateKinds": [
+        "CONTAINER",
+        "SMELT"
+      ],
+      "dispatch": {
+        "CONTAINER": "runContainer",
+        "SMELT": "runSmelt"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming container/station instance + transfer intent",
+      "mutationSurfaces": [
+        "bot.openContainer",
+        "bot.openBlock",
+        "bot.openFurnace",
+        "bot.activateBlock",
+        "bot.closeWindow",
+        "window.close",
+        "bot.clickWindow",
+        "bot.transfer",
+        "bot.withdraw",
+        "bot.deposit",
+        "window.putInput",
+        "window.putFuel",
+        "window.takeInput",
+        "window.takeFuel",
+        "window.takeOutput",
+        "window.withdraw",
+        "window.deposit",
+        "bot.equip",
+        "bot.unequip",
+        "bot.look",
+        "bot.lookAt",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop"
+      ],
+      "resourceDomains": [
+        "body",
+        "container",
+        "equipment",
+        "interaction",
+        "inventory",
+        "station",
+        "window",
+        "world"
+      ],
+      "effects": [
+        "EQUIP",
+        "INTERACT",
+        "INVENTORY_MUTATION",
+        "LOOK",
+        "MOVE",
+        "STATION_MUTATION"
+      ],
+      "observation": "window contents + inventory deltas + furnace progress state",
+      "verification": "item count deltas observed on both sides of the transfer; smelt output observed",
+      "cancellation": "AbortSignal + epoch fencing; window closed on abort",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "combat/survival": {
+      "owner": "executor.ts:runAttack + runEat (+ runMove for RETREAT)",
+      "candidateKinds": [
+        "ATTACK",
+        "EAT",
+        "RETREAT"
+      ],
+      "dispatch": {
+        "ATTACK": "runAttack",
+        "EAT": "runEat",
+        "RETREAT": "runMove"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming target entity / food item / retreat route",
+      "mutationSurfaces": [
+        "bot.attack",
+        "bot.activateEntity",
+        "bot.activateEntityAt",
+        "bot.swingArm",
+        "bot.equip",
+        "bot.unequip",
+        "bot.activateItem",
+        "bot.deactivateItem",
+        "bot.consume",
+        "bot.look",
+        "bot.lookAt",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop",
+        "collectBlock.collect",
+        "entity.position.write",
+        "entity.yaw",
+        "entity.pitch",
+        "entity.onGround",
+        "entity.velocity.write",
+        "bot.physicsEnabled",
+        {
+          "surface": "_client.write",
+          "instance": "arm_animation"
+        },
+        {
+          "surface": "_client.write",
+          "instance": "entity_action"
+        }
+      ],
+      "resourceDomains": [
+        "body",
+        "attack",
+        "entity",
+        "interaction",
+        "equipment",
+        "inventory"
+      ],
+      "effects": [
+        "ATTACK",
+        "INTERACT",
+        "CONSUME",
+        "EQUIP",
+        "MOVE",
+        "LOOK"
+      ],
+      "observation": "target entity health/death, hunger/health state, threat distance",
+      "verification": "entity death/removal or food-level increase observed; retreat distance achieved",
+      "cancellation": "AbortSignal + epoch fencing; attack stops with controls cleared",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "portals": {
+      "owner": "executor.ts:runEnterPortal + runIgnite",
+      "candidateKinds": [
+        "ENTER_PORTAL",
+        "IGNITE"
+      ],
+      "dispatch": {
+        "ENTER_PORTAL": "runEnterPortal",
+        "IGNITE": "runIgnite"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming portal frame/entry cell + dimension",
+      "mutationSurfaces": [
+        "bot.activateBlock",
+        "bot.useOn",
+        "bot.activateItem",
+        "bot.deactivateItem",
+        "bot.placeBlock",
+        "bot._placeBlockWithOptions",
+        "bot.dig",
+        "bot.stopDigging",
+        "bot.equip",
+        "bot.unequip",
+        "bot.look",
+        "bot.lookAt",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop",
+        "entity.position.write",
+        "entity.yaw",
+        "entity.pitch",
+        "entity.onGround",
+        "bot.physicsEnabled",
+        {
+          "surface": "_client.write",
+          "instance": "position"
+        },
+        {
+          "surface": "_client.write",
+          "instance": "position_look"
+        }
+      ],
+      "resourceDomains": [
+        "body",
+        "world",
+        "interaction",
+        "equipment",
+        "inventory"
+      ],
+      "effects": [
+        "INTERACT",
+        "PLACE",
+        "DIG",
+        "EQUIP",
+        "MOVE",
+        "LOOK"
+      ],
+      "observation": "portal frame/interior lit state, dimension transition, position across crossing legs",
+      "verification": "portal interior lit / dimension-change observed; entry target identity matched",
+      "cancellation": "AbortSignal + epoch fencing; portal-entry interrupt reported via formatSkillInterrupt",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "retrieval and recovery": {
+      "owner": "executor.ts:runRetrieve + runPickup",
+      "candidateKinds": [
+        "RETRIEVE",
+        "PICKUP"
+      ],
+      "dispatch": {
+        "RETRIEVE": "runRetrieve",
+        "PICKUP": "runPickup"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "flat Candidate naming known item/drop location or remembered source",
+      "mutationSurfaces": [
+        "collectBlock.collect",
+        "bot.dig",
+        "bot.stopDigging",
+        "bot.placeBlock",
+        "bot._placeBlockWithOptions",
+        "bot.equip",
+        "bot.unequip",
+        "bot.look",
+        "bot.lookAt",
+        "bot.setControlState",
+        "bot.clearControlStates",
+        "pathfinder.setGoal",
+        "pathfinder.setMovements",
+        "pathfinder.goto",
+        "pathfinder.stop",
+        "entity.position.write",
+        "entity.yaw",
+        "entity.pitch",
+        "entity.onGround",
+        "entity.velocity.write",
+        "bot.physicsEnabled"
+      ],
+      "resourceDomains": [
+        "body",
+        "entity",
+        "equipment",
+        "interaction",
+        "inventory",
+        "world"
+      ],
+      "effects": [
+        "MOVE",
+        "DIG",
+        "PLACE",
+        "EQUIP",
+        "LOOK"
+      ],
+      "observation": "drop entity pickup + goalItemCount delta + recovery-route progress",
+      "verification": "item count increase observed in inventory",
+      "cancellation": "AbortSignal + epoch fencing",
+      "terminalization": "flat buildResult(done|failed|cancelled)"
+    },
+    "control": {
+      "owner": "executor dispatch only (non-actuating coordination markers)",
+      "candidateKinds": [
+        "WAIT",
+        "ESCALATE"
+      ],
+      "dispatch": {
+        "WAIT": "runWait",
+        "ESCALATE": "buildResult"
+      },
+      "admission": "flat-candidate",
+      "kernelAdmitted": "none",
+      "kernelModules": [],
+      "contract": "coordination marker candidates; they carry no mutation authority",
+      "mutationSurfaces": [],
+      "resourceDomains": [],
+      "effects": [],
+      "observation": "none \u2014 these candidates perform no world actuation",
+      "verification": "n/a \u2014 WAIT holds position; ESCALATE returns a staged handoff marker, never a verified world outcome",
+      "cancellation": "n/a \u2014 synchronous or timer-bounded, non-blocking result",
+      "terminalization": "buildResult(done) marker only"
+    }
+  }
+}
