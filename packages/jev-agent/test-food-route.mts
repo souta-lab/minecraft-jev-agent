@@ -616,13 +616,17 @@ addCase('(g2) the plan-layer fact is position-free, so it cannot churn the model
 //   EAT_REFUSED food=15 threshold=18
 //
 // The body stood under an oak canopy, sensed the leaves (so `sensedEdibleBlock`
-// was TRUE) and STILL grounded no route. The canopy cell is neither
-// pickup-adjacent (`vertical` 3+ > PICKUP_MINE_VERTICAL 1.5) nor walk-up
-// reachable (`findAdjacentStandable` samples only dy=0 and dy=-1, so a leaf with
-// leaves around it has none), so the ONLY offered step toward it is the indirect
-// `columnDigBaseFor`/`columnDigMine` branch - which carried NO `foodRoute` tag.
-// `foodSourceGap.offered` and the FOOD_ROUTE marker both read that tag, so the
-// route was on offer while the food accounting reported no food route at all.
+// was TRUE) and STILL grounded no route. Under the original interaction-stand
+// search the canopy cell was neither pickup-adjacent (`vertical` 3+ >
+// PICKUP_MINE_VERTICAL 1.5) nor walk-up reachable (the 12-cell
+// `findAdjacentStandable` probe found no stand inside leaf cover), so the ONLY
+// offered step toward it was the indirect `columnDigBaseFor`/`columnDigMine`
+// branch - which carried NO `foodRoute` tag. `foodSourceGap.offered` and the
+// FOOD_ROUTE marker both read that tag, so the route was on offer while the
+// food accounting reported no food route at all. Since the stand search now
+// enumerates the reach envelope, low canopy leaves are simply `inReach` and
+// the direct MINE carries the tag; the indirect branch still serves cells the
+// envelope cannot reach.
 // ---------------------------------------------------------------------------
 
 /** A dense oak canopy `layers` above the body's feet; interior cells have no walk-up stand. */
@@ -656,7 +660,7 @@ addCase('(i) THE LIVE SHAPE: hungry under a canopy grounds a forage route (was o
   }
 })
 
-addCase('(i2) the canopy route is the INDIRECT branch, and it names the sensed cell it serves', () => {
+addCase('(i2) the canopy route grounds real MINEs, and each names the sensed cell it serves', () => {
   const state = perceive({ counts: LIVE_INVENTORY, food: 15, health: 5.33, blocks: canopyBlocks(4) })
   const result = grounded(state)
   const sensed = new Set(
@@ -665,13 +669,17 @@ addCase('(i2) the canopy route is the INDIRECT branch, and it names the sensed c
       .map((block) => `${block.position.x},${block.position.y},${block.position.z}`),
   )
   const tagged = result.candidates.filter((candidate) => candidate.meta.foodRoute === 'forage')
+  // Under the reach-envelope stand search the low canopy is directly in
+  // reach, so the route arrives as plain MINEs; a canopy cell the envelope
+  // cannot reach would instead arrive via the columnDig/digAccess branch
+  // (covered by their own suites). Either way the tag must ride along.
   const indirect = tagged.filter((candidate) => candidate.meta.columnDig === true || candidate.meta.digAccess === true)
   const servesSensedCell = tagged.every((candidate) => {
     const target = candidate.target
     return target !== null && sensed.has(`${target.x},${target.y},${target.z}`)
   })
   return {
-    pass: indirect.length > 0 && servesSensedCell && tagged.every((candidate) => candidate.kind === 'MINE'),
+    pass: tagged.length > 0 && servesSensedCell && tagged.every((candidate) => candidate.kind === 'MINE'),
     detail: `tagged=${tagged.length} indirect=${indirect.length} sample=${tagged[0]?.id ?? 'none'} servesSensedCell=${servesSensedCell}`,
   }
 })

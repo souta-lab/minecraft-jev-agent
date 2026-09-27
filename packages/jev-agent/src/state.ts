@@ -1931,7 +1931,9 @@ export function interactionStandCells(
 function findAdjacentStandable(bot: Bot, target: Vec3Json, reach: number): Vec3Json | null {
   const probe: InteractionStandProbe = {
     passable: (x, y, z) => isPassable(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
-    solidSupport: (x, y, z) => isSolidSupport(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
+    // Usable ground, matching the old isStandable call: leaves are solid but
+    // no walk-up path lands on them, so canopy tops stay out of the offer.
+    solidSupport: (x, y, z) => isUsableGroundSupport(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
   }
   const stands = interactionStandCells(target, vecJson(bot.entity.position), probe, reach)
   return stands[0] ?? null
