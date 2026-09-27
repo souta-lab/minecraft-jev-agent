@@ -426,6 +426,23 @@ export const THREAT_SURVIVAL_KINDS: ReadonlySet<CandidateKind> = new Set<Candida
 ])
 
 /**
+ * A `MOVE:dangerzone:*` id is a survival route, not work: it is the bounded
+ * nearest-out-of-zone leg offered while the body's own cell stands inside a
+ * measured lethal area (see `deathZoneEscapeCandidates`). The threat and
+ * critical-health restrictions keep grounded RETREAT legs for exactly the
+ * same reason - they end the damage by moving - so withholding only this one
+ * filtered the exit out of the offer at precisely the contact ticks it
+ * exists for. Measured portal-p11: exits emitted and reachability-clean, yet
+ * never reached JEV_CANDIDATE_SET under contact (the restricted offer was
+ * ATTACK/RETREAT/WAIT only), so the camp kept landing kills while a grounded
+ * way out sat upstream of the restriction. Code never ranks the exit against
+ * the reflex legs - Jev still owns WHICH of them to take.
+ */
+export function isDeathZoneEscapeRoute(candidate: Candidate): boolean {
+  return candidate.kind === 'MOVE' && candidate.id.startsWith('MOVE:dangerzone:')
+}
+
+/**
  * The bounded escalation offered when the body is under threat and the code
  * cannot ground a single attack or keep-distance route. Returning the work set
  * here (the pre-existing fallback) is exactly the measured "keeps mining next to
@@ -489,7 +506,9 @@ export function restrictCandidatesDuringImmediateThreat(
 ): Candidate[] {
   const immediateHostile = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
   if (!immediateHostile) return [...candidates]
-  const combat = candidates.filter((candidate) => CONTACT_THREAT_KINDS.has(candidate.kind))
+  const combat = candidates.filter(
+    (candidate) => CONTACT_THREAT_KINDS.has(candidate.kind) || isDeathZoneEscapeRoute(candidate),
+  )
   // A body in melee contact with no grounded attack and no grounded escape must
   // NOT be handed its work set back: that is the measured "digs while the zombie
   // kills it" loop. Offer the bounded escalation instead and let the controller
@@ -528,7 +547,8 @@ export function restrictCandidatesAtCriticalHealth(
       candidate.kind === 'RETREAT' ||
       candidate.kind === 'ESCALATE' ||
       candidate.kind === 'EAT' ||
-      candidate.kind === 'EQUIP',
+      candidate.kind === 'EQUIP' ||
+      isDeathZoneEscapeRoute(candidate),
   )
   return survival.length > 0 ? survival : [...candidates]
 }
@@ -556,7 +576,9 @@ export function restrictCandidatesDuringDangerousThreat(
 ): Candidate[] {
   const threat = state.signals?.threat ?? null
   if (threat === null || threat.active !== true) return [...candidates]
-  const survival = candidates.filter((candidate) => THREAT_SURVIVAL_KINDS.has(candidate.kind))
+  const survival = candidates.filter(
+    (candidate) => THREAT_SURVIVAL_KINDS.has(candidate.kind) || isDeathZoneEscapeRoute(candidate),
+  )
   if (survival.length > 0) return survival
   return [
     threatEscalateCandidate(

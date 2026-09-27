@@ -10,7 +10,7 @@
 // Pure: no bot, no network, no file IO.
 import { DEATH_ZONE_DEATHS, DEATH_ZONE_RADIUS, isInDeathZone } from '../jev-agent/src/moveFailMemory.ts'
 import { DescendAwarePolicy, pickDescend } from './system-one-policy.ts'
-import { deathZoneEscapeCandidates as zoneEscapes } from '../jev-agent/src/candidates.ts'
+import { applyThreatRestriction, deathZoneEscapeCandidates as zoneEscapes } from '../jev-agent/src/candidates.ts'
 import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
 import type { DeathHazard } from './resident-types.ts'
 import type { JevPolicy, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
@@ -246,6 +246,50 @@ addCase('death-zone exits: no offers while the body stands outside the zone', ()
   )
   const offers = zoneEscapes(state, options)
   return { pass: offers.length === 0, detail: `offers=${offers.length}` }
+})
+
+// Measured portal-p11: the exits emitted and passed reachability, but the
+// threat restriction strips every MOVE under contact and the bounded danger
+// state - so JEV_CANDIDATE_SET under fire was ATTACK/RETREAT/WAIT and the
+// grounded way out of the kill zone never reached Jev. A `MOVE:dangerzone:*`
+// is a survival route (same class as RETREAT) and must survive both filters;
+// Jev still owns whether to take it over the reflex legs.
+function hostileAt(distance: number): { hostile: boolean; distance: number } {
+  return { hostile: true, distance }
+}
+
+addCase('death-zone exits: the exit survives the contact-range threat offer (portal-p11)', () => {
+  const exit = candidate('MOVE:dangerzone:p3214_64_2818', 'MOVE', { x: 3214, y: 64, z: 2818 })
+  const attack = candidate('ATTACK:e1', 'ATTACK', null)
+  const work = candidate('MINE:b3225_63_2802', 'MINE', { x: 3225, y: 63, z: 2802 })
+  const offer = applyThreatRestriction(
+    {
+      entities: [hostileAt(1.2) as never],
+      signals: {} as never,
+      timestampMs: 1,
+    },
+    [exit, attack, work],
+  )
+  const ids = offer.candidates.map((entry) => entry.id)
+  const pass = ids.includes(exit.id) && ids.includes(attack.id) && !ids.includes(work.id) && offer.restricted === true
+  return { pass, detail: `offered=[${ids.join(',')}] restricted=${offer.restricted}` }
+})
+
+addCase('death-zone exits: the exit survives the bounded danger-state offer (portal-p11)', () => {
+  const exit = candidate('MOVE:dangerzone:p3214_64_2818', 'MOVE', { x: 3214, y: 64, z: 2818 })
+  const retreat = candidate('RETREAT:p3211_67_2787', 'RETREAT', { x: 3211, y: 67, z: 2787 })
+  const work = candidate('MOVE:p3225_63_2802', 'MOVE', { x: 3225, y: 63, z: 2802 })
+  const offer = applyThreatRestriction(
+    {
+      entities: [hostileAt(9) as never], // in the danger radius, out of contact
+      signals: { threat: { active: true, threatName: 'zombie' } } as never,
+      timestampMs: 1,
+    },
+    [exit, retreat, work],
+  )
+  const ids = offer.candidates.map((entry) => entry.id)
+  const pass = ids.includes(exit.id) && ids.includes(retreat.id) && !ids.includes(work.id)
+  return { pass, detail: `offered=[${ids.join(',')}]` }
 })
 
 addCase('DescendAwarePolicy strips in-zone move targets before the inner policy sees them', async () => {
