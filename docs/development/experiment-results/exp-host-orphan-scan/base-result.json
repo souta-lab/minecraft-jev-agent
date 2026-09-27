@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "exp-host-orphan-scan",
+  "baseSha": "f6179102219c794388f0bf8d10a4b3da3574a9ef",
+  "candidateSha": "f6179102219c794388f0bf8d10a4b3da3574a9ef",
+  "scenario": "bun-tests/host-surface.test.ts",
+  "command": "bun test bun-tests/host-surface.test.ts",
+  "status": "PASS",
+  "failureClass": "none",
+  "metrics": {
+    "wallMs": 1261,
+    "bunMs": 1257,
+    "testsPass": 4,
+    "expectCalls": 22
+  },
+  "evidence": ["runs/exp-host-surface-orphan-scan/base.log"],
+  "verdict": "KEEP",
+  "frozenZoneTouched": false,
+  "notes": "Base record at baseSha before the open-zone optimization."
+}

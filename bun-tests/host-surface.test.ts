@@ -68,19 +68,30 @@ describe('controller host-surface binding', () => {
   })
 
   test('every Host interface member is referenced somewhere outside its declaration', () => {
+    // allIdents: every \w+ token anywhere in the file.
+    // useIdents: tokens on lines that are NOT `  member:` declarations —
+    // declaration lines never count as references in the host's own file.
+    const allIdents = new Map<string, Set<string>>()
+    const useIdents = new Map<string, Set<string>>()
+    for (const [file, text] of SOURCES) {
+      const all = new Set<string>()
+      const used = new Set<string>()
+      for (const line of text.split('\n')) {
+        for (const w of line.matchAll(/\b\w+\b/g)) all.add(w[0])
+        if (/^ {2}\w+\s*[?]?\s*:/.test(line)) continue
+        for (const w of line.matchAll(/\b\w+\b/g)) used.add(w[0])
+      }
+      allIdents.set(file, all)
+      useIdents.set(file, used)
+    }
     const orphans: string[] = []
     for (const host of HOSTS) {
       for (const member of host.members) {
-        const re = new RegExp(`\\b${member}\\b`)
-        let referenced = false
-        for (const [file, text] of SOURCES) {
-          for (const line of text.split('\n')) {
-            if (!re.test(line)) continue
-            if (file === host.file && new RegExp(`^ {2}${member}\\s*[?]?\\s*:`).test(line)) continue
-            referenced = true
-            break
+        let referenced = useIdents.get(host.file)!.has(member)
+        if (!referenced) {
+          for (const [file] of SOURCES) {
+            if (file !== host.file && allIdents.get(file)!.has(member)) { referenced = true; break }
           }
-          if (referenced) break
         }
         if (!referenced) orphans.push(`${host.name}.${member} (${host.file})`)
       }
