@@ -98,6 +98,22 @@ For each rung:
 
 Core live metrics, when observable: verified task success, wall-clock time-to-success, mechanical actions/steps, deaths, damage/food/air emergencies, recovery success, stall count/duration, resource waste, replans, candidate refusals, Jev decisions/rejections, System2 invocation count/rate/token-or-cost proxy, model-unavailable events, and cross-seed/biome/novel-state failures. Prefer verified world predicates over log vibes.
 
+### Test-surface discipline — capability first
+
+This repository already has a large test surface. **Do not let capability work turn into test-suite growth for its own sake.** Tests exist to protect real capability and constitutional invariants; they are not the product.
+
+- **Do not create a new test file by default.** New test files are exceptional and require a concrete observed failure that cannot be covered cleanly in an existing relevant test/scenario/fixture.
+- Add regression coverage only for a **real reproduced bug or failure that the candidate actually fixes**, and only when deterministic coverage materially prevents recurrence.
+- Prefer one minimal case in an existing relevant test, scenario registry entry, or fixture over a new bespoke harness, test family, or framework.
+- Do not write broad speculative tests for hypothetical edge cases during capability campaigns. The architecture red-team phase is over.
+- A live failure does **not** automatically require a unit test. Clean reproducible live evidence plus existing guards may be sufficient when that is the more faithful proof.
+- Reuse existing clean-run, seed-cohort, experiment-result, scenario-registry, and package-test machinery. Do not build a second measurement framework unless a measured blocker proves the existing one insufficient.
+- Track test files and test LOC added by each KEEP. If test/tooling surface starts growing faster than production capability value, **stop adding tests, consolidate duplicated coverage, and return effort to Minecraft behavior**.
+- Spend the clear majority of productive campaign time on live Minecraft runs, failure clustering, production behavior fixes, recovery quality, holdout validation, and capability progression—not test authoring.
+- Never weaken or delete constitutional/authority/proof coverage merely to reduce test count. Consolidation is allowed only when equivalent protection remains mechanically enforced.
+
+A good capability KEEP should normally have a small proof footprint relative to the production behavior/evidence it protects. "More tests" is not a success metric; **better verified Minecraft capability with unchanged V4.1.2 safety is the metric.**
+
 ## 2. Role constitution
 
 - **Jev** — the production-default fast System-One decision policy. Semantic/tactical decision **only**: choose/rank/score among grounded enabled Transitions and in-contract tactics. Jev does **not** own world truth, SUCCESS, the actuation lease, resource authority, or effect authorization. A Jev output is policy input that the kernel validates; it is never permission for a primitive call.
