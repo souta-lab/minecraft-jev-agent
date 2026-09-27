@@ -2013,6 +2013,19 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
   const bySeparation = (a: KeepDistanceSpot, b: KeepDistanceSpot): number => b.separation - a.separation
   const plain = scored.filter((entry) => !entry.occluded).sort(bySeparation)
   const covered = scored.filter((entry) => entry.occluded).sort(bySeparation)
+  // The STEP representative: the qualifying destination nearest the body. The
+  // separation sort alone hands the gate only the scan's farthest cells, and
+  // measured live (portal-p5) those 10-22 m destinations all failed
+  // no_path/path_timeout inside a broken-terrain pocket while nearer steps
+  // that could chain out never reached the offer. Reserving one slot for the
+  // nearest qualifying cell guarantees a realizable leg is always present;
+  // farthest-first still dominates the remaining slots on open ground.
+  const step = plain.reduce<KeepDistanceSpot | null>(
+    (nearest, entry) =>
+      nearest === null || distance(entry.spot, input.self) < distance(nearest.spot, input.self) ? entry : nearest,
+    null,
+  )
+  const rest = step === null ? plain : plain.filter((entry) => entry !== step)
   // COVER RESERVES THE FIRST SLOT. Cover and separation are different facts with
   // the same effect (the attack stops), but only one of them is measured ALONG
   // the axis the attack travels: a cell out of the sight line stops a ranged
@@ -2023,8 +2036,8 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
   // number) cover was grounded and then never offered. One reserved slot is the
   // smallest change that makes the fact representable; the rest of the offer
   // keeps the measured separation ordering exactly.
-  if (covered.length === 0) return plain.slice(0, max)
-  return max === 0 ? [] : [covered[0] as KeepDistanceSpot, ...covered.slice(1), ...plain].slice(0, max)
+  if (covered.length === 0) return [...rest.slice(0, Math.max(0, max - 1)), ...(step === null ? [] : [step])].slice(0, max)
+  return max === 0 ? [] : [covered[0] as KeepDistanceSpot, ...(step === null ? [] : [step]), ...covered.slice(1), ...rest].slice(0, max)
 }
 
 function cellKey(spot: Vec3Json): string {

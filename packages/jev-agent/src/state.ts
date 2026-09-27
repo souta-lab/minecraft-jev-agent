@@ -5055,7 +5055,21 @@ function buildEscapeCells(
   }
   found.sort((a, b) => distance(b, threat.position) - distance(a, threat.position))
   const cap = Math.max(0, Math.floor(options.maxEscapeCells ?? THREAT_ESCAPE_MAX_CELLS))
-  return { cells: found.slice(0, cap), coverCells: cover, portalWalkInCells: transfer }
+  // A pure farthest-first cap fills the offer with the scan's boundary cells.
+  // Measured live (portal-p5): with a 16 m window the 12-cell offer held only
+  // 10-22 m destinations; every one failed no_path/path_timeout in the pocket
+  // while nearer steps that could have chained out never reached the solver.
+  // Reserve a slice for the nearest qualifying cells so the offer always spans
+  // the distance range - far legs break tracking on open ground, near steps are
+  // the ones that can actually be pathed in broken terrain.
+  const nearReserve = Math.min(4, Math.floor(cap / 3))
+  const far = found.slice(0, Math.max(0, cap - nearReserve))
+  const kept = new Set(far)
+  const near = [...found]
+    .sort((a, b) => distance(a, self.position) - distance(b, self.position))
+    .filter((cell) => !kept.has(cell))
+    .slice(0, nearReserve)
+  return { cells: [...far, ...near], coverCells: cover, portalWalkInCells: transfer }
 }
 
 /** Unit vector of a horizontal offset, or null when it is degenerate. */

@@ -1653,6 +1653,57 @@ addCase('(vii1) a sensed distant tracker is offered destinations beyond the old 
   }
 })
 
+addCase('(vii2) the offer spans distances: a near realizable step reaches the gate beside the far legs', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(5.5, 59, -0.5)
+  const bot = {
+    username: 'AI_P5_STEP',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 4,
+    food: 6,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: -64, height: 384 },
+    time: { isDay: false },
+    registry: null,
+    entities: { 7: { id: 7, name: 'drowned', kind: 'hostile', position: new Vec3(5.5, 59, 20), isValid: true, heldItem: null } },
+    inventory: { items: () => [] },
+    blockAt: (p: { x: number; y: number; z: number }) =>
+      p.y < 59 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' },
+    canSeeBlock: () => false,
+    findBlocks: () => [],
+  } as never
+  const state = buildWorldState(
+    bot,
+    {
+      tick: 9,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      signals: signals({ lastDamage: { atMs: Date.now() - 400, health: 4, sourceId: 7, sourceName: 'drowned' } }),
+    },
+    defaultSensorOptions,
+  )
+  const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+  const escape = state.terrain.escapeCells ?? []
+  const bySelf = escape.map((cell) => Math.hypot(cell.x - feet.x, cell.z - feet.z))
+  const retreats = generateCandidates(state, defaultCandidateOptions)
+    .filter((candidate) => candidate.kind === 'RETREAT' && candidate.target !== null)
+    .map((candidate) => Math.hypot((candidate.target?.x ?? 0) - feet.x, (candidate.target?.z ?? 0) - feet.z))
+  return {
+    pass:
+      // the sensor's offer spans the range: near steps AND tracking-break legs
+      escape.length > 0 &&
+      Math.min(...bySelf) <= 8 &&
+      Math.max(...bySelf) > 10 &&
+      // and at least one near leg survives to the candidate gate - the p5 shape
+      // (top-3 all-far cells -> all unpathable -> no_grounded_threat_response)
+      // can no longer collapse the offer
+      retreats.length > 0 &&
+      Math.min(...retreats) <= 8,
+    detail: `escape=${escape.length} nearest=${Math.round(Math.min(...bySelf) * 100) / 100}m farthest=${Math.round(Math.max(...bySelf) * 100) / 100}m retreatDistances=[${retreats.map((d) => Math.round(d * 10) / 10).join(',')}]`,
+  }
+})
+
 let failures = 0
 process.stdout.write('threat response grounding - engaged attacker answerable, no dimension-crossing realization\n')
 process.stdout.write('-'.repeat(96) + '\n')
