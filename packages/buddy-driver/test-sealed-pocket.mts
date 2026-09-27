@@ -148,8 +148,29 @@ function escapeOffers(world: WorldState): string[] {
 
 addCase('(p10) a stalled sealed body under a goto goal is offered a staircase-up escape', () => {
   const offers = escapeOffers(sealedWorld())
-  const pass = offers.length === 1 && offers[0] === `ASCEND:escape:p${EAST_CUT.step.x}_${EAST_CUT.step.y}_${EAST_CUT.step.z}`
+  // The id is keyed on the escape CONTEXT (own cell), so a re-planned step
+  // cell cannot churn the chosen id out of the offer (portal-p13 vanish).
+  const pass = offers.length === 1 && offers[0] === `ASCEND:escape:p${FEET.x}_${FEET.y}_${FEET.z}`
   return { pass, detail: `offers=[${offers.join(',')}]` }
+})
+
+addCase('(p13) a re-planned step cut keeps the SAME escape id (vanish regression)', () => {
+  // The vertical planner may pick a different cut each tick; the offered id
+  // must stay constant or the freshness guard drops the chosen escape.
+  const north: StepCut = {
+    dir: 'N',
+    dx: 0,
+    dz: -1,
+    cut: { x: FEET.x, y: FEET.y + 1, z: FEET.z - 1 },
+    step: { x: FEET.x, y: FEET.y + 1, z: FEET.z - 1 },
+    name: 'stone',
+    safe: true,
+    reason: 'safe',
+  }
+  const east = escapeOffers(sealedWorld())
+  const northOffers = escapeOffers(sealedWorld({ stepCuts: [north] }))
+  const pass = east.length === 1 && northOffers.length === 1 && east[0] === northOffers[0]
+  return { pass, detail: `east=[${east.join(',')}] north=[${northOffers.join(',')}]` }
 })
 
 addCase('(p10) a transient empty tick below the stall boundary gets no escape offer', () => {

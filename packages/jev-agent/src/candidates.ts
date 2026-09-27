@@ -4859,6 +4859,14 @@ function generateRawCandidates(
     normalizeDimensionId(state.self.dimension) === 'overworld' &&
     state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
   ) {
+    // The offered id is keyed on the escape CONTEXT (the body's own cell), not
+    // the vertical plan's step cell: the planner re-picks the best cut each
+    // tick, so a step-keyed id churned out of the fresh offer and the chosen
+    // escape "vanished between the Jev answer and execution" (measured
+    // portal-p13, same class as the p10 dangerzone churn). The body does not
+    // move while sealed, so the context key is stable; target/meta still carry
+    // the freshly re-planned step, which is what the executor needs.
+    const escapeId = `ASCEND:escape:${blockId('p', { x: Math.floor(state.self.position.x), y: Math.floor(state.self.position.y), z: Math.floor(state.self.position.z) })}`
     candidates.push(
       ...ascentRouteTo(state, options, {
         targetY: ANIMAL_HABITAT_SEA_LEVEL + 1,
@@ -4866,7 +4874,7 @@ function generateRawCandidates(
         idPrefix: 'ASCEND:escape:',
         label: 'dig or climb back out of the sealed pocket toward the surface',
         extraMeta: { escapeAscent: true },
-      }).candidates,
+      }).candidates.map((candidate) => ({ ...candidate, id: escapeId })),
     )
   }
 
