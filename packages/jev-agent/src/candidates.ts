@@ -1398,6 +1398,54 @@ export function envHazardEscapeCandidates(
 }
 
 /**
+ * SAFE reflex-offer: the body is standing inside a proven death zone, so the
+ * NEAREST standable cells outside the zone become bounded exit MOVEs - the
+ * same offer class as envHazardEscapeCandidates (CAN affordance; Jev still
+ * chooses WHICH). The zone predicate otherwise only blocks targets: portal-p8
+ * measured 19 deaths in ~4.5 min at a respawn anchor inside the zone because
+ * each post-death generation had queue=none, only ATTACK/RETREAT reflexes,
+ * and ~20 m keep-distance legs kept getting cancelled mid-leg inside a ~10 s
+ * life. A nearest-out-of-zone move is the shortest completable leg; the
+ * offers exist only while the body's own cell is in-zone.
+ */
+const DEATH_ZONE_EXIT_OFFERS = 3
+
+export function deathZoneEscapeCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+): Candidate[] {
+  const blacklisted = options.blacklistedMoveTargets
+  if (blacklisted === undefined) return []
+  if (!isBlacklistedMoveTarget(state, blacklisted, state.self.position)) return []
+  const exits = state.terrain.standable
+    .filter((cell) => !isBlacklistedMoveTarget(state, blacklisted, cell))
+    .map((cell) => ({ spot: cell, d: distance(cell, state.self.position) }))
+    .filter((entry) => entry.d > 0.5)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, DEATH_ZONE_EXIT_OFFERS)
+  return exits.map((entry) => ({
+    id: `MOVE:dangerzone:${blockId('p', entry.spot)}`,
+    kind: 'MOVE' as CandidateKind,
+    label: `${moveLabel(entry.spot, 'leave the area that has already killed the body', state.self.position)}`,
+    targetName: null,
+    target: entry.spot,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: entry.d <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: entry.spot.x,
+      y: entry.spot.y,
+      z: entry.spot.z,
+      deathZoneExit: true,
+    },
+  }))
+}
+
+/**
  * SAFE/CAN fact: the placement spots a station may be placed from.
  *
  * A spot in `submergedPlacementSpots` has only fluid-column body access, i.e.
@@ -4618,6 +4666,14 @@ function generateRawCandidates(
   // hard-safety reflex only when it is the single grounded route out
   // (`envHazardReflexAction`).
   candidates.push(...envHazardEscapeCandidates(state, options.blacklistedMoveTargets, options.reach))
+
+  // SAFE: the death-zone exits. While the body's own cell is a proven-lethal
+  // area, the nearest standable cells outside the zone are offered as bounded
+  // exit MOVEs - the same reflex-offer class as the hazard exits above; Jev
+  // still chooses. Without them a post-death generation at an in-zone respawn
+  // anchor only ever sees ~20 m keep-distance legs that cannot complete inside
+  // a ~10 s camped life (measured portal-p8: 19 deaths/~4.5 min).
+  candidates.push(...deathZoneEscapeCandidates(state, options))
 
   // A known-resource retrieval is grounded even when other (non-progressing)
   // candidates exist: if the wanted block is not visible but its coordinate is

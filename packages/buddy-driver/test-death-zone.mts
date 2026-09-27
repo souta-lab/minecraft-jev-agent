@@ -10,8 +10,9 @@
 // Pure: no bot, no network, no file IO.
 import { DEATH_ZONE_DEATHS, DEATH_ZONE_RADIUS, isInDeathZone } from '../jev-agent/src/moveFailMemory.ts'
 import { DescendAwarePolicy, pickDescend } from './system-one-policy.ts'
+import { deathZoneEscapeCandidates as zoneEscapes } from '../jev-agent/src/candidates.ts'
+import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
 import type { DeathHazard } from './resident-types.ts'
-import type { Candidate } from '../jev-agent/src/candidates.ts'
 import type { JevPolicy, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
 import type { WorldState } from '../jev-agent/src/state.ts'
 
@@ -132,6 +133,60 @@ addCase('pickDescend returns null when every DESCEND target is in-zone (no unsaf
   const inZone = candidate('DESCEND:p3225_60_2802', 'DESCEND', { x: 3225, y: 60, z: 2802 })
   const picked = pickDescend(request([inZone]), hazards)
   return { pass: picked === null, detail: `picked=${picked === null ? 'null' : picked.id}` }
+})
+
+function zoneEscapeFixture(
+  selfPos: { x: number; y: number; z: number },
+  standable: Array<{ x: number; y: number; z: number }>,
+  hazards: readonly DeathHazard[],
+): { state: WorldState; options: CandidateOptions } {
+  const state = {
+    self: { position: selfPos, dimension: DIM },
+    terrain: { standable },
+    tick: 1,
+  } as unknown as WorldState
+  const options = {
+    reach: 4.5,
+    blacklistedMoveTargets: (dimension: string, position: { x: number; y: number; z: number }) =>
+      isInDeathZone(hazards, position, dimension) !== null,
+  } as unknown as CandidateOptions
+  return { state, options }
+}
+
+addCase('death-zone exits: standing in-zone offers nearest out-of-zone cells', () => {
+  // p8 shape: respawn anchor at 3224,64,2809 sits inside the pocket; exits must
+  // be the SHORTEST completable legs (nearest first), not max-separation legs.
+  const hazards = [production(3219, 63, 2812, 1, DIM), production(3233, 67, 2803, 1, DIM)]
+  const { state, options } = zoneEscapeFixture(
+    { x: 3224, y: 64, z: 2809 },
+    [
+      { x: 3210, y: 64, z: 2815 }, // out of zone, ~16m
+      { x: 3230, y: 64, z: 2805 }, // in-zone (between the deaths)
+      { x: 3214, y: 64, z: 2818 }, // out of zone, ~13m -> nearest offer
+      { x: 3190, y: 64, z: 2830 }, // out of zone, ~40m
+    ],
+    hazards,
+  )
+  const offers = zoneEscapes(state, options)
+  const targets = offers.map((entry) => `${entry.target?.x},${entry.target?.y},${entry.target?.z}`)
+  const allOutside = offers.every(
+    (entry) => entry.target !== null && isInDeathZone(hazards, entry.target, DIM) === null,
+  )
+  return {
+    pass: offers.length > 0 && allOutside && targets[0] === '3214,64,2818',
+    detail: `offers=[${targets.join(' | ')}] allOutside=${allOutside}`,
+  }
+})
+
+addCase('death-zone exits: no offers while the body stands outside the zone', () => {
+  const hazards = [production(3219, 63, 2812, 1, DIM), production(3233, 67, 2803, 1, DIM)]
+  const { state, options } = zoneEscapeFixture(
+    { x: 3300, y: 64, z: 2900 },
+    [{ x: 3305, y: 64, z: 2900 }, { x: 3295, y: 64, z: 2900 }],
+    hazards,
+  )
+  const offers = zoneEscapes(state, options)
+  return { pass: offers.length === 0, detail: `offers=${offers.length}` }
 })
 
 addCase('DescendAwarePolicy strips in-zone move targets before the inner policy sees them', async () => {
