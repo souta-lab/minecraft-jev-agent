@@ -570,14 +570,27 @@ const WINDOW_SURFACES: readonly string[] = [
   'window.close',
 ]
 const ITEM_SURFACES: readonly string[] = ['bot.activateItem', 'bot.deactivateItem', 'bot.consume']
+/**
+ * The equip operation itself plus the hotbar plumbing mineflayer may emit while
+ * fulfilling it. Locomotion families declare this envelope because approach,
+ * staircase and pillar recovery can equip a harvest tool or a placeable block
+ * mid-leg (executor `cutApproachStep` / `pillarUp`); without it every such
+ * effect is refused as `effect-not-permitted` and the body deadlocks.
+ */
+const EQUIP_SURFACES: readonly string[] = [
+  'bot.equip',
+  'bot.unequip',
+  'bot.setQuickBarSlot',
+  'bot.putSelectedItemRange',
+]
 
 export const CONTROLLER_TRANSITION_SURFACES: Readonly<Record<string, readonly string[]>> = {
-  walk_to: BODY_SURFACES,
-  retreat: BODY_SURFACES,
-  enter_portal: BODY_SURFACES,
-  descend: [...BODY_SURFACES, ...WORLD_SURFACES],
-  step: [...BODY_SURFACES, ...WORLD_SURFACES],
-  retrieve: BODY_SURFACES,
+  walk_to: [...BODY_SURFACES, ...WORLD_SURFACES, ...EQUIP_SURFACES],
+  retreat: [...BODY_SURFACES, ...WORLD_SURFACES, ...EQUIP_SURFACES],
+  enter_portal: [...BODY_SURFACES, ...WORLD_SURFACES, ...EQUIP_SURFACES],
+  descend: [...BODY_SURFACES, ...WORLD_SURFACES, ...EQUIP_SURFACES],
+  step: [...BODY_SURFACES, ...WORLD_SURFACES, ...EQUIP_SURFACES],
+  retrieve: [...BODY_SURFACES, ...WORLD_SURFACES, ...EQUIP_SURFACES],
   mine: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...ITEM_SURFACES],
   place: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...ITEM_SURFACES],
   craft: [...BODY_SURFACES, ...WORLD_SURFACES, ...INVENTORY_SURFACES, ...WINDOW_SURFACES, 'bot.craft'],

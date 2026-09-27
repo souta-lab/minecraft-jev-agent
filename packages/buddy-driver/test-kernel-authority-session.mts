@@ -375,6 +375,20 @@ addCase('terminalize presenting a mismatched contract hash is denied and leaves 
   return { pass, detail: `verdict=${JSON.stringify(verdict)} lifecycle=${live?.lifecycle}` }
 })
 
+addCase('locomotion families declare the equip/dig/place permits their recovery mechanics emit', () => {
+  // Live evidence (portal-p2, gen-mujxjls7, 2026-09-27): walk_to/retrieve/step/
+  // descend contracts admitted without EQUIP or DIG permits refused every
+  // `issueStepEffect` from approach stair-cuts and pillar recovery, deadlocking
+  // the body inside a hostile pocket for ~20min as `effect_reservation_refused`.
+  const { session, blockers } = makeSession()
+  const admitted = session.authority.admitContract(controllerSpec('controller:c6:1'))
+  session.authority.activateTransition('controller:c6:1', null)
+  const kinds = ['locomotion', 'EQUIP', 'DIG', 'PLACE']
+  const results = kinds.map((kind, i) => session.authority.issueStepEffect({ transitionId: 'controller:c6:1', intentId: 'i', stepId: `s-${i}`, effectKind: kind }))
+  const pass = admitted.ok && results.every((r) => r.ok) && blockers().length === 0
+  return { pass, detail: `issues=${results.map((r) => r.ok).join(',')} blockers=${blockers().map((b) => `${b.kind}:${b.detail}`).join('|') || 'none'}` }
+})
+
 addCase('a settle for a step the kernel never issued neither debits budget nor reconciles', () => {
   const { session, blockers } = makeSession()
   const admitted = session.authority.admitContract(controllerSpec('controller:c4:1'))
