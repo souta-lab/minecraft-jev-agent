@@ -235,15 +235,32 @@ function clearActiveRunRegistry(runId, path = ACTIVE_RUN_REGISTRY) {
 }
 
 /**
- * Other live campaign runs visible to the process table (covers runs launched
- * before the registry existed — their server JVM carries the run path in argv).
+ * Self + every ancestor pid (walk /proc ppids). A `bash -c 'nohup bun …
+ * > runs/…/x.log &'` launch wrapper carries a run path in its own
+ * cmdline; so can a monitoring shell — anything in the caller's
+ * ancestry is not a stray campaign workload.
  */
+function selfAndAncestorPids() {
+  const seen = new Set()
+  let cur = process.pid
+  while (Number.isInteger(cur) && cur > 1 && !seen.has(cur)) {
+    seen.add(cur)
+    try {
+      const stat = readFileSync(`/proc/${cur}/stat`, 'utf8')
+      const afterComm = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      cur = Number(afterComm[1])
+    } catch {
+      break
+    }
+  }
+  return seen
+}
+
+/** Other live campaign runs (covers runs launched before the registry existed). */
 function liveCampaignProcesses() {
   const out = spawnSync('pgrep', ['-fa', 'runs/capability-campaign/runs/'], { encoding: 'utf8' })
   if (out.status !== 0 || typeof out.stdout !== 'string') return []
-  // Exclude self and the direct parent: a `bash -c 'nohup bun … > runs/…/x.log &'`
-  // launch wrapper carries the run path in its own cmdline for its ~ms lifetime.
-  const selfPids = new Set([process.pid, process.ppid])
+  const selfPids = selfAndAncestorPids()
   return out.stdout.split('\n').map((line) => line.trim())
     .filter((line) => line !== '' && !selfPids.has(Number(line.split(/\s+/u, 1)[0])))
 }
