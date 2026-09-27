@@ -149,6 +149,18 @@ The first frontier for a new campaign is honest autonomous wood acquisition from
 
 For failed runs, capture the **first causal failure**, not just the last error. Prioritize repeated clusters by frequency × severity × downstream blocking value, subject to the permanent architecture lock and open-zone rules. Do not keep polishing instrumentation once it answers the causal question well enough to run the next experiment.
 
+### Measurement stop rule — gameplay must dominate
+
+Measurement, cohort selection, observer work, and harness repair are support work, not the product. **Do not spend hours proving that a start coordinate or measurement fixture is perfect when a simple, honest fixture is already good enough to run Minecraft.**
+
+- Time-box measurement/tooling setup. As a default, if a setup task has consumed roughly **15 minutes or 2–3 failed refinement iterations** without unlocking a new gameplay run, stop refining it, record the known limitation, and use the simplest trustworthy protocol that preserves provenance and safety.
+- For a normal capability cohort, a start only needs to be an **ordinary playable start**, not exhaustively certified. Reject clearly invalid or pathological fixtures such as open water/ocean, lava, sealed/enclosed spawn, extreme lethal cliff/void exposure, or a spawn correction that immediately strands the bot.
+- **Trees and canopy are expected Minecraft terrain, especially for wood acquisition. Do not reject forest, birch forest, taiga, dark forest, or another normal biome merely because trees/leaves exist.** A real traversal/access failure after a valid ordinary start is product evidence, not a reason to keep searching for an easier fixture.
+- For the wood normal cohort, once **5 sufficiently separated, predeclared, ordinary playable starts** are available, freeze the cohort and start the sequential runs. Do not keep searching for a theoretically nicer biome mix, exhaustively scan every column/chunk, or repeatedly re-certify starts after the cohort is adequate.
+- Prefer a quick surface/headroom/hazard sanity check plus one real spawn check over exhaustive canopy/chunk certification. Additional fixture proof requires a concrete observed contamination problem.
+- When fixture/setup complexity begins dominating a work session, **stop infrastructure work and return to live gameplay, failure clustering, and production fixes**. Over a capability campaign, gameplay/evaluation time must clearly exceed measurement-framework time.
+- Never discard a valid gameplay failure merely because a more convenient start could have been chosen. Normal terrain difficulty belongs in capability evidence; only fixture-invalid conditions belong in fixture filtering.
+
 ### Bounded experiment contract
 
 For each selected failure cluster:
