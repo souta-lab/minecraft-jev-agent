@@ -263,6 +263,31 @@ async function main() {
       return Number(counts[acceptItem] ?? 0) >= acceptCount
     }
     const sock = join(wtDir, 'packages/buddy-driver/data/resident/control.sock')
+    const buddyLogPath = join(wtDir, 'packages/buddy-driver/buddy.log')
+    const stdoutLogPath = join(runDir, 'resident-stdout.log')
+    const lastHeartbeatCounts = (text) => {
+      // Last `inv={...}` inventory payload in a HEARTBEAT line. The resident's
+      // socket replies starve while the generation is mid-scan (measured: report
+      // hangs >12s during CANDIDATE_STARVATION loops, dev-424242-m2), so the
+      // decision loop reads the honest inventory stream the resident itself
+      // writes — same predicate, no socket dependency.
+      let counts = null
+      for (const m of text.matchAll(/HEARTBEAT [^\n]*?inv=(\{[^\n]*?\})/gu)) {
+        try { counts = JSON.parse(m[1]) } catch { /* partial line */ }
+      }
+      return counts
+    }
+    const tailedInventory = () => {
+      for (const path of [buddyLogPath, stdoutLogPath]) {
+        try {
+          if (!existsSync(path)) continue
+          const text = readFileSync(path, 'utf8')
+          const counts = lastHeartbeatCounts(text.slice(-2_000_000))
+          if (counts !== null) return counts
+        } catch { /* log not readable yet */ }
+      }
+      return null
+    }
     const deadline = Date.now() + options.timeoutMin * 60_000
     const startedAt = Date.now()
     let outcome = 'TIMEOUT'
@@ -278,12 +303,15 @@ async function main() {
         lastStatus = reply.data
         const counts = reply.data?.currentInventoryObservation?.counts ?? null
         if (counts !== null) lastInventory = counts
-        if (accepts(counts)) {
-          objectiveCompleteAtMs = Date.now() - startedAt
-          inventoryAtCompletion = counts
-          outcome = 'OBJECTIVE_SATISFIED'
-          break
-        }
+      }
+      const polled = reply.ok === true ? (reply.data?.currentInventoryObservation?.counts ?? null) : null
+      const live = polled ?? tailedInventory()
+      if (live !== null) lastInventory = live
+      if (accepts(live)) {
+        objectiveCompleteAtMs = Date.now() - startedAt
+        inventoryAtCompletion = live
+        outcome = 'OBJECTIVE_SATISFIED'
+        break
       }
       await new Promise((r) => setTimeout(r, 10_000))
     }
