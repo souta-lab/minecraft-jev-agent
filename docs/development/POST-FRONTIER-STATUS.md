@@ -11,8 +11,8 @@ Current HEAD: `846b38cd` == origin/main, clean tree.
 3. [done] Red-team validators/comparators/packaging — `76be08fb` + `e1ad56e7`
 4. [done] Deterministic scenario lab — `45da2131` (10 kernel traces + 6 regression pointers, registry digest-pinned)
 5. [done] Machine-checkable feature authority map — `846b38cd` (9 domains + control; union coverage, dispatch table, surface envelopes, canonical resource/effect derivation all test-bound)
-6. [in progress] PBF/god-surface reduction — host-cast coupling mapped; carcass deletion + binding gate
-7. [ ] One demonstrated bounded experiment (KEEP/REVERT/ESCALATE, machine-readable)
+6. [in progress] PBF/god-surface reduction — host-cast binding gate committed `1dd2dc49`; carcass cleanup done
+7. [done] Bounded experiment substrate demonstrated — `cd63f37d`+`58d68d8b` (exp-host-orphan-scan: base 1257ms → candidate 236ms, verdict KEEP, schema-validated, frozenZoneTouched=false)
 8. [ ] V4.1.2 architecture red-team (after 2–5 strengthen evidence)
 
 ## Working log
@@ -78,3 +78,10 @@ Current HEAD: `846b38cd` == origin/main, clean tree.
 - Deleted carcasses: `furnacePrereqCandidateOptions`, `uncertainStreaks`, and 4 write-only System2PlaneHost members (`waitReplans`, `wedgeRepeats`, `wedgeWindowFingerprint`, `wedgeWindowId`) whose writes minted unread dynamic properties.
 - `bun-tests/host-surface.test.ts`: binding-integrity gate — every Host member must resolve to a real JevController declaration (a host member with no backing reads `undefined` at runtime through the cast — now a test failure); every member must be referenced somewhere; structural casts enumerated + ratcheted; exposed-private count ratcheted (may shrink, must not grow past ceiling).
 - jev-agent suite: 207/207; typecheck clean.
+
+### P7 — bounded experiment substrate demonstrated (`cd63f37d` + `58d68d8b`)
+- Experiment `exp-host-orphan-scan`: hypothesis = per-file identifier sets replace O(members×files×lines) rescan in `bun-tests/host-surface.test.ts`, same assertion semantics.
+- Loop executed end-to-end per EXPERIMENT-PROTOCOL: base record at `f6179102` (1257ms bun, 4 pass, 22 expects) → open-zone diff → candidate record at `cd63f37d` (236ms, 4 pass, 22 expects) → architecture guard `v412-architecture.test.ts` green → comparator → **KEEP**.
+- Both records schema-validated via `tools/validate-experiment-result.mjs`; `frozenZoneTouched=false` (diff confined to `bun-tests/host-surface.test.ts`, not a §2 frozen path).
+- Convention established: durable records + logs committed under `docs/development/experiment-results/<id>/`; bulky artifacts stay in gitignored `runs/`.
+- Full gate suite: 568/568 tests (490s) — no regressions.
