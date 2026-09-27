@@ -949,6 +949,8 @@ export type SurvivalRegroundReason =
   | 'same_target_attack'
   /** the same causal threat under a NEW entity id (bounded churn adoption) */
   | 'same_kind_near_last_position_attack'
+  /** the committed keep-distance cell itself is still grounded (no retarget) */
+  | 'same_cell_keep_distance'
   | 'same_threat_keep_distance'
   | 'any_threat_keep_distance'
   | 'no_grounded_equivalent'
@@ -1124,14 +1126,15 @@ export function identityChurnCandidate(
 /**
  * Re-ground a vanished chosen survival action from the fresh offer.
  *
- * `fresh` is scanned in the order the generator produced it, so the destination
- * preference that already narrowed the offer (farthest-from-threat first,
- * `selectKeepDistanceSpots`) is preserved instead of being re-derived here. The
- * rule is deliberately NOT "pick the safest fresh action": the measured body was
- * re-deciding every ~1 s while being knocked back, and any requirement that the
- * replacement be *better* than the dropped one is another way to end the tick
- * with no action. Any grounded survival action of the same kind is enough; Jev
- * re-chooses on the next decision.
+ * RETREAT prefers heading continuity: the committed destination when it is
+ * still grounded, else the fresh retreat nearest it, else the offer order
+ * (farthest-from-threat first, `selectKeepDistanceSpots`). The measured body
+ * was re-deciding every ~1 s while being knocked back, and every retarget
+ * revoked the in-flight leg - so the replacement rule deliberately does NOT
+ * require *better* than the dropped one (another way to end the tick with no
+ * action). A grounded survival action of the same kind, as close to the
+ * already-chosen heading as possible, is enough; Jev re-chooses on the next
+ * decision.
  */
 export function regroundVanishedSurvivalChoice(
   chosen: SurvivalChoiceLike | null,
@@ -1213,9 +1216,45 @@ export function regroundVanishedSurvivalChoice(
 
   const retreats = fresh.filter((candidate) => candidate.kind === 'RETREAT')
   const threatEntityId = numericMeta(chosen.meta, 'threatEntityId')
+  // Heading continuity first: the destination Jev already committed to is still
+  // grounded, so re-committing it lets the in-flight leg keep running. The
+  // measured death loop (v2-n1, 21 deaths to a respawn swarm) retargeted EVERY
+  // re-ground onto a different cell - each swap revoked the lease mid-leg, so
+  // ~3 s of walking bought ~2 m before the next damage wake churned again.
+  const sameCell = retreats.find((candidate) => candidate.id === chosen.id)
+  if (sameCell !== undefined) {
+    return {
+      candidateId: sameCell.id,
+      kind: 'RETREAT',
+      reason: 'same_cell_keep_distance',
+      entityId: threatEntityId ?? numericMeta(sameCell.meta, 'threatEntityId'),
+      outcome: 'REGROUNDED',
+      identityChurn: null,
+    }
+  }
+  // The committed cell left the offer (positions moved). The replacement that
+  // preserves the escape heading is the grounded retreat NEAREST that cell -
+  // the walk re-paths a few blocks instead of reversing onto another cell.
+  const origin = position(chosen)
+  const nearest = (list: readonly SurvivalChoiceLike[]): SurvivalChoiceLike | undefined => {
+    if (list.length === 0) return undefined
+    if (origin === null) return list[0]
+    let best = list[0] as SurvivalChoiceLike
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const candidate of list) {
+      const spot = position(candidate)
+      if (spot === null) continue
+      const d = distance(spot, origin)
+      if (d < bestDistance) {
+        bestDistance = d
+        best = candidate
+      }
+    }
+    return best
+  }
   if (threatEntityId !== null) {
-    const sameThreat = retreats.find(
-      (candidate) => numericMeta(candidate.meta, 'threatEntityId') === threatEntityId,
+    const sameThreat = nearest(
+      retreats.filter((candidate) => numericMeta(candidate.meta, 'threatEntityId') === threatEntityId),
     )
     if (sameThreat !== undefined) {
       return {
@@ -1228,7 +1267,7 @@ export function regroundVanishedSurvivalChoice(
       }
     }
   }
-  const first = retreats[0]
+  const first = nearest(retreats)
   if (first !== undefined) {
     return {
       candidateId: first.id,

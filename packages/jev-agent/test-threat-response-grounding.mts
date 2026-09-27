@@ -1440,6 +1440,74 @@ addCase('(v) ordinary one-id combat is byte-identical (same id, same markers, pr
   }
 })
 
+addCase('(v-b) the v2-n1 death-loop shape: a re-grounded RETREAT keeps its heading instead of churning cells', () => {
+  // Live shape (v2-n1, 21 deaths to a respawn swarm): every SURVIVAL_REGROUND
+  // swapped to a DIFFERENT cell, each swap revoked the in-flight lease ~3 s in,
+  // and ~2 m per leg let the same hostiles farm the respawn. The re-ground must
+  // keep the committed cell while it is still grounded, and otherwise pick the
+  // fresh retreat NEAREST it - not the farthest-from-threat by the moved
+  // geometry, which is how a leg got reversed onto p3227_64_2821.
+  const context = {
+    previousEntityTracked: false,
+    knownEntityIds: new Set([49561]),
+    chosenAtMs: NOW,
+    nowMs: CUBE_CHURN_NOW,
+  }
+  const committed = { x: 10, y: 59, z: 3 }
+  const chosen = {
+    id: 'RETREAT:p10_59_3',
+    kind: 'RETREAT',
+    target: committed,
+    targetEntityId: null,
+    meta: { threatEntityId: 49561 },
+  }
+  // (a) the committed cell is still offered alongside other retreats.
+  const stillOffered = regroundVanishedSurvivalChoice(
+    chosen,
+    [
+      { id: 'RETREAT:p10_59_3', kind: 'RETREAT', target: committed, meta: { threatEntityId: 49561 } },
+      { id: 'RETREAT:p4_59_9', kind: 'RETREAT', target: { x: 4, y: 59, z: 9 }, meta: { threatEntityId: 49561 } },
+    ],
+    context,
+  )
+  // (b) it left the offer: the SAME-THREAT retreat nearest the committed cell
+  // wins over a farther same-threat cell and over a nearer cell answering a
+  // different threat.
+  const cellGone = regroundVanishedSurvivalChoice(
+    chosen,
+    [
+      { id: 'RETREAT:p4_59_9', kind: 'RETREAT', target: { x: 4, y: 59, z: 9 }, meta: { threatEntityId: 49561 } },
+      { id: 'RETREAT:p9_59_4', kind: 'RETREAT', target: { x: 9, y: 59, z: 4 }, meta: { threatEntityId: 49561 } },
+      { id: 'RETREAT:p10_59_2', kind: 'RETREAT', target: { x: 10, y: 59, z: 2 }, meta: { threatEntityId: 77777 } },
+    ],
+    context,
+  )
+  // (c) no same-threat retreats at all: the any-threat fallback also keeps the
+  // heading (nearest to the committed cell), not the raw offer order.
+  const anyThreat = regroundVanishedSurvivalChoice(
+    chosen,
+    [
+      { id: 'RETREAT:p2_59_9', kind: 'RETREAT', target: { x: 2, y: 59, z: 9 }, meta: { threatEntityId: 77777 } },
+      { id: 'RETREAT:p9_59_2', kind: 'RETREAT', target: { x: 9, y: 59, z: 2 }, meta: { threatEntityId: 88888 } },
+    ],
+    context,
+  )
+  const pass =
+    stillOffered.candidateId === 'RETREAT:p10_59_3' &&
+    stillOffered.reason === 'same_cell_keep_distance' &&
+    stillOffered.outcome === 'REGROUNDED' &&
+    cellGone.candidateId === 'RETREAT:p9_59_4' &&
+    cellGone.reason === 'same_threat_keep_distance' &&
+    cellGone.entityId === 49561 &&
+    anyThreat.candidateId === 'RETREAT:p9_59_2' &&
+    anyThreat.reason === 'any_threat_keep_distance' &&
+    anyThreat.entityId === 49561
+  return {
+    pass,
+    detail: `sameCell=${stillOffered.candidateId}/${stillOffered.reason} cellGone=${cellGone.candidateId}/${cellGone.reason} any=${anyThreat.candidateId}/${anyThreat.reason}`,
+  }
+})
+
 addCase('(vi) with no grounded response the survival path stays TYPED (never a silent no-action, never a fabricated target)', () => {
   const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
   const context = {
