@@ -140,11 +140,31 @@ export function correctStandingOnGround(bot: { entity: JumpEntityLike }, isSolid
   return true
 }
 
+/** `ActuationLeaseManager.assertActive` throws with this prefix when the writer's generation no longer holds the lease. */
+const ACTUATION_LEASE_DENIED_PREFIX = 'ACTUATION_LEASE_DENIED'
+
+function isActuationLeaseDenied(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith(ACTUATION_LEASE_DENIED_PREFIX)
+}
+
 /**
  * Install the correction on every physicsTick; the returned function removes
  * it. `onTick` observes the physics loop itself (`grounded` is the correction
  * verdict), so a caller can tell "the loop never ran" from "the loop ran but
  * the body never left the ground".
+ *
+ * Stale-generation containment (measured live, dev-90210-a /
+ * run-mujep4ji-23swi): a respawned generation installed this correction, died
+ * three ticks later, and the NEXT generation already held the actuation lease
+ * when the stale `physicsTick` listener fired. The proxy write
+ * `bot.entity.onGround = true` threw ACTUATION_LEASE_DENIED synchronously
+ * inside the emit -> uncaughtException -> FATAL_SHUTDOWN killed the resident.
+ *
+ * The denial itself is correct and stays enforced: the stale write is refused
+ * (the lease layer logs LEASE_DENIED, the world is untouched). What must not
+ * happen is the throw escaping a dead generation's emit. A lease denial means
+ * this listener's owning generation is gone, so the correction removes itself
+ * instead of throwing into the emitter.
  */
 export function installGroundCorrection(
   bot: JumpBotLike,
@@ -152,12 +172,29 @@ export function installGroundCorrection(
   onTick?: (grounded: boolean) => void,
   onEvent?: (event: 'physicsTick' | 'forcedMove', grounded: boolean, onGroundBefore: boolean, onGroundAfter: boolean) => void,
 ): () => void {
-  const onPhysicsTick = (): void => {
+  const removeAll = (): void => {
+    bot.removeListener('physicsTick', onPhysicsTick)
+    bot.removeListener('forcedMove', onForcedMove)
+  }
+  const correctOrSelfRemove = (): { grounded: boolean; onGroundBefore: boolean; onGroundAfter: boolean } | null => {
     const onGroundBefore = bot.entity.onGround
-    const grounded = correctStandingOnGround(bot, isSolid)
-    const onGroundAfter = bot.entity.onGround
-    onTick?.(grounded)
-    onEvent?.('physicsTick', grounded, onGroundBefore, onGroundAfter)
+    let grounded = false
+    try {
+      grounded = correctStandingOnGround(bot, isSolid)
+    } catch (error) {
+      if (isActuationLeaseDenied(error)) {
+        removeAll()
+        return null
+      }
+      throw error
+    }
+    return { grounded, onGroundBefore, onGroundAfter: bot.entity.onGround }
+  }
+  const onPhysicsTick = (): void => {
+    const result = correctOrSelfRemove()
+    if (result === null) return
+    onTick?.(result.grounded)
+    onEvent?.('physicsTick', result.grounded, result.onGroundBefore, result.onGroundAfter)
   }
   // A clientbound `position` packet resets `onGround = false` and zeroes the
   // velocity, then emits `forcedMove` (physics.js position handler). It can
@@ -166,17 +203,13 @@ export function installGroundCorrection(
   // `setControlState('jump')` stays a silent no-op. Re-ground on the packet
   // event too; this does not count as a physics tick.
   const onForcedMove = (): void => {
-    const onGroundBefore = bot.entity.onGround
-    const grounded = correctStandingOnGround(bot, isSolid)
-    const onGroundAfter = bot.entity.onGround
-    onEvent?.('forcedMove', grounded, onGroundBefore, onGroundAfter)
+    const result = correctOrSelfRemove()
+    if (result === null) return
+    onEvent?.('forcedMove', result.grounded, result.onGroundBefore, result.onGroundAfter)
   }
   bot.on('physicsTick', onPhysicsTick)
   bot.on('forcedMove', onForcedMove)
-  return () => {
-    bot.removeListener('physicsTick', onPhysicsTick)
-    bot.removeListener('forcedMove', onForcedMove)
-  }
+  return removeAll
 }
 
 /**

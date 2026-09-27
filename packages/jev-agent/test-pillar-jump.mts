@@ -14,7 +14,7 @@
 //   bun run pillar-jump-test
 import type { Bot } from 'mineflayer'
 import { ActuationLeaseManager, withActuationLease } from '../buddy-driver/resident-safety.ts'
-import { correctStandingOnGround, formatPillarUpStep, jumpWithGroundCorrection, JUMP_IMPULSE_VY, TAKEOFF_RISE } from './src/pillarJump.ts'
+import { correctStandingOnGround, formatPillarUpStep, installGroundCorrection, jumpWithGroundCorrection, JUMP_IMPULSE_VY, TAKEOFF_RISE } from './src/pillarJump.ts'
 import type { JumpBotLike, SolidAt } from './src/pillarJump.ts'
 
 interface CaseResult {
@@ -498,6 +498,41 @@ addCase('a positive-velocity tick advances the leased positionY (physics apply r
   return {
     pass,
     detail: `launchY=${launchY} airborne=${outcome.airborne} rise=${outcome.peakRise} ticks=${outcome.ticks} impulses=${outcome.impulses} replacements=${raw.stats.replacements} gateFires=${raw.stats.jumpApplied}`,
+  }
+})
+
+addCase('a stale-generation correction listener self-removes on lease denial (dev-90210-a live crash)', () => {
+  // Measured live on the wood baseline (run-mujep4ji-23swi): a respawned
+  // generation's physicsTick correction listener survived its death, the next
+  // generation held the lease, and the denied `entity.onGround` write escaped
+  // the emit as uncaughtException -> FATAL_SHUTDOWN (RESIDENT_EXIT_1). The
+  // denial is still enforced and logged by the lease layer; the listener must
+  // contain the throw and remove itself.
+  const manager = new ActuationLeaseManager()
+  const raw = createHeldPositionBot({ y: 10.5 })
+  const leased = withActuationLease(raw as unknown as Bot, manager, 'gen-old') as unknown as JumpBotLike
+  manager.acquire('gen-old')
+  const ticks: boolean[] = []
+  installGroundCorrection(leased, footingAt(9), (grounded) => ticks.push(grounded))
+  raw.tick() // lease held: correction grounds the body, listener stays
+  manager.revoke('death')
+  manager.acquire('gen-new')
+  let threw = false
+  try {
+    raw.tick()
+    raw.packet()
+  } catch {
+    threw = true
+  }
+  const pass =
+    !threw &&
+    raw.listenerCount('physicsTick') === 0 &&
+    raw.listenerCount('forcedMove') === 0 &&
+    ticks.length === 1 &&
+    raw.entity.onGround === false
+  return {
+    pass,
+    detail: `threw=${threw} ticksObserved=${ticks.length} physicsTick=${raw.listenerCount('physicsTick')} forcedMove=${raw.listenerCount('forcedMove')} onGround=${raw.entity.onGround}`,
   }
 })
 
