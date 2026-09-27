@@ -78,7 +78,7 @@ function authorize(state: KernelState, command: LooseCommand): KernelCommand {
   if ('capability' in command) return command as unknown as KernelCommand
   switch (command.kind) {
     case 'REGISTER_TRANSITION': return { ...command, compiler, capability: trustedContractCompiler(compiler.id) } as unknown as KernelCommand
-    case 'ADMIT_TRANSITION': case 'ACQUIRE_DECLARED_RESOURCES': case 'PAUSE_ACTIVE': case 'RESUME_TRANSITION': case 'AGE_RUNNABLE': case 'START_PREEMPTION': case 'COMMIT_PREEMPTION': case 'REQUEST_CANCEL':
+    case 'ADMIT_TRANSITION': case 'ACQUIRE_DECLARED_RESOURCES': case 'PAUSE_ACTIVE': case 'RESUME_TRANSITION': case 'AGE_RUNNABLE': case 'START_PREEMPTION': case 'COMMIT_PREEMPTION': case 'CANCEL_PREEMPTION': case 'REQUEST_CANCEL':
       return { ...command, capability: trustedScheduler() } as unknown as KernelCommand
     case 'ACK_PREEMPTION_YIELD': return { ...command, capability: trustedController(String(command.victimId), state.transitionContracts[String(command.victimId)] ?? '', state.generationId) } as unknown as KernelCommand
     case 'ISSUE_EFFECT': case 'APPEND_RECORD': case 'ACK_CANCEL_YIELD': {
@@ -246,13 +246,17 @@ describe('V4.1.2 production-grade executable kernel regressions', () => {
     expect(admitJevDecision(s, frame, { ...base, rankedTransitionIds: [c.transitionId], tacticChoices: { [c.transitionId]: 'teleport' } })).toEqual({ ok: false, reason: 'UNGROUNDED_TACTIC' })
   })
 
-  test('old preemption transaction cannot revoke a newly granted lease', () => {
+  test('resolved preemption transaction cannot revoke a lease granted after cancel', () => {
     const victim = contract('reach:victim')
     const requester = contract('viability:requester', 'VIABILITY')
     let s = initial([victim, requester]); s = activate(s, victim); s = registerAdmit(s, requester)
     const planned = applyKernelCommand(s, authorize(s, { kind: 'START_PREEMPTION', requesterId: requester.transitionId })); expect(planned.ok).toBe(true); if (!planned.ok) return
     s = planned.state
     const txId = Object.keys(s.preemptions)[0]!
+    // A live transaction owns the victim's lease set: an independent pause is
+    // refused. Explicit cancel releases that ownership.
+    reject(s, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'BLOCKED', reason: 'external' }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    s = apply(s, { kind: 'CANCEL_PREEMPTION', transactionId: txId, reason: 'scheduler replan' })
     s = apply(s, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'BLOCKED', reason: 'external' })
     s = apply(s, { kind: 'RESUME_TRANSITION', transitionId: victim.transitionId })
     s = apply(s, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: victim.transitionId })

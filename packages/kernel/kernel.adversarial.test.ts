@@ -77,7 +77,7 @@ function authorize(state: KernelState, command: LooseCommand): KernelCommand {
   if ('capability' in command) return command as unknown as KernelCommand
   switch (command.kind) {
     case 'REGISTER_TRANSITION': return { ...command, compiler, capability: trustedContractCompiler(compiler.id) } as unknown as KernelCommand
-    case 'ADMIT_TRANSITION': case 'ACQUIRE_DECLARED_RESOURCES': case 'PAUSE_ACTIVE': case 'RESUME_TRANSITION': case 'AGE_RUNNABLE': case 'START_PREEMPTION': case 'COMMIT_PREEMPTION': case 'REQUEST_CANCEL':
+    case 'ADMIT_TRANSITION': case 'ACQUIRE_DECLARED_RESOURCES': case 'PAUSE_ACTIVE': case 'RESUME_TRANSITION': case 'AGE_RUNNABLE': case 'START_PREEMPTION': case 'COMMIT_PREEMPTION': case 'CANCEL_PREEMPTION': case 'REQUEST_CANCEL':
       return { ...command, capability: trustedScheduler() } as unknown as KernelCommand
     case 'ACK_PREEMPTION_YIELD': return { ...command, capability: trustedController(String(command.victimId), state.transitionContracts[String(command.victimId)] ?? '', state.generationId) } as unknown as KernelCommand
     case 'ACK_PAUSE_YIELD': case 'ACK_TERMINAL_YIELD': case 'ISSUE_EFFECT': case 'APPEND_RECORD': case 'ACK_CANCEL_YIELD': {
@@ -145,7 +145,7 @@ function planPreemption(state: KernelState, requester: CanonicalTransitionContra
 const criticalClaim = () => claim(locomotion, 'EXCLUSIVE_WRITE', { preemptible: false, resumable: true, maxNonPreemptibleMs: 500 })
 
 describe('V4.1.2 adversarial safe-yield and preemption edges', () => {
-  test('K3 characterizes: a preemptible victim that never yields wedges the preemptor past the yield deadline', () => {
+  test('K3 fences: a preemptible victim that never yields is force-yielded by the contract deadline, not wedged forever', () => {
     const victim = contract('victim:walk', 'MISSION', [claim()], [effect('MOVE', 'scope:victim:walk')])
     const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
     let state = initial([victim, requester])
@@ -153,25 +153,25 @@ describe('V4.1.2 adversarial safe-yield and preemption edges', () => {
     state = registerAdmit(state, requester)
     const plan = planPreemption(state, requester); state = plan.state
 
-    // The victim's yield deadline passes with no acknowledgement and nothing
-    // forces the yield: the kernel only records lateness when an ack arrives.
-    state = advance(state, 1_000)
+    // Inside the bounded yield window the unacknowledged victim still wedges
+    // the commit and stays effect-eligible - that window is the safe-yield
+    // protocol's concession, not a defect.
     reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'PREEMPTION_NOT_READY')
     reject(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: requester.transitionId }, 'RESOURCE_CONFLICT')
     expect(state.transitions[victim.transitionId]!.lifecycle).toBe('ACTIVE')
-    // The victim is still fully effect-eligible: the unacknowledged plan does
-    // not fence it.
     const issued = issue(state, victim, 'MOVE', 'scope:victim:walk'); state = issued.state
 
-    // Scheduler recourse exists but is destructive: cancel terminalizes the
-    // victim instead of suspending it, so resumable work is lost.
-    state = apply(state, { kind: 'REQUEST_CANCEL', transitionId: victim.transitionId, reason: 'preemption wedge' })
-    expect(state.transitions[victim.transitionId]!.terminalOutcome).toEqual({ kind: 'CANCELED', reason: 'preemption wedge' })
-    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: requester.transitionId })
+    // Past hardYieldDeadlineMonoMs the claim's own bound authorizes the forced
+    // commit: the victim is suspended (resumable work preserved) inside the
+    // same atomic transaction that grants the requester.
+    state = advance(state, 1_000)
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
     expect(state.transitions[requester.transitionId]!.lifecycle).toBe('ACTIVE')
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
   })
 
-  test('K4 characterizes: the scheduler can pause a yield-acknowledged victim out of a READY transaction', () => {
+  test('K4 fences: the scheduler cannot pause a yield-acknowledged victim out of a READY transaction', () => {
     const victim = contract('victim:walk', 'MISSION', [claim()])
     const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
     let state = initial([victim, requester])
@@ -181,17 +181,16 @@ describe('V4.1.2 adversarial safe-yield and preemption edges', () => {
     state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
     expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
 
-    // PAUSE_ACTIVE does not gate on preemptionYielded: the yielded victim's
-    // leases are released outside the atomic transaction, so the READY plan
-    // can never commit and can never be cancelled.
-    state = apply(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'scheduler pause' })
-    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('OBSERVING')
-    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'STALE_PREEMPTION')
-    reject(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs }, 'STALE_PREEMPTION')
-    expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
+    // PAUSE_ACTIVE now gates on transaction participation: the victim's lease
+    // set belongs to the READY transaction until commit or cancel.
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'scheduler pause' }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('ACTIVE')
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
+    expect(state.transitions[requester.transitionId]!.lifecycle).toBe('ACTIVE')
   })
 
-  test('K4b characterizes: a non-preemptible victim can veto an acknowledged preemption by yielding to pause', () => {
+  test('K4b fences: a non-preemptible victim cannot veto an acknowledged preemption by yielding to pause', () => {
     const victim = contract('victim:critical', 'MISSION', [criticalClaim()])
     const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
     let state = initial([victim, requester])
@@ -201,21 +200,17 @@ describe('V4.1.2 adversarial safe-yield and preemption edges', () => {
     state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
     expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
 
-    // ACK_PAUSE_YIELD also lacks the preemptionYielded gate: the victim's own
-    // controller unilaterally releases the critical lease mid-transaction and
-    // the atomic commit becomes unresolvable.
-    state = apply(state, { kind: 'ACK_PAUSE_YIELD', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'victim pause', atMonoMs: state.monotonicMs })
-    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('OBSERVING')
-    expect(Object.keys(state.leases)).toHaveLength(0)
-    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'STALE_PREEMPTION')
-    expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
-    // The requester is now free, but only because the victim leaked its lease
-    // outside the transaction - the plan did not suspend it.
-    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: requester.transitionId })
+    // ACK_PAUSE_YIELD carries the same gate: the controller cannot leak the
+    // critical lease outside the atomic commit.
+    reject(state, { kind: 'ACK_PAUSE_YIELD', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'victim pause', atMonoMs: state.monotonicMs }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('ACTIVE')
+    expect(Object.keys(state.leases)).toHaveLength(1)
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
     expect(state.transitions[requester.transitionId]!.lifecycle).toBe('ACTIVE')
   })
 
-  test('K5 characterizes: a victim pausing mid-plan orphans the transaction record forever', () => {
+  test('K5 fences: a victim cannot pause mid-plan, and CANCEL_PREEMPTION resolves the plan explicitly', () => {
     const victim = contract('victim:walk', 'MISSION', [claim()])
     const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
     let state = initial([victim, requester])
@@ -223,14 +218,15 @@ describe('V4.1.2 adversarial safe-yield and preemption edges', () => {
     state = registerAdmit(state, requester)
     const plan = planPreemption(state, requester); state = plan.state
 
+    // A merely-planned victim's lease set is transaction-owned: pausing it
+    // would orphan the plan, so the pause is refused outright.
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'unrelated pause' }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    // The explicit resolution path is CANCEL_PREEMPTION - after it the victim
+    // can pause normally and the record is durable.
+    state = apply(state, { kind: 'CANCEL_PREEMPTION', transactionId: plan.transactionId, reason: 'scheduler replan' })
     state = apply(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'unrelated pause' })
-    // Neither ack nor commit can resolve the orphaned plan; no cancel command
-    // exists. The record sits in state.preemptions until a participant
-    // terminalizes or the generation changes.
-    reject(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs }, 'STALE_PREEMPTION')
-    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'STALE_PREEMPTION')
-    state = apply(state, { kind: 'ACQUIRE_DECLARED_RESOURCES', transitionId: requester.transitionId })
-    expect(state.preemptions[plan.transactionId]!.status).toBe('PLANNED')
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('OBSERVING')
+    expect(state.preemptions[plan.transactionId]!.status).toBe('CANCELED')
   })
 
   test('K6 fences: requesting cancel on a non-preemptible critical section quiesces in-flight dispatch immediately', () => {
@@ -769,5 +765,113 @@ describe('V4.1.2 adversarial semantic characterizations (pinned for architecture
     expect(state.effects[issued.commitId]!.status).toBe('ISSUED')
     // The token is effectively permanent while the binding holds; ttl only
     // bounds the dispatch window and there is no cap on it.
+  })
+})
+
+describe('V4.1.2 preemption transaction integrity (K3/K4/K5 fixes)', () => {
+  test('K34 fences: a deadline-expired victim can no longer wedge the preemptor - the commit forces the yield', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()], [effect('MOVE', 'scope:victim:walk')])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+
+    // Inside the contract-bounded yield window the unacknowledged victim still
+    // blocks the commit.
+    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'PREEMPTION_NOT_READY')
+
+    // Past hardYieldDeadlineMonoMs the contract itself bound the critical
+    // section: the commit resolves the unresponsive victim inside the same
+    // atomic transaction and marks the forced yield in the journal.
+    state = advance(state, 1_000)
+    const evts: KernelEvent[] = []
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, evts)
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
+    expect(state.transitions[victim.transitionId]!.suspendReason).toBe(`PREEMPTED_BY:${requester.transitionId}`)
+    expect(state.transitions[requester.transitionId]!.lifecycle).toBe('ACTIVE')
+    expect(state.preemptions[plan.transactionId]!.status).toBe('COMMITTED')
+    const commit = evts.find((e) => e.kind === 'PREEMPTION_COMMITTED')!
+    expect(commit.data.forcedVictims).toEqual([victim.transitionId])
+  })
+
+  test('K34b fences: a forced yield marks an in-flight irreversible dispatch UNKNOWN like any other quiesce', () => {
+    const victim = contract('victim:dig', 'MISSION', [claim(worldBlocks)], [effect('DIG', 'scope:dig', worldBlocks)])
+    const requester = contract('requester:urgent', 'MISSION', [claim(worldBlocks)], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const issued = issue(state, victim, 'DIG', 'scope:dig'); state = issued.state
+    state = apply(state, { kind: 'BEGIN_EFFECT_DISPATCH', commitId: issued.commitId })
+    const plan = planPreemption(state, requester); state = plan.state
+    // An in-flight dispatch cannot safe-yield, so the victim cannot ack: the
+    // deadline expiring is what un-wedges this, not an ack that can never come.
+    reject(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs }, 'EFFECT_DISPATCH_IN_FLIGHT')
+    state = advance(state, 1_000)
+    state = apply(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('SUSPENDED')
+    expect(state.effects[issued.commitId]!.status).toBe('UNKNOWN')
+    expect(state.transitions[requester.transitionId]!.lifecycle).toBe('ACTIVE')
+  })
+
+  test('K35 fences: a preemption participant cannot pause out of a live transaction', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+
+    // Even a merely-planned victim's lease set is owned by the transaction:
+    // pausing would diverge it and orphan the plan (old K5).
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'unrelated pause' }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    reject(state, { kind: 'ACK_PAUSE_YIELD', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'victim pause', atMonoMs: state.monotonicMs }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+
+    // The acked victim is likewise locked until commit/cancel (old K4/K4b).
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+    expect(state.preemptions[plan.transactionId]!.status).toBe('READY')
+    reject(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'scheduler pause' }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    reject(state, { kind: 'ACK_PAUSE_YIELD', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'victim pause', atMonoMs: state.monotonicMs }, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('ACTIVE')
+    expect(Object.keys(state.leases)).toHaveLength(1)
+  })
+
+  test('K36 fences: CANCEL_PREEMPTION resolves live and stale transactions explicitly', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()], [effect('MOVE', 'scope:victim:walk')])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    state = apply(state, { kind: 'ACK_PREEMPTION_YIELD', transactionId: plan.transactionId, victimId: victim.transitionId, safeYield: true, atMonoMs: state.monotonicMs })
+
+    const evts: KernelEvent[] = []
+    state = apply(state, { kind: 'CANCEL_PREEMPTION', transactionId: plan.transactionId, reason: 'requester abandoned' }, evts)
+    expect(state.preemptions[plan.transactionId]!.status).toBe('CANCELED')
+    expect(evts.some((e) => e.kind === 'PREEMPTION_CANCELED' && e.data.reason === 'requester abandoned')).toBe(true)
+    // The released victim is effect-eligible again; the transaction record is
+    // durable and cannot be re-resolved.
+    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'STALE_PREEMPTION')
+    reject(state, { kind: 'CANCEL_PREEMPTION', transactionId: plan.transactionId, reason: 'again' }, 'PREEMPTION_ALREADY_RESOLVED')
+    const issued = issue(state, victim, 'MOVE', 'scope:victim:walk'); state = issued.state
+    expect(state.effects[issued.commitId]!.status).toBe('ISSUED')
+    // After cancel, K35's pause gate no longer applies.
+    state = apply(state, { kind: 'PAUSE_ACTIVE', transitionId: victim.transitionId, to: 'OBSERVING', reason: 'scheduler pause' })
+    expect(state.transitions[victim.transitionId]!.lifecycle).toBe('OBSERVING')
+  })
+
+  test('K36b fences: a generation change resolves live transactions to STALE and cancel refuses to rewrite that durable verdict', () => {
+    const victim = contract('victim:walk', 'MISSION', [claim()])
+    const requester = contract('requester:urgent', 'MISSION', [claim()], [], { urgency: 100 })
+    let state = initial([victim, requester])
+    state = activate(state, victim)
+    state = registerAdmit(state, requester)
+    const plan = planPreemption(state, requester); state = plan.state
+    state = apply(state, { kind: 'CHANGE_GENERATION', generationId: 'gen-b', capability: trustedWorldAdapter('runtime') })
+    // The generation fence resolves the transaction record itself: STALE is a
+    // terminal tx status - neither commit nor cancel may rewrite it.
+    expect(state.preemptions[plan.transactionId]!.status).toBe('STALE')
+    reject(state, { kind: 'COMMIT_PREEMPTION', transactionId: plan.transactionId }, 'STALE_PREEMPTION')
+    reject(state, { kind: 'CANCEL_PREEMPTION', transactionId: plan.transactionId, reason: 'generation fenced' }, 'PREEMPTION_ALREADY_RESOLVED')
   })
 })

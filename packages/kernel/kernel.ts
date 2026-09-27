@@ -129,6 +129,7 @@ export type KernelCommand =
   | { readonly kind: 'START_PREEMPTION'; readonly requesterId: TransitionId; readonly capability: unknown }
   | { readonly kind: 'ACK_PREEMPTION_YIELD'; readonly transactionId: string; readonly victimId: TransitionId; readonly safeYield: boolean; readonly atMonoMs: number; readonly capability: unknown }
   | { readonly kind: 'COMMIT_PREEMPTION'; readonly transactionId: string; readonly capability: unknown }
+  | { readonly kind: 'CANCEL_PREEMPTION'; readonly transactionId: string; readonly reason: string; readonly capability: unknown }
   | { readonly kind: 'ISSUE_EFFECT'; readonly transitionId: TransitionId; readonly effect: EffectKind; readonly scope: string; readonly ttlMs: number; readonly capability: unknown }
   | { readonly kind: 'BEGIN_EFFECT_DISPATCH'; readonly commitId: string; readonly capability: unknown }
   | { readonly kind: 'RECONCILE_EFFECT'; readonly commitId: string; readonly observation: 'OCCURRED' | 'NOT_OCCURRED' | 'UNKNOWN'; readonly factIds: readonly string[]; readonly verifier: DefinitionIdentity; readonly capability: unknown }
@@ -492,6 +493,14 @@ function preemptionYielded(state: KernelState, transitionId: TransitionId): bool
     (tx.status === 'PLANNED' || tx.status === 'READY') && txCurrent(state, tx) &&
     tx.victims.some((victim) => victim.transitionId === transitionId && victim.safeYieldAcknowledged))
 }
+/** Any victim slot in a live current transaction owns that transition's lease
+ *  set until commit/cancel/terminal resolves it: the transition may not mutate
+ *  its leases through an independent path. */
+function preemptionParticipant(state: KernelState, transitionId: TransitionId): boolean {
+  return Object.values(state.preemptions).some((tx) =>
+    (tx.status === 'PLANNED' || tx.status === 'READY') && txCurrent(state, tx) &&
+    tx.victims.some((victim) => victim.transitionId === transitionId))
+}
 function hasDispatchInFlight(state: KernelState, transitionId: TransitionId): boolean {
   return Object.values(state.effects).some((effect) => effect.transitionId === transitionId && effect.status === 'DISPATCHING')
 }
@@ -573,6 +582,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       if (t.cancelRequested || t.pendingTerminalOutcome !== null) return failure(inputState, 'TRANSITION_QUIESCING')
       if (hasDispatchInFlight(state, t.transitionId)) return failure(inputState, 'EFFECT_DISPATCH_IN_FLIGHT')
       if (hasBoundedNonPreemptibleLease(state, t.transitionId)) return failure(inputState, 'SAFE_YIELD_REQUIRED')
+      if (preemptionParticipant(state, t.transitionId)) return failure(inputState, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
       state = releaseAllLeases(state, t.transitionId); state = quiesceTransitionEffects(state, t.transitionId)
       state = updateTransition(state, { ...t, lifecycle: command.to, heldLeaseIds: [], activeSinceMonoMs: null, blockReason: command.to === 'BLOCKED' ? command.reason : null, suspendReason: null, lifecycleRevision: t.lifecycleRevision + 1 }, true)
       return success(state, command, command.to === 'OBSERVING' ? 'TRANSITION_OBSERVING' : 'TRANSITION_BLOCKED', t.transitionId, { reason: command.reason })
@@ -585,6 +595,7 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       if (hasDispatchInFlight(state, t.transitionId)) return failure(inputState, 'EFFECT_DISPATCH_IN_FLIGHT')
       if (command.atMonoMs !== state.monotonicMs) return failure(inputState, 'STALE_YIELD_ACK')
       if (!currentLeaseSetMatchesTransition(state, t)) return failure(inputState, 'LEASE_STATE_DIVERGENCE')
+      if (preemptionParticipant(state, t.transitionId)) return failure(inputState, 'PREEMPTION_TRANSACTION_IN_FLIGHT')
       const late = leasesFor(state, t.transitionId).some((l) => !l.preemptible && command.atMonoMs > l.hardYieldDeadlineMonoMs!)
       state = releaseAllLeases(state, t.transitionId); state = quiesceTransitionEffects(state, t.transitionId)
       state = updateTransition(state, { ...t, lifecycle: command.to, heldLeaseIds: [], activeSinceMonoMs: null, blockReason: command.to === 'BLOCKED' ? command.reason : null, suspendReason: null, lifecycleRevision: t.lifecycleRevision + 1 }, true)
@@ -640,7 +651,13 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
     }
     case 'COMMIT_PREEMPTION': {
       if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
-      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(inputState, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(inputState, 'STALE_PREEMPTION'); if (tx.status !== 'READY') return failure(inputState, 'PREEMPTION_NOT_READY')
+      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(inputState, 'UNKNOWN_PREEMPTION'); if (!txCurrent(state, tx)) return failure(inputState, 'STALE_PREEMPTION')
+      // A victim that never acks wedges the transaction only inside the
+      // contract-bounded yield window: past hardYieldDeadlineMonoMs the claim's
+      // own bound authorizes the kernel to force the yield inside the same
+      // atomic commit.
+      const forcedVictimIds = tx.victims.filter((v) => !v.safeYieldAcknowledged && state.monotonicMs > v.hardYieldDeadlineMonoMs).map((v) => v.transitionId)
+      if (tx.status !== 'READY' && tx.victims.some((v) => !v.safeYieldAcknowledged && !forcedVictimIds.includes(v.transitionId))) return failure(inputState, 'PREEMPTION_NOT_READY')
       const requester = state.transitions[tx.requesterId]; const rc = contractFor(state, tx.requesterId); if (requester === undefined || rc === null || requester.lifecycle !== 'RUNNABLE') return failure(inputState, 'REQUESTER_NOT_RUNNABLE')
       if (rc.contractHash !== tx.requesterContractHash || claimFingerprint(rc.claims) !== tx.requesterClaimFingerprint) return failure(inputState, 'REQUESTER_BUNDLE_CHANGED')
       const plannedVictimIds = new Set(tx.victims.map((v) => v.transitionId)); const conflicts = conflictsFor(state, requester.transitionId, rc.claims); if (conflicts.some((l) => !plannedVictimIds.has(l.owner))) return failure(inputState, 'UNPLANNED_CONFLICT')
@@ -654,9 +671,22 @@ function applyInternal(inputState: KernelState, command: KernelCommand, replay =
       for (const v of tx.victims) { const vt = transitions[v.transitionId]!; transitions[v.transitionId] = v.resumable ? deepFreeze({ ...vt, lifecycle: 'SUSPENDED', heldLeaseIds: [], suspendReason: `PREEMPTED_BY:${tx.requesterId}`, activeSinceMonoMs: null, lifecycleRevision: vt.lifecycleRevision + 1 }) : deepFreeze({ ...vt, lifecycle: 'TERMINAL', heldLeaseIds: [], terminalOutcome: { kind: 'PREEMPTED_NONRESUMABLE', by: tx.requesterId }, activeSinceMonoMs: null, lifecycleRevision: vt.lifecycleRevision + 1 }) }
       next = deepFreeze({ ...next, transitions, registryRevision: next.registryRevision + 1 })
       const grant = grantDeclared(next, tx.requesterId, true); if (typeof grant === 'string') return failure(inputState, `ATOMIC_PREEMPTION_GRANT_FAILED:${grant}`); next = grant
-      const preemptions = cloneRecord(next.preemptions); preemptions[tx.transactionId] = deepFreeze({ ...tx, status: 'COMMITTED' }); next = deepFreeze({ ...next, preemptions })
+      const committedVictims = tx.victims.map((v) => forcedVictimIds.includes(v.transitionId) ? deepFreeze({ ...v, deadlineViolated: true }) : v)
+      const preemptions = cloneRecord(next.preemptions); preemptions[tx.transactionId] = deepFreeze({ ...tx, victims: committedVictims, status: 'COMMITTED' }); next = deepFreeze({ ...next, preemptions })
       state = next
-      return success(state, command, 'PREEMPTION_COMMITTED', tx.requesterId, { transactionId: tx.transactionId, victims: tx.victims.map((v) => v.transitionId), deadlineViolations: tx.victims.filter((v) => v.deadlineViolated).map((v) => v.transitionId) }, [tx.requesterId, ...tx.victims.map((v) => v.transitionId)])
+      return success(state, command, 'PREEMPTION_COMMITTED', tx.requesterId, { transactionId: tx.transactionId, victims: tx.victims.map((v) => v.transitionId), forcedVictims: forcedVictimIds, deadlineViolations: tx.victims.filter((v) => v.deadlineViolated || forcedVictimIds.includes(v.transitionId)).map((v) => v.transitionId) }, [tx.requesterId, ...tx.victims.map((v) => v.transitionId)])
+    }
+    case 'CANCEL_PREEMPTION': {
+      if (!schedulerAuthorized(command.capability)) return failure(inputState, 'UNTRUSTED_SCHEDULER')
+      const tx = state.preemptions[command.transactionId]; if (tx === undefined) return failure(inputState, 'UNKNOWN_PREEMPTION')
+      if (tx.status !== 'PLANNED' && tx.status !== 'READY') return failure(inputState, 'PREEMPTION_ALREADY_RESOLVED')
+      // Explicit resolution for plans that can no longer commit (requester
+      // abandoned, scheduler replanned, or the transaction was fenced stale by
+      // a generation/world change). Cancellation only marks the durable record:
+      // it cannot actuate anything, so it does not require transaction currency.
+      const preemptions = cloneRecord(state.preemptions); preemptions[tx.transactionId] = deepFreeze({ ...tx, status: 'CANCELED' })
+      state = deepFreeze({ ...state, preemptions })
+      return success(state, command, 'PREEMPTION_CANCELED', tx.requesterId, { transactionId: tx.transactionId, reason: command.reason, victims: tx.victims.map((v) => v.transitionId) }, [tx.requesterId, ...tx.victims.map((v) => v.transitionId)])
     }
     case 'ISSUE_EFFECT': {
       if (!controllerAuthorized(command.transitionId, command.capability)) return failure(inputState, 'UNTRUSTED_CONTROLLER')

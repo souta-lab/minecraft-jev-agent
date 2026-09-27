@@ -4,7 +4,7 @@
     "packages/kernel/scenarios.ts",
     "tools/emit-scenario-registry.mjs"
   ],
-  "definitionsSha256": "2b1e79bfbca2d146fa4039caecf0447c04d8cc744416c820918377db605182fd",
+  "definitionsSha256": "461640fc72bc014a4f3d13bfd805db6655112e779cd58141f0b5b03898b10965",
   "scenarios": [
     {
       "id": "sc-k-quiesce-generation",
@@ -66,14 +66,12 @@
       "id": "sc-k-preempt-wedge",
       "kind": "kernelTrace",
       "surface": "packages/kernel",
-      "origin": "finding F-K3 — cooperative safe-yield bound is observational, not enforced",
-      "hypothesis": "CHARACTERIZATION: a preemptible victim that never yields wedges a higher-priority preemptor past the yield deadline; the only kernel recourse is victim terminalization",
-      "defSha256": "2946be61135f465e2cae39898918529b65e3133936927c1036848eafa0527115",
+      "origin": "finding F-K3 — cooperative safe-yield bound is observational, not enforced (resolved: contract-deadline forced commit)",
+      "hypothesis": "RESOLVED: a preemptible victim that never yields is force-yielded by the contract deadline inside the same atomic commit that grants the requester — no destructive cancel needed",
+      "defSha256": "091b2df0bf5643b8e074b4e35f0d9bf4ef3f2dbd8ba3f7b768fa0b3251edc992",
       "expect": {
-        "terminalOutcomes": {
-          "victim:walk": "CANCELED"
-        },
         "lifecycles": {
+          "victim:walk": "SUSPENDED",
           "requester:urgent": "ACTIVE"
         }
       }
@@ -82,12 +80,13 @@
       "id": "sc-k-ready-abort",
       "kind": "kernelTrace",
       "surface": "packages/kernel",
-      "origin": "finding F-K4 — PAUSE_ACTIVE/ACK_PAUSE_YIELD do not gate on preemptionYielded",
-      "hypothesis": "CHARACTERIZATION: an acknowledged victim can be paused out of a READY transaction, releasing leases outside the atomic commit and leaving an unresolvable STALE plan",
-      "defSha256": "afc2b6808873dd77d77b4a603326021f0b9331c0485e5cc6ac63cb955c138add",
+      "origin": "finding F-K4 — PAUSE_ACTIVE/ACK_PAUSE_YIELD do not gate on preemptionYielded (resolved: participant pause fence)",
+      "hypothesis": "RESOLVED: a yield-acknowledged victim cannot be paused out of a READY transaction; the transaction owns the lease set until commit or cancel",
+      "defSha256": "59947495bbcf03c7980bc98149bc3cfac26a16f0f4f1c4e8f3651182982f6571",
       "expect": {
         "lifecycles": {
-          "victim:walk": "OBSERVING"
+          "victim:walk": "SUSPENDED",
+          "requester:urgent": "ACTIVE"
         }
       }
     },
