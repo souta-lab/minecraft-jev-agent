@@ -13,8 +13,15 @@ const SOURCE = 'a'.repeat(40)
 const RUN = 'run-vtrabc123-archive'
 const GENERATION = 'gen-vtr-archive-xyz789'
 const WORLD = '127.0.0.1:25565|overworld|4'
-const CONTRACT = 'c'.repeat(64)
 const TRANSITION = 'transition-vtr-archive-1'
+// The committed contract hash must be the real v2 fingerprint so the
+// validator's contract-content re-hash binds honest fixture archives too.
+const reachCanonicalJson = (value) => {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(reachCanonicalJson).join(',')}]`
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${reachCanonicalJson(value[key])}`).join(',')}}`
+}
+const reachFingerprint = (value) => createHash('sha256').update(reachCanonicalJson(value)).digest('hex')
 const MISSION = { kind: 'inventory_at_least', item: 'oak_log', count: 1 }
 const START = Date.parse('2026-09-25T04:00:00.000Z')
 const iso = (offset) => new Date(START + offset).toISOString()
@@ -82,9 +89,23 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     expected: true,
   }
   const identity = { worldKey: WORLD, dimension: 'overworld', worldEpoch: 4, generationId: GENERATION, leaseId: GENERATION }
+  const contractBudget = { maxMechanicalSteps: 4, maxElapsedMs: 10000, resources: {}, risk: {} }
+  const contractController = { allowedTactics: ['walk', 'replan'] }
+  const contractProgress = { kind: 'verified-distance-reduction' }
+  const contractSemantic = {
+    schema: 'vtr.reach.contract.v2',
+    transitionId: TRANSITION, desiredPredicate, requires: [], ensures: [desiredPredicate], invariants: [],
+    admissibleEffects: [], budget: contractBudget, controller: contractController,
+    progressDefinition: contractProgress, identity,
+  }
+  const CONTRACT = reachFingerprint(contractSemantic)
+  const DESIRED_PREDICATE_IDENTITY = reachFingerprint(desiredPredicate)
+  const ENSURES_IDENTITY = reachFingerprint([desiredPredicate])
   const commit = event(10, 'VTR_TRANSITION_COMMIT', {
     transitionId: TRANSITION,
     contractHash: CONTRACT,
+    desiredPredicateIdentity: DESIRED_PREDICATE_IDENTITY,
+    ensuresIdentity: ENSURES_IDENTITY,
     identity,
     mission: MISSION,
     desiredPredicate,
@@ -92,9 +113,9 @@ function makeFixture(root, { omitProvider = null, addCapture = true, omitLifecyc
     ensures: [desiredPredicate],
     invariants: [],
     admissibleEffects: [],
-    budget: { maxMechanicalSteps: 4, maxElapsedMs: 10000, resources: {}, risk: {} },
-    controller: { allowedTactics: ['walk', 'replan'] },
-    progressDefinition: { kind: 'verified-distance-reduction' },
+    budget: contractBudget,
+    controller: contractController,
+    progressDefinition: contractProgress,
     witness: { target: witnessPosition, witnessId: 'oak-log-witness' },
   })
   const actionId = 'MOVE:b4_64_4'
@@ -929,6 +950,200 @@ try {
   assert.ok(missingWitnessResult.report.requiredValidatorPaths.includes(missingWitnessRegion.witnessRegionPath))
   assert.equal(missingWitnessResult.report.checks.find((entry) => entry.id === 'required:world-witness-region')?.status, 'INCOMPLETE')
   assert.equal(missingWitnessResult.report.packageStatus, 'INCOMPLETE', 'omitting the committed witness region must still fail closed')
+
+  // --- Validator hardening: fail-closed negative coverage --------------------
+  // Every check family added for the hardened validator must demonstrably
+  // reject tampered evidence rather than silently passing or going incomplete.
+  const addArchiveFile = (archive, relativePath, contents) => {
+    const full = join(archive, relativePath)
+    mkdirSync(dirname(full), { recursive: true })
+    writeFileSync(full, contents)
+    const sumsPath = join(archive, 'SHA256SUMS')
+    writeFileSync(sumsPath, `${readFileSync(sumsPath, 'utf8')}${digest(contents)}  ${relativePath}\n`)
+  }
+  const rewriteArchiveJsonl = (archive, relativePath, mutate) => {
+    const full = join(archive, relativePath)
+    const rows = readFileSync(full, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    mutate(rows)
+    writeFileSync(full, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+    rehashArchiveFile(archive, relativePath)
+    return rows
+  }
+  const kernelJournalRows = () => {
+    const rows = []
+    const command = (via, name) => rows.push({ type: 'kernel-command', transitionId: TRANSITION, generationId: GENERATION, via, command: name, ok: true })
+    command('gate-admit', 'REGISTER_TRANSITION'); command('gate-admit', 'UPDATE_MISSION'); command('gate-admit', 'ADMIT_TRANSITION')
+    command('gate-activate', 'ACQUIRE_DECLARED_RESOURCES')
+    for (let leg = 1; leg <= 4; leg += 1) {
+      command('mechanical-step-issued', 'ISSUE_EFFECT'); command('mechanical-step-issued', 'BEGIN_EFFECT_DISPATCH')
+      rows.push({ type: 'effect-dispatch', transitionId: TRANSITION, generationId: GENERATION, stepId: `MOVE:b4_64_4#17:walk-leg-${leg}`, commitId: `commit:${leg}`, authority: true })
+      command('mechanical-step-settled', 'DEBIT_USAGE'); command('mechanical-step-settled', 'RECONCILE_EFFECT')
+    }
+    command('transition-terminal', 'ACCEPT_VERIFIED_SNAPSHOT'); command('transition-terminal', 'VERIFY_SUCCESS')
+    rows.push({ type: 'verify-attempt', transitionId: TRANSITION, generationId: GENERATION, missingObservedProof: [] })
+    rows.push({ type: 'verify-provenance', transitionId: TRANSITION, generationId: GENERATION, factIds: ['verify:40:oak_log'] })
+    rows.forEach((row, index) => { row.seq = index + 1 })
+    return rows
+  }
+  const injectKernelEvidence = (archive) => {
+    const buddyPath = join(archive, 'runner/buddy.log')
+    writeFileSync(buddyPath, `${readFileSync(buddyPath, 'utf8')}` +
+      `[${iso(6)}] KERNEL_AUTHORITY_MODE mode=authority generationId=${GENERATION}\n` +
+      `[${iso(6)}] KERNEL_AUTHORITY_READY id=${GENERATION} kernelAuthority=on legacyReachAuthority=off\n` +
+      `[${iso(47)}] KERNEL_AUTHORITY_SUMMARY id=${GENERATION} authorityMode=authority mutationsObserved=5 mutationsAttributedToTransition=5 coverageComplete=true gateDenials=0 mutationsDeniedByLease=0 kernelDenied=0\n`)
+    rehashArchiveFile(archive, 'runner/buddy.log')
+    addArchiveFile(archive, 'runner/kernel-authority.jsonl', `${kernelJournalRows().map((row) => JSON.stringify(row)).join('\n')}\n`)
+  }
+  const kernelTamper = async (name, tamper) => {
+    const fixture = makeFixture(join(tempRoot, name))
+    packageVtrReachArchive({ collectorReportPath: fixture.collectorPath, manifestPath: fixture.manifestPath, archivePath: fixture.archive })
+    injectKernelEvidence(fixture.archive)
+    tamper(fixture.archive)
+    return validateEvidenceArchive(fixture.archive)
+  }
+  const statusOf = (report, id) => report.checks.find((entry) => entry.id === id)?.status
+
+  const kernelBase = makeFixture(join(tempRoot, 'kernel-evidence-base'))
+  packageVtrReachArchive({ collectorReportPath: kernelBase.collectorPath, manifestPath: kernelBase.manifestPath, archivePath: kernelBase.archive })
+  injectKernelEvidence(kernelBase.archive)
+  const kernelBaseValidation = await validateEvidenceArchive(kernelBase.archive)
+  for (const id of ['authority:kernel-mode-on', 'authority:kernel-summary', 'authority:kernel-gates-live', 'transition:contract-content-binding', 'transition:row-run-binding']) {
+    assert.equal(statusOf(kernelBaseValidation, id), 'PASS', `honest kernel evidence passes ${id}`)
+  }
+  assert.ok(kernelBaseValidation.checks.every((entry) => ['PASS', 'FAIL', 'INCOMPLETE'].includes(entry.status)),
+    'every emitted check carries a concrete status (no detail-key collision can hide a verdict)')
+  assert.equal(kernelBaseValidation.checkCount, kernelBaseValidation.checks.length)
+  assert.equal(kernelBaseValidation.counts.pass + kernelBaseValidation.counts.fail + kernelBaseValidation.counts.incomplete, kernelBaseValidation.checkCount)
+  assert.deepEqual(kernelBaseValidation.duplicateCheckIds, [])
+
+  const kernelForeignGeneration = await kernelTamper('kernel-foreign-generation', (archive) => rewriteArchiveJsonl(archive, 'runner/kernel-authority.jsonl', (rows) => {
+    rows.push({ type: 'note', transitionId: TRANSITION, generationId: 'gen-foreign-9', seq: rows.length + 1 })
+  }))
+  assert.equal(statusOf(kernelForeignGeneration, 'authority:kernel-gates-live'), 'FAIL', 'journal rows bound to a foreign generation are rejected')
+
+  const kernelSeqReorder = await kernelTamper('kernel-seq-reorder', (archive) => rewriteArchiveJsonl(archive, 'runner/kernel-authority.jsonl', (rows) => {
+    rows[5].seq = 99
+  }))
+  assert.equal(statusOf(kernelSeqReorder, 'authority:kernel-gates-live'), 'FAIL', 'non-monotonic journal sequence is rejected')
+
+  const kernelNoVerifyAttempt = await kernelTamper('kernel-no-verify-attempt', (archive) => rewriteArchiveJsonl(archive, 'runner/kernel-authority.jsonl', (rows) => {
+    const kept = rows.filter((row) => row.type !== 'verify-attempt')
+    rows.length = 0
+    rows.push(...kept.map((row, index) => ({ ...row, seq: index + 1 })))
+  }))
+  assert.equal(statusOf(kernelNoVerifyAttempt, 'authority:kernel-gates-live'), 'FAIL', 'an empty verify-attempt set cannot pass vacuously')
+
+  const kernelForeignStep = await kernelTamper('kernel-foreign-step', (archive) => rewriteArchiveJsonl(archive, 'runner/kernel-authority.jsonl', (rows) => {
+    rows.find((row) => row.type === 'effect-dispatch').stepId = 'MOVE:b4_64_4#17:walk-leg-99'
+  }))
+  assert.equal(statusOf(kernelForeignStep, 'authority:kernel-gates-live'), 'FAIL', 'a dispatch stepId outside the reserved mechanical steps is rejected')
+
+  const kernelUnbracketed = await kernelTamper('kernel-unbracketed-dispatch', (archive) => rewriteArchiveJsonl(archive, 'runner/kernel-authority.jsonl', (rows) => {
+    const index = rows.findIndex((row) => row.type === 'effect-dispatch')
+    const [dispatch] = rows.splice(index, 1)
+    rows.push(dispatch)
+    rows.forEach((row, position) => { row.seq = position + 1 })
+  }))
+  assert.equal(statusOf(kernelUnbracketed, 'authority:kernel-gates-live'), 'FAIL', 'a dispatch unbracketed by gated BEGIN/RECONCILE commands is rejected')
+
+  const kernelModeOff = await kernelTamper('kernel-mode-off', (archive) => {
+    const buddyPath = join(archive, 'runner/buddy.log')
+    writeFileSync(buddyPath, `${readFileSync(buddyPath, 'utf8')}[${iso(6)}] KERNEL_AUTHORITY_MODE mode=shadow generationId=${GENERATION}\n`)
+    rehashArchiveFile(archive, 'runner/buddy.log')
+  })
+  assert.equal(statusOf(kernelModeOff, 'authority:kernel-mode-on'), 'FAIL', 'a shadow-mode row anywhere in the run is rejected')
+
+  const kernelDeniedSummary = await kernelTamper('kernel-denied-summary', (archive) => {
+    const buddyPath = join(archive, 'runner/buddy.log')
+    writeFileSync(buddyPath, `${readFileSync(buddyPath, 'utf8')}[${iso(47)}] KERNEL_AUTHORITY_SUMMARY id=${GENERATION} authorityMode=authority mutationsObserved=5 mutationsAttributedToTransition=5 coverageComplete=true gateDenials=0 mutationsDeniedByLease=0 kernelDenied=3\n`)
+    rehashArchiveFile(archive, 'runner/buddy.log')
+  })
+  assert.equal(statusOf(kernelDeniedSummary, 'authority:kernel-summary'), 'FAIL', 'a second summary row carrying nonzero kernel denials is rejected')
+
+  const kernelForeignSummaryGeneration = await kernelTamper('kernel-foreign-summary-generation', (archive) => {
+    const buddyPath = join(archive, 'runner/buddy.log')
+    writeFileSync(buddyPath, `${readFileSync(buddyPath, 'utf8')}[${iso(47)}] KERNEL_AUTHORITY_SUMMARY id=gen-foreign-9 authorityMode=authority mutationsObserved=0 mutationsAttributedToTransition=0 coverageComplete=true gateDenials=0 mutationsDeniedByLease=0 kernelDenied=0\n`)
+    rehashArchiveFile(archive, 'runner/buddy.log')
+  })
+  assert.equal(statusOf(kernelForeignSummaryGeneration, 'authority:kernel-summary'), 'FAIL', 'a summary row bound to a foreign generation is rejected')
+
+  const foreignRowRunId = await kernelTamper('row-foreign-runid', (archive) => rewriteArchiveJsonl(archive, 'runner/jev-run.jsonl', (rows) => {
+    rows.find((row) => String(row?.message ?? '').includes('VTR_TRANSITION_OUTCOME')).detail.runId = 'run-foreign-9'
+  }))
+  assert.equal(statusOf(foreignRowRunId, 'transition:row-run-binding'), 'FAIL', 'a Transition row carrying a foreign runId is rejected')
+
+  const mutatedContractContent = await kernelTamper('contract-content-mutated', (archive) => rewriteArchiveJsonl(archive, 'runner/jev-run.jsonl', (rows) => {
+    rows.find((row) => String(row?.message ?? '').includes('VTR_TRANSITION_COMMIT')).detail.budget.maxMechanicalSteps = 40
+  }))
+  assert.equal(statusOf(mutatedContractContent, 'transition:contract-content-binding'), 'FAIL', 'committed contract fields that do not re-hash to the claimed hash are rejected')
+
+  const fabricatedMilestone = await kernelTamper('milestone-fabricated-counts', (archive) => {
+    const proofPath = join(archive, 'proofs/no-double-authority.json')
+    const proof = JSON.parse(readFileSync(proofPath, 'utf8'))
+    proof.vtrActuationCount = 5
+    writeJson(proofPath, proof)
+    rehashArchiveFile(archive, 'proofs/no-double-authority.json')
+  })
+  assert.equal(statusOf(fabricatedMilestone, 'milestone:proofs/no-double-authority.json'), 'FAIL', 'self-reported actuation counts disagreeing with recomputation are rejected')
+  assert.equal(fabricatedMilestone.status, 'FAIL', 'milestone failures propagate to the aggregate status')
+
+  const secondJournalTamper = async (name, mutate) => {
+    const fixture = makeFixture(join(tempRoot, name))
+    packageVtrReachArchive({ collectorReportPath: fixture.collectorPath, manifestPath: fixture.manifestPath, archivePath: fixture.archive })
+    const archive = fixture.archive
+    const journalBytes = readFileSync(join(archive, 'runner/jev-run.jsonl'))
+    renameSync(join(archive, 'runner/jev-run.jsonl'), join(archive, 'runner/run.jsonl'))
+    const sumsPath = join(archive, 'SHA256SUMS')
+    writeFileSync(sumsPath, readFileSync(sumsPath, 'utf8').split('\n').map((row) => row.endsWith('  runner/jev-run.jsonl') ? `${digest(journalBytes)}  runner/run.jsonl` : row).join('\n'))
+    mutate(archive)
+    return validateEvidenceArchive(archive)
+  }
+  const secondJournalForeignRun = await secondJournalTamper('second-journal-foreign-run', (archive) => rewriteArchiveJsonl(archive, 'runner/run.jsonl', (rows) => {
+    rows.find((row) => String(row?.message ?? '').includes('VTR_TRANSITION_OUTCOME')).detail.runId = 'run-foreign-9'
+  }))
+  assert.equal(statusOf(secondJournalForeignRun, 'archive:second-journal-binding'), 'FAIL', 'VTR evidence in the run.jsonl journal bound to a foreign runId is rejected')
+
+  const duplicateJournals = makeFixture(join(tempRoot, 'duplicate-journals'))
+  packageVtrReachArchive({ collectorReportPath: duplicateJournals.collectorPath, manifestPath: duplicateJournals.manifestPath, archivePath: duplicateJournals.archive })
+  const duplicateJournalRows = readFileSync(join(duplicateJournals.archive, 'runner/jev-run.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  duplicateJournalRows.find((row) => String(row?.message ?? '').includes('VTR_TRANSITION_OUTCOME')).detail.runId = 'run-foreign-9'
+  addArchiveFile(duplicateJournals.archive, 'runner/run.jsonl', `${duplicateJournalRows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  const duplicateJournalValidation = await validateEvidenceArchive(duplicateJournals.archive)
+  assert.equal(statusOf(duplicateJournalValidation, 'archive:second-journal-binding'), 'FAIL', 'a second journal cannot smuggle foreign-bound Transition evidence beside a clean primary')
+
+  const consistentJournals = makeFixture(join(tempRoot, 'consistent-journals'))
+  packageVtrReachArchive({ collectorReportPath: consistentJournals.collectorPath, manifestPath: consistentJournals.manifestPath, archivePath: consistentJournals.archive })
+  addArchiveFile(consistentJournals.archive, 'runner/run.jsonl', readFileSync(join(consistentJournals.archive, 'runner/jev-run.jsonl')))
+  const consistentJournalsValidation = await validateEvidenceArchive(consistentJournals.archive)
+  assert.equal(statusOf(consistentJournalsValidation, 'archive:second-journal-binding'), 'PASS', 'a byte-identical second journal does not false-positive')
+
+  const kernelModeUnbound = await kernelTamper('kernel-mode-unbound', (archive) => {
+    const buddyPath = join(archive, 'runner/buddy.log')
+    const text = readFileSync(buddyPath, 'utf8').replaceAll(`generationId=${GENERATION}`, 'generationId=gen-foreign-9').replaceAll(`id=${GENERATION}`, 'id=gen-foreign-9')
+    writeFileSync(buddyPath, text)
+    rehashArchiveFile(archive, 'runner/buddy.log')
+  })
+  assert.equal(statusOf(kernelModeUnbound, 'authority:kernel-mode-on'), 'INCOMPLETE', 'mode markers bound to a foreign generation cannot grant kernel authority')
+
+  const malformedKernelJournal = await kernelTamper('kernel-journal-malformed', (archive) => {
+    writeFileSync(join(archive, 'runner/kernel-authority.jsonl'), '{"type":"kernel-command",\n')
+    rehashArchiveFile(archive, 'runner/kernel-authority.jsonl')
+  }).catch((error) => ({ parseError: error }))
+  assert.ok(malformedKernelJournal.parseError, 'a malformed kernel journal aborts validation rather than being trusted')
+
+  const bareArchive = makeFixture(join(tempRoot, 'bare-archive'))
+  packageVtrReachArchive({ collectorReportPath: bareArchive.collectorPath, manifestPath: bareArchive.manifestPath, archivePath: bareArchive.archive })
+  const bareValidation = await validateEvidenceArchive(bareArchive.archive)
+  for (const id of ['authority:kernel-mode-on', 'authority:kernel-summary', 'authority:kernel-gates-live']) {
+    assert.equal(statusOf(bareValidation, id), 'INCOMPLETE', `absent kernel evidence leaves ${id} INCOMPLETE, never PASS`)
+  }
+
+  const duplicateBoot = await kernelTamper('duplicate-boot', (archive) => {
+    const buddyPath = join(archive, 'runner/buddy.log')
+    writeFileSync(buddyPath, `${readFileSync(buddyPath, 'utf8')}[${iso(0)}] BOOT runId=${RUN} source=${SOURCE} worldKey=${JSON.stringify({ host: '127.0.0.1', port: 25565 })}\n`)
+    rehashArchiveFile(archive, 'runner/buddy.log')
+  })
+  assert.equal(statusOf(duplicateBoot, 'run:boot-line'), 'FAIL', 'a second BOOT line for the probe runId is rejected')
 } finally {
   rmSync(tempRoot, { recursive: true, force: true })
 }

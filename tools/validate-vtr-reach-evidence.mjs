@@ -286,6 +286,40 @@ function parseArgs(argv) {
   return out
 }
 
+// Mirrors packages/jev-agent/src/reach/transition.ts canonicalJson/fingerprint
+// (v2 schema): the committed contract detail must re-hash to the claimed
+// contractHash/desiredPredicateIdentity/ensuresIdentity, otherwise the archive
+// may assert an arbitrary contract under a self-consistent label.
+function reachCanonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(reachCanonicalJson).join(',')}]`
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${reachCanonicalJson(value[key])}`).join(',')}}`
+}
+function reachFingerprint(value) {
+  return createHash('sha256').update(reachCanonicalJson(value)).digest('hex')
+}
+function recomputeReachContract(commitDetail) {
+  const semantic = {
+    schema: 'vtr.reach.contract.v2',
+    transitionId: commitDetail.transitionId,
+    desiredPredicate: commitDetail.desiredPredicate,
+    requires: commitDetail.requires,
+    ensures: commitDetail.ensures,
+    invariants: commitDetail.invariants,
+    admissibleEffects: commitDetail.admissibleEffects,
+    budget: commitDetail.budget,
+    controller: commitDetail.controller,
+    progressDefinition: commitDetail.progressDefinition,
+    identity: commitDetail.identity,
+  }
+  if (Object.values(semantic).some((value) => value === undefined)) return null
+  return {
+    contractHash: reachFingerprint(semantic),
+    desiredPredicateIdentity: reachFingerprint(commitDetail.desiredPredicate),
+    ensuresIdentity: reachFingerprint(commitDetail.ensures),
+  }
+}
+
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
@@ -1164,6 +1198,7 @@ function inspectRawVtrSide(side, expectedIdentity) {
   const expectedWorldKey = probe?.record === 'vtr-reach-live-probe' ? contractIdentity.worldKey : probe.run?.worldKey
   if (contractIdentity.generationId !== expectedIdentity.generationId || contractIdentity.leaseId !== expectedIdentity.generationId ||
       typeof expectedWorldKey !== 'string' || !expectedWorldKey ||
+      (typeof probe.run?.worldKey === 'string' && contractIdentity.worldKey !== probe.run.worldKey) ||
       (probe?.record === 'vtr-reach-live-probe' && probe.server?.worldEpoch !== contractIdentity.worldEpoch)) {
     throw new Error('VTR committed contract identity is not bound to generation/world epoch')
   }
@@ -1655,7 +1690,7 @@ export function inspectReachComparisonProof(proof, expectedLiveSourceSha, expect
     return incomplete('comparison raw capture is valid but it is not marked acceptance-eligible')
   }
   if (proof.comparisonStatus !== 'PASS' || !aligned) return incomplete('comparison Mission, fixture, or environment is not fully aligned', { comparisonStatus: proof.comparisonStatus ?? null, alignment: proof.alignment ?? null })
-  if (proof.noNetworkProfile?.status !== 'PASS') return fail('acceptance-eligible comparison lacks a PASS no-network profile', { status: proof.noNetworkProfile?.status ?? null })
+  if (proof.noNetworkProfile?.status !== 'PASS') return fail('acceptance-eligible comparison lacks a PASS no-network profile', { noNetworkProfileStatus: proof.noNetworkProfile?.status ?? null })
   return { status: 'PASS', reason: 'source-bound raw comparison evidence independently validates both aligned run artifacts' }
 }
 
@@ -2456,20 +2491,30 @@ function gitCommitExists(repo, commit) {
 export function summarizeValidationStatuses(checks) {
   const all = Array.isArray(checks) ? checks : []
   const probeChecks = all.filter((check) => !String(check?.id ?? '').startsWith('milestone:'))
-  const statusFor = (entries) => entries.some((check) => check.status === CHECK_STATUS.FAIL)
-    ? 'FAIL'
-    : entries.some((check) => check.status === CHECK_STATUS.INCOMPLETE) ? 'INCOMPLETE' : 'PASS'
+  const statusFor = (entries) => entries.length === 0
+    ? 'INCOMPLETE'
+    : entries.some((check) => check.status === CHECK_STATUS.FAIL)
+      ? 'FAIL'
+      : entries.some((check) => check.status === CHECK_STATUS.INCOMPLETE) ? 'INCOMPLETE' : 'PASS'
   const counts = Object.fromEntries(Object.values(CHECK_STATUS).map((value) => [
     value.toLowerCase(), all.filter((check) => check.status === value).length,
   ]))
+  const seenIds = new Set()
+  const duplicateCheckIds = [...new Set(all.map((check) => check?.id).filter((id) => {
+    if (seenIds.has(id)) return true
+    seenIds.add(id)
+    return false
+  }))]
   const overallStatus = statusFor(all)
   const probeStatus = statusFor(probeChecks)
   return {
-    status: probeStatus,
+    status: overallStatus,
     probeStatus,
     migrationMilestoneStatus: overallStatus,
     overallStatus,
     counts,
+    checkCount: all.length,
+    duplicateCheckIds,
   }
 }
 
@@ -2796,7 +2841,7 @@ export async function validateEvidenceArchive(archive, repo = null) {
         if (!hasCommit) fail('source:commit-object', 'source commit object is absent')
         else pass('source:commit-object', { commit: sourceSha })
         const status = gitOutput(repo, ['status', '--porcelain', '--untracked-files=all'])
-        if (status.length > 0) fail('source:repo-clean', 'exact-source checkout has non-ignored changes', { status: status.split('\n') })
+        if (status.length > 0) fail('source:repo-clean', 'exact-source checkout has non-ignored changes', { dirty: status.split('\n') })
         else pass('source:repo-clean')
         const branch = gitOutput(repo, ['branch', '--show-current'])
         if (source.branch && branch && branch !== source.branch) fail('source:repo-branch', 'checkout branch differs from recorded run branch', { expected: source.branch, observed: branch })
@@ -2933,14 +2978,32 @@ export async function validateEvidenceArchive(archive, repo = null) {
     const probeQueueEmptyLines = rawHostLines.filter((line) => hostEventToken(line) === 'VTR_REACH_PROBE_QUEUE_EMPTY')
     const vtrAuthorityReadyLines = rawHostLines.filter((line) => hostEventToken(line) === 'GENERATION_READY' && line.includes('productionPlanAuthority=vtr-reach-probe'))
     if (botLog) {
-      const boot = botLog.split(/\r?\n/).find((line) => line.includes(' BOOT ') && line.includes(`runId=${runId}`))
-      if (!boot) fail('run:boot-line', 'resident log has no BOOT line for the probe runId')
+      const bootLines = botLog.split(/\r?\n/).filter((line) => line.includes(' BOOT ') && line.includes(`runId=${runId}`))
+      if (bootLines.length !== 1) fail('run:boot-line', `resident log must contain exactly one BOOT line for the probe runId (found ${bootLines.length})`)
       else {
+      const boot = bootLines[0]
         if (!boot.includes(`source=${sourceSha}`)) fail('run:boot-source', 'resident BOOT source SHA differs from manifest')
         else pass('run:boot-source', { sourceSha })
         if (!boot.includes(`connection={"host":"127.0.0.1","port":${Number(run.serverId?.split(':').at(-1))},"serverId":"${run.serverId}"}`)) incomplete('run:boot-server', 'resident BOOT connection does not exactly match parsed server identity')
         else pass('run:boot-server', { serverId: run.serverId })
       }
+    }
+
+    if (listing.files.includes('runner/run.jsonl')) {
+      let secondJournalProblems = []
+      try {
+        const secondRows = parseJsonl(archive, 'runner/run.jsonl')
+        const vtrRows = secondRows.filter((row) => String(row?.message ?? '').includes('VTR_TRANSITION'))
+        for (const row of vtrRows) {
+          const detail = row?.detail
+          if (detail === null || typeof detail !== 'object') continue
+          if (detail.runId !== undefined && detail.runId !== runId) secondJournalProblems.push({ field: 'runId', observed: detail.runId })
+          if (detail.generationId !== undefined && detail.generationId !== generationId) secondJournalProblems.push({ field: 'generationId', observed: detail.generationId })
+          if (detail.sourceSha !== undefined && String(detail.sourceSha).toLowerCase() !== String(sourceSha ?? '').toLowerCase()) secondJournalProblems.push({ field: 'sourceSha', observed: detail.sourceSha })
+        }
+      } catch { secondJournalProblems.push({ field: 'parse', observed: 'runner/run.jsonl is not valid JSONL' }) }
+      if (secondJournalProblems.length) fail('archive:second-journal-binding', 'runner/run.jsonl carries Transition evidence disagreeing with the probe-bound identity or is unparseable', { problems: secondJournalProblems })
+      else pass('archive:second-journal-binding', { vtrRows: 'consistent-or-absent' })
     }
 
     const commits = eventMessage(events, 'VTR_TRANSITION_COMMIT')
@@ -2969,6 +3032,33 @@ export async function validateEvidenceArchive(archive, repo = null) {
     else if (outcome?.contractHash !== contractHash || conflictingContractHashRows.length) fail('transition:contract-hash-chain', 'contract hash differs across committed, mechanical, and terminal event rows', { expected: contractHash, outcomeHash: outcome?.contractHash ?? null, conflicts: conflictingContractHashRows.map(({ row, hash }) => ({ event: firstMessageToken(row?.message), observed: hash })) })
     else if (missingContractHashRows.length) incomplete('transition:contract-hash-chain', 'one or more Transition event rows do not explicitly carry the committed contract hash', { contractHash, missingRows: missingContractHashRows.map(({ row }) => firstMessageToken(row?.message)) })
     else pass('transition:contract-hash-chain', { contractHash, rows: contractBoundRows.length })
+
+    const rowIdentityProblems = []
+    for (const row of contractBoundRows) {
+      const detail = row?.detail
+      if (detail === null || typeof detail !== 'object') continue
+      if (detail.runId !== undefined && detail.runId !== runId) rowIdentityProblems.push({ event: firstMessageToken(row?.message), field: 'runId', observed: detail.runId })
+      if (detail.sourceSha !== undefined && String(detail.sourceSha).toLowerCase() !== String(sourceSha ?? '').toLowerCase()) rowIdentityProblems.push({ event: firstMessageToken(row?.message), field: 'sourceSha', observed: detail.sourceSha })
+      if (detail.generationId !== undefined && detail.generationId !== generationId) rowIdentityProblems.push({ event: firstMessageToken(row?.message), field: 'generationId', observed: detail.generationId })
+      if (detail.worldKey !== undefined && detail.worldKey !== run.worldKey) rowIdentityProblems.push({ event: firstMessageToken(row?.message), field: 'worldKey', observed: detail.worldKey })
+      const identity = detail.identity
+      if (identity !== null && typeof identity === 'object') {
+        if (identity.worldKey !== undefined && identity.worldKey !== run.worldKey) rowIdentityProblems.push({ event: firstMessageToken(row?.message), field: 'identity.worldKey', observed: identity.worldKey })
+        if (identity.generationId !== undefined && identity.generationId !== generationId) rowIdentityProblems.push({ event: firstMessageToken(row?.message), field: 'identity.generationId', observed: identity.generationId })
+      }
+    }
+    if (rowIdentityProblems.length) fail('transition:row-run-binding', 'a Transition event row carries run/source/generation/world identity that disagrees with the probe-bound identity', { problems: rowIdentityProblems })
+    else pass('transition:row-run-binding', { rows: contractBoundRows.length })
+
+    const recomputed = commit === undefined || commit === null ? null : recomputeReachContract(commit)
+    if (recomputed === null) incomplete('transition:contract-content-binding', 'commit event detail is unavailable for contract-content re-hash')
+    else if (recomputed.contractHash !== contractHash || recomputed.desiredPredicateIdentity !== commit.desiredPredicateIdentity || recomputed.ensuresIdentity !== commit.ensuresIdentity) {
+      fail('transition:contract-content-binding', 'committed contract fields do not re-hash to the claimed contract/predicate identities', {
+        expectedContractHash: contractHash, recomputedContractHash: recomputed.contractHash,
+        desiredPredicateIdentity: { expected: commit.desiredPredicateIdentity ?? null, recomputed: recomputed.desiredPredicateIdentity },
+        ensuresIdentity: { expected: commit.ensuresIdentity ?? null, recomputed: recomputed.ensuresIdentity },
+      })
+    } else pass('transition:contract-content-binding', { contractHash })
 
     const committedIdentity = commit?.identity ?? commit?.worldIdentity
     if (!committedIdentity) incomplete('transition:commit-world-binding', 'commit event does not serialize its world/generation/lease identity')
@@ -3563,23 +3653,22 @@ export async function validateEvidenceArchive(archive, repo = null) {
     const kernelAuthorityModeLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_MODE')
     const kernelReadyLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_READY')
     const kernelSummaryLines = rawHostLines.filter((line) => hostEventToken(line) === 'KERNEL_AUTHORITY_SUMMARY')
-    const kernelModeOn = kernelAuthorityModeLines.some((line) => /\bmode=authority\b/.test(line)) &&
-      kernelReadyLines.some((line) => /\bkernelAuthority=on\b/.test(line) && /\blegacyReachAuthority=off\b/.test(line))
+    const kernelModeOn = kernelAuthorityModeLines.some((line) => /\bmode=authority\b/.test(line) && line.includes(`generationId=${generationId}`)) &&
+      kernelReadyLines.some((line) => /\bkernelAuthority=on\b/.test(line) && /\blegacyReachAuthority=off\b/.test(line) && line.includes(`id=${generationId}`))
     const kernelModeOff = kernelAuthorityModeLines.some((line) => /\bmode=shadow\b/.test(line)) ||
       kernelReadyLines.some((line) => /\bkernelAuthority=off\b/.test(line))
     if (kernelModeOff) fail('authority:kernel-mode-on', 'kernel authority session ran in shadow-only mode; production authority was OFF', { kernelAuthorityModeLines, kernelReadyLines })
     else if (!kernelModeOn) incomplete('authority:kernel-mode-on', 'KERNEL_AUTHORITY_MODE/KERNEL_AUTHORITY_READY rows do not bind kernelAuthority=on and legacyReachAuthority=off', { kernelAuthorityModeLines: kernelAuthorityModeLines.length, kernelReadyLines: kernelReadyLines.length })
     else pass('authority:kernel-mode-on', { mode: 'authority', legacyReachAuthority: 'off' })
 
-    const kernelSummaryOk = kernelSummaryLines.length > 0 && kernelSummaryLines.every((line) =>
-      /\bauthorityMode=authority\b/.test(line) && /\bgateDenials=0\b/.test(line))
-    const kernelSummaryLine = kernelSummaryLines[0] ?? null
-    const summaryMutationsDenied = kernelSummaryLine === null ? null : /mutationsDeniedByLease=0/.test(kernelSummaryLine)
-    const summaryKernelDenied = kernelSummaryLine === null ? null : /kernelDenied=0/.test(kernelSummaryLine)
-    const summaryCoverage = kernelSummaryLine === null ? null : /coverageComplete=true/.test(kernelSummaryLine)
+    const summaryLineOk = (line) => /\bauthorityMode=authority\b/.test(line) && /\bgateDenials=0\b/.test(line) &&
+      /\bmutationsDeniedByLease=0\b/.test(line) && /\bkernelDenied=0\b/.test(line) && /\bcoverageComplete=true\b/.test(line)
+    const kernelSummaryOk = kernelSummaryLines.length > 0 && kernelSummaryLines.every(summaryLineOk)
+    const kernelSummaryBound = kernelSummaryLines.every((line) => line.includes(`id=${generationId}`))
     if (!kernelSummaryLines.length) incomplete('authority:kernel-summary', 'no KERNEL_AUTHORITY_SUMMARY row was archived', {})
-    else if (!kernelSummaryOk || summaryMutationsDenied !== true || summaryKernelDenied !== true || summaryCoverage !== true) fail('authority:kernel-summary', 'kernel summary does not assert authority mode, zero gate denials, zero lease/kernel denials, and complete mutation coverage', { authorityModeOk: kernelSummaryOk, mutationsDeniedByLeaseZero: summaryMutationsDenied, kernelDeniedZero: summaryKernelDenied, coverageComplete: summaryCoverage, line: kernelSummaryLine })
-    else pass('authority:kernel-summary', { mode: 'authority', gateDenials: 0, kernelDenied: 0, mutationsDeniedByLease: 0, coverageComplete: true })
+    else if (!kernelSummaryBound) fail('authority:kernel-summary', 'a KERNEL_AUTHORITY_SUMMARY row is not bound to this run generation', { generationId, lines: kernelSummaryLines.length })
+    else if (!kernelSummaryOk) fail('authority:kernel-summary', 'a KERNEL_AUTHORITY_SUMMARY row does not assert authority mode, zero gate denials, zero lease/kernel denials, and complete mutation coverage', { summaryRows: kernelSummaryLines.length })
+    else pass('authority:kernel-summary', { mode: 'authority', gateDenials: 0, kernelDenied: 0, mutationsDeniedByLease: 0, coverageComplete: true, summaryRows: kernelSummaryLines.length })
 
     const kernelJournalText = listing.files.includes('runner/kernel-authority.jsonl') ? readText(archive, 'runner/kernel-authority.jsonl') : null
     if (kernelJournalText === null) {
@@ -3588,7 +3677,9 @@ export async function validateEvidenceArchive(archive, repo = null) {
       const kernelRows = parsedJsonLines(kernelJournalText, 'runner/kernel-authority.jsonl')
       const gateDeniedRows = kernelRows.filter((row) => row?.type === 'gate-denied')
       const blockerRows = kernelRows.filter((row) => row?.type === 'blocker')
-      const transitionRows = kernelRows.filter((row) => row?.transitionId === transition.transitionId)
+      const foreignGenerationRows = kernelRows.filter((row) => row?.generationId !== undefined && row.generationId !== generationId)
+      const seqOrdered = kernelRows.length > 0 && kernelRows.every((row, index) => Number.isInteger(row?.seq) && row.seq === index + 1)
+      const transitionRows = kernelRows.filter((row) => row?.transitionId === transition.transitionId && row?.generationId === generationId)
       const commands = (via) => transitionRows.filter((row) => row?.type === 'kernel-command' && row?.via === via && row?.ok === true).map((row) => row.command)
       const admitted = commands('gate-admit').includes('ADMIT_TRANSITION')
       const activated = commands('gate-activate').includes('ACQUIRE_DECLARED_RESOURCES')
@@ -3597,19 +3688,31 @@ export async function validateEvidenceArchive(archive, repo = null) {
       const settleCount = commands('mechanical-step-settled').filter((command) => command === 'RECONCILE_EFFECT').length
       const verified = transitionRows.some((row) => row?.type === 'kernel-command' && row?.via === 'transition-terminal' && row?.command === 'VERIFY_SUCCESS' && row?.ok === true)
       const dispatches = transitionRows.filter((row) => row?.type === 'effect-dispatch' && row?.authority === true)
+      const reservedStepIds = new Set(reservations.map((row) => row?.detail?.stepId).filter((stepId) => typeof stepId === 'string'))
+      const unreservedDispatches = dispatches.filter((row) => !reservedStepIds.has(row?.stepId))
       const verifyAttempts = transitionRows.filter((row) => row?.type === 'verify-attempt')
       const verifyProvenance = transitionRows.filter((row) => row?.type === 'verify-provenance')
-      const missingObservedProof = verifyAttempts.every((row) => Array.isArray(row.missingObservedProof) && row.missingObservedProof.length === 0)
+      const missingObservedProof = verifyAttempts.length > 0 && verifyAttempts.every((row) => Array.isArray(row.missingObservedProof) && row.missingObservedProof.length === 0)
       const problems = []
+      if (foreignGenerationRows.length) problems.push(`journal rows for foreign generationId: ${foreignGenerationRows.length}`)
+      if (!seqOrdered) problems.push('kernel journal seq is not a strictly increasing sequence starting at 1')
       if (!admitted) problems.push('gate-admit:ADMIT_TRANSITION')
       if (!activated) problems.push('gate-activate:ACQUIRE_DECLARED_RESOURCES')
       if (issueCount !== reservations.length) problems.push(`issue count ${issueCount} != reservations ${reservations.length}`)
       if (dispatchCount !== reservations.length) problems.push(`dispatch count ${dispatchCount} != reservations ${reservations.length}`)
       if (dispatches.length !== dispatchCount) problems.push('effect-dispatch authority rows do not cover every dispatch')
+      if (unreservedDispatches.length) problems.push(`effect-dispatch stepIds not among reserved mechanical steps: ${unreservedDispatches.map((row) => String(row?.stepId ?? 'missing')).join(',')}`)
       if (settleCount !== reservations.length) problems.push(`settle count ${settleCount} != reservations ${reservations.length}`)
       if (!verified) problems.push('transition-terminal:VERIFY_SUCCESS')
       if (!missingObservedProof) problems.push('verify-attempt missingObservedProof is not empty')
       if (!verifyProvenance.some((row) => Array.isArray(row.factIds) && row.factIds.length > 0)) problems.push('verify-provenance factIds empty')
+      const issuedIndex = (command) => kernelRows.map((row, index) => ({ row, index })).filter(({ row }) => row?.type === 'kernel-command' && row?.via === 'mechanical-step-issued' && row?.command === command && row?.ok === true && row?.transitionId === transition.transitionId).map(({ index }) => index)
+      const beginIndexes = issuedIndex('BEGIN_EFFECT_DISPATCH')
+      const settleIndexes = kernelRows.map((row, index) => ({ row, index })).filter(({ row }) => row?.type === 'kernel-command' && row?.via === 'mechanical-step-settled' && row?.command === 'RECONCILE_EFFECT' && row?.ok === true && row?.transitionId === transition.transitionId).map(({ index }) => index)
+      for (const dispatch of dispatches) {
+        const at = kernelRows.indexOf(dispatch)
+        if (!beginIndexes.some((index) => index < at) || !settleIndexes.some((index) => index > at)) problems.push(`effect-dispatch ${String(dispatch.stepId ?? dispatch.commitId)} is not bracketed by gated BEGIN/RECONCILE commands`)
+      }
       if (gateDeniedRows.length > 0) problems.push(`gate-denied rows: ${gateDeniedRows.length}`)
       if (blockerRows.length > 0) problems.push(`blocker rows: ${blockerRows.length}`)
       const mechanicalStepCount = typeof transition.metrics?.mechanicalStepsPerTransition === 'number' ? transition.metrics.mechanicalStepsPerTransition : reservations.length
@@ -3721,11 +3824,20 @@ export async function validateEvidenceArchive(archive, repo = null) {
       try {
         const proof = readJson(archive, path)
         if (path.endsWith('no-double-authority.json')) {
+          const proofSkillStarts = eventMessage(events, 'SKILL_START')
+          const recomputedVtrStarts = proofSkillStarts.filter((row) => /\bselectedBy=vtr-transition(?:\s|$)/.test(String(row?.message ?? '')) && String(eventActionId(row) ?? '').startsWith('MOVE:')).length
+          const recomputedLegacyStarts = proofSkillStarts.filter((row) => !/\bselectedBy=vtr-transition(?:\s|$)/.test(String(row?.message ?? '')) && String(eventActionId(row) ?? '').startsWith('MOVE:')).length
+          const expectedRunId = probe?.run?.runId
+          const expectedGenerationId = probe?.run?.generationId
           if (typeof proof.sourceSha !== 'string' || !SHA_RE.test(proof.sourceSha)) incomplete(`milestone:${path}`, 'no-double-authority proof does not bind a full source SHA')
           else if (typeof expectedLiveSourceSha !== 'string' || !SHA_RE.test(expectedLiveSourceSha)) incomplete(`milestone:${path}`, 'live Transition source SHA is unavailable for binding the no-double-authority test')
           else if (proof.sourceSha.toLowerCase() !== expectedLiveSourceSha.toLowerCase()) fail(`milestone:${path}`, 'no-double-authority proof source SHA differs from the live Transition source', { expectedSourceSha: expectedLiveSourceSha, observedSourceSha: proof.sourceSha })
-          else if (proof.result === 'PASS' && proof.legacyActuationCount === 0 && proof.vtrActuationCount > 0) pass(`milestone:${path}`, { sourceSha: proof.sourceSha, vtrActuationCount: proof.vtrActuationCount })
-          else fail(`milestone:${path}`, 'no-double-authority proof is malformed or failed', { result: proof.result ?? null })
+          else if (proof.runId !== undefined && proof.runId !== expectedRunId) fail(`milestone:${path}`, 'no-double-authority proof runId differs from the probe run', { expected: expectedRunId, observed: proof.runId })
+          else if (proof.generationId !== undefined && proof.generationId !== expectedGenerationId) fail(`milestone:${path}`, 'no-double-authority proof generationId differs from the probe run', { expected: expectedGenerationId, observed: proof.generationId })
+          else if (proof.result === 'PASS' && proof.legacyActuationCount === 0 && proof.vtrActuationCount > 0 &&
+                   proof.vtrActuationCount === recomputedVtrStarts && proof.legacyActuationCount === recomputedLegacyStarts) {
+            pass(`milestone:${path}`, { sourceSha: proof.sourceSha, vtrActuationCount: proof.vtrActuationCount })
+          } else fail(`milestone:${path}`, 'no-double-authority proof is malformed, failed, or disagrees with the independently recomputed actuation counts', { result: proof.result ?? null, claimed: { vtr: proof.vtrActuationCount ?? null, legacy: proof.legacyActuationCount ?? null }, recomputed: { vtr: recomputedVtrStarts, legacy: recomputedLegacyStarts } })
         } else {
           let expectedLegacyOriginMainSha = null
           if (repo !== null) {
