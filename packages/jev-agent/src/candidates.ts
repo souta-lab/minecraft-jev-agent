@@ -4665,9 +4665,12 @@ function generateRawCandidates(
       label:
         threatName === null
           ? moveLabel(spot, 'retreat to safety', state.self.position)
-          : `${moveLabel(spot, `keep distance from ${threatName}`, state.self.position)} ` +
-            `(+${Math.round(retreat.gain * 100) / 100}m separation, ${Math.round(retreat.separation * 100) / 100}m away` +
-            `${retreat.outsideReach ? ', outside its reach' : ''}${retreat.occluded ? ', out of its sight line' : ''}${retreat.escape ? ', escape scan' : ''})`,
+          : retreat.disengage === true
+            ? `${moveLabel(spot, `move to reduce the worst-case threat exposure from ${threatName}`, state.self.position)} ` +
+              `(+${Math.round(retreat.gain * 100) / 100}m vs primary, ${Math.round(retreat.separation * 100) / 100}m away, disengage)`
+            : `${moveLabel(spot, `keep distance from ${threatName}`, state.self.position)} ` +
+              `(+${Math.round(retreat.gain * 100) / 100}m separation, ${Math.round(retreat.separation * 100) / 100}m away` +
+              `${retreat.outsideReach ? ', outside its reach' : ''}${retreat.occluded ? ', out of its sight line' : ''}${retreat.escape ? ', escape scan' : ''})`,
       targetName: null,
       target: spot,
       targetEntityId: null,
@@ -4685,6 +4688,10 @@ function generateRawCandidates(
         separationGain: Math.round(retreat.gain * 100) / 100,
         outsideReach: retreat.outsideReach,
         ...(retreat.escape ? { escapeScan: true } : {}),
+        // Code-owned marker: this destination was offered by the flanked
+        // disengage fallback (worst-case separation step), not the strict
+        // keep-distance solver - it may approach a secondary threat.
+        ...(retreat.disengage === true ? { disengage: true } : {}),
         // Code-owned cover fact: this destination is NOT in the threat's sight
         // line (real block truth). It is what makes a ranged attacker answerable
         // when the room gives the body no separation to buy. Jev still chooses
@@ -12353,7 +12360,7 @@ function pickRetreats(
     // destination measured from a hazard block while an attacker is known would
     // have no relation to that attacker at all.
     const unseen = hostile === null
-    return selectKeepDistanceSpots({
+    const spots = selectKeepDistanceSpots({
       self: state.self.position,
       threat: hostile?.position ?? attributed?.position ?? state.self.position,
       standable: standableUsable,
@@ -12369,6 +12376,16 @@ function pickRetreats(
       ...(unseen ? { minGain: UNSENSED_MIN_KEEP_DISTANCE_GAIN } : {}),
       max: MAX_RETREAT_CANDIDATES,
     })
+    if (spots.length > 0) return spots
+    // FLANKED-FALLBACK (measured portal-p14/p15): with the body pocketed
+    // between 2+ hostiles the separation constraints above can eliminate
+    // EVERY destination - the offer then collapses to ATTACK-only and Jev
+    // cannot choose disengagement even when it wants it (bare fists into a
+    // drowned swarm, shouldRetreat=0.69 with nothing to pick). A cell that
+    // strictly improves the WORST-CASE separation across all active threats
+    // is a real disengage step even when it approaches a secondary threat:
+    // mechanical truth only, Jev still chooses attack vs escape.
+    return disengageSpots(state, threats, hostile ?? attributed, standableUsable, usable)
   }
   // Hazard-only (or critical-health-with-no-sensed-hostile): unchanged semantics
   // - the destination must clear the hazard radius. A dimension-transfer cell is
@@ -12390,6 +12407,89 @@ function pickRetreats(
   }
   scored.sort((a, b) => b.separation - a.separation)
   return scored.slice(0, MAX_RETREAT_CANDIDATES)
+}
+
+/**
+ * A retreat step is meaningful if it widens the body's worst threat gap by at
+ * least this much; anything smaller is the jitter step the live runs showed
+ * dying in place (same bar as the death-zone exit's minimum distance).
+ */
+const DISENGAGE_MIN_IMPROVEMENT = 0.5
+
+/**
+ * The last-resort disengage set, offered only when the keep-distance solver
+ * produced NOTHING while active threats stand within response range
+ * (measured portal-p14/p15: a body pocketed between a skeleton and a drowned
+ * saw `JEV_CANDIDATE_SET` = two bare-fist ATTACKs and nothing else - Jev's
+ * own shouldRetreat could not be expressed).
+ *
+ * Qualification is the WORST-CASE threat separation across every active
+ * threat: a cell is offered when it strictly improves the minimum distance
+ * to any hostile, even if it approaches a secondary one - "less flanked" is
+ * real mechanical progress the strict per-threat rule cannot represent.
+ * Cells come from the same proven-standable sources the rest of the survival
+ * family uses (the local window, the threat escape scan, and the body's own
+ * exploredCells). This is a CAN offer, not a ranking: the candidate kind is
+ * still RETREAT and Jev chooses it against ATTACK like any other escape.
+ */
+function disengageSpots(
+  state: WorldState,
+  threats: readonly ThreatEntityLike[],
+  primary: { name: string; position: Vec3Json } | null,
+  standableUsable: Vec3Json[],
+  usable: (spot: Vec3Json) => boolean,
+): KeepDistanceSpot[] {
+  if (primary === null) return []
+  const points = threats.map((threat) => ({ position: threat.position, name: threat.name }))
+  // An unseen attacker (attribution-only primary) still counts in the worst
+  // case; a sensed primary is already a point at distance 0.
+  if (points.every((point) => distance(point.position, primary.position) > 1)) {
+    points.push(primary)
+  }
+  // FLANKED only. With a single threat a zero from the strict solver is a
+  // DELIBERATE judgment - a sub-gain shuffle inside its reach was already
+  // measured dying in place, so the offer stays on the typed
+  // no_grounded_threat_response path (threat-response fixture iv1). The
+  // fallback exists because the strict rule cannot even express the least-bad
+  // step out of a pincer: every direction approaches SOME hostile.
+  if (points.length < 2) return []
+  const worst = (p: Vec3Json): number => Math.min(...points.map((t) => distance(p, t.position)))
+  const currentWorst = worst(state.self.position)
+  const transfer = new Set((state.terrain.portalWalkInCells ?? []).map((cell) => blockId('p', cell)))
+  const cells: { spot: Vec3Json; worst: number; escape: boolean }[] = []
+  const seen = new Set<string>()
+  const consider = (spot: Vec3Json, escape: boolean): void => {
+    const key = blockId('p', spot)
+    if (seen.has(key) || transfer.has(key)) return
+    seen.add(key)
+    const w = worst(spot)
+    if (w <= currentWorst + DISENGAGE_MIN_IMPROVEMENT) return
+    cells.push({ spot, worst: w, escape })
+  }
+  for (const spot of state.terrain.escapeCells ?? []) if (usable(spot)) consider(spot, true)
+  for (const spot of standableUsable) consider(spot, false)
+  for (const key of state.signals?.exploredCells ?? []) {
+    const parts = key.slice(1).split('_')
+    const x = Number(parts[0])
+    const y = Number(parts[1])
+    const z = Number(parts[2])
+    const spot = { x, y, z }
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && usable(spot)) consider(spot, true)
+  }
+  cells.sort((a, b) => b.worst - a.worst)
+  const selfToPrimary = distance(state.self.position, primary.position)
+  return cells.slice(0, MAX_RETREAT_CANDIDATES).map((entry) => {
+    const separation = distance(entry.spot, primary.position)
+    return {
+      spot: entry.spot,
+      separation,
+      gain: separation - selfToPrimary,
+      outsideReach: separation >= threatStandoffRange(primary.name),
+      escape: entry.escape,
+      occluded: false,
+      disengage: true,
+    }
+  })
 }
 
 /**

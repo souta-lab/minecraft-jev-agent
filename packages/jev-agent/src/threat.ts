@@ -1949,6 +1949,14 @@ export interface KeepDistanceSpot {
   escape: boolean
   /** the threat's sight line to this destination is blocked (code-owned cover) */
   occluded: boolean
+  /**
+   * The destination is a worst-case-separation step, not a keep-distance spot:
+   * it strictly improves the body's minimum distance across ALL active
+   * threats and may approach a secondary threat (offered only when the
+   * primary keep-distance solver produced nothing - measured portal-p15,
+   * the flanked-pocket attack-only collapse).
+   */
+  disengage?: boolean
 }
 
 /**

@@ -437,6 +437,107 @@ addCase('(i5) a cell out of the attacker sight line is a grounded keep-distance 
   }
 })
 
+addCase('(i6) a body pocketed between two hostiles still gets a disengage offer, never ATTACK-only', () => {
+  // Measured portal-p15: `JEV_CANDIDATE_SET count=2 ids=[ATTACK:e1512,ATTACK:e1492]`
+  // with the skeleton 5.24m away - the strict per-threat separation rule
+  // rejected every destination (each one approached a hostile inside its
+  // standoff), so the offer collapsed to bare-fist attacks while Jev's own
+  // shouldRetreat=0.69 had nothing to pick. The disengage fallback offers a
+  // cell that strictly improves the WORST-CASE separation across all threats.
+  const skeleton = entity(1512, 'skeleton', { x: 5, y: 59, z: 4 }, true, {
+    lineOfSight: true,
+    heldItem: 'bow',
+    attackedSelf: true,
+  })
+  const drowned = entity(1492, 'drowned', { x: 5, y: 59, z: -5 }, true, { attackedSelf: true })
+  // The pocket geometry: going south gains on the skeleton but closes on the
+  // drowned inside its standoff; going north approaches the primary; the
+  // perpendicular cells buy < 2m on the skeleton and cannot reach its 12m
+  // standoff - the strict solver yields NOTHING from this set.
+  const corridor = [
+    { x: 5, y: 59, z: 2 },
+    { x: 5, y: 59, z: -2 },
+    { x: 5, y: 59, z: -6 },
+  ]
+  const east = { x: 8, y: 59, z: 0 }
+  const west = { x: 2, y: 59, z: 0 }
+  const state = noteThreat(
+    measuredBody({
+      entities: [skeleton, drowned],
+      terrain: {
+        standable: [BODY, ...corridor, east, west],
+        escapeCells: [...corridor, east, west],
+      },
+    }),
+  )
+  const grounded = generateGroundedCandidates(
+    state,
+    withProbe(defaultCandidateOptions, {
+      pathProbe: () => 'reachable',
+      attackPathProbe: () => 'reachable',
+    }),
+  )
+  const offer = applyGroundedThreatRestriction(state, grounded.candidates, grounded.withheld)
+  const attacks = offer.candidates.filter((candidate) => candidate.kind === 'ATTACK')
+  const retreats = offer.candidates.filter((candidate) => candidate.kind === 'RETREAT')
+  const disengaged = retreats.filter((candidate) => candidate.meta.disengage === true)
+  const toCorridor = disengaged.filter((candidate) =>
+    corridor.some((cell) => cell.x === candidate.target?.x && cell.z === candidate.target?.z),
+  )
+  const pass =
+    // Jev still sees the attack choices - this is a CAN offer, not a suppression;
+    attacks.some((candidate) => candidate.targetEntityId === 1512) &&
+    // the perpendicular cells qualify (worst-case separation 4 -> 5, past the
+    // 0.5m bar) while every corridor step worsens the worst threat gap;
+    disengaged.length === 2 &&
+    disengaged.some((candidate) => candidate.target?.x === east.x && candidate.target.z === east.z) &&
+    disengaged.some((candidate) => candidate.target?.x === west.x && candidate.target.z === west.z) &&
+    toCorridor.length === 0
+  return {
+    pass,
+    detail: `attacks=[${attacks.map((candidate) => candidate.id).join(',')}] retreats=[${retreats.map((candidate) => `${candidate.id}${candidate.meta.disengage === true ? ':disengage' : ''}`).join(',')}]`,
+  }
+})
+
+addCase('(i7) the disengage fallback stays silent when a real keep-distance spot exists', () => {
+  // Same pocket, but a far east cell that satisfies the STRICT solver: it
+  // reaches past the drowned standoff while gaining on the skeleton without
+  // closing on it. The fallback must not crowd that offer.
+  const skeleton = entity(1512, 'skeleton', { x: 5, y: 59, z: 4 }, true, {
+    lineOfSight: true,
+    heldItem: 'bow',
+    attackedSelf: true,
+  })
+  const drowned = entity(1492, 'drowned', { x: 5, y: 59, z: -5 }, true, { attackedSelf: true })
+  const south = { x: 5, y: 59, z: -2 }
+  const far = { x: 14, y: 59, z: 0 }
+  const state = noteThreat(
+    measuredBody({
+      entities: [skeleton, drowned],
+      terrain: {
+        standable: [BODY, south, far],
+        escapeCells: [south, far],
+      },
+    }),
+  )
+  const generated = generateGroundedCandidates(
+    state,
+    withProbe(defaultCandidateOptions, {
+      pathProbe: () => 'reachable',
+      attackPathProbe: () => 'reachable',
+    }),
+  )
+  const retreats = generated.candidates.filter((candidate) => candidate.kind === 'RETREAT')
+  const pass =
+    retreats.length > 0 &&
+    retreats.every((candidate) => candidate.meta.disengage !== true) &&
+    retreats.some((candidate) => candidate.target?.x === far.x && candidate.target.z === far.z)
+  return {
+    pass,
+    detail: `retreats=[${retreats.map((candidate) => `${candidate.id}${candidate.meta.disengage === true ? ':disengage' : ''}`).join(',')}]`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // (ii) the only "away" cells are through a portal -> never realized
 // ---------------------------------------------------------------------------
