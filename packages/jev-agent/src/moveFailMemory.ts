@@ -139,6 +139,68 @@ export function moveFailureKey(dimension: string, position: Vec3Like): string {
   return `${dimension}:${cell.x},${cell.y},${cell.z}`
 }
 
+/**
+ * Move-target exclusion fact supplied by the controller: either an explicit
+ * dimension-scoped cell set (moveFailureKey form) or a zone predicate that
+ * evaluates membership lazily (a bounded kill area cannot be enumerated into
+ * cells). Consumed only inside isBlacklistedMoveTarget in candidates.ts.
+ */
+export type BlacklistedMoveTargets = ReadonlySet<string> | ((dimension: string, position: Vec3Like) => boolean)
+
+/**
+ * Structural projection of the resident's durable DeathHazard record
+ * (buddy-driver/resident-types.ts owns the schema; jev-agent cannot import it).
+ * `dimension` is optional: durable records written before the field existed are
+ * treated as applying to every dimension, which errs on the side of exclusion.
+ */
+export interface DeathZoneHazard {
+  x: number
+  y: number
+  z: number
+  count: number
+  dimension?: string
+}
+
+/**
+ * Radius (blocks, 3D) within which death records count against a candidate
+ * target, and the summed death count that marks the area lethal. Measured
+ * portal-p6: 9 deaths spread over ~15-25 m in one hostile pocket — every
+ * individual cell merged at count=1, so the old exact-cell gate (`count>=2` at
+ * ±1) never fired and objectives kept routing the body back into the pocket it
+ * kept dying in. 14 m covers the measured pocket's cross-section; the death
+ * threshold stays the safety tripwire.
+ */
+export const DEATH_ZONE_RADIUS = 14
+export const DEATH_ZONE_DEATHS = 2
+
+/**
+ * Area-scoped death-zone check: returns the nearest contributing hazard when
+ * the summed death count within DEATH_ZONE_RADIUS of `position` reaches
+ * DEATH_ZONE_DEATHS, else null. A single death is not proof of a kill zone;
+ * repeated deaths anywhere inside the radius are. This is a CAN/SAFE filter -
+ * withholding a target proven lethal, never ranking or choosing an objective.
+ */
+export function isInDeathZone<H extends DeathZoneHazard>(
+  hazards: readonly H[],
+  position: Vec3Like,
+  dimension: string,
+): H | null {
+  let total = 0
+  let nearest: H | null = null
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const hazard of hazards) {
+    if (hazard.dimension !== undefined && hazard.dimension !== dimension) continue
+    const d = Math.hypot(position.x - hazard.x, position.y - hazard.y, position.z - hazard.z)
+    if (d > DEATH_ZONE_RADIUS) continue
+    total += Math.max(1, hazard.count)
+    if (d < nearestDistance) {
+      nearestDistance = d
+      nearest = hazard
+    }
+  }
+  return total >= DEATH_ZONE_DEATHS ? nearest : null
+}
+
 /** One-decimal position for log lines, matching the live HEARTBEAT format. */
 export function formatMovePosition(position: Vec3Like): string {
   const round = (value: number): number => Math.round(value * 10) / 10

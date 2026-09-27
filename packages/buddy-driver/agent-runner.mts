@@ -1886,12 +1886,13 @@ function inferDeathCause(b: Bot, pos: Vec3Json | null, healthBefore: number | nu
   return 'unknown'
 }
 
-function registerDeathHazard(pos: Vec3Json, reason: string): DeathHazard {
+function registerDeathHazard(pos: Vec3Json, reason: string, dimension: string): DeathHazard {
   const memory = keyedMemory()
   const hazard = mergeHazard(memory.hazards, {
     x: pos.x,
     y: pos.y,
     z: pos.z,
+    dimension,
     reason,
     count: 1,
     source: 'production',
@@ -1965,7 +1966,7 @@ function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json 
   lastSeenDeathPosition = pos
   if (pos !== null) {
     if (shouldRegisterHazard(input.source)) {
-      registerDeathHazard(pos, input.cause)
+      registerDeathHazard(pos, input.cause, state.dimension)
     } else {
       const rehearsal = recordRehearsalHazard(pos, input.cause)
       log('HAZARD_SKIPPED', {

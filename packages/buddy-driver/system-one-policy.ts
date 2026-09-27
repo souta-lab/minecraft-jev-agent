@@ -8,31 +8,44 @@
 // make deterministic code a second semantic action authority and violate #11.
 import type { JevPolicy, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
+import { isInDeathZone } from '../jev-agent/src/moveFailMemory.ts'
 import type { DeathHazard } from './resident-types.ts'
 
-function nearHardHazard(hazards: readonly DeathHazard[], pos: { x: number; y: number; z: number }): DeathHazard | null {
-  const x = Math.round(pos.x)
-  const y = Math.round(pos.y)
-  const z = Math.round(pos.z)
-  for (const hazard of hazards) {
-    if (hazard.count < 2) continue
-    if (Math.abs(x - hazard.x) <= 1 && Math.abs(y - hazard.y) <= 1 && Math.abs(z - hazard.z) <= 1) return hazard
-  }
-  return null
+/**
+ * Hard-hazard membership is AREA-scoped (isInDeathZone): the summed death count
+ * within DEATH_ZONE_RADIUS must reach DEATH_ZONE_DEATHS. The old gate —
+ * `count>=2` at the exact rounded cell — never fired against a swarm pocket
+ * that kills at scattered coordinates: measured portal-p6 had 9 deaths over
+ * ~15 m and every cell merged at count=1, so objectives kept routing the body
+ * back into the lethal area.
+ */
+function nearHardHazard(
+  hazards: readonly DeathHazard[],
+  pos: { x: number; y: number; z: number },
+  dimension: string,
+): DeathHazard | null {
+  return isInDeathZone(hazards, pos, dimension)
 }
 
 export function pickDescend(request: JevRequest, hazards: readonly DeathHazard[]): Candidate | null {
+  const dimension = request.state.self.dimension
   for (const candidate of request.candidates) {
     if (candidate.kind !== 'DESCEND') continue
-    if (candidate.target !== null && nearHardHazard(hazards, candidate.target) !== null) continue
+    if (candidate.target !== null && nearHardHazard(hazards, candidate.target, dimension) !== null) continue
     return candidate
   }
   return null
 }
 
-function excludeHardHazardCandidates(candidates: readonly Candidate[], hazards: readonly DeathHazard[]): readonly Candidate[] {
-  if (hazards.every((hazard) => hazard.count < 2)) return candidates
-  return candidates.filter((candidate) => candidate.target === null || nearHardHazard(hazards, candidate.target) === null)
+function excludeHardHazardCandidates(
+  candidates: readonly Candidate[],
+  hazards: readonly DeathHazard[],
+  dimension: string,
+): readonly Candidate[] {
+  if (hazards.length === 0) return candidates
+  return candidates.filter(
+    (candidate) => candidate.target === null || nearHardHazard(hazards, candidate.target, dimension) === null,
+  )
 }
 
 export class DescendAwarePolicy implements JevPolicy {
@@ -55,7 +68,10 @@ export class DescendAwarePolicy implements JevPolicy {
   }
 
   async decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult> {
-    const safeRequest: JevRequest = { ...request, candidates: excludeHardHazardCandidates(request.candidates, this.hazards) }
+    const safeRequest: JevRequest = {
+      ...request,
+      candidates: excludeHardHazardCandidates(request.candidates, this.hazards, request.state.self.dimension),
+    }
     const result = await this.inner.decide(safeRequest, signal)
     const action = result.answers.action
     if (action === undefined || action.value !== 'WAIT') return result

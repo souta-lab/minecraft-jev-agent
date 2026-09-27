@@ -182,8 +182,8 @@ export function validateLedgerProposal(
 // world-memory merge (moved from agent-runner: single implementation)
 // ---------------------------------------------------------------------------
 
-function hazardKey(h: { x: number; y: number; z: number }): string {
-  return `${Math.round(h.x)},${Math.round(h.y)},${Math.round(h.z)}`
+function hazardKey(h: { x: number; y: number; z: number; dimension?: string }): string {
+  return `${h.dimension ?? ''}:${Math.round(h.x)},${Math.round(h.y)},${Math.round(h.z)}`
 }
 
 /** Merge a death coordinate. The HOST is the only writer; two deaths at the same
@@ -201,6 +201,7 @@ export function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHaz
       x: Math.round(found.x),
       y: Math.round(found.y),
       z: Math.round(found.z),
+      dimension: found.dimension,
       reason: found.reason,
       count: Math.max(1, found.count),
       firstSeenAt: found.firstSeenAt || Date.now(),

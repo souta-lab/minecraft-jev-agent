@@ -193,8 +193,8 @@ import * as reach from './reach/controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './reach/controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, evaluateCapabilityGap, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
-import { detectOscillation, MoveFailMemory, StateFingerprintMemory } from './moveFailMemory.ts'
-import type { MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
+import { detectOscillation, isInDeathZone, MoveFailMemory, StateFingerprintMemory } from './moveFailMemory.ts'
+import type { BlacklistedMoveTargets, MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
 // The durable cross-action bound on one action's own typed outcome repeating
 // identically at the same target. The module owns the ONE bound; the controller
 // only observes and prunes.
@@ -4394,9 +4394,11 @@ export class JevController {
    * restored entries too; otherwise pickExplore/retrievalCandidates chooses a
    * target that filterMoveCandidates immediately removes, leaving only WAIT.
    */
-  private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
+  private blacklistedMoveTargets(state: WorldState): BlacklistedMoveTargets {
+    const hazards = this.options.deathHazards
+    if (hazards === undefined || hazards.length === 0) return new Set<string>()
     void state
-    return new Set<string>()
+    return (dimension, position) => isInDeathZone(hazards, position, dimension) !== null
   }
 
   private logStaleKnownResources(state: WorldState): void {

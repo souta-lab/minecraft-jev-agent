@@ -99,6 +99,7 @@ import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evalu
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
+import type { BlacklistedMoveTargets } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, inventoryClassCount, inventoryCount, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
 import {
@@ -1334,7 +1335,7 @@ export function restrictCandidatesDuringEnvHazard(
  */
 export function envHazardEscapeSpots(
   state: Pick<WorldState, 'self' | 'blocks' | 'envHazardCells'>,
-  blacklistedMoveTargets?: ReadonlySet<string>,
+  blacklistedMoveTargets?: BlacklistedMoveTargets,
 ): EnvHazardEscape[] {
   const hazard = state.self.envHazard ?? null
   if (hazard?.active !== true) return []
@@ -1359,7 +1360,7 @@ export function envHazardEscapeSpots(
  */
 export function envHazardEscapeCandidates(
   state: WorldState,
-  blacklistedMoveTargets?: ReadonlySet<string>,
+  blacklistedMoveTargets?: BlacklistedMoveTargets,
   reach = 4.5,
 ): Candidate[] {
   const hazard = state.self.envHazard ?? null
@@ -1474,7 +1475,7 @@ export interface CandidateOptions {
    * retrieval target; filtering only after generation would leave WAIT as the
    * apparent fallback when the sole target is restored from a prior generation.
    */
-  blacklistedMoveTargets?: ReadonlySet<string>
+  blacklistedMoveTargets?: BlacklistedMoveTargets
   /**
    * Surface-search waypoints already reached in this world epoch. These are
    * search-frontier facts, not retry counts: arriving at a waypoint without
@@ -7099,7 +7100,7 @@ function knownPlacementCells(state: WorldState): Vec3Json[] {
 function placementApproachCell(
   state: WorldState,
   target: Vec3Json,
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
 ): Vec3Json {
   const here = distance(state.self.position, target)
   const options = state.terrain.standable.filter(
@@ -9480,7 +9481,7 @@ function nearestResource(state: WorldState, focusItem: string | null): BlockStat
 function explorationResourcePosition(
   state: WorldState,
   focusItem: string | null,
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
 ): Vec3Json | null {
   const sensed = nearestResource(state, focusItem)
   if (sensed !== null) return sensed.position
@@ -9756,7 +9757,7 @@ function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | 
 function knownResourceFor(
   state: WorldState,
   want: RetrievalWant,
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
 ): KnownResource | null {
   const known = state.signals.knownResources ?? []
   const liveStructures = liveStructureIndexOf(state)
@@ -12062,7 +12063,7 @@ export function surfaceSpot(
   state: WorldState,
   item: string,
   moveFailureLimit: number,
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
   searchedSurfaceTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
   let best: Vec3Json | null = null
@@ -12141,7 +12142,7 @@ function pickRetreats(
   standable: Vec3Json[],
   danger: BlockState | null,
   threats: readonly ThreatEntityLike[],
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
   /** the damage attribution as a threat origin, for an attacker never sensed */
   attributed: { name: string; position: Vec3Json } | null = null,
 ): KeepDistanceSpot[] {
@@ -12225,7 +12226,7 @@ function pickExplore(
   standable: Vec3Json[],
   focusItem: string | null,
   moveFailureLimit: number,
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
 ): Vec3Json | null {
   const options = standable.filter(
     (spot) =>
@@ -12266,10 +12267,12 @@ function pickExplore(
 
 function isBlacklistedMoveTarget(
   state: Pick<WorldState, 'self'>,
-  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
   position: Vec3Json,
 ): boolean {
-  return blacklistedMoveTargets?.has(moveFailureKey(state.self.dimension, position)) ?? false
+  if (blacklistedMoveTargets === undefined) return false
+  if (typeof blacklistedMoveTargets === 'function') return blacklistedMoveTargets(state.self.dimension, position)
+  return blacklistedMoveTargets.has(moveFailureKey(state.self.dimension, position))
 }
 
 /**

@@ -3083,6 +3083,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       ctx.proposeWorldMemory({ repeatedOutcomes: world.repeatedOutcomes })
     },
     knownResources: groundedWaypoints,
+    // Durable production death hazards become the controller's move-target
+    // death-zone predicate: a candidate target inside an area that has killed
+    // the body >= DEATH_ZONE_DEATHS times is withheld from every move offer.
+    // Simulation provenance is defence-in-depth filtered even though the
+    // durable set is already production-only.
+    deathHazards: world.hazards.filter((hazard) => hazard.source !== 'simulation'),
     // #prereq-dominated: the deterministic ladder owns the capability closure
     // (rung `satisfied` + recipe/smelt consumers). A queued prerequisite whose
     // purposes are already fulfilled by better held items retires mid-generation

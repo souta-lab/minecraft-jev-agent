@@ -74,7 +74,7 @@ import { formatArmorCraft, formatArmorCraftRefusal, formatArmorRefusal, formatCo
 import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPlan.ts'
 import type { GoalQueue } from './goalQueue.ts'
 import type { EventLogger } from './jev.ts'
-import type { MoveFailMemory } from './moveFailMemory.ts'
+import type { BlacklistedMoveTargets, MoveFailMemory } from './moveFailMemory.ts'
 import { formatPortalFrameSiteRejected } from './netherPortalPlan.ts'
 import { explainNearestPortalFrameRejection } from './state.ts'
 import type { WorldState } from './state.ts'
@@ -135,7 +135,7 @@ export interface GroundedEvidenceHost {
   currentDimension(): string
   reachabilityGateOptions(): ReachabilityGateOptions
   unreachableStationKeys(state: WorldState): ReadonlySet<string>
-  blacklistedMoveTargets(state: WorldState): ReadonlySet<string>
+  blacklistedMoveTargets(state: WorldState): BlacklistedMoveTargets
 }
 
 

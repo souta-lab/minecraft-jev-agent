@@ -74,6 +74,9 @@ export interface DeathHazard {
   x: number
   y: number
   z: number
+  /** dimension the death happened in; absent on old durable records, which are
+   * then treated as applying to every dimension (conservative exclusion). */
+  dimension?: string
   /** best-effort inferred cause: void | lava | water | fall | suffocation | unknown */
   reason: string
   /** how many deaths happened at/next to this coordinate */

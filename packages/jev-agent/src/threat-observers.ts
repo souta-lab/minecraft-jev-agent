@@ -31,6 +31,7 @@ import {
   formatEnvHazardReflexEvidence,
 } from './envHazard.ts'
 import type { EventLogger } from './jev.ts'
+import type { BlacklistedMoveTargets } from './moveFailMemory.ts'
 import {
   formatReflex,
   formatSkillInterrupt,
@@ -103,7 +104,7 @@ export interface ThreatObserverHost {
 
   // Callbacks that stay on the shell.
   currentGoalKey(): string
-  blacklistedMoveTargets(state: WorldState): ReadonlySet<string>
+  blacklistedMoveTargets(state: WorldState): BlacklistedMoveTargets
   escalate(reason: EscalationReason, detail: string): void
 
   // Inter-module observer calls dispatched through the shell.

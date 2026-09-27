@@ -21,7 +21,7 @@ import type { FatalModelError, ModelAuthorityIdentity } from './modelFailure.ts'
 import type { KernelTransitionAuthority } from './reach/kernel-authority-map.ts'
 import type { KnownResource } from './state.ts'
 import type { LocalOscillationRecordJson } from './localOscillation.ts'
-import type { MoveFailEntry } from './moveFailMemory.ts'
+import type { BlacklistedMoveTargets, DeathZoneHazard, MoveFailEntry } from './moveFailMemory.ts'
 import type { DominatedPrerequisiteDecision, PlanIdentity, PlanObsoleteProof, QueuedGoal } from './goalQueue.ts'
 import type { RepeatedOutcomeEntryJson } from './repeatedOutcomeEscalation.ts'
 import type { System2RecoveryFenceRejection } from './system2/authority.ts'
@@ -56,7 +56,7 @@ export function candidateOptions(
   recipes: RecipeIndex,
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
-  blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
+  blacklistedMoveTargets: BlacklistedMoveTargets = new Set<string>(),
   portalFrame: PortalFrameValidation | null = null,
   searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
   portalEntry: PortalEntryPlan | null = null,
@@ -193,6 +193,14 @@ export interface JevAgentOptions {
   eventSink?: (event: string, detail: Record<string, unknown>) => void
   /** durable known-resource coordinates injected by the resident host (issue #43) */
   knownResources?: KnownResource[]
+  /**
+   * Durable production death-hazard records injected by the resident host. When
+   * present, the controller's move-target blacklist becomes a death-zone
+   * predicate (isInDeathZone): a candidate target inside an area that has
+   * already killed the body >= DEATH_ZONE_DEATHS times is withheld from every
+   * move-target offer - CAN/SAFE filtering, not semantic choice.
+   */
+  deathHazards?: readonly DeathZoneHazard[]
   /**
    * #prereq-dominated: code-owned proof that an unfinished queued prerequisite's
    * purposes are already fulfilled by better items the bot holds. The resident
