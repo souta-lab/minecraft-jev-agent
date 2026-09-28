@@ -2792,21 +2792,37 @@ export class JevController {
       // decision-time offer (contact range + the published bounded danger
       // state), so a work action cannot slip back in between the Jev answer and
       // execution while a hostile is on the body.
-      const freshGrounded = generateGroundedCandidates(
-        freshState,
-        candidateOptions(
-          this.options,
-          this.recipeIndex,
-          this.unreachableStationKeys(freshState),
-          this.reachabilityGateOptions(),
-          this.blacklistedMoveTargets(freshState),
-          freshState.portalFrame,
-          this.searchedSurfaceTargets,
-          this.portalEntryPlan(freshState),
-          this.placementRetries.retiredItemSet(),
-        ),
+      const freshOptions = candidateOptions(
+        this.options,
+        this.recipeIndex,
+        this.unreachableStationKeys(freshState),
+        this.reachabilityGateOptions(),
+        this.blacklistedMoveTargets(freshState),
+        freshState.portalFrame,
+        this.searchedSurfaceTargets,
+        this.portalEntryPlan(freshState),
+        this.placementRetries.retiredItemSet(),
       )
-      const freshBeforeThreat = [...freshGrounded.candidates]
+      const freshGrounded = generateGroundedCandidates(freshState, freshOptions)
+      // The revalidation offer must be built the same way the decision-time
+      // offer was: the legacy-reach kill switch and the repeated-outcome prune
+      // remove the same provably-dead candidates, and the deterministic craft
+      // backfill restores the same executable step. Without them the fresh set
+      // diverges from the offer Jev answered on identical state - the measured
+      // p18 wedge: `CRAFT:oak_planks` vetoed "vanished" on every tick while the
+      // backfill kept re-offering it each epoch (741 vetoes in one stall).
+      let freshBeforeThreat = [...freshGrounded.candidates]
+      const freshVtrMission = this.options.vtrMission
+      if (freshVtrMission !== null && freshVtrMission !== undefined) {
+        freshBeforeThreat = filterLegacyReachCandidates({
+          candidates: freshBeforeThreat,
+          world: freshState,
+          missionItem: freshVtrMission.item,
+          missionSourceNames: minecraftMissionSourceNames(freshVtrMission.item),
+        }).candidates
+      }
+      freshBeforeThreat = this.filterRepeatedOutcomeCandidates(freshBeforeThreat, freshState)
+      freshBeforeThreat = ensureCraftStepActionable(freshState, freshBeforeThreat, freshOptions)
       const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
       const freshCandidates = restrictCandidatesDuringEnvHazard(
         freshState,

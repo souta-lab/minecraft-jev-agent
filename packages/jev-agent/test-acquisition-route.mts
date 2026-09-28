@@ -30,7 +30,17 @@ import {
   generateGroundedCandidates,
 } from './src/candidates.ts'
 import type { Candidate, CandidateAcquisition, CandidateReachability } from './src/candidates.ts'
+import { ensureCraftStepActionable } from './src/candidate-diagnostics.ts'
 import { candidateStarvationLine, candidateStarvationMissing, MIRRORED_MARKERS } from './src/controller.ts'
+import {
+  filterRetiredRepeats,
+  RepeatedOutcomeEscalation,
+  repeatedOutcomeCell,
+  repeatedOutcomeFactSignature,
+  repeatedOutcomeSemanticProgress,
+  repeatedOutcomeToken,
+  REPEATED_OUTCOME_LIMIT_DEFAULT,
+} from './src/repeatedOutcomeEscalation.ts'
 import { capabilityKey } from './src/reachability.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -599,6 +609,119 @@ addCase('(viii) a hand-diggable step cut is unaffected (no invented requirement)
     pass:
       offered !== undefined && offered.requiresTool === false && offered.toolName === null && stepWithheld(gate) === null,
     detail: `offered=${offered?.id ?? 'none'} requiresTool=${offered?.requiresTool} tool=${offered?.toolName}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (p18.1) REVALIDATION PARITY: the fresh offer is rebuilt through the same
+//         controller-side transforms as the decision offer (repeated-outcome
+//         prune, then the deterministic craft backfill). Measured live
+//         (portal-p18, run-mukohc1f): a known station made `craftCandidates`
+//         answer `craft:crafting_table` with station-acquisition MOVEs; the
+//         repeated-outcome prune retired them at decision time, so the backfill
+//         added `CRAFT:oak_planks` to Jev's offer. The old revalidation path
+//         skipped both transforms, kept the retired move, and vetoed the chosen
+//         craft "vanished" on every tick - 741 vetoes in one stall.
+// ---------------------------------------------------------------------------
+
+function craftGoalState(inventoryCounts: Record<string, number>): WorldState {
+  const base = liveState({ inventory: inventoryCounts, headroomCuts: [] })
+  const current: QueuedGoal = {
+    id: 'g15:craft:crafting_table',
+    kind: 'craft',
+    description: 'craft 1 x crafting_table',
+    targetItem: 'crafting_table',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  return {
+    ...base,
+    goal: {
+      ...base.goal,
+      id: 'craft:crafting_table:1',
+      description: 'craft 1 x crafting_table',
+      targetItem: 'crafting_table',
+    },
+    goalQueue: { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] },
+  }
+}
+
+const STATION_MOVE_TARGET: Vec3Json = { x: 3220, y: 42, z: 2817 }
+const stationMove: Candidate = {
+  id: 'MOVE:p3220_42_2817',
+  kind: 'MOVE',
+  label: 'walk to the remembered crafting table at (3220,42,2817)',
+  targetName: 'crafting_table',
+  target: STATION_MOVE_TARGET,
+  targetEntityId: null,
+  itemName: null,
+  requiresTool: false,
+  toolName: null,
+  inReach: true,
+  hasStandableAdjacent: true,
+  meta: { tick: 7, x: 3220, y: 42, z: 2817 },
+}
+const waitCandidate: Candidate = {
+  id: 'WAIT',
+  kind: 'WAIT',
+  label: 'do nothing for one tick',
+  targetName: null,
+  target: null,
+  targetEntityId: null,
+  itemName: null,
+  requiresTool: false,
+  toolName: null,
+  inReach: true,
+  hasStandableAdjacent: true,
+  meta: { tick: 7 },
+}
+
+function stationMoveObservation(cycle: number): Parameters<RepeatedOutcomeEscalation['note']>[0] {
+  return {
+    actionId: stationMove.id,
+    actionShape: 'MOVE:p*',
+    cell: repeatedOutcomeCell('overworld', STATION_MOVE_TARGET, FEET),
+    outcome: repeatedOutcomeToken({ failure: 'path_stuck', status: 'failed', verified: false }),
+    failureCode: 'path_stuck',
+    semanticProgress: repeatedOutcomeSemanticProgress({ progressKinds: ['none'], itemsGained: 0, blockRemoved: false }),
+    factSignature: repeatedOutcomeFactSignature({
+      affordanceFingerprint: 'rv1|3220,42,2817|reachable|missing=[]|place=0|tools=[]|hazard=0|approach=1|head=1|foot=1',
+      planIdentity: 'g15:craft:crafting_table',
+      worldKey: 'overworld|epoch=1',
+    }),
+    now: 1_000 + cycle,
+  }
+}
+
+addCase('(p18.1-a) the parity set keeps the chosen backfilled craft once the dead move retires', () => {
+  const state = craftGoalState({ oak_log: 4, stick: 2 })
+  const ledger = new RepeatedOutcomeEscalation({ limit: REPEATED_OUTCOME_LIMIT_DEFAULT })
+  for (let cycle = 0; cycle < REPEATED_OUTCOME_LIMIT_DEFAULT; cycle += 1) {
+    ledger.note(stationMoveObservation(cycle * 2))
+  }
+  const { kept, withheld } = filterRetiredRepeats([stationMove, waitCandidate], ledger, 'overworld', FEET)
+  const parity = ensureCraftStepActionable(state, kept, options)
+  return {
+    pass:
+      withheld.length === 1 &&
+      withheld[0]?.candidate.id === stationMove.id &&
+      parity.some((candidate) => candidate.id === 'CRAFT:oak_planks'),
+    detail: `withheld=${withheld.map((entry) => entry.candidate.id).join(',') || 'none'} parity=${parity.map((candidate) => candidate.id).join(',')}`,
+  }
+})
+
+addCase('(p18.1-b) control: while a productive candidate survives the backfill stays silent', () => {
+  const state = craftGoalState({ oak_log: 4, stick: 2 })
+  const parity = ensureCraftStepActionable(state, [stationMove, waitCandidate], options)
+  return {
+    pass: parity.every((candidate) => candidate.id !== 'CRAFT:oak_planks'),
+    detail: `parity=${parity.map((candidate) => candidate.id).join(',')}`,
   }
 })
 
