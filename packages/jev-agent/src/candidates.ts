@@ -9980,10 +9980,31 @@ function knownResourceFor(
   want: RetrievalWant,
   blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
 ): KnownResource | null {
+  return knownResourcesFor(state, want, blacklistedMoveTargets, 1)[0] ?? null
+}
+
+/**
+ * The bounded nearest DISTINCT remembered sites matching the want.
+ *
+ * The single-nearest `knownResourceFor` read is a dead end in the measured
+ * p19.1 wedge: the closest remembered `log` (a jungle tree across the water)
+ * burned its whole failure budget on `path_stuck`, its id retired, and the
+ * RETRIEVE arm then emitted NOTHING - even though `knownResources` still held
+ * an unoffered `oak_log` site ~80m north-east. A trunk/vein records one row per
+ * block, so distinctness is judged on a horizontal site separation, not cell
+ * equality. Nearest-first ordering with a cap is an enumeration bound, not a
+ * rank - Jev still chooses which grounded route to take.
+ */
+function knownResourcesFor(
+  state: WorldState,
+  want: RetrievalWant,
+  blacklistedMoveTargets: BlacklistedMoveTargets | undefined,
+  cap: number,
+): KnownResource[] {
   const known = state.signals.knownResources ?? []
   const liveStructures = liveStructureIndexOf(state)
   const falsified = falsifiedKnownCellKeys(state)
-  let best: KnownResource | null = null
+  const out: KnownResource[] = []
   for (const resource of known) {
     if (!resourceDimensionMatches(resource, state.self.dimension)) continue
     // `ore` and `structure` routes both match the remembered cell by block name
@@ -10011,12 +10032,30 @@ function knownResourceFor(
     if (falsified.has(`${resource.position.x},${resource.position.y},${resource.position.z}`)) continue
     if (resourceDepleted(state, resource)) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
-    if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
-      best = resource
-    }
+    out.push(resource)
   }
-  return best
+  out.sort(
+    (a, b) =>
+      distance(a.position, state.self.position) - distance(b.position, state.self.position),
+  )
+  const sites: KnownResource[] = []
+  for (const resource of out) {
+    const sameSite = sites.some(
+      (site) =>
+        Math.abs(site.position.x - resource.position.x) <= KNOWN_RETRIEVE_SITE_SEPARATION &&
+        Math.abs(site.position.z - resource.position.z) <= KNOWN_RETRIEVE_SITE_SEPARATION,
+    )
+    if (sameSite) continue
+    sites.push(resource)
+    if (sites.length >= cap) break
+  }
+  return sites
 }
+
+/** Distinct retrieval sites offered per want (nearest first; a bound, not a rank). */
+const KNOWN_RETRIEVE_SITE_CAP = 3
+/** Horizontal separation below which two remembered cells are the same site (one trunk/vein). */
+const KNOWN_RETRIEVE_SITE_SEPARATION = 6
 
 /**
  * The stable id of the executed `RETRIEVE:known` Skill, for the #436 Skill
@@ -12040,14 +12079,20 @@ function retrievalCandidatesForWant(
   digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   if (mineableBlockFor(state, want) !== null) return []
-  const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
-  if (known !== null) {
+  const knowns = knownResourcesFor(
+    state,
+    want,
+    options.blacklistedMoveTargets,
+    KNOWN_RETRIEVE_SITE_CAP,
+  )
+  const emitted: Candidate[] = []
+  for (const known of knowns) {
     const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
     if (
       failureCount(state.signals.failedCandidates, id) >=
       (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
     )
-      return []
+      continue
     // Issue #45: a remembered resource below the current level needs a vertical
     // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
     // horizontal bearing and falls back to WAIT.
@@ -12106,10 +12151,16 @@ function retrievalCandidatesForWant(
       // The grounded route changes for a spent retrieval: a walk leg that changes
       // the stand cell, and/or the bounded dig route through the terrain toward
       // the remembered cell when no standable cell improves the distance.
-      return knownResourceApproachLegs(state, options, want, known, digRefusals)
+      emitted.push(...knownResourceApproachLegs(state, options, want, known, digRefusals))
+    } else {
+      emitted.push(candidate)
     }
-    return [candidate]
   }
+  if (emitted.length > 0) return emitted
+  // Remembered-but-fully-retired stays silent (the retire machinery owns the
+  // retry cadence); the surface explore affordance only fires when no
+  // remembered site existed at all - the pre-p19.2 contract.
+  if (knowns.length > 0) return []
   if (want.kind !== 'log') return []
   const spot = surfaceSpot(
     state,

@@ -753,6 +753,104 @@ addCase('(p19.1-c) no materials, no fabricated route: the offer stays silent', (
   return { pass, detail: `offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
+// ---------------------------------------------------------------------------
+// (p19.2) MULTI-SITE KNOWN RETRIEVAL: `knownResourceFor` returned the single
+//         nearest remembered cell, so when that one route burned its failure
+//         budget the whole RETRIEVE arm went silent even though other sites
+//         were still remembered (live: jungle_log across the water retired on
+//         path_stuck x6; the 80m oak site was never offered). The arm now
+//         enumerates the bounded nearest DISTINCT sites.
+// ---------------------------------------------------------------------------
+
+function collectLogState(overrides: {
+  knownResources: NonNullable<AgentSignals['knownResources']>
+  failedCandidates?: Record<string, number>
+}): WorldState {
+  const base = liveState({ inventory: {}, headroomCuts: [] })
+  const current: QueuedGoal = {
+    id: 'g1:collect:log',
+    kind: 'collect',
+    description: 'collect 3 x log',
+    targetItem: 'log',
+    requiredCount: 3,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  return {
+    ...base,
+    goal: {
+      ...base.goal,
+      id: 'collect:log:3',
+      description: 'collect 3 x log',
+      targetItem: 'log',
+    },
+    goalQueue: { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] },
+    signals: signals({ knownResources: overrides.knownResources, failedCandidates: overrides.failedCandidates ?? {} }),
+  }
+}
+
+// NOTE: both sites sit past KNOWN_RESOURCE_PROOF_DISTANCE (8m) - a remembered
+// cell nearer than that and absent from `blocks` is honestly falsified-depleted.
+const NEAR_LOG = { name: 'oak_log', kind: 'log' as const, position: { x: 35, y: 61, z: 8 }, dimension: 'overworld', worldEpoch: 1 }
+const NEAR_LOG_TOP = { name: 'oak_log', kind: 'log' as const, position: { x: 35, y: 64, z: 8 }, dimension: 'overworld', worldEpoch: 1 }
+const FAR_LOG = { name: 'oak_log', kind: 'log' as const, position: { x: 50, y: 63, z: -30 }, dimension: 'overworld', worldEpoch: 1 }
+
+/** every id a want produced, offered or gated-withheld */
+function allCandidateIds(grounded: { candidates: Candidate[]; withheld: CandidateReachability[] }): string[] {
+  return [
+    ...grounded.candidates.map((candidate) => candidate.id),
+    ...grounded.withheld.map((entry) => entry.candidate.id),
+  ]
+}
+
+addCase('(p19.2-a) a failure-retired nearest site no longer silences the farther remembered site', () => {
+  const state = collectLogState({
+    knownResources: [NEAR_LOG, FAR_LOG],
+    failedCandidates: { 'RETRIEVE:known:log:b35_61_8': 4 },
+  })
+  const ids = allCandidateIds(generateGroundedCandidates(state, options))
+  return {
+    pass:
+      ids.includes('RETRIEVE:known:log:b50_63_-30') &&
+      !ids.includes('RETRIEVE:known:log:b35_61_8'),
+    detail: `retrieves=[${ids.filter((id) => id.startsWith('RETRIEVE')).join(',') || 'none'}]`,
+  }
+})
+
+addCase('(p19.2-b) cells of one trunk dedupe to one site (bounded enumeration, not per-block noise)', () => {
+  const state = collectLogState({ knownResources: [NEAR_LOG, NEAR_LOG_TOP] })
+  const ids = allCandidateIds(generateGroundedCandidates(state, options)).filter((id) =>
+    id.startsWith('RETRIEVE:known:'),
+  )
+  return { pass: ids.length === 1, detail: `retrieves=[${ids.join(',')}]` }
+})
+
+addCase('(p19.2-c) all remembered sites retired keeps the offer silent (retire machinery owns the retry)', () => {
+  const state = collectLogState({
+    knownResources: [NEAR_LOG, FAR_LOG],
+    failedCandidates: { 'RETRIEVE:known:log:b35_61_8': 4, 'RETRIEVE:known:log:b50_63_-30': 4 },
+  })
+  const ids = allCandidateIds(generateGroundedCandidates(state, options))
+  const pass = ids.every((id) => !id.startsWith('RETRIEVE:'))
+  return { pass, detail: `ids=[${ids.join(',') || 'none'}]` }
+})
+
+addCase('(p19.2-d) control: two unretired distinct sites both reach the gate', () => {
+  const state = collectLogState({ knownResources: [NEAR_LOG, FAR_LOG] })
+  const ids = allCandidateIds(generateGroundedCandidates(state, options))
+  return {
+    pass:
+      ids.includes('RETRIEVE:known:log:b35_61_8') &&
+      ids.includes('RETRIEVE:known:log:b50_63_-30'),
+    detail: `retrieves=[${ids.filter((id) => id.startsWith('RETRIEVE')).join(',') || 'none'}]`,
+  }
+})
+
 let failures = 0
 process.stdout.write('acquisition route - a withheld mechanical fact gets a grounded route or a typed refusal\n')
 process.stdout.write('-'.repeat(78) + '\n')
