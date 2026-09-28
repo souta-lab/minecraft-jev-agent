@@ -486,26 +486,34 @@ state: WorldState | null): Pick<
     // envelope cannot change what the plan should be - measured live (v2-n5,
     // portal-p1): it discarded every authored plan via `threat_state_changed`.
     //
-    // And neither can per-entity tactics. The plan-material threat basis is
-    // WHICH hostile kinds press the body, how many, and whether any is in
-    // contact or has already hit it; per-entity id/position/health/item rows
-    // are Jev-layer tactics the candidate offer re-grounds every tick anyway.
-    // Measured live (portal-p17.2, 2026-09-28): a hostile-pocket camp churned
-    // position/activeItemUse rows continuously, so every ~30s plan call landed
-    // `threat_state_changed` - 30 PLAN_DISCARDED vs 0 applied, queue pinned
-    // empty for ~10min while the body idled safe. Same doctrine as the
-    // survival fingerprint's band-level basis (portal-p3).
-    hostileNames: [...new Set(dangerousHostiles.map((entity) => entity.name ?? 'unknown'))].sort(),
-    hostileCount: dangerousHostiles.length,
+    // And neither can per-entity tactics or census noise. The plan-material
+    // threat basis is: is the body under threat at all, is a hostile at
+    // contact range or inside the danger envelope, has one actually hit it,
+    // and roughly how pressed is it (count BAND). Per-entity id/position/
+    // health/item rows, the exact census count, the kind set, and which kind
+    // is nearest are Jev-layer tactics the candidate offer re-grounds every
+    // tick anyway. Measured live (portal-p17.2 + p17.3, 2026-09-28): a dense
+    // hostile-pocket camp first churned position/activeItemUse rows, then -
+    // after those were dropped - kept churning exact census as mobs spawned/
+    // despawned (hostileCount 13->10->9, creeper/enderman left the kind set),
+    // so every ~30s plan call landed `threat_state_changed` - 47 PLAN_DISCARDED
+    // vs 0 applied across two minors, queue pinned empty while the body idled
+    // safe. Same doctrine as the survival fingerprint's band-level basis
+    // (portal-p3): a band crossing is material; same-band census churn is not.
+    band: dangerousHostiles.length === 0
+      ? 'none'
+      : dangerousHostiles.length <= 3
+        ? 'few'
+        : dangerousHostiles.length <= 7
+          ? 'several'
+          : 'many',
     anyAttackedSelf: dangerousHostiles.some((entity) => entity.attackedSelf === true),
     envelope: threat === null
       ? null
       : {
           active: threat.active,
-          threatName: threat.threatName,
           inContact: threat.inContact,
           inDanger: threat.inDanger,
-          hostileCount: threat.hostileCount,
         },
   })
   result.survivalFingerprint = JSON.stringify({

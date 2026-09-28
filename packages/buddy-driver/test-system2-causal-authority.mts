@@ -246,12 +246,34 @@ assert.equal(system2BodyOwned(null), false)
     world({ entities: [{ ...hostile(2, 6.5), activeItemUse: 'bow', health: 14, heldItem: 'bow' }] }),
   )
   assert.equal(nearDrawing.threatFingerprint, near.threatFingerprint)
-  // A DIFFERENT hostile kind arriving, a second hostile joining, or contact
-  // starting still invalidate - those change which plan is correct.
+  // portal-p17.3 (2026-09-28): census churn is tactics too. A dense hostile
+  // pocket kept spawning/despawning mobs across ~30s plan calls (hostileCount
+  // 13->10->9; creeper and enderman left the kind set) - 17 more
+  // PLAN_DISCARDED vs 0 applied. Kind swaps and same-band count changes are
+  // NOT material; a band crossing, an actual hit, or a contact/danger flip is.
   const skeleton = identityFor(world({ entities: [{ ...hostile(2, 6.5), name: 'skeleton' }] }))
-  assert.notEqual(skeleton.threatFingerprint, near.threatFingerprint)
+  assert.equal(skeleton.threatFingerprint, near.threatFingerprint)
   const twoHostiles = identityFor(world({ entities: [hostile(2, 6.5), hostile(4, 5.0)] }))
-  assert.notEqual(twoHostiles.threatFingerprint, near.threatFingerprint)
+  assert.equal(twoHostiles.threatFingerprint, near.threatFingerprint)
+  const severalHostiles = identityFor(
+    world({ entities: [hostile(2, 6.5), hostile(4, 5.0), hostile(5, 4.0), hostile(6, 6.0)] }),
+  )
+  assert.notEqual(severalHostiles.threatFingerprint, near.threatFingerprint)
+  const nearAttacker = identityFor(world({ entities: [hostile(2, 6.5, true)] }))
+  assert.notEqual(nearAttacker.threatFingerprint, near.threatFingerprint)
+  // Envelope booleans stay material; the nearest kind and the signal's raw
+  // hostile census are not part of the plan basis either.
+  const threatSignal = {
+    active: true, threatName: 'zombie', threatDistance: 5,
+    inContact: false, inDanger: true, hostileCount: 1,
+  }
+  const signalWorld = (threat: unknown) =>
+    world({ entities: [hostile(2, 6.5)], signals: { knownResources: [], threat } })
+  const inDanger = identityFor(signalWorld(threatSignal))
+  const inContact = identityFor(signalWorld({ ...threatSignal, inContact: true }))
+  assert.notEqual(inContact.threatFingerprint, inDanger.threatFingerprint)
+  assert.equal(identityFor(signalWorld({ ...threatSignal, threatName: 'skeleton' })).threatFingerprint, inDanger.threatFingerprint)
+  assert.equal(identityFor(signalWorld({ ...threatSignal, hostileCount: 9 })).threatFingerprint, inDanger.threatFingerprint)
   // The sensed-block snapshot is execution-time input, not plan basis.
   const scanned = identityFor(
     world({ blocks: [{ kind: 'log', name: 'oak_log', position: { x: 3, y: 64, z: 9 }, diggable: true }] }),
