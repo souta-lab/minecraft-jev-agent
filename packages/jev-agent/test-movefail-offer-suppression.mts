@@ -26,7 +26,7 @@ import {
   filterMoveCandidates,
   movePathFailureScope,
 } from './src/outcome-ledgers.ts'
-import { deathZoneEscapeCandidates, defaultCandidateOptions } from './src/candidates.ts'
+import { deathZoneEscapeCandidates, defaultCandidateOptions, isDeathZoneEscapeRoute } from './src/candidates.ts'
 import type { OutcomeLedgersHost } from './src/outcome-ledgers.ts'
 import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
 import type { Candidate } from './src/candidates.ts'
@@ -298,6 +298,37 @@ addCase('all refused exits empty the generation-time envelope (ungates sealed-po
   return {
     pass: offered.length === 0,
     detail: `offered=[${offered.map((candidate) => candidate.id).join(' ')}]`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (iii) THE SURVIVAL SEAM: the sealed-pocket escape ascent is the survival
+//       route. A contact-range hostile strips every MOVE that is not a
+//       recognized escape, so the arm's only offer must be recognized.
+// ---------------------------------------------------------------------------
+
+addCase('a sealed-pocket escape ascent counts as a survival escape route under threat', () => {
+  const escape = {
+    id: 'ASCEND:escape:p5_57_-9',
+    kind: 'MOVE' as Candidate['kind'],
+    meta: { escapeAscent: true },
+  } as unknown as Candidate
+  const ordinary = {
+    id: 'MOVE:p5_57_-10',
+    kind: 'MOVE' as Candidate['kind'],
+    meta: {},
+  } as unknown as Candidate
+  const dangerzone = {
+    id: 'MOVE:dangerzone:p-3_57_17',
+    kind: 'MOVE' as Candidate['kind'],
+    meta: {},
+  } as unknown as Candidate
+  return {
+    pass:
+      isDeathZoneEscapeRoute(escape) === true &&
+      isDeathZoneEscapeRoute(ordinary) === false &&
+      isDeathZoneEscapeRoute(dangerzone) === true,
+    detail: `escape=${isDeathZoneEscapeRoute(escape)} ordinary=${isDeathZoneEscapeRoute(ordinary)} dangerzone=${isDeathZoneEscapeRoute(dangerzone)}`,
   }
 })
 

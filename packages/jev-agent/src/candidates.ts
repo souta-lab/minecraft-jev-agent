@@ -440,7 +440,15 @@ export const THREAT_SURVIVAL_KINDS: ReadonlySet<CandidateKind> = new Set<Candida
  * the reflex legs - Jev still owns WHICH of them to take.
  */
 export function isDeathZoneEscapeRoute(candidate: Candidate): boolean {
-  return candidate.kind === 'MOVE' && candidate.id.startsWith('MOVE:dangerzone:')
+  // `ASCEND:escape:*` carries the same survival semantics as a danger-zone
+  // exit: it is the sealed pocket's one mechanical way out. Without it a
+  // contact-range hostile (creeper adjacent to the pocket) strips the escape
+  // offer and the body is handed a bare ESCALATE forever - measured
+  // portal-p19.7, `no_grounded_threat_response` loop while reachable=true.
+  return (
+    candidate.kind === 'MOVE' &&
+    (candidate.id.startsWith('MOVE:dangerzone:') || candidate.meta?.escapeAscent === true)
+  )
 }
 
 /**
