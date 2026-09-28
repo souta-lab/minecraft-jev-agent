@@ -21,7 +21,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt, ANIMAL_HABITAT_SEA_LEVEL, LOCOMOTION_CANDIDATE_KINDS, SEALED_ESCAPE_STALL_MS } from './candidates.ts'
+import { failureCount } from './failureMemory.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
@@ -2143,6 +2144,7 @@ export class JevController {
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
+      this.logSealedEscapeGate(state, grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logContactRefusals(grounded.contactRefusals)
       this.logDigRouteRefusals(grounded.digRefusals)
       this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
@@ -4649,6 +4651,39 @@ export class JevController {
 
   private logColumnDescentRefusal(refusal: ColumnDescentRefusal | null): void {
     return evidence.logColumnDescentRefusal(this.evidenceHost, refusal)
+  }
+
+  private lastSealedEscapeGateLogMs = 0
+
+  /**
+   * Names why the sealed-pocket escape arm (`ASCEND:escape`, candidates.ts)
+   * did not offer when every contextual gate (stalled >= 25s, overworld,
+   * below the surface band, non-surface goal) is satisfied: lists the residual
+   * locomotion candidates present at generation time with their
+   * failure-memory charge, so a phantom that always terminates `blocked` can
+   * be distinguished from a real route the body simply has not taken.
+   */
+  private logSealedEscapeGate(state: WorldState, candidates: readonly Candidate[], withheld: readonly Candidate[]): void {
+    if ((state.signals?.stalledMs ?? 0) < SEALED_ESCAPE_STALL_MS) return
+    if (!state.self.dimension.includes('overworld')) return
+    if (state.self.position.y >= ANIMAL_HABITAT_SEA_LEVEL) return
+    if (state.goalQueue?.current?.kind === 'surface') return
+    if (candidates.some((candidate) => candidate.id.startsWith('ASCEND:escape:'))) return
+    const now = Date.now()
+    if (now - this.lastSealedEscapeGateLogMs < 15_000) return
+    this.lastSealedEscapeGateLogMs = now
+    const failed = state.signals?.failedCandidates ?? {}
+    const describe = (list: readonly Candidate[], mark: string): string =>
+      list
+        .filter((candidate) => LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind))
+        .slice(0, 6)
+        .map((candidate) => `${mark}${candidate.id}@${failureCount(failed, candidate.id)}`)
+        .join(' ')
+    const locomotion = `${describe(candidates, '')} ${describe(withheld, 'w:')}`.trim()
+    this.logger.warn(
+      'agent',
+      `SEALED_ESCAPE_GATED goal="${state.goalQueue?.current?.id ?? 'none'}" y=${state.self.position.y.toFixed(1)} stalledMs=${state.signals?.stalledMs ?? 0} locomotion=[${locomotion}]`,
+    )
   }
 
   private logContactRefusals(refusals: readonly ContactRefusal[]): void {

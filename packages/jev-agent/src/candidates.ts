@@ -2837,7 +2837,7 @@ export function strandedOnColumn(state: Pick<WorldState, 'terrain' | 'self'>): b
  * tick already has a way out of the current cell, so the last-resort vertical
  * step is not enumerated.
  */
-const LOCOMOTION_CANDIDATE_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+export const LOCOMOTION_CANDIDATE_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'MOVE',
   'RETRIEVE',
   'RETREAT',
@@ -4893,8 +4893,16 @@ function generateRawCandidates(
   // preference: Jev still owns WHICH of the remaining candidates to take). The
   // typed refusal is returned when even that safe step does not exist, so the
   // tick never falls through to a bare WAIT without a stated cause.
+  // A candidate the world has already refused to the move-failure limit is not
+  // a locomotion route: counting it here would gate off BOTH the bounded
+  // down-step and the sealed-pocket escape arm behind a phantom that always
+  // terminates `blocked`/`no_path` (portal-p19.6: refused dangerzone exits kept
+  // hasLocomotionCandidate true while the dig-up arm never evaluated).
+  const gateMoveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const gateFailed = state.signals?.failedCandidates ?? {}
   const hasLocomotionCandidate = candidates.some((candidate) =>
-      LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind),
+      LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+      failureCount(gateFailed, candidate.id) < gateMoveFailureLimit,
     )
   const columnDescent = hasLocomotionCandidate
     ? { candidates: [], refusal: null }
