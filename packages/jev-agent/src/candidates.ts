@@ -6320,7 +6320,21 @@ export function parseWaterRouteWitness(
  */
 export function waterRouteCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
   const maxCandidates = options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES
-  const targets = (state.waterRouteTargets ?? []).filter((entry) => waterRouteBreathOk(state.self, entry.costMs))
+  // A `breath` exit is a place to breathe - it resolves nothing for a body
+  // whose head is already out of fluid. Measured p19.8 live: the dry trapped
+  // body dipped ~0.5m onto each surface cell's edge, verified `done` on the
+  // breath condition it already had, and the repeated-identical-outcome ledger
+  // retired the whole `SWIM:exit:*` shape for the cell at 6/6 while the body
+  // never left the pocket. Breath exits are offered only when breathing is the
+  // measured deficit (low air while submerged, or unobserved air with the eyes
+  // under); a body that breathes needs the `shore` - standable ground it does
+  // not already occupy.
+  const breathExitUseful = bodyNeedsBreathEscape(state.self) || state.self.eyesInWater === true
+  const targets = (state.waterRouteTargets ?? []).filter(
+    (entry) =>
+      (entry.exitKind !== 'breath' || breathExitUseful) &&
+      waterRouteBreathOk(state.self, entry.costMs),
+  )
   return targets.slice(0, maxCandidates).map((entry) => ({
     id: `SWIM:exit:${blockId('p', entry.exit)}`,
     kind: 'MOVE',

@@ -218,6 +218,36 @@ addCase('breath budget: unknown air on a dry body is capped at the vanilla suppl
   return { pass: fits === true && exceeds === false, detail: `fits=${fits} exceeds=${exceeds}` }
 })
 
+// A body that already breathes (head out of fluid) gains nothing from a
+// `breath` exit: measured p19.8 live, the dry pocket body dipped ~0.5m onto
+// the surface cell's edge, verified `done`, and the repeated-outcome ledger
+// retired the whole `SWIM:exit:*` shape at 6/6 without the body leaving the
+// pocket. Only `shore` exits - standable ground the body does not occupy -
+// are real exits for it. Eyes under fluid keeps breath exits: each one is an
+// air pocket on the route.
+addCase('breath exits are suppressed for a body that already breathes', () => {
+  const breathRoute = { exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath' as const, waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], costMs: 900 }
+  const shoreRoute = { exit: { x: 4, y: 0, z: 0 }, exitKind: 'shore' as const, waypoints: [{ x: 1, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }], waypointBlocks: ['water', 'air'], costMs: 3300 }
+  const drySelf = { ...SELF_BASE, feetInWater: false, eyesInWater: false, air: 20 }
+  const dryOut = waterRouteCandidates(
+    { self: drySelf, waterRouteTargets: [breathRoute, shoreRoute] } as unknown as WorldState,
+    defaultCandidateOptions,
+  )
+  const submergedSelf = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 14 }
+  const wetOut = waterRouteCandidates(
+    { self: submergedSelf, waterRouteTargets: [breathRoute, shoreRoute] } as unknown as WorldState,
+    defaultCandidateOptions,
+  )
+  const pass =
+    dryOut.length === 1 &&
+    dryOut[0]?.meta.waterRouteExitKind === 'shore' &&
+    wetOut.length === 2
+  return {
+    pass,
+    detail: `dry=[${dryOut.map((c) => c.id).join(' ')}] wet=[${wetOut.map((c) => c.id).join(' ')}]`,
+  }
+})
+
 addCase('unknown breath with submerged eyes emits no horizontal route', () => {
   const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: null }
   const candidates = waterRouteCandidates(
