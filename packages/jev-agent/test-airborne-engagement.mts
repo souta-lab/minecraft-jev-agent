@@ -301,10 +301,20 @@ const mobs = ['blaze', 'ghast', 'phantom', 'skeleton', 'magma_cube'] as const
     hazard: () => false,
     visible: () => true,
   }
+  // A world with NO standable cell still refuses - but only while the entity
+  // stays outside the body's OWN envelope: since the contact rule (v-c of
+  // attack-stand) the body's physical position IS a stance when the target is
+  // already inside it, so `none` pins the same world with the entity at 6
+  // levels up - outside even the corrected reach.
   const noStanceWorld = { standable: () => false, hazard: () => false, visible: () => true }
 
   const inside = selectAttackStand({ entity: base, feet: BODY, reach: MELEE_ATTACK_REACH, world: ownCellOnly })
-  const none = selectAttackStand({ entity: base, feet: BODY, reach: MELEE_ATTACK_REACH, world: noStanceWorld })
+  const none = selectAttackStand({
+    entity: { position: { x: BODY.x + 1.7, y: BODY.y + 6, z: BODY.z }, height: 1.8 },
+    feet: BODY,
+    reach: MELEE_ATTACK_REACH,
+    world: noStanceWorld,
+  })
 
   // "At the edge": the body's own cell is exactly at the envelope boundary. The
   // boundary entity is 3.1 corrected metres away, so a target 4 up needs

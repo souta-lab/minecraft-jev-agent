@@ -528,9 +528,14 @@ export function selectAttackStand(input: AttackStandInput): AttackStandFact {
     for (let dx = -span; dx <= span; dx += 1) {
       for (let dz = -span; dz <= span; dz += 1) {
         const cell = { x: entityFeet.x + dx, y: entityFeet.y + dy, z: entityFeet.z + dz }
-        // The entity's own body column: the swing's target, not a place to stand.
-        if (dx === 0 && dz === 0 && (dy === 0 || dy === 1)) continue
         const onBody = cell.x === bodyFeet.x && cell.y === bodyFeet.y && cell.z === bodyFeet.z
+        // The entity's own body column is never a stance TO WALK TO - but a
+        // body already inside it (a contact attacker sharing the cell) is not
+        // walking anywhere: distance/visibility/hazard are the only facts left
+        // that can refuse the swing. Measured p20 live: a zombie sharing the
+        // body's cell over an open-floor descent was unattackable - the column
+        // skip removed the body's own cell, `not_standable` removed the rest.
+        if (dx === 0 && dz === 0 && (dy === 0 || dy === 1) && !onBody) continue
         // The body's own stance is measured from where the body IS (the executor's
         // own expression); a stance it would walk to is measured from the cell.
         // BOTH credit the body's own height against a target above it, which is the
@@ -569,11 +574,13 @@ export function selectAttackStand(input: AttackStandInput): AttackStandFact {
   for (const stance of stances) {
     const onBody =
       stance.cell.x === bodyFeet.x && stance.cell.y === bodyFeet.y && stance.cell.z === bodyFeet.z
-    // A stance the body is ALREADY in is still required to be standable and
-    // hazard-free: uniform rule, no special case. A body standing in fire has a
-    // grounded escape (RETREAT / the hazard-escape candidates), and trading hits
-    // while burning is not the only position it can swing from.
-    if (!input.world.standable(stance.cell.x, stance.cell.y, stance.cell.z)) {
+    // `standable` is locomotion legality - "would this cell support a body
+    // placed on it" - and cannot refute a cell the body already PHYSICALLY
+    // occupies: over an open floor, on a partial edge, or sharing the
+    // attacker's column, the swing is still mechanically real. A stance the
+    // body would walk to still requires it. Hazard (burning/drowning column)
+    // and occlusion still refuse the body's own cell.
+    if (!onBody && !input.world.standable(stance.cell.x, stance.cell.y, stance.cell.z)) {
       nearest ??= { cell: stance.cell, distance: stance.distance, reason: 'not_standable' }
       continue
     }

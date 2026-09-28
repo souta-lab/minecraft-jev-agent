@@ -595,11 +595,13 @@ const MAGMA = { id: 85793, name: 'magma_cube', position: { x: 2.5, y: 34, z: 0.5
     },
   })
   const beyondEnvelope = selectAttackStand({
-    entity: { position: aim, height: 1.8 },
+    // The entity sits beyond the body's OWN envelope too (4.0 - 0.5 = 3.5 >
+    // 3.1), so the contact rule cannot reach it, and the only standable cell
+    // (7,34,0) is likewise outside the entity's envelope: 7.5 - 4.0 = 3.5.
+    entity: { position: { x: 4.0, y: 34, z: 0.5 }, height: 1.8 },
     feet: BODY,
     reach: MELEE_ATTACK_REACH,
     world: {
-      // only one cell further out is a legal stance: 7.5 - 3.6 = 3.9 > 3.1
       standable: (x, y, z) => x === 7 && y === 34 && z === 0,
       hazard: () => false,
       visible: () => true,
@@ -642,6 +644,10 @@ const MAGMA = { id: 85793, name: 'magma_cube', position: { x: 2.5, y: 34, z: 0.5
 // ===========================================================================
 {
   const aim = { x: 2.5, y: 34, z: 0.5 }
+  // The body's OWN cell is exempt from `standable` (contact rule, v-c): a body
+  // physically at a position can swing from it even over an open floor. The
+  // pure "no standable cell inside the envelope" refusal is still pinned by
+  // `far` below, where the only legal cell is outside the envelope entirely.
   const noStand = selectAttackStand({
     entity: { position: aim, height: 1.8 },
     feet: BODY,
@@ -675,8 +681,8 @@ const MAGMA = { id: 85793, name: 'magma_cube', position: { x: 2.5, y: 34, z: 0.5
     },
   })
   const pass =
-    noStand.stand === null &&
-    noStand.refusal === 'no_standable_cell' &&
+    noStand.stand !== null &&
+    noStand.onBody === true &&
     hazard.stand === null &&
     hazard.refusal === 'hazardous_stand' &&
     occluded.stand === null &&
@@ -690,6 +696,59 @@ const MAGMA = { id: 85793, name: 'magma_cube', position: { x: 2.5, y: 34, z: 0.5
     pass,
     '(v-b) the pure stance verdict names WHICH fact refused it: no_standable_cell / hazardous_stand / no_line_of_sight',
     `noStand=${noStand.refusal ?? 'none'}/${String(noStand.nearest?.reason)} hazard=${hazard.refusal ?? 'none'} occluded=${occluded.refusal ?? 'none'}/${String(occluded.nearest?.reason)} far=${far.refusal ?? 'none'} nearest=${far.nearest === null ? 'none' : `${far.nearest.cell.x},${far.nearest.cell.y},${far.nearest.cell.z}:${far.nearest.reason}`}`,
+  )
+}
+
+// ===========================================================================
+// (v-c) THE CONTACT RULE: a body already inside the attacker's own cell needs
+//       no stance at all. Measured p20 live (~22:50Z): zombie e1445 at
+//       (1.7,64,28.7) vs body at (1.4,64,28.7) - same cell, contact range. The
+//       entity-column skip excluded the ONLY stance the body occupied, the
+//       open-floor descent made that column `not_standable`, the nearest legal
+//       stand was `no_path`, and ATTACK was withheld while the body died at
+//       hp 8 carrying a wooden_sword. `standable` is locomotion legality for a
+//       cell the body would have to be placed on; it cannot refute the cell
+//       the body physically occupies. Occlusion and hazard still refuse it.
+// ===========================================================================
+{
+  const contact = selectAttackStand({
+    entity: { position: { x: 1.7, y: 64, z: 28.7 }, height: 1.8 },
+    feet: { x: 1.4, y: 64, z: 28.7 },
+    reach: MELEE_ATTACK_REACH,
+    // Nothing near the body is a legal stand (open floor under the descent):
+    // the shared cell is feet-over-air, and every neighbour is the same.
+    world: { standable: () => false, hazard: () => false, visible: () => true },
+  })
+  const occludedContact = selectAttackStand({
+    entity: { position: { x: 1.7, y: 64, z: 28.7 }, height: 1.8 },
+    feet: { x: 1.4, y: 64, z: 28.7 },
+    reach: MELEE_ATTACK_REACH,
+    // Same shape but no line of sight: the embedded-target protection still
+    // applies - presence does not override geometry. Neighbour cells are legal
+    // stands so the ONLY failing fact is the ray itself.
+    world: { standable: () => true, hazard: () => false, visible: () => false },
+  })
+  const hazardContact = selectAttackStand({
+    entity: { position: { x: 1.7, y: 64, z: 28.7 }, height: 1.8 },
+    feet: { x: 1.4, y: 64, z: 28.7 },
+    reach: MELEE_ATTACK_REACH,
+    // And a hazardous own column still refuses (the escape arm owns burning).
+    world: { standable: () => true, hazard: () => true, visible: () => true },
+  })
+  const pass =
+    contact.stand !== null &&
+    contact.onBody === true &&
+    contact.stand.x === 1 &&
+    contact.stand.y === 64 &&
+    contact.stand.z === 28 &&
+    occludedContact.stand === null &&
+    occludedContact.refusal === 'no_line_of_sight' &&
+    hazardContact.stand === null &&
+    hazardContact.refusal === 'hazardous_stand'
+  report(
+    pass,
+    '(v-c) a body sharing the attacker cell swings without a standable stance; occlusion/hazard still refuse',
+    `contact=${contact.stand ? `${contact.stand.x},${contact.stand.y},${contact.stand.z} onBody=${contact.onBody}` : `null/${contact.refusal}`} occluded=${occludedContact.refusal ?? 'none'} hazard=${hazardContact.refusal ?? 'none'}`,
   )
 }
 
