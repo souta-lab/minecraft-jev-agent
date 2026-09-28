@@ -471,7 +471,12 @@ Model calls per verified Transition and mechanical steps per model call are impo
 
 ## 14. Parallel work / subagents
 
-Use subagents and independent disposable worktrees aggressively when they increase throughput, especially during unattended campaigns.
+Use subagents and independent disposable worktrees aggressively when they increase throughput, especially during unattended campaigns. **Subagents are an explicit default throughput tool, not an optional afterthought.** When a task naturally decomposes into independent investigation, implementation, test/evidence, or audit lanes, launch subagents proactively instead of doing every lane serially.
+
+- **Use up to 3 subagents concurrently and actively aim for 2–3-way parallelism when there are 2–3 genuinely independent useful lanes.** Do not create filler work merely to reach three; a tiny single-lane quick fix should stay single-lane.
+- The parent agent remains the integrator/decision owner: assign each subagent a narrow non-overlapping question or artifact, keep one mutation owner per subsystem, collect results promptly, reconcile conflicts personally, and land only the validated causal change.
+- Prefer subagents for work that can proceed while Minecraft/live tests accumulate evidence: log/root-cause analysis, independent code-path audit, focused test/proof review, alternative generic hypotheses, or preparation of the next non-conflicting fix.
+- Never idle waiting for a subagent if another useful non-conflicting lane exists. Check completed/available subagent results opportunistically; do not replace parallelism with long `sleep`, `wait`, or blocking tool calls.
 
 Rules:
 
