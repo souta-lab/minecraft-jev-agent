@@ -3590,7 +3590,7 @@ export class Executor {
     const deadline = Date.now() + durationMs
     const start = this.bot.entity.position.clone()
     let index = 0
-    let waypointDeadline = Date.now() + 2500
+    let waypointDeadline = Date.now() + 3500
     this.setControlState('forward', true)
     this.setControlState('sprint', true)
     try {
@@ -3610,7 +3610,7 @@ export class Executor {
         this.setControlState('jump', center.y > pos.y + 0.15 || (exitKind === 'shore' && index === waypoints.length - 1))
         if (Math.hypot(pos.x - center.x, pos.z - center.z) < 0.7 && Math.abs(pos.y - center.y) < 1.0) {
           index += 1
-          waypointDeadline = Date.now() + 2500
+          waypointDeadline = Date.now() + 3500
           continue
         }
         if (Date.now() > waypointDeadline) {
@@ -3635,12 +3635,20 @@ export class Executor {
     this.ensureOwned(epoch, signal)
     const end = this.bot.entity.position.clone()
     const endFeet = { x: Math.floor(end.x), y: Math.floor(end.y), z: Math.floor(end.z) }
-    const atExit = endFeet.x === target.x && endFeet.z === target.z && Math.abs(endFeet.y - target.y) <= 1
+    const progressed = distance(end, start) >= 0.5 || index > 0
+    // Verified means the witnessed EXIT CONDITION holds at the body's own
+    // cell after real traversal - never mere motion, never exact-cell
+    // equality. Cell flooring at a route boundary must not fail a swim that
+    // did reach breathable surface (measured p19.8 live: 3/3 waypoints swum,
+    // end floored one cell short of the exit, verdict path_stuck, and the
+    // SWIM shape hit its repeated-outcome retirement cap while still working).
+    // `breath` exit: the eyes are out of fluid at the surface. `shore` exit:
+    // the body's own feet/head are clear and its support is solid ground.
     let verified = false
-    if (atExit && exitKind === 'breath') {
+    if (progressed && exitKind === 'breath') {
       const eyeBlock = this.currentBlockAt({ x: endFeet.x, y: Math.floor(end.y + 1.62), z: endFeet.z })
       verified = (eyeBlock !== null && airNames.has(eyeBlock.name)) || !this.liveSubmersion().eyesInWater
-    } else if (atExit && exitKind === 'shore') {
+    } else if (progressed && exitKind === 'shore') {
       const feet = this.currentBlockAt(endFeet)
       const head = this.currentBlockAt({ x: endFeet.x, y: endFeet.y + 1, z: endFeet.z })
       const support = this.currentBlockAt({ x: endFeet.x, y: endFeet.y - 1, z: endFeet.z })
@@ -3649,10 +3657,10 @@ export class Executor {
         head !== null &&
         support !== null &&
         feet.boundingBox === 'empty' &&
+        !PROBE_FLUIDS.has(feet.name) &&
         head.boundingBox === 'empty' &&
         support.boundingBox === 'block'
     }
-    const progressed = distance(end, start) >= 0.5 || index > 0
     this.logger.info(
       'executor',
       `WATER_ROUTE action=${candidate.id} exit=${exitKind}@(${target.x},${target.y},${target.z}) ` +
