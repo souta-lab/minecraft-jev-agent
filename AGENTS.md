@@ -31,6 +31,8 @@ Normative references, in precedence order:
 
 If this file disagrees with the V4.1.2 implementation or current V4.1.2 docs, **the implementation and V4.1.2 docs are canonical — fix AGENTS.md**, not the implementation.
 
+Research context: `docs/history/investigations/minecraft-ai-frontier-report-2026-09-28.md`
+
 ## 1. Project mission
 
 Build a general Minecraft agent that autonomously drives verified world-state transitions for long periods without human feedback.
