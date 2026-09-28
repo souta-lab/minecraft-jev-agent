@@ -157,12 +157,27 @@ export function shouldPreemptActiveActionLease(
  * until this retreat's bounded Skill completes; its terminal/action event will
  * replay the freshest coalesced trigger and let Jev choose from the new state.
  * New-hostile and low-air signals remain able to interrupt.
+ *
+ * CRITICAL-HEALTH EXCEPTION (measured portal-p14, repeated portal-p16: 9/28
+ * deaths landed under an in-flight RETREAT lease): the deferral exists to let a
+ * retreat gain separation, but at critical health that trade inverts - one more
+ * absorbed hit ends the body while the lease is still walking. This is the same
+ * boundary `shouldInterruptAttackLease` already owns for ATTACK. Below it, the
+ * hit is fresh safety evidence and preempts: Jev may pick a shorter disengage,
+ * cover, eating, or fighting back - semantic continuity of ESCAPING survives in
+ * the offer set; blind commitment to the stale destination does not.
  */
 export function shouldDeferDamageDuringRetreatLease(
   trigger: DecisionTrigger,
   actionKind: string,
+  health = Number.POSITIVE_INFINITY,
+  criticalHealth = 6,
 ): boolean {
-  return actionKind === 'RETREAT' && (trigger === 'damage_taken' || trigger === 'hp_changed')
+  return (
+    actionKind === 'RETREAT' &&
+    (trigger === 'damage_taken' || trigger === 'hp_changed') &&
+    !(Number.isFinite(health) && health <= criticalHealth)
+  )
 }
 
 /**
@@ -175,9 +190,11 @@ export function shouldDeferDamageDuringRetreatLease(
 export function shouldDeferTriggerDuringRetreatLease(
   trigger: DecisionTrigger,
   actionKind: string,
+  health = Number.POSITIVE_INFINITY,
+  criticalHealth = 6,
 ): boolean {
   return (
-    shouldDeferDamageDuringRetreatLease(trigger, actionKind) ||
+    shouldDeferDamageDuringRetreatLease(trigger, actionKind, health, criticalHealth) ||
     (actionKind === 'RETREAT' && trigger === 'survival_reground')
   )
 }

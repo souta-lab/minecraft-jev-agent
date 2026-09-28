@@ -859,6 +859,27 @@ addCase('real damage is deferred while a bounded RETREAT lease closes distance, 
   }
 })
 
+addCase('a damage event at critical health preempts the RETREAT lease instead of deferring under it (portal-p16: 9/28 deaths mid-retreat)', () => {
+  // Above the critical band the old semantics stand: hits coalesce while the
+  // bounded leg gains separation. At/below it the same hit is fresh safety
+  // evidence - the lease must yield so Jev can re-ground against fresh state.
+  const pass =
+    shouldDeferDamageDuringRetreatLease('damage_taken', 'RETREAT', 20, 6) &&
+    shouldDeferDamageDuringRetreatLease('hp_changed', 'RETREAT', 7, 6) &&
+    !shouldDeferDamageDuringRetreatLease('damage_taken', 'RETREAT', 6, 6) &&
+    !shouldDeferDamageDuringRetreatLease('hp_changed', 'RETREAT', 2, 6) &&
+    !shouldDeferTriggerDuringRetreatLease('damage_taken', 'RETREAT', 4, 6) &&
+    // controller-only repair requests still defer even at critical health -
+    // they are not fresh world evidence
+    shouldDeferTriggerDuringRetreatLease('survival_reground', 'RETREAT', 4, 6) &&
+    // non-RETREAT leases unchanged
+    !shouldDeferDamageDuringRetreatLease('damage_taken', 'ATTACK', 4, 6)
+  return {
+    pass,
+    detail: 'critical-band hits break the deferral; healthy-band hits and controller repair requests keep it',
+  }
+})
+
 addCase('queued reground cannot cancel a successful RETREAT, while real damage replays preemptively into a fresh threat state', () => {
   const completed: TriggerEvent = {
     trigger: 'action_completed',

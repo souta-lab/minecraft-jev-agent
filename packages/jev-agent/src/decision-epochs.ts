@@ -1203,7 +1203,7 @@ export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigg
     // reground requests and real hit/health events wait for its bounded Skill
     // to finish; action completion will either supersede stale repair or
     // replay real damage with its normal preemptive priority.
-    if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind)) {
+    if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind, host.bot.health, CRITICAL_COMBAT_HEALTH)) {
       host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
       host.logger.info(
         'scheduler',
