@@ -263,6 +263,197 @@ export interface SubmersionEscapeTarget {
   headBlock: string
 }
 
+/**
+ * CAN: a bounded local route through sensor-observed water to an observed exit,
+ * offered when the body's ordinary dry locomotion cannot leave (portal-p19.7
+ * tail: dry body parked in a dug pocket, 6 water blocks in the loaded sample,
+ * PILLAR_UP refused on liquid in column, every remembered-resource leg
+ * path_stuck, envelope collapsed to WAIT/ESCALATE for ~30min).
+ *
+ * `waypoints`/`waypointBlocks` are the witness: the feet cells the route
+ * occupies in order (body cell excluded, exit cell included) and the exact
+ * block name the sensor saw there. Any changed or unloaded cell fails closed.
+ */
+export interface WaterRouteTarget {
+  exit: Vec3Json
+  /** `breath` = water surface cell whose head is air; `shore` = usable stand cell. */
+  exitKind: 'breath' | 'shore'
+  waypoints: Vec3Json[]
+  waypointBlocks: string[]
+  /** conservative traversal estimate; the breath budget is checked against it */
+  costMs: number
+}
+
+/** Vanilla breath: 0..20 oxygenLevel bubbles ≈ 750ms each (300 server ticks = 15s). */
+export const WATER_ROUTE_AIR_MS = 750
+const WATER_ROUTE_RADIUS = 6
+const WATER_ROUTE_DY_MIN = -2
+const WATER_ROUTE_DY_MAX = 6
+const WATER_ROUTE_VISIT_LIMIT = 480
+const WATER_ROUTE_STEP_LIMIT = 12
+const WATER_ROUTE_TARGET_LIMIT = 3
+const WATER_ROUTE_MARGIN_MS = 1500
+
+/**
+ * SAFE: whether the body's measured breath can cover a witnessed water route.
+ * Low air tightens the offer rather than gating the mechanic - a dry body or a
+ * wet body with air left may take a corridor, while an out-of-air body may take
+ * only a route it can afford. Unknown breath with the head confirmed under
+ * water can never be budgeted, so horizontal routes stay silent there (the
+ * vertical submersion arm still owns that case).
+ */
+export function waterRouteBreathOk(
+  self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>,
+  costMs: number,
+): boolean {
+  const air = observedAir(self.air)
+  if (air !== null) {
+    // Every route that enters water consumes a bounded breath budget - air=11
+    // is only ~8.25s, and a 12-step corridor can exceed it. The budget applies
+    // to ALL water routes (dry or wet body), not only the out-of-air case.
+    return air * WATER_ROUTE_AIR_MS >= costMs
+  }
+  // Unknown breath with the head confirmed under water fails closed. A dry or
+  // head-out body is still capped at the full vanilla supply: never authorize
+  // a route no possible air value could cover.
+  if (bodyHasUnknownAirWithSubmergedEyes(self)) return false
+  return costMs <= MAX_AIR * WATER_ROUTE_AIR_MS
+}
+
+/**
+ * Bounded BFS over water-occupiable cells out to an observed exit. A node is
+ * water-occupiable when its feet cell is a water-family fluid (`PROBE_FLUIDS`
+ * already excludes lava) and its head cell is passable and hazard-free - the
+ * two-cell body volume fits. The single dry-body exception is the body's own
+ * cell, which may step into adjacent water. Exits: `breath` (a water node whose
+ * head cell is non-fluid air) and `shore` (a usable-stand cell one step from a
+ * water node, dy -1..+1 for the climb-out). Lava can never be a route cell or
+ * an exit cell.
+ */
+export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTarget[] {
+  // No ring precondition: the BFS's own first expansion (≤12 bounded probes
+  // from the body's cell) is the cheap entry witness. A ±1 envHazard ring
+  // excludes the body's own column and cannot see a corridor whose first water
+  // cell sits outside it - gating on it would silently suppress exactly the
+  // dry-body blocked routes this mechanic exists for (measured p19.7 tail:
+  // 6 water cells in the sample, none in the ±1 ring).
+  const base = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const at = (position: Vec3Json) =>
+    sensorBlockAt(bot, toVec3(bot, position), 'water-route')
+  const waterNode = (x: number, y: number, z: number): boolean => {
+    const feet = at({ x, y, z })
+    if (feet === null || !PROBE_FLUIDS.has(feet.name) || envHazardKindOfBlock(feet.name) !== null) return false
+    const head = at({ x, y: y + 1, z })
+    return isPassable(head) && head !== null && envHazardKindOfBlock(head.name) === null
+  }
+  interface Node {
+    x: number
+    y: number
+    z: number
+    path: Vec3Json[]
+    blocks: string[]
+  }
+  const key = (x: number, y: number, z: number): string => `${x},${y},${z}`
+  const visited = new Set<string>([key(base.x, base.y, base.z)])
+  const queue: Node[] = [{ ...base, path: [], blocks: [] }]
+  const seenExits = new Set<string>()
+  const targets: WaterRouteTarget[] = []
+  const dirs = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const
+  while (queue.length > 0 && visited.size <= WATER_ROUTE_VISIT_LIMIT && targets.length < WATER_ROUTE_TARGET_LIMIT) {
+    const node = queue.shift()
+    if (node === undefined) break
+    const isStart = node.path.length === 0
+    if (!isStart) {
+      // A breath exit is the water surface itself: feet fluid, head air.
+      const head = at({ x: node.x, y: node.y + 1, z: node.z })
+      const headIsAir =
+        head !== null && isPassable(head) && !PROBE_FLUIDS.has(head.name) && envHazardKindOfBlock(head.name) === null
+      const exitKey = key(node.x, node.y, node.z)
+      if (headIsAir && !seenExits.has(`breath:${exitKey}`)) {
+        seenExits.add(`breath:${exitKey}`)
+        targets.push({ exit: { x: node.x, y: node.y, z: node.z }, exitKind: 'breath', waypoints: node.path, waypointBlocks: node.blocks, costMs: 0 })
+        if (targets.length >= WATER_ROUTE_TARGET_LIMIT) break
+      }
+      // A shore exit is a usable stand cell reachable by climbing out of this
+      // water node (same level or one up/down - the swim actuator jumps it).
+      for (const [dx, dz] of dirs) {
+        for (const dy of [-1, 0, 1]) {
+          const sx = node.x + dx
+          const sy = node.y + dy
+          const sz = node.z + dz
+          // The body's own cell is never an exit - a route must leave through water.
+          if (sx === base.x && sy === base.y && sz === base.z) continue
+          const sKey = `shore:${key(sx, sy, sz)}`
+          if (seenExits.has(sKey)) continue
+          if (
+            isUsableStandFromBlocks(at({ x: sx, y: sy, z: sz }), at({ x: sx, y: sy + 1, z: sz }), at({ x: sx, y: sy - 1, z: sz })) &&
+            envHazardKindOfBlock(at({ x: sx, y: sy, z: sz })?.name ?? '') === null &&
+            envHazardKindOfBlock(at({ x: sx, y: sy + 1, z: sz })?.name ?? '') === null
+          ) {
+            const shoreFeet = at({ x: sx, y: sy, z: sz })
+            if (shoreFeet === null || PROBE_FLUIDS.has(shoreFeet.name)) continue
+            seenExits.add(sKey)
+            targets.push({
+              exit: { x: sx, y: sy, z: sz },
+              exitKind: 'shore',
+              waypoints: [...node.path, { x: sx, y: sy, z: sz }],
+              waypointBlocks: [...node.blocks, shoreFeet.name],
+              costMs: 0,
+            })
+          }
+        }
+      }
+      if (targets.length >= WATER_ROUTE_TARGET_LIMIT) break
+    }
+    if (node.path.length >= WATER_ROUTE_STEP_LIMIT) continue
+    for (const [dx, dz] of dirs) {
+      for (const dy of [0, 1, -1] as const) {
+        const nx = node.x + dx
+        const ny = node.y + dy
+        const nz = node.z + dz
+        if (
+          Math.abs(nx - base.x) > WATER_ROUTE_RADIUS ||
+          Math.abs(nz - base.z) > WATER_ROUTE_RADIUS ||
+          ny - base.y < WATER_ROUTE_DY_MIN ||
+          ny - base.y > WATER_ROUTE_DY_MAX
+        )
+          continue
+        if (visited.has(key(nx, ny, nz))) continue
+        if (isStart ? !waterNode(nx, ny, nz) : !waterNode(nx, ny, nz)) continue
+        visited.add(key(nx, ny, nz))
+        const block = at({ x: nx, y: ny, z: nz })
+        if (block === null) continue
+        queue.push({
+          x: nx,
+          y: ny,
+          z: nz,
+          path: [...node.path, { x: nx, y: ny, z: nz }],
+          blocks: [...node.blocks, block.name],
+        })
+      }
+    }
+  }
+  for (const target of targets) {
+    let cost = WATER_ROUTE_MARGIN_MS
+    for (let i = 0; i < target.waypoints.length; i += 1) {
+      const prev = i === 0 ? base.y : (target.waypoints[i - 1]?.y ?? base.y)
+      const dy = (target.waypoints[i]?.y ?? base.y) - prev
+      cost += dy > 0 ? 1400 : dy < 0 ? 600 : 900
+    }
+    target.costMs = cost
+  }
+  return targets
+}
+
 /** Typed survival fact line; mirrored so a submerging body is never silent. */
 export const BODY_SUBMERGED = 'BODY_SUBMERGED'
 
@@ -980,6 +1171,13 @@ export type WorldState = {
    * means the bounded local sample found no waypoint.
    */
   submersionEscapeTargets?: SubmersionEscapeTarget[]
+  /**
+   * p19.8: bounded local water-corridor routes to an observed breathable or
+   * standable exit. Present only while a water obstruction is actually
+   * observed near the body; absent means "no witnessed water route" (and on
+   * old fixtures, "this fact did not exist yet").
+   */
+  waterRouteTargets?: WaterRouteTarget[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
@@ -5204,6 +5402,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const timestampMs = Date.now()
   const { self, envHazardCells } = buildSelfDetail(bot)
   const submersionEscapeTargets = buildSubmersionEscapeTargets(bot, self)
+  const waterRouteTargets = buildWaterRouteTargets(bot, self)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   // #14-world-proof: falsify remembered resource cells the loaded world
@@ -5280,6 +5479,9 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // existed, and the candidate layer reads "no cells" as "no hazard".
     ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
     ...(bodyNeedsBreathEscape(self) ? { submersionEscapeTargets } : {}),
+    // p19.8: the bounded water-corridor witness exists only while a local water
+    // obstruction is actually observed (wet body, or water in the hazard ring).
+    ...(waterRouteTargets.length > 0 ? { waterRouteTargets } : {}),
     // Both new terrain facts follow the same rule: a body with no portal and no
     // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {

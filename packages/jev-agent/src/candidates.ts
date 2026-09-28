@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyIsSubmerged, bodyNeedsBreathEscape, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyIsSubmerged, bodyNeedsBreathEscape, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames, waterRouteBreathOk } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -447,7 +447,9 @@ export function isDeathZoneEscapeRoute(candidate: Candidate): boolean {
   // portal-p19.7, `no_grounded_threat_response` loop while reachable=true.
   return (
     candidate.kind === 'MOVE' &&
-    (candidate.id.startsWith('MOVE:dangerzone:') || candidate.meta?.escapeAscent === true)
+    (candidate.id.startsWith('MOVE:dangerzone:') ||
+      candidate.meta?.escapeAscent === true ||
+      candidate.meta?.swimRoute === true)
   )
 }
 
@@ -891,7 +893,9 @@ export function restrictCandidatesDuringSubmersion(
       (candidate) =>
         candidate.kind === 'ESCALATE' ||
         (candidate.kind === 'MOVE' &&
-          (candidate.meta.submersionEscape === true || candidate.meta.surfaceAscent === true)),
+          (candidate.meta.submersionEscape === true ||
+            candidate.meta.surfaceAscent === true ||
+            candidate.meta.swimRoute === true)),
     )
     if (ascent.length > 0) return ascent
     const escalation = candidates.find((candidate) => candidate.kind === 'ESCALATE')
@@ -4918,8 +4922,13 @@ function generateRawCandidates(
   // hasLocomotionCandidate true while the dig-up arm never evaluated).
   const gateMoveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const gateFailed = state.signals?.failedCandidates ?? {}
+  // Last-resort arms (the low-air column swim, the corridor water route) do not
+  // prove ordinary dry locomotion exists: they are emitted precisely because
+  // none does, so they must not count here or each would gate off the others.
   const hasLocomotionCandidate = candidates.some((candidate) =>
       LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+      candidate.meta.submersionEscape !== true &&
+      candidate.meta.swimRoute !== true &&
       options.suppressedCandidateIds?.has(candidate.id) !== true &&
       failureCount(gateFailed, candidate.id) < gateMoveFailureLimit,
     )
@@ -4984,6 +4993,37 @@ function generateRawCandidates(
         extraMeta: { escapeAscent: true },
       }).candidates.map((candidate) => ({ ...candidate, id: escapeId })),
     )
+  }
+
+  // p19.8: the water-obstruction twin of the sealed-pocket arm. The invariant
+  // is "no USABLE dry locomotion", evaluated after the dry-recovery arms are
+  // appended: a fresh bounded DESCEND dig-step proves the pocket is not
+  // water-locked and gates this off, while an `ASCEND:escape` offer must NOT -
+  // it coexists as a Jev alternative (measured p19.7 tail: the ascend stood
+  // offered for 30min while every PILLAR_UP refused on liquid in the column;
+  // counting it would have hidden the corridor forever). Last-resort arms
+  // (submersion/escape/swim) never prove usable locomotion for each other.
+  const hasUsableDryRoute = candidates.some(
+    (candidate) =>
+      LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+      candidate.meta.submersionEscape !== true &&
+      candidate.meta.escapeAscent !== true &&
+      candidate.meta.swimRoute !== true &&
+      options.suppressedCandidateIds?.has(candidate.id) !== true &&
+      failureCount(gateFailed, candidate.id) < gateMoveFailureLimit,
+  )
+  if (
+    !hasUsableDryRoute &&
+    ((state.signals?.stalledMs ?? 0) >= SEALED_ESCAPE_STALL_MS ||
+      bodyIsSubmerged(state.self) ||
+      bodyNeedsBreathEscape(state.self))
+  ) {
+    const columnIds2 = new Set(candidates.map((candidate) => candidate.id))
+    for (const candidate of waterRouteCandidates(state, options)) {
+      if (columnIds2.has(candidate.id)) continue
+      columnIds2.add(candidate.id)
+      candidates.push(candidate)
+    }
   }
 
   candidates.push({
@@ -6229,6 +6269,82 @@ export function submersionAscentCandidates(state: WorldState, options: Candidate
         : {}),
       submersionFeetBlock: entry.feetBlock,
       submersionHeadBlock: entry.headBlock,
+    },
+  }))
+}
+
+/**
+ * The serialized route witness carried in a `swimRoute` candidate's meta
+ * (`Record<string, string|number|boolean>` cannot hold arrays). Malformed or
+ * missing pieces fail closed - the guard and actuator both refuse an unparseable
+ * witness rather than driving an unattested route.
+ */
+export function parseWaterRouteWitness(
+  meta: Readonly<Record<string, unknown>>,
+): { waypoints: Vec3Json[]; blocks: string[]; exitKind: 'breath' | 'shore'; costMs: number } | null {
+  const exitKind = meta.waterRouteExitKind
+  const waypointsRaw = meta.waterRouteWaypoints
+  const blocksRaw = meta.waterRouteBlocks
+  const costMs = meta.waterRouteCostMs
+  if (
+    (exitKind !== 'breath' && exitKind !== 'shore') ||
+    typeof waypointsRaw !== 'string' ||
+    typeof blocksRaw !== 'string' ||
+    typeof costMs !== 'number' ||
+    !Number.isFinite(costMs)
+  ) {
+    return null
+  }
+  const waypoints: Vec3Json[] = []
+  for (const part of waypointsRaw.split(';')) {
+    const [xs, ys, zs] = part.split(',')
+    const x = Number(xs)
+    const y = Number(ys)
+    const z = Number(zs)
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return null
+    waypoints.push({ x, y, z })
+  }
+  const blocks = blocksRaw.split(',').filter((name) => name.length > 0)
+  if (waypoints.length === 0 || waypoints.length !== blocks.length) return null
+  return { waypoints, blocks, exitKind, costMs }
+}
+
+/**
+ * CAN: bounded local water-corridor routes (p19.8). Each witnessed exit -
+ * a breathable surface cell or a standable shore cell - becomes an ordinary
+ * MOVE candidate whose meta carries the route witness (feet cells + observed
+ * block names). The generator never ranks: it only drops routes the measured
+ * breath supply cannot cover, and Jev still owns WHICH exit to take. A dry
+ * body blocked on all dry locomotion gets the same offers - the arm is gated
+ * on the absence of a usable route, not on submersion.
+ */
+export function waterRouteCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const maxCandidates = options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES
+  const targets = (state.waterRouteTargets ?? []).filter((entry) => waterRouteBreathOk(state.self, entry.costMs))
+  return targets.slice(0, maxCandidates).map((entry) => ({
+    id: `SWIM:exit:${blockId('p', entry.exit)}`,
+    kind: 'MOVE',
+    label:
+      entry.exitKind === 'shore'
+        ? `swim the observed water corridor to standable ground at (${entry.exit.x},${entry.exit.y},${entry.exit.z})`
+        : `swim the observed water corridor to breathable surface at (${entry.exit.x},${entry.exit.y},${entry.exit.z})`,
+    targetName: null,
+    target: entry.exit,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(entry.exit, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: false,
+    meta: {
+      tick: state.tick,
+      swimRoute: true,
+      waterRouteExitKind: entry.exitKind,
+      // meta is scalar-only: the witness is serialized and re-parsed by the
+      // guard and the actuator, which both fail closed on a malformed shape.
+      waterRouteWaypoints: entry.waypoints.map((wp) => `${wp.x},${wp.y},${wp.z}`).join(';'),
+      waterRouteBlocks: entry.waypointBlocks.join(','),
+      waterRouteCostMs: entry.costMs,
     },
   }))
 }
@@ -13474,6 +13590,13 @@ function evaluateCandidate(
   // and realize this exact column, so do not apply the ordinary ground route
   // solver or pathProbe here.
   if (candidate.meta.submersionEscape === true) {
+    return null
+  }
+  // p19.8: a horizontal water route carries its own block-by-block sensor
+  // witness; the pinned pathfinder cannot express swimming and would report
+  // no-path for a valid corridor. The guard (isGroundedWaterRoute) re-checks
+  // the witness against fresh state and the actuator re-reads every cell.
+  if (candidate.meta.swimRoute === true) {
     return null
   }
   // A plain survival ATTACK is locomotion too: outside contact range the executor

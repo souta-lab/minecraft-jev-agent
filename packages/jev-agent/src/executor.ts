@@ -18,13 +18,13 @@ import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
 import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
-import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
+import { digsBotSupport, formatDigDownRefused, parseWaterRouteWitness } from './candidates.ts'
 import { filterSubmersionDestinations } from './wadePolicy.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, WATER_ROUTE_AIR_MS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
 import {
   BRIDGE_BLOCK_META,
   BRIDGE_DIR_META,
@@ -3360,6 +3360,11 @@ export class Executor {
         this.runSubmersionSwimLeg(candidate, epoch, _legSignal, startedAt, remainingMs),
       )
     }
+    if (candidate.meta.swimRoute === true) {
+      return await this.runWalkSkill(candidate, epoch, signal, startedAt, (_legSignal, _strict, remainingMs) =>
+        this.runWaterRouteLeg(candidate, epoch, _legSignal, startedAt, remainingMs),
+      )
+    }
     return await this.runWalkSkill(candidate, epoch, signal, startedAt, (legSignal, strict, remainingMs) =>
       this.runMoveLeg(candidate, epoch, legSignal, startedAt, strict, remainingMs),
     )
@@ -3525,6 +3530,155 @@ export class Executor {
         progressed: progress || relieved,
         distanceClosed: progress || relieved,
       }),
+    }
+  }
+
+  /**
+   * p19.8: one bounded horizontal corridor swim through sensor-witnessed water
+   * cells. The stock pathfinder cannot represent underwater or water-crossed
+   * movement, so this arm re-validates the candidate's exact route witness
+   * (every waypoint's observed block) against live blocks and drives the
+   * declared `move`/`jump`/`sprint` effects toward each waypoint in turn. A
+   * changed/unloaded cell, a route the body's measured breath cannot cover, or
+   * a waypoint the body cannot reach inside its per-cell bound all fail closed
+   * with a typed reason - never a re-planned route from inside the executor.
+   *
+   * Verified means arrived: for `breath` exits the head is observed dry at the
+   * exit cell, for `shore` exits the body stands on the observed usable ground.
+   * Motion without the exit is `leg` progress, never completion.
+   */
+  private async runWaterRouteLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+    remainingMs: number,
+  ): Promise<WalkLegExecution> {
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('target_gone', `${candidate.id} water route has no destination`)
+    this.ensureOwned(epoch, signal)
+    const witness = parseWaterRouteWitness(candidate.meta)
+    if (witness === null) {
+      throw new ExecutorError('target_gone', `${candidate.id} water route has no parseable sensor witness`)
+    }
+    const { waypoints, blocks, exitKind, costMs } = witness
+    // Fail closed: every waypoint feet cell must still be its witnessed block.
+    for (let i = 0; i < waypoints.length; i += 1) {
+      const wp = waypoints[i] as Vec3Json
+      const live = this.currentBlockAt(wp)
+      if (live === null || live.name !== blocks[i]) {
+        throw new ExecutorError(
+          'target_gone',
+          `${candidate.id} water route waypoint ${i} (${wp.x},${wp.y},${wp.z}) changed or unloaded: observed ${live?.name ?? 'unloaded'}, witnessed ${blocks[i]}`,
+        )
+      }
+    }
+    // Breath admission re-check: a submerged body whose measured air cannot
+    // cover the declared cost is refused here even if it slipped past the gate.
+    const startAir = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
+    const startSubmersion = this.liveSubmersion()
+    // Breath budget for the WHOLE route, checked at dispatch for any body that
+    // will enter water - not only an already-out-of-air one (air=11 is ~8.25s).
+    if (startAir !== null && startAir * WATER_ROUTE_AIR_MS < costMs) {
+      throw new ExecutorError('submerged', `${candidate.id} water route refused: breath ${startAir}/${MAX_AIR} cannot cover ${costMs}ms`)
+    }
+    if (startSubmersion.eyesInWater && startAir === null) {
+      throw new ExecutorError('submerged', `${candidate.id} water route refused: breath unobserved while eyes are underwater`)
+    }
+    const airNames = new Set(['air', 'cave_air', 'void_air'])
+    const durationMs = Math.max(1, Math.min(remainingMs, costMs + 2500, 9000))
+    const deadline = Date.now() + durationMs
+    const start = this.bot.entity.position.clone()
+    let index = 0
+    let waypointDeadline = Date.now() + 2500
+    this.setControlState('forward', true)
+    this.setControlState('sprint', true)
+    try {
+      while (Date.now() < deadline && index < waypoints.length) {
+        this.ensureOwned(epoch, signal)
+        const wp = waypoints[index] as Vec3Json
+        const live = this.currentBlockAt(wp)
+        if (live === null || live.name !== blocks[index]) {
+          throw new ExecutorError('target_gone', `${candidate.id} water route waypoint ${index} changed or unloaded mid-route`)
+        }
+        const pos = this.bot.entity.position
+        const center = { x: wp.x + 0.5, y: wp.y + 0.4, z: wp.z + 0.5 }
+        this.assertEffect({ type: 'look' })
+        await this.bot.lookAt(toVec3(this.bot, center), true).catch(() => undefined)
+        // Rise toward higher cells and climb out onto shore exits; horizontal
+        // and downward cells are reached by the look direction alone.
+        this.setControlState('jump', center.y > pos.y + 0.15 || (exitKind === 'shore' && index === waypoints.length - 1))
+        if (Math.hypot(pos.x - center.x, pos.z - center.z) < 0.7 && Math.abs(pos.y - center.y) < 1.0) {
+          index += 1
+          waypointDeadline = Date.now() + 2500
+          continue
+        }
+        if (Date.now() > waypointDeadline) {
+          throw new ExecutorError('path_stuck', `${candidate.id} water route waypoint ${index} not reached in 2500ms`)
+        }
+        const air = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
+        const submersion = this.liveSubmersion()
+        const remainingCost = (waypoints.length - index) * 900
+        if (submersion.eyesInWater && air === null && index < waypoints.length - 1) {
+          throw new ExecutorError('submerged', `${candidate.id} water route aborted: breath went unobserved while underwater`)
+        }
+        if (air !== null && air * WATER_ROUTE_AIR_MS < remainingCost && index < waypoints.length - 1) {
+          throw new ExecutorError('submerged', `${candidate.id} water route aborted: breath ${air}/${MAX_AIR} cannot cover the remaining corridor`)
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 50))
+      }
+    } finally {
+      this.setControlState('forward', false)
+      this.setControlState('sprint', false)
+      this.setControlState('jump', false)
+    }
+    this.ensureOwned(epoch, signal)
+    const end = this.bot.entity.position.clone()
+    const endFeet = { x: Math.floor(end.x), y: Math.floor(end.y), z: Math.floor(end.z) }
+    const atExit = endFeet.x === target.x && endFeet.z === target.z && Math.abs(endFeet.y - target.y) <= 1
+    let verified = false
+    if (atExit && exitKind === 'breath') {
+      const eyeBlock = this.currentBlockAt({ x: endFeet.x, y: Math.floor(end.y + 1.62), z: endFeet.z })
+      verified = (eyeBlock !== null && airNames.has(eyeBlock.name)) || !this.liveSubmersion().eyesInWater
+    } else if (atExit && exitKind === 'shore') {
+      const feet = this.currentBlockAt(endFeet)
+      const head = this.currentBlockAt({ x: endFeet.x, y: endFeet.y + 1, z: endFeet.z })
+      const support = this.currentBlockAt({ x: endFeet.x, y: endFeet.y - 1, z: endFeet.z })
+      verified =
+        feet !== null &&
+        head !== null &&
+        support !== null &&
+        feet.boundingBox === 'empty' &&
+        head.boundingBox === 'empty' &&
+        support.boundingBox === 'block'
+    }
+    const progressed = distance(end, start) >= 0.5 || index > 0
+    this.logger.info(
+      'executor',
+      `WATER_ROUTE action=${candidate.id} exit=${exitKind}@(${target.x},${target.y},${target.z}) ` +
+        `waypoints=${index}/${waypoints.length} end=(${round2(end.x)},${round2(end.y)},${round2(end.z)}) ` +
+        `air=${startAir ?? 'unknown'}->${observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel) ?? 'unknown'} verified=${verified}`,
+      { actionId: candidate.id, target, exitKind, waypointsReached: index, end: endFeet, verified },
+    )
+    if (!verified && !progressed) {
+      throw new ExecutorError('path_stuck', `${candidate.id} water route made no progress in ${durationMs}ms`)
+    }
+    return {
+      arrived: verified,
+      result: this.buildResult(candidate, epoch, startedAt, 'done', verified ? 'arrived' : 'leg',
+        verified
+          ? `swam the witnessed water corridor to the ${exitKind === 'shore' ? 'standable shore' : 'breathable surface'} at (${target.x},${target.y},${target.z})`
+          : `swam ${index}/${waypoints.length} witnessed water cells toward (${target.x},${target.y},${target.z})`,
+        null,
+        {
+          verified,
+          blockRemoved: false,
+          dropObserved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+          progressed: progressed || verified,
+          distanceClosed: progressed || verified,
+        }),
     }
   }
 

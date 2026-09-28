@@ -925,7 +925,12 @@ export const SURVIVAL_REGROUNDABLE_KINDS: ReadonlySet<string> = new Set(['ATTACK
 export function isSurvivalEscapeChoice(choice: SurvivalChoiceLike): boolean {
   return (
     choice.kind === 'MOVE' &&
-    (choice.id.startsWith('MOVE:dangerzone:') || choice.meta?.escapeAscent === true)
+    (choice.id.startsWith('MOVE:dangerzone:') ||
+      choice.meta?.escapeAscent === true ||
+      // p19.8: a witnessed water-corridor swim is the same class of survival
+      // escape - its id is keyed on the exit cell, so a stale choice re-grounds
+      // only to that same exit, never a substituted route.
+      choice.meta?.swimRoute === true)
   )
 }
 

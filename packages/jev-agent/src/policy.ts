@@ -10,11 +10,11 @@
 //   'decision' - validating the chosen candidate before the executor starts
 //   'dig'      - re-validating at the moment of the dig, after pathing moved us
 import type { Candidate, CandidateKind } from './candidates.ts'
-import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META, exploredCellKey } from './candidates.ts'
+import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META, exploredCellKey, parseWaterRouteWitness } from './candidates.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 import type { Vec3Json, WorldState } from './state.ts'
-import { bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyNeedsBreathEscape, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
+import { bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyNeedsBreathEscape, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey, waterRouteBreathOk } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
@@ -364,6 +364,7 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
   // held, step cap / bounded bridge span with its verified far side).
   const ownRoute = carriesOwnRoute(candidate)
   const submersionWaypoint = candidate.meta.submersionEscape === true
+  const swimRoute = candidate.meta.swimRoute === true
   if (submersionWaypoint && !isGroundedSubmersionWaypoint(candidate, state)) {
     return deny(
       candidate.id,
@@ -371,7 +372,14 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
       'swim waypoint is not the current low-air body column or no longer matches its sensor witness',
     )
   }
-  if (!ownRoute && !submersionWaypoint) {
+  if (swimRoute && !isGroundedWaterRoute(candidate, state)) {
+    return deny(
+      candidate.id,
+      'TARGET_GONE',
+      'water route exit is not in the current witnessed corridor set, its waypoints changed, or its breath budget is spent',
+    )
+  }
+  if (!ownRoute && !submersionWaypoint && !swimRoute) {
     // SAFE/CAN: a keep-distance destination may come from the threat escape
     // scan, which applies the same `isStandable` predicate over a wider window
     // (`state.terrain.escapeCells`). The ordinary 5x5x3 window can never contain
@@ -415,10 +423,43 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
     return { ok: true, candidate }
   }
   // The specialized swim actuator rises inside the exact observed vertical
-  // water/air column above. A ground-support predicate and the stock pathfinder
-  // are both inapplicable; its Guard proof is the live, contiguous sensor fact.
-  if (submersionWaypoint) return { ok: true, candidate }
+  // water/air column above - and the bounded corridor actuator drives the
+  // witnessed water route waypoint-by-waypoint. A ground-support predicate and
+  // the stock pathfinder are both inapplicable to either; their Guard proofs
+  // are the live sensor witnesses.
+  if (submersionWaypoint || swimRoute) return { ok: true, candidate }
   return guardPathComputable(candidate, context, target)
+}
+
+/**
+ * p19.8: a corridor swim candidate stays grounded only while the sensor still
+ * reports the identical route - same exit, same waypoint cells, same exit kind -
+ * and the body's current breath still covers its cost. Any change (or a state
+ * where the water-route scan produced nothing, e.g. an unloaded corridor) fails
+ * closed rather than letting the actuator drive a route nobody witnessed.
+ */
+export function isGroundedWaterRoute(candidate: Candidate, state: WorldState): boolean {
+  const target = candidate.target
+  const witness = parseWaterRouteWitness(candidate.meta)
+  if (
+    target === null ||
+    !Number.isInteger(target.x) ||
+    !Number.isInteger(target.y) ||
+    !Number.isInteger(target.z) ||
+    witness === null
+  ) {
+    return false
+  }
+  const entry = (state.waterRouteTargets ?? []).find(
+    (entry) =>
+      entry.exitKind === witness.exitKind &&
+      samePosition(entry.exit, target) &&
+      entry.waypoints.length === witness.waypoints.length &&
+      entry.waypoints.every((wp, i) => samePosition(wp, witness.waypoints[i] ?? { x: 0, y: 0, z: 0 })) &&
+      entry.waypointBlocks.every((name, i) => name === witness.blocks[i]),
+  )
+  if (entry === undefined) return false
+  return waterRouteBreathOk(state.self, entry.costMs)
 }
 
 function isGroundedSubmersionWaypoint(candidate: Candidate, state: WorldState): boolean {

@@ -312,6 +312,7 @@ const ROUTE_MOVE_META_KEYS = [
   'contactAscent',
   'pillarPlaceName',
   'submersionEscape',
+  'swimRoute',
 ] as const
 
 export function isRouteDeclaredMove(candidate: Candidate): boolean {
