@@ -753,6 +753,31 @@ addCase('(p19.1-c) no materials, no fabricated route: the offer stays silent', (
   return { pass, detail: `offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
+// (audit seam): unarmed + sword materials + a reachable REMEMBERED table with
+// none held. `sensedCraftingTableAvailable` sees no sensed table, so the sword
+// plan's next step is `craft:crafting_table`; `planStepCraftsKnownStation`
+// correctly suppresses that duplicate craft — but the arm must then offer the
+// remembered-station walk as the armament route, not go silent. Silence here
+// strands an unarmed body that has every ingredient except proximity.
+const REMEMBERED_TABLE = {
+  name: 'crafting_table',
+  kind: 'station' as const,
+  position: { x: 30, y: 61, z: 8 },
+  dimension: 'overworld',
+  worldEpoch: 1,
+}
+addCase('(seam) remembered reachable table + sword materials + no held table still offers the arm route', () => {
+  const state = liveState({ inventory: { oak_planks: 4, stick: 2 } })
+  state.signals = signals({ knownResources: [REMEMBERED_TABLE] })
+  const grounded = generateGroundedCandidates(state, options)
+  const armRoute = grounded.candidates.filter((candidate) => candidate.meta.combatKit === 'sword')
+  const stationRoute = grounded.candidates.filter((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  return {
+    pass: armRoute.length > 0,
+    detail: `arming=[${armRoute.map((candidate) => candidate.id).join(',') || 'none'}] station=[${stationRoute.map((candidate) => candidate.id).join(',') || 'none'}] offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // (p19.2) MULTI-SITE KNOWN RETRIEVAL: `knownResourceFor` returned the single
 //         nearest remembered cell, so when that one route burned its failure

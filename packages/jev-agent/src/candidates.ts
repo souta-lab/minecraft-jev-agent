@@ -3882,8 +3882,27 @@ function combatKitPrerequisiteCandidates(
     if (plan.op === null) continue
     // Same station rule every other plan consumer obeys: a sword step that
     // would craft a station the world model already knows is a duplicate
-    // route - the station-acquisition ladder offers the walk instead.
-    if (planStepCraftsKnownStation(state, options, plan.op)) continue
+    // route. But this arm runs in survival context where no craft goal drives
+    // the station-acquisition ladder, so suppress-then-silent would strand an
+    // unarmed body that lacks only proximity: offer the remembered usable
+    // station walk AS the armament route. Same canonical id the ladder emits -
+    // the retire machinery owns it identically.
+    if (planStepCraftsKnownStation(state, options, plan.op)) {
+      const station = stationKindOfItem(plan.op.item)
+      if (station !== null) {
+        const truth = stationWorldTruth(state, options, station, plan.op.item)
+        const usable = truth.remembered.find((entry) => !truth.unreachableKeys.has(knownStationKey(entry)))
+        if (usable !== undefined) {
+          const route = knownStationRetrievalCandidate(state, options, usable)
+          out.push({
+            ...route,
+            meta: { ...route.meta, combatKit: 'sword', combatWeapon: sword, combatTarget: target },
+          })
+          if (out.length >= COMBAT_KIT_CANDIDATE_CAP) break
+        }
+      }
+      continue
+    }
     const step = craftPlanStepCandidate(state, options, plan.op, `combat:${sword}`)
     if (step.candidate === null) continue
     out.push({
