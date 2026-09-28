@@ -237,6 +237,21 @@ assert.equal(system2BodyOwned(null), false)
   // An actively-attacking hostile is material at any distance.
   const attacker = identityFor(world({ entities: [hostile(3, 30, true)] }))
   assert.notEqual(attacker.threatFingerprint, baseline.threatFingerprint)
+  // portal-p17.2 (2026-09-28): a hostile moving INSIDE the envelope, drawing
+  // its bow, or losing health are Jev-layer tactics - not a changed plan basis.
+  // 30 PLAN_DISCARDED vs 0 applied were measured on exactly this churn.
+  const nearMoved = identityFor(world({ entities: [hostile(2, 5.1)] }))
+  assert.equal(nearMoved.threatFingerprint, near.threatFingerprint)
+  const nearDrawing = identityFor(
+    world({ entities: [{ ...hostile(2, 6.5), activeItemUse: 'bow', health: 14, heldItem: 'bow' }] }),
+  )
+  assert.equal(nearDrawing.threatFingerprint, near.threatFingerprint)
+  // A DIFFERENT hostile kind arriving, a second hostile joining, or contact
+  // starting still invalidate - those change which plan is correct.
+  const skeleton = identityFor(world({ entities: [{ ...hostile(2, 6.5), name: 'skeleton' }] }))
+  assert.notEqual(skeleton.threatFingerprint, near.threatFingerprint)
+  const twoHostiles = identityFor(world({ entities: [hostile(2, 6.5), hostile(4, 5.0)] }))
+  assert.notEqual(twoHostiles.threatFingerprint, near.threatFingerprint)
   // The sensed-block snapshot is execution-time input, not plan basis.
   const scanned = identityFor(
     world({ blocks: [{ kind: 'log', name: 'oak_log', position: { x: 3, y: 64, z: 9 }, diggable: true }] }),

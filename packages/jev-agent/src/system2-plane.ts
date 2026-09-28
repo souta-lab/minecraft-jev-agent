@@ -477,36 +477,32 @@ state: WorldState | null): Pick<
   })
   const threat = world.signals.threat ?? null
   const hazard = world.self.envHazard
+  const dangerousHostiles = world.entities
+    .filter((entity) => entity.hostile && (isDangerousThreat(entity) || entity.attackedSelf === true))
   result.threatFingerprint = JSON.stringify({
     // Threat-relevant hostiles only: `isDangerousThreat` is the same 8m danger
     // boundary the candidate/survival layers use, and `attackedSelf` keeps a
     // hitting mob material at any distance. A zombie twitching far outside the
     // envelope cannot change what the plan should be - measured live (v2-n5,
     // portal-p1): it discarded every authored plan via `threat_state_changed`.
-    hostiles: world.entities
-      .filter((entity) => entity.hostile && (isDangerousThreat(entity) || entity.attackedSelf === true))
-      .map((entity) => ({
-        id: entity.id,
-        name: entity.name,
-        // Entity position is world-relative, unlike the `distance` derived
-        // from the player's position. A hostile moving during the request is
-        // a changed threat input; the player moving alone leaves this stable.
-        position: [entity.position.x, entity.position.y, entity.position.z],
-        heldItem: entity.heldItem ?? null,
-        activeItemUse: entity.activeItemUse ?? null,
-        health: entity.health ?? null,
-        attackedSelf: entity.attackedSelf === true,
-      }))
-      .sort((left, right) => left.id - right.id),
+    //
+    // And neither can per-entity tactics. The plan-material threat basis is
+    // WHICH hostile kinds press the body, how many, and whether any is in
+    // contact or has already hit it; per-entity id/position/health/item rows
+    // are Jev-layer tactics the candidate offer re-grounds every tick anyway.
+    // Measured live (portal-p17.2, 2026-09-28): a hostile-pocket camp churned
+    // position/activeItemUse rows continuously, so every ~30s plan call landed
+    // `threat_state_changed` - 30 PLAN_DISCARDED vs 0 applied, queue pinned
+    // empty for ~10min while the body idled safe. Same doctrine as the
+    // survival fingerprint's band-level basis (portal-p3).
+    hostileNames: [...new Set(dangerousHostiles.map((entity) => entity.name ?? 'unknown'))].sort(),
+    hostileCount: dangerousHostiles.length,
+    anyAttackedSelf: dangerousHostiles.some((entity) => entity.attackedSelf === true),
     envelope: threat === null
       ? null
       : {
           active: threat.active,
-          threatId: threat.threatId,
           threatName: threat.threatName,
-          threatHeldItem: threat.threatHeldItem,
-          threatEngaged: threat.threatEngaged,
-          threatLineOfSight: threat.threatLineOfSight,
           inContact: threat.inContact,
           inDanger: threat.inDanger,
           hostileCount: threat.hostileCount,
