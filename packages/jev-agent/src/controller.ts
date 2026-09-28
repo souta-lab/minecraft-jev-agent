@@ -95,7 +95,7 @@ import type { EscalationHost } from './escalation.ts'
 import type { EscalationReason } from './escalation.ts'
 import type { PendingDecision } from './decision-epochs.ts'
 import * as diagnostics from './candidate-diagnostics.ts'
-import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalPreconditionCause, goalStarvationBlockedBy, mirroredEventToken, withheldToolGaps } from './candidate-diagnostics.ts'
+import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalPreconditionCause, goalStarvationBlockedBy, MAX_STARVATION_MISSING, mirroredEventToken, withheldToolGaps } from './candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './candidate-diagnostics.ts'
 import * as evidence from './grounded-evidence.ts'
 import type { GroundedEvidenceHost } from './grounded-evidence.ts'
@@ -722,6 +722,31 @@ export class JevController {
   private noProductiveRepeats = 0
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
+  /**
+   * DURABLE NEGATIVE CONSTRAINT: typed blockers that already exhausted their
+   * bounded local-recovery window at a locality. Keyed `reason|roundedCell`,
+   * valued with the goal keys it defeated and how many bounded windows it
+   * survived. Causal history, not a choice: the ledger only names proven CAN
+   * refusals back to System2 so an identical re-plan is informed, never
+   * silently replaced (portal-p14/p16/p17 `column_descent:no_safe_step` loops).
+   */
+  private readonly blockedAffordanceLedger = new Map<string, { reason: string; cell: string; goals: Set<string>; count: number; lastTick: number }>()
+  /** Bounded evidence: distinct reason+locality refusals retained for the constraint channel. */
+  private static readonly BLOCKED_AFFORDANCE_LEDGER_LIMIT = 16
+
+  /**
+   * The ledger as read-only causal facts for the semantic projection and the
+   * System2 blocker channel. Entries near the body's current locality are the
+   * negative constraints a re-plan must route around; far entries are kept in
+   * case work returns there but are not asserted as live blockers.
+   */
+  private repeatedBlockerFacts(): readonly { reason: string; goals: readonly string[]; count: number }[] {
+    const out: { reason: string; goals: readonly string[]; count: number }[] = []
+    for (const entry of this.blockedAffordanceLedger.values()) {
+      out.push({ reason: entry.reason, goals: [...entry.goals], count: entry.count })
+    }
+    return out
+  }
   /**
    * #plan-reconciliation: dedupe for the ROW_NOT_EXECUTABLE_HERE line. The
    * measured run emitted it 227 times for one unchanged fact; the repeat count
@@ -2475,6 +2500,23 @@ export class JevController {
             }
           }
         }
+        // RESIDENT-LIFETIME NEGATIVE CONSTRAINT (measured portal-p14 36x,
+        // portal-p16 x214, portal-p17 x325): the same typed blocker kept
+        // exhausting local recovery under DIFFERENT goals
+        // (explore<->descend_to<->collect), and each new System2 plan recompiled
+        // to the identical unavailable affordance. The ledger carries that
+        // causal history forward across goal installs and replans within this
+        // resident: a blocker that already exhausted its bounded window at this
+        // locality stays named in `missing`
+        // with its repeat count, so the next summon sees "this path was tried
+        // and failed" instead of one transient blocker string. Appended LAST so
+        // persisted history can only fill capacity the live tick did not use.
+        // Code owns the CAN-fact; System2 still owns the replacement WHAT.
+        for (const entry of this.blockedAffordanceLedger.values()) {
+          if (missing.length >= MAX_STARVATION_MISSING) break
+          const token = `blocked_affordance:${entry.reason}@${entry.cell}:x${entry.count}`
+          if (!missing.includes(token)) missing.push(token)
+        }
         this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
           candidates,
@@ -2505,6 +2547,43 @@ export class JevController {
           this.tickCounter,
         )
         if (this.noProductiveRepeats >= this.options.waitLimit) {
+          // Record the exhausted episode as durable causal history BEFORE the
+          // boundary decision: one occurrence per bounded window, carrying the
+          // goal identity it defeated. The next goal that hits the same
+          // reason+locality inherits the negative constraint in `missing`.
+          // The ledger reason is the TYPED affordance refusal when the tick
+          // produced one (`column_descent:no_safe_step`), not the generic
+          // `no_productive_action` wrapper - distinct goals that recompile to
+          // the same unavailable affordance then collide on one ledger entry.
+          const ledgerReason =
+            missing.find((token) => token.includes(':') && !token.startsWith('blocked_affordance:')) ?? blockedBy
+          const ledgerCell = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
+          const ledgerKey = `${ledgerReason}|${ledgerCell}`
+          const ledgerEntry = this.blockedAffordanceLedger.get(ledgerKey)
+          if (ledgerEntry === undefined) {
+            if (this.blockedAffordanceLedger.size >= JevController.BLOCKED_AFFORDANCE_LEDGER_LIMIT) {
+              let oldestKey: string | null = null
+              let oldestTick = Number.POSITIVE_INFINITY
+              for (const [entryKey, entry] of this.blockedAffordanceLedger) {
+                if (entry.lastTick < oldestTick) {
+                  oldestTick = entry.lastTick
+                  oldestKey = entryKey
+                }
+              }
+              if (oldestKey !== null) this.blockedAffordanceLedger.delete(oldestKey)
+            }
+            this.blockedAffordanceLedger.set(ledgerKey, {
+              reason: ledgerReason,
+              cell: ledgerCell,
+              goals: new Set(this.queue.current === null ? [] : [this.currentGoalKey()]),
+              count: 1,
+              lastTick: this.tickCounter,
+            })
+          } else {
+            if (this.queue.current !== null) ledgerEntry.goals.add(this.currentGoalKey())
+            ledgerEntry.count += 1
+            ledgerEntry.lastTick = this.tickCounter
+          }
           const boundary = evaluateCandidateStarvationBoundary({
             activeOption: this.queue.current !== null,
             blockedBy,

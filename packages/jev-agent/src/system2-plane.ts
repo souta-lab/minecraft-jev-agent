@@ -116,6 +116,12 @@ export interface System2PlaneHost {
   semanticStateFingerprint(): string
   signals: AgentSignals
   starvationContext: { blockedBy: string; missing: string[] } | null
+  /**
+   * Typed blockers that already exhausted their bounded local window at this
+   * locality within the resident (portal-p14/p16/p17 `column_descent` loops):
+   * causal history so a re-plan sees the constraint it must route around.
+   */
+  repeatedBlockerFacts(): readonly { reason: string; goals: readonly string[]; count: number }[]
   system2: System2Brain
   system2ApplyIdentity(state: WorldState | null): Pick<
     System2RequestContext,
@@ -181,6 +187,20 @@ state: WorldState): GroundedFact[] {
       kind: 'blocked',
       key: host.starvationContext.blockedBy,
       detail: `local candidates are blocked by ${host.starvationContext.blockedBy}`,
+    })
+  }
+  // Accumulated negative constraints: a blocker that already exhausted its
+  // bounded window at this locality under prior goals is proven CAN-refusal
+  // evidence,
+  // not a guess - the semantic projection carries it as its own fact class so a
+  // re-plan cannot mistake it for a fresh, unexplored direction.
+  for (const entry of host.repeatedBlockerFacts()) {
+    if (facts.length >= 16) break
+    if (host.starvationContext !== null && entry.reason === host.starvationContext.blockedBy) continue
+    facts.push({
+      kind: 'blocked',
+      key: `repeated:${entry.reason}`,
+      detail: `${entry.reason} exhausted local recovery ${entry.count}x under ${entry.goals.slice(0, 3).join('/')}`,
     })
   }
   const queue = state.goalQueue
