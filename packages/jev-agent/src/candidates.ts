@@ -1478,6 +1478,13 @@ export function deathZoneEscapeCandidates(
     if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) cells.push({ x, y, z })
   }
   const seen = new Set<string>()
+  // An exit the world has already refused is not a locomotion offer: charging
+  // it here keeps `hasLocomotionCandidate` honest at generation time, so the
+  // sealed-pocket escape arm is not gated off by exits that always terminate
+  // `blocked` (measured portal-p19.5: one refused exit recommitted 261x while
+  // the dig-up arm never evaluated).
+  const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const failed = state.signals?.failedCandidates ?? {}
   const exits = cells
     .filter((cell) => {
       const key = blockId('p', cell)
@@ -1488,6 +1495,10 @@ export function deathZoneEscapeCandidates(
     .map((cell) => ({ spot: cell, d: distance(cell, state.self.position) }))
     .filter((entry) => entry.d > 0.5)
     .sort((a, b) => a.d - b.d)
+    .filter(
+      (entry) =>
+        failureCount(failed, `MOVE:dangerzone:${blockId('p', entry.spot)}`) < moveFailureLimit,
+    )
     .slice(0, DEATH_ZONE_EXIT_OFFERS)
   return exits.map((entry) => ({
     id: `MOVE:dangerzone:${blockId('p', entry.spot)}`,

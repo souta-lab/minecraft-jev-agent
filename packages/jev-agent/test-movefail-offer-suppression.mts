@@ -26,6 +26,7 @@ import {
   filterMoveCandidates,
   movePathFailureScope,
 } from './src/outcome-ledgers.ts'
+import { deathZoneEscapeCandidates, defaultCandidateOptions } from './src/candidates.ts'
 import type { OutcomeLedgersHost } from './src/outcome-ledgers.ts'
 import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
 import type { Candidate } from './src/candidates.ts'
@@ -180,6 +181,123 @@ addCase('all refused dangerzone exits empty the move envelope; control candidate
   return {
     pass: movesLeft.length === 0 && ids.includes('WAIT'),
     detail: `moves_left=[${movesLeft.join(' ')}] kept=[${ids.join(' ')}]`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (ii) THE GATE SEAM: refused exits must not count as locomotion at generation
+//      time, or the sealed-pocket escape arm stays gated off forever while the
+//      body has no real route. Producer-side suppression keeps the accounting
+//      honest: an always-blocked exit was never a route.
+// ---------------------------------------------------------------------------
+
+function inZoneState(failedCandidates: Record<string, number>): WorldState {
+  return {
+    schemaVersion: 1,
+    tick: 7,
+    timestampMs: 1_700_000_000_000,
+    self: {
+      username: 'AI_TEST',
+      position: { ...BODY },
+      eyePosition: { x: BODY.x, y: BODY.y + 1.62, z: BODY.z },
+      yaw: 0,
+      pitch: 0,
+      onGround: true,
+      health: 20,
+      food: 20,
+      gameMode: 'survival',
+      dimension: DIM,
+      isDay: true,
+      heldItem: null,
+    },
+    inventory: { slots: [], counts: {}, totalItems: 0 },
+    entities: [],
+    blocks: [],
+    terrain: {
+      standable: [],
+      escapeCells: [
+        { x: -3, y: 57, z: 17 },
+        { x: -4, y: 57, z: 17 },
+        { x: -5, y: 57, z: 17 },
+        { x: -6, y: 57, z: 17 },
+      ],
+    },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    descent: [],
+    stepCuts: [],
+    headroomCuts: [],
+    goal: {
+      id: 'explore:explore:1',
+      description: 'explore',
+      targetItem: null,
+      requiredCount: 1,
+      startCount: 0,
+      haveCount: 0,
+      progress: 0,
+      complete: false,
+      startedAtMs: 0,
+    },
+    goalQueue: { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [] },
+    recentEvents: [],
+    signals: {
+      consecutiveFailures: 0,
+      lastFailureCode: null,
+      lastPathStatus: 'idle',
+      stalledMs: 60_000,
+      lastPolicyConfidence: null,
+      maxConcurrentActions: 0,
+      escalationRecommended: false,
+      failedCandidates,
+      knownResources: [],
+      exploredCells: [],
+    },
+  } as unknown as WorldState
+}
+
+const dzOptions = {
+  ...defaultCandidateOptions,
+  // The body's own cell is in the death zone; the exit cells are outside it.
+  blacklistedMoveTargets: (_dim: string, pos: Vec3Json) => Math.hypot(pos.x - BODY.x, pos.y - BODY.y, pos.z - BODY.z) <= 14,
+  reach: 8,
+}
+
+addCase('uncharged dangerzone exits are offered normally (baseline)', () => {
+  const offered = deathZoneEscapeCandidates(inZoneState({}), dzOptions)
+  const ids = offered.map((candidate) => candidate.id)
+  return {
+    pass: ids.length === 3 && ids[0] === 'MOVE:dangerzone:p-3_57_17',
+    detail: `offered=[${ids.join(' ')}]`,
+  }
+})
+
+addCase('a failure-memorised exit is withheld at generation; farther exits stay offered', () => {
+  const offered = deathZoneEscapeCandidates(
+    inZoneState({ 'MOVE:dangerzone:p-3_57_17': 6 }),
+    dzOptions,
+  )
+  const ids = offered.map((candidate) => candidate.id)
+  const suppressed = !ids.includes('MOVE:dangerzone:p-3_57_17')
+  return {
+    pass: suppressed && ids.length === 3 && ids.includes('MOVE:dangerzone:p-6_57_17'),
+    detail: `offered=[${ids.join(' ')}] suppressed=${suppressed}`,
+  }
+})
+
+addCase('all refused exits empty the generation-time envelope (ungates sealed-pocket escape arm)', () => {
+  const offered = deathZoneEscapeCandidates(
+    inZoneState({
+      'MOVE:dangerzone:p-3_57_17': 6,
+      'MOVE:dangerzone:p-4_57_17': 6,
+      'MOVE:dangerzone:p-5_57_17': 6,
+      'MOVE:dangerzone:p-6_57_17': 6,
+    }),
+    dzOptions,
+  )
+  return {
+    pass: offered.length === 0,
+    detail: `offered=[${offered.map((candidate) => candidate.id).join(' ')}]`,
   }
 })
 
