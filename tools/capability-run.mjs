@@ -27,7 +27,7 @@
 // time (registry + process guard), canonical seed with a predeclared
 // coordinate cohort; protocol v1 was per-run fresh seeds with parallel
 // worlds — the two result sets are labelled separately and never mixed.
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, unlinkSync, renameSync, openSync, fsyncSync, closeSync } from 'node:fs'
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
@@ -227,17 +227,61 @@ function readActiveRunRegistry(path = ACTIVE_RUN_REGISTRY) {
   } catch { return null }
 }
 
-function writeActiveRunRegistry(value, path = ACTIVE_RUN_REGISTRY) {
+/**
+ * Atomic write: readers must never observe a torn/partial registry file.
+ * Serialized to a unique sibling then renamed over the target (POSIX rename
+ * is atomic within one filesystem); fsync before rename so a crash can't
+ * surface a renamed-but-unflushed entry.
+ */
+export function writeActiveRunRegistry(value, path = ACTIVE_RUN_REGISTRY) {
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`)
+  const fd = openSync(tmp, 'r')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+  renameSync(tmp, path)
 }
 
-/** Clear only when the entry still names THIS run — a newer run's claim is never clobbered by a stale cleanup. */
-function clearActiveRunRegistry(runId, path = ACTIVE_RUN_REGISTRY) {
+/**
+ * Clear only when the entry still names THIS run's own claim — a newer
+ * minor/restart of the same major run re-issues the claim token, so a stale
+ * owner can never unlink a newer `portal-pN.x` entry merely because both
+ * share `runId`. Legacy records without a claimToken fall back to runId.
+ */
+export function clearActiveRunRegistry(runId, claimToken = null, path = ACTIVE_RUN_REGISTRY) {
   const current = readActiveRunRegistry(path)
-  if (current !== null && current.runId === runId) {
-    try { unlinkSync(path) } catch { /* already gone */ }
+  if (current === null || current.runId !== runId) return
+  if (typeof current.claimToken === 'string' && current.claimToken !== claimToken) return
+  try { unlinkSync(path) } catch { /* already gone */ }
+}
+
+/**
+ * Same-world minor-swap provenance update (generation reload OR resident
+ * restart). runId/runDir/seed/mission/world identity are preserved verbatim;
+ * only the fields that honestly changed move. `boundary` must name which
+ * kind it was so history can distinguish a connection-preserving reload from
+ * an infrastructure reconnect.
+ */
+export function updateActiveRunMinor(fields, path = ACTIVE_RUN_REGISTRY) {
+  const current = readActiveRunRegistry(path)
+  if (current === null) throw new Error('no active-run registry to update')
+  if (fields.runId !== undefined && fields.runId !== current.runId) {
+    throw new Error(`minor swap cannot rename major runId ${current.runId} → ${fields.runId}`)
   }
+  const next = {
+    ...current,
+    // Rotate ownership: the prior writer's cleanup token is disarmed by this
+    // update, so a stale `portal-pN` runner can never unlink a newer pN.x.
+    claimToken: `${current.runId}#minor#${Date.now().toString(36)}`,
+    ...fields,
+    runId: current.runId,
+    runDir: current.runDir,
+    record: 'capability-active-run',
+    status: 'active',
+    swappedAt: new Date().toISOString(),
+  }
+  writeActiveRunRegistry(next, path)
+  return next
 }
 
 /**
@@ -297,6 +341,10 @@ async function main() {
   const { priorRegistry, concurrentOverride } = options.dryRun
     ? { priorRegistry: readActiveRunRegistry(), concurrentOverride: false }
     : assertSingleLiveRun(options)
+  // Ownership token for generation-safe registry cleanup: every same-major
+  // minor swap/restart re-issues it, so a stale runner's cleanup can never
+  // unlink a newer `portal-pN.x` entry sharing this runId.
+  const claimToken = `${runId}#${process.pid}#${Date.now().toString(36)}`
   mkdirSync(runDir, { recursive: true })
   // Claim the active slot immediately: the full entry (runtimeDir, resident
   // pid, mission) is written after resident launch. This closes the staging
@@ -308,6 +356,7 @@ async function main() {
       status: 'claiming',
       runId,
       runDir,
+      claimToken,
       runnerPid: process.pid,
       sha: options.sha,
       seed: options.seed,
@@ -356,7 +405,7 @@ async function main() {
 
   const procs = []
   const cleanup = async () => {
-    clearActiveRunRegistry(runId)
+    clearActiveRunRegistry(runId, claimToken)
     for (const p of procs.reverse()) {
       try { if (p.stdin && !p.stdin.destroyed) p.stdin.write('stop\n') } catch { /* ignore */ }
       try { process.kill(-p.pid, 'SIGTERM') } catch { try { p.kill('SIGTERM') } catch { /* ignore */ } }
@@ -419,6 +468,13 @@ async function main() {
       status: 'active',
       runId,
       runDir,
+      claimToken,
+      // A fresh major launch is its own first segment; same-world minor swaps
+      // overwrite these via updateActiveRunMinor without touching runId.
+      activeMinor: runId,
+      segmentId: runId,
+      hostBootSha: options.sha,
+      generationSourceSha: options.sha,
       runtimeDir: join(wtDir, 'packages/buddy-driver'),
       serverLog: join(runDir, 'server.log'),
       residentStdout: join(runDir, 'resident-stdout.log'),
