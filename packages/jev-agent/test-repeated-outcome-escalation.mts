@@ -43,6 +43,8 @@ import {
   RepeatedOutcomeEscalation,
   repeatedOutcomeCell,
   repeatedOutcomeFactSignature,
+  repeatedOutcomeLocalityCell,
+  repeatedOutcomeLocalitySignature,
   repeatedOutcomeKey,
   repeatedOutcomeSemanticProgress,
   repeatedOutcomeToken,
@@ -616,6 +618,175 @@ addCase('(s-h) THE MEASURED LAUNDERING: the full fingerprint alternates with the
     fullA !== fullB && targetA === targetB && fullEscalations === 0 && targetEscalations === 1,
     `fullAlternates=${fullA !== fullB} targetStable=${targetA === targetB} fullEscalations=${fullEscalations} targetEscalations=${targetEscalations}`,
   )
+})
+
+// --- (v) the pocket streak: 2-cell alternation inside one 8m bucket ---------------
+//
+// THE MEASURED LAUNDERING (portal-p17.1, live `run-mukm09lm-52xv`):
+// `RETREAT:p3238_35_2812` (752 lines) and `RETREAT:p3238_35_2811` (219) alternated
+// `path_timeout` settles while the body sat at 3245.7,36.3,2814.6 for ~7min. Each
+// exact-cell streak showed `ACTION_REPEAT count=2/6` forever - the pocket-level
+// question ("retreat out of THIS pocket") was never asked. The `b8:` bucket key
+// asks it.
+
+const POCKET_BODY = { x: 3245.7, y: 36.3, z: 2814.6 }
+const POCKET_TARGET_A = { x: 3238, y: 35, z: 2812 }
+const POCKET_TARGET_B = { x: 3238, y: 35, z: 2811 }
+const POCKET_SHAPE = actionShapeOf('RETREAT:p3238_35_2812')
+const POCKET_PLAN = 'g10:collect:raw_iron'
+const POCKET_WORLD = 'overworld|epoch=1'
+
+function pocketObservation(target: { x: number; y: number; z: number }, index: number) {
+  const cell = repeatedOutcomeCell('overworld', target, POCKET_BODY)
+  const localityCell = repeatedOutcomeLocalityCell('overworld', target, POCKET_BODY)
+  // The laundering: every visit to a cell carries a FRESH affordance row
+  // (threat context churns the gate digest), so the exact-cell streak restarts
+  // at 1 on every settle while the pocket signature (plan|world) stays flat.
+  const factSignature = repeatedOutcomeFactSignature({
+    affordanceFingerprint: `afp|${cell}|v${index}`,
+    planIdentity: POCKET_PLAN,
+    worldKey: POCKET_WORLD,
+  })
+  return {
+    actionId: `RETREAT:p${Math.floor(target.x)}_${Math.floor(target.y)}_${Math.floor(target.z)}`,
+    actionShape: POCKET_SHAPE,
+    cell,
+    outcome: repeatedOutcomeToken({ failure: 'path_timeout', status: 'failed', verified: false }),
+    failureCode: 'path_timeout',
+    semanticProgress: false,
+    factSignature,
+    localityCell,
+    localitySignature: repeatedOutcomeLocalitySignature({ planIdentity: POCKET_PLAN, worldKey: POCKET_WORLD }),
+    now: 1_000 + index,
+  }
+}
+
+addCase('(v-a) the measured pair shares one b8 bucket', () => {
+  const a = repeatedOutcomeLocalityCell('overworld', POCKET_TARGET_A, POCKET_BODY)
+  const b = repeatedOutcomeLocalityCell('overworld', POCKET_TARGET_B, POCKET_BODY)
+  return ok(
+    a === b && a.includes('b8:') && a !== repeatedOutcomeCell('overworld', POCKET_TARGET_A, POCKET_BODY),
+    `a=${a} b=${b}`,
+  )
+})
+
+addCase('(v-b) alternating cells launder the exact-cell streak but trip the pocket bound once', () => {
+  const ledger = new RepeatedOutcomeEscalation({ limit: REPEATED_OUTCOME_LIMIT_DEFAULT })
+  let exactEscalations = 0
+  let localityEscalations = 0
+  let maxExactCount = 0
+  let lastLocality: { count: number; retired: boolean; cell: string } | null = null
+  for (let i = 0; i < 14; i += 1) {
+    const decision = ledger.note(pocketObservation(i % 2 === 0 ? POCKET_TARGET_A : POCKET_TARGET_B, i))
+    maxExactCount = Math.max(maxExactCount, decision.count)
+    if (decision.escalate) exactEscalations += 1
+    if (decision.locality !== null) {
+      lastLocality = decision.locality
+      if (decision.locality.escalate) localityEscalations += 1
+    }
+  }
+  return ok(
+    exactEscalations === 0 &&
+      maxExactCount <= 2 &&
+      localityEscalations === 1 &&
+      lastLocality !== null &&
+      lastLocality.retired === true &&
+      lastLocality.cell.includes('b8:'),
+    `exactEsc=${exactEscalations} maxExact=${maxExactCount} locEsc=${localityEscalations} locRetired=${lastLocality?.retired} locCell=${lastLocality?.cell}`,
+  )
+})
+
+addCase('(v-c) a pocket retirement withholds BOTH alternating cells and the rest of the bucket', () => {
+  const limit = REPEATED_OUTCOME_LIMIT_DEFAULT
+  const ledger = new RepeatedOutcomeEscalation({ limit })
+  for (let i = 0; i < limit; i += 1) {
+    ledger.note(pocketObservation(i % 2 === 0 ? POCKET_TARGET_A : POCKET_TARGET_B, i))
+  }
+  const candidates = [
+    { id: 'RETREAT:p3238_35_2812', kind: 'RETREAT', target: POCKET_TARGET_A },
+    { id: 'RETREAT:p3238_35_2811', kind: 'RETREAT', target: POCKET_TARGET_B },
+    // a third retreat inside the same bucket is the same proven-dead shape
+    { id: 'RETREAT:p3239_34_2809', kind: 'RETREAT', target: { x: 3239, y: 34, z: 2809 } },
+    // a retreat OUTSIDE the pocket is a different question
+    { id: 'RETREAT:p3300_60_2900', kind: 'RETREAT', target: { x: 3300, y: 60, z: 2900 } },
+    // a different kind at the pocket cell is a different question
+    { id: 'MOVE:p3238_35_2812', kind: 'MOVE', target: POCKET_TARGET_A },
+  ]
+  const { kept, withheld } = filterRetiredRepeats(candidates, ledger, 'overworld', POCKET_BODY)
+  return ok(
+    withheld.length === 3 &&
+      withheld.every((entry) => entry.cell.includes('b8:')) &&
+      kept.length === 2 &&
+      kept.some((candidate) => candidate.id === 'RETREAT:p3300_60_2900') &&
+      kept.some((candidate) => candidate.id === 'MOVE:p3238_35_2812'),
+    `withheld=${withheld.map((entry) => entry.candidate.id).join(',')} kept=${kept.map((candidate) => candidate.id).join(',')}`,
+  )
+})
+
+addCase('(v-d) control: a plan change restarts the pocket streak and lifts the pocket retirement', () => {
+  const limit = REPEATED_OUTCOME_LIMIT_DEFAULT
+  const ledger = new RepeatedOutcomeEscalation({ limit })
+  for (let i = 0; i < limit; i += 1) {
+    ledger.note(pocketObservation(POCKET_TARGET_A, i))
+  }
+  const retiredBefore = ledger.isRetired(
+    POCKET_SHAPE,
+    repeatedOutcomeLocalityCell('overworld', POCKET_TARGET_A, POCKET_BODY),
+  )
+  const fresh = pocketObservation(POCKET_TARGET_A, 99)
+  const decision = ledger.note({
+    ...fresh,
+    localitySignature: repeatedOutcomeLocalitySignature({ planIdentity: 'g11:escape', worldKey: POCKET_WORLD }),
+  })
+  const retiredAfter = ledger.isRetired(
+    POCKET_SHAPE,
+    repeatedOutcomeLocalityCell('overworld', POCKET_TARGET_A, POCKET_BODY),
+  )
+  return ok(
+    retiredBefore === true &&
+      decision.locality !== null &&
+      decision.locality.restarted === 'new_fact' &&
+      decision.locality.count === 1 &&
+      retiredAfter === false,
+    `before=${retiredBefore} restarted=${decision.locality?.restarted} count=${decision.locality?.count} after=${retiredAfter}`,
+  )
+})
+
+addCase('(v-e) control: outcomes in DIFFERENT buckets are different questions', () => {
+  const ledger = new RepeatedOutcomeEscalation({ limit: REPEATED_OUTCOME_LIMIT_DEFAULT })
+  let localityEscalations = 0
+  for (let i = 0; i < REPEATED_OUTCOME_LIMIT_DEFAULT; i += 1) {
+    // far-apart targets: each lands in its own bucket
+    const decision = ledger.note(
+      pocketObservation({ x: 3238 + i * 32, y: 35, z: 2812 + i * 32 }, i),
+    )
+    if (decision.locality?.escalate === true) localityEscalations += 1
+  }
+  return ok(localityEscalations === 0, `localityEscalations=${localityEscalations}`)
+})
+
+addCase('(v-f) the pocket streak is DURABLE through the same snapshot/restore as its sibling', () => {
+  const limit = REPEATED_OUTCOME_LIMIT_DEFAULT
+  const first = new RepeatedOutcomeEscalation({ limit })
+  for (let i = 0; i < limit - 1; i += 1) {
+    first.note(pocketObservation(i % 2 === 0 ? POCKET_TARGET_A : POCKET_TARGET_B, i))
+  }
+  const durable = JSON.parse(JSON.stringify(first.snapshot())) as unknown[]
+  const second = new RepeatedOutcomeEscalation({ limit, initialEntries: durable })
+  const decision = second.note(pocketObservation(POCKET_TARGET_A, 9_000))
+  return ok(
+    decision.locality !== null &&
+      decision.locality.count === limit &&
+      decision.locality.escalate === true &&
+      decision.locality.retired === true,
+    `count=${decision.locality?.count} escalate=${decision.locality?.escalate} retired=${decision.locality?.retired}`,
+  )
+})
+
+addCase('(v-g) no locality signature supplied = exact-cell semantics are byte-identical', () => {
+  const ledger = new RepeatedOutcomeEscalation({ limit: REPEATED_OUTCOME_LIMIT_DEFAULT })
+  const decision = ledger.note(measuredObservation('refuse', 1_000))
+  return ok(decision.locality === null && decision.count === 1, `locality=${JSON.stringify(decision.locality)}`)
 })
 
 // --- runner ----------------------------------------------------------------------

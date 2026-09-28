@@ -27,7 +27,7 @@ import type { LocomotionObservation } from './locomotion.ts'
 import { filterBlacklistedMoves, formatMoveFailMem, formatMoveFailMemReset, formatMoveTargetSkipped, isTrackedMoveKind, MoveFailMemory, moveFailureKey } from './moveFailMemory.ts'
 import type { MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
-import { actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken } from './repeatedOutcomeEscalation.ts'
+import { actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeLocalityCell, repeatedOutcomeLocalitySignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken } from './repeatedOutcomeEscalation.ts'
 import { formatActionFailureExhausted, formatActionFailureRepeat } from './replanThrottle.ts'
 import type { ActionFailureEscalation } from './replanThrottle.ts'
 import { KNOWN_RETRIEVE_RETIRE_LIMIT } from './retrieval-progress.ts'
@@ -490,6 +490,11 @@ export function noteRepeatedOutcome(
     worldKey: `${dimension}|epoch=${host.options.worldEpoch}`,
   })
   const decision = host.repeatedOutcomes.note({
+    localityCell: repeatedOutcomeLocalityCell(dimension, candidate.target, host.bot.entity.position),
+    localitySignature: repeatedOutcomeLocalitySignature({
+      planIdentity: host.queue.current?.id ?? null,
+      worldKey: `${dimension}|epoch=${host.options.worldEpoch}`,
+    }),
     actionId: result.actionId,
     actionShape,
     cell,
@@ -547,7 +552,34 @@ export function noteRepeatedOutcome(
       host.tickCounter,
     )
   }
-  if (decision.escalate || decision.restarted !== null) host.notifyRepeatedOutcomes()
+  // The pocket decision rides the same evidence path: its `cell` is the
+  // `b8:`-tagged bucket, so `ACTION_REPEAT cell=overworld:b8:..` reads as the
+  // coarser streak without a new marker family.
+  const locality = decision.locality
+  if (locality !== null && locality.count > 1) {
+    host.logger.warn(
+      'agent',
+      locality.line,
+      {
+        actionId: result.actionId,
+        kind: candidate.kind,
+        cell: locality.cell,
+        outcome: locality.outcome,
+        count: locality.count,
+        limit: locality.limit,
+        restarted: locality.restarted,
+        escalated: locality.escalate,
+        consequence: locality.escalate ? 'retire_shape_at_locality' : undefined,
+        boundary: 'mechanical_invalidity',
+      },
+      host.tickCounter,
+    )
+  }
+  if (
+    decision.escalate ||
+    decision.restarted !== null ||
+    (locality !== null && (locality.escalate || locality.restarted !== null))
+  ) host.notifyRepeatedOutcomes()
 }
 
 /**

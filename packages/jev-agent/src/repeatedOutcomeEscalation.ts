@@ -132,6 +132,41 @@ export function repeatedOutcomeKey(actionShape: string, cell: string): string {
 }
 
 /**
+ * The POCKET half of the key. The exact-cell key is laundered by cell
+ * alternation inside one pocket: portal-p17.1 measured `RETREAT:p3238_35_2812`
+ * (x752 lines) and `RETREAT:p3238_35_2811` (x219) alternating path_timeout
+ * outcomes, so each per-cell streak restarted at 1 while the same action kept
+ * failing the same way in the same 2-cell neighbourhood. An 8m-aligned bucket
+ * is the granularity "the same action in the same pocket" is a single
+ * question; the bucket cell is tagged `b8:` so it can never collide with an
+ * exact-cell key.
+ */
+export function repeatedOutcomeLocalityCell(
+  dimension: string,
+  target: Vec3Like | null,
+  bodyPosition: Vec3Like,
+): string {
+  const point = target ?? bodyPosition
+  const bucket = (v: number) => Math.floor(v / 8) * 8
+  return `${dimension}:b8:${bucket(point.x)},${bucket(point.y)},${bucket(point.z)}`
+}
+
+/**
+ * The locality streak's fact signature. Deliberately EXCLUDES the affordance
+ * fingerprint: that digest embeds the per-cell affordance evaluation, which is
+ * the laundering vector - two adjacent targets in one pocket present different
+ * affordance rows while being the same mechanical question. `plan|world` says
+ * "the same objective in the same world"; the typed outcome keying supplies
+ * "failing the same way".
+ */
+export function repeatedOutcomeLocalitySignature(input: {
+  planIdentity: string | null
+  worldKey: string
+}): string {
+  return [`plan=${input.planIdentity ?? 'none'}`, `world=${input.worldKey}`].join('|')
+}
+
+/**
  * The typed outcome token, for evidence. Deliberately excludes `progressKinds`:
  * a token that moved with the body would launder the streak, which is the
  * measured defect. The token says only WHAT the action's bounded execution
@@ -243,6 +278,14 @@ export interface RepeatedOutcomeObservation {
   /** true when the outcome carried semantic progress (`repeatedOutcomeSemanticProgress`) */
   semanticProgress: boolean
   factSignature: string
+  /**
+   * The pocket streak's signature (`repeatedOutcomeLocalitySignature`):
+   * plan+world only, never the per-cell affordance row. When present, the same
+   * settled outcome also advances the `(shape, 8m bucket)` streak so 2-cell
+   * alternation cannot launder the bound. Absent = no locality tracking.
+   */
+  localityCell?: string
+  localitySignature?: string
   now: number
 }
 
@@ -263,6 +306,12 @@ export interface RepeatedOutcomeDecision {
   retired: boolean
   /** non-null when this observation restarted a streak rather than advancing it */
   restarted: RepeatedOutcomeRestart | null
+  /**
+   * The parallel (shape, pocket) decision for the same settled outcome, or
+   * null when the observation carried no locality signature. Shares the entry
+   * store: a pocket entry's `cell` is the `b8:`-tagged bucket.
+   */
+  locality: RepeatedOutcomeDecision | null
   /** the ready-to-log typed line: the counter, or the escalation on the bound */
   line: string
 }
@@ -388,7 +437,43 @@ export class RepeatedOutcomeEscalation {
 
   /** Record one settled outcome and return the bounded decision. */
   note(observation: RepeatedOutcomeObservation): RepeatedOutcomeDecision {
-    const key = repeatedOutcomeKey(observation.actionShape, observation.cell)
+    const decision = this.noteInto(
+      repeatedOutcomeKey(observation.actionShape, observation.cell),
+      observation.cell,
+      observation.factSignature,
+      observation,
+    )
+    // The POCKET streak: same action, same typed outcome, same plan+world,
+    // anywhere inside the 8m bucket. The exact-cell key is laundered by
+    // 2-cell alternation (portal-p17.1: RETREAT _2812 <-> _2811); the bucket
+    // key is not - it asks one coarser question with the same restart rules
+    // and the same retirement consequence (the shape leaves the offered set
+    // for every candidate cell inside the bucket).
+    if (observation.localityCell !== undefined && observation.localitySignature !== undefined) {
+      decision.locality = this.noteInto(
+        repeatedOutcomeKey(observation.actionShape, observation.localityCell),
+        observation.localityCell,
+        observation.localitySignature,
+        observation,
+      )
+    }
+    this.evictIfNeeded()
+    decision.line = decision.escalate ? formatActionRepeatExhausted(decision, observation.actionId) : formatActionRepeat(decision)
+    if (decision.locality !== null) {
+      decision.locality.line = decision.locality.escalate
+        ? formatActionRepeatExhausted(decision.locality, observation.actionId)
+        : formatActionRepeat(decision.locality)
+    }
+    return decision
+  }
+
+  /** Advance one streak entry under the shared restart/retire rules. */
+  private noteInto(
+    key: string,
+    cell: string,
+    signature: string,
+    observation: RepeatedOutcomeObservation,
+  ): RepeatedOutcomeDecision {
     const previous = this.entries.get(key)
     let restarted: RepeatedOutcomeRestart | null = null
     let count: number
@@ -405,7 +490,7 @@ export class RepeatedOutcomeEscalation {
       restarted = 'new_fact'
       count = 1
       firstAt = observation.now
-    } else if (previous.factSignature !== observation.factSignature) {
+    } else if (previous.factSignature !== signature) {
       // A changed grounding fact: the streak restarts and the retirement lifts.
       restarted = 'new_fact'
       count = 1
@@ -444,7 +529,7 @@ export class RepeatedOutcomeEscalation {
     const entry: RepeatedOutcomeEntryJson = {
       key,
       actionShape: observation.actionShape,
-      cell: observation.cell,
+      cell,
       outcome: observation.outcome,
       // STICKY: the most recent typed FAILURE at this target, so the escalation
       // line can name the diagnosis even when the bound is reached on the
@@ -453,17 +538,16 @@ export class RepeatedOutcomeEscalation {
       count,
       firstAt,
       lastAt: observation.now,
-      factSignature: observation.factSignature,
+      factSignature: signature,
       retired,
       retiredAt,
     }
     this.entries.set(key, entry)
-    this.evictIfNeeded()
 
-    const decision: RepeatedOutcomeDecision = {
+    return {
       key,
       actionShape: observation.actionShape,
-      cell: observation.cell,
+      cell,
       outcome: observation.outcome,
       failureCode: observation.failureCode ?? previous?.failureCode ?? null,
       count,
@@ -471,10 +555,9 @@ export class RepeatedOutcomeEscalation {
       escalate,
       retired,
       restarted,
+      locality: null,
       line: '',
     }
-    decision.line = escalate ? formatActionRepeatExhausted(decision, observation.actionId) : formatActionRepeat(decision)
-    return decision
   }
 
   /** True while this action shape is retired at this cell. */
@@ -583,7 +666,12 @@ export function filterRetiredRepeats<T extends RepeatedOutcomeTargetCandidate>(
     }
     const actionShape = actionShapeOf(candidate.id)
     const cell = repeatedOutcomeCell(dimension, candidate.target, bodyPosition)
-    const entry = ledger.retirement(actionShape, cell)
+    // The exact-cell retirement and the pocket retirement are the same kind
+    // of consequence: a cell retired under its own streak, or the whole 8m
+    // bucket retired for this shape after cell-alternated identical outcomes.
+    const entry =
+      ledger.retirement(actionShape, cell) ??
+      ledger.retirement(actionShape, repeatedOutcomeLocalityCell(dimension, candidate.target, bodyPosition))
     if (entry === null) {
       kept.push(candidate)
       continue
@@ -592,7 +680,7 @@ export function filterRetiredRepeats<T extends RepeatedOutcomeTargetCandidate>(
       candidate,
       key: entry.key,
       actionShape,
-      cell,
+      cell: entry.cell,
       outcome: entry.outcome,
       count: entry.count,
       limit: ledger.limit,
