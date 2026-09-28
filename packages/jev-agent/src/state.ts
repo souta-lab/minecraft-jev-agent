@@ -270,22 +270,42 @@ export interface SubmersionEscapeTarget {
  * PILLAR_UP refused on liquid in column, every remembered-resource leg
  * path_stuck, envelope collapsed to WAIT/ESCALATE for ~30min).
  *
- * `waypoints`/`waypointBlocks` are the witness: the feet cells the route
- * occupies in order (body cell excluded, exit cell included) and the exact
- * block name the sensor saw there. Any changed or unloaded cell fails closed.
+ * `waypoints`/`waypointBlocks`/`waypointHeads`/`exitSupport` are the witness:
+ * the exact body volume the route's feasibility check used - feet and head
+ * cell names per waypoint in order (body cell excluded, exit cell included),
+ * plus the shore exit's support block name. Any changed or unloaded cell in
+ * that volume fails closed; feet-only witnessing would let a changed head
+ * cell (or a hazardous support) invalidate safety after grounding.
  */
 export interface WaterRouteTarget {
   exit: Vec3Json
   /** `breath` = water surface cell whose head is air; `shore` = usable stand cell. */
   exitKind: 'breath' | 'shore'
   waypoints: Vec3Json[]
+  /** feet-cell block name per waypoint */
   waypointBlocks: string[]
-  /** conservative traversal estimate; the breath budget is checked against it */
+  /** head-cell (y+1) block name per waypoint */
+  waypointHeads: string[]
+  /** `shore` exits: the support (y-1) block name; null for `breath` */
+  exitSupport: string | null
+  /**
+   * conservative traversal upper bound: every waypoint may consume its full
+   * actuator deadline (`WATER_ROUTE_WAYPOINT_MS`), so the breath budget is
+   * never under-counted against what the executor is allowed to spend.
+   */
   costMs: number
 }
 
 /** Vanilla breath: 0..20 oxygenLevel bubbles ≈ 750ms each (300 server ticks = 15s). */
 export const WATER_ROUTE_AIR_MS = 750
+/**
+ * The ONE per-waypoint time bound, shared by admission and actuation: the
+ * executor's per-cell deadline and the route-cost accounting use the same
+ * constant, so a route admitted on breath can never be slower-per-cell than
+ * the budget assumed (measured mismatch: 900ms/step estimate vs a 3500ms
+ * actuator deadline under-budgeted a submerged route ~3.9x).
+ */
+export const WATER_ROUTE_WAYPOINT_MS = 2500
 const WATER_ROUTE_RADIUS = 6
 const WATER_ROUTE_DY_MIN = -2
 const WATER_ROUTE_DY_MAX = 6
@@ -344,11 +364,14 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
   }
   const at = (position: Vec3Json) =>
     sensorBlockAt(bot, toVec3(bot, position), 'water-route')
-  const waterNode = (x: number, y: number, z: number): boolean => {
+  // A water node occupies a two-cell body volume; BOTH names enter the witness
+  // so a head cell that changed after generation fails closed at actuation.
+  const waterNode = (x: number, y: number, z: number): { feet: string; head: string } | null => {
     const feet = at({ x, y, z })
-    if (feet === null || !PROBE_FLUIDS.has(feet.name) || envHazardKindOfBlock(feet.name) !== null) return false
+    if (feet === null || !PROBE_FLUIDS.has(feet.name) || envHazardKindOfBlock(feet.name) !== null) return null
     const head = at({ x, y: y + 1, z })
-    return isPassable(head) && head !== null && envHazardKindOfBlock(head.name) === null
+    if (head === null || !isPassable(head) || envHazardKindOfBlock(head.name) !== null) return null
+    return { feet: feet.name, head: head.name }
   }
   interface Node {
     x: number
@@ -356,10 +379,11 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
     z: number
     path: Vec3Json[]
     blocks: string[]
+    heads: string[]
   }
   const key = (x: number, y: number, z: number): string => `${x},${y},${z}`
   const visited = new Set<string>([key(base.x, base.y, base.z)])
-  const queue: Node[] = [{ ...base, path: [], blocks: [] }]
+  const queue: Node[] = [{ ...base, path: [], blocks: [], heads: [] }]
   const seenExits = new Set<string>()
   const targets: WaterRouteTarget[] = []
   const dirs = [
@@ -380,7 +404,15 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
       const exitKey = key(node.x, node.y, node.z)
       if (headIsAir && !seenExits.has(`breath:${exitKey}`)) {
         seenExits.add(`breath:${exitKey}`)
-        targets.push({ exit: { x: node.x, y: node.y, z: node.z }, exitKind: 'breath', waypoints: node.path, waypointBlocks: node.blocks, costMs: 0 })
+        targets.push({
+          exit: { x: node.x, y: node.y, z: node.z },
+          exitKind: 'breath',
+          waypoints: node.path,
+          waypointBlocks: node.blocks,
+          waypointHeads: node.heads,
+          exitSupport: null,
+          costMs: 0,
+        })
         if (targets.length >= WATER_ROUTE_TARGET_LIMIT) break
       }
       // A shore exit is a usable stand cell reachable by climbing out of this
@@ -394,19 +426,28 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
           if (sx === base.x && sy === base.y && sz === base.z) continue
           const sKey = `shore:${key(sx, sy, sz)}`
           if (seenExits.has(sKey)) continue
+          const shoreFeet = at({ x: sx, y: sy, z: sz })
+          const shoreHead = at({ x: sx, y: sy + 1, z: sz })
+          const shoreSupport = at({ x: sx, y: sy - 1, z: sz })
+          if (shoreFeet === null || shoreHead === null || shoreSupport === null) continue
+          // Support carries its own hazard check: isUsableGroundSupport admits
+          // any solid non-canopy block - including magma_block/lava-class
+          // ground - so a hazard-free feet+head is not a hazard-free stand.
           if (
-            isUsableStandFromBlocks(at({ x: sx, y: sy, z: sz }), at({ x: sx, y: sy + 1, z: sz }), at({ x: sx, y: sy - 1, z: sz })) &&
-            envHazardKindOfBlock(at({ x: sx, y: sy, z: sz })?.name ?? '') === null &&
-            envHazardKindOfBlock(at({ x: sx, y: sy + 1, z: sz })?.name ?? '') === null
+            isUsableStandFromBlocks(shoreFeet, shoreHead, shoreSupport) &&
+            envHazardKindOfBlock(shoreFeet.name) === null &&
+            envHazardKindOfBlock(shoreHead.name) === null &&
+            envHazardKindOfBlock(shoreSupport.name) === null &&
+            !PROBE_FLUIDS.has(shoreFeet.name)
           ) {
-            const shoreFeet = at({ x: sx, y: sy, z: sz })
-            if (shoreFeet === null || PROBE_FLUIDS.has(shoreFeet.name)) continue
             seenExits.add(sKey)
             targets.push({
               exit: { x: sx, y: sy, z: sz },
               exitKind: 'shore',
               waypoints: [...node.path, { x: sx, y: sy, z: sz }],
               waypointBlocks: [...node.blocks, shoreFeet.name],
+              waypointHeads: [...node.heads, shoreHead.name],
+              exitSupport: shoreSupport.name,
               costMs: 0,
             })
           }
@@ -428,28 +469,25 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
         )
           continue
         if (visited.has(key(nx, ny, nz))) continue
-        if (isStart ? !waterNode(nx, ny, nz) : !waterNode(nx, ny, nz)) continue
+        const node_ = waterNode(nx, ny, nz)
+        if (node_ === null) continue
         visited.add(key(nx, ny, nz))
-        const block = at({ x: nx, y: ny, z: nz })
-        if (block === null) continue
         queue.push({
           x: nx,
           y: ny,
           z: nz,
           path: [...node.path, { x: nx, y: ny, z: nz }],
-          blocks: [...node.blocks, block.name],
+          blocks: [...node.blocks, node_.feet],
+          heads: [...node.heads, node_.head],
         })
       }
     }
   }
   for (const target of targets) {
-    let cost = WATER_ROUTE_MARGIN_MS
-    for (let i = 0; i < target.waypoints.length; i += 1) {
-      const prev = i === 0 ? base.y : (target.waypoints[i - 1]?.y ?? base.y)
-      const dy = (target.waypoints[i]?.y ?? base.y) - prev
-      cost += dy > 0 ? 1400 : dy < 0 ? 600 : 900
-    }
-    target.costMs = cost
+    // Every waypoint is budgeted at its full actuator deadline, not a mean
+    // traversal estimate: admission must never assume less underwater time
+    // than the executor is allowed to spend reaching that cell.
+    target.costMs = WATER_ROUTE_MARGIN_MS + target.waypoints.length * WATER_ROUTE_WAYPOINT_MS
   }
   return targets
 }

@@ -6281,15 +6281,29 @@ export function submersionAscentCandidates(state: WorldState, options: Candidate
  */
 export function parseWaterRouteWitness(
   meta: Readonly<Record<string, unknown>>,
-): { waypoints: Vec3Json[]; blocks: string[]; exitKind: 'breath' | 'shore'; costMs: number } | null {
+): {
+  waypoints: Vec3Json[]
+  /** feet-cell name per waypoint */
+  blocks: string[]
+  /** head-cell (y+1) name per waypoint - the body volume the route requires */
+  heads: string[]
+  /** `shore` exit support (y-1) name; null for `breath` */
+  exitSupport: string | null
+  exitKind: 'breath' | 'shore'
+  costMs: number
+} | null {
   const exitKind = meta.waterRouteExitKind
   const waypointsRaw = meta.waterRouteWaypoints
   const blocksRaw = meta.waterRouteBlocks
+  const headsRaw = meta.waterRouteHeads
+  const exitSupportRaw = meta.waterRouteExitSupport
   const costMs = meta.waterRouteCostMs
   if (
     (exitKind !== 'breath' && exitKind !== 'shore') ||
     typeof waypointsRaw !== 'string' ||
     typeof blocksRaw !== 'string' ||
+    typeof headsRaw !== 'string' ||
+    typeof exitSupportRaw !== 'string' ||
     typeof costMs !== 'number' ||
     !Number.isFinite(costMs)
   ) {
@@ -6305,8 +6319,12 @@ export function parseWaterRouteWitness(
     waypoints.push({ x, y, z })
   }
   const blocks = blocksRaw.split(',').filter((name) => name.length > 0)
-  if (waypoints.length === 0 || waypoints.length !== blocks.length) return null
-  return { waypoints, blocks, exitKind, costMs }
+  const heads = headsRaw.split(',').filter((name) => name.length > 0)
+  if (waypoints.length === 0 || waypoints.length !== blocks.length || waypoints.length !== heads.length) return null
+  // A shore exit must carry the support it claimed; breath exits attest none.
+  const exitSupport = exitSupportRaw.length > 0 ? exitSupportRaw : null
+  if (exitKind === 'shore' && exitSupport === null) return null
+  return { waypoints, blocks, heads, exitSupport, exitKind, costMs }
 }
 
 /**
@@ -6358,6 +6376,8 @@ export function waterRouteCandidates(state: WorldState, options: CandidateOption
       // guard and the actuator, which both fail closed on a malformed shape.
       waterRouteWaypoints: entry.waypoints.map((wp) => `${wp.x},${wp.y},${wp.z}`).join(';'),
       waterRouteBlocks: entry.waypointBlocks.join(','),
+      waterRouteHeads: entry.waypointHeads.join(','),
+      waterRouteExitSupport: entry.exitSupport ?? '',
       waterRouteCostMs: entry.costMs,
     },
   }))

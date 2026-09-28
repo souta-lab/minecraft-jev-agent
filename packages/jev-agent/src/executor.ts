@@ -24,7 +24,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, WATER_ROUTE_AIR_MS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, WATER_ROUTE_AIR_MS, WATER_ROUTE_WAYPOINT_MS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
 import {
   BRIDGE_BLOCK_META,
   BRIDGE_DIR_META,
@@ -3561,15 +3561,28 @@ export class Executor {
     if (witness === null) {
       throw new ExecutorError('target_gone', `${candidate.id} water route has no parseable sensor witness`)
     }
-    const { waypoints, blocks, exitKind, costMs } = witness
-    // Fail closed: every waypoint feet cell must still be its witnessed block.
+    const { waypoints, blocks, heads, exitSupport, exitKind, costMs } = witness
+    // Fail closed: every waypoint's FULL witnessed body volume must still
+    // match - feet cell, head cell above it, and for a shore exit waypoint the
+    // support block it claims to stand on. A feet-only check would let a
+    // changed/unloaded head cell invalidate safety after grounding.
+    const waypointIntact = (wp: Vec3Json, i: number): boolean => {
+      const liveFeet = this.currentBlockAt(wp)
+      const liveHead = this.currentBlockAt({ x: wp.x, y: wp.y + 1, z: wp.z })
+      if (liveFeet === null || liveFeet.name !== blocks[i]) return false
+      if (liveHead === null || liveHead.name !== heads[i]) return false
+      if (exitKind === 'shore' && i === waypoints.length - 1) {
+        const liveSupport = this.currentBlockAt({ x: wp.x, y: wp.y - 1, z: wp.z })
+        if (liveSupport === null || liveSupport.name !== exitSupport) return false
+      }
+      return true
+    }
     for (let i = 0; i < waypoints.length; i += 1) {
       const wp = waypoints[i] as Vec3Json
-      const live = this.currentBlockAt(wp)
-      if (live === null || live.name !== blocks[i]) {
+      if (!waypointIntact(wp, i)) {
         throw new ExecutorError(
           'target_gone',
-          `${candidate.id} water route waypoint ${i} (${wp.x},${wp.y},${wp.z}) changed or unloaded: observed ${live?.name ?? 'unloaded'}, witnessed ${blocks[i]}`,
+          `${candidate.id} water route waypoint ${i} (${wp.x},${wp.y},${wp.z}) changed or unloaded: witnessed feet=${blocks[i]} head=${heads[i]}${exitKind === 'shore' && i === waypoints.length - 1 ? ` support=${exitSupport}` : ''}`,
         )
       }
     }
@@ -3586,19 +3599,21 @@ export class Executor {
       throw new ExecutorError('submerged', `${candidate.id} water route refused: breath unobserved while eyes are underwater`)
     }
     const airNames = new Set(['air', 'cave_air', 'void_air'])
-    const durationMs = Math.max(1, Math.min(remainingMs, costMs + 2500, 9000))
+    // The whole-route deadline is the declared cost plus one waypoint slot of
+    // slack - admission already capped costMs to the measured breath supply,
+    // so this bound cannot under-run the actuator's own per-cell deadline.
+    const durationMs = Math.max(1, Math.min(remainingMs, costMs + WATER_ROUTE_WAYPOINT_MS))
     const deadline = Date.now() + durationMs
     const start = this.bot.entity.position.clone()
     let index = 0
-    let waypointDeadline = Date.now() + 3500
+    let waypointDeadline = Date.now() + WATER_ROUTE_WAYPOINT_MS
     this.setControlState('forward', true)
     this.setControlState('sprint', true)
     try {
       while (Date.now() < deadline && index < waypoints.length) {
         this.ensureOwned(epoch, signal)
         const wp = waypoints[index] as Vec3Json
-        const live = this.currentBlockAt(wp)
-        if (live === null || live.name !== blocks[index]) {
+        if (!waypointIntact(wp, index)) {
           throw new ExecutorError('target_gone', `${candidate.id} water route waypoint ${index} changed or unloaded mid-route`)
         }
         const pos = this.bot.entity.position
@@ -3610,15 +3625,17 @@ export class Executor {
         this.setControlState('jump', center.y > pos.y + 0.15 || (exitKind === 'shore' && index === waypoints.length - 1))
         if (Math.hypot(pos.x - center.x, pos.z - center.z) < 0.7 && Math.abs(pos.y - center.y) < 1.0) {
           index += 1
-          waypointDeadline = Date.now() + 3500
+          waypointDeadline = Date.now() + WATER_ROUTE_WAYPOINT_MS
           continue
         }
         if (Date.now() > waypointDeadline) {
-          throw new ExecutorError('path_stuck', `${candidate.id} water route waypoint ${index} not reached in 2500ms`)
+          throw new ExecutorError('path_stuck', `${candidate.id} water route waypoint ${index} not reached in ${WATER_ROUTE_WAYPOINT_MS}ms`)
         }
         const air = observedAir((this.bot as { oxygenLevel?: number }).oxygenLevel)
         const submersion = this.liveSubmersion()
-        const remainingCost = (waypoints.length - index) * 900
+        // Remaining cost uses the SAME per-waypoint bound the admission check
+        // budgeted - never less underwater time than the actuator may spend.
+        const remainingCost = (waypoints.length - index) * WATER_ROUTE_WAYPOINT_MS
         if (submersion.eyesInWater && air === null && index < waypoints.length - 1) {
           throw new ExecutorError('submerged', `${candidate.id} water route aborted: breath went unobserved while underwater`)
         }

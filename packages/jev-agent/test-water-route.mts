@@ -27,7 +27,7 @@ import {
   isDeathZoneEscapeRoute,
   waterRouteCandidates,
 } from './src/candidates.ts'
-import { buildWaterRouteTargets, waterRouteBreathOk } from './src/state.ts'
+import { buildWaterRouteTargets, waterRouteBreathOk, WATER_ROUTE_WAYPOINT_MS } from './src/state.ts'
 import { isGroundedWaterRoute } from './src/policy.ts'
 import { isSurvivalEscapeChoice } from './src/threat.ts'
 import type { Candidate } from './src/candidates.ts'
@@ -166,9 +166,10 @@ addCase('lava cells are never water-occupiable', () => {
 
 addCase('insufficient breath refuses the horizontal route (out_of_air, cost > supply)', () => {
   const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 2 }
-  const ok = waterRouteBreathOk(self, 8 * 900 + 1500)
+  const cost = 1500 + 8 * WATER_ROUTE_WAYPOINT_MS
+  const ok = waterRouteBreathOk(self, cost)
   const candidates = waterRouteCandidates(
-    { self, waterRouteTargets: [{ exit: { x: 3, y: 0, z: 0 }, exitKind: 'breath', waypoints: [{ x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }, { x: 3, y: 0, z: 0 }], waypointBlocks: ['water', 'water', 'water'], costMs: 8 * 900 + 1500 }] } as unknown as WorldState,
+    { self, waterRouteTargets: [{ exit: { x: 3, y: 0, z: 0 }, exitKind: 'breath', waypoints: [{ x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }, { x: 3, y: 0, z: 0 }], waypointBlocks: ['water', 'water', 'water'], waypointHeads: ['water', 'water', 'air'], exitSupport: null, costMs: cost }] } as unknown as WorldState,
     defaultCandidateOptions,
   )
   return { pass: ok === false && candidates.length === 0, detail: `breathOk=${ok} candidates=${candidates.length}` }
@@ -176,7 +177,7 @@ addCase('insufficient breath refuses the horizontal route (out_of_air, cost > su
 
 addCase('affordable breath exit is still offered at low air', () => {
   const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 10 }
-  const route = { exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath' as const, waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], costMs: 900 + 1500 }
+  const route = { exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath' as const, waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], waypointHeads: ['water'], exitSupport: null, costMs: 1500 + WATER_ROUTE_WAYPOINT_MS }
   const candidates = waterRouteCandidates(
     { self, waterRouteTargets: [route] } as unknown as WorldState,
     defaultCandidateOptions,
@@ -195,10 +196,13 @@ addCase('affordable breath exit is still offered at low air', () => {
 // (20 bubbles = 300 server ticks = 15s), so air=11 affords ~8.25s. A route's
 // declared costMs must fit under the measured supply for EVERY water entry,
 // wet or dry - a dry body that will swim is not exempt.
-addCase('breath budget: air=11 refuses a 12-step corridor, allows a 3-step one', () => {
+addCase('breath budget: air=11 (~8.25s) refuses a 3-step corridor, allows a 2-step one', () => {
+  // Every waypoint is budgeted at its full actuator bound (2500ms), so air=11
+  // covers exactly 1500+2*2500=6.5s and no more - admission never assumes
+  // less underwater time than the actuator is allowed to spend.
   const self = { ...SELF_BASE, feetInWater: false, eyesInWater: false, air: 11 }
-  const longCost = 1500 + 12 * 900 // 12.3s > 8.25s supply
-  const shortCost = 1500 + 3 * 900 // 4.2s < 8.25s supply
+  const longCost = 1500 + 3 * WATER_ROUTE_WAYPOINT_MS // 9s > 8.25s supply
+  const shortCost = 1500 + 2 * WATER_ROUTE_WAYPOINT_MS // 6.5s < 8.25s supply
   return {
     pass: waterRouteBreathOk(self, longCost) === false && waterRouteBreathOk(self, shortCost) === true,
     detail: `long=${waterRouteBreathOk(self, longCost)} short=${waterRouteBreathOk(self, shortCost)}`,
@@ -226,8 +230,8 @@ addCase('breath budget: unknown air on a dry body is capped at the vanilla suppl
 // are real exits for it. Eyes under fluid keeps breath exits: each one is an
 // air pocket on the route.
 addCase('breath exits are suppressed for a body that already breathes', () => {
-  const breathRoute = { exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath' as const, waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], costMs: 900 }
-  const shoreRoute = { exit: { x: 4, y: 0, z: 0 }, exitKind: 'shore' as const, waypoints: [{ x: 1, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }], waypointBlocks: ['water', 'air'], costMs: 3300 }
+  const breathRoute = { exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath' as const, waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], waypointHeads: ['water'], exitSupport: null, costMs: 1500 + WATER_ROUTE_WAYPOINT_MS }
+  const shoreRoute = { exit: { x: 4, y: 0, z: 0 }, exitKind: 'shore' as const, waypoints: [{ x: 1, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }], waypointBlocks: ['water', 'air'], waypointHeads: ['water', 'air'], exitSupport: 'stone', costMs: 1500 + 2 * WATER_ROUTE_WAYPOINT_MS }
   const drySelf = { ...SELF_BASE, feetInWater: false, eyesInWater: false, air: 20 }
   const dryOut = waterRouteCandidates(
     { self: drySelf, waterRouteTargets: [breathRoute, shoreRoute] } as unknown as WorldState,
@@ -253,7 +257,7 @@ addCase('unknown breath with submerged eyes emits no horizontal route', () => {
   const candidates = waterRouteCandidates(
     {
       self,
-      waterRouteTargets: [{ exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath', waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], costMs: 900 }],
+      waterRouteTargets: [{ exit: { x: 1, y: 0, z: 0 }, exitKind: 'breath', waypoints: [{ x: 1, y: 0, z: 0 }], waypointBlocks: ['water'], waypointHeads: ['water'], exitSupport: null, costMs: 1500 + WATER_ROUTE_WAYPOINT_MS }],
     } as unknown as WorldState,
     defaultCandidateOptions,
   )
@@ -321,7 +325,9 @@ const ROUTE = {
     { x: 4, y: 0, z: 0 },
   ],
   waypointBlocks: ['water', 'water', 'water', 'air'],
-  costMs: 4 * 900 + 1500,
+  waypointHeads: ['water', 'water', 'air', 'air'],
+  exitSupport: 'stone',
+  costMs: 1500 + 4 * WATER_ROUTE_WAYPOINT_MS,
 }
 
 // A trapped body NOT in a death zone (the live p19.7 tail shape): no blacklist
@@ -417,6 +423,105 @@ addCase('a water-route MOVE counts as a survival escape route under threat', () 
     isSurvivalEscapeChoice({ id: 'SWIM:exit:p4_0_0', kind: 'MOVE', meta: { swimRoute: true } }) === true &&
     isSurvivalEscapeChoice({ id: 'MOVE:p1_0_0', kind: 'MOVE', meta: {} }) === false
   return { pass, detail: `swim=${isDeathZoneEscapeRoute(swim)} ordinary=${isDeathZoneEscapeRoute(ordinary)}` }
+})
+
+// p19.8 review hardening: the witness covers the whole body volume the route
+// feasibility check used (feet + head per waypoint, shore support), and the
+// per-waypoint time bound is shared between admission and actuation.
+
+addCase('grounding: a changed waypoint HEAD fails the witness check', () => {
+  const candidate = waterRouteCandidates(routeState([ROUTE]), defaultCandidateOptions)[0]
+  const tampered = {
+    ...(candidate as Candidate),
+    meta: { ...(candidate as Candidate).meta, waterRouteHeads: 'water,water,water,stone' },
+  } as unknown as Candidate
+  return {
+    pass: isGroundedWaterRoute(tampered, routeState([ROUTE])) === false,
+    detail: 'head name mismatch -> false',
+  }
+})
+
+addCase('grounding: a changed shore SUPPORT fails the witness check', () => {
+  const candidate = waterRouteCandidates(routeState([ROUTE]), defaultCandidateOptions)[0]
+  const tampered = {
+    ...(candidate as Candidate),
+    meta: { ...(candidate as Candidate).meta, waterRouteExitSupport: 'magma_block' },
+  } as unknown as Candidate
+  return {
+    pass: isGroundedWaterRoute(tampered, routeState([ROUTE])) === false,
+    detail: 'support name mismatch -> false',
+  }
+})
+
+addCase('grounding: a missing witness head list fails closed in the parser', () => {
+  const candidate = waterRouteCandidates(routeState([ROUTE]), defaultCandidateOptions)[0]
+  const meta = { ...(candidate as Candidate).meta }
+  delete (meta as Record<string, unknown>).waterRouteHeads
+  const tampered = { ...(candidate as Candidate), meta } as unknown as Candidate
+  return {
+    pass: isGroundedWaterRoute(tampered, routeState([ROUTE])) === false,
+    detail: 'no waterRouteHeads -> unparseable -> false',
+  }
+})
+
+addCase('corridor BFS: an unloaded head cell blocks the water node (fail closed)', () => {
+  const g = corridorGrid()
+  delete g[k(2, 1, 0)] // head cell of waypoint (2,0,0) unobserved
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 15 }
+  const targets = buildWaterRouteTargets(gridBot(g, self.position), self)
+  // The corridor is severed at x=2 and no exit is reachable from node (1,0,0)
+  // alone - the honest outcome is no route at all.
+  return { pass: targets.length === 0, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit]))}` }
+})
+
+addCase('corridor BFS: a hazardous (magma) shore support is refused', () => {
+  const g = corridorGrid()
+  g[k(4, -1, 0)] = solid('magma_block') // stand support becomes lava-class
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 15 }
+  const targets = buildWaterRouteTargets(gridBot(g, self.position), self)
+  const pass = targets.every((t) => !(t.exitKind === 'shore' && t.exit.x === 4))
+  return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit]))}` }
+})
+
+// Long corridor: 6 water cells -> 6-waypoint breath exit. Declared cost uses
+// the shared bound: 1500 + 6*2500 = 16.5s > the ~15s vanilla supply, so a
+// FULL-air body still cannot afford it - admission mirrors the actuator.
+function longCorridorGrid(): Record<string, BlockSpec> {
+  const g: Record<string, BlockSpec> = {
+    [k(0, -1, 0)]: solid('stone'),
+    [k(0, 0, 0)]: empty('air'),
+    [k(0, 1, 0)]: empty('air'),
+  }
+  for (let x = 1; x <= 6; x += 1) {
+    g[k(x, 0, 0)] = empty('water')
+    g[k(x, 1, 0)] = empty(x === 6 ? 'air' : 'water')
+  }
+  return g
+}
+
+addCase('breath budget: full air rejects a 6-waypoint route beyond the ~15s vanilla supply', () => {
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
+  const targets = buildWaterRouteTargets(gridBot(longCorridorGrid(), self.position), self)
+  const route = targets.find((t) => t.exitKind === 'breath')
+  const expected = 1500 + 6 * WATER_ROUTE_WAYPOINT_MS
+  const pass =
+    route !== undefined &&
+    route.waypoints.length === 6 &&
+    route.costMs === expected &&
+    expected > 20 * 750 &&
+    waterRouteBreathOk(self, route.costMs) === false
+  return {
+    pass,
+    detail: `route=${route ? `wp=${route.waypoints.length} costMs=${route.costMs}` : 'none'} supply=${20 * 750}`,
+  }
+})
+
+addCase('route cost derives from the shared per-waypoint bound', () => {
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 15 }
+  const targets = buildWaterRouteTargets(gridBot(corridorGrid(), self.position), self)
+  const breath = targets.find((t) => t.exitKind === 'breath')
+  const pass = breath !== undefined && breath.costMs === 1500 + breath.waypoints.length * WATER_ROUTE_WAYPOINT_MS
+  return { pass, detail: `costMs=${breath?.costMs} wp=${breath?.waypoints.length} bound=${WATER_ROUTE_WAYPOINT_MS}` }
 })
 
 // ---------------------------------------------------------------------------

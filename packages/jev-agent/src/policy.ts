@@ -456,7 +456,9 @@ export function isGroundedWaterRoute(candidate: Candidate, state: WorldState): b
       samePosition(entry.exit, target) &&
       entry.waypoints.length === witness.waypoints.length &&
       entry.waypoints.every((wp, i) => samePosition(wp, witness.waypoints[i] ?? { x: 0, y: 0, z: 0 })) &&
-      entry.waypointBlocks.every((name, i) => name === witness.blocks[i]),
+      entry.waypointBlocks.every((name, i) => name === witness.blocks[i]) &&
+      entry.waypointHeads.every((name, i) => name === witness.heads[i]) &&
+      entry.exitSupport === witness.exitSupport,
   )
   if (entry === undefined) return false
   return waterRouteBreathOk(state.self, entry.costMs)
