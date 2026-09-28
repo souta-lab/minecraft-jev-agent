@@ -27,6 +27,7 @@ import {
   movePathFailureScope,
 } from './src/outcome-ledgers.ts'
 import { deathZoneEscapeCandidates, defaultCandidateOptions, isDeathZoneEscapeRoute } from './src/candidates.ts'
+import { regroundVanishedSurvivalChoice } from './src/threat.ts'
 import type { OutcomeLedgersHost } from './src/outcome-ledgers.ts'
 import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
 import type { Candidate } from './src/candidates.ts'
@@ -329,6 +330,50 @@ addCase('a sealed-pocket escape ascent counts as a survival escape route under t
       isDeathZoneEscapeRoute(ordinary) === false &&
       isDeathZoneEscapeRoute(dangerzone) === true,
     detail: `escape=${isDeathZoneEscapeRoute(escape)} ordinary=${isDeathZoneEscapeRoute(ordinary)} dangerzone=${isDeathZoneEscapeRoute(dangerzone)}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (iv) THE REGROUND SEAM: a stale survival escape re-grounds by its stable
+//      body-cell id; MOVE is a survival kind only for escape routes.
+// ---------------------------------------------------------------------------
+
+addCase('a stale sealed-pocket escape re-grounds to the same id in the fresh offer', () => {
+  const chosen = { id: 'ASCEND:escape:p5_57_-9', kind: 'MOVE', meta: { escapeAscent: true } }
+  const fresh = [
+    { id: 'ESCALATE', kind: 'ESCALATE' },
+    { id: 'ASCEND:escape:p5_57_-9', kind: 'MOVE', meta: { escapeAscent: true } },
+  ]
+  const reground = regroundVanishedSurvivalChoice(chosen, fresh)
+  return {
+    pass:
+      reground.candidateId === 'ASCEND:escape:p5_57_-9' &&
+      reground.kind === 'MOVE' &&
+      reground.reason === 'same_escape_route' &&
+      reground.outcome === 'REGROUNDED',
+    detail: `candidateId=${reground.candidateId} kind=${reground.kind} reason=${reground.reason} outcome=${reground.outcome}`,
+  }
+})
+
+addCase('an ordinary MOVE still is not a survival action', () => {
+  const reground = regroundVanishedSurvivalChoice(
+    { id: 'MOVE:p5_57_-10', kind: 'MOVE', meta: {} },
+    [{ id: 'MOVE:p5_57_-10', kind: 'MOVE', meta: {} }],
+  )
+  return {
+    pass: reground.candidateId === null && reground.outcome === 'NOT_A_SURVIVAL_ACTION',
+    detail: `candidateId=${reground.candidateId} outcome=${reground.outcome}`,
+  }
+})
+
+addCase('a vanished escape with no fresh offer ends CAPABILITY_LOST, not silent', () => {
+  const reground = regroundVanishedSurvivalChoice(
+    { id: 'ASCEND:escape:p5_57_-9', kind: 'MOVE', meta: { escapeAscent: true } },
+    [{ id: 'ESCALATE', kind: 'ESCALATE' }],
+  )
+  return {
+    pass: reground.candidateId === null && reground.kind === 'MOVE' && reground.outcome === 'CAPABILITY_LOST',
+    detail: `candidateId=${reground.candidateId} kind=${reground.kind} outcome=${reground.outcome}`,
   }
 })
 

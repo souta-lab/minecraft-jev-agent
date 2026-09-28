@@ -912,6 +912,23 @@ export const MOB_IDENTITY_CHURN = 'MOB_IDENTITY_CHURN'
  */
 export const SURVIVAL_REGROUNDABLE_KINDS: ReadonlySet<string> = new Set(['ATTACK', 'RETREAT'])
 
+/**
+ * MOVE-kind survival escapes: a danger-zone exit (`MOVE:dangerzone:`) or the
+ * sealed-pocket escape ascent (`meta.escapeAscent`). Their ids are keyed on the
+ * body's own cell context, so the only faithful re-ground is the same id still
+ * present in the fresh offer - never a different cell (that would be a new
+ * WHICH decision). Measured portal-p19.7: `ASCEND:escape:*` was the sole offer
+ * under a contact-range creeper, went stale mid-pipeline, and the reground
+ * answered `not_a_survival_action` ~6x/s forever because MOVE was not in
+ * `SURVIVAL_REGROUNDABLE_KINDS`.
+ */
+export function isSurvivalEscapeChoice(choice: SurvivalChoiceLike): boolean {
+  return (
+    choice.kind === 'MOVE' &&
+    (choice.id.startsWith('MOVE:dangerzone:') || choice.meta?.escapeAscent === true)
+  )
+}
+
 /** The subset of `Candidate` the re-grounding rule reads. */
 export interface SurvivalChoiceLike {
   id: string
@@ -979,6 +996,8 @@ export type SurvivalRegroundReason =
   | 'same_cell_keep_distance'
   | 'same_threat_keep_distance'
   | 'any_threat_keep_distance'
+  /** the body-cell-keyed escape route (dangerzone exit / sealed ascent) is still offered */
+  | 'same_escape_route'
   | 'no_grounded_equivalent'
 
 /**
@@ -1013,7 +1032,7 @@ export interface SurvivalRegroundResult {
   /** the fresh candidate that carries the same survival action, or null */
   candidateId: string | null
   /** the survival kind that was re-grounded, or null when the choice was not one */
-  kind: 'ATTACK' | 'RETREAT' | null
+  kind: 'ATTACK' | 'RETREAT' | 'MOVE' | null
   reason: SurvivalRegroundReason
   /** the entity the vanished choice was answering, when it carried one */
   entityId: number | null
@@ -1177,13 +1196,38 @@ export function regroundVanishedSurvivalChoice(
       identityChurn: null,
     }
   }
-  if (!SURVIVAL_REGROUNDABLE_KINDS.has(chosen.kind)) {
+  if (!SURVIVAL_REGROUNDABLE_KINDS.has(chosen.kind) && !isSurvivalEscapeChoice(chosen)) {
     return {
       candidateId: null,
       kind: null,
       reason: 'not_a_survival_action',
       entityId: null,
       outcome: 'NOT_A_SURVIVAL_ACTION',
+      identityChurn: null,
+    }
+  }
+
+  if (isSurvivalEscapeChoice(chosen)) {
+    // The escape id is keyed on the body's own cell context (stable across
+    // re-offers while the body stays sealed), so the faithful re-ground is the
+    // same id in the fresh offer. A different target would be a new WHICH.
+    const same = fresh.find((candidate) => candidate.id === chosen.id)
+    if (same !== undefined) {
+      return {
+        candidateId: same.id,
+        kind: 'MOVE',
+        reason: 'same_escape_route',
+        entityId: null,
+        outcome: 'REGROUNDED',
+        identityChurn: null,
+      }
+    }
+    return {
+      candidateId: null,
+      kind: 'MOVE',
+      reason: 'no_grounded_equivalent',
+      entityId: null,
+      outcome: 'CAPABILITY_LOST',
       identityChurn: null,
     }
   }
