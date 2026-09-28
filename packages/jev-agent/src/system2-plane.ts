@@ -403,8 +403,18 @@ export function semanticStateFingerprint(host: System2PlaneHost): string {
 }
 
 
-/** Bounded hold a fresh plan gets while a body-owned action is still in flight. */
-const SYSTEM2_APPLY_DEFER_ATTEMPTS = 3
+/**
+ * Bounded hold a fresh plan gets while a body-owned action is still in flight.
+ * Sized to outlast a mechanical action's own bound (walk_to msBudget=15s, dig
+ * legs several seconds each) plus settle margin: 20 x 1.5s ~= 30s. Measured
+ * live (portal-p19.4, run-mul5t8tp-93bb): 3x1.5s could never outlast a DESCEND
+ * dig leg, so every starvation-summoned plan was discarded `action_in_flight`
+ * by the exact in-flight action it was meant to replace. Each deferred attempt
+ * re-runs the full apply-validity check, so a real basis change (queue,
+ * objective, inventory, dimension, epoch, threat, facts) still discards
+ * immediately - only a pure body-owned continuation holds the plan.
+ */
+const SYSTEM2_APPLY_DEFER_ATTEMPTS = 20
 const SYSTEM2_APPLY_DEFER_MS = 1500
 
 export function system2ApplyIdentity(host: System2PlaneHost,
