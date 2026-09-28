@@ -32,6 +32,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pruneCapabilityRuns } from './prune-capability-runs.mjs'
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(TOOL_DIR, '..')
@@ -640,6 +641,11 @@ async function main() {
     await cleanup()
     if (!options.keepWorktree && options.sourceDir === null) {
       spawnSync('git', ['-C', REPO_ROOT, 'worktree', 'remove', '--force', wtDir], { encoding: 'utf8' })
+    }
+    // Retain the newest p-series raw worlds, but compact older completed failures.
+    // Accepted/successful, active, incomplete, and explicitly protected runs are never pruned.
+    try { await pruneCapabilityRuns({ repoRoot: REPO_ROOT, keepPortal: 10, apply: true, quiet: true }) } catch (retentionError) {
+      process.stderr.write(`[retention] prune skipped: ${retentionError instanceof Error ? retentionError.message : String(retentionError)}\n`)
     }
     process.stdout.write(`${JSON.stringify({ runId, outcome, objectiveCompleteAtMs, inventory: inventoryAtCompletion ?? lastInventory, runDir }, null, 2)}\n`)
     return outcome === 'OBJECTIVE_SATISFIED' ? 0 : outcome.startsWith('RESIDENT_EXIT') ? 2 : 1

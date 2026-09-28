@@ -229,6 +229,7 @@ A candidate that wins by weakening verification, changing the task after baselin
 - Periodically check free disk, stale/zombie servers, worktree count, run-artifact growth, and port/world ownership.
 - Preserve sealed accepted evidence and committed experiment records. Prune only disposable/reproducible artifacts after their causal summary is durable. Never delete user worlds or accepted VTR archives.
 - On disk pressure, remove transient caches/build output/completed disposable worktrees/reproducible failed runs first and record what was removed.
+- Capability-run retention is automatic: keep the newest **10 p-series versions** with full raw worlds/logs; for older completed failed `portal-p*` runs, preserve `plan.json`, `result.json`, `P-SERIES.md` provenance, `server.log`, a `retention-summary.json`, and gzip-compressed resident AI logs, then delete only the reproducible raw `server/` world. Never prune the active/incomplete run, an `OBJECTIVE_SATISFIED`/accepted run, a sealed archive, or a run carrying `.retention-protect`.
 - On provider outage, record `MODEL_UNAVAILABLE`; do not add fallback authority or change semantics. Switch to mechanical, deterministic, observability, recovery, or provider-independent lanes until service returns.
 - If run identity, source binding, server configuration, or world provenance becomes uncertain, invalidate the run and start clean. Never repair evidence by hand.
 
