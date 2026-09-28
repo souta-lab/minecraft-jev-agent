@@ -4561,6 +4561,31 @@ function generateRawCandidates(
     }
   }
 
+  // The SURVIVAL half of the same armament affordance. The arm above only fires
+  // for a goal-driven required kill (a collect whose item is a mob drop), so a
+  // body under ordinary hostile attack was never offered the weapon it could
+  // already craft - measured live p19: 12 contact deaths while carrying
+  // oak_planks + stick + a crafting_table, every swing logged `weapon=fists`.
+  // Same standing-offer doctrine as `armorCraftCandidates` a few lines below:
+  // the weapon has to exist BEFORE the fight, the offer is grounded CAN (the
+  // planner refuses an uncraftable step), it is self-limiting once the kit
+  // carries a real weapon, and Jev still owns whether arming beats the goal
+  // work this tick.
+  if (goalDropTargets.length === 0) {
+    const survivalKit = assessCombatKit({
+      heldItem: state.self.heldItem?.name ?? null,
+      carried: state.inventory.counts,
+      worn: state.self.armor ?? {},
+      health: state.self.health,
+      food: state.self.food,
+    })
+    if (survivalKit.missing.includes('sword')) {
+      candidates.push(
+        ...combatKitPrerequisiteCandidates(state, options, attackTargets[0]?.name ?? 'survival'),
+      )
+    }
+  }
+
   // The REPOSITION half of a fight whose target sits above the walk envelope: the
   // own-column vertical route to the target's level, offered as an ordinary
   // MOVE-family candidate ALONGSIDE the ATTACK. CAN enumeration only - code says

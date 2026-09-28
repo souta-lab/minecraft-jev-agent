@@ -725,6 +725,34 @@ addCase('(p18.1-b) control: while a productive candidate survives the backfill s
   }
 })
 
+// p19.1: survival armament. The goal-driven arm only fires for required kills
+// (a collect whose item is a mob drop); a body under ordinary attack with the
+// materials for a weapon was never offered it (live: 12 contact deaths with
+// oak_planks+stick+crafting_table carried, weapon=fists every swing).
+addCase('(p19.1-a) an unarmed body carrying sword materials is offered the arm-up route', () => {
+  const state = liveState({ inventory: { oak_planks: 4, stick: 2, crafting_table: 1 } })
+  const grounded = generateGroundedCandidates(state, options)
+  const armRoute = grounded.candidates.filter((candidate) => candidate.meta.combatKit === 'sword')
+  return {
+    pass: armRoute.length > 0,
+    detail: `arming=[${armRoute.map((candidate) => candidate.id).join(',') || 'none'}] offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
+addCase('(p19.1-b) self-limiting: an already-armed body gets no arm-up route', () => {
+  const state = liveState({ inventory: { stone_sword: 1, oak_planks: 4, stick: 2, crafting_table: 1 } })
+  const grounded = generateGroundedCandidates(state, options)
+  const pass = grounded.candidates.every((candidate) => candidate.meta.combatKit !== 'sword')
+  return { pass, detail: `offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(p19.1-c) no materials, no fabricated route: the offer stays silent', () => {
+  const state = liveState({ inventory: {} })
+  const grounded = generateGroundedCandidates(state, options)
+  const pass = grounded.candidates.every((candidate) => candidate.meta.combatKit !== 'sword')
+  return { pass, detail: `offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 let failures = 0
 process.stdout.write('acquisition route - a withheld mechanical fact gets a grounded route or a typed refusal\n')
 process.stdout.write('-'.repeat(78) + '\n')
