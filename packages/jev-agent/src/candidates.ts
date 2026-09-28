@@ -3880,6 +3880,10 @@ function combatKitPrerequisiteCandidates(
       1,
     )
     if (plan.op === null) continue
+    // Same station rule every other plan consumer obeys: a sword step that
+    // would craft a station the world model already knows is a duplicate
+    // route - the station-acquisition ladder offers the walk instead.
+    if (planStepCraftsKnownStation(state, options, plan.op)) continue
     const step = craftPlanStepCandidate(state, options, plan.op, `combat:${sword}`)
     if (step.candidate === null) continue
     out.push({

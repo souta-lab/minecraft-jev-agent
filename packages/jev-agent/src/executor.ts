@@ -19,6 +19,7 @@ import type { Item } from 'prismarine-item'
 import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
+import { filterSubmersionDestinations } from './wadePolicy.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import type { EventLogger } from './jev.ts'
@@ -267,6 +268,28 @@ import {
 } from './netherPortalPlan.ts'
 
 const { Movements, goals } = pathfinderModule
+
+type PathfinderMove = import('mineflayer-pathfinder').Move
+
+/**
+ * portal-p19.2 measured drowning (run-mul2ky3e-6sas, 2026-09-28): the stock
+ * `canDig=false` planner walks into water for `liquidCost = 1`, but every
+ * vertical move refuses a liquid node (`dont go underwater`), so once the
+ * head is under it can never plan the way back out - the body bottom-walked
+ * until `AI_Cap drowned` while the submersion arm hopped in place. This
+ * subclass keeps the pinned stock movement set and removes only the neighbors
+ * whose destination is deeper than a bounded wade (`wadePolicy.ts`): a liquid
+ * feet cell stays legal only with a proven dry head and a proven solid floor,
+ * which is also the shape the env-hazard fire escape relies on. Deep water
+ * degrades to the ordinary typed no-path/stuck refusal instead of a corpse.
+ */
+class WadeBoundMovements extends Movements {
+  override getNeighbors(node: PathfinderMove): PathfinderMove[] {
+    return filterSubmersionDestinations(super.getNeighbors(node), (x, y, z) =>
+      this.getBlock({ x, y, z } as never, 0, 0, 0),
+    )
+  }
+}
 
 /**
  * Server `position` packets per bot, shared by every Executor instance built for
@@ -2248,7 +2271,7 @@ export class Executor {
     if (this.bot.pathfinder === undefined) {
       throw new Error('mineflayer-pathfinder is not loaded; call bot.loadPlugin(pathfinder) before jev-agent')
     }
-    const movements = new Movements(this.bot)
+    const movements = new WadeBoundMovements(this.bot)
     movements.canDig = false
     movements.allow1by1towers = false
     movements.scafoldingBlocks = []
@@ -2259,7 +2282,7 @@ export class Executor {
     movements.infiniteLiquidDropdownDistance = false
     this.bot.pathfinder.setMovements(movements)
     this.movementsReady = true
-    this.logger.info('executor', 'movements pinned: canDig=false, allow1by1towers=false, scaffolding=[]', {
+    this.logger.info('executor', 'movements pinned: canDig=false, allow1by1towers=false, scaffolding=[], wade-bound=true', {
       canDig: movements.canDig,
       allow1by1towers: movements.allow1by1towers,
       scaffoldingBlocks: movements.scafoldingBlocks,
