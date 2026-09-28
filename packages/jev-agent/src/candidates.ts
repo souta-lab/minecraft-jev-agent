@@ -1602,6 +1602,16 @@ export interface CandidateOptions {
    */
   blacklistedMoveTargets?: BlacklistedMoveTargets
   /**
+   * Candidate ids generated last tick but pruned before presentation by the
+   * controller's suppression layers (reachability, repeated-outcome,
+   * not-executable-here, safety restrictions). The stranded-body gates that
+   * key on "is there a locomotion route" must not count a candidate the tick
+   * itself will never present — measured portal-p19.7: three DESCEND:level:*
+   * wall-cells and an unreachable RETRIEVE:known:log kept the sealed-pocket
+   * escape arm gated off while they were suppressed downstream every tick.
+   */
+  suppressedCandidateIds?: ReadonlySet<string>
+  /**
    * Surface-search waypoints already reached in this world epoch. These are
    * search-frontier facts, not retry counts: arriving at a waypoint without
    * seeing/acquiring the requested resource must move the frontier onward, or
@@ -4902,6 +4912,7 @@ function generateRawCandidates(
   const gateFailed = state.signals?.failedCandidates ?? {}
   const hasLocomotionCandidate = candidates.some((candidate) =>
       LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+      options.suppressedCandidateIds?.has(candidate.id) !== true &&
       failureCount(gateFailed, candidate.id) < gateMoveFailureLimit,
     )
   const columnDescent = hasLocomotionCandidate
@@ -4940,7 +4951,9 @@ function generateRawCandidates(
   // offer - the affordance appears only once no-progress is a measured fact.
   if (
     !hasLocomotionCandidate &&
-    columnDescent.candidates.length === 0 &&
+    columnDescent.candidates.filter(
+      (candidate) => options.suppressedCandidateIds?.has(candidate.id) !== true,
+    ).length === 0 &&
     (state.signals?.stalledMs ?? 0) >= SEALED_ESCAPE_STALL_MS &&
     current?.kind !== 'surface' &&
     normalizeDimensionId(state.self.dimension) === 'overworld' &&

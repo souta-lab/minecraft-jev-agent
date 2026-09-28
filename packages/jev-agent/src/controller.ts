@@ -937,6 +937,8 @@ export class JevController {
   private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: ledgers.MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
   private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
+  /** ids generated last tick but pruned before presentation; fed back into generation via `suppressedCandidateIds` */
+  private suppressedCandidateIds: ReadonlySet<string> = new Set<string>()
   /** gate facts (station/dig approach probes) resolved once per tick. */
   private gateOptions: ReachabilityGateOptions | null = null
   private gateOptionsTick = -1
@@ -2090,6 +2092,10 @@ export class JevController {
         portalEntry,
         this.placementRetries.retiredItemSet(),
       )
+      // Last tick's generated-but-never-presented ids, projected into
+      // generation so stranded-body gates count only candidates that can
+      // actually survive the suppression layers (see CandidateOptions).
+      groundingOptions.suppressedCandidateIds = this.suppressedCandidateIds
       const grounded = generateGroundedCandidates(state, groundingOptions)
       // The affordance plane evaluated every candidate's grounding facts this
       // tick. Its fingerprint is the "did anything that could re-open this
@@ -2381,6 +2387,17 @@ export class JevController {
         }
       }
       this.observeDescendProgress(candidates)
+      // Which generated ids never reached presentation this tick. Next tick's
+      // generation reads this so stranded-body gates (columnDescent,
+      // ASCEND:escape) are not held closed by candidates that every tick
+      // generates and every tick suppresses (reachability, repeated-outcome,
+      // not-executable, safety restrictions).
+      const presentedIds = new Set(candidates.map((candidate) => candidate.id))
+      this.suppressedCandidateIds = new Set(
+        grounded.candidates
+          .filter((candidate) => !presentedIds.has(candidate.id))
+          .map((candidate) => candidate.id),
+      )
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
       this.logFoodState(candidates, state, groundingOptions)
