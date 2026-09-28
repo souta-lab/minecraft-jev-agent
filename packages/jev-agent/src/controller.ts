@@ -2196,6 +2196,7 @@ export class JevController {
       // The cross-action bound's consequence runs beside the coordinate failure
       // memory's: a target this action provably cannot progress at is pruned the
       // same mechanical way, which forces the offer onto a different target.
+      candidates = this.filterMoveCandidates(candidates, state)
       candidates = this.filterRepeatedOutcomeCandidates(candidates, state)
       // The gate's self-contained craft ladder runs before these controller
       // filters, so a move-failure-memory prune can strip the last productive
@@ -2821,6 +2822,7 @@ export class JevController {
           missionSourceNames: minecraftMissionSourceNames(freshVtrMission.item),
         }).candidates
       }
+      freshBeforeThreat = this.filterMoveCandidates(freshBeforeThreat, freshState)
       freshBeforeThreat = this.filterRepeatedOutcomeCandidates(freshBeforeThreat, freshState)
       freshBeforeThreat = ensureCraftStepActionable(freshState, freshBeforeThreat, freshOptions)
       const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
@@ -4788,6 +4790,14 @@ export class JevController {
     log = true,
   ): Candidate[] {
     return ledgers.filterRepeatedOutcomeCandidates(this.ledgersHost, candidates, state, log)
+  }
+
+  private filterMoveCandidates(
+    candidates: readonly Candidate[],
+    state: WorldState,
+    log = true,
+  ): Candidate[] {
+    return ledgers.filterMoveCandidates(this.ledgersHost, candidates, state, log)
   }
 
   private rememberMoveTarget(candidate: Candidate): void {

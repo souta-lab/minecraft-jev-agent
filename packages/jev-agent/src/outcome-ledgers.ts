@@ -583,6 +583,54 @@ export function noteRepeatedOutcome(
 }
 
 /**
+ * #8: drop movement targets whose coordinate the failure memory currently
+ * suppresses (failure-limit cooldown or a still-valid path-scoped NO_PATH).
+ *
+ * The write side charges every mechanical move failure (`recordMoveFailure`,
+ * guard-level `guardMoveFailureReason`) but the consume side was orphaned when
+ * the pre-V4.1.2 selector machinery was removed - measured portal-p19.5: one
+ * death-zone exit committed `MOVE:dangerzone:p-3_57_17` and ended
+ * `terminalReason=blocked failure=NO_PATH progress=none` 261 times in a row
+ * while every escalation bound stayed blind (not a WAIT, not a counted typed
+ * failure streak, no body progress, non-empty envelope). Withholding the
+ * refused target is a CAN/SAFE fact identical in kind to the death-zone
+ * blacklist: it never ranks or substitutes a semantic alternative, and an
+ * emptied envelope is exactly the starvation evidence the bounded
+ * `localRecoveryExhausted` path already owns.
+ */
+export function filterMoveCandidates(
+  host: OutcomeLedgersHost,
+  candidates: readonly Candidate[],
+  state: WorldState,
+  log = true,
+): Candidate[] {
+  const dimension = state.self.dimension
+  const { kept, skipped } = filterBlacklistedMoves(
+    candidates,
+    host.moveFailMemory,
+    dimension,
+    movePathFailureScope(host, state),
+  )
+  if (!log) return kept
+  for (const entry of skipped) {
+    host.logger.warn(
+      'agent',
+      formatMoveTargetSkipped(entry.key, entry.attempts, entry.cooldownSeconds),
+      {
+        actionId: entry.candidate.id,
+        key: entry.key,
+        attempts: entry.attempts,
+        cooldown: entry.cooldownSeconds,
+        reason: entry.reason,
+        consequence: 'withheld_from_offer',
+      },
+      host.tickCounter,
+    )
+  }
+  return kept
+}
+
+/**
  * The consequence of the cross-action bound: an `(action shape, cell)` proven
  * unable to progress there leaves the offered set, which forces the offer onto
  * a different target - the bounded relocation. Same mechanical-invalidity shape
