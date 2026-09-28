@@ -346,7 +346,7 @@ export function logThreatOccluded(host: ThreatObserverHost, offer: ThreatOffer):
       host.lastThreatOccludedLine = null
       return
     }
-    const line = formatThreatOccluded(host.currentGoalKey(), offer.threat, offer.occluded.entityIds)
+    const line = formatThreatOccluded(host.currentGoalKey(), offer.threat, offer.occluded.entityIds, offer.occluded.reason)
     if (line === host.lastThreatOccludedLine) return
     host.lastThreatOccludedLine = line
     host.logger.info(

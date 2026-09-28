@@ -126,6 +126,7 @@ import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorCraftTarget, ArmorRefusal
 import {
   activeThreats,
   bodySurvivalFacts,
+  isRangedThreatName,
   isResponseWorthyThreat,
   MELEE_THREAT_REACH,
   selectKeepDistanceSpots,
@@ -609,17 +610,19 @@ export interface ThreatOffer {
   /** code grounded no attack and no keep-distance route under threat */
   gap: { reason: string } | null
   /**
-   * Current danger-radius hostiles are all occluded and have no melee path. The
+   * Current danger-radius hostiles are all occluded and have no melee path - or
+   * are melee-only watchers whose approach is proven unreachable. The
    * conservative tracker remains active, but this snapshot does not suppress
-   * goal work solely because Euclidean distance is small through sealed terrain.
+   * goal work solely because Euclidean distance is small through sealed terrain
+   * or a sightline the hostile cannot act on.
    */
-  occluded: { reason: 'no_los_no_path'; entityIds: number[] } | null
+  occluded: { reason: 'no_los_no_path' | 'unreachable_melee'; entityIds: number[] } | null
 }
 
 function occludedThreatBypass(
   state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
   facts: ThreatRestrictionFacts,
-): { reason: 'no_los_no_path'; entityIds: number[] } | null {
+): { reason: 'no_los_no_path' | 'unreachable_melee'; entityIds: number[] } | null {
   const threat = state.signals?.threat ?? null
   const unreachable = facts.unreachableThreatEntityIds ?? new Set<number>()
   if (threat === null || threat.active !== true || unreachable.size === 0) return null
@@ -632,15 +635,25 @@ function occludedThreatBypass(
     (entity) => entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
   )
   if (nearby.length === 0) return null // lingering clear-state hysteresis stays unchanged
-  const allOccludedAndUnreachable = nearby.every(
-    (entity) =>
-      entity.distance > IMMEDIATE_HOSTILE_RANGE &&
-      entity.attackedSelf !== true &&
-      entity.lineOfSight === false &&
-      unreachable.has(entity.id),
-  )
-  if (!allOccludedAndUnreachable) return null
-  return { reason: 'no_los_no_path', entityIds: nearby.map((entity) => entity.id).sort((a, b) => a - b) }
+  // A hostile can hold the bypass when current CAN proves its melee approach is
+  // not groundable AND it cannot hurt the body from where it stands:
+  //   - no line of sight (the original arm), or
+  //   - line of sight but melee-only - seeing the body does not close the gap,
+  //     and a watcher that can never arrive cannot damage it. A RANGED hostile
+  //     still answers LOS with a projectile, so its sightline keeps suppressing.
+  // Live p18.1: a creeper at 5.46m below the body's ledge (los=true, approach
+  // proven no_attack_stand -> unreachable) held the danger envelope armed for
+  // ~17 minutes of ESCALATE-only churn; the mob never landed a hit because it
+  // mechanically could not reach the body.
+  const harmless = (entity: (typeof nearby)[number]): boolean =>
+    entity.distance > IMMEDIATE_HOSTILE_RANGE &&
+    entity.attackedSelf !== true &&
+    unreachable.has(entity.id) &&
+    (entity.lineOfSight === false ||
+      (entity.lineOfSight === true && !isRangedThreatName(entity.name)))
+  if (!nearby.every(harmless)) return null
+  const reason = nearby.every((entity) => entity.lineOfSight === false) ? 'no_los_no_path' : 'unreachable_melee'
+  return { reason, entityIds: nearby.map((entity) => entity.id).sort((a, b) => a - b) }
 }
 
 /**

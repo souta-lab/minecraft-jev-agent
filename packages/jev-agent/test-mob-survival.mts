@@ -493,6 +493,55 @@ addCase('(c1h) one additional danger-radius hostile without a no-path proof prev
   return { pass, detail: `proofs=[53966] hostiles=[53966,53967] offered=[${ids(offer.candidates).join(',')}]` }
 })
 
+addCase('(c1i) a melee-only watcher whose approach is proven no_path does not suppress work', () => {
+  // Live p18.1: creeper at 5.46m with lineOfSight=true and a proven-unreachable
+  // melee approach held the danger envelope armed ~17min (ESCALATE-only churn)
+  // while mechanically unable to ever reach the body's ledge.
+  const state = bodyState([hostile(53970, 'creeper', { x: 5.5, y: 10, z: 0.5 }, { lineOfSight: true })])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_11_0', kind: 'MINE', label: 'work', targetName: 'stone', target: { x: 0, y: 11, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set([53970]) })
+  const pass =
+    offer.occluded?.reason === 'unreachable_melee' &&
+    offer.restricted === false &&
+    offer.gap === null &&
+    offer.candidates.length === 1 &&
+    offer.candidates[0]?.id === work.id
+  return { pass, detail: `occluded=${offer.occluded?.reason ?? 'none'} offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1j) LOS=true still suppresses for a melee watcher with NO unreachable proof', () => {
+  // Sight alone is not the release: without the no_path/no_attack_stand proof a
+  // visible hostile may simply not have been evaluated yet, so the envelope stays.
+  const state = bodyState([hostile(53971, 'creeper', { x: 5.5, y: 10, z: 0.5 }, { lineOfSight: true })])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_11_0', kind: 'MINE', label: 'work', targetName: 'stone', target: { x: 0, y: 11, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set() })
+  const pass = offer.occluded === null && offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE'
+  return { pass, detail: `occluded=${offer.occluded?.reason ?? 'none'} offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1k) one reachable watcher keeps the suppression even beside a proven-unreachable one', () => {
+  const state = bodyState([
+    hostile(53972, 'creeper', { x: 5.5, y: 10, z: 0.5 }, { lineOfSight: true }),
+    hostile(53973, 'zombie', { x: 6.5, y: 10, z: 0.5 }, { lineOfSight: true }),
+  ])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_11_0', kind: 'MINE', label: 'work', targetName: 'stone', target: { x: 0, y: 11, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set([53972]) })
+  const pass = offer.occluded === null && offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE' && !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `proofs=[53972] hostiles=[53972,53973] offered=[${ids(offer.candidates).join(',')}]` }
+})
+
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {
   const starving = bodyState([hostile(16, 'zombie', { x: 6, y: 10, z: 0.5 })])
   starving.self = { ...starving.self, food: 0 }

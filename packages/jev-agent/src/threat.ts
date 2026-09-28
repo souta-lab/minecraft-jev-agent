@@ -443,6 +443,30 @@ export function weaponFacts(held: string | null | undefined): WeaponFacts {
 }
 
 /**
+ * Hostiles whose attack travels: they can hurt the body across a sightline they
+ * could never walk. For every OTHER hostile, line of sight without a melee
+ * path is observation only - it cannot close the distance, so it cannot damage
+ * the body, and it must not hold the danger envelope armed by sight alone.
+ */
+const RANGED_THREAT_NAMES = new Set([
+  'skeleton',
+  'stray',
+  'bogged',
+  'pillager',
+  'witch',
+  'blaze',
+  'ghast',
+  'phantom',
+  'llama',
+  'trader_llama',
+])
+
+/** Whether this hostile's attack works at range (projectile/spell), not melee. */
+export function isRangedThreatName(name: string): boolean {
+  return RANGED_THREAT_NAMES.has(name.toLowerCase())
+}
+
+/**
  * Bounded standoff range per hostile family. A creeper must be answered from
  * further out than a zombie (blast vs melee), and a ranged attacker outranges
  * any local walk, so its standoff is the bow envelope.
@@ -450,20 +474,7 @@ export function weaponFacts(held: string | null | undefined): WeaponFacts {
 export function threatStandoffRange(name: string): number {
   const mob = name.toLowerCase()
   if (mob === 'creeper') return 6
-  if (
-    mob === 'skeleton' ||
-    mob === 'stray' ||
-    mob === 'bogged' ||
-    mob === 'pillager' ||
-    mob === 'witch' ||
-    mob === 'blaze' ||
-    mob === 'ghast' ||
-    mob === 'phantom' ||
-    mob === 'llama' ||
-    mob === 'trader_llama'
-  ) {
-    return 12
-  }
+  if (isRangedThreatName(mob)) return 12
   return THREAT_STANDOFF_RANGE
 }
 
@@ -714,21 +725,24 @@ export function formatThreatNearby(
 
 /**
  * The conservative distance tracker sees a hostile, but current CAN proves every
- * danger-radius hostile is behind occlusion with no melee route and there was no
- * recent hit. Work may continue for THIS snapshot; the tracker is intentionally
- * left active so LOS/path/contact becoming true re-arms survival immediately.
+ * danger-radius hostile is behind occlusion with no melee route - or is a
+ * melee-only hostile whose approach is proven no_path even though it can see the
+ * body - and there was no recent hit. Work may continue for THIS snapshot; the
+ * tracker is intentionally left active so LOS/path/contact becoming true re-arms
+ * survival immediately.
  */
 export function formatThreatOccluded(
   goalKey: string,
   evidence: ThreatStateEvidence,
   entityIds: readonly number[],
+  reason: string = 'no_los_no_path',
 ): string {
   const name = evidence.threatName ?? 'unknown'
   const distance = evidence.threatDistance === null ? 'unknown' : `${round2(evidence.threatDistance)}m`
   return (
     `${THREAT_OCCLUDED} goal=${goalKey} threat=${name} ids=[${entityIds.join(',')}] distance=${distance} ` +
     `los=${evidence.threatLineOfSight === null ? 'unknown' : evidence.threatLineOfSight} engaged=${evidence.threatEngaged} ` +
-    `reason=no_los_no_path -> threat memory stays active, but this snapshot does not suppress grounded goal work`
+    `reason=${reason} -> threat memory stays active, but this snapshot does not suppress grounded goal work`
   )
 }
 
