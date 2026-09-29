@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { writeActiveRunRegistry } from './capability-run.mjs'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -22,8 +23,10 @@ const {
   extractTerminatingMarkers,
   isHealthyRun,
   parseArgs,
+  parseGenerationReadyLine,
   parseResidentProcessLines,
   preflight,
+  syncActiveRunRegistryOnReady,
 } = await import('./resident-supervisor.mjs')
 
 const tmp = mkdtempSync(join(tmpdir(), 'resident-supervisor-'))
@@ -183,6 +186,45 @@ try {
   assert.equal(args.baseDelayMs, 5)
   assert.equal(args.driverDir, join('/x', 'packages/buddy-driver'))
   assert.equal(args.childScript, join('/x', 'packages/buddy-driver', 'agent-runner.mts'))
+  assert.equal(args.registryPath, join('/x', 'runs', 'capability-campaign', 'active-run.json'))
+  checks++
+
+  // ---- GENERATION_READY atomically transfers active-run ownership ---------
+  const rootRegistry = makeRoot('root-registry')
+  const driverRegistry = join(rootRegistry, 'packages/buddy-driver')
+  const registryDir = join(rootRegistry, 'runs', 'capability-campaign')
+  mkdirSync(registryDir, { recursive: true })
+  const registryPath = join(registryDir, 'active-run.json')
+  const sourceSha = 'a'.repeat(40)
+  writeActiveRunRegistry({
+    record: 'capability-active-run', schemaVersion: 1, status: 'active',
+    runId: 'portal-test', runDir: join(registryDir, 'runs/portal-test'),
+    claimToken: 'portal-test#old', activeMinor: 'portal-test.9', segmentId: 'portal-test.9',
+    runtimeDir: driverRegistry, runnerPid: 10, residentPid: 20,
+    internalRunId: 'run-old', activeGenerationId: 'gen-old',
+    sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: sourceSha,
+  }, registryPath)
+  const ready = parseGenerationReadyLine(`[t] GENERATION_READY runId=run-new id=gen-new sourceSha=${sourceSha} buildHash=abc`)
+  assert.deepEqual(ready, { runId: 'run-new', generationId: 'gen-new', sourceSha })
+  const synced = syncActiveRunRegistryOnReady({
+    registryPath, driverDir: driverRegistry, childPid: 222, supervisorPid: 111, ready,
+  })
+  assert.equal(synced.status, 'updated')
+  assert.equal(synced.residentRestart, true)
+  const storedRegistry = JSON.parse(readFileSync(registryPath, 'utf8'))
+  assert.equal(storedRegistry.runnerPid, 111)
+  assert.equal(storedRegistry.supervisorPid, 111)
+  assert.equal(storedRegistry.residentPid, 222)
+  assert.equal(storedRegistry.internalRunId, 'run-new')
+  assert.equal(storedRegistry.activeGenerationId, 'gen-new')
+  assert.equal(storedRegistry.boundary, 'resident-restart')
+  assert.equal(storedRegistry.activeMinor, 'portal-test.9', 'minor identity must survive supervisor restart')
+  const mismatch = syncActiveRunRegistryOnReady({
+    registryPath, driverDir: driverRegistry, childPid: 333, supervisorPid: 111,
+    ready: { runId: 'run-wrong', generationId: 'gen-wrong', sourceSha: 'b'.repeat(40) },
+  })
+  assert.deepEqual(mismatch, { status: 'skipped', reason: 'source-sha-mismatch' })
+  assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).residentPid, 222, 'mismatched generation must not rewrite registry')
   checks++
 
   // ---- restart on transient exit, then clean stop -------------------------

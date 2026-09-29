@@ -64,6 +64,7 @@ import {
 } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { updateActiveRunMinor } from './capability-run.mjs'
 
 export const SCHEMA_VERSION = 1
 
@@ -106,6 +107,8 @@ export const DEFAULTS = {
   dryRun: false,
   status: false,
   help: false,
+  registrySync: true,
+  registryPath: null,
 }
 
 // Terminating / diagnostic marker lines we must never lose. `FATAL` and the
@@ -314,6 +317,9 @@ Options:
                         advanced/testing only: the default is the real resident)
   --artifact-dir PATH   where run-scoped artifacts go (default <driver-dir>/data/supervisor)
   --log PATH            also append supervisor lifecycle lines to PATH
+  --registry PATH       active-run registry to sync after child GENERATION_READY
+                        (default <root>/runs/capability-campaign/active-run.json)
+  --no-registry-sync    disable campaign registry ownership/PID sync
   --no-preflight        skip the "resident already running" guard (UNSAFE; tests only)
   --status              read-only: report whether a resident is running, then exit
   --dry-run             run preflight, print the plan, spawn nothing
@@ -344,6 +350,7 @@ export function parseArgs(argv) {
     else if (a === '--dry-run') opts.dryRun = true
     else if (a === '--json') opts.json = true
     else if (a === '--no-preflight') opts.preflight = false
+    else if (a === '--no-registry-sync') opts.registrySync = false
     else if (a === '--max-restarts') opts.maxRestarts = num(a, next())
     else if (a === '--base-delay-ms') opts.baseDelayMs = num(a, next())
     else if (a === '--max-delay-ms') opts.maxDelayMs = num(a, next())
@@ -355,12 +362,14 @@ export function parseArgs(argv) {
     else if (a === '--child-script') opts.childScript = next()
     else if (a === '--artifact-dir') opts.artifactDir = next()
     else if (a === '--log') opts.log = next()
+    else if (a === '--registry') opts.registryPath = next()
     else if (a.startsWith('-')) throw new Error(`unknown flag: ${a}`)
     else opts._.push(a)
   }
   opts.driverDir = opts.driverDir ?? path.join(opts.root, 'packages/buddy-driver')
   opts.childScript = opts.childScript ?? path.join(opts.driverDir, 'agent-runner.mts')
   opts.artifactDir = opts.artifactDir ?? path.join(opts.driverDir, 'data', 'supervisor')
+  opts.registryPath = opts.registryPath ?? path.join(opts.root, 'runs', 'capability-campaign', 'active-run.json')
   if (opts.maxDelayMs < opts.baseDelayMs) opts.maxDelayMs = opts.baseDelayMs
   return opts
 }
@@ -387,6 +396,78 @@ function appendJsonl(file, record) {
   appendFileSync(file, `${JSON.stringify(record)}\n`)
 }
 
+/** Parse the resident's authoritative generation-ready provenance line. */
+export function parseGenerationReadyLine(line) {
+  if (typeof line !== 'string' || !line.includes('GENERATION_READY')) return null
+  const field = (name) => line.match(new RegExp(`${name}=(\\S+)`, 'u'))?.[1] ?? null
+  const runId = field('runId')
+  const generationId = field('id') ?? field('generationId')
+  const sourceSha = field('sourceSha')
+  if (runId === null || generationId === null || sourceSha === null) return null
+  return { runId, generationId, sourceSha }
+}
+
+function sameResolvedPath(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const resolveOne = (value) => {
+    try { return realpathSync(value) } catch { return path.resolve(value) }
+  }
+  return resolveOne(a) === resolveOne(b)
+}
+
+/**
+ * Transfer active-run lifecycle ownership to this supervisor/resident pair after
+ * the new child proves its generation identity. This is intentionally keyed by
+ * runtimeDir + sourceSha so a stale or unrelated supervisor cannot rewrite the
+ * active campaign record.
+ */
+export function syncActiveRunRegistryOnReady({
+  registryPath,
+  driverDir,
+  childPid,
+  supervisorPid = process.pid,
+  ready,
+  updater = updateActiveRunMinor,
+} = {}) {
+  if (typeof registryPath !== 'string' || !existsSync(registryPath)) return { status: 'skipped', reason: 'registry-missing' }
+  if (!Number.isInteger(childPid) || childPid <= 0) return { status: 'skipped', reason: 'invalid-child-pid' }
+  if (!Number.isInteger(supervisorPid) || supervisorPid <= 0) return { status: 'skipped', reason: 'invalid-supervisor-pid' }
+  if (ready === null || typeof ready !== 'object') return { status: 'skipped', reason: 'generation-ready-missing' }
+
+  let current
+  try { current = JSON.parse(readFileSync(registryPath, 'utf8')) } catch { return { status: 'skipped', reason: 'registry-unreadable' } }
+  if (current?.record !== 'capability-active-run' || current.status !== 'active') return { status: 'skipped', reason: 'registry-not-active' }
+  if (!sameResolvedPath(current.runtimeDir, driverDir)) return { status: 'skipped', reason: 'runtime-dir-mismatch' }
+  if (typeof current.generationSourceSha === 'string' && current.generationSourceSha !== ready.sourceSha) {
+    return { status: 'skipped', reason: 'source-sha-mismatch' }
+  }
+
+  const residentRestart = current.residentPid !== childPid || current.internalRunId !== ready.runId
+  const fields = {
+    runnerPid: supervisorPid,
+    supervisorPid,
+    residentPid: childPid,
+    internalRunId: ready.runId,
+    activeGenerationId: ready.generationId,
+  }
+  if (residentRestart) {
+    fields.boundary = 'resident-restart'
+    fields.hostBootSha = ready.sourceSha
+  }
+  const next = updater(fields, registryPath)
+  return {
+    status: 'updated',
+    residentRestart,
+    runId: next.runId,
+    activeMinor: next.activeMinor,
+    runnerPid: next.runnerPid,
+    residentPid: next.residentPid,
+    internalRunId: next.internalRunId,
+    generationId: next.activeGenerationId,
+    sourceSha: next.generationSourceSha,
+  }
+}
+
 function humanize(record) {
   switch (record.type) {
     case 'supervisor_start':
@@ -400,6 +481,8 @@ function humanize(record) {
         : `SUPERVISOR_FAILURE attempt=${record.attempt} exitCode=${record.exitCode} signal=${record.signal} uptimeMs=${record.uptimeMs} classification=${record.classification} reason=${record.reason} markers=${record.markers.length}`
     case 'restart_scheduled':
       return `SUPERVISOR_RETRY nextAttempt=${record.nextAttempt} inMs=${record.delayMs} consecutiveFailures=${record.consecutiveFailures}`
+    case 'registry_sync':
+      return `SUPERVISOR_REGISTRY_SYNC status=${record.status} reason=${record.reason ?? 'none'} runnerPid=${record.runnerPid ?? 'none'} residentPid=${record.residentPid ?? 'none'} generationId=${record.generationId ?? 'none'}`
     case 'supervisor_stop':
       return `SUPERVISOR_STOP reason=${record.reason} exitCode=${record.exitCode} restarts=${record.restarts} failures=${record.failures}`
     default:
@@ -540,9 +623,33 @@ export async function supervise(options, deps = {}) {
       // Preserve the resident's own logs on the supervisor's streams while keeping
       // a bounded ring of lines for marker extraction.
       const captured = []
+      let registrySyncAttempted = false
       const onLine = (line) => {
         captured.push(line)
         if (captured.length > MAX_CAPTURED_LINES) captured.shift()
+        if (options.registrySync && !registrySyncAttempted) {
+          const ready = parseGenerationReadyLine(line)
+          if (ready !== null) {
+            registrySyncAttempted = true
+            try {
+              const synced = syncActiveRunRegistryOnReady({
+                registryPath: options.registryPath,
+                driverDir: options.driverDir,
+                childPid: child.pid,
+                supervisorPid: process.pid,
+                ready,
+              })
+              emit({ type: 'registry_sync', at: new Date().toISOString(), ...synced })
+            } catch (error) {
+              emit({
+                type: 'registry_sync',
+                at: new Date().toISOString(),
+                status: 'error',
+                reason: error instanceof Error ? error.message : String(error),
+              })
+            }
+          }
+        }
       }
       const pumps = [
         pump(child.stdout, onLine, out),
