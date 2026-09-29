@@ -2823,6 +2823,17 @@ export class JevController {
         this.portalEntryPlan(freshState),
         this.placementRetries.retiredItemSet(),
       )
+      // Same stranded-body gate inputs as the decision-time offer (see the
+      // `suppressedCandidateIds` projection in the offer build): without it the
+      // fresh generation counts candidates that every tick is suppressed
+      // downstream (blacklist/reachability/repeated-outcome) as usable
+      // locomotion, so the last-resort arms (ASCEND:escape, SWIM:exit, bounded
+      // down-step) never fire in the revalidation set. A committed escape then
+      // "vanishes" between the Jev answer and execution on EVERY tick while the
+      // decision offer keeps offering it - measured portal-p21.2 tail:
+      // `SURVIVAL_NO_GROUNDED_ACTION ... CAPABILITY_LOST` ~0.5 Hz on
+      // `SWIM:exit:p17_63_-1`/`ASCEND:escape:*` in the flooded pocket.
+      freshOptions.suppressedCandidateIds = this.suppressedCandidateIds
       const freshGrounded = generateGroundedCandidates(freshState, freshOptions)
       // The revalidation offer must be built the same way the decision-time
       // offer was: the legacy-reach kill switch and the repeated-outcome prune

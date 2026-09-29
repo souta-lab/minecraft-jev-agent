@@ -380,6 +380,28 @@ addCase('offer seam: no measured stall -> the water arm stays gated off', () => 
   return { pass: swim.length === 0, detail: `swim=[${swim.map((c) => c.id).join(' ')}]` }
 })
 
+// portal-p21.2 regression: the controller's fresh revalidation offer must pass
+// `suppressedCandidateIds` (the ids generated last tick but pruned before
+// presentation) into generation. Without it, a phantom dry route that every
+// tick is suppressed downstream still counted as usable locomotion here, the
+// swim arm never fired in the fresh set, and a committed SWIM:exit vanished
+// between the Jev answer and execution on every tick (`CAPABILITY_LOST` loop).
+addCase('offer seam: suppressed dry locomotion does not gate the water arm off', () => {
+  const state = trappedState([ROUTE], {}, 60_000)
+  const base = generateCandidates(state, zoneOptions)
+  const dryIds = base.filter((c) => c.id.startsWith('MOVE:dangerzone:')).map((c) => c.id)
+  const suppressed = {
+    ...zoneOptions,
+    suppressedCandidateIds: new Set(dryIds),
+  }
+  const offered = generateCandidates(state, suppressed)
+  const swim = offered.filter((c) => c.id.startsWith('SWIM:exit:'))
+  return {
+    pass: dryIds.length > 0 && swim.length === 1 && swim[0]?.id === 'SWIM:exit:p4_0_0',
+    detail: `suppressed=[${dryIds.join(' ')}] swim=[${swim.map((c) => c.id).join(' ')}]`,
+  }
+})
+
 // A grounded candidate comes from the production serializer - meta scalars
 // only. Any hand-injected array shape must fail closed in the parser, and the
 // real candidate must parse back to the exact witness.
