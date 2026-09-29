@@ -52,6 +52,7 @@ import {
   JEV_PROJECTION_VERSION,
   JevDecisionEpochs,
   airBand,
+  dayPhase,
   mandatoryPolicyBoundary,
   meaningfulEventKinds,
   policyBoundary,
@@ -119,7 +120,7 @@ function projectionInput(overrides: Partial<SemanticProjectionInput> = {}): Sema
     goal: { key: 'collect:flint:1', targetItem: 'flint', have: 0, required: 1, complete: false, progress: 0 },
     option: { instanceId: 'option:enter_portal#1', templateId: 'enter_portal', skillKind: 'ENTER_PORTAL', targetKey: 'portal@26,67,9' },
     world: { dimension: OVERWORLD, worldEpoch: 7, generationId: 'g1', leaseHeld: true, alive: true },
-    safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', dayPhase: 'day', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
     progress: {
       consecutiveFailures: 0,
       lastFailureCode: null,
@@ -278,14 +279,14 @@ addCase('(0) air bands share the sensor scale, reject invalid readings, and use 
   const unknown = [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, MAX_AIR + 1, 300]
     .map((value) => airBand(observedAir(value)))
   const dryFull = buildJevSemanticProjection(projectionInput({
-    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(MAX_AIR), dayPhase: 'day', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
   }))
   const underwaterLow = buildJevSemanticProjection(projectionInput({
-    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(LOW_AIR_LEVEL), submerged: true, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(LOW_AIR_LEVEL), dayPhase: 'day', submerged: true, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
   }))
   const boundaryHashes = values.map((value) => {
     const projection = buildJevSemanticProjection(projectionInput({
-      safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(value), submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
+      safety: { healthBand: 'healthy', foodBand: 'full', airBand: airBand(value), dayPhase: 'day', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
     }))
     return projectionHash(projection)
   })
@@ -299,6 +300,28 @@ addCase('(0) air bands share the sensor scale, reject invalid readings, and use 
     boundaryHashes[0] === boundaryHashes[1] &&
     new Set(boundaryHashes).size === 3
   return { pass, detail: `scale=0..${MAX_AIR} threshold=${LOW_AIR_LEVEL} bands=${JSON.stringify(bands)} invalidNormalized=${JSON.stringify(unknown)} boundaryHashes=${JSON.stringify(boundaryHashes)} controllerNormalizes=${SRC_CONTROLLER.includes('airBand(observedAir(state.self.air))')} dryFull=${dryFull.safety.airBand}/${dryFull.safety.submerged} underwaterLow=${underwaterLow.safety.airBand}/${underwaterLow.safety.submerged}` }
+})
+
+addCase('(0b) dayPhase bands the day tick, keeps night without ticks, and never invents daylight', () => {
+  const day = [0, 6000, 10499].map((t) => dayPhase(true, t))
+  const dusk = [10500, 12000, 12541].map((t) => dayPhase(true, t))
+  const night = [dayPhase(false, 13000), dayPhase(false, null), dayPhase(false, undefined)]
+  const unknown = [dayPhase(null, 0), dayPhase(undefined, 0)]
+  const noTicksDay = dayPhase(true, null)
+  const dayHash = projectionHash(buildJevSemanticProjection(projectionInput({
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', dayPhase: 'day', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
+  })))
+  const nightHash = projectionHash(buildJevSemanticProjection(projectionInput({
+    safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', dayPhase: 'night', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
+  })))
+  const pass =
+    day.every((band) => band === 'day') &&
+    dusk.every((band) => band === 'dusk') &&
+    night.every((band) => band === 'night') &&
+    unknown.every((band) => band === 'unknown') &&
+    noTicksDay === 'day' &&
+    dayHash !== nightHash
+  return { pass, detail: `day=${JSON.stringify(day)} dusk=${JSON.stringify(dusk)} night=${JSON.stringify(night)} unknown=${JSON.stringify(unknown)} noTicksDay=${noTicksDay} phaseChangesEpoch=${dayHash !== nightHash}` }
 })
 
 // ---------------------------------------------------------------------------
@@ -881,7 +904,7 @@ addCase('(12) a meaningful Option/progress/failure/safety change changes the key
   const safety = buildJevSemanticProjection(
     projectionInput({
       candidates: [walkToPortalLeg('26,67,10')],
-      safety: { healthBand: 'critical', foodBand: 'starving', airBand: 'critical', submerged: true, threatKey: 'zombie:1:true', criticalDamageKey: 'collect:flint:1:3:zombie', lastDamageKey: 'e33467', wornArmor: null, offhand: null },
+      safety: { healthBand: 'critical', foodBand: 'starving', airBand: 'critical', dayPhase: 'night', submerged: true, threatKey: 'zombie:1:true', criticalDamageKey: 'collect:flint:1:3:zombie', lastDamageKey: 'e33467', wornArmor: null, offhand: null },
     }),
   )
   const hashes = [base, option, progress, safety].map((projection) => projectionHash(projection))

@@ -528,6 +528,12 @@ export type SelfState = {
   gameMode: string
   dimension: string
   isDay: boolean
+  /**
+   * Vanilla day tick (0..23999) when the client exposes it. Optional so pure
+   * fixtures that predate day-phase visibility need not restate it; consumers
+   * treat absent/null as "phase not observed" and never promote it to day.
+   */
+  timeOfDay?: number | null
   heldItem: HeldItemState | null
   /** Offhand window slot 45; undefined means this client/version did not expose it. */
   offhand?: OffhandState | null
@@ -2231,6 +2237,7 @@ function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazard
     gameMode: bot.game.gameMode,
     dimension: bot.game.dimension,
     isDay: bot.time.isDay,
+    timeOfDay: typeof bot.time.timeOfDay === 'number' ? bot.time.timeOfDay : null,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
     ...(offhand === undefined ? {} : { offhand }),
     activeItemUse,

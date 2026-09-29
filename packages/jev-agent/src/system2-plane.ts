@@ -12,7 +12,7 @@ import type { Executor } from './executor.ts'
 import { failureCount } from './failureMemory.ts'
 import type { GoalQueue, GoalQueueSnapshot, HeadAnswerWarrant, PlannedGoal, PlanOp, QueuedGoal } from './goalQueue.ts'
 import type { EventLogger } from './jev.ts'
-import { airBand, buildJevSemanticProjection, buildSemanticCombatFacts, diffSemanticProjections, foodBand, healthBand, semanticOffhand, semanticWornArmor, threatBand } from './jev/semantic-projection.ts'
+import { airBand, buildJevSemanticProjection, buildSemanticCombatFacts, dayPhase, diffSemanticProjections, foodBand, healthBand, semanticOffhand, semanticWornArmor, threatBand } from './jev/semantic-projection.ts'
 import type { GroundedFact, JevSemanticProjection, PreviousDecisionFacts, SemanticProgressFacts, SkillOutcomePacket } from './jev/semantic-projection.ts'
 import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
 import type { OptionWorldSnapshot } from './optionSpec.ts'
@@ -261,6 +261,11 @@ export function buildSemanticProjection(host: System2PlaneHost,
       healthBand: healthBand(state.self.health),
       foodBand: foodBand(state.self.food),
       airBand: airBand(observedAir(state.self.air)),
+      // Day phase is Jev-decision context only (a crossing opens a cheap
+      // re-decision epoch); it is deliberately absent from the survival
+      // fingerprint below - an underground plan must not die because the sun
+      // set (the fingerprint churn incidents measured in p3/p17 are why).
+      dayPhase: dayPhase(state.self.isDay, state.self.timeOfDay),
       submerged:
         state.self.feetInWater === undefined && state.self.eyesInWater === undefined
           ? null

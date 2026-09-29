@@ -744,6 +744,13 @@ export interface SemanticSafetyFacts {
   airBand: string
   /** the body is in water (a hard safety envelope the candidate layer restricts on) */
   submerged: boolean | null
+  /**
+   * Banded day phase (`day`/`dusk`/`night`/`unknown`): hostile surface spawn is
+   * a darkness fact, so the phase is a hard safety condition the model cannot
+   * otherwise see until a hostile is already inside the threat radius. `dusk`
+   * gives the tail of `isDay` (~last 2000 ticks) as an anticipation window.
+   */
+  dayPhase: string
   /** bounded danger state from the threat tracker */
   threatKey: string | null
   criticalDamageKey: string | null
@@ -1230,6 +1237,20 @@ export function healthBand(health: number): string {
 
 export function foodBand(food: number): string {
   return bandFood(food)
+}
+
+/**
+ * Missing day-phase facts mean "not observed" -> `unknown`; never promoted to
+ * `day`. Vanilla ticks: `isDay` covers ~0..12541; the `dusk` band is the
+ * isDay tail (>=10500, ~100s of real warning) so the model can stop starting
+ * exposed surface work right before darkness. `timeOfDay` absent -> fall back
+ * to the binary `isDay` flag (`night` still observable without ticks).
+ */
+export function dayPhase(isDay: boolean | null | undefined, timeOfDay: number | null | undefined): string {
+  if (isDay === null || isDay === undefined) return 'unknown'
+  if (!isDay) return 'night'
+  if (typeof timeOfDay === 'number' && Number.isFinite(timeOfDay) && timeOfDay >= 10500) return 'dusk'
+  return 'day'
 }
 
 /** Missing/null air means "not observed"; bands use the sensor's 0..MAX_AIR scale. */

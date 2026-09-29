@@ -96,6 +96,7 @@ function selfAirProjection(state: WorldState) {
       healthBand: healthBand(state.self.health),
       foodBand: foodBand(state.self.food),
       airBand: airBand(state.self.air),
+      dayPhase: 'day',
       submerged: state.self.feetInWater === true || state.self.eyesInWater === true,
       threatKey: null,
       criticalDamageKey: null,
