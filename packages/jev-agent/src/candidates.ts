@@ -895,7 +895,16 @@ export function restrictCandidatesDuringSubmersion(
         (candidate.kind === 'MOVE' &&
           (candidate.meta.submersionEscape === true ||
             candidate.meta.surfaceAscent === true ||
-            candidate.meta.swimRoute === true)),
+            candidate.meta.swimRoute === true ||
+            // The sealed-pocket escape (`ASCEND:escape:*`) is the same
+            // survival-escape family `isDeathZoneEscapeRoute` /
+            // `isSurvivalEscapeChoice` already recognize: an upward MOVE that
+            // can end the submersion. Omitting it made a committed escape
+            // vanish from every fresh offer while drowned-adjacent - the tick
+            // ended CAPABILITY_LOST and the route could neither run nor accrue
+            // a mechanical failure to retire on (measured portal-p21, air
+            // unknown + eyes wet under a flooded pocket, ~0.5 Hz livelock).
+            candidate.meta.escapeAscent === true)),
     )
     if (ascent.length > 0) return ascent
     const escalation = candidates.find((candidate) => candidate.kind === 'ESCALATE')

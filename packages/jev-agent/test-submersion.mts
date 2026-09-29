@@ -762,7 +762,8 @@ function makeLogger(): {
     hasStandableAdjacent: true,
     meta: {
       tick: 1,
-      ...(id.startsWith('ASCEND:') ? { submersionEscape: true, surfaceAscent: true } : {}),
+      ...(id.startsWith('ASCEND:escape:') ? { escapeAscent: true } : {}),
+      ...(id.startsWith('ASCEND:surface:') ? { submersionEscape: true, surfaceAscent: true } : {}),
     },
   })
   const all = [
@@ -771,6 +772,7 @@ function makeLogger(): {
     candidate('ASCEND:surface:p1_65_0', 'MOVE'),
     candidate('RETREAT:p0_64_0', 'RETREAT'),
     candidate('WAIT', 'WAIT'),
+    candidate('ASCEND:escape:p1_65_0', 'MOVE'),
   ]
   const drowning: Pick<WorldState, 'self'> = {
     self: { ...({} as SelfState), air: 3, feetInWater: true, eyesInWater: true },
@@ -793,19 +795,26 @@ function makeLogger(): {
   const knownSafeKept = restrictCandidatesDuringSubmersion(wetKnownSafe, all).map((entry) => entry.id)
   const unknownWithoutAscent = restrictCandidatesDuringSubmersion(wetUnknownHead, [all[0]!, all[4]!])
   const pass =
-    kept.length === 2 &&
+    kept.length === 3 &&
     kept.includes('ASCEND:surface:p1_65_0') &&
+    kept.includes('ASCEND:escape:p1_65_0') &&
     kept.includes('RETREAT:p0_64_0') &&
     !kept.includes('ATTACK:e7') &&
     !kept.includes('PLACE:furnace:p2_64_0') &&
     untouched.length === all.length &&
     noRescue.length === 3 &&
-    unknownKept.length === 1 && unknownKept[0] === 'ASCEND:surface:p1_65_0' &&
+    unknownKept.length === 2 &&
+    unknownKept.includes('ASCEND:surface:p1_65_0') &&
+    // The sealed-pocket escape ascent is the same survival-escape family the
+    // reground (`isSurvivalEscapeChoice`) and the threat envelope
+    // (`isDeathZoneEscapeRoute`) keep - dropping it at submerged eyes made a
+    // committed escape vanish from every fresh offer (CAPABILITY_LOST loop).
+    unknownKept.includes('ASCEND:escape:p1_65_0') &&
     feetOnlyKept.length === all.length &&
     knownSafeKept.length === all.length &&
     unknownWithoutAscent.length === 1 && unknownWithoutAscent[0]?.kind === 'ESCALATE'
   check(
-    '(c3) low air and unknown breath at submerged eyes remove hold actions; feet-only unknown and known-safe air remain Jev choices',
+    '(c3) low air and unknown breath at submerged eyes remove hold actions; sealed-pocket escape ascent survives; feet-only unknown and known-safe air remain Jev choices',
     pass,
     `low=${kept.join('|')} unknownEyes=${unknownKept.join('|')} feetOnly=${feetOnlyKept.length} ` +
       `known20=${knownSafeKept.length} unknownNoAscent=${unknownWithoutAscent.map((entry) => entry.kind).join('|')} ` +
