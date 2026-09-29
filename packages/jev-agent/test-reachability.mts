@@ -113,6 +113,7 @@ function worldState(overrides: {
   blocks?: BlockState[]
   furnaces?: WorldState['furnaces']
   craftingTables?: WorldState['craftingTables']
+  pillarFootingPlacement?: WorldState['pillarFootingPlacement']
   goal?: GoalState
   goalQueue?: GoalQueueState
 }): WorldState {
@@ -128,6 +129,7 @@ function worldState(overrides: {
     craftingTables: overrides.craftingTables ?? [],
     furnaces: overrides.furnaces ?? [],
     placementSpots: [],
+    ...(overrides.pillarFootingPlacement === undefined ? {} : { pillarFootingPlacement: overrides.pillarFootingPlacement }),
     descent: overrides.descent ?? [],
     stepCuts: overrides.stepCuts ?? [],
     headroomCuts: overrides.headroomCuts ?? [],
@@ -2117,8 +2119,33 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       !keys.includes('ascend_plan'),
     `available=${abilities.ascend.available} missing=[${keys.join(',')}]`,
   )
+  const footingState = worldState({
+    position: { x: 22.7, y: 66, z: 4.5 },
+    inventory: inventory({ dirt: 1 }),
+    standable: [{ x: 23, y: 67, z: 4 }],
+    pillarFootingPlacement: {
+      target: { x: 22, y: 65, z: 4 },
+      reference: { x: 21, y: 65, z: 4 },
+      replacedBlock: 'water',
+    },
+    signals: signals({ knownResources: [KNOWN_LOG] }),
+  })
+  const footingGrounded = generateGroundedCandidates(footingState, optionsWith(null))
+  const footingPlace = footingGrounded.candidates.find((candidate) => candidate.meta.pillarFooting === true)
+  const footingWithheld = footingGrounded.withheld.find((entry) => entry.candidate.id === `RETRIEVE:known:oak_log:b${FAR_ABOVE.x}_${FAR_ABOVE.y}_${FAR_ABOVE.z}`)
   check(
-    '(18b) the typed key never drifts for a legacy bare token, so existing fingerprints are unchanged',
+    '(18b) no-footing ascent exposes a verified PLACE prerequisite when the sensor proves a replaceable under-body cell',
+    footingWithheld?.result.missingCapabilities.some((capability) => capabilityKey(capability).includes('ascend_plan:pillar:no_footing')) === true &&
+      footingPlace?.kind === 'PLACE' &&
+      footingPlace.itemName === 'dirt' &&
+      footingPlace.target?.x === 22 && footingPlace.target?.y === 65 && footingPlace.target?.z === 4 &&
+      footingPlace.meta.capabilityAcquisition === true &&
+      String(footingPlace.meta.missingCapability).includes('ascend_plan:pillar:no_footing'),
+    `place=${footingPlace?.id ?? 'none'} missing=${String(footingPlace?.meta.missingCapability ?? 'none')} withheld=${footingWithheld?.result.reason ?? 'none'}`,
+  )
+
+  check(
+    '(18c) the typed key never drifts for a legacy bare token, so existing fingerprints are unchanged',
     capabilityKey({ kind: 'ascend_plan' }) === 'ascend_plan' &&
       capabilityKey({ kind: 'ascend_plan', plan: null, reason: null, cell: null }) === 'ascend_plan' &&
       capabilityKey({ kind: 'ascend_plan', plan: 'staircase-up', reason: 'plan_unavailable', cell: { x: 22, y: 66, z: 4 } }) ===

@@ -1197,6 +1197,14 @@ export type WorldState = {
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
   /**
+   * Exact under-body cell that can be filled to CREATE load-bearing footing for
+   * a pillar. Separate from `placementSpots`: that generic station/build surface
+   * only admits dry air over existing ground, while this fact deliberately names
+   * the missing-ground case (air/water under the body) and the already-observed
+   * solid reference face that makes one verified PLACE mechanically possible.
+   */
+  pillarFootingPlacement?: { target: Vec3Json; reference: Vec3Json; replacedBlock: string }
+  /**
    * The bounded cardinal forward probes a BRIDGE/scaffold grounding reads: for
    * each of the four horizontal faces, the live truth of the next
    * `BRIDGE_PROBE_DEPTH` columns (open / placeable / supported / standable /
@@ -4308,6 +4316,48 @@ function placementAccessSubmerged(bot: Bot, spot: Vec3Json): boolean {
   return sawStandable
 }
 
+/**
+ * Ground the ONE block placement that turns a floating body column into a real
+ * pillar footing. This is intentionally not part of generic placementSpots:
+ * stations/builds require pre-existing dry ground, while a footing prerequisite
+ * exists specifically because the cell under the body is air/water.
+ *
+ * Positive evidence only: target cell is loaded + replaceable (air or water),
+ * never lava/hazard; and one face-adjacent loaded full block is already present
+ * for Mineflayer's PLACE mechanism. The executor re-resolves that reference and
+ * verifies the placed post-condition, so stale sensor truth fails closed.
+ */
+function buildPillarFootingPlacement(
+  bot: Bot,
+  self: SelfState,
+): { target: Vec3Json; reference: Vec3Json; replacedBlock: string } | null {
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  if (hasUsableGroundSupport(bot, feet)) return null
+  const target = { x: feet.x, y: feet.y - 1, z: feet.z }
+  const scratch = bot.entity.position.clone()
+  const targetBlock = sensorBlockAt(bot, scratch.set(target.x, target.y, target.z), 'pillar-footing')
+  if (targetBlock === null) return null
+  const replaceable = isReplaceableAir(targetBlock) || PROBE_FLUIDS.has(targetBlock.name)
+  if (!replaceable || PROBE_HAZARDS.has(targetBlock.name)) return null
+  const references: Vec3Json[] = [
+    { x: target.x, y: target.y - 1, z: target.z },
+    { x: target.x + 1, y: target.y, z: target.z },
+    { x: target.x - 1, y: target.y, z: target.z },
+    { x: target.x, y: target.y, z: target.z + 1 },
+    { x: target.x, y: target.y, z: target.z - 1 },
+  ]
+  for (const reference of references) {
+    const block = sensorBlockAt(bot, scratch.set(reference.x, reference.y, reference.z), 'pillar-footing')
+    if (block === null || !isSolidSupport(block)) continue
+    return { target, reference, replacedBlock: targetBlock.name }
+  }
+  return null
+}
+
 function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const base = {
     x: Math.floor(self.position.x),
@@ -5504,6 +5554,8 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       })
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   const placementSpots = buildPlacementSpots(bot, options, self)
+  const pillarFootingPlacement =
+    selectPlaceableBlock(inventory.counts) === null ? null : buildPillarFootingPlacement(bot, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
   const terrain = buildTerrain(bot, options, self)
   const escape = buildEscapeCells(bot, options, self, entities, input.signals.lastDamage ?? null, timestampMs)
@@ -5562,6 +5614,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       ? {}
       : { containerContents: input.containerContents.map((entry) => ({ ...entry, items: entry.items.map((stack) => ({ ...stack })) })) }),
     placementSpots,
+    ...(pillarFootingPlacement === null ? {} : { pillarFootingPlacement }),
     submergedPlacementSpots: submergedPlacementSpots(bot, placementSpots),
     // Sensing is gated on the material possibility (a bridge needs a block to
     // place), never on a decision: the typed `no_block` refusal is derived from the

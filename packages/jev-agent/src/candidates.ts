@@ -14784,6 +14784,45 @@ function acquisitionRefusalFor(
   return { reason: 'no_producer', item: null, count: null }
 }
 
+/**
+ * The missing-ground answer for a pillar: place one held solid block into the
+ * sensor-proven cell directly under the body, then let the next fresh state
+ * derive the pillar normally. This does NOT declare footing present; it is a
+ * verified prerequisite action whose post-condition creates that fact.
+ */
+function pillarFootingPrerequisiteCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  capability: Capability,
+): Candidate[] {
+  if (capability.kind !== 'ascend_plan' || capability.plan !== 'pillar' || capability.reason !== 'no_footing') return []
+  const footing = state.pillarFootingPlacement ?? null
+  const placeable = selectPlaceableBlock(state.inventory.counts)
+  if (footing === null || placeable === null) return []
+  if (distance(footing.target, state.self.eyePosition) > options.reach + 0.5) return []
+  return [
+    {
+      id: `PLACE:${placeable.name}:pillar-footing:${blockId('p', footing.target)}`,
+      kind: 'PLACE',
+      label: `place ${placeable.name} under the body at (${footing.target.x},${footing.target.y},${footing.target.z}) to create pillar footing`,
+      targetName: placeable.name,
+      target: footing.target,
+      targetEntityId: null,
+      itemName: placeable.name,
+      requiresTool: false,
+      toolName: null,
+      inReach: true,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        pillarFooting: true,
+        footingReference: blockId('b', footing.reference),
+        footingReplacedBlock: footing.replacedBlock,
+      },
+    },
+  ]
+}
+
 /** Grounded candidates that would acquire a withheld target's missing capability. */
 function capabilityAcquisitionCandidates(
   state: WorldState,
@@ -14830,6 +14869,8 @@ function capabilityAcquisitionCandidates(
           (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
           true,
         )
+      } else if (capability.kind === 'ascend_plan') {
+        source = pillarFootingPrerequisiteCandidates(state, options, capability)
       } else if (capability.kind === 'tool') {
         // Enumerate every tier-satisfying tool the inventory can actually make
         // (weakest first), not only the weakest canonical name. A body holding
