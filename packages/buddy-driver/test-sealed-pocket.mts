@@ -130,7 +130,17 @@ function sealedWorld(overrides: Partial<WorldState> = {}): WorldState {
     descent: [],
     stepCuts: [EAST_CUT],
     headroomCuts: [],
-    goal: null,
+    goal: {
+      id: 'g31:goto:oak_log',
+      description: 'reach the nearest known oak_log',
+      targetItem: 'oak_log',
+      requiredCount: 1,
+      startCount: 0,
+      haveCount: 0,
+      progress: 0,
+      complete: false,
+      startedAtMs: 0,
+    },
     goalQueue: queueWith(gotoGoal()),
     recentEvents: [],
     // The measured wedge stalled for ~25 min; use a comfortably-boundary-
