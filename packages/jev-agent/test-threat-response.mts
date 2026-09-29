@@ -34,7 +34,7 @@ import { authorityState } from './src/jev/authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
 import { pickHigherPriority } from './src/controller.ts'
-import { DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
+import { DecisionScheduler, PREEMPTIVE_TRIGGERS, RETREAT_DEFER_HIT_BUDGET, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, BlockState, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -856,6 +856,26 @@ addCase('real damage is deferred while a bounded RETREAT lease closes distance, 
   return {
     pass,
     detail: 'damage/hp events coalesce through the bounded retreat; new mobs, low air, and non-retreat actions retain existing preemption',
+  }
+})
+
+addCase('a RETREAT lease absorbs at most a bounded hit count before the next hit preempts (portal-p21: spider free-hit 12hp across 6 deferred hits, zero separation)', () => {
+  // The deferral exists to let a retreat gain separation; each hit that lands
+  // during the lease is live proof the premise is false. Budget the absorbed
+  // hits per lease so a non-separating retreat yields while hp is still
+  // survivable - measured chain: 6 deferrals, hp 17.8 -> 3.84, death.
+  const pass =
+    shouldDeferDamageDuringRetreatLease('damage_taken', 'RETREAT', 20, 6, 0) &&
+    shouldDeferDamageDuringRetreatLease('damage_taken', 'RETREAT', 20, 6, RETREAT_DEFER_HIT_BUDGET - 1) &&
+    !shouldDeferDamageDuringRetreatLease('damage_taken', 'RETREAT', 20, 6, RETREAT_DEFER_HIT_BUDGET) &&
+    !shouldDeferTriggerDuringRetreatLease('damage_taken', 'RETREAT', 20, 6, RETREAT_DEFER_HIT_BUDGET) &&
+    // hp_changed shares the same budget (same deferrable class)
+    !shouldDeferDamageDuringRetreatLease('hp_changed', 'RETREAT', 20, 6, RETREAT_DEFER_HIT_BUDGET) &&
+    // survival_reground is controller repair, not world damage - unaffected
+    shouldDeferTriggerDuringRetreatLease('survival_reground', 'RETREAT', 20, 6, RETREAT_DEFER_HIT_BUDGET)
+  return {
+    pass,
+    detail: `per-lease absorbed-hit budget=${RETREAT_DEFER_HIT_BUDGET}; beyond it the next hit preempts while hp is still survivable`,
   }
 })
 

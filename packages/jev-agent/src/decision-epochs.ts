@@ -1190,6 +1190,14 @@ export async function decide(
 // RETREAT/ATTACK lease defer/preempt, macrotask-spaced tick dispatch.
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-lease absorbed-hit count for the RETREAT damage deferral, keyed on the
+ * in-flight action object itself: a lease that keeps running keeps its count,
+ * a revoked/re-committed lease (new object) starts fresh, and the entry is
+ * collected when the action is. See `RETREAT_DEFER_HIT_BUDGET` in scheduler.ts.
+ */
+const retreatLeaseAbsorbedHits = new WeakMap<object, number>()
+
 export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigger, detail: Record<string, unknown>): void {
   if (!host.running || host.modelRecoveryStopping) return
   const event: TriggerEvent = { trigger, detail, ts: Date.now() }
@@ -1202,8 +1210,17 @@ export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigg
     // A RETREAT is already the selected safety response. Controller-only
     // reground requests and real hit/health events wait for its bounded Skill
     // to finish; action completion will either supersede stale repair or
-    // replay real damage with its normal preemptive priority.
-    if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind, host.bot.health, CRITICAL_COMBAT_HEALTH)) {
+    // replay real damage with its normal preemptive priority. The deferral is
+    // hit-budgeted per lease (`RETREAT_DEFER_HIT_BUDGET`): every absorbed hit
+    // is proof the retreat is not separating, so the budget exhausts and the
+    // next hit preempts while hp is still survivable. Keyed on the action
+    // object itself, so a revoked/re-committed lease gets a fresh budget and
+    // a lease that keeps running keeps its count.
+    const absorbedHits = retreatLeaseAbsorbedHits.get(inFlight) ?? 0
+    if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind, host.bot.health, CRITICAL_COMBAT_HEALTH, absorbedHits)) {
+      if (trigger === 'damage_taken' || trigger === 'hp_changed') {
+        retreatLeaseAbsorbedHits.set(inFlight, absorbedHits + 1)
+      }
       host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
       host.logger.info(
         'scheduler',

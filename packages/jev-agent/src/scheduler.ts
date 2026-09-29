@@ -166,16 +166,29 @@ export function shouldPreemptActiveActionLease(
  * hit is fresh safety evidence and preempts: Jev may pick a shorter disengage,
  * cover, eating, or fighting back - semantic continuity of ESCAPING survives in
  * the offer set; blind commitment to the stale destination does not.
+ *
+ * ABSORBED-HIT BUDGET (measured portal-p21, 2026-09-29): a faster mob at contact
+ * range never lets a retreat gain separation at all. The spider case deferred
+ * 6 hits across ~18 s while the threat stayed at 1.15 m (hp 17.8 -> 3.84 ->
+ * death); the critical floor only woke the decision at 5.84, too late for any
+ * response. The deferral premise - "this lease is buying separation" - is
+ * falsified by every hit absorbed during it, so a lease defers at most
+ * `RETREAT_DEFER_HIT_BUDGET` damage/hp events; the next hit preempts while the
+ * body can still fight, pillar, or pick a shorter disengage.
  */
+export const RETREAT_DEFER_HIT_BUDGET = 3
+
 export function shouldDeferDamageDuringRetreatLease(
   trigger: DecisionTrigger,
   actionKind: string,
   health = Number.POSITIVE_INFINITY,
   criticalHealth = 6,
+  absorbedHits = 0,
 ): boolean {
   return (
     actionKind === 'RETREAT' &&
     (trigger === 'damage_taken' || trigger === 'hp_changed') &&
+    absorbedHits < RETREAT_DEFER_HIT_BUDGET &&
     !(Number.isFinite(health) && health <= criticalHealth)
   )
 }
@@ -192,9 +205,10 @@ export function shouldDeferTriggerDuringRetreatLease(
   actionKind: string,
   health = Number.POSITIVE_INFINITY,
   criticalHealth = 6,
+  absorbedHits = 0,
 ): boolean {
   return (
-    shouldDeferDamageDuringRetreatLease(trigger, actionKind, health, criticalHealth) ||
+    shouldDeferDamageDuringRetreatLease(trigger, actionKind, health, criticalHealth, absorbedHits) ||
     (actionKind === 'RETREAT' && trigger === 'survival_reground')
   )
 }
