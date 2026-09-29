@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Exec(sleep)",
+      "Exec(/usr/bin/sleep)",
+      "Exec(/bin/sleep)"
+    ]
+  }
+}

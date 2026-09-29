@@ -27,10 +27,10 @@ done
 if ! curl -s -m 2 "${BASE}/models" >/dev/null 2>&1; then
   echo "endpoint ${BASE} is down; trying systemctl --user start ${UNIT}"
   systemctl --user start "$UNIT" || true
-  for _ in $(seq 1 60); do
-    curl -s -m 2 "${BASE}/models" >/dev/null 2>&1 && break
-    sleep 1
-  done
+  if ! curl -s -m 2 "${BASE}/models" >/dev/null 2>&1; then
+    echo "endpoint ${BASE} is not ready yet; rerun after the service reports ready" >&2
+    exit 1
+  fi
 fi
 
 if [ "$SKIP_PREFLIGHT" -eq 0 ]; then
