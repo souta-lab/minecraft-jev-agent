@@ -26,7 +26,7 @@ import { failureCount } from './failureMemory.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, freshestLastDamage, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import type { AttackStandFact } from './combatClosure.ts'
 import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPlan.ts'
@@ -1695,7 +1695,7 @@ export class JevController {
   private readonly onBotDeath = (): void => {
     const state = this.lastWorldState
     if (state !== null) {
-      const lastDamage = state.signals.lastDamage ?? null
+      const lastDamage = freshestLastDamage(this.signals.lastDamage, state.signals.lastDamage)
       const threat = state.signals.threat ?? null
       const at = state.self.position
       // SAFE: fire/lava/burning have no attacking entity, so an unattributed

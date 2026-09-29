@@ -1926,6 +1926,25 @@ export function formatDeathCause(input: DeathCauseInput): string {
   )
 }
 
+/**
+ * Death-time attribution merges the live damage signal with the frozen
+ * world-state snapshot. `onBotDeath` reads `lastWorldState`, which can lag a
+ * `damage_taken` write that landed between the last decision tick and the
+ * death packet (measured live `run-mumsak77-109y` death #3: a spider hit at
+ * hp 0.36 produced `killer=null` because the snapshot predated the write).
+ * The live signal only ever moves forward, so the newer `atMs` wins.
+ */
+export function freshestLastDamage(
+  live: LastDamageEvidence | null | undefined,
+  snapshot: LastDamageEvidence | null | undefined,
+): LastDamageEvidence | null {
+  const l = live ?? null
+  const s = snapshot ?? null
+  if (l === null) return s
+  if (s === null) return l
+  return l.atMs >= s.atMs ? l : s
+}
+
 export interface ThreatSeparationConstraint {
   position: Vec3Json
   standoff: number

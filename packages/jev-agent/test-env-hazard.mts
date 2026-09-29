@@ -67,7 +67,7 @@ import {
   selectEnvHazardEscapes,
 } from './src/envHazard.ts'
 import type { EnvHazardCell, EnvHazardState } from './src/envHazard.ts'
-import { bodySurvivalFacts, formatDeathCause, weaponFacts } from './src/threat.ts'
+import { bodySurvivalFacts, formatDeathCause, freshestLastDamage, weaponFacts } from './src/threat.ts'
 import { formatReflex, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, REFLEX, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, SKILL_STEP } from './src/netherPortalPlan.ts'
 import { createRequire } from 'node:module'
 
@@ -700,6 +700,26 @@ function pocket(): Map<string, BlockSpec> {
     "(e) the body's own hazard facts still name the damage-dealing cause only",
     envHazardDamageSource([]) === null && envHazardDamageSource(['adjacent_lava']) === null,
     `empty=${String(envHazardDamageSource([]))} adjacent=${String(envHazardDamageSource(['adjacent_lava']))}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (e2) freshestLastDamage: the live damage signal beats a stale world-state
+//      snapshot at death time (p21 death #3 pin - a spider hit landing between
+//      the last decision tick and the death packet must still attribute;
+//      measured live `run-mumsak77-109y` produced killer=null)
+// ---------------------------------------------------------------------------
+{
+  const spider = { atMs: NOW - 200, health: 0.4, sourceId: 5833, sourceName: 'spider' }
+  const older = { atMs: NOW - 5000, health: 2, sourceId: 100, sourceName: 'zombie' }
+  check(
+    '(e2) live damage_taken wins over a stale snapshot; snapshot fills when live is absent',
+    freshestLastDamage(spider, null)?.sourceName === 'spider' &&
+      freshestLastDamage(spider, older)?.sourceName === 'spider' &&
+      freshestLastDamage(older, spider)?.sourceName === 'spider' &&
+      freshestLastDamage(null, older)?.sourceName === 'zombie' &&
+      freshestLastDamage(null, null) === null,
+    `liveOnly="${freshestLastDamage(spider, null)?.sourceName}" both="${freshestLastDamage(spider, older)?.sourceName}"`,
   )
 }
 
