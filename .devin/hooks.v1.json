@@ -1,0 +1,14 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "^(get_output|run_subagent|read_subagent)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 .devin/no-blocking-waits.py",
+          "timeout": 1
+        }
+      ]
+    }
+  ]
+}
