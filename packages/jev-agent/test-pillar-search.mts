@@ -75,6 +75,18 @@ addCase('place-block refuses with none_held when no priority block is held', () 
   return { pass, detail: formatPillarSearch(decision) }
 })
 
+addCase('held logs count as placeable footing - planks still outrank them (live p21: 43 logs held read as no_placeable while climbing to a remembered descent entry)', () => {
+  const logsOnly = decidePillarPlaceBlock({ oak_log: 23, birch_log: 20 })
+  const mixed = selectPlaceableBlock({ oak_log: 23, birch_log: 20, birch_planks: 2 })
+  const pass =
+    logsOnly.chosen === 'oak_log' &&
+    logsOnly.reason === 'priority_order' &&
+    logsOnly.alternatives.map((entry) => entry.option).join(',') === 'birch_log' &&
+    mixed?.name === 'birch_planks' &&
+    mixed.count === 2
+  return { pass, detail: `${formatPillarSearch(logsOnly)} | mixed=${mixed?.name ?? 'null'}x${mixed?.count ?? 0}` }
+})
+
 addCase('step-budget chunks a 56-block gap to the cap and keeps a small gap exact', () => {
   const capped = decidePillarStepBudget(56)
   const small = decidePillarStepBudget(5)
