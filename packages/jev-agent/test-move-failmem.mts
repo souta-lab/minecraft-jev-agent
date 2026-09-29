@@ -154,6 +154,29 @@ check(
   `during=${duringCooldown.blacklisted} remaining=${duringCooldown.cooldownRemainingMs} after=${afterCooldown.blacklisted}`,
 )
 
+// (d2) post-threshold re-failures escalate the cooldown geometrically --------------
+// The threshold strike keeps the flat base window; each later failure doubles it.
+let escClock = 20_000
+const escMemory = new MoveFailMemory({ failureLimit: 3, cooldownMs: 10_000, now: () => escClock })
+escMemory.record(OVERWORLD, pos, 'stuck')
+escMemory.record(OVERWORLD, pos, 'stuck')
+escMemory.record(OVERWORLD, pos, 'stuck')
+const firstWindow = escMemory.check(OVERWORLD, pos)
+escClock += 11_000
+escMemory.record(OVERWORLD, pos, 'stuck')
+const secondWindow = escMemory.check(OVERWORLD, pos)
+escClock += 21_000
+escMemory.record(OVERWORLD, pos, 'stuck')
+const thirdWindow = escMemory.check(OVERWORLD, pos)
+check(
+  'post-threshold re-failures double the blacklist cooldown (10s -> 20s -> 40s)',
+  firstWindow.cooldownRemainingMs <= 10_000 &&
+    secondWindow.cooldownRemainingMs > 10_000 &&
+    secondWindow.cooldownRemainingMs <= 20_000 &&
+    thirdWindow.cooldownRemainingMs > 20_000,
+  `first=${firstWindow.cooldownRemainingMs} second=${secondWindow.cooldownRemainingMs} third=${thirdWindow.cooldownRemainingMs}`,
+)
+
 // (e) dimension scoping is respected ----------------------------------------------
 const scopedMemory = new MoveFailMemory({ failureLimit: 1, cooldownMs: 10_000, now: () => clock })
 scopedMemory.record(OVERWORLD, pos, 'unreachable')
@@ -188,5 +211,5 @@ check(
   formatMoveTargetSkipped('overworld:39,10,34', 3, 30),
 )
 
-process.stdout.write(`\n${16 - failures}/16 move-failmem cases passed\n`)
+process.stdout.write(`\n${17 - failures}/17 move-failmem cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)

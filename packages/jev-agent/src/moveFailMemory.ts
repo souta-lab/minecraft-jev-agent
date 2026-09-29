@@ -322,10 +322,22 @@ export class MoveFailMemory {
     entry.pathFailureScope = undefined
     let newlyBlacklisted = false
     if (entry.attempts >= this.failureLimit) {
+      // Post-threshold re-failures escalate the suppression window exactly the
+      // way oscillation escapes do (#360): a cell that keeps failing after its
+      // cooldown expired is stronger trap evidence than the first strike, so the
+      // window doubles per re-failure up to the same shared cap. Measured
+      // portal-p21 (run-mumpepb8): a remembered furnace whose pit approach the
+      // pathfinder proved but the body could not execute churned `stuck` x7 and
+      // MOVE_TARGET_SKIPPED ~500x, re-opening to the same failing route every
+      // flat 30s window while the station ladder's place/craft arms waited.
+      // The base window is unchanged at the threshold crossing (2^0), so the
+      // first strike keeps its existing 30s semantics.
+      const strikes = entry.attempts - this.failureLimit
+      const escalated = Math.min(this.cooldownMs * 2 ** strikes, MAX_OSCILLATION_COOLDOWN_MS)
       // Never SHORTEN an active (possibly escalated) escape cooldown: a later
       // mechanical failure at the same cell is more evidence, not less, and a
       // downgrade here would silently re-open the loop the escalation retired.
-      entry.blacklistedUntil = Math.max(entry.blacklistedUntil, now + this.cooldownMs)
+      entry.blacklistedUntil = Math.max(entry.blacklistedUntil, now + escalated)
       newlyBlacklisted = !wasBlacklisted
     }
     this.evictIfNeeded()
