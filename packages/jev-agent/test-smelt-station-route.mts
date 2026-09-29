@@ -107,6 +107,7 @@ function worldState(overrides: {
   knownResources?: KnownResource[]
   craftingTables?: StationEntry[]
   placementSpots?: Vec3Json[]
+  standable?: Vec3Json[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -129,7 +130,7 @@ function worldState(overrides: {
     inventory: inventory(overrides.inventory),
     entities: [],
     blocks: [],
-    terrain: { standable: [LIVE_FEET] },
+    terrain: { standable: overrides.standable ?? [LIVE_FEET] },
     craftingTables: overrides.craftingTables ?? [],
     furnaces: overrides.furnaces ?? [],
     placementSpots: overrides.placementSpots ?? [],
@@ -259,6 +260,44 @@ function main(): void {
       '(c) no station + a held furnace yields a placement route',
       place !== undefined && place.id === `PLACE:furnace:p${IN_REACH.x}_${IN_REACH.y}_${IN_REACH.z}`,
       `ids=[${ids(grounded.candidates)}]`,
+    )
+  }
+
+  // (c2) two valid spot cells, the nearer one pocketed (0 standable neighbour
+  // columns, the measured p21 trap class), the farther one open (>=3 standable
+  // neighbour columns at level +-1): the solve prefers the open cell. And when
+  // every sensed cell is enclosed the pocket still resolves - a preference,
+  // never a removal.
+  {
+    const POCKET: Vec3Json = { x: 25, y: 66, z: 10 } // ~1.3m from feet, enclosed
+    const OPEN: Vec3Json = { x: 25, y: 66, z: 12 } // ~3.1m, open
+    const openNeighbours: Vec3Json[] = [
+      { x: 25, y: 66, z: 11 },
+      { x: 26, y: 66, z: 12 },
+      { x: 24, y: 66, z: 12 },
+    ]
+    const open = worldState({
+      inventory: { ...INPUT_AND_FUEL, furnace: 1 },
+      placementSpots: [POCKET, OPEN],
+      standable: [LIVE_FEET, OPEN, ...openNeighbours],
+    })
+    const openAll = generateGroundedCandidates(open, options()).candidates
+    const placeOpen = openAll.find((candidate) => candidate.kind === 'PLACE')
+    const onlyPocket = worldState({
+      inventory: { ...INPUT_AND_FUEL, furnace: 1 },
+      placementSpots: [POCKET],
+      standable: [LIVE_FEET],
+    })
+    const placePocket = generateGroundedCandidates(onlyPocket, options()).candidates.find(
+      (candidate) => candidate.kind === 'PLACE',
+    )
+    check(
+      '(c2) a held furnace prefers an open placement cell over a nearer pocket cell, and a pocket still resolves when nothing open is sensed',
+      placeOpen !== undefined &&
+        sameTarget(placeOpen, OPEN) &&
+        placePocket !== undefined &&
+        sameTarget(placePocket, POCKET),
+      `openPlace=${placeOpen?.id ?? 'none'}@${placeOpen?.target === null || placeOpen?.target === undefined ? '-' : `${placeOpen.target.x},${placeOpen.target.y},${placeOpen.target.z}`} pocketPlace=${placePocket?.id ?? 'none'}@${placePocket?.target === null || placePocket?.target === undefined ? '-' : `${placePocket.target.x},${placePocket.target.y},${placePocket.target.z}`}`,
     )
   }
 

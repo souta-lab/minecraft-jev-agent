@@ -7494,7 +7494,42 @@ function placementIntersectsBody(cell: Vec3Json, self: Vec3Json): boolean {
   return distance({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, self) < 1.0
 }
 
-/** Nearest-first known placement cells: the strict live spots plus the sensed standable terrain. */
+/**
+ * Count of horizontal neighbour columns that hold a standable cell at the
+ * cell's level +-1 (a walkable approach exists at that height). A station is
+ * re-approached many times; a pocket/pit-floor cell whose neighbours are all
+ * walls or drops yields approach stands only below the ledge, which is the
+ * measured p21 trap class (furnace 14,63,0 + tables -17,64,44 / -17,60,33 all
+ * path_stuck forever). Three of eight directions is the openness proxy from
+ * the deferred ledger hypothesis: it never removes a cell, it only orders.
+ */
+function placementOpenness(standable: ReadonlySet<string>, cell: Vec3Json): number {
+  let open = 0
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      if (dx === 0 && dz === 0) continue
+      for (let dy = -1; dy <= 1; dy += 1) {
+        if (standable.has(blockId('p', { x: cell.x + dx, y: cell.y + dy, z: cell.z + dz }))) {
+          open += 1
+          break
+        }
+      }
+    }
+  }
+  return open
+}
+
+const PLACEMENT_OPEN_NEIGHBOURS = 3
+
+/** Open cells first (stable within each class): a preference, never a removal. */
+function preferOpenPlacementCells(state: WorldState, cells: Vec3Json[]): Vec3Json[] {
+  const standable = new Set(state.terrain.standable.map((cell) => blockId('p', cell)))
+  return cells
+    .map((cell, index) => ({ cell, index, open: placementOpenness(standable, cell) >= PLACEMENT_OPEN_NEIGHBOURS }))
+    .sort((a, b) => Number(b.open) - Number(a.open) || a.index - b.index)
+    .map((entry) => entry.cell)
+}
+
 function knownPlacementCells(state: WorldState): Vec3Json[] {
   const seen = new Set<string>()
   const cells: Vec3Json[] = []
@@ -7504,7 +7539,13 @@ function knownPlacementCells(state: WorldState): Vec3Json[] {
     seen.add(key)
     cells.push(cell)
   }
-  cells.sort((a, b) => distance(a, state.self.position) - distance(b, state.self.position))
+  const standable = new Set(state.terrain.standable.map((cell) => blockId('p', cell)))
+  cells.sort(
+    (a, b) =>
+      (placementOpenness(standable, b) >= PLACEMENT_OPEN_NEIGHBOURS ? 1 : 0) -
+        (placementOpenness(standable, a) >= PLACEMENT_OPEN_NEIGHBOURS ? 1 : 0) ||
+      distance(a, state.self.position) - distance(b, state.self.position),
+  )
   return cells
 }
 
@@ -7607,8 +7648,10 @@ function heldStationPlacement(
 
   if (state.placementSpots.length > 0) {
     // A station is not placed from a submerged body position while a dry-access
-    // spot exists (SAFE/CAN fact, see dryAwarePlacementSpots).
-    const spot = dryAwarePlacementSpots(state).find((cell) => failureCountFor(cell) < retryLimit)
+    // spot exists (SAFE/CAN fact, see dryAwarePlacementSpots). Openness order
+    // prefers a returnable open cell over a pocket cell (same p21 trap class).
+    const spot = preferOpenPlacementCells(state, dryAwarePlacementSpots(state))
+      .find((cell) => failureCountFor(cell) < retryLimit)
     if (spot !== undefined) return { spot, refusal: null, alternative: null }
   }
 
@@ -8137,7 +8180,7 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
   const failed = state.signals.failedCandidates
   let best: Vec3Json | null = null
   let bestCount = Number.POSITIVE_INFINITY
-  for (const spot of dryAwarePlacementSpots(state)) {
+  for (const spot of preferOpenPlacementCells(state, dryAwarePlacementSpots(state))) {
     const count = failed[`PLACE:${item}:${blockId('p', spot)}`] ?? 0
     if (count < bestCount) {
       best = spot
