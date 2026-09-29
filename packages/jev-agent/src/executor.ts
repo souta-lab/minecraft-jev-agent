@@ -3621,8 +3621,15 @@ export class Executor {
         this.assertEffect({ type: 'look' })
         await this.bot.lookAt(toVec3(this.bot, center), true).catch(() => undefined)
         // Rise toward higher cells and climb out onto shore exits; horizontal
-        // and downward cells are reached by the look direction alone.
-        this.setControlState('jump', center.y > pos.y + 0.15 || (exitKind === 'shore' && index === waypoints.length - 1))
+        // and downward cells are reached by the look direction alone. The
+        // shore-climb jump fires only when the stand is not below the body -
+        // a drop-out shore (cave floor under a waterfall base) is reached by
+        // sinking, and jumping there just bobs the body up to its deadline.
+        this.setControlState(
+          'jump',
+          center.y > pos.y + 0.15 ||
+            (exitKind === 'shore' && index === waypoints.length - 1 && wp.y >= Math.floor(pos.y)),
+        )
         if (Math.hypot(pos.x - center.x, pos.z - center.z) < 0.7 && Math.abs(pos.y - center.y) < 1.0) {
           index += 1
           waypointDeadline = Date.now() + WATER_ROUTE_WAYPOINT_MS

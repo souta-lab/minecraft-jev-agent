@@ -307,12 +307,22 @@ export const WATER_ROUTE_AIR_MS = 750
  */
 export const WATER_ROUTE_WAYPOINT_MS = 2500
 const WATER_ROUTE_RADIUS = 6
-const WATER_ROUTE_DY_MIN = -2
 const WATER_ROUTE_DY_MAX = 6
 const WATER_ROUTE_VISIT_LIMIT = 480
 const WATER_ROUTE_STEP_LIMIT = 12
 const WATER_ROUTE_TARGET_LIMIT = 3
 const WATER_ROUTE_MARGIN_MS = 1500
+/**
+ * Deepest net descent the BFS explores. Bound to the deepest route the breath
+ * admission check could ever approve: every waypoint costs the full
+ * WAYPOINT_MS deadline plus MARGIN_MS, so a full vanilla air supply covers
+ * exactly floor((MAX_AIR*AIR_MS - MARGIN)/WAYPOINT_MS) = 5 cells. A shaft
+ * deeper than that can never be offered, so descending the search further
+ * would only spend the visit budget on unofferable exits.
+ */
+const WATER_ROUTE_DY_MIN = -Math.floor(
+  (MAX_AIR * WATER_ROUTE_AIR_MS - WATER_ROUTE_MARGIN_MS) / WATER_ROUTE_WAYPOINT_MS,
+)
 
 /**
  * SAFE: whether the body's measured breath can cover a witnessed water route.
@@ -386,11 +396,17 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
   const queue: Node[] = [{ ...base, path: [], blocks: [], heads: [] }]
   const seenExits = new Set<string>()
   const targets: WaterRouteTarget[] = []
+  // (0,0) contributes the pure-vertical edges (0,±1,0): a waterfall/flooded
+  // shaft is ridden straight down or swum straight up inside its own column,
+  // which no horizontal-staircase step can express. The (0,0,0) self-step dies
+  // on the visited check; the same-column shore candidates it also adds are
+  // still validated by the ordinary stand/support/hazard checks below.
   const dirs = [
     [1, 0],
     [-1, 0],
     [0, 1],
     [0, -1],
+    [0, 0],
   ] as const
   while (queue.length > 0 && visited.size <= WATER_ROUTE_VISIT_LIMIT && targets.length < WATER_ROUTE_TARGET_LIMIT) {
     const node = queue.shift()

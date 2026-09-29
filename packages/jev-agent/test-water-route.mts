@@ -546,6 +546,100 @@ addCase('route cost derives from the shared per-waypoint bound', () => {
   return { pass, detail: `costMs=${breath?.costMs} wp=${breath?.waypoints.length} bound=${WATER_ROUTE_WAYPOINT_MS}` }
 })
 
+// Sealed flooded pocket: body cell is water, every horizontal neighbor and the
+// cap above are stone, and the ONLY way out is straight down a water column
+// into a cave - the descent the live pocket at (15,62,-1) demanded. Water fills
+// (0,-1..-4,0); (0,-5,0) is air over stone at (0,-6,0), so the shore exit is a
+// same-column drop-out below the last water node.
+function shaftDownGrid(): Record<string, BlockSpec> {
+  const g: Record<string, BlockSpec> = {
+    [k(0, -6, 0)]: solid('stone'),
+    [k(0, -5, 0)]: empty('air'),
+    [k(0, -4, 0)]: empty('water'),
+    [k(0, -3, 0)]: empty('water'),
+    [k(0, -2, 0)]: empty('water'),
+    [k(0, -1, 0)]: empty('water'),
+    [k(0, 0, 0)]: empty('water'),
+    [k(0, 1, 0)]: empty('water'),
+    [k(0, 2, 0)]: solid('stone'),
+    [k(1, -5, 0)]: empty('air'),
+    [k(1, -4, 0)]: empty('air'),
+    [k(1, -6, 0)]: solid('stone'),
+  }
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    for (const y of [-1, 0, 1, 2]) g[k(dx, y, dz)] = solid('stone')
+  }
+  // Restore the lateral cave mouth beside the drop-out cell.
+  g[k(1, -5, 0)] = empty('air')
+  g[k(1, -4, 0)] = empty('air')
+  g[k(1, -6, 0)] = solid('stone')
+  return g
+}
+
+addCase('shaft descent: vertical water column reaches a cave-floor shore exit below the body', () => {
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
+  const targets = buildWaterRouteTargets(gridBot(shaftDownGrid(), self.position), self)
+  const shore = targets.find((t) => t.exitKind === 'shore' && t.exit.y === -5)
+  const pass =
+    shore !== undefined &&
+    shore.waypoints.length === 5 &&
+    shore.waypoints[0]?.y === -1 &&
+    shore.waypoints[3]?.y === -4 &&
+    shore.waypointBlocks.slice(0, 4).every((name) => name === 'water')
+  return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit, t.waypoints.length]))}` }
+})
+
+addCase('shaft descent: route stays inside the breath-affordable depth envelope', () => {
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
+  const targets = buildWaterRouteTargets(gridBot(shaftDownGrid(), self.position), self)
+  const shore = targets.find((t) => t.exitKind === 'shore' && t.exit.y === -5)
+  const pass = shore !== undefined && waterRouteBreathOk(self, shore.costMs) === true
+  return { pass, detail: `costMs=${shore?.costMs} supply=${20 * 750}` }
+})
+
+addCase('shaft descent: a drop deeper than any breath supply is not explored', () => {
+  const g = shaftDownGrid()
+  // Fill the drop-out cells: the column keeps going to -7 with the first
+  // dry stand at -8, so the only exit lies below the deepest offerable route.
+  g[k(0, -5, 0)] = empty('water')
+  g[k(0, -6, 0)] = empty('water')
+  g[k(0, -7, 0)] = empty('water')
+  g[k(0, -8, 0)] = empty('air')
+  g[k(0, -9, 0)] = solid('stone')
+  g[k(1, -5, 0)] = empty('water')
+  g[k(1, -4, 0)] = empty('water')
+  g[k(1, -6, 0)] = empty('water')
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
+  const targets = buildWaterRouteTargets(gridBot(g, self.position), self)
+  const pass = targets.length === 0
+  return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit]))}` }
+})
+
+addCase('shaft ascent: vertical water column reaches a breath exit directly overhead', () => {
+  // Body submerged in a sealed shaft whose only opening is the water surface
+  // straight above: (0,1..3,0) water, (0,4,0) air -> breath exit at (0,3,0).
+  const g: Record<string, BlockSpec> = {
+    [k(0, -1, 0)]: solid('stone'),
+    [k(0, 0, 0)]: empty('water'),
+    [k(0, 1, 0)]: empty('water'),
+    [k(0, 2, 0)]: empty('water'),
+    [k(0, 3, 0)]: empty('water'),
+    [k(0, 4, 0)]: empty('air'),
+  }
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    for (const y of [-1, 0, 1, 2, 3]) g[k(dx, y, dz)] = solid('stone')
+  }
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
+  const targets = buildWaterRouteTargets(gridBot(g, self.position), self)
+  const breath = targets.find((t) => t.exitKind === 'breath')
+  const pass =
+    breath !== undefined &&
+    breath.exit.y === 3 &&
+    breath.waypoints.length === 3 &&
+    breath.waypoints.every((wp) => wp.x === 0 && wp.z === 0)
+  return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit, t.waypoints.length]))}` }
+})
+
 // ---------------------------------------------------------------------------
 
 let failed = 0
