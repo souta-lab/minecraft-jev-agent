@@ -9333,11 +9333,33 @@ export class Executor {
     if (reference === null) {
       throw new ExecutorError('place_error', `no supporting block adjacent to (${target.x},${target.y},${target.z})`)
     }
+    // A p21.11 footing prerequisite fills the cell directly under a floating
+    // body. The candidate is admitted only from a fresh, exact under-body fluid
+    // witness; re-check the actual AABB immediately before the effect. Unlike a
+    // station/frame placement, this cell has almost no vertical slack. The
+    // ordinary Mineflayer `placeBlock` awaits a look handshake before writing
+    // the packet, which advances physics for several ticks and can put the
+    // buoyant body back inside the destination cell by the time the server
+    // validates it. PILLAR_UP already closed exactly this measured refusal class
+    // with the same-tick `_placeBlockWithOptions(forceLook=ignore)` entry point.
+    // Reuse that actuator only for the typed footing prerequisite; every normal
+    // PLACE keeps the ordinary look path.
+    const pillarFooting = candidate.meta.pillarFooting === true
+    if (pillarFooting && this.placementCellOverlapsBody(target)) {
+      throw new ExecutorError(
+        'path_stuck',
+        `pillar footing target (${target.x},${target.y},${target.z}) intersects the live body before placement`,
+      )
+    }
     this.setPhase(candidate, epoch, 'equipping')
     await this.equipPlacementItem(candidate, itemName, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
     try {
-      await this.performPlaceEffect(target, itemName, () => this.bot.placeBlock(reference.block, reference.face))
+      await this.performPlaceEffect(target, itemName, () =>
+        pillarFooting
+          ? this.placePillarBlock(reference.block, reference.face)
+          : this.bot.placeBlock(reference.block, reference.face),
+      )
     } catch (error) {
       // The placement mechanism's own rejection was previously an untyped
       // `unknown_event`: mineflayer's `placeBlock` throws a plain `Error`
