@@ -430,6 +430,77 @@ function makeLogger(): {
 }
 
 // ---------------------------------------------------------------------------
+// (c1d / p21.14) a dry solid headroom blocker that dams a face-adjacent fluid
+//      is NOT a clearance MINE. Live p21 mined exactly such a dripstone dam
+//      after PILLAR_UP had already classified it flood_risk, flooding the body
+//      at y29 and erasing the recovery attempt by drowning.
+// ---------------------------------------------------------------------------
+{
+  const ORIGIN: Vec3Json = { x: 0, y: 64, z: 0 }
+  const blocker: Vec3Json = { x: 0, y: 66, z: 0 }
+  const makeBot = (fluidAbove: boolean): Bot => {
+    const position = new Vec3(ORIGIN.x + 0.5, ORIGIN.y, ORIGIN.z + 0.5)
+    return {
+      username: 'AI_HEADROOM_FLOOD',
+      entity: { position, yaw: 0, pitch: 0, onGround: true, width: 0.6, height: 1.8 },
+      health: 20,
+      food: 20,
+      oxygenLevel: MAX_AIR,
+      game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: -64, height: 384 },
+      time: { isDay: true },
+      registry,
+      entities: {},
+      inventory: { items: () => [] },
+      canSeeBlock: () => true,
+      findBlocks: () => [],
+      blockAt: (v: Vec3Json) => {
+        const cell = { x: Math.floor(v.x), y: Math.floor(v.y), z: Math.floor(v.z) }
+        if (cell.x === blocker.x && cell.y === blocker.y && cell.z === blocker.z) {
+          return { name: 'dripstone_block', boundingBox: 'block' as const, diggable: true }
+        }
+        if (fluidAbove && cell.x === blocker.x && cell.y === blocker.y + 1 && cell.z === blocker.z) {
+          return { name: 'water', boundingBox: 'empty' as const, diggable: false }
+        }
+        if (cell.y === ORIGIN.y - 1) return { name: 'stone', boundingBox: 'block' as const, diggable: true }
+        return { name: 'air', boundingBox: 'empty' as const, diggable: false }
+      },
+    } as unknown as Bot
+  }
+  const goal: GoalState = {
+    id: 'collect:log', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1,
+    startCount: 0, haveCount: 0, progress: 0, complete: false, startedAtMs: 0,
+  }
+  const signals: AgentSignals = {
+    consecutiveFailures: 0, lastFailureCode: null, lastPathStatus: 'idle', stalledMs: 0,
+    lastPolicyConfidence: null, maxConcurrentActions: 0, escalationRecommended: false, failedCandidates: {},
+  }
+  const build = (fluidAbove: boolean) => buildWorldState(
+    makeBot(fluidAbove),
+    { tick: 8, goal, goalQueue: { depth: 1, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }, recentEvents: [], signals },
+    { ...defaultSensorOptions, maxPlacementSpots: 24 },
+  )
+  const flooded = build(true)
+  const dry = build(false)
+  flooded.inventory = { slots: [], counts: { wooden_pickaxe: 1 }, totalItems: 1 }
+  dry.inventory = { slots: [], counts: { wooden_pickaxe: 1 }, totalItems: 1 }
+  const floodCut = flooded.headroomCuts?.find((cut) => key(cut.pos) === key(blocker))
+  const dryCut = dry.headroomCuts?.find((cut) => key(cut.pos) === key(blocker))
+  const floodMine = generateGroundedCandidates(flooded, defaultCandidateOptions).candidates.find(
+    (candidate) => candidate.kind === 'MINE' && candidate.target !== null && key(candidate.target) === key(blocker),
+  )
+  const dryMine = generateGroundedCandidates(dry, defaultCandidateOptions).candidates.find(
+    (candidate) => candidate.kind === 'MINE' && candidate.target !== null && key(candidate.target) === key(blocker),
+  )
+  check(
+    '(c1d/p21.14) face-adjacent water makes a solid headroom dam unsafe and suppresses its clearance MINE',
+    floodCut?.safe === false && floodCut.reason.includes('flood') && floodMine === undefined &&
+      dryCut?.safe === true && dryMine !== undefined,
+    `floodCut=${JSON.stringify(floodCut)} floodMine=${floodMine?.id ?? 'none'} ` +
+      `dryCut=${JSON.stringify(dryCut)} dryMine=${dryMine?.id ?? 'none'}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // (c2) the SCHEDULER owns the preempt: low air is a typed, edge-triggered event
 // ---------------------------------------------------------------------------
 {

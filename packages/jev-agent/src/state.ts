@@ -4262,6 +4262,29 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
     } else if (PROBE_HAZARDS.has(name) || PROBE_FLUIDS.has(name)) {
       safe = false
       reason = `${name} would flood or burn the pocket`
+    } else {
+      // Match Executor.cellClearOfFluids: a solid ceiling can itself be dry but
+      // still be the dam holding back water/lava. The live p21 recovery death
+      // proved this distinction matters: PILLAR_UP correctly refused a
+      // dripstone blocker as flood_risk, then the generic headroom acquisition
+      // mined that same blocker because sensing had marked it safe. Removing a
+      // face-adjacent fluid/hazard barrier is not a safe clearance action.
+      const floodOffsets: ReadonlyArray<readonly [number, number, number]> = [
+        [0, 1, 0],
+        [0, -1, 0],
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+      ]
+      const wouldFlood = floodOffsets.some(([dx, dy, dz]) => {
+        const neighbour = at(x + dx, y + dy, z + dz)
+        return neighbour !== null && (PROBE_FLUIDS.has(neighbour.name) || PROBE_HAZARDS.has(neighbour.name))
+      })
+      if (wouldFlood) {
+        safe = false
+        reason = `${name} is a fluid/hazard barrier; removing it would flood or burn the pocket`
+      }
     }
     const key = `${x},${y},${z}`
     const existing = out.get(key)
