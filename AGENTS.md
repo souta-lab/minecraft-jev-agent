@@ -53,6 +53,10 @@ Diagnostic ladder: `wood -> stone tools -> iron -> food/survival -> cave recover
 
 Until first clean verified autonomous Nether entry, optimize the **end-to-end portal objective**. Pre-portal rungs are checkpoints only: run the longest honest portal-directed attempt, identify the earliest/highest-impact blocker, make the smallest generic fix, return immediately to portal. Do not require full robustness at intermediate rungs.
 
+**Local capability closure is not campaign progress.** Every minor records `campaignDelta`: `ADVANCE` = new verified high-water rung/checkpoint; `RETENTION` = same frontier survives materially better while continuing forward; `RECOVERY` = prior frontier is regained materially faster/cheaper after loss; `LOCAL_ONLY` = mechanic improved without frontier/retention/recovery gain; `REGRESSION` = mission capability worsened. Green tests, vanished markers, reusable primitives, and single-mechanic live success alone are `LOCAL_ONLY`. Track high-water separately from current rung; death/reset never erases it. Returning to wood after iron creates **recovery debt**, not a fresh start; while debt exists, restoring the frontier is primary and unrelated local polish is secondary unless it causally blocks recovery.
+
+End-to-end scoreboard: high-water/current gap, time/actions to first reach and re-reach the frontier, deaths/resets before conversion, and portal/Nether success. Commits/tests/minor count/internal sophistication are not progress. After **3 consecutive `LOCAL_ONLY` KEEP minors**, conversion failure becomes the primary defect: before a fourth local minor, audit why proven gains do not move/preserve the mission frontier and require an explicit live-evidence link from the next fix to `ADVANCE`/`RETENTION`/`RECOVERY`.
+
 Ordered phases:
 1. **Possibility:** first clean unassisted exact-provenance verified Nether entry.
 2. **Reliability:** declared dev+holdout cohort; default robust criterion when five valid trials are practical is **>=4/5 clean portal successes including >=1 holdout**, focused guards green, zero authority violations, no material regression/pathological model-cost growth.
@@ -65,7 +69,7 @@ One portal success proves possibility, not robustness. If infrastructure prevent
 
 Use immutable `portal-pN` major episodes and `pN.x` same-world causal hot iterations. Maintain append-only `runs/capability-campaign/P-SERIES.md`, machine state in `state.json.portalAttempts`, and immutable run artifacts. Never rewrite old evidence; append corrections with provenance.
 
-Each major record binds exact SHA/config/seed/world/start/mission+accept/model-provider/run identity and records terminal depth/outcome, checkpoint times, inventory/tool progression, Jev/System2 count+latency, deaths/stalls/cost, earliest causal blocker, learning, KEEP/REVERT/DEFER, fix SHA/control reason, and next hypothesis/signature.
+Each major record binds exact SHA/config/seed/world/start/mission+accept/model-provider/run identity and records terminal depth/outcome, high-water/current rung, checkpoint and re-recovery times/actions, deaths/stalls/cost, Jev/System2 count+latency, earliest causal blocker, learning, KEEP/REVERT/DEFER, `campaignDelta`, fix SHA/control reason, and next hypothesis/signature.
 
 ### Major vs minor
 - `pN+1`: materially new experiment episode — normally fresh world/fixture, changed premise, broad/non-quick causal change, or clean exact-SHA end-to-end proof.
@@ -93,7 +97,7 @@ For each selected blocker/checkpoint:
 3. Cluster **first causal failures** by typed cause/signature: `GROUNDING_REFUSAL`, `VERIFY_FAIL`, `LEASE_DENY`, `STALE_FENCE`, `BUDGET_EXHAUST`, `MODEL_UNAVAILABLE`, `MECHANICAL_FAIL`, `NO_PROGRESS`, `AUTHORITY_VIOLATION`, `INFRA`.
 4. Choose highest-impact frequent open-zone cluster. One experiment = one falsifiable hypothesis = one causal change + explicit expected signature/metric.
 5. Minimum deterministic/focused regression first; then smallest dev live sample that can falsify; full dev cohort only when warranted; holdout for portal reliability/promotion, not intermediate polishing before first portal.
-6. KEEP only if architecture/authority guards remain green and declared primary improves (or holds while declared secondary materially improves) without material lower-rung regression or unbounded model/System2 cost.
+6. KEEP may close a real local defect when guards stay green, but classify its mission effect separately with `campaignDelta`; never promote `LOCAL_ONLY` evidence into an end-to-end progress claim. `REGRESSION` normally reverts unless required to expose/fix a more fundamental blocker with explicit evidence.
 7. REVERT early on causal falsification/regression/new failure/authority violation. DEFER/ESCALATE on frozen/constitutionally impossible/unavailable dependency/exhausted bounded hypotheses, preserve evidence and switch lanes. INFRA requires evidence/control reproduction when practical.
 8. Commit before provenance-sensitive live evaluation; after KEEP update records/state, integrate safely, and immediately continue.
 
