@@ -12,7 +12,7 @@ import {
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { JevController } from './src/controller.ts'
-import { DIG_PATH_CAP, DigMemory } from './src/worldMemory.ts'
+import { DESCEND_NO_PROGRESS_LIMIT, DIG_PATH_CAP, DigMemory, descendBudget } from './src/worldMemory.ts'
 import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -333,6 +333,16 @@ addCase('a successful policy-selected recovery starts its own bounded Skill cont
     detail: `selected=${selected.id} next=${continuation?.id ?? 'none'} mode=${afterSelection.digMode} ` +
       `streak=${afterSelection.descendNoProgress} limit=${afterSelection.descendLimitReached} ` +
       `nextBoundary=${String(continuation?.meta.recoveryBoundaryReason ?? 'none')}`,
+  }
+})
+
+addCase('(p21.16) three verified DESCENDs with zero resource delta hit the anti-rut boundary; there is no fourth', () => {
+  const one = descendBudget(0, false)
+  const two = descendBudget(one.noProgress, false)
+  const three = descendBudget(two.noProgress, false)
+  return {
+    pass: DESCEND_NO_PROGRESS_LIMIT === 3 && !one.limitReached && !two.limitReached && three.limitReached && three.noProgress === 3,
+    detail: `limit=${DESCEND_NO_PROGRESS_LIMIT} one=${JSON.stringify(one)} two=${JSON.stringify(two)} three=${JSON.stringify(three)}`,
   }
 })
 

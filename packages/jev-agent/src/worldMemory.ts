@@ -21,7 +21,7 @@ export interface DigStep {
 }
 
 export const DIG_PATH_CAP = 8
-export const DESCEND_NO_PROGRESS_LIMIT = 4
+export const DESCEND_NO_PROGRESS_LIMIT = 3
 const DIG_OSCILLATE_WINDOW = 6
 const DIG_OSCILLATE_NET = 2.5
 
