@@ -34,16 +34,16 @@ Campaign operation is explicitly autonomous and fully permissioned for ordinary 
 
 Full permissions do **not** authorize cheating capability evidence, architecture changes, force-push/history destruction, deleting user worlds/sealed archives, or overwriting another lane's unmerged work. Record unresolved non-blocking assumptions/questions in `STATUS.md`/campaign state and keep moving.
 
-### No idle / no polling / substantial-turn rule
+### No idle / causal closure
 
 Time must pass as a side effect of useful work, never as the work itself.
-- **No fixed-time waiting, ever.** `sleep` is mechanically denied for every duration. Do not bypass with `/bin/sleep`, `/usr/bin/sleep`, Python/Node timers, `timeout` used as delay, blocking `tail -f`/reads, busy loops, timer polling, or equivalents.
-- **No blocking command observation.** Long-running shells/tests/runs go background; `get_output` is snapshot-only. Inspect once, then work another lane. A timeout is a safety ceiling, never a planned wait.
-- **No blocking subagent wait.** Launch independent subagents in background; `read_subagent` is non-blocking only. Check opportunistically at natural work boundaries.
-- **No duplicate status polling.** Do not re-run the same normalized heartbeat/log/process/status command unless intervening work or a concrete event gives a causal reason to expect a changed result.
-- **Do not micro-turn.** A turn must do a substantial work batch before stopping: e.g. causal analysis + implementation + focused verification, or multiple independent useful actions. One observation/search/subagent launch/tiny edit/status report is not a turn's completion.
-- If live evidence is unchanged, switch immediately to log/root-cause analysis, code audit, focused regression, next-fix preparation, provenance repair, or another non-conflicting lane **in the same turn**. Yield only when every useful lane is genuinely blocked.
-- Status/commit/subagent completion/context compaction is not goal completion. Continue until the requested milestone is proven or external conditions make every useful lane impossible.
+- **Never wait:** `sleep`/timers/delay loops/`timeout`-as-delay/blocking reads are forbidden. Long shells/tests/runs and subagents stay background; snapshots are non-blocking; timeouts are safety ceilings. Failed/rate-limited subagents do not block parent work.
+- **Never duplicate observation:** repeat heartbeat/log/process/status only after intervening work or a concrete event can change the result.
+- **No micro-turns:** one observation/search/subagent launch/tiny edit/status is not a completed turn. Finish analysis + implementation + focused proof, or multiple independent useful actions, before yielding.
+- **Exit a causal rut:** one decisive typed mechanical/VERIFY/authority failure, or two identical post-change failures with unchanged causal facts, ends observation. Three unchanged `WAIT`/`ESCALATE`/System2 replans on one state fingerprint is churn; there is no fourth—patch, REVERT, or DEFER/switch lane.
+- **Fresh code needs fresh evidence:** same-SHA restarts preserve durable failure memory; source-dependent failures/retirements from an older SHA cannot evaluate or suppress changed code. A stale fence blocking the fresh attempt is the next defect.
+- Discovering the next defect closes/stamps the current minor and opens the next `pN.x` immediately. Once a narrow fix path is known, do not carry it as uncommitted WIP across a normal turn/context boundary: drive focused proof + exact commit, then reload + first fresh evidence when available.
+- Unchanged evidence means switch to root-cause/code/test/provenance/another lane **in the same turn**. Yield only when every useful lane is blocked; status/commit/context compaction is not goal completion.
 
 Live observation/audit must be read-only by construction. Never call ambiguous helpers that may `quit/stop/kill`, mutate control sockets/lifecycle/world/inventory, reload generation, or send server commands just to obtain status; inspect source/`--help` first. State-changing lifecycle actions must be deliberate and separately targeted.
 
@@ -75,7 +75,7 @@ Each major record binds exact SHA/config/seed/world/start/mission+accept/model-p
 - AI inefficiency (over-collection, rebuilding satisfied resources, bad upgrades, needless slow strategy, repeated satisfied subgoals) is a valid generic capability defect.
 
 ### Fast hot iteration
-Minor evaluation is normally **10–15 minutes maximum**, often less when its target signature proves/falsifies earlier. Repeated typed blocker with enough causal evidence => patch immediately; do not let one SHA idle for an hour. Long major-world progression may accumulate across many fast minors.
+A minor ends on evidence, not time. **10–15 minutes is a hard ceiling for unchanged-fingerprint dwell, never a target.** Decisive evidence ends it immediately. At the exit thresholds or ceiling: patch, REVERT, or DEFER; watching longer is a campaign-process defect. Long major-world progression should be many fast minors.
 
 For reloadable generation changes, preserve the resident HOST/Mineflayer connection and use canonical generation reload: `build -> import -> structural smoke -> quiesce old -> atomic lease/generation commit -> start new -> dispose old`. Require changed hash plus `GENERATION_READY`/status carrying exact new `sourceSha`, `reconnects=0`. HOST restart/reconnect only for genuine HOST/contract/schema change, dead/unhealthy resident, or explicit infra condition.
 
