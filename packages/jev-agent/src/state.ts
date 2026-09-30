@@ -3175,7 +3175,14 @@ function buildBuriedStoneBlocks(
 function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
   const radius = Math.max(options.reach + 2, 8)
   const positions = stableFindBlocks(bot, `nearbyPlaceable:${radius}:256`, {
-    matching: (block) => STONE_LIKE.has(block.name),
+    // This scan answers a MATERIAL capability, not a stone semantic goal.  A
+    // trapped recovery body may have hand-mineable dirt/netherrack/planks in
+    // reach while every stone producer is tool-gated.  Restricting the scan to
+    // STONE_LIKE created the live circular dependency
+    //   wood -> pickaxe -> stone -> placeable -> surface -> wood.
+    // Use the pillar policy's own placeable names as the bounded producer
+    // envelope, then resolve the actual drop below before admitting it.
+    matching: (block) => PILLAR_PLACE_PRIORITY.includes(block.name),
     maxDistance: radius,
     count: 256,
   })

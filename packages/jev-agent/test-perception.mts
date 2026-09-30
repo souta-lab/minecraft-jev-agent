@@ -98,6 +98,9 @@ function fakeStonePrerequisiteBot(): Bot {
   const blocks = new Map<string, { name: string; boundingBox: string; diggable: boolean }>([
     ['31,47,34', { name: 'stone', boundingBox: 'block', diggable: true }],
     ['30,46,34', { name: 'stone', boundingBox: 'block', diggable: true }],
+    // p21.15: a hand-mineable placeable producer must survive the mechanical
+    // prerequisite scan even though it is not STONE_LIKE.
+    ['28,47,34', { name: 'dirt', boundingBox: 'block', diggable: true }],
     // This producer is in the same column below a buried stone cell. The
     // capability scan must retain it even though the exposed-column scan stops
     // at the buried cell.
@@ -274,6 +277,25 @@ addCase('(1) a missing placeable capability keeps a grounded stone producer in p
   const stones = state.blocks.filter((block) => block.kind === 'stone' && block.yield === 'cobblestone')
   const pass = stones.some((stone) => stone.position.x === 31 && stone.position.y === 47 && stone.position.z === 34)
   return { pass, detail: `stones=${JSON.stringify(stones)} blocks=${state.blocks.length}` }
+})
+
+addCase('(1/p21.15) a nearby hand-mineable dirt producer remains in the placeable prerequisite envelope', () => {
+  const state = buildWorldState(
+    fakeStonePrerequisiteBot(),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const dirt = state.blocks.find(
+    (block) => block.name === 'dirt' && block.yield === 'dirt' && block.position.x === 28 && block.position.y === 47 && block.position.z === 34,
+  )
+  return { pass: dirt !== undefined && dirt.harvestTool === null && dirt.inReach, detail: `dirt=${JSON.stringify(dirt ?? null)}` }
 })
 
 addCase('(1) a near placeable producer below a buried column cell remains sensed', () => {

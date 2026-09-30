@@ -311,7 +311,7 @@ const PLACEABLE: BlockState = {
 
 addCase('(iii) a missing material fact routes to the grounded producer of that material', () => {
   const state = liveState({
-    inventory: { oak_log: 81, flint: 4 },
+    inventory: { flint: 4 },
     headroomCuts: [],
     blocks: [PLACEABLE],
     standable: [FEET, { x: 28, y: 61, z: 15 }],
@@ -379,12 +379,14 @@ addCase('(iv) holding a pickaxe only changes the optional clearance speed tool',
 //     mechanical fact, and the route for that fact is still offered. This is the
 //     general "prerequisite of a prerequisite" case - no incident shape.
 // ---------------------------------------------------------------------------
-addCase('(v) a second-order prerequisite is expanded: the route to the route is offered', () => {
-  // The ascend needs a placeable block. The only producer is stone, which needs a
-  // pickaxe the body does not hold - so the acquisition MINE is itself withheld
-  // and the closure must expand the tool fact it introduced.
+addCase('(v/p21.15) stone-only placeable acquisition exposes the honest wood-tool cycle instead of fabricating progress', () => {
+  // Recovery deadlock control: with no held placeable and no wood/planks, the
+  // only material producer is stone. The material route is real but withheld on
+  // missing_tool; the closure must then report no_material for the pickaxe, not
+  // invent a tool route. p21.15 breaks this cycle only when an actually sensed
+  // hand-mineable placeable producer (e.g. dirt) exists.
   const state = liveState({
-    inventory: { oak_log: 81, flint: 4 },
+    inventory: { flint: 4 },
     headroomCuts: [],
     blocks: [{ ...PLACEABLE, name: 'stone', yield: 'cobblestone', harvestTool: 'pickaxe', harvestTier: 0 }],
     standable: [FEET, { x: 28, y: 61, z: 15 }],
@@ -392,21 +394,20 @@ addCase('(v) a second-order prerequisite is expanded: the route to the route is 
   const gate = applyReachabilityGate([entryCandidate()], state, options)
   const entry = withheldEntry(gate, 'ENTER:26,67,9')
   const materialFact = entry === null ? null : acquisitionFor(entry, 'placeable_block')
-  const productive = gate.candidates.filter(
-    (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
-  )
-  const toolRoute = productive.filter((candidate) => candidate.meta.missingCapability === 'tool:pickaxe@0')
   const withheldMaterial = gate.withheld.find(
     (w) => w.candidate.meta.capabilityAcquisition === true && w.candidate.kind === 'MINE',
   )
+  const toolFact = withheldMaterial === undefined ? null : acquisitionFor(withheldMaterial, 'tool:pickaxe@0')
+  const productive = gate.candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
   return {
     pass:
       materialFact !== null &&
       materialFact.routes.length > 0 &&
-      withheldMaterial !== undefined &&
-      withheldMaterial.result.reason === 'missing_tool' &&
-      toolRoute.length > 0,
-    detail: `materialRoutes=[${(materialFact?.routes ?? []).join(',')}] withheldAcq=${withheldMaterial?.candidate.id}:${withheldMaterial?.result.reason} toolRoutes=[${toolRoute.map((c) => c.id).join(',')}]`,
+      withheldMaterial?.result.reason === 'missing_tool' &&
+      toolFact?.reason === 'no_material' &&
+      toolFact.item === 'planks' &&
+      productive.length === 0,
+    detail: `materialRoutes=[${(materialFact?.routes ?? []).join(',')}] withheldAcq=${withheldMaterial?.candidate.id}:${withheldMaterial?.result.reason} toolRefusal=${toolFact?.reason}:${toolFact?.item} productive=[${productive.map((c) => c.id).join(',')}]`,
   }
 })
 
