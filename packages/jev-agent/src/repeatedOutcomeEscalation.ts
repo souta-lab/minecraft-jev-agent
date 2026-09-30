@@ -262,6 +262,12 @@ export interface RepeatedOutcomeEntryJson {
   lastAt: number
   /** the grounding fact signature in force at the latest attempt */
   factSignature: string
+  /**
+   * Production source that produced this execution verdict. Same-SHA resident /
+   * generation restarts preserve the verdict; a changed source re-evaluates it.
+   * Missing only on legacy rows written before the source fence existed.
+   */
+  sourceSha?: string | null
   /** true once the bound fired: this action is not grounded here while these facts hold */
   retired: boolean
   retiredAt: number | null
@@ -383,6 +389,7 @@ export function restoreRepeatedOutcomeEntry(value: unknown): RepeatedOutcomeEntr
     firstAt,
     lastAt,
     factSignature,
+    sourceSha: text(source.sourceSha),
     retired,
     retiredAt: retired ? number(source.retiredAt, lastAt) : null,
   }
@@ -393,6 +400,8 @@ export interface RepeatedOutcomeEscalationOptions {
   maxEntries?: number
   /** entries restored from HOST-owned class-A world memory */
   initialEntries?: readonly unknown[]
+  /** exact production source for execution verdicts; null keeps standalone tests source-agnostic */
+  sourceSha?: string | null
 }
 
 /**
@@ -423,8 +432,10 @@ export class RepeatedOutcomeEscalation {
   private readonly entries = new Map<string, RepeatedOutcomeEntryJson>()
   readonly limit: number
   readonly maxEntries: number
+  readonly sourceSha: string | null
 
   constructor(options: RepeatedOutcomeEscalationOptions = {}) {
+    this.sourceSha = typeof options.sourceSha === 'string' && options.sourceSha.length > 0 ? options.sourceSha : null
     this.limit = Number.isInteger(options.limit) && (options.limit ?? 0) >= 1
       ? (options.limit as number)
       : REPEATED_OUTCOME_LIMIT_DEFAULT
@@ -539,6 +550,7 @@ export class RepeatedOutcomeEscalation {
       firstAt,
       lastAt: observation.now,
       factSignature: signature,
+      sourceSha: this.sourceSha,
       retired,
       retiredAt,
     }
@@ -586,7 +598,15 @@ export class RepeatedOutcomeEscalation {
     this.entries.clear()
     for (const source of entries) {
       const entry = restoreRepeatedOutcomeEntry(source)
-      if (entry !== null) this.entries.set(entry.key, entry)
+      if (entry === null) continue
+      // A repeated execution outcome is evidence about BOTH world facts and the
+      // code that executed them. Preserve it through same-SHA resident/generation
+      // restarts (the original anti-laundering requirement), but never let a
+      // pre-fix execution verdict permanently suppress a changed implementation.
+      // Legacy rows have no source identity, so a source-bound production
+      // generation must re-observe them once rather than silently trusting them.
+      if (this.sourceSha !== null && entry.sourceSha !== this.sourceSha) continue
+      this.entries.set(entry.key, entry)
     }
     this.evictIfNeeded()
   }

@@ -126,6 +126,7 @@ export function createRepeatedOutcomes(host: OutcomeLedgersHost): RepeatedOutcom
   return new RepeatedOutcomeEscalation({
     limit: host.options.repeatedOutcomeLimit,
     initialEntries: host.options.repeatedOutcomeEntries,
+    sourceSha: host.options.decisionProvenance.sourceSha,
   })
 }
 

@@ -204,6 +204,51 @@ addCase('(i-d) the counter is DURABLE: a generation swap resumes the streak inst
   )
 })
 
+addCase('(i-d2) same-source restore preserves the durable streak', () => {
+  const limit = REPEATED_OUTCOME_LIMIT_DEFAULT
+  const sourceSha = 'sha-a'
+  const first = new RepeatedOutcomeEscalation({ limit, sourceSha })
+  for (let attempt = 0; attempt < limit - 1; attempt += 1) {
+    first.note(measuredObservation(attempt % 2 === 0 ? 'refuse' : 'rise', 2_000 + attempt))
+  }
+  const carried = first.countFor(MEASURED_SHAPE, MEASURED_CELL)
+  const second = new RepeatedOutcomeEscalation({ limit, sourceSha, initialEntries: first.snapshot() })
+  const decision = second.note(measuredObservation('refuse', 9_100))
+  return ok(
+    carried === limit - 1 && decision.count === limit && decision.escalate && decision.retired,
+    `carried=${carried} count=${decision.count} escalate=${decision.escalate} retired=${decision.retired}`,
+  )
+})
+
+addCase('(i-d3) changed source drops old execution verdict and re-observes from one', () => {
+  const limit = REPEATED_OUTCOME_LIMIT_DEFAULT
+  const first = new RepeatedOutcomeEscalation({ limit, sourceSha: 'sha-a' })
+  for (let attempt = 0; attempt < limit; attempt += 1) {
+    first.note(measuredObservation('refuse', 3_000 + attempt))
+  }
+  const durable = first.snapshot()
+  const changed = new RepeatedOutcomeEscalation({ limit, sourceSha: 'sha-b', initialEntries: durable })
+  const before = changed.size()
+  const decision = changed.note(measuredObservation('refuse', 9_200))
+  return ok(
+    durable.some((entry) => entry.retired && entry.sourceSha === 'sha-a') &&
+      before === 0 && decision.count === 1 && !decision.escalate && !decision.retired,
+    `durableSha=${durable[0]?.sourceSha ?? 'null'} before=${before} count=${decision.count} retired=${decision.retired}`,
+  )
+})
+
+addCase('(i-d4) source-bound production drops legacy rows with no source identity', () => {
+  const legacy = new RepeatedOutcomeEscalation({ limit: REPEATED_OUTCOME_LIMIT_DEFAULT })
+  legacy.note(measuredObservation('refuse', 4_000))
+  const durable = legacy.snapshot().map(({ sourceSha: _ignored, ...entry }) => entry)
+  const restored = new RepeatedOutcomeEscalation({
+    limit: REPEATED_OUTCOME_LIMIT_DEFAULT,
+    sourceSha: 'sha-new',
+    initialEntries: durable,
+  })
+  return ok(restored.size() === 0, `restored=${restored.size()}`)
+})
+
 addCase('(i-e) the retirement removes the candidate from the offer and says so, once', () => {
   const limit = REPEATED_OUTCOME_LIMIT_DEFAULT
   const ledger = new RepeatedOutcomeEscalation({ limit })
