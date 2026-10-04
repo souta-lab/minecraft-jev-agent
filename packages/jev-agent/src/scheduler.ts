@@ -222,6 +222,36 @@ export function shouldDeferTriggerDuringRetreatLease(
 }
 
 /**
+ * An in-flight breath-escape lease IS the selected response to the signals
+ * that fire while drowning. Measured death (gen-mutol0yz, 2026-10-04
+ * 10:33:20-10:34:11): `low_air`, `air_unknown_head_submerged`, `damage_taken`
+ * and `hp_changed` each preempted the `ASCEND:breath` swim leg mid-flight -
+ * four+ cancels in ~12 s, each forcing a fresh ~550 ms Jev round-trip before
+ * the next leg, net progress ~1.5 cells while air ran out 4 cells below the
+ * surface. The deferral is unbounded for the drowning family because no
+ * better affordance exists underwater: a stuck leg still dies to its own
+ * `action_timeout` (kept preemptive) and the skill msBudget, at which point
+ * the freshest coalesced trigger replays and re-routes. New threats
+ * (`mob_appeared`) keep their usual interrupt.
+ */
+export const BREATH_ESCAPE_ID_PREFIXES: readonly string[] = ['ASCEND:breath:', 'SWIM:exit:']
+
+const DROWNING_FAMILY_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
+  'low_air',
+  'air_unknown_head_submerged',
+  'damage_taken',
+  'hp_changed',
+])
+
+export function isBreathEscapeActionId(actionId: string): boolean {
+  return BREATH_ESCAPE_ID_PREFIXES.some((prefix) => actionId.startsWith(prefix))
+}
+
+export function shouldDeferTriggerDuringBreathEscapeLease(trigger: DecisionTrigger, actionId: string): boolean {
+  return isBreathEscapeActionId(actionId) && DROWNING_FAMILY_TRIGGERS.has(trigger)
+}
+
+/**
  * The scheduler-level survival fact. `layer=scheduler` names the owner of the
  * preemption (the sensor owns the air reading, the guard/executor own refusing
  * the mechanical action); the semantic response stays Jev's.

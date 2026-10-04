@@ -64,7 +64,7 @@ import type { GuardCode, GuardResult } from './policy.ts'
 import { formatWaitExhausted, formatWaitStreak } from './replanThrottle.ts'
 import type { WaitStreakEscalation } from './replanThrottle.ts'
 import { commitmentInvalidation, formatSkillInvalidated, targetIdentityKey } from './skillCommitment.ts'
-import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease } from './scheduler.ts'
+import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringBreathEscapeLease, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import type { GoalState, Vec3Json, WorldState } from './state.ts'
 import { MELEE_THREAT_REACH } from './threat.ts'
@@ -1225,6 +1225,19 @@ export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigg
       host.logger.info(
         'scheduler',
         `trigger=${trigger} deferred during RETREAT lease#${inFlight.epoch} ${inFlight.id}`,
+        detail,
+        host.tickCounter,
+      )
+      return
+    }
+    // A breath-escape swim is the drowning response: the air/damage signals it
+    // exists to resolve must not cancel each leg before it can gain altitude.
+    // Everything else (new mobs, action timeout) keeps its preemptive path.
+    if (shouldDeferTriggerDuringBreathEscapeLease(trigger, inFlight.id)) {
+      host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
+      host.logger.info(
+        'scheduler',
+        `trigger=${trigger} deferred during breath-escape lease#${inFlight.epoch} ${inFlight.id}`,
         detail,
         host.tickCounter,
       )

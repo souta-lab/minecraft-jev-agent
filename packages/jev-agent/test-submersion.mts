@@ -56,8 +56,10 @@ import type { GuardContext } from './src/policy.ts'
 import {
   DecisionScheduler,
   formatLowAirPreempt,
+  isBreathEscapeActionId,
   LOW_AIR_PREEMPT,
   PREEMPTIVE_TRIGGERS,
+  shouldDeferTriggerDuringBreathEscapeLease,
   shouldInterruptAttackLease,
   shouldPreemptActiveActionLease,
   TRIGGER_PRIORITY,
@@ -1495,6 +1497,34 @@ function placeCandidate(target: Vec3Json, id = `PLACE:furnace:p${target.x}_${tar
     pass,
     `status=${result.status} verified=${result.verified} y=${position.y} jump=${jumpWrites.join(',')} ` +
       `pathGoals=${pathGoals.length} swim="${swimLine ?? 'none'}"`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (c2defer) drowning-family triggers defer while a breath-escape lease flies
+// ---------------------------------------------------------------------------
+{
+  // Live death gen-mutol0yz: low_air/air_unknown/damage/hp each preempted the
+  // in-flight ASCEND:breath leg (~550ms re-decision per cancel); the body
+  // covered ~1.5 cells in 12s and drowned 4 cells below the surface. The
+  // drowning family now defers during the escape lease; mobs and timeouts
+  // keep their preemptive path, and a non-escape lease is unaffected.
+  const triggers: DecisionTrigger[] = ['low_air', 'air_unknown_head_submerged', 'damage_taken', 'hp_changed']
+  const pass =
+    triggers.every((trigger) => shouldDeferTriggerDuringBreathEscapeLease(trigger, 'ASCEND:breath:p-21_62_-33')) &&
+    shouldDeferTriggerDuringBreathEscapeLease('low_air', 'SWIM:exit:p-21_62_-33') &&
+    !shouldDeferTriggerDuringBreathEscapeLease('mob_appeared', 'ASCEND:breath:p-21_62_-33') &&
+    !shouldDeferTriggerDuringBreathEscapeLease('action_timeout', 'ASCEND:breath:p-21_62_-33') &&
+    !shouldDeferTriggerDuringBreathEscapeLease('low_air', 'MOVE:b-23_64_-35') &&
+    !shouldDeferTriggerDuringBreathEscapeLease('damage_taken', 'MOVE:b-23_64_-35') &&
+    isBreathEscapeActionId('ASCEND:breath:p2_65_0') &&
+    isBreathEscapeActionId('SWIM:exit:p-21_62_-33') &&
+    !isBreathEscapeActionId('ASCEND:surface:p2_65_0') &&
+    !isBreathEscapeActionId('MOVE:b1_2_3')
+  check(
+    '(c2defer) drowning-family triggers defer during a breath-escape lease only',
+    pass,
+    `breath=${triggers.every((t) => shouldDeferTriggerDuringBreathEscapeLease(t, 'ASCEND:breath:p1_1_1'))} swim=${shouldDeferTriggerDuringBreathEscapeLease('low_air', 'SWIM:exit:p1_1_1')} mob=${shouldDeferTriggerDuringBreathEscapeLease('mob_appeared', 'ASCEND:breath:p1_1_1')} timeout=${shouldDeferTriggerDuringBreathEscapeLease('action_timeout', 'ASCEND:breath:p1_1_1')} move=${shouldDeferTriggerDuringBreathEscapeLease('low_air', 'MOVE:b1_1_1')}`,
   )
 }
 
