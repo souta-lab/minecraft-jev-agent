@@ -54,6 +54,14 @@ export type DecisionTrigger = (typeof DECISION_TRIGGERS)[number]
  */
 export const MOB_REACTION_RANGE = 8
 
+/**
+ * Exit band for the approach watch: a hostile counts as "near" only once, on
+ * entry into `MOB_REACTION_RANGE`, and must leave past this distance before
+ * a re-approach may fire again. Without the band a mob hovering at the
+ * boundary flaps the trigger every other tick.
+ */
+export const MOB_APPROACH_EXIT_RANGE = MOB_REACTION_RANGE + 2
+
 export type PositionLike = { x: number; y: number; z: number }
 
 /**
@@ -485,7 +493,11 @@ export class DecisionScheduler {
     this.bot.on('chunkColumnUnload', this.onWorldChunkChange)
     this.observesChunks = true
     if (this.enabled.has('path_completed')) this.bot.on('goal_reached', this.onGoalReached)
-    if (this.enabled.has('mob_appeared')) this.bot.on('entitySpawn', this.onEntitySpawn)
+    if (this.enabled.has('mob_appeared')) {
+      this.bot.on('entitySpawn', this.onEntitySpawn)
+      this.bot.on('entityMoved', this.onEntityMoved)
+      this.bot.on('entityGone', this.onEntityGone)
+    }
     if (this.enabled.has('damage_taken')) {
       this.bot.on('entityHurt', this.onEntityHurt)
       // The packet's own origin, which mineflayer's `entityHurt` does not carry.
@@ -515,6 +527,9 @@ export class DecisionScheduler {
     this.observesChunks = false
     this.bot.removeListener('goal_reached', this.onGoalReached)
     this.bot.removeListener('entitySpawn', this.onEntitySpawn)
+    this.bot.removeListener('entityMoved', this.onEntityMoved)
+    this.bot.removeListener('entityGone', this.onEntityGone)
+    this.nearHostileIds.clear()
     this.bot.removeListener('entityHurt', this.onEntityHurt)
     this.client()?.removeListener('damage_event', this.onDamageEvent)
     this.bot.removeListener('health', this.onHealth)
@@ -565,9 +580,53 @@ export class DecisionScheduler {
     }
     if (!mobAppearanceIsNear(observer, position)) {
       this.logger.info('scheduler', 'mob_appeared observed outside reaction range; action continues', detail)
+      this.nearHostileIds.delete(entity.id)
       return
     }
+    // Mark the entry so an already-reported near hostile does not fire again
+    // from `entityMoved` while it stays inside the band.
+    this.nearHostileIds.add(entity.id)
     this.request('mob_appeared', detail)
+  }
+
+  /**
+   * Hostile entity ids already reported inside `MOB_REACTION_RANGE`. An entry
+   * fires `mob_appeared` exactly once until the entity leaves past
+   * `MOB_APPROACH_EXIT_RANGE` or despawns, then it may re-approach again.
+   */
+  private readonly nearHostileIds = new Set<number>()
+
+  /**
+   * `entitySpawn` only evaluates distance AT spawn: a hostile that appeared
+   * outside the reaction band ("action continues") and then walks in produced
+   * no decision boundary until its first `damage_taken` - measured portal-p23
+   * (zombie id 2213 closed >8m -> 2.06m during a 4s MINE; first signal was the
+   * first hit; drowned id 1584 camped three consecutive respawns). The moved
+   * event supplies the missing entry boundary: same trigger name, same
+   * preempt class, `reason=approach` distinguishes the evidence. One entry per
+   * band crossing; the hysteresis keeps boundary-hover from flapping it.
+   */
+  private readonly onEntityMoved = (entity: Entity): void => {
+    const observer = this.bot.entity?.position
+    const distance = observer === undefined ? null : observer.distanceTo(entity.position)
+    if (this.nearHostileIds.has(entity.id)) {
+      // Re-arm only on a clear exit; inside the hysteresis band the entity
+      // keeps its "already reported" state so hovering cannot flap the trigger.
+      if (distance !== null && distance > MOB_APPROACH_EXIT_RANGE) this.nearHostileIds.delete(entity.id)
+      else return
+    }
+    const name = entity.username ?? entity.name ?? entity.kind ?? 'unknown'
+    if (!isHostileEntityName(name, entity.kind ?? undefined)) return
+    const position = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+    if (distance !== null && distance > MOB_REACTION_RANGE) return
+    this.nearHostileIds.add(entity.id)
+    const detail = { entity: name, id: entity.id, position, distance, reason: 'approach' }
+    this.logger.info('scheduler', 'mob_appeared entered reaction range by movement; decision requested', detail)
+    this.request('mob_appeared', detail)
+  }
+
+  private readonly onEntityGone = (entity: Entity): void => {
+    this.nearHostileIds.delete(entity.id)
   }
 
   /**

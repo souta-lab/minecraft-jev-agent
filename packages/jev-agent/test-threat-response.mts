@@ -1054,6 +1054,62 @@ addCase('the scheduler carries the packet damage origin, and an origin-less hit 
 // peaceful control: neither evidence nor a combat candidate
 // ---------------------------------------------------------------------------
 
+addCase('an approaching hostile enters the reaction band by movement and fires once, re-arming only after a clear exit (portal-p23 zombie 2213: spawned >8m, closed to 2.06m under a 4s MINE, first signal was the first hit)', () => {
+  const Vec3 = require('vec3')
+  const bot = new EventEmitter() as unknown as Bot & EventEmitter
+  ;(bot as unknown as { entity: unknown }).entity = { id: 1, position: new Vec3(0, 0, 0) }
+  ;(bot as unknown as { health: number }).health = 20
+  ;(bot as unknown as { food: number }).food = 20
+  ;(bot as unknown as { inventory: EventEmitter }).inventory = new EventEmitter()
+  const scheduler = new DecisionScheduler(bot, new EventLogger(null, false), { enabledTriggers: ['mob_appeared'] })
+  const delivered: TriggerEvent[] = []
+  scheduler.onDecision((event) => delivered.push(event))
+  const zombie = { id: 2213, name: 'zombie', kind: 'hostile', position: { x: 30, y: 0, z: 0 } }
+  try {
+    scheduler.start()
+    // Far spawn: observed outside the band, no trigger.
+    bot.emit('entitySpawn', zombie)
+    // Walks in over several ticks: 30 -> 12 -> 7.5 -> 6m.
+    zombie.position = { x: 12, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    zombie.position = { x: 7.5, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    // Keeps moving inside the band: must not re-fire.
+    zombie.position = { x: 6, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    // Inside the hysteresis band (>8, <=10): still "near", no re-fire later.
+    zombie.position = { x: 9, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    // Clear exit past the band re-arms; re-approach fires again.
+    zombie.position = { x: 11, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    zombie.position = { x: 7, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    // Despawn clears the near marker entirely.
+    bot.emit('entityGone', zombie)
+    zombie.position = { x: 5, y: 0, z: 0 }
+    bot.emit('entityMoved', zombie)
+    // A passive entity moved never fires.
+    const cow = { id: 9, name: 'cow', kind: 'passive', position: { x: 2, y: 0, z: 0 } }
+    bot.emit('entityMoved', cow)
+    // And a second hostile spawning NEAR does not double-fire on its first move.
+    const skeleton = { id: 30, name: 'skeleton', kind: 'hostile', position: { x: 4, y: 0, z: 0 } }
+    bot.emit('entitySpawn', skeleton)
+    bot.emit('entityMoved', skeleton)
+  } finally {
+    scheduler.stop()
+  }
+  const mobs = delivered.filter((event) => event.trigger === 'mob_appeared')
+  const zombieFires = mobs.filter((event) => event.detail.id === 2213)
+  const pass =
+    mobs.length === 4 &&
+    zombieFires.length === 3 &&
+    zombieFires[0].detail.reason === 'approach' &&
+    zombieFires[0].detail.distance === 7.5 &&
+    mobs.some((event) => event.detail.id === 30)
+  return { pass, detail: `mobs=${JSON.stringify(mobs.map((event) => ({ id: event.detail.id, d: event.detail.distance, r: event.detail.reason })))}` }
+})
+
 addCase('a peaceful Nether (no hostile, no damage) has neither threat evidence nor a combat candidate', () => {
   const cow: EntityState = {
     id: 7,
