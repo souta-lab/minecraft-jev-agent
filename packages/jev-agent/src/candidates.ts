@@ -13109,6 +13109,19 @@ function retrievalCandidatesForWant(
       (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
     )
       continue
+    // The resource-scoped retire set (`outcome-ledgers.ts`): a remembered cell
+    // whose RETRIEVE arm settled KNOWN_RETRIEVE_RETIRE_LIMIT route failures
+    // across stand cells is withheld for this generation. The cell itself
+    // stays in `knownResources` - the dig-route bearing and the adjacent-MINE
+    // collection arm both still see it; only the long-range travel retry dies.
+    // Key format mirrors retrieval-progress `resourceKey` (importing it here
+    // would close a candidates<->retrieval-progress cycle).
+    if (
+      state.signals.retiredKnownRetrieveTargets?.has(
+        `${known.name}@${known.position.x},${known.position.y},${known.position.z}`,
+      ) === true
+    )
+      continue
     // Issue #45: a remembered resource below the current level needs a vertical
     // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
     // horizontal bearing and falls back to WAIT.

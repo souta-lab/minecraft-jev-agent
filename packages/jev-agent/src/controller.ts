@@ -848,6 +848,13 @@ export class JevController {
    * Retires a present-but-unreachable resource after KNOWN_RETRIEVE_RETIRE_LIMIT.
    */
   private readonly knownRetrieveFailures = new Map<string, number>()
+  /**
+   * Cells whose `RETRIEVE:known` arm is retired this generation (same
+   * `resourceKey` keys as `knownRetrieveFailures`). Suppresses the RETRIEVE
+   * offer only: the remembered cell stays in `knownResources`, so the
+   * dig-route bearing survives and the MINE arm still collects it adjacent.
+   */
+  private readonly retiredKnownRetrieveTargets = new Set<string>()
   /** M2 ascent trap: bounded-window tracker owned by evaluateCapabilityGap. */
   private capabilityGapState: CapabilityGapState | null = null
   private capabilityGapActive = false
@@ -1929,6 +1936,7 @@ export class JevController {
         this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.reachRuntimeAdapter.currentDimension())),
         this.unreachableResources,
       )
+      this.signals.retiredKnownRetrieveTargets = this.retiredKnownRetrieveTargets
       this.updateStallSignal()
       this.observeThreat(trigger, detail, this.reachRuntimeAdapter.currentHealth())
 

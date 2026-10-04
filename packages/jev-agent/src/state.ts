@@ -1128,6 +1128,16 @@ export type AgentSignals = {
    * every pure caller keeps its existing behaviour.
    */
   zeroProgressRoutes?: ZeroProgressRoutes
+  /**
+   * Known-resource cells whose RETRIEVE arm this generation retired after
+   * `KNOWN_RETRIEVE_RETIRE_LIMIT` settled route failures ACROSS stand cells
+   * (`outcome-ledgers.ts`, keys are `resourceKey` `name@x,y,z`). Suppresses
+   * only the RETRIEVE offer: the cell stays in `knownResources`, so the
+   * dig-route bearing toward it survives, and an adjacent body still collects
+   * it via the MINE arm. Generation-scoped like `unreachableResources` - a
+   * fresh source re-litiates it exactly once.
+   */
+  retiredKnownRetrieveTargets?: ReadonlySet<string>
   /** selected descent direction, retained while that mode/heading stays grounded */
   digDir?: DescentDir | null
   /** consecutive digs in the selected direction and mode (level paths are capped) */

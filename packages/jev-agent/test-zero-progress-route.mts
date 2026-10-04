@@ -634,7 +634,52 @@ addCase('(b) after one approach leg the retrieval is offered again (no premature
   }
 })
 
-// --- (a') the measured travel/enter shape: a PATH-STAGE failure spends the route --
+// --- (e) cross-stand retirement: the resource-scoped bound ---------------------
+// Live p23 (run-mutsv43u): `RETRIEVE:known:log:b-14_76_26` committed 13x for 12
+// typed route failures ~4min apart - each commit from a NEW stand cell, so the
+// (target, stand) ledger never reached its limit, the 120s route TTL expired
+// between failures, and the 30s failure-count decay erased each charge. The
+// generation-scoped `retiredKnownRetrieveTargets` set is the arm-level bound:
+// the remembered cell stays a dig-route bearing while the long-range RETRIEVE
+// retry dies.
+
+const ORE_ABOVE_2: KnownResource = {
+  name: 'iron_ore',
+  kind: 'ore',
+  position: { x: 40, y: 30, z: 11 },
+  dimension: 'minecraft:overworld',
+}
+
+addCase("(e) a retired remembered cell suppresses its RETRIEVE arm while a sibling cell still offers", () => {
+  const feet = { x: 10, y: 21, z: 20 }
+  const standable = [
+    { x: 10, y: 21, z: 20 },
+    { x: 12, y: 21, z: 20 },
+  ]
+  const retired = new Set(['iron_ore@24,22,11'])
+  const offered = generateGroundedCandidates(
+    worldState({
+      position: feet,
+      standable,
+      signals: signals({ knownResources: [ORE_ABOVE, ORE_ABOVE_2], retiredKnownRetrieveTargets: retired }),
+    }),
+  )
+  const ids = offered.candidates.map((candidate) => candidate.id)
+  return {
+    pass:
+      !ids.includes('RETRIEVE:known:raw_iron:b24_22_11') &&
+      ids.includes('RETRIEVE:known:raw_iron:b40_30_11'),
+    detail: `offered=${JSON.stringify(ids.filter((id) => id.startsWith('RETRIEVE')))}`,
+  }
+})
+
+addCase('(e) the retired set only gates the RETRIEVE arm: the remembered cell stays in knownResources', () => {
+  const sigs = signals({ knownResources: [ORE_ABOVE], retiredKnownRetrieveTargets: new Set(['iron_ore@24,22,11']) })
+  const stillKnown = (sigs.knownResources ?? []).some(
+    (resource) => resource.position.x === ORE_ABOVE.position.x && resource.position.y === ORE_ABOVE.position.y,
+  )
+  return { pass: stillKnown, detail: `knownResources=${(sigs.knownResources ?? []).length}` }
+})
 
 addCase("(a') a path-stage failure spends the ENTER route: the identical candidate is not re-offered and the goal escalates typed", () => {
   const state = portalWorld({ position: PORTAL_BODY, standable: [PORTAL_BODY] })
@@ -869,6 +914,9 @@ addCase('the live controller records the verdict and emits the typed markers', (
     ['ROUTE_ESCALATE mirrored', /const MIRRORED_MARKERS[\s\S]*?'ROUTE_ESCALATE'/.test(source)],
     ['ACTION_ZERO_PROGRESS mirrored', /const MIRRORED_MARKERS[\s\S]*?'ACTION_ZERO_PROGRESS'/.test(source)],
     ['publishes the ledger', /this\.signals\.zeroProgressRoutes = this\.zeroProgressRoutes/.test(source)],
+    ['publishes the retire set', /this\.signals\.retiredKnownRetrieveTargets = this\.retiredKnownRetrieveTargets/.test(source)],
+    ['cross-stand retrieve counter', /knownRetrieveFailures\?\.set\(retireKey/.test(source)],
+    ['retrieve retire gate', /retiredKnownRetrieveTargets\?\.has\(/.test(candidatesSource)],
     ['descend family gate', /standFamilyExhausted\(state\.signals\.zeroProgressRoutes, 'DESCEND'/.test(candidatesSource)],
     ['retrieve repeat gate', /isZeroProgressRouteRepeat\(state\.signals\.zeroProgressRoutes/.test(candidatesSource)],
     ['entry repeat gate', /kind: 'ENTER_PORTAL',\s*\n\s*targetKey,\s*\n\s*standKey,/.test(candidatesSource)],

@@ -30,7 +30,7 @@ import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from 
 import { actionShapeOf, filterRetiredRepeats, formatActionRepeat, formatActionTargetRetired, isRepeatTrackedKind, RepeatedOutcomeEscalation, repeatedOutcomeCell, repeatedOutcomeFactSignature, repeatedOutcomeLocalityCell, repeatedOutcomeLocalitySignature, repeatedOutcomeSemanticProgress, repeatedOutcomeToken } from './repeatedOutcomeEscalation.ts'
 import { formatActionFailureExhausted, formatActionFailureRepeat } from './replanThrottle.ts'
 import type { ActionFailureEscalation } from './replanThrottle.ts'
-import { KNOWN_RETRIEVE_RETIRE_LIMIT } from './retrieval-progress.ts'
+import { KNOWN_RETRIEVE_RETIRE_LIMIT, resourceKey } from './retrieval-progress.ts'
 import type { DecisionScheduler } from './scheduler.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './state.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
@@ -76,6 +76,10 @@ export interface OutcomeLedgersHost {
   readonly bot: Bot
   candidateFailureAt: Map<string, number>
   candidateFailures: Map<string, number>
+  /** settled route failures per known-resource cell (`resourceKey`), cross-stand */
+  readonly knownRetrieveFailures: Map<string, number>
+  /** cells whose RETRIEVE arm is retired this generation (`resourceKey` keys) */
+  readonly retiredKnownRetrieveTargets: Set<string>
   currentGoalKey(): string
   digMemory: DigMemory
   escalate(reason: EscalationReason, detail: string): void
@@ -430,15 +434,28 @@ export function recordZeroProgressOutcome(
     )
   }
   if (result.kind === 'RETRIEVE') {
-    if (decision.attempts >= KNOWN_RETRIEVE_RETIRE_LIMIT) {
-      host.logger.warn(
-        'agent',
-        formatRetrieveRetired('zero_progress_budget', candidate.target, decision.attempts),
-        { target: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
-        host.tickCounter,
-      )
-    }
-    if (candidate.meta.retrieval === 'known') {
+    if (candidate.meta.retrieval === 'known' && candidate.target !== null) {
+      // Cross-stand retire, the `decideKnownRetrieve` boundary wired live: the
+      // route-ledger attempts above are (target, stand)-scoped, so a remembered
+      // cell that fails once from each new stand cell never reaches them (live
+      // p23: RETRIEVE:known:log:b-14_76_26 committed 13x for 12 typed route
+      // failures ~4min apart - beyond the 120s route TTL and the 30s failure
+      // decay). The resource-scoped counter is generation-durable: N settled
+      // route failures ACROSS stands retires the RETRIEVE arm; the cell stays
+      // remembered (the dig-route bearing survives) and an adjacent body still
+      // collects it via the MINE arm.
+      const retireKey = resourceKey({ name: knownRetrieveName(candidate), position: candidate.target })
+      const resourceAttempts = (host.knownRetrieveFailures?.get(retireKey) ?? 0) + 1
+      host.knownRetrieveFailures?.set(retireKey, resourceAttempts)
+      if (resourceAttempts >= KNOWN_RETRIEVE_RETIRE_LIMIT && host.retiredKnownRetrieveTargets?.has(retireKey) === false) {
+        host.retiredKnownRetrieveTargets.add(retireKey)
+        host.logger.warn(
+          'agent',
+          formatRetrieveRetired('zero_progress_budget', candidate.target, resourceAttempts),
+          { target: candidate.target, attempts: resourceAttempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
+          host.tickCounter,
+        )
+      }
       // This exact route is now withheld from this stand cell: re-offering it
       // would be the same action with unchanged preconditions.
       host.logger.warn(
@@ -449,6 +466,12 @@ export function recordZeroProgressOutcome(
       )
     }
   }
+}
+
+/** The remembered-resource name a `RETRIEVE:known` candidate carries (`meta.knownName`, falling back to the wanted item). */
+function knownRetrieveName(candidate: Candidate): string {
+  const name = candidate.meta.knownName ?? candidate.meta.resource
+  return typeof name === 'string' && name.length > 0 ? name : 'unknown'
 }
 
 /**
