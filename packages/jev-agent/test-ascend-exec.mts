@@ -241,7 +241,7 @@ function makeCapturingLogger(logs: CapturedLog[]): EventLogger {
   return new EventLogger(writer, false)
 }
 
-function makeStructuralBot(): { bot: Bot; position: P } {
+function makeStructuralBot(goalLog?: string[]): { bot: Bot; position: P } {
   const position = new P(BODY_FEET.x + 0.5, BODY_FEET.y, BODY_FEET.z + 0.5)
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const emit = (event: string, payload?: unknown): void => {
@@ -296,9 +296,19 @@ function makeStructuralBot(): { bot: Bot; position: P } {
       setMovements: (movements: unknown): void => {
         bot.pathfinder.movements = movements
       },
-      setGoal: (goal: { constructor?: { name?: string } } | null): void => {
+      setGoal: (
+        goal: { constructor?: { name?: string }; x?: number; y?: number; z?: number } | null,
+      ): void => {
         if (goal === null) return
         void emit
+        if (goalLog === undefined) return
+        goalLog.push(goal.constructor?.name ?? 'unknown')
+        // Simulate the stock path walk: the body lands inside the goal cell and
+        // the pathfinder reports arrival, exactly what `waitForGoal` listens for.
+        if (typeof goal.x === 'number' && typeof goal.y === 'number' && typeof goal.z === 'number') {
+          position.set(goal.x, goal.y, goal.z)
+        }
+        setTimeout(() => emit('goal_reached'), 0)
       },
       stop: (): void => undefined,
       getPathTo: (): { status: string; path: unknown[] } => ({ status: 'noPath', path: [] }),
@@ -582,6 +592,58 @@ addCase('the executor refusal for an unplaceable pillar leaves a typed PILLAR ma
   )
   executor.cancelCurrent('ascend-exec fixture complete')
   return { pass: typed, detail: `markers=[${logs.map((entry) => entry.message.split(' ')[0]).join(',')}]` }
+})
+
+// Measured live (run-mutsv43u, gen-muubi91d @ 45baf947): the step_overhead
+// clears opened (12,26,25)+(12,27,25), `ASCEND:habitat:p12_25_25` was committed,
+// the dig opened (12,25,25), then the stock pathfinder's `GoalGetToBlock`
+// "reached" at (13.3,24.8,25.5) - adjacent to the step cell, never inside it -
+// and `isAtRequiredLevel` refused every leg into `path_stuck`. The step's
+// postcondition is occupancy, so its goal must be `GoalBlock` (the same
+// occupancy goal the down-staircase uses), never adjacency.
+addCase('a staircase-up step paths with an occupancy goal (GoalBlock), never adjacency', async () => {
+  const world = liveWorld({ diamond_pickaxe: 1 })
+  world.stepCuts = [
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut: { x: 4, y: BODY_FEET.y + 1, z: BODY_FEET.z },
+      step: { x: 4, y: BODY_FEET.y + 1, z: BODY_FEET.z },
+      name: 'stone',
+      safe: true,
+      reason: 'safe',
+    },
+  ]
+  const grounded = generateGroundedCandidates(world, defaultCandidateOptions)
+  const ascent = ascentOf(grounded.candidates)
+  if (ascent === null) return { pass: false, detail: 'no ASCEND candidate was generated' }
+  if (ascent.meta.vertical !== 'staircase-up') {
+    return { pass: false, detail: `expected a staircase-up plan, got ${String(ascent.meta.vertical)}` }
+  }
+
+  const goals: string[] = []
+  const logs: CapturedLog[] = []
+  const { bot } = makeStructuralBot(goals)
+  const executor = new Executor(bot, makeCapturingLogger(logs), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+    pathTimeoutMs: 3000,
+    pickupPathTimeoutMs: 3000,
+    packetStepMs: 0,
+    maxStepsPerWaypoint: 1,
+  })
+  fixtureClaim(executor, ascent)
+  const stepped = await waitFor(
+    () => goals.length > 0 && logs.some((line) => line.message.startsWith('ASCEND_STEP')),
+  )
+  executor.cancelCurrent('ascend-exec fixture complete')
+  const adjacency = goals.filter((name) => name === 'GoalGetToBlock').length
+  const occupancy = goals.filter((name) => name === 'GoalBlock').length
+  return {
+    pass: stepped && adjacency === 0 && occupancy > 0,
+    detail: `ASCEND_STEP=${logs.some((line) => line.message.startsWith('ASCEND_STEP'))} goals=[${goals.join(',')}]`,
+  }
 })
 
 let failures = 0

@@ -5265,7 +5265,6 @@ export class Executor {
     step: Vec3Json,
     epoch: number,
     signal: AbortSignal,
-    goalKind: 'GoalBlock' | 'GoalGetToBlock' = 'GoalBlock',
   ): Promise<boolean> {
     if (this.distanceToEyes(dig) > this.options.reach) {
       this.setPhase(candidate, epoch, 'pathing-to-staircase')
@@ -5276,7 +5275,7 @@ export class Executor {
     if (block === null || block.boundingBox === 'empty') {
       this.setPhase(candidate, epoch, 'stepping')
       try {
-        await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })
+        await this.pathTo(step, epoch, signal, 'GoalBlock', { requireLevel: true })
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
         throw error instanceof ExecutorError
@@ -5326,7 +5325,7 @@ export class Executor {
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'stepping')
     try {
-      await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })
+      await this.pathTo(step, epoch, signal, 'GoalBlock', { requireLevel: true })
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       throw error instanceof ExecutorError
@@ -5416,7 +5415,13 @@ export class Executor {
         dig,
         step,
       })
-      return this.digRetrievalStaircase(candidate, dig, step, epoch, signal, 'GoalGetToBlock')
+      // The step postcondition is occupancy (`isAtRequiredLevel(step)`), so the
+      // goal is `GoalBlock` exactly like the down-staircase. `GoalGetToBlock`
+      // completes on mere adjacency under the stock pathfinder - measured live
+      // (run-mutsv43u, gen-muubi91d): the dig opened (12,25,25), the stock goal
+      // "reached" at (13.3,24.8,25.5) without occupying the cell, and every leg
+      // ended `path_stuck` before the body ever stood in the step.
+      return this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
     }
     const placeName = readMetaString(candidate, `${keyBase}PlaceName`)
     const steps = Math.floor(readMetaNumber(candidate, `${keyBase}Steps`, 0))
