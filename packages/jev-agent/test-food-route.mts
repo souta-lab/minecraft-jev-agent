@@ -782,6 +782,47 @@ addCase('(iv-b) a sensed food block no route can ground: the refusal names the R
   }
 })
 
+// --- (iv-c) a sensed edible block out of walk/mine range: the tunnel closes it -
+
+addCase('(iv-c) starving + forage cell beyond MOVE range + a level dig step: the food arm composes the tunnel toward it', () => {
+  const state = perceive(
+    {
+      counts: {},
+      food: 14,
+      blocks: [
+        // the sensed edible cell, 55 blocks east: standable but far past
+        // moveMax (48), so it lands in `tunnelTargets` instead of MOVE/MINE
+        { at: { x: 55, y: 64, z: 0 }, name: 'sweet_berry_bush' },
+        // a diggable wall beside the body, so state.descent grounds a level:E step
+        { at: { x: 1, y: 64, z: 0 }, name: 'stone' },
+        { at: { x: 1, y: 65, z: 0 }, name: 'stone' },
+      ],
+    },
+    'acacia_log',
+  )
+  const result = grounded(state)
+  const tunnel = result.candidates.filter(
+    (candidate) =>
+      candidate.kind === 'DESCEND' &&
+      typeof candidate.meta.foodRoute === 'string',
+  )
+  return {
+    pass:
+      tunnel.length > 0 &&
+      tunnel.every(
+        (candidate) =>
+          candidate.meta.foodRoute === 'forage' &&
+          candidate.meta.foodTarget === 'sweet_berries' &&
+          candidate.meta.foodCell === '55,64,0',
+      ) &&
+      // a grounded route exists, so the food-source gap resolves to no report
+      result.foodGap === null,
+    detail: `tunnel=${tunnel.length} gap=${result.foodGap === null ? 'null' : formatFoodSourceGap(result.foodGap)} ids=${JSON.stringify(
+      result.candidates.map((candidate) => candidate.id),
+    )}`,
+  }
+})
+
 // --- (v) a fed body: the food tiers add nothing -------------------------------
 
 addCase('(v) a fed body: no food tag, no gap, and the offer is the hungry offer minus the food tiers', () => {

@@ -444,6 +444,7 @@ const MEANINGFUL_META_KEYS: readonly string[] = [
   'goalDrop',
   'food',
   'foodTarget',
+  'foodCell',
   'verticalRecovery',
   'strategy',
   'purpose',

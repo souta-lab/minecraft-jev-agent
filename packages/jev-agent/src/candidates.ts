@@ -7582,7 +7582,13 @@ function descendCandidates(
   tunnelTargets: readonly BlockState[],
   descendTargetY: number | null = null,
 ): Candidate[] {
-  if (focusItem === null && descendTargetY === null) return []
+  // Tunnel targets alone ground the route: a caller with no focus item may still
+  // have handed the descend machinery specific far cells to close on (the food
+  // arm's sensed-forage cells are the measured case: `sensedEdibleBlock=true`
+  // with `offered=[]` - the cells landed in `tunnelTargets` and were dropped by
+  // this early return, so a hungry body got `next=explore` while the tunnel
+  // primitive that answers it existed).
+  if (focusItem === null && descendTargetY === null && tunnelTargets.length === 0) return []
   const nowMs = state.timestampMs
   const standKey = cellKey(state.self.position)
   // Zero-progress route memory: a descend step whose dig provably removed nothing
@@ -7613,6 +7619,16 @@ function descendCandidates(
   if (steps.length === 0) return []
 
   const target = tunnelTargets[0] ?? nearestResource(state, focusItem)
+  // When the route target is a sensed food cell (focusItem === null on the food
+  // arm), the legs must carry the same foodRoute/foodTarget tag the direct
+  // MINE/MOVE food legs carry: `foodTarget` is a meaningful meta key, so the
+  // terminus cell reaches Jev's params as the bearing it picks the dig
+  // direction from, and the food accounting reads the same route fact.
+  const foodTag =
+    target !== null && target.foodRoute !== undefined
+      ? { route: target.foodRoute, item: target.foodItem ?? target.yield ?? target.name }
+      : null
+  const effectiveFocus = focusItem ?? foodTag?.item ?? null
   const feet = {
     x: Math.floor(state.self.position.x),
     y: Math.floor(state.self.position.y),
@@ -7703,8 +7719,9 @@ function descendCandidates(
   for (const step of offeredSteps) {
     const heading = descentHeadingForStep(step.dir, fixedDir, obstruction, oscillate, budgetExhausted, fixedMode, fixedCount)
     const built = descendCandidateFromStep(state, options, step, {
-      focusItem,
+      focusItem: effectiveFocus,
       descendTargetY,
+      foodTag: foodTag === null || target === null ? null : { ...foodTag, cell: target.position },
       grounded: descendToY || hasGoalTarget || knownStoneBelow || stoneGoal,
       // This describes the candidate's geometry, not a recovery strategy.
       staircase: step.mode === 'down' && (step.dx !== 0 || step.dz !== 0),
@@ -7955,6 +7972,12 @@ function descendCandidateFromStep(
     descendTargetY: number | null
     grounded: boolean
     staircase: boolean
+    /**
+     * Set when the route's terminus is a sensed food cell: the same
+     * `foodRoute`/`foodTarget` tag the direct food MINE/MOVE legs carry, plus
+     * `foodCell` - the terminus position Jev picks the dig direction from.
+     */
+    foodTag?: { route: 'forage' | 'acquire'; item: string; cell: Vec3Json } | null
     /** the selected heading and any typed obstruction being crossed */
     heading?: DescentHeadingPlan
     extraMeta?: Record<string, string | number | boolean>
@@ -8003,6 +8026,13 @@ function descendCandidateFromStep(
         // (the tunnel arm) and is read as such by the fixtures and the equip path.
         digStep: true,
         digStepReason: spec.focusItem === null ? 'focus:none' : `focus:${spec.focusItem}`,
+        ...(spec.foodTag === null || spec.foodTag === undefined
+          ? {}
+          : {
+              foodRoute: spec.foodTag.route,
+              foodTarget: spec.foodTag.item,
+              foodCell: `${spec.foodTag.cell.x},${spec.foodTag.cell.y},${spec.foodTag.cell.z}`,
+            }),
         mode: best.mode,
         dir: best.dir,
         dx: best.dx,
