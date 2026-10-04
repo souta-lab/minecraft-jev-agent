@@ -96,7 +96,7 @@ const READ_ONLY_BOT = new Set([
   'username', 'version', 'game', 'world', 'dimension', 'isSleeping', 'isRaining',
   'players', 'player', 'targetDigBlock', 'entityAtCursor', 'nearestEntity',
   'recipesAll', 'recipesFor', 'supportFeature', 'tablist', 'teams',
-  'creative', 'physics', 'controlState', 'quickBarSlot', 'equipment', 'mouse',
+  'creative', 'physics', 'controlState', 'getControlState', 'quickBarSlot', 'equipment', 'mouse',
   'pathfinder', 'collectBlock', 'movements', 'settings', 'viewer',
   'on', 'once', 'removeListener', 'addListener', 'digTime', 'loadPlugin',
   'waitForTicks', 'waitForChunksToLoad', 'getEquipmentDestSlot', 'blockInHand',

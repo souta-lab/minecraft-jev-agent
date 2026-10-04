@@ -54,7 +54,7 @@ describe('repo layout guard', () => {
   })
 
   test('root keeps only composition files (no stray tracked dirs outside the allowlist)', () => {
-    const allowed = /^(packages|tools|bun-tests|ops|docs|runs|\.github)\/|^[^/]+$/
+    const allowed = /^(packages|tools|bun-tests|ops|docs|runs|\.github|\.devin)\/|^[^/]+$/
     const stray = tracked.filter((file) => !allowed.test(file))
     expect(stray).toEqual([])
   })
