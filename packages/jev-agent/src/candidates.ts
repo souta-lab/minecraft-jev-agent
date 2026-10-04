@@ -8290,7 +8290,7 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
     if (
       focusItem === OBSIDIAN &&
       grounding?.temporarySupportRequired === true &&
-      selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)) === null
+      selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null)) === null
     ) {
       return portalFrameSupportPrerequisiteCandidates(state, options)
     }
@@ -9834,7 +9834,7 @@ function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
     tunnel: state.signals.lastTunnel,
     descent: digSources.descent,
     stepCuts: digSources.stepCuts,
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null)),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     inventory: state.inventory.counts,
   }
@@ -10771,7 +10771,7 @@ function contactGeometryFor(
   const bodyLevel = Math.floor(state.self.position.y)
   const targetY = Math.floor(entity.position.y)
   const gapY = contactGapY(bodyLevel, targetY)
-  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue))
+  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null))
   const decision = planVerticalApproachDetailed(
     verticalInputFor(state, {
       x: Math.floor(state.self.position.x),
@@ -10998,7 +10998,7 @@ function groundDescentScaffoldLeg(
   }
   if (!(spec.target.y < feet.y)) return { plan: null, refusal: null, line: null }
   const probe = state.descentScaffold ?? null
-  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue))
+  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null))
   const decision = planDescentScaffoldStep({
     probe,
     blockName: placeable?.name ?? null,
@@ -11153,7 +11153,7 @@ function descentScaffoldForLevel(
   }
   if (!(feet.y > spec.targetY)) return { candidate: null, refusal: null }
   const probe = state.descentScaffold ?? null
-  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue))
+  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null))
   const decision = planDescentScaffoldStep({
     probe,
     blockName: placeable?.name ?? null,
@@ -12131,7 +12131,7 @@ function groundBridgeLeg(
     selfFeet: feet,
     target: spec.target,
     probes: state.bridgeProbes,
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null)),
     isProtected: (cell, name) =>
       (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell),
     maxSpan: options.bridgeMaxSpan ?? BRIDGE_MAX_SPAN,
@@ -12195,7 +12195,7 @@ function groundEntryBridgeLeg(
     selfFeet: feet,
     target: entry.enterCell,
     probes: state.bridgeProbes,
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null)),
     isProtected: (cell, name) =>
       (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell),
     maxSpan: options.bridgeMaxSpan ?? BRIDGE_MAX_SPAN,
@@ -14331,7 +14331,7 @@ function columnFacts(state: WorldState): ColumnFacts {
     )
   })
   return {
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null)),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     footingSolid,
     headroomClear: ownCut === undefined,
@@ -14807,7 +14807,7 @@ function pillarFootingPrerequisiteCandidates(
 ): Candidate[] {
   if (capability.kind !== 'ascend_plan' || capability.plan !== 'pillar' || capability.reason !== 'no_footing') return []
   const footing = state.pillarFootingPlacement ?? null
-  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue))
+  const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null))
   if (footing === null || placeable === null) return []
   if (distance(footing.target, state.self.eyePosition) > options.reach + 0.5) return []
   return [

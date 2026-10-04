@@ -322,7 +322,7 @@ target: { y: number } | null): boolean {
     tunnel: state.signals.lastTunnel ?? null,
     descent: state.descent,
     stepCuts: state.stepCuts,
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null)),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     inventory: state.inventory.counts,
   })

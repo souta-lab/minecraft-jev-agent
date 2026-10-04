@@ -370,3 +370,84 @@ function world(
   )
   if (!pass) process.exitCode = 1
 }
+
+// portal-p23 regression: the p22.1 protection covered only the collect target,
+// so a live DESCEND spent `craft:furnace`'s cobblestone feedstock as route
+// scaffolding (10 -> 3, measured). The spendable view now withholds every item
+// the ACTIVE goal still requires - craft materials (recursively, through the
+// variant `planNextCraftStep` would take), smelt input + enough of the best
+// held fuel, and the place payload - while the verified surplus above the
+// requirement stays spendable.
+{
+  const countsFor = (held: Record<string, number>, goal: QueuedGoal) =>
+    routeScaffoldCounts(held, queue(goal), recipes)
+
+  // Direct ingredient: 8 cobblestone for one furnace -> surplus 2 spends, dirt is free.
+  const furnace = countsFor(
+    { cobblestone: 10, dirt: 4 },
+    queuedGoal({ id: 'g-craft-furnace', kind: 'craft', targetItem: 'furnace', requiredCount: 1 }),
+  )
+  const furnaceOk = furnace['cobblestone'] === 2 && furnace['dirt'] === 4
+
+  // Recursive + cumulative earmark: a pickaxe needs 3 planks and 2 sticks;
+  // with nothing held, the logs for BOTH branches are withheld.
+  const pick = countsFor(
+    { oak_log: 2, dirt: 4 },
+    queuedGoal({ kind: 'craft', targetItem: 'wooden_pickaxe', requiredCount: 1 }),
+  )
+  const pickOk = (pick['oak_log'] ?? 0) === 0 && pick['dirt'] === 4
+
+  // Held units are earmarked once across branches: 3 held planks cover the
+  // pickaxe head, so the stick chain still needs planks -> logs stay withheld.
+  const pickPartial = countsFor(
+    { oak_log: 2, oak_planks: 3 },
+    queuedGoal({ kind: 'craft', targetItem: 'wooden_pickaxe', requiredCount: 1 }),
+  )
+  const pickPartialOk = (pickPartial['oak_log'] ?? 0) === 1
+
+  // Outstanding semantics: held product shrinks the material requirement;
+  // a satisfied craft goal withholds nothing.
+  const furnaceTwo = countsFor(
+    { furnace: 1, cobblestone: 10 },
+    queuedGoal({ kind: 'craft', targetItem: 'furnace', requiredCount: 2 }),
+  )
+  const furnaceDone = countsFor(
+    { furnace: 1, cobblestone: 10 },
+    queuedGoal({ kind: 'craft', targetItem: 'furnace', requiredCount: 1 }),
+  )
+  const outstandingOk = furnaceTwo['cobblestone'] === 2 && furnaceDone['cobblestone'] === 10
+
+  // Smelt: outstanding input units plus enough of the best held fuel; the
+  // surplus fuel and unrelated items stay spendable.
+  const smelt = countsFor(
+    { raw_iron: 2, coal: 2, stick: 4, dirt: 3 },
+    queuedGoal({ kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 2 }),
+  )
+  const smeltOk =
+    (smelt['raw_iron'] ?? 0) === 0 && smelt['coal'] === 1 && smelt['stick'] === 4 && smelt['dirt'] === 3
+
+  // Place: the held payload IS the goal - surplus above want spends, want does not.
+  const placeSurplus = countsFor(
+    { furnace: 2, dirt: 3 },
+    queuedGoal({ kind: 'place', targetItem: 'furnace', requiredCount: 1 }),
+  )
+  const placeExact = countsFor(
+    { furnace: 1, dirt: 3 },
+    queuedGoal({ kind: 'place', targetItem: 'furnace', requiredCount: 1 }),
+  )
+  const placeOk = placeSurplus['furnace'] === 1 && (placeExact['furnace'] ?? 0) === 0 && placeExact['dirt'] === 3
+
+  // recipes=null degrades to collect-only protection (fixture/production parity).
+  const degraded = routeScaffoldCounts({ cobblestone: 10 }, queue(queuedGoal({ kind: 'craft', targetItem: 'furnace' })))
+  const degradedOk = degraded['cobblestone'] === 10
+
+  const pass =
+    furnaceOk && pickOk && pickPartialOk && outstandingOk && smeltOk && placeOk && degradedOk
+  process.stdout.write(
+    `active-goal materials are never route scaffolding: ${pass ? 'PASS' : 'FAIL'} ` +
+      `furnace=${JSON.stringify(furnace)} pick=${JSON.stringify(pick)} pickPartial=${JSON.stringify(pickPartial)} ` +
+      `furnaceTwo=${JSON.stringify(furnaceTwo)} smelt=${JSON.stringify(smelt)} ` +
+      `place=${JSON.stringify(placeSurplus)}/${JSON.stringify(placeExact)} degraded=${JSON.stringify(degraded)}\n`,
+  )
+  if (!pass) process.exitCode = 1
+}

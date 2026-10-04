@@ -1134,6 +1134,12 @@ export type WorldState = {
   entities: EntityState[]
   blocks: BlockState[]
   /**
+   * The recipe index `routeScaffoldCounts` resolves craft/smelt material
+   * requirements through (SensorInput.recipes). Absent in fixtures that do not
+   * exercise craft-goal scaffold protection.
+   */
+  recipes?: import('./crafting.ts').RecipeIndex | null
+  /**
    * The spawn context of every mob the tick declared a producer for: where that
    * mob can exist, and whether the body's own column currently satisfies the
    * rule. Populated only when the active focus item has a declared mob producer
@@ -1464,6 +1470,13 @@ export interface SensorInput {
   tick: number
   goal: GoalState
   goalQueue: GoalQueueState
+  /**
+   * The recipe index the active craft goal's material protection resolves
+   * through (`routeScaffoldCounts`): a craft/smelt/place goal's required
+   * materials are withheld from the scaffold-spendable view exactly like the
+   * collect target. Null degrades to collect-only protection.
+   */
+  recipes?: import('./crafting.ts').RecipeIndex | null
   /** #56: the exact compiled Option instance currently being evaluated by Jev */
   currentOption?: CurrentOptionContext | null
   recentOutcomes?: readonly System2Outcome[]
@@ -5587,7 +5600,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   // Route-scaffold probes and the prerequisite producer scan read the SAME
   // spendable inventory the candidate layer plans with, so a body holding only
   // its collect target still senses the placeable producers it now needs.
-  const scaffoldCounts = routeScaffoldCounts(inventory.counts, input.goalQueue)
+  const scaffoldCounts = routeScaffoldCounts(inventory.counts, input.goalQueue, input.recipes ?? null)
   const pillarFootingPlacement =
     selectPlaceableBlock(scaffoldCounts) === null ? null : buildPillarFootingPlacement(bot, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
@@ -5682,6 +5695,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     headroomCuts: buildHeadroomCuts(bot, options, self),
     goal: input.goal,
     goalQueue: input.goalQueue,
+    recipes: input.recipes ?? null,
     currentOption: input.currentOption ?? null,
     recentOutcomes: [...(input.recentOutcomes ?? [])].slice(-8),
     recentEvents: input.recentEvents.slice(-12),

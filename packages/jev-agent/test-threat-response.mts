@@ -1104,8 +1104,8 @@ addCase('an approaching hostile enters the reaction band by movement and fires o
   const pass =
     mobs.length === 4 &&
     zombieFires.length === 3 &&
-    zombieFires[0].detail.reason === 'approach' &&
-    zombieFires[0].detail.distance === 7.5 &&
+    zombieFires[0]?.detail.reason === 'approach' &&
+    zombieFires[0]?.detail.distance === 7.5 &&
     mobs.some((event) => event.detail.id === 30)
   return { pass, detail: `mobs=${JSON.stringify(mobs.map((event) => ({ id: event.detail.id, d: event.detail.distance, r: event.detail.reason })))}` }
 })
