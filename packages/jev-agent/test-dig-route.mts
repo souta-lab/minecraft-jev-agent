@@ -271,6 +271,24 @@ interface WorldSpec {
   liveStructureMembers?: NonNullable<WorldState['liveStructureMembers']>
 }
 
+/**
+ * A connected open-ground standable component around `feet`: reaches the 5x5
+ * scan edge and is larger than the stranded pocket bound, so
+ * `strandedOnColumn` reads it as ordinary terrain (a bare few-cell list is a
+ * closed pocket under the component test and spells `shaft_exit` instead of
+ * `tunnel`).
+ */
+function openGround(feet: Vec3Json): Vec3Json[] {
+  const cells: Vec3Json[] = [feet]
+  for (let dx = -2; dx <= 2; dx += 1) {
+    for (const dz of [0, 1]) {
+      if (dx === 0 && dz === 0) continue
+      cells.push({ x: feet.x + dx, y: feet.y, z: feet.z + dz })
+    }
+  }
+  return cells
+}
+
 function worldState(spec: WorldSpec): WorldState {
   const feet = spec.feet
   const current = spec.current ?? queuedPlace(spec.enterCell ?? ENTER_CELL)
@@ -568,7 +586,22 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const SIDE: Vec3Json = { x: 12, y: 66, z: 24 }
   const FRONTIER: Vec3Json = { x: 13, y: 66, z: 24 }
   const counts = { diamond_pickaxe: 1 }
-  const walkable = [FEET, SIDE, FRONTIER]
+  // A genuinely open frontier: the walking component reaches the scan edge and
+  // is larger than any pocket (`strandedOnColumn` reads a small closed
+  // component as stranded; a 3-cell list would now spell `shaft_exit`).
+  const walkable = [
+    FEET,
+    SIDE,
+    FRONTIER,
+    { x: 11, y: 66, z: 23 },
+    { x: 12, y: 66, z: 23 },
+    { x: 13, y: 66, z: 23 },
+    { x: 11, y: 66, z: 25 },
+    { x: 12, y: 66, z: 25 },
+    { x: 13, y: 66, z: 25 },
+    { x: 12, y: 66, z: 22 },
+    { x: 11, y: 66, z: 22 },
+  ]
   const base = worldState({ feet: FEET, descent: shaftDescent(FEET), counts, enterCell: TARGET, standable: walkable })
   const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
   const fresh = entryCandidates(base, options)
@@ -1106,7 +1139,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     counts,
     current: queuedPlace(TARGET),
     enterCell: TARGET,
-    standable: [FEET, { x: 11, y: 66, z: 22 }],
+    standable: openGround(FEET),
     liveStructureMembers: protectedE,
   })
   const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
@@ -1117,7 +1150,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     counts,
     current: queuedPlace(TARGET),
     enterCell: TARGET,
-    standable: [FEET, { x: 11, y: 66, z: 22 }],
+    standable: openGround(FEET),
     routes: spent,
     liveStructureMembers: protectedE,
   })

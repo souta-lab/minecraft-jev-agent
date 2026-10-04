@@ -1908,9 +1908,22 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
 {
   const FEET: Vec3Json = { x: 119.7, y: 75, z: -14.5 }
   const GATE: Vec3Json = { x: 27, y: 67, z: 9 }
+  // The body stands on open ground: a connected walking component that reaches
+  // the 5x5 scan edge and is larger than the stranded pocket bound, plus the
+  // distant standable cells the wider world offers. A bare few-cell list is a
+  // closed pocket under the component test (`canTravel` would then be false).
   const FRONTIER: Vec3Json[] = [
     FEET,
     { x: 118, y: 75, z: -14 },
+    { x: 118, y: 75, z: -15 },
+    { x: 117, y: 75, z: -14 },
+    { x: 117, y: 75, z: -15 },
+    { x: 118, y: 75, z: -13 },
+    { x: 119, y: 75, z: -13 },
+    { x: 120, y: 75, z: -14 },
+    { x: 120, y: 75, z: -15 },
+    { x: 121, y: 75, z: -15 },
+    { x: 117, y: 75, z: -13 },
     { x: 110, y: 74, z: -12 },
     { x: 100, y: 73, z: -10 },
   ]

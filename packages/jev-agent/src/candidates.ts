@@ -2867,22 +2867,87 @@ export function formatColumnDescentRefused(refusal: ColumnDescentRefusal): strin
 }
 
 /**
- * The frontier distance `pickExplore` uses to reject the body's own cell. Shared
- * so "no walkable frontier" cannot drift between the exploration arm, the
- * typed explore dead end and the stranded-column descent.
+ * The frontier distance `pickExplore` uses to reject the body's own cell (and
+ * the cells it can merely pace on) as an exploration target.
  */
 const STRANDED_FRONTIER_DISTANCE = 1.5
 
 /**
- * A body is STRANDED when the sensor knows no standable cell beyond the one it
- * occupies: `pickExplore` finds no frontier and no ordinary walking MOVE can be
- * enumerated. This is the one geometric precondition for
- * {@link columnDescentCandidates} and is exported pure so the offer and its
- * typed refusal read the same fact. It says nothing about pillars: a 1-wide
- * ledge, a 1x1 shaft and a self-built column are the same world state.
+ * The pocket bound for {@link strandedOnColumn}: a walking component this
+ * small is a dead end even when it touches the scan edge (a continuation
+ * might exist beyond the window, but a region the body can cross in two
+ * paces affords no frontier regardless). Sized at the 3x3 neighborhood the
+ * old one-cell test effectively admitted.
+ */
+const STRANDED_POCKET_MAX_CELLS = 9
+
+/**
+ * A body is STRANDED when every standable cell it can walk to lies inside one
+ * small pocket with no frontier: `pickExplore` finds no frontier and no
+ * ordinary walking MOVE can be enumerated. This is the one geometric
+ * precondition for {@link columnDescentCandidates} and is exported pure so the
+ * offer and its typed refusal read the same fact. It says nothing about
+ * pillars: a 1-wide ledge, a 1x1 shaft, a self-built column and a small
+ * sky-island are the same world state.
+ *
+ * The pocket is the body's walking component over the sensed standable set:
+ * 8-connected cells at most one block of rise/fall apart, the moves ordinary
+ * walking can make. It is a dead end - the body stranded - when EITHER the
+ * whole component lies inside the sensed window (no member touches the
+ * horizontal 5x5 scan edge, so no walking continuation can exist beyond the
+ * sensor's view) OR the component is small enough to be a pocket on its own
+ * (a strip that reaches the edge might continue, but a region this small
+ * affords no frontier either way; the old 1.5m test admitted at most the
+ * body's own 3x3 neighborhood). An edge-touching LARGER region keeps the
+ * pre-arm behavior (typed starvation, bounded escalation); unreachable
+ * standable cells in other components never rescue the body, since walking
+ * to them is impossible anyway.
+ *
+ * This replaces the old "no standable cell beyond 1.5m" one-cell test, which
+ * went silent the moment a stranded body bridged or pillared itself a second
+ * cell to pace between (measured portal-p23 run-mutsv43u-1a0g: a self-built
+ * y87 island starved under `descend_to`/`explore` with `dig_route:no_support`
+ * and no `column_descent` fact ever reported, while the safe down-step the
+ * arm exists to offer sat under the body's feet).
  */
 export function strandedOnColumn(state: Pick<WorldState, 'terrain' | 'self'>): boolean {
-  return !state.terrain.standable.some((spot) => distance(spot, state.self.position) > STRANDED_FRONTIER_DISTANCE)
+  const standable = state.terrain.standable
+  if (standable.length === 0) return true
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const key = (spot: Vec3Json) => `${Math.floor(spot.x)},${Math.floor(spot.y)},${Math.floor(spot.z)}`
+  const byKey = new Map<string, Vec3Json>()
+  for (const spot of standable) byKey.set(key(spot), spot)
+  // `buildTerrain` sorts standable nearest-first, so index 0 is the body's own
+  // cell whenever it is standable at all.
+  const start = byKey.get(key(feet)) ?? (standable[0] as Vec3Json)
+  const seen = new Set<string>([key(start)])
+  const queue: Vec3Json[] = [start]
+  let touchesEdge = false
+  while (queue.length > 0) {
+    const cell = queue.pop() as Vec3Json
+    const cx = Math.floor(cell.x)
+    const cy = Math.floor(cell.y)
+    const cz = Math.floor(cell.z)
+    if (Math.abs(cx - feet.x) === 2 || Math.abs(cz - feet.z) === 2) touchesEdge = true
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        if (dx === 0 && dz === 0) continue
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const neighborKey = `${cx + dx},${cy + dy},${cz + dz}`
+          if (seen.has(neighborKey)) continue
+          const neighbor = byKey.get(neighborKey)
+          if (neighbor === undefined) continue
+          seen.add(neighborKey)
+          queue.push(neighbor)
+        }
+      }
+    }
+  }
+  return !touchesEdge || seen.size <= STRANDED_POCKET_MAX_CELLS
 }
 
 /**

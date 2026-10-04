@@ -281,16 +281,126 @@ addCase('(a3) an existing locomotion candidate is never displaced by the last-re
   }
 })
 
+// --- a stranded multi-cell island is still stranded --------------------------------
+//
+// Measured live (run-mutsv43u-1a0g, source 7becaf56): the body pillared and
+// bridged itself a small y87 sky-island, then starved under descend_to and
+// explore:surface - `dig_route:no_support`, `explore_route_blocked:exhausted`,
+// only WAIT/ESCALATE offered, and no `column_descent` fact was ever reported.
+// The 1.5m one-cell test saw a second standable cell and concluded "a frontier
+// exists"; the walking component was a closed pocket all along.
+
+addCase('(b1) a multi-cell island pocket still offers the own-column descent', () => {
+  // Three standable cells the body can pace between; the raised corner cell is
+  // 1.73m away, which defeated the old radius test while remaining inside the
+  // same dead-end pocket. Its frontier MOVE is already spent, as it was live.
+  const corner = { x: FEET_CELL.x + 1, y: FEET_CELL.y + 1, z: FEET_CELL.z + 1 }
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL, { x: FEET_CELL.x + 1, y: FEET_CELL.y, z: FEET_CELL.z }, corner],
+    descent: pillarDescent(FEET),
+    signals: signals({ failedCandidates: { [`MOVE:p${corner.x}_${corner.y}_${corner.z}`]: 9 } }),
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const descent = grounded.candidates.find((candidate) => candidate.kind === 'DESCEND')
+  const pass =
+    strandedOnColumn(state) &&
+    descent !== undefined &&
+    descent.meta.columnDescent === true &&
+    descent.meta.dir === 'D' &&
+    descent.meta.mode === 'down' &&
+    descent.meta.stepY === FEET_CELL.y - 1
+  return {
+    pass,
+    detail: `stranded=${strandedOnColumn(state)} set=[${grounded.candidates.map((c) => c.id).join(',')}] descent=${descent?.id ?? 'none'} refusal=${JSON.stringify(grounded.columnDescentRefusal)}`,
+  }
+})
+
+addCase('(b2) a small pocket that reaches the scan edge is still a dead end', () => {
+  // A 3-cell strip ending at the window boundary (dx=2): it MIGHT continue
+  // beyond the sensor, but a region this small affords no frontier either way.
+  const edge = { x: FEET_CELL.x + 2, y: FEET_CELL.y, z: FEET_CELL.z }
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL, { x: FEET_CELL.x + 1, y: FEET_CELL.y, z: FEET_CELL.z }, edge],
+    descent: pillarDescent(FEET),
+    signals: signals({ failedCandidates: { [`MOVE:p${edge.x}_${edge.y}_${edge.z}`]: 9 } }),
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const descent = grounded.candidates.find((candidate) => candidate.kind === 'DESCEND')
+  const pass =
+    strandedOnColumn(state) &&
+    descent !== undefined &&
+    descent.meta.columnDescent === true &&
+    descent.meta.dir === 'D'
+  return {
+    pass,
+    detail: `stranded=${strandedOnColumn(state)} set=[${grounded.candidates.map((c) => c.id).join(',')}] descent=${descent?.id ?? 'none'} refusal=${JSON.stringify(grounded.columnDescentRefusal)}`,
+  }
+})
+
+addCase('(b3) a larger edge-touching region is not stranded (unchanged conservatism)', () => {
+  // A 10-cell component reaching the scan edge can continue beyond the sensor:
+  // the arm stays off and the ordinary starvation/escalation path owns the fact.
+  const patch: Vec3Json[] = [FEET_CELL]
+  for (let dx = -2; dx <= 2; dx += 1) {
+    for (const dz of [0, 1]) {
+      if (dx === 0 && dz === 0) continue
+      patch.push({ x: FEET_CELL.x + dx, y: FEET_CELL.y, z: FEET_CELL.z + dz })
+    }
+  }
+  const state = worldState({
+    position: FEET,
+    standable: patch,
+    descent: pillarDescent(FEET),
+    signals: signals({
+      failedCandidates: Object.fromEntries(
+        patch.filter((spot) => spot.x !== FEET_CELL.x || spot.z !== FEET_CELL.z).map((spot) => [`MOVE:p${spot.x}_${spot.y}_${spot.z}`, 9]),
+      ),
+    }),
+  })
+  const pass = !strandedOnColumn(state) && groundedSet(state).column === 0
+  return {
+    pass,
+    detail: `stranded=${strandedOnColumn(state)} cells=${patch.length}`,
+  }
+})
+
+function groundedSet(state: WorldState): { ids: string[]; column: number } {
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  return { ids: grounded.candidates.map((candidate) => candidate.id), column: columnDescentCandidates(grounded.candidates).length }
+}
+
+addCase('(b4) a standable cell the body cannot reach does not rescue the pocket', () => {
+  // An unreachable pillar cell in a DIFFERENT walking component: walking to it
+  // is impossible, so it must not lift the stranded verdict.
+  const far = { x: FEET_CELL.x - 2, y: FEET_CELL.y + 1, z: FEET_CELL.z + 2 }
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL, far],
+    descent: pillarDescent(FEET),
+    signals: signals({ failedCandidates: { [`MOVE:p${far.x}_${far.y}_${far.z}`]: 9 } }),
+  })
+  const pass = strandedOnColumn(state)
+  return { pass, detail: `stranded=${strandedOnColumn(state)}` }
+})
+
 // --- flat ground is unchanged ----------------------------------------------------
 
 addCase('(b) normal flat ground offers no column descent even when a down step is safe', () => {
-  // A walkable frontier exists (neighbouring standable cells), so the body is not
-  // stranded. Digging a hole beside the body is mechanically "safe" but must stay
-  // a gratuitous step-down: it is not offered.
-  const neighbour = { x: FEET_CELL.x + 2, y: FEET_CELL.y, z: FEET_CELL.z }
+  // A walkable frontier exists (a region larger than any pocket, continuing to
+  // the scan edge), so the body is not stranded. Digging a hole beside the body
+  // is mechanically "safe" but must stay a gratuitous step-down: not offered.
+  const open: Vec3Json[] = [FEET_CELL]
+  for (let dx = -2; dx <= 2; dx += 1) {
+    for (const dz of [0, 1]) {
+      if (dx === 0 && dz === 0) continue
+      open.push({ x: FEET_CELL.x + dx, y: FEET_CELL.y, z: FEET_CELL.z + dz })
+    }
+  }
   const state = worldState({
     position: FEET,
-    standable: [FEET_CELL, { x: FEET_CELL.x + 1, y: FEET_CELL.y, z: FEET_CELL.z }, neighbour],
+    standable: open,
     descent: openGroundDescent(FEET),
   })
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
