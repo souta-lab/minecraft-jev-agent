@@ -265,6 +265,23 @@ addCase('rejects STALE_COORDS for an old candidate', () => {
   return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
 })
 
+// --- STALE_COORDS is a spatial gate only: control kinds carry no coordinates
+// (live portal-p23 gen-muu41xft 17:46Z: ESCALATE picks rejected 15-16 ticks old
+// during planner latency -> six blocked epochs on the only grounded action)
+addCase('accepts a stale ESCALATE (no coordinates to decay)', () => {
+  const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [], tick: 90 })
+  const escalate = candidate({ id: 'ESCALATE', kind: 'ESCALATE', meta: { tick: 5 } })
+  const result = guardCandidate(escalate, fixture, context({ candidateIds: new Set([escalate.id]), maxCandidateAgeTicks: 10 }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
+addCase('accepts a stale WAIT (no coordinates to decay)', () => {
+  const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [], tick: 90 })
+  const wait = candidate({ id: 'WAIT', kind: 'WAIT', meta: { tick: 5 } })
+  const result = guardCandidate(wait, fixture, context({ candidateIds: new Set([wait.id]), maxCandidateAgeTicks: 10 }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
 // --- NO_SUPPORT: reachable in principle, but no walkable spot and canDig=false
 addCase('rejects NO_SUPPORT when there is no walk-up access', () => {
   const fixture = state({
@@ -458,6 +475,8 @@ const expected: Record<string, GuardCode | null> = {
   'rejects UNKNOWN_CANDIDATE (hallucinated id)': 'UNKNOWN_CANDIDATE',
   'rejects TARGET_GONE when the block is no longer in the state': 'TARGET_GONE',
   'rejects STALE_COORDS for an old candidate': 'STALE_COORDS',
+  'accepts a stale ESCALATE (no coordinates to decay)': null,
+  'accepts a stale WAIT (no coordinates to decay)': null,
   'rejects NO_SUPPORT when there is no walk-up access': 'NO_SUPPORT',
   'rejects LAVA_RISK when lava is adjacent': 'LAVA_RISK',
   'rejects CONFLICT_IN_FLIGHT while another mine is running': 'CONFLICT_IN_FLIGHT',

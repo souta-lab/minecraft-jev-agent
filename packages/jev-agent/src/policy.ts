@@ -145,8 +145,15 @@ export function guardCandidate(
     return deny(candidate.id, 'UNKNOWN_CANDIDATE', 'candidate id is not part of the current candidate set')
   }
 
+  // STALE_COORDS is a spatial-truth gate: a target/motion cell the world may
+  // have changed since generation. Control kinds carry no coordinates - the
+  // ESCALATE handoff re-reads live state at submission - so age can never
+  // invalidate them; measured live portal-p23 `gen-muu41xft` (17:46Z) every
+  // ESCALATE pick was rejected `candidate is 15-16 ticks old` during planner
+  // latency, burning a 6/6 streak of `terminalReason=blocked` epochs on the
+  // scene's only grounded action.
   const age = state.tick - readMetaNumber(candidate, 'tick', state.tick)
-  if (age > context.maxCandidateAgeTicks) {
+  if (ACTING_KINDS.has(candidate.kind) && age > context.maxCandidateAgeTicks) {
     return deny(candidate.id, 'STALE_COORDS', `candidate is ${age} ticks old (limit ${context.maxCandidateAgeTicks})`)
   }
 
