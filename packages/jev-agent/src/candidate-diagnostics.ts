@@ -816,7 +816,13 @@ export function logReachability(host: CandidateDiagnosticsHost,
   }
   for (const entry of withheld) {
     const candidateId = entry.candidate.id
-    const signature = `withheld:${entry.result.reason}|${entry.fingerprint}|${entry.suppressed}`
+    // Content-keyed signature: the fingerprint embeds the body cell, which
+    // rotates as the body moves and re-logs the whole withheld set every pass
+    // (measured gen-muu8vp90: 16k CANDIDATE_ACQUISITION_REFUSED lines for one
+    // pickaxe-gated cluster). reason+missing+suppressed IS the refusal content;
+    // a fingerprint move with identical content adds no evidence.
+    const missing = entry.result.missingCapabilities.map(capabilityKey).join('+')
+    const signature = `withheld:${entry.result.reason}|${missing}|${entry.suppressed}`
     host.logReachabilityOnce(`withheld:${candidateId}`, signature, true, entry)
   }
 }
