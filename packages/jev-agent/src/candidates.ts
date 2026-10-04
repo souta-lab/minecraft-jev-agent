@@ -520,7 +520,19 @@ function descentPolicyEscalateCandidate(input: {
  * WHICH of them is taken stays Jev's choice in both places.
  */
 export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
-  return CONTACT_THREAT_KINDS.has(candidate.kind) || isDeathZoneEscapeRoute(candidate)
+  return (
+    CONTACT_THREAT_KINDS.has(candidate.kind) ||
+    isDeathZoneEscapeRoute(candidate) ||
+    // §4.1 world-shaping survival answers: `MOVE:escapeup:*` (a MOVE carrying
+    // its own grounded pillar route) and `PLACE:wall:*` (a placement into the
+    // threat's approach lane). Measured portal-p23 gen-mutp1aul
+    // (2026-10-04T10:44:4x): `escapes=0` collapsed the offer to bare-fist
+    // ATTACKs against a zombie+drowned pair while placeable dirt sat in the
+    // inventory - the locomotion gap erased every world-modification
+    // affordance and the restriction stripped them even where emitted.
+    candidate.meta.escapePillar === true ||
+    candidate.meta.threatWall === true
+  )
 }
 
 export function restrictCandidatesDuringImmediateThreat(
@@ -562,15 +574,7 @@ export function restrictCandidatesAtCriticalHealth(
     (entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE,
   )
   if (!immediateHostile || state.self.health > CRITICAL_COMBAT_HEALTH) return [...candidates]
-  const survival = candidates.filter(
-    (candidate) =>
-      candidate.kind === 'ATTACK' ||
-      candidate.kind === 'RETREAT' ||
-      candidate.kind === 'ESCALATE' ||
-      candidate.kind === 'EAT' ||
-      candidate.kind === 'EQUIP' ||
-      isDeathZoneEscapeRoute(candidate),
-  )
+  const survival = candidates.filter(isSurvivalAnswerCandidate)
   return survival.length > 0 ? survival : [...candidates]
 }
 
@@ -597,9 +601,7 @@ export function restrictCandidatesDuringDangerousThreat(
 ): Candidate[] {
   const threat = state.signals?.threat ?? null
   if (threat === null || threat.active !== true) return [...candidates]
-  const survival = candidates.filter(
-    (candidate) => THREAT_SURVIVAL_KINDS.has(candidate.kind) || isDeathZoneEscapeRoute(candidate),
-  )
+  const survival = candidates.filter(isSurvivalAnswerCandidate)
   if (survival.length > 0) return survival
   return [
     threatEscalateCandidate(
@@ -4831,6 +4833,15 @@ function generateRawCandidates(
       },
     })
   }
+
+  // §4.1 survival affordance set: world modification is a first-class
+  // survival action. While a hostile is inside the response envelope the
+  // offer names the grounded shaping answers (vertical-escape pillar,
+  // approach-lane wall) alongside locomotion, so `no_grounded_escape` closes
+  // walking only - never the whole survival surface. Measured portal-p23
+  // gen-mutp1aul: escapes=0 -> ATTACK-only offer, bare fists into a
+  // zombie+drowned pair with placeable dirt in hand.
+  candidates.push(...survivalShapingCandidates(state, options, primaryThreat))
 
   // SAFE: the environmental-hazard exits. Ordinary MOVE candidates to real,
   // standable, hazard-free adjacent cells, grounded by the sensor's classified
@@ -12854,6 +12865,168 @@ function disengageSpots(
       disengage: true,
     }
   })
+}
+
+/** The pillar height that puts the body's feet beyond a melee hostile's reach. */
+const SURVIVAL_PILLAR_STEPS = 2
+
+/**
+ * The cell the wall placement can attempt. `state.blocks` lists only
+ * interesting (non-air) names, so a cell the scan carries is a sensed SOLID
+ * and is never a fill target; a cell absent from the scan is air, fluid or
+ * simply uninteresting terrain - open by the placement's fail-open-on-solids
+ * rule, with the executor's live `placeOneCell` verification owning the final
+ * truth. A cell the threat itself occupies is not fillable (the server
+ * refuses placement inside an entity AABB).
+ */
+function wallCellFillable(state: WorldState, cell: Vec3Json, threatCells: ReadonlySet<string>): boolean {
+  const solid = state.blocks.find(
+    (block) => block.position.x === cell.x && block.position.y === cell.y && block.position.z === cell.z,
+  )
+  if (solid !== undefined) return false
+  return !threatCells.has(blockId('p', cell))
+}
+
+/**
+ * §4.1: world modification is a first-class survival action. While a hostile
+ * is inside the response envelope the offer names the grounded shaping
+ * answers alongside locomotion, so `no_grounded_escape` closes walking only -
+ * never the whole survival surface. Measured portal-p23 gen-mutp1aul
+ * (2026-10-04T10:44:4x): `escapes=0` collapsed the contact offer to bare-fist
+ * ATTACKs vs a zombie+drowned pair while dirt sat in the inventory, because
+ * no shaping affordance was ever emitted.
+ *
+ * Both answers reuse proven primitives under the existing authority path:
+ *
+ *  * `MOVE:escapeup:*` is an ordinary MOVE carrying the grounded
+ *    `vertical='pillar'` contract (`pillarUp` executor leg +
+ *    `declaredRoutePlaceBlocks` equip): the placed blocks put the body's feet
+ *    beyond a melee hostile's reach. Melee-class threats only - a pillar
+ *    gives a ranged attacker a cleaner shot, so it is never offered for one.
+ *  * `PLACE:wall:*` is an ordinary `placementCells` PLACE filling the open
+ *    cells of the approach-lane column between the body and the threat (its
+ *    own 1x2 profile): a barrier the hostile must path around. It also breaks
+ *    a ranged sight line, so it is offered for every hostile.
+ *
+ * Material comes from the same scaffold-protected spendable view every route
+ * support uses (`routeScaffoldCounts`): active-goal resource classes stay
+ * withheld. WHICH answer is taken stays Jev's choice - these are CAN offers.
+ */
+function survivalShapingCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  threat: ThreatEntityLike | null,
+): Candidate[] {
+  if (threat === null) return []
+  const placeable = selectPlaceableBlock(
+    routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null),
+  )
+  if (placeable === null) return []
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const threatMeta = {
+    threatEntityId: threat.id,
+    threatName: threat.name,
+    threatDistance: threat.distance,
+    threatStandoff: threatStandoffRange(threat.name),
+  }
+  const out: Candidate[] = []
+
+  // Vertical escape. The column-liquid probe is the same sensor-side gate
+  // `verticalInputFor` applies to every generated pillar route; headroom
+  // clearance stays with the executor's measured `clearPillarHeadroom` leg.
+  if (
+    placeable.count >= SURVIVAL_PILLAR_STEPS &&
+    !isRangedThreatName(threat.name) &&
+    !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks)
+  ) {
+    const top = { x: feet.x, y: feet.y + SURVIVAL_PILLAR_STEPS, z: feet.z }
+    out.push({
+      id: `MOVE:escapeup:${blockId('p', top)}`,
+      kind: 'MOVE',
+      label: `pillar up ${SURVIVAL_PILLAR_STEPS} blocks with ${placeable.name} to break ${threat.name}'s melee reach`,
+      targetName: null,
+      target: top,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: true,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        escapePillar: true,
+        vertical: 'pillar',
+        pillarFromY: feet.y,
+        pillarToY: top.y,
+        pillarSteps: SURVIVAL_PILLAR_STEPS,
+        pillarPlaceName: placeable.name,
+        pillarPlaceCount: SURVIVAL_PILLAR_STEPS,
+        ...threatMeta,
+      },
+    })
+  }
+
+  // Blocking wall. The lane column is the adjacent column nearest the threat;
+  // the wall fills that column's open cells at the threat's own body heights,
+  // lowest first so the upper cell finds its reference on the lower block.
+  let lane: Vec3Json | null = null
+  let laneDistance = Number.POSITIVE_INFINITY
+  for (const dx of [-1, 0, 1]) {
+    for (const dz of [-1, 0, 1]) {
+      if (dx === 0 && dz === 0) continue
+      const cell = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+      const d = distance(cell, threat.position)
+      if (d < laneDistance) {
+        laneDistance = d
+        lane = cell
+      }
+    }
+  }
+  if (lane !== null) {
+    const wallBase = Math.floor(threat.position.y)
+    const threatColumn = { x: Math.floor(threat.position.x), z: Math.floor(threat.position.z) }
+    const threatCells = new Set([
+      blockId('p', { x: threatColumn.x, y: wallBase, z: threatColumn.z }),
+      blockId('p', { x: threatColumn.x, y: wallBase + 1, z: threatColumn.z }),
+    ])
+    const laneCells: Vec3Json[] = [
+      { x: lane.x, y: wallBase, z: lane.z },
+      { x: lane.x, y: wallBase + 1, z: lane.z },
+    ]
+    const openCells = laneCells.filter(
+      (cell) =>
+        wallCellFillable(state, cell, threatCells) &&
+        distance(cell, state.self.eyePosition) <= options.reach + 0.5,
+    )
+    const fill = openCells.sort((a, b) => a.y - b.y).slice(0, placeable.count)
+    const first = fill[0]
+    if (first !== undefined) {
+      out.push({
+        id: `PLACE:wall:${placeable.name}:${blockId('p', first)}`,
+        kind: 'PLACE',
+        label: `wall off ${threat.name}'s approach at (${first.x},${first.y},${first.z}) with ${placeable.name}`,
+        targetName: placeable.name,
+        target: first,
+        targetEntityId: null,
+        itemName: placeable.name,
+        requiresTool: false,
+        toolName: null,
+        inReach: true,
+        hasStandableAdjacent: true,
+        placementCells: fill,
+        meta: {
+          tick: state.tick,
+          threatWall: true,
+          ...threatMeta,
+        },
+      })
+    }
+  }
+  return out
 }
 
 /**

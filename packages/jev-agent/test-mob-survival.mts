@@ -896,6 +896,124 @@ addCase('(e2) the danger radius is the bounded combat envelope, and the contract
   }
 })
 
+// ---------------------------------------------------------------------------
+// (g) §4.1 world-shaping survival answers (portal-p23 gen-mutp1aul):
+//     `escapes=0` closes locomotion only - the offer names the grounded
+//     shaping affordances (vertical-escape pillar, approach-lane wall)
+//     alongside combat, and the threat restriction keeps them.
+// ---------------------------------------------------------------------------
+
+addCase('(g1) a contact melee threat with placeable dirt offers pillar and wall, not ATTACK-only', () => {
+  // Measured live (portal-p23 gen-mutp1aul, 2026-10-04T10:44:4x): a naked
+  // respawn at a water-adjacent pocket saw `SURVIVAL_ESCAPE_NONE escapes=0`
+  // and the offer collapsed to bare-fist ATTACKs while dirt sat in hand -
+  // the locomotion gap erased every world-modification affordance.
+  const state = bodyState([hostile(10460, 'drowned', { x: 2.5, y: 10, z: 0.5 }, { attackedSelf: true })], {
+    inventory: { slots: [], counts: { dirt: 4 }, totalItems: 4 },
+  })
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const offered = applyThreatRestriction(state, generated)
+  const pillar = offered.candidates.find((candidate) => candidate.meta.escapePillar === true)
+  const wall = offered.candidates.find((candidate) => candidate.meta.threatWall === true)
+  const pass =
+    state.signals.threat.active === true &&
+    state.signals.threat.inContact === true &&
+    offered.restricted === true &&
+    pillar !== undefined &&
+    pillar.id.startsWith('MOVE:escapeup:') &&
+    pillar.kind === 'MOVE' &&
+    pillar.meta.vertical === 'pillar' &&
+    pillar.meta.pillarSteps === 2 &&
+    pillar.meta.pillarPlaceName === 'dirt' &&
+    wall !== undefined &&
+    wall.kind === 'PLACE' &&
+    wall.itemName === 'dirt' &&
+    wall.placementCells?.length === 2 &&
+    wall.placementCells[0]?.y === 10 &&
+    wall.placementCells[1]?.y === 11
+  return {
+    pass,
+    detail: `offered=[${ids(offered.candidates).join(',')}] wallCells=${(wall?.placementCells ?? []).length}`,
+  }
+})
+
+addCase('(g2) a ranged threat suppresses the pillar but keeps the wall', () => {
+  const state = bodyState([hostile(99, 'skeleton', { x: 3, y: 10, z: 0.5 })], {
+    inventory: { slots: [], counts: { dirt: 4 }, totalItems: 4 },
+  })
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const offered = applyThreatRestriction(state, generated)
+  const pillar = offered.candidates.find((candidate) => candidate.meta.escapePillar === true)
+  const wall = offered.candidates.find((candidate) => candidate.meta.threatWall === true)
+  return {
+    pass: pillar === undefined && wall !== undefined,
+    detail: `offered=[${ids(offered.candidates).join(',')}]`,
+  }
+})
+
+addCase('(g3) no placeable material emits neither shaping answer', () => {
+  const state = bodyState([hostile(98, 'zombie', { x: 2.5, y: 10, z: 0.5 })])
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const shaping = generated.filter((candidate) => candidate.meta.escapePillar === true || candidate.meta.threatWall === true)
+  return {
+    pass: shaping.length === 0,
+    detail: `generated=[${ids(generated).join(',')}]`,
+  }
+})
+
+addCase('(g4) one held block offers a one-cell wall and no two-step pillar', () => {
+  const state = bodyState([hostile(97, 'zombie', { x: 2.5, y: 10, z: 0.5 })], {
+    inventory: { slots: [], counts: { dirt: 1 }, totalItems: 1 },
+  })
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const wall = generated.find((candidate) => candidate.meta.threatWall === true)
+  const pillar = generated.find((candidate) => candidate.meta.escapePillar === true)
+  return {
+    pass: pillar === undefined && wall !== undefined && wall.placementCells?.length === 1,
+    detail: `wall=${wall?.id ?? 'none'} cells=${(wall?.placementCells ?? []).length}`,
+  }
+})
+
+addCase('(g5) a lane cell the scan names solid is never a fill target', () => {
+  const state = bodyState([hostile(96, 'zombie', { x: 2.5, y: 10, z: 0.5 })], {
+    inventory: { slots: [], counts: { dirt: 4 }, totalItems: 4 },
+  })
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  // The lane column toward the zombie is (1,10,0); its feet cell is stone.
+  state.blocks = [
+    {
+      kind: 'stone',
+      name: 'stone',
+      position: { x: 1, y: 10, z: 0 },
+      distance: 1.4,
+      diggable: true,
+      inReach: true,
+      hasAdjacentStandable: true,
+      adjacentStandable: null,
+    },
+  ]
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const wall = generated.find((candidate) => candidate.meta.threatWall === true)
+  const cells = wall?.placementCells ?? []
+  return {
+    pass:
+      wall !== undefined &&
+      cells.length === 1 &&
+      cells[0]?.y === 11 &&
+      cells.every((cell) => !(cell.x === 1 && cell.y === 10 && cell.z === 0)),
+    detail: `cells=[${cells.map((cell) => `${cell.x},${cell.y},${cell.z}`).join(';')}]`,
+  }
+})
+
 let failures = 0
 process.stdout.write('mob survival - grounded threat response, bounded danger state, honest retreats\n')
 process.stdout.write('-'.repeat(78) + '\n')
