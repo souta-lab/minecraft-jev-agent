@@ -722,6 +722,36 @@ addCase('traverse exits: a DRY body keeps the old gate - walk candidates still p
   return { pass: swim.length === 0, detail: `swim=[${swim.map((c) => c.id).join(' ')}]` }
 })
 
+addCase('traverse exits: a traverse target survives the offer seam with its exit kind intact', () => {
+  const traverse = {
+    exit: { x: 6, y: 0, z: 0 },
+    exitKind: 'traverse' as const,
+    waypoints: [
+      { x: 1, y: 0, z: 0 },
+      { x: 6, y: 0, z: 0 },
+    ],
+    waypointBlocks: ['water', 'water'],
+    waypointHeads: ['air', 'air'],
+    exitSupport: null,
+    costMs: 1500,
+  }
+  const state = trappedState([traverse], {}, 60_000)
+  state.self = { ...state.self, feetInWater: true, eyesInWater: true, air: 8 } as WorldState['self']
+  const offered = generateCandidates(state, zoneOptions)
+  const swim = offered.find((c) => c.id === 'SWIM:exit:p6_0_0')
+  // And the grounded-side round trip: the same offer stays grounded while the
+  // sensor still reports the identical route (the p21.2 CAPABILITY_LOST class).
+  const grounded = swim !== undefined && isGroundedWaterRoute(swim as Candidate, state)
+  return {
+    pass:
+      swim !== undefined &&
+      swim.meta.waterRouteExitKind === 'traverse' &&
+      swim.label.includes('open water') &&
+      grounded === true,
+    detail: `swim=${swim?.id ?? 'none'} kind=${swim?.meta.waterRouteExitKind} grounded=${grounded}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 
 let failed = 0
