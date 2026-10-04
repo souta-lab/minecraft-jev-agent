@@ -385,6 +385,34 @@ addCase('(b4) a standable cell the body cannot reach does not rescue the pocket'
   return { pass, detail: `stranded=${strandedOnColumn(state)}` }
 })
 
+addCase('(b5) a corner-blocked diagonal does not fuse the pocket to open ground', () => {
+  // A 12-cell edge-touching region surrounds the body, but every cell adjacent
+  // to the body is diagonal across two blocked orthogonals (x+-1,z) / (x,z+-1)
+  // are absent - the corner squeeze walking cannot make. Counting those moves
+  // would fuse the body's 1-cell pocket to a 13-cell open component and hide
+  // the strand behind the size/edge tests.
+  const ring: Vec3Json[] = [FEET_CELL]
+  for (const dx of [-2, -1, 0, 1, 2]) ring.push({ x: FEET_CELL.x + dx, y: FEET_CELL.y, z: FEET_CELL.z + 2 })
+  for (const cell of [
+    { x: FEET_CELL.x - 2, z: FEET_CELL.z + 1 }, { x: FEET_CELL.x - 1, z: FEET_CELL.z + 1 },
+    { x: FEET_CELL.x + 1, z: FEET_CELL.z + 1 }, { x: FEET_CELL.x + 2, z: FEET_CELL.z + 1 },
+    { x: FEET_CELL.x - 2, z: FEET_CELL.z }, { x: FEET_CELL.x - 2, z: FEET_CELL.z - 1 },
+    { x: FEET_CELL.x - 1, z: FEET_CELL.z - 1 },
+  ]) ring.push({ x: cell.x, y: FEET_CELL.y, z: cell.z })
+  const state = worldState({
+    position: FEET,
+    standable: ring,
+    descent: pillarDescent(FEET),
+    signals: signals({
+      failedCandidates: Object.fromEntries(
+        ring.filter((spot) => spot.x !== FEET_CELL.x || spot.z !== FEET_CELL.z).map((spot) => [`MOVE:p${spot.x}_${spot.y}_${spot.z}`, 9]),
+      ),
+    }),
+  })
+  const pass = strandedOnColumn(state) && groundedSet(state).column === 1
+  return { pass, detail: `stranded=${strandedOnColumn(state)} cells=${ring.length}` }
+})
+
 // --- flat ground is unchanged ----------------------------------------------------
 
 addCase('(b) normal flat ground offers no column descent even when a down step is safe', () => {

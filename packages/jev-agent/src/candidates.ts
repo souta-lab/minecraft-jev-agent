@@ -2892,7 +2892,9 @@ const STRANDED_POCKET_MAX_CELLS = 9
  *
  * The pocket is the body's walking component over the sensed standable set:
  * 8-connected cells at most one block of rise/fall apart, the moves ordinary
- * walking can make. It is a dead end - the body stranded - when EITHER the
+ * walking can make - with one honest restriction, since a diagonal step that
+ * squeezes past two blocked orthogonals is a move walking cannot make. It is
+ * a dead end - the body stranded - when EITHER the
  * whole component lies inside the sensed window (no member touches the
  * horizontal 5x5 scan edge, so no walking continuation can exist beyond the
  * sensor's view) OR the component is small enough to be a pocket on its own
@@ -2941,6 +2943,17 @@ export function strandedOnColumn(state: Pick<WorldState, 'terrain' | 'self'>): b
           if (seen.has(neighborKey)) continue
           const neighbor = byKey.get(neighborKey)
           if (neighbor === undefined) continue
+          // A diagonal move is real walking only when it does not squeeze
+          // through the corner of two blocked orthogonals: at least one of
+          // the cells the body would pass through must itself be standable
+          // (at any within-reach height).
+          if (dx !== 0 && dz !== 0) {
+            let cornerOpen = false
+            for (let oy = -1; oy <= 1 && !cornerOpen; oy += 1) {
+              cornerOpen = byKey.has(`${cx + dx},${cy + oy},${cz}`) || byKey.has(`${cx},${cy + oy},${cz + dz}`)
+            }
+            if (!cornerOpen) continue
+          }
           seen.add(neighborKey)
           queue.push(neighbor)
         }
