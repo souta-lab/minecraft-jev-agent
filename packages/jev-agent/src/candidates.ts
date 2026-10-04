@@ -511,15 +511,25 @@ function descentPolicyEscalateCandidate(input: {
   }
 }
 
+/**
+ * One definition of "this candidate is already a survival answer": the combat /
+ * self-care kinds the threat restrictions preserve, plus the bounded escape
+ * routes (danger-zone exit, sealed-pocket ascent, swim-out). The restriction
+ * filter and the controller's critical-flight keep both read this, so the set
+ * of choices allowed to reach the executor under fire is defined exactly once.
+ * WHICH of them is taken stays Jev's choice in both places.
+ */
+export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
+  return CONTACT_THREAT_KINDS.has(candidate.kind) || isDeathZoneEscapeRoute(candidate)
+}
+
 export function restrictCandidatesDuringImmediateThreat(
   state: Pick<WorldState, 'entities'>,
   candidates: readonly Candidate[],
 ): Candidate[] {
   const immediateHostile = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
   if (!immediateHostile) return [...candidates]
-  const combat = candidates.filter(
-    (candidate) => CONTACT_THREAT_KINDS.has(candidate.kind) || isDeathZoneEscapeRoute(candidate),
-  )
+  const combat = candidates.filter(isSurvivalAnswerCandidate)
   // A body in melee contact with no grounded attack and no grounded escape must
   // NOT be handed its work set back: that is the measured "digs while the zombie
   // kills it" loop. Offer the bounded escalation instead and let the controller

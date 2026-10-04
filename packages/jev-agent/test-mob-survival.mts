@@ -36,6 +36,7 @@ import {
   defaultCandidateOptions,
   generateCandidates,
   generateGroundedCandidates,
+  isSurvivalAnswerCandidate,
   restrictCandidatesAtCriticalHealth,
   THREAT_SURVIVAL_KINDS,
 } from './src/candidates.ts'
@@ -635,6 +636,40 @@ addCase('(c5) the in-flight hold releases to Jev newer choice when a hostile is 
     released.chosenId === 'ATTACK:e33467' &&
     (released.releaseLine ?? '').includes('reason=contact_threat')
   return { pass, detail: `held=${held.chosenId} released=${released.chosenId} line=${released.releaseLine ?? 'none'}` }
+})
+
+addCase('(c6) the critical-flight keep consults exactly the survival-answer set', () => {
+  // portal-p22 spawn-camp: every post-respawn 'start'-epoch answer was voided
+  // by the first damage_taken pending in flight, so the body never executed a
+  // single survival action across 15 camped generations. The keep must admit
+  // exactly the kinds the threat restriction preserves - no wider (a stale
+  // work/WAIT answer taken before injury must still void), no narrower (a
+  // danger-zone exit is a survival route, not work).
+  const at = (id: string, kind: Candidate['kind'], meta: Candidate['meta'] = { tick: 1 }): Candidate => ({
+    id,
+    kind,
+    label: id,
+    targetName: null,
+    target: null,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta,
+  })
+  const kept = ['ATTACK', 'RETREAT', 'ESCALATE', 'EAT', 'EQUIP'] as const
+  const dropped = ['MINE', 'CRAFT', 'PLACE', 'WAIT', 'RETRIEVE', 'MOVE', 'DESCEND', 'SMELT', 'PICKUP', 'STEP'] as const
+  const keptSet = kept.every((kind) => isSurvivalAnswerCandidate(at(`X:${kind}`, kind)))
+  const droppedSet = dropped.every((kind) => !isSurvivalAnswerCandidate(at(`X:${kind}`, kind)))
+  const escapeRoutes =
+    isSurvivalAnswerCandidate(at('MOVE:dangerzone:p-5_10_0', 'MOVE')) &&
+    isSurvivalAnswerCandidate(at('ASCEND:escape:p0_10_0', 'MOVE', { tick: 1, escapeAscent: true })) &&
+    isSurvivalAnswerCandidate(at('SWIM:exit:p0_10_0', 'MOVE', { tick: 1, swimRoute: true }))
+  const workMove = !isSurvivalAnswerCandidate(at('MOVE:p-5_10_0', 'MOVE'))
+  const pass = keptSet && droppedSet && escapeRoutes && workMove
+  return { pass, detail: `kept=${keptSet} dropped=${droppedSet} escapes=${escapeRoutes} workMove=${workMove}` }
 })
 
 // ---------------------------------------------------------------------------

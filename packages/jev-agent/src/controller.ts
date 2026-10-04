@@ -21,7 +21,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt, ANIMAL_HABITAT_SEA_LEVEL, LOCOMOTION_CANDIDATE_KINDS, SEALED_ESCAPE_STALL_MS } from './candidates.ts'
+import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt, ANIMAL_HABITAT_SEA_LEVEL, LOCOMOTION_CANDIDATE_KINDS, SEALED_ESCAPE_STALL_MS, isSurvivalAnswerCandidate } from './candidates.ts'
 import { failureCount } from './failureMemory.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazardReflexEvidence } from './envHazard.ts'
@@ -2766,16 +2766,42 @@ export class JevController {
         // §3: this is the live "late async model result" case in this
         // architecture - a critical trigger arrived while pi was deciding, so the
         // decision's epoch is invalidated and the result must not authorize.
-        const dropped = this.decisionEpochs.invalidate('superseded')
+        //
+        // One bounded exception: a survival-kind answer is exempt. The
+        // threat-restricted offer the model answered inside was already built
+        // from the SAME danger the pending critical trigger encodes, and the
+        // fresh-state revalidation below re-proves the choice against
+        // post-event truth before any lease is claimed - so executing it is
+        // not authorizing a stale premise. Voiding it instead costs one full
+        // sense+decide cycle (~4s) while the hostile keeps swinging: measured
+        // portal-p22 (gen-mutkwlfx-y1ku4z and 14 sibling generations) the
+        // 'start'-epoch RETREAT was voided by the first damage_taken in
+        // flight, the re-decide landed after the body was at 2.33hp, and 24
+        // spawn-camp deaths accumulated without ONE executed survival action.
+        // The pending critical trigger still drives the next tick's fresh
+        // decision, so the safety loop is never suppressed; non-survival
+        // answers (work/WAIT taken before injury) still void exactly as before.
+        const pendingCriticalChoice = candidates.find((candidate) => candidate.id === chosenId) ?? null
+        const survivalAnswer = pendingCriticalChoice !== null && isSurvivalAnswerCandidate(pendingCriticalChoice)
+        if (!survivalAnswer) {
+          const dropped = this.decisionEpochs.invalidate('superseded')
+          this.logger.warn(
+            'policy',
+            dropped === null
+              ? `discarding stale decision ${decision.callId}: an incompatible critical trigger arrived during the Jev flight`
+              : formatStaleResultDropped(dropped.epoch, null, 'critical_trigger_during_flight'),
+            { callId: decision.callId, trigger },
+            this.tickCounter,
+          )
+          return
+        }
         this.logger.warn(
           'policy',
-          dropped === null
-            ? `discarding stale decision ${decision.callId}: an incompatible critical trigger arrived during the Jev flight`
-            : formatStaleResultDropped(dropped.epoch, null, 'critical_trigger_during_flight'),
-          { callId: decision.callId, trigger },
+          `CRITICAL_FLIGHT_SURVIVAL_KEEP decision=${decision.callId} chosen=${chosenId} kind=${pendingCriticalChoice.kind} ` +
+            `-> survival answer re-grounds against post-event truth instead of voiding; pending critical trigger still re-decides next tick`,
+          { callId: decision.callId, trigger, chosenId, kind: pendingCriticalChoice.kind },
           this.tickCounter,
         )
-        return
       }
 
       if (this.hasCriticalTriggerDuringFlight()) {
