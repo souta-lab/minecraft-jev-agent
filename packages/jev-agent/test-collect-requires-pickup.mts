@@ -326,6 +326,91 @@ addCase('(generic) a resource MINE carries requiresPickup=true from the collect 
   return { pass, detail: `mine=${mine?.id ?? 'none'} requiresPickup=${String(mine?.meta.requiresPickup)}` }
 })
 
+/** A world with one cobblestone drop and a caller-chosen standable set. */
+function dropWorld(standable: Vec3Json[], dropY = 63): WorldState {
+  const current = queued({ id: 'g-cobble', description: 'collect 11 x cobblestone', targetItem: 'cobblestone', requiredCount: 11 })
+  return {
+    schemaVersion: 1,
+    tick: 5,
+    timestampMs: 1_700_000_000_000,
+    self: self({ x: 24.5, y: 64, z: -21.5 }),
+    inventory: inventory({ cobblestone: 10, wooden_pickaxe: 1 }),
+    entities: [
+      {
+        id: 1730,
+        name: 'item',
+        kind: 'item',
+        username: null,
+        position: { x: 24.88, y: dropY, z: -21.36 },
+        distance: 1.21,
+        hostile: false,
+        droppedItem: 'cobblestone',
+      },
+    ],
+    blocks: [],
+    terrain: { standable },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    goal: goalFor(current),
+    goalQueue: { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] },
+    recentEvents: [],
+    signals: signals(),
+  }
+}
+
+addCase('(generic) a drop one ledge below every sensed stand is withheld no_standable_approach', () => {
+  // Live gen-muuepxtj (portal-p24): PICKUP:e1730 burned 8.7s at distance 1.21
+  // (nudges=4, gained=0) - the drop rested a full block below the shaft lip, so
+  // no standable could ever put it inside the server's pickup volume, yet the
+  // candidate was offered as if a stand existed. repeat 5/6, 30s stall on
+  // collect:cobblestone:11. The gate must withhold it `no_standable_approach`
+  // like every other locomotion family instead of committing a guaranteed
+  // pickup_failed.
+  const world = dropWorld([
+    { x: 24, y: 64, z: -21 },
+    { x: 24, y: 64, z: -22 },
+    { x: 25, y: 64, z: -21 },
+  ])
+  const grounded = generateGroundedCandidates(world, defaultCandidateOptions)
+  const offered = grounded.candidates.find((candidate) => candidate.id === 'PICKUP:e1730')
+  const withheld = grounded.withheld.find((entry) => entry.candidate.id === 'PICKUP:e1730')
+  const pass =
+    offered === undefined &&
+    withheld !== undefined &&
+    withheld.result.reachable === false &&
+    (withheld.result.reason === 'no_standable_approach' || withheld.result.reason === 'out_of_reach')
+  return {
+    pass,
+    detail: `offered=${offered?.id ?? 'none'} withheld=${withheld?.result.reason ?? 'none'} missing=[${(withheld?.result.missingCapabilities ?? []).map((capability) => capability.kind).join(',')}]`,
+  }
+})
+
+addCase('(generic) a drop with a ledge-level stand inside the pickup envelope stays offered', () => {
+  const world = dropWorld([
+    { x: 24, y: 64, z: -21 },
+    { x: 24, y: 63, z: -22 },
+  ])
+  const grounded = generateGroundedCandidates(world, defaultCandidateOptions)
+  const offered = grounded.candidates.find((candidate) => candidate.id === 'PICKUP:e1730')
+  const pass = offered !== undefined && offered.hasStandableAdjacent === true
+  return {
+    pass,
+    detail: `offered=${offered?.id ?? 'none'} standableAdjacent=${String(offered?.hasStandableAdjacent)}`,
+  }
+})
+
+addCase('(generic) a drop with no sensed stand nearby keeps the historical admit', () => {
+  const world = dropWorld([{ x: 30, y: 64, z: -30 }])
+  const grounded = generateGroundedCandidates(world, defaultCandidateOptions)
+  const reachable = grounded.reachability.find((entry) => entry.candidate.id === 'PICKUP:e1730')
+  const pass = reachable !== undefined && reachable.candidate.hasStandableAdjacent === true
+  return {
+    pass,
+    detail: `entry=${reachable?.candidate.id ?? 'none'} standableAdjacent=${String(reachable?.candidate.hasStandableAdjacent)} reachable=${String(reachable?.result.reachable)}`,
+  }
+})
+
 addCase('(generic) a headroom clearance MINE stays a pure dig (requiresPickup !== true)', () => {
   const mine = mineCandidates(clearanceWorld()).find((candidate) => candidate.id === 'MINE:b0_61_0')
   const pass = mine !== undefined && mine.meta.clearance === true && mine.meta.requiresPickup !== true

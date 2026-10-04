@@ -13485,6 +13485,41 @@ function pickupCandidates(
   return drops.map((entity) => pickupCandidateForEntity(state, options, entity))
 }
 
+/**
+ * Whether a sensed stand can put the entity inside the body's pickup volume.
+ * Vanilla collects a drop when the item's box meets the player's inflated AABB:
+ * ~1.3m horizontally of the feet cell centre and ~[-0.55,+2.35] vertically of
+ * the feet. A drop resting in a wall pocket or on a ledge a full block below
+ * every sensed stand can never enter that volume from any of them - the walk
+ * then burns its whole window at ~1.2m and types pickup_failed anyway (live
+ * gen-muuepxtj, portal-p24: PICKUP:e1730 sat 1.21m away one ledge down inside
+ * the mine shaft for 8.7s / nudges=4, repeat 5/6, LOCAL_PROGRESS_STALL 30s on
+ * collect:cobblestone:11). The designed verdict for that fact is the same
+ * `no_standable_approach` withhold every other locomotion family uses, and it
+ * lets the acquisition pass answer the drop with a stand-creating dig instead
+ * of another doomed walk. A drop with NO sensed stand nearby keeps the
+ * historical admit: an unscanned floor is a sensor gap, not a proven
+ * unreachable drop.
+ */
+const PICKUP_STAND_HORIZONTAL = 1.3
+const PICKUP_STAND_SCAN = 2.6
+const PICKUP_STAND_MIN_DY = -0.55
+const PICKUP_STAND_MAX_DY = 2.35
+
+function dropStandReachable(state: WorldState, entity: Vec3Json): boolean {
+  let sensedNearby = false
+  for (const cell of state.terrain.standable) {
+    const horizontal = Math.hypot(cell.x + 0.5 - entity.x, cell.z + 0.5 - entity.z)
+    if (horizontal > PICKUP_STAND_SCAN) continue
+    sensedNearby = true
+    const dy = entity.y - cell.y
+    if (horizontal <= PICKUP_STAND_HORIZONTAL && dy >= PICKUP_STAND_MIN_DY && dy <= PICKUP_STAND_MAX_DY) {
+      return true
+    }
+  }
+  return !sensedNearby
+}
+
 function pickupCandidateForEntity(
   state: WorldState,
   options: CandidateOptions,
@@ -13504,7 +13539,7 @@ function pickupCandidateForEntity(
     requiresTool: false,
     toolName: null,
     inReach,
-    hasStandableAdjacent: true,
+    hasStandableAdjacent: dropStandReachable(state, entity.position),
     meta: {
       tick: state.tick,
       pickupItem: item,
