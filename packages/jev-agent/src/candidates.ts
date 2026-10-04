@@ -7414,6 +7414,31 @@ function stepOverheadCandidates(
 }
 
 /**
+ * The guard-side re-ground for a vanished clearance MINE. A sealed pocket's
+ * overhead-clearance offer is derived from volatile sensor cuts
+ * (`headroomCuts`/`stepCuts.blockedBy`), so its `MINE:b<cell>` id set rotates
+ * across passes on identical geometry while every named cell stays diggable
+ * (measured live gen-muu7zaic, sealed shaft y44: the offer rotated
+ * `b13_46_8`/`b14_46_8`/`b12_46_7`/`b12_47_7`/`b14_45_7` and every Jev pick
+ * vanished between answer and execution - `dropped=4`, zero commits, stall).
+ * Re-emitting the COMMITTED cell through the production overhead emit on the
+ * fresh state is the whole revalidation: still-observed, diggable,
+ * unprotected, inside its retry budget -> the same id comes back and Jev's own
+ * pick executes (no WHICH substitution); rotated out of observation or now
+ * invalid -> null and the ordinary drop stands.
+ */
+export function clearanceMineReground(
+  state: WorldState,
+  options: CandidateOptions,
+  chosen: Candidate | null,
+): Candidate | null {
+  if (chosen === null || chosen.kind !== 'MINE' || chosen.target === null) return null
+  if (chosen.meta.clearance !== true && chosen.meta.stepOverhead !== true) return null
+  const emitted = stepOverheadCandidates(state, options, { kind: 'headroom', cell: chosen.target })
+  return emitted.find((candidate) => candidate.id === chosen.id) ?? null
+}
+
+/**
  * A `STEP` candidate removes the upper block of an adjacent 2-block vertical
  * face, turning it into a 1-block step. Without it the offered MOVE stand spot
  * is behind a rise no vanilla client can climb (jump apex 1.2522), so the route

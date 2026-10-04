@@ -21,7 +21,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt, ANIMAL_HABITAT_SEA_LEVEL, LOCOMOTION_CANDIDATE_KINDS, SEALED_ESCAPE_STALL_MS, isSurvivalAnswerCandidate } from './candidates.ts'
+import { CRAFT_STATION_ALREADY_KNOWN, applyGroundedThreatRestriction, clearanceMineReground, envHazardEscapeRoutes, envHazardReflexAction, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates, optionsWithWithheldStationRetirements, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, surfaceAscentRouteless, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt, ANIMAL_HABITAT_SEA_LEVEL, LOCOMOTION_CANDIDATE_KINDS, SEALED_ESCAPE_STALL_MS, isSurvivalAnswerCandidate } from './candidates.ts'
 import { failureCount } from './failureMemory.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazardReflexEvidence } from './envHazard.ts'
@@ -2920,6 +2920,13 @@ export class JevController {
         // action (see the in-contact branch below). Never a mutation, never a
         // target choice - it re-enters the semantic decision immediately.
         let controlId: string | null = null
+        // A clearance MINE's id is keyed on volatile sensor cuts, so a sealed
+        // pocket rotates the offer set every pass on identical geometry
+        // (measured gen-muu7zaic: four picks dropped in ~9 s, zero commits).
+        // Re-emitting the committed cell through the production overhead emit
+        // revalidates it on fresh truth; the same id coming back executes
+        // Jev's own pick instead of ending the tick actionless.
+        let regroundedMine: Candidate | null = null
         const threatEvidence = state.signals.threat ?? null
         const body = bodySurvivalFacts(state.self)
         if (reground.candidateId !== null) {
@@ -3052,16 +3059,31 @@ export class JevController {
               }
             }
           } else {
-            this.logger.warn(
-              'guard',
-              `chosen candidate ${chosenId} vanished between the Jev answer and execution`,
-              { chosenId, freshOffer: freshCandidates.length, reground: reground.reason },
-              this.tickCounter,
-            )
+            regroundedMine = clearanceMineReground(freshState, freshOptions, vanishedChoice)
+            if (regroundedMine !== null) {
+              this.survivalRegrounds += 1
+              freshCandidates.push(regroundedMine)
+              freshIds.add(regroundedMine.id)
+              chosenId = regroundedMine.id
+              this.logger.warn(
+                'guard',
+                `MECHANICAL_REGROUND ${chosenId} -> same clearance cell still grounded on fresh truth`,
+                { chosenId, freshOffer: freshCandidates.length, reground: 'same_clearance_cell' },
+                this.tickCounter,
+              )
+            } else {
+              this.guardRejections += 1
+              this.logger.warn(
+                'guard',
+                `chosen candidate ${chosenId} vanished between the Jev answer and execution`,
+                { chosenId, freshOffer: freshCandidates.length, reground: reground.reason },
+                this.tickCounter,
+              )
+            }
           }
         }
         this.logGuardRejections()
-        if (reground.candidateId === null) {
+        if (reground.candidateId === null && regroundedMine === null) {
           // A chosen SURVIVAL action that cannot be re-grounded must not end the
           // tick with NO action while a hostile is on the body. Measured live
           // (run-mucg2obc-v75cry): `SURVIVAL_NO_GROUNDED_ACTION chosenId=RETREAT:p23_57_-20
@@ -3093,7 +3115,7 @@ export class JevController {
         // decision up immediately), so "no action while a hostile is on the body"
         // is impossible rather than merely shorter. `survivalControlFallback` is
         // pure and returns null when nothing is offered.
-        if (reground.candidateId === null && controlId === null) return
+        if (reground.candidateId === null && regroundedMine === null && controlId === null) return
         if (controlId !== null) {
           chosenId = controlId
           freshIds.add(controlId)

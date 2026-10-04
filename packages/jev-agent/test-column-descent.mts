@@ -14,7 +14,7 @@
 // No bot, no network.
 //
 // Run: bun test-column-descent.mts
-import { defaultCandidateOptions, formatColumnDescentRefused, generateGroundedCandidates, strandedOnColumn } from './src/candidates.ts'
+import { clearanceMineReground, defaultCandidateOptions, formatColumnDescentRefused, generateGroundedCandidates, strandedOnColumn } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -643,6 +643,61 @@ addCase('the overhead dig is not offered when the sealed plan already grounds a 
     pass: mines.length === 0 && ascent !== undefined,
     detail: `ascent=${ascent?.id ?? 'none'} mines=[${mines.map((c) => c.id).join(',')}] set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
   }
+})
+
+// portal-p23.31: the sealed pocket's clearance offer rotates its `MINE:b<cell>`
+// id set every pass because the overhead cells are named by volatile sensor
+// cuts (measured live gen-muu7zaic: `b13_46_8`/`b14_46_8`/`b12_46_7`/`b12_47_7`
+// rotating, four Jev picks dropped in ~9 s, zero commits, `survival_reground`
+// churn). A vanished clearance MINE whose cell the fresh state still observes
+// re-grounds to itself through the production emit and executes; a cell that
+// rotated out of observation or stopped being valid stays dropped.
+function clearanceChoice(cell: Vec3Json): Candidate {
+  return {
+    id: `MINE:b${cell.x}_${cell.y}_${cell.z}`,
+    kind: 'MINE',
+    label: 'mine the stone block to open the staircase step overhead',
+    targetName: 'stone',
+    target: cell,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    toolTier: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 1, clearance: true, stepOverhead: true },
+  }
+}
+
+addCase('a vanished clearance MINE re-grounds to itself while the cell stays observed', () => {
+  const cell = { x: 12, y: 46, z: 6 }
+  const state = sealedShaftState([shaftStepCut('E', 1, 0), shaftStepCut('W', -1, 0)])
+  const regrounded = clearanceMineReground(state, defaultCandidateOptions, clearanceChoice(cell))
+  return {
+    pass: regrounded !== null && regrounded.id === 'MINE:b12_46_6' && regrounded.target === cell,
+    detail: `regrounded=${regrounded?.id ?? 'null'}`,
+  }
+})
+
+addCase('a vanished clearance MINE stays dropped when its cell rotated out of observation', () => {
+  const cell = { x: 12, y: 46, z: 6 }
+  // Fresh truth observes only the west face's overhead; the committed east cell
+  // is no longer a sensed cut at all -> the drop is honest, not churn.
+  const state = sealedShaftState([shaftStepCut('W', -1, 0)])
+  const regrounded = clearanceMineReground(state, defaultCandidateOptions, clearanceChoice(cell))
+  return { pass: regrounded === null, detail: `regrounded=${regrounded?.id ?? 'null'}` }
+})
+
+addCase('a non-clearance MINE never re-grounds through the clearance arm', () => {
+  const cell = { x: 12, y: 46, z: 6 }
+  const state = sealedShaftState([shaftStepCut('E', 1, 0)])
+  const resourceMine = {
+    ...clearanceChoice(cell),
+    meta: { tick: 1 },
+  }
+  const regrounded = clearanceMineReground(state, defaultCandidateOptions, resourceMine)
+  return { pass: regrounded === null, detail: `regrounded=${regrounded?.id ?? 'null'}` }
 })
 
 addCase('the typed marker line is stable for every refusal reason', () => {
