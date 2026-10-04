@@ -38,6 +38,7 @@ import {
   generateGroundedCandidates,
   isSurvivalAnswerCandidate,
   restrictCandidatesAtCriticalHealth,
+  threatRunnableLocomotionPredicate,
   THREAT_SURVIVAL_KINDS,
 } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
@@ -774,6 +775,83 @@ addCase('(c1s) line of sight or fresh damage keeps every leg suppressed', () => 
     hurtOffer.candidates.length === 1 &&
     hurtOffer.candidates[0]?.kind === 'ESCALATE'
   return { pass, detail: `los=[${ids(seenOffer.candidates).join(',')}] damage=[${ids(hurtOffer.candidates).join(',')}]` }
+})
+
+// The generation-time twin of the escape arm: `threatRunnableLocomotionPredicate`
+// is what the last-resort gates read as "usable locomotion". Live portal-p23
+// gen-muu4r6m6: plane DESCEND legs all refused by the contact band while the
+// spider camped 3.01 m below, yet `hasLocomotionCandidate` stayed true on
+// legs that could never run - the sealed-pocket escape never evaluated.
+// ---------------------------------------------------------------------------
+
+const moveLeg = (state: WorldState, id: string, dest: Vec3Json): Candidate => ({
+  id, kind: 'MOVE', label: `move to ${dest.x},${dest.y},${dest.z}`, targetName: 'cell', target: dest,
+  targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true,
+  hasStandableAdjacent: true, meta: { tick: state.tick },
+})
+
+const retreatLeg = (state: WorldState): Candidate => ({
+  id: 'RETREAT:p-5_10_0', kind: 'RETREAT', label: 'keep distance', targetName: 'cell', target: { x: -5, y: 10, z: 0 },
+  targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true,
+  hasStandableAdjacent: true, meta: { tick: state.tick },
+})
+
+addCase('(c1t) no in-band hostile: every locomotion candidate counts for the last-resort gates', () => {
+  const state = bodyState([])
+  const runnable = threatRunnableLocomotionPredicate(state, {})
+  const leg = moveLeg(state, 'MOVE:p1_10_0', { x: 1, y: 10, z: 0.5 })
+  const pass = runnable(leg) === true && runnable(workCell(state)) === false && runnable(retreatLeg(state)) === true
+  return { pass, detail: `move=${runnable(leg)} mine=${runnable(workCell(state))} retreat=${runnable(retreatLeg(state))}` }
+})
+
+addCase('(c1u) a proven-separated tracker counts survival answers and strictly-receding legs only', () => {
+  const state = separatedScene()
+  const options = {
+    reachability: {
+      attackStandProbe: () => ({ stand: null, standDistance: null, onBody: false, nearest: null, refusal: 'no_standable_cell' as const }),
+      pathProbe: () => 'no_path' as const,
+    },
+  }
+  const runnable = threatRunnableLocomotionPredicate(state, options)
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const toward = descendLeg(state, 'DESCEND:level:E:b2_10_0', { x: 2, y: 10, z: 0 }, { x: 2, y: 10, z: 0.5 })
+  // A leg whose dig cell leans approach-side (nearer the tracker than the
+  // body) never counts at generation time - no lane set exists yet, so the
+  // strict form refuses it even though the landing recedes.
+  const leans = descendLeg(state, 'DESCEND:level:E:b1_10_0', { x: 1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const pass =
+    runnable(away) === true &&
+    runnable(toward) === false &&
+    runnable(leans) === false &&
+    runnable(retreatLeg(state)) === true &&
+    runnable(workCell(state)) === false &&
+    runnable(moveLeg(state, 'MOVE:p2_10_0', { x: 2, y: 10, z: 0.5 })) === false
+  return {
+    pass,
+    detail: `away=${runnable(away)} toward=${runnable(toward)} leans=${runnable(leans)} retreat=${runnable(retreatLeg(state))} mine=${runnable(workCell(state))} moveNearer=${runnable(moveLeg(state, 'MOVE:p2_10_0', { x: 2, y: 10, z: 0.5 }))}`,
+  }
+})
+
+addCase('(c1v) an in-band tracker with a reachable stance counts nothing but survival answers', () => {
+  const state = separatedScene()
+  const options = {
+    reachability: {
+      attackStandProbe: () => ({ stand: { x: 2, y: 10, z: 0.5 }, standDistance: 1.5, onBody: false, nearest: null, refusal: null }),
+      pathProbe: () => 'reachable' as const,
+    },
+  }
+  const runnable = threatRunnableLocomotionPredicate(state, options)
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const pass = runnable(away) === false && runnable(retreatLeg(state)) === true && runnable(workCell(state)) === false
+  return { pass, detail: `away=${runnable(away)} retreat=${runnable(retreatLeg(state))}` }
+})
+
+addCase('(c1w) no probe wired: unknown reachability never promotes a leg past the band', () => {
+  const state = separatedScene()
+  const runnable = threatRunnableLocomotionPredicate(state, {})
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const pass = runnable(away) === false && runnable(retreatLeg(state)) === true
+  return { pass, detail: `away=${runnable(away)} retreat=${runnable(retreatLeg(state))}` }
 })
 
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {

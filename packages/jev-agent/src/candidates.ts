@@ -842,6 +842,79 @@ function threatApproachLaneCells(withheld: readonly CandidateReachability[]): Se
 }
 
 /**
+ * The generation-time half of the "usable locomotion" question the last-resort
+ * arms gate on: would this candidate still be runnable after the offer's
+ * threat restriction? With no in-band hostile, everything runs. Under contact
+ * the band keeps survival answers and - while every in-band hostile is proven
+ * separated - locomotion legs that strictly recede; the verdicts reuse the
+ * SAME stance/path probes the reachability adapter hands the restriction, so
+ * the gate's count and the offer's filter cannot disagree about which legs
+ * CAN can actually run. The dig rule is stricter than the offer's because no
+ * acquisition lanes exist yet at generation time: any dig cell nearer the
+ * tracker than the body is approach-side and never counts as runnable.
+ *
+ * Measured live portal-p23 `run-mutsv43u-1a0g` gen-muu4r6m6 (18:04Z): spider
+ * e47428 parked 3.01 m below the pocket (proven no_attack_stand, los=false,
+ * zero damage, hp20), every plane DESCEND leg either dug toward the mob's own
+ * pocket or landed no farther away, and `hasLocomotionCandidate` stayed true
+ * on legs the band could never offer - so neither the bounded down-step nor
+ * the sealed-pocket escape arm ever evaluated and the tick sat ESCALATE-only.
+ */
+export function threatRunnableLocomotionPredicate(
+  state: Pick<WorldState, 'self' | 'entities' | 'signals' | 'timestampMs'>,
+  options: Pick<CandidateOptions, 'reachability'>,
+): (candidate: Candidate) => boolean {
+  const inBand = state.entities.filter(
+    (entity) =>
+      entity.hostile && Number.isFinite(entity.distance) && entity.distance <= IMMEDIATE_HOSTILE_RANGE,
+  )
+  const separatedArm = ((): ((candidate: Candidate) => boolean) | null => {
+    if (inBand.length === 0) return null
+    const damage = state.signals?.lastDamage ?? null
+    if (
+      damage !== null &&
+      Number.isFinite(damage.atMs) &&
+      state.timestampMs - damage.atMs <= THREAT_MEMORY_MS
+    ) {
+      return null
+    }
+    const standProbe = options.reachability?.attackStandProbe ?? null
+    if (standProbe === null) return null
+    for (const entity of inBand) {
+      if (entity.lineOfSight !== false || entity.attackedSelf === true) return null
+      const fact = standProbe({ entityId: entity.id, position: entity.position })
+      if (fact === null) return null
+      if (fact.stand === null) continue
+      if (fact.onBody === true) return null
+      const standFar = distance(state.self.position, fact.stand) > FAR_LEG_PROBE_RADIUS
+      const path = standFar ? 'unknown' : (options.reachability?.pathProbe?.(fact.stand) ?? 'unknown')
+      if (path !== 'no_path') return null
+    }
+    return (candidate) => {
+      if (!SEPARATION_LEG_KINDS.has(candidate.kind)) return false
+      const destination = separationLegDestination(candidate)
+      if (destination === null) return false
+      const opened = separationLegOpenedCells(candidate)
+      for (const threat of inBand) {
+        const current = Number.isFinite(threat.distance)
+          ? threat.distance
+          : distance(state.self.position, threat.position)
+        if (distance(destination, threat.position) <= current) return false
+        for (const cell of opened) {
+          if (distance(cell, threat.position) < current) return false
+        }
+      }
+      return true
+    }
+  })()
+  return (candidate) => {
+    if (!LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind)) return false
+    if (inBand.length === 0) return true
+    return isSurvivalAnswerCandidate(candidate) || separatedArm?.(candidate) === true
+  }
+}
+
+/**
  * Project the reachability layer's CURRENT ordinary-hostile CAN facts into the
  * threat restriction. Both decision-time offer generation and the pre-execution
  * guard MUST call this adapter; otherwise the same state can expose goal work to
@@ -5313,10 +5386,16 @@ function generateRawCandidates(
   // Last-resort arms (the low-air column swim, the corridor water route) do not
   // prove ordinary dry locomotion exists: they are emitted precisely because
   // none does, so they must not count here or each would gate off the others.
+  // The same phantom class, one layer down: a locomotion candidate the offer's
+  // contact band erases every tick is not usable locomotion either
+  // (`threatRunnableLocomotionPredicate` - measured portal-p23 gen-muu4r6m6,
+  // plane DESCEND legs all threat-refused while a walled-off spider camped
+  // below the pocket kept the sealed escape arm shut).
+  const locomotionRunsNow = threatRunnableLocomotionPredicate(state, options)
   const hasLocomotionCandidate =
     !bodyInWater &&
     candidates.some((candidate) =>
-      LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+      locomotionRunsNow(candidate) &&
       candidate.meta.submersionEscape !== true &&
       candidate.meta.swimRoute !== true &&
       options.suppressedCandidateIds?.has(candidate.id) !== true &&
@@ -5359,7 +5438,12 @@ function generateRawCandidates(
   if (
     !hasLocomotionCandidate &&
     columnDescent.candidates.filter(
-      (candidate) => options.suppressedCandidateIds?.has(candidate.id) !== true,
+      (candidate) =>
+        options.suppressedCandidateIds?.has(candidate.id) !== true &&
+        // A down-step the threat envelope erases (descending toward the
+        // tracker) is not a route either - counting it gates this arm shut
+        // behind the same phantom.
+        locomotionRunsNow(candidate),
     ).length === 0 &&
     (state.signals?.stalledMs ?? 0) >= SEALED_ESCAPE_STALL_MS &&
     current?.kind !== 'surface' &&
@@ -5397,7 +5481,7 @@ function generateRawCandidates(
     !bodyInWater &&
     candidates.some(
       (candidate) =>
-        LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+        locomotionRunsNow(candidate) &&
         candidate.meta.submersionEscape !== true &&
         candidate.meta.escapeAscent !== true &&
         candidate.meta.swimRoute !== true &&
