@@ -149,6 +149,7 @@ function liveState(overrides: {
   standable?: Vec3Json[]
   placementSpots?: WorldState['placementSpots']
   stepCuts?: WorldState['stepCuts']
+  entities?: WorldState['entities']
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -156,7 +157,7 @@ function liveState(overrides: {
     timestampMs: 1_700_000_000_000,
     self: self(FEET),
     inventory: inventory(overrides.inventory),
-    entities: [],
+    entities: overrides.entities ?? [],
     blocks: overrides.blocks ?? [],
     terrain: { standable: overrides.standable ?? [FEET] },
     craftingTables: [],
@@ -408,6 +409,73 @@ addCase('(iii-b) with no producer at all the placeable fact is an honest refusal
         (id) => gate.candidates.find((candidate) => candidate.id === id)?.meta.clearance === true,
       ),
     detail: `placeable=${placeableFact?.reason ?? `routes=${(placeableFact?.routes ?? []).join(',')}`} headroomRoutes=[${(headroomFact?.routes ?? []).join(',')}] stampedClearance=${stampedClearance.length}`,
+  }
+})
+
+// (iii-c) A sensed world DROP that satisfies the missing capability is the
+//         cheapest grounded route to it. Live gen-mutxuqsg @ cab6d12e: the
+//         body's own bore dug ~25 `block=dirt` cells by hand while
+//         `missing=placeable_block` held for the whole pocket; every dirt drop
+//         was invisible because `pickupDropAdvancesFocus` only serves the
+//         `collect:log` focus. A `dirt` drop must appear under
+//         `missing=placeable_block`; unrelated loot must not.
+addCase('(iii-c) a dropped placeable block is a grounded placeable route', () => {
+  const drop = (id: number, item: string): WorldState['entities'][number] => ({
+    id,
+    name: 'item',
+    kind: 'item',
+    username: null,
+    position: { x: 28.5, y: 61, z: 15.5 },
+    distance: 1.4,
+    hostile: false,
+    droppedItem: item,
+  })
+  const state = liveState({
+    inventory: { flint: 4 },
+    blocks: [],
+    entities: [drop(41, 'dirt'), drop(42, 'rotten_flesh')],
+  })
+  const gate = applyReachabilityGate([entryCandidate()], state, options)
+  const entry = withheldEntry(gate, 'ENTER:26,67,9')
+  const placeableFact = entry === null ? null : acquisitionFor(entry, 'placeable_block')
+  const headroomFact = entry === null ? null : acquisitionFor(entry, 'headroom@27,62,15')
+  const placeableRoutes = placeableFact?.routes ?? []
+  return {
+    pass:
+      placeableFact !== null &&
+      placeableRoutes.includes('PICKUP:e41') &&
+      !placeableRoutes.includes('PICKUP:e42') &&
+      !(headroomFact?.routes ?? []).includes('PICKUP:e41'),
+    detail: `placeableRoutes=[${placeableRoutes.join(',')}] headroomRoutes=[${(headroomFact?.routes ?? []).join(',')}]`,
+  }
+})
+
+addCase('(iii-c) a death-zoned drop is not offered as a capability route', () => {
+  const drop = (id: number, item: string): WorldState['entities'][number] => ({
+    id,
+    name: 'item',
+    kind: 'item',
+    username: null,
+    position: { x: 28.5, y: 61, z: 15.5 },
+    distance: 1.4,
+    hostile: false,
+    droppedItem: item,
+  })
+  const state = liveState({
+    inventory: { flint: 4 },
+    blocks: [],
+    entities: [drop(43, 'dirt')],
+  })
+  const gate = applyReachabilityGate([entryCandidate()], state, {
+    ...options,
+    blacklistedMoveTargets: new Set(['overworld:28,61,15']),
+  })
+  const entry = withheldEntry(gate, 'ENTER:26,67,9')
+  const placeableFact = entry === null ? null : acquisitionFor(entry, 'placeable_block')
+  const placeableRoutes = placeableFact?.routes ?? []
+  return {
+    pass: placeableFact !== null && !placeableRoutes.includes('PICKUP:e43'),
+    detail: `placeableRoutes=[${placeableRoutes.join(',')}] reason=${placeableFact?.reason ?? 'none'}`,
   }
 })
 

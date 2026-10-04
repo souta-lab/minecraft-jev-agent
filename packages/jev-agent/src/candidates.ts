@@ -12764,34 +12764,94 @@ function pickupCandidates(
     })
     .sort((a, b) => (a.distance === b.distance ? a.id - b.id : a.distance - b.distance))
     .slice(0, MAX_PICKUP_CANDIDATES)
-  return drops.map((entity) => {
-    const item = entity.droppedItem as string
-    const inReach = distance(entity.position, state.self.eyePosition) <= options.reach
-    return {
-      // The entity ID is the identity of THIS drop for its whole lifetime.
-      id: `PICKUP:e${entity.id}`,
-      kind: 'PICKUP' as const,
-      label: `walk onto the dropped ${item} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z}) and pick it up`,
-      targetName: item,
-      target: entity.position,
-      targetEntityId: entity.id,
-      itemName: item,
-      requiresTool: false,
-      toolName: null,
-      inReach,
-      hasStandableAdjacent: true,
-      meta: {
-        tick: state.tick,
-        pickupItem: item,
-        pickupEntityId: entity.id,
-        distance: entity.distance,
-        // The drop is a WORLD entity, not a remembered coordinate: the executor
-        // must re-locate the item entity by name near this position rather than
-        // trusting a stale cell (an item keeps falling for a few ticks).
-        pickupRoute: 'dropped_item_entity',
-      },
-    }
-  })
+  return drops.map((entity) => pickupCandidateForEntity(state, options, entity))
+}
+
+function pickupCandidateForEntity(
+  state: WorldState,
+  options: CandidateOptions,
+  entity: { id: number; droppedItem?: string | null; distance: number; position: Vec3Json },
+): Candidate {
+  const item = entity.droppedItem as string
+  const inReach = distance(entity.position, state.self.eyePosition) <= options.reach
+  return {
+    // The entity ID is the identity of THIS drop for its whole lifetime.
+    id: `PICKUP:e${entity.id}`,
+    kind: 'PICKUP' as const,
+    label: `walk onto the dropped ${item} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z}) and pick it up`,
+    targetName: item,
+    target: entity.position,
+    targetEntityId: entity.id,
+    itemName: item,
+    requiresTool: false,
+    toolName: null,
+    inReach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      pickupItem: item,
+      pickupEntityId: entity.id,
+      distance: entity.distance,
+      // The drop is a WORLD entity, not a remembered coordinate: the executor
+      // must re-locate the item entity by name near this position rather than
+      // trusting a stale cell (an item keeps falling for a few ticks).
+      pickupRoute: 'dropped_item_entity',
+    },
+  }
+}
+
+/**
+ * Whether a dropped item on the ground satisfies this capability directly. A
+ * drop is a grounded producer for an ITEM capability - cheaper than any MINE
+ * leg and already present in the world. Geometry capabilities (headroom,
+ * columns, plans, paths) are never answered by a held item and return null.
+ */
+function capabilityDropPredicate(capability: Capability): ((item: string) => boolean) | null {
+  const satisfiesTool = (item: string, tool: HarvestTool, tier: number): boolean =>
+    tool === 'pickaxe' ? (PICKAXE_RANKS[item] ?? -1) >= tier : item.endsWith(`_${tool}`)
+  switch (capability.kind) {
+    case 'placeable_block':
+      return (item) => PILLAR_PLACE_PRIORITY.includes(item)
+    case 'tool':
+      return (item) => satisfiesTool(item, capability.tool, capability.tier)
+    case 'safe_column':
+      if (capability.reason !== 'no_tool' || capability.tool === null) return null
+      return (item) => satisfiesTool(item, capability.tool as HarvestTool, capability.tier ?? 0)
+    default:
+      return null
+  }
+}
+
+/**
+ * Sensed world drops that satisfy the missing capability, offered under that
+ * capability's route list. `pickupCandidates` cannot emit these: its
+ * `pickupDropAdvancesFocus` filter serves the active goal's focus/chain, so a
+ * `dirt` drop while `collect:log` is focused is invisible to the offer layer
+ * even while `placeable_block` is the fact withholding every goal route - the
+ * measured underground shape where the body's own digs left drops it could
+ * never be offered. The acquisition arm is where the missing fact is known.
+ * Same death-zone/failure bounds as the focus-driven arm; the reachability
+ * gate still owns whether the body can actually walk to the entity.
+ */
+function capabilityDropCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  capability: Capability,
+): Candidate[] {
+  const accepts = capabilityDropPredicate(capability)
+  if (accepts === null) return []
+  const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  return state.entities
+    .filter((entity) => {
+      const item = entity.droppedItem
+      if (typeof item !== 'string' || item.length === 0 || !accepts(item)) return false
+      if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, entity.position)) return false
+      if (failureCount(state.signals.failedCandidates, `PICKUP:e${entity.id}`) >= failureLimit) return false
+      return true
+    })
+    .sort((a, b) => (a.distance === b.distance ? a.id - b.id : a.distance - b.distance))
+    .slice(0, MAX_PICKUP_CANDIDATES)
+    .map((entity) => pickupCandidateForEntity(state, options, entity))
 }
 
 export function surfaceSpot(
@@ -15239,9 +15299,11 @@ function capabilityAcquisitionCandidates(
   for (const entry of withheld) seen.add(entry.candidate.id)
   for (const entry of withheld) {
     for (const capability of entry.result.missingCapabilities) {
-      let source: Candidate[] = []
+      // A sensed world drop that satisfies this capability is the cheapest
+      // grounded route to it, so it leads the emitted list.
+      let source: Candidate[] = capabilityDropCandidates(state, options, capability)
       if (capability.kind === 'headroom') {
-        source = headroomCandidates(state, options)
+        source.push(...headroomCandidates(state, options))
       } else if (capability.kind === 'placeable_block') {
         // A vertical Skill may need a held solid block for a pillar/step.  The
         // missing capability is mechanical, so acquire it from a grounded
@@ -15262,7 +15324,7 @@ function capabilityAcquisitionCandidates(
         // `producersOnly` is the other half of the same contract: the stamped
         // route must be able to END with the drop held, so the clearance/escape
         // tail `mineCandidates` appends for ordinary callers is excluded here.
-        source = mineCandidates(
+        source.push(...mineCandidates(
           state,
           options,
           null,
@@ -15270,9 +15332,9 @@ function capabilityAcquisitionCandidates(
           (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
           true,
           true,
-        )
+        ))
       } else if (capability.kind === 'ascend_plan') {
-        source = pillarFootingPrerequisiteCandidates(state, options, capability)
+        source.push(...pillarFootingPrerequisiteCandidates(state, options, capability))
       } else if (capability.kind === 'tool') {
         // Enumerate every tier-satisfying tool the inventory can actually make
         // (weakest first), not only the weakest canonical name. A body holding
@@ -15302,7 +15364,7 @@ function capabilityAcquisitionCandidates(
         // DESCEND remain available as mechanical route-opening facts because
         // they can change the topology even when their immediate landing cell
         // is not closer in Euclidean distance.
-        source = routeOpeningCandidates(state, options, entry.candidate.target, digRefusals)
+        source.push(...routeOpeningCandidates(state, options, entry.candidate.target, digRefusals))
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -15352,7 +15414,7 @@ function capabilityAcquisitionCandidates(
                 skill: null,
                 walkable: false,
               })
-        source = [...levelSteps, ...approach, ...scaffold.candidates]
+        source.push(...levelSteps, ...approach, ...scaffold.candidates)
       }
       const key = capabilityKey(capability)
       const emitted: string[] = []
