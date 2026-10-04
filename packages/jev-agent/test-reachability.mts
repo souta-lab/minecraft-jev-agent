@@ -625,6 +625,64 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   )
 }
 
+// (8b) unreachableMove parity: a plan-less walk claim to a >4-high target is a
+//      guaranteed executor-side refuse, so a body-level ascend affordance must
+//      not admit it (live gen-muubxz60: `retrieve_known` to dy=42 committed
+//      whenever a natural ledge made ascend.available true, then died at
+//      MOVE_UNREACHABLE inside the epoch's own validity check) ------------------
+{
+  const abilities: ReachabilityAbilities = {
+    ascend: { available: true, missing: [] },
+    descend: { available: false, missing: [] },
+  }
+  const world: ReachabilityWorld = {
+    self: BOT,
+    approach: { x: 0, y: 110, z: 0 },
+    reach: 4.5,
+    hazardAtTarget: false,
+    footingSolid: true,
+    headroomClear: true,
+  }
+  const retrieve: ReachabilityTarget = {
+    candidateId: 'RETRIEVE:known:oak_log:b0_110_0',
+    kind: 'RETRIEVE',
+    position: FAR_ABOVE,
+    barrier: null,
+  }
+  const routeless = evaluateReachability(retrieve, world, {}, abilities, 'unknown')
+  check(
+    'a plan-less retrieve to a >4-high target is needs_ascend even when the body can ascend',
+    !routeless.reachable && routeless.reason === 'needs_ascend',
+    JSON.stringify(routeless),
+  )
+  check(
+    'the refusal names the plan the claim does not carry',
+    routeless.missingCapabilities.some((capability) => capability.kind === 'ascend_plan'),
+    JSON.stringify(routeless.missingCapabilities),
+  )
+  const move: ReachabilityTarget = { candidateId: 'MOVE:p0_110_0', kind: 'MOVE', position: FAR_ABOVE, barrier: null }
+  const routelessMove = evaluateReachability(move, world, {}, abilities, 'unknown')
+  check(
+    'a plan-less move to a >4-high target is needs_ascend under the same bound',
+    !routelessMove.reachable && routelessMove.reason === 'needs_ascend',
+    JSON.stringify(routelessMove),
+  )
+  const routeOwned: ReachabilityTarget = { ...retrieve, carriesRoute: true }
+  const owned = evaluateReachability(routeOwned, world, {}, abilities, 'unknown')
+  check(
+    'a retrieve carrying its own route contract is admitted on the plan',
+    owned.reachable && owned.reason === 'reachable',
+    JSON.stringify(owned),
+  )
+  const otherKind: ReachabilityTarget = { candidateId: 'STEP:p0_110_0', kind: 'STEP', position: FAR_ABOVE, barrier: null }
+  const stepped = evaluateReachability(otherKind, world, {}, abilities, 'unknown')
+  check(
+    'a non-MOVE/RETRIEVE kind keeps the body-level verdict (its own executor bound)',
+    stepped.reachable && stepped.reason === 'reachable',
+    JSON.stringify(stepped),
+  )
+}
+
 // (9) live-geometry replay: the measured run-mu5qd4ah-3xdh failure ----------------
 {
   // Bot at y=9 with the live inventory (dirt/cobblestone held, NO pickaxe), a

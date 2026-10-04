@@ -15307,6 +15307,10 @@ function reachabilityTargetFor(state: WorldState, candidate: Candidate): Reachab
     kind: candidate.kind,
     position: candidate.target,
     barrier: barrierForCandidate(state, candidate),
+    // The same own-route set `unreachableMove` exempts from its plan-less walk
+    // bound: the gate and the executor decide a >4-high claim identically.
+    carriesRoute:
+      hasVerticalPlan(candidate) || isBridgeMove(candidate) || candidate.meta.submersionEscape === true,
   }
 }
 

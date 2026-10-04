@@ -227,6 +227,12 @@ export interface ReachabilityTarget {
   /** destination cell; null means "not a locomotion target" (always feasible) */
   position: Vec3Json | null
   barrier: ReachabilityBarrier | null
+  /**
+   * The candidate owns its route contract (vertical plan / bridge / submersion
+   * escape), so the executor's plan-less walk bound (`unreachableMove`) does not
+   * apply to it. Absent/false = a plain walk claim.
+   */
+  carriesRoute?: boolean
 }
 
 /** World facts about the destination and the body's current column. */
@@ -416,6 +422,17 @@ export function evaluateReachability(
   if (dy > ASCEND_GAP_LIMIT) {
     if (!abilities.ascend.available) {
       return unreachable('needs_ascend', ascendCapabilities(abilities.ascend))
+    }
+    // `unreachableMove` parity (MOVE_VERTICAL_GAP_LIMIT === ASCEND_GAP_LIMIT):
+    // a MOVE/RETRIEVE carrying no route contract is a plain walk claim, and the
+    // executor refuses it unconditionally at this same gap - the body's
+    // unrelated +1 affordance cannot make a walk claim to a +N target
+    // executable. Admitting it was a guaranteed zero-progress commit (live
+    // gen-muubxz60: `retrieve_known` to dy=42 admitted whenever a natural ledge
+    // made ascend.available true, then died at the executor's own bound). The
+    // candidate that DOES carry a plan is judged on that plan's availability.
+    if ((target.kind === 'MOVE' || target.kind === 'RETRIEVE') && target.carriesRoute !== true) {
+      return unreachable('needs_ascend', [{ kind: 'ascend_plan' }])
     }
   } else if (dy < -DESCEND_GAP_LIMIT && !abilities.descend.available) {
     const localDescent =
