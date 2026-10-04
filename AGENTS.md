@@ -86,7 +86,7 @@ Every minor records one `campaignDelta`:
 
 Tests passing, a marker disappearing, or one mechanic succeeding remains `LOCAL_ONLY` until it converts into Mission behavior.
 
-Track **high-water** separately from **current rung**. Death/reset never erases high-water. Returning to wood after iron creates **recovery debt**; while debt exists, restoring the frontier is primary.
+Track **high-water** separately from **current rung**. Death/reset never erases high-water. Returning to wood after iron creates **recovery debt**; while debt exists, restoring the frontier is primary. Never infer attainment from a rung label alone: a runtime `rung=X` may name the **first unsatisfied** rung. Count a frontier only from verified inventory/postcondition/VERIFY evidence and the current runtime contract.
 
 Primary scoreboard:
 - high-water/current gap;
@@ -99,6 +99,30 @@ Primary scoreboard:
 Commit count, test count, minor count, lines changed, or local mechanism sophistication are not progress metrics.
 
 After **3 consecutive `LOCAL_ONLY` KEEP minors**, conversion failure itself becomes the primary blocker. A fourth local minor requires a direct live-evidence link to `ADVANCE`, `RETENTION`, or `RECOVERY`.
+
+### 4.1 Survival is an affordance set, not a RETREAT button
+
+Reason about survival at the **affordance-class** level. A typed failure such as `no_grounded_escape`, `path_stuck`, or `no_safe_step` proves only that one class of action is unavailable; it does **not** prove that the body has no survivable action.
+
+Before declaring `CAPABILITY_LOST`, accepting a bare-hand combat loop, or repeatedly respawning into the same threat, inspect grounded options across the capabilities already present in V4.1.2:
+- **locomotion escape:** retreat, step, wade, climb, alternate grounded route, known-safe route;
+- **vertical escape:** jump/ascent/pillar or other verified height gain that breaks contact;
+- **terrain shaping:** mine/burrow/descend, create headroom, place footing, wall, closure, roof, bridge, or other bounded geometry that changes reachability;
+- **defensible positioning:** use terrain/choke/obstacle/distance so the threat cannot maintain damaging contact;
+- **combat:** only when grounded evidence says fighting is more survivable than disengagement or world modification;
+- **temporal avoidance:** sleep/time-skipping when the capability and resources are actually grounded. Add a new bed/sleep surface only when live evidence shows hostile phase itself remains the earliest blocker after existing affordances are exhausted.
+
+This is **not** a scripted priority route. The agent chooses among grounded affordance classes from current facts. The invariant is that **world modification is a first-class survival action**. In Minecraft, inability to walk away is not equivalent to inability to escape.
+
+Prefer composition of already-proven primitives before adding a new executor surface. If `MINE`, `PLACE`, `DESCEND`, `PILLAR_UP`, footing placement, headroom acquisition, or local water locomotion can solve the state, reuse them under the existing authority path instead of inventing a parallel survival mechanism.
+
+### 4.2 Repeated death is a strategic failure, not more sample size
+
+A death/reset is evidence about `RETENTION` and `RECOVERY`, not merely another mechanical outcome. Two deaths with the same causal fingerprint (same local threat class/context, same missing affordance, same effective response, no material intervening change) decide the hypothesis. **Do not treat a third unchanged death as useful evidence.**
+
+The runtime may physically respawn, but the engineering loop must immediately change strategy, implement the smallest causal fix, or explicitly seal/roll the episode. A spawn-camp or recovery trap outranks ordinary resource progression until the body reaches a stable survivable state.
+
+After a frontier loss, first establish survival, then repay recovery debt. Do not repeatedly rebuild resources into a state that is predictably killed before conversion.
 
 ## 5. P-series: one causal defect at a time
 
@@ -118,6 +142,12 @@ Exit rules:
 - once a narrow fix path is known, drive focused proof + exact commit + fresh live evidence in the same work batch when mechanically possible.
 
 A guard that only reduces reachable state is `SAFETY_GUARD/PARTIAL`, not solved capability.
+
+Before opening a new capability surface, perform a **capability-reuse check**: search the current runtime for already-verified primitives that can be composed to satisfy the missing affordance. Repeated campaign history has shown that local primitives often exist while the semantic layer fails to present them in the context where they matter. That presentation/composition gap is usually a smaller and more general defect than implementing another bespoke mechanic.
+
+Treat cross-layer contradictions as high-value defects. Examples: sensing says an escape is impossible while live geometry supports one; a goal needs a resource while scaffolding consumes it; a critical survival trigger arrives while a grounded answer is in flight; a source change is evaluated using an older source's verdict. Resolve the contradiction at the narrowest ownership boundary rather than compensating downstream.
+
+Decision triggers must follow **meaningful state-boundary crossings**, not only object birth or periodic heartbeats. If a hostile moves from outside to inside reaction range, health crosses a critical band, breathable space disappears, or another safety predicate becomes newly true, that crossing is new evidence and may require immediate re-evaluation. Conversely, a critical trigger must not erase an already-grounded survivable answer merely because it arrived mid-action; re-ground or preserve it under normal lease/generation rules.
 
 ## 6. Portal-first experiment policy
 
@@ -181,11 +211,15 @@ Long commands/tests/runs may stay background; inspect them only at natural work 
 
 If live evidence is unchanged, switch **in the same turn** to root cause, code inspection, focused test, provenance repair, or the next Mission-leverage task.
 
+Repeated physical outcomes are subject to the same rule. Do not watch additional deaths, path failures, pickup failures, or combat contacts after the causal fingerprint is already decided. Count **new causal information**, not event volume.
+
 ## 10. Kernel/resource/mutation invariants
 
 Semantic transition ownership and physical resource/actuation leases are separate. `ResourceId` is structured/hierarchical and bundles acquire atomically. Every mutation requires current ACTIVE contract, current world/dimension/epoch/generation binding, covering current lease, and allowed effect permit. Irreversible effects require kernel-owned single-use `EffectCommitToken` bound to transition/contract hash/generation/effect.
 
 World/dimension/epoch/generation revisions fence stale Jev/System2 decisions, leases, tokens, ResumeProofs, and preemption transactions.
+
+Active-goal resources are protected resources. Generic route/scaffold/support actions may consume a goal-relevant resource class only from **verified surplus above the protected requirement**. Protection is class/alias based (for example semantically equivalent log species), not item-name hacks or seed-specific rules.
 
 All production mutation crosses Runtime Adapter/ActuationPort. Core semantic components must not retain raw Mineflayer mutation authority.
 
@@ -250,7 +284,7 @@ Prefer A/B/C. Use D only for a concrete blocker. Product/capability work stays t
 
 Portal-first completion requires normal V4.1.2 authority/VERIFY evidence of an **unassisted autonomous transition into `minecraft:the_nether`** with exact source/world/run provenance and no benchmark-specific behavior or manual gameplay help.
 
-Never reintroduce old authority under new names, smarter shadow GoalQueue/β authority, giant deterministic planners, mega-controllers without causal ownership improvement, unbounded retries, weakened VERIFY/evidence, or permanent dual authority.
+Never reintroduce old authority under new names, smarter shadow GoalQueue/β authority, giant deterministic planners, mega-controllers without causal ownership improvement, unbounded retries, weakened VERIFY/evidence, permanent dual authority, or a one-dimensional survival policy that substitutes repeated combat for a missing escape/world-modification affordance.
 
 M3 (`ender_eye >= 12` under the canonical run-scoped gate) remains a long-horizon composition benchmark, not the architecture or sole objective.
 
