@@ -356,6 +356,49 @@ function craftMaterialRequirements(
 }
 
 /**
+ * For every ingredient item in the goal's craft tree, the set of concrete
+ * items that may legally fill THE SAME ingredient slot. The recipe index
+ * expands a tag ingredient into one variant per concrete item, so the slot
+ * siblings of `cherry_planks` in `wooden_pickaxe` are exactly the planks
+ * species - and `coal`'s siblings in `torch` are `coal`/`charcoal` only, never
+ * `stick`. Species-locked recipes (oak_boat) produce singleton sibling sets,
+ * so class siblings correctly stay spendable there. Same depth/stack bounds
+ * as `craftMaterialRequirements`.
+ */
+function craftIngredientAlternatives(
+  recipes: RecipeIndex,
+  item: string,
+  alternatives: Map<string, Set<string>>,
+  stack: ReadonlySet<string>,
+  depth: number,
+): void {
+  if (depth > SCAFFOLD_REQUIREMENT_DEPTH || stack.has(item)) return
+  const variants = recipes.recipesFor(item)
+  if (variants.length === 0) return
+  const nextStack = new Set(stack)
+  nextStack.add(item)
+  const slots = Math.max(...variants.map((variant) => variant.ingredients.length))
+  for (let slot = 0; slot < slots; slot += 1) {
+    const siblings = new Set<string>()
+    for (const variant of variants) {
+      const ingredient = variant.ingredients[slot]
+      if (ingredient !== undefined) siblings.add(ingredient.item)
+    }
+    for (const sibling of siblings) {
+      const entry = alternatives.get(sibling) ?? new Set<string>()
+      for (const other of siblings) entry.add(other)
+      alternatives.set(sibling, entry)
+    }
+    for (const variant of variants) {
+      const ingredient = variant.ingredients[slot]
+      if (ingredient !== undefined) {
+        craftIngredientAlternatives(recipes, ingredient.item, alternatives, nextStack, depth + 1)
+      }
+    }
+  }
+}
+
+/**
  * Items the ACTIVE goal still requires, as the generalised p22.1 rule: a
  * resource required by the active goal is never generic support/scaffolding
  * unless a verified surplus above the protected requirement exists.
@@ -382,8 +425,21 @@ function protectedScaffoldRequirements(
       if (recipes === null) return []
       const materials = new Map<string, number>()
       craftMaterialRequirements(recipes, target, want, counts, materials, new Set<string>(), 0)
+      // Ingredient-slot substitutes stay protected: the recipe index expands
+      // tag ingredients into one variant per concrete item, but the ledger can
+      // only earmark the chosen variant's names. `birch_planks` is a legal
+      // pickaxe ingredient even when the ledger says `cherry_planks` - spending
+      // it as scaffolding consumes the goal's material by another name
+      // (measured: `test-craft-log-route` case (2)/(3) spent the fixture's
+      // pickaxe planks as a pillar block). Alternatives are per ingredient
+      // slot, so a sibling species in a DIFFERENT slot (charcoal for stick)
+      // and species-locked recipes (oak_boat) stay spendable; the units
+      // earmark stays per-item, which is conservative only.
+      const alternatives = new Map<string, Set<string>>()
+      craftIngredientAlternatives(recipes, target, alternatives, new Set<string>(), 0)
       return [...materials].map(([item, units]) => ({
-        match: (name: string) => name === item || resourceMatches(name, item),
+        match: (name: string) =>
+          name === item || resourceMatches(name, item) || (alternatives.get(item)?.has(name) ?? false),
         units,
       }))
     }

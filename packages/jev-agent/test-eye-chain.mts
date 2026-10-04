@@ -781,17 +781,29 @@ addCase('(iv) a satisfied collect need keeps its pristine gap rule (item = the f
 // ===========================================================================
 // (v) ordinary crafting is byte-identical (literals captured from 877c3ac)
 // ===========================================================================
-/** The candidate id lists the PRISTINE tree (877c3ac) offered for these shapes. */
+/** The candidate id lists offered for these shapes (base literals from the pristine tree 877c3ac).
+ * Two designed arms changed the offered set since that capture, so the expected
+ * literals now name them:
+ * - `combatKitPrerequisiteCandidates` (survival armament, d84c4284): a kit
+ *   missing `sword` carries a standing grounded offer of the startable
+ *   sword-material step - `CRAFT:stick` whenever planks are held (Jev still
+ *   owns WHETHER arming beats the goal work; CAN is all this adds).
+ * - The `collect log` ingredient route for `craft wooden_pickaxe` no longer
+ *   emits undirected same-level frontier walks: `retrievalCandidatesForWant`
+ *   replaced them with the directed `RETRIEVE:surface` arm, which requires a
+ *   strictly higher standable spot (`spot.y > self.y`). At this flat fixture
+ *   frontier the arm correctly stays silent - walking to a same-level cell is
+ *   not a log-directed answer. */
 const PRISTINE_SHAPES: ReadonlyArray<readonly [string, WorldState, string]> = [
   [
     'craft crafting_table from 4 planks',
     world({ kind: 'craft', targetItem: 'crafting_table', requiredCount: 1, counts: { oak_planks: 4 } }),
-    '["CRAFT:crafting_table","WAIT"]',
+    '["CRAFT:crafting_table","CRAFT:stick","WAIT"]',
   ],
   [
     'craft wooden_pickaxe from 2 planks',
     world({ kind: 'craft', targetItem: 'wooden_pickaxe', requiredCount: 1, counts: { oak_planks: 2 } }),
-    '["MOVE:p3_61_0","MOVE:p0_61_3","WAIT"]',
+    '["CRAFT:stick","WAIT"]',
   ],
   [
     'craft diamond_pickaxe from 3 diamond + 2 stick',

@@ -3194,7 +3194,7 @@ export function entryCandidates(
   // route at all, so `pathTo(enterCell)` reported `noPath`/`stuck` forever. When
   // no grounded plan exists the refusal is carried too, so the executor fails
   // ONCE with the obstruction instead of re-arming the same unreachable walk.
-  const route = planVerticalApproachDetailed(verticalInputFor(state, entry.enterCell))
+  const route = planVerticalApproachDetailed(verticalInputFor(state, entry.enterCell, options.recipes))
   const verticalMeta = verticalPlanMeta(route.plan, Math.floor(state.self.position.y), entry.enterCell.y)
   // The SECOND grounded plan of the SAME contract, so the entry's vertical leg
   // has a composed fallback the executor can run when the first one cannot close
@@ -5924,10 +5924,10 @@ function mineCandidates(
       // the MOVE that takes the body to its standable spot; otherwise the
       // executor sees only a horizontal path and repeatedly stalls below the
       // resource even though the sensor proved a safe pillar/staircase leg.
-      const vertical = planVerticalApproach(verticalInputFor(state, block.position))
+      const vertical = planVerticalApproach(verticalInputFor(state, block.position, options.recipes))
       const tunnelFallback =
         vertical?.kind === 'reuse'
-          ? planVerticalApproach({ ...verticalInputFor(state, block.position), tunnel: null })
+          ? planVerticalApproach({ ...verticalInputFor(state, block.position, options.recipes), tunnel: null })
           : null
       const verticalMeta = {
         ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), block.position.y),
@@ -6719,7 +6719,7 @@ function ascentRouteTo(
   const feet = { x: Math.floor(own.x), y: Math.floor(own.y), z: Math.floor(own.z) }
   if (spec.targetY - own.y <= VERTICAL_GAP) return { candidates: [], refusal: null }
   const target = { x: feet.x, y: spec.targetY, z: feet.z }
-  const decision = planVerticalApproachDetailed(verticalInputFor(state, target))
+  const decision = planVerticalApproachDetailed(verticalInputFor(state, target, options.recipes))
   if (decision.plan === null) {
     const refusal = decision.ascentRefusal
     if (refusal === null) return { candidates: [], refusal: null }
@@ -6738,7 +6738,7 @@ function ascentRouteTo(
   const targetCell =
     plan.kind === 'pillar' ? { x: feet.x, y: plan.toY, z: feet.z } : plan.kind === 'reuse' ? plan.tunnel : plan.step
   const tunnelFallback =
-    plan.kind === 'reuse' ? planVerticalApproach({ ...verticalInputFor(state, target), tunnel: null }) : null
+    plan.kind === 'reuse' ? planVerticalApproach({ ...verticalInputFor(state, target, options.recipes), tunnel: null }) : null
   const verticalMeta = {
     ...verticalPlanMeta(plan, feet.y, spec.targetY),
     ...(plan.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
@@ -8587,7 +8587,7 @@ function stationApproachReachable(
   if (probe === null) return true
   const fact = probe(station, kind)
   if (fact.approach === null) return false
-  const column = columnFacts(state)
+  const column = columnFacts(state, options.recipes)
   const abilities = deriveReachabilityAbilities(state, station, column)
   const target: ReachabilityTarget = {
     candidateId: `STATION:${kind}:${blockId('b', station)}`,
@@ -10008,7 +10008,7 @@ function verticalPlanLabel(vertical: VerticalPlan | null): string {
  * the executor can fall back to a different vertical plan when the live reuse
  * entry turns out to be unusable.
  */
-function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
+function verticalInputFor(state: WorldState, target: Vec3Json, recipes: RecipeIndex | null = null): VerticalInput {
   const digSources = protectedVerticalDigSources(state)
   return {
     selfFeetY: state.self.position.y,
@@ -10017,7 +10017,11 @@ function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
     tunnel: state.signals.lastTunnel,
     descent: digSources.descent,
     stepCuts: digSources.stepCuts,
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null)),
+    // `options.recipes` is the candidate-layer recipe contract for tests and
+    // degraded inputs; `state.recipes` is the sensor-populated production copy.
+    // A caller that has options must pass them or the scaffold holdback sees no
+    // craft goal at all and spends needed material as pillar footing.
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, recipes ?? state.recipes ?? null)),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     inventory: state.inventory.counts,
   }
@@ -10083,10 +10087,10 @@ function knownStationRetrievalCandidate(
 ): Candidate {
   const isFurnace = known.name.includes('furnace')
   const purpose = isFurnace ? 'smelt' : stationRetrievalPurpose(state)
-  const vertical = planVerticalApproach(verticalInputFor(state, known.position))
+  const vertical = planVerticalApproach(verticalInputFor(state, known.position, options.recipes))
   const tunnelFallback =
     vertical?.kind === 'reuse'
-      ? planVerticalApproach({ ...verticalInputFor(state, known.position), tunnel: null })
+      ? planVerticalApproach({ ...verticalInputFor(state, known.position, options.recipes), tunnel: null })
       : null
   const verticalMeta = {
     ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y),
@@ -12554,10 +12558,10 @@ function retrievalCandidatesForWant(
     // Issue #45: a remembered resource below the current level needs a vertical
     // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
     // horizontal bearing and falls back to WAIT.
-    const vertical = planVerticalApproach(verticalInputFor(state, known.position))
+    const vertical = planVerticalApproach(verticalInputFor(state, known.position, options.recipes))
     const tunnelFallback =
       vertical?.kind === 'reuse'
-        ? planVerticalApproach({ ...verticalInputFor(state, known.position), tunnel: null })
+        ? planVerticalApproach({ ...verticalInputFor(state, known.position, options.recipes), tunnel: null })
         : null
     const verticalMeta = {
       ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y),
@@ -13837,7 +13841,7 @@ export function applyReachabilityGate(
     state,
     options,
     memory: options.reachability?.memory ?? null,
-    column: columnFacts(state),
+    column: columnFacts(state, options.recipes),
   }
   let presented: Candidate[] = []
   const reachability: CandidateReachability[] = []
@@ -14732,7 +14736,7 @@ function cellHarvestBarrier(state: WorldState, cell: Vec3Json): ReachabilityBarr
   return { position: cell, name, requiredTool: profile.harvestTool, requiredTier: profile.harvestTier }
 }
 
-function columnFacts(state: WorldState): ColumnFacts {
+function columnFacts(state: WorldState, recipes: RecipeIndex | null = null): ColumnFacts {
   const feet = {
     x: Math.floor(state.self.position.x),
     y: Math.floor(state.self.position.y),
@@ -14764,7 +14768,7 @@ function columnFacts(state: WorldState): ColumnFacts {
     )
   })
   return {
-    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, state.recipes ?? null)),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, recipes ?? state.recipes ?? null)),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     footingSolid,
     headroomClear: ownCut === undefined,

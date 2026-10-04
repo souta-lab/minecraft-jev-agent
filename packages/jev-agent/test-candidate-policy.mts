@@ -172,6 +172,16 @@ addCase('an immediate hostile threat removes work actions but leaves Jev ATTACK/
 addCase('critical health keeps every grounded survival action and leaves WHICH to Jev', () => {
   const state = exploreState(0)
   state.self = { ...state.self, health: CRITICAL_COMBAT_HEALTH - 1 }
+  // The ATTACK must be grounded under the CAN race verdict, not merely offered:
+  // p23.12's `assessAttackRace` marks a kill that cannot land before the body
+  // dies (`killMs > deathMs`) as `attackRaceLost` and removes it from the
+  // survival set - a CAN refusal, not a WHICH choice. A bare-fist swing
+  // against a fresh zombie loses that race at critical health (measured:
+  // 15000ms-to-kill vs 2000ms-to-die), so the fixture carries a diamond sword
+  // the lease will arm and a wounded zombie the armed swing finishes first
+  // (1500ms kill < 2000ms death). The exclusion itself is pinned in
+  // `test-mob-survival.mts`; this case pins WHICH among *grounded* answers.
+  state.inventory = { ...state.inventory, counts: { diamond_sword: 1 } }
   state.entities = [
     {
       id: 7,
@@ -181,6 +191,7 @@ addCase('critical health keeps every grounded survival action and leaves WHICH t
       position: { x: 3.5, y: 10, z: 0.5 },
       distance: 3,
       hostile: true,
+      health: 10,
     },
   ]
   state.terrain = { standable: [SELF, { x: -3, y: 10, z: 0.5 }] }
