@@ -1,192 +1,260 @@
-# AGENTS.md — V4.1.2 Authority Constitution + Capability Campaign
+# AGENTS.md — V4.1.2 Single-Agent Capability Constitution
 
-## 0. Permanent architecture lock and precedence
+## 0. Mission and precedence
 
-**V4.1.2 Concurrent Verified Transition Runtime is the one permanent architecture.** Validated checkpoint: `092a5b38` (`docs/development/P8-CLOSURE-REPORT.md`). Never create/reopen V4.1.3/V4.2/V5, a successor architecture, architecture tournament/migration, selector, shadow/fallback authority, second terminalization path, or alternate SUCCESS owner. No benchmark result, capability failure, model preference, refactor, or future evidence can unlock this rule.
+Build one general Minecraft agent that autonomously drives **verified world-state transitions** for long periods without human gameplay assistance and ultimately reaches the End across unseen worlds/states/instructions.
 
-Fix defects **inside** V4.1.2 ownership/authority semantics. Allowed: implementation fixes, missing mechanics, policy/planning/recovery improvements, observability/proof hardening, semantics-preserving PBF/refactors, scenarios/tests, and new Kernel state/commands/timeouts when ownership is unchanged. If a defect truly requires changing constitutional ownership, record a permanent limitation and work around it at capability/policy/mechanics/observability/proof level.
+Until first success, the campaign objective is the **FIRST CLEAN VERIFIED AUTONOMOUS NETHER ENTRY**. Everything else is subordinate to that objective.
 
-Canonical sources, highest first: (1) current source/live server truth; (2) `packages/kernel/kernel.ts` plus `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`, `docs/architecture/v4.1/{V4.1.2-HARDENING,INVARIANTS,KERNEL-EVENTS}.md`; (3) `RESOURCE-AUTHORITY-INVENTORY.md` + static mutation scan; (4) historical V4/V4.1/V4.1.1 lineage docs; (5) deterministic tests/probes/exact-run evidence; (6) older issues/docs as evidence only. If AGENTS conflicts with current V4.1.2 implementation/docs, fix AGENTS. Research context: `docs/history/investigations/minecraft-ai-frontier-report-2026-09-28.md`.
+Precedence, highest first:
+1. live server/world truth and current source;
+2. V4.1.2 Kernel/architecture contracts;
+3. this file;
+4. deterministic tests/probes/exact-run evidence;
+5. campaign history/issues/docs.
 
-Production authority path is uniquely:
+If this file conflicts with current V4.1.2 implementation/contracts, repair this file; never bend runtime truth to documentation.
+
+## 1. Permanent architecture lock
+
+**V4.1.2 Concurrent Verified Transition Runtime is permanent.** Validated checkpoint: `092a5b38`. Canonical contracts: `packages/kernel/kernel.ts`, `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`, and `docs/architecture/v4.1/{V4.1.2-HARDENING,INVARIANTS,KERNEL-EVENTS}.md`.
+
+Never create or revive V4.1.3/V4.2/V5, alternate terminalization, shadow/fallback authority, second SUCCESS owner, selector architecture, architecture tournament, or a parallel semantic authority path.
+
+The sole production authority path is:
 `proposal -> typed KernelCommand -> applyKernelCommand(KernelState, command) -> KernelState + KernelEvent[] -> transition-scoped adapter capability -> Mineflayer/server effect`.
-No semantic caller directly mutates ATR state, leases, effect commits, revisions, budgets, Mission authority, trusted facts, or journal sequence. M2/M3/M4 are proof corpora, not the production brain.
 
-## 1. Mission, roles, and success
+Fixed ownership:
+- **Jev:** tactical/semantic WHICH/WHETHER among grounded enabled choices.
+- **System2:** sparse WHAT synthesis, repair, decomposition, and causal hypotheses.
+- **Kernel:** sole lifecycle/resource/effect/trusted-fact/revision/budget/Mission/journal/SUCCESS authority.
+- **Transition Controller:** realizes one admitted transition until VERIFY success, typed terminal, or invalidation.
+- **Viability Runtime:** suspend/stabilize/revalidate/resume without silently replacing mission intent.
+- **Runtime Adapter / ActuationPort:** sole production mutation boundary.
+- **VERIFY:** sole SUCCESS authority; trusted truth is TRUE/FALSE/UNKNOWN.
+- **HOST:** connection/generation/durable-state/evidence owner, not gameplay policy.
 
-Build a general Minecraft agent that autonomously drives **verified world-state transitions** for long periods without human feedback and ultimately reaches End-game goals across unseen worlds/states/instructions.
+Lifecycle remains `ENABLED -> RUNNABLE -> ACTIVE <-> SUSPENDED`, with observing/blocked/terminal states governed by the Kernel. Crash ambiguity becomes UNKNOWN.
 
-Roles are fixed:
-- **Jev:** fast System-One semantic/tactical WHICH/WHETHER choice among grounded enabled transitions/tactics; no truth, SUCCESS, lease, effect, lifecycle, or primitive authority.
-- **System2:** sparse WHAT synthesis/repair/decomposition/new causal hypotheses; never a motor loop.
-- **Kernel:** sole lifecycle/resource/effect/trusted-fact/revision/budget/Mission/journal/SUCCESS authority; canonicalizes contracts/hashes.
-- **Transition Controller:** owns one admitted contract until VERIFY success, typed terminal, or invalidation; requests KernelCommands only.
-- **Viability Runtime:** preserves mission-crossing survival via SUSPEND/stabilize/fresh facts/revalidate/RESUME of the same contract; never silently replaces mission intent.
-- **Runtime Adapter / ActuationPort:** only production mutation boundary to raw Mineflayer/backend.
-- **VERIFY:** sole SUCCESS authority; only verified facts count; truth is TRUE/FALSE/UNKNOWN.
-- **HOST:** connection, generation identity, durable state, lease issuance, evidence; not gameplay policy.
+## 2. Project-scoped blanket authorization
 
-ATR lifecycle: `ENABLED -> RUNNABLE -> ACTIVE <-> SUSPENDED`, with `ACTIVE -> OBSERVING`, `BLOCKED -> TERMINAL`. Replayed/audited history never becomes live authority. Crash ambiguity becomes UNKNOWN; never auto-reexecute an ambiguous effect.
+This repository/campaign is **pre-authorized for unattended engineering execution**. Routine project work must not stop for operator approval.
 
-## 2. Unattended/YOLO campaign operating contract
+Do not ask for confirmation before ordinary repository/campaign actions. Do not choose a slower path merely because a direct project-scoped action changes state. When a technically valid next action is known, take it and continue.
 
-Campaign operation is explicitly autonomous and fully permissioned for ordinary engineering. Do **not** ask for routine approval for investigation, edits, tests, branches/worktrees, commits/pushes of validated KEEP changes, process/server/test-world lifecycle, config changes, evidence analysis, or other reversible work serving the goal. Choose the highest-information-value valid action and continue. Permission is not a decision variable: do not choose a slower/read-only/reduced-scope path merely because a direct authorized operation feels riskier; manage engineering risk with exact provenance, focused checks, and reversible commits—not operator confirmation. Questions are allowed only for genuinely user-only input (e.g. unavailable credentials or missing intent whose alternatives materially change the requested goal); keep all independent work moving meanwhile. Never park in a chooser or end with “shall I…?”.
+The following are pre-approved when they serve this repository/campaign:
+- inspect project files, run artifacts, logs, local campaign config, processes, databases, services, and temporary artifacts;
+- create/edit/rename/remove project files, generated artifacts, caches, fixtures, disposable worktrees, and campaign-owned test state;
+- run shell commands, tests, builds, compilers, linters, formatters, migrations, diagnostics, package managers, and repository tooling;
+- install/update/remove project dependencies and ordinary development tooling required by the campaign;
+- update project-local hooks/config, goal-mode state, campaign tooling, local process wiring, and user-level services used by this campaign;
+- start/stop/restart/reload campaign-owned servers, residents, supervisors, observers, test processes, and Devin sessions;
+- create/remove branches/worktrees and perform normal fetch/rebase/cherry-pick/merge/commit/push flows for validated KEEP work;
+- repair stale campaign registry/state/provenance after exact identity checks;
+- run fresh experiments, major rollovers, and same-world minor reloads when required by the experiment contract.
 
-Full permissions do **not** authorize cheating capability evidence, architecture changes, force-push/history destruction, deleting user worlds/sealed archives, or overwriting another lane's unmerged work. Record unresolved non-blocking assumptions/questions in `STATUS.md`/campaign state and keep moving.
+Use exact identity checks, focused tests, backups where useful, reversible commits, and provenance to manage engineering risk. **Do not convert engineering caution into an approval request.**
 
-### No idle / causal closure
+Ask the operator only when progress truly requires information unavailable to the agent, such as a missing external credential or genuinely ambiguous product intent. Continue every independent useful task while such a dependency exists.
 
-Time must pass as a side effect of useful work, never as the work itself.
-- **Never wait:** `sleep`/timers/delay loops/`timeout`-as-delay/blocking reads are forbidden. Long shells/tests/runs stay background; snapshots are non-blocking; timeouts are safety ceilings. Subagents are disabled for this campaign, so no work may depend on delegated agent output.
-- **Never duplicate observation:** repeat heartbeat/log/process/status only after intervening work or a concrete event can change the result.
-- **No micro-turns:** one observation/search/tiny edit/status is not a completed turn. Finish analysis + implementation + focused proof, or multiple independent useful actions, before yielding.
-- **Exit a causal rut:** one decisive typed mechanical/VERIFY/authority failure, or two identical post-change failures with unchanged causal facts, ends observation. Three unchanged `WAIT`/`ESCALATE`/System2 replans on one state fingerprint is churn; there is no fourth—patch, REVERT, or DEFER/switch lane.
-- **Fresh code needs fresh evidence:** same-SHA restarts preserve durable failure memory; source-dependent failures/retirements from an older SHA cannot evaluate or suppress changed code. A stale fence blocking the fresh attempt is the next defect.
-- Discovering the next defect closes/stamps the current minor and opens the next `pN.x` immediately. Once a narrow fix path is known, do not carry it as uncommitted WIP across a normal turn/context boundary: drive focused proof + exact commit, then reload + first fresh evidence when available.
-- Unchanged evidence means switch to root-cause/code/test/provenance/another lane **in the same turn**. Yield only when every useful lane is blocked; status/commit/context compaction is not goal completion.
+Project-integrity invariants still apply: no cheating/benchmaxxing evidence, no frozen-architecture ownership change, no unrelated user-data mutation, no loss of sealed evidence, and no fabricated/weakened VERIFY or provenance.
 
-Live observation/audit must be read-only by construction. Never call ambiguous helpers that may `quit/stop/kill`, mutate control sockets/lifecycle/world/inventory, reload generation, or send server commands just to obtain status; inspect source/`--help` first. State-changing lifecycle actions must be deliberate and separately targeted.
+## 3. One-agent execution model
 
-## 3. Capability direction: portal first, then reliability/speed/generalization
+The campaign uses **one lead agent only**. Project config keeps `subagents_enabled=false`.
 
-Diagnostic ladder: `wood -> stone tools -> iron -> food/survival -> cave recovery -> smelting -> portal -> Nether traversal -> fortress/blaze -> pearls -> stronghold -> End`. This is a diagnostic decomposition, **not** a production route script or mandatory promotion ladder.
+Never spawn, resume, read, poll, or wait for subagents/sidekicks. The lead agent owns the whole causal chain:
+`live evidence -> diagnosis -> code inspection -> implementation -> focused proof -> commit -> integration -> reload -> first fresh evidence -> next blocker`.
 
-Until first clean verified autonomous Nether entry, optimize the **end-to-end portal objective**. Pre-portal rungs are checkpoints only: run the longest honest portal-directed attempt, identify the earliest/highest-impact blocker, make the smallest generic fix, return immediately to portal. Do not require full robustness at intermediate rungs.
+Allowed concurrency is mechanical only: background tests/builds/probes may run while the same lead agent continues useful work. There is one reasoning owner and one mutation owner.
 
-**Local capability closure is not campaign progress.** Every minor records `campaignDelta`: `ADVANCE` = new verified high-water rung/checkpoint; `RETENTION` = same frontier survives materially better while continuing forward; `RECOVERY` = prior frontier is regained materially faster/cheaper after loss; `LOCAL_ONLY` = mechanic improved without frontier/retention/recovery gain; `REGRESSION` = mission capability worsened. Green tests, vanished markers, reusable primitives, and single-mechanic live success alone are `LOCAL_ONLY`. Track high-water separately from current rung; death/reset never erases it. Returning to wood after iron creates **recovery debt**, not a fresh start; while debt exists, restoring the frontier is primary and unrelated local polish is secondary unless it causally blocks recovery.
+If several tasks are useful, execute them sequentially by **Mission leverage**.
 
-End-to-end scoreboard: high-water/current gap, time/actions to first reach and re-reach the frontier, deaths/resets before conversion, and portal/Nether success. Commits/tests/minor count/internal sophistication are not progress. After **3 consecutive `LOCAL_ONLY` KEEP minors**, conversion failure becomes the primary defect: before a fourth local minor, audit why proven gains do not move/preserve the mission frontier and require an explicit live-evidence link from the next fix to `ADVANCE`/`RETENTION`/`RECOVERY`.
+## 4. Mission scoreboard: capability only counts when it converts
 
-Ordered phases:
-1. **Possibility:** first clean unassisted exact-provenance verified Nether entry.
-2. **Reliability:** declared dev+holdout cohort; default robust criterion when five valid trials are practical is **>=4/5 clean portal successes including >=1 holdout**, focused guards green, zero authority violations, no material regression/pathological model-cost growth.
-3. **Speed:** minimize verified time-to-portal/actions while preserving reliability/safety/authority/proof; track deaths, stalls, recovery, waste, replans, Jev/System2 use.
-4. **Generalize:** unseen seeds/terrain/partial states and semantically equivalent natural-language goals; same generic mechanics/composition, no benchmark memorization.
+Diagnostic frontier:
+`wood -> stone tools -> iron -> survival/food -> smelting -> diamond/obsidian -> portal -> Nether -> blaze/pearls -> stronghold -> End`.
 
-One portal success proves possibility, not robustness. If infrastructure prevents five valid reliability trials, label confidence LOW. Major rollover is pre-authorized: once a pN premise/timeout is resolved and the next honest experiment needs a fresh world, seal its evidence and launch pN+1 without asking. After portal work is healthy, continue the same pattern toward Nether and End.
+This is diagnostic decomposition, not a scripted route.
 
-## 4. P-series is the development spine
+Every minor records one `campaignDelta`:
+- `ADVANCE`: new verified high-water frontier;
+- `RETENTION`: same frontier is materially preserved better while continuing forward;
+- `RECOVERY`: previous frontier is materially regained faster/cheaper after loss;
+- `LOCAL_ONLY`: local capability improved without frontier/retention/recovery gain;
+- `REGRESSION`: mission capability worsened.
 
-Use immutable `portal-pN` major episodes and `pN.x` same-world causal hot iterations. Maintain append-only `runs/capability-campaign/P-SERIES.md`, machine state in `state.json.portalAttempts`, and immutable run artifacts. Never rewrite old evidence; append corrections with provenance.
+Tests passing, a marker disappearing, or one mechanic succeeding remains `LOCAL_ONLY` until it converts into Mission behavior.
 
-Each major record binds exact SHA/config/seed/world/start/mission+accept/model-provider/run identity and records terminal depth/outcome, high-water/current rung, checkpoint and re-recovery times/actions, deaths/stalls/cost, Jev/System2 count+latency, earliest causal blocker, learning, KEEP/REVERT/DEFER, `campaignDelta`, fix SHA/control reason, and next hypothesis/signature.
+Track **high-water** separately from **current rung**. Death/reset never erases high-water. Returning to wood after iron creates **recovery debt**; while debt exists, restoring the frontier is primary.
 
-### Major vs minor
-- `pN+1`: materially new experiment episode — normally fresh world/fixture, changed premise, broad/non-quick causal change, or clean exact-SHA end-to-end proof.
-- `pN.x`: **same major world/server/player/connection/host durable state by default**, one narrow causal production delta, no architecture/authority/verification change, no broad refactor or benchmark-specific behavior.
-- One minor = one causal production defect. Required test/docs proving that defect may share the commit; unrelated fixes get separate minors.
-- A safety restriction that merely shrinks reachable state is `SAFETY_GUARD/PARTIAL`, not capability closure; pursue the reusable mechanic unless the state is intrinsically invalid.
-- AI inefficiency (over-collection, rebuilding satisfied resources, bad upgrades, needless slow strategy, repeated satisfied subgoals) is a valid generic capability defect.
+Primary scoreboard:
+- high-water/current gap;
+- time/actions to first reach and re-reach frontier;
+- deaths/resets before conversion;
+- retained inventory/tool/station progress;
+- portal construction/light/entry state;
+- verified Nether entry.
 
-### Fast hot iteration
-A minor ends on evidence, not time. **10–15 minutes is a hard ceiling for unchanged-fingerprint dwell, never a target.** Decisive evidence ends it immediately. At the exit thresholds or ceiling: patch, REVERT, or DEFER; watching longer is a campaign-process defect. Long major-world progression should be many fast minors.
+Commit count, test count, minor count, lines changed, or local mechanism sophistication are not progress metrics.
 
-For reloadable generation changes, preserve the resident HOST/Mineflayer connection and use canonical generation reload: `build -> import -> structural smoke -> quiesce old -> atomic lease/generation commit -> start new -> dispose old`. Require changed hash plus `GENERATION_READY`/status carrying exact new `sourceSha`, `reconnects=0`. HOST restart/reconnect only for genuine HOST/contract/schema change, dead/unhealthy resident, or explicit infra condition.
+After **3 consecutive `LOCAL_ONLY` KEEP minors**, conversion failure itself becomes the primary blocker. A fourth local minor requires a direct live-evidence link to `ADVANCE`, `RETENTION`, or `RECOVERY`.
 
-Use one stable live resident worktree per major (`src-live` style). **Never edit production source dirty in the live resident worktree.** Implement/test elsewhere, commit exact one-cause SHA, require live worktree clean, move it to that SHA, then reload. Dirty live reload invalidates exact-SHA evidence.
+## 5. P-series: one causal defect at a time
 
-Hot-swap provenance moves atomically with generation: keep major `runId` as episode/directory identity; use `activeMinor`/`segmentId` for pN.x; record generation SHA/hash/id, runtime/worktree, HOST PID, resident log, swap time, reconnect count, unchanged world/server, and distinguish `hostBootSha` from `generationSourceSha`. `active-run.json`, observer/state and evidence must agree. Registry writes are atomic/CAS-like on exact claim/segment so stale pN cleanup cannot unlink/overwrite pN.x.
+`portal-pN` = major episode. `pN.x` = same-world narrow causal hot iteration. Keep `runs/capability-campaign/P-SERIES.md` append-only, machine state in `state.json.portalAttempts`, and immutable run evidence.
 
-## 5. Anti-benchmaxxing and experiment contract
+Use `pN+1` for materially new experiment premises, fresh-world requirements, broad/non-quick causal changes, or clean exact-SHA end-to-end proof.
 
-`BENCHMAXX` means improving measured depth/score by reducing transfer. Forbidden: seed coordinates, memorized resource/block locations, p-specific action sequences, exact benchmark wording hacks, fixture-specific branches, hidden task selectors, giant ladder scripts, or tuning prompts only to known runs. Improvements must come from reusable mechanics, world-state reasoning, prerequisite/resource accounting, planning/decomposition, survival/recovery/navigation, interaction mechanics, and instruction interpretation.
+Use `pN.x` for **one causal production defect** while preserving the same major world/server/player/connection/durable state whenever possible.
 
-For each selected blocker/checkpoint:
-1. Predeclare predicate, metrics, dev cohort and holdout cohort **before tuning**; prefer >=3 dev + >=2 holdout when practical, otherwise record sample-size limitation.
-2. Establish clean same-protocol exact-SHA baseline.
-3. Cluster **first causal failures** by typed cause/signature: `GROUNDING_REFUSAL`, `VERIFY_FAIL`, `LEASE_DENY`, `STALE_FENCE`, `BUDGET_EXHAUST`, `MODEL_UNAVAILABLE`, `MECHANICAL_FAIL`, `NO_PROGRESS`, `AUTHORITY_VIOLATION`, `INFRA`.
-4. Choose highest-impact frequent open-zone cluster. One experiment = one falsifiable hypothesis = one causal change + explicit expected signature/metric.
-5. Minimum deterministic/focused regression first; then smallest dev live sample that can falsify; full dev cohort only when warranted; holdout for portal reliability/promotion, not intermediate polishing before first portal.
-6. KEEP may close a real local defect when guards stay green, but classify its mission effect separately with `campaignDelta`; never promote `LOCAL_ONLY` evidence into an end-to-end progress claim. `REGRESSION` normally reverts unless required to expose/fix a more fundamental blocker with explicit evidence.
-7. REVERT early on causal falsification/regression/new failure/authority violation. DEFER/ESCALATE on frozen/constitutionally impossible/unavailable dependency/exhausted bounded hypotheses, preserve evidence and switch lanes. INFRA requires evidence/control reproduction when practical.
-8. Commit before provenance-sensitive live evaluation; after KEEP update records/state, integrate safely, and immediately continue.
+A minor ends when the hypothesis is decided, not when a timer expires. **10–15 minutes is a hard ceiling for unchanged-fingerprint dwell, never a target.**
 
-Core metrics: verified task success; time/actions/steps; deaths/damage/food/air emergencies; recovery success; stall count/duration; resource waste; replans; candidate refusals; Jev choices/rejections/latency; System2 calls/applied/discarded/latency/token-cost proxy; model-unavailable events; authority/effect failures; cross-seed/biome/novel-state failures. Prefer verified predicates over “log vibes”.
+Exit rules:
+- one decisive typed mechanical/VERIFY/authority failure is enough;
+- two identical post-change failures with unchanged causal facts are enough;
+- three unchanged `WAIT`/`ESCALATE`/System2/no-progress cycles on one state fingerprint are churn; **there is no fourth**;
+- once the next defect is exposed, close/stamp the current minor and open the next immediately;
+- once a narrow fix path is known, drive focused proof + exact commit + fresh live evidence in the same work batch when mechanically possible.
 
-Never change seed cohort after seeing results, count a run twice, discard a valid inconvenient failure, label gameplay `INFRA` without evidence, weaken predicate/acceptance/world premise/VERIFY, hide retries by resetting identity/counters, or tune on holdout outcomes.
+A guard that only reduces reachable state is `SAFETY_GUARD/PARTIAL`, not solved capability.
 
-## 6. Measurement protocol and fixture discipline
+## 6. Portal-first experiment policy
 
-Protocol v2 ordinary capability cohorts are **sequential single-world experiments**:
-- Max one live mutating capability server; `tools/capability-run.mjs` enforces `runs/capability-campaign/active-run.json` + process guard; `--allow-concurrent` is exceptional and hypothesis-bound.
-- Canonical seed/world family declared in `state.json`; predeclared coordinate cohort in `runs/capability-campaign/cohort-v2.json` from `tools/cohort-scan.mjs`; coordinates separated enough to avoid mutation contamination and never cherry-picked after results.
-- `--start x,y,z` is fixture setup via spawn configuration before resident join/measured clock, not capability; no post-start operator assists.
-- Exact-state comparisons regenerate fresh world from canonical seed per run; server does not persist between cohort runs.
-- Normal cohort rejects clearly pathological starts (ocean-only, lava, sealed spawn, extreme lethal cliff/void/tiny island/deep cave); normal trees/canopy/ordinary terrain are **not** invalid. Pathological terrain belongs to named stress cohort.
-- v1 = pre-2026-09-27 per-run fresh seeds/parallel worlds; v2 = canonical seed + declared start/sequential. Never mix denominators.
-- Canonical read-only observer: `http://127.0.0.1:4173/api/ai-summary` via `tools/buddy-observer.mjs`, registry mode; idle response is HTTP 200 `available=false/no_active_campaign_run`.
+Until first verified Nether entry, optimize the **longest honest portal-directed attempt**.
 
-Measurement/tooling supports gameplay, not vice versa. If setup consumes roughly **15 min or 2–3 failed refinements** without unlocking gameplay, use the simplest trustworthy protocol and record limitations. Once 5 sufficiently separated ordinary starts exist for a normal wood cohort, freeze it; do not hunt for prettier terrain. Never discard a valid gameplay failure because an easier start exists.
+Phases:
+1. **Possibility:** first clean autonomous exact-provenance Nether entry.
+2. **Reliability:** declared dev+holdout cohort; default practical target >=4/5 clean successes including >=1 holdout.
+3. **Speed:** reduce verified time/actions/deaths/stalls/cost without sacrificing correctness.
+4. **Generalize:** unseen seeds/terrain/partial states/semantically equivalent instructions with the same generic mechanics.
 
-## 7. Kernel/resource/mutation invariants
+Experiment contract:
+1. predeclare predicate/metric/cohort before tuning;
+2. establish exact-SHA baseline when comparison matters;
+3. cluster **first causal failures**, not downstream noise;
+4. pick the highest-impact open causal cluster;
+5. one hypothesis -> one causal change -> one expected signature;
+6. run minimum focused deterministic proof, then the smallest live sample that can falsify;
+7. KEEP/REVERT/DEFER immediately on evidence;
+8. commit before provenance-sensitive live evaluation.
 
-Semantic contract ownership and physical resource/actuation leases are separate. `ResourceId` is structured/hierarchical; bundles acquire atomically. Every mutation requires an ACTIVE current contract, current world+dimension+epoch+generation binding, a covering current lease, and allowed effect permit. Irreversible effects require kernel-owned single-use `EffectCommitToken` bound to transition/contract hash/generation/effect.
+Useful typed clusters include `GROUNDING_REFUSAL`, `VERIFY_FAIL`, `LEASE_DENY`, `STALE_FENCE`, `BUDGET_EXHAUST`, `MODEL_UNAVAILABLE`, `MECHANICAL_FAIL`, `NO_PROGRESS`, `AUTHORITY_VIOLATION`, `INFRA`.
 
-World/dimension/epoch/generation revisions fence stale Jev/System2 decisions, leases, effect tokens, ResumeProofs and preemption transactions. Preemption uses safe-yield, bounded critical sections, multi-victim atomicity, priority inheritance.
+## 7. Anti-benchmaxxing
 
-All production mutation crosses Runtime Adapter/ActuationPort. Do not add raw `bot`, `_client`, pathfinder/entity/window/plugin mutation bypasses. VTR core (Mission/World Model/Graph/Scheduler/Controllers/Viability/Jev/System2) must not retain/call raw Mineflayer. HOST may own it only for lifecycle/lease/adapter wiring.
+Forbidden: seed coordinates, memorized resource locations, p-specific action sequences, fixture-specific branches, benchmark wording hacks, hidden task selectors, giant scripted ladders, cohort changes after outcomes, discarded valid failures, weakened predicates/VERIFY, or identity resets that hide retries.
 
-Migration/cutover is CLOSED historical work. Kernel authority is production authority; old SHADOW/cutover/deletion instructions are evidence history. Sealed VTR archives/validators remain protected proof infrastructure.
+Improvements must come from reusable mechanics, verified world-state reasoning, prerequisite/resource accounting, navigation, survival/recovery, planning/decomposition, interaction mechanics, or instruction interpretation.
 
-## 8. Development classification and proof
+## 8. Live runtime, hot reload, and provenance
 
-Classify work:
-- **A CAPABILITY_CRITICAL:** improves/measures lowest unsolved rung or regression.
-- **B CAPABILITY_CORRECTNESS:** truth/mechanics/controller/recovery/lifecycle/durability/provenance/verification bug invalidating capability.
-- **C MEASUREMENT_PROOF:** minimal scenarios/probes/cohorts/results/observability/tests needed to trust A/B.
-- **D CAMPAIGN_INFRA:** bounded work removing a real unattended-campaign blocker.
-- **E DEFER:** forbidden architecture work, cosmetics, unrelated refactor, speculative feature, or polishing solved rung while later blocker exists.
-Prefer A/B/C; D only for concrete blocker; never invent E because capability is hard.
+Production live worktrees must be clean. Never dirty-edit the resident worktree. Implement/test elsewhere, commit exact SHA, move live worktree to that SHA, then reload.
 
-Development rules: new authority only via KernelCommand; new intelligence only through Jev policy, scheduler/routing, Verified World Model, controller tactics or sparse System2. Compatibility adapters name authoritative side + deletion condition. Never silently fall back to deterministic semantics on model outage unless explicitly configured test/offline policy. `action done` != SUCCESS. Keep irreversible effects fail-closed.
+Canonical reload:
+`build -> import -> structural smoke -> quiesce old -> atomic generation/lease commit -> start new -> dispose old`.
 
-Proof hierarchy as applicable: pure contract/state-machine -> deterministic mechanical fixture -> no-LLM CAN/HOW/DONE live probe -> real scheduler/runtime integration -> double-authority exclusion -> stale world/epoch/lease/generation fencing -> target/witness substitution -> progress/budget exhaustion -> provider-outage test when independence claimed -> fresh exact-source live evidence. Mechanical probe PASS proves mechanics, not autonomous composition; benchmark PASS proves outcome, not architecture; shadow journal proves observation only.
+Require exact new `sourceSha`/hash/generation evidence and `reconnects=0`. Restart HOST only for real host/contract/schema need or unhealthy/dead resident.
 
-### Test-surface discipline
-Tests protect observed capability and constitutional invariants; they are not the product. Do not create a test file by default. Add minimum deterministic coverage for a real reproduced failure, preferably inside an existing relevant test/scenario/fixture. Avoid speculative edge-test families and second measurement frameworks. A faithful clean live reproduction plus existing guards may be sufficient. Track test/tooling growth; if it outgrows production value, consolidate and return to Minecraft. Never weaken constitutional/proof coverage to shrink tests.
+Fresh code requires fresh evidence. Same-SHA restart may retain durable failure memory; older-SHA source-dependent retirement/failure may not suppress evaluation of changed code.
 
-For shared scheduler/decision-epoch/controller/executor lifecycle or HOST contract changes, include direct lifecycle/terminal seam fixtures with partial/fake hosts; update those fixtures in the same causal commit. At most one full repo/package sweep runs at once. The single campaign agent owns diagnosis, edits, focused checks, integration, and the final sweep so one causal context remains authoritative.
+Provenance binds major `runId`, `activeMinor`/`segmentId`, `generationSourceSha`, build hash, generation id, world/server identity, runtime PIDs, reload/restart boundary, reconnect count, and `hostBootSha` separately from generation SHA.
 
-## 9. Single-agent execution
+`active-run.json`, `state.json`, observer, P-SERIES, and live generation must agree. If provenance is uncertain, evidence is UNKNOWN until identity is reconciled.
 
-The capability campaign uses **one lead agent only**. Project config must keep `subagents_enabled=false`; do not call, spawn, resume, read, poll, or wait for subagents/sidekicks. The lead agent directly owns live evidence, root cause, code/fixture audit, implementation, focused regression, provenance, integration, and campaign decisions. This deliberately trades nominal parallelism for one continuous causal context and zero handoff/wait/integration tax.
+## 9. No idle, no polling, no approval stalls
 
-Parallelize only external mechanics that do not create another reasoning owner: independent shell tests/builds may run in background while the lead continues useful work, but their outputs are evidence for the same agent. Keep one mutation owner and one causal hypothesis at a time; do not create filler lanes, duplicate implementation, or architecture-design side work. If several useful tasks are independent, execute them sequentially by Mission leverage rather than delegating them.
+Time passes as a side effect of useful work.
 
-## 10. Runtime/resource hygiene
+Status/audit requests are read-only by intent: observe without mutating lifecycle, world, inventory, or generation. Inspect unfamiliar helper source/`--help` before using it for status.
 
-Default one active Leaf server for current major. After major rollover, stop obsolete resident/server processes once world bytes/evidence are safely on disk; historical world preservation does not require a live JVM. Concurrent old servers require named current hypothesis, explicit evidence purpose, prompt end condition. Treat RAM/swap/CPU/disk pressure as development latency.
+Forbidden campaign behavior:
+- `sleep`, timer loops, delay loops, timeout-as-delay;
+- blocking command observation;
+- repeated unchanged heartbeat/log/process/status polling;
+- waiting for a background process when another useful action exists;
+- ending a turn after one observation/search/tiny edit/status;
+- watching a live run after its causal hypothesis is already decided;
+- asking for routine project authorization.
 
-Capability retention: keep newest **10 p-series versions** with full raw worlds/logs. For older completed failed `portal-p*`, retain `plan.json`, `result.json`, `P-SERIES.md` provenance, `server.log`, `retention-summary.json`, gzip resident AI logs, then raw reproducible server world may be removed. Never prune active/incomplete, OBJECTIVE_SATISFIED/accepted, sealed archive, `.retention-protect`, or user world.
+Long commands/tests/runs may stay background; inspect them only at natural work boundaries with non-blocking snapshots.
 
-On provider outage record `MODEL_UNAVAILABLE`, preserve semantics, switch to deterministic/mechanical/observability/recovery/provider-independent work. If source/run/server/world identity is uncertain, invalidate evidence and start clean; never repair provenance by hand.
+If live evidence is unchanged, switch **in the same turn** to root cause, code inspection, focused test, provenance repair, or the next Mission-leverage task.
 
-## 11. Git, worktrees, issues, integration
+## 10. Kernel/resource/mutation invariants
 
-`main` is validated KEEP checkpoints, not speculative work. Fetch/reconcile before push; never force-push/rewrite shared history, reset away unrelated work, delete another lane's unmerged worktree, or amend pushed shared commits. Risky candidates use clean disposable `cap-*` worktrees from exact trusted SHA. Push small coherent validated KEEP checkpoints so crashes lose little work.
+Semantic transition ownership and physical resource/actuation leases are separate. `ResourceId` is structured/hierarchical and bundles acquire atomically. Every mutation requires current ACTIVE contract, current world/dimension/epoch/generation binding, covering current lease, and allowed effect permit. Irreversible effects require kernel-owned single-use `EffectCommitToken` bound to transition/contract hash/generation/effect.
 
-Do not create issues/PRs for tiny symptoms. Durable issue = repeated causal cluster, capability acceptance criterion, reproducibility blocker, or correctness defect spanning experiments. Direct integration is authorized for unattended KEEP work after required evidence/tests, safe `origin/main` integration, and diff review. Commit/result record names rung/scenario, causal hypothesis/failure, verdict, evidence path.
+World/dimension/epoch/generation revisions fence stale Jev/System2 decisions, leases, tokens, ResumeProofs, and preemption transactions.
 
-Spend clear majority of productive time on measured gameplay capability; campaign infra/tooling should normally stay below roughly **25%** unless a concrete blocker requires more.
+All production mutation crosses Runtime Adapter/ActuationPort. Core semantic components must not retain raw Mineflayer mutation authority.
 
-## 12. Durable campaign state and resume
+`action done` != SUCCESS. Only VERIFY establishes SUCCESS.
 
-Keep `runs/capability-campaign/state.json`/`STATUS.md` resumable: campaign/start time, start/trusted/last-KEEP SHAs, active rung/predicate/promotion criterion, dev/holdout cohorts, baseline/results, failure clusters/signatures, falsified hypotheses, active experiment/worktree/process/world, blocked/deferred lanes, next actions, plus active major/minor/generation provenance.
+## 11. Testing and proof discipline
 
-After restart, reconcile **AGENTS + state.json + P-SERIES + git HEAD/origin/status + actual processes/world/registry** before action. A prompt of only `continue` means resume the next falsifiable action; never ask the operator to restate context.
+Proof ladder when applicable:
+`contract/state-machine -> deterministic mechanical fixture -> no-LLM live probe -> scheduler/runtime integration -> stale-fence/authority exclusion -> fresh exact-source live evidence`.
 
-A fresh/hard-reset campaign boot: fetch and inspect exact git state; record start SHA/time/disk/process/provider availability without secrets; create/resume durable state; reuse existing run/supervisor/observer/result tooling; establish exact-SHA/world/seed/predicate/run provenance; isolate campaign worlds from sealed/user worlds; never allow two mutating owners of one world.
+A mechanical PASS proves mechanics, not autonomous composition. A benchmark PASS proves outcome, not architecture.
 
-For an explicitly time-bounded long campaign, finish current bounded experiment near the end and write a durable report: start/end + start/final origin SHAs; KEEP list by rung/failure; baseline/final metrics/cohorts/sample/confidence/holdout; frontier + first unsolved rung; remaining clusters/next experiments; regressions; Jev/System2 usage/cost; evidence paths; infra vs product failures; confirmation V4.1.2/guards remained intact. One rung passing is never early completion.
+Add the smallest deterministic regression reproducing the real failure, preferably in an existing fixture. Avoid speculative test families and duplicate measurement frameworks. At most one full repo/package sweep runs at once; the single agent owns the final sweep.
 
-## 13. Runtime evidence checklist
+## 12. Measurement protocol
 
-Be able to answer: active Mission frontier; Transition type/instance/contract hash; requires/ensures; controller progress; temporary target/witness changes; resource/risk budgets; viability interruption/resume; deterministic postcondition; terminal outcome/reason; world/dimension/epoch/generation; model calls and why; any legacy Option/GoalQueue/Jev-π/β authority involvement vs kernel-admitted Jev frames; whether two authority paths could actuate; shadow counters (`mutationsObserved`, `mutationsMapped`, `mutationsAttributedToTransition`, `mutationsUnguarded`, `kernelDenied`, blockers, `coverageComplete`). Track model calls per verified Transition and mechanical steps per model call.
+Protocol v2 ordinary cohorts are sequential single-world experiments:
+- at most one live mutating capability server by default;
+- canonical seed/world family and predeclared starts live in campaign state/cohort files;
+- `--start x,y,z` is fixture setup before resident join/measured clock, never post-start assistance;
+- exact-state comparisons regenerate fresh world when required;
+- ordinary starts exclude pathological spawn conditions but not normal inconvenient terrain;
+- v1 is the old fresh-seed/parallel-world protocol; v2 is canonical-seed + declared-start + sequential; never mix denominators;
+- canonical read-only observer is `http://127.0.0.1:4173/api/ai-summary`; idle is `available=false/no_active_campaign_run`.
 
-## 14. Explicit anti-goals
+Measurement tooling remains subordinate to gameplay.
 
-Never solve problems by: renaming Option to Transition while preserving old per-action authority; wrapping GoalQueue as another truth ledger; making β smarter instead of removing generic model-owned termination; ending/recommitting a Transition for every tactical recovery when bounded in-contract Jev consultation suffices; giant deterministic benchmark planner; moving mega-controller into files without causal-ownership improvement; candidate/context growth instead of controller closure; unbounded retries/arbitrary N-failure switches; weakened Guard/VERIFY/evidence; shadow replay as authority; permanent old+new dual authority; seed/fixture/wording-specific hacks.
+## 13. Git, processes, worlds, and storage
 
-M3 (`ender_eye >= 12` under canonical run-scoped gate) remains a useful long-horizon composition benchmark, not the architecture or only objective. A fresh M3 PASS matters only from honest clean V4.1.2 production evidence; continue changed-seed/partial-start/benchmark-absent/unsupported-predicate testing before calling behavior robust.
+`main` is validated KEEP checkpoints. Fetch/reconcile before push. Push small coherent KEEP commits frequently enough that a crash loses little work.
 
-**Core loop:** `evidence -> causal defect -> smallest generic V4.1.2 fix -> focused proof -> exact commit -> generation hot reload when eligible -> first live evidence -> next blocker`. Keep it fast; keep it honest; keep Minecraft moving.
+Use disposable clean worktrees for risky candidates. Never reset away unrelated work or overwrite another owner’s unmerged work.
+
+Default one active Leaf server for current major. Stop obsolete servers/residents after evidence/world bytes are durable.
+
+Keep newest **10 p-series versions** with full raw worlds/logs. Older failed runs may be compacted to essential provenance/log summaries, but never prune active/incomplete, accepted success, sealed archives, `.retention-protect`, or unrelated user worlds.
+
+On provider outage record `MODEL_UNAVAILABLE`, preserve semantics, and immediately work on deterministic/mechanical/provenance/recovery tasks instead of waiting.
+
+## 14. Resume contract
+
+After restart or a long absence, reconcile before mutation:
+`AGENTS -> git HEAD/origin/status -> state.json -> P-SERIES -> active-run registry -> actual processes/PIDs/ports -> world/server bytes -> latest resident generation/logs -> observer`.
+
+Durable state may claim `active` while all processes are dead; process truth wins. Repair stale durable ownership before resuming evidence claims.
+
+A user prompt of only `continue` means resume the next falsifiable Mission-leverage action. Never ask the operator to restate context already on disk.
+
+Preserve same-world minor continuity when identity is valid; otherwise seal the prior episode and start the next major honestly.
+
+## 15. Work classification
+
+- **A CAPABILITY_CRITICAL:** advances or directly restores Mission frontier.
+- **B CAPABILITY_CORRECTNESS:** fixes truth/mechanics/controller/recovery/lifecycle/durability/provenance defects invalidating capability.
+- **C MEASUREMENT_PROOF:** minimal proof needed to trust A/B.
+- **D CAMPAIGN_INFRA:** bounded fix for a real unattended-campaign blocker.
+- **E DEFER:** cosmetics, speculative refactor, forbidden architecture work, or local polish while a higher Mission blocker exists.
+
+Prefer A/B/C. Use D only for a concrete blocker. Product/capability work stays the clear majority; infra normally remains below roughly 25% unless a measured blocker justifies more.
+
+## 16. Completion and anti-goals
+
+Portal-first completion requires normal V4.1.2 authority/VERIFY evidence of an **unassisted autonomous transition into `minecraft:the_nether`** with exact source/world/run provenance and no benchmark-specific behavior or manual gameplay help.
+
+Never reintroduce old authority under new names, smarter shadow GoalQueue/β authority, giant deterministic planners, mega-controllers without causal ownership improvement, unbounded retries, weakened VERIFY/evidence, or permanent dual authority.
+
+M3 (`ender_eye >= 12` under the canonical run-scoped gate) remains a long-horizon composition benchmark, not the architecture or sole objective.
+
+**Core loop:**
+`Mission evidence -> first causal blocker -> smallest generic V4.1.2 fix -> focused proof -> exact commit -> same-world hot reload when valid -> first fresh evidence -> campaignDelta -> next blocker`.
+
+**Keep Minecraft moving. Do not wait. Do not ask for routine project permission. Do not confuse local fixes with Mission progress.**
