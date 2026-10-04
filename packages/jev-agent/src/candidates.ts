@@ -515,6 +515,29 @@ function descentPolicyEscalateCandidate(input: {
 }
 
 /**
+ * Whether an ATTACK target can answer the situation a survival set exists for.
+ * Under fire an ATTACK stays offered because it can BE the response, so the
+ * target must be the threat (`hostile`), the body's own attacker
+ * (`attackedSelf`), a producer the active goal needs (`goalDrop`), or
+ * the emitted hunger hunt (`foodAnimal`). An ambient mob is none of those: it
+ * is ordinary work in a combat kind, and its approach path can relocate the
+ * body into the pocket the danger envelope was suppressing it for. Measured
+ * live portal-p23 `run-mutsv43u-1a0g` gen-muu5xmaw (2026-10-04T18:50Z): the
+ * sole offer under an active danger envelope was `ATTACK:e34520` on a harmless
+ * bat; the kill path walked the body into the suppressed creeper pocket and it
+ * died at hp 14.
+ */
+function attackRespondsToThreatOrNeed(candidate: Candidate): boolean {
+  const meta = candidate.meta
+  return (
+    meta.hostile === true ||
+    meta.attackedSelf === true ||
+    meta.goalDrop !== undefined ||
+    meta.foodAnimal === true
+  )
+}
+
+/**
  * One definition of "this candidate is already a survival answer": the combat /
  * self-care kinds the threat restrictions preserve, plus the bounded escape
  * routes (danger-zone exit, sealed-pocket ascent, swim-out). The restriction
@@ -530,6 +553,7 @@ export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
     // here also releases a running doomed attack so a grounded answer can take
     // the lease.
     candidate.meta.attackRaceLost !== true &&
+    (candidate.kind !== 'ATTACK' || attackRespondsToThreatOrNeed(candidate)) &&
     (CONTACT_THREAT_KINDS.has(candidate.kind) ||
     isDeathZoneEscapeRoute(candidate) ||
     // §4.1 world-shaping survival answers: `MOVE:escapeup:*` (a MOVE carrying

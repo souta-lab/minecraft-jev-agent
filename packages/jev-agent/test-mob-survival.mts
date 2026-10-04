@@ -952,6 +952,73 @@ addCase('(c1z) an approach lane is the hostile side of the gap, not every named 
   return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
 })
 
+addCase('(c1aa) an ambient-mob ATTACK is not a survival answer under an active danger envelope', () => {
+  // Live gen-muu5xmaw 2026-10-04T18:50Z: the corridor broke into the creeper
+  // pocket; once the hostiles went reachable the offer collapsed to exactly one
+  // "survival answer" - an ATTACK on a harmless bat - and the kill approach
+  // walked the body into the pocket, where e53592 killed it. A value-free
+  // target (not hostile, not the body's attacker, not a goal producer, not the
+  // hunger hunt) is work in a combat kind, never the response.
+  const bat: EntityState = {
+    id: 34520,
+    name: 'bat',
+    kind: 'ambient',
+    username: null,
+    position: { x: 2, y: 10, z: 0.5 },
+    distance: 1.5,
+    hostile: false,
+    lineOfSight: true,
+    heldItem: null,
+    health: 6,
+    attackedSelf: false,
+  }
+  const state = bodyState([hostile(53592, 'spider', { x: 4.5, y: 10, z: 0.5 }, { health: 16 }), bat])
+  state.self = { ...state.self, heldItem: { name: 'stone_sword', count: 1, slot: 0 } }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const emittedBat = generated.find((candidate) => candidate.id === 'ATTACK:e34520')
+  const offer = applyThreatRestriction(state, generated)
+  const pass =
+    state.signals.threat.active === true &&
+    offer.restricted === true &&
+    // Emission is unchanged: the CAN set still reports the attackable ambient
+    // mob - the restriction is what must not call it a survival answer.
+    emittedBat !== undefined &&
+    !offer.candidates.some((candidate) => candidate.id === 'ATTACK:e34520') &&
+    // The real fight (winnable race) stays on the table.
+    offer.candidates.some((candidate) => candidate.id === 'ATTACK:e53592') &&
+    offer.candidates.every((candidate) => candidate.kind !== 'MINE' && candidate.kind !== 'RETRIEVE')
+  return { pass, detail: `emittedBat=${emittedBat !== undefined} offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1ab) the value-target classes stay in the survival set; the ambient class leaves', () => {
+  const at = (id: string, meta: Candidate['meta']): Candidate => ({
+    id,
+    kind: 'ATTACK',
+    label: id,
+    targetName: null,
+    target: null,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta,
+  })
+  const kept =
+    isSurvivalAnswerCandidate(at('ATTACK:e1', { tick: 1, hostile: true })) &&
+    isSurvivalAnswerCandidate(at('ATTACK:e2', { tick: 1, hostile: false, attackedSelf: true })) &&
+    isSurvivalAnswerCandidate(at('ATTACK:e3', { tick: 1, hostile: false, goalDrop: 'blaze_rod' })) &&
+    isSurvivalAnswerCandidate(at('ATTACK:e4', { tick: 1, hostile: false, foodAnimal: true }))
+  const dropped =
+    !isSurvivalAnswerCandidate(at('ATTACK:e5', { tick: 1, hostile: false })) &&
+    !isSurvivalAnswerCandidate(at('ATTACK:e6', { tick: 1, hostile: false, dropItem: 'leather' })) &&
+    !isSurvivalAnswerCandidate(at('ATTACK:e7', { tick: 1, hostile: true, attackRaceLost: true }))
+  const pass = kept && dropped
+  return { pass, detail: `kept=${kept} dropped=${dropped}` }
+})
+
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {
   const starving = bodyState([hostile(16, 'zombie', { x: 6, y: 10, z: 0.5 })])
   starving.self = { ...starving.self, food: 0 }
@@ -1108,7 +1175,11 @@ addCase('(c6) the critical-flight keep consults exactly the survival-answer set'
   })
   const kept = ['ATTACK', 'RETREAT', 'ESCALATE', 'EAT', 'EQUIP'] as const
   const dropped = ['MINE', 'CRAFT', 'PLACE', 'WAIT', 'RETRIEVE', 'MOVE', 'DESCEND', 'SMELT', 'PICKUP', 'STEP'] as const
-  const keptSet = kept.every((kind) => isSurvivalAnswerCandidate(at(`X:${kind}`, kind)))
+  // A real emitted ATTACK carries its entity truth (`hostile` is stamped
+  // unconditionally); a target that answers the threat keeps it in the set.
+  const keptSet = kept.every((kind) =>
+    isSurvivalAnswerCandidate(at(`X:${kind}`, kind, kind === 'ATTACK' ? { tick: 1, hostile: true } : { tick: 1 })),
+  )
   const droppedSet = dropped.every((kind) => !isSurvivalAnswerCandidate(at(`X:${kind}`, kind)))
   const escapeRoutes =
     isSurvivalAnswerCandidate(at('MOVE:dangerzone:p-5_10_0', 'MOVE')) &&

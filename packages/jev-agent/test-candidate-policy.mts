@@ -158,7 +158,15 @@ addCase('the configured MOVE budget suppresses the same spot when set to 2', () 
 
 addCase('an immediate hostile threat removes work actions but leaves Jev ATTACK/RETREAT authority', () => {
   const work: Candidate = { ...policyCandidate('MINE:work'), kind: 'MINE', label: 'mine unrelated dirt' }
-  const attack: Candidate = { ...policyCandidate('ATTACK:e1'), kind: 'ATTACK', targetEntityId: 1, label: 'attack zombie' }
+  // A real emitted ATTACK carries its entity truth (`hostile` is stamped
+  // unconditionally): the kept combat option is an attack ON the threat.
+  const attack: Candidate = {
+    ...policyCandidate('ATTACK:e1'),
+    kind: 'ATTACK',
+    targetEntityId: 1,
+    label: 'attack zombie',
+    meta: { ...policyCandidate('ATTACK:e1').meta, hostile: true },
+  }
   const retreat: Candidate = { ...policyCandidate('RETREAT:p1'), kind: 'RETREAT', label: 'retreat to safety' }
   const kept = restrictCandidatesDuringImmediateThreat(
     { entities: [{ hostile: true, distance: 0.7 }] } as never,
