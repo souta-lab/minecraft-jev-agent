@@ -143,6 +143,52 @@ function fakeStonePrerequisiteBot(): Bot {
   } as never
 }
 
+/**
+ * p23.19 sealed-pocket double: an explicit cell map only. The near pool can be
+ * made entirely tool-gated (all-stone walls, the live shaft-bottom shape) while
+ * hand-mineable placeable geology sits beyond the 8m near scan.
+ */
+function fakePocketBot(cells: Array<[number, number, number, string]>): Bot {
+  const position = new Vec3(29.12, 47.75, 34.19)
+  const blocks = new Map<string, { name: string; boundingBox: string; diggable: boolean }>()
+  for (const [x, y, z, name] of cells) {
+    blocks.set(`${x},${y},${z}`, { name, boundingBox: 'block', diggable: true })
+  }
+  const key = (p: { x: number; y: number; z: number }): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
+  const blockAt = (p: { x: number; y: number; z: number }) =>
+    blocks.get(key(p)) ?? { name: 'air', boundingBox: 'empty', diggable: false }
+  const findBlocks = (options: {
+    matching: (block: { name: string }) => boolean
+    maxDistance: number
+    count: number
+  }): unknown[] => {
+    const origin = new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z))
+    return [...blocks.entries()]
+      .filter(([, block]) => options.matching(block))
+      .map(([cell]) => {
+        const [x, y, z] = cell.split(',').map(Number)
+        return new Vec3(x, y, z)
+      })
+      .filter((block) => block.distanceTo(origin) <= options.maxDistance)
+      .slice(0, options.count)
+  }
+  return {
+    username: 'AI_PERC_POCKET',
+    entity: { id: 3, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 20,
+    food: 20,
+    game: { gameMode: 'survival', dimension: 'overworld', minY: -64, height: 384 },
+    time: { isDay: true },
+    registry: require('minecraft-data')('1.21.11'),
+    entities: {},
+    inventory: { items: () => [] },
+    blockAt,
+    canSeeBlock: () => true,
+    findBlocks,
+  } as never
+}
+
 function signals(overrides: Partial<AgentSignals> = {}): AgentSignals {
   return {
     consecutiveFailures: 0,
@@ -316,6 +362,93 @@ addCase('(1) a near placeable producer below a buried column cell remains sensed
   )
   const pass = producer !== undefined && producer.inReach
   return { pass, detail: `producer=${JSON.stringify(producer ?? null)}` }
+})
+
+// --- (1/p23.19) sealed pocket: a far hand-mineable producer is a real route ---
+// Live gen-mutyc7pf @72d6d9f0 shaft bottom y38: every near placeable producer
+// was tool-gated stone (`missing_tool=tool:pickaxe@0`), so `missing=
+// placeable_block` offered only tool-gated MOVEs while hand-mineable dirt
+// geology sat beyond the 8m near scan. The far tier admits hand-mineable
+// names only, and only while no near convertible exists.
+
+addCase('(1/p23.19) a sealed all-stone pocket admits a far hand-mineable placeable producer', () => {
+  const state = buildWorldState(
+    fakePocketBot([
+      [31, 47, 34, 'stone'],
+      [30, 46, 34, 'stone'],
+      [30, 47, 35, 'andesite'],
+      [45, 47, 34, 'dirt'],
+    ]),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const farDirt = state.blocks.find(
+    (block) => block.name === 'dirt' && block.position.x === 45 && block.position.y === 47 && block.position.z === 34,
+  )
+  const nearStone = state.blocks.find(
+    (block) => block.name === 'stone' && block.position.x === 31 && block.position.y === 47 && block.position.z === 34,
+  )
+  return {
+    pass:
+      farDirt !== undefined &&
+      farDirt.yield === 'dirt' &&
+      farDirt.harvestTool === null &&
+      farDirt.inReach === false &&
+      nearStone?.harvestTool === 'pickaxe',
+    detail: `farDirt=${JSON.stringify(farDirt ?? null)} nearStone=${JSON.stringify(nearStone ?? null)}`,
+  }
+})
+
+addCase('(1/p23.19) a far tool-gated placeable name (netherrack) stays out of the far tier', () => {
+  const state = buildWorldState(
+    fakePocketBot([
+      [31, 47, 34, 'stone'],
+      [45, 47, 34, 'netherrack'],
+    ]),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const farNetherrack = state.blocks.find((block) => block.name === 'netherrack' && block.position.x === 45)
+  return { pass: farNetherrack === undefined, detail: `farNetherrack=${JSON.stringify(farNetherrack ?? null)}` }
+})
+
+addCase('(1/p23.19) the far tier stays off while a near hand-mineable producer exists', () => {
+  const state = buildWorldState(
+    fakePocketBot([
+      [31, 47, 34, 'stone'],
+      [28, 47, 34, 'dirt'],
+      [45, 47, 34, 'dirt'],
+    ]),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const nearDirt = state.blocks.find((block) => block.name === 'dirt' && block.position.x === 28)
+  const farDirt = state.blocks.find((block) => block.name === 'dirt' && block.position.x === 45)
+  return {
+    pass: nearDirt !== undefined && farDirt === undefined,
+    detail: `nearDirt=${JSON.stringify(nearDirt ?? null)} farDirt=${JSON.stringify(farDirt ?? null)}`,
+  }
 })
 
 // --- (2) remembered coordinates never satisfy an in-reach predicate ------------

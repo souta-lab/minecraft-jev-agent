@@ -3269,13 +3269,17 @@ function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: S
     maxDistance: radius,
     count: 256,
   })
+  const seen = new Set<string>()
   const out: BlockState[] = []
-  for (const position of positions) {
+  const pushProducer = (position: Vec3) => {
     const block = sensorBlockAt(bot, position, 'placeable-producer-scan')
-    if (block === null) continue
+    if (block === null) return
     const pos = vecJson(position)
+    const key = `${pos.x},${pos.y},${pos.z}`
+    if (seen.has(key)) return
+    seen.add(key)
     const harvest = resolveBlockHarvest(bot, block.name)
-    if (typeof harvest.yield !== 'string' || !PILLAR_PLACE_PRIORITY.includes(harvest.yield)) continue
+    if (typeof harvest.yield !== 'string' || !PILLAR_PLACE_PRIORITY.includes(harvest.yield)) return
     const inReach = distance(pos, self.eyePosition) <= options.reach
     const adjacentStandable = findAdjacentStandable(bot, pos, options.reach)
     out.push({
@@ -3292,6 +3296,29 @@ function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: S
       harvestTier: harvest.harvestTier,
       visible: blockVisible(bot, { position: pos }, inReach),
     })
+  }
+  for (const position of positions) pushProducer(position)
+  // p23.19 far tier: when every near producer is tool-gated, a sealed stone
+  // pocket (the live shaft bottom at y38: all-stone walls, `missing=
+  // placeable_block`) reports only `missing_tool` approach legs even though
+  // hand-mineable placeable geology exists inside the resource radius.  A
+  // distant dirt/planks/log cell is a convertible producer: its out-of-reach
+  // MOVE approach withholds `no_path`, and the route-opening arm then tunnels
+  // TOWARD convertible material instead of digging blind level cells.  A
+  // distant stone would only re-report the `missing_tool` fact the near pool
+  // already carries, so the far scan admits hand-mineable names only and runs
+  // only while no near convertible exists.
+  if (!out.some((entry) => entry.harvestTool === null)) {
+    const handMineable = new Set(
+      PILLAR_PLACE_PRIORITY.filter((name) => resolveBlockHarvest(bot, name).harvestTool === null),
+    )
+    const farRadius = Math.max(options.scanRadius, 64)
+    const farPositions = stableFindBlocks(bot, `farPlaceable:${farRadius}:64`, {
+      matching: (block) => handMineable.has(block.name),
+      maxDistance: farRadius,
+      count: 64,
+    })
+    for (const position of farPositions) pushProducer(position)
   }
   out.sort((a, b) => a.distance - b.distance || b.position.y - a.position.y)
   return out.slice(0, Math.max(options.maxStoneBlocks, 64))
