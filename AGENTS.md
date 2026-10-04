@@ -100,6 +100,12 @@ Commit count, test count, minor count, lines changed, or local mechanism sophist
 
 After **3 consecutive `LOCAL_ONLY` KEEP minors**, conversion failure itself becomes the primary blocker. A fourth local minor requires a direct live-evidence link to `ADVANCE`, `RETENTION`, or `RECOVERY`.
 
+**Conversion debt is measured from the last source-bound Mission delta, not from minor labels.** `ARMED`, `PENDING`, test-only, observability-only, signature-only confirmation, or a verified local action that does not improve frontier/retention/recovery does **not** reset the debt. Splitting one causal cluster across follow-up commits/minors does not reset it either.
+
+While recovery debt is open, default work is re-attainment. A code change must either directly improve the current recovery path or be required to make that path's evidence trustworthy. Log dedupe, fixture polish, broad refactor, and unrelated correctness cleanup are `E DEFER` unless they are themselves blocking diagnosis/provenance.
+
+After **3 source-changing non-converting fixes** since the last `ADVANCE`/`RETENTION`/`RECOVERY`, stop patching and perform a Mission conversion checkpoint before any fourth gameplay change. Record current high-water/current state, deaths since the last Mission delta, verification debt, and why the same world is more informative than a fresh major. Same-world continuation requires one explicit frontier-conversion hypothesis and one bounded falsification window. If that window closes without a Mission delta, seal/roll unless fresh causal evidence establishes a new reason that this exact world state is uniquely informative.
+
 ### 4.1 Survival is an affordance set, not a RETREAT button
 
 Reason about survival at the **affordance-class** level. A typed failure such as `no_grounded_escape`, `path_stuck`, or `no_safe_step` proves only that one class of action is unavailable; it does **not** prove that the body has no survivable action.
@@ -123,6 +129,8 @@ A death/reset is evidence about `RETENTION` and `RECOVERY`, not merely another m
 The runtime may physically respawn, but the engineering loop must immediately change strategy, implement the smallest causal fix, or explicitly seal/roll the episode. A spawn-camp or recovery trap outranks ordinary resource progression until the body reaches a stable survivable state.
 
 After a frontier loss, first establish survival, then repay recovery debt. Do not repeatedly rebuild resources into a state that is predictably killed before conversion.
+
+Cumulative death pressure matters even when individual fingerprints differ. **Three additional deaths without a source-bound Mission delta force the same conversion checkpoint before another gameplay minor.** Source reloads, new minor numbers, or different mob names do not reset that count. If accumulated world scars (death-zone unions, shafts/tunnels, abandoned stations/drops, hostile clustering caused by the episode) dominate candidate generation, treat the episode state itself as a confound: prefer a fresh major unless the next hypothesis explicitly needs those scars to be falsifiable.
 
 ## 5. P-series: one causal defect at a time
 
@@ -150,6 +158,8 @@ An `ARMED`/unmeasured fix is **verification debt**, not a second active blocker.
 Do not accumulate a stack of unmeasured patches and call it progress. Before opening a **third consecutive unconfirmed minor**, perform one conversion checkpoint: either (a) fresh live truth now exercises an older fix, (b) the scene has moved on and the older fix is explicitly deferred while the new earliest blocker is pursued, or (c) same-world information value is genuinely lower and the major is honestly sealed/rolled. Do not roll merely to manufacture a rare old recurrence.
 
 Once the causal defect and owning lane are known, read required governance/issue routing **once for that lane**. Do not repeatedly re-read unchanged routing, issue text, or architecture docs between edit/test steps. Re-open them only if scope/ownership actually changes or a contradiction appears.
+
+Apply **causal compression**. If 3 consecutive code-changing minors touch the same owning subsystem/invariant while the Mission state does not convert, treat them as one unresolved causal cluster rather than three successes. Before another patch, state the violated cross-layer invariant and either fix that invariant at its ownership boundary or make the major-episode decision. Do not indefinitely discover one more local exception in the same lane.
 
 Before opening a new capability surface, perform a **capability-reuse check**: search the current runtime for already-verified primitives that can be composed to satisfy the missing affordance. Repeated campaign history has shown that local primitives often exist while the semantic layer fails to present them in the context where they matter. That presentation/composition gap is usually a smaller and more general defect than implementing another bespoke mechanic.
 
@@ -198,7 +208,7 @@ Fresh code requires fresh evidence. Same-SHA restart may retain durable failure 
 
 Provenance binds major `runId`, `activeMinor`/`segmentId`, `generationSourceSha`, build hash, generation id, world/server identity, runtime PIDs, reload/restart boundary, reconnect count, and `hostBootSha` separately from generation SHA.
 
-`active-run.json`, `state.json`, observer, P-SERIES, and live generation must agree. If provenance is uncertain, evidence is UNKNOWN until identity is reconciled.
+`active-run.json`, `state.json`, observer, P-SERIES, and live generation must agree. If provenance is uncertain, evidence is UNKNOWN until identity is reconciled. **Known registry/state drift may not survive into the next minor or source reload.** Repair stale run/minor/source ownership in the same bookkeeping batch once discovered; do not let `state.json` or `active-run.json` trail multiple accepted generations and then reconstruct final proof from memory.
 
 ## 9. No idle, no polling, no approval stalls
 
@@ -226,6 +236,8 @@ Repeated physical outcomes are subject to the same rule. Do not watch additional
 Treat the engineering toolchain itself as a bounded resource. Inspection commands must be finite and non-interactive; prefer small single-purpose reads/searches over giant compound pipelines, and give naturally long tests/builds an explicit bounded execution path when available.
 
 A terminal/tool UI that still says `Running` is **not evidence that useful work is running**. If the OS child for a normally short command is already gone, or a normally sub-minute command has had no child/output/state change for several minutes, classify it as `DEVIN_TOOL_STALE` rather than waiting. If control is available, cancel that stale tool **once** and resume from durable evidence; do not rerun the whole discovery batch just to recreate context. Legitimate long tests/runs are distinguished by a live child process, CPU/output/progress, or an explicit background contract.
+
+An explicit model/API usage limit is `MODEL_RATE_LIMITED`, **not** `DEVIN_TOOL_STALE`. Preserve WIP and the live Minecraft campaign, record the provider's reset/retry time when supplied, and back off until that boundary. Do not repeatedly restart Devin during the same rate-limit window and do not silently switch to a different/paid model merely to bypass the limit. When the boundary passes, retry the existing session once; only use ordinary stale-tool recovery if the post-limit session itself becomes stale.
 
 A Devin/session restart is an infrastructure boundary, not permission to discard WIP or restart reasoning from zero. Preserve dirty files, read `git diff` before editing, and continue the same causal batch unless fresh live truth invalidates it. Never reset or overwrite surviving WIP merely because the previous UI died.
 
