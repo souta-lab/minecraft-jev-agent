@@ -1,6 +1,9 @@
 // test-reload-lifecycle.mts - Issue #49 reload rollback ownership + old-generation
 // disposal (#13). Pure: no bot, no socket; fakes implement the swap ports.
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Bot } from 'mineflayer'
 import {
   ActuationLeaseManager,
@@ -388,6 +391,26 @@ addCase('#13 generation-owned listeners are removable and untracked by the lease
     removed.timers === 0 &&
     registry.isDisposed()
   return { pass, detail: `before=${JSON.stringify(before)} owned=${JSON.stringify(owned)} after=${JSON.stringify(removed)} emitterListeners=${emitter.listenerCount('physicsTick')}` }
+})
+
+addCase('#13 every generation teardown in agent-runner routes through disposeGeneration', async () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(join(here, 'agent-runner.mts'), 'utf8')
+  // The canonical teardown is the only place a generation's dispose may be
+  // invoked: raw gen.dispose() skips GenerationResourceRegistry.dispose(), which
+  // leaves generation-owned timers/listeners alive (measured zombie generations
+  // issuing decision epochs after death/respawn replacement on run-mutlktrv-3xw).
+  const anchor = src.indexOf('function disposeGeneration')
+  const tail = src.indexOf('return tracked\n}', anchor)
+  const body = tail === -1 ? '' : src.slice(anchor, tail + 'return tracked\n}'.length)
+  const outside = src.slice(0, anchor) + src.slice(anchor + body.length)
+  const leaked = [...outside.matchAll(/\.dispose\(\)/g)].map((m) => m.index)
+  const canonicalCallers = (outside.match(/disposeGeneration\(/g) ?? []).length
+  const pass = anchor !== -1 && tail !== -1 && leaked.length === 0 && canonicalCallers >= 6
+  return {
+    pass,
+    detail: `anchor=${anchor} tail=${tail} rawDisposeOutside=${leaked.length} canonicalCallers=${canonicalCallers}`,
+  }
 })
 
 let failures = 0

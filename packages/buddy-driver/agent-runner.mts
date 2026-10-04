@@ -1985,7 +1985,7 @@ function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json 
   revokeLease(simulated ? 'death-simulated' : 'death')
   if (oldGeneration !== null) {
     try {
-      oldGeneration.dispose()
+      disposeGeneration(oldGeneration)
     } catch {
       // best effort
     }
@@ -2890,7 +2890,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
         // best effort
       }
       if (leaseManager.isActive(old.id)) revokeLease('simdeath')
-      old.dispose()
+      disposeGeneration(old)
     } else {
       revokeLease('simdeath')
     }
