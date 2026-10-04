@@ -638,6 +638,44 @@ addCase('(c5) the in-flight hold releases to Jev newer choice when a hostile is 
   return { pass, detail: `held=${held.chosenId} released=${released.chosenId} line=${released.releaseLine ?? 'none'}` }
 })
 
+addCase('(c5b) a same-kind RETREAT retarget holds the in-flight escape in contact', () => {
+  // portal-p23 gen-mutoyo8o (2026-10-04T10:44:0x): three successive RETREAT
+  // picks each released the last via contact_threat, every walk leg restarted
+  // (final leg `closed=0.01m`), and the drowned killed the body at 3.17hp
+  // while escape-scan-endorsed retreat cells stayed offered. The contact
+  // release exists for kind switches; a same-kind retarget only discards the
+  // held escape's closed distance.
+  const base = {
+    previous: { actionId: 'RETREAT:p34_62_-2', epoch: 3, planKey: 'plan', holds: 0 },
+    inFlight: { id: 'RETREAT:p34_62_-2', epoch: 3, startedAtMs: NOW },
+    planKey: 'plan',
+    nowMs: NOW + 1000,
+    inFlightInvalid: false,
+    inFlightOffered: true,
+    contactThreatResponse: true,
+  }
+  const held = evaluateActionCommitment({ ...base, chosenId: 'RETREAT:p34_62_-20' })
+  const kindSwitch = evaluateActionCommitment({ ...base, chosenId: 'ATTACK:e10460' })
+  // A held cell that leaves the offer still releases to the newer retreat.
+  const dropped = evaluateActionCommitment({
+    ...base,
+    chosenId: 'RETREAT:p34_62_-20',
+    inFlightOffered: false,
+  })
+  const pass =
+    held.committed === true &&
+    held.chosenId === 'RETREAT:p34_62_-2' &&
+    kindSwitch.committed === false &&
+    kindSwitch.chosenId === 'ATTACK:e10460' &&
+    (kindSwitch.releaseLine ?? '').includes('reason=contact_threat') &&
+    dropped.chosenId === 'RETREAT:p34_62_-20' &&
+    (dropped.releaseLine ?? '').includes('reason=no_longer_offered')
+  return {
+    pass,
+    detail: `held=${held.chosenId} kindSwitch=${kindSwitch.chosenId} dropped=${dropped.chosenId} heldLine=${held.line ?? 'none'}`,
+  }
+})
+
 addCase('(c6) the critical-flight keep consults exactly the survival-answer set', () => {
   // portal-p22 spawn-camp: every post-respawn 'start'-epoch answer was voided
   // by the first damage_taken pending in flight, so the body never executed a

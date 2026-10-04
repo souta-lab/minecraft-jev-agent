@@ -411,7 +411,21 @@ export function evaluateActionCommitment(input: ActionCommitmentInput): ActionCo
   // (c) plan/goal change, (d) deterministic infeasibility/vanishing and the
   // bounded window/budget all release; everything else holds.
   let reason: ActionCommitReleaseReason | null = null
-  if (input.contactThreatResponse === true) {
+  // SAFE: a same-kind RETREAT retarget while a retreat is already in flight
+  // restarts the escape leg and discards its closed distance. Measured
+  // gen-mutoyo8o (2026-10-04T10:44:0x): three successive RETREAT picks each
+  // released the last via contact_threat, every walk leg restarted
+  // (`closed=0.01m`), and the drowned killed the body at 3.17hp while valid
+  // escapes stayed offered the whole time. The contact release exists for
+  // KIND switches (ATTACK over a held RETREAT); a held retreat already IS the
+  // grounded threat answer and an offered retreat cell remains
+  // escape-scan-endorsed, so the newer cell is only a marginal retarget. A
+  // dropped/invalid/old hold still releases through the ordinary set below.
+  const sameRetreatRetarget =
+    input.contactThreatResponse === true &&
+    inFlight.id.startsWith('RETREAT:') &&
+    input.chosenId.startsWith('RETREAT:')
+  if (input.contactThreatResponse === true && !sameRetreatRetarget) {
     // In contact, the body answers now: a newer threat response is never held
     // behind the previous action lease.
     reason = 'contact_threat'
