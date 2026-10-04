@@ -478,6 +478,111 @@ export function threatStandoffRange(name: string): number {
   return THREAT_STANDOFF_RANGE
 }
 
+/**
+ * Vanilla hostile facts for the attack-race verdict. `meleeDamage` uses the
+ * Hard-mode melee value, the direction that errs toward refusing a fight the
+ * numbers cannot prove is survivable (the measured camp deaths took ~4.5-5.5
+ * per zombie hit). A hostile absent from this table reports `lost=false,
+ * known=false` and the ATTACK stays on offer - unknown math never withholds a
+ * choice, the same fail-open rule the unknown-weapon-damage path keeps.
+ */
+export interface HostileRaceFact {
+  health: number
+  meleeDamage: number
+}
+
+export const HOSTILE_RACE_FACTS: Readonly<Record<string, HostileRaceFact>> = {
+  zombie: { health: 20, meleeDamage: 4.5 },
+  zombie_villager: { health: 20, meleeDamage: 4.5 },
+  husk: { health: 20, meleeDamage: 4.5 },
+  drowned: { health: 20, meleeDamage: 4.5 },
+  baby_zombie: { health: 20, meleeDamage: 4.5 },
+  spider: { health: 16, meleeDamage: 3 },
+  cave_spider: { health: 12, meleeDamage: 3 },
+  spider_jockey: { health: 16, meleeDamage: 3 },
+  silverfish: { health: 8, meleeDamage: 1 },
+  endermite: { health: 8, meleeDamage: 3 },
+  vex: { health: 14, meleeDamage: 5.5 },
+  vindicator: { health: 24, meleeDamage: 7.5 },
+  enderman: { health: 40, meleeDamage: 7 },
+  wolf: { health: 8, meleeDamage: 3 },
+  zombified_piglin: { health: 20, meleeDamage: 8 },
+  piglin: { health: 16, meleeDamage: 5 },
+  piglin_brute: { health: 50, meleeDamage: 13 },
+  hoglin: { health: 40, meleeDamage: 6 },
+  zoglin: { health: 40, meleeDamage: 6 },
+  magma_cube: { health: 16, meleeDamage: 6 },
+  phantom: { health: 20, meleeDamage: 4.5 },
+}
+
+/**
+ * One full-strength swing of the armed weapon in a live melee: the vanilla
+ * attack-speed floor plus the measured re-acquire overhead of the ATTACK lease
+ * (3 hits across a 2243 ms combat window = ~750 ms/hit on run-mutlktrv-3xw).
+ */
+export const PLAYER_ATTACK_SWING_MS = 750
+
+/** Vanilla melee hostile attack cadence (~1 hit/second once in reach). */
+export const THREAT_ATTACK_SWING_MS = 1000
+
+export interface AttackRaceVerdict {
+  /** true only when the numbers PROVE the body dies before the kill lands */
+  lost: boolean
+  /** the table knew this hostile; false -> `lost` is always false (fail open) */
+  known: boolean
+  /** estimated ms for the armed swing to kill, null when inputs were missing */
+  killMs: number | null
+  /** estimated ms until the body dies under this hostile's cadence, null when unknown */
+  deathMs: number | null
+  /** effective extra hearts regeneration banks before hunger stops it */
+  regenBonusHp: number
+  reason: 'unknown_threat' | 'unknown_health' | 'race_lost' | 'race_winnable'
+}
+
+/**
+ * Effective hearts a regenerating body banks inside a melee window. Vanilla
+ * saturation regen heals ~1 hp/0.5 s while saturated then slows to ~1 hp/3 s
+ * and stops entirely once food drops below `REGEN_FOOD_THRESHOLD` - three
+ * hearts is the honest banked amount, not infinite sustain. Measured live: a
+ * fresh respawn reads `regenerating` (food=20) and still dies to a contact
+ * zombie's cadence; exempting regeneration entirely would keep the measured
+ * camp-loop offer.
+ */
+export const REGEN_RACE_BONUS_HP = 3
+
+/**
+ * CAN-only feasibility for a melee ATTACK: `killMs > deathMs` means the kill
+ * postcondition cannot verify before the body dies - the same refusal class as
+ * a water route that outruns the breath budget. It is deliberately NOT a
+ * ranking: a fight the numbers call winnable is offered untouched, and the
+ * regeneration bonus only credits the hearts the body can actually bank.
+ */
+export function assessAttackRace(input: {
+  threatName: string
+  threatHealth: number | null | undefined
+  swingDamage: number
+  bodyHealth: number
+  bodyRegenerating: boolean
+}): AttackRaceVerdict {
+  const regenBonusHp = input.bodyRegenerating ? REGEN_RACE_BONUS_HP : 0
+  const base: Omit<AttackRaceVerdict, 'reason'> = { lost: false, known: false, killMs: null, deathMs: null, regenBonusHp }
+  const fact = HOSTILE_RACE_FACTS[input.threatName.toLowerCase()]
+  if (fact === undefined) return { ...base, reason: 'unknown_threat' }
+  const health = Number.isFinite(input.threatHealth) && (input.threatHealth as number) > 0 ? (input.threatHealth as number) : fact.health
+  if (!Number.isFinite(health) || health <= 0) return { ...base, known: true, reason: 'unknown_health' }
+  const damage = input.swingDamage > 0 ? input.swingDamage : FIST_DAMAGE
+  const killMs = Math.ceil(health / damage) * PLAYER_ATTACK_SWING_MS
+  const deathMs = Math.max(1, Math.ceil((input.bodyHealth + regenBonusHp) / fact.meleeDamage)) * THREAT_ATTACK_SWING_MS
+  return {
+    known: true,
+    lost: killMs > deathMs,
+    killMs,
+    deathMs,
+    regenBonusHp,
+    reason: killMs > deathMs ? 'race_lost' : 'race_winnable',
+  }
+}
+
 /** The entity facts this module reads; a structural subset of `EntityState`. */
 export type ThreatEntityLike = Pick<
   EntityState,

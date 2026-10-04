@@ -256,6 +256,17 @@ export interface BodySubmersion {
   state: SubmersionState
 }
 
+/**
+ * CAN: a live-witnessed fist-diggable cell whose drop is a placeable block.
+ * `yieldItem` is the resolved harvest drop (via `resolveBlockHarvest`), so the
+ * candidate layer never guesses that a `grass_block` dig produces `dirt`.
+ */
+export interface SurvivalDigCell {
+  position: Vec3Json
+  name: string
+  yieldItem: string
+}
+
 /** A bounded, observed two-cell-tall water/air position a submerged body can swim toward. */
 export interface SubmersionEscapeTarget {
   position: Vec3Json
@@ -1294,6 +1305,16 @@ export type WorldState = {
    * means the bounded local sample found no waypoint.
    */
   submersionEscapeTargets?: SubmersionEscapeTarget[]
+  /**
+   * SAFE/CAN: fist-diggable cells whose drop is a placeable block, sampled only
+   * while a threat is active AND the inventory holds no placeable material -
+   * the measured camp-death shape (`itemsLost=0`, `no_grounded_escape`, offer
+   * collapsed to a bare-fist ATTACK). They are material sources for the
+   * wall/pillar survival answers, not claims that digging them wins the fight.
+   * Absent means "no zero-material shaping source witnessed" (and on old
+   * fixtures, "this fact did not exist yet").
+   */
+  survivalDigCells?: SurvivalDigCell[]
   /**
    * p19.8: bounded local water-corridor routes to an observed breathable or
    * standable exit. Present only while a water obstruction is actually
@@ -5511,6 +5532,93 @@ function buildEscapeCells(
   return { cells: [...far, ...near], coverCells: cover, portalWalkInCells: transfer }
 }
 
+/**
+ * Soft-block names whose resolved harvest drop is itself placeable - the only
+ * blocks a bare-handed body can convert into wall/pillar material fast enough
+ * to matter inside a melee window (dirt ~0.75 s, grass/sand ~0.9 s by fist).
+ */
+const SURVIVAL_DIG_YIELD_NAMES: ReadonlySet<string> = new Set([
+  'dirt',
+  'grass_block',
+  'dirt_path',
+  'farmland',
+  'podzol',
+  'mycelium',
+  'coarse_dirt',
+  'rooted_dirt',
+  'mud',
+  'muddy_mangrove_roots',
+  'sand',
+  'red_sand',
+  'snow_block',
+  'gravel',
+  'soul_sand',
+  'soul_soil',
+])
+
+/** The sampled dig window: adjacent cells the body can reach without moving. */
+const SURVIVAL_DIG_RADIUS = 3
+const SURVIVAL_DIG_MAX_CELLS = 4
+
+/**
+ * CAN: the zero-material survival-shaping sources. Populated only while a
+ * threat is active AND `selectPlaceableBlock` finds nothing to place - the
+ * exact starvation shape the measured camp deaths showed (`itemsLost=0`,
+ * `no_grounded_escape`, offer collapsed to a bare-fist ATTACK it could not
+ * survive). A body already holding placeables keeps exactly the state shape it
+ * had: it has the material answer and a dig offer would only compete with it.
+ *
+ * Cells on the threat's own approach lane sort first: digging one removes the
+ * lane's floor AND yields the block the wall needs. The body's own column is
+ * never offered - digging the floor it stands on is a descent affordance, not
+ * a shaping source.
+ */
+function buildSurvivalDigCells(
+  bot: Bot,
+  self: SelfState,
+  entities: readonly EntityState[],
+  lastDamage: LastDamageEvidence | null,
+  scaffoldCounts: Record<string, number>,
+  options: SensorOptions,
+  nowMs = Date.now(),
+): SurvivalDigCell[] {
+  if (selectPlaceableBlock(scaffoldCounts) !== null) return []
+  const threats = activeThreats(entities as readonly ThreatEntityLike[], lastDamage, nowMs)
+  const threat = threats[0] ?? null
+  if (threat === null) return []
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const lane = normalize({ x: threat.position.x - self.position.x, y: 0, z: threat.position.z - self.position.z })
+  const scratch = bot.entity.position.clone()
+  const out: SurvivalDigCell[] = []
+  for (let dx = -SURVIVAL_DIG_RADIUS; dx <= SURVIVAL_DIG_RADIUS; dx += 1) {
+    for (let dz = -SURVIVAL_DIG_RADIUS; dz <= SURVIVAL_DIG_RADIUS; dz += 1) {
+      if (dx === 0 && dz === 0) continue
+      for (let dy = -1; dy <= 0; dy += 1) {
+        const position = { x: feet.x + dx, y: feet.y + dy, z: feet.z + dz }
+        if (distance(position, self.eyePosition) > options.reach + 0.5) continue
+        const block = sensorBlockAt(bot, scratch.set(position.x, position.y, position.z), 'survival-dig')
+        if (block === null || block.boundingBox !== 'block') continue
+        if (!SURVIVAL_DIG_YIELD_NAMES.has(block.name)) continue
+        const harvest = resolveBlockHarvest(bot, block.name)
+        if (harvest.yield === null) continue
+        out.push({ position, name: block.name, yieldItem: harvest.yield })
+      }
+    }
+  }
+  const onLane = (cell: SurvivalDigCell): number => {
+    if (lane === null) return 0
+    const toward = (cell.position.x - feet.x) * lane.x + (cell.position.z - feet.z) * lane.z
+    const lateral = Math.abs((cell.position.x - feet.x) * lane.z - (cell.position.z - feet.z) * lane.x)
+    return toward > 0 && lateral <= 1 ? 0 : 1
+  }
+  out.sort((a, b) => onLane(a) - onLane(b) || distance(a.position, self.position) - distance(b.position, self.position))
+  return out.slice(0, SURVIVAL_DIG_MAX_CELLS)
+}
+
 /** Unit vector of a horizontal offset, or null when it is degenerate. */
 function normalize(offset: Vec3Json): { x: number; z: number } | null {
   const length = Math.hypot(offset.x, offset.z)
@@ -5691,6 +5799,15 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const pillarFootingPlacement =
     selectPlaceableBlock(scaffoldCounts) === null ? null : buildPillarFootingPlacement(bot, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
+  const survivalDigCells = buildSurvivalDigCells(
+    bot,
+    self,
+    entities,
+    input.signals.lastDamage ?? null,
+    scaffoldCounts,
+    options,
+    timestampMs,
+  )
   const terrain = buildTerrain(bot, options, self)
   const escape = buildEscapeCells(bot, options, self, entities, input.signals.lastDamage ?? null, timestampMs)
   // Both transfer-cell sources are unioned: the local terrain window is where an
@@ -5729,6 +5846,10 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // p19.8: the bounded water-corridor witness exists only while a local water
     // obstruction is actually observed (wet body, or water in the hazard ring).
     ...(waterRouteTargets.length > 0 ? { waterRouteTargets } : {}),
+    // Zero-material shaping sources exist only while the threat/starvation
+    // shape is real: a body holding placeables, or a body not under threat,
+    // keeps exactly the state shape it had.
+    ...(survivalDigCells.length > 0 ? { survivalDigCells } : {}),
     // Both new terrain facts follow the same rule: a body with no portal and no
     // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {

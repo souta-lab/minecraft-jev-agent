@@ -125,6 +125,7 @@ import { armorCraftTargets, armorEquipOffers, armorEquipRefusals, armorSlotFor, 
 import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorCraftTarget, ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
   activeThreats,
+  assessAttackRace,
   bodySurvivalFacts,
   isRangedThreatName,
   isResponseWorthyThreat,
@@ -521,7 +522,13 @@ function descentPolicyEscalateCandidate(input: {
  */
 export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
   return (
-    CONTACT_THREAT_KINDS.has(candidate.kind) ||
+    // A race-lost ATTACK is not a survival answer at all: `assessAttackRace`
+    // proved the kill postcondition cannot verify before the body dies, so the
+    // candidate is the same phantom class as an unreachable MOVE. Excluding it
+    // here also releases a running doomed attack so a grounded answer can take
+    // the lease.
+    candidate.meta.attackRaceLost !== true &&
+    (CONTACT_THREAT_KINDS.has(candidate.kind) ||
     isDeathZoneEscapeRoute(candidate) ||
     // §4.1 world-shaping survival answers: `MOVE:escapeup:*` (a MOVE carrying
     // its own grounded pillar route) and `PLACE:wall:*` (a placement into the
@@ -531,7 +538,10 @@ export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
     // inventory - the locomotion gap erased every world-modification
     // affordance and the restriction stripped them even where emitted.
     candidate.meta.escapePillar === true ||
-    candidate.meta.threatWall === true
+    candidate.meta.threatWall === true ||
+    // Zero-material continuation of the same family: fist-mine the soft block
+    // whose drop IS the wall/pillar material the starving body lacks.
+    candidate.meta.survivalDig === true)
   )
 }
 
@@ -4514,6 +4524,26 @@ function generateRawCandidates(
   const swing = combatSwingFor(state.self.heldItem?.name ?? null, state.inventory.counts)
   const body = bodySurvivalFacts(state.self)
   for (const entity of attackTargets) {
+    // CAN: a melee fight the armed swing provably cannot finish before the
+    // body dies is not a grounded answer - the same refusal class as a water
+    // route that outruns the breath budget. Measured camp cluster on
+    // run-mutlktrv-3xw (deaths #12-14, 2026-10-04 12:26-12:27): bare-fist
+    // ATTACK offers against a zombie either replaced the wall it should have
+    // taken (15s-to-kill vs ~3s-to-die) or were the only offer at all - and a
+    // fist swing is a lost race against a fresh zombie at ANY distance, so the
+    // verdict applies to the whole melee table, not only engaged contact.
+    // Ranged hostiles keep their own damage model; neutral provoked mobs and
+    // unknown names fail open via `known=false`.
+    const attackRace =
+      entity.hostile === true && !isRangedThreatName(entity.name)
+        ? assessAttackRace({
+            threatName: entity.name,
+            threatHealth: entity.health ?? null,
+            swingDamage: swing.damage,
+            bodyHealth: body.health,
+            bodyRegenerating: body.regenerating,
+          })
+        : null
     const isFoodTarget = huntTargets.includes(entity)
     const goalDrop = goalDropByEntity.get(entity.id) ?? null
     // The label states the fight the LEASE will run, not only what the hand holds
@@ -4561,6 +4591,18 @@ function generateRawCandidates(
         bodyHealth: body.health,
         bodyFood: body.food,
         bodyRegenerates: body.regenerating,
+        // The CAN race verdict: `attackRaceLost` removes this candidate from
+        // every survival-answer set (`isSurvivalAnswerCandidate`), never a
+        // preference ranking - the numbers either prove the kill cannot land
+        // before the body dies or they stay silent (`known=false`).
+        ...(attackRace === null
+          ? {}
+          : {
+              attackRace: attackRace.reason,
+              ...(attackRace.killMs === null ? {} : { attackRaceKillMs: attackRace.killMs }),
+              ...(attackRace.deathMs === null ? {} : { attackRaceDeathMs: attackRace.deathMs }),
+              ...(attackRace.lost ? { attackRaceLost: true } : {}),
+            }),
         ...(goalDrop === null ? {} : { goalDrop, requiresKill: true }),
         // Typed producer facts: this ATTACK is the mob-drop route to `goalDrop`
         // and this instance is a real sensed producer. issue #436 section 9: the
@@ -12934,17 +12976,45 @@ function survivalShapingCandidates(
   const placeable = selectPlaceableBlock(
     routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null),
   )
-  if (placeable === null) return []
-  const feet = {
-    x: Math.floor(state.self.position.x),
-    y: Math.floor(state.self.position.y),
-    z: Math.floor(state.self.position.z),
-  }
   const threatMeta = {
     threatEntityId: threat.id,
     threatName: threat.name,
     threatDistance: threat.distance,
     threatStandoff: threatStandoffRange(threat.name),
+  }
+  if (placeable === null) {
+    // Zero-material starvation (the measured camp shape, `itemsLost=0`): the
+    // only shaping answer the body can still produce is digging a soft block
+    // whose drop IS the placeable the wall/pillar answers need. The sensor
+    // only populates `survivalDigCells` under exactly this condition.
+    return (state.survivalDigCells ?? []).map((cell) => ({
+      id: `MINE:survival:${blockId('b', cell.position)}`,
+      kind: 'MINE' as const,
+      label: `fist-mine ${cell.name} at (${cell.position.x},${cell.position.y},${cell.position.z}) for blocks to wall ${threat.name} off`,
+      targetName: cell.name,
+      target: cell.position,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: true,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        survivalDig: true,
+        x: cell.position.x,
+        y: cell.position.y,
+        z: cell.position.z,
+        diggable: true,
+        yieldItem: cell.yieldItem,
+        ...threatMeta,
+      },
+    }))
+  }
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
   }
   const out: Candidate[] = []
 

@@ -46,6 +46,7 @@ import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, EntityState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import {
+  assessAttackRace,
   bodySurvivalFacts,
   formatThreatClear,
   formatThreatNearby,
@@ -248,6 +249,7 @@ addCase('(a2) a hostile inside the danger radius with a stalled goal leaves only
   const offer = applyThreatRestriction(state, generated)
   const kinds = new Set(offer.candidates.map((candidate) => candidate.kind))
   const attacks = offer.candidates.filter((candidate) => candidate.kind === 'ATTACK')
+  const markedAttack = generated.find((candidate) => candidate.kind === 'ATTACK')
   const work = generated.filter((candidate) => !THREAT_SURVIVAL_KINDS.has(candidate.kind))
   const pass =
     offer.threat?.active === true &&
@@ -255,7 +257,10 @@ addCase('(a2) a hostile inside the danger radius with a stalled goal leaves only
     work.length > 0 &&
     offer.candidates.length > 0 &&
     [...kinds].every((kind) => THREAT_SURVIVAL_KINDS.has(kind)) &&
-    attacks.length === 1 &&
+    // The bare-fist zombie fight is a proven-lost race (15s kill vs ~6s death
+    // at 20hp + regen bank): generated for observability, withheld from offer.
+    attacks.length === 0 &&
+    markedAttack?.meta.attackRaceLost === true &&
     offer.gap === null
   return {
     pass,
@@ -871,8 +876,9 @@ addCase('(f1) the measured 22:19 death window now offers a real escape, not the 
     retreats.length > 0 &&
     retreats.every((candidate) => (candidate.meta.separationGain as number) >= MIN_KEEP_DISTANCE_GAIN) &&
     retreats.some((candidate) => candidate.meta.escapeScan === true) &&
-    attack !== undefined &&
-    attack.meta.weapon === 'fists'
+    // The starving body (food=2, no regen) dies to the zombie long before the
+    // fist kill lands - the measured death. The race gate withholds it.
+    attack === undefined
   return {
     pass,
     detail: `offered=[${ids(offered.candidates).join(',')}] retreatGains=[${retreats
@@ -1011,6 +1017,64 @@ addCase('(g5) a lane cell the scan names solid is never a fill target', () => {
       cells[0]?.y === 11 &&
       cells.every((cell) => !(cell.x === 1 && cell.y === 10 && cell.z === 0)),
     detail: `cells=[${cells.map((cell) => `${cell.x},${cell.y},${cell.z}`).join(';')}]`,
+  }
+})
+
+addCase('(g6) a starved body under contact offers MINE:survival material sources and no race-lost ATTACK (run-mutlktrv-3xw deaths #12-14 camp cluster)', () => {
+  // The measured shape: `itemsLost=0` respawn, contact zombie, no placeable -
+  // the offer collapsed to a bare-fist ATTACK that cannot out-race the body.
+  const state = bodyState([hostile(90, 'zombie', { x: 2.5, y: 10, z: 0.5 }, { attackedSelf: true })])
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.survivalDigCells = [
+    { position: { x: 1, y: 9, z: 0 }, name: 'grass_block', yieldItem: 'dirt' },
+    { position: { x: 1, y: 9, z: -1 }, name: 'dirt', yieldItem: 'dirt' },
+  ]
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const offered = applyThreatRestriction(state, generated)
+  const dig = offered.candidates.find((candidate) => candidate.meta.survivalDig === true)
+  const attack = generated.find((candidate) => candidate.kind === 'ATTACK')
+  const pass =
+    dig !== undefined &&
+    dig.id.startsWith('MINE:survival:') &&
+    dig.kind === 'MINE' &&
+    dig.meta.yieldItem === 'dirt' &&
+    isSurvivalAnswerCandidate(dig) === true &&
+    attack !== undefined &&
+    attack.meta.attackRaceLost === true &&
+    !offered.candidates.some((candidate) => candidate.kind === 'ATTACK')
+  return {
+    pass,
+    detail: `dig=${dig?.id ?? 'none'} attack=${attack?.id ?? 'none'} race=${String(attack?.meta.attackRace)} offered=[${ids(offered.candidates).join(',')}]`,
+  }
+})
+
+addCase('(g7) the attack race verdict: fists lose even while regenerating, a sword wins, unknown names fail open', () => {
+  const fistVsZombie = assessAttackRace({ threatName: 'zombie', threatHealth: null, swingDamage: 1, bodyHealth: 20, bodyRegenerating: false })
+  const swordVsZombie = assessAttackRace({ threatName: 'zombie', threatHealth: null, swingDamage: 4, bodyHealth: 20, bodyRegenerating: false })
+  const fistVsWoundedZombie = assessAttackRace({ threatName: 'zombie', threatHealth: 6, swingDamage: 1, bodyHealth: 20, bodyRegenerating: false })
+  const unknownMob = assessAttackRace({ threatName: 'wither_skeleton', threatHealth: null, swingDamage: 1, bodyHealth: 5, bodyRegenerating: false })
+  // The measured case: a fresh respawn reads regenerating (food=20) and the
+  // fist race is still hopeless - regeneration banks hearts, not immunity.
+  const regenFistVsZombie = assessAttackRace({ threatName: 'zombie', threatHealth: null, swingDamage: 1, bodyHealth: 20, bodyRegenerating: true })
+  // The bonus flips a marginal fight: hp 4 dies before a 2-hp zombie falls,
+  // hp 4 + banked regen outlasts the kill.
+  const regenMarginal = assessAttackRace({ threatName: 'zombie', threatHealth: 2, swingDamage: 1, bodyHealth: 4, bodyRegenerating: true })
+  const sameMarginalStarved = assessAttackRace({ threatName: 'zombie', threatHealth: 2, swingDamage: 1, bodyHealth: 4, bodyRegenerating: false })
+  const pass =
+    fistVsZombie.lost === true &&
+    fistVsZombie.reason === 'race_lost' &&
+    swordVsZombie.lost === false &&
+    swordVsZombie.reason === 'race_winnable' &&
+    fistVsWoundedZombie.lost === false &&
+    unknownMob.lost === false &&
+    unknownMob.known === false &&
+    regenFistVsZombie.lost === true &&
+    regenMarginal.lost === false &&
+    sameMarginalStarved.lost === true
+  return {
+    pass,
+    detail: `fist=${fistVsZombie.killMs}/${fistVsZombie.deathMs} regenFist=${regenFistVsZombie.lost} marginal=${regenMarginal.lost}/${sameMarginalStarved.lost} unknown=${unknownMob.known}`,
   }
 })
 
