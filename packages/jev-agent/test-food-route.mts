@@ -823,6 +823,80 @@ addCase('(iv-c) starving + forage cell beyond MOVE range + a level dig step: the
   }
 })
 
+// --- (iv-d) one id, two purposes: the shared tunnel leg offers once -----------
+//
+// Measured live portal-p23 (run-mutsv43u-1a0g, gen-muua79pb): a starving
+// `collect log` body emitted `DESCEND:level:N:b7_25_22` twice - once "toward
+// log" (the goal arm) and once "toward apple" (the forage arm digging the same
+// cell). The offer chain keys everything on candidate.id: the semantic views
+// overwrote (`Map<id, view>`), Jev saw the apple identity twice and the log
+// identity never, and the commit resolved the shared id by first match - the
+// leg Jev picked as "apple" executed as "log". One physical dig cannot be two
+// choices; the offer must carry ONE row whose meta holds both route claims.
+
+function collectGoal(): QueuedGoal {
+  return {
+    id: 'g10:collect:acacia_log',
+    kind: 'collect',
+    description: 'collect 1 x acacia_log',
+    targetItem: 'acacia_log',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
+addCase('(iv-d) a leg two arms ground for different purposes emits once, carrying both claims', () => {
+  const state = buildWorldState(
+    fakeBot({
+      counts: {},
+      food: 12,
+      blocks: [
+        // the sensed edible cell, 55 blocks east: past moveMax, lands in tunnelTargets
+        { at: { x: 55, y: 64, z: 0 }, name: 'sweet_berry_bush' },
+        // a far sensed log: the goal arm's tunnelTarget, also past moveMax
+        { at: { x: -40, y: 90, z: 0 }, name: 'acacia_log' },
+        // diggable walls on two sides so level steps ground for BOTH arms
+        { at: { x: 1, y: 64, z: 0 }, name: 'stone' },
+        { at: { x: -1, y: 64, z: 0 }, name: 'stone' },
+      ],
+    }),
+    {
+      tick: 1,
+      goal: makeGoal('acacia_log', 1),
+      goalQueue: queueWith(collectGoal()),
+      focusItem: 'acacia_log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const result = grounded(state)
+  const ids = result.candidates.map((candidate) => candidate.id)
+  const descendLegs = result.candidates.filter((candidate) => candidate.kind === 'DESCEND')
+  const tunnel = descendLegs.find(
+    (candidate) => typeof candidate.meta.foodRoute === 'string',
+  )
+  return {
+    pass:
+      // no executable id appears twice in the offer
+      ids.length === new Set(ids).size &&
+      // the kept leg carries the goal claim AND the food-route claim
+      tunnel !== undefined &&
+      tunnel.targetName === 'acacia_log' &&
+      tunnel.meta.foodRoute === 'forage' &&
+      tunnel.meta.foodTarget === 'sweet_berries' &&
+      tunnel.meta.foodCell === '55,64,0' &&
+      result.foodGap === null,
+    detail: `legs=${descendLegs.length} ids=${JSON.stringify(ids)} tunnelMeta=${tunnel === undefined ? 'none' : JSON.stringify({ targetName: tunnel.targetName, foodRoute: tunnel.meta.foodRoute, foodTarget: tunnel.meta.foodTarget, foodCell: tunnel.meta.foodCell })}`,
+  }
+})
+
 // --- (v) a fed body: the food tiers add nothing -------------------------------
 
 addCase('(v) a fed body: no food tag, no gap, and the offer is the hungry offer minus the food tiers', () => {

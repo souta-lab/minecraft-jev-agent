@@ -5683,7 +5683,7 @@ function generateRawCandidates(
   }
 
   return {
-    candidates,
+    candidates: mergeDuplicateCandidates(candidates),
     placeRefusal,
     ignitionRefusal,
     entryRefusal,
@@ -11218,6 +11218,46 @@ function dedupeDigRouteRefusals(refusals: readonly DigRouteRefusal[]): DigRouteR
     seen.add(line)
     out.push(refusal)
     if (out.length >= DIG_ROUTE_REFUSAL_CAP) break
+  }
+  return out
+}
+
+/**
+ * One offer row per executable candidate id.
+ *
+ * Two arms can ground the SAME mechanical step for different purposes: a
+ * starving `collect log` body emitted `DESCEND:level:N:b7_25_22` twice in one
+ * tick - once "toward log" (the goal tunnel) and once "toward apple" (the
+ * forage tunnel toward the same cell). The offer chain is built on candidate-id
+ * uniqueness: `dedupeSemanticCandidates` stores views in `Map<candidate.id,
+ * view>`, so the second identity overwrote the first and Jev saw the apple
+ * identity twice and the log identity never; the commitment then resolved the
+ * shared id by first match, so the semantic choice Jev named was not the
+ * realization it got (measured live portal-p23 run-mutsv43u-1a0g
+ * gen-muua79pb: `JEV_CANDIDATE_SET count=3` held two byte-identical apple
+ * identities while the commit ran the "toward log" leg).
+ *
+ * The physical action is identical, so the second row can never be a separate
+ * choice Jev can make: collapse to the FIRST emitted copy (goal arms precede
+ * the survival arms in emit order, keeping the active goal's target/label as
+ * the primary claim) and fold every discarded copy's meta into it, so a leg
+ * that honestly serves two routes carries both facts (`foodCell`/`foodTarget`
+ * alongside the goal target) on one row.
+ */
+function mergeDuplicateCandidates(candidates: readonly Candidate[]): Candidate[] {
+  const kept = new Map<string, Candidate>()
+  const out: Candidate[] = []
+  for (const candidate of candidates) {
+    const first = kept.get(candidate.id)
+    if (first === undefined) {
+      kept.set(candidate.id, candidate)
+      out.push(candidate)
+      continue
+    }
+    for (const [key, value] of Object.entries(candidate.meta)) {
+      if (first.meta[key] === undefined) first.meta[key] = value
+    }
+    if (first.targetName === null && candidate.targetName !== null) first.targetName = candidate.targetName
   }
   return out
 }
