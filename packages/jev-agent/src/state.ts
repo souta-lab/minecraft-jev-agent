@@ -53,7 +53,7 @@ import {
 import type { PortalBlockPosition, PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock, liveStructureCellKey } from './blockSafety.ts'
 import type { LiveStructureMember } from './blockSafety.ts'
-import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
+import { PILLAR_PLACE_PRIORITY, routeScaffoldCounts, selectPlaceableBlock } from './pillarSearch.ts'
 import type { DescentScaffoldProbe } from './descentScaffold.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
@@ -5584,8 +5584,12 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       })
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   const placementSpots = buildPlacementSpots(bot, options, self)
+  // Route-scaffold probes and the prerequisite producer scan read the SAME
+  // spendable inventory the candidate layer plans with, so a body holding only
+  // its collect target still senses the placeable producers it now needs.
+  const scaffoldCounts = routeScaffoldCounts(inventory.counts, input.goalQueue)
   const pillarFootingPlacement =
-    selectPlaceableBlock(inventory.counts) === null ? null : buildPillarFootingPlacement(bot, self)
+    selectPlaceableBlock(scaffoldCounts) === null ? null : buildPillarFootingPlacement(bot, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
   const terrain = buildTerrain(bot, options, self)
   const escape = buildEscapeCells(bot, options, self, entities, input.signals.lastDamage ?? null, timestampMs)
@@ -5604,7 +5608,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     self,
     inventory,
     entities,
-    blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
+    blocks: buildBlocks(bot, options, self, input.focusItem ?? null, scaffoldCounts),
     // The spawn-context observations are read ONLY for a focus whose item
     // declared a mob producer (`ender_pearl` <- enderman, `blaze_rod` <- blaze):
     // an ordinary tick pays nothing, and the fact exists exactly where the
@@ -5649,7 +5653,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // Sensing is gated on the material possibility (a bridge needs a block to
     // place), never on a decision: the typed `no_block` refusal is derived from the
     // inventory fact alone, so an empty-handed body still reads its gap.
-    ...(selectPlaceableBlock(inventory.counts) === null ? {} : { bridgeProbes: buildBridgeProbes(bot, self) }),
+    ...(selectPlaceableBlock(scaffoldCounts) === null ? {} : { bridgeProbes: buildBridgeProbes(bot, self) }),
     portalFrameSites,
     portalFrame,
     liveStructureMembers: mergeLiveStructureMembers(

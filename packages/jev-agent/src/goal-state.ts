@@ -25,7 +25,7 @@ import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, Vec3Json, WorldState } from './state.ts'
 import type { System2Objective } from './system2/service.ts'
-import { formatAscentRefused, pillarColumnUnsafeFromBlocks, planVerticalApproachDetailed, selectPlaceableBlock } from './verticalPlan.ts'
+import { formatAscentRefused, pillarColumnUnsafeFromBlocks, planVerticalApproachDetailed, routeScaffoldCounts, selectPlaceableBlock } from './verticalPlan.ts'
 import { orphanedSmeltPrerequisiteReason } from './goal-queue-plane.ts'
 import type { Bot } from 'mineflayer'
 
@@ -322,7 +322,7 @@ target: { y: number } | null): boolean {
     tunnel: state.signals.lastTunnel ?? null,
     descent: state.descent,
     stepCuts: state.stepCuts,
-    placeable: selectPlaceableBlock(state.inventory.counts),
+    placeable: selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue)),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     inventory: state.inventory.counts,
   })

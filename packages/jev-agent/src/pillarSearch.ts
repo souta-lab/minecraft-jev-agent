@@ -9,6 +9,7 @@
 // function or Jev can replace them later.
 //
 // Pure and bot-free: the executor feeds live probes and inventory counts in.
+import { resourceMatches } from './resourceClass.ts'
 import type { Vec3Json } from './state.ts'
 
 /**
@@ -275,6 +276,32 @@ export function formatPillarSearch(decision: PillarSearchDecision): string {
   const target =
     decision.target === null ? '' : ` target=${decision.target.x},${decision.target.y},${decision.target.z}`
   return `PILLAR_SEARCH kind=${decision.kind} chosen=${decision.chosen ?? 'none'}${target} score=${score} alternatives=[${alternatives}] reason=${decision.reason}`
+}
+
+/**
+ * The inventory a ROUTE may consume as scaffolding (pillar, bridge, descent
+ * scaffold, pillar footing). Items that satisfy the active collect goal's target
+ * are withheld: spending the held log to pillar toward a log, then mining the
+ * placed block back, is a zero-sum loop whose both halves verify SUCCESS
+ * (measured portal-p22: PILLAR_UP placing the only jungle_log -> MINE of that
+ * placed block, 8+ cycles, wood rung stalled). Resource accounting only: no
+ * route is ranked, and with nothing else held the route is refused
+ * `no_placeable`, which opens the placeable-acquisition producers.
+ */
+export function routeScaffoldCounts(
+  counts: Readonly<Record<string, number>>,
+  goalQueue: { readonly current: { readonly kind: string; readonly targetItem: string | null } | null } | null | undefined,
+): Readonly<Record<string, number>> {
+  const current = goalQueue?.current ?? null
+  const target = current !== null && current.kind === 'collect' ? current.targetItem : null
+  if (target === null) return counts
+  let withheld = false
+  const spendable: Record<string, number> = {}
+  for (const [name, count] of Object.entries(counts)) {
+    if (resourceMatches(name, target)) withheld = true
+    else spendable[name] = count
+  }
+  return withheld ? spendable : counts
 }
 
 /** The held pillar block from inventory counts; null when none is usable. */

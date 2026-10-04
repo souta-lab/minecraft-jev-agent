@@ -23,6 +23,7 @@
 // the no-placeable safe staircase introduced by #462.
 
 import { craftStationGap, defaultCandidateOptions, formatCraftStationGap, generateGroundedCandidates, logRouteOf, optionsWithWithheldStationRetirements } from './src/candidates.ts'
+import { routeScaffoldCounts, selectPlaceableBlock } from './src/pillarSearch.ts'
 import { createRequire } from 'node:module'
 import { createRecipeIndex } from './src/crafting.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
@@ -320,6 +321,52 @@ function world(
     `craft prerequisite log route (safe step cut, no placeable): ${pass ? 'PASS' : 'FAIL'} ` +
       `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] ` +
       `vertical=${String(retrieve?.meta.vertical ?? 'none')} withheld=${withheldLog?.result.reason ?? 'none'}\n`,
+  )
+  if (!pass) process.exitCode = 1
+}
+
+// (5) portal-p22: a route never spends the active collect goal's own target as
+// scaffolding. Live: under `collect log` the body pillared with its only
+// jungle_log, then mined the placed block back (both SUCCESS) for 8+ cycles.
+// The collect target is withheld from the route's placeable; another held
+// placeable still grounds the pillar; a non-collect goal keeps p21.6 log footing.
+{
+  const collectLog = queuedGoal({
+    id: 'g-collect-log',
+    kind: 'collect',
+    description: 'collect 3 x log',
+    targetItem: 'log',
+    requiredCount: 3,
+  })
+  const asCollect = (state: WorldState): WorldState => ({ ...state, goalQueue: queue(collectLog) })
+  const routeOf = (state: WorldState) =>
+    generateGroundedCandidates(state, { ...defaultCandidateOptions, recipes }).candidates.find(
+      (candidate) => candidate.id === 'RETRIEVE:known:log:b27_65_19',
+    )
+  const onlyTargetGrounded = generateGroundedCandidates(asCollect(world({ jungle_log: 1 }, false)), { ...defaultCandidateOptions, recipes })
+  const spendsTarget = onlyTargetGrounded.candidates.some((candidate) =>
+    Object.values(candidate.meta).includes('jungle_log') && candidate.kind !== 'MINE',
+  )
+  const onlyTargetWithheld = onlyTargetGrounded.withheld.find((entry) => entry.candidate.id === 'RETRIEVE:known:log:b27_65_19')
+  const withDirt = routeOf(asCollect(world({ jungle_log: 1, dirt: 3 }, false)))
+  // Non-collect goals (and an empty queue) keep the p21.6 log footing.
+  const craftGoal = selectPlaceableBlock(routeScaffoldCounts({ oak_log: 5 }, queue(queuedGoal({}))))?.name ?? 'none'
+  const noGoal = selectPlaceableBlock(routeScaffoldCounts({ oak_log: 5 }, null))?.name ?? 'none'
+  const collectStone = selectPlaceableBlock(
+    routeScaffoldCounts({ cobblestone: 9, oak_log: 2 }, queue(queuedGoal({ kind: 'collect', targetItem: 'cobblestone' }))),
+  )?.name ?? 'none'
+  const pass =
+    !spendsTarget &&
+    onlyTargetWithheld?.result.reason === 'needs_ascend' &&
+    withDirt?.meta.vertical === 'pillar' &&
+    withDirt.meta.pillarPlaceName === 'dirt' &&
+    craftGoal === 'oak_log' &&
+    noGoal === 'oak_log' &&
+    collectStone === 'oak_log'
+  process.stdout.write(
+    `collect target is never route scaffolding: ${pass ? 'PASS' : 'FAIL'} ` +
+      `onlyTarget=spends:${spendsTarget}/withheld:${onlyTargetWithheld?.result.reason ?? 'none'} ` +
+      `withDirt=${String(withDirt?.meta.pillarPlaceName ?? 'none')} craftGoal=${craftGoal} noGoal=${noGoal} collectStone=${collectStone}\n`,
   )
   if (!pass) process.exitCode = 1
 }

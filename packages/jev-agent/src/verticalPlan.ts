@@ -24,11 +24,12 @@ import {
   DEFAULT_PILLAR_SEARCH_POLICY,
   PILLAR_PLACE_PRIORITY,
   rankPillarFallbackColumns,
+  routeScaffoldCounts,
   selectPlaceableBlock,
 } from './pillarSearch.ts'
 import type { PlaceableBlock, PillarColumnProbe } from './pillarSearch.ts'
 
-export { PILLAR_PLACE_PRIORITY, selectPlaceableBlock }
+export { PILLAR_PLACE_PRIORITY, routeScaffoldCounts, selectPlaceableBlock }
 export type { PlaceableBlock, PillarColumnProbe }
 
 /** A vertical gap larger than this (blocks) needs an explicit vertical plan. */
