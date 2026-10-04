@@ -861,6 +861,27 @@ addCase('(c1x) a leg that escapes the wall but drifts toward a live watcher in t
   return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
 })
 
+addCase('(c1y) a proven watcher in the danger band does not constrain the corridor', () => {
+  const state = separatedScene()
+  // Live gen-muu59n44 fingerprint: ~20 proven watchers pack the pocket
+  // below-west 4-7 m out and every corridor leg lands measurably nearer one
+  // of them. A dead threat's walls - not its Euclidean distance - are the
+  // separation fact; the lane rule already guards those walls. Only live
+  // threats (no proof, engaged, ranged-with-LOS) constrain the corridor.
+  state.entities.push(hostile(54802, 'creeper', { x: -4.5, y: 10, z: 0.5 }, { lineOfSight: false }))
+  // Lands 3.5 m from the proven creeper (was 5.0): nearer, still outside its
+  // band - and 4.0 m from the in-band spider (receding). Admitted.
+  const nearerDead = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -1, y: 10, z: 0.5 })
+  const offer = applyThreatRestriction(state, [nearerDead, workCell(state), escalateOut(state)], {
+    unreachableThreatEntityIds: new Set([54801, 54802]),
+    threatApproachLaneCells: new Set(),
+  })
+  const pass =
+    offer.candidates.some((candidate) => candidate.id === nearerDead.id) &&
+    !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
+})
+
 addCase('(c1v) an in-band tracker with a reachable stance counts nothing but survival answers', () => {
   const state = separatedScene()
   const options = {

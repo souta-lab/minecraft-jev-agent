@@ -822,13 +822,29 @@ function separatedTrackerEscapeArm(
     if (!unreachable.has(entity.id) || entity.lineOfSight !== false || entity.attackedSelf === true) return null
   }
   const laneCells = facts.threatApproachLaneCells ?? new Set<string>()
-  // The non-approach invariant guards every hostile in the danger band, not
-  // just the proven in-band trackers: a leg that escapes the wall but drifts
-  // measurably toward a live reachable watcher trades a dead threat for a
-  // live one and is not an escape.
+  // The non-approach invariant guards every in-band tracker - contact range
+  // is one wall from melee even while its approach is proven impossible -
+  // plus every danger-band hostile that is NOT proven-separated under the
+  // bypass's own harmless test (reachable, engaged, or a ranged mob with a
+  // sightline: it can hurt the body from where it stands). A hostile already
+  // proven unreachable does not constrain Euclidean distance at all - its
+  // pocket's walls are the separation fact, and the lane rule above already
+  // refuses to open them. Measured live gen-muu59n44: twenty proven watchers
+  // pack the pocket below-west 4.1-7.4 m out; every corridor leg lands
+  // ~0.2 m nearer one of them, so an all-band guard deadlocks the exact
+  // escape this arm exists to open.
   const guarded = state.entities.filter(
     (entity) =>
-      entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
+      entity.hostile &&
+      Number.isFinite(entity.distance) &&
+      entity.distance <= THREAT_DANGER_RADIUS &&
+      (entity.distance <= IMMEDIATE_HOSTILE_RANGE ||
+        !(
+          unreachable.has(entity.id) &&
+          entity.attackedSelf !== true &&
+          (entity.lineOfSight === false ||
+            (entity.lineOfSight === true && !isRangedThreatName(entity.name)))
+        )),
   )
   return (candidate) =>
     SEPARATION_LEG_KINDS.has(candidate.kind) && separationIncreasingLeg(self, guarded, laneCells, candidate)
@@ -894,19 +910,38 @@ export function threatRunnableLocomotionPredicate(
     }
     const standProbe = options.reachability?.attackStandProbe ?? null
     if (standProbe === null) return null
-    for (const entity of inBand) {
-      if (entity.lineOfSight !== false || entity.attackedSelf === true) return null
+    // Probe the whole danger band once - the same fact the restriction builds
+    // from emitted/withheld ATTACKs plus the overflow evaluation - so the
+    // guarded set can tell dead threats from live ones identically.
+    const unreachableNow = new Set<number>()
+    for (const entity of state.entities) {
+      if (!(entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS)) continue
       const fact = standProbe({ entityId: entity.id, position: entity.position })
-      if (fact === null) return null
-      if (fact.stand === null) continue
-      if (fact.onBody === true) return null
+      if (fact === null) continue
+      if (fact.stand === null) {
+        unreachableNow.add(entity.id)
+        continue
+      }
+      if (fact.onBody === true) continue
       const standFar = distance(state.self.position, fact.stand) > FAR_LEG_PROBE_RADIUS
       const path = standFar ? 'unknown' : (options.reachability?.pathProbe?.(fact.stand) ?? 'unknown')
-      if (path !== 'no_path') return null
+      if (path === 'no_path') unreachableNow.add(entity.id)
+    }
+    for (const entity of inBand) {
+      if (!unreachableNow.has(entity.id) || entity.lineOfSight !== false || entity.attackedSelf === true) return null
     }
     const guarded = state.entities.filter(
       (entity) =>
-        entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
+        entity.hostile &&
+        Number.isFinite(entity.distance) &&
+        entity.distance <= THREAT_DANGER_RADIUS &&
+        (entity.distance <= IMMEDIATE_HOSTILE_RANGE ||
+          !(
+            unreachableNow.has(entity.id) &&
+            entity.attackedSelf !== true &&
+            (entity.lineOfSight === false ||
+              (entity.lineOfSight === true && !isRangedThreatName(entity.name)))
+          )),
     )
     return (candidate) => {
       if (!SEPARATION_LEG_KINDS.has(candidate.kind)) return false
