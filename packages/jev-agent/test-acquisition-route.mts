@@ -334,6 +334,84 @@ addCase('(iii) a missing material fact routes to the grounded producer of that m
 })
 
 // ---------------------------------------------------------------------------
+// (iii-b) A clearance MINE can never be a placeable route. Live gen-mutx5jbm
+//         @15a88a28: `missing=[placeable_block, headroom@0,51,9]`, the placeable
+//         arm's `mineCandidates` found no in-reach producer, fell back to the
+//         headroom clearance pool, and stamped `MINE:b*_51_9` as
+//         `prerequisiteRole=placeable_block` - seven ceiling digs all `verified`
+//         with `requiresPickup=false` while `inv={}` persisted, and the same
+//         `seen` dedup suppressed the cell's real headroom route to
+//         `no_producer`. The material arm is producers-only; the clearance cell
+//         keeps its OWN capability evidence.
+// ---------------------------------------------------------------------------
+const DISTANT_PLACEABLE: BlockState = {
+  ...PLACEABLE,
+  position: { x: 33, y: 61, z: 15 },
+  distance: 5.6,
+  inReach: false,
+  adjacentStandable: { x: 32, y: 61, z: 15 },
+}
+
+addCase('(iii-b) a placeable route is producers-only; the same cell keeps its honest headroom route', () => {
+  const state = liveState({
+    inventory: { flint: 4 },
+    blocks: [DISTANT_PLACEABLE],
+    standable: [FEET, { x: 32, y: 61, z: 15 }],
+  })
+  const gate = applyReachabilityGate([entryCandidate()], state, options)
+  const entry = withheldEntry(gate, 'ENTER:26,67,9')
+  const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
+  const placeableFact = entry === null ? null : acquisitionFor(entry, 'placeable_block')
+  const headroomFact = entry === null ? null : acquisitionFor(entry, 'headroom@27,62,15')
+  const stampedClearance = gate.candidates.filter(
+    (candidate) => candidate.meta.missingCapability === 'placeable_block' && candidate.meta.clearance === true,
+  )
+  const placeableRoutes = (placeableFact?.routes ?? []).map(
+    (id) => gate.candidates.find((candidate) => candidate.id === id)?.id ?? id,
+  )
+  return {
+    pass:
+      missing.includes('placeable_block') &&
+      missing.includes('headroom@27,62,15') &&
+      stampedClearance.length === 0 &&
+      placeableFact !== null &&
+      placeableFact.routes.length > 0 &&
+      (placeableFact.routes ?? []).every(
+        (id) => gate.candidates.find((candidate) => candidate.id === id)?.meta.clearance !== true,
+      ) &&
+      headroomFact !== null &&
+      headroomFact.reason === null &&
+      (headroomFact.routes ?? []).some(
+        (id) => gate.candidates.find((candidate) => candidate.id === id)?.meta.clearance === true,
+      ),
+    detail: `missing=[${missing.join(',')}] placeableRoutes=[${placeableRoutes.join(',')}] headroomRoutes=[${(headroomFact?.routes ?? []).join(',')}] stampedClearance=[${stampedClearance.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(iii-b) with no producer at all the placeable fact is an honest refusal, not a clearance stamp', () => {
+  const state = liveState({ inventory: { flint: 4 }, blocks: [] })
+  const gate = applyReachabilityGate([entryCandidate()], state, options)
+  const entry = withheldEntry(gate, 'ENTER:26,67,9')
+  const placeableFact = entry === null ? null : acquisitionFor(entry, 'placeable_block')
+  const headroomFact = entry === null ? null : acquisitionFor(entry, 'headroom@27,62,15')
+  const stampedClearance = gate.candidates.filter(
+    (candidate) => candidate.meta.missingCapability === 'placeable_block' && candidate.meta.clearance === true,
+  )
+  return {
+    pass:
+      placeableFact !== null &&
+      placeableFact.reason === 'no_producer' &&
+      stampedClearance.length === 0 &&
+      headroomFact !== null &&
+      headroomFact.reason === null &&
+      (headroomFact.routes ?? []).some(
+        (id) => gate.candidates.find((candidate) => candidate.id === id)?.meta.clearance === true,
+      ),
+    detail: `placeable=${placeableFact?.reason ?? `routes=${(placeableFact?.routes ?? []).join(',')}`} headroomRoutes=[${(headroomFact?.routes ?? []).join(',')}] stampedClearance=${stampedClearance.length}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
 // (iv) CONTROL: the precondition is already satisfied. The offer must be
 //      byte-identical to the pre-acquisition behaviour - no invented route and
 //      no acquisition evidence.

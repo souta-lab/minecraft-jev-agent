@@ -5741,6 +5741,19 @@ function mineCandidates(
    * offer is unchanged where the tool is already held.
    */
   keepUnharvestable = false,
+  /**
+   * Producer contract only: return harvest MINEs plus the MOVE legs that
+   * approach a producer, and never any of the route-opening tail below
+   * (headroom/step clearance, access retires, descent machinery). A capability
+   * that is satisfied by a HELD drop (`placeable_block`) can never be answered
+   * by a clearance dig: it completes with `requiresPickup=false`, collects
+   * nothing, yet stamping it as the material route records CAN evidence the
+   * action cannot deliver - and the acquisition `seen` dedup then suppresses
+   * the SAME cell's real clearance route under `no_producer` (live
+   * gen-mutx5jbm @15a88a28: seven ceiling clearance MINEs all `verified` under
+   * `prerequisiteRole=placeable_block` while `inv={}` persisted).
+   */
+  producersOnly = false,
 ): Candidate[] {
   // A MINE that feeds an inventory-counted goal (collect/craft/smelt) must end
   // with its drop in the inventory; a navigation goal (descend/surface/explore)
@@ -6002,6 +6015,10 @@ function mineCandidates(
   }
 
   const candidates = [...mineActions]
+  if (producersOnly) {
+    candidates.push(...moveActions)
+    return candidates
+  }
   // Route-opening options come BEFORE MOVE: a MOVE whose stand spot is behind a
   // 2-block face (or under a canopy ceiling) can never execute, so the cut/clear
   // that opens the route must be the first thing the policy sees.
@@ -8534,6 +8551,8 @@ function portalFrameSupportPrerequisiteCandidates(state: WorldState, options: Ca
     null,
     null,
     (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
+    false,
+    true,
   ).map((candidate) => ({
     ...candidate,
     meta: {
@@ -15240,12 +15259,16 @@ function capabilityAcquisitionCandidates(
         // and it must be enumerated so the gate can say `missing_tool` and the
         // closure can offer the tool. Dropping it here made the acquisition pass
         // report `no_producer` for a producer the sensor had proved.
+        // `producersOnly` is the other half of the same contract: the stamped
+        // route must be able to END with the drop held, so the clearance/escape
+        // tail `mineCandidates` appends for ordinary callers is excluded here.
         source = mineCandidates(
           state,
           options,
           null,
           null,
           (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
+          true,
           true,
         )
       } else if (capability.kind === 'ascend_plan') {
