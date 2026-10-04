@@ -251,6 +251,35 @@ assert.equal(unboundGenerationSnapshot.mission.id, null)
 assert.equal(unboundGenerationSnapshot.mission.title, null)
 assert.equal(unboundGenerationSnapshot.mission.provenance.reason, 'mission_current_generation_boundary_unavailable')
 
+// Same-world minor reload: GENERATION_READY carries the minor's new sourceSha
+// while BOOT and the acceptance artifacts keep the host-boot sha. The split is
+// designed reload provenance, not a conflict — the generation must still bind
+// and the live generation sha becomes the reported sourceCommit.
+const reloadSourceSha = 'c'.repeat(40)
+const reloadedGenerationEvents = [
+  laggedGenerationEvents[0],
+  parseBuddyLogLine(`[2026-09-23T19:40:23.559Z] GENERATION_READY runId=run-observer-1 id=gen-reloaded generationId=gen-reloaded sourceSha=${reloadSourceSha}`),
+  parseBuddyLogLine('[2026-09-23T19:40:28.302Z] JEV_HEADS action=MOVE:b99_67_79 generationId=gen-reloaded sourceSha=' + reloadSourceSha),
+].filter((event) => event !== null)
+const reloadedGenerationSnapshot = buildObserverSnapshot({
+  report: { ...report, data: { ...report.data, runId: 'run-observer-1', generationId: 'gen-reloaded' } },
+  events: reloadedGenerationEvents,
+  mission: {
+    id: 'M3',
+    title: 'Nether progression',
+    provenance: { source: 'SYSTEM2_AUTHORITY_INPUT.humanMission', runId: 'run-observer-1', generationId: 'gen-reloaded' },
+  },
+  runBoot: reloadedGenerationEvents[0],
+  runMetadata: laggedGenerationMetadata,
+  runGenerationReady: reloadedGenerationEvents[1],
+  now: Date.parse('2026-09-23T19:40:47.952Z'),
+})
+assert.equal(reloadedGenerationSnapshot.resident.generationBoundary?.generationId, 'gen-reloaded')
+assert.equal(reloadedGenerationSnapshot.resident.sourceCommit, reloadSourceSha)
+assert.equal(reloadedGenerationSnapshot.resident.sourceCommitConflict, false)
+assert.equal(reloadedGenerationSnapshot.mission.status, 'observed')
+assert.equal(reloadedGenerationSnapshot.decisionTrace.jev?.detail.action, 'MOVE:b99_67_79')
+
 // V4 live missions and Reach transitions are visible before HOST writes the
 // final acceptance artifact. The run/generation/source/world chain itself is
 // sufficient for read-only live projection.

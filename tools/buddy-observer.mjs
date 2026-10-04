@@ -378,9 +378,13 @@ function runGenerationAnchorMatches(metadata, runId, generationId, readyEvent, r
     const identity = completeWorldIdentity(normalizeWorldKey(value))
     return identity === null || identity !== reportedWorldId
   })
+  // A same-world minor reload legitimately rewrites GENERATION_READY's
+  // sourceSha while the resident's BOOT keeps the host-boot sha — that split is
+  // the designed reload provenance, not staleness. runId + generationId +
+  // worldKey below are what bind the two events to one run and one live
+  // generation; requiring sha equality would unbind every minor for life.
   const eventSourceBound = validSha(bootSourceSha)
     && validSha(readySourceSha)
-    && bootSourceSha === readySourceSha
   const artifactMatchesEvents = artifactSourceCandidates.every((value) => value === bootSourceSha)
   return typeof runId === 'string'
     && generationId !== null
@@ -1593,16 +1597,26 @@ export function buildObserverSnapshot({ report, events, mission = null, runBoot 
   const eventSourceSha = boot?.detail?.source ?? null
   const readySourceSha = candidateGenerationReady?.detail?.sourceSha ?? candidateGenerationReady?.detail?.source ?? null
   const artifactSourceSha = runMetadata?.sourceSha ?? null
-  const sourceCandidates = [eventSourceSha, readySourceSha, artifactSourceSha]
+  const validCommitSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+  // The live generation's source is the commit value. Same-world minor reloads
+  // legitimately change GENERATION_READY's sourceSha while BOOT and the
+  // acceptance artifacts keep the host-boot sha; that split is designed
+  // provenance, not a conflict. Generation-stamped evidence (VTR transitions,
+  // reach routes) fences against the live generation sha, so reporting the
+  // launch sha instead would blind every minor after the first.
+  const acceptanceShaCandidates = [eventSourceSha, artifactSourceSha]
     .filter((value) => value !== null && value !== undefined && value !== '')
-  const sourceCandidatesValid = sourceCandidates.every((value) => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value))
-  const distinctSourceCandidates = [...new Set(sourceCandidates)]
+  const readySourceShaValid = validCommitSha(readySourceSha)
+  const acceptanceShaDistinct = [...new Set(acceptanceShaCandidates)]
   const sourceCommitConflict = runMetadata?.sourceShaConflict === true
-    || !sourceCandidatesValid
-    || distinctSourceCandidates.length > 1
-  const sourceCommit = sourceCommitConflict || distinctSourceCandidates.length !== 1
-    ? null
-    : distinctSourceCandidates[0]
+    || !acceptanceShaCandidates.every(validCommitSha)
+    || acceptanceShaDistinct.length > 1
+    || (readySourceSha !== null && !readySourceShaValid)
+  const sourceCommit = readySourceShaValid
+    ? readySourceSha
+    : sourceCommitConflict || acceptanceShaDistinct.length !== 1
+      ? null
+      : acceptanceShaDistinct[0]
   const sourceCommitBinding = sourceCommit === null
     ? sourceCommitConflict ? 'conflict' : 'unknown'
     : eventSourceSha !== null && readySourceSha !== null && artifactSourceSha !== null ? 'run-BOOT+GENERATION_READY+acceptance+predicate-artifacts'
