@@ -31,7 +31,7 @@ import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClas
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
 import type { FoodSourceGap, FoodSourceMissingLink } from './foodSources.ts'
-import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
+import { isProtectedStationBlock, isInfestedBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectClearanceTool, selectDigTool, strongestDigRequirement } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, routeScaffoldCounts, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
@@ -5683,7 +5683,7 @@ function generateRawCandidates(
   }
 
   return {
-    candidates: mergeDuplicateCandidates(candidates),
+    candidates: annotateInfestedDigs(mergeDuplicateCandidates(candidates)),
     placeRefusal,
     ignitionRefusal,
     entryRefusal,
@@ -7998,12 +7998,19 @@ function descendCandidateFromStep(
   const headingDir = spec.heading?.dir ?? best.dir
   const headingLine = spec.heading === undefined ? null : formatDescentHeading(spec.heading)
   const digList = digPlan.map((item) => `${item.cell.x},${item.cell.y},${item.cell.z}`).join(';')
+  // Dig consequence, not a refusal: every `infested_*` cell this step breaks
+  // releases a silverfish (live gen-muud0269: two infested_stone digs -> a
+  // 3-silverfish swarm -> death). The full dig plan is checked, not only the
+  // primary cell - a feet+1 head dig releases it just the same. The leg stays
+  // offered and grounded; Jev weighs the spawn against the route value.
+  const infestedDigs = [...new Set(digPlan.filter((item) => item.name !== null && isInfestedBlock(item.name)).map((item) => item.name as string))]
+  const infestedSuffix = infestedDigs.length === 0 ? '' : `, dig releases a silverfish (${infestedDigs.join('/')})`
   return {
     toolReason: choice.reason,
     candidate: {
       id: descendId(best),
       kind: 'DESCEND',
-      label: `${best.dir === 'D' ? 'dig straight down' : best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${toward} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})`,
+      label: `${best.dir === 'D' ? 'dig straight down' : best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${toward} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})${infestedSuffix}`,
       targetName: spec.focusItem,
       target: primary,
       targetEntityId: null,
@@ -8041,6 +8048,7 @@ function descendCandidateFromStep(
         predicate: spec.descendTargetY === null ? 'none' : `descend_to:Y=${spec.descendTargetY}`,
         descendTargetY: spec.descendTargetY ?? 'none',
         digBlockName: best.digName ?? 'unknown',
+        ...(infestedDigs.length === 0 ? {} : { infestedDig: infestedDigs.join('/') }),
         toolReason: choice.reason,
         clearance: true,
         staircase: spec.staircase,
@@ -11260,6 +11268,44 @@ function mergeDuplicateCandidates(candidates: readonly Candidate[]): Candidate[]
     if (first.targetName === null && candidate.targetName !== null) first.targetName = candidate.targetName
   }
   return out
+}
+
+/**
+ * The declared dig-block names a candidate carries outside `targetName`. A
+ * candidate that digs an `infested_*` cell releases a silverfish whether its
+ * arm knew it or not; the emit sites declare the cell name under one of these
+ * keys, and the assembly-level annotation below turns any of them into the
+ * same `infestedDig` fact Jev's params carry. DESCEND legs set the key at emit
+ * time from their full dig plan (non-primary head cells included), so this is
+ * the sibling-arm coverage: MINE on `targetName`, STEP/ASCEND on their
+ * declared dig names.
+ */
+const INFESTED_DIG_META_KEYS: readonly string[] = [
+  'digBlockName',
+  'digName',
+  'stairBlockName',
+  'upBlockName',
+  'fallbackStairBlockName',
+  'fallbackUpBlockName',
+]
+
+function annotateInfestedDigs(candidates: readonly Candidate[]): Candidate[] {
+  return candidates.map((candidate) => {
+    if (candidate.meta.infestedDig !== undefined) return candidate
+    const names = new Set<string>()
+    if (candidate.targetName !== null && isInfestedBlock(candidate.targetName)) names.add(candidate.targetName)
+    for (const key of INFESTED_DIG_META_KEYS) {
+      const value = candidate.meta[key]
+      if (typeof value === 'string' && isInfestedBlock(value)) names.add(value)
+    }
+    if (names.size === 0) return candidate
+    const joined = [...names].join('/')
+    return {
+      ...candidate,
+      label: `${candidate.label}, dig releases a silverfish`,
+      meta: { ...candidate.meta, infestedDig: joined },
+    }
+  })
 }
 
 function cellText(position: Vec3Json): string {

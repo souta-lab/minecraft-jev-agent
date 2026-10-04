@@ -452,6 +452,7 @@ const MEANINGFUL_META_KEYS: readonly string[] = [
   'tableSource',
   'furnaceSource',
   'placementAxis',
+  'infestedDig',
 ]
 
 function cellKey(position: { x: number; y: number; z: number }): string {

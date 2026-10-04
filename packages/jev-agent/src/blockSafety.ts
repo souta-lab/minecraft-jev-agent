@@ -21,6 +21,20 @@ export function isProtectedStationBlock(name: string): boolean {
   return PROTECTED_STATION_BLOCKS.has(normalized)
 }
 
+/**
+ * Vanilla dig consequence: mining an `infested_*` block (infested stone,
+ * cobblestone, deepslate and the stone-brick family) releases a silverfish.
+ * The client receives the true block id, so the world model knows the name
+ * before the dig; what it did not know anywhere was the consequence. This is
+ * a world-model fact, not a refusal: an armed body may still choose the dig,
+ * and stronghold routes cannot avoid infested stone bricks at all - the
+ * candidate carries the fact so Jev weighs it, exactly like `targetName`.
+ */
+export function isInfestedBlock(name: string): boolean {
+  const normalized = name.includes(':') ? name.slice(name.lastIndexOf(':') + 1) : name
+  return normalized.startsWith('infested_')
+}
+
 // ---------------------------------------------------------------------------
 // live-structure membership: a general source-protection predicate
 // ---------------------------------------------------------------------------

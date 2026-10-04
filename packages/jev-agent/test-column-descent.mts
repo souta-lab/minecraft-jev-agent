@@ -700,6 +700,45 @@ addCase('a non-clearance MINE never re-grounds through the clearance arm', () =>
   return { pass: regrounded === null, detail: `regrounded=${regrounded?.id ?? 'null'}` }
 })
 
+// portal-p23.39: the measured gen-muud0269 death - a descend tunnel dug
+// `infested_stone` cells, releasing a silverfish swarm that killed the unarmed
+// body. The dig consequence is now a candidate fact, not a refusal: the leg
+// stays offered and Jev weighs the spawn against the route value.
+addCase('an infested dig cell is named on the step, not refused', () => {
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL],
+    inventory: inventory({ dirt: 100 }),
+    descent: [step(FEET, 'D', 0, 0, { mode: 'down', safe: true, digName: 'infested_stone' })],
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const candidate = grounded.candidates.find((entry) => entry.kind === 'DESCEND')
+  const pass =
+    candidate !== undefined &&
+    candidate.meta.infestedDig === 'infested_stone' &&
+    candidate.label.includes('releases a silverfish')
+  return {
+    pass,
+    detail: `candidate=${candidate?.id ?? 'none'} infestedDig=${String(candidate?.meta.infestedDig)} label=${candidate?.label ?? 'none'}`,
+  }
+})
+
+addCase('a clean dig cell carries no infestedDig fact', () => {
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL],
+    inventory: inventory({ dirt: 100 }),
+    descent: [step(FEET, 'D', 0, 0, { mode: 'down', safe: true, digName: 'stone' })],
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const candidate = grounded.candidates.find((entry) => entry.kind === 'DESCEND')
+  const pass = candidate !== undefined && candidate.meta.infestedDig === undefined && !candidate.label.includes('silverfish')
+  return {
+    pass,
+    detail: `candidate=${candidate?.id ?? 'none'} infestedDig=${String(candidate?.meta.infestedDig)}`,
+  }
+})
+
 addCase('the typed marker line is stable for every refusal reason', () => {
   const cell = { x: 23, y: 81, z: 8 }
   const noStep = formatColumnDescentRefused({ reason: 'no_safe_step', cell })
