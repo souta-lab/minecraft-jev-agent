@@ -42,7 +42,7 @@ import {
 } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { guardCandidate } from './src/policy.ts'
-import { buildWorldState, defaultSensorOptions } from './src/state.ts'
+import { buildSurvivalDigCells, buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, EntityState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import {
@@ -1076,6 +1076,137 @@ addCase('(g7) the attack race verdict: fists lose even while regenerating, a swo
     pass,
     detail: `fist=${fistVsZombie.killMs}/${fistVsZombie.deathMs} regenFist=${regenFistVsZombie.lost} marginal=${regenMarginal.lost}/${sameMarginalStarved.lost} unknown=${unknownMob.known}`,
   }
+})
+
+// --- (h) survivalDigCells sensor: the zero-material material source ----------
+
+type DigBlockSpec = { name: string; boundingBox: string }
+const digSolid = (name: string): DigBlockSpec => ({ name, boundingBox: 'block' })
+const digEmpty = (): DigBlockSpec => ({ name: 'air', boundingBox: 'empty' })
+const digKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
+
+/** A stub world for the sensor: "x,y,z" -> block, missing cells unloaded. */
+function digBot(blocks: Record<string, DigBlockSpec>, selfPos: Vec3Json): Bot {
+  const entity = {
+    position: {
+      ...selfPos,
+      set(x: number, y: number, z: number) {
+        this.x = x
+        this.y = y
+        this.z = z
+        return this
+      },
+      clone() {
+        return { x: this.x, y: this.y, z: this.z, set: this.set }
+      },
+    },
+  }
+  return {
+    entity,
+    blockAt: (p: { x: number; y: number; z: number }) =>
+      blocks[digKey(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))] ?? null,
+    registry: {
+      blocksByName: {
+        dirt: { drops: [3] },
+        grass_block: { drops: [3] },
+        sand: { drops: [4] },
+        stone: { drops: [5] },
+      },
+      items: { 3: { name: 'dirt' }, 4: { name: 'sand' }, 5: { name: 'cobblestone' } },
+    },
+  } as unknown as Bot
+}
+
+addCase('(h1) starved + threatened: adjacent soft solids emit dig cells, the standing cell is excluded', () => {
+  const self = selfState(SELF)
+  const zombie = hostile(80, 'zombie', { x: 2.5, y: 10, z: 0.5 })
+  const g: Record<string, DigBlockSpec> = {
+    // Standing cell + floor: floor never offered, own column excluded anyway.
+    [digKey(0, 9, 0)]: digSolid('dirt'),
+    // Lane toward the zombie (+x): grass drops dirt.
+    [digKey(1, 9, 0)]: digSolid('grass_block'),
+    [digKey(2, 9, 0)]: digSolid('grass_block'),
+    // Off-lane dirt and a sand cell at feet level.
+    [digKey(0, 9, -1)]: digSolid('dirt'),
+    [digKey(-1, 10, 0)]: digSolid('sand'),
+    // Stone is not in the soft set - too slow to fist-mine inside a melee
+    // window; filtered by name before the harvest lookup ever runs.
+    [digKey(0, 9, 1)]: digSolid('stone'),
+    [digKey(-1, 9, 0)]: digEmpty(),
+  }
+  const cells = buildSurvivalDigCells(
+    digBot(g, SELF),
+    self,
+    [zombie],
+    null,
+    {},
+    { ...defaultSensorOptions, reach: 4.5 },
+    NOW,
+  )
+  const standing = cells.find((cell) => cell.position.x === 0 && cell.position.z === 0)
+  const names = cells.map((cell) => `${cell.position.x},${cell.position.y},${cell.position.z}:${cell.name}->${cell.yieldItem}`)
+  const pass =
+    cells.length > 0 &&
+    cells.length <= 4 &&
+    standing === undefined &&
+    cells.every((cell) => cell.yieldItem.length > 0) &&
+    cells.some((cell) => cell.name === 'grass_block' && cell.yieldItem === 'dirt') &&
+    // Lane-first ordering: the +x grass cells sort before the off-lane cells.
+    cells[0] !== undefined &&
+    cells[0].position.x === 1 &&
+    cells[0].position.z === 0
+  return { pass, detail: `cells=[${names.join(' | ')}]` }
+})
+
+addCase('(h2) the sensor stays silent while a placeable is already held or no threat is active', () => {
+  const self = selfState(SELF)
+  const zombie = hostile(79, 'zombie', { x: 2.5, y: 10, z: 0.5 })
+  const g: Record<string, DigBlockSpec> = { [digKey(1, 9, 0)]: digSolid('dirt') }
+  const withPlaceable = buildSurvivalDigCells(
+    digBot(g, SELF),
+    self,
+    [zombie],
+    null,
+    { dirt: 4 },
+    { ...defaultSensorOptions, reach: 4.5 },
+    NOW,
+  )
+  const noThreat = buildSurvivalDigCells(
+    digBot(g, SELF),
+    self,
+    [],
+    null,
+    {},
+    { ...defaultSensorOptions, reach: 4.5 },
+    NOW,
+  )
+  const pass = withPlaceable.length === 0 && noThreat.length === 0
+  return { pass, detail: `withPlaceable=${withPlaceable.length} noThreat=${noThreat.length}` }
+})
+
+addCase('(h3) blocks with no resolved yield are never offered', () => {
+  const self = selfState(SELF)
+  const zombie = hostile(78, 'zombie', { x: 2.5, y: 10, z: 0.5 })
+  // obsidian is not in the soft set (name filter); gravel/mud ARE in the set
+  // but absent from the stub registry, so resolveBlockHarvest yields null and
+  // the cell is dropped - only the honest dig source survives.
+  const g: Record<string, DigBlockSpec> = {
+    [digKey(1, 9, 0)]: digSolid('obsidian'),
+    [digKey(1, 9, 1)]: digSolid('gravel'),
+    [digKey(2, 9, 1)]: digSolid('mud'),
+    [digKey(-1, 9, 0)]: digSolid('dirt'),
+  }
+  const cells = buildSurvivalDigCells(
+    digBot(g, SELF),
+    self,
+    [zombie],
+    null,
+    {},
+    { ...defaultSensorOptions, reach: 4.5 },
+    NOW,
+  )
+  const pass = cells.length === 1 && cells[0] !== undefined && cells[0].name === 'dirt'
+  return { pass, detail: `cells=[${cells.map((cell) => cell.name).join(',')}]` }
 })
 
 let failures = 0

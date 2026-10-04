@@ -5573,7 +5573,7 @@ const SURVIVAL_DIG_MAX_CELLS = 4
  * never offered - digging the floor it stands on is a descent affordance, not
  * a shaping source.
  */
-function buildSurvivalDigCells(
+export function buildSurvivalDigCells(
   bot: Bot,
   self: SelfState,
   entities: readonly EntityState[],
