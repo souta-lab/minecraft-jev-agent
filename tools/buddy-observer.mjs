@@ -23,6 +23,7 @@ const DEFAULT_PORT = 4173
 const DEFAULT_INTERVAL_MS = 2500
 const DEFAULT_LOG_TAIL_BYTES = 128 * 1024
 const MAX_RUN_BOUNDARY_SCAN_BYTES = 1024 * 1024
+const MAX_RUN_BOUNDARY_SCAN_TOTAL_BYTES = 64 * 1024 * 1024
 const MAX_RUN_HEAD_SCAN_BYTES = 64 * 1024
 const MAX_RUN_ARTIFACT_BYTES = 64 * 1024
 const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
@@ -266,33 +267,45 @@ function readLogEvent(logPath, eventName, runId = null, detailMatches = null) {
   const fd = openSync(logPath, 'r')
   try {
     const size = fstatSync(fd).size
-    const scanStart = Math.max(0, size - MAX_RUN_BOUNDARY_SCAN_BYTES)
-    let cursor = size
-    let carry = ''
     const chunkSize = 64 * 1024
-    while (cursor > scanStart) {
-      const length = Math.min(cursor - scanStart, chunkSize)
-      const start = cursor - length
-      const buffer = Buffer.alloc(length)
-      readSync(fd, buffer, 0, length, start)
-      const lines = (buffer.toString('utf8') + carry).split('\n')
-      carry = lines.shift() ?? ''
-      for (let index = lines.length - 1; index >= 0; index -= 1) {
-        const entry = parseBuddyLogLine(lines[index] ?? '')
-        if (entry?.event === eventName
-          && (runId === null || entry.detail.runId === runId)
-          && (detailMatches === null || detailMatches(entry.detail))) return entry
+    // Run-boundary events (GENERATION_READY from reloads/respawns) anchor
+    // mid-log and drift backward ~100KB/min on verbose traces, so a fixed
+    // window loses them once the generation outlives the window. Grow the
+    // window geometrically until the event is found, the file start is
+    // reached, or the hard cap is exceeded; cost stays proportional to the
+    // event's actual distance from the tail.
+    let windowBytes = MAX_RUN_BOUNDARY_SCAN_BYTES
+    while (true) {
+      const scanStart = Math.max(0, size - windowBytes)
+      let cursor = size
+      let carry = ''
+      while (cursor > scanStart) {
+        const length = Math.min(cursor - scanStart, chunkSize)
+        const start = cursor - length
+        const buffer = Buffer.alloc(length)
+        readSync(fd, buffer, 0, length, start)
+        const lines = (buffer.toString('utf8') + carry).split('\n')
+        carry = lines.shift() ?? ''
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+          const entry = parseBuddyLogLine(lines[index] ?? '')
+          if (entry?.event === eventName
+            && (runId === null || entry.detail.runId === runId)
+            && (detailMatches === null || detailMatches(entry.detail))) return entry
+        }
+        cursor = start
       }
-      cursor = start
+      // At a bounded scan boundary `carry` may be only the end of a line. Do not
+      // attribute a partial record to this run; only parse it when the file start
+      // was reached.
+      if (scanStart === 0) {
+        const first = parseBuddyLogLine(carry)
+        return first?.event === eventName
+          && (runId === null || first.detail.runId === runId)
+          && (detailMatches === null || detailMatches(first.detail)) ? first : null
+      }
+      if (windowBytes >= MAX_RUN_BOUNDARY_SCAN_TOTAL_BYTES) return null
+      windowBytes = Math.min(windowBytes * 4, MAX_RUN_BOUNDARY_SCAN_TOTAL_BYTES)
     }
-    // At a bounded scan boundary `carry` may be only the end of a line. Do not
-    // attribute a partial record to this run; only parse it when the file start
-    // was reached.
-    if (scanStart > 0) return null
-    const first = parseBuddyLogLine(carry)
-    return first?.event === eventName
-      && (runId === null || first.detail.runId === runId)
-      && (detailMatches === null || detailMatches(first.detail)) ? first : null
   } finally {
     closeSync(fd)
   }
@@ -325,14 +338,13 @@ function readLogHeadEvent(logPath, eventName, runId = null, detailMatches = null
 
 function readRunEvent(logPath, eventName, runId) {
   if (runId === null || runId === undefined) return null
-  // Historical run metadata beyond MAX_RUN_BOUNDARY_SCAN_BYTES stays unknown;
-  // never recover it by scanning an unbounded log on a live request. BOOT and
-  // BUILD are emitted once at resident start and anchor the log head, so once
-  // the log grows past the backward window a bounded head scan still reaches
-  // them. GENERATION_READY is intentionally not handled here: minor reloads and
-  // respawns can emit it anywhere in the log, so it keeps the backward scan.
-  return readLogEvent(logPath, eventName, runId)
-    ?? readLogHeadEvent(logPath, eventName, runId)
+  // Run metadata beyond the backward scan stays unknown rather than scanning an
+  // unbounded log on every request. BOOT and BUILD are emitted once at resident
+  // start and anchor the log head, so a bounded head scan reaches them in O(1)
+  // regardless of log size; the adaptive backward scan remains the fallback for
+  // a mid-log restart BOOT.
+  return readLogHeadEvent(logPath, eventName, runId)
+    ?? readLogEvent(logPath, eventName, runId)
 }
 
 function readRunArtifact(runtimeDir, prefix, recordName, runId) {

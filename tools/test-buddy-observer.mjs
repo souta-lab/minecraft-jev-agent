@@ -1078,13 +1078,14 @@ try {
   assert.equal(ingressSummary.choices.jevStatus, 'observed')
   assert.equal(ingressSummary.unknown.includes('jev_call_context_unavailable'), false)
 
-  // A mature log pushes the resident-start BOOT past the backward boundary
-  // scan window while GENERATION_READY stays near the tail. The head-anchored
-  // fallback must still find BOOT and bind the generation boundary.
+  // A mature log pushes both the resident-start BOOT and this generation's
+  // GENERATION_READY past the 1MB backward boundary-scan window. The
+  // head-anchored scan must still find BOOT and the growing backward scan must
+  // still reach READY to bind the generation boundary.
   writeFileSync(join(ingressRuntimeDir, 'buddy.log'), [
     `[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha} worldKey=${JSON.stringify(ingressWorld)}`,
-    'x'.repeat(1024 * 1024 + 256 * 1024),
     `[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`,
+    'x'.repeat(1024 * 1024 + 256 * 1024),
     ingressRouteMirrorLine,
   ].join('\n') + '\n')
   const matureSnapshot = await createObserver({ runtimeDir: ingressRuntimeDir }).snapshot()
