@@ -5109,6 +5109,24 @@ function generateRawCandidates(
       columnIds2.add(candidate.id)
       candidates.push(candidate)
     }
+    // A floating body holding a solid has the SAME under-body footing answer
+    // the pillar-acquisition arm already proves (`pillarFootingCandidate`):
+    // place one block into the witnessed fluid cell under the feet and stand
+    // on it, after which ordinary wade/step locomotion expresses the bank.
+    // Measured portal-p23 run-mutsv43u-1a0g (2026-10-04T13:24:29Z): the body
+    // drowned 0.37m from a shore cell it could not climb while dirt:7 sat in
+    // the inventory - every `SWIM:exit` ended `verified=false` at the bank
+    // and no shaping answer was ever offered, because the only footing
+    // emission lived behind a pillar-acquisition chain that liquid columns
+    // suppress upstream. The sensor's own `hasUsableGroundSupport` gate keeps
+    // this silent for a wading body that can already stand.
+    if (bodyInWater) {
+      for (const candidate of pillarFootingCandidate(state, options)) {
+        if (columnIds2.has(candidate.id)) continue
+        columnIds2.add(candidate.id)
+        candidates.push(candidate)
+      }
+    }
   }
 
   candidates.push({
@@ -15053,17 +15071,19 @@ function acquisitionRefusalFor(
 }
 
 /**
- * The missing-ground answer for a pillar: place one held solid block into the
- * sensor-proven cell directly under the body, then let the next fresh state
- * derive the pillar normally. This does NOT declare footing present; it is a
- * verified prerequisite action whose post-condition creates that fact.
+ * The missing-ground answer for a body over a fluid/air cell: place one held
+ * solid block into the sensor-proven cell directly under it, then let the
+ * next fresh state derive the pillar or the ordinary standable-ground route
+ * normally. This does NOT declare footing present; it is a verified
+ * prerequisite action whose post-condition creates that fact.
+ *
+ * p23.14: the same emitted shape is reused as the water-trap answer, so it is
+ * exported and offered from the water arm as well as the pillar-acquisition
+ * chain. The witness is one sensor field (`state.pillarFootingPlacement`,
+ * populated only when the body has no usable ground support) and the
+ * executor's `pillarFooting` path is the already-proven actuator.
  */
-function pillarFootingPrerequisiteCandidates(
-  state: WorldState,
-  options: CandidateOptions,
-  capability: Capability,
-): Candidate[] {
-  if (capability.kind !== 'ascend_plan' || capability.plan !== 'pillar' || capability.reason !== 'no_footing') return []
+export function pillarFootingCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
   const footing = state.pillarFootingPlacement ?? null
   const placeable = selectPlaceableBlock(routeScaffoldCounts(state.inventory.counts, state.goalQueue, options.recipes ?? null))
   if (footing === null || placeable === null) return []
@@ -15089,6 +15109,19 @@ function pillarFootingPrerequisiteCandidates(
       },
     },
   ]
+}
+
+/**
+ * The pillar-acquisition gate over `pillarFootingCandidate`: offered only when
+ * a withheld ascend plan named `no_footing` as its missing capability.
+ */
+function pillarFootingPrerequisiteCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  capability: Capability,
+): Candidate[] {
+  if (capability.kind !== 'ascend_plan' || capability.plan !== 'pillar' || capability.reason !== 'no_footing') return []
+  return pillarFootingCandidate(state, options)
 }
 
 /** Grounded candidates that would acquire a withheld target's missing capability. */

@@ -25,6 +25,7 @@ import {
   defaultCandidateOptions,
   generateCandidates,
   isDeathZoneEscapeRoute,
+  pillarFootingCandidate,
   waterRouteCandidates,
 } from './src/candidates.ts'
 import { buildWaterRouteTargets, waterRouteBreathOk, WATER_ROUTE_WAYPOINT_MS } from './src/state.ts'
@@ -750,6 +751,81 @@ addCase('traverse exits: a traverse target survives the offer seam with its exit
       grounded === true,
     detail: `swim=${swim?.id ?? 'none'} kind=${swim?.meta.waterRouteExitKind} grounded=${grounded}`,
   }
+})
+
+// p23.14: the under-body footing answer must be offered to a floating body
+// inside the water arm, not only behind the pillar-acquisition chain (the
+// liquid column suppresses every ascend plan upstream). Measured
+// portal-p23 run-mutsv43u-1a0g (2026-10-04T13:24:29Z): drowned 0.37m from an
+// unclimbable shore while dirt:7 sat in the inventory; every SWIM:exit ended
+// verified=false and no shaping answer was ever emitted.
+
+const FOOTING_WITNESS = {
+  target: { x: 0, y: -1, z: 0 },
+  reference: { x: 0, y: -2, z: 0 },
+  replacedBlock: 'water',
+}
+
+addCase('footing seam: floating body + witnessed footing + placeable -> PLACE:pillar-footing', () => {
+  const state = {
+    self: { ...SELF_BASE, feetInWater: true, eyesInWater: false, air: 15 },
+    inventory: { counts: { dirt: 7 } },
+    goalQueue: null,
+    pillarFootingPlacement: FOOTING_WITNESS,
+  } as unknown as WorldState
+  const out = pillarFootingCandidate(state, defaultCandidateOptions)
+  const c = out[0]
+  const pass =
+    out.length === 1 &&
+    c?.id === 'PLACE:dirt:pillar-footing:p0_-1_0' &&
+    c?.kind === 'PLACE' &&
+    c?.meta.pillarFooting === true &&
+    c?.meta.footingReference === 'b0_-2_0' &&
+    c?.meta.footingReplacedBlock === 'water'
+  return { pass, detail: `out=[${out.map((x) => x.id).join(' ')}]` }
+})
+
+addCase('footing seam: no footing witness -> nothing emitted', () => {
+  const state = {
+    self: { ...SELF_BASE, feetInWater: true, eyesInWater: false, air: 15 },
+    inventory: { counts: { dirt: 7 } },
+    goalQueue: null,
+  } as unknown as WorldState
+  return { pass: pillarFootingCandidate(state, defaultCandidateOptions).length === 0, detail: 'no witness' }
+})
+
+addCase('footing seam: witness but no placeable -> nothing emitted', () => {
+  const state = {
+    self: { ...SELF_BASE, feetInWater: true, eyesInWater: false, air: 15 },
+    inventory: { counts: {} },
+    goalQueue: null,
+    pillarFootingPlacement: FOOTING_WITNESS,
+  } as unknown as WorldState
+  return { pass: pillarFootingCandidate(state, defaultCandidateOptions).length === 0, detail: 'no placeable' }
+})
+
+addCase('offer seam: a wet body that cannot stand is offered the footing place beside SWIM:exit', () => {
+  const state = trappedState([ROUTE], {}, 0)
+  // air:20 is the measured scene (surface-floating body, eyes out): a shore
+  // exit is still offered while the under-body footing place appears beside
+  // it. air:15 would price the 4-waypoint ROUTE out of the breath budget and
+  // conflate "route filtered" with "footing emitted".
+  state.self = { ...state.self, feetInWater: true, eyesInWater: false, air: 20 } as WorldState['self']
+  state.inventory = { ...state.inventory, counts: { dirt: 7 }, totalItems: 7 }
+  state.pillarFootingPlacement = FOOTING_WITNESS
+  const offered = generateCandidates(state, openOptions)
+  const ids = offered.map((c) => c.id)
+  const pass = ids.includes('PLACE:dirt:pillar-footing:p0_-1_0') && ids.includes('SWIM:exit:p4_0_0')
+  return { pass, detail: `offered=[${ids.join(' ')}]` }
+})
+
+addCase('offer seam: the same wet body without a placeable gets no footing offer', () => {
+  const state = trappedState([ROUTE], {}, 0)
+  state.self = { ...state.self, feetInWater: true, eyesInWater: false, air: 15 } as WorldState['self']
+  state.pillarFootingPlacement = FOOTING_WITNESS
+  const offered = generateCandidates(state, openOptions)
+  const footing = offered.filter((c) => c.id.startsWith('PLACE:dirt:pillar-footing:'))
+  return { pass: footing.length === 0, detail: `footing=[${footing.map((c) => c.id).join(' ')}]` }
 })
 
 // ---------------------------------------------------------------------------
