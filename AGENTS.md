@@ -143,6 +143,14 @@ Exit rules:
 
 A guard that only reduces reachable state is `SAFETY_GUARD/PARTIAL`, not solved capability.
 
+### 5.1 Verification debt and lane closure
+
+An `ARMED`/unmeasured fix is **verification debt**, not a second active blocker. Keep exactly one current causal blocker. When live state moves on, stamp the old fix `ARMED` or `DEFERRED` with its falsification signature and continue the Mission; do not keep re-reading or re-chasing it by elapsed time. Never promote an armed fix to `CONFIRMED` without source-bound fresh evidence.
+
+Do not accumulate a stack of unmeasured patches and call it progress. Before opening a **third consecutive unconfirmed minor**, perform one conversion checkpoint: either (a) fresh live truth now exercises an older fix, (b) the scene has moved on and the older fix is explicitly deferred while the new earliest blocker is pursued, or (c) same-world information value is genuinely lower and the major is honestly sealed/rolled. Do not roll merely to manufacture a rare old recurrence.
+
+Once the causal defect and owning lane are known, read required governance/issue routing **once for that lane**. Do not repeatedly re-read unchanged routing, issue text, or architecture docs between edit/test steps. Re-open them only if scope/ownership actually changes or a contradiction appears.
+
 Before opening a new capability surface, perform a **capability-reuse check**: search the current runtime for already-verified primitives that can be composed to satisfy the missing affordance. Repeated campaign history has shown that local primitives often exist while the semantic layer fails to present them in the context where they matter. That presentation/composition gap is usually a smaller and more general defect than implementing another bespoke mechanic.
 
 Treat cross-layer contradictions as high-value defects. Examples: sensing says an escape is impossible while live geometry supports one; a goal needs a resource while scaffolding consumes it; a critical survival trigger arrives while a grounded answer is in flight; a source change is evaluated using an older source's verdict. Resolve the contradiction at the narrowest ownership boundary rather than compensating downstream.
@@ -213,6 +221,16 @@ If live evidence is unchanged, switch **in the same turn** to root cause, code i
 
 Repeated physical outcomes are subject to the same rule. Do not watch additional deaths, path failures, pickup failures, or combat contacts after the causal fingerprint is already decided. Count **new causal information**, not event volume.
 
+### 9.1 Unattended tool/session liveness
+
+Treat the engineering toolchain itself as a bounded resource. Inspection commands must be finite and non-interactive; prefer small single-purpose reads/searches over giant compound pipelines, and give naturally long tests/builds an explicit bounded execution path when available.
+
+A terminal/tool UI that still says `Running` is **not evidence that useful work is running**. If the OS child for a normally short command is already gone, or a normally sub-minute command has had no child/output/state change for several minutes, classify it as `DEVIN_TOOL_STALE` rather than waiting. If control is available, cancel that stale tool **once** and resume from durable evidence; do not rerun the whole discovery batch just to recreate context. Legitimate long tests/runs are distinguished by a live child process, CPU/output/progress, or an explicit background contract.
+
+A Devin/session restart is an infrastructure boundary, not permission to discard WIP or restart reasoning from zero. Preserve dirty files, read `git diff` before editing, and continue the same causal batch unless fresh live truth invalidates it. Never reset or overwrite surviving WIP merely because the previous UI died.
+
+Maintain `/home/s0u7a/.config/devin/mc-ai-handoff.md` as a **non-authoritative crash note** containing: current run + exact source, verified high-water/current debt, current causal hypothesis, dirty files, last completed proof step, and the next concrete action. Update it when a causal defect becomes decided, before a naturally long/risky tool step, and after commit/reload. On restart read it after git status, then reconcile against live truth. Live process/world/source evidence always overrides the note.
+
 ## 10. Kernel/resource/mutation invariants
 
 Semantic transition ownership and physical resource/actuation leases are separate. `ResourceId` is structured/hierarchical and bundles acquire atomically. Every mutation requires current ACTIVE contract, current world/dimension/epoch/generation binding, covering current lease, and allowed effect permit. Irreversible effects require kernel-owned single-use `EffectCommitToken` bound to transition/contract hash/generation/effect.
@@ -262,7 +280,7 @@ On provider outage record `MODEL_UNAVAILABLE`, preserve semantics, and immediate
 ## 14. Resume contract
 
 After restart or a long absence, reconcile before mutation:
-`AGENTS -> git HEAD/origin/status -> state.json -> P-SERIES -> active-run registry -> actual processes/PIDs/ports -> world/server bytes -> latest resident generation/logs -> observer`.
+`AGENTS -> git HEAD/origin/status + surviving diff -> /home/s0u7a/.config/devin/mc-ai-handoff.md -> state.json -> P-SERIES -> active-run registry -> actual processes/PIDs/ports -> world/server bytes -> latest resident generation/logs -> observer`.
 
 Durable state may claim `active` while all processes are dead; process truth wins. Repair stale durable ownership before resuming evidence claims.
 
