@@ -1609,6 +1609,114 @@ addCase('(v-b) the v2-n1 death-loop shape: a re-grounded RETREAT keeps its headi
   }
 })
 
+addCase('(v-c) the p23 drowned-contact shaping churn: a re-keyed wall/pillar/dig keeps the SAME causal answer', () => {
+  // Measured live (gen-mutwrj01, 2026-10-04T14:20, drowned 33819 at contact,
+  // health ~2.3): `PLACE:wall:dirt:p-3_64_-7` was re-offered one tick later as
+  // `p-3_63_-6` (the threat's floor(y) and lane column moved with it) and the
+  // pick ended the tick actionless as `not_a_survival_action`; the same churn
+  // voided `MOVE:escapeup:*`. These are survival actions, so the vanished id
+  // must re-ground to the same answer - never a different threat's.
+  const wall = {
+    id: 'PLACE:wall:dirt:p-3_64_-7',
+    kind: 'PLACE',
+    target: { x: -3, y: 64, z: -7 },
+    meta: { threatWall: true, threatEntityId: 33819 },
+  }
+  const reKeyed = regroundVanishedSurvivalChoice(
+    wall,
+    [
+      { id: 'MOVE:escapeup:p-4_64_-6', kind: 'MOVE', target: { x: -4, y: 64, z: -6 }, meta: { escapePillar: true, threatEntityId: 33819 } },
+      { id: 'PLACE:wall:dirt:p-3_63_-6', kind: 'PLACE', target: { x: -3, y: 63, z: -6 }, meta: { threatWall: true, threatEntityId: 33819 } },
+    ],
+    null,
+  )
+  const stillThere = regroundVanishedSurvivalChoice(
+    wall,
+    [{ id: 'PLACE:wall:dirt:p-3_64_-7', kind: 'PLACE', target: { x: -3, y: 64, z: -7 }, meta: { threatWall: true, threatEntityId: 33819 } }],
+    null,
+  )
+  const otherThreat = regroundVanishedSurvivalChoice(
+    wall,
+    [{ id: 'PLACE:wall:dirt:p-3_63_-6', kind: 'PLACE', target: { x: -3, y: 63, z: -6 }, meta: { threatWall: true, threatEntityId: 99999 } }],
+    null,
+  )
+  const pass =
+    reKeyed.candidateId === 'PLACE:wall:dirt:p-3_63_-6' &&
+    reKeyed.kind === 'PLACE' &&
+    reKeyed.reason === 'same_threat_shaping' &&
+    reKeyed.outcome === 'REGROUNDED' &&
+    reKeyed.entityId === 33819 &&
+    stillThere.candidateId === 'PLACE:wall:dirt:p-3_64_-7' &&
+    stillThere.reason === 'same_cell_shaping' &&
+    otherThreat.candidateId === null &&
+    otherThreat.outcome === 'CAPABILITY_LOST' &&
+    otherThreat.kind === 'PLACE' &&
+    otherThreat.entityId === 33819
+  return {
+    pass,
+    detail: `reKeyed=${reKeyed.candidateId}/${reKeyed.reason} same=${stillThere.reason} other=${otherThreat.candidateId}/${otherThreat.outcome}`,
+  }
+})
+
+addCase('(v-d) a vanished escape pillar degrades to a TYPED CAPABILITY_LOST, and the dig family re-grounds by threat', () => {
+  // The second half of the measured window: the body's last placeable was spent
+  // by the first pillar leg, so the fresh offer carried only `MINE:survival:*`.
+  // `MOVE:escapeup:p-4_65_-6` must then end CAPABILITY_LOST (kind=MOVE) so the
+  // contact fallback fires - never `not_a_survival_action`, which voids silent.
+  const pillar = {
+    id: 'MOVE:escapeup:p-4_65_-6',
+    kind: 'MOVE',
+    target: { x: -4, y: 65, z: -6 },
+    meta: { escapePillar: true, threatEntityId: 33819 },
+  }
+  const noMaterial = regroundVanishedSurvivalChoice(
+    pillar,
+    [
+      { id: 'MINE:survival:b-5_63_-6', kind: 'MINE', target: { x: -5, y: 63, z: -6 }, meta: { survivalDig: true, threatEntityId: 33819 } },
+      { id: 'MINE:survival:b-5_63_-7', kind: 'MINE', target: { x: -5, y: 63, z: -7 }, meta: { survivalDig: true, threatEntityId: 33819 } },
+    ],
+    null,
+  )
+  const fallback = survivalControlFallback({
+    reground: noMaterial,
+    threatInContact: true,
+    freshCandidates: [{ id: 'ESCALATE', kind: 'ESCALATE' }],
+  })
+  // the continuation pillar still offered under its re-keyed top cell re-grounds
+  const continuation = regroundVanishedSurvivalChoice(
+    pillar,
+    [{ id: 'MOVE:escapeup:p-4_66_-6', kind: 'MOVE', target: { x: -4, y: 66, z: -6 }, meta: { escapePillar: true, threatEntityId: 33819 } }],
+    null,
+  )
+  // a vanished dig cell re-grounds to the NEAREST same-threat dig cell
+  const dig = { id: 'MINE:survival:b-5_63_-6', kind: 'MINE', target: { x: -5, y: 63, z: -6 }, meta: { survivalDig: true, threatEntityId: 33819 } }
+  const digReKeyed = regroundVanishedSurvivalChoice(
+    dig,
+    [
+      { id: 'MINE:survival:b-5_63_-7', kind: 'MINE', target: { x: -5, y: 63, z: -7 }, meta: { survivalDig: true, threatEntityId: 33819 } },
+      { id: 'MINE:survival:b-7_64_-7', kind: 'MINE', target: { x: -7, y: 64, z: -7 }, meta: { survivalDig: true, threatEntityId: 33819 } },
+    ],
+    null,
+  )
+  const pass =
+    noMaterial.candidateId === null &&
+    noMaterial.kind === 'MOVE' &&
+    noMaterial.outcome === 'CAPABILITY_LOST' &&
+    noMaterial.entityId === 33819 &&
+    fallback.candidateId === 'ESCALATE' &&
+    fallback.reason === 'control_action_escalate' &&
+    continuation.candidateId === 'MOVE:escapeup:p-4_66_-6' &&
+    continuation.reason === 'same_threat_shaping' &&
+    continuation.kind === 'MOVE' &&
+    digReKeyed.candidateId === 'MINE:survival:b-5_63_-7' &&
+    digReKeyed.reason === 'same_threat_shaping' &&
+    digReKeyed.kind === 'MINE'
+  return {
+    pass,
+    detail: `pillar=${noMaterial.outcome}/${noMaterial.kind} fallback=${fallback.candidateId} cont=${continuation.candidateId} dig=${digReKeyed.candidateId}`,
+  }
+})
+
 addCase('(vi) with no grounded response the survival path stays TYPED (never a silent no-action, never a fabricated target)', () => {
   const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
   const context = {

@@ -1066,6 +1066,30 @@ export const MOB_IDENTITY_CHURN = 'MOB_IDENTITY_CHURN'
 export const SURVIVAL_REGROUNDABLE_KINDS: ReadonlySet<string> = new Set(['ATTACK', 'RETREAT'])
 
 /**
+ * The §4.1 world-shaping survival answers (`candidates.ts`
+ * `survivalShapingCandidates`): `MOVE:escapeup:*` (`meta.escapePillar`),
+ * `PLACE:wall:*` (`meta.threatWall`) and `MINE:survival:*` (`meta.survivalDig`).
+ * They are admitted into the restricted threat offer as survival actions, but
+ * their ids are keyed on the same volatile truth as a RETREAT cell - the wall's
+ * first fill cell re-derives from `floor(threat.y)` and the lane column as the
+ * hostile moves, the pillar top re-keys as the body's own feet rise, and the
+ * dig cells re-derive with the sensed set - so an id mismatch between the Jev
+ * answer and execution is mechanical identity churn, not semantic invalidity.
+ * Measured portal-p23 (`gen-mutwrj01`, 2026-10-04T14:20, drowned 33819 at
+ * contact, health ~2.3): `PLACE:wall:dirt:p-3_64_-7` was re-offered one tick
+ * later as `p-3_63_-6` and `MOVE:escapeup:p-4_65_-6` vanished behind a
+ * zero-material offer - every pick ended the tick actionless as
+ * `not_a_survival_action`, and the body died inside the same window.
+ */
+export function isSurvivalShapingChoice(choice: SurvivalChoiceLike): boolean {
+  return (
+    choice.meta?.escapePillar === true ||
+    choice.meta?.threatWall === true ||
+    choice.meta?.survivalDig === true
+  )
+}
+
+/**
  * MOVE-kind survival escapes: a danger-zone exit (`MOVE:dangerzone:`) or the
  * sealed-pocket escape ascent (`meta.escapeAscent`). Their ids are keyed on the
  * body's own cell context, so the only faithful re-ground is the same id still
@@ -1156,6 +1180,10 @@ export type SurvivalRegroundReason =
   | 'any_threat_keep_distance'
   /** the body-cell-keyed escape route (dangerzone exit / sealed ascent) is still offered */
   | 'same_escape_route'
+  /** the exact shaping id (wall fill cell / pillar top / dig cell) is still offered */
+  | 'same_cell_shaping'
+  /** the same shaping answer for the SAME causal threat under a re-derived id */
+  | 'same_threat_shaping'
   | 'no_grounded_equivalent'
 
 /**
@@ -1190,7 +1218,7 @@ export interface SurvivalRegroundResult {
   /** the fresh candidate that carries the same survival action, or null */
   candidateId: string | null
   /** the survival kind that was re-grounded, or null when the choice was not one */
-  kind: 'ATTACK' | 'RETREAT' | 'MOVE' | null
+  kind: 'ATTACK' | 'RETREAT' | 'MOVE' | 'PLACE' | 'MINE' | null
   reason: SurvivalRegroundReason
   /** the entity the vanished choice was answering, when it carried one */
   entityId: number | null
@@ -1354,7 +1382,7 @@ export function regroundVanishedSurvivalChoice(
       identityChurn: null,
     }
   }
-  if (!SURVIVAL_REGROUNDABLE_KINDS.has(chosen.kind) && !isSurvivalEscapeChoice(chosen)) {
+  if (!SURVIVAL_REGROUNDABLE_KINDS.has(chosen.kind) && !isSurvivalEscapeChoice(chosen) && !isSurvivalShapingChoice(chosen)) {
     return {
       candidateId: null,
       kind: null,
@@ -1385,6 +1413,69 @@ export function regroundVanishedSurvivalChoice(
       kind: 'MOVE',
       reason: 'no_grounded_equivalent',
       entityId: null,
+      outcome: 'CAPABILITY_LOST',
+      identityChurn: null,
+    }
+  }
+
+  if (isSurvivalShapingChoice(chosen)) {
+    // The §4.1 shaping answer re-derives its id from volatile truth, so the same
+    // action legitimately returns under a new id between the Jev answer and
+    // execution (see `isSurvivalShapingChoice`). The faithful re-ground is the
+    // same-family candidate answering the SAME causal threat - the threat id is
+    // the whole premise, so a member emitted for a different threat is a new
+    // WHICH and never adopted. Same id first (the committed cell still offered),
+    // then the fresh member nearest the committed target (heading continuity,
+    // the same rule the RETREAT re-ground uses), then CAPABILITY_LOST: the offer
+    // no longer carries that shaping answer at all (the measured p23 window:
+    // the last placeable spent -> the offer correctly degraded to MINE:survival
+    // only, and a pillar pick must then end TYPED, not silent).
+    const flag =
+      chosen.meta?.escapePillar === true ? 'escapePillar' : chosen.meta?.threatWall === true ? 'threatWall' : 'survivalDig'
+    const threatEntityId = numericMeta(chosen.meta, 'threatEntityId')
+    const family = fresh.filter((candidate) => {
+      if (candidate.meta?.[flag] !== true) return false
+      const candidateThreat = numericMeta(candidate.meta, 'threatEntityId')
+      return threatEntityId === null ? candidateThreat === null : candidateThreat === threatEntityId
+    })
+    const kind = chosen.kind === 'PLACE' ? 'PLACE' : chosen.kind === 'MINE' ? 'MINE' : 'MOVE'
+    const sameCell = family.find((candidate) => candidate.id === chosen.id)
+    if (sameCell !== undefined) {
+      return {
+        candidateId: sameCell.id,
+        kind,
+        reason: 'same_cell_shaping',
+        entityId: threatEntityId,
+        outcome: 'REGROUNDED',
+        identityChurn: null,
+      }
+    }
+    const origin = position(chosen)
+    let nearest: SurvivalChoiceLike | undefined
+    let nearestDistance = Number.POSITIVE_INFINITY
+    for (const candidate of family) {
+      const spot = position(candidate)
+      const d = origin === null || spot === null ? Number.POSITIVE_INFINITY : distance(spot, origin)
+      if (nearest === undefined || d < nearestDistance) {
+        nearest = candidate
+        nearestDistance = d
+      }
+    }
+    if (nearest !== undefined) {
+      return {
+        candidateId: nearest.id,
+        kind,
+        reason: 'same_threat_shaping',
+        entityId: threatEntityId ?? numericMeta(nearest.meta, 'threatEntityId'),
+        outcome: 'REGROUNDED',
+        identityChurn: null,
+      }
+    }
+    return {
+      candidateId: null,
+      kind,
+      reason: 'no_grounded_equivalent',
+      entityId: threatEntityId,
       outcome: 'CAPABILITY_LOST',
       identityChurn: null,
     }
