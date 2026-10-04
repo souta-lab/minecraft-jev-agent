@@ -201,6 +201,54 @@ export function isInDeathZone<H extends DeathZoneHazard>(
   return total >= DEATH_ZONE_DEATHS ? nearest : null
 }
 
+/**
+ * The summed death count within DEATH_ZONE_RADIUS of a position - the zone's
+ * local density. `isInDeathZone` answers membership; this answers direction:
+ * a cell with strictly lower density is measurably farther from the kill
+ * cluster's mass, which is the only gradient an in-zone body can descend to
+ * leave through cells that are themselves still inside the union.
+ */
+export function deathZoneDensity<H extends DeathZoneHazard>(
+  hazards: readonly H[],
+  position: Vec3Like,
+  dimension: string,
+): number {
+  let total = 0
+  for (const hazard of hazards) {
+    if (hazard.dimension !== undefined && hazard.dimension !== dimension) continue
+    if (Math.hypot(position.x - hazard.x, position.y - hazard.y, position.z - hazard.z) > DEATH_ZONE_RADIUS) continue
+    total += Math.max(1, hazard.count)
+  }
+  return total
+}
+
+/**
+ * The production move-target blacklist. While the body stands OUTSIDE the
+ * union the guard is pure anti-entry: any destination inside it is withheld
+ * (the portal-p6 pocket the memory exists for). While the body stands INSIDE
+ * it that reading inverts - every egress step is also inside the zone when
+ * the cluster is wider than the sensing radius, and withholding them all
+ * yields `SURVIVAL_ESCAPE_NONE reason=no_grounded_escape` at a camped
+ * respawn (measured portal-p23 run-mutsv43u-1a0g, 2026-10-04T19:0xZ: ~50+
+ * recorded deaths within 14 m of every scatter point, the radius-16 escape
+ * scan entirely inside the union, seven contact deaths while zombie 55683
+ * and drowned 55113 held the spawn). A destination whose density is
+ * strictly lower than the body's own is an egress step, not a re-entry;
+ * deeper-or-equal stays withheld, which is also what keeps the anti-entry
+ * semantics identical whenever the body is outside.
+ */
+export function deathZoneMoveBlacklist(
+  hazards: readonly DeathZoneHazard[],
+  selfPosition: Vec3Like,
+  selfDimension: string,
+): (dimension: string, position: Vec3Like) => boolean {
+  const selfDensity = deathZoneDensity(hazards, selfPosition, selfDimension)
+  if (selfDensity < DEATH_ZONE_DEATHS) {
+    return (dimension, position) => isInDeathZone(hazards, position, dimension) !== null
+  }
+  return (dimension, position) => deathZoneDensity(hazards, position, dimension) >= selfDensity
+}
+
 /** One-decimal position for log lines, matching the live HEARTBEAT format. */
 export function formatMovePosition(position: Vec3Like): string {
   const round = (value: number): number => Math.round(value * 10) / 10

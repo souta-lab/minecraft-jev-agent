@@ -194,7 +194,7 @@ import * as reach from './reach/controller-plane.ts'
 import type { ActiveReachTransition, ReachPlaneHost, ReachTerminalActionCorrelation } from './reach/controller-plane.ts'
 import { ActionFailureEscalation, BetaAbandonDeferral, evaluateCapabilityGap, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
-import { detectOscillation, isInDeathZone, MoveFailMemory, StateFingerprintMemory } from './moveFailMemory.ts'
+import { deathZoneMoveBlacklist, detectOscillation, MoveFailMemory, StateFingerprintMemory } from './moveFailMemory.ts'
 import type { BlacklistedMoveTargets, MoveFailurePathScope, MoveFailureReason } from './moveFailMemory.ts'
 // The durable cross-action bound on one action's own typed outcome repeating
 // identically at the same target. The module owns the ONE bound; the controller
@@ -4552,8 +4552,7 @@ export class JevController {
   private blacklistedMoveTargets(state: WorldState): BlacklistedMoveTargets {
     const hazards = this.options.deathHazards
     if (hazards === undefined || hazards.length === 0) return new Set<string>()
-    void state
-    return (dimension, position) => isInDeathZone(hazards, position, dimension) !== null
+    return deathZoneMoveBlacklist(hazards, state.self.position, state.self.dimension)
   }
 
   private logStaleKnownResources(state: WorldState): void {

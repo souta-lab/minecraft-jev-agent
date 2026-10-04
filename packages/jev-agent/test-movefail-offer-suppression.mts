@@ -29,7 +29,7 @@ import {
 import { deathZoneEscapeCandidates, defaultCandidateOptions, isDeathZoneEscapeRoute } from './src/candidates.ts'
 import { regroundVanishedSurvivalChoice } from './src/threat.ts'
 import type { OutcomeLedgersHost } from './src/outcome-ledgers.ts'
-import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
+import { MoveFailMemory, deathZoneMoveBlacklist, moveFailureKey } from './src/moveFailMemory.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { Vec3Json, WorldState } from './src/state.ts'
 import type { Bot } from 'mineflayer'
@@ -388,6 +388,80 @@ addCase('MOVE_TARGET_SKIPPED is logged once per suppressed candidate', () => {
   return {
     pass: skipLine !== undefined && skipLine.includes(expectedKey),
     detail: `line=${skipLine ?? '[none]'} expectedKey=${expectedKey}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (v) THE IN-ZONE SEAM: a death zone that contains the body must not withhold
+//     the egress steps out of it. Measured live portal-p23 run-mutsv43u-1a0g
+//     (2026-10-04T19:0xZ): ~50+ recorded deaths within 14 m of every respawn
+//     scatter point; the radius-16 escape scan sat entirely inside the union,
+//     `SURVIVAL_ESCAPE_NONE reason=no_grounded_escape` repeated for seven
+//     contact deaths while zombie 55683 + drowned 55113 held the spawn. The
+//     blacklist is anti-ENTRY from outside; inside it is egress-descent.
+// ---------------------------------------------------------------------------
+
+// Hazards concentrated on BODY's +x side so density descends strictly toward
+// -x: density(BODY)=3, deeper cell (9,-9)=3, egress cells progressively less.
+const CAMP_HAZARDS = [
+  { x: 5, y: 57, z: -9, count: 1 },
+  { x: 12, y: 57, z: -9, count: 1 },
+  { x: 19, y: 57, z: -9, count: 1 },
+]
+
+addCase('an out-of-zone body keeps pure anti-entry semantics', () => {
+  const outside = { x: 5.4, y: 57.9, z: -40 }
+  const blacklist = deathZoneMoveBlacklist(CAMP_HAZARDS, outside, DIM)
+  const inZone = { x: 5, y: 57, z: -9 }
+  const free = { x: 5.4, y: 57, z: -41 }
+  return {
+    pass: blacklist(DIM, inZone) === true && blacklist(DIM, free) === false,
+    detail: `inZone=${blacklist(DIM, inZone)} free=${blacklist(DIM, free)}`,
+  }
+})
+
+addCase('an in-zone body keeps deeper/lateral cells withheld but egress cells open', () => {
+  const blacklist = deathZoneMoveBlacklist(CAMP_HAZARDS, BODY, DIM)
+  const deeperA = { x: 9, y: 57, z: -9 }
+  const deeperB = { x: 15, y: 57, z: -9 }
+  const egressNear = { x: 1, y: 57, z: -9 }
+  const egressFar = { x: -7, y: 57, z: -9 }
+  const out = { x: 5.4, y: 57, z: -40 }
+  const results = [
+    blacklist(DIM, deeperA),
+    blacklist(DIM, deeperB),
+    blacklist(DIM, egressNear),
+    blacklist(DIM, egressFar),
+    blacklist(DIM, out),
+  ]
+  return {
+    pass: results[0] === true && results[1] === true && results[2] === false && results[3] === false && results[4] === false,
+    detail: `deeperA=${results[0]} deeperB=${results[1]} egressNear=${results[2]} egressFar=${results[3]} out=${results[4]}`,
+  }
+})
+
+addCase('death-zone exits ground density-descent cells the uniform zone withheld', () => {
+  const camped = inZoneState({})
+  camped.terrain.escapeCells = [
+    { x: 9, y: 57, z: -9 },
+    { x: 1, y: 57, z: -9 },
+    { x: -3, y: 57, z: -9 },
+    { x: -7, y: 57, z: -9 },
+  ]
+  const offered = deathZoneEscapeCandidates(camped, {
+    ...defaultCandidateOptions,
+    blacklistedMoveTargets: deathZoneMoveBlacklist(CAMP_HAZARDS, BODY, DIM),
+    reach: 8,
+  })
+  const ids = offered.map((candidate) => candidate.id)
+  return {
+    pass:
+      ids.length === 3 &&
+      !ids.includes('MOVE:dangerzone:p9_57_-9') &&
+      ids.includes('MOVE:dangerzone:p1_57_-9') &&
+      ids.includes('MOVE:dangerzone:p-3_57_-9') &&
+      ids.includes('MOVE:dangerzone:p-7_57_-9'),
+    detail: `offered=[${ids.join(' ')}]`,
   }
 })
 
