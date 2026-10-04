@@ -4952,10 +4952,19 @@ function generateRawCandidates(
   // hasLocomotionCandidate true while the dig-up arm never evaluated).
   const gateMoveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const gateFailed = state.signals?.failedCandidates ?? {}
+  // A wet body's ordinary locomotion is not usable locomotion: the pinned
+  // pathfinder cannot express water legs (WadeBoundMovements removes every
+  // deep-water node), so walk offers that only exist on paper must not gate
+  // the last-resort arms off. Measured portal-p23 run-mutlktrv-3xw: ~17min in
+  // a water pocket, walk candidates offered every tick, SWIM:exit and
+  // ASCEND:escape never emitted, body drowned at health 7.
+  const bodyInWater = state.self.feetInWater === true
   // Last-resort arms (the low-air column swim, the corridor water route) do not
   // prove ordinary dry locomotion exists: they are emitted precisely because
   // none does, so they must not count here or each would gate off the others.
-  const hasLocomotionCandidate = candidates.some((candidate) =>
+  const hasLocomotionCandidate =
+    !bodyInWater &&
+    candidates.some((candidate) =>
       LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
       candidate.meta.submersionEscape !== true &&
       candidate.meta.swimRoute !== true &&
@@ -5033,15 +5042,17 @@ function generateRawCandidates(
   // offered for 30min while every PILLAR_UP refused on liquid in the column;
   // counting it would have hidden the corridor forever). Last-resort arms
   // (submersion/escape/swim) never prove usable locomotion for each other.
-  const hasUsableDryRoute = candidates.some(
-    (candidate) =>
-      LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
-      candidate.meta.submersionEscape !== true &&
-      candidate.meta.escapeAscent !== true &&
-      candidate.meta.swimRoute !== true &&
-      options.suppressedCandidateIds?.has(candidate.id) !== true &&
-      failureCount(gateFailed, candidate.id) < gateMoveFailureLimit,
-  )
+  const hasUsableDryRoute =
+    !bodyInWater &&
+    candidates.some(
+      (candidate) =>
+        LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind) &&
+        candidate.meta.submersionEscape !== true &&
+        candidate.meta.escapeAscent !== true &&
+        candidate.meta.swimRoute !== true &&
+        options.suppressedCandidateIds?.has(candidate.id) !== true &&
+        failureCount(gateFailed, candidate.id) < gateMoveFailureLimit,
+    )
   if (
     !hasUsableDryRoute &&
     ((state.signals?.stalledMs ?? 0) >= SEALED_ESCAPE_STALL_MS ||
@@ -6317,9 +6328,9 @@ export function parseWaterRouteWitness(
   blocks: string[]
   /** head-cell (y+1) name per waypoint - the body volume the route requires */
   heads: string[]
-  /** `shore` exit support (y-1) name; null for `breath` */
+  /** `shore` exit support (y-1) name; null for `breath`/`traverse` */
   exitSupport: string | null
-  exitKind: 'breath' | 'shore'
+  exitKind: 'breath' | 'shore' | 'traverse'
   costMs: number
 } | null {
   const exitKind = meta.waterRouteExitKind
@@ -6329,7 +6340,7 @@ export function parseWaterRouteWitness(
   const exitSupportRaw = meta.waterRouteExitSupport
   const costMs = meta.waterRouteCostMs
   if (
-    (exitKind !== 'breath' && exitKind !== 'shore') ||
+    (exitKind !== 'breath' && exitKind !== 'shore' && exitKind !== 'traverse') ||
     typeof waypointsRaw !== 'string' ||
     typeof blocksRaw !== 'string' ||
     typeof headsRaw !== 'string' ||
@@ -6389,7 +6400,9 @@ export function waterRouteCandidates(state: WorldState, options: CandidateOption
     label:
       entry.exitKind === 'shore'
         ? `swim the observed water corridor to standable ground at (${entry.exit.x},${entry.exit.y},${entry.exit.z})`
-        : `swim the observed water corridor to breathable surface at (${entry.exit.x},${entry.exit.y},${entry.exit.z})`,
+        : entry.exitKind === 'traverse'
+          ? `swim the observed water corridor toward open water at (${entry.exit.x},${entry.exit.y},${entry.exit.z})`
+          : `swim the observed water corridor to breathable surface at (${entry.exit.x},${entry.exit.y},${entry.exit.z})`,
     targetName: null,
     target: entry.exit,
     targetEntityId: null,

@@ -505,9 +505,10 @@ addCase('corridor BFS: a hazardous (magma) shore support is refused', () => {
   return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit]))}` }
 })
 
-// Long corridor: 6 water cells -> 6-waypoint breath exit. Declared cost uses
-// the shared bound: 1500 + 6*2500 = 16.5s > the ~15s vanilla supply, so a
-// FULL-air body still cannot afford it - admission mirrors the actuator.
+// Long corridor: 6 water cells, the last with an air head -> traverse exit
+// (no shore exists in the box). Declared cost counts only waypoints whose
+// head stays under fluid: 1500 + 5*2500 = 14s - exactly inside the ~15s
+// vanilla supply, so full air admits it and air=18 (~13.5s) refuses.
 function longCorridorGrid(): Record<string, BlockSpec> {
   const g: Record<string, BlockSpec> = {
     [k(0, -1, 0)]: solid('stone'),
@@ -521,29 +522,34 @@ function longCorridorGrid(): Record<string, BlockSpec> {
   return g
 }
 
-addCase('breath budget: full air rejects a 6-waypoint route beyond the ~15s vanilla supply', () => {
+addCase('breath budget: a head-dry exit cell costs no breath; 5 submerged waypoints fit the vanilla supply', () => {
   const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
   const targets = buildWaterRouteTargets(gridBot(longCorridorGrid(), self.position), self)
-  const route = targets.find((t) => t.exitKind === 'breath')
-  const expected = 1500 + 6 * WATER_ROUTE_WAYPOINT_MS
+  // The corridor's only surface node is both the far edge and the lone
+  // breathable cell - the composition keeps it offered (breath, since it is
+  // the only surface node), and the cost check is what this case owns.
+  const route = targets.find((t) => t.exitKind !== 'shore')
+  const expected = 1500 + 5 * WATER_ROUTE_WAYPOINT_MS
   const pass =
     route !== undefined &&
     route.waypoints.length === 6 &&
     route.costMs === expected &&
-    expected > 20 * 750 &&
-    waterRouteBreathOk(self, route.costMs) === false
+    expected <= 20 * 750 &&
+    waterRouteBreathOk(self, route.costMs) === true &&
+    waterRouteBreathOk({ ...self, air: 18 }, route.costMs) === false
   return {
     pass,
     detail: `route=${route ? `wp=${route.waypoints.length} costMs=${route.costMs}` : 'none'} supply=${20 * 750}`,
   }
 })
 
-addCase('route cost derives from the shared per-waypoint bound', () => {
+addCase('route cost budgets only head-submerged waypoints at the shared per-waypoint bound', () => {
   const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 15 }
   const targets = buildWaterRouteTargets(gridBot(corridorGrid(), self.position), self)
   const breath = targets.find((t) => t.exitKind === 'breath')
-  const pass = breath !== undefined && breath.costMs === 1500 + breath.waypoints.length * WATER_ROUTE_WAYPOINT_MS
-  return { pass, detail: `costMs=${breath?.costMs} wp=${breath?.waypoints.length} bound=${WATER_ROUTE_WAYPOINT_MS}` }
+  const submerged = breath?.waypointHeads.filter((name) => name !== 'air').length ?? -1
+  const pass = breath !== undefined && breath.costMs === 1500 + submerged * WATER_ROUTE_WAYPOINT_MS
+  return { pass, detail: `costMs=${breath?.costMs} submerged=${submerged} bound=${WATER_ROUTE_WAYPOINT_MS}` }
 })
 
 // Sealed flooded pocket: body cell is water, every horizontal neighbor and the
@@ -638,6 +644,82 @@ addCase('shaft ascent: vertical water column reaches a breath exit directly over
     breath.waypoints.length === 3 &&
     breath.waypoints.every((wp) => wp.x === 0 && wp.z === 0)
   return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit, t.waypoints.length]))}` }
+})
+
+// ---------------------------------------------------------------------------
+// portal-p23 (run-mutlktrv-3xw, 2026-10-04T11:04:06Z): ~17min trapped in a
+// water pocket whose shore sat beyond the bounded scan, then DEATH cause=
+// water at health 7. Two stacked defects decided the hypothesis:
+//
+//   * every surface cell inside the box was a `breath` exit - which resolves
+//     breathing only - so no progress affordance existed at all;
+//   * ordinary walk candidates were offered on paper every tick and counted
+//     as "usable dry locomotion", gating the water-route arm off entirely -
+//     though the pinned pathfinder cannot express a water leg at all.
+// ---------------------------------------------------------------------------
+
+// Open lake: water fills the whole scan box, every head cell is air, and no
+// standable shore exists inside the radius - the pocket shape that drowned
+// the live body. Exit composition must emit `traverse` exits at the witnessed
+// far edge while still keeping a `breath` offer for safety.
+function openLakeGrid(): Record<string, BlockSpec> {
+  const g: Record<string, BlockSpec> = {}
+  for (let x = -6; x <= 6; x += 1) {
+    for (let z = -6; z <= 6; z += 1) {
+      g[k(x, 0, z)] = empty('water')
+      g[k(x, 1, z)] = empty('air')
+      g[k(x, -1, z)] = empty('water')
+    }
+  }
+  return g
+}
+
+addCase('traverse exits: a shoreless open-water box offers the witnessed far edge, not only breath', () => {
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 20 }
+  const targets = buildWaterRouteTargets(gridBot(openLakeGrid(), self.position), self)
+  const traverses = targets.filter((t) => t.exitKind === 'traverse')
+  const breaths = targets.filter((t) => t.exitKind === 'breath')
+  const pass =
+    traverses.length >= 1 &&
+    breaths.length >= 1 &&
+    traverses.every((t) => Math.hypot(t.exit.x, t.exit.z) >= 5) &&
+    traverses.every((t) => t.exitSupport === null && t.waypoints.length > 0) &&
+    // Head-dry waypoint chains carry no breath budget: a surface traverse at
+    // low air is still affordable, while the same count under water is not.
+    traverses.every((t) => t.costMs === 1500)
+  return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit, t.waypoints.length, t.costMs]))}` }
+})
+
+addCase('traverse exits: a real shore suppresses the frontier fallback', () => {
+  const self = { ...SELF_BASE, feetInWater: true, eyesInWater: true, air: 15 }
+  const targets = buildWaterRouteTargets(gridBot(corridorGrid(), self.position), self)
+  const pass =
+    targets.some((t) => t.exitKind === 'shore') &&
+    targets.every((t) => t.exitKind !== 'traverse')
+  return { pass, detail: `targets=${JSON.stringify(targets.map((t) => [t.exitKind, t.exit]))}` }
+})
+
+addCase('traverse exits: a wet body\'s paper walk candidates no longer gate the water arm off', () => {
+  // The measured suppression: dangerzone MOVEs existed on paper, so the arm
+  // never fired even though a witnessed corridor was grounded.
+  const state = trappedState([ROUTE], {}, 60_000)
+  state.self = { ...state.self, feetInWater: true, eyesInWater: true, air: 20 } as WorldState['self']
+  const offered = generateCandidates(state, zoneOptions)
+  const swim = offered.filter((c) => c.id.startsWith('SWIM:exit:'))
+  const locomotion = offered.filter((c) => c.id.startsWith('MOVE:dangerzone:'))
+  return {
+    pass: locomotion.length > 0 && swim.length === 1 && swim[0]?.id === 'SWIM:exit:p4_0_0',
+    detail: `locomotion=[${locomotion.map((c) => c.id).join(' ')}] swim=[${swim.map((c) => c.id).join(' ')}]`,
+  }
+})
+
+addCase('traverse exits: a DRY body keeps the old gate - walk candidates still prove usable locomotion', () => {
+  // The wet-body rule must not leak onto dry land: dangerzone MOVEs there are
+  // real locomotion and still gate the last-resort arms.
+  const state = trappedState([ROUTE], {}, 60_000)
+  const offered = generateCandidates(state, zoneOptions)
+  const swim = offered.filter((c) => c.id.startsWith('SWIM:exit:'))
+  return { pass: swim.length === 0, detail: `swim=[${swim.map((c) => c.id).join(' ')}]` }
 })
 
 // ---------------------------------------------------------------------------

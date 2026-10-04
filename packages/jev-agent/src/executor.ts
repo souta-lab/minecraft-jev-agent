@@ -3781,7 +3781,7 @@ export class Executor {
     // `breath` exit: the eyes are out of fluid at the surface. `shore` exit:
     // the body's own feet/head are clear and its support is solid ground.
     let verified = false
-    if (progressed && exitKind === 'breath') {
+    if (progressed && (exitKind === 'breath' || exitKind === 'traverse')) {
       const eyeBlock = this.currentBlockAt({ x: endFeet.x, y: Math.floor(end.y + 1.62), z: endFeet.z })
       verified = (eyeBlock !== null && airNames.has(eyeBlock.name)) || !this.liveSubmersion().eyesInWater
     } else if (progressed && exitKind === 'shore') {
@@ -3811,7 +3811,7 @@ export class Executor {
       arrived: verified,
       result: this.buildResult(candidate, epoch, startedAt, 'done', verified ? 'arrived' : 'leg',
         verified
-          ? `swam the witnessed water corridor to the ${exitKind === 'shore' ? 'standable shore' : 'breathable surface'} at (${target.x},${target.y},${target.z})`
+          ? `swam the witnessed water corridor to the ${exitKind === 'shore' ? 'standable shore' : exitKind === 'traverse' ? 'open-water frontier' : 'breathable surface'} at (${target.x},${target.y},${target.z})`
           : `swam ${index}/${waypoints.length} witnessed water cells toward (${target.x},${target.y},${target.z})`,
         null,
         {

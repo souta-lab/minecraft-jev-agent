@@ -279,8 +279,16 @@ export interface SubmersionEscapeTarget {
  */
 export interface WaterRouteTarget {
   exit: Vec3Json
-  /** `breath` = water surface cell whose head is air; `shore` = usable stand cell. */
-  exitKind: 'breath' | 'shore'
+  /**
+   * `breath` = water surface cell whose head is air; `shore` = usable stand
+   * cell; `traverse` = the corridor's witnessed far edge - no shore grounded
+   * inside the bounded scan, so the exit is the deepest surface node and the
+   * next sensor pass re-grounds from there. Only emitted when no shore exit
+   * exists (measured portal-p23 run-mutlktrv-3xw: ~17min + death in a pocket
+   * whose shore sat beyond the scan radius; every surface cell inside it was
+   * a breath exit that resolved nothing).
+   */
+  exitKind: 'breath' | 'shore' | 'traverse'
   waypoints: Vec3Json[]
   /** feet-cell block name per waypoint */
   waypointBlocks: string[]
@@ -311,6 +319,12 @@ const WATER_ROUTE_DY_MAX = 6
 const WATER_ROUTE_VISIT_LIMIT = 480
 const WATER_ROUTE_STEP_LIMIT = 12
 const WATER_ROUTE_TARGET_LIMIT = 3
+/**
+ * How many witnessed frontier cells a no-shore scan offers as `traverse`
+ * exits. Two keeps a directional choice (Jev still owns WHICH) without
+ * flooding the move-cap on open water.
+ */
+const WATER_ROUTE_TRAVERSE_LIMIT = 2
 const WATER_ROUTE_MARGIN_MS = 1500
 /**
  * Deepest net descent the BFS explores. Bound to the deepest route the breath
@@ -396,6 +410,9 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
   const queue: Node[] = [{ ...base, path: [], blocks: [], heads: [] }]
   const seenExits = new Set<string>()
   const targets: WaterRouteTarget[] = []
+  // Breath-eligible surface nodes in BFS (nearest-first) order; the exit
+  // composition after the loop decides breath vs traverse from the whole set.
+  const surfaceNodes: Node[] = []
   // (0,0) contributes the pure-vertical edges (0,±1,0): a waterfall/flooded
   // shaft is ridden straight down or swum straight up inside its own column,
   // which no horizontal-staircase step can express. The (0,0,0) self-step dies
@@ -414,22 +431,14 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
     const isStart = node.path.length === 0
     if (!isStart) {
       // A breath exit is the water surface itself: feet fluid, head air.
+      // Surface nodes are COLLECTED, not pushed: the exit composition after
+      // the loop decides breath vs traverse from the whole set.
       const head = at({ x: node.x, y: node.y + 1, z: node.z })
       const headIsAir =
         head !== null && isPassable(head) && !PROBE_FLUIDS.has(head.name) && envHazardKindOfBlock(head.name) === null
-      const exitKey = key(node.x, node.y, node.z)
-      if (headIsAir && !seenExits.has(`breath:${exitKey}`)) {
-        seenExits.add(`breath:${exitKey}`)
-        targets.push({
-          exit: { x: node.x, y: node.y, z: node.z },
-          exitKind: 'breath',
-          waypoints: node.path,
-          waypointBlocks: node.blocks,
-          waypointHeads: node.heads,
-          exitSupport: null,
-          costMs: 0,
-        })
-        if (targets.length >= WATER_ROUTE_TARGET_LIMIT) break
+      if (headIsAir && !seenExits.has(`breath:${key(node.x, node.y, node.z)}`)) {
+        seenExits.add(`breath:${key(node.x, node.y, node.z)}`)
+        surfaceNodes.push(node)
       }
       // A shore exit is a usable stand cell reachable by climbing out of this
       // water node (same level or one up/down - the swim actuator jumps it).
@@ -499,11 +508,51 @@ export function buildWaterRouteTargets(bot: Bot, self: SelfState): WaterRouteTar
       }
     }
   }
+  // Exit composition. surfaceNodes arrive nearest-first (BFS order), so their
+  // tail is the corridor's witnessed far edge.
+  //
+  // portal-p23 (run-mutlktrv-3xw, 2026-10-04T11:04:06Z): a body spent ~17min
+  // treading a pocket whose shore sat beyond this scan's radius and drowned at
+  // health 7. Every surface cell inside the box was a breath exit, which
+  // resolves breathing only - a shore beyond the scan was unrepresentable.
+  // `traverse` exits fix exactly that: the deepest witnessed surface nodes
+  // become ordinary route targets, the next sensor pass re-grounds from the
+  // new cell, and a wide pocket crosses iteratively. Emitted only when no
+  // shore exit exists - a grounded stand resolution never needs a frontier.
+  const surfaceTarget = (node: Node, exitKind: 'breath' | 'traverse'): WaterRouteTarget => ({
+    exit: { x: node.x, y: node.y, z: node.z },
+    exitKind,
+    waypoints: node.path,
+    waypointBlocks: node.blocks,
+    waypointHeads: node.heads,
+    exitSupport: null,
+    costMs: 0,
+  })
+  let breathPool = surfaceNodes
+  if (!targets.some((target) => target.exitKind === 'shore')) {
+    // Traverse never displaces the whole safety affordance: while any surface
+    // node exists, at least one stays offered as `breath` - an out-of-air
+    // body needs the NEAREST surface, not the corridor's far edge.
+    const traverseCount = Math.min(WATER_ROUTE_TRAVERSE_LIMIT, Math.max(0, surfaceNodes.length - 1))
+    const traverses = traverseCount > 0 ? surfaceNodes.slice(-traverseCount) : []
+    breathPool = surfaceNodes.slice(0, surfaceNodes.length - traverses.length)
+    for (const node of traverses) targets.push(surfaceTarget(node, 'traverse'))
+  }
+  for (const node of breathPool) {
+    if (targets.length >= WATER_ROUTE_TARGET_LIMIT) break
+    targets.push(surfaceTarget(node, 'breath'))
+  }
   for (const target of targets) {
-    // Every waypoint is budgeted at its full actuator deadline, not a mean
-    // traversal estimate: admission must never assume less underwater time
-    // than the executor is allowed to spend reaching that cell.
-    target.costMs = WATER_ROUTE_MARGIN_MS + target.waypoints.length * WATER_ROUTE_WAYPOINT_MS
+    // Every waypoint whose head cell is under fluid is budgeted at its full
+    // actuator deadline, not a mean traversal estimate: admission must never
+    // assume less underwater time than the executor is allowed to spend
+    // reaching that cell. A waypoint whose head cell is provably air keeps
+    // the eyes dry the whole leg - it consumes no breath budget at all, so a
+    // long surface traverse is not refused by an accounting that only makes
+    // sense for submerged cells.
+    target.costMs =
+      WATER_ROUTE_MARGIN_MS +
+      target.waypointHeads.filter((name) => !REPLACEABLE_AIR.has(name)).length * WATER_ROUTE_WAYPOINT_MS
   }
   return targets
 }
