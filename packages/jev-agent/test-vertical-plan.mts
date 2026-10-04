@@ -864,6 +864,72 @@ addCase('fluid, flood-risk and unbreakable ceilings refuse with their own causes
   }
 })
 
+addCase('a falling block above the clearance refuses instead of burying the head cell (live gravel death)', () => {
+  // Live gen-mutofos2 @ c95bf41: feet (2,63,27), the headroom acquisition MINE
+  // cleared gravel@2,64,27 while a gravel column sat above it - the refill
+  // landed in the head cell and suffocated the body (108 items lost). Every
+  // clearance surface with the same geometry must refuse; a lone gravel block
+  // with nothing falling above it stays clearable.
+  const headroom = classifyHeadroomBlocker({
+    cell: { x: 2, y: 64, z: 27 },
+    name: 'gravel',
+    diggable: true,
+    fluidOrHazard: false,
+    floodRisk: false,
+    fallingAbove: true,
+    canClear: true,
+  })
+  const lone = classifyHeadroomBlocker({
+    cell: { x: 2, y: 64, z: 27 },
+    name: 'gravel',
+    diggable: true,
+    fluidOrHazard: false,
+    floodRisk: false,
+    fallingAbove: false,
+    canClear: true,
+  })
+  const marker =
+    headroom.kind === 'refuse'
+      ? formatPillarRefused({ reason: 'no_headroom', cell: { x: 2, y: 63, z: 27 }, obstacle: headroom.obstacle, cause: headroom.reason })
+      : 'not-refused'
+  const entry = evaluateTunnelEntry({
+    cell: { x: 2, y: 63, z: 27 },
+    bodyClear: true,
+    headClear: false,
+    supportSolid: true,
+    blocker: { ...blockedBy({ x: 2, y: 64, z: 27 }, 'gravel'), fallingAbove: true },
+  })
+  const approach = planReuseLeg({
+    entry: { kind: 'enterable' },
+    pathFailed: true,
+    distanceToTunnel: 1.5,
+    approachBlockages: [
+      { cell: { x: 2, y: 64, z: 27 }, passable: false, name: 'gravel', diggable: true, fluidOrHazard: false, floodRisk: false, fallingAbove: true, canClear: true },
+    ],
+  })
+  const ordinary = planReuseLeg({
+    entry: { kind: 'enterable' },
+    pathFailed: true,
+    distanceToTunnel: 1.5,
+    approachBlockages: [
+      { cell: { x: 2, y: 64, z: 27 }, passable: false, name: 'gravel', diggable: true, fluidOrHazard: false, floodRisk: false, canClear: true },
+    ],
+  })
+  const pass =
+    headroom.kind === 'refuse' &&
+    headroom.reason === 'falling_block_above' &&
+    marker === 'PILLAR_REFUSED reason=no_headroom cell=2,63,27 obstacle=gravel@2,64,27 cause=falling_block_above' &&
+    lone.kind === 'dig' &&
+    entry.kind === 'refuse' &&
+    entry.reason === 'no_clearance' &&
+    approach.action === 'fail' &&
+    ordinary.action === 'clear-approach'
+  return {
+    pass,
+    detail: `headroom=${headroom.kind}/${headroom.kind === 'refuse' ? headroom.reason : 'dig'} lone=${lone.kind} marker=${marker} entry=${entry.kind}${entry.kind === 'refuse' ? `/${entry.reason}` : ''} approach=${approach.action} ordinary=${ordinary.action}`,
+  }
+})
+
 addCase('the fallback picks the nearest open same-level column and keeps probe order as tie-break', () => {
   const open = (cell: Vec3Json): PillarColumnProbe => ({
     cell,

@@ -24,7 +24,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, WATER_ROUTE_AIR_MS, WATER_ROUTE_WAYPOINT_MS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, buildArmor, formatBodySubmerged, interactionStandCells, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, WATER_ROUTE_AIR_MS, WATER_ROUTE_WAYPOINT_MS, distance, isBreakableSolidBlock, isFallingBlockName, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
 import {
   BRIDGE_BLOCK_META,
   BRIDGE_DIR_META,
@@ -5544,6 +5544,7 @@ export class Executor {
           diggable: block.diggable === true,
           fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
           floodRisk: !this.cellClearOfFluids(blockerCell),
+          fallingAbove: this.fallingBlockAbove(blockerCell),
           canClear: live.ok,
         }
       }
@@ -5584,6 +5585,7 @@ export class Executor {
         diggable: block?.diggable === true,
         fluidOrHazard: block !== null && (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)),
         floodRisk: !this.cellClearOfFluids(cell),
+        fallingAbove: this.fallingBlockAbove(cell),
         canClear: live?.ok === true,
       })
     }
@@ -6343,6 +6345,7 @@ export class Executor {
         diggable: block.diggable === true,
         fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
         floodRisk: !this.cellClearOfFluids({ x: blockingCell.x, y: blockingCell.y + 1, z: blockingCell.z }),
+        fallingAbove: this.fallingBlockAbove(blockingCell),
         canClear: live.ok,
       })
       if (decision.kind === 'refuse') return { cleared: false, obstacle: decision.obstacle, reason: decision.reason }
@@ -6522,6 +6525,16 @@ export class Executor {
       if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return false
     }
     return true
+  }
+
+  /**
+   * True when a solid falling block sits directly above the cell, so digging
+   * the cell refills it the next tick - a burial when the cell is the body's
+   * head. An unread cell above is not proof and keeps the clearance viable.
+   */
+  private fallingBlockAbove(cell: Vec3Json): boolean {
+    const above = this.currentBlockAt({ x: cell.x, y: cell.y + 1, z: cell.z })
+    return above !== null && above.boundingBox !== 'empty' && isFallingBlockName(above.name)
   }
 
   private columnUnsafeAt(x: number, feetY: number, z: number): boolean {

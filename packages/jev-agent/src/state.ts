@@ -3875,6 +3875,32 @@ export const PROBE_HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire',
 export const PROBE_FLUIDS = new Set(['water', 'flowing_water', 'bubble_column'])
 
 /**
+ * Blocks Minecraft converts into a falling entity the tick their support is
+ * removed. minecraft-data carries no `gravity` flag, so the mechanical truth
+ * is this name list (sand family, concrete powders via suffix, anvils, and
+ * the loose one-offs). A clearance dig directly under one refills the opened
+ * cell - fatal when the fall lands in the body's own head cell (measured live
+ * suffocation death mining a gravel ceiling for headroom, gen-mutofos2).
+ */
+export const FALLING_BLOCK_NAMES = new Set([
+  'sand',
+  'red_sand',
+  'gravel',
+  'suspicious_sand',
+  'suspicious_gravel',
+  'anvil',
+  'chipped_anvil',
+  'damaged_anvil',
+  'dragon_egg',
+  'scaffolding',
+  'pointed_dripstone',
+])
+
+export function isFallingBlockName(name: string): boolean {
+  return FALLING_BLOCK_NAMES.has(name) || name.endsWith('_concrete_powder')
+}
+
+/**
  * The block slice the breakability rule needs.
  */
 export interface BreakabilityProbe {
@@ -4304,6 +4330,18 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
       if (wouldFlood) {
         safe = false
         reason = `${name} is a fluid/hazard barrier; removing it would flood or burn the pocket`
+      } else {
+        // Same measured-death class as the flood barrier: a falling block
+        // directly above the cut drops into the opened cell the tick it is
+        // cleared. At head level the refill lands on the head and suffocates
+        // the body in a sealed pocket (live death, gravel@2,64,27); above the
+        // head the clearance still never holds. Only a proven faller refuses -
+        // an unread cell above keeps the cut offerable.
+        const above = at(x, y + 1, z)
+        if (above !== null && above.boundingBox !== 'empty' && isFallingBlockName(above.name)) {
+          safe = false
+          reason = `${above.name} above the cut falls into the opened cell`
+        }
       }
     }
     const key = `${x},${y},${z}`

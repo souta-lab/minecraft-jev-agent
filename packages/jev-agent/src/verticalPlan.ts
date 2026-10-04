@@ -241,6 +241,7 @@ export type HeadroomClearRefusal =
   | 'not_clearable'
   | 'fluid_or_hazard'
   | 'flood_risk'
+  | 'falling_block_above'
   | 'dig_failed'
 
 export interface HeadroomObstacle {
@@ -259,6 +260,11 @@ export interface HeadroomBlockerProbe {
   fluidOrHazard: boolean
   /** a fluid/hazard touches the opened cell, so a dig could flood the pocket */
   floodRisk: boolean
+  /**
+   * a falling block sits directly above the blocker, so a dig refills the
+   * opened cell - a burial when the fall lands in the body's head cell
+   */
+  fallingAbove?: boolean
   /** the block has a known name and a mechanical clearance action is available */
   canClear: boolean
 }
@@ -283,6 +289,7 @@ export function classifyHeadroomBlocker(probe: HeadroomBlockerProbe | null): Hea
   if (probe.fluidOrHazard) return { kind: 'refuse', obstacle, reason: 'fluid_or_hazard' }
   if (!probe.diggable) return { kind: 'refuse', obstacle, reason: 'not_diggable' }
   if (probe.floodRisk) return { kind: 'refuse', obstacle, reason: 'flood_risk' }
+  if (probe.fallingAbove === true) return { kind: 'refuse', obstacle, reason: 'falling_block_above' }
   if (!probe.canClear) return { kind: 'refuse', obstacle, reason: 'not_clearable' }
   return { kind: 'dig', obstacle }
 }
@@ -469,6 +476,8 @@ export interface TunnelEntryBlockerProbe {
   diggable: boolean
   fluidOrHazard: boolean
   floodRisk: boolean
+  /** a falling block sits directly above the blocker; clearing refills the cell */
+  fallingAbove?: boolean
   canClear: boolean
 }
 
@@ -509,6 +518,7 @@ export function evaluateTunnelEntry(probe: TunnelEntryProbe): TunnelEntryDecisio
       blocker.diggable &&
       !blocker.fluidOrHazard &&
       !blocker.floodRisk &&
+      blocker.fallingAbove !== true &&
       blocker.canClear
     ) {
       return { kind: 'clear', blocker }
@@ -530,6 +540,8 @@ export interface ApproachBlockage {
   diggable?: boolean
   fluidOrHazard?: boolean
   floodRisk?: boolean
+  /** a falling block sits directly above the blockage; clearing refills the cell */
+  fallingAbove?: boolean
   canClear?: boolean
 }
 
@@ -550,7 +562,11 @@ export function selectLocalClearCell(blockages: readonly ApproachBlockage[]): Lo
   const only = blocked[0]
   if (only === undefined) return { kind: 'none' }
   const safe =
-    only.diggable === true && only.fluidOrHazard !== true && only.floodRisk !== true && only.canClear === true
+    only.diggable === true &&
+    only.fluidOrHazard !== true &&
+    only.floodRisk !== true &&
+    only.fallingAbove !== true &&
+    only.canClear === true
   return safe ? { kind: 'clear', cell: only.cell } : { kind: 'none' }
 }
 
