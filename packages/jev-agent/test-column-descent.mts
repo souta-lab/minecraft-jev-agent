@@ -739,6 +739,80 @@ addCase('a clean dig cell carries no infestedDig fact', () => {
   }
 })
 
+addCase('a craftable focus does not label the column descent as digging toward the product', () => {
+  // Live gen-muue9gpf (portal-p24): stranded on a snowy ledge under
+  // `craft:crafting_table`, the column descent labeled itself
+  // "dig straight down toward crafting_table" - no cell below holds the
+  // product, so the claim was fabricated; Jev dug a 9-deep shaft while
+  // `CRAFT:spruce_planks` sat in the same offer. The affordance stays
+  // (the body is still stranded) but the claimed direction must be honest.
+  const craftGoal: QueuedGoal = {
+    id: 'g2:craft:crafting_table',
+    kind: 'craft',
+    description: 'craft 1 x crafting_table',
+    targetItem: 'crafting_table',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL],
+    descent: pillarDescent(FEET),
+    goalQueue: { ...emptyGoalQueueState(), depth: 1, current: craftGoal, empty: false, goals: [craftGoal] },
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const descent = grounded.candidates.find((candidate) => candidate.kind === 'DESCEND')
+  const pass =
+    descent !== undefined &&
+    descent.meta.columnDescent === true &&
+    descent.targetName !== 'crafting_table' &&
+    !descent.label.includes('crafting_table') &&
+    descent.label.includes('lower ground')
+  return {
+    pass,
+    detail: `descent=${descent?.id ?? 'none'} targetName=${descent?.targetName ?? 'none'} label=${descent?.label ?? 'none'}`,
+  }
+})
+
+addCase('a below-ground locatable focus still names its direction on the column descent', () => {
+  const obsidianGoal: QueuedGoal = {
+    id: 'g7:collect:obsidian',
+    kind: 'collect',
+    description: 'collect 10 x obsidian',
+    targetItem: 'obsidian',
+    requiredCount: 10,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  const state = worldState({
+    position: FEET,
+    standable: [FEET_CELL],
+    descent: pillarDescent(FEET),
+    goalQueue: { ...emptyGoalQueueState(), depth: 1, current: obsidianGoal, empty: false, goals: [obsidianGoal] },
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const descent = grounded.candidates.find((candidate) => candidate.kind === 'DESCEND')
+  const pass =
+    descent !== undefined &&
+    descent.targetName === 'obsidian' &&
+    descent.label.includes('toward obsidian')
+  return {
+    pass,
+    detail: `descent=${descent?.id ?? 'none'} targetName=${descent?.targetName ?? 'none'} label=${descent?.label ?? 'none'}`,
+  }
+})
+
 addCase('the typed marker line is stable for every refusal reason', () => {
   const cell = { x: 23, y: 81, z: 8 }
   const noStep = formatColumnDescentRefused({ reason: 'no_safe_step', cell })

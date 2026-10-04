@@ -7575,6 +7575,23 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
  * continuation and exposes the remaining mechanically valid routes as policy
  * candidates; this function never chooses a replacement mode or heading.
  */
+/**
+ * True when digging down can actually expose the focus: an underground source
+ * (a stone yield, or an ore/scanned block source other than built structure
+ * fabric). A craftable product, a mob drop, food, or a fortress landmark has
+ * no below-ground source - a `toward <focus>` descend label for one is a
+ * fabricated direction (live gen-muue9gpf, portal-p24: a `craft:crafting_table`
+ * row drove a 9-deep `dig straight down toward crafting_table` shaft while
+ * `CRAFT:spruce_planks` - the goal's own next step - sat in the same offer).
+ */
+function focusHasUndergroundSource(focusItem: string | null): boolean {
+  if (focusItem === null) return false
+  return (
+    STONE_YIELDS.has(focusItem) ||
+    (scannedBlockNames(focusItem) !== undefined && retrievalWant(focusItem)?.kind !== 'structure')
+  )
+}
+
 function descendCandidates(
   state: WorldState,
   options: CandidateOptions,
@@ -7639,10 +7656,7 @@ function descendCandidates(
   // an underground vein: a downward staircase/tunnel step cannot reach it and
   // must not be classified as an underground search. ORE sources and stone-class
   // focuses keep the historical underground verdict unchanged.
-  const focusWant = focusItem === null ? null : retrievalWant(focusItem)
-  const goalIsUnderground =
-    focusItem !== null &&
-    (STONE_YIELDS.has(focusItem) || (scannedBlockNames(focusItem) !== undefined && focusWant?.kind !== 'structure'))
+  const goalIsUnderground = focusHasUndergroundSource(focusItem)
   const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
 
   // Feasibility (CAN) rule for a SPECIFIC focus item whose source is not
@@ -7978,6 +7992,13 @@ function descendCandidateFromStep(
      * `foodCell` - the terminus position Jev picks the dig direction from.
      */
     foodTag?: { route: 'forage' | 'acquire'; item: string; cell: Vec3Json } | null
+    /**
+     * Honest direction text when the focus item is not the route's terminus
+     * (a stranded column descent under a craftable goal: the product does not
+     * exist below, so the leg's real direction is lower ground). Falls back to
+     * the focus name when unset.
+     */
+    towardLabel?: string | null
     /** the selected heading and any typed obstruction being crossed */
     heading?: DescentHeadingPlan
     extraMeta?: Record<string, string | number | boolean>
@@ -7994,7 +8015,7 @@ function descendCandidateFromStep(
   const choice = profile.clearanceChoice
   if (!choice.ok) return null
   const toward =
-    spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
+    spec.towardLabel ?? spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
   const headingDir = spec.heading?.dir ?? best.dir
   const headingLine = spec.heading === undefined ? null : formatDescentHeading(spec.heading)
   const digList = digPlan.map((item) => `${item.cell.x},${item.cell.y},${item.cell.z}`).join(';')
@@ -8184,11 +8205,21 @@ function columnDescentCandidates(
 
   const obstruction = fixedDir === null ? null : headingObstructionFor(state.descent ?? [], fixedDir, fixedMode, fixedCount)
   const terminalOutcome = boundaryReason === null ? null : descentRecoveryOutcome(boundaryReason)
+  // A stranded column step is a real affordance, but its `toward <focus>` claim
+  // is honest only when digging down can actually expose the focus (underground
+  // source or a resource class). For a craftable product no cell below holds the
+  // item - the leg's real direction is lower ground and nothing else (live
+  // gen-muue9gpf: `craft:crafting_table` drove a 9-deep `toward crafting_table`
+  // shaft while `CRAFT:spruce_planks` - the goal's own next step - sat in the
+  // same offer). Step, dig plan, guard and postcondition are unchanged; only the
+  // claimed direction and the item-bearing meta stop naming the product.
+  const locatableFocus = focusItem === null || isResourceClass(focusItem) || focusHasUndergroundSource(focusItem)
   const candidates: Candidate[] = []
   let toolRefusal: DescentOption | null = null
   for (const step of offeredSteps) {
     const built = descendCandidateFromStep(state, options, step, {
-      focusItem,
+      focusItem: locatableFocus ? focusItem : null,
+      towardLabel: locatableFocus ? null : 'lower ground',
       descendTargetY: null,
       grounded: true,
       staircase: step.dx !== 0 || step.dz !== 0,
