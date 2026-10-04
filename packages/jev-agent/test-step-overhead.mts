@@ -130,7 +130,7 @@ const FEET = { x: -21, y: 38, z: 11 }
 // East-leaning so the E face is the alignment winner the named cell lands on.
 const SURFACE: Vec3Json = { x: -17, y: 66, z: 11 }
 
-function perceive(grid: Map<string, string>): WorldState {
+function perceive(grid: Map<string, string>, signalOverrides: Partial<AgentSignals> = {}): WorldState {
   return buildWorldState(
     gridBot(grid, POSITION),
     {
@@ -139,7 +139,7 @@ function perceive(grid: Map<string, string>): WorldState {
       goalQueue: goalQueue(null),
       focusItem: null,
       recentEvents: [],
-      signals: signals(),
+      signals: signals(signalOverrides),
     },
     defaultSensorOptions,
   )
@@ -237,6 +237,43 @@ function aboveMove(): Candidate {
       .map((c) => c.id)
       .join(',')}]`,
   )
+
+  // --- 3b: failure memory must not hide the named cell ----------------------
+  // Live p23.20 falsification: ~1000 `target_lost` rejections of a stale
+  // gravel MINE two quantized buckets away put `MINE@-6,8,5` past the limit,
+  // and `failureCount`'s 3x3x3 spatial sharing suppressed the named step cell
+  // entirely (`no_producer`). The named cell is identity-critical - a
+  // neighbour's failure is a different mechanical fact.
+  {
+    const eastCell = `b${FEET.x + 1}_${FEET.y + 2}_${FEET.z}`
+    const neighbourHot = perceive(sealedPocket(), {
+      failedCandidates: { 'MINE@-8,12,3': 12, 'MINE@-6,14,4': 9 },
+    })
+    const gateNb = applyReachabilityGate([aboveMove()], neighbourHot, options)
+    const nbMine = gateNb.candidates.find(
+      (candidate) => candidate.meta.stepOverhead === true && candidate.id === `MINE:${eastCell}`,
+    )
+    check(
+      '(3b) saturated NEIGHBOUR buckets do not suppress the named step cell',
+      nbMine !== undefined,
+      `stepOverheadMines=[${gateNb.candidates
+        .filter((c) => c.meta.stepOverhead === true)
+        .map((c) => c.id)
+        .join(',')}]`,
+    )
+    const ownHot = perceive(sealedPocket(), {
+      failedCandidates: { [`MINE:${eastCell}`]: 5 },
+    })
+    const gateOwn = applyReachabilityGate([aboveMove()], ownHot, options)
+    check(
+      "(3b) the cell's OWN exhausted retry budget still suppresses",
+      gateOwn.candidates.find((candidate) => candidate.meta.stepOverhead === true) === undefined,
+      `stepOverheadMines=[${gateOwn.candidates
+        .filter((c) => c.meta.stepOverhead === true)
+        .map((c) => c.id)
+        .join(',')}]`,
+    )
+  }
 
   // --- 4: after the feet+2 dig the chain re-derives the feet+3 cell ----------
   const grid2 = sealedPocket()

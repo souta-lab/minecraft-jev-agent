@@ -6934,7 +6934,15 @@ function stepOverheadCandidates(
   if (protectedResourceTest(state)(cell, name)) return []
   const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const id = `MINE:${blockId('b', cell)}`
-  if (failureCount(state.signals.failedCandidates, id) >= failureLimit) return []
+  // The named cell is identity-critical: it is the ONE cell the sensor proved
+  // binding, and no substitute exists. `failureCount`'s coarse 3x3x3 spatial
+  // sharing - designed so a wandering MOVE cannot dodge its budget by picking
+  // a neighbour - would let a DIFFERENT nearby dig's failures suppress the
+  // only mechanically-correct offer. Live p23.20: ~1000 `target_lost`
+  // rejections of a stale gravel MINE two quantized buckets away hid this
+  // exact cell behind `no_producer` for the whole window. Honour only the
+  // cell's own retry budget.
+  if ((state.signals.failedCandidates[id] ?? 0) >= failureLimit) return []
   const barrier = cellHarvestBarrier(state, cell)
   const profile = resolveHarvest(loadGameData(), name)
   const choice = selectClearanceTool(
@@ -6953,11 +6961,19 @@ function stepOverheadCandidates(
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
+  // The same arm answers a named own-footprint cell when the generic
+  // headroom pool's spatial failure memory suppressed it - the label names
+  // which fact the dig serves.
+  const ownFootprint = (state.headroomCuts ?? []).some(
+    (cut) => cut.currentFootprint === true && cut.pos.x === cell.x && cut.pos.y === cell.y && cut.pos.z === cell.z,
+  )
   return [
     {
       id,
       kind: 'MINE' as const,
-      label: `mine the ${name} block at (${cell.x},${cell.y},${cell.z}) to open the staircase step's overhead`,
+      label: ownFootprint
+        ? `mine the ${name} ceiling block at (${cell.x},${cell.y},${cell.z}) to open jump headroom`
+        : `mine the ${name} block at (${cell.x},${cell.y},${cell.z}) to open the staircase step's overhead`,
       targetName: name,
       target: cell,
       targetEntityId: null,
