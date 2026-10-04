@@ -125,6 +125,7 @@ import { armorCraftTargets, armorEquipOffers, armorEquipRefusals, armorSlotFor, 
 import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorCraftTarget, ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
   activeThreats,
+  armorDefensePoints,
   assessAttackRace,
   bodySurvivalFacts,
   isRangedThreatName,
@@ -4542,6 +4543,7 @@ function generateRawCandidates(
             swingDamage: swing.damage,
             bodyHealth: body.health,
             bodyRegenerating: body.regenerating,
+            bodyArmorPoints: armorDefensePoints(state.self.armor),
           })
         : null
     const isFoodTarget = huntTargets.includes(entity)

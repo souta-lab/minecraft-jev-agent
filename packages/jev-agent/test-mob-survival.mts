@@ -1061,6 +1061,11 @@ addCase('(g7) the attack race verdict: fists lose even while regenerating, a swo
   // hp 4 + banked regen outlasts the kill.
   const regenMarginal = assessAttackRace({ threatName: 'zombie', threatHealth: 2, swingDamage: 1, bodyHealth: 4, bodyRegenerating: true })
   const sameMarginalStarved = assessAttackRace({ threatName: 'zombie', threatHealth: 2, swingDamage: 1, bodyHealth: 4, bodyRegenerating: false })
+  // The measured miss: a creeper blast is ~30 hearts inside reach. Unarmored
+  // at full health the race is always lost; diamond armor (20 pts -> 80%
+  // mitigation) makes the same sword fight survivable enough to offer.
+  const creeperUnarmored = assessAttackRace({ threatName: 'creeper', threatHealth: null, swingDamage: 7, bodyHealth: 20, bodyRegenerating: true })
+  const creeperArmored = assessAttackRace({ threatName: 'creeper', threatHealth: null, swingDamage: 7, bodyHealth: 20, bodyRegenerating: true, bodyArmorPoints: 20 })
   const pass =
     fistVsZombie.lost === true &&
     fistVsZombie.reason === 'race_lost' &&
@@ -1071,10 +1076,12 @@ addCase('(g7) the attack race verdict: fists lose even while regenerating, a swo
     unknownMob.known === false &&
     regenFistVsZombie.lost === true &&
     regenMarginal.lost === false &&
-    sameMarginalStarved.lost === true
+    sameMarginalStarved.lost === true &&
+    creeperUnarmored.lost === true &&
+    creeperArmored.lost === false
   return {
     pass,
-    detail: `fist=${fistVsZombie.killMs}/${fistVsZombie.deathMs} regenFist=${regenFistVsZombie.lost} marginal=${regenMarginal.lost}/${sameMarginalStarved.lost} unknown=${unknownMob.known}`,
+    detail: `fist=${fistVsZombie.killMs}/${fistVsZombie.deathMs} regenFist=${regenFistVsZombie.lost} creeper=${creeperUnarmored.lost}/${creeperArmored.lost} unknown=${unknownMob.known}`,
   }
 })
 

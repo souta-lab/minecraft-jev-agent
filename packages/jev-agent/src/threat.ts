@@ -493,6 +493,12 @@ export interface HostileRaceFact {
 
 export const HOSTILE_RACE_FACTS: Readonly<Record<string, HostileRaceFact>> = {
   zombie: { health: 20, meleeDamage: 4.5 },
+  // The "melee" is one blast inside reach (~30 hearts unarmored, hard
+  // difficulty). The cadence model prices it as continuous dps - conservative
+  // for an armored body that would survive a single real blast, but never
+  // lethal-direction wrong: a body that cannot take ~30 in one window has no
+  // grounded melee answer to a creeper at all.
+  creeper: { health: 20, meleeDamage: 30 },
   zombie_villager: { health: 20, meleeDamage: 4.5 },
   husk: { health: 20, meleeDamage: 4.5 },
   drowned: { health: 20, meleeDamage: 4.5 },
@@ -524,6 +530,45 @@ export const PLAYER_ATTACK_SWING_MS = 750
 
 /** Vanilla melee hostile attack cadence (~1 hit/second once in reach). */
 export const THREAT_ATTACK_SWING_MS = 1000
+
+/** Vanilla defense points per material x slot (item names are `${material}_${piece}`). */
+const ARMOR_DEFENSE: Readonly<Record<string, { helmet: number; chestplate: number; leggings: number; boots: number }>> = {
+  leather: { helmet: 1, chestplate: 3, leggings: 2, boots: 1 },
+  golden: { helmet: 2, chestplate: 5, leggings: 3, boots: 1 },
+  chainmail: { helmet: 2, chestplate: 5, leggings: 4, boots: 1 },
+  iron: { helmet: 2, chestplate: 6, leggings: 5, boots: 2 },
+  diamond: { helmet: 3, chestplate: 8, leggings: 6, boots: 3 },
+  netherite: { helmet: 3, chestplate: 8, leggings: 6, boots: 3 },
+  turtle: { helmet: 2, chestplate: 0, leggings: 0, boots: 0 },
+}
+
+const ARMOR_PIECE_SUFFIX = ['helmet', 'chestplate', 'leggings', 'boots'] as const
+
+/**
+ * Worn-armor defense points from the sensed armor slots (item names only, so
+ * threat.ts stays free of the state.ts import cycle). Unknown/absent pieces
+ * count 0 - never invent protection.
+ */
+export function armorDefensePoints(
+  armor: { head?: { name: string } | null; torso?: { name: string } | null; legs?: { name: string } | null; feet?: { name: string } | null } | null | undefined,
+): number {
+  if (armor === null || armor === undefined) return 0
+  const slots = [armor.head ?? null, armor.torso ?? null, armor.legs ?? null, armor.feet ?? null]
+  let points = 0
+  for (const piece of slots) {
+    if (piece === null) continue
+    const suffix = ARMOR_PIECE_SUFFIX.find((name) => piece.name.endsWith(`_${name}`))
+    if (suffix === undefined) continue
+    const material = piece.name.slice(0, piece.name.length - suffix.length - 1)
+    points += ARMOR_DEFENSE[material]?.[suffix] ?? 0
+  }
+  return points
+}
+
+/** Vanilla armor mitigation: 4%/defense point, hard-capped at 80%. */
+function armorDamageFactor(defensePoints: number): number {
+  return Math.max(0.2, 1 - Math.min(20, Math.max(0, defensePoints)) * 0.04)
+}
 
 export interface AttackRaceVerdict {
   /** true only when the numbers PROVE the body dies before the kill lands */
@@ -563,6 +608,8 @@ export function assessAttackRace(input: {
   swingDamage: number
   bodyHealth: number
   bodyRegenerating: boolean
+  /** worn-armor defense points; absent/0 = unarmored (never a guess) */
+  bodyArmorPoints?: number
 }): AttackRaceVerdict {
   const regenBonusHp = input.bodyRegenerating ? REGEN_RACE_BONUS_HP : 0
   const base: Omit<AttackRaceVerdict, 'reason'> = { lost: false, known: false, killMs: null, deathMs: null, regenBonusHp }
@@ -572,7 +619,8 @@ export function assessAttackRace(input: {
   if (!Number.isFinite(health) || health <= 0) return { ...base, known: true, reason: 'unknown_health' }
   const damage = input.swingDamage > 0 ? input.swingDamage : FIST_DAMAGE
   const killMs = Math.ceil(health / damage) * PLAYER_ATTACK_SWING_MS
-  const deathMs = Math.max(1, Math.ceil((input.bodyHealth + regenBonusHp) / fact.meleeDamage)) * THREAT_ATTACK_SWING_MS
+  const hitDamage = fact.meleeDamage * armorDamageFactor(input.bodyArmorPoints ?? 0)
+  const deathMs = Math.max(1, Math.ceil((input.bodyHealth + regenBonusHp) / hitDamage)) * THREAT_ATTACK_SWING_MS
   return {
     known: true,
     lost: killMs > deathMs,
