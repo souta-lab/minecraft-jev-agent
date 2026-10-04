@@ -742,6 +742,118 @@ const PLACED_MAX_STEP_CUTS = 3
 /** #79: bounded settle for the PLACE post-condition (client world is one tick behind the server). */
 const PLACE_VERIFY_SETTLE_MS = 500
 /**
+ * Full blocks that swallow a use-on-block click: vanilla activates them
+ * (crafting window, container, workstation GUI, or a scripted use like
+ * cake/dragon_egg) instead of placing against the face, so the destination
+ * stays air and `placeBlock` reports `place_refused`. A placement solver that
+ * only sees `boundingBox === 'block'` happily picks a just-placed station as
+ * the reference for the next cell and every click opens its GUI - measured
+ * live portal-p23 (gen-mutlkyij-h4alup): six consecutive `place_refused`
+ * crafting_table placements into cells face-adjacent to the first placed
+ * table while `g5:place:crafting_table` stayed queue head.
+ *
+ * `findPlaceReference` prefers a non-interactive neighbour and only falls
+ * back to these; `placeBlockAgainst` sneaks for exactly this set (vanilla
+ * sneak-click places instead of activating). The list is explicit, same
+ * auditable style as `CONTAINER_BLOCK_NAMES` - a derived list would hide a
+ * typo behind a loop.
+ */
+export const INTERACTIVE_PLACE_REFERENCE_BLOCKS: ReadonlySet<string> = new Set([
+  'crafting_table',
+  'furnace',
+  'blast_furnace',
+  'smoker',
+  'chest',
+  'trapped_chest',
+  'barrel',
+  'ender_chest',
+  'shulker_box',
+  'white_shulker_box',
+  'orange_shulker_box',
+  'magenta_shulker_box',
+  'light_blue_shulker_box',
+  'yellow_shulker_box',
+  'lime_shulker_box',
+  'pink_shulker_box',
+  'gray_shulker_box',
+  'light_gray_shulker_box',
+  'cyan_shulker_box',
+  'purple_shulker_box',
+  'blue_shulker_box',
+  'brown_shulker_box',
+  'green_shulker_box',
+  'red_shulker_box',
+  'black_shulker_box',
+  'dispenser',
+  'dropper',
+  'hopper',
+  'enchanting_table',
+  'anvil',
+  'chipped_anvil',
+  'damaged_anvil',
+  'grindstone',
+  'smithing_table',
+  'stonecutter',
+  'loom',
+  'cartography_table',
+  'fletching_table',
+  'lectern',
+  'jukebox',
+  'note_block',
+  'beacon',
+  'command_block',
+  'chain_command_block',
+  'repeating_command_block',
+  'structure_block',
+  'jigsaw_block',
+  'chiseled_bookshelf',
+  'decorated_pot',
+  'crafter',
+  'respawn_anchor',
+  'cake',
+  'white_candle_cake',
+  'orange_candle_cake',
+  'magenta_candle_cake',
+  'light_blue_candle_cake',
+  'yellow_candle_cake',
+  'lime_candle_cake',
+  'pink_candle_cake',
+  'gray_candle_cake',
+  'light_gray_candle_cake',
+  'cyan_candle_cake',
+  'purple_candle_cake',
+  'blue_candle_cake',
+  'brown_candle_cake',
+  'green_candle_cake',
+  'red_candle_cake',
+  'black_candle_cake',
+  'dragon_egg',
+  'bee_nest',
+  'beehive',
+])
+
+/**
+ * Pure half of `findPlaceReference`: the first solid neighbour in the old
+ * direction order, except interactive blocks are skipped while a plain solid
+ * face exists and the first interactive one is kept as the fallback. A fixture
+ * can pin the ordering without a live bot.
+ */
+export function placeReferenceChoice<T extends { boundingBox?: string; name?: string }>(
+  neighbors: readonly { block: T | null; direction: { face: Vec3Json } }[],
+): { block: T; face: Vec3Json } | null {
+  let interactiveFallback: { block: T; face: Vec3Json } | null = null
+  for (const neighbor of neighbors) {
+    const block = neighbor.block
+    if (block === null || block.boundingBox !== 'block') continue
+    if (INTERACTIVE_PLACE_REFERENCE_BLOCKS.has(block.name ?? '')) {
+      if (interactiveFallback === null) interactiveFallback = { block, face: neighbor.direction.face }
+      continue
+    }
+    return { block, face: neighbor.direction.face }
+  }
+  return interactiveFallback
+}
+/**
  * Bounded window to walk into a lit portal and observe the server-side
  * dimension change. Long enough for a short approach + the respawn round trip,
  * short enough that a portal which never transfers fails loud.
@@ -4631,14 +4743,16 @@ export class Executor {
         // mechanical step, so a bridge cell outside its declared span fails
         // closed instead of silently widening the envelope.
         try {
-          await this.performPlaceEffect(span.place, block, () => this.bot.placeBlock(reference.block, reference.face))
+          await this.performPlaceEffect(span.place, block, () => this.placeBlockAgainst(reference))
         } catch (error) {
           if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
           const observed = this.currentBlockAt(span.place)?.name ?? null
           const message = error instanceof Error ? error.message : String(error)
           throw new ExecutorError(
             'place_refused',
-            `bridge placement of ${block} at (${span.place.x},${span.place.y},${span.place.z}) was rejected; observed block is ${observed ?? 'unknown'} (${message})`,
+            `bridge placement of ${block} at (${span.place.x},${span.place.y},${span.place.z}) was rejected; observed block is ${observed ?? 'unknown'} ` +
+              `ref=${reference.block.name}@${reference.block.position.x},${reference.block.position.y},${reference.block.position.z} ` +
+              `face=${reference.face.x},${reference.face.y},${reference.face.z} (${message})`,
           )
         }
         this.ensureOwned(epoch, signal)
@@ -8908,14 +9022,16 @@ export class Executor {
           // outside its declared contract fails closed instead of silently widening
           // the envelope.
           try {
-            await this.performPlaceEffect(place, block, () => this.bot.placeBlock(reference.block, reference.face))
+            await this.performPlaceEffect(place, block, () => this.placeBlockAgainst(reference))
           } catch (error) {
             if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
             const observed = this.currentBlockAt(place)?.name ?? null
             const message = error instanceof Error ? error.message : String(error)
             throw new ExecutorError(
               'place_refused',
-              `descent scaffold placement of ${block} at (${place.x},${place.y},${place.z}) was rejected; observed block is ${observed ?? 'unknown'} (${message})`,
+              `descent scaffold placement of ${block} at (${place.x},${place.y},${place.z}) was rejected; observed block is ${observed ?? 'unknown'} ` +
+                `ref=${reference.block.name}@${reference.block.position.x},${reference.block.position.y},${reference.block.position.z} ` +
+                `face=${reference.face.x},${reference.face.y},${reference.face.z} (${message})`,
             )
           }
           this.ensureOwned(epoch, signal)
@@ -9358,7 +9474,7 @@ export class Executor {
       await this.performPlaceEffect(target, itemName, () =>
         pillarFooting
           ? this.placePillarBlock(reference.block, reference.face)
-          : this.bot.placeBlock(reference.block, reference.face),
+          : this.placeBlockAgainst(reference),
       )
     } catch (error) {
       // The placement mechanism's own rejection was previously an untyped
@@ -9369,12 +9485,16 @@ export class Executor {
       // 2026-09-21T16:29:56.736Z: the whole `PLACE:furnace:p57_59_-3` retry run
       // was `reason=unknown_event` and no layer could tell a server refusal from
       // a crash. The verdict is read from world truth, not from the message.
+      // `ref=` names the clicked face owner so the next refusal distinguishes
+      // an interactive-reference activation from occlusion/reach rejections.
       if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
       const observed = this.currentBlockAt(target)?.name ?? null
       const message = error instanceof Error ? error.message : String(error)
       throw new ExecutorError(
         'place_refused',
-        `placement mechanism rejected ${itemName} at (${target.x},${target.y},${target.z}); observed block is ${observed ?? 'unknown'} (${message})`,
+        `placement mechanism rejected ${itemName} at (${target.x},${target.y},${target.z}); observed block is ${observed ?? 'unknown'} ` +
+          `ref=${reference.block.name}@${reference.block.position.x},${reference.block.position.y},${reference.block.position.z} ` +
+          `face=${reference.face.x},${reference.face.y},${reference.face.z} (${message})`,
       )
     }
     this.ensureOwned(epoch, signal)
@@ -9807,7 +9927,7 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.equipPlacementItem(candidate, supportItem.name, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
-    await this.performPlaceEffect(scaffold, supportItem.name, () => this.bot.placeBlock(reference.block, reference.face))
+    await this.performPlaceEffect(scaffold, supportItem.name, () => this.placeBlockAgainst(reference))
     this.ensureOwned(epoch, signal)
     const placedName = await this.waitForPlacedBlock(scaffold, supportItem.name, epoch, signal)
     if (!isPlacePostconditionMet(placedName, supportItem.name)) {
@@ -13119,17 +13239,46 @@ export class Executor {
       { offset: { x: 0, y: 0, z: -1 }, face: { x: 0, y: 0, z: 1 } },
       { offset: { x: 0, y: 1, z: 0 }, face: { x: 0, y: -1, z: 0 } },
     ]
-    for (const direction of directions) {
-      const block = this.currentBlockAt({
+    // A use-on click on an interactive block activates it instead of placing
+    // (see INTERACTIVE_PLACE_REFERENCE_BLOCKS), so prefer a plain solid face;
+    // an interactive neighbour remains usable via the sneak-click fallback.
+    const neighbors = directions.map((direction) => ({
+      block: this.currentBlockAt({
         x: target.x + direction.offset.x,
         y: target.y + direction.offset.y,
         z: target.z + direction.offset.z,
-      })
-      if (block === null || block.boundingBox !== 'block') continue
-      const face = this.bot.entity.position.clone().set(direction.face.x, direction.face.y, direction.face.z)
-      return { block, face }
+      }),
+      direction,
+    }))
+    const picked = placeReferenceChoice(neighbors)
+    if (picked === null) return null
+    return {
+      block: picked.block,
+      face: this.bot.entity.position.clone().set(picked.face.x, picked.face.y, picked.face.z),
     }
-    return null
+  }
+
+  /**
+   * `bot.placeBlock` is a plain use-on click; vanilla activates an interactive
+   * reference instead of placing against it. Sneaking for the click is the
+   * vanilla "place anyway" signal; non-interactive references keep the exact
+   * old path so this can never change a working placement.
+   */
+  private async placeBlockAgainst(reference: {
+    block: Block
+    face: ReturnType<Bot['entity']['position']['clone']>
+  }): Promise<void> {
+    if (!INTERACTIVE_PLACE_REFERENCE_BLOCKS.has(reference.block.name)) {
+      await this.bot.placeBlock(reference.block, reference.face)
+      return
+    }
+    const wasSneaking = this.bot.getControlState('sneak')
+    this.setControlState('sneak', true)
+    try {
+      await this.bot.placeBlock(reference.block, reference.face)
+    } finally {
+      this.setControlState('sneak', wasSneaking)
+    }
   }
 }
 
