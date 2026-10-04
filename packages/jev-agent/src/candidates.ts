@@ -752,17 +752,18 @@ function separationLegOpenedCells(candidate: Candidate): Vec3Json[] {
 }
 
 /**
- * One locomotion leg that measurably increases separation from every tracker
- * camped inside contact range: its landing cell is strictly farther from the
- * hostile than the body is, and no cell it would open is an approach lane the
- * hostile's own analysis named or sits meaningfully closer to the hostile
- * than the body does. The half-block margin keeps the pocket's own floor
- * diggable - it is the body's floor, not the boundary - while a cell that
- * leans into the hostile's pocket still fails.
+ * One locomotion leg that can only hold or widen separation from every
+ * tracker camped inside contact range: its landing cell never comes
+ * measurably nearer the hostile than the body is (a flat landing into the
+ * shared wall still opens the corridor), and no cell it would open is an
+ * approach lane the hostile's own analysis named or sits meaningfully closer
+ * to the hostile than the body does. The half-block margin keeps the
+ * pocket's own floor diggable - it is the body's floor, not the boundary -
+ * while a cell that leans into the hostile's pocket still fails.
  */
 function separationIncreasingLeg(
   self: WorldState['self'],
-  inBand: readonly EntityState[],
+  guarded: readonly EntityState[],
   laneCells: ReadonlySet<string>,
   candidate: Candidate,
 ): boolean {
@@ -772,11 +773,16 @@ function separationIncreasingLeg(
   for (const cell of opened) {
     if (laneCells.has(`${cell.x},${cell.y},${cell.z}`)) return false
   }
-  for (const threat of inBand) {
+  for (const threat of guarded) {
     const current = Number.isFinite(threat.distance)
       ? threat.distance
       : distance(self.position, threat.position)
-    if (distance(destination, threat.position) <= current) return false
+    // Non-decreasing, not strictly increasing: the first step into the shared
+    // wall is distance-neutral by cell quantization (measured live 3.00 m
+    // landing vs 3.01 m body) yet opens the corridor every following step
+    // ratchets. The safety invariant is never-approach: a landing that comes
+    // measurably closer is refused, and each epoch re-evaluates the proof.
+    if (distance(destination, threat.position) < current - 0.05) return false
     for (const cell of opened) {
       if (distance(cell, threat.position) <= current - 0.5) return false
     }
@@ -790,7 +796,7 @@ function separationIncreasingLeg(
  * with no line of sight and no live engagement, and no fresh damage may be in
  * memory - the same harmlessness the occluded bypass demands minus the
  * distance arm the band itself denies. When it holds, locomotion legs that
- * strictly recede and open no approach-lane cell join the survival set, so the
+ * never approach and open no approach-lane cell join the survival set, so the
  * body can dig a widening corridor instead of standing forever behind a wall
  * the tracker cannot cross. Returns null - the arm is off - wherever any of
  * those separation facts is not proven.
@@ -816,8 +822,16 @@ function separatedTrackerEscapeArm(
     if (!unreachable.has(entity.id) || entity.lineOfSight !== false || entity.attackedSelf === true) return null
   }
   const laneCells = facts.threatApproachLaneCells ?? new Set<string>()
+  // The non-approach invariant guards every hostile in the danger band, not
+  // just the proven in-band trackers: a leg that escapes the wall but drifts
+  // measurably toward a live reachable watcher trades a dead threat for a
+  // live one and is not an escape.
+  const guarded = state.entities.filter(
+    (entity) =>
+      entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
+  )
   return (candidate) =>
-    SEPARATION_LEG_KINDS.has(candidate.kind) && separationIncreasingLeg(self, inBand, laneCells, candidate)
+    SEPARATION_LEG_KINDS.has(candidate.kind) && separationIncreasingLeg(self, guarded, laneCells, candidate)
 }
 
 /**
@@ -890,16 +904,20 @@ export function threatRunnableLocomotionPredicate(
       const path = standFar ? 'unknown' : (options.reachability?.pathProbe?.(fact.stand) ?? 'unknown')
       if (path !== 'no_path') return null
     }
+    const guarded = state.entities.filter(
+      (entity) =>
+        entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
+    )
     return (candidate) => {
       if (!SEPARATION_LEG_KINDS.has(candidate.kind)) return false
       const destination = separationLegDestination(candidate)
       if (destination === null) return false
       const opened = separationLegOpenedCells(candidate)
-      for (const threat of inBand) {
+      for (const threat of guarded) {
         const current = Number.isFinite(threat.distance)
           ? threat.distance
           : distance(state.self.position, threat.position)
-        if (distance(destination, threat.position) <= current) return false
+        if (distance(destination, threat.position) < current - 0.05) return false
         for (const cell of opened) {
           if (distance(cell, threat.position) < current) return false
         }

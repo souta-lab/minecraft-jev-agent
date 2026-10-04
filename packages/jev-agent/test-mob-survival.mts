@@ -708,20 +708,25 @@ addCase("(c1o) a receding leg that opens the tracker's own approach lane is refu
   return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
 })
 
-addCase('(c1p) a leg that does not strictly recede is refused', () => {
+addCase('(c1p) never-approach: a flat wall-cell landing is admitted, a closer landing refused', () => {
   const state = separatedScene()
-  // Descending TOWARD the pocket (landing 1.12 m from the tracker) is an
-  // approach, not an escape; and a leg that lands where the body stands gains
-  // nothing. Both stay out even though the tracker is proven unreachable.
-  const toward = descendLeg(state, 'DESCEND:level:E:b2_10_0', { x: 2, y: 10, z: 0 }, { x: 2, y: 10, z: 0.5 })
-  const same = descendLeg(state, 'DESCEND:level:W:b0_10_0', { x: 0, y: 10, z: 0 }, { x: 0.5, y: 10, z: 0.5 })
-  const offer = applyThreatRestriction(state, [toward, same, workCell(state), escalateOut(state)], {
+  // Live gen-muu51k6u: `DESCEND:level:W` lands 2.998 m out vs the body's
+  // 3.008 m - flat by cell quantization, yet it opens the west wall into a
+  // new pocket cell the corridor ratchets from. Strict `>` could never admit
+  // the first wall step; the invariant is non-decreasing separation.
+  const flat = descendLeg(state, 'DESCEND:level:W:b-2_10_0', { x: -2, y: 10, z: 0 }, { x: -2, y: 10, z: 0.5 })
+  // Descending TOWARD the pocket (landing 1.0 m from the tracker) is an
+  // approach, not an escape, and stays out even though the tracker is
+  // proven unreachable.
+  const closer = descendLeg(state, 'DESCEND:level:E:b2_10_0', { x: 2, y: 10, z: 0 }, { x: 2, y: 10, z: 0.5 })
+  const offer = applyThreatRestriction(state, [flat, closer, workCell(state), escalateOut(state)], {
     unreachableThreatEntityIds: new Set([54801]),
     threatApproachLaneCells: new Set(),
   })
   const pass =
-    offer.candidates.length === 1 &&
-    offer.candidates[0]?.kind === 'ESCALATE'
+    offer.candidates.some((candidate) => candidate.id === flat.id) &&
+    !offer.candidates.some((candidate) => candidate.id === closer.id) &&
+    !offer.candidates.some((candidate) => candidate.kind === 'MINE')
   return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
 })
 
@@ -814,6 +819,9 @@ addCase('(c1u) a proven-separated tracker counts survival answers and strictly-r
   }
   const runnable = threatRunnableLocomotionPredicate(state, options)
   const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  // A landing flat to within cell quantization (2.5 m like the body's 2.5 m)
+  // still counts - it opens a new wall cell the corridor ratchets from.
+  const flat = descendLeg(state, 'DESCEND:level:W:b-2_10_0', { x: -2, y: 10, z: 0 }, { x: -2, y: 10, z: 0.5 })
   const toward = descendLeg(state, 'DESCEND:level:E:b2_10_0', { x: 2, y: 10, z: 0 }, { x: 2, y: 10, z: 0.5 })
   // A leg whose dig cell leans approach-side (nearer the tracker than the
   // body) never counts at generation time - no lane set exists yet, so the
@@ -821,6 +829,7 @@ addCase('(c1u) a proven-separated tracker counts survival answers and strictly-r
   const leans = descendLeg(state, 'DESCEND:level:E:b1_10_0', { x: 1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
   const pass =
     runnable(away) === true &&
+    runnable(flat) === true &&
     runnable(toward) === false &&
     runnable(leans) === false &&
     runnable(retreatLeg(state)) === true &&
@@ -828,8 +837,28 @@ addCase('(c1u) a proven-separated tracker counts survival answers and strictly-r
     runnable(moveLeg(state, 'MOVE:p2_10_0', { x: 2, y: 10, z: 0.5 })) === false
   return {
     pass,
-    detail: `away=${runnable(away)} toward=${runnable(toward)} leans=${runnable(leans)} retreat=${runnable(retreatLeg(state))} mine=${runnable(workCell(state))} moveNearer=${runnable(moveLeg(state, 'MOVE:p2_10_0', { x: 2, y: 10, z: 0.5 }))}`,
+    detail: `away=${runnable(away)} flat=${runnable(flat)} toward=${runnable(toward)} leans=${runnable(leans)} retreat=${runnable(retreatLeg(state))} mine=${runnable(workCell(state))} moveNearer=${runnable(moveLeg(state, 'MOVE:p2_10_0', { x: 2, y: 10, z: 0.5 }))}`,
   }
+})
+
+addCase('(c1x) a leg that escapes the wall but drifts toward a live watcher in the band is refused', () => {
+  const state = separatedScene()
+  // A second hostile inside the danger radius - live LOS, reachable, NOT
+  // proven: the arm still fires for the proven in-band spider, but no leg may
+  // close on the live watcher. Trading a dead threat for a live one is not an
+  // escape; the west leg that holds-or-gains against BOTH stays offered.
+  state.entities.push(hostile(54802, 'zombie', { x: 0.5, y: 10, z: -4 }))
+  const towardLive = descendLeg(state, 'DESCEND:level:N:b0_10_-2', { x: 0, y: 10, z: -2 }, { x: 0.5, y: 10, z: -2.5 })
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const offer = applyThreatRestriction(state, [towardLive, away, workCell(state), escalateOut(state)], {
+    unreachableThreatEntityIds: new Set([54801]),
+    threatApproachLaneCells: new Set(),
+  })
+  const pass =
+    !offer.candidates.some((candidate) => candidate.id === towardLive.id) &&
+    offer.candidates.some((candidate) => candidate.id === away.id) &&
+    !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
 })
 
 addCase('(c1v) an in-band tracker with a reachable stance counts nothing but survival answers', () => {
