@@ -852,19 +852,43 @@ function separatedTrackerEscapeArm(
 
 /**
  * The cells a nearby hostile's own approach analysis names as the first dig
- * toward its stance - `DIG_ROUTE:mode:dir:b-x_y_z` route ids carried on
- * withheld ATTACK entries' acquisition evidence. The union over every
- * dangerous hostile's lanes is conservative: a leg that recedes but breaks a
- * named boundary hands that tracker the exact approach it was proven to lack.
+ * toward its stance - `b-x_y_z` route ids carried on withheld ATTACK entries'
+ * acquisition evidence - restricted to the cells on the hostile's side of the
+ * gap: a cell can only be part of the approach the hostile was proven to lack
+ * when it sits nearer the hostile than the body is. A corridor-extension cell
+ * beyond the body cannot adjoin the sealed region; the acquisition fanout
+ * carries the SAME locomotion ids the escape arm emits (`DESCEND:level:W`),
+ * so without the gap test every new frontier cell lands in the lane set and
+ * the corridor deadlocks one cell at a time (measured live portal-p23
+ * `run-mutsv43u-1a0g` gen-muu5h6zu: the pocket's routes absorbed
+ * `b-20_24_14`, 4.8 m from the hostile vs the body's 4.4 m gap). When the
+ * entry's hostile is missing from the entity list the cell is kept - a lane
+ * whose side of the gap cannot be measured stays protected.
  */
-function threatApproachLaneCells(withheld: readonly CandidateReachability[]): Set<string> {
+function threatApproachLaneCells(
+  withheld: readonly CandidateReachability[],
+  entities: readonly EntityState[],
+  selfPosition: Vec3Json,
+): Set<string> {
   const cells = new Set<string>()
+  const byId = new Map<number, EntityState>()
+  for (const entity of entities) byId.set(entity.id, entity)
   for (const entry of withheld) {
     if (entry.candidate.kind !== 'ATTACK') continue
+    const mob = byId.get(entry.candidate.targetEntityId ?? -1)
+    const bodyGap =
+      mob === undefined
+        ? null
+        : Number.isFinite(mob.distance)
+          ? mob.distance
+          : distance(selfPosition, mob.position)
     for (const acquisition of entry.acquisition ?? []) {
       for (const route of acquisition.routes ?? []) {
         const match = /:b(-?\d+)_(-?\d+)_(-?\d+)$/.exec(route)
-        if (match !== null) cells.add(`${match[1]},${match[2]},${match[3]}`)
+        if (match === null) continue
+        const cell = { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) }
+        if (mob !== undefined && bodyGap !== null && distance(cell, mob.position) > bodyGap) continue
+        cells.add(`${cell.x},${cell.y},${cell.z}`)
       }
     }
   }
@@ -1177,10 +1201,10 @@ export function applyGroundedThreatRestriction(
   return applyThreatRestriction(state, candidates, {
     unreachableThreatEntityIds,
     // The lane cells every withheld ATTACK's own acquisition evidence named as
-    // the first dig toward its stance. The separated-tracker escape arm reads
-    // them so a receding leg can never open the boundary the hostile was just
-    // proven unable to cross.
-    threatApproachLaneCells: threatApproachLaneCells(withheld),
+    // the first dig toward its stance - the cells on the hostile's side of the
+    // gap. The separated-tracker escape arm reads them so a receding leg can
+    // never open the boundary the hostile was just proven unable to cross.
+    threatApproachLaneCells: threatApproachLaneCells(withheld, state.entities, state.self.position),
   })
 }
 

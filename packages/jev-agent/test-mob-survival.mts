@@ -904,6 +904,54 @@ addCase('(c1w) no probe wired: unknown reachability never promotes a leg past th
   return { pass, detail: `away=${runnable(away)} retreat=${runnable(retreatLeg(state))}` }
 })
 
+addCase('(c1z) an approach lane is the hostile side of the gap, not every named route cell', () => {
+  // Live gen-muu5h6zu: the sealed pocket's acquisition fanout listed the
+  // escape arm's own corridor frontier (`DESCEND:level:W:b-20_24_14`) among a
+  // withheld ATTACK's routes, so the extension cell landed in the lane set and
+  // the corridor deadlocked one cell at a time. A lane is a cell that can
+  // adjoin the hostile's sealed region - nearer the hostile than the body is;
+  // a cell beyond the body cannot breach the pocket from the far side.
+  const entities = [
+    walledSpider(), // (3,10,0.5) - 2.5 m, in-band
+    hostile(54811, 'creeper', { x: 0.5, y: 10, z: 6 }, { lineOfSight: false }), // 5.5 m north
+  ]
+  const state = bodyState(entities)
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const reachability = {
+    attackStandProbe: () => ({ stand: null, standDistance: null, onBody: false, nearest: null, refusal: 'no_standable_cell' as const }),
+    pathProbe: () => 'no_path' as const,
+  }
+  const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability })
+  const acquisition = (routes: string[]) => [
+    { missing: 'standable_approach', routes, reason: null, item: null, count: null, held: null, tools: 'none' },
+  ]
+  const withheld = grounded.withheld.map((entry) => {
+    if (entry.candidate.kind !== 'ATTACK') return entry
+    // The spider's own fanout names the west frontier cell - 4.0 m from it vs
+    // the 2.5 m gap: freed. The creeper names the same far cell (freed) plus
+    // the gap cell (0,9,4) - 2.3 m from it vs the 5.5 m gap: stays a lane.
+    if (entry.candidate.targetEntityId === 54801) {
+      return { ...entry, acquisition: acquisition(['DESCEND:level:W:b-1_10_0']) }
+    }
+    if (entry.candidate.targetEntityId === 54811) {
+      return { ...entry, acquisition: acquisition(['DESCEND:level:W:b-1_10_0', 'DIG_ROUTE:down:N:b0_9_4']) }
+    }
+    return { ...entry, acquisition: [] }
+  })
+  const west = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -1, y: 10, z: 0.5 })
+  const northStep: Candidate = {
+    id: 'STEP:p0_9_4', kind: 'STEP', label: 'step north', targetName: null, target: { x: 0, y: 9, z: 4 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true,
+    hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyGroundedThreatRestriction(state, [west, northStep, workCell(state), escalateOut(state)], withheld, reachability)
+  const pass =
+    offer.candidates.some((candidate) => candidate.id === west.id) &&
+    !offer.candidates.some((candidate) => candidate.id === northStep.id) &&
+    !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
+})
+
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {
   const starving = bodyState([hostile(16, 'zombie', { x: 6, y: 10, z: 0.5 })])
   starving.self = { ...starving.self, food: 0 }
