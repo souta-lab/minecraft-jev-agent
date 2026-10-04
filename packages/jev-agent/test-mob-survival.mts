@@ -1118,8 +1118,16 @@ function digBot(blocks: Record<string, DigBlockSpec>, selfPos: Vec3Json): Bot {
         grass_block: { drops: [3] },
         sand: { drops: [4] },
         stone: { drops: [5] },
+        gravel: { drops: [6] },
+        mud: { drops: [7] },
       },
-      items: { 3: { name: 'dirt' }, 4: { name: 'sand' }, 5: { name: 'cobblestone' } },
+      items: {
+        3: { name: 'dirt' },
+        4: { name: 'sand' },
+        5: { name: 'cobblestone' },
+        6: { name: 'gravel' },
+        7: { name: 'mud' },
+      },
     },
   } as unknown as Bot
 }
@@ -1191,12 +1199,17 @@ addCase('(h2) the sensor stays silent while a placeable is already held or no th
   return { pass, detail: `withPlaceable=${withPlaceable.length} noThreat=${noThreat.length}` }
 })
 
-addCase('(h3) blocks with no resolved yield are never offered', () => {
+addCase('(h3) blocks whose drop cannot feed the wall/pillar answers are never offered', () => {
   const self = selfState(SELF)
   const zombie = hostile(78, 'zombie', { x: 2.5, y: 10, z: 0.5 })
-  // obsidian is not in the soft set (name filter); gravel/mud ARE in the set
-  // but absent from the stub registry, so resolveBlockHarvest yields null and
-  // the cell is dropped - only the honest dig source survives.
+  // obsidian is not in the soft set (name filter). gravel/mud ARE in the set
+  // and resolve real drops (`gravel`/`mud`), but neither yield is
+  // PILLAR_PLACE_PRIORITY-selectable, so digging them can never satisfy the
+  // placeable starvation the arm exists to break - the same contract the
+  // producer scan applies. Only the dirt cell (yield `dirt`) survives.
+  // Live evidence: `MINE:survival:b-17_24_16` offered gravel thousands of
+  // epochs and every lease answered TARGET_GONE because the cell was never in
+  // `state.blocks`.
   const g: Record<string, DigBlockSpec> = {
     [digKey(1, 9, 0)]: digSolid('obsidian'),
     [digKey(1, 9, 1)]: digSolid('gravel'),
@@ -1214,6 +1227,27 @@ addCase('(h3) blocks with no resolved yield are never offered', () => {
   )
   const pass = cells.length === 1 && cells[0] !== undefined && cells[0].name === 'dirt'
   return { pass, detail: `cells=[${cells.map((cell) => cell.name).join(',')}]` }
+})
+
+addCase('(h4) a survival dig cell that has exhausted its own retry budget is not re-offered', () => {
+  // Same-arm complement of the yield contract: the candidate layer honours
+  // the ordinary spatial failure memory. The measured loop leased one dead
+  // cell for thousands of epochs precisely because the arm ignored it.
+  const state = bodyState([hostile(77, 'zombie', { x: 2.5, y: 10, z: 0.5 }, { attackedSelf: true })])
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.survivalDigCells = [
+    { position: { x: 1, y: 9, z: 0 }, name: 'dirt', yieldItem: 'dirt' },
+    { position: { x: -2, y: 9, z: 0 }, name: 'dirt', yieldItem: 'dirt' },
+  ]
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  state.signals.failedCandidates = { 'MINE:survival:b1_9_0': 40 }
+  const generated = generateCandidates(state, defaultCandidateOptions)
+  const digs = generated.filter((candidate) => candidate.meta.survivalDig === true)
+  const pass =
+    digs.length === 1 &&
+    digs[0] !== undefined &&
+    digs[0].id === 'MINE:survival:b-2_9_0'
+  return { pass, detail: `digs=[${digs.map((candidate) => candidate.id).join(',')}]` }
 })
 
 let failures = 0

@@ -5638,9 +5638,11 @@ function buildEscapeCells(
 }
 
 /**
- * Soft-block names whose resolved harvest drop is itself placeable - the only
- * blocks a bare-handed body can convert into wall/pillar material fast enough
- * to matter inside a melee window (dirt ~0.75 s, grass/sand ~0.9 s by fist).
+ * Soft-block names fast enough to fist-mine inside a melee window (dirt
+ * ~0.75 s, grass/sand ~0.9 s by fist). This is the NAME prefilter only: a
+ * candidate cell is admitted below only when its resolved drop is also
+ * PILLAR_PLACE_PRIORITY-selectable, because the arm's contract is that the
+ * drop IS the material the wall/pillar answers spend.
  */
 const SURVIVAL_DIG_YIELD_NAMES: ReadonlySet<string> = new Set([
   'dirt',
@@ -5711,7 +5713,16 @@ export function buildSurvivalDigCells(
         if (block === null || block.boundingBox !== 'block') continue
         if (!SURVIVAL_DIG_YIELD_NAMES.has(block.name)) continue
         const harvest = resolveBlockHarvest(bot, block.name)
-        if (harvest.yield === null) continue
+        // The arm's contract is that the drop IS the placeable the wall/pillar
+        // answers spend, and `selectPlaceableBlock` only selects
+        // PILLAR_PLACE_PRIORITY names - the same envelope the producer scan
+        // applies above. A soft block that resolves to anything else (gravel
+        // -> gravel, snow_block -> snowball, mud -> mud) can be dug but never
+        // satisfies the placeable starvation the offer exists to break, and
+        // the cell is not in `state.blocks` either, so `guardMine` can only
+        // answer TARGET_GONE on every lease. The name set is the fast soft
+        // prefilter; this yield check is the spendability contract.
+        if (typeof harvest.yield !== 'string' || !PILLAR_PLACE_PRIORITY.includes(harvest.yield)) continue
         out.push({ position, name: block.name, yieldItem: harvest.yield })
       }
     }

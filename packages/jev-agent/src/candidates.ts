@@ -13283,29 +13283,43 @@ function survivalShapingCandidates(
     // only shaping answer the body can still produce is digging a soft block
     // whose drop IS the placeable the wall/pillar answers need. The sensor
     // only populates `survivalDigCells` under exactly this condition.
-    return (state.survivalDigCells ?? []).map((cell) => ({
-      id: `MINE:survival:${blockId('b', cell.position)}`,
-      kind: 'MINE' as const,
-      label: `fist-mine ${cell.name} at (${cell.position.x},${cell.position.y},${cell.position.z}) for blocks to wall ${threat.name} off`,
-      targetName: cell.name,
-      target: cell.position,
-      targetEntityId: null,
-      itemName: null,
-      requiresTool: false,
-      toolName: null,
-      inReach: true,
-      hasStandableAdjacent: true,
-      meta: {
-        tick: state.tick,
-        survivalDig: true,
-        x: cell.position.x,
-        y: cell.position.y,
-        z: cell.position.z,
-        diggable: true,
-        yieldItem: cell.yieldItem,
-        ...threatMeta,
-      },
-    }))
+    // Survival cells are fungible - any soft cell satisfies the material
+    // need - so the ordinary spatial failure memory applies (unlike the
+    // identity-critical step-overhead cell, which checks its exact id only).
+    // Without this bound a cell that can never lease (live evidence: a gravel
+    // cell the guard could not validate) re-offered every epoch for thousands
+    // of cycles, saturating the neighbourhood's failure buckets on top of its
+    // own unbounded failure ledger.
+    const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+    return (state.survivalDigCells ?? [])
+      .filter(
+        (cell) =>
+          failureCount(state.signals.failedCandidates, `MINE:survival:${blockId('b', cell.position)}`) <
+          failureLimit,
+      )
+      .map((cell) => ({
+        id: `MINE:survival:${blockId('b', cell.position)}`,
+        kind: 'MINE' as const,
+        label: `fist-mine ${cell.name} at (${cell.position.x},${cell.position.y},${cell.position.z}) for blocks to wall ${threat.name} off`,
+        targetName: cell.name,
+        target: cell.position,
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: true,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          survivalDig: true,
+          x: cell.position.x,
+          y: cell.position.y,
+          z: cell.position.z,
+          diggable: true,
+          yieldItem: cell.yieldItem,
+          ...threatMeta,
+        },
+      }))
   }
   const feet = {
     x: Math.floor(state.self.position.x),
