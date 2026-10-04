@@ -5599,7 +5599,9 @@ export function buildSurvivalDigCells(
       if (dx === 0 && dz === 0) continue
       for (let dy = -1; dy <= 0; dy += 1) {
         const position = { x: feet.x + dx, y: feet.y + dy, z: feet.z + dz }
-        if (distance(position, self.eyePosition) > options.reach + 0.5) continue
+        // The same `inReach` bound every other sensor uses - a cell past it
+        // would emit a MINE the dig executor's own reach check refuses.
+        if (distance(position, self.eyePosition) > options.reach) continue
         const block = sensorBlockAt(bot, scratch.set(position.x, position.y, position.z), 'survival-dig')
         if (block === null || block.boundingBox !== 'block') continue
         if (!SURVIVAL_DIG_YIELD_NAMES.has(block.name)) continue
