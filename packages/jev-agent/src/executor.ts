@@ -9489,12 +9489,14 @@ export class Executor {
       // an interactive-reference activation from occlusion/reach rejections.
       if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
       const observed = this.currentBlockAt(target)?.name ?? null
+      const occupants = this.cellOccupants(target)
       const message = error instanceof Error ? error.message : String(error)
       throw new ExecutorError(
         'place_refused',
         `placement mechanism rejected ${itemName} at (${target.x},${target.y},${target.z}); observed block is ${observed ?? 'unknown'} ` +
           `ref=${reference.block.name}@${reference.block.position.x},${reference.block.position.y},${reference.block.position.z} ` +
-          `face=${reference.face.x},${reference.face.y},${reference.face.z} (${message})`,
+          `face=${reference.face.x},${reference.face.y},${reference.face.z} ` +
+          `held=${this.bot.heldItem?.name ?? 'empty'} occupants=[${occupants}] (${message})`,
       )
     }
     this.ensureOwned(epoch, signal)
@@ -13101,6 +13103,22 @@ export class Executor {
     return this.bot.blockAt(toVec3(this.bot, position))
   }
 
+  /**
+   * Entities whose AABB overlaps the target cell. A server refusal with an
+   * `observed=air` cell narrows to entity-obstruction, an inventory/held-slot
+   * desync, or a ref-side mismatch; naming the live occupants in the refusal
+   * forensics decides which family the next failure belongs to.
+   */
+  private cellOccupants(cell: Vec3Json): string {
+    return Object.values(this.bot.entities)
+      .filter((entity) => entity !== this.bot.entity && entityOverlapsCell(entity, cell))
+      .map((entity) => {
+        const p = entity.position
+        return `${entity.name ?? entity.type ?? 'entity'}@${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}`
+      })
+      .join(';')
+  }
+
   private distanceToEyes(position: Vec3Json): number {
     const eye = this.bot.entity.position.offset(0, 1.62, 0)
     return distance(position, { x: eye.x, y: eye.y, z: eye.z })
@@ -13280,6 +13298,21 @@ export class Executor {
       this.setControlState('sneak', wasSneaking)
     }
   }
+}
+
+/** Conservative AABB overlap between a tracked entity and a cell's unit box. */
+function entityOverlapsCell(entity: Entity, cell: Vec3Json): boolean {
+  const p = entity.position
+  const halfWidth = typeof entity.width === 'number' && entity.width > 0 ? entity.width / 2 : 0.3
+  const height = typeof entity.height === 'number' && entity.height > 0 ? entity.height : 0.5
+  return (
+    p.x + halfWidth > cell.x &&
+    p.x - halfWidth < cell.x + 1 &&
+    p.z + halfWidth > cell.z &&
+    p.z - halfWidth < cell.z + 1 &&
+    p.y + height > cell.y &&
+    p.y < cell.y + 1
+  )
 }
 
 /** The floored feet cell of a live body. */
