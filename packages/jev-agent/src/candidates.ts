@@ -128,6 +128,7 @@ import {
   armorDefensePoints,
   assessAttackRace,
   bodySurvivalFacts,
+  dangerousThreats,
   isRangedThreatName,
   isResponseWorthyThreat,
   MELEE_THREAT_REACH,
@@ -840,9 +841,10 @@ export function formatNotExecutableHereInterrupt(
 }
 
 export function applyGroundedThreatRestriction(
-  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs' | 'self'>,
   candidates: readonly Candidate[],
   withheld: readonly CandidateReachability[],
+  reachability?: ReachabilityGateOptions | null,
 ): ThreatOffer {
   const unreachableThreatEntityIds = new Set<number>(
     withheld
@@ -860,6 +862,41 @@ export function applyGroundedThreatRestriction(
       )
       .map((entry) => entry.candidate.targetEntityId as number),
   )
+  // The ATTACK offer is budget-bounded (`maxAttackCandidates`), but the CAN set
+  // the occluded-envelope bypass reads must not be: a crowd larger than the
+  // budget leaves every overflow hostile with no verdict at all, `harmless`
+  // can never hold, and the danger envelope suppresses work forever even when
+  // every watcher is mechanically unable to reach the body (measured live
+  // portal-p23 `run-mutsv43u-1a0g` gen-muu2pt9c: 7 hostiles inside 8 m, 4
+  // withheld ATTACKs all `no_attack_stand`, ESCALATE-only for ~35 min). For a
+  // dangerous hostile with NO emitted candidate, run the same stance/path fact
+  // the gate applied to the emitted ones; `null`/reachable/`unknown` is never
+  // promoted - only a proven no-stance or no-path approach joins the set.
+  const standProbe = reachability?.attackStandProbe ?? null
+  if (standProbe !== null) {
+    const emitted = new Set<number>()
+    for (const candidate of candidates) {
+      if (candidate.kind === 'ATTACK' && candidate.targetEntityId !== null) emitted.add(candidate.targetEntityId)
+    }
+    for (const entry of withheld) {
+      if (entry.candidate.kind === 'ATTACK' && entry.candidate.targetEntityId !== null) {
+        emitted.add(entry.candidate.targetEntityId)
+      }
+    }
+    for (const entity of dangerousThreats(state.entities)) {
+      if (emitted.has(entity.id) || unreachableThreatEntityIds.has(entity.id)) continue
+      const fact = standProbe({ entityId: entity.id, position: entity.position })
+      if (fact === null) continue
+      if (fact.stand === null) {
+        unreachableThreatEntityIds.add(entity.id)
+        continue
+      }
+      if (fact.onBody === true) continue
+      const standFar = distance(state.self.position, fact.stand) > FAR_LEG_PROBE_RADIUS
+      const path = standFar ? 'unknown' : (reachability?.pathProbe?.(fact.stand) ?? 'unknown')
+      if (path === 'no_path') unreachableThreatEntityIds.add(entity.id)
+    }
+  }
   return applyThreatRestriction(state, candidates, { unreachableThreatEntityIds })
 }
 

@@ -548,6 +548,89 @@ addCase('(c1k) one reachable watcher keeps the suppression even beside a proven-
   return { pass, detail: `proofs=[53972] hostiles=[53972,53973] offered=[${ids(offer.candidates).join(',')}]` }
 })
 
+addCase('(c1l) a crowd beyond the ATTACK budget: unemitted hostiles get the same stance/path verdict and the bypass still releases work', () => {
+  // Live portal-p23 `run-mutsv43u-1a0g` gen-muu2pt9c (17:07-17:40Z): seven
+  // hostiles inside the 8 m danger radius, all mechanically unreachable
+  // (every emitted ATTACK withheld `no_attack_stand`), but `maxAttackCandidates`
+  // caps the emitted set at 4 - the three overflow watchers never produced a
+  // candidate, so `unreachableThreatEntityIds` could never cover `nearby`, the
+  // occluded-envelope bypass never held, and the offer sat ESCALATE-only for
+  // ~35 min of starvation/replan churn at hp20 with zero contact.
+  const entities = [
+    hostile(54601, 'spider', { x: 4, y: 10, z: 0.5 }, { lineOfSight: false }),
+    hostile(54602, 'creeper', { x: 6, y: 8, z: 0.5 }, { lineOfSight: false }),
+    hostile(54603, 'creeper', { x: -6, y: 10, z: 0.5 }, { lineOfSight: false }),
+    hostile(54604, 'zombie', { x: 0.5, y: 10, z: 7 }, { lineOfSight: false }),
+    // These two sit past the emitted budget: no ATTACK candidate is ever built
+    // for them, so only the probe-eval arm can prove their approach.
+    hostile(54605, 'creeper', { x: 0.5, y: 6, z: -5 }, { lineOfSight: false }),
+    hostile(54606, 'creeper', { x: 0.5, y: 14, z: -6 }, { lineOfSight: false }),
+  ]
+  const state = bodyState(entities)
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_12_0', kind: 'MINE', label: 'dig pocket ceiling', targetName: 'stone', target: { x: 0, y: 12, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const reachability = {
+    // Every watcher is unreachable: the unemitted pair proves it two ways -
+    // 54605 has no stance at all; 54606's stance exists but the walk is no_path.
+    attackStandProbe: ({ entityId }: { entityId: number; position: Vec3Json }) =>
+      entityId === 54606
+        ? { stand: { x: 1, y: 10, z: -5 }, standDistance: 2.4, onBody: false, nearest: null, refusal: null }
+        : { stand: null, standDistance: null, onBody: false, nearest: null, refusal: 'no_standable_cell' as const },
+    pathProbe: () => 'no_path' as const,
+  }
+  const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability })
+  const emittedAttacks = grounded.withheld.filter((entry) => entry.candidate.kind === 'ATTACK')
+  const offer = applyGroundedThreatRestriction(state, [work], grounded.withheld, reachability)
+  const pass =
+    emittedAttacks.length === 4 &&
+    emittedAttacks.every((entry) => entry.result.reason === 'no_attack_stand') &&
+    offer.threat?.active === true &&
+    offer.occluded?.reason === 'no_los_no_path' &&
+    offer.occluded.entityIds.length === 6 &&
+    offer.restricted === false &&
+    offer.candidates.length === 1 &&
+    offer.candidates[0]?.id === work.id
+  return {
+    pass,
+    detail: `emitted=${emittedAttacks.length} occluded=${offer.occluded?.reason ?? 'none'}[${(offer.occluded?.entityIds ?? []).join(',')}] offered=[${ids(offer.candidates).join(',')}]`,
+  }
+})
+
+addCase('(c1m) an unemitted watcher whose probe says REACHABLE keeps the suppression', () => {
+  // The probe-eval arm is not a release by itself: an overflow hostile with a
+  // stance the body could walk to is still dangerous, so the envelope holds.
+  const entities = [
+    hostile(54701, 'spider', { x: 4, y: 10, z: 0.5 }, { lineOfSight: false }),
+    hostile(54702, 'creeper', { x: 6, y: 8, z: 0.5 }, { lineOfSight: false }),
+    hostile(54703, 'creeper', { x: -6, y: 10, z: 0.5 }, { lineOfSight: false }),
+    hostile(54704, 'zombie', { x: 0.5, y: 10, z: 7 }, { lineOfSight: false }),
+    hostile(54705, 'creeper', { x: 0.5, y: 10, z: -6 }, { lineOfSight: false }),
+  ]
+  const state = bodyState(entities)
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_12_0', kind: 'MINE', label: 'dig pocket ceiling', targetName: 'stone', target: { x: 0, y: 12, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const reachability = {
+    attackStandProbe: ({ entityId }: { entityId: number; position: Vec3Json }) =>
+      entityId === 54705
+        ? { stand: { x: 1, y: 10, z: -5 }, standDistance: 2.4, onBody: false, nearest: null, refusal: null }
+        : { stand: null, standDistance: null, onBody: false, nearest: null, refusal: 'no_standable_cell' as const },
+    pathProbe: () => 'no_path' as const,
+  }
+  // The emitted four keep `no_attack_stand`; the unemitted creeper's stance is
+  // real and - with the default reachable path probe below - walkable.
+  const walkable = { ...reachability, pathProbe: () => 'reachable' as const }
+  const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability })
+  const offer = applyGroundedThreatRestriction(state, [work], grounded.withheld, walkable)
+  const pass = offer.occluded === null && offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE'
+  return { pass, detail: `occluded=${offer.occluded?.reason ?? 'none'} offered=[${ids(offer.candidates).join(',')}]` }
+})
+
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {
   const starving = bodyState([hostile(16, 'zombie', { x: 6, y: 10, z: 0.5 })])
   starving.self = { ...starving.self, food: 0 }

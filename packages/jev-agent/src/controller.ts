@@ -2223,7 +2223,7 @@ export class JevController {
       // not-executable-here binding can tell whether a safety envelope is active
       // (its escape routes must never be withdrawn by the binding below).
       const rawOfferBeforeSafety = candidates
-      const threatOffer = applyGroundedThreatRestriction(state, candidates, grounded.withheld)
+      const threatOffer = applyGroundedThreatRestriction(state, candidates, grounded.withheld, groundingOptions.reachability)
       candidates = threatOffer.candidates
       this.logThreatOccluded(threatOffer)
       this.logThreatGap(state, threatOffer)
@@ -2883,7 +2883,7 @@ export class JevController {
       freshBeforeThreat = this.filterMoveCandidates(freshBeforeThreat, freshState)
       freshBeforeThreat = this.filterRepeatedOutcomeCandidates(freshBeforeThreat, freshState)
       freshBeforeThreat = ensureCraftStepActionable(freshState, freshBeforeThreat, freshOptions)
-      const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
+      const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld, freshOptions.reachability)
       const freshCandidates = restrictCandidatesDuringEnvHazard(
         freshState,
         restrictCandidatesDuringUnseenAttacker(

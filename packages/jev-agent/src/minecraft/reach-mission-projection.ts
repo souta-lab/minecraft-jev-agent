@@ -158,7 +158,7 @@ export function projectMinecraftReachMission(input: MinecraftReachMissionProject
   const { mission, world } = input
   const sourceNames = minecraftMissionSourceNames(mission.item)
   const grounded = generateGroundedCandidates(world, input.candidateOptions)
-  const threatOffer = applyGroundedThreatRestriction(world, grounded.candidates, grounded.withheld)
+  const threatOffer = applyGroundedThreatRestriction(world, grounded.candidates, grounded.withheld, input.candidateOptions.reachability)
   let sourceCandidates = threatOffer.candidates
     .filter((candidate) => isMissionReachSourceCandidate(candidate, world, mission.item, sourceNames))
     .filter(reachMoveFitsLocomotionContract)
