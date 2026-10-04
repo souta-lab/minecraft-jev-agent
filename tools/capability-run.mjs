@@ -45,6 +45,15 @@ const RUNS_ROOT = join(CAMPAIGN_DIR, 'runs')
  * current runtime dir from it instead of scanning for runtime state.
  */
 const ACTIVE_RUN_REGISTRY = join(CAMPAIGN_DIR, 'active-run.json')
+/**
+ * The resident runs under the availability supervisor from launch: the host is
+ * fail-loud on MODEL_UNAVAILABLE (exit 1), and a direct child turned the first
+ * provider outage into a run terminal (portal-p21: RESIDENT_EXIT_1 at 73min,
+ * then 10 more outages absorbed only after a manual supervisor relaunch).
+ * Same launcher tree as this file, so launcher and supervisor share registry
+ * semantics.
+ */
+const RESIDENT_SUPERVISOR = join(TOOL_DIR, 'resident-supervisor.mjs')
 const LEAF_JAR = '/home/s0u7a/mc-server/leaf-1.21.11-178.jar'
 const JAVA = '/usr/lib/jvm/java-21-openjdk-amd64/bin/java'
 const RESIDENT_ENV = '/home/s0u7a/.config/mc-ai/resident.env'
@@ -256,6 +265,18 @@ export function clearActiveRunRegistry(runId, claimToken = null, path = ACTIVE_R
 }
 
 /**
+ * Launcher-side release. The supervisor's GENERATION_READY sync rotates the
+ * claim token, so a launcher whose own supervisor child is still the
+ * registered owner releases with the current token; any other owner (a newer
+ * run, or a standalone supervisor relaunch) keeps its entry.
+ */
+export function releaseActiveRunRegistry(runId, claimToken, supervisorPid = null, path = ACTIVE_RUN_REGISTRY) {
+  const current = readActiveRunRegistry(path)
+  const owned = current !== null && current.runId === runId && Number.isInteger(supervisorPid) && current.supervisorPid === supervisorPid
+  clearActiveRunRegistry(runId, owned ? current.claimToken : claimToken, path)
+}
+
+/**
  * Same-world minor-swap provenance update (generation reload OR resident
  * restart). runId/runDir/seed/mission/world identity are preserved verbatim;
  * only the fields that honestly changed move. `boundary` must name which
@@ -404,8 +425,9 @@ async function main() {
   if (!(await portFree(options.port))) throw new Error(`port ${options.port} is busy`)
 
   const procs = []
+  let supervisorPid = null
   const cleanup = async () => {
-    clearActiveRunRegistry(runId, claimToken)
+    releaseActiveRunRegistry(runId, claimToken, supervisorPid)
     for (const p of procs.reverse()) {
       try { if (p.stdin && !p.stdin.destroyed) p.stdin.write('stop\n') } catch { /* ignore */ }
       try { process.kill(-p.pid, 'SIGTERM') } catch { try { p.kill('SIGTERM') } catch { /* ignore */ } }
@@ -456,8 +478,14 @@ async function main() {
       BUDDY_MISSION_ITEM: options.missionItem,
       BUDDY_MISSION_COUNT: String(options.missionCount),
     }
-    const residentProc = spawnLogged('bun', ['agent-runner.mts'], { cwd: join(wtDir, 'packages/buddy-driver'), env: residentEnv, logPath: join(runDir, 'resident-stdout.log') })
-    procs.push(residentProc)
+    // Availability retry only (same host, same env, never a semantic fallback):
+    // a MODEL_UNAVAILABLE exit becomes a same-world resident-restart boundary
+    // whose ownership the supervisor syncs into the registry on GENERATION_READY.
+    const driverDir = join(wtDir, 'packages/buddy-driver')
+    const supervisorDir = join(runDir, 'supervisor')
+    const supervisorProc = spawnLogged('bun', [RESIDENT_SUPERVISOR, '--driver-dir', driverDir, '--artifact-dir', supervisorDir, '--registry', ACTIVE_RUN_REGISTRY], { cwd: driverDir, env: residentEnv, logPath: join(runDir, 'resident-stdout.log') })
+    procs.push(supervisorProc)
+    supervisorPid = supervisorProc.pid
 
     // The canonical campaign pointer: the observer (tools/buddy-observer.mjs
     // registry mode) and rung bookkeeping follow this file instead of scanning
@@ -475,12 +503,15 @@ async function main() {
       segmentId: runId,
       hostBootSha: options.sha,
       generationSourceSha: options.sha,
-      runtimeDir: join(wtDir, 'packages/buddy-driver'),
+      runtimeDir: driverDir,
       serverLog: join(runDir, 'server.log'),
       residentStdout: join(runDir, 'resident-stdout.log'),
+      supervisorArtifactDir: supervisorDir,
       port: options.port,
       runnerPid: process.pid,
-      residentPid: residentProc.pid,
+      supervisorPid,
+      // Bound by the supervisor from the child's first GENERATION_READY.
+      residentPid: null,
       sha: options.sha,
       seed: options.seed,
       username: options.username,
@@ -589,7 +620,7 @@ async function main() {
     let inventoryAtCompletion = null
     let residentAliveAtEnd = false
     while (Date.now() < deadline) {
-      if (residentProc.exitCode !== null) { outcome = `RESIDENT_EXIT_${residentProc.exitCode}`; break }
+      if (supervisorProc.exitCode !== null) { outcome = `SUPERVISOR_EXIT_${supervisorProc.exitCode}`; break }
       const reply = await control(sock, 'report')
       if (reply.ok === true) {
         lastStatus = reply.data
@@ -610,7 +641,7 @@ async function main() {
       }
       await new Promise((r) => setTimeout(r, 10_000))
     }
-    residentAliveAtEnd = residentProc.exitCode === null
+    residentAliveAtEnd = supervisorProc.exitCode === null
 
     // --- harvest ---
     await control(sock, 'acceptance').catch(() => null)
@@ -678,7 +709,7 @@ async function main() {
         fixture: { start: options.start, actualSpawn, fixtureDisplacementBlocks: fixtureDisplacement },
       }),
       ...(concurrentOverride ? { concurrentOverride: true } : {}),
-      outcome, residentAliveAtEnd, worldPresent: extractLevelSeed(serverDir),
+      outcome, residentAliveAtEnd, supervised: true, worldPresent: extractLevelSeed(serverDir),
       objectiveCompleteAtMs, inventoryAtCompletion, finalInventory: lastInventory,
       wallClockMs: Date.now() - startedAt,
       finishedAt: new Date().toISOString(),
@@ -691,7 +722,7 @@ async function main() {
         seed: latestAcceptance.seed, sourceSha: latestAcceptance.sourceSha ?? latestAcceptance.provenance ?? null,
         modelAvailability: latestAcceptance.modelAvailability ?? null, listenerLeak: latestAcceptance.listenerLeak ?? null,
       },
-      paths: { runDir, worktree: wtDir, buddyLog: join(wtDir, 'packages/buddy-driver/buddy.log'), serverLog: join(runDir, 'server.log'), residentStdout: join(runDir, 'resident-stdout.log') },
+      paths: { runDir, worktree: wtDir, buddyLog: join(wtDir, 'packages/buddy-driver/buddy.log'), serverLog: join(runDir, 'server.log'), residentStdout: join(runDir, 'resident-stdout.log'), supervisorDir },
     }
     writeFileSync(join(runDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`)
     await cleanup()
@@ -704,7 +735,7 @@ async function main() {
       process.stderr.write(`[retention] prune skipped: ${retentionError instanceof Error ? retentionError.message : String(retentionError)}\n`)
     }
     process.stdout.write(`${JSON.stringify({ runId, outcome, objectiveCompleteAtMs, inventory: inventoryAtCompletion ?? lastInventory, runDir }, null, 2)}\n`)
-    return outcome === 'OBJECTIVE_SATISFIED' ? 0 : outcome.startsWith('RESIDENT_EXIT') ? 2 : 1
+    return outcome === 'OBJECTIVE_SATISFIED' ? 0 : outcome.startsWith('SUPERVISOR_EXIT') ? 2 : 1
   } catch (error) {
     await cleanup()
     writeFileSync(join(runDir, 'error.txt'), `${error instanceof Error ? error.stack : String(error)}\n`)

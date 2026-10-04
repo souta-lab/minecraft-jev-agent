@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   writeActiveRunRegistry,
   clearActiveRunRegistry,
+  releaseActiveRunRegistry,
   updateActiveRunMinor,
 } from './capability-run.mjs'
 
@@ -94,6 +95,24 @@ try {
     assert.equal(next.generationSourceSha, 'b'.repeat(40))
     assert.equal(next.status, 'active')
     assert.equal(typeof next.swappedAt, 'string')
+  })
+
+  check('launcher release: own supervisor still registered clears despite rotated token', () => {
+    writeActiveRunRegistry(record({ supervisorPid: 555, residentPid: null }), registryPath)
+    // Supervisor GENERATION_READY sync (and later minor swaps) rotate the token.
+    updateActiveRunMinor({ residentPid: 556, internalRunId: 'run-x', activeGenerationId: 'gen-x' }, registryPath)
+    releaseActiveRunRegistry('portal-t1', 'portal-t1#100#a', 555, registryPath)
+    assert.equal(existsSync(registryPath), false)
+  })
+
+  check('launcher release: foreign supervisor owner keeps the entry', () => {
+    writeActiveRunRegistry(record({ supervisorPid: 555, residentPid: null }), registryPath)
+    updateActiveRunMinor({ supervisorPid: 777, runnerPid: 777, residentPid: 778, boundary: 'resident-restart' }, registryPath)
+    releaseActiveRunRegistry('portal-t1', 'portal-t1#100#a', 555, registryPath)
+    assert.equal(existsSync(registryPath), true, 'standalone supervisor relaunch owns the run now')
+    releaseActiveRunRegistry('portal-t1', 'portal-t1#100#a', null, registryPath)
+    assert.equal(existsSync(registryPath), true, 'no supervisor identity falls back to the claim token')
+    writeActiveRunRegistry(record(), registryPath)
   })
 
   check('minor update refuses runId rename and missing registry', () => {

@@ -442,9 +442,14 @@ export function syncActiveRunRegistryOnReady({
     return { status: 'skipped', reason: 'source-sha-mismatch' }
   }
 
-  const residentRestart = current.residentPid !== childPid || current.internalRunId !== ready.runId
+  // A launcher-owned run (tools/capability-run.mjs) registers this supervisor at
+  // launch: the launcher stays the runner, and the first child's ready line is
+  // the major's initial bind, not a resident-restart boundary.
+  const launcherOwned = current.supervisorPid === supervisorPid
+  const initialBind = launcherOwned && (current.residentPid ?? null) === null
+  const residentRestart = !initialBind && (current.residentPid !== childPid || current.internalRunId !== ready.runId)
   const fields = {
-    runnerPid: supervisorPid,
+    runnerPid: launcherOwned ? current.runnerPid : supervisorPid,
     supervisorPid,
     residentPid: childPid,
     internalRunId: ready.runId,

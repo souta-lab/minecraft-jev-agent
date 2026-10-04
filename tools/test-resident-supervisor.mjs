@@ -227,6 +227,38 @@ try {
   assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).residentPid, 222, 'mismatched generation must not rewrite registry')
   checks++
 
+  // ---- launcher-owned run: first ready is the initial bind, launcher stays runner
+  writeActiveRunRegistry({
+    record: 'capability-active-run', schemaVersion: 1, status: 'active',
+    runId: 'portal-launch', runDir: join(registryDir, 'runs/portal-launch'),
+    claimToken: 'portal-launch#900#a', activeMinor: 'portal-launch', segmentId: 'portal-launch',
+    runtimeDir: driverRegistry, runnerPid: 900, supervisorPid: 901, residentPid: null,
+    sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: sourceSha,
+  }, registryPath)
+  const bind = syncActiveRunRegistryOnReady({
+    registryPath, driverDir: driverRegistry, childPid: 902, supervisorPid: 901,
+    ready: { runId: 'run-first', generationId: 'gen-first', sourceSha },
+  })
+  assert.equal(bind.status, 'updated')
+  assert.equal(bind.residentRestart, false, 'first child of a launcher-owned supervisor is not a restart')
+  const bound = JSON.parse(readFileSync(registryPath, 'utf8'))
+  assert.equal(bound.runnerPid, 900, 'launcher remains the runner')
+  assert.equal(bound.supervisorPid, 901)
+  assert.equal(bound.residentPid, 902)
+  assert.equal(bound.internalRunId, 'run-first')
+  assert.equal(bound.boundary, undefined, 'initial bind stamps no boundary')
+  const relaunch = syncActiveRunRegistryOnReady({
+    registryPath, driverDir: driverRegistry, childPid: 903, supervisorPid: 901,
+    ready: { runId: 'run-second', generationId: 'gen-second', sourceSha },
+  })
+  assert.equal(relaunch.residentRestart, true, 'outage relaunch under the same supervisor is a resident restart')
+  const restarted = JSON.parse(readFileSync(registryPath, 'utf8'))
+  assert.equal(restarted.runnerPid, 900)
+  assert.equal(restarted.residentPid, 903)
+  assert.equal(restarted.boundary, 'resident-restart')
+  assert.equal(restarted.activeMinor, 'portal-launch')
+  checks++
+
   // ---- restart on transient exit, then clean stop -------------------------
   const rootA = makeRoot('root-a')
   const artA = join(tmp, 'art-a')
