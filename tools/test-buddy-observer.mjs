@@ -1077,6 +1077,22 @@ try {
   assert.equal(ingressSummary.choices.latest.selected.transitionId, ingressTransitionId)
   assert.equal(ingressSummary.choices.jevStatus, 'observed')
   assert.equal(ingressSummary.unknown.includes('jev_call_context_unavailable'), false)
+
+  // A mature log pushes the resident-start BOOT past the backward boundary
+  // scan window while GENERATION_READY stays near the tail. The head-anchored
+  // fallback must still find BOOT and bind the generation boundary.
+  writeFileSync(join(ingressRuntimeDir, 'buddy.log'), [
+    `[${ingressBootTs}] BOOT pid=1 runId=${ingressRunId} source=${ingressSourceSha} worldKey=${JSON.stringify(ingressWorld)}`,
+    'x'.repeat(1024 * 1024 + 256 * 1024),
+    `[${ingressReadyTs}] GENERATION_READY runId=${ingressRunId} id=${ingressGenerationId} generationId=${ingressGenerationId} sourceSha=${ingressSourceSha}`,
+    ingressRouteMirrorLine,
+  ].join('\n') + '\n')
+  const matureSnapshot = await createObserver({ runtimeDir: ingressRuntimeDir }).snapshot()
+  assert.equal(matureSnapshot.resident.generationBoundary?.generationId, ingressGenerationId)
+  assert.equal(matureSnapshot.resident.sourceCommit, ingressSourceSha)
+  assert.equal(matureSnapshot.resident.sourceCommitBinding, 'run-BOOT+GENERATION_READY')
+  assert.equal(matureSnapshot.mission.status, 'observed')
+  assert.equal(matureSnapshot.vtr.transitions.length, 1)
 } finally {
   await new Promise((resolve) => ingressControlServer.close(resolve))
   rmSync(ingressRuntimeDir, { recursive: true, force: true })

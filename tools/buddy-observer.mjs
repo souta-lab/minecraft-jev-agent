@@ -23,6 +23,7 @@ const DEFAULT_PORT = 4173
 const DEFAULT_INTERVAL_MS = 2500
 const DEFAULT_LOG_TAIL_BYTES = 128 * 1024
 const MAX_RUN_BOUNDARY_SCAN_BYTES = 1024 * 1024
+const MAX_RUN_HEAD_SCAN_BYTES = 64 * 1024
 const MAX_RUN_ARTIFACT_BYTES = 64 * 1024
 const DEFAULT_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
 const MAX_RECENT_CHOICE_LOG_BYTES = 8 * 1024 * 1024
@@ -297,11 +298,41 @@ function readLogEvent(logPath, eventName, runId = null, detailMatches = null) {
   }
 }
 
+/** Find a run-boundary event anchored at the head of an append-only log. */
+function readLogHeadEvent(logPath, eventName, runId = null, detailMatches = null) {
+  if (!existsSync(logPath)) return null
+  const fd = openSync(logPath, 'r')
+  try {
+    const size = fstatSync(fd).size
+    const length = Math.min(size, MAX_RUN_HEAD_SCAN_BYTES)
+    const buffer = Buffer.alloc(length)
+    readSync(fd, buffer, 0, length, 0)
+    const lines = buffer.toString('utf8').split('\n')
+    // At a bounded scan boundary the last line may be partial; never attribute
+    // a truncated record to this run.
+    if (length < size) lines.pop()
+    for (const line of lines) {
+      const entry = parseBuddyLogLine(line)
+      if (entry?.event === eventName
+        && (runId === null || entry.detail.runId === runId)
+        && (detailMatches === null || detailMatches(entry.detail))) return entry
+    }
+    return null
+  } finally {
+    closeSync(fd)
+  }
+}
+
 function readRunEvent(logPath, eventName, runId) {
   if (runId === null || runId === undefined) return null
   // Historical run metadata beyond MAX_RUN_BOUNDARY_SCAN_BYTES stays unknown;
-  // never recover it by scanning an unbounded log on a live request.
+  // never recover it by scanning an unbounded log on a live request. BOOT and
+  // BUILD are emitted once at resident start and anchor the log head, so once
+  // the log grows past the backward window a bounded head scan still reaches
+  // them. GENERATION_READY is intentionally not handled here: minor reloads and
+  // respawns can emit it anywhere in the log, so it keeps the backward scan.
   return readLogEvent(logPath, eventName, runId)
+    ?? readLogHeadEvent(logPath, eventName, runId)
 }
 
 function readRunArtifact(runtimeDir, prefix, recordName, runId) {
