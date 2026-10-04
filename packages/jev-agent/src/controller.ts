@@ -2916,17 +2916,28 @@ export class JevController {
         // two snapshot times. All code-owned; any UNKNOWN refuses the adoption.
         const identityContext = this.mobIdentityContext(vanishedChoice, state, freshState)
         const reground = regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates, identityContext)
-        // The bounded CONTROL action executed in place of an unservable survival
-        // action (see the in-contact branch below). Never a mutation, never a
-        // target choice - it re-enters the semantic decision immediately.
-        let controlId: string | null = null
         // A clearance MINE's id is keyed on volatile sensor cuts, so a sealed
         // pocket rotates the offer set every pass on identical geometry
         // (measured gen-muu7zaic: four picks dropped in ~9 s, zero commits).
         // Re-emitting the committed cell through the production overhead emit
-        // revalidates it on fresh truth; the same id coming back executes
-        // Jev's own pick instead of ending the tick actionless.
-        let regroundedMine: Candidate | null = null
+        // revalidates it on fresh truth; the same id coming back becomes an
+        // ordinary reground adoption - Jev's own pick executes (no WHICH
+        // substitution) and every gate below stays unchanged.
+        if (reground.candidateId === null && reground.kind === null) {
+          const mechanical = clearanceMineReground(freshState, freshOptions, vanishedChoice)
+          if (mechanical !== null) {
+            freshCandidates.push(mechanical)
+            freshIds.add(mechanical.id)
+            reground.candidateId = mechanical.id
+            reground.kind = 'MINE'
+            reground.reason = 'same_cell_shaping'
+            reground.outcome = 'REGROUNDED'
+          }
+        }
+        // The bounded CONTROL action executed in place of an unservable survival
+        // action (see the in-contact branch below). Never a mutation, never a
+        // target choice - it re-enters the semantic decision immediately.
+        let controlId: string | null = null
         const threatEvidence = state.signals.threat ?? null
         const body = bodySurvivalFacts(state.self)
         if (reground.candidateId !== null) {
@@ -3059,31 +3070,16 @@ export class JevController {
               }
             }
           } else {
-            regroundedMine = clearanceMineReground(freshState, freshOptions, vanishedChoice)
-            if (regroundedMine !== null) {
-              this.survivalRegrounds += 1
-              freshCandidates.push(regroundedMine)
-              freshIds.add(regroundedMine.id)
-              chosenId = regroundedMine.id
-              this.logger.warn(
-                'guard',
-                `MECHANICAL_REGROUND ${chosenId} -> same clearance cell still grounded on fresh truth`,
-                { chosenId, freshOffer: freshCandidates.length, reground: 'same_clearance_cell' },
-                this.tickCounter,
-              )
-            } else {
-              this.guardRejections += 1
-              this.logger.warn(
-                'guard',
-                `chosen candidate ${chosenId} vanished between the Jev answer and execution`,
-                { chosenId, freshOffer: freshCandidates.length, reground: reground.reason },
-                this.tickCounter,
-              )
-            }
+            this.logger.warn(
+              'guard',
+              `chosen candidate ${chosenId} vanished between the Jev answer and execution`,
+              { chosenId, freshOffer: freshCandidates.length, reground: reground.reason },
+              this.tickCounter,
+            )
           }
         }
         this.logGuardRejections()
-        if (reground.candidateId === null && regroundedMine === null) {
+        if (reground.candidateId === null) {
           // A chosen SURVIVAL action that cannot be re-grounded must not end the
           // tick with NO action while a hostile is on the body. Measured live
           // (run-mucg2obc-v75cry): `SURVIVAL_NO_GROUNDED_ACTION chosenId=RETREAT:p23_57_-20
@@ -3115,7 +3111,7 @@ export class JevController {
         // decision up immediately), so "no action while a hostile is on the body"
         // is impossible rather than merely shorter. `survivalControlFallback` is
         // pure and returns null when nothing is offered.
-        if (reground.candidateId === null && regroundedMine === null && controlId === null) return
+        if (reground.candidateId === null && controlId === null) return
         if (controlId !== null) {
           chosenId = controlId
           freshIds.add(controlId)
