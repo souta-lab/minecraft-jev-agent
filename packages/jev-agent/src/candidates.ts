@@ -5559,15 +5559,44 @@ function generateRawCandidates(
     // move while sealed, so the context key is stable; target/meta still carry
     // the freshly re-planned step, which is what the executor needs.
     const escapeId = `ASCEND:escape:${blockId('p', { x: Math.floor(state.self.position.x), y: Math.floor(state.self.position.y), z: Math.floor(state.self.position.z) })}`
+    const escape = ascentRouteTo(state, options, {
+      targetY: ANIMAL_HABITAT_SEA_LEVEL + 1,
+      goalId: current?.id ?? 'sealed-escape',
+      idPrefix: 'ASCEND:escape:',
+      label: 'dig or climb back out of the sealed pocket toward the surface',
+      extraMeta: { escapeAscent: true },
+    })
     candidates.push(
-      ...ascentRouteTo(state, options, {
-        targetY: ANIMAL_HABITAT_SEA_LEVEL + 1,
-        goalId: current?.id ?? 'sealed-escape',
-        idPrefix: 'ASCEND:escape:',
-        label: 'dig or climb back out of the sealed pocket toward the surface',
-        extraMeta: { escapeAscent: true },
-      }).candidates.map((candidate) => ({ ...candidate, id: escapeId })),
+      ...escape.candidates.map((candidate) => ({ ...candidate, id: escapeId })),
     )
+    // When the whole-column plan grounds nothing (no placeable, no reuse, no
+    // one-step staircase), the sensor's own stepCuts still name each face's
+    // FIRST staircase overhead cell (`StepCut.blockedBy` - proven diggable,
+    // unprotected, hazard-free when the sensor set it). Clearing it re-derives
+    // the next cell until a staircase grounds: the same hand-cut composition
+    // the `headroom` capability path offers beside withheld targets, here
+    // grounded straight on the sensor fact so a sealed body is never left
+    // WAIT-only. Measured live (run-mutsv43u-1a0g, gen-muu79i6r, 19:26Z):
+    // shaft bottom y44 with every route out refused (`column_descent:
+    // no_safe_step`, `ASCENT_REFUSED no_placeable`), offer collapsed to
+    // WAIT/ESCALATE while four sensor-named overhead cells sat unoffered and
+    // the starvation repeat count climbed past 30.
+    if (escape.candidates.length === 0) {
+      const seen = new Set<string>()
+      const present = new Set(candidates.map((candidate) => candidate.id))
+      for (const cut of state.stepCuts ?? []) {
+        const blocked = cut.blockedBy ?? null
+        if (blocked === null) continue
+        const key = cellKey(blocked.pos)
+        if (seen.has(key)) continue
+        seen.add(key)
+        for (const mine of stepOverheadCandidates(state, options, { kind: 'headroom', cell: blocked.pos })) {
+          if (present.has(mine.id)) continue
+          present.add(mine.id)
+          candidates.push(mine)
+        }
+      }
+    }
   }
 
   // p19.8: the water-obstruction twin of the sealed-pocket arm. The invariant

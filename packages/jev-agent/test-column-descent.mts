@@ -18,7 +18,7 @@ import { defaultCandidateOptions, formatColumnDescentRefused, generateGroundedCa
 import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
-import type { AgentSignals, DescentOption, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, DescentOption, GoalState, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -549,6 +549,99 @@ addCase('(c4) recurrence retires the only column step and hands the no-frontier 
       escalate?.meta.skillOutcome === 'RECURRENT_STATE' &&
       String(escalate.meta.legPolicyBoundary).includes('reason=recurrent_descent_no_alternative'),
     detail: `set=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] refusal=${formatColumnDescentRefused(grounded.columnDescentRefusal ?? { reason: 'no_safe_step', cell: FEET_CELL })}`,
+  }
+})
+
+// portal-p23.30: the sealed-shaft bottom. Measured live (run-mutsv43u-1a0g,
+// gen-muu79i6r, 19:26Z): body dug itself to y44 in a 1-wide shaft; every route
+// out refused - `column_descent:no_safe_step` below and `ASCENT_REFUSED
+// no_placeable` above (inv={}, nothing to pillar with) - while four solid
+// faces each carried a sensor-named `blockedBy` overhead cell. The offer
+// collapsed to WAIT/ESCALATE with the starvation repeat count past 30. The
+// sensor already proved each overhead cell diggable/unprotected/hazard-free;
+// the sealed-escape arm must offer the FIRST clearance dig, not just full
+// plans.
+const SHAFT_FEET: Vec3Json = { x: 11.5, y: 44, z: 6.5 }
+const SHAFT_CELL: Vec3Json = { x: 11, y: 44, z: 6 }
+
+function shaftStepCut(dir: 'E' | 'W' | 'N' | 'S', dx: number, dz: number): StepCut {
+  const cell = { x: SHAFT_CELL.x + dx, y: SHAFT_CELL.y + 2, z: SHAFT_CELL.z + dz }
+  return {
+    dir,
+    dx,
+    dz,
+    cut: cell,
+    step: cell,
+    name: 'stone',
+    safe: false,
+    reason: 'no headroom above the new step',
+    blockedBy: { pos: cell, name: 'stone' },
+  }
+}
+
+function sealedShaftState(stepCuts: StepCut[]): WorldState {
+  return {
+    ...worldState({
+      position: SHAFT_FEET,
+      standable: [SHAFT_CELL],
+      descent: [],
+      inventory: inventory({}),
+      signals: signals({ stalledMs: 60_000 }),
+    }),
+    stepCuts,
+  }
+}
+
+addCase('a sealed shaft bottom offers the sensor-named staircase overhead digs when no plan grounds', () => {
+  const state = sealedShaftState([
+    shaftStepCut('E', 1, 0),
+    shaftStepCut('W', -1, 0),
+    shaftStepCut('N', 0, -1),
+    shaftStepCut('S', 0, 1),
+  ])
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const ids = grounded.candidates.map((candidate) => candidate.id)
+  const mines = grounded.candidates.filter(
+    (candidate) => candidate.kind === 'MINE' && candidate.meta.stepOverhead === true,
+  )
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason === 'no_safe_step' &&
+    mines.length === 4 &&
+    mines.every((candidate) => candidate.id.startsWith('MINE:b') && candidate.meta.clearance === true) &&
+    ids.includes('WAIT')
+  return {
+    pass,
+    detail: `stranded=${strandedOnColumn(state)} refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} set=[${ids.join(',')}]`,
+  }
+})
+
+addCase('the overhead dig is not offered when the sealed plan already grounds a route', () => {
+  const state = sealedShaftState([
+    // One face is already cut: a safe feet+1 up-step grounds `staircase-up`
+    // inside the sealed-escape plan, so the sensor-named clearance dig is not
+    // doubled into the offer.
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut: { x: 12, y: 45, z: 6 },
+      step: { x: 12, y: 45, z: 6 },
+      name: 'dirt',
+      safe: true,
+      reason: 'safe',
+      blockedBy: null,
+    },
+    shaftStepCut('W', -1, 0),
+  ])
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const mines = grounded.candidates.filter(
+    (candidate) => candidate.kind === 'MINE' && candidate.meta.stepOverhead === true,
+  )
+  const ascent = grounded.candidates.find((candidate) => candidate.id.startsWith('ASCEND:'))
+  return {
+    pass: mines.length === 0 && ascent !== undefined,
+    detail: `ascent=${ascent?.id ?? 'none'} mines=[${mines.map((c) => c.id).join(',')}] set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
   }
 })
 
