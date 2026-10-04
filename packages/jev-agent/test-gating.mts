@@ -41,7 +41,9 @@ function candidate(id: string, kind: Candidate['kind']): Candidate {
   }
 }
 
-const attack = candidate('ATTACK:e7', 'ATTACK')
+// A real emitted ATTACK against a hostile always stamps `hostile` in meta;
+// without it the survival-answer filter (p23.28) correctly drops the candidate.
+const attack = { ...candidate('ATTACK:e7', 'ATTACK'), meta: { hostile: true } }
 const retreat = candidate('RETREAT:p1', 'RETREAT')
 test('a high danger score remains evidence and cannot replace a valid Jev ATTACK', () => {
   const answer = dangerAnswer(3, 0.9)

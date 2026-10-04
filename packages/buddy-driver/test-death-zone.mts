@@ -261,7 +261,7 @@ function hostileAt(distance: number): { hostile: boolean; distance: number } {
 
 addCase('death-zone exits: the exit survives the contact-range threat offer (portal-p11)', () => {
   const exit = candidate('MOVE:dangerzone:p3214_64_2818', 'MOVE', { x: 3214, y: 64, z: 2818 })
-  const attack = candidate('ATTACK:e1', 'ATTACK', null)
+  const attack = { ...candidate('ATTACK:e1', 'ATTACK', null), meta: { hostile: true } }
   const work = candidate('MINE:b3225_63_2802', 'MINE', { x: 3225, y: 63, z: 2802 })
   const offer = applyThreatRestriction(
     {

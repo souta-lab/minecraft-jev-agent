@@ -736,7 +736,7 @@ check(
     const offer = [
       workCandidate('BRIDGE:E:p29_59_-20', 'MOVE'),
       workCandidate('DIG_ROUTE:level:E:b30_59_-20', 'DESCEND'),
-      workCandidate('ATTACK:e52841', 'ATTACK'),
+      { ...workCandidate('ATTACK:e52841', 'ATTACK'), meta: { hostile: true, attackedSelf: true } },
       workCandidate('RETREAT:p26_59_-20', 'RETREAT'),
       workCandidate('WAIT', 'WAIT'),
     ]
@@ -756,7 +756,7 @@ check(
     const offer = [
       workCandidate('BRIDGE:E:p29_59_-20', 'MOVE'),
       workCandidate('DIG_ROUTE:level:E:b30_59_-20', 'DESCEND'),
-      workCandidate('ATTACK:e52841', 'ATTACK'),
+      { ...workCandidate('ATTACK:e52841', 'ATTACK'), meta: { hostile: true, attackedSelf: true } },
       workCandidate('RETREAT:p26_59_-20', 'RETREAT'),
       workCandidate('WAIT', 'WAIT'),
     ]
