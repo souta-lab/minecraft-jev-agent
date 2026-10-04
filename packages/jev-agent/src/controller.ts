@@ -882,6 +882,7 @@ export class JevController {
   private lastColumnDigKey: string | null = null
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
+  private readonly loggedSkippedMoves = new Set<string>()
   private readonly loggedUnreachableMoves = new Set<string>()
   /** retirement evidence dedup: one `ACTION_TARGET_RETIRED` line per retirement, not per tick */
   private readonly loggedRetiredRepeats = new Set<string>()

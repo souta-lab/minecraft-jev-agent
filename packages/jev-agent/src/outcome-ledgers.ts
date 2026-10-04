@@ -83,6 +83,7 @@ export interface OutcomeLedgersHost {
   lastLocomotionObservation: LocomotionObservation
   lastMoveTarget: { dimension: string; position: Vec3Json } | null
   readonly loggedRetiredRepeats: Set<string>
+  readonly loggedSkippedMoves: Set<string>
   readonly loggedUnreachableMoves: Set<string>
   logger: EventLogger
   moveFailMemory: MoveFailMemory
@@ -615,6 +616,12 @@ export function filterMoveCandidates(
   )
   if (!log) return kept
   for (const entry of skipped) {
+    // Deduped per (key, attempts): the cooldown countdown is not new evidence
+    // (measured ~30 identical warn lines/min per withheld target, drowning real
+    // skips), while a re-fail increments attempts and earns a fresh line.
+    const dedupKey = `${entry.key}|${entry.attempts}`
+    if (host.loggedSkippedMoves.has(dedupKey)) continue
+    host.loggedSkippedMoves.add(dedupKey)
     host.logger.warn(
       'agent',
       formatMoveTargetSkipped(entry.key, entry.attempts, entry.cooldownSeconds),

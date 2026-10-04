@@ -48,6 +48,7 @@ const DIM = 'overworld'
 
 const logged: string[] = []
 const host = {
+  loggedSkippedMoves: new Set<string>(),
   moveFailMemory: new MoveFailMemory({ now: () => 1_000_000 }),
   movePathFailureGenerationId: 'gen-test',
   scheduler: { worldRevision: 3 },
@@ -379,6 +380,7 @@ addCase('a vanished escape with no fresh offer ends CAPABILITY_LOST, not silent'
 
 addCase('MOVE_TARGET_SKIPPED is logged once per suppressed candidate', () => {
   host.moveFailMemory = new MoveFailMemory({ now: () => 1_000_000 })
+  host.loggedSkippedMoves.clear()
   logged.length = 0
   const target = { x: -3, y: 57, z: 17 }
   for (let i = 0; i < 3; i += 1) host.moveFailMemory.record(DIM, target, 'stuck')
@@ -388,6 +390,30 @@ addCase('MOVE_TARGET_SKIPPED is logged once per suppressed candidate', () => {
   return {
     pass: skipLine !== undefined && skipLine.includes(expectedKey),
     detail: `line=${skipLine ?? '[none]'} expectedKey=${expectedKey}`,
+  }
+})
+
+// Measured live portal-p23 gen-muu8lk51: a blacklisted retrieve re-evaluated
+// every ~1-3 s emitted ~30 identical warn lines/min while only its cooldown
+// countdown changed. The dedupe collapses repeats; a re-fail (attempts++) is
+// new evidence and earns a fresh line.
+addCase('MOVE_TARGET_SKIPPED dedupes on key|attempts until a re-fail adds evidence', () => {
+  host.moveFailMemory = new MoveFailMemory({ now: () => 1_000_000 })
+  host.loggedSkippedMoves.clear()
+  logged.length = 0
+  const target = { x: -3, y: 57, z: 17 }
+  for (let i = 0; i < 3; i += 1) host.moveFailMemory.record(DIM, target, 'stuck')
+  const candidate = moveCandidate('MOVE:p-3_57_17', target)
+  filterMoveCandidates(host, [candidate], state)
+  filterMoveCandidates(host, [candidate], state)
+  filterMoveCandidates(host, [candidate], state)
+  const firstPass = logged.filter((line) => line.includes('MOVE_TARGET_SKIPPED')).length
+  host.moveFailMemory.record(DIM, target, 'stuck')
+  filterMoveCandidates(host, [candidate], state)
+  const secondPass = logged.filter((line) => line.includes('MOVE_TARGET_SKIPPED')).length
+  return {
+    pass: firstPass === 1 && secondPass === 2,
+    detail: `firstPass=${firstPass} secondPass=${secondPass}`,
   }
 })
 
