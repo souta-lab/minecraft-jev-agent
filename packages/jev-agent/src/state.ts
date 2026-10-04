@@ -922,6 +922,17 @@ export type StepCut = {
   name: string
   safe: boolean
   reason: string
+  /**
+   * The FIRST binding overhead cell of this face column's feet+1 step
+   * destination, when that cell is a proven safe clearance target (diggable,
+   * unprotected, not a fluid/hazard dam, hazard-free destination column). The
+   * up-staircase destination is always the face's feet+1 cell even when the
+   * face tops at feet+2 (a 2-block wall): its overhead is feet+2 then feet+3.
+   * Naming the first blocked cell turns a sealed pocket into an iterated
+   * hand-cut staircase (dig -> re-derive -> dig -> `staircase-up`) instead of
+   * an unnamed impossible ascent. Null/absent when no such cell exists.
+   */
+  blockedBy?: { pos: Vec3Json; name: string } | null
 }
 
 /**
@@ -4296,6 +4307,15 @@ function hazardsAround(
   return false
 }
 
+const CELL_FACE_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [
+  [0, 1, 0],
+  [0, -1, 0],
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+]
+
 function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepCut[] {
   const feetX = Math.floor(self.position.x)
   const feetY = Math.floor(self.position.y)
@@ -4319,6 +4339,15 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
     const block = at(x, y, z)
     return block !== null && (PROBE_HAZARDS.has(block.name) || PROBE_FLUIDS.has(block.name)) && block.boundingBox === 'empty'
   }
+  // A solid clearance target can still be the dam holding back water/lava; the
+  // same face-adjacency doctrine `buildHeadroomCuts` applies to its own cells.
+  const floodAdjacent = (x: number, y: number, z: number): boolean =>
+    CELL_FACE_OFFSETS.some(([dx, dy, dz]) => {
+      const neighbour = at(x + dx, y + dy, z + dz)
+      return (
+        neighbour !== null && (PROBE_FLUIDS.has(neighbour.name) || PROBE_HAZARDS.has(neighbour.name))
+      )
+    })
 
   const dirs: Array<{ dir: StepCut['dir']; dx: number; dz: number }> = [
     { dir: 'E', dx: 1, dz: 0 },
@@ -4354,7 +4383,56 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
       else if (!usableGround(x, top - 1, z)) reason = 'no usable ground under the cut'
       else if (!clear(x, top + 1, z) || !clear(x, top + 2, z)) reason = 'no headroom above the new step'
       else if (hazardsAround(hazardous, cut, step, { x, y: top - 1, z })) reason = 'lava/water in the step column'
-      out.push({ dir, dx, dz, cut, step, name, safe: reason === 'safe', reason })
+
+      // Hand-cut staircase composition: the feet+1 cell of this face column is
+      // the up-step destination even when the face tops at feet+2 (a 2-block
+      // wall in a dug tunnel). When its 2-cell overhead (feet+2, feet+3) is
+      // closed, name the FIRST binding cell so the planner can offer a real
+      // clearance dig instead of reporting an impossible ascent. Each dig
+      // re-derives the next cell until a `staircase-up` grounds; no placed
+      // block is ever required. Named only when the cell is proven diggable,
+      // unprotected and not a fluid/hazard dam, and the feet+1 destination is
+      // supported and hazard-free.
+      let blockedBy: StepCut['blockedBy'] = null
+      const destHazard = hazardsAround(
+        hazardous,
+        { x, y: feetY + 1, z },
+        { x, y: feetY + 1, z },
+        { x, y: feetY, z },
+      )
+      if (top === feetY + 2) {
+        // Ceiling-top face: the cut itself IS the destination's first overhead
+        // cell. Its feet+1 neighbour must be an eventual open or diggable
+        // destination, and feet+0 must support the step.
+        if (
+          (clear(x, feetY + 1, z) || diggableSolid(x, feetY + 1, z)) &&
+          usableGround(x, feetY, z) &&
+          diggableSolid(x, top, z) &&
+          !isProtectedStationBlock(name) &&
+          !destHazard &&
+          !floodAdjacent(x, top, z)
+        ) {
+          blockedBy = { pos: { x, y: top, z }, name }
+        }
+      } else if (top === feetY + 1 && reason === 'no headroom above the new step') {
+        // One-block face whose own headroom is closed: feet+2 is already open
+        // (otherwise `top` would be feet+2), so the binding cell is feet+3.
+        const blockedY = !clear(x, feetY + 2, z) ? feetY + 2 : !clear(x, feetY + 3, z) ? feetY + 3 : null
+        if (blockedY !== null) {
+          const overhead = at(x, blockedY, z)
+          const overheadName = overhead?.name ?? 'unknown'
+          if (
+            overhead !== null &&
+            isBreakableSolidBlock(overhead) &&
+            !isProtectedStationBlock(overheadName) &&
+            !destHazard &&
+            !floodAdjacent(x, blockedY, z)
+          ) {
+            blockedBy = { pos: { x, y: blockedY, z }, name: overheadName }
+          }
+        }
+      }
+      out.push({ dir, dx, dz, cut, step, name, safe: reason === 'safe', reason, blockedBy })
       break
     }
   }

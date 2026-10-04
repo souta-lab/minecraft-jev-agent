@@ -641,7 +641,7 @@ export function formatLocalClear(
 //   - no_clearance -> neither exists; the refusal names the examined cell.
 
 /** Why no usable ascent column exists at all. */
-export type AscentColumnRefusalReason = 'no_clearance' | 'no_tool'
+export type AscentColumnRefusalReason = 'no_clearance' | 'no_tool' | 'step_overhead'
 
 /** The one diggable blocker of a clearable ascent column, with its tool facts. */
 export interface AscentColumnBlocker {
@@ -787,6 +787,27 @@ export function evaluateAscentColumn(input: AscentColumnInput): AscentColumnDeci
       ? { kind: 'clearable', cell: bestCut.cut.cut, blocker: bestCut.blocker }
       : { kind: 'refuse', reason: 'no_tool', cell: bestCut.cut.cut, blocker: bestCut.blocker }
   }
+
+  // 2b. Overhead-blocked step columns: a face whose feet+1 destination is only
+  //     missing its 2-cell overhead IS a hand-cuttable staircase the bare
+  //     `no_clearance` vocabulary could never name. The sensor proves the first
+  //     binding cell diggable/safe (`StepCut.blockedBy`); clearing it re-derives
+  //     the next cell or grounds `staircase-up` - no placeable block required.
+  //     The sealed-pocket live shape (every face tops at the feet+2 ceiling)
+  //     resolves here instead of starving on `placeable_block`.
+  let bestOverhead: { cell: Vec3Json; score: number } | null = null
+  for (const cut of input.stepCuts ?? []) {
+    const blockedBy = cut.blockedBy
+    if (blockedBy === null || blockedBy === undefined) continue
+    const score = ascentAlignmentScore(cut.cut, input) + distance(cut.cut, input.selfPosition) * 0.1
+    if (bestOverhead === null || score < bestOverhead.score) {
+      bestOverhead = { cell: blockedBy.pos, score }
+    }
+  }
+  if (bestOverhead !== null) {
+    return { kind: 'refuse', reason: 'step_overhead', cell: bestOverhead.cell, blocker: null }
+  }
+
   if (bestUnsafe !== null) {
     return { kind: 'refuse', reason: 'no_clearance', cell: bestUnsafe.cut.cut, blocker: null }
   }

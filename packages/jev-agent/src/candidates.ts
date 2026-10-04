@@ -6914,6 +6914,76 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
 }
 
 /**
+ * A `headroom` capability whose named cell is NOT the body's own footprint is
+ * a step-column overhead blocker (`evaluateAscentColumn` -> `step_overhead`):
+ * the one cell whose removal lets a hand-cut staircase step ground in a sealed
+ * pocket. `headroomCandidates` only exposes the current-footprint pool, so this
+ * arm emits the targeted MINE for exactly the named cell. The sensor proved it
+ * diggable, unprotected and not a fluid/hazard dam when it set
+ * `StepCut.blockedBy`; the executor revalidates the same facts live.
+ */
+function stepOverheadCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  capability: Capability,
+): Candidate[] {
+  if (capability.kind !== 'headroom' || capability.cell === null) return []
+  const cell = capability.cell
+  const name = observedCutName(state, cell)
+  if (name === null || name === 'unknown') return []
+  if (protectedResourceTest(state)(cell, name)) return []
+  const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const id = `MINE:${blockId('b', cell)}`
+  if (failureCount(state.signals.failedCandidates, id) >= failureLimit) return []
+  const barrier = cellHarvestBarrier(state, cell)
+  const profile = resolveHarvest(loadGameData(), name)
+  const choice = selectClearanceTool(
+    {
+      name,
+      harvestTool: barrier?.requiredTool ?? profile.harvestTool,
+      harvestTier: barrier?.requiredTier ?? profile.harvestTier,
+      diggable: true,
+      knownBlock: profile.yield !== null,
+    },
+    (tool, tier) => hasTool(state, tool, tier),
+  )
+  if (!choice.ok) return []
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  return [
+    {
+      id,
+      kind: 'MINE' as const,
+      label: `mine the ${name} block at (${cell.x},${cell.y},${cell.z}) to open the staircase step's overhead`,
+      targetName: name,
+      target: cell,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: choice.tool,
+      toolTier: choice.tier,
+      inReach: distance(cell, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        x: cell.x,
+        y: cell.y,
+        z: cell.z,
+        clearance: true,
+        stepOverhead: true,
+        toolReason: choice.reason,
+        requiresPickup: false,
+        yieldItem: name,
+        distance: Math.hypot(cell.x + 0.5 - feet.x, cell.z + 0.5 - feet.z),
+      },
+    },
+  ]
+}
+
+/**
  * A `STEP` candidate removes the upper block of an adjacent 2-block vertical
  * face, turning it into a 1-block step. Without it the offered MOVE stand spot
  * is behind a rise no vanilla client can climb (jump apex 1.2522), so the route
@@ -14712,8 +14782,14 @@ function observedCutName(state: WorldState, cell: Vec3Json): string | null {
   const at = (pos: Vec3Json): boolean => pos.x === cell.x && pos.y === cell.y && pos.z === cell.z
   const head = (state.headroomCuts ?? []).find((cut) => at(cut.pos))
   if (head !== undefined) return head.name
-  const step = (state.stepCuts ?? []).find((cut) => at(cut.cut))
-  if (step !== undefined) return step.name
+  for (const cut of state.stepCuts ?? []) {
+    if (at(cut.cut)) return cut.name
+    // The step-column overhead cell the sensor named for a hand-cut staircase
+    // (`StepCut.blockedBy`) carries its own read name.
+    if (cut.blockedBy !== null && cut.blockedBy !== undefined && at(cut.blockedBy.pos)) {
+      return cut.blockedBy.name
+    }
+  }
   return null
 }
 
@@ -14877,17 +14953,21 @@ export function deriveReachabilityAbilities(
   // A plan counts as an available ascend only when it is mechanically
   // executable NOW: a pillar needs a supported, safe column with jump headroom;
   // an up-staircase needs a known clearance block, but not the harvest tool for
-  // drops the route does not require.
+  // drops the route does not require. ANY +1 rise also needs the body's own
+  // jump headroom - under a sealed ceiling the head collides at +0.2 and the
+  // step cannot start, so `headroomClear` gates the staircase-up and the
+  // clear-column jump alike (the same physics the pillar check already encodes).
   const explicitPlanAvailable =
     plan !== null &&
     (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
-    (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')
+    (plan.kind !== 'staircase-up' || (ascent.kind !== 'refuse' && column.headroomClear))
   // `ascent.kind === clear` is only evidence for the no-explicit-plan path. If
   // the candidate already carries a concrete pillar/staircase HOW, the executor
   // will execute THAT plan; an unrelated adjacent step cannot make its blocked
   // current-column mechanics executable. Live 2026-09-22 y54 proved the old OR
   // false-positive: fingerprint head=0, ENTER reachable=true, then PILLAR_REFUSED.
-  const ascendPlanAvailable = plan === null ? ascent.kind === 'clear' : explicitPlanAvailable
+  const ascendPlanAvailable =
+    plan === null ? ascent.kind === 'clear' && column.headroomClear : explicitPlanAvailable
 
   const ascendMissing: Capability[] = []
   if (dy > ASCEND_GAP_LIMIT && !ascendPlanAvailable) {
@@ -14898,7 +14978,18 @@ export function deriveReachabilityAbilities(
       // only when the action needs this block's drops, which headroom clearance
       // does not.
       ascendMissing.push({ kind: 'headroom', cell: column.headroomCell })
-    } else if (ascent.kind === 'refuse') {
+    }
+    if (ascent.kind === 'refuse' && ascent.reason === 'step_overhead') {
+      // A face column whose feet+1 step destination only lacks its 2-cell
+      // overhead IS a hand-cuttable staircase the `safe_column` vocabulary
+      // could never name (live p23 sealed pocket: `placeable_block` +
+      // own-column headroom withheld while every face topped at the feet+2
+      // ceiling). The binding cell is a `headroom` fact on the STEP column;
+      // the acquisition pass offers the one targeted dig, then the next fresh
+      // state names the next cell or grounds `staircase-up` - no placeable
+      // block required.
+      ascendMissing.push({ kind: 'headroom', cell: ascent.cell })
+    } else if (ascent.kind === 'refuse' && ascent.reason !== 'step_overhead' && column.headroomClear) {
       // Name the specific absent fact (`safe_column:no_clearance@x,y,z` /
       // `safe_column:no_tool@x,y,z`) instead of a bare token.
       const requiredTool = ascent.blocker?.requiredTool ?? null
@@ -15337,6 +15428,9 @@ function capabilityAcquisitionCandidates(
       let source: Candidate[] = capabilityDropCandidates(state, options, capability)
       if (capability.kind === 'headroom') {
         source.push(...headroomCandidates(state, options))
+        // A named non-footprint cell is a step-column overhead blocker; the
+        // generic arm above cannot see it, so emit its one targeted dig.
+        source.push(...stepOverheadCandidates(state, options, capability))
       } else if (capability.kind === 'placeable_block') {
         // A vertical Skill may need a held solid block for a pillar/step.  The
         // missing capability is mechanical, so acquire it from a grounded

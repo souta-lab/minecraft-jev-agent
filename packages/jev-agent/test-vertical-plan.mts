@@ -1582,6 +1582,143 @@ addCase('the safe_column fact: a shovel/axe cut still clears by hand (no false n
   }
 })
 
+// --- step_overhead: hand-cut staircase composition --------------------------
+// The sealed-pocket live shape (portal-p23): every face tops at the feet+2
+// ceiling, so no feet+1 cut exists and the column vocabulary used to report
+// only `no_clearance` + `placeable_block`. The sensor's `blockedBy` names the
+// first binding overhead cell of the feet+1 step destination; the evaluator
+// must surface it as an actionable `step_overhead` refusal.
+
+addCase('step_overhead: a feet+2 ceiling cut names its own cell as the binding overhead', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 36, z: 37 },
+    step: { x: 32, y: 36, z: 37 },
+    name: 'stone',
+    safe: false,
+    reason: 'no headroom above the new step',
+    blockedBy: { pos: { x: 32, y: 36, z: 37 }, name: 'stone' },
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'step_overhead' &&
+      decision.cell.x === 32 &&
+      decision.cell.y === 36 &&
+      decision.cell.z === 37,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('step_overhead: a feet+1 face with closed headroom names the second overhead cell', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'N',
+    dx: 0,
+    dz: -1,
+    cut: { x: 31, y: 35, z: 36 },
+    step: { x: 31, y: 35, z: 36 },
+    name: 'stone',
+    safe: false,
+    reason: 'no headroom above the new step',
+    blockedBy: { pos: { x: 31, y: 37, z: 36 }, name: 'stone' },
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 30 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'step_overhead' &&
+      decision.cell.y === 37 &&
+      decision.cell.z === 36,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('step_overhead: the target-aligned face wins the named overhead', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const east: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 36, z: 37 },
+    step: { x: 32, y: 36, z: 37 },
+    name: 'stone',
+    safe: false,
+    reason: 'no headroom above the new step',
+    blockedBy: { pos: { x: 32, y: 36, z: 37 }, name: 'stone' },
+  }
+  const south: StepCut = {
+    dir: 'S',
+    dx: 0,
+    dz: 1,
+    cut: { x: 31, y: 36, z: 38 },
+    step: { x: 31, y: 36, z: 38 },
+    name: 'stone',
+    safe: false,
+    reason: 'no headroom above the new step',
+    blockedBy: { pos: { x: 31, y: 36, z: 38 }, name: 'stone' },
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 50 },
+    stepCuts: [east, south],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'step_overhead' &&
+      decision.cell.z === 38,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('step_overhead: a cut without blockedBy keeps the bare no_clearance refusal', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'N',
+    dx: 0,
+    dz: -1,
+    cut: { x: 31, y: 35, z: 36 },
+    step: { x: 31, y: 35, z: 36 },
+    name: 'stone',
+    safe: false,
+    reason: 'no headroom above the new step',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 30 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'refuse' && decision.reason === 'no_clearance' && decision.cell.y === 35,
+    detail: JSON.stringify(decision),
+  }
+})
+
 let failures = 0
 process.stdout.write('issue #45 - retrieval vertical plan and stall escalation\n')
 process.stdout.write('-'.repeat(72) + '\n')
