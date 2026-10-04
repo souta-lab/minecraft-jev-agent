@@ -37,9 +37,9 @@ Full permissions do **not** authorize cheating capability evidence, architecture
 ### No idle / causal closure
 
 Time must pass as a side effect of useful work, never as the work itself.
-- **Never wait:** `sleep`/timers/delay loops/`timeout`-as-delay/blocking reads are forbidden. Long shells/tests/runs and subagents stay background; snapshots are non-blocking; timeouts are safety ceilings. Failed/rate-limited subagents do not block parent work.
+- **Never wait:** `sleep`/timers/delay loops/`timeout`-as-delay/blocking reads are forbidden. Long shells/tests/runs stay background; snapshots are non-blocking; timeouts are safety ceilings. Subagents are disabled for this campaign, so no work may depend on delegated agent output.
 - **Never duplicate observation:** repeat heartbeat/log/process/status only after intervening work or a concrete event can change the result.
-- **No micro-turns:** one observation/search/subagent launch/tiny edit/status is not a completed turn. Finish analysis + implementation + focused proof, or multiple independent useful actions, before yielding.
+- **No micro-turns:** one observation/search/tiny edit/status is not a completed turn. Finish analysis + implementation + focused proof, or multiple independent useful actions, before yielding.
 - **Exit a causal rut:** one decisive typed mechanical/VERIFY/authority failure, or two identical post-change failures with unchanged causal facts, ends observation. Three unchanged `WAIT`/`ESCALATE`/System2 replans on one state fingerprint is churn; there is no fourth—patch, REVERT, or DEFER/switch lane.
 - **Fresh code needs fresh evidence:** same-SHA restarts preserve durable failure memory; source-dependent failures/retirements from an older SHA cannot evaluate or suppress changed code. A stale fence blocking the fresh attempt is the next defect.
 - Discovering the next defect closes/stamps the current minor and opens the next `pN.x` immediately. Once a narrow fix path is known, do not carry it as uncommitted WIP across a normal turn/context boundary: drive focused proof + exact commit, then reload + first fresh evidence when available.
@@ -145,13 +145,13 @@ Proof hierarchy as applicable: pure contract/state-machine -> deterministic mech
 ### Test-surface discipline
 Tests protect observed capability and constitutional invariants; they are not the product. Do not create a test file by default. Add minimum deterministic coverage for a real reproduced failure, preferably inside an existing relevant test/scenario/fixture. Avoid speculative edge-test families and second measurement frameworks. A faithful clean live reproduction plus existing guards may be sufficient. Track test/tooling growth; if it outgrows production value, consolidate and return to Minecraft. Never weaken constitutional/proof coverage to shrink tests.
 
-For shared scheduler/decision-epoch/controller/executor lifecycle or HOST contract changes, include direct lifecycle/terminal seam fixtures with partial/fake hosts; update those fixtures in the same causal commit. At most one full repo/package sweep runs at once; parent owns final full sweep, subagents use focused non-overlapping checks.
+For shared scheduler/decision-epoch/controller/executor lifecycle or HOST contract changes, include direct lifecycle/terminal seam fixtures with partial/fake hosts; update those fixtures in the same causal commit. At most one full repo/package sweep runs at once. The single campaign agent owns diagnosis, edits, focused checks, integration, and the final sweep so one causal context remains authoritative.
 
-## 9. Parallel work and subagents
+## 9. Single-agent execution
 
-Use up to **3** genuinely independent lanes; aim for 2–3-way parallelism when useful, never filler. Parent is integrator/decision owner; one mutation owner per subsystem/experiment. Good lanes: live evidence/root cause; focused code/fixture audit; independent regression/provenance; Jev ranking; sparse System2 quality/cost; recovery/viability; bounded infra hygiene.
+The capability campaign uses **one lead agent only**. Project config must keep `subagents_enabled=false`; do not call, spawn, resume, read, poll, or wait for subagents/sidekicks. The lead agent directly owns live evidence, root cause, code/fixture audit, implementation, focused regression, provenance, integration, and campaign decisions. This deliberately trades nominal parallelism for one continuous causal context and zero handoff/wait/integration tax.
 
-Subagents are throughput tools, never waiting targets. Launch background, continue parent work immediately, poll non-blockingly only at natural boundaries, reconcile personally before landing. Do not run same full suite in parallel, duplicate implementation, reset concurrent worktrees, or keep old subagents/processes alive without purpose. Never create an architecture-design lane.
+Parallelize only external mechanics that do not create another reasoning owner: independent shell tests/builds may run in background while the lead continues useful work, but their outputs are evidence for the same agent. Keep one mutation owner and one causal hypothesis at a time; do not create filler lanes, duplicate implementation, or architecture-design side work. If several useful tasks are independent, execute them sequentially by Mission leverage rather than delegating them.
 
 ## 10. Runtime/resource hygiene
 

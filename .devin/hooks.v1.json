@@ -1,7 +1,7 @@
 {
   "PreToolUse": [
     {
-      "matcher": "^(get_output|run_subagent|read_subagent)$",
+      "matcher": "^get_output$",
       "hooks": [
         {
           "type": "command",
