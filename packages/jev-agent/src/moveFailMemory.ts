@@ -334,10 +334,17 @@ export class MoveFailMemory {
       // first strike keeps its existing 30s semantics.
       const strikes = entry.attempts - this.failureLimit
       const escalated = Math.min(this.cooldownMs * 2 ** strikes, MAX_OSCILLATION_COOLDOWN_MS)
-      // Never SHORTEN an active (possibly escalated) escape cooldown: a later
-      // mechanical failure at the same cell is more evidence, not less, and a
-      // downgrade here would silently re-open the loop the escalation retired.
-      entry.blacklistedUntil = Math.max(entry.blacklistedUntil, now + escalated)
+      // Re-arm only when the committed window has expired. A strike during an
+      // ACTIVE cooldown is bookkeeping for an attempt the suppression did not
+      // prevent, not fresh trap evidence (#360 escalates on failures that keep
+      // arriving AFTER release): recomputing `now + escalated` then would let
+      // ambient records pin a cell almost indefinitely, and any recomputation
+      // that shortened the committed expiry would silently re-open the loop
+      // the escalation retired. The attempt history still grows, so the next
+      // post-expiry failure escalates from the right geometric step.
+      if (entry.blacklistedUntil <= now) {
+        entry.blacklistedUntil = now + escalated
+      }
       newlyBlacklisted = !wasBlacklisted
     }
     this.evictIfNeeded()

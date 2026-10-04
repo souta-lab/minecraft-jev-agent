@@ -1547,7 +1547,22 @@ function trialPathFacts(fixture: FixtureBot, executor: Executor, alsoBlockEntry:
   const LIVE_GATE: Vec3Json = { x: 27, y: 67, z: 9 }
   const frontier: Vec3Json[] = [
     LIVE_BODY,
+    // A real surface body stands inside a dense walkable component - the
+    // sensor reports every standable neighbor, so the cells around the feet
+    // are present. The sparse frontier list alone reads as a sealed pocket
+    // under `strandedOnColumn` (p23.15): component <= 9 and no edge contact
+    // means canTravel=false, which makes ANY far-below target a LOCAL descent
+    // problem and withholds the travel leg this case pins.
     { x: 122, y: 78, z: -7 },
+    { x: 122, y: 78, z: -6 },
+    { x: 122, y: 78, z: -8 },
+    { x: 123, y: 78, z: -8 },
+    { x: 124, y: 78, z: -8 },
+    { x: 124, y: 78, z: -7 },
+    { x: 124, y: 78, z: -6 },
+    { x: 123, y: 78, z: -6 },
+    { x: 123, y: 78, z: -5 },
+    { x: 124, y: 78, z: -5 },
     { x: 118, y: 77, z: -8 },
     { x: 110, y: 76, z: -9 },
   ]

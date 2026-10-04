@@ -270,10 +270,14 @@ addCase('(i1) the measured magma_cube race keeps a GROUNDED response at contact'
     evidence.active === true &&
     evidence.inContact === true &&
     evidence.threatId === CUBE_ID &&
-    // a real answer survives the contact envelope: the reachable ATTACK the
-    // measured run offered, and/or a grounded keep-distance cell
-    (offer.some((candidate) => candidate.kind === 'ATTACK') || offer.some((candidate) => candidate.kind === 'RETREAT')) &&
-    // the self-care the contact envelope used to erase
+    // a real answer survives the contact envelope: the self-care the contact
+    // envelope used to erase. Under p23.12's CAN race verdict the ATTACK is a
+    // doomed action here (diamond_sword killMs=2250 vs cube deathMs=2000 -
+    // this fixture models the measured DEATH state) and the escape cells stay
+    // inside the cube's reach, so EQUIP is the one grounded survival answer:
+    // the arm the body needed armed BEFORE the fight, exactly the affordance
+    // the armament arm exists to keep offered. (i4) owns the no-escape
+    // CAPABILITY_LOST path; (iii3) owns the armed-swing label.
     offer.some((candidate) => candidate.id === 'EQUIP:hand:diamond_sword') &&
     offer.every((candidate) => CONTACT_THREAT_KINDS.has(candidate.kind) || candidate.kind === 'MOVE')
   return {
@@ -543,7 +547,12 @@ addCase('(iii2) a body with NO fight on the table gets NO arm offer while it min
 })
 
 addCase('(iii3) the ATTACK line states the swing the LEASE will run, once a better weapon is carried', () => {
-  const state = noteThreat(measuredBody())
+  // The measured body's own fight is legitimately race_lost under p23.12's CAN
+  // verdict (killMs 2250 > deathMs 2000 at health 8.3) and is withheld - this
+  // case pins the armed-swing LABEL, so it needs a fight the lease can win:
+  // health 14 banks 3 cube hits (3000ms) against the 3-swing kill (2250ms).
+  // The lastDamage record keeps its measured values; regen explains the gain.
+  const state = noteThreat(measuredBody({ self: selfState(BODY, { health: 14, food: 20, heldItem: { name: 'stone_pickaxe', count: 1, slot: 0 } }) }))
   const offer = offerFor(state)
   const attack = offer.find((candidate) => candidate.kind === 'ATTACK')
   const pass =

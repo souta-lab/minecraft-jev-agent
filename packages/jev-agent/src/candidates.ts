@@ -4057,6 +4057,33 @@ function combatKitPrerequisiteCandidates(
   return out
 }
 
+/**
+ * Append armament-route candidates without duplicating a mechanical action
+ * already on offer. The arm deliberately emits the SAME canonical id the goal's
+ * own ladder emits (`PLACE:crafting_table:pX_Y_Z`, `RETRIEVE:known:*`) so the
+ * retire machinery owns both routes identically - but presenting the id twice
+ * gives Jev a duplicate action and breaks the one-candidate-per-transition
+ * contract. When the id already exists the arm's `combatKit` tags are merged
+ * onto the existing candidate instead: `combatKitGap` still names the offered
+ * armament route, and the surviving label keeps the goal purpose that emitted
+ * it first.
+ */
+function mergeCombatKitCandidates(candidates: Candidate[], kit: Candidate[]): void {
+  for (const candidate of kit) {
+    const existing = candidates.find((entry) => entry.id === candidate.id)
+    if (existing === undefined) {
+      candidates.push(candidate)
+      continue
+    }
+    const combatMeta: Record<string, string | number | boolean> = {}
+    for (const key of ['combatKit', 'combatWeapon', 'combatTarget'] as const) {
+      const value = candidate.meta[key]
+      if (value !== undefined) combatMeta[key] = value
+    }
+    existing.meta = { ...existing.meta, ...combatMeta }
+  }
+}
+
 /** The typed `COMBAT_KIT_GAP` evidence for one required kill, or null. */
 export interface CombatKitGapEvidence {
   focus: string
@@ -4753,8 +4780,9 @@ function generateRawCandidates(
       // it had, when the missing half was armour. The prerequisite is enumerated
       // from the missing half the assessment actually reported.
       if (kit.missing.includes('sword')) {
-        candidates.push(
-          ...combatKitPrerequisiteCandidates(state, options, goalDropTargets[0]?.name ?? focusItem ?? 'unknown'),
+        mergeCombatKitCandidates(
+          candidates,
+          combatKitPrerequisiteCandidates(state, options, goalDropTargets[0]?.name ?? focusItem ?? 'unknown'),
         )
       }
     }
@@ -4779,8 +4807,9 @@ function generateRawCandidates(
       food: state.self.food,
     })
     if (survivalKit.missing.includes('sword')) {
-      candidates.push(
-        ...combatKitPrerequisiteCandidates(state, options, attackTargets[0]?.name ?? 'survival'),
+      mergeCombatKitCandidates(
+        candidates,
+        combatKitPrerequisiteCandidates(state, options, attackTargets[0]?.name ?? 'survival'),
       )
     }
   }
