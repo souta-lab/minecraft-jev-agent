@@ -550,10 +550,13 @@ export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
 export function restrictCandidatesDuringImmediateThreat(
   state: Pick<WorldState, 'entities'>,
   candidates: readonly Candidate[],
+  extraAllowed?: (candidate: Candidate) => boolean,
 ): Candidate[] {
   const immediateHostile = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
   if (!immediateHostile) return [...candidates]
-  const combat = candidates.filter(isSurvivalAnswerCandidate)
+  const combat = candidates.filter(
+    (candidate) => isSurvivalAnswerCandidate(candidate) || extraAllowed?.(candidate) === true,
+  )
   // A body in melee contact with no grounded attack and no grounded escape must
   // NOT be handed its work set back: that is the measured "digs while the zombie
   // kills it" loop. Offer the bounded escalation instead and let the controller
@@ -610,10 +613,13 @@ export function restrictCandidatesAtCriticalHealth(
 export function restrictCandidatesDuringDangerousThreat(
   state: Pick<WorldState, 'entities' | 'signals'>,
   candidates: readonly Candidate[],
+  extraAllowed?: (candidate: Candidate) => boolean,
 ): Candidate[] {
   const threat = state.signals?.threat ?? null
   if (threat === null || threat.active !== true) return [...candidates]
-  const survival = candidates.filter(isSurvivalAnswerCandidate)
+  const survival = candidates.filter(
+    (candidate) => isSurvivalAnswerCandidate(candidate) || extraAllowed?.(candidate) === true,
+  )
   if (survival.length > 0) return survival
   return [
     threatEscalateCandidate(
@@ -631,6 +637,13 @@ export function restrictCandidatesDuringDangerousThreat(
 export interface ThreatRestrictionFacts {
   /** Ordinary hostile ids whose current melee approach was proven no_path. */
   unreachableThreatEntityIds?: ReadonlySet<number>
+  /**
+   * The dig cells a dangerous hostile's own approach analysis already named as
+   * the first step toward its stance - the wall between the pockets. A
+   * locomotion leg may never open one while a tracker camps inside contact
+   * range: doing so hands it exactly the approach it was just proven to lack.
+   */
+  threatApproachLaneCells?: ReadonlySet<string>
 }
 
 export interface ThreatOffer {
@@ -688,6 +701,144 @@ function occludedThreatBypass(
   if (!nearby.every(harmless)) return null
   const reason = nearby.every((entity) => entity.lineOfSight === false) ? 'no_los_no_path' : 'unreachable_melee'
   return { reason, entityIds: nearby.map((entity) => entity.id).sort((a, b) => a - b) }
+}
+
+// ---------------------------------------------------------------------------
+// Separated-tracker escape legs
+// ---------------------------------------------------------------------------
+
+/** The locomotion kinds that move the body - the only kinds that can separate. */
+const SEPARATION_LEG_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'STEP',
+  'DESCEND',
+  'RETREAT',
+])
+
+/**
+ * The cell where the body's feet land if this leg runs: the DESCEND family
+ * carries its stand cell in meta; every other locomotion kind names its
+ * destination as `target`. A candidate with neither moves nothing.
+ */
+function separationLegDestination(candidate: Candidate): Vec3Json | null {
+  const stepX = Number(candidate.meta?.stepX)
+  const stepY = Number(candidate.meta?.stepY)
+  const stepZ = Number(candidate.meta?.stepZ)
+  if (Number.isFinite(stepX) && Number.isFinite(stepY) && Number.isFinite(stepZ)) {
+    return { x: stepX, y: stepY, z: stepZ }
+  }
+  return candidate.target
+}
+
+/**
+ * The cells this leg's execution would open. The DESCEND family carries the
+ * executor's exact dig profile as `x,y,z;x,y,z`; a STEP cut opens its target;
+ * pure locomotion opens nothing.
+ */
+function separationLegOpenedCells(candidate: Candidate): Vec3Json[] {
+  const declared = candidate.meta?.digCells
+  if (typeof declared === 'string' && declared.length > 0) {
+    const cells: Vec3Json[] = []
+    for (const part of declared.split(';')) {
+      const [xs, ys, zs] = part.split(',')
+      const x = Number(xs)
+      const y = Number(ys)
+      const z = Number(zs)
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) cells.push({ x, y, z })
+    }
+    return cells
+  }
+  return candidate.kind === 'STEP' && candidate.target !== null ? [candidate.target] : []
+}
+
+/**
+ * One locomotion leg that measurably increases separation from every tracker
+ * camped inside contact range: its landing cell is strictly farther from the
+ * hostile than the body is, and no cell it would open is an approach lane the
+ * hostile's own analysis named or sits meaningfully closer to the hostile
+ * than the body does. The half-block margin keeps the pocket's own floor
+ * diggable - it is the body's floor, not the boundary - while a cell that
+ * leans into the hostile's pocket still fails.
+ */
+function separationIncreasingLeg(
+  self: WorldState['self'],
+  inBand: readonly EntityState[],
+  laneCells: ReadonlySet<string>,
+  candidate: Candidate,
+): boolean {
+  const destination = separationLegDestination(candidate)
+  if (destination === null) return false
+  const opened = separationLegOpenedCells(candidate)
+  for (const cell of opened) {
+    if (laneCells.has(`${cell.x},${cell.y},${cell.z}`)) return false
+  }
+  for (const threat of inBand) {
+    const current = Number.isFinite(threat.distance)
+      ? threat.distance
+      : distance(self.position, threat.position)
+    if (distance(destination, threat.position) <= current) return false
+    for (const cell of opened) {
+      if (distance(cell, threat.position) <= current - 0.5) return false
+    }
+  }
+  return true
+}
+
+/**
+ * The escape arm for a tracker camped inside contact range while proven
+ * separated: every in-band hostile must already carry the unreachable verdict
+ * with no line of sight and no live engagement, and no fresh damage may be in
+ * memory - the same harmlessness the occluded bypass demands minus the
+ * distance arm the band itself denies. When it holds, locomotion legs that
+ * strictly recede and open no approach-lane cell join the survival set, so the
+ * body can dig a widening corridor instead of standing forever behind a wall
+ * the tracker cannot cross. Returns null - the arm is off - wherever any of
+ * those separation facts is not proven.
+ */
+function separatedTrackerEscapeArm(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'> & Partial<Pick<WorldState, 'self'>>,
+  facts: ThreatRestrictionFacts,
+): ((candidate: Candidate) => boolean) | null {
+  const self = state.self ?? null
+  if (self === null) return null
+  const unreachable = facts.unreachableThreatEntityIds ?? null
+  if (unreachable === null || unreachable.size === 0) return null
+  const inBand = state.entities.filter(
+    (entity) =>
+      entity.hostile && Number.isFinite(entity.distance) && entity.distance <= IMMEDIATE_HOSTILE_RANGE,
+  )
+  if (inBand.length === 0) return null
+  // A recent hit keeps the survival envelope conservative, exactly as the
+  // bypass's damage arm does: a body being hurt through the wall does not dig.
+  const damage = state.signals.lastDamage ?? null
+  if (damage !== null && Number.isFinite(damage.atMs) && state.timestampMs - damage.atMs <= THREAT_MEMORY_MS) return null
+  for (const entity of inBand) {
+    if (!unreachable.has(entity.id) || entity.lineOfSight !== false || entity.attackedSelf === true) return null
+  }
+  const laneCells = facts.threatApproachLaneCells ?? new Set<string>()
+  return (candidate) =>
+    SEPARATION_LEG_KINDS.has(candidate.kind) && separationIncreasingLeg(self, inBand, laneCells, candidate)
+}
+
+/**
+ * The cells a nearby hostile's own approach analysis names as the first dig
+ * toward its stance - `DIG_ROUTE:mode:dir:b-x_y_z` route ids carried on
+ * withheld ATTACK entries' acquisition evidence. The union over every
+ * dangerous hostile's lanes is conservative: a leg that recedes but breaks a
+ * named boundary hands that tracker the exact approach it was proven to lack.
+ */
+function threatApproachLaneCells(withheld: readonly CandidateReachability[]): Set<string> {
+  const cells = new Set<string>()
+  for (const entry of withheld) {
+    if (entry.candidate.kind !== 'ATTACK') continue
+    for (const acquisition of entry.acquisition ?? []) {
+      for (const route of acquisition.routes ?? []) {
+        const match = /:b(-?\d+)_(-?\d+)_(-?\d+)$/.exec(route)
+        if (match !== null) cells.add(`${match[1]},${match[2]},${match[3]}`)
+      }
+    }
+  }
+  return cells
 }
 
 /**
@@ -897,11 +1048,18 @@ export function applyGroundedThreatRestriction(
       if (path === 'no_path') unreachableThreatEntityIds.add(entity.id)
     }
   }
-  return applyThreatRestriction(state, candidates, { unreachableThreatEntityIds })
+  return applyThreatRestriction(state, candidates, {
+    unreachableThreatEntityIds,
+    // The lane cells every withheld ATTACK's own acquisition evidence named as
+    // the first dig toward its stance. The separated-tracker escape arm reads
+    // them so a receding leg can never open the boundary the hostile was just
+    // proven unable to cross.
+    threatApproachLaneCells: threatApproachLaneCells(withheld),
+  })
 }
 
 export function applyThreatRestriction(
-  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'> & Partial<Pick<WorldState, 'self'>>,
   candidates: readonly Candidate[],
   facts: ThreatRestrictionFacts = {},
 ): ThreatOffer {
@@ -911,8 +1069,13 @@ export function applyThreatRestriction(
   if (occluded !== null) {
     return { candidates: [...candidates], threat, restricted: false, inContact: false, gap: null, occluded }
   }
-  const contact = restrictCandidatesDuringImmediateThreat(state, candidates)
-  const restricted = restrictCandidatesDuringDangerousThreat(state, contact)
+  // The separated-tracker escape arm: every in-band hostile already proven
+  // unreachable, sightless and disengaged lets strictly-receding locomotion
+  // legs join the survival set. Null - and the offer is exactly as before -
+  // wherever a separation fact is missing.
+  const escapeLeg = separatedTrackerEscapeArm(state, facts)
+  const contact = restrictCandidatesDuringImmediateThreat(state, candidates, escapeLeg ?? undefined)
+  const restricted = restrictCandidatesDuringDangerousThreat(state, contact, escapeLeg ?? undefined)
   const onlyEscalate = restricted.length === 1 && restricted[0]?.kind === 'ESCALATE'
   const gap = onlyEscalate && (threat?.active === true || inContact) ? { reason: 'no_grounded_threat_response' } : null
   return {

@@ -631,6 +631,151 @@ addCase('(c1m) an unemitted watcher whose probe says REACHABLE keeps the suppres
   return { pass, detail: `occluded=${offer.occluded?.reason ?? 'none'} offered=[${ids(offer.candidates).join(',')}]` }
 })
 
+// ---------------------------------------------------------------------------
+// Separated-tracker escape legs. Live portal-p23 `run-mutsv43u-1a0g`
+// gen-muu4falj (17:44-17:59Z): spider e47428 parked at exactly 3.01 m behind a
+// sealed wall - `no_attack_stand` (unreachable), los=false, zero damage, hp20 -
+// for 14+ min while the contact band erased every way out, and the designed
+// chain (ESCALATE -> System2 -> unexecutable goals) could not move the body.
+// The escape arm admits a locomotion leg only when it PROVABLY separates:
+// strict distance gain and no opened approach-lane cell.
+// ---------------------------------------------------------------------------
+
+const walledSpider = () => hostile(54801, 'spider', { x: 3, y: 10, z: 0.5 }, { lineOfSight: false })
+
+const separatedScene = () => {
+  const state = bodyState([walledSpider()])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  return state
+}
+
+const workCell = (state: WorldState): Candidate => ({
+  id: 'MINE:b0_12_0', kind: 'MINE', label: 'dig pocket ceiling', targetName: 'stone', target: { x: 0, y: 12, z: 0 },
+  targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true,
+  meta: { tick: state.tick },
+})
+
+const escalateOut = (state: WorldState): Candidate => ({
+  id: 'ESCALATE:no_grounded_threat_response', kind: 'ESCALATE', label: 'hand the stall to System2', targetName: null,
+  target: null, targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true,
+  hasStandableAdjacent: true, meta: { tick: state.tick },
+})
+
+const descendLeg = (state: WorldState, id: string, dig: Vec3Json, stand: Vec3Json): Candidate => ({
+  id, kind: 'DESCEND', label: `tunnel one block toward ${stand.x},${stand.y},${stand.z}`,
+  targetName: 'stone', target: dig, targetEntityId: null, itemName: null, requiresTool: false, toolName: null,
+  inReach: true, hasStandableAdjacent: true,
+  meta: { tick: state.tick, digStep: true, digCells: `${dig.x},${dig.y},${dig.z}`, stepX: stand.x, stepY: stand.y, stepZ: stand.z },
+})
+
+addCase('(c1n) a walled-off tracker at contact range admits a strictly-receding dig leg', () => {
+  const state = separatedScene()
+  // Body at (0.5,10,0.5), spider walled off at (3,10,0.5) = 2.5 m. The leg
+  // digs the west pocket cell and lands 5.0 m from the tracker: a real,
+  // widening corridor away from it.
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const work = workCell(state)
+  const offer = applyThreatRestriction(state, [away, work, escalateOut(state)], {
+    unreachableThreatEntityIds: new Set([54801]),
+    threatApproachLaneCells: new Set(),
+  })
+  const pass =
+    offer.occluded === null &&
+    offer.candidates.some((candidate) => candidate.id === away.id) &&
+    offer.candidates.some((candidate) => candidate.kind === 'ESCALATE') &&
+    !offer.candidates.some((candidate) => candidate.kind === 'MINE') &&
+    offer.gap === null
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}] gap=${offer.gap?.reason ?? 'none'}` }
+})
+
+addCase("(c1o) a receding leg that opens the tracker's own approach lane is refused", () => {
+  const state = separatedScene()
+  // Same scene and same landing cell as c1n, but this leg's dig cell is the
+  // boundary the withheld ATTACK's acquisition named (`DIG_ROUTE:-:b-1_10_0`):
+  // digging it hands the tracker the approach it was proven to lack. A leg
+  // whose dig profile avoids the lane still goes through.
+  const lane = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const clean = descendLeg(state, 'DESCEND:down:D:b0_9_0', { x: 0, y: 9, z: 0 }, { x: 0, y: 8, z: 0 })
+  const offer = applyThreatRestriction(state, [lane, clean, workCell(state), escalateOut(state)], {
+    unreachableThreatEntityIds: new Set([54801]),
+    threatApproachLaneCells: new Set(['-1,10,0']),
+  })
+  const pass =
+    offer.candidates.some((candidate) => candidate.id === clean.id) &&
+    !offer.candidates.some((candidate) => candidate.id === lane.id) &&
+    !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1p) a leg that does not strictly recede is refused', () => {
+  const state = separatedScene()
+  // Descending TOWARD the pocket (landing 1.12 m from the tracker) is an
+  // approach, not an escape; and a leg that lands where the body stands gains
+  // nothing. Both stay out even though the tracker is proven unreachable.
+  const toward = descendLeg(state, 'DESCEND:level:E:b2_10_0', { x: 2, y: 10, z: 0 }, { x: 2, y: 10, z: 0.5 })
+  const same = descendLeg(state, 'DESCEND:level:W:b0_10_0', { x: 0, y: 10, z: 0 }, { x: 0.5, y: 10, z: 0.5 })
+  const offer = applyThreatRestriction(state, [toward, same, workCell(state), escalateOut(state)], {
+    unreachableThreatEntityIds: new Set([54801]),
+    threatApproachLaneCells: new Set(),
+  })
+  const pass =
+    offer.candidates.length === 1 &&
+    offer.candidates[0]?.kind === 'ESCALATE'
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1q) an in-band tracker with NO unreachable proof keeps every leg suppressed', () => {
+  const state = separatedScene()
+  // No proof at all: the mob may be one dig or one climb away, so the contact
+  // band stays absolute.
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const offer = applyThreatRestriction(state, [away, workCell(state), escalateOut(state)], {
+    unreachableThreatEntityIds: new Set(),
+  })
+  const pass = offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE'
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1r) one unproven in-band watcher beside a proven one keeps every leg suppressed', () => {
+  const state = bodyState([
+    walledSpider(),
+    hostile(54802, 'zombie', { x: 0.5, y: 10, z: 3 }, { lineOfSight: false }),
+  ])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const away = descendLeg(state, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const offer = applyThreatRestriction(state, [away, workCell(state), escalateOut(state)], {
+    // Only the spider carries the unreachable verdict; the zombie's approach
+    // was never proven, so the arm stays off.
+    unreachableThreatEntityIds: new Set([54801]),
+  })
+  const pass = offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE'
+  return { pass, detail: `proofs=[54801] inBand=[54801,54802] offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1s) line of sight or fresh damage keeps every leg suppressed', () => {
+  // los=true: a sightline means the separation proof is stale the moment a
+  // climb opens it; fresh damage: the envelope stays conservative exactly as
+  // the bypass's damage arm does.
+  const seen = bodyState([hostile(54803, 'spider', { x: 3, y: 10, z: 0.5 }, { lineOfSight: true })])
+  seen.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: seen.entities })
+  const hurt = separatedScene()
+  hurt.signals.lastDamage = { atMs: NOW - 500, health: 18, sourceId: 54801, sourceName: 'spider' }
+  const away1 = descendLeg(seen, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const away2 = descendLeg(hurt, 'DESCEND:level:W:b-1_10_0', { x: -1, y: 10, z: 0 }, { x: -2, y: 10, z: 0 })
+  const seenOffer = applyThreatRestriction(seen, [away1, workCell(seen), escalateOut(seen)], {
+    unreachableThreatEntityIds: new Set([54803]),
+  })
+  const hurtOffer = applyThreatRestriction(hurt, [away2, workCell(hurt), escalateOut(hurt)], {
+    unreachableThreatEntityIds: new Set([54801]),
+  })
+  const pass =
+    seenOffer.candidates.length === 1 &&
+    seenOffer.candidates[0]?.kind === 'ESCALATE' &&
+    hurtOffer.candidates.length === 1 &&
+    hurtOffer.candidates[0]?.kind === 'ESCALATE'
+  return { pass, detail: `los=[${ids(seenOffer.candidates).join(',')}] damage=[${ids(hurtOffer.candidates).join(',')}]` }
+})
+
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {
   const starving = bodyState([hostile(16, 'zombie', { x: 6, y: 10, z: 0.5 })])
   starving.self = { ...starving.self, food: 0 }
