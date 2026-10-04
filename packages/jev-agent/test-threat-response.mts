@@ -34,7 +34,7 @@ import { authorityState } from './src/jev/authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
 import { pickHigherPriority } from './src/controller.ts'
-import { DecisionScheduler, PREEMPTIVE_TRIGGERS, RETREAT_DEFER_HIT_BUDGET, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
+import { DecisionScheduler, PREEMPTIVE_TRIGGERS, RETREAT_DEFER_HIT_BUDGET, SHAPING_DEFER_HIT_BUDGET, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldDeferTriggerDuringSurvivalShapingLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
 import type { AgentSignals, BlockState, EntityState, GoalState, InventoryState, LastDamageEvidence, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -897,6 +897,30 @@ addCase('a damage event at critical health preempts the RETREAT lease instead of
   return {
     pass,
     detail: 'critical-band hits break the deferral; healthy-band hits and controller repair requests keep it',
+  }
+})
+
+addCase('damage/hp hits are hit-budgeted deferred under a survival-shaping lease; reground defers; new mobs and timeouts still preempt (run-mutlktrv-3xw: escapeup pillar killed mid-build by damage preempts)', () => {
+  // A MOVE:escapeup/PLACE:wall build IS the selected survival answer: each
+  // damage_taken that preempts it restarts the build from step 0 while the
+  // threat keeps swinging. Hits defer with the same hit budget + critical
+  // floor the RETREAT lease owns; controller repair (survival_reground) is
+  // never fresh world evidence; mob_appeared/action_timeout stay preemptive.
+  const pillar = 'MOVE:escapeup:p4_69_-1'
+  const wall = 'PLACE:wall:dirt:p-1_65_-1'
+  const pass =
+    shouldDeferTriggerDuringSurvivalShapingLease('damage_taken', pillar, 20, 6, 0) &&
+    shouldDeferTriggerDuringSurvivalShapingLease('hp_changed', wall, 20, 6, SHAPING_DEFER_HIT_BUDGET - 1) &&
+    !shouldDeferTriggerDuringSurvivalShapingLease('damage_taken', pillar, 20, 6, SHAPING_DEFER_HIT_BUDGET) &&
+    shouldDeferTriggerDuringSurvivalShapingLease('survival_reground', wall, 4, 6, 0) &&
+    !shouldDeferTriggerDuringSurvivalShapingLease('damage_taken', pillar, 5, 6, 0) &&
+    !shouldDeferTriggerDuringSurvivalShapingLease('mob_appeared', pillar, 20, 6, 0) &&
+    !shouldDeferTriggerDuringSurvivalShapingLease('action_timeout', wall, 20, 6, 0) &&
+    !shouldDeferTriggerDuringSurvivalShapingLease('damage_taken', 'MOVE:b1_1_1', 20, 6, 0) &&
+    !shouldDeferTriggerDuringSurvivalShapingLease('damage_taken', 'ATTACK:e21503', 20, 6, 0)
+  return {
+    pass,
+    detail: `hit budget=${SHAPING_DEFER_HIT_BUDGET}; escapeup/wall defer damage+hp+reground, keep mob/timeout preempts, ordinary MOVE/ATTACK unaffected`,
   }
 })
 

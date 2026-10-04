@@ -252,6 +252,42 @@ export function shouldDeferTriggerDuringBreathEscapeLease(trigger: DecisionTrigg
 }
 
 /**
+ * An in-flight escape-pillar/wall build IS the selected survival answer to the
+ * damage landing while it builds. Measured death (run-mutlktrv-3xw, 2026-10-04
+ * 12:26): `damage_taken` preempted a `MOVE:escapeup` pillar 5.4 s in, the
+ * replacement pillar restarted from step 0, and the next hit killed the body
+ * mid-build - the same thrash class as the drowning preempts, one family over.
+ * Hits are deferrable but hit-budgeted: every absorbed hit is proof the shape
+ * has not yet bought cover, so the budget exhausts and the next hit preempts
+ * while other answers still exist. New threats (`mob_appeared`) and timeouts
+ * keep their usual interrupt, and the critical-health floor keeps its
+ * preemptive path for the same reason the RETREAT deferral owns one.
+ */
+export const SURVIVAL_SHAPING_ID_PREFIXES: readonly string[] = ['MOVE:escapeup:', 'PLACE:wall:']
+
+export const SHAPING_DEFER_HIT_BUDGET = 3
+
+export function isSurvivalShapingActionId(actionId: string): boolean {
+  return SURVIVAL_SHAPING_ID_PREFIXES.some((prefix) => actionId.startsWith(prefix))
+}
+
+export function shouldDeferTriggerDuringSurvivalShapingLease(
+  trigger: DecisionTrigger,
+  actionId: string,
+  health = Number.POSITIVE_INFINITY,
+  criticalHealth = 6,
+  absorbedHits = 0,
+): boolean {
+  if (!isSurvivalShapingActionId(actionId)) return false
+  if (trigger === 'survival_reground') return true
+  return (
+    (trigger === 'damage_taken' || trigger === 'hp_changed') &&
+    absorbedHits < SHAPING_DEFER_HIT_BUDGET &&
+    !(Number.isFinite(health) && health <= criticalHealth)
+  )
+}
+
+/**
  * The scheduler-level survival fact. `layer=scheduler` names the owner of the
  * preemption (the sensor owns the air reading, the guard/executor own refusing
  * the mechanical action); the semantic response stays Jev's.

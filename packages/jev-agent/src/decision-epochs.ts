@@ -64,7 +64,7 @@ import type { GuardCode, GuardResult } from './policy.ts'
 import { formatWaitExhausted, formatWaitStreak } from './replanThrottle.ts'
 import type { WaitStreakEscalation } from './replanThrottle.ts'
 import { commitmentInvalidation, formatSkillInvalidated, targetIdentityKey } from './skillCommitment.ts'
-import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringBreathEscapeLease, shouldDeferTriggerDuringRetreatLease, shouldPreemptActiveActionLease } from './scheduler.ts'
+import { pickHigherPriority, PREEMPTIVE_TRIGGERS, shouldDeferTriggerDuringBreathEscapeLease, shouldDeferTriggerDuringRetreatLease, shouldDeferTriggerDuringSurvivalShapingLease, shouldPreemptActiveActionLease } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import type { GoalState, Vec3Json, WorldState } from './state.ts'
 import { MELEE_THREAT_REACH } from './threat.ts'
@@ -1191,12 +1191,13 @@ export async function decide(
 // ---------------------------------------------------------------------------
 
 /**
- * Per-lease absorbed-hit count for the RETREAT damage deferral, keyed on the
- * in-flight action object itself: a lease that keeps running keeps its count,
- * a revoked/re-committed lease (new object) starts fresh, and the entry is
- * collected when the action is. See `RETREAT_DEFER_HIT_BUDGET` in scheduler.ts.
+ * Per-lease absorbed-hit count for the hit-budgeted damage deferrals (RETREAT
+ * and survival shaping), keyed on the in-flight action object itself: a lease
+ * that keeps running keeps its count, a revoked/re-committed lease (new object)
+ * starts fresh, and the entry is collected when the action is. See
+ * `RETREAT_DEFER_HIT_BUDGET`/`SHAPING_DEFER_HIT_BUDGET` in scheduler.ts.
  */
-const retreatLeaseAbsorbedHits = new WeakMap<object, number>()
+const leaseAbsorbedHits = new WeakMap<object, number>()
 
 export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigger, detail: Record<string, unknown>): void {
   if (!host.running || host.modelRecoveryStopping) return
@@ -1216,10 +1217,10 @@ export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigg
     // next hit preempts while hp is still survivable. Keyed on the action
     // object itself, so a revoked/re-committed lease gets a fresh budget and
     // a lease that keeps running keeps its count.
-    const absorbedHits = retreatLeaseAbsorbedHits.get(inFlight) ?? 0
+    const absorbedHits = leaseAbsorbedHits.get(inFlight) ?? 0
     if (shouldDeferTriggerDuringRetreatLease(trigger, inFlight.kind, host.bot.health, CRITICAL_COMBAT_HEALTH, absorbedHits)) {
       if (trigger === 'damage_taken' || trigger === 'hp_changed') {
-        retreatLeaseAbsorbedHits.set(inFlight, absorbedHits + 1)
+        leaseAbsorbedHits.set(inFlight, absorbedHits + 1)
       }
       host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
       host.logger.info(
@@ -1238,6 +1239,21 @@ export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigg
       host.logger.info(
         'scheduler',
         `trigger=${trigger} deferred during breath-escape lease#${inFlight.epoch} ${inFlight.id}`,
+        detail,
+        host.tickCounter,
+      )
+      return
+    }
+    // An escape pillar or threat wall is the selected survival answer: the
+    // damage landing while it builds must not cancel the build every swing.
+    if (shouldDeferTriggerDuringSurvivalShapingLease(trigger, inFlight.id, host.bot.health, CRITICAL_COMBAT_HEALTH, absorbedHits)) {
+      if (trigger === 'damage_taken' || trigger === 'hp_changed') {
+        leaseAbsorbedHits.set(inFlight, absorbedHits + 1)
+      }
+      host.deferredTrigger = pickHigherPriority(host.deferredTrigger, event)
+      host.logger.info(
+        'scheduler',
+        `trigger=${trigger} deferred during survival-shaping lease#${inFlight.epoch} ${inFlight.id}`,
         detail,
         host.tickCounter,
       )
