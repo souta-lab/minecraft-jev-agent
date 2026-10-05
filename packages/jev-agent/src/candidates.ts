@@ -16016,10 +16016,40 @@ export function deriveReachabilityAbilities(
               },
         )
       }
-    } else if (plan.kind === 'staircase' && typeof plan.harvestTool === 'string') {
-      const tier = plan.harvestTier ?? 0
-      if (bestToolTier(counts, plan.harvestTool) < tier) {
-        descendMissing.push({ kind: 'tool', tool: plan.harvestTool, tier })
+    } else if (plan.kind === 'staircase') {
+      // A staircase plan is a clearance action: `harvestTool` names what the
+      // cell's DROPS need, and a descent route does not need the drops. The
+      // ascend arm applies the same `selectClearanceTool` rule to the same plan
+      // shape ("the harvest tier controls drops, not breakability"). Priced as
+      // a drops requirement instead, every hand-breakable cell carrying a
+      // harvestTools entry withheld the descent as `tool:*` - live 2026-10-05
+      // gen-muvlflzo-iry0k2: a snowy-taiga death-site GOTO withheld
+      // `tool:shovel@0` for snow steps while the dropped inventory despawned,
+      // and any no-pickaxe staircase through stone would do the same. The only
+      // fact that can still stop the plan is an unproven cell, which is the
+      // `unbreakable` verdict `planDigRouteRefusal` already assigns, never a
+      // tool acquisition the body could mis-spend trying to satisfy.
+      const gameData = loadGameData()
+      const planHarvest = resolveHarvest(gameData, plan.digName ?? '')
+      const clearance = selectClearanceTool(
+        {
+          name: plan.digName ?? '',
+          harvestTool: plan.harvestTool ?? null,
+          harvestTier: plan.harvestTier ?? null,
+          diggable: gameData.blocksByName?.[plan.digName ?? '']?.diggable ?? true,
+          knownBlock: planHarvest.yield !== null,
+        },
+        (tool, tier) => hasTool(state, tool, tier),
+      )
+      if (!clearance.ok) {
+        descendMissing.push({
+          kind: 'descend_plan',
+          reason: 'unbreakable',
+          cell: plan.dig,
+          block: plan.digName,
+          tool: null,
+          tier: null,
+        })
       }
     }
   }

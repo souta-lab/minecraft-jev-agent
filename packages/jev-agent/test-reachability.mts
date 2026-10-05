@@ -876,7 +876,13 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     })
   }
 
-  function stoneDownStep(feet: Vec3Json): DescentOption {
+  // A diggable-in-sensor step whose named cell the registry reports
+  // undiggable: the only mechanically honest way a grounded staircase plan is
+  // unreachable. (`digName:'stone'` used to stand in for "needs a tool" - that
+  // priced the drops requirement as a clearance gate, the exact defect this
+  // suite now pins: stone hand-breaks for a route, so the station was
+  // reachable all along.)
+  function bedrockDownStep(feet: Vec3Json): DescentOption {
     return {
       dir: 'E',
       mode: 'down',
@@ -891,9 +897,9 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       floorSolid: true,
       safe: true,
       reason: 'safe',
-      digName: 'stone',
-      digHarvestTool: 'pickaxe',
-      digHarvestTier: 0,
+      digName: 'bedrock',
+      digHarvestTool: null,
+      digHarvestTier: null,
       diggable: true,
     }
   }
@@ -913,7 +919,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   {
     const held = inventory({ birch_planks: 7, stick: 2 })
     const scenarios: Array<{ label: string; known: KnownResource; descent?: DescentOption[]; standable?: Vec3Json[] }> = [
-      { label: 'below (descend staircase needs a pickaxe)', known: tableBelow, descent: [stoneDownStep(feet)] },
+      { label: 'below (descend staircase hits bedrock)', known: tableBelow, descent: [bedrockDownStep(feet)] },
       { label: 'above (ascend needs a column)', known: tableAbove, standable: [] },
     ]
     for (const scenario of scenarios) {
@@ -958,7 +964,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   }
 
   // (b) no planks held: the self-craft ladder cannot run, so the reachable-blocked
-  // stone craft is attributed the tool ITS route needs (never suppressed).
+  // stone craft is attributed the route's own missing fact (never suppressed).
   {
     const state = worldState({
       position: bot,
@@ -966,7 +972,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       goal: goal({ targetItem: 'stone_pickaxe', description: 'craft 1 x stone_pickaxe', requiredCount: 1 }),
       goalQueue: queueWith(craftGoal('stone_pickaxe')),
       signals: signals({ knownResources: [tableBelow] }),
-      descent: [stoneDownStep(feet)],
+      descent: [bedrockDownStep(feet)],
     })
     const grounded = generateGroundedCandidates(state, craftOptions)
     const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'stone_pickaxe' }, grounded.withheld)
@@ -979,8 +985,8 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
         missing.every((token) => token.startsWith('RETRIEVE:known:station:crafting_table:b40_29_35:')) &&
         line !== null &&
         line.includes('blockedBy=no_productive_action') &&
-        !line.includes('tool:pickaxe@0 missing') &&
-        line.includes('missing=["RETRIEVE:known:station:crafting_table:b40_29_35:tool:pickaxe@0"]'),
+        !line.includes('descend_plan:unbreakable missing') &&
+        line.includes('missing=["RETRIEVE:known:station:crafting_table:b40_29_35:descend_plan:unbreakable@31,47,37:bedrock"]'),
       `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line ?? 'none'}"`,
     )
   }
@@ -2255,6 +2261,76 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       blockedKeys.includes('headroom@22,68,4') &&
       !blockedKeys.includes('ascend_plan'),
     `supported=${supported.ascend.available} blocked=[${blockedKeys.join(',')}]`,
+  )
+}
+
+// (19) CLEARANCE vs DROPS on a staircase descent plan -------------------------
+//
+// Live defect (portal-p24, gen-muvlflzo-iry0k2, 2026-10-05): a snowy-taiga
+// death-site GOTO was withheld `missing=[GOTO:p21_60_-46:tool:shovel@0]` while
+// the dropped iron bank despawned. The descend-gap gate priced the staircase
+// plan's `harvestTool` as a hard requirement - the DROPS profile (snow needs a
+// shovel for snowballs; stone a pickaxe for cobblestone) - when a staircase is
+// a clearance action and the route never needs the drops. Every diggable cell
+// hand-breaks; the tool is a speed preference. The ascend arm already applies
+// `selectClearanceTool` to the same plan shape; the descend gap now does too.
+// A genuinely undiggable cell keeps the `unbreakable` verdict (the same token
+// `planDigRouteRefusal` assigns an unproven cell), never a `tool:` acquisition
+// the body could mis-spend trying to satisfy.
+{
+  const body = { x: 0.5, y: 95, z: 0.5 }
+  const downStep = (name: string, harvestTool: 'pickaxe' | 'axe' | 'shovel' | null): DescentOption => ({
+    dir: 'E',
+    mode: 'down',
+    dx: 1,
+    dz: 0,
+    step: { x: 0, y: 94, z: 0 },
+    wall: { x: 0, y: 95, z: 0 },
+    head: { x: 0, y: 96, z: 0 },
+    floor: { x: 0, y: 94, z: 0 },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: name,
+    digHarvestTool: harvestTool,
+    digHarvestTier: 0,
+    diggable: true,
+  })
+  const farBelow: Vec3Json = { x: 0, y: 60, z: 0 }
+
+  const snow = deriveReachabilityAbilities(
+    worldState({ position: body, inventory: inventory({ dirt: 2 }), descent: [downStep('snow', 'shovel')] }),
+    farBelow,
+  )
+  check(
+    '(19a) a snow staircase descent needs no shovel - its drops are not the route',
+    snow.descend.available === true && snow.descend.missing.length === 0,
+    `available=${snow.descend.available} missing=[${snow.descend.missing.map(capabilityKey).join(',')}]`,
+  )
+
+  const stone = deriveReachabilityAbilities(
+    worldState({ position: body, inventory: inventory({ dirt: 2 }), descent: [downStep('stone', 'pickaxe')] }),
+    farBelow,
+  )
+  check(
+    '(19b) a stone staircase descent needs no pickaxe - hand clearance is legal',
+    stone.descend.available === true && stone.descend.missing.length === 0,
+    `available=${stone.descend.available} missing=[${stone.descend.missing.map(capabilityKey).join(',')}]`,
+  )
+
+  const bedrock = deriveReachabilityAbilities(
+    worldState({ position: body, inventory: inventory({ dirt: 2 }), descent: [downStep('bedrock', null)] }),
+    farBelow,
+  )
+  const bedrockKeys = bedrock.descend.missing.map((capability) => capabilityKey(capability))
+  check(
+    '(19c) an undiggable plan cell keeps the unbreakable verdict, never a tool acquisition',
+    bedrock.descend.available === false &&
+      bedrockKeys.includes('descend_plan:unbreakable@0,94,0:bedrock') &&
+      !bedrockKeys.some((key) => key.startsWith('tool:')),
+    `available=${bedrock.descend.available} missing=[${bedrockKeys.join(',')}]`,
   )
 }
 
