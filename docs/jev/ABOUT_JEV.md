@@ -1,5 +1,7 @@
 # ABOUT_JEV
 
+> **Operational note:** this is background/reference material. The canonical Minecraft operating constitution for Jev/System One usage is `docs/architecture/JEV-BEST-PRACTICES-FOR-MINECRAFT.md`; it is second only to V4.1.2 VTR contracts for Typed Decision Plane work.
+
 This note documents **what Jev actually is**, what is provider/gateway-specific, how this
 repository uses it, and what our live evidence does and does not prove.
 

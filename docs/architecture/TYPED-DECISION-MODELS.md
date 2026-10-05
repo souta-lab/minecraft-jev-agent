@@ -5,6 +5,8 @@ Last reviewed: 2026-10-05.
 
 This document exists because the project historically overloaded **Jev** to mean both a concrete TypeSafe AI model and the Minecraft component that used that model. Those are not the same thing. This reference separates the model class, concrete models, architectural responsibility, provider, transport, and compatibility contract so future decision-model backends can be swapped without changing V4.1.2 ownership.
 
+**Operational precedence:** this file is the terminology/backend-compatibility reference. For Minecraft-side state shaping, candidate compilation, question design, decision cadence, probability gates, replay proof, cost discipline, and the mandatory pre-p24 gates, `docs/architecture/JEV-BEST-PRACTICES-FOR-MINECRAFT.md` is the canonical operating guide and is second only to V4.1.2 VTR contracts.
+
 ## 1. Terminology map
 
 Use these names precisely.

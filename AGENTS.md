@@ -19,6 +19,10 @@ If this file conflicts with current V4.1.2 implementation/contracts, repair this
 
 **V4.1.2 Concurrent Verified Transition Runtime is permanent.** Validated checkpoint: `092a5b38`. Canonical contracts: `packages/kernel/kernel.ts`, `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`, and `docs/architecture/v4.1/{V4.1.2-HARDENING,INVARIANTS,KERNEL-EVENTS}.md`.
 
+**Typed Decision Plane operating rules are the next-highest runtime constitution after VTR.** Mandatory companion: `docs/architecture/JEV-BEST-PRACTICES-FOR-MINECRAFT.md`. Read it immediately after the V4.1.2 contracts before changing Jev/d1 state projection, candidate compilation, decision epochs, question heads, probability gates, retry/cost behavior, or Minecraft policy that can alter when/why the Typed Decision Plane is called. `docs/architecture/TYPED-DECISION-MODELS.md` defines terminology/backend compatibility; the Jev-best-practices guide defines Minecraft-side operation. If ordinary policy/gameplay code conflicts with that guide without a VTR requirement, repair the code.
+
+**Root gate:** portal gameplay remains lower priority while the Jev-best-practices guide §18 gates A-H are open. Do not resume p24 merely because the provider/backend works. First prove one canonical compact DecisionState, semantic decision-epoch/commitment boundaries, parallel typed-head contract, replay/holdout quality, model-specific calibration, and operational evidence. Token/call savings alone are not proof; verified decision/composition quality must survive.
+
 Never create or revive V4.1.3/V4.2/V5, alternate terminalization, shadow/fallback authority, second SUCCESS owner, selector architecture, architecture tournament, or a parallel semantic authority path.
 
 The sole production authority path is:
