@@ -652,6 +652,23 @@ export class BetaAbandonDeferral {
     this.limit = Number.isInteger(limit) && limit >= 1 ? limit : BETA_ABANDON_DEFER_CYCLES_DEFAULT
   }
 
+  /**
+   * The streak-key form of a deferral reason. The pure boundary reports one
+   * control suppression under two phase labels: `control_action` when the
+   * decision itself picked WAIT/ESCALATE and `control_outcome` when the settled
+   * outcome was a control. A starved offer that keeps electing WAIT alternates
+   * between them every epoch — keying the streak on the raw reason resets the
+   * count at each flip, so the exact suppression loop this bound exists to
+   * break could never reach the limit (measured live run-muvh4ofl /
+   * gen-muvip6au 2026-10-05T17:37Z: beta>0.5 across ~30 epochs,
+   * BETA_ABANDON_DEFERRED cycling 1-2/6). The phase difference is not a
+   * different deferral cause; collapse only the control family for the key.
+   * The reported decision still carries the raw reason.
+   */
+  private streakReason(reason: string): string {
+    return reason === 'control_action' || reason === 'control_outcome' ? 'control' : reason
+  }
+
   /** Record one deferred abandon request and return the bounded decision. */
   note(input: BetaAbandonDeferralInput): BetaAbandonDeferralDecision {
     if (input.progressed === true) {
@@ -666,12 +683,13 @@ export class BetaAbandonDeferral {
         released: false,
       }
     }
+    const reasonKey = this.streakReason(input.reason)
     const previous = this.streak
     const same =
       previous !== null &&
       previous.plan === input.plan &&
       previous.action === input.action &&
-      previous.reason === input.reason
+      previous.reason === reasonKey
     const count = same ? previous.count + 1 : 1
     if (count >= this.limit) {
       this.streak = null
@@ -685,7 +703,7 @@ export class BetaAbandonDeferral {
         released: true,
       }
     }
-    this.streak = { plan: input.plan, action: input.action, reason: input.reason, count }
+    this.streak = { plan: input.plan, action: input.action, reason: reasonKey, count }
     return {
       defer: true,
       count,

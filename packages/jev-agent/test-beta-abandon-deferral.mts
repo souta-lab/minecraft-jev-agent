@@ -308,6 +308,117 @@ addCase('(c) a different plan restarts the streak instead of carrying it over', 
   }
 })
 
+// --- (d) the live phase-alternation defect -------------------------------------
+//
+// Live fingerprint (run-muvh4ofl / gen-muvip6au, 2026-10-05T17:37Z): a starved
+// `explore:surface` offer kept electing WAIT while beta held >0.5 for ~30
+// epochs. The deferral alternated `control_action` (the model picked WAIT) and
+// `control_outcome` (the model declined / no actionId, and the settled outcome
+// was a control WAIT) — both reported `action=WAIT`, plan stable — so the
+// raw-reason streak key reset at every flip and the count never exceeded 2/6.
+// The suppression loop the bound exists to break could never reach the limit.
+
+const waitControlOutcome = {
+  execution: 'success',
+  verification: 'not_applicable',
+  progress: 'none',
+  progressKinds: ['none'],
+  control: 'wait',
+  failure: null,
+}
+
+/** A decision whose action answer is the decline label -> decisionIdFrom null. */
+function declineDecision(beta: number): JevResult {
+  return {
+    callId: 'call-decline',
+    policy: 'typesafe',
+    source: 'jev',
+    model: 'test',
+    latencyMs: 0,
+    usage: null,
+    answers: {
+      action: {
+        name: 'action',
+        type: 'choice',
+        value: 'DECLINE',
+        probability: 1,
+        confidence: 1,
+        probabilities: { DECLINE: 1 },
+        legend: ['DECLINE'],
+        note: null,
+      },
+      abandon_option: {
+        name: 'abandon_option',
+        type: 'boolean',
+        value: 1,
+        probability: beta,
+        confidence: null,
+        probabilities: null,
+        legend: null,
+        note: null,
+      },
+    },
+  } as unknown as JevResult
+}
+
+addCase('(d) alternating control_action/control_outcome is ONE control suppression and releases at N', () => {
+  const harness = makeHarness(GOAL, 3)
+  const one = harness.call(decision(ACTION, 0.6), null) // control_action
+  const two = harness.call(declineDecision(0.6), waitControlOutcome) // control_outcome, action=WAIT
+  const three = harness.call(decision(ACTION, 0.6), null) // control_action -> released
+  const deferred = harness.lines.filter((line) => line.startsWith(BETA_ABANDON_DEFERRED_MARKER))
+  return {
+    pass:
+      !one.adopt &&
+      !two.adopt &&
+      three.adopt === true &&
+      three.wake === true &&
+      three.reason === 'semantic_abandon' &&
+      deferred.length === 2 &&
+      countOf(harness.lines, BETA_ABANDON_RELEASED_MARKER) === 1,
+    detail: `deferred=[${deferred.join(' | ')}] release=${harness.lines.find((line) => line.startsWith(BETA_ABANDON_RELEASED_MARKER)) ?? 'MISSING'}`,
+  }
+})
+
+addCase('(d) the counter accumulates the control family under both phase labels', () => {
+  const counter = new BetaAbandonDeferral(4)
+  const counts = [
+    counter.note({ plan: GOAL, action: ACTION, reason: 'control_action' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'control_outcome' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'control_action' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'control_outcome' }),
+  ]
+  return {
+    pass:
+      counts[0]!.count === 1 &&
+      counts[1]!.count === 2 &&
+      counts[2]!.count === 3 &&
+      counts[3]!.released === true &&
+      counts[3]!.reason === 'control_outcome',
+    detail: `counts=[${counts.map((d) => `${d.count}${d.released ? ':released' : ''}`).join(',')}]`,
+  }
+})
+
+addCase('(d) a genuinely different deferral cause still resets the streak', () => {
+  const counter = new BetaAbandonDeferral(4)
+  const counts = [
+    counter.note({ plan: GOAL, action: ACTION, reason: 'control_action' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'control_action' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'local_recovery' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'local_recovery' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'local_recovery' }),
+    counter.note({ plan: GOAL, action: ACTION, reason: 'local_recovery' }),
+  ]
+  return {
+    pass:
+      counts[1]!.count === 2 &&
+      counts[2]!.count === 1 &&
+      counts[5]!.released === true &&
+      counts[5]!.reason === 'local_recovery',
+    detail: `counts=[${counts.map((d) => `${d.reason}=${d.count}${d.released ? ':released' : ''}`).join(',')}]`,
+  }
+})
+
 // --- pure counter + markers + env ---------------------------------------------
 
 addCase('the counter releases at exactly N for the same (plan, action, reason)', () => {
