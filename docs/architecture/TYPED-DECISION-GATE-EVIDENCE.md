@@ -353,6 +353,63 @@ offers), `test-decision-epochs.mts`, `test-decision-state.mts`,
 `test-beta-stall-evidence.mts` PASS, `test-skill-commitment.mts` 21/21,
 `test-controller-transitions.mts` 7/7. `tsc --noEmit` clean.
 
-## Gates G–H
+## Gate G — operational fail-closed, provenance, cost, no churn (PROVEN)
 
-Pending. Do not resume Minecraft until all pass.
+### Fail-closed matrix (all exercised by tests or live probe)
+
+| Failure | Behavior | Proof |
+|---|---|---|
+| Missing credential for selected profile | `FatalModelError` at `createJevPolicy` — construction fails, nothing starts | `test-typed-decision-backend.mts` 27/27 |
+| Unknown profile id | `FatalModelError` — "no other profile is substituted" | same suite |
+| Auth (401) / credit (402 or credit-text on any status) / entitlement (403) / bad_request / model_identity | `DecisionUnavailableError` DECISIVE → `provider-unavailable-decisive:<kind>` journaled → `FatalModelError` non-retryable → `terminate-process` (single FATAL, exit 1) | typed-backend suite; live 401 probe (one attempt, no retry) |
+| rate_limited (429) / timeout / network / 5xx | `retryable` → bounded in-policy transient retries → exhaustion → `recover-generation` under `modelRecoveryStartGate` exponential backoff (5 s base -> 5 min cap) | typed-backend suite; `test-model-recovery.mts` 18/18 |
+| Malformed/non-grounded model answer (invented id, DECLINE on a wide offer, probability keys != offered labels, sum out of tolerance, reported model != profile) | decisive failure closed, journaled | typed-backend suite; `test-question-heads.mts` |
+| Epoch invalidated mid-flight / stale result | dropped before commitment (`decisionEpochs.accept`), never anchors a replay | Gate C `test-decision-epochs.mts` |
+| Errored provider call | never becomes a replay anchor | Gate E simulation: 139 necessary errored calls, 0 anchored |
+| Silent fallback to another profile/model (`d1:free`, gateway, deterministic) | impossible: no code path substitutes; `d1:free` and `typesafe-gateway-jev` are explicit-only | typed-backend suite; `assertRecoveryModelAuthority` on recovery |
+| System2 unavailable | separate authority stack; surfaces UNKNOWN/unavailable, never a deterministic semantic plan | `test-system2-handoff.mts` 7/7 |
+
+### Generation-churn bound (the p24 incident shape)
+
+The p24 credit outage churned ~one generation per 5 min because the error was
+classified retryable. Under `liquid-direct-d1`: `credit` is DECISIVE ->
+`modelFailureDisposition` -> `terminate-process` -> ONE `FATAL
+MODEL_UNAVAILABLE` journal line + process exit. Transient outages recover the
+generation only through `modelRecoveryStartGate` — exponential backoff
+(MODEL_RETRY_BASE_DELAY_MS 5 s -> MODEL_RETRY_MAX_DELAY_MS 5 min), honored by
+every generation-start path (respawn, world-reset, control, scheduled retry).
+Recovery restarts verify authority identity (`assertRecoveryModelAuthority`)
+so a recovered generation cannot silently run a different backend.
+
+Known limitation (documented, not fixed here): the explicit-only
+`typesafe-gateway-jev` dialect predates typed error classification — a
+credit-like gateway error still classifies retryable and would churn under
+bounded backoff. Mitigation: that profile is explicit-only, never selected by
+default or by fallback.
+
+### Provenance (exact, journaled)
+
+- Per generation: `GENERATION_READY` — `runId`, `generationId`, `sourceSha`,
+  `buildHash`, `policy`, `policyProvider`, `policyProfile`, `policyModel`,
+  `system2*` authority fields.
+- Per decision: controller journal — `trigger`, `policy`, `provider`,
+  `profile`, `model`, `callId`, `projectionHash`, `decisionEpoch`,
+  `decisionReason` (§7.1 typed boundary), `latencyMs`, `inputTokens`,
+  `actionConfidence`, `dangerScore`, `shouldRetreat`, `abandonOption`.
+- Per provider call: `jev-call` record — `backend` (profileId + providerId),
+  `model`, exact `state` sent, `questions` sent, `response.requestId`,
+  attempts/wait counters, `authority.decisionReason` (also on failure
+  records), Option-boundary `authority.decision` (beta threshold/probability/
+  adopt — omitted on route frames, which journal `jev-policy-input` instead).
+
+### Cost evidence (measured, d1)
+
+Gate F calibration run: mean 6,016 input tokens/call, p50 4,800, p90 11,556
+(provider's accounting of state + question text — NOT comparable to Gate B's
+serialized-state bytes); `usage.outputTokens` 0; latency p50 ~0.41 s. Under
+Gate C semantics the p24-holdout simulation calls the provider on 19.4% of
+decision ticks, so the measured ~6k/call applies to boundary calls only.
+
+## Gate H
+
+Pending. Do not resume Minecraft until it passes.
