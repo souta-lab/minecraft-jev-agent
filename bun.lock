@@ -19,6 +19,7 @@
       "name": "buddy-driver",
       "version": "0.1.0",
       "dependencies": {
+        "@typesafe-ai/sdk": "^0.6.0",
         "ai": "^7.0.105",
         "minecraft-data": "^3.116.0",
         "mineflayer": "^4.39.0",

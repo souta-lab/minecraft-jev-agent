@@ -58,11 +58,12 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
     "ai": "^7.0.105",
+    "minecraft-data": "^3.116.0",
     "mineflayer": "^4.39.0",
     "mineflayer-collectblock": "^1.6.0",
     "mineflayer-pathfinder": "^2.4.5",
-    "minecraft-data": "^3.116.0",
     "prismarine-block": "^1.23.0",
     "prismarine-entity": "^2.6.0",
     "prismarine-item": "^1.18.0",
