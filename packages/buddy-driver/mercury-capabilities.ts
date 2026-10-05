@@ -98,6 +98,12 @@ export const MERCURY_ALLOWED_GOALS: MercuryAllowedGoals = {
     // capability instead of being forced to invent a deterministic route.
     'flint',
     'obsidian',
+    // 'food' is a resource class, not an item: the existing collect:food
+    // machinery (matchesResourceClass satisfaction, FOOD_ANIMALS/hunt arm,
+    // blocked_affordance marker when no source is sensed) is already
+    // first-class, but the kind matrix offered no way to name the WHAT, so
+    // a starving body's only expressible answer was explore:* churn.
+    'food',
   ],
   craft: [
     'crafting_table',

@@ -131,6 +131,25 @@ addCase('typed collect/smelt compile to matching kinds', () => {
   }
 })
 
+addCase('collect:food is a grounded kind x target pair (resource class, food machinery owns production)', () => {
+  const typed = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'food', count: 4 }], reason: 'starving' })
+  const legacy = validateMercuryPlan({ op: 'patch', goals: [{ item: 'food', count: 2 }], reason: 'starving' })
+  if (!typed.ok) return { pass: false, detail: `typed: ${typed.error}` }
+  if (!legacy.ok) return { pass: false, detail: `legacy: ${legacy.error}` }
+  const goals = plannedGoalsFromMercury(typed.plan)
+  const legacyGoals = plannedGoalsFromMercury(legacy.plan)
+  return {
+    pass:
+      goals[0]?.kind === 'collect' &&
+      goals[0]?.targetItem === 'food' &&
+      goals[0]?.requiredCount === 4 &&
+      legacyGoals[0]?.kind === 'collect' &&
+      legacyGoals[0]?.targetItem === 'food',
+    detail: goals.map((goal) => `${goal.kind}:${goal.targetItem}x${goal.requiredCount}`).join(',') +
+      ' legacy=' + legacyGoals.map((goal) => `${goal.kind}:${goal.targetItem}`).join(','),
+  }
+})
+
 addCase('backward compatible: legacy {item,count} still validates and infers the kind', () => {
   const checked = validateMercuryPlan({
     op: 'patch',
