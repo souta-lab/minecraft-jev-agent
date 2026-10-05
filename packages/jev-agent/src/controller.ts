@@ -673,6 +673,10 @@ export class JevController {
   private readonly decisionEpochs = new JevDecisionEpochs()
   /** Issue #437 §5/§9: the exact semantic projection Jev last saw. */
   private lastSemanticProjection: JevSemanticProjection | null = null
+  /** §7.1 replay anchor: the projection the last ACCEPTED model answer judged. */
+  private lastAnsweredProjection: JevSemanticProjection | null = null
+  /** §7.1 provenance: the epoch that issued the last ACCEPTED answer. */
+  private lastAnsweredEpoch: number | null = null
   private lastProjectionHash = ''
   /** Issue #437 §2/§7: bounded previous semantic outcomes (never raw telemetry). */
   private recentSkillOutcomes: SkillOutcomePacket[] = []

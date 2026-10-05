@@ -182,6 +182,10 @@ export interface DecisionEpochsHost {
   lastDecision: JevResult | null
   lastDecisionId: string | null
   lastProjectionHash: string | null
+  /** §7.1 replay anchor: the projection the last ACCEPTED model answer judged. */
+  lastAnsweredProjection: JevSemanticProjection | null
+  /** §7.1 provenance: the epoch that issued the last ACCEPTED answer (the replay's reusedFrom). */
+  lastAnsweredEpoch: number | null
   staleDecisionDropped: boolean
   lastAbandonAdopted: boolean
   policyEpoch: number
@@ -1023,6 +1027,11 @@ export async function decide(
   // §3: a world/epoch change invalidates the ACTIVE epoch, so a result
   // attributed to it can no longer authorize a commitment.
   if (!host.decisionEpochs.matchesWorld({ dimension: state.self.dimension, worldEpoch: host.options.worldEpoch })) {
+    // A stale-world answer must never be replayable: the replay source and
+    // its epoch provenance are dropped here even before the boundary
+    // signature catches the change.
+    host.lastDecision = null
+    host.lastAnsweredEpoch = null
     const invalidated = host.decisionEpochs.invalidate('world_changed')
     if (invalidated !== null) {
       host.logger.warn(
@@ -1034,20 +1043,18 @@ export async function decide(
     }
   }
 
-  // §6/§9: re-query only at a semantic boundary. A settled mechanical step with
-  // an unchanged semantic projection is NOT a policy event, so the previous
-  // decision is replayed inside a NEW epoch: causal isolation is preserved (the
-  // replay is attributed to the current epoch, never to the stale one), and no
-  // model call is spent on an identical semantic state.
+  // §6/§7.1/§9: re-query only at a semantic boundary. The anchor is the
+  // projection the last ACCEPTED answer judged - NOT the active epoch, which
+  // closes on every settled Skill and used to force `first_decision` every
+  // microstep. When no decision-relevant section changed, the previous
+  // decision is replayed inside a NEW epoch: causal isolation is preserved
+  // (the replay is attributed to the current epoch, never to the stale one),
+  // and no model call is spent on an identical semantic state.
   const boundary = classifySemanticBoundary({
-    active: host.decisionEpochs.active,
-    projectionHash: hash,
-    candidateIdentities,
-    worldKey: { dimension: state.self.dimension, worldEpoch: host.options.worldEpoch, leaseHeld: true },
-    optionKey: projection.option.instanceId,
-    safetyKey: JSON.stringify(projection.safety),
-    goalKey: projection.goal.key,
+    answered: host.lastAnsweredProjection,
+    current: projection,
     lastOutcomeRequiredDecision: host.skillOutcomeBoundary,
+    leaseHeld: true,
   })
   // §4/§10: the cached decision names the realization that was representative
   // when the model chose. Identity is stable, the realization id is mechanical,
@@ -1057,7 +1064,10 @@ export async function decide(
   const replayed = host.lastDecision === null ? null : host.repointReplay(host.lastDecision, views)
   if (!boundary.requery && replayed !== null) {
     const previousActive = host.decisionEpochs.active
-    const reusedFrom = previousActive?.epoch ?? null
+    // §7.1: the replay reuses the answer bound to the ANSWERED epoch (which a
+    // post-settle close may already have retired), not whatever happens to be
+    // open right now.
+    const reusedFrom = host.lastAnsweredEpoch ?? previousActive?.epoch ?? null
     const epoch = host.decisionEpochs.begin({
       projectionHash: hash,
       candidateIdentities,
@@ -1073,6 +1083,8 @@ export async function decide(
     host.lastProjectionHash = hash
     host.skillOutcomeBoundary = false
     host.lastDecision = replayed
+    // The repointed realization id is the choice this epoch authorizes.
+    host.lastDecisionId = decisionIdFrom(replayed)
     return replayed
   }
 
@@ -1110,6 +1122,8 @@ export async function decide(
       candidates: dedupe.offered,
       semanticProjection: projection,
       projectionHash: hash,
+      // §7.1 evidence: WHICH semantic boundary authorized this provider call.
+      decisionReason: boundary.reason,
       questionNames: questionNamesFor(questionSetForTrigger(trigger)),
     })
     if (host.options.recoveryPolicyAuthority !== undefined && host.options.recoveryPolicyAuthority !== null) {
@@ -1121,7 +1135,6 @@ export async function decide(
     }
     host.jevCalls += 1
     host.lastJevAt = Date.now()
-    host.lastDecision = result
     host.lastDecisionId = decisionIdFrom(result)
     host.signals.lastPolicyConfidence = result.answers.action?.confidence ?? null
 
@@ -1139,7 +1152,12 @@ export async function decide(
       )
       return result
     }
-
+    // §7.1: only an ACCEPTED answer becomes replayable and re-anchors the
+    // semantic boundary. A dropped result was never authorized, so it must not
+    // suppress the next boundary classification.
+    host.lastDecision = result
+    host.lastAnsweredProjection = projection
+    host.lastAnsweredEpoch = epoch.epoch
     const chosen = dedupe.offered.find((candidate) => candidate.id === host.lastDecisionId)
     host.logger.info(
       'policy',

@@ -35,10 +35,11 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'labels, criteria tags, inReach, and failureBand are evidence to weigh, not fixed ranking rules. Judge the whole ' +
   'canonical state: goal/option contract, progress facts, safety/combat facts, candidates, and recentOutcomes. A ' +
   'candidate tagged optionSkill=PREREQUISITE is a required dependency route for this Option, not a detour and not a ' +
-  'reason to WAIT; SAFETY and CONTROL candidates stay live under threat. When an ATTACK candidate exists, attack ' +
-  'versus MOVE/RETREAT/WAIT is your judgment: weigh the combat block (target, distance buckets, weapons, armor ' +
-  'condition, danger) and what each escape buys (separation, cover, reach). Code grounds and bounds the choice; it ' +
-  'never picks it.'
+  'reason to WAIT; SAFETY and CONTROL candidates stay live under threat. When an ATTACK candidate exists, ATTACK ' +
+  'versus MOVE, RETREAT, or WAIT is your pi decision: weigh the combat block (target, distance buckets, weapons, ' +
+  'armor condition, danger) and what each escape buys (separation, cover, reach). Do not attack merely because a ' +
+  'mob exists - attack only when it serves the Option or survival; code grounds and bounds the choice and must not ' +
+  'choose attack for you.'
 
 const BETA_INSTRUCTIONS =
   'You are the beta head: does the CURRENT Option end now? Judge option.success/preconditions against progress ' +
@@ -220,6 +221,7 @@ function authorityJournal(
         questionAuthorities: Object.fromEntries(requested.map((name) => [name, 'jev-policy-input'])),
       },
       code: 'grounding+safety+truth',
+      decisionReason: request.decisionReason ?? null,
       ...fields,
     }
   }
@@ -227,6 +229,9 @@ function authorityJournal(
     pi: 'model',
     beta: 'model',
     code: 'grounding+safety+truth',
+    // §7.1: which semantic boundary authorized this provider call (null on
+    // callers that do not classify - e.g. tests and non-decision frames).
+    decisionReason: request.decisionReason ?? null,
     ...fields,
   }
 }

@@ -125,6 +125,8 @@ export interface JevRequest {
    */
   semanticProjection?: unknown | null
   projectionHash?: string | null
+  /** §7.1 evidence: which semantic boundary authorized this provider call. */
+  decisionReason?: string
 }
 
 export interface JevPolicy {

@@ -95,6 +95,86 @@ commitment so settled microsteps replay rather than re-ask). Gate E must
 confirm decision quality on the compact state (no hidden quality regression
 behind the size cut) and Gate F calibrates d1 separately.
 
-## Gates C–H
+## Gate C — semantic decision epochs + controller commitment (PROVEN)
+
+Root defect (this commit's diagnosis): `emitSkillOutcomePacket` closes the
+decision epoch on every settled Skill, so the next `decide()` tick saw
+`active === null` → `first_decision` → a fresh provider call regardless of
+whether the semantic situation changed. The old classifier then anchored on
+`active.projectionHash`, which embeds per-microstep outcome memory
+(`previousDecision`, `meaningfulDelta`, `recentOutcomes`, raw counters), so
+hash equality was unreachable anyway. Result: every settled microstep bought
+a call — the p24 1,215-call/hour cadence defect.
+
+Repair (`semantic-projection.ts` / `decision-epochs.ts` / `controller.ts` /
+`client.ts` / `authority.ts`):
+
+- The boundary anchor is now the projection the last **ACCEPTED** answer was
+  bound to (`host.lastAnsweredProjection`), not the per-settle-closed active
+  epoch. Epoch lifecycle, lease binding, and `accept()` gating are unchanged
+  — epochs still open/close per decision for provenance and causal isolation.
+- `classifySemanticBoundary` compares the anchor against the current
+  projection section-by-section and returns typed §7.1 `decisionReason`s:
+  `first_decision` / `skill_outcome_boundary` / `world_or_lease_changed` /
+  `goal_or_option_changed` / `safety_changed` / `candidate_set_changed` /
+  `progress_boundary` / `resource_evidence_changed` / `same_semantic_state`.
+  Signed sections: `world`, `goal`, Option **contract** (runtime counters
+  excluded), queue identity/health, `safety`, `combat`, `sense.threats`,
+  candidate identities (identity + kind + targetName + inReach +
+  failureBand, never realization ids/labels/raw counts), banded progress
+  (`consecutiveFailures`/`oscillationsDetected` via `failureBandOf`,
+  `lastFailureCode`, `escalationRecommended`, `stall.exhausted`/
+  `exhaustedRepeats`), and grounded evidence (fact kind+key set, event kind
+  set, inventory TYPE presence + truncation). Churn-exempt by construction:
+  `previousDecision`, `meaningfulDelta`, `recentOutcomes`, `counts`,
+  `sense.blockNames` (terrain scroll — resource arrival surfaces via
+  candidates/facts), stack sizes, and Option runtime counters. The walk is
+  fail-closed: any model-visible key not explicitly classified is compared
+  verbatim and a difference re-queries (`semantic_state_changed`).
+- Replay preserves the semantic choice and re-points it at the current
+  representative realization (`repointReplay`); the fresh epoch is stamped
+  `cacheHit=true` with `reusedFrom` = the ANSWERED epoch
+  (`host.lastAnsweredEpoch`), so causal attribution survives the intervening
+  settle-close.
+- Fail-closed authority: only an **accepted** answer may anchor or replay —
+  `lastDecision`/`lastAnsweredProjection`/`lastAnsweredEpoch` are set after
+  `accept()`, never on a stale-dropped result; a world/epoch invalidation
+  clears the replay source before the boundary signature even runs; a lost
+  candidate identity falls through to a real call.
+- Provenance: `decisionReason` rides the `JevRequest` into the jev-call
+  journal (`authority.decisionReason`) and every boundary/replay logs the
+  typed reason via `logBoundary`.
+
+Focused proof: `test-decision-epochs.mts` — drives the real `decide()` and
+`emitSkillOutcomePacket()` against a counting stub policy: first unanswered
+situation spends one call (`first_decision`); settled `done` + unchanged
+semantics replays with zero calls in a new `cacheHit` epoch attributed to
+the answered epoch; outcome-memory churn replays; a new semantic candidate
+re-queries (`candidate_set_changed`); a mandatory `target_lost` outcome
+re-queries (`skill_outcome_boundary`); `none→some` failure-band crossing
+re-queries (`progress_boundary`) while `some→some` churn replays; a
+mid-flight-invalidated (stale-dropped) result never becomes anchor or replay
+source — the previously accepted answer is what replays; a world-epoch change
+re-queries (`world_or_lease_changed`).
+
+Regression: `test-jev-semantic-projection.mts` 20/20 (boundary fixtures
+migrated to the anchored API), `test-decision-state.mts` PASS,
+`test-skill-commitment.mts` 21/21, `test-ascend-exec.mts` 9/9,
+`test-movefail-offer-suppression.mts` 16/16, `test-controller-authority.mts`,
+`test-controller-transitions.mts` 7/7, `test-observability.mts` 12/12,
+`test-provider-recovery.mts`, `test-typed-decision-backend.mts` 27/27,
+`test-anti-flap.mts` 15/15, `test-audit.mts` 10/10 (pi instruction phrases
+restored), `test-nether-survival.mts` 23/23, `test-threat-response.mts`
+22/22, `test-submersion.mts`, `test-gating.mts`/`test-system2-handoff.mts`
+(bun:test) 7/7. `tsc --noEmit` clean on `packages/jev-agent`.
+
+Deliberately deferred: explore-MOVE candidate identities still key on the
+destination cell when no `approachTarget`/`knownName` anchor exists — a real
+frontier-set change SHOULD re-query (§11: distinct alternatives are genuine
+choices), so no identity collapse was introduced. If Gate E replay evidence
+shows per-leg identity turnover dominates in healthy exploration, the fix is
+a semantic destination anchor, not boundary weakening.
+
+## Gates D–H
 
 Pending. Do not resume Minecraft until all pass.

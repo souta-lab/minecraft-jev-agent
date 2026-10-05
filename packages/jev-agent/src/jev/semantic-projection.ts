@@ -1957,19 +1957,26 @@ export type SemanticBoundaryReason =
   | 'goal_or_option_changed'
   | 'world_or_lease_changed'
   | 'skill_outcome_boundary'
+  | 'progress_boundary'
+  | 'resource_evidence_changed'
   | 'same_semantic_state'
 
 export interface SemanticBoundaryInput {
-  active: DecisionEpoch | null
-  /** the projection hash of the world as it is NOW */
-  projectionHash: string
-  candidateIdentities: readonly string[]
-  worldKey: { dimension: string; worldEpoch: number; leaseHeld: boolean }
-  optionKey: string | null
-  safetyKey: string
-  goalKey: string
-  /** the last packet closed a policy boundary (§6: code returned alternatives) */
+  /**
+   * §7.1 anchor: the projection the last ACCEPTED model answer was bound to.
+   * The active DECISION epoch is deliberately not the anchor - an epoch closes
+   * when its Skill settles, and a settled mechanical step is not a policy
+   * event. Anchoring on the answered projection is what makes a post-settle
+   * tick with an unchanged semantic situation a replay instead of a fresh
+   * `first_decision`.
+   */
+  answered: JevSemanticProjection | null
+  /** the projection as it is NOW */
+  current: JevSemanticProjection
+  /** the last packet closed a mandatory policy boundary (§6: code returned alternatives) */
   lastOutcomeRequiredDecision?: boolean
+  /** the world/mutation lease is still held (fail-closed when it is not) */
+  leaseHeld: boolean
 }
 
 export interface SemanticBoundaryVerdict {
@@ -1978,26 +1985,168 @@ export interface SemanticBoundaryVerdict {
 }
 
 /**
- * §6/§9: Jev is re-queried only at a semantic boundary. When the semantic
- * projection is unchanged, a settled mechanical step is NOT a policy event, so
- * the decision is replayed inside a NEW epoch (causal isolation is preserved:
- * the replay is attributed to the current epoch, not to the old one).
+ * §7.1 decision signature: the sections of the model-visible projection whose
+ * change is a real WHICH/WHETHER question. Outcome memory and causal trace
+ * (`previousDecision`, `meaningfulDelta`, `recentOutcomes`) are deliberately
+ * NOT in the signature: they churn on every settled microstep without changing
+ * the semantic situation, and their verdicts already crossed the boundary as
+ * typed fields (failure bands, stall exhaustion, candidate identity loss).
+ */
+const SEMANTIC_BOUNDARY_EXEMPT = new Set<string>([
+  'previousDecision',
+  'meaningfulDelta',
+  'recentOutcomes',
+  // `counts` is never model-visible (projectionModelView strips it).
+  'counts',
+])
+
+/** §7.1 sections the classifier handles explicitly; anything else is a defensive requery. */
+const SEMANTIC_BOUNDARY_SIGNED = new Set<string>([
+  'goal',
+  'option',
+  'world',
+  'safety',
+  'combat',
+  'progress',
+  'queue',
+  'sense',
+  'events',
+  'inventory',
+  'inventoryTruncated',
+  'candidates',
+  'facts',
+])
+
+const boundaryEqual = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+
+/**
+ * The Option CONTRACT a head judges. Runtime counters (`verifiedProgress`,
+ * `failures`) are evidence for the model, not identity: they increment per
+ * microstep while the offered choice is unchanged.
+ */
+function optionContractKey(option: SemanticOptionFacts): Record<string, unknown> {
+  const { verifiedProgress: _verifiedProgress, failures: _failures, ...contract } = option
+  return contract
+}
+
+/** Queue identity/health; the head's bounded description is derived from its id. */
+function queueDecisionKey(queue: SemanticQueueFacts | null): unknown {
+  if (queue === null) return null
+  return {
+    depth: queue.depth,
+    empty: queue.empty,
+    hasImpossible: queue.hasImpossible,
+    head:
+      queue.current === null
+        ? null
+        : {
+            id: queue.current.id,
+            optionInstanceId: queue.current.optionInstanceId,
+            semanticOptionInstanceId: queue.current.semanticOptionInstanceId,
+          },
+  }
+}
+
+/**
+ * §5 banded progress boundary. Raw counters churn per microstep; the BANDS are
+ * the semantic change: no failures -> some -> many, a different failure code,
+ * an escalation recommendation, a newly detected oscillation pocket, and the
+ * code-proven stall-exhaustion flags.
+ */
+function progressBoundaryKey(progress: SemanticProgressFacts): unknown {
+  return {
+    consecutiveFailures: failureBandOf(progress.consecutiveFailures),
+    lastFailureCode: progress.lastFailureCode,
+    escalationRecommended: progress.escalationRecommended,
+    oscillationsDetected: failureBandOf(progress.oscillationsDetected),
+    stallExhausted: progress.stall?.exhausted ?? null,
+    stallExhaustedRepeats: progress.stall?.exhaustedRepeats ?? null,
+  }
+}
+
+/**
+ * The offered semantic choices: identity + the offer-time facts that change
+ * which answer is correct (kind, named target, reachability, failure band).
+ * Realization ids/labels and raw failure counts are mechanical churn.
+ */
+function candidateDecisionKey(views: readonly SemanticCandidateView[]): unknown[] {
+  return views
+    .map((view) => ({
+      identity: view.identity,
+      kind: view.kind,
+      targetName: view.targetName,
+      inReach: view.inReach,
+      failureBand: view.failureBand,
+    }))
+    .sort((a, b) => (a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0))
+}
+
+/**
+ * New grounded EVIDENCE: distinct fact kind+key, distinct event kinds,
+ * inventory TYPE presence (stack-size churn is not a boundary), and whether
+ * the bounded inventory was truncated. Sensed threat kinds are handled with
+ * safety; sensed block NAMES are exempt - terrain scroll while walking - since
+ * a decision-relevant arrival already surfaces as a candidate or a fact.
+ */
+function resourceEvidenceKey(projection: JevSemanticProjection): unknown {
+  return {
+    facts: projection.facts.map((fact) => `${fact.kind}:${fact.key}`).sort(),
+    events: [...new Set(projection.events)].sort(),
+    inventoryTypes: Object.keys(projection.inventory).sort(),
+    inventoryTruncated: projection.inventoryTruncated,
+  }
+}
+
+/**
+ * §6/§7.1: the model is re-queried only at a semantic boundary. The anchor is
+ * the last ANSWERED projection (not the per-settle-closed epoch), so a settled
+ * mechanical step that changes no decision-relevant section is replayed inside
+ * a NEW epoch - causal isolation is preserved, no provider call is spent. The
+ * walk is fail-closed: a model-visible section with no explicit comparator is
+ * compared verbatim and any difference re-queries.
  */
 export function classifySemanticBoundary(input: SemanticBoundaryInput): SemanticBoundaryVerdict {
-  const active = input.active
-  if (active === null) return { requery: true, reason: 'first_decision' }
+  const answered = input.answered
+  if (answered === null) return { requery: true, reason: 'first_decision' }
   if (input.lastOutcomeRequiredDecision === true) return { requery: true, reason: 'skill_outcome_boundary' }
-  if (active.dimension !== input.worldKey.dimension || active.worldEpoch !== input.worldKey.worldEpoch) {
-    return { requery: true, reason: 'world_or_lease_changed' }
+  if (!input.leaseHeld) return { requery: true, reason: 'world_or_lease_changed' }
+  const current = input.current
+  if (!boundaryEqual(answered.world, current.world)) return { requery: true, reason: 'world_or_lease_changed' }
+  if (
+    !boundaryEqual(answered.goal, current.goal) ||
+    !boundaryEqual(optionContractKey(answered.option), optionContractKey(current.option)) ||
+    !boundaryEqual(queueDecisionKey(answered.queue), queueDecisionKey(current.queue))
+  ) {
+    return { requery: true, reason: 'goal_or_option_changed' }
   }
-  if (!input.worldKey.leaseHeld) return { requery: true, reason: 'world_or_lease_changed' }
-  if (active.projectionHash === input.projectionHash) return { requery: false, reason: 'same_semantic_state' }
-  const previous = new Set(active.candidateIdentities)
-  const current = new Set(input.candidateIdentities)
-  const sameCandidates =
-    previous.size === current.size && [...current].every((identity) => previous.has(identity))
-  if (!sameCandidates) return { requery: true, reason: 'candidate_set_changed' }
-  return { requery: true, reason: 'semantic_state_changed' }
+  if (
+    !boundaryEqual(answered.safety, current.safety) ||
+    !boundaryEqual(answered.combat, current.combat) ||
+    !boundaryEqual(answered.sense?.threats ?? [], current.sense?.threats ?? [])
+  ) {
+    return { requery: true, reason: 'safety_changed' }
+  }
+  if (!boundaryEqual(candidateDecisionKey(answered.candidates), candidateDecisionKey(current.candidates))) {
+    return { requery: true, reason: 'candidate_set_changed' }
+  }
+  if (!boundaryEqual(progressBoundaryKey(answered.progress), progressBoundaryKey(current.progress))) {
+    return { requery: true, reason: 'progress_boundary' }
+  }
+  if (!boundaryEqual(resourceEvidenceKey(answered), resourceEvidenceKey(current))) {
+    return { requery: true, reason: 'resource_evidence_changed' }
+  }
+  // Defensive: any model-visible key not handled above is compared verbatim.
+  // A future projection field that forgets to classify itself re-queries
+  // rather than silently replaying.
+  const answeredRecord = answered as unknown as Record<string, unknown>
+  const currentRecord = current as unknown as Record<string, unknown>
+  for (const key of Object.keys(currentRecord)) {
+    if (SEMANTIC_BOUNDARY_EXEMPT.has(key) || SEMANTIC_BOUNDARY_SIGNED.has(key)) continue
+    if (!boundaryEqual(answeredRecord[key], currentRecord[key])) {
+      return { requery: true, reason: 'semantic_state_changed' }
+    }
+  }
+  return { requery: false, reason: 'same_semantic_state' }
 }
 
 /** Classify WHY a changed projection is a boundary (evidence, not authority). */

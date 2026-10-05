@@ -378,31 +378,13 @@ addCase('(2) WALK_TO crosses many path nodes without candidate-ID churn or repea
   const projection = buildJevSemanticProjection(
     projectionInput({ candidates: [walkToPortalLeg('24,67,10'), candidate({ id: 'WAIT', kind: 'WAIT' })] }),
   )
-  const active = {
-    epoch: 1,
-    projectionHash: projectionHash(projection),
-    candidateIdentities: projection.candidates.map((view) => view.identity),
-    dimension: OVERWORLD,
-    worldEpoch: 7,
-    openedAtMs: 0,
-    cacheHit: false,
-    reusedFrom: null,
-    closed: false,
-    closeReason: null,
-    commitmentId: null,
-    selectedIdentity: null,
-  }
   const boundary = classifySemanticBoundary({
-    active,
+    answered: projection,
     // the SAME semantic situation, one body cell later
-    projectionHash: projectionHash(
-      buildJevSemanticProjection(projectionInput({ candidates: [walkToPortalLeg('26,67,10'), candidate({ id: 'WAIT', kind: 'WAIT' })] })),
+    current: buildJevSemanticProjection(
+      projectionInput({ candidates: [walkToPortalLeg('26,67,10'), candidate({ id: 'WAIT', kind: 'WAIT' })] }),
     ),
-    candidateIdentities: projection.candidates.map((view) => view.identity),
-    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
-    optionKey: 'option:enter_portal#1',
-    safetyKey: 'stable',
-    goalKey: 'collect:flint:1',
+    leaseHeld: true,
   })
   const pass = keys.size === 1 && hashes.size === 1 && boundary.requery === false && boundary.reason === 'same_semantic_state'
   return { pass, detail: `distinctIdentities=${keys.size} distinctHashes=${hashes.size} requery=${boundary.requery} reason=${boundary.reason}` }
@@ -439,26 +421,9 @@ addCase('(4) target death changes the semantic state and the next boundary', () 
   )
   const packet = outcomePacket({ entityDefeated: true })
   const boundary = classifySemanticBoundary({
-    active: {
-      epoch: 481,
-      projectionHash: projectionHash(before),
-      candidateIdentities: before.candidates.map((view) => view.identity),
-      dimension: OVERWORLD,
-      worldEpoch: 7,
-      openedAtMs: 0,
-      cacheHit: false,
-      reusedFrom: null,
-      closed: false,
-      closeReason: null,
-      commitmentId: null,
-      selectedIdentity: null,
-    },
-    projectionHash: projectionHash(after),
-    candidateIdentities: after.candidates.map((view) => view.identity),
-    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
-    optionKey: 'option:enter_portal#1',
-    safetyKey: 'stable',
-    goalKey: 'collect:flint:1',
+    answered: before,
+    current: after,
+    leaseHeld: true,
   })
   const diff = diffSemanticProjections(before, after)
   const pass =
@@ -672,38 +637,16 @@ addCase('combat choice facts open a semantic boundary only when bounded threat/c
     combatProjection({ threatItemUse: { active: true, hand: 'mainhand', item: 'bow' } }),
   ]
   const initialHash = projectionHash(initial)
-  const active = {
-    epoch: 17,
-    projectionHash: initialHash,
-    candidateIdentities: initial.candidates.map((view) => view.identity),
-    dimension: OVERWORLD,
-    worldEpoch: 7,
-    openedAtMs: 0,
-    cacheHit: false,
-    reusedFrom: null,
-    closed: false,
-    closeReason: null,
-    commitmentId: null,
-    selectedIdentity: null,
-  }
   const stableBoundary = classifySemanticBoundary({
-    active,
-    projectionHash: projectionHash(stable),
-    candidateIdentities: stable.candidates.map((view) => view.identity),
-    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
-    optionKey: 'option:enter_portal#1',
-    safetyKey: 'stable',
-    goalKey: 'collect:flint:1',
+    answered: initial,
+    current: stable,
+    leaseHeld: true,
   })
   const changed = meaningfulChanges[0] as JevSemanticProjection
   const changedBoundary = classifySemanticBoundary({
-    active,
-    projectionHash: projectionHash(changed),
-    candidateIdentities: changed.candidates.map((view) => view.identity),
-    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
-    optionKey: 'option:enter_portal#1',
-    safetyKey: 'stable',
-    goalKey: 'collect:flint:1',
+    answered: initial,
+    current: changed,
+    leaseHeld: true,
   })
   const combatText = JSON.stringify(initial.combat)
   const sameChoices = meaningfulChanges.every(
@@ -725,7 +668,7 @@ addCase('combat choice facts open a semantic boundary only when bounded threat/c
     stableBoundary.reason === 'same_semantic_state' &&
     meaningfulChanges.every((projection) => projectionHash(projection) !== initialHash) &&
     changedBoundary.requery === true &&
-    changedBoundary.reason === 'semantic_state_changed' &&
+    changedBoundary.reason === 'safety_changed' &&
     sameChoices &&
     choicesRemainWithJev &&
     SRC_CONTROLLER.includes('combat: buildSemanticCombatFacts({') &&
@@ -791,26 +734,9 @@ addCase('(7) a new genuinely distinct recovery alternative changes the candidate
   const before = buildJevSemanticProjection(projectionInput({ candidates: base }))
   const after = buildJevSemanticProjection(projectionInput({ candidates: withPillar }))
   const boundary = classifySemanticBoundary({
-    active: {
-      epoch: 9,
-      projectionHash: projectionHash(before),
-      candidateIdentities: before.candidates.map((view) => view.identity),
-      dimension: OVERWORLD,
-      worldEpoch: 7,
-      openedAtMs: 0,
-      cacheHit: false,
-      reusedFrom: null,
-      closed: false,
-      closeReason: null,
-      commitmentId: null,
-      selectedIdentity: null,
-    },
-    projectionHash: projectionHash(after),
-    candidateIdentities: after.candidates.map((view) => view.identity),
-    worldKey: { dimension: OVERWORLD, worldEpoch: 7, leaseHeld: true },
-    optionKey: 'option:enter_portal#1',
-    safetyKey: 'stable',
-    goalKey: 'collect:flint:1',
+    answered: before,
+    current: after,
+    leaseHeld: true,
   })
   const pass =
     before.candidates.length === 2 &&
