@@ -16321,6 +16321,18 @@ function capabilityAcquisitionCandidates(
         ))
       } else if (capability.kind === 'ascend_plan') {
         source.push(...pillarFootingPrerequisiteCandidates(state, options, capability))
+        // A bare `ascend_plan` is a plan-less walk claim refused at the same
+        // >4-block envelope the executor owns (`evaluateReachability` MOVE/
+        // RETRIEVE parity): the walk is withheld even when the column could
+        // start a grounded ascent. The footing producer only answers the
+        // `pillar + no_footing` shape, so every other ascend refusal reported
+        // `no_producer` while `routeOpeningCandidates` already carries the
+        // designed answer - the vertical-remedy ascent supplies the route the
+        // walk claim lacks, beside the same step/dig/detour family `open_path`
+        // gets. Live (run-muvh4ofl-eezn): a respawned body's every remembered
+        // log sat 6+ blocks up a snow face; each refused MOVE fell through to
+        // `no_producer` although a bounded pillar plan was grounded.
+        source.push(...routeOpeningCandidates(state, options, entry.candidate.target, digRefusals))
       } else if (capability.kind === 'tool') {
         // Enumerate every tier-satisfying tool the inventory can actually make
         // (weakest first), not only the weakest canonical name. A body holding

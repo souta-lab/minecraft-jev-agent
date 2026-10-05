@@ -1023,6 +1023,50 @@ addCase('(p19.2-d) control: two unretired distinct sites both reach the gate', (
   }
 })
 
+// ---------------------------------------------------------------------------
+// (p24.9) A bare `ascend_plan` (plan-less walk claim to a dy>4 target) gets the
+// SAME grounded route family `open_path` gets - the vertical-remedy ascent
+// carries the route the walk claim lacks - instead of `no_producer` while a
+// bounded pillar plan sits unoffered. Measured live (run-muvh4ofl-eezn): every
+// remembered log 6+ blocks up a snow face, each refused MOVE -> `no_producer`.
+// ---------------------------------------------------------------------------
+function climbableMoveCandidate(): Candidate {
+  return {
+    id: 'MOVE:b26_67_9',
+    kind: 'MOVE',
+    label: 'walk to the stand cell at (26,67,9), 8.49m away (out of reach)',
+    targetName: null,
+    target: ABOVE,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { tick: 7 },
+  }
+}
+
+addCase('(p24.9) a plan-less MOVE withheld ascend_plan gets a grounded route, not no_producer', () => {
+  const state = liveState({ inventory: { dirt: 5 }, headroomCuts: [] })
+  const gate = applyReachabilityGate([climbableMoveCandidate()], state, options)
+  const entry = withheldEntry(gate, 'MOVE:b26_67_9')
+  const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
+  const ascent = gate.candidates.find((candidate) => candidate.id.startsWith('ASCEND:target:'))
+  const fact = entry === null ? null : acquisitionFor(entry, 'ascend_plan')
+  return {
+    pass:
+      entry !== null &&
+      entry.result.reason === 'needs_ascend' &&
+      missing.includes('ascend_plan') &&
+      ascent !== undefined &&
+      ascent.meta.capabilityAcquisition === true &&
+      ascent.meta.missingCapability === 'ascend_plan' &&
+      fact?.reason !== 'no_producer',
+    detail: `reason=${entry?.result.reason ?? 'offered'} missing=[${missing.join(',')}] ascent=${ascent?.id ?? 'none'} acquisition=${fact?.reason ?? `routes:${fact?.routes?.length ?? 0}`} offered=[${gate.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
 let failures = 0
 process.stdout.write('acquisition route - a withheld mechanical fact gets a grounded route or a typed refusal\n')
 process.stdout.write('-'.repeat(78) + '\n')
