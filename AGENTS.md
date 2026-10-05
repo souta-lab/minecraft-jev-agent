@@ -36,6 +36,26 @@ Fixed ownership:
 
 Lifecycle remains `ENABLED -> RUNNABLE -> ACTIVE <-> SUSPENDED`, with observing/blocked/terminal states governed by the Kernel. Crash ambiguity becomes UNKNOWN.
 
+
+### 1.1 Typed decision models are an authority primitive, not a vendor
+
+The Jev role is **not** synonymous with `typesafe-ai/jev`, Vercel AI Gateway, TypeSafe AI, Liquid AI, or any one SDK. Jev is the V4.1.2 tactical/semantic WHICH/WHETHER authority. A **typed decision model / System One model** is one implementation class for that role: code supplies bounded state plus predeclared typed questions, and the model returns typed probabilistic decisions over values that code defined in advance.
+
+Do not reason about these models as chat LLMs. They are not asked to write plans, invent actions, emit arbitrary JSON, call tools, or provide prose. In production Jev use:
+- code owns the grounded candidate set, question types, criteria, thresholds, lifecycle, leases, guards, and VERIFY;
+- the typed model may choose/evaluate only the alternatives encoded in those questions;
+- model output may never create a new candidate id, target, resource, effect, transition, or success fact;
+- probability/confidence is evidence for a typed answer, not permission to bypass Kernel authority or verification;
+- System2 remains the sparse WHAT/decomposition/repair authority. A typed model backend change must not collapse Jev and System2 into one owner.
+
+Treat the wire primitives as semantic types, not provider branding. The baseline System One family is **Noul** (yes/no with `P(true)`), **Choice** (one label from a finite set with a distribution), and **Score** (an ordered scale with a score/distribution). Runtime adapters may expose an internal `boolean` spelling for Noul, but the raw probability must survive end-to-end; never collapse it to a bool at the provider boundary. Choice labels must round-trip exact grounded candidate ids. Score legend ordering must be preserved exactly.
+
+**Backend/model/transport are replaceable profiles under the same Jev authority.** A production profile must make explicit: provider identity, model identity, base URL / transport, secret resolver, wire dialect/version, question mapping, answer mapping, timeout, retry policy, availability classification, and observable capability metadata. Outside the narrow typed-model transport/adapter and its tests/telemetry, gameplay code must not branch on provider/model names. Adding a compatible backend is a transport/configuration change, not a new semantic authority path.
+
+"TypeSafe-compatible" means compatible **semantics**, not merely an endpoint that accepts similar JSON. Before accepting a backend/model, focused proof must cover at least: mixed question batching; exact Choice-label preservation; Noul `P(true)` preservation; Score legend/order; distributions/confidence shape; usage/model identity; abort/timeout; 429 and 5xx classification; malformed/missing answers; and no silent fallback. A new model may be differently calibrated even when the wire schema matches, so do not inherit confidence thresholds or reliability claims from another model without evidence.
+
+The current concept/reference and backend-profile checklist live in `docs/architecture/TYPED-DECISION-MODELS.md`. Keep that document current when the typed-model contract changes; do not encode a transient vendor outage as architecture.
+
 ## 2. Project-scoped blanket authorization
 
 This repository/campaign is **pre-authorized for unattended engineering execution**. Routine project work must not stop for operator approval.
@@ -173,6 +193,9 @@ Before opening a new capability surface, perform a **capability-reuse check**: s
 
 Treat cross-layer contradictions as high-value defects. Examples: sensing says an escape is impossible while live geometry supports one; a goal needs a resource while scaffolding consumes it; a critical survival trigger arrives while a grounded answer is in flight; a source change is evaluated using an older source's verdict. Resolve the contradiction at the narrowest ownership boundary rather than compensating downstream.
 
+
+**Do not rediscover already-decided campaign failure modes.** The p21-p24 audits established reusable evidence: p23 accumulated 96 deaths and many locally-valid source changes while Mission conversion stayed weak, demonstrating that a scarred same-world episode plus causal-cluster patching can become less informative than a fresh major; fresh p24 immediately regained stone/furnace progression with far fewer deaths. p24 then exposed a cross-layer recovery defect where a `collect:log`/surface intent could become a cobblestone/deepslate `DESCEND`, physically VERIFY successfully with `resourceDelta=0`, reset progress accounting, and drive a wood-recovery body to roughly Y=-60. Separate audits found live generation/source truth drifting ahead of `active-run.json`/`state.json` and `/goal`, repeated observer/tool-stale repair becoming its own lane, and an unavailable Jev provider causing identical fresh generations about every five minutes without new semantic evidence. These are canonical examples of conversion debt, trajectory churn, provenance drift, tooling churn, and infra churn respectively. When the same shape appears, apply the governing invariant immediately instead of collecting another long sample.
+
 Decision triggers must follow **meaningful state-boundary crossings**, not only object birth or periodic heartbeats. If a hostile moves from outside to inside reaction range, health crosses a critical band, breathable space disappears, or another safety predicate becomes newly true, that crossing is new evidence and may require immediate re-evaluation. Conversely, a critical trigger must not erase an already-grounded survivable answer merely because it arrived mid-action; re-ground or preserve it under normal lease/generation rules.
 
 ## 6. Portal-first experiment policy
@@ -252,6 +275,17 @@ An explicit model/API usage limit is `MODEL_RATE_LIMITED`, **not** `DEVIN_TOOL_S
 A watchdog restart is recovery, not success. If **2 `DEVIN_TOOL_STALE` recoveries occur within 60 minutes**, classify the engineering-tool lane itself as an active infra incident before launching another similar command shape. Switch to smaller direct file reads/searches or one bounded single-purpose command; avoid the compound pipeline/streaming pattern that just stalled, record the stale command class in the handoff, and return to normal tooling only after a clean bounded operation. Do not let repeated watchdog restarts become the normal execution loop.
 
 A Devin/session restart is an infrastructure boundary, not permission to discard WIP or restart reasoning from zero. Preserve dirty files, read `git diff` before editing, and continue the same causal batch unless fresh live truth invalidates it. Never reset or overwrite surviving WIP merely because the previous UI died.
+
+
+### 9.2 Model/provider availability is a bounded infrastructure episode
+
+Do not confuse **model availability** with model semantics. `MODEL_UNAVAILABLE`, authentication/credit/entitlement failures, gateway/provider outages, transport 5xx, or a provider-specific rate limit do not falsify a gameplay hypothesis. Preserve the world/source/WIP and classify the failure at the provider/transport boundary.
+
+One decisive non-retryable availability error, or two identical retryable failures after the documented retry boundary with unchanged provider facts, decides the availability fingerprint. **Do not create a fresh Minecraft generation every few minutes just to rediscover the same provider outage.** Park/stop the campaign lifecycle cleanly, keep durable evidence, and work offline on transport/proof or another independent task. Repeated generation restarts with the same unavailable authority are `INFRA_CHURN`, not liveness.
+
+A provider/model switch is allowed only through the typed-model compatibility profile in §1.1. It must be explicit and provenance-visible; never silently substitute another backend because an API failed. Reusing the Jev authority with a compatible backend is permitted; creating a second selector/semantic authority is not. Secret values never enter git, logs, handoffs, prompts, process argv, or evidence artifacts. Resolve them from permission-restricted external files/environment and log only non-secret origin metadata.
+
+For paid or credit-backed APIs, record model identity plus returned usage/cost metadata when available and keep retries bounded. Availability recovery is complete only after one focused typed-model probe succeeds and the first production Jev decision records the intended provider/model/source provenance.
 
 Maintain `/home/s0u7a/.config/devin/mc-ai-handoff.md` as a **non-authoritative crash note** containing: current run + exact source, verified high-water/current debt, current causal hypothesis, dirty files, last completed proof step, and the next concrete action. Update it when a causal defect becomes decided, before a naturally long/risky tool step, and after commit/reload. On restart read it after git status, then reconcile against live truth. Live process/world/source evidence always overrides the note.
 
