@@ -2866,6 +2866,7 @@ export class Executor {
         itemName: candidate.itemName,
         toolName: candidate.toolName,
         goalDrop: readMetaString(candidate, 'goalDrop'),
+        columnDescent: candidate.meta.columnDescent === true,
       },
     })
   }
@@ -3159,6 +3160,7 @@ export class Executor {
       progressed: result.progressed,
       entityDefeated: result.entityDefeated,
       damageObserved: result.damageObserved,
+      ungroundedDescent: commitment.params.columnDescent === true,
       failureCode: result.failure,
     })
     const failure = result.failure ?? thrown?.failure ?? null

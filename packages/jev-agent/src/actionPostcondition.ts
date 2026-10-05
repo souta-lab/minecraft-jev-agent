@@ -99,6 +99,17 @@ export interface ActionOutcomeTaxonomyInput extends ActionOutcomeInput {
   /** The controller may mark a verified goal-predicate change after re-sensing. */
   semanticProgress?: boolean
   semanticAbandon?: boolean
+  /**
+   * The settled candidate is an UNGROUNDED descent - the stranded-column
+   * escape step (`meta.columnDescent`), which names no search anchor: no focus
+   * item, no `descend_to` predicate, no sensed/tunnel target. Its verified
+   * step is body motion only; crediting `search` laundered 88 pocket digs
+   * into semantic progress (portal-p24 gen-muul1u2o: `explore:cave`/
+   * `explore:surface` ratcheted y12 -> y-60 while every leg reset the
+   * no-progress bounds). A grounded `descendCandidates` leg (focus /
+   * `descend_to` / tunnel target / food route) keeps its `search` claim.
+   */
+  ungroundedDescent?: boolean
 }
 
 /**
@@ -132,8 +143,8 @@ export function classifyActionOutcome(input: ActionOutcomeTaxonomyInput): Action
   const search =
     input.entityDefeated === true ||
     input.damageObserved === true ||
-    input.blockRemoved === true ||
-    (input.kind === 'DESCEND' && input.progressed === true) ||
+    (input.blockRemoved === true && input.ungroundedDescent !== true) ||
+    (input.kind === 'DESCEND' && input.progressed === true && input.ungroundedDescent !== true) ||
     (input.kind === 'RETRIEVE' &&
       (input.progressed === true || input.distanceClosed === true || input.searchArrived === true))
   if (body) kinds.push('body')

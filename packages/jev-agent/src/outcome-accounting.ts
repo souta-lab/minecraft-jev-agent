@@ -335,6 +335,7 @@ result: ExecutionResult, decision: JevResult, candidate: Candidate): TruthfulOut
     distanceClosed: retrieveDistanceClosed,
     searchArrived,
     semanticProgress,
+    ungroundedDescent: candidate.meta.columnDescent === true,
     failureCode: result.failure,
   })
   if (surfaceSearchArrived && result.itemsGained === 0 && !result.blockRemoved) {

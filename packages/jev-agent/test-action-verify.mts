@@ -117,6 +117,42 @@ addCase('(M3) mob-drop ATTACK requires entityDead and remains search progress un
   return { pass, detail: `dead=${dead} alive=${alive} noDrop=${killedNoDrop.progress}/${killedNoDrop.semantic} withDrop=${killedWithDrop.progress}/${killedWithDrop.semantic}` }
 })
 
+addCase('(p24) an ungrounded column-descent step reports body progress, never search', () => {
+  // portal-p24 gen-muul1u2o: the stranded-column escape legs had no search
+  // anchor (focusItem none, predicate none, targetY none) yet each verified
+  // dig-step credited `search`, resetting every no-progress bound while the
+  // body ratcheted y12 -> y-60 under explore:cave/explore:surface. A grounded
+  // descend leg (focus/descend_to/tunnel target) keeps its `search` claim.
+  const ungrounded = classifyActionOutcome({
+    kind: 'DESCEND',
+    status: 'done',
+    verified: true,
+    itemsGained: 0,
+    blockRemoved: true,
+    progressed: true,
+    ungroundedDescent: true,
+  })
+  const grounded = classifyActionOutcome({
+    kind: 'DESCEND',
+    status: 'done',
+    verified: true,
+    itemsGained: 0,
+    blockRemoved: true,
+    progressed: true,
+  })
+  const pass =
+    ungrounded.progress === 'body' &&
+    ungrounded.progressKinds.join(',') === 'body' &&
+    !ungrounded.progressKinds.includes('search') &&
+    grounded.progress === 'search' &&
+    grounded.progressKinds.includes('body') &&
+    grounded.progressKinds.includes('search')
+  return {
+    pass,
+    detail: `ungrounded=${ungrounded.progress}[${ungrounded.progressKinds.join(',')}] grounded=${grounded.progress}[${grounded.progressKinds.join(',')}]`,
+  }
+})
+
 addCase('(#79b) a genuine smelt (item count increases) is verified=true and advances the ladder', () => {
   const decision = decideActionOutcome({
     kind: 'SMELT',

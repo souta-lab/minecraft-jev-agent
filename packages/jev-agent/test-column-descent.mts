@@ -85,7 +85,7 @@ function goal(): GoalState {
   }
 }
 
-function queued(): QueuedGoal {
+function queued(overrides: Partial<QueuedGoal> = {}): QueuedGoal {
   return {
     id: 'g37:collect:food',
     kind: 'collect',
@@ -99,6 +99,7 @@ function queued(): QueuedGoal {
     createdAt: 0,
     updatedAt: 0,
     detail: null,
+    ...overrides,
   }
 }
 
@@ -604,9 +605,13 @@ addCase('a sealed shaft bottom offers the sensor-named staircase overhead digs w
   const mines = grounded.candidates.filter(
     (candidate) => candidate.kind === 'MINE' && candidate.meta.stepOverhead === true,
   )
+  // `collect:food` names the surface direction, and y44 sits below the surface
+  // band, so the stranded down-step is now refused as `direction_mismatch`
+  // BEFORE the geometric no-safe-step check - the up-route (these overhead
+  // digs) owns the honest way out.
   const pass =
     strandedOnColumn(state) &&
-    grounded.columnDescentRefusal?.reason === 'no_safe_step' &&
+    grounded.columnDescentRefusal?.reason === 'direction_mismatch' &&
     mines.length === 4 &&
     mines.every((candidate) => candidate.id.startsWith('MINE:b') && candidate.meta.clearance === true) &&
     ids.includes('WAIT')
@@ -813,18 +818,163 @@ addCase('a below-ground locatable focus still names its direction on the column 
   }
 })
 
+// --- portal-p24 recovery identity: a surface-directed row must not become a
+// generic underground DESCEND (measured gen-muul1u2o: `collect:log` /
+// `explore:surface` stranded in a dug pocket at y12 emitted verified
+// `DESCEND:down` legs for 23 minutes, ratcheting the body to y-60 while every
+// step credited `search` progress and reset the no-progress bounds) ---------
+
+const POCKET_FEET: Vec3Json = { x: 45.5, y: 12, z: -14.5 }
+const POCKET_CELL: Vec3Json = { x: 45, y: 12, z: -14 }
+
+function queueWith(row: QueuedGoal): GoalQueueState {
+  return { ...emptyGoalQueueState(), depth: 1, current: row, empty: false, goals: [row] }
+}
+
+function pocketState(row: QueuedGoal): WorldState {
+  const state = worldState({
+    position: POCKET_FEET,
+    standable: [POCKET_CELL],
+    descent: openGroundDescent(POCKET_FEET),
+    goalQueue: queueWith(row),
+  })
+  // A starving body correctly offers the grounded habitat-ascent route (kind
+  // 'MOVE'), which outranks the last-resort column arm before direction is even
+  // evaluated. The direction gate under test is health-independent - the p24
+  // descent ran at varying health - so these cases use a fed, healthy body to
+  // isolate the option-direction boundary.
+  state.self = { ...state.self, health: 20, food: 20 }
+  return state
+}
+
+addCase('(p24) collect:log below the surface band refuses the down-step with a typed direction refusal', () => {
+  const logRow = queued({ id: 'g7:collect:log', kind: 'collect', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1 })
+  const state = pocketState(logRow)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason === 'direction_mismatch' &&
+    grounded.candidates.every((candidate) => candidate.kind !== 'DESCEND')
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24) explore:surface below the surface band refuses the down-step', () => {
+  const surfaceRow = queued({
+    id: 'g13:explore',
+    kind: 'explore',
+    description: 'explore',
+    targetItem: null,
+    requiredCount: 1,
+    optionInstanceId: 'explore:surface',
+    optionTemplateId: 'explore:surface',
+  })
+  const state = pocketState(surfaceRow)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason === 'direction_mismatch' &&
+    grounded.candidates.every((candidate) => candidate.kind !== 'DESCEND')
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24) explore:cave below the surface band still offers the grounded down-step', () => {
+  const caveRow = queued({
+    id: 'g12:explore',
+    kind: 'explore',
+    description: 'explore',
+    targetItem: null,
+    requiredCount: 1,
+    optionInstanceId: 'explore:cave',
+    optionTemplateId: 'explore:cave',
+  })
+  const state = pocketState(caveRow)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal === null &&
+    columnDescentCandidates(grounded.candidates).length > 0
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=${columnDescentCandidates(grounded.candidates).length} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24) an underground collect focus below the band keeps a descent offer', () => {
+  const cobbleRow = queued({ id: 'g15:collect:cobblestone', kind: 'collect', description: 'collect 8 x cobblestone', targetItem: 'cobblestone', requiredCount: 8 })
+  const state = pocketState(cobbleRow)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason !== 'direction_mismatch' &&
+    grounded.candidates.some((candidate) => candidate.kind === 'DESCEND')
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24) collect:log ABOVE the surface band keeps the descent (down moves toward surface ground)', () => {
+  const logRow = queued({ id: 'g7:collect:log', kind: 'collect', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1 })
+  const state = worldState({ position: FEET, standable: [FEET_CELL], descent: pillarDescent(FEET), goalQueue: queueWith(logRow) })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal === null &&
+    columnDescentCandidates(grounded.candidates).length > 0
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=${columnDescentCandidates(grounded.candidates).length}`,
+  }
+})
+
+addCase('(p24) an explicit descend row below the band keeps the descent offer', () => {
+  const descendRow = queued({ id: 'g5:descend', kind: 'descend', description: 'descend to y <= 0', targetItem: null, requiredCount: 1, targetY: 0 })
+  const state = pocketState(descendRow)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason !== 'direction_mismatch' &&
+    grounded.candidates.some((candidate) => candidate.kind === 'DESCEND')
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24) a bare explore row with no direction suffix keeps the descent offer below the band', () => {
+  const bareExplore = queued({ id: 'g20:explore', kind: 'explore', description: 'explore', targetItem: null, requiredCount: 1, optionInstanceId: 'explore', optionTemplateId: 'explore' })
+  const state = pocketState(bareExplore)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal === null &&
+    columnDescentCandidates(grounded.candidates).length > 0
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=${columnDescentCandidates(grounded.candidates).length}`,
+  }
+})
+
 addCase('the typed marker line is stable for every refusal reason', () => {
   const cell = { x: 23, y: 81, z: 8 }
   const noStep = formatColumnDescentRefused({ reason: 'no_safe_step', cell })
   const noTool = formatColumnDescentRefused({ reason: 'no_tool', cell, tool: 'pickaxe', tier: 2 })
   const exhausted = formatColumnDescentRefused({ reason: 'exhausted', cell })
   const recurrent = formatColumnDescentRefused({ reason: 'recurrent', cell })
+  const direction = formatColumnDescentRefused({ reason: 'direction_mismatch', cell })
   const pass =
     noStep === 'COLUMN_DESCENT_REFUSED reason=no_safe_step cell=23,81,8' &&
     noTool === 'COLUMN_DESCENT_REFUSED reason=no_tool cell=23,81,8 tool=pickaxe tier=2' &&
     exhausted === 'COLUMN_DESCENT_REFUSED reason=exhausted cell=23,81,8' &&
-    recurrent === 'COLUMN_DESCENT_REFUSED reason=recurrent cell=23,81,8'
-  return { pass, detail: `${noStep} | ${noTool} | ${exhausted} | ${recurrent}` }
+    recurrent === 'COLUMN_DESCENT_REFUSED reason=recurrent cell=23,81,8' &&
+    direction === 'COLUMN_DESCENT_REFUSED reason=direction_mismatch cell=23,81,8'
+  return { pass, detail: `${noStep} | ${noTool} | ${exhausted} | ${recurrent} | ${direction}` }
 })
 
 let failures = 0

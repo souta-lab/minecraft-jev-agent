@@ -102,6 +102,7 @@ import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import type { BlacklistedMoveTargets } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, inventoryClassCount, inventoryCount, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
+import type { QueuedGoal } from './goalQueue.ts'
 import {
   FLINT_AND_STEEL,
   NETHER_PORTAL,
@@ -3216,13 +3217,23 @@ export function formatExploreRouteBlocked(blocked: ExploreRouteBlocked): string 
  *   - `exhausted`     every safe step has spent its bounded failure budget.
  *   - `recurrent`     the only remembered safe continuation has oscillated; it
  *                     is retired and the policy boundary receives the no-frontier fact.
+ *   - `direction_mismatch` the active row names the surface/up direction and the
+ *                     body already sits below the surface band, so every
+ *                     down-step digs AWAY from the option's own search space
+ *                     (the up-route belongs to the sealed-pocket escape and
+ *                     surface-ascent arms instead).
  *
  * This is deterministic CAN/SAFE truth about the OFFERED set, never a
  * preference: it exists so "the body is cut off and the safe way down is
  * unavailable" is a typed fact instead of a bare WAIT. A damaging drop is never
  * a substitute - the refusal is the honest answer when no safe step exists.
  */
-export type ColumnDescentRefusalReason = 'no_safe_step' | 'no_tool' | 'exhausted' | 'recurrent'
+export type ColumnDescentRefusalReason =
+  | 'no_safe_step'
+  | 'no_tool'
+  | 'exhausted'
+  | 'recurrent'
+  | 'direction_mismatch'
 
 export interface ColumnDescentRefusal {
   reason: ColumnDescentRefusalReason
@@ -8185,6 +8196,38 @@ function descendCandidateFromStep(
 }
 
 /**
+ * Does the active queue row name the SURFACE as its direction? Three honest
+ * sources, all read off the row's own identity (never inferred from terrain):
+ *
+ *   - `surface` rows (`return_to_surface` recovery) name it explicitly;
+ *   - an `explore` row whose Option template is `explore:surface` names it in
+ *     the option id itself (Mercury's explore modes are `cave`/`surface`);
+ *   - a `collect` row whose focus has no underground source names it
+ *     implicitly: the item's own source truth (`STONE_YIELDS`/ore/direct-block
+ *     tables) says nothing below holds it, so a down-step cannot serve the
+ *     named prerequisite.
+ *
+ * Underground-directed (`explore:cave`, `descend` rows, a collect focus like
+ * `cobblestone`/`raw_iron`/`coal`) and direction-agnostic rows (`craft`,
+ * `goto`, bare `explore`) are not surface-directed. This is an OFFER gate for
+ * the stranded-column escape arm only: it never ranks candidates and never
+ * picks an objective.
+ */
+function optionIsSurfaceDirected(
+  current: Pick<QueuedGoal, 'kind' | 'optionInstanceId' | 'optionTemplateId' | 'semanticOptionTemplateId'> | null,
+  focusItem: string | null,
+): boolean {
+  if (current === null) return false
+  if (current.kind === 'surface') return true
+  if (current.kind === 'explore') {
+    const template = current.optionTemplateId ?? current.semanticOptionTemplateId ?? null
+    const instance = (current.optionInstanceId ?? '').split('#')[0]
+    return template === 'explore:surface' || (template === null && instance === 'explore:surface')
+  }
+  return current.kind === 'collect' && focusItem !== null && !focusHasUndergroundSource(focusItem)
+}
+
+/**
  * The bounded descent off a body that is stranded on its own support column.
  *
  * `strandedOnColumn` (no standable cell beyond the body's own) is exactly the
@@ -8208,6 +8251,22 @@ function descendCandidateFromStep(
  * action; the bound is the safe-step fact itself (it is withdrawn the moment the
  * body is no longer stranded, the floor is not diggable, a hazard appears, or
  * the failure budget for the step is spent).
+ *
+ * Two honesty boundaries bound the arm on the OTHER side of "mechanically safe":
+ *
+ *   - PROGRESS: the step is an escape affordance with no named search anchor,
+ *     so its outcome classifies `body`, never `search` (the
+ *     `ungroundedDescent` flag in `classifyActionOutcome`). Portal-p24
+ *     (gen-muul1u2o) measured the laundered version: 88 verified down-steps
+ *     under `explore:cave`/`explore:surface` each credited `search`, resetting
+ *     every no-progress bound while the body ratcheted y12 -> y-60.
+ *   - DIRECTION: under a surface-directed row (`surface` kind, an
+ *     `explore:surface` template, or a `collect` focus with no underground
+ *     source) and already below the surface band, a down-step digs deeper AWAY
+ *     from the option's named search space. The offer is refused with a typed
+ *     reason so the up-route arms (sealed-pocket escape, surface ascent) or
+ *     the starvation -> repair boundary answer instead. Above the band the
+ *     same step descends TOWARD surface ground and stays offered.
  */
 function columnDescentCandidates(
   state: WorldState,
@@ -8219,6 +8278,12 @@ function columnDescentCandidates(
     x: Math.floor(state.self.position.x),
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
+  }
+  if (
+    optionIsSurfaceDirected(state.goalQueue?.current ?? null, focusItem) &&
+    state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
+  ) {
+    return { candidates: [], refusal: { reason: 'direction_mismatch', cell: feet } }
   }
   const safeDown = (state.descent ?? []).filter(
     (step) =>
