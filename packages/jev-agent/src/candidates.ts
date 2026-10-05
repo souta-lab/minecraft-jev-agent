@@ -3222,6 +3222,13 @@ export function formatExploreRouteBlocked(blocked: ExploreRouteBlocked): string 
  *                     down-step digs AWAY from the option's own search space
  *                     (the up-route belongs to the sealed-pocket escape and
  *                     surface-ascent arms instead).
+ *   - `descent_budget_exhausted` the zero-delta descent latch armed: at least
+ *                     `DESCEND_NO_PROGRESS_LIMIT` completed descends removed
+ *                     blocks without any resource/frontier delta, which proves
+ *                     the stranding is self-created (an imposed trap cannot
+ *                     have armed the latch). Further own-column digs are
+ *                     trajectory churn, not escape; the starvation -> repair
+ *                     boundary answers instead.
  *
  * This is deterministic CAN/SAFE truth about the OFFERED set, never a
  * preference: it exists so "the body is cut off and the safe way down is
@@ -3234,6 +3241,7 @@ export type ColumnDescentRefusalReason =
   | 'exhausted'
   | 'recurrent'
   | 'direction_mismatch'
+  | 'descent_budget_exhausted'
 
 export interface ColumnDescentRefusal {
   reason: ColumnDescentRefusalReason
@@ -8244,13 +8252,19 @@ function optionIsSurfaceDirected(
  * Nothing here is pillar-, goal- or M3-specific, and no candidate is ever a
  * damaging drop: when no safe step exists the typed refusal says so instead.
  *
- * The `descendLimitReached` no-progress latch is deliberately NOT applied here.
- * That latch bounds blind SEARCH descent (which can carve an unbounded tunnel
- * network). A stranded body has nowhere else to go and this step is a verified
- * block removal plus a monotone Y change, re-planned from fresh state every
- * action; the bound is the safe-step fact itself (it is withdrawn the moment the
- * body is no longer stranded, the floor is not diggable, a hazard appears, or
- * the failure budget for the step is spent).
+ * The `descendLimitReached` no-progress latch bounds this arm ONLY once armed:
+ * the latch itself cannot arm before `DESCEND_NO_PROGRESS_LIMIT` completed
+ * zero-delta descends, so an externally stranded body always gets its first
+ * escape digs. Once armed, the stranding is provably self-created (the body's
+ * own digs made this column), and each further own-column dig re-creates the
+ * stranded state one block deeper while the active row's named product gains
+ * nothing - live portal-p24.8 (run-muvcsl6w, gen-muvcsm8k): under
+ * `place:crafting_table` the degenerate offer [DESCEND:down:D, WAIT, ESCALATE]
+ * ratcheted y98 -> y46 over ~4min, resourceDelta=0 throughout, until the offer
+ * collapsed to ESCALATE-only. That is TRAJECTORY_CHURN (AGENTS.md $4), not the
+ * escape affordance this arm exists for, so the latch is honored here and the
+ * offer refuses with `descent_budget_exhausted` until a verified relocation or
+ * resource gain clears it.
  *
  * Two honesty boundaries bound the arm on the OTHER side of "mechanically safe":
  *
@@ -8284,6 +8298,13 @@ function columnDescentCandidates(
     state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
   ) {
     return { candidates: [], refusal: { reason: 'direction_mismatch', cell: feet } }
+  }
+  // Trajectory bound for self-created stranding: the latch needs completed
+  // zero-delta descends to arm, so this refusal can only fire after the body's
+  // own digs already made the column it is stranded on. The offer collapses to
+  // WAIT/ESCALATE instead of re-offering the same down-step one block deeper.
+  if (state.signals.descendLimitReached === true) {
+    return { candidates: [], refusal: { reason: 'descent_budget_exhausted', cell: feet } }
   }
   const safeDown = (state.descent ?? []).filter(
     (step) =>

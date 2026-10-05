@@ -961,6 +961,79 @@ addCase('(p24) a bare explore row with no direction suffix keeps the descent off
   }
 })
 
+// --- portal-p24.8: the armed zero-delta latch must bound the column arm too.
+// Live run-muvcsl6w / gen-muvcsm8k: under `place:crafting_table` the degenerate
+// offer [DESCEND:down:D, WAIT, ESCALATE] ratcheted the body y98 -> y46 with
+// resourceDelta=0 on every step; the latch fired DESCEND_LIMIT repeatedly but
+// this arm ignored it (self-created stranding re-creates the stranded state one
+// block deeper with every dig). An externally stranded body keeps its escape:
+// the latch cannot arm before three completed zero-delta descends. -----------
+
+addCase('(p24.8) an armed descent latch refuses own-column digs under a place goal', () => {
+  const placeRow = queued({ id: 'g8:place:crafting_table', kind: 'place', description: 'place crafting_table', targetItem: 'crafting_table', requiredCount: 1 })
+  const state = worldState({
+    position: POCKET_FEET,
+    standable: [POCKET_CELL],
+    descent: openGroundDescent(POCKET_FEET),
+    goalQueue: queueWith(placeRow),
+    signals: signals({ descendLimitReached: true, descendNoProgress: 3, digDepth: 8 }),
+  })
+  state.self = { ...state.self, health: 20, food: 20 }
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const refusal = grounded.columnDescentRefusal
+  const pass =
+    strandedOnColumn(state) &&
+    columnDescentCandidates(grounded.candidates).length === 0 &&
+    refusal !== null &&
+    refusal.reason === 'descent_budget_exhausted' &&
+    formatColumnDescentRefused(refusal) === 'COLUMN_DESCENT_REFUSED reason=descent_budget_exhausted cell=45,12,-15'
+  return {
+    pass,
+    detail: `refusal=${refusal === null ? 'none' : formatColumnDescentRefused(refusal)} column=${columnDescentCandidates(grounded.candidates).length} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24.8) the armed latch bounds the column arm under a bare explore row too', () => {
+  const exploreRow = queued({ id: 'g20:explore', kind: 'explore', description: 'explore', targetItem: null, requiredCount: 1, optionInstanceId: 'explore', optionTemplateId: 'explore' })
+  const state = worldState({
+    position: POCKET_FEET,
+    standable: [POCKET_CELL],
+    descent: openGroundDescent(POCKET_FEET),
+    goalQueue: queueWith(exploreRow),
+    signals: signals({ descendLimitReached: true, descendNoProgress: 3, digDepth: 5 }),
+  })
+  state.self = { ...state.self, health: 20, food: 20 }
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason === 'descent_budget_exhausted' &&
+    columnDescentCandidates(grounded.candidates).length === 0
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=${columnDescentCandidates(grounded.candidates).length} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24.8) an unlatched place goal still offers the escape down-step (stranding not yet churned)', () => {
+  const placeRow = queued({ id: 'g8:place:crafting_table', kind: 'place', description: 'place crafting_table', targetItem: 'crafting_table', requiredCount: 1 })
+  const state = worldState({
+    position: POCKET_FEET,
+    standable: [POCKET_CELL],
+    descent: openGroundDescent(POCKET_FEET),
+    goalQueue: queueWith(placeRow),
+  })
+  state.self = { ...state.self, health: 20, food: 20 }
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal === null &&
+    columnDescentCandidates(grounded.candidates).length > 0
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=${columnDescentCandidates(grounded.candidates).length} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
 addCase('the typed marker line is stable for every refusal reason', () => {
   const cell = { x: 23, y: 81, z: 8 }
   const noStep = formatColumnDescentRefused({ reason: 'no_safe_step', cell })
@@ -968,13 +1041,15 @@ addCase('the typed marker line is stable for every refusal reason', () => {
   const exhausted = formatColumnDescentRefused({ reason: 'exhausted', cell })
   const recurrent = formatColumnDescentRefused({ reason: 'recurrent', cell })
   const direction = formatColumnDescentRefused({ reason: 'direction_mismatch', cell })
+  const budget = formatColumnDescentRefused({ reason: 'descent_budget_exhausted', cell })
   const pass =
     noStep === 'COLUMN_DESCENT_REFUSED reason=no_safe_step cell=23,81,8' &&
     noTool === 'COLUMN_DESCENT_REFUSED reason=no_tool cell=23,81,8 tool=pickaxe tier=2' &&
     exhausted === 'COLUMN_DESCENT_REFUSED reason=exhausted cell=23,81,8' &&
     recurrent === 'COLUMN_DESCENT_REFUSED reason=recurrent cell=23,81,8' &&
-    direction === 'COLUMN_DESCENT_REFUSED reason=direction_mismatch cell=23,81,8'
-  return { pass, detail: `${noStep} | ${noTool} | ${exhausted} | ${recurrent} | ${direction}` }
+    direction === 'COLUMN_DESCENT_REFUSED reason=direction_mismatch cell=23,81,8' &&
+    budget === 'COLUMN_DESCENT_REFUSED reason=descent_budget_exhausted cell=23,81,8'
+  return { pass, detail: `${noStep} | ${noTool} | ${exhausted} | ${recurrent} | ${direction} | ${budget}` }
 })
 
 let failures = 0
