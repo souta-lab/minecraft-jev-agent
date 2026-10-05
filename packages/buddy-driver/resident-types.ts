@@ -951,6 +951,12 @@ export interface GenerationStatus {
   /** exact source revision this immutable generation bundle was built from */
   sourceSha?: string | null
   buildHash?: string | null
+  /**
+   * The bundle was built from a dirty working tree: `sourceSha` names the HEAD
+   * commit the build was checked against, but uncommitted content may differ.
+   * Honest provenance flag; never alters identity comparisons.
+   */
+  treeDirty?: boolean
   policyKind: string
   policyProvider: string
   /** Typed Decision Plane backend profile id; null for offline/deterministic policies. */
@@ -1225,6 +1231,8 @@ export interface GenerationContext {
   sourceSha?: string | null
   /** generation bundle hash (BUILD `hash`) the running generation was loaded from. */
   buildHash?: string | null
+  /** The build ran against a dirty working tree; `sourceSha` names the checked HEAD, not the full content. */
+  treeDirty?: boolean
   /** directory the resident writes run-scoped M2 evidence snapshots into. */
   m2SnapshotDir?: string
 }

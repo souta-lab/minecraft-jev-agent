@@ -601,6 +601,7 @@ let disconnectReasonSeen: DisconnectReason | null = null
 let disconnectDetail: string | null = null
 let generationHash: string | null = null
 let generationSourceSha: string | null = null
+let generationTreeDirty = false
 let listenerBaseline: Record<string, number> = {}
 let listenerHostBaseline: Record<string, number> = {}
 let baselineCaptured = false
@@ -777,6 +778,7 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
     try {
       const built = await buildGeneration()
       const sourceSha = gitCommit()
+      const treeDirty = gitTreeDirty()
       const mod = (await import(`${pathToFileURL(built.outfile).href}?v=${built.hash}`)) as GenerationModule
       const readinessError = generationModuleReadinessError(mod, CONTRACT_VERSION)
       if (readinessError !== null) throw new Error(readinessError)
@@ -784,10 +786,11 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
       currentBundle = built.outfile
       generationHash = built.hash
       generationSourceSha = sourceSha
+      generationTreeDirty = treeDirty
       // The bundle hash attests WHICH bundle; the git commit attests WHICH SOURCE it was built from.
       // Without this a hot-reloaded run could prove its bundle but not its commit, which is exactly what the
-      // acceptance asks for (`exact source SHA`).
-      log('BUILD', { hash: built.hash, sourceSha, bytes: built.bytes, ms: built.ms, outfile: built.outfile })
+      // acceptance asks for (`exact source SHA`). `treeDirty` flags when the tree differed from that commit.
+      log('BUILD', { hash: built.hash, sourceSha, treeDirty, bytes: built.bytes, ms: built.ms, outfile: built.outfile })
       return mod
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -848,6 +851,7 @@ function makeGenerationContext(
   seed: GenerationSeed = { revision: state.revision },
   buildHash: string | null = generationHash,
   sourceSha: string | null = generationSourceSha,
+  treeDirty: boolean = generationTreeDirty,
 ): GenerationContext {
   const generationWorldKey = currentWorldKey()
   const availabilityAtCreate = modelAvailability.snapshot()
@@ -857,6 +861,7 @@ function makeGenerationContext(
     bootSourceSha,
     sourceSha,
     buildHash,
+    treeDirty,
     recoveryPolicyAuthority: availabilityAtCreate.state === 'degraded'
       ? availabilityAtCreate.recoveryAuthorityKind === 'jev' ? availabilityAtCreate.recoveryAuthority : null
       : null,
@@ -1258,6 +1263,7 @@ function inspectGenerationAuthority(gen: ResidentGeneration, trigger: string): {
       system2Provider: system2Authority.provider,
       system2Model: system2Authority.model,
       sourceSha: status.sourceSha ?? null,
+      treeDirty: status.treeDirty === true,
       recoveryAuthorityKind: recoveryKind,
       recovery: admission.reason === 'same-recovery-authority',
     })
@@ -2367,7 +2373,10 @@ function sourceFiles(root: string): string[] {
 
 function signatureOfSource(): string {
   const hash = createHash('sha1')
-  for (const root of [JEV_SRC, HERE]) {
+  // Watch every root the generation bundle can compile: jev-agent source,
+  // jev-harness transport profiles, and this driver. A harness-only edit must
+  // reload too - otherwise provider/profile changes never reach the resident.
+  for (const root of [JEV_SRC, join(MC_AI, 'jev-harness'), HERE]) {
     for (const full of sourceFiles(root).sort()) {
       try {
         const info = statSync(full)
@@ -2429,6 +2438,19 @@ function gitCommit(): string | null {
     return execSync('git rev-parse HEAD', { cwd: MC_AI, encoding: 'utf8' }).trim()
   } catch {
     return null
+  }
+}
+
+/**
+ * Builds run against the working tree while `sourceSha` stamps HEAD, so a
+ * dirty tree is a provenance lie unless it is said. `treeDirty` records it
+ * without touching the identity fields recovery compares.
+ */
+function gitTreeDirty(): boolean {
+  try {
+    return execSync('git status --porcelain -- .', { cwd: MC_AI, encoding: 'utf8' }).trim().length > 0
+  } catch {
+    return false
   }
 }
 
@@ -2572,7 +2594,8 @@ async function performReload(trigger: string): Promise<void> {
     const nextSeed: GenerationSeed = { revision: state.revision }
     const nextPending = newPendingProposals()
     const candidateSourceSha = gitCommit()
-    const ctx = makeGenerationContext(bot, nextPending, nextSeed, built.hash, candidateSourceSha)
+    const candidateTreeDirty = gitTreeDirty()
+    const ctx = makeGenerationContext(bot, nextPending, nextSeed, built.hash, candidateSourceSha, candidateTreeDirty)
     candidate = mod.createGeneration(ctx)
     nextPending.generationId = candidate.id
     pendingByGeneration.set(candidate.id, nextPending)
@@ -2622,6 +2645,7 @@ async function performReload(trigger: string): Promise<void> {
       currentBundle = built.outfile
       generationHash = built.hash
       generationSourceSha = candidateSourceSha
+      generationTreeDirty = candidateTreeDirty
       stats.reloadsChangedHash += 1
       log('RELOAD', { ok: true, trigger, deferred: 'frozen', ms: Date.now() - started, hash: built.hash, sourceSha: gitCommit(), contractVersion: mod.CONTRACT_VERSION })
       return
@@ -2675,6 +2699,7 @@ async function performReload(trigger: string): Promise<void> {
     currentBundle = built.outfile
     generationHash = built.hash
     generationSourceSha = candidateSourceSha
+    generationTreeDirty = candidateTreeDirty
     lastActionId = null
     stats.reloadsChangedHash += 1
     commitStagedProposals(outcome.generationId, 'reload-commit')
