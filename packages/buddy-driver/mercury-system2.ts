@@ -1204,6 +1204,19 @@ export interface MercuryConfigFile {
   system2?: boolean
   /** Legacy compatibility key from the old Mercury-only adapter. */
   mercury?: boolean
+  /** Explicit System2 transport/backend profile. */
+  provider?: string
+  /** Concrete System2 model id for the selected backend. */
+  model?: string
+}
+
+export function readMercuryConfig(configPath: string): MercuryConfigFile | null {
+  try {
+    if (!existsSync(configPath)) return null
+    return JSON.parse(readFileSync(configPath, 'utf8')) as MercuryConfigFile
+  } catch {
+    return null
+  }
 }
 
 export interface MercuryEnablement {
@@ -1231,10 +1244,8 @@ export function resolveMercuryEnablement(
   let configured = explicitOn
   if (!configured) {
     try {
-      if (existsSync(configPath)) {
-        const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as MercuryConfigFile
-        configured = parsed.system2 === true || parsed.mercury === true
-      }
+      const parsed = readMercuryConfig(configPath)
+      if (parsed !== null) configured = parsed.system2 === true || parsed.mercury === true
     } catch {
       configured = false
     }
@@ -1647,11 +1658,14 @@ export interface MercurySystem2Options {
   generationId?: string
   /** bypass durable cached plans during same-authority provider recovery. */
   requireFreshProviderDecision?: boolean
-  /** transport seam for tests; defaults to the AI SDK `generateText` tool call. */
+  /** transport seam for tests; defaults to the selected provider transport. */
   transport?: MercuryTransport
+  /** System2 config path; lets the generation use the same config used for enablement. */
+  configPath?: string
   /**
-   * Local OpenAI-compatible endpoint seam. `undefined` resolves from
-   * BUDDY_MERCURY_BASE_URL; an explicit null forces the AI Gateway path.
+   * OpenAI-compatible endpoint seam. `undefined` resolves the configured provider
+   * profile (OpenCode Go first, then BUDDY_MERCURY_BASE_URL); explicit null forces
+   * the historical AI Gateway path.
    */
   localEndpoint?: MercuryLocalEndpoint | null
 }
@@ -1732,6 +1746,14 @@ export function mercuryTransportMode(model: string): MercuryTransportMode {
 export const MERCURY_LOCAL_BASE_URL_ENV = 'BUDDY_MERCURY_BASE_URL'
 export const MERCURY_LOCAL_API_KEY_ENV = 'BUDDY_MERCURY_API_KEY'
 export const MERCURY_LOCAL_NO_THINK_ENV = 'BUDDY_MERCURY_LOCAL_NO_THINK'
+export const SYSTEM2_PROVIDER_ENV = 'BUDDY_SYSTEM2_PROVIDER'
+export const OPENCODE_GO_PROVIDER = 'opencode-go'
+export const OPENCODE_GO_MODEL = 'muse-spark-1.3-contributor'
+export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go/v1'
+export const OPENCODE_GO_API_KEY_FILE_ENV = 'BUDDY_OPENCODE_GO_API_KEY_FILE'
+export const OPENCODE_GO_SESSION_FILE_ENV = 'BUDDY_OPENCODE_GO_SESSION_FILE'
+export const OPENCODE_GO_USER_AGENT_ENV = 'BUDDY_OPENCODE_GO_USER_AGENT'
+export const OPENCODE_GO_DEFAULT_USER_AGENT = 'minecraft-jev-agent/0.1 system2'
 
 export interface MercuryLocalEndpoint {
   /** OpenAI-compatible base URL without a trailing slash, e.g. http://127.0.0.1:8080/v1 */
@@ -1740,6 +1762,16 @@ export interface MercuryLocalEndpoint {
   readonly apiKey: string
   /** Optional chat-template controls understood by local reasoning servers. */
   readonly chatTemplateKwargs?: Record<string, unknown>
+  /** Extra transport headers. Secrets are never logged. */
+  readonly headers?: Readonly<Record<string, string>>
+  /** Provenance label for non-local OpenAI-compatible transports. */
+  readonly providerLabel?: string
+  /** Transport label emitted in ADVISOR_TRANSPORT. */
+  readonly transportLabel?: string
+  /** Human-readable endpoint name for bounded error messages. */
+  readonly errorLabel?: string
+  /** Wire protocol used by this OpenAI-family endpoint. */
+  readonly protocol?: 'chat-completions' | 'responses'
 }
 
 /** BUDDY_MERCURY_BASE_URL is the explicit opt-in for local System2 transport. */
@@ -1753,6 +1785,43 @@ export function resolveMercuryLocalEndpoint(
     baseUrl: raw.replace(/\/+$/, ''),
     apiKey: (env[MERCURY_LOCAL_API_KEY_ENV] ?? '').trim() || 'local',
     ...(noThink ? { chatTemplateKwargs: { enable_thinking: false } } : {}),
+  }
+}
+
+/**
+ * OpenCode Go direct System2 profile. The API key and stable session id are read
+ * from 0600 files so neither appears in argv, environment dumps, or run logs.
+ * The client identifies itself honestly rather than impersonating OpenCode/Codex.
+ */
+export function resolveMercuryOpenCodeGoEndpoint(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  providerOverride?: string | null,
+): MercuryLocalEndpoint | null {
+  const provider = (providerOverride ?? env[SYSTEM2_PROVIDER_ENV] ?? '').trim().toLowerCase()
+  if (provider !== OPENCODE_GO_PROVIDER) return null
+  const home = (env.HOME ?? '').trim()
+  const keyFile =
+    (env[OPENCODE_GO_API_KEY_FILE_ENV] ?? '').trim() ||
+    (home !== '' ? `${home}/.config/mc-ai-secrets/opencode-go-api.key` : '')
+  const sessionFile =
+    (env[OPENCODE_GO_SESSION_FILE_ENV] ?? '').trim() ||
+    (home !== '' ? `${home}/.config/mc-ai-secrets/opencode-go-system2-session.id` : '')
+  if (keyFile === '' || sessionFile === '') throw new Error('OpenCode Go System2 requires HOME or explicit key/session file paths')
+  const apiKey = readFileSync(keyFile, 'utf8').trim()
+  const sessionId = readFileSync(sessionFile, 'utf8').trim()
+  if (apiKey === '') throw new Error('OpenCode Go System2 API key file is empty')
+  if (sessionId === '') throw new Error('OpenCode Go System2 session file is empty')
+  return {
+    baseUrl: OPENCODE_GO_BASE_URL,
+    apiKey,
+    headers: {
+      'user-agent': (env[OPENCODE_GO_USER_AGENT_ENV] ?? '').trim() || OPENCODE_GO_DEFAULT_USER_AGENT,
+      'x-opencode-session': sessionId,
+    },
+    providerLabel: OPENCODE_GO_PROVIDER,
+    transportLabel: 'opencode-go-responses',
+    errorLabel: 'OpenCode Go System2',
+    protocol: 'responses',
   }
 }
 
@@ -1789,6 +1858,7 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${endpoint.apiKey}`,
+        ...(endpoint.headers ?? {}),
       },
       body: JSON.stringify({
         model,
@@ -1805,7 +1875,7 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
     })
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
-      throw new Error(`local mercury endpoint HTTP ${response.status}: ${detail.slice(0, 200)}`)
+      throw new Error(`${endpoint.errorLabel ?? 'local mercury endpoint'} HTTP ${response.status}: ${detail.slice(0, 200)}`)
     }
     const payload = (await response.json()) as LocalChatCompletion
     const content = payload.choices?.[0]?.message?.content
@@ -1823,10 +1893,76 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
       objects: parsed.objects,
       chars: typeof content === 'string' ? content.length : 0,
     }
-    if (parsed.value === null) return { toolCalls: [], usage, repairs: [repair] }
+    if (parsed.value === null) return { toolCalls: [], usage, text: content ?? '', repairs: [repair] }
     return {
       toolCalls: [{ input: parsed.value }],
       usage,
+      text: content ?? '',
+      repairs: parsed.shape === 'exact' ? [] : [repair],
+    }
+  }
+}
+
+interface OpenAIResponsesPayload {
+  output_text?: string | null
+  output?: Array<{
+    type?: string
+    content?: Array<{ type?: string; text?: string | null } | null> | null
+  } | null>
+  usage?: { input_tokens?: number; output_tokens?: number } | null
+}
+
+function responsesOutputText(payload: OpenAIResponsesPayload): string {
+  if (typeof payload.output_text === 'string') return payload.output_text
+  const parts: string[] = []
+  for (const item of payload.output ?? []) {
+    for (const content of item?.content ?? []) {
+      if (content?.type === 'output_text' && typeof content.text === 'string') parts.push(content.text)
+    }
+  }
+  return parts.join('')
+}
+
+/** OpenAI Responses API transport used by OpenCode Go Muse Spark. */
+export function responsesMercuryTransport(model: string, endpoint: MercuryLocalEndpoint): MercuryTransport {
+  return async ({ system, prompt, maxOutputTokens, timeoutMs, signal }) => {
+    const response = await fetch(`${endpoint.baseUrl}/responses`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${endpoint.apiKey}`,
+        ...(endpoint.headers ?? {}),
+      },
+      body: JSON.stringify({
+        model,
+        instructions: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
+        input: prompt,
+        max_output_tokens: maxOutputTokens,
+        stream: false,
+      }),
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
+    })
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`${endpoint.errorLabel ?? 'responses endpoint'} HTTP ${response.status}: ${detail.slice(0, 200)}`)
+    }
+    const payload = (await response.json()) as OpenAIResponsesPayload
+    const content = responsesOutputText(payload)
+    const parsed = parseMercuryJsonTextDetailed(content)
+    const usage = payload.usage == null
+      ? null
+      : { inputTokens: payload.usage.input_tokens ?? null, outputTokens: payload.usage.output_tokens ?? null }
+    const repair: MercuryTransportRepair = {
+      kind: 'json-text',
+      shape: parsed.shape,
+      objects: parsed.objects,
+      chars: content.length,
+    }
+    if (parsed.value === null) return { toolCalls: [], usage, text: content, repairs: [repair] }
+    return {
+      toolCalls: [{ input: parsed.value }],
+      usage,
+      text: content,
       repairs: parsed.shape === 'exact' ? [] : [repair],
     }
   }
@@ -2247,9 +2383,28 @@ export class MercurySystem2 implements System2Brain {
     this.summarize = options.summarize
     this.callsPath = options.callsPath
     this.cachePath = options.cachePath
-    this.model = options.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? SYSTEM2_MODEL_DEFAULT
+    const configPath = options.configPath ?? process.env.BUDDY_SYSTEM2_CONFIG
+    const system2Config = configPath === undefined ? null : readMercuryConfig(configPath)
+    const configuredProvider = (process.env[SYSTEM2_PROVIDER_ENV] ?? system2Config?.provider ?? '').trim().toLowerCase()
+    const requestedModel =
+      options.model ??
+      process.env.BUDDY_SYSTEM2_MODEL ??
+      process.env.BUDDY_MERCURY_MODEL ??
+      system2Config?.model ??
+      (configuredProvider === OPENCODE_GO_PROVIDER ? OPENCODE_GO_MODEL : SYSTEM2_MODEL_DEFAULT)
+    this.model =
+      configuredProvider === OPENCODE_GO_PROVIDER && isMuseSparkModel(requestedModel)
+        ? OPENCODE_GO_MODEL
+        : requestedModel
     this.authorityModel = this.model
-    this.localEndpoint = options.localEndpoint !== undefined ? options.localEndpoint : resolveMercuryLocalEndpoint()
+    const openCodeGoEndpoint =
+      options.localEndpoint === undefined
+        ? resolveMercuryOpenCodeGoEndpoint(process.env, configuredProvider)
+        : null
+    this.localEndpoint =
+      options.localEndpoint !== undefined
+        ? options.localEndpoint
+        : openCodeGoEndpoint ?? resolveMercuryLocalEndpoint()
     const configuredMaxPerHour = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
     this.maxPerHour =
       options.maxPerHour ??
@@ -2267,7 +2422,11 @@ export class MercurySystem2 implements System2Brain {
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 4096)
     this.transport =
       options.transport ??
-      (this.localEndpoint === null ? defaultMercuryTransport(this.model) : localMercuryTransport(this.model, this.localEndpoint))
+      (this.localEndpoint === null
+        ? defaultMercuryTransport(this.model)
+        : this.localEndpoint.protocol === 'responses'
+          ? responsesMercuryTransport(this.model, this.localEndpoint)
+          : localMercuryTransport(this.model, this.localEndpoint))
 
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
@@ -2287,8 +2446,8 @@ export class MercurySystem2 implements System2Brain {
     this.cache = this.loadCache()
     if (this.localEndpoint !== null) {
       this.log('ADVISOR_TRANSPORT', {
-        source: 'mercury',
-        transport: 'local-openai-compatible',
+        source: this.localEndpoint.providerLabel ?? 'mercury',
+        transport: this.localEndpoint.transportLabel ?? 'local-openai-compatible',
         baseUrl: this.localEndpoint.baseUrl,
         model: this.model,
         maxPerHour: this.maxPerHour,
@@ -2307,6 +2466,7 @@ export class MercurySystem2 implements System2Brain {
 
   /** Runtime authority label reflects the selected model, not the legacy class name. */
   get provider(): string {
+    if (this.localEndpoint?.providerLabel !== undefined) return this.localEndpoint.providerLabel
     if (mercuryTransportMode(this.model) === 'json-text') return 'muse-spark'
     if (this.model.toLowerCase().includes('mercury')) return 'mercury'
     return 'gateway-system2'

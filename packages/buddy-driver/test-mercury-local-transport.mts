@@ -6,14 +6,18 @@
 // an AI Gateway key. No external network access is used.
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT,
   localMercuryTransport,
   MercurySystem2,
+  OPENCODE_GO_MODEL,
+  OPENCODE_GO_PROVIDER,
   resolveMercuryLocalEndpoint,
+  resolveMercuryOpenCodeGoEndpoint,
+  responsesMercuryTransport,
 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
@@ -78,6 +82,8 @@ function mercurySummary(): MercuryStateSummary {
 interface StubRequest {
   readonly url: string
   readonly authorization: string | undefined
+  readonly userAgent: string | undefined
+  readonly sessionId: string | undefined
   readonly body: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number; chat_template_kwargs?: Record<string, unknown> }
 }
 
@@ -97,6 +103,8 @@ async function startStub(reply: { status: number; content: string | null }): Pro
       requests.push({
         url: req.url ?? '',
         authorization: req.headers.authorization,
+        userAgent: req.headers['user-agent'],
+        sessionId: req.headers['x-opencode-session'] as string | undefined,
         body: JSON.parse(raw) as StubRequest['body'],
       })
       res.writeHead(reply.status, { 'content-type': 'application/json' })
@@ -106,6 +114,47 @@ async function startStub(reply: { status: number; content: string | null }): Pro
           usage: { prompt_tokens: 11, completion_tokens: 7 },
         }),
       )
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as AddressInfo).port
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    requests,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
+}
+
+interface ResponsesStubRequest {
+  readonly url: string
+  readonly authorization: string | undefined
+  readonly userAgent: string | undefined
+  readonly sessionId: string | undefined
+  readonly body: { model?: string; instructions?: string; input?: string; max_output_tokens?: number; stream?: boolean }
+}
+
+async function startResponsesStub(content: string): Promise<{
+  baseUrl: string
+  requests: ResponsesStubRequest[]
+  close: () => Promise<void>
+}> {
+  const requests: ResponsesStubRequest[] = []
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (chunk) => { raw += String(chunk) })
+    req.on('end', () => {
+      requests.push({
+        url: req.url ?? '',
+        authorization: req.headers.authorization,
+        userAgent: req.headers['user-agent'],
+        sessionId: req.headers['x-opencode-session'] as string | undefined,
+        body: JSON.parse(raw) as ResponsesStubRequest['body'],
+      })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: content }] }],
+        usage: { input_tokens: 13, output_tokens: 9 },
+      }))
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -139,6 +188,98 @@ addCase('resolveMercuryLocalEndpoint trims the URL and defaults the key', () => 
     resolved.apiKey === 'local' &&
     keyed?.apiKey === 'secret'
   return { pass, detail: `resolved=${JSON.stringify(resolved)} keyed=${JSON.stringify(keyed)}` }
+})
+
+addCase('OpenCode Go profile reads file-backed credentials and sends honest stable client headers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-go-system2-'))
+  const keyFile = join(dir, 'key')
+  const sessionFile = join(dir, 'session')
+  writeFileSync(keyFile, 'fixture-key\n')
+  writeFileSync(sessionFile, 'fixture-session\n')
+  const endpoint = resolveMercuryOpenCodeGoEndpoint({
+    HOME: dir,
+    BUDDY_OPENCODE_GO_API_KEY_FILE: keyFile,
+    BUDDY_OPENCODE_GO_SESSION_FILE: sessionFile,
+    BUDDY_OPENCODE_GO_USER_AGENT: 'minecraft-jev-agent/test system2',
+  }, OPENCODE_GO_PROVIDER)
+  const disabled = resolveMercuryOpenCodeGoEndpoint({ HOME: dir }, 'muse-spark')
+  if (endpoint === null) return { pass: false, detail: 'OpenCode Go endpoint did not resolve' }
+  const stub = await startResponsesStub(VALID_PLAN_JSON)
+  try {
+    const transport = responsesMercuryTransport(OPENCODE_GO_MODEL, { ...endpoint, baseUrl: stub.baseUrl })
+    const result = await transport({ system: 'SYS', prompt: 'PROMPT', maxOutputTokens: 512, timeoutMs: 5000 })
+    const req = stub.requests[0]
+    const usage = result.usage as { inputTokens?: number; outputTokens?: number } | null
+    const pass =
+      disabled === null &&
+      req?.url === '/v1/responses' &&
+      req?.authorization === 'Bearer fixture-key' &&
+      req?.userAgent === 'minecraft-jev-agent/test system2' &&
+      req?.sessionId === 'fixture-session' &&
+      req?.body.model === OPENCODE_GO_MODEL &&
+      req?.body.input === 'PROMPT' &&
+      req?.body.max_output_tokens === 512 &&
+      result.text === VALID_PLAN_JSON &&
+      usage?.inputTokens === 13 &&
+      usage?.outputTokens === 9 &&
+      endpoint.providerLabel === OPENCODE_GO_PROVIDER &&
+      endpoint.transportLabel === 'opencode-go-responses'
+    return {
+      pass,
+      detail: `requests=${stub.requests.length} model=${req?.body.model ?? 'none'} ua=${req?.userAgent ?? 'none'} sessionHeader=${req?.sessionId === 'fixture-session'} rawText=${result.text === VALID_PLAN_JSON}`,
+    }
+  } finally {
+    await stub.close()
+  }
+})
+
+addCase('MercurySystem2 config selects OpenCode Go provider and bare Muse model without Gateway credentials', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-go-config-'))
+  const keyFile = join(dir, 'key')
+  const sessionFile = join(dir, 'session')
+  const configPath = join(dir, 'system2.config.json')
+  writeFileSync(keyFile, 'fixture-key\n')
+  writeFileSync(sessionFile, 'fixture-session\n')
+  writeFileSync(configPath, JSON.stringify({ system2: true, provider: OPENCODE_GO_PROVIDER, model: OPENCODE_GO_MODEL }))
+  const prior = {
+    key: process.env.BUDDY_OPENCODE_GO_API_KEY_FILE,
+    session: process.env.BUDDY_OPENCODE_GO_SESSION_FILE,
+    provider: process.env.BUDDY_SYSTEM2_PROVIDER,
+    system2Model: process.env.BUDDY_SYSTEM2_MODEL,
+    mercuryModel: process.env.BUDDY_MERCURY_MODEL,
+  }
+  process.env.BUDDY_OPENCODE_GO_API_KEY_FILE = keyFile
+  process.env.BUDDY_OPENCODE_GO_SESSION_FILE = sessionFile
+  delete process.env.BUDDY_SYSTEM2_PROVIDER
+  delete process.env.BUDDY_SYSTEM2_MODEL
+  delete process.env.BUDDY_MERCURY_MODEL
+  const logs: string[] = []
+  try {
+    const mercury = new MercurySystem2({
+      summarize: () => mercurySummary(),
+      log: hostLog(logs),
+      callsPath: join(dir, 'calls.jsonl'),
+      cachePath: join(dir, 'cache.json'),
+      configPath,
+      transport: async () => ({ toolCalls: [], usage: null, text: '' }),
+    })
+    const transportLog = logs.find((line) => line.startsWith('ADVISOR_TRANSPORT')) ?? ''
+    const pass =
+      mercury.provider === OPENCODE_GO_PROVIDER &&
+      mercury.model === OPENCODE_GO_MODEL &&
+      transportLog.includes('source=opencode-go') &&
+      transportLog.includes('transport=opencode-go-responses') &&
+      !transportLog.includes('fixture-key') &&
+      !transportLog.includes('fixture-session')
+    return { pass, detail: `provider=${mercury.provider} model=${mercury.model} transport=${transportLog}` }
+  } finally {
+    const restore = (name: string, value: string | undefined) => value === undefined ? delete process.env[name] : (process.env[name] = value)
+    restore('BUDDY_OPENCODE_GO_API_KEY_FILE', prior.key)
+    restore('BUDDY_OPENCODE_GO_SESSION_FILE', prior.session)
+    restore('BUDDY_SYSTEM2_PROVIDER', prior.provider)
+    restore('BUDDY_SYSTEM2_MODEL', prior.system2Model)
+    restore('BUDDY_MERCURY_MODEL', prior.mercuryModel)
+  }
 })
 
 addCase('local transport posts chat completions and parses the JSON plan', async () => {

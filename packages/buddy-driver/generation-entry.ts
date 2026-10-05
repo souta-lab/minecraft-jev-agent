@@ -2806,6 +2806,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,
+        configPath: mercuryConfigPath,
         sourceSha: ctx.sourceSha ?? null,
         buildHash: ctx.buildHash ?? null,
         requireFreshProviderDecision: ctx.recoverySystem2Authority !== undefined && ctx.recoverySystem2Authority !== null,
