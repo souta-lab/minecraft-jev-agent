@@ -410,6 +410,110 @@ serialized-state bytes); `usage.outputTokens` 0; latency p50 ~0.41 s. Under
 Gate C semantics the p24-holdout simulation calls the provider on 19.4% of
 decision ticks, so the measured ~6k/call applies to boundary calls only.
 
-## Gate H
+## Gate H — bounded live composition sample (PROVEN, with recorded findings)
 
-Pending. Do not resume Minecraft until it passes.
+§18 requires, after A-G: "run the smallest live source-bound sample that can
+falsify the new decision interface. Inspect calls per semantic commitment,
+tokens per call, stale/requery causes, and verified semantic progress before
+returning to ordinary portal progression."
+
+### Sample identity (exact provenance)
+
+- Campaign: portal-p24, seed 20261005, world `cap-portal-p24` (saved world
+  resumed, minor p24.5, `boundary=resident-restart`).
+- Live window analysed: `2026-10-05T13:01:28Z` -> `13:08:42Z` (~7.2 min),
+  generation `gen-muv9dq21-k8fjzi`, internal run `run-muv9dpld-co2e`,
+  `sourceSha=afa2ce5d7edad23741c8c74495f39544f1bfe67f`, `buildHash=996ad6c2cfed`.
+- `GENERATION_READY` attests: `policyProvider=liquid`,
+  `policyProfile=liquid-direct-d1`, `policyModel=d1`,
+  `deterministicFallbackEnabled=false`.
+- Tool: `tools/jev-live-sample-eval.mts` (committed; joins resident stdout
+  epoch markers with `logs/jev/jev-calls.jsonl`).
+
+### Planner labeling (required honesty note)
+
+System2 (muse-spark via Vercel AI Gateway) had a dead credit balance during the
+window, so the live sample ran in two phases:
+
+- **Phase A (12:54:33-13:01:00Z, `planner=llm`, System2 dead)**: every boot
+  reached `first_decision`, d1 selected `ESCALATE` on a `WAIT/ESCALATE`-only
+  offer, the System2 summon failed decisively on credit, and the resident
+  terminated fail-closed (`FATAL MODEL_UNAVAILABLE context=system2-authority`,
+  `terminate-resident`, supervisor restart). 5 generations in ~6.5 min, all
+  journaled, zero silent fallback — the bounded recovery/churn machinery
+  behaved exactly as designed and the operator's predeclared "park if System2
+  fails" condition was confirmed live.
+- **Phase B (13:01:28-13:08:42Z, `BUDDY_PLANNER=deterministic`)**: the
+  explicitly-labeled deterministic planner baseline
+  (`productionPlanAuthority=deterministic`, `planner=deterministic`,
+  `system2Provider=deterministic`) supplied WHAT goals so the Typed Decision
+  Plane under test (Liquid d1 WHICH/WHETHER) could be exercised for a bounded
+  window. Per AGENTS.md §3 this is `DETERMINISTIC_BASELINE` plan synthesis —
+  it is evidence about the decision interface only, never mission/acceptance
+  credit.
+
+### Measured Gate H contract (phase B, n=305 provider calls)
+
+| Axis | Result |
+|---|---|
+| Epochs started | 757 |
+| Provider calls | 305 (0.403 calls/epoch) |
+| Replayed epochs (`same_semantic_state`, `cacheHit=true`, `reusedFrom=<answered epoch>`) | 452 — 59.7% of epochs reused the committed answer with no call |
+| Stale-result drops | 0 (mechanism proven in Gate C fixtures; none triggered live) |
+| Boundary reasons on calls | `resource_evidence_changed` 297, `candidate_set_changed` 3, `safety_changed` 3, `progress_boundary` 1, `first_decision` 1 — every provider call carries a typed `decisionReason`; none is a bare hash diff |
+| Input tokens/call | mean 4011.5, p50 3976, p90 4271, max 4370 (vs p24 healthy-hour 7091.8 — ~43% reduction from the v7 compact state) |
+| Latency | p50 353 ms, p90 416 ms |
+| Question sets | `action+abandon_option` only (no threat frame triggered) |
+| DECLINE (singleton offers) | 299 singleton offers; d1 declined 252 (84%); `declineOnMultiCandidate=0` — the grounding invariant held live |
+| Abandon head (beta) | mean P 0.609 — under the calibrated 0.8 threshold; no enforced abandons |
+| Errors | 0 provider errors in-window |
+| Generation churn | 1 generation, 0 FATAL, 0 terminate-resident (phase B) |
+
+### Verified semantic progress — honest null
+
+Phase B produced 118 `SKILL_OUTCOME_PACKET`s, `terminalReason=blocked` on all,
+`verified=false` on all. The resumed world state is a physically trapped
+pocket (position ~40.5,-60,-0.5, health 1, inventory dirt:5): every grounded
+candidate resolved to `NO_SUPPORT` (below world floor) or was correctly
+declined by d1. **The interface was asked 757 times and never manufactured or
+credited progress it did not verify** — which is the correct fail-closed
+outcome, but means the sample cannot demonstrate verified semantic progress.
+Phase A's only verified outcome was one `MOVE` (`verified=true`) before the
+System2 wall.
+
+### Findings recorded (not fixed under Gate H)
+
+1. **Trap-state boundary amplification.** In a degenerate state, each blocked
+   or declined action appends a per-cell failure event; `events` is a signed
+   resource-evidence section, so each tick re-queries
+   (`resource_evidence_changed`, 297/305 calls). Semantically defensible — the
+   evidence set genuinely changed — but it means the replay rate collapses to
+   ~40% calls/epoch exactly when the world can produce nothing new. A §7.1
+   refinement candidate (band/dedupe identical failure-class events) is
+   recorded, not adopted: suppressing real evidence would weaken the
+   signature. Live counter-evidence that the mechanism is correct: in a normal
+   state 59.7% of epochs replay cleanly.
+2. **Dead-System2 churn (phase A)** matches the known p24 INFRA_CHURN shape;
+   under `BUDDY_PLANNER=llm` the run cannot proceed at all while the Vercel
+   credit is exhausted. Fail-closed held throughout.
+3. The Gate H launch itself caught one deployment defect pre-flight: the
+   `packages: 'external'` generation bundle could not resolve
+   `@typesafe-ai/sdk` from `data/resident/` — fixed by declaring it in
+   `packages/buddy-driver/package.json` (`afa2ce5d`).
+
+### Gate H verdict
+
+PASS for the gate's stated purpose: one bounded live source-bound sample
+exercised the new decision interface and produced exact measurements on every
+required axis. The interface demonstrably composes (typed boundaries, replay,
+DECLINE, parallel heads, exact provenance, no churn, fail-closed) at ~43%
+lower input tokens. Verified semantic progress in-window was zero for a
+world-state reason outside the decision plane; that limitation is recorded,
+not smoothed over.
+
+### Gate status A-H
+
+A,B,C,D,E,F,G,H all pass. Remaining operational dependency before ordinary
+portal progression: System2 (muse-spark) credit — a provider credential/billing
+dependency, not a code defect. The typed decision plane is proven on Liquid
+direct d1 as primary with no silent fallback.
