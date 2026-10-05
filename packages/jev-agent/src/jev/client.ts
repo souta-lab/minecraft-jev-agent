@@ -334,16 +334,33 @@ export const SITUATION_LEVELS = [
 ] as const
 
 /**
- * Question sets are CORE + trigger-specific (P1-7). The tool-to-LLM contract is:
- *  - `action`             the ONLY authoritative control choice; it embeds its target.
- *  - `goal_progress`      core score.
- *  - `plan_still_valid`   core score; low -> semantic escalation.
- *  - `situation_understood` core score; low -> semantic escalation.
- *  - `danger` / `should_retreat`      threat-triggered only.
- *  - `goal_blocked` / `strategy_change_needed` stall/failure-triggered only.
+ * §6/§18-D typed-head contract. All requested heads are answered in ONE batched
+ * evaluate() over the same canonical DecisionState; no head sees another's
+ * answer, so every consumer is a code-owned deterministic gate, never a
+ * head-to-head inference chain.
  *
- * `need_llm` / `need_replan` are deliberately NOT asked: "should the LLM run" is a
- * deterministic controller decision, not a model meta-judgement.
+ *   head             | type   | set      | consumer                       | authority boundary
+ *   -----------------|--------|----------|--------------------------------|------------------------------
+ *   action           | Choice | always   | decisionIdFrom -> commitment   | the ONLY actuation authority:
+ *                    |        |          |  -> guard -> executor lease    | it embeds its grounded target;
+ *                    |        |          |                                | no other head can name a
+ *                    |        |          |                                | candidate or dispatch a Skill.
+ *   abandon_option   | Noul   | always   | abandonRequested -> verdict -> | WHETHER only: ends the active
+ *                    |        |          |  applyAbandon (threshold +     | Option; never selects WHICH
+ *                    |        |          |  deferral/cooldown gates)      | candidate or forces success.
+ *   danger           | Score  | threat   | gateDanger -> decision journal | calibration evidence only:
+ *                    |        | trigger  |  (dangerGate band/confidence)  | no actuation consumer.
+ *   should_retreat   | Noul   | threat   | shouldRetreatFrom band ->      | calibration evidence only:
+ *                    |        | trigger  |  decision journal              | no actuation consumer.
+ *   SHADOW_*         | -      | never    | none                           | defined for offline replay
+ *                    |        |          |                                | only; not in QUESTION_NAMES,
+ *                    |        |          |                                | so they cannot be requested.
+ *   vtr-reach-route  | frame  | explicit | VTR reach route decision       | journaled `jev-policy-input`;
+ *                    |        | caller   | policy (not pi/beta authority) | separate contract, no Option
+ *                    |        |          |                                | or actuation authority.
+ *
+ * An unused or evidence-only head answer cannot execute anything: the only
+ * path from answers to mutation is `decisionIdFrom(result.answers.action)`.
  */
 export const AUTHORITATIVE_QUESTION_NAMES = ['action', 'abandon_option'] as const
 export const SAFETY_QUESTION_NAMES = ['danger', 'should_retreat'] as const

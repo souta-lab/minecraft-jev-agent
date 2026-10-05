@@ -175,6 +175,41 @@ choices), so no identity collapse was introduced. If Gate E replay evidence
 shows per-leg identity turnover dominates in healthy exploration, the fix is
 a semantic destination anchor, not boundary weakening.
 
-## Gates D–H
+## Gate D — concise independent parallel heads (PROVEN)
+
+The head topology was already structurally conformant; this gate formalizes
+the contract in `client.ts` (the canonical §6/§18-D table beside
+`QUESTION_NAMES`) and proves it mechanically in `test-question-heads.mts`:
+
+- **Batched**: every requested head is answered in ONE `evaluate()` over the
+  same canonical DecisionState; no head sees another head's answer.
+- **Exact sets per trigger**: `questionSetForTrigger` maps `core`/`stall`
+  triggers to `[action, abandon_option]` and `threat` triggers to the pair
+  plus `[danger, should_retreat]`; `questionNamesFor` cannot emit a shadow
+  name (they are not in `QUESTION_NAMES`, and requesting one yields zero
+  questions).
+- **`action` (pi, Choice)** is the sole actuation authority — criteria keys
+  are exactly the offered grounded ids; the authority kernel throws on a
+  choice outside the offer (`Jev invented non-grounded action id`), so a
+  head can never fabricate an action.
+- **`abandon_option` (beta, Noul)** is WHETHER-only — `abandonRequested` /
+  `abandonVerdict` / `applyAbandon` end the active Option under threshold +
+  deferral/cooldown gates; beta cannot select WHICH candidate.
+- **`danger` (Score) / `should_retreat` (Noul)** are calibration/evidence
+  heads on threat triggers: `gateDanger` and the `shouldRetreatFrom` band
+  feed the decision journal only — a result carrying only safety answers has
+  `decisionIdFrom === null` and authorizes nothing.
+- **Route frames** (`vtr-reach-route`) journal `jev-policy-input` per
+  question, never `pi:'model'`/`beta:'model'` Option authority.
+- **No singleton bypass**: `decide()` keeps the documented
+  `candidates.length === 1` non-bypass; the §18 prohibition is preserved
+  verbatim.
+- `decisionReason` (Gate C) is journaled in `authority.decisionReason` on
+  every call record.
+
+Focused proof: `test-question-heads.mts` PASS; regression sweep green
+(`test-audit.mts` 10/10, `test-typed-decision-backend.mts` 27/27).
+
+## Gates E–H
 
 Pending. Do not resume Minecraft until all pass.
