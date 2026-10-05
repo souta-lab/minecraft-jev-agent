@@ -1444,7 +1444,14 @@ export class JevController {
   }
 
   get policyProvider(): string {
-    return this.jev.kind === 'typesafe' ? 'typesafe-ai' : 'deterministic'
+    // A backend profile names its provider; `typesafe-ai` remains the identity
+    // of model-authoritative policies that predate backend profiles.
+    return this.jev.provider ?? (this.jev.kind === 'typesafe' ? 'typesafe-ai' : 'deterministic')
+  }
+
+  /** Typed Decision Plane backend profile id (provenance); null for offline policies. */
+  get policyProfile(): string | null {
+    return this.jev.profileId ?? null
   }
 
   get deterministicFallbackEnabled(): boolean {

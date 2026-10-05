@@ -145,10 +145,24 @@ function numberRecord(source: unknown, key: string): Record<string, number> | nu
   return out
 }
 
+/**
+ * Per-question confidence exactly as the serving backend reported it: the
+ * gateway dialect reports under `typesafe`, the direct System One dialect
+ * under `systemone`. Its calibration is a declared, model-specific property of
+ * the backend profile; nothing here rescales it.
+ */
 function calibratedConfidence(metadata: unknown, name: string): number | null {
-  const typesafe = member(metadata, 'typesafe')
-  const confidence = member(member(typesafe, 'confidence'), name)
-  return typeof confidence === 'number' && Number.isFinite(confidence) ? confidence : null
+  for (const namespace of ['typesafe', 'systemone']) {
+    const confidence = member(member(member(metadata, namespace), 'confidence'), name)
+    if (typeof confidence === 'number' && Number.isFinite(confidence)) return confidence
+  }
+  return null
+}
+
+/** Provider request id reported by the direct System One dialect (bounded provenance). */
+function reportedRequestId(metadata: unknown): string | null {
+  const requestId = member(member(metadata, 'systemone'), 'requestId')
+  return typeof requestId === 'string' ? requestId : null
 }
 
 function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown, routeFrame = false): JevAnswer {
@@ -389,6 +403,10 @@ export function isTransientProviderFailure(error: unknown, depth = 0): boolean {
   }
   if (depth > 5 || typeof error !== 'object' || error === null) return false
   const row = error as Record<string, unknown>
+  // A typed decision-transport failure carries its own transience verdict;
+  // trust it over the raw provider error it wraps (a credit failure a provider
+  // served as a 5xx is decisive, not a transient outage).
+  if (row.name === 'DecisionUnavailableError' && typeof row.retryable === 'boolean') return row.retryable
   const code = typeof row.code === 'string' ? row.code : ''
   if (/^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH)$/.test(code)) return true
   const status = [row.statusCode, row.status, row.httpStatus].find(
@@ -405,6 +423,19 @@ export function isTransientProviderFailure(error: unknown, depth = 0): boolean {
     isTransientProviderFailure(row.response, depth + 1)
   ) return true
   return Array.isArray(row.errors) && row.errors.some((entry) => isTransientProviderFailure(entry, depth + 1))
+}
+
+/**
+ * The availability class of a typed decision-transport failure that retrying
+ * the same request cannot fix (credentials, credit, entitlement, request or
+ * model identity), or null. Duck-typed: the policy does not import a transport.
+ */
+function decisiveDecisionFailure(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null
+  const row = error as Record<string, unknown>
+  return row.name === 'DecisionUnavailableError' && row.decisive === true && typeof row.availability === 'string'
+    ? row.availability
+    : null
 }
 
 /** Bounded, secret-safe diagnostics copied from known AI SDK error fields only. */
@@ -752,9 +783,26 @@ function sleepWithSignal(ms: number, signal: AbortSignal | undefined): Promise<v
   })
 }
 
+/** Non-secret identity of the backend profile serving the Typed Decision Plane. */
+export interface AuthorityBackendIdentity {
+  readonly profileId: string
+  readonly providerId: string
+}
+
+/** Historical default: TypeSafe Jev through the AI Gateway evaluate primitive. */
+export const GATEWAY_BACKEND_IDENTITY: AuthorityBackendIdentity = {
+  profileId: 'typesafe-gateway-jev',
+  providerId: 'typesafe-ai',
+}
+
 export interface AuthorityJevPolicyDependencies {
-  /** Internal transport seam used by deterministic retry regressions. */
+  /**
+   * Transport seam: deterministic retry regressions and the direct System One
+   * backend profiles. An injected transport owns its own credential.
+   */
   evaluate?: typeof evaluate
+  /** Serving backend provenance; defaults to the historical gateway profile. */
+  backend?: AuthorityBackendIdentity
   /** Internal wait seam; production waits remain abortable. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   random?: () => number
@@ -764,20 +812,31 @@ export class AuthorityJevPolicy implements JevPolicy {
   readonly kind = 'typesafe' as const
   readonly model: string
   readonly keyOrigin: string
+  readonly provider: string
+  readonly profileId: string
 
   private readonly options: JevPolicyOptions
   private readonly requestEvaluation: typeof evaluate
   private readonly wait: (ms: number, signal?: AbortSignal) => Promise<void>
   private readonly random: () => number
+  /** Non-secret serving-backend provenance stamped on every jev-call record. */
+  private readonly backendJournal: Readonly<Record<string, string>>
 
   constructor(options: JevPolicyOptions, key: KeyResolution, dependencies: AuthorityJevPolicyDependencies = {}) {
     this.options = options
     this.keyOrigin = key.origin
     this.model = options.model ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    const backend = dependencies.backend ?? GATEWAY_BACKEND_IDENTITY
+    this.provider = backend.providerId
+    this.profileId = backend.profileId
+    this.backendJournal = { profileId: backend.profileId, provider: backend.providerId, model: this.model, keyOrigin: key.origin }
     this.requestEvaluation = dependencies.evaluate ?? evaluate
     this.wait = dependencies.sleep ?? sleepWithSignal
     this.random = dependencies.random ?? Math.random
-    process.env.AI_GATEWAY_API_KEY = key.key
+    // Only the gateway primitive reads its credential from the environment. An
+    // injected transport owns its credential; installing it here would hand one
+    // provider's key to every other gateway caller in the process (System2).
+    if (dependencies.evaluate === undefined) process.env.AI_GATEWAY_API_KEY = key.key
   }
 
   async decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult> {
@@ -838,7 +897,7 @@ export class AuthorityJevPolicy implements JevPolicy {
         const latencyMs = Date.now() - started
         const decisionJournal = authorityDecision === undefined ? {} : { decision: authorityDecision }
         this.options.writer.write({
-          record: 'jev-call',
+          record: 'jev-call', backend: this.backendJournal,
           callId,
           ts: new Date().toISOString(),
           policy: this.kind,
@@ -854,7 +913,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           // authority/replay evidence inspectable rather than logging a different snapshot.
           state: modelState,
           questions,
-          response: { model: this.model, usage, answers },
+          response: { model: this.model, usage, answers, requestId: reportedRequestId(response.providerMetadata) },
           error: null,
           authority: authorityJournal(request, decisionJournal),
         })
@@ -863,6 +922,8 @@ export class AuthorityJevPolicy implements JevPolicy {
           policy: this.kind,
           source: 'jev' as const,
           model: this.model,
+          provider: this.provider,
+          profileId: this.profileId,
           latencyMs,
           usage,
           answers,
@@ -878,7 +939,7 @@ export class AuthorityJevPolicy implements JevPolicy {
         const callTimedOut = timeout.aborted
         if (callerCancelled || (isCancellationFailure(error) && !callTimedOut)) {
           this.options.writer.write({
-            record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+            record: 'jev-call', backend: this.backendJournal, callId, ts: new Date().toISOString(), policy: this.kind,
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
             transientRetries: transientRetryCount, transientWaitMs,
@@ -887,6 +948,23 @@ export class AuthorityJevPolicy implements JevPolicy {
             ...providerDiagnosticsField,
           })
           throw new FatalModelError('jev-authority', generalAttempt, message)
+        }
+        const decisive = decisiveDecisionFailure(error)
+        if (decisive !== null) {
+          // Credentials, credit, entitlement or request/model identity: retrying
+          // the same request cannot help, and a host retry would only rediscover
+          // the same outage as fresh generations (INFRA_CHURN).
+          this.options.writer.write({
+            record: 'jev-call', backend: this.backendJournal, callId, ts: new Date().toISOString(), policy: this.kind,
+            model: this.model, stage: request.stage, latencyMs: Date.now() - started,
+            rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
+            transientRetries: transientRetryCount, transientWaitMs,
+            state: modelState, questions, response: null, error: message, providerAttempts,
+            authority: authorityJournal(request, { failure: `provider-unavailable-decisive:${decisive}` }),
+            retryable: false,
+            ...providerDiagnosticsField,
+          })
+          throw new FatalModelError('jev-authority', generalAttempt, message, false)
         }
         if (isRateLimit(error) && rateAttempt < this.options.rateLimitRetries) {
           rateAttempt += 1
@@ -924,7 +1002,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             transientRetryCount += 1
             transientWaitMs += retryDelayMs
             this.options.writer.write({
-              record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+              record: 'jev-call', backend: this.backendJournal, callId, ts: new Date().toISOString(), policy: this.kind,
               model: this.model, stage: request.stage, latencyMs: Date.now() - started,
               rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
               transientRetries: transientRetryCount, transientWaitMs,
@@ -953,7 +1031,7 @@ export class AuthorityJevPolicy implements JevPolicy {
             continue
           }
           this.options.writer.write({
-            record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+            record: 'jev-call', backend: this.backendJournal, callId, ts: new Date().toISOString(), policy: this.kind,
             model: this.model, stage: request.stage, latencyMs: Date.now() - started,
             rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
             transientRetries: transientRetryCount, transientWaitMs, state: modelState, providerAttempts,
@@ -974,7 +1052,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           continue
         }
         this.options.writer.write({
-          record: 'jev-call', callId, ts: new Date().toISOString(), policy: this.kind,
+          record: 'jev-call', backend: this.backendJournal, callId, ts: new Date().toISOString(), policy: this.kind,
           model: this.model, stage: request.stage, latencyMs: Date.now() - started,
           rateLimitRetries: rateAttempt, rateLimitWaitMs: rateWaitMs,
           transientRetries: transientRetryCount, transientWaitMs, state: modelState, providerAttempts,

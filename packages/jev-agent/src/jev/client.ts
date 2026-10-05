@@ -98,6 +98,9 @@ export interface JevResult {
   answers: Record<string, JevAnswer>
   /** Number of actual model-provider evaluate attempts; absent for legacy/offline policies. */
   providerAttempts?: number
+  /** Serving backend provider/profile (provenance); absent for legacy/offline policies. */
+  provider?: string
+  profileId?: string
 }
 
 export interface JevRequest {
@@ -127,6 +130,9 @@ export interface JevRequest {
 export interface JevPolicy {
   readonly kind: JevPolicyKind
   readonly model: string
+  /** Serving backend provider/profile of a model-authoritative policy (provenance only). */
+  readonly provider?: string
+  readonly profileId?: string
   decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult>
 }
 
@@ -750,8 +756,13 @@ export function resolveJevApiKey(): KeyResolution | null {
 
 export interface JevPolicyOptions {
   writer: JsonlWriter
-  /** null -> DEFAULT_JEV_MODEL / AI_GATEWAY_MODEL env override */
+  /**
+   * Gateway dialect only: null -> DEFAULT_JEV_MODEL / AI_GATEWAY_MODEL env
+   * override. A direct backend profile pins its own model id.
+   */
   model: string | null
+  /** Typed Decision Plane backend profile id; unset -> BUDDY_DECISION_PROFILE / the committed default. */
+  decisionProfile?: string | null
   timeoutMs: number
   maxRetries: number
   /** how many times a 429 gateway rate limit is retried before giving up */
@@ -760,7 +771,7 @@ export interface JevPolicyOptions {
   rateLimitBaseDelayMs: number
   /** force the local deterministic policy even when a key is present */
   forceFallback?: boolean
-  /** key resolver seam for tests; defaults to `resolveJevApiKey` */
+  /** credential resolver seam for tests; defaults to the selected profile's own resolver */
   resolveKey?: () => KeyResolution | null
 }
 

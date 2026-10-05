@@ -22,6 +22,12 @@ import {
 import type { JevPolicy, JevPolicyOptions, JevResult } from './jev/client.ts'
 import { AuthorityJevPolicy, AUTHORITY_PRIMARY_INSTRUCTIONS, buildAuthorityQuestions } from './jev/authority.ts'
 import type { AuthorityTaggedJevResult } from './jev/authority.ts'
+import {
+  DECISION_PROFILES,
+  DEFAULT_DECISION_PROFILE_ID,
+  createDirectDecisionBackend,
+  resolveProfileCredential,
+} from '../../jev-harness/providers/systemone-direct.ts'
 
 /** Neutral public prompt: evidence is not silently upgraded into a hard ranking rule. */
 export const PRIMARY_INSTRUCTIONS = AUTHORITY_PRIMARY_INSTRUCTIONS
@@ -54,16 +60,47 @@ export function abandonRequested(result: JevResult, threshold?: number): boolean
   return legacyAbandonRequested(result)
 }
 
+/** Explicit backend selection; unset or blank -> the committed primary profile. */
+export function resolveDecisionProfileId(env: Record<string, string | undefined> = process.env): string {
+  const raw = (env.BUDDY_DECISION_PROFILE ?? '').trim()
+  return raw.length > 0 ? raw : DEFAULT_DECISION_PROFILE_ID
+}
+
 /**
  * Single swap point. Deterministic local policy is explicit-only; every normal
- * run receives the new AuthorityJevPolicy and a missing key is fatal.
+ * run receives the AuthorityJevPolicy served by exactly ONE explicit backend
+ * profile. An unknown profile or a missing credential is fatal: no other
+ * profile, model or deterministic policy is ever substituted.
  */
 export function createJevPolicy(options: JevPolicyOptions): JevPolicy {
   if (options.forceFallback === true) return createLegacyJevPolicy(options)
-  const resolve = options.resolveKey ?? resolveJevApiKey
-  const key = resolve()
-  if (key === null) {
-    throw new FatalModelError('jev-policy-key', 1, 'no gateway key resolved and forceFallback was not set')
+  const profileId = options.decisionProfile ?? resolveDecisionProfileId()
+  const profile = DECISION_PROFILES[profileId]
+  if (profile === undefined) {
+    throw new FatalModelError('jev-policy-profile', 1, `unknown decision profile ${JSON.stringify(profileId)}; no other profile is substituted`)
   }
-  return new AuthorityJevPolicy(options, key)
+  const backend = { profileId: profile.profileId, providerId: profile.providerId }
+  if (profile.wireDialect === 'ai-gateway-evaluate') {
+    const key = (options.resolveKey ?? resolveJevApiKey)()
+    if (key === null) {
+      throw new FatalModelError('jev-policy-key', 1, 'no gateway key resolved and forceFallback was not set')
+    }
+    return new AuthorityJevPolicy(options, key, { backend })
+  }
+  const credential = options.resolveKey !== undefined ? options.resolveKey() : resolveProfileCredential(profile)
+  if (credential === null) {
+    throw new FatalModelError(
+      'jev-policy-key',
+      1,
+      `no key resolved for decision profile ${profileId} (${profile.secretFile ?? 'no credential source'}) and forceFallback was not set`,
+    )
+  }
+  const direct = createDirectDecisionBackend(profile, credential, { timeoutMs: options.timeoutMs })
+  // The profile pins the model (AI_GATEWAY_MODEL addresses the gateway dialect
+  // only), and the backend - not the policy - holds the credential.
+  return new AuthorityJevPolicy(
+    { ...options, model: profile.modelId },
+    { key: '', origin: direct.keyOrigin },
+    { evaluate: direct.evaluate, backend },
+  )
 }

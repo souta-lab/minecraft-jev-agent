@@ -65,6 +65,7 @@
       "name": "jev-harness",
       "version": "0.1.0",
       "dependencies": {
+        "@typesafe-ai/sdk": "^0.6.0",
         "ai": "^7.0.105",
       },
       "devDependencies": {

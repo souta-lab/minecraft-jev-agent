@@ -1149,6 +1149,8 @@ export async function decide(
         source: result.source,
         policy: result.policy,
         model: result.model,
+        provider: result.provider ?? host.policyProvider,
+        profile: result.profileId ?? null,
         callId: result.callId,
         chainId,
         projectionHash: hash,

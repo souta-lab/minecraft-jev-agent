@@ -351,6 +351,19 @@ All sampled calls returned HTTP 200. This is a connectivity/latency sanity check
 
 The Liquid API key is stored outside the repository in a permission-restricted secret file. Never place it in docs, git, logs, prompts, handoff, test fixtures, or process arguments.
 
+### Liquid-direct profile (implemented 2026-10-05)
+
+The seam lives at `packages/jev-harness/providers/systemone-direct.ts` (the only firewall-allowed home for a provider SDK) and plugs into the unchanged `AuthorityJevPolicy` transport seam; `createJevPolicy` selects exactly one profile (`BUDDY_DECISION_PROFILE`, default `liquid-direct-d1`; `typesafe-gateway-jev` and `liquid-direct-d1-free` are explicit-only). The policy never holds the Liquid credential and never installs it as `AI_GATEWAY_API_KEY`.
+
+Live acceptance probe through the production policy path:
+
+- discovery: the SDK root is `https://api.liquid.ai/decisions` (`/v1/models` -> `d1`, `d1:free`); the bare host serves the console web app (404 HTML);
+- mixed Choice + Score + Noul batch: exact candidate ids round-trip, distribution keys equal the offered labels, raw Noul `P(true)` preserved, Score legend order preserved, reported model `d1`, `usage.output_tokens = 0`, 0.30-0.51 s per batch; identical input produced identical answers across samples;
+- caller abort -> cancelled (non-retryable); 1 ms attempt timeout -> transient; invalid credential -> HTTP 401 `invalid_api_key` -> decisive `auth`, one attempt, no retry;
+- explicit `d1:free` profile answers with reported model `d1:free`.
+
+Level-3 calibration is **not** established. On two synthetic probe states without a current Option, d1's beta `P(abandon=true)` was 0.72-0.91, while historical Jev beta in comparable live states sat near 0.1-0.2. Treat beta adoption under d1 as a live measurement target; do not retune thresholds without measured evidence.
+
 ## 13. Backend profile contract
 
 A production decision-model profile should explicitly declare:

@@ -109,7 +109,7 @@ addCase('createJevPolicy: unresolvable key is fatal, never a silent fallback', (
     pass:
       thrown instanceof FatalModelError &&
       thrown.context === 'jev-policy-key' &&
-      thrown.message.includes('no gateway key resolved'),
+      /no (?:gateway )?key resolved/.test(thrown.message),
     detail: thrown instanceof FatalModelError ? `context=${thrown.context} attempts=${thrown.attempts}` : `thrown=${String(thrown)}`,
   }
 })

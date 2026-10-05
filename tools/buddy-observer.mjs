@@ -2289,6 +2289,11 @@ const SAFE_PROVIDER_DIAGNOSTIC_HEADERS = new Set([
   'x-vercel-id', 'x-vercel-request-id', 'x-request-id', 'request-id', 'x-typesafe-request-id', 'requestid',
 ])
 
+/** Serving provider of a jev-call; records written before backend profiles are the historical gateway. */
+function jevCallProvider(call) {
+  return typeof call?.backend?.provider === 'string' && call.backend.provider.length > 0 ? call.backend.provider : 'typesafe-ai'
+}
+
 function safeProviderDiagnosticToken(value, maxLength = 80) {
   if (typeof value !== 'string') return null
   const token = value.trim()
@@ -2353,7 +2358,6 @@ export function projectJevProviderFailures({
     ? failed.generationId
     : null
   const failureAt = parseTimestamp(failed?.ts)
-  if (runWindowBound && failed.authority?.provider !== undefined && failed.authority.provider !== 'typesafe-ai') return []
   if (runWindowBound && failedGenerationId === null && failureAt === null) return []
   return jevCalls
     .filter((call) => {
@@ -2373,6 +2377,7 @@ export function projectJevProviderFailures({
         if (callGenerationId !== null && failedGenerationId !== null && callGenerationId !== failedGenerationId) return false
         if (failureAt !== null && (at > failureAt + 5_000 || failureAt - at > 120_000)) return false
         if (typeof failed.authority?.model === 'string' && call.model !== failed.authority.model) return false
+        if (typeof failed.authority?.provider === 'string' && jevCallProvider(call) !== failed.authority.provider) return false
         if (expectedEpoch !== null && callWorld.worldEpoch !== undefined && callWorld.worldEpoch !== expectedEpoch) return false
         const callDimension = normalizeDimension(callWorld.dimension ?? call.state?.self?.dimension)
         if (expectedDimension !== null && callDimension !== null && callDimension !== expectedDimension) return false
@@ -2388,7 +2393,7 @@ export function projectJevProviderFailures({
       return redactSecrets({
         observedAt: call.ts,
         callId: call.callId ?? null,
-        provider: 'typesafe-ai',
+        provider: jevCallProvider(call),
         model: call.model ?? null,
         stage: call.stage ?? null,
         latencyMs: Number.isFinite(call.latencyMs) ? call.latencyMs : null,

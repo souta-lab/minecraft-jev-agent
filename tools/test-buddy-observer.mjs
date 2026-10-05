@@ -1315,6 +1315,24 @@ assert.deepEqual(providerFailureSummary.authority.jevRecentFailures[0].providerD
 })
 assert.equal(providerFailureSummary.authority.jevRecentFailures[0].binding.confidence, 'generation-window-inferred')
 assert.ok(!JSON.stringify(providerFailureSummary.authority.jevRecentFailures).includes('private-token'))
+assert.equal(providerFailureSummary.authority.jevRecentFailures[0].provider, 'typesafe-ai', 'pre-profile records keep their historical identity')
+const liquidFailureSummary = buildAiSummary(buildObserverSnapshot({
+  report,
+  events: combatEvents,
+  runBoot: combatEvents[0],
+  runMetadata: observerRunMetadata(),
+  runGenerationReady: observerGenerationReady('gen-7', '2026-09-21T12:00:01.000Z'),
+  jevCalls: [{
+    ...gatewayFailure,
+    callId: 'liquid-503-call',
+    model: 'd1',
+    backend: { profileId: 'liquid-direct-d1', provider: 'liquid', model: 'd1', keyOrigin: 'file:/fixture/liquid.key' },
+  }],
+  now: Date.parse('2026-09-21T12:00:12.000Z'),
+}), { now: Date.parse('2026-09-21T12:00:12.000Z') })
+assert.equal(liquidFailureSummary.authority.jevRecentFailures.length, 1)
+assert.equal(liquidFailureSummary.authority.jevRecentFailures[0].provider, 'liquid', 'a profile-backed failure names its real provider')
+assert.equal(liquidFailureSummary.authority.jevRecentFailures[0].model, 'd1')
 const unboundProviderFailureSnapshot = buildObserverSnapshot({
   report,
   events: combatEvents,

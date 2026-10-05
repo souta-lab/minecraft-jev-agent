@@ -953,6 +953,8 @@ export interface GenerationStatus {
   buildHash?: string | null
   policyKind: string
   policyProvider: string
+  /** Typed Decision Plane backend profile id; null for offline/deterministic policies. */
+  policyProfile?: string | null
   policyModel: string
   system2Provider: string
   system2Model: string
