@@ -479,6 +479,91 @@ addCase('(iii-c) a death-zoned drop is not offered as a capability route', () =>
   }
 })
 
+// (iii-d) A drop whose dedicated pickup walk already bounded out has, by the
+//         executor's own stricter truth, NO standable approach: the gate's
+//         probe admitted a stand the walk could not use (live gen-muvhqtpi:
+//         raw_iron `PICKUP:e13225` pinned at 2.68m inside the body's own
+//         descend bore for the whole window on `g5:collect:raw_iron`, then
+//         re-admitted for another identical walk). One proven failure must
+//         flip the drop to the SAME `standable_approach` withhold a
+//         stand-less drop already gets, so the acquisition pass answers it
+//         with a grounded route instead of re-burning bounded windows until
+//         the invisible failure-limit filter removes it.
+function collectIronDropState(overrides: {
+  failedCandidates?: Record<string, number>
+}): WorldState {
+  const base = liveState({
+    inventory: { stone_pickaxe: 1 },
+    headroomCuts: [],
+    stepCuts: [STEP_CUT],
+  })
+  const current: QueuedGoal = {
+    id: 'g5:collect:raw_iron',
+    kind: 'collect',
+    description: 'collect 8 x raw_iron',
+    targetItem: 'raw_iron',
+    requiredCount: 8,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  return {
+    ...base,
+    goal: {
+      ...base.goal,
+      id: 'collect:raw_iron:8',
+      description: 'collect 8 x raw_iron',
+      targetItem: 'raw_iron',
+      requiredCount: 8,
+    },
+    goalQueue: { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] },
+    signals: signals({ failedCandidates: overrides.failedCandidates ?? {} }),
+    entities: [
+      {
+        id: 60,
+        name: 'item',
+        kind: 'item',
+        username: null,
+        position: { x: 28.5, y: 61, z: 15.5 },
+        distance: 1.0,
+        hostile: false,
+        droppedItem: 'raw_iron',
+      },
+    ],
+  }
+}
+
+addCase('(iii-d) control: an untried focus drop with a sensed stand is offered as PICKUP', () => {
+  const grounded = generateGroundedCandidates(collectIronDropState({}), options)
+  const offered = grounded.candidates.some((candidate) => candidate.id === 'PICKUP:e60')
+  const withheld = grounded.withheld.find((entry) => entry.candidate.id === 'PICKUP:e60')
+  return {
+    pass: offered && withheld === undefined,
+    detail: `offered=${offered} withheldReason=${withheld?.result.reason ?? 'none'}`,
+  }
+})
+
+addCase('(iii-d) a pickup-proven-blocked drop withholds standable_approach and gets the route family', () => {
+  const grounded = generateGroundedCandidates(collectIronDropState({ failedCandidates: { 'PICKUP:e60': 1 } }), options)
+  const offered = grounded.candidates.some((candidate) => candidate.id === 'PICKUP:e60')
+  const entry = grounded.withheld.find((w) => w.candidate.id === 'PICKUP:e60')
+  const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
+  const fact = entry === null || entry === undefined ? null : acquisitionFor(entry, 'standable_approach')
+  return {
+    pass:
+      !offered &&
+      entry !== undefined &&
+      missing.includes('standable_approach') &&
+      fact !== null &&
+      (fact?.routes ?? []).length > 0,
+    detail: `offered=${offered} withheld=${entry !== undefined} missing=[${missing.join(',')}] routes=[${(fact?.routes ?? []).join(',') || 'none'}] reason=${fact?.reason ?? 'none'}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // (iv) CONTROL: the precondition is already satisfied. The offer must be
 //      byte-identical to the pre-acquisition behaviour - no invented route and

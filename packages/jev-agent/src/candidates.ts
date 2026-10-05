@@ -13718,6 +13718,19 @@ function pickupCandidateForEntity(
 ): Candidate {
   const item = entity.droppedItem as string
   const inReach = distance(entity.position, state.self.eyePosition) <= options.reach
+  // A drop whose dedicated pickup walk already bounded out is, by the
+  // executor's own stricter truth, a drop with no standable approach: the
+  // gate's probe found a stand the walk could not use (the live shape is a
+  // drop one ledge down inside the body's own descend bore - `PICKUP:e13225`
+  // pinned at 2.68m for the whole window, raw_iron on the iron rung), and
+  // re-offering the same walk just burns another bounded window against the
+  // same geometry. Withhold it as `standable_approach` - the exact verdict
+  // `dropStandReachable` already produces for a stand-less drop - so the
+  // acquisition pass answers the drop with a stand-creating route grounded at
+  // its position instead of repeating the failed walk. The failure-limit
+  // filter in the list builders still owns full retirement.
+  const walkProvenBlocked =
+    failureCount(state.signals.failedCandidates, `PICKUP:e${entity.id}`) > 0
   return {
     // The entity ID is the identity of THIS drop for its whole lifetime.
     id: `PICKUP:e${entity.id}`,
@@ -13730,7 +13743,7 @@ function pickupCandidateForEntity(
     requiresTool: false,
     toolName: null,
     inReach,
-    hasStandableAdjacent: dropStandReachable(state, entity.position),
+    hasStandableAdjacent: dropStandReachable(state, entity.position) && !walkProvenBlocked,
     meta: {
       tick: state.tick,
       pickupItem: item,
