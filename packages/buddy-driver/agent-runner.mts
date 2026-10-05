@@ -23,6 +23,7 @@ import { Vec3 } from 'vec3'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { buildGeneration } from './build.mts'
+import { initialSourceWatchState, sourceWatchPoll } from './source-watch.ts'
 import type {
   AcceptanceRecord,
   ActuationLease,
@@ -144,6 +145,9 @@ const VERSION = '1.21.11'
 const HEARTBEAT_MS = 15000
 const OBSERVE_MS = 1500
 const RELOAD_DEBOUNCE_MS = 1200
+// Stable-signature polls required before a source-changed reload is scheduled;
+// ~12s at OBSERVE_MS. Keeps mid-edit trees out of the builder.
+const RELOAD_QUIESCE_CYCLES = 8
 const GEN_RESTART_MS = 3000
 const LISTENER_BASELINE_POLL_MS = 25
 const LISTENER_BASELINE_MAX_POLLS = 200
@@ -586,7 +590,6 @@ let generationConnectionAttempt: Promise<boolean> | null = null
 let reloadTimer: NodeJS.Timeout | null = null
 let deferredModelReloadTrigger: string | null = null
 let reloadArbiter: ReloadArbiter | null = null
-let lastSrcSignature = ''
 let lastInventoryHash = ''
 let lastActionId: string | null = null
 let lastHeartbeatAt = 0
@@ -2396,13 +2399,13 @@ function signatureOfSource(): string {
   return hash.digest('hex')
 }
 
+// A signature delta can land mid-edit: the gate only schedules the reload
+// after the signature has been stable for RELOAD_QUIESCE_CYCLES polls, so a
+// burst of saves cannot build a half-written tree.
+const sourceWatchState = initialSourceWatchState()
 setInterval(() => {
-  const sig = signatureOfSource()
-  if (sig !== lastSrcSignature) {
-    const first = lastSrcSignature === ''
-    lastSrcSignature = sig
-    if (!first) scheduleReload('source-changed')
-  }
+  const trigger = sourceWatchPoll(signatureOfSource(), sourceWatchState, RELOAD_QUIESCE_CYCLES)
+  if (trigger !== null) scheduleReload(trigger)
 }, OBSERVE_MS)
 
 function scheduleReload(trigger: string): void {
