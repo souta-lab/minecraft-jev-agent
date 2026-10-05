@@ -505,6 +505,54 @@ addCase('(d5) foodSourceGap is pure: the same state yields the same gap line', (
   }
 })
 
+// --- (d6/d7) `next=escalate` delivers an electable handoff -----------------------
+//
+// Live shape (portal-p24 run-muue9c3f-7cyn gen-muug8kq2-5gdu28): a hungry body
+// underground held `FOOD_SOURCE_NONE ... next=escalate` for ~20 min while the
+// offer kept producing verified DESCEND/PICKUP `search` progress under an
+// open-ended explore head - every settled progress reset `starvedDecisions`, so
+// `NO_PRODUCTIVE_HEAD_WINDOW` stayed at count=1 and the starvation bound the gap
+// was designed to ride never matured. The only reachable handoff was the
+// `bodyStarving` restriction at food=0: the lethal-fragility timing of the
+// 23:25 starvation death. The escalation arm the typed fact names must be
+// electable while the body still has runway, without masking a real route.
+
+addCase('(d6) a hungry body with no food route and no search route gets an electable ESCALATE', () => {
+  const state = perceive({ counts: { raw_iron: 2 }, food: 14, blocks: FLOOR })
+  const result = grounded(state)
+  const escalates = result.candidates.filter((candidate) => candidate.kind === 'ESCALATE')
+  const foodEscalate = escalates.find((candidate) => String(candidate.meta.reason).startsWith('food_source:'))
+  return {
+    pass:
+      result.foodGap !== null &&
+      result.foodGap.next === 'escalate' &&
+      escalates.length === 1 &&
+      foodEscalate !== undefined &&
+      String(foodEscalate.meta.reason) === `food_source:${result.foodGap.reason}` &&
+      foodEscalate.label.includes(`food_source:${result.foodGap.reason}`),
+    detail: `next=${result.foodGap?.next ?? 'none'} escalates=[${escalates.map((candidate) => String(candidate.meta.reason)).join(',') || 'none'}]`,
+  }
+})
+
+addCase('(d7) a fed body, and a hungry body with a grounded food route, keep the offer free of the food escalation', () => {
+  const fed = grounded(perceive({ counts: {}, food: 20, blocks: FLOOR }))
+  const routed = grounded(
+    perceive({ counts: {}, food: 14, blocks: [{ at: { x: 2, y: 64, z: 0 }, name: 'sweet_berry_bush' }] }),
+  )
+  const foodEscalates = (candidates: ReadonlyArray<{ kind: string; meta: Record<string, unknown> }>) =>
+    candidates.filter(
+      (candidate) => candidate.kind === 'ESCALATE' && String(candidate.meta.reason).startsWith('food_source:'),
+    ).length
+  return {
+    pass:
+      fed.foodGap === null &&
+      routed.foodGap === null &&
+      foodEscalates(fed.candidates) === 0 &&
+      foodEscalates(routed.candidates) === 0,
+    detail: `fedGap=${fed.foodGap === null ? 'none' : 'set'} routedGap=${routed.foodGap === null ? 'none' : 'set'} fedEscalates=${foodEscalates(fed.candidates)} routedEscalates=${foodEscalates(routed.candidates)}`,
+  }
+})
+
 // --- (e) the food truth table --------------------------------------------------
 
 addCase('(e1) the eat truth is one table: mushroom_stew / glow_berries are edible, raw red_mushroom is not', () => {

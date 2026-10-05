@@ -3962,9 +3962,50 @@ export function generateGroundedCandidates(
   // so "no food route" can never be reported while a route is actually on offer.
   // The mob-drop producer gap follows the same rule: it is derived from the same
   // offered set, so it can never claim a missing producer while one is on offer.
+  const foodGap = foodSourceGap(state, options, grounded.candidates)
+  // `next=escalate` is the code-owned statement that this offer grounds no route
+  // toward food AND no grounded search route at all, so the starvation/
+  // escalation arm the gap names must be reachable, not merely logged. Measured
+  // live (portal-p24 run-muue9c3f-7cyn gen-muug8kq2-5gdu28): the gap stayed open
+  // ~20 min while the starvation bound it was designed to ride was laundered by
+  // interleaved `search` progress (any verified DESCEND/PICKUP resets the row's
+  // starvedDecisions under an open-ended explore head), so a handoff could only
+  // arrive via the bodyStarving restriction at food=0 - the lethal-fragility
+  // timing of the 23:25 starvation death. The injection is deliberately limited
+  // to the pre-floor window: at `starving` the critical-damage restriction and
+  // its own exhaustion ledger own the offer shape (a lone injected ESCALATE
+  // would silently collapse their "original set stays observable" fallback).
+  // The candidate is appended only when the offered set carries no explore
+  // route (`next=escalate`), so it can never outrank a grounded search answer;
+  // ESCALATE is excluded from `actionable`, so the starvation ledger still
+  // counts the tick, and the election stays with Jev.
+  const candidates =
+    foodGap !== null &&
+    foodGap.next === 'escalate' &&
+    !foodGap.starving &&
+    !grounded.candidates.some((candidate) => candidate.kind === 'ESCALATE')
+      ? [
+          ...grounded.candidates,
+          {
+            id: 'ESCALATE',
+            kind: 'ESCALATE' as const,
+            label: `request System 2 review (food_source:${foodGap.reason})`,
+            targetName: null,
+            target: null,
+            targetEntityId: null,
+            itemName: null,
+            requiresTool: false,
+            toolName: null,
+            inReach: true,
+            hasStandableAdjacent: true,
+            meta: { tick: state.tick, reason: `food_source:${foodGap.reason}` },
+          },
+        ]
+      : grounded.candidates
   return {
     ...grounded,
-    foodGap: foodSourceGap(state, options, grounded.candidates),
+    candidates,
+    foodGap,
     // The combat-kit fact is the other half of the same producer path: which
     // prerequisite (a sword craft, an armour equip or the armour craft that
     // produces the piece) this body's kit is missing for the required kill.
