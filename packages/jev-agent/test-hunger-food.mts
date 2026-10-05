@@ -604,6 +604,42 @@ addCase('(f4) sealed + stranded BELOW the band: unchanged - the arm leads as bef
   }
 })
 
+// The `ASCEND:escape` last-resort arm carried the same altitude over-closure:
+// its `y < band` clause kept a NON-hungry sealed body above the band WAIT/
+// ESCALATE-only after the 25s stall measured, with no producer of the up-route.
+function pocketStateFed(y: number): WorldState {
+  const base = pocketState(y)
+  return {
+    ...base,
+    self: { ...base.self, food: 20, health: 20 },
+    signals: signals({ stalledMs: 30000 }),
+  }
+}
+
+addCase('(f5) NOT hungry + sealed + stranded ABOVE the band + stalled: ASCEND:escape still offers the climb out', () => {
+  const state = pocketStateFed(64.3)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const escape = grounded.candidates.filter(
+    (candidate) => candidate.id.startsWith('ASCEND:escape:') || candidate.meta.stepOverhead === true,
+  )
+  return {
+    pass: escape.length > 0,
+    detail: `candidates=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(f6) NOT hungry + stranded above band with OPEN sky + stalled: the escape arm stays silent (island digs DOWN)', () => {
+  const state = { ...pocketStateFed(64.3), headroomCuts: [], stepCuts: [] }
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const escape = grounded.candidates.filter(
+    (candidate) => candidate.id.startsWith('ASCEND:escape:') || candidate.meta.stepOverhead === true,
+  )
+  return {
+    pass: escape.length === 0,
+    detail: `candidates=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 
 let failures = 0

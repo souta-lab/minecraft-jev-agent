@@ -3357,6 +3357,35 @@ export function strandedOnColumn(state: Pick<WorldState, 'terrain' | 'self'>): b
 }
 
 /**
+ * The sealed-pocket escape fact, shared by the upward arms
+ * (`foodHabitatAscent`'s above-band exception and the `ASCEND:escape`
+ * last-resort offer): a body stranded on its own walking component AND with a
+ * sensed overhead obstruction in the climb envelope - the pocket's own
+ * `currentFootprint` headroom cell, or a face step's `blockedBy`. An unknown
+ * overhead cell fails closed into the same fact. The canopy/island body these
+ * gates were measured on has the opposite facts (walkable region, open sky).
+ *
+ * `ceilingY` is the next staircase landing the escape must stand on: the top of
+ * the pocket's own sensed blocking cell (fallback `feet + 2`, the hand-cut
+ * profile the shaft conveyor cuts). The route self-terminates the tick the
+ * column breaks open - the headroom fact clears, `strandedOnColumn` widens,
+ * and every consumer's gate fires again.
+ */
+export function sealedPocketEscape(state: Pick<WorldState, 'terrain' | 'self' | 'headroomCuts' | 'stepCuts'>): { ceilingY: number } | null {
+  if (!strandedOnColumn(state)) return null
+  const sealedOverhead =
+    (state.headroomCuts ?? []).some((cut) => cut.currentFootprint === true) ||
+    (state.stepCuts ?? []).some((cut) => cut.blockedBy !== null && cut.blockedBy !== undefined)
+  if (!sealedOverhead) return null
+  const ceilingCuts = (state.headroomCuts ?? []).filter((cut) => cut.currentFootprint === true)
+  const ceilingY =
+    ceilingCuts.length > 0
+      ? Math.max(...ceilingCuts.map((cut) => cut.pos.y))
+      : Math.floor(state.self.position.y) + 2
+  return { ceilingY }
+}
+
+/**
  * Candidate kinds that move the body to another world cell. Used as the CAN
  * envelope for the stranded-column descent: while ANY of these is on offer the
  * tick already has a way out of the current cell, so the last-resort vertical
@@ -5611,6 +5640,12 @@ function generateRawCandidates(
   // the scheduler's own boundary (`stallMs`, controller.ts): a transient
   // candidate-starved tick between plans must not see a routine "climb out"
   // offer - the affordance appears only once no-progress is a measured fact.
+  // The altitude clause carries the same exception `foodHabitatAscent` got:
+  // `y < band` was the sealed-pocket premise, but a hand-cut shaft keeps a
+  // body sealed ABOVE the band too - `sealedPocketEscape` holds the stranded +
+  // overhead-obstruction facts, and a sealed body that is not hungry still has
+  // no other producer of the up-route.
+  const sealedEscape = sealedPocketEscape(state)
   if (
     !hasLocomotionCandidate &&
     columnDescent.candidates.filter(
@@ -5624,7 +5659,7 @@ function generateRawCandidates(
     (state.signals?.stalledMs ?? 0) >= SEALED_ESCAPE_STALL_MS &&
     current?.kind !== 'surface' &&
     normalizeDimensionId(state.self.dimension) === 'overworld' &&
-    state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
+    (state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL || sealedEscape !== null)
   ) {
     // The offered id is keyed on the escape CONTEXT (the body's own cell), not
     // the vertical plan's step cell: the planner re-picks the best cut each
@@ -5635,7 +5670,7 @@ function generateRawCandidates(
     // the freshly re-planned step, which is what the executor needs.
     const escapeId = `ASCEND:escape:${blockId('p', { x: Math.floor(state.self.position.x), y: Math.floor(state.self.position.y), z: Math.floor(state.self.position.z) })}`
     const escape = ascentRouteTo(state, options, {
-      targetY: ANIMAL_HABITAT_SEA_LEVEL + 1,
+      targetY: Math.max(ANIMAL_HABITAT_SEA_LEVEL + 1, (sealedEscape?.ceilingY ?? 0) + 1),
       goalId: current?.id ?? 'sealed-escape',
       idPrefix: 'ASCEND:escape:',
       label: 'dig or climb back out of the sealed pocket toward the surface',
@@ -7186,36 +7221,22 @@ export function foodHabitatAscent(state: WorldState, options: CandidateOptions):
   // habitat - no grass, no sky, no standable cell beyond its own, exactly the
   // hand-cut pocket this arm leads out of starvation. The canopy/island body the
   // gate was measured on has the opposite facts (walkable region, open sky), so
-  // the exception keys on the same two sensed facts instead of altitude alone:
-  // `strandedOnColumn` (no standable cell beyond the body's own) AND an overhead
-  // obstruction in the climb envelope - the pocket's own `currentFootprint`
-  // headroom cell, or a face step's `blockedBy`; an unknown overhead cell fails
-  // closed into the same fact.
+  // the exception keys on `sealedPocketEscape` - the same sensed stranded +
+  // overhead-obstruction facts the `ASCEND:escape` fallback arm shares.
   const aboveBand = Math.floor(state.self.position.y) >= ANIMAL_HABITAT_SEA_LEVEL
-  const sealedOverhead =
-    (state.headroomCuts ?? []).some((cut) => cut.currentFootprint === true) ||
-    (state.stepCuts ?? []).some((cut) => cut.blockedBy !== null && cut.blockedBy !== undefined)
-  const sealedAboveBand = aboveBand && strandedOnColumn(state) && sealedOverhead
-  if (aboveBand && !sealedAboveBand) return { candidates: [], refusal: null }
+  const sealed = aboveBand ? sealedPocketEscape(state) : null
+  if (aboveBand && sealed === null) return { candidates: [], refusal: null }
   const hinted =
     typeof options.foodHabitatY === 'number' && Number.isFinite(options.foodHabitatY)
       ? options.foodHabitatY
       : sensedSurfaceY(state)
   let targetY = Math.max(ANIMAL_HABITAT_SEA_LEVEL, hinted ?? ANIMAL_HABITAT_SEA_LEVEL)
-  if (sealedAboveBand) {
+  if (sealed !== null) {
     // A sealed body cannot know where the surface is, so the one grounded
-    // target is one standable cell above the sensed ceiling: each
-    // `currentFootprint` cut names the pocket's own blocking cell, whose top is
-    // the next staircase landing. The arm then emits the same
-    // step_overhead -> MINE -> step conveyor it produces below the band, and it
-    // self-terminates the tick the column breaks open - the headroom fact
-    // clears, `strandedOnColumn` widens, and the band gate fires again.
-    const ceilingCuts = (state.headroomCuts ?? []).filter((cut) => cut.currentFootprint === true)
-    const ceilingY =
-      ceilingCuts.length > 0
-        ? Math.max(...ceilingCuts.map((cut) => cut.pos.y))
-        : Math.floor(state.self.position.y) + 2
-    targetY = Math.max(targetY, ceilingY + 1)
+    // target is one standable cell above the sensed ceiling - the arm emits
+    // the same step_overhead -> MINE -> step conveyor it produces below the
+    // band, and self-terminates the tick the column breaks open.
+    targetY = Math.max(targetY, sealed.ceilingY + 1)
   }
   const current = state.goalQueue?.current ?? null
   const goalId = current?.id ?? 'food-habitat'
@@ -7227,7 +7248,7 @@ export function foodHabitatAscent(state: WorldState, options: CandidateOptions):
     extraMeta: {
       foodHabitat: true,
       foodHabitatGoalId: goalId,
-      ...(sealedAboveBand ? { sealedHabitat: true } : {}),
+      ...(sealed !== null ? { sealedHabitat: true } : {}),
     },
   })
 }
