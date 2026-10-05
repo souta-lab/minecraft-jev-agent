@@ -419,10 +419,23 @@ export function evaluateActionCommitment(input: ActionCommitmentInput): ActionCo
   // escapes stayed offered the whole time. The contact release exists for
   // KIND switches (ATTACK over a held RETREAT); a held retreat already IS the
   // grounded threat answer and an offered retreat cell remains
-  // escape-scan-endorsed, so the newer cell is only a marginal retarget. A
-  // dropped/invalid/old hold still releases through the ordinary set below.
+  // escape-scan-endorsed, so the newer cell is only a marginal retarget.
+  //
+  // The carve-out is not contact-scoped, and it is not defeated by the volatile
+  // cell identity: escape cells are recomputed inside a radius-16 box anchored
+  // on the body's CURRENT block (`state.ts#buildEscapeCells`), so knockback or
+  // a single walked block re-anchors the box and rewrites every boundary-cell
+  // id - a held retreat leaves the offer without the escape answer changing.
+  // Measured portal-p24 (2026-10-05, bow skeletons id=36/id=587, contact=false,
+  // los=true): every critical-health hit preempted the in-flight RETREAT, the
+  // fresh pick was a same-kind retarget 1-20 cells away, and the release came
+  // through `no_longer_offered`/`window_elapsed` - each walk leg restarted at
+  // `closed=0m` while arrows kept landing, death at (29.6,103,4.7) and again
+  // at (14.9,95,-12.5) on the same fingerprint. Releasing only for a genuinely
+  // different answer - a plan move or a deterministically invalid held cell -
+  // keeps Jev's own repeated choice ("keep escaping") executing inside the
+  // bounded walk lease, which still ends on its own stepCap/msBudget.
   const sameRetreatRetarget =
-    input.contactThreatResponse === true &&
     inFlight.id.startsWith('RETREAT:') &&
     input.chosenId.startsWith('RETREAT:')
   if (input.contactThreatResponse === true && !sameRetreatRetarget) {
@@ -431,13 +444,13 @@ export function evaluateActionCommitment(input: ActionCommitmentInput): ActionCo
     reason = 'contact_threat'
   } else if (!sameInstance && previous !== null && previous.planKey !== input.planKey) {
     reason = 'plan_changed'
-  } else if (!input.inFlightOffered) {
-    reason = 'no_longer_offered'
   } else if (input.inFlightInvalid) {
     reason = 'deterministically_invalid'
-  } else if (elapsedMs >= windowMs) {
+  } else if (!sameRetreatRetarget && !input.inFlightOffered) {
+    reason = 'no_longer_offered'
+  } else if (!sameRetreatRetarget && elapsedMs >= windowMs) {
     reason = 'window_elapsed'
-  } else if (holds >= maxHolds) {
+  } else if (!sameRetreatRetarget && holds >= maxHolds) {
     reason = 'decision_budget_exhausted'
   }
 

@@ -1114,13 +1114,19 @@ addCase('(c5) the in-flight hold releases to Jev newer choice when a hostile is 
   return { pass, detail: `held=${held.chosenId} released=${released.chosenId} line=${released.releaseLine ?? 'none'}` }
 })
 
-addCase('(c5b) a same-kind RETREAT retarget holds the in-flight escape in contact', () => {
+addCase('(c5b) a same-kind RETREAT retarget holds the in-flight escape', () => {
   // portal-p23 gen-mutoyo8o (2026-10-04T10:44:0x): three successive RETREAT
   // picks each released the last via contact_threat, every walk leg restarted
   // (final leg `closed=0.01m`), and the drowned killed the body at 3.17hp
   // while escape-scan-endorsed retreat cells stayed offered. The contact
   // release exists for kind switches; a same-kind retarget only discards the
   // held escape's closed distance.
+  // portal-p24 (2026-10-05, bow skeletons, contact=false): the same churn ran
+  // through `no_longer_offered`/`window_elapsed` because escape-cell ids are
+  // volatile by construction (the scan box re-anchors on the body). A held
+  // retreat leaving the offer is identity churn, not a lost endorsement, so
+  // the same-kind retarget now holds there too. `plan_changed` and
+  // `deterministically_invalid` remain real releases.
   const base = {
     previous: { actionId: 'RETREAT:p34_62_-2', epoch: 3, planKey: 'plan', holds: 0 },
     inFlight: { id: 'RETREAT:p34_62_-2', epoch: 3, startedAtMs: NOW },
@@ -1132,11 +1138,25 @@ addCase('(c5b) a same-kind RETREAT retarget holds the in-flight escape in contac
   }
   const held = evaluateActionCommitment({ ...base, chosenId: 'RETREAT:p34_62_-20' })
   const kindSwitch = evaluateActionCommitment({ ...base, chosenId: 'ATTACK:e10460' })
-  // A held cell that leaves the offer still releases to the newer retreat.
+  // A held cell that leaves the offer still holds: the newer retreat is the
+  // same escape answer under a re-anchored cell id.
   const dropped = evaluateActionCommitment({
     ...base,
     chosenId: 'RETREAT:p34_62_-20',
     inFlightOffered: false,
+  })
+  // ...including outside contact (the ranged-attacker shape).
+  const droppedNoContact = evaluateActionCommitment({
+    ...base,
+    chosenId: 'RETREAT:p34_62_-20',
+    inFlightOffered: false,
+    contactThreatResponse: false,
+  })
+  // ...while a genuinely different answer still releases.
+  const invalid = evaluateActionCommitment({
+    ...base,
+    chosenId: 'RETREAT:p34_62_-20',
+    inFlightInvalid: true,
   })
   const pass =
     held.committed === true &&
@@ -1144,11 +1164,17 @@ addCase('(c5b) a same-kind RETREAT retarget holds the in-flight escape in contac
     kindSwitch.committed === false &&
     kindSwitch.chosenId === 'ATTACK:e10460' &&
     (kindSwitch.releaseLine ?? '').includes('reason=contact_threat') &&
-    dropped.chosenId === 'RETREAT:p34_62_-20' &&
-    (dropped.releaseLine ?? '').includes('reason=no_longer_offered')
+    dropped.committed === true &&
+    dropped.chosenId === 'RETREAT:p34_62_-2' &&
+    dropped.releaseLine === null &&
+    droppedNoContact.committed === true &&
+    droppedNoContact.chosenId === 'RETREAT:p34_62_-2' &&
+    invalid.committed === false &&
+    invalid.chosenId === 'RETREAT:p34_62_-20' &&
+    (invalid.releaseLine ?? '').includes('reason=deterministically_invalid')
   return {
     pass,
-    detail: `held=${held.chosenId} kindSwitch=${kindSwitch.chosenId} dropped=${dropped.chosenId} heldLine=${held.line ?? 'none'}`,
+    detail: `held=${held.chosenId} kindSwitch=${kindSwitch.chosenId} dropped=${dropped.chosenId}/${dropped.releaseLine ?? 'held'} droppedNoContact=${droppedNoContact.chosenId}/${droppedNoContact.releaseLine ?? 'held'} invalid=${invalid.releaseLine ?? 'none'}`,
   }
 })
 

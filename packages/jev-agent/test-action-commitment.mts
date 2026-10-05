@@ -233,6 +233,85 @@ addCase('(d) a released hang keeps releasing rather than re-holding forever', ()
   }
 })
 
+// --- (e) a same-kind RETREAT retarget holds the in-flight escape --------------
+//
+// portal-p24 (2026-10-05, bow skeletons, contact=false): each critical-health
+// hit preempted the in-flight RETREAT, the fresh pick was the same survival
+// answer under a re-anchored escape-cell id, and the release ran through
+// `no_longer_offered`/`window_elapsed` - every walk leg restarted at closed=0m
+// until death. The retarget is not a different answer; only `plan_changed` and
+// `deterministically_invalid` remain real releases for it.
+
+const RETREAT_A = 'RETREAT:p13_103_14'
+const RETREAT_B = 'RETREAT:p13_103_15'
+const retreatFlight = inFlight(RETREAT_A, 7, 0)
+
+addCase('(e) a same-kind RETREAT retarget holds through window_elapsed without contact', () => {
+  const decision = step(null, RETREAT_B, {
+    inFlight: retreatFlight,
+    chosenId: RETREAT_B,
+    nowMs: 9_000,
+    contactThreatResponse: false,
+  })
+  const pass =
+    decision.committed === true &&
+    decision.chosenId === RETREAT_A &&
+    decision.releaseLine === null &&
+    decision.line === formatActionCommit(PLAN, RETREAT_A, 0)
+  return { pass, detail: `chosen=${decision.chosenId} line=${decision.line ?? 'none'}` }
+})
+
+addCase('(e) a same-kind RETREAT retarget holds through no_longer_offered churn', () => {
+  const decision = step(null, RETREAT_B, {
+    inFlight: retreatFlight,
+    chosenId: RETREAT_B,
+    inFlightOffered: false,
+    contactThreatResponse: false,
+  })
+  return {
+    pass: decision.committed === true && decision.chosenId === RETREAT_A && decision.releaseLine === null,
+    detail: `chosen=${decision.chosenId} release=${decision.releaseLine ?? 'none'}`,
+  }
+})
+
+addCase('(e) a same-kind RETREAT retarget holds past the decision budget', () => {
+  const decision = step(
+    { actionId: RETREAT_A, epoch: 7, planKey: PLAN, holds: 99 },
+    RETREAT_B,
+    { inFlight: retreatFlight, chosenId: RETREAT_B, nowMs: 1_000, contactThreatResponse: false },
+  )
+  return {
+    pass: decision.committed === true && decision.chosenId === RETREAT_A && decision.releaseLine === null,
+    detail: `chosen=${decision.chosenId} holds=${decision.state?.holds ?? -1}`,
+  }
+})
+
+addCase('(e) the retarget still releases on plan change, invalidity, or a kind switch', () => {
+  const planMoved = step(null, RETREAT_B, {
+    previous: { actionId: RETREAT_A, epoch: 7, planKey: PLAN_B, holds: 0 },
+    inFlight: retreatFlight,
+    chosenId: RETREAT_B,
+    planKey: PLAN,
+    contactThreatResponse: false,
+  })
+  const invalid = step(null, RETREAT_B, {
+    inFlight: retreatFlight,
+    chosenId: RETREAT_B,
+    inFlightInvalid: true,
+    contactThreatResponse: false,
+  })
+  const kindSwitch = step(null, 'ATTACK:e36', {
+    inFlight: retreatFlight,
+    chosenId: 'ATTACK:e36',
+    contactThreatResponse: true,
+  })
+  const pass =
+    planMoved.releaseLine === formatActionPreempt(PLAN, RETREAT_A, RETREAT_B, 'plan_changed') &&
+    invalid.releaseLine === formatActionPreempt(PLAN, RETREAT_A, RETREAT_B, 'deterministically_invalid') &&
+    kindSwitch.releaseLine === formatActionPreempt(PLAN, RETREAT_A, 'ATTACK:e36', 'contact_threat')
+  return { pass, detail: `plan=${planMoved.releaseLine ?? 'none'} invalid=${invalid.releaseLine ?? 'none'} kind=${kindSwitch.releaseLine ?? 'none'}` }
+})
+
 // --- resolvers + wiring -------------------------------------------------------
 
 addCase('the commit window and hold budget resolve from env with safe defaults', () => {
