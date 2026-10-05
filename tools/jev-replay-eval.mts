@@ -46,6 +46,15 @@ const verbose = args.includes('--verbose')
 // ---------------------------------------------------------------------------
 
 function reconstruct(state: Record<string, any>): Record<string, any> | null {
+  // v7 records already store the classifier-ready projection directly in
+  // `state` (schema `jev-semantic-projection/v7`): option carries
+  // semanticInstanceId/intent/preconditions/success as described strings,
+  // progress.stall the measured window, queue/world the same fields the v6
+  // envelope rebuild below produces. Anything else predates the projection
+  // field the classifier needs and is dropped.
+  if (state.schema === 'jev-semantic-projection/v7') {
+    return { ...state, counts: {} }
+  }
   const semantic = state.semantic
   if (semantic === null || typeof semantic !== 'object') return null
   const currentOption = state.currentOption ?? null
@@ -129,7 +138,7 @@ for (const line of readFileSync(file, 'utf8').split('\n')) {
     continue
   }
   if (record.record !== 'jev-call' || record.state === null || record.state === undefined) continue
-  if ((record.state.semantic ?? null) === null) continue
+  if ((record.state.semantic ?? null) === null && record.state.schema !== 'jev-semantic-projection/v7') continue
   const ts = Date.parse(record.ts)
   if (since !== null && ts < since) continue
   if (until !== null && ts > until) continue
