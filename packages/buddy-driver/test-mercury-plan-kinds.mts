@@ -150,6 +150,30 @@ addCase('collect:food is a grounded kind x target pair (resource class, food mac
   }
 })
 
+addCase('post-Nether frontier items are groundable: collect blaze_rod/ender_pearl, craft blaze_powder/ender_eye', () => {
+  const checked = validateMercuryPlan({
+    op: 'patch',
+    goals: [
+      { kind: 'collect', item: 'blaze_rod', count: 6 },
+      { kind: 'collect', item: 'ender_pearl', count: 12 },
+      { kind: 'craft', item: 'ender_eye', count: 12 },
+      { kind: 'craft', item: 'blaze_powder', count: 6 },
+    ],
+    reason: 'blaze/pearl frontier',
+  })
+  if (!checked.ok) return { pass: false, detail: checked.error }
+  const goals = plannedGoalsFromMercury(checked.plan)
+  const shapes = goals.map((goal) => `${goal.kind}:${goal.targetItem}x${goal.requiredCount}`)
+  return {
+    pass:
+      goals[0]?.kind === 'collect' && goals[0]?.targetItem === 'blaze_rod' &&
+      goals[1]?.kind === 'collect' && goals[1]?.targetItem === 'ender_pearl' &&
+      goals[2]?.kind === 'craft' && goals[2]?.targetItem === 'ender_eye' &&
+      goals[3]?.kind === 'craft' && goals[3]?.targetItem === 'blaze_powder',
+    detail: shapes.join(','),
+  }
+})
+
 addCase('backward compatible: legacy {item,count} still validates and infers the kind', () => {
   const checked = validateMercuryPlan({
     op: 'patch',

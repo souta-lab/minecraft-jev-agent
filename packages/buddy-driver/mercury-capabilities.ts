@@ -104,6 +104,13 @@ export const MERCURY_ALLOWED_GOALS: MercuryAllowedGoals = {
     // first-class, but the kind matrix offered no way to name the WHAT, so
     // a starving body's only expressible answer was explore:* churn.
     'food',
+    // Same class one frontier ahead: MOB_DROP_PRODUCERS already owns
+    // `blaze_rod` <- blaze and `ender_pearl` <- enderman (hunt arm,
+    // spawn-context truth, producers=[...] blocked affordance), so the
+    // collect machinery consumes both end-to-end; without them the
+    // post-entry Nether loop hits the identical unnameable-WHAT churn.
+    'blaze_rod',
+    'ender_pearl',
   ],
   craft: [
     'crafting_table',
@@ -118,6 +125,12 @@ export const MERCURY_ALLOWED_GOALS: MercuryAllowedGoals = {
     'iron_helmet',
     'iron_boots',
     'iron_sword',
+    // The M3 craft chain the planner already expands end-to-end
+    // (`craft N x ender_eye` -> ender_pearl + blaze_powder -> blaze_rod via
+    // `goalMaterialNeeds`, whose mob-drop ingredient produces the blaze hunt
+    // through `mobDropNeedsForGoal`). Recipe names match minecraft-data.
+    'blaze_powder',
+    'ender_eye',
   ],
   smelt: ['charcoal', 'iron_ingot', 'gold_ingot', 'copper_ingot'],
   // Only stations the current PLACE path can actually place (issue #19).
