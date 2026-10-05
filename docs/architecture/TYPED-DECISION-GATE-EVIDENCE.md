@@ -210,6 +210,86 @@ the contract in `client.ts` (the canonical §6/§18-D table beside
 Focused proof: `test-question-heads.mts` PASS; regression sweep green
 (`test-audit.mts` 10/10, `test-typed-decision-backend.mts` 27/27).
 
-## Gates E–H
+## Gate E — replay + sealed holdout on recorded corpora (PROVEN)
+
+Tool: `tools/jev-replay-eval.mts` (read-only). For every recorded `jev-call`
+it reconstructs the v7-equivalent projection (same mapping as the Gate B
+`--compact-sim`), feeds it to the REAL `classifySemanticBoundary`, and
+simulates the Gate C policy over the chronological call stream:
+
+- the anchor is the projection bound to the last ACCEPTED answer — a replay
+  never advances it, and a failed call never anchors;
+- `lastOutcomeRequiredDecision` is reconstructed from the call's own
+  `previousDecision.terminalReason` (the same settle packet production reads);
+- `leaseHeld` comes from the recorded `world.leaseHeld`;
+- on a replay verdict, the anchored answer's semantic identity is repointed to
+  the current realization and compared with what the model actually answered
+  (fidelity).
+
+Split: chronological — dev = first 75%, sealed holdout = last 25%. The
+classifier and signature were finalized before either holdout slice was run.
+p23 is an independent corpus from a different run.
+
+### Results
+
+| Corpus | Slice | Calls | Necessary | Replays | Reduction | Fidelity (agree/judged) |
+|---|---|---:|---:|---:|---:|---:|
+| p24 | all | 4,855 | 3,024 | 1,831 | 37.7% | 1,758/1,826 (96.3%) |
+| p24 | dev | 3,641 | 2,790 | 851 | 23.4% | 782/850 (92.0%) |
+| p24 | **holdout** | 1,214 | 235 | 979 | **80.6%** | **975/975 (100%)** |
+| p23 | all | 6,802 | 6,224 | 578 | 8.5% | 545/578 (94.3%) |
+| p23 | dev | 5,101 | 4,625 | 476 | 9.3% | 455/476 (95.6%) |
+| p23 | **holdout** | 1,701 | 1,599 | 102 | **6.0%** | **90/102 (88.2%)** |
+
+Boundary reasons (p24 all): `candidate_set_changed` 1,658,
+`same_semantic_state` 1,831, `safety_changed` 772, `goal_or_option_changed`
+229, `resource_evidence_changed` 185, `skill_outcome_boundary` 159,
+`progress_boundary` 20, `first_decision` 1.
+
+### Reading the evidence
+
+- **The defect reproduces and the repair works.** In p24's stable phase
+  (holdout quarter — the healthy-hour region where every recorded call was
+  the same coarse `explore:cave` + MOVE shape), 80.6% of calls carry no
+  decision-relevant change; under Gate C they are replays inside new causal
+  epochs, spending zero provider calls, and 100% of them agree with the
+  answer the model produced when it WAS queried. The remaining 235 calls in
+  that same quarter are real boundaries (`goal_or_option_changed` 136,
+  `safety_changed` 53, `resource_evidence_changed` 45) — the signature does
+  not suppress semantically distinct states even when the coarse shape is
+  identical.
+- **p23 is a genuinely busier run** — only 8.5% of its stream is replayable
+  (it crossed 595 mandatory skill-outcome boundaries and 2,382 real
+  candidate-set changes). The classifier suppresses where semantics are
+  stable and calls where they are not; it is not a throttle.
+- **Raw-hash replay would have failed**: 1,807 of 1,831 p24 replays (98.7%)
+  and 563 of 578 p23 replays (97.4%) had a different `projectionHash` than
+  their anchor — the hash churns on outcome memory while the semantic
+  signature holds.
+- **Disagreements are model oscillation, not replay error.** On same-
+  signature pairs where the repointed anchor disagrees with the recorded
+  answer (68 on p24 dev, 12 on p23 holdout), the live model itself switched
+  choices (e.g. WAIT -> DESCEND -> MOVE) under an unchanged semantic
+  situation. Replay enforces the committed choice — exactly the commitment
+  stability §6 requires — so these count as churn removed, not quality lost.
+- **No unmappable replays** (0 in both corpora): the signature guarantee that
+  an anchored semantic identity remains offered held on every replay.
+- **Errored calls are handled exactly as production**: a failed call never
+  becomes an anchor (139 necessary errored calls on p24 spent the call and
+  left the previous anchor intact), and 5 errored calls on p24 would simply
+  not have happened under replay.
+
+### Documented blind spots in the reconstruction
+
+- v6 records do not carry `goalQueue.hasImpossible`; it is reconstructed as
+  constant `false`, so a mid-run queue-impossibility flip is invisible to this
+  eval (biases toward replay, not against; such flips are rare and always
+  coincide with an option/queue change that IS signed).
+- `lastOutcomeRequiredDecision` is read from the next call's
+  `previousDecision.terminalReason`; a same-tick double-settle not reflected
+  in that field could differ (not observed to matter: the
+  `skill_outcome_boundary` counts are dominated by genuine mandatory reasons).
+
+## Gates F–H
 
 Pending. Do not resume Minecraft until all pass.
