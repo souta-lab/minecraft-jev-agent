@@ -2014,6 +2014,21 @@ export interface CandidateOptions {
    */
   unreachableStations?: ReadonlySet<string>
   /**
+   * Station walk-probe verdict memory, owned by the controller for the
+   * generation and keyed `dimension|b8-body-bucket|stationKey`. Without it
+   * `unreachableStationKeysFor` re-probes the same `STATION_WALK_PROBE_BUDGET`
+   * nearest cells every pass, so a remembered station beyond the budget can
+   * never retire and holds `stationCraftAllowed` false forever - measured live
+   * (run-muvh4ofl, 2026-10-05): 9 remembered crafting_tables, 7 probe-retired,
+   * `b23_58_-23`/`b24_49_-22` never evaluated, the 2x2 `CRAFT:crafting_table`
+   * step withheld while the only offered route (a ~35-cell staircase RETRIEVE)
+   * kept `budget_exhausted`-ing with net distance INCREASING (34 -> 38m).
+   * The verdict is position-relative, so the key carries the same 8m body
+   * bucket the repeated-outcome ledgers use: a move across a bucket boundary
+   * re-probes instead of trusting a stale cell.
+   */
+  stationProbeMemory?: Map<string, PathProbeResult>
+  /**
    * Coordinate keys currently blacklisted by durable movement failure memory.
    * Candidate selection consumes this fact before it chooses an exploration or
    * retrieval target; filtering only after generation would leave WAIT as the
@@ -9736,13 +9751,34 @@ function unreachableStationKeysFor(
   }
   const probe = options.reachability?.pathProbe ?? null
   if (probe === null) return out
+  const memory = options.stationProbeMemory ?? null
+  const self = state.self.position
+  const bucket = (v: number): number => Math.floor(v / 8) * 8
+  const memoryKey = (station: KnownStationLike): string =>
+    `${state.self.dimension}|b8:${bucket(self.x)},${bucket(self.y)},${bucket(self.z)}|${knownStationKey(station)}`
   const walkable = stations
     .filter((station) => distance(station.position, state.self.eyePosition) > options.reach)
     .sort((a, b) => distance(a.position, state.self.eyePosition) - distance(b.position, state.self.eyePosition))
-  for (const station of walkable.slice(0, STATION_WALK_PROBE_BUDGET)) {
+  // The budget bounds NEW probes per pass, not the coverage: a memoised
+  // verdict costs nothing, so retired cells stop consuming slots and every
+  // remembered station is evaluated within ceil(N/BUDGET) passes. Previously
+  // the slice ran before the retirement check, the same 6 nearest cells were
+  // re-probed every pass, and farther stations could never retire at all.
+  let probed = 0
+  for (const station of walkable) {
     const key = knownStationKey(station)
     if (out.has(key)) continue
-    if (probe(station.position) === 'no_path') out.add(key)
+    const memoKey = memoryKey(station)
+    const memoised = memory?.get(memoKey)
+    if (memoised !== undefined) {
+      if (memoised === 'no_path') out.add(key)
+      continue
+    }
+    if (probed >= STATION_WALK_PROBE_BUDGET) continue
+    probed += 1
+    const verdict = probe(station.position)
+    memory?.set(memoKey, verdict)
+    if (verdict === 'no_path') out.add(key)
   }
   return out
 }

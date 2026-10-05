@@ -33,7 +33,7 @@ import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPla
 import { FOOD_SOURCE_NONE } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
 import { capabilityKey } from './reachability.ts'
-import type { DigApproachProbe, DimensionTransferRoute, StationApproachProbe, StationApproachRefusal, StationKindName } from './reachability.ts'
+import type { DigApproachProbe, DimensionTransferRoute, PathProbeResult, StationApproachProbe, StationApproachRefusal, StationKindName } from './reachability.ts'
 import { makeCausalStamp, makeChainId } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import { OptionAttemptTracker, resolveAbandonCooldownMs, resolveUnproductiveAttemptLimit } from './abandonPolicy.ts'
@@ -951,6 +951,13 @@ export class JevController {
   private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
   /** ids generated last tick but pruned before presentation; fed back into generation via `suppressedCandidateIds` */
   private suppressedCandidateIds: ReadonlySet<string> = new Set<string>()
+  /**
+   * Station walk-probe verdicts keyed `dimension|b8-body-bucket|stationKey`
+   * (CandidateOptions.stationProbeMemory): lets the probe budget bound NEW
+   * probes per pass instead of re-probing the same nearest cells forever, so
+   * every remembered station retires within ceil(N/BUDGET) passes.
+   */
+  private stationProbeMemory = new Map<string, PathProbeResult>()
   /** gate facts (station/dig approach probes) resolved once per tick. */
   private gateOptions: ReachabilityGateOptions | null = null
   private gateOptionsTick = -1
@@ -2117,6 +2124,7 @@ export class JevController {
       // generation so stranded-body gates count only candidates that can
       // actually survive the suppression layers (see CandidateOptions).
       groundingOptions.suppressedCandidateIds = this.suppressedCandidateIds
+      groundingOptions.stationProbeMemory = this.stationProbeMemory
       const grounded = generateGroundedCandidates(state, groundingOptions)
       // The affordance plane evaluated every candidate's grounding facts this
       // tick. Its fingerprint is the "did anything that could re-open this
@@ -2882,6 +2890,7 @@ export class JevController {
       // `SURVIVAL_NO_GROUNDED_ACTION ... CAPABILITY_LOST` ~0.5 Hz on
       // `SWIM:exit:p17_63_-1`/`ASCEND:escape:*` in the flooded pocket.
       freshOptions.suppressedCandidateIds = this.suppressedCandidateIds
+      freshOptions.stationProbeMemory = this.stationProbeMemory
       const freshGrounded = generateGroundedCandidates(freshState, freshOptions)
       // The revalidation offer must be built the same way the decision-time
       // offer was: the legacy-reach kill switch and the repeated-outcome prune

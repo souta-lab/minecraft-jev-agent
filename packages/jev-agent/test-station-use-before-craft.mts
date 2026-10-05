@@ -571,6 +571,85 @@ function main(): void {
     )
   }
 
+  // (f2) 2026-10-05 live wedge (run-muvh4ofl, p24.26 recovery): 9 remembered
+  // crafting tables, the 6 nearest all probe `no_path`, and the two far cells
+  // (`b23_58_-23`/`b24_49_-22` in the live shape) sat BEYOND
+  // `STATION_WALK_PROBE_BUDGET` - the slice ran before the retirement check, the
+  // same 6 nearest were re-probed every pass, and the far pair stayed "usable"
+  // forever: `stationCraftAllowed` never flipped, the 2x2 `CRAFT:crafting_table`
+  // step stayed withheld, and the only offered route (a ~35-cell staircase
+  // RETRIEVE) `budget_exhausted`-ed with net distance INCREASING (34 -> 38m).
+  // `stationProbeMemory` bounds NEW probes per pass instead of coverage: pass 2
+  // evaluates the unprobed cells, every remembered cell retires, and the held-
+  // planks 2x2 craft unlocks - exactly the #58 deadlock escape the truth owns.
+  {
+    const nine = Array.from({ length: 9 }, (_, i) => station('crafting_table', i))
+    const state = world(queued({}), { oak_planks: 8 }, nine)
+    let probeCalls = 0
+    const probeOptions = (memory?: Map<string, 'reachable' | 'no_path' | 'unknown'>): typeof defaultCandidateOptions => ({
+      ...options(),
+      reachability: {
+        pathProbe: () => {
+          probeCalls += 1
+          return 'no_path'
+        },
+      },
+      ...(memory === undefined ? {} : { stationProbeMemory: memory }),
+    })
+    const memory = new Map<string, 'reachable' | 'no_path' | 'unknown'>()
+    const pass1 = stationWorldTruth(state, probeOptions(memory), 'crafting_table', 'crafting_table')
+    const pass1Calls = probeCalls
+    const pass2 = stationWorldTruth(state, probeOptions(memory), 'crafting_table', 'crafting_table')
+    const pass2Calls = probeCalls - pass1Calls
+    // Control: without the memory the same 6 nearest are re-probed every pass
+    // and the far cells never retire (the measured wedge).
+    probeCalls = 0
+    const control1 = stationWorldTruth(state, probeOptions(), 'crafting_table', 'crafting_table')
+    const control2 = stationWorldTruth(state, probeOptions(), 'crafting_table', 'crafting_table')
+    check(
+      '(f2) probe-verdict memory bounds NEW probes per pass, so every remembered station retires',
+      pass1.unreachable.length === 6 &&
+        stationCraftAllowed(pass1) === false &&
+        pass1Calls === 6 &&
+        pass2.unreachable.length === 9 &&
+        stationCraftAllowed(pass2) === true &&
+        pass2Calls === 3 &&
+        control1.unreachable.length === 6 &&
+        control2.unreachable.length === 6 &&
+        stationCraftAllowed(control2) === false &&
+        probeCalls === 12,
+      `pass1=${pass1.unreachable.length}/${pass1Calls} pass2=${pass2.unreachable.length}/${pass2Calls} control=${control2.unreachable.length}/${probeCalls} allowed=${stationCraftAllowed(pass2)}`,
+    )
+  }
+
+  // (f3) a memoised `reachable` verdict keeps its station usable: the memory
+  // must never treat a proven path as retired.
+  {
+    const nine = Array.from({ length: 9 }, (_, i) => station('crafting_table', i))
+    const state = world(queued({}), { oak_planks: 8 }, nine)
+    const memory = new Map<string, 'reachable' | 'no_path' | 'unknown'>()
+    const probeOptions = (): typeof defaultCandidateOptions => ({
+      ...options(),
+      reachability: {
+        // Every cell refuses except the NEAREST station (`i === 8`, x=48 -
+        // `station()`'s positions sort it closest to FEET): a `reachable`
+        // verdict memoises as usable, so the withhold holds and no duplicate
+        // is crafted.
+        pathProbe: (position) => (position.x === 48 ? 'reachable' : 'no_path'),
+      },
+      stationProbeMemory: memory,
+    })
+    const pass1 = stationWorldTruth(state, probeOptions(), 'crafting_table', 'crafting_table')
+    const pass2 = stationWorldTruth(state, probeOptions(), 'crafting_table', 'crafting_table')
+    check(
+      '(f3) a memoised reachable verdict keeps the withhold honest',
+      pass1.unreachable.length === 5 &&
+        pass2.unreachable.length === 8 &&
+        stationCraftAllowed(pass2) === false,
+      `pass1=${pass1.unreachable.length} pass2=${pass2.unreachable.length} allowed=${stationCraftAllowed(pass2)}`,
+    )
+  }
+
   // The wiring: the generator owns the rule, the controller mirrors the typed
   // fact through the same marker family it already uses for craft prerequisites,
   // and the smelt prerequisite's withheld-craft fact is on the mirrored event path
