@@ -253,17 +253,34 @@ function guardMine(candidate: Candidate, state: WorldState, context: GuardContex
   // A ceiling-clear MINE targets terrain (leaves/dirt) that is not in
   // `state.blocks`; validate it against the sensor's own `headroomCuts` exactly
   // like guardStep uses stepCuts, so the canopy-pocket escape stays grounded.
+  // A staircase-overhead MINE targets the face cell `buildStepCuts` named in
+  // `StepCut.blockedBy` - proven diggable, unprotected and hazard-free when the
+  // sensor set it, which is the same safety fact `cut.safe` carries for the
+  // own-head pool. Measured live run-muvdwl9a-dtzq (2026-10-05): every side-face
+  // staircase overhead cell (`b46_22_14`, `b45_16_14`, ...) rejected TARGET_GONE
+  // in a sealed pocket because this lookup never consulted stepCuts, so a
+  // grounded clearance dig kept dying at the guard while the starvation window
+  // read `presented=2 productive=0`.
   const block = findBlock(state, target)
   if (block === undefined) {
     const cut = (state.headroomCuts ?? []).find((entry) => samePosition(entry.pos, target))
-    if (cut === undefined) {
+    const stepBlocked =
+      cut === undefined
+        ? (state.stepCuts ?? []).find(
+            (entry) =>
+              entry.blockedBy !== null &&
+              entry.blockedBy !== undefined &&
+              samePosition(entry.blockedBy.pos, target),
+          )?.blockedBy
+        : undefined
+    if (cut === undefined && stepBlocked === undefined) {
       return deny(
         candidate.id,
         'TARGET_GONE',
         `no ${candidate.targetName ?? 'log'} at (${target.x},${target.y},${target.z}) in the current state`,
       )
     }
-    if (!cut.safe) {
+    if (cut !== undefined && !cut.safe) {
       return deny(candidate.id, 'NO_SUPPORT', `the ceiling block is not safe to remove: ${cut.reason}`)
     }
     if (candidate.requiresTool && !hasTool(state, candidate.toolName)) {

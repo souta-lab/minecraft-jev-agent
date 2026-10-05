@@ -6,7 +6,7 @@ import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import { guardCandidate, guardDecision } from './src/policy.ts'
 import type { GuardCode, GuardContext } from './src/policy.ts'
-import type { BlockState, DescentOption, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { BlockState, DescentOption, HeadroomCut, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 const IN_REACH_LOG: Vec3Json = { x: 1, y: 64, z: 0 }
 const FAR_LOG: Vec3Json = { x: 1, y: 64, z: 40 }
@@ -54,6 +54,8 @@ function state(overrides: {
   tick?: number
   standable?: Vec3Json[]
   descent?: DescentOption[]
+  stepCuts?: StepCut[]
+  headroomCuts?: HeadroomCut[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -67,6 +69,8 @@ function state(overrides: {
     craftingTables: [],
     placementSpots: [],
     descent: overrides.descent ?? [],
+    stepCuts: overrides.stepCuts,
+    headroomCuts: overrides.headroomCuts,
     goal: {
       id: 'chop:oak_log',
       description: 'collect 1 x oak_log',
@@ -467,6 +471,70 @@ addCase('rejects EAT when the food left the inventory', () => {
   return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
 })
 
+// --- staircase-overhead clearance: the emit names the face cell from
+// `StepCut.blockedBy` (the same sensor pool guardStep uses), so the guard must
+// consult it - live run-muvdwl9a-dtzq rejected every such dig TARGET_GONE
+// because only headroomCuts were checked.
+const STEP_OVERHEAD_CELL: Vec3Json = { x: -1, y: 66, z: 0 }
+const STEP_CUT: StepCut = {
+  dir: 'W',
+  dx: -1,
+  dz: 0,
+  cut: { x: -1, y: 64, z: 0 },
+  step: { x: -1, y: 65, z: 0 },
+  name: 'stone',
+  safe: false,
+  reason: 'face wall above head',
+  blockedBy: { pos: STEP_OVERHEAD_CELL, name: 'stone' },
+}
+
+addCase('accepts a staircase-overhead MINE grounded in stepCuts.blockedBy', () => {
+  const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [], stepCuts: [STEP_CUT] })
+  const chunk = candidate({
+    id: 'MINE:b-1_66_0',
+    kind: 'MINE',
+    targetName: 'stone',
+    target: STEP_OVERHEAD_CELL,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 5, clearance: true, stepOverhead: true },
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
+addCase('accepts an own-footprint clearance MINE grounded in headroomCuts', () => {
+  const ceiling: Vec3Json = { x: 0, y: 66, z: 0 }
+  const headCut: HeadroomCut = { pos: ceiling, name: 'stone', safe: true, reason: 'diggable', currentFootprint: true }
+  const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [], headroomCuts: [headCut] })
+  const chunk = candidate({
+    id: 'MINE:b0_66_0',
+    kind: 'MINE',
+    targetName: 'stone',
+    target: ceiling,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 5, clearance: true },
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
+addCase('still rejects TARGET_GONE when the clearance cell is in no sensor pool', () => {
+  const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [], stepCuts: [STEP_CUT] })
+  const chunk = candidate({
+    id: 'MINE:b-5_66_0',
+    kind: 'MINE',
+    targetName: 'stone',
+    target: { x: -5, y: 66, z: 0 },
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 5, clearance: true, stepOverhead: true },
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
 const expected: Record<string, GuardCode | null> = {
   'accepts an in-reach oak_log': null,
   'accepts an out-of-reach multi-cell portal placement for executor approach': null,
@@ -485,6 +553,9 @@ const expected: Record<string, GuardCode | null> = {
   'accepts a level DESCEND when a same-direction down step shares its wall': null,
   'rejects a log-anchored MOVE when the log is gone': 'TARGET_GONE',
   'rejects EAT when the food left the inventory': 'EMPTY_HAND',
+  'accepts a staircase-overhead MINE grounded in stepCuts.blockedBy': null,
+  'accepts an own-footprint clearance MINE grounded in headroomCuts': null,
+  'still rejects TARGET_GONE when the clearance cell is in no sensor pool': 'TARGET_GONE',
 }
 
 let failures = 0
