@@ -266,6 +266,32 @@ export class ModelAvailabilityTracker {
     return { allowed: true, reason: 'ordinary-generation', authorityKind, expected: clonedActual }
   }
 
+  /**
+   * A committed, observed one-way authority succession (the paid -> free tier
+   * transition) updates the pinned identity so subsequent generations admit
+   * the successor cleanly. The edge moves the pin ONLY when the recorded
+   * identity exactly matches the declared from-identity; anything else is a
+   * no-op, so this cannot weaken or bypass the identity/source fencing.
+   */
+  noteAuthoritySuccession(
+    authorityKind: ModelAuthorityKind,
+    edge: { provider: string; fromModel: string; toModel: string },
+  ): boolean {
+    const to = { provider: edge.provider, model: edge.toModel }
+    const matches = (identity: ModelAuthorityIdentity | null) =>
+      identity !== null && identity.provider === edge.provider && identity.model === edge.fromModel
+    let moved = false
+    if (matches(this.activeAuthorities[authorityKind])) {
+      this.activeAuthorities[authorityKind] = to
+      moved = true
+    }
+    if (this.recoveryAuthorityKind === authorityKind && matches(this.recoveryAuthority)) {
+      this.recoveryAuthority = to
+      moved = true
+    }
+    return moved
+  }
+
   recordUnavailable(
     failure: Omit<ModelFailureRecord, 'ts' | 'authority' | 'sourceSha'> & { ts?: string; authority?: ModelAuthorityIdentity | null; sourceSha?: string | null },
     nowMs = Date.now(),

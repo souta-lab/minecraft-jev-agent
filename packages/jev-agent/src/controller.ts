@@ -1536,6 +1536,7 @@ export class JevController {
         rateLimitRetries: this.options.jevRateLimitRetries,
         rateLimitBaseDelayMs: this.options.jevRateLimitBaseDelayMs,
         forceFallback: this.options.forceFallbackPolicy,
+        onPolicyEvent: (message, detail) => this.logger.warn('policy', message, detail, this.tickCounter),
       })
     } catch (error) {
       const fatal = error instanceof FatalModelError ? error : new FatalModelError('jev-policy', 1, describeFailure(error))

@@ -890,6 +890,28 @@ function makeGenerationContext(
           retryDelayMs: failure.delayMs,
         })
         try { writeAcceptance() } catch { /* availability log remains durable */ }
+      } else if (event === 'DECISION_TIER_TRANSITION') {
+        // The paid -> free tier succession committed inside the policy
+        // boundary. Move the pinned jev authority to the declared successor so
+        // generation admission and response fencing accept it; only the exact
+        // recorded edge moves the pin, every other identity still mismatches.
+        const moved = modelAvailability.noteAuthoritySuccession('jev', {
+          provider: typeof detail.providerId === 'string' ? detail.providerId : '',
+          fromModel: typeof detail.fromModelId === 'string' ? detail.fromModelId : '',
+          toModel: typeof detail.toModelId === 'string' ? detail.toModelId : '',
+        })
+        log('MODEL_AUTHORITY_SUCCESSION', {
+          runId,
+          generationId: typeof detail.generationId === 'string' ? detail.generationId : null,
+          providerId: typeof detail.providerId === 'string' ? detail.providerId : null,
+          fromModelId: typeof detail.fromModelId === 'string' ? detail.fromModelId : null,
+          toModelId: typeof detail.toModelId === 'string' ? detail.toModelId : null,
+          availability: typeof detail.availability === 'string' ? detail.availability : null,
+          moved,
+        })
+        if (moved) {
+          try { writeAcceptance() } catch { /* succession remains in the event log */ }
+        }
       } else if (event === 'JEV_HEADS') {
         const previousState = modelAvailability.snapshot().state
         const authority = typeof detail.provider === 'string' && typeof detail.model === 'string'

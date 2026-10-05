@@ -1019,6 +1019,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SYSTEM2_PLAN_DISCARDED',
   'SYSTEM2_STALE_DISCARD',
   'SYSTEM2_REQUEST_CANCELLED',
+  // The paid -> free Typed Decision Plane tier transition: the operator-mandated
+  // one-way continuity boundary (liquid-direct-d1 -> liquid-direct-d1-free on
+  // decisive credit/entitlement exhaustion). Without it in the live plane the
+  // exact moment the serving model changed is invisible to buddy.log even
+  // though every later jev-call journal entry stamps the serving identity.
+  'DECISION_TIER_TRANSITION',
   // A Jev-selected escalation is only a successful handoff when this marker
   // names the concrete System2 request that accepted it; suppressed requests
   // use the same marker with `status=unavailable` and a typed blocker.

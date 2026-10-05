@@ -907,7 +907,12 @@ export class AuthorityJevPolicy implements JevPolicy {
           // authority/replay evidence inspectable rather than logging a different snapshot.
           state: modelState,
           questions,
-          response: { model: this.model, usage, answers, requestId: reportedRequestId(response.providerMetadata) },
+          response: {
+            model: this.model,
+            usage,
+            answers,
+            requestId: reportedRequestId(response.providerMetadata),
+          },
           error: null,
           authority: authorityJournal(request, decisionJournal),
         })

@@ -54,6 +54,14 @@ export interface DecisionBackendProfile {
    */
   readonly lowConfidenceThreshold?: number
   /**
+   * Paid-tier continuity: the free-tier profile this profile may transition to
+   * ONE WAY when the account's paid credit/quota/entitlement is decisively
+   * exhausted. Only the `credit` and `entitlement` availability classes commit
+   * the transition; auth, bad_request, model_identity and every transient class
+   * (rate_limited/server/network/timeout) propagate to the policy unchanged.
+   */
+  readonly paidExhaustionFallbackProfileId?: string
+  /**
    * §18 Gate F: measured beta (abandon_option) adoption threshold, calibrated
    * per model. Absent = the historical Jev-era 0.5 applies.
    * liquid-direct-d1: 0.8 — measured 2026-10-05 over 48 real d1 calls on
@@ -69,7 +77,11 @@ export interface DecisionBackendProfile {
  * Explicit, provenance-visible backend profiles. Selecting one is a
  * configuration act; no code path substitutes another profile or model when a
  * call fails. `d1:free` is a distinct model with its own explicit profile; a
- * `liquid-direct-d1` failure never reaches it.
+ * `liquid-direct-d1` failure reaches it ONLY through the declared one-way
+ * `paidExhaustionFallbackProfileId` transition on typed credit/entitlement
+ * exhaustion (`TierTransitionJevPolicy` in jev-agent/src/jev/tier-transition.ts)
+ * - never implicitly, and never for transient, auth, request or model-identity
+ * failures.
  */
 export const DECISION_PROFILES: Readonly<Record<string, DecisionBackendProfile>> = {
   'typesafe-gateway-jev': {
@@ -91,6 +103,7 @@ export const DECISION_PROFILES: Readonly<Record<string, DecisionBackendProfile>>
     confidence: 'provider-reported-unmeasured',
     lowConfidenceThreshold: 0.2,
     abandonThreshold: 0.8,
+    paidExhaustionFallbackProfileId: 'liquid-direct-d1-free',
   },
   'liquid-direct-d1-free': {
     profileId: 'liquid-direct-d1-free',
@@ -435,4 +448,23 @@ export function createDirectDecisionBackend(
       }
     },
   }
+}
+
+// ---------------------------------------------------------------------------
+// per-profile calibration helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Effective low-confidence floor for a decision profile: the operator env
+ * override wins, then the profile's measured calibration, then the historical
+ * default. Free-tier profiles intentionally carry no calibration, so their
+ * floor resolves to the default rather than an inherited paid value.
+ */
+export function profileLowConfidenceFloor(
+  profile: DecisionBackendProfile | undefined,
+  env: Record<string, string | undefined>,
+): number {
+  const raw = Number(env.BUDDY_LOW_CONFIDENCE_THRESHOLD)
+  if (Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw
+  return profile?.lowConfidenceThreshold ?? 0.55
 }

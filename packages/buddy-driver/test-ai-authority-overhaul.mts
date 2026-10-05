@@ -29,7 +29,7 @@ const prompt = PRIMARY_INSTRUCTIONS.toLowerCase()
 assert.ok(!prompt.includes('prefer an id with no recorded failures'))
 assert.ok(!prompt.includes('while plan_still_valid is high'))
 assert.match(prompt, /evidence/)
-assert.match(prompt, /not universal ranking/)
+assert.match(prompt, /not fixed ranking rules/)
 
 const dir = mkdtempSync(join(tmpdir(), 'ai-authority-overhaul-'))
 const writer = new JsonlWriter(join(dir, 'jev.jsonl'))

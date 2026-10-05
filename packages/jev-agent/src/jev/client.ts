@@ -135,7 +135,23 @@ export interface JevPolicy {
   /** Serving backend provider/profile of a model-authoritative policy (provenance only). */
   readonly provider?: string
   readonly profileId?: string
+  /**
+   * The SERVING tier's effective low-confidence escalation floor, resolved per
+   * read. Policies without tier composition leave this unset and the caller
+   * falls back to the statically configured value.
+   */
+  readonly lowConfidenceThreshold?: number
   decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult>
+  /**
+   * Recovery-fence legality for a committed, declared authority succession
+   * (e.g. the one-way paid -> free tier transition). Returns true only for the
+   * exact observed edge; absent or uncommitted -> the pinned identity check is
+   * unchanged.
+   */
+  authoritySuccessionAllowed?(
+    expected: { provider: string; model: string },
+    actual: { provider: string; model: string },
+  ): boolean
 }
 
 export class JevPolicyError extends Error {
@@ -825,6 +841,17 @@ export interface JevPolicyOptions {
   forceFallback?: boolean
   /** credential resolver seam for tests; defaults to the selected profile's own resolver */
   resolveKey?: () => KeyResolution | null
+  /**
+   * Deterministic transport seam for the direct System One dialect (tier
+   * transition tests); production leaves it unset. Never changes semantics.
+   */
+  decisionFetch?: typeof fetch
+  /**
+   * Provenance-visible policy event channel (the controller's mirrored logger).
+   * Fired on backend-level lifecycle events such as the one-way paid -> free
+   * tier transition; never used for per-call telemetry.
+   */
+  onPolicyEvent?: (message: string, detail: Record<string, unknown>) => void
   /**
    * §18 Gate F: explicit beta (abandon_option) adoption threshold. Unset ->
    * the selected profile's measured calibration, then the historical 0.5.

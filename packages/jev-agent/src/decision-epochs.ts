@@ -83,7 +83,7 @@ import { stableStateHash } from './decisionlog.ts'
 import { failureCount } from './failureMemory.ts'
 import { questionNamesFor } from './jev.ts'
 import { optionIdForGoal, planRevisionForGoal } from './causal.ts'
-import { assertRecoveryModelAuthority, describeFailure, failLoud, FatalModelError } from './modelFailure.ts'
+import { assertRecoveryModelAuthority, describeFailure, failLoud, FatalModelError, modelResponseAuthorityMismatch } from './modelFailure.ts'
 import type { AbandonVerdict } from './goal-queue-plane.ts'
 import type { AgentSignals } from './state.ts'
 
@@ -1157,11 +1157,18 @@ export async function decide(
       questionNames: questionNamesFor(questionSetForTrigger(trigger)),
     })
     if (host.options.recoveryPolicyAuthority !== undefined && host.options.recoveryPolicyAuthority !== null) {
-      assertRecoveryModelAuthority(
-        host.options.recoveryPolicyAuthority,
-        { provider: host.policyProvider, model: result.model },
-        result.source,
-      )
+      const actual = { provider: host.policyProvider, model: result.model }
+      const mismatch = modelResponseAuthorityMismatch(host.options.recoveryPolicyAuthority, actual, result.source)
+      // The exact pinned identity is required; the sole exception is the
+      // policy's own declared one-way tier succession (paid exhaustion ->
+      // d1:free), committed and provenance-recorded inside the policy
+      // boundary. Every other provider/model still fails closed.
+      const succeeded =
+        mismatch === 'model-mismatch' &&
+        host.jev.authoritySuccessionAllowed?.(host.options.recoveryPolicyAuthority, actual) === true
+      if (mismatch !== null && !succeeded) {
+        assertRecoveryModelAuthority(host.options.recoveryPolicyAuthority, actual, result.source)
+      }
     }
     host.jevCalls += 1
     host.lastJevAt = Date.now()
@@ -1222,10 +1229,14 @@ export async function decide(
     host.lastAbandonAdopted = host.applyAbandon(result, verdict)
 
     const confidence = result.answers.action?.confidence
-    if (typeof confidence === 'number' && confidence < host.options.lowConfidenceThreshold) {
+    // Per-decision floor: a tiered policy reports the SERVING profile's
+    // calibration (free tier resolves to its own default, never the paid
+    // value); otherwise the statically configured floor applies.
+    const confidenceFloor = host.jev.lowConfidenceThreshold ?? host.options.lowConfidenceThreshold
+    if (typeof confidence === 'number' && confidence < confidenceFloor) {
       host.escalate(
         'low_confidence',
-        `action confidence ${confidence} < ${host.options.lowConfidenceThreshold} for ${host.lastDecisionId ?? 'none'}`,
+        `action confidence ${confidence} < ${confidenceFloor} for ${host.lastDecisionId ?? 'none'}`,
       )
     }
     return result

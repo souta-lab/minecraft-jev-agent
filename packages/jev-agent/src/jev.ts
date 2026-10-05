@@ -26,8 +26,10 @@ import {
   DECISION_PROFILES,
   DEFAULT_DECISION_PROFILE_ID,
   createDirectDecisionBackend,
+  profileLowConfidenceFloor,
   resolveProfileCredential,
 } from '../../jev-harness/providers/systemone-direct.ts'
+import { createTieredJevPolicy } from './jev/tier-transition.ts'
 
 /** Neutral public prompt: evidence is not silently upgraded into a hard ranking rule. */
 export const PRIMARY_INSTRUCTIONS = AUTHORITY_PRIMARY_INSTRUCTIONS
@@ -73,9 +75,7 @@ export function resolveDecisionProfileId(env: Record<string, string | undefined>
  * Thresholds never silently transfer between models.
  */
 export function resolveLowConfidenceThreshold(env: Record<string, string | undefined> = process.env): number {
-  const raw = Number(env.BUDDY_LOW_CONFIDENCE_THRESHOLD)
-  if (Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw
-  return DECISION_PROFILES[resolveDecisionProfileId(env)]?.lowConfidenceThreshold ?? 0.55
+  return profileLowConfidenceFloor(DECISION_PROFILES[resolveDecisionProfileId(env)], env)
 }
 
 /**
@@ -110,7 +110,27 @@ export function createJevPolicy(options: JevPolicyOptions): JevPolicy {
       `no key resolved for decision profile ${profileId} (${profile.secretFile ?? 'no credential source'}) and forceFallback was not set`,
     )
   }
-  const direct = createDirectDecisionBackend(profile, credential, { timeoutMs: options.timeoutMs })
+  if (profile.paidExhaustionFallbackProfileId !== undefined) {
+    // Paid-tier continuity (operator-mandated): policy-layer composition, so
+    // each tier's AuthorityJevPolicy keeps its own calibration and journal
+    // identity. The transition is provenance-visible in BOTH evidence planes -
+    // a durable `jev-tier-transition` record plus the mirrored
+    // DECISION_TIER_TRANSITION marker - and sticky for the process: flipping
+    // BUDDY_DECISION_PROFILE makes later generations construct the free
+    // profile directly (which declares no further fallback).
+    return createTieredJevPolicy(profile, credential, options, (transition) => {
+      options.writer.write({ record: 'jev-tier-transition', ts: new Date().toISOString(), ...transition })
+      options.onPolicyEvent?.(
+        `DECISION_TIER_TRANSITION from=${transition.fromProfileId} to=${transition.toProfileId} provider=${transition.providerId} model=${transition.toModelId} availability=${transition.availability}${transition.status === null ? '' : ` status=${transition.status}`}`,
+        { ...transition },
+      )
+      process.env.BUDDY_DECISION_PROFILE = transition.toProfileId
+    })
+  }
+  const direct = createDirectDecisionBackend(profile, credential, {
+    timeoutMs: options.timeoutMs,
+    ...(options.decisionFetch === undefined ? {} : { fetch: options.decisionFetch }),
+  })
   // The profile pins the model (AI_GATEWAY_MODEL addresses the gateway dialect
   // only), and the backend - not the policy - holds the credential.
   return new AuthorityJevPolicy(

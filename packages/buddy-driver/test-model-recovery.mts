@@ -327,6 +327,39 @@ describe('model authority recovery host policy', () => {
     expect(tracker.snapshot()).toMatchObject({ state: 'available', recoveryAuthority: null })
   })
 
+  test('a declared tier succession moves the pinned Jev identity; every other identity still mismatches', () => {
+    const tracker = new ModelAvailabilityTracker()
+    const paid = { provider: 'liquid', model: 'd1' }
+    const free = { provider: 'liquid', model: 'd1:free' }
+    const t0 = Date.parse('2026-10-11T00:00:00.000Z')
+    expect(tracker.admitGenerationAuthority(paid, 'jev', SOURCE_SHA).allowed).toBe(true)
+    tracker.recordUnavailable({
+      generationId: 'gen-paid', context: 'jev-authority', attempts: 1,
+      authorityKind: 'jev', error: 'credit: payment required', sourceSha: SOURCE_SHA,
+    }, t0)
+    expect(tracker.snapshot()).toMatchObject({ state: 'degraded', recoveryAuthority: paid })
+
+    // Before the observed transition, the free identity is a plain mismatch.
+    expect(tracker.admitGenerationAuthority(free, 'jev', SOURCE_SHA)).toMatchObject({
+      allowed: false, reason: 'model-mismatch', authorityKind: 'jev',
+    })
+    // An unrelated edge cannot move the pin.
+    expect(tracker.noteAuthoritySuccession('jev', { provider: 'liquid', fromModel: 'other', toModel: 'd1:free' })).toBe(false)
+    expect(tracker.admitGenerationAuthority(free, 'jev', SOURCE_SHA)).toMatchObject({ allowed: false, reason: 'model-mismatch' })
+    // The declared paid -> free edge moves the pin exactly once.
+    expect(tracker.noteAuthoritySuccession('jev', { provider: 'liquid', fromModel: 'd1', toModel: 'd1:free' })).toBe(true)
+    expect(tracker.snapshot().recoveryAuthority).toEqual(free)
+    expect(tracker.admitGenerationAuthority(free, 'jev', SOURCE_SHA)).toMatchObject({
+      allowed: true, reason: 'same-recovery-authority', authorityKind: 'jev',
+    })
+    // ...but it does not re-admit the retired paid identity or anything else.
+    expect(tracker.admitGenerationAuthority(paid, 'jev', SOURCE_SHA)).toMatchObject({ allowed: false, reason: 'model-mismatch' })
+    expect(tracker.admitGenerationAuthority({ provider: 'liquid', model: 'd2' }, 'jev', SOURCE_SHA)).toMatchObject({ allowed: false, reason: 'model-mismatch' })
+    // And a free response from the successor identity completes recovery.
+    expect(tracker.recordPolicyResponse(free, 'jev', t0 + 5_000)).toEqual({ accepted: true, recovered: true, reason: null })
+    expect(tracker.snapshot()).toMatchObject({ state: 'available' })
+  })
+
   test('System2 recovery pins its own provider/model and requires a fresh provider-authored plan', () => {
     const tracker = new ModelAvailabilityTracker()
     const jev = { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }

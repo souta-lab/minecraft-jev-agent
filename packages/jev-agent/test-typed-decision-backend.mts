@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { AuthorityJevPolicy } from './src/jev/authority.ts'
 import { createJevPolicy, resolveDecisionProfileId } from './src/jev.ts'
 import { DANGER_LEVELS } from './src/jev/client.ts'
-import type { JevPolicyOptions, JevRequest } from './src/jev/client.ts'
+import type { JevPolicy, JevPolicyOptions, JevRequest } from './src/jev/client.ts'
 import type { Candidate } from './src/candidates.ts'
 import { FatalModelError } from './src/modelFailure.ts'
 import {
@@ -144,7 +144,7 @@ function directPolicy(responder: Responder, options: { maxRetries?: number; rate
   return { policy, seen, records, waits }
 }
 
-async function fatalOf(policy: AuthorityJevPolicy, signal?: AbortSignal): Promise<FatalModelError> {
+async function fatalOf(policy: JevPolicy, signal?: AbortSignal): Promise<FatalModelError> {
   try {
     await policy.decide(request(), signal)
   } catch (error) {
@@ -378,5 +378,167 @@ await check('a missing credential is fatal, never a deterministic fallback', () 
     (error: unknown) => error instanceof FatalModelError && error.context === 'jev-policy-key' && /no key resolved/.test(error.message),
   )
 })
+
+// ---------------------------------------------------------------------------
+// one-way paid -> free tier continuity (operator-mandated, policy-layer)
+// ---------------------------------------------------------------------------
+
+interface TieredHarness {
+  policy: ReturnType<typeof createJevPolicy>
+  seen: Seen[]
+  records: Array<Record<string, any>>
+  events: Array<{ message: string; detail: Record<string, any> }>
+}
+
+function tieredPolicy(responder: Responder, overrides: Partial<JevPolicyOptions> = {}): TieredHarness {
+  const seen: Seen[] = []
+  const records: Array<Record<string, any>> = []
+  const events: Array<{ message: string; detail: Record<string, any> }> = []
+  const policy = createJevPolicy(factoryOptions({
+    decisionProfile: 'liquid-direct-d1',
+    decisionFetch: fakeFetch(responder, seen),
+    writer: { path: 'test', write(record: Record<string, any>) { records.push(record) } },
+    onPolicyEvent: (message, detail) => { events.push({ message, detail }) },
+    ...overrides,
+  }))
+  return { policy, seen, records, events }
+}
+
+const profileEnvBefore = process.env.BUDDY_DECISION_PROFILE
+try {
+  await check('paid success stays paid: no transition, paid identity everywhere', async () => {
+    const h = tieredPolicy(() => json(200, goodReply()))
+    const result = await h.policy.decide(request())
+    assert.equal(result.model, 'd1')
+    assert.equal(result.profileId, 'liquid-direct-d1')
+    assert.equal(h.policy.model, 'd1')
+    assert.equal(h.policy.profileId, 'liquid-direct-d1')
+    assert.equal(h.policy.lowConfidenceThreshold, 0.2, 'the paid profile keeps its measured floor')
+    assert.equal(h.seen.length, 1)
+    assert.equal(h.seen[0]!.body?.model, 'd1')
+    assert.equal(h.events.length, 0, 'no transition event without exhaustion')
+    assert.equal(h.records.some((row) => row.record === 'jev-tier-transition'), false)
+    assert.equal(h.policy.authoritySuccessionAllowed?.(
+      { provider: 'liquid', model: 'd1' }, { provider: 'liquid', model: 'd1:free' },
+    ), false, 'no succession is declared before the transition commits')
+  })
+
+  await check('typed credit exhaustion transitions once and retries the SAME request on d1:free', async () => {
+    const h = tieredPolicy((_seen, _signal, call) =>
+      call === 1 ? json(402, { error: 'payment required' }) : json(200, goodReply((reply) => { reply.model = 'd1:free' })),
+    )
+    const result = await h.policy.decide(request())
+    assert.equal(result.model, 'd1:free', 'the retried result reports the serving model')
+    assert.equal(result.provider, 'liquid')
+    assert.equal(result.profileId, 'liquid-direct-d1-free')
+    assert.equal(h.seen.length, 2)
+    assert.equal(h.seen[0]!.body?.model, 'd1', 'first attempt on paid d1')
+    assert.equal(h.seen[1]!.body?.model, 'd1:free', 'retry on d1:free')
+    assert.deepEqual(h.seen[1]!.body?.state, h.seen[0]!.body?.state, 'the same grounded state is retried')
+    assert.deepEqual(h.seen[1]!.body?.questions, h.seen[0]!.body?.questions, 'the same question set is retried')
+
+    // Provenance: one durable journal record + one live mirrored event.
+    const journal = h.records.filter((row) => row.record === 'jev-tier-transition')
+    assert.equal(journal.length, 1)
+    assert.deepEqual(
+      { providerId: journal[0]!.providerId, from: journal[0]!.fromProfileId, to: journal[0]!.toProfileId,
+        fromModel: journal[0]!.fromModelId, toModel: journal[0]!.toModelId, availability: journal[0]!.availability },
+      { providerId: 'liquid', from: 'liquid-direct-d1', to: 'liquid-direct-d1-free',
+        fromModel: 'd1', toModel: 'd1:free', availability: 'credit' },
+    )
+    assert.equal(h.events.length, 1)
+    assert.match(h.events[0]!.message, /^DECISION_TIER_TRANSITION /)
+
+    // Per-call journals stamp each tier's own identity - no d1 leakage.
+    const calls = h.records.filter((row) => row.record === 'jev-call')
+    assert.equal(calls.length, 2, 'one journaled paid failure + one journaled free success')
+    assert.equal(calls[0]!.backend.profileId, 'liquid-direct-d1')
+    assert.equal(calls[0]!.backend.model, 'd1')
+    assert.equal(calls[1]!.backend.profileId, 'liquid-direct-d1-free')
+    assert.equal(calls[1]!.backend.model, 'd1:free')
+    assert.equal(calls[1]!.model, 'd1:free')
+    assert.equal(calls[1]!.response.model, 'd1:free')
+
+    // Serving identity + calibration flip to the free profile.
+    assert.equal(h.policy.model, 'd1:free')
+    assert.equal(h.policy.provider, 'liquid')
+    assert.equal(h.policy.profileId, 'liquid-direct-d1-free')
+    assert.equal(h.policy.lowConfidenceThreshold, 0.55, 'free tier resolves its own default floor, never the paid 0.2')
+    assert.equal(h.policy.authoritySuccessionAllowed?.(
+      { provider: 'liquid', model: 'd1' }, { provider: 'liquid', model: 'd1:free' },
+    ), true, 'the committed edge is the legal recovery succession')
+    assert.equal(h.policy.authoritySuccessionAllowed?.(
+      { provider: 'liquid', model: 'd1' }, { provider: 'liquid', model: 'other' },
+    ), false, 'an undeclared identity is still illegal')
+
+    // Sticky for subsequent decisions: the next call goes straight to free.
+    const again = await h.policy.decide(request())
+    assert.equal(again.model, 'd1:free')
+    assert.equal(h.seen.length, 3)
+    assert.equal(h.seen[2]!.body?.model, 'd1:free', 'subsequent calls never re-attempt the paid tier')
+    assert.equal(h.events.length, 1, 'the transition fires exactly once')
+
+    // Sticky across generations: env flipped, so a fresh policy builds the free
+    // profile directly (no wrapper, no paid attempt).
+    assert.equal(process.env.BUDDY_DECISION_PROFILE, 'liquid-direct-d1-free')
+    const next = createJevPolicy(factoryOptions({ decisionFetch: fakeFetch(() => json(200, goodReply((reply) => { reply.model = 'd1:free' })), []) }))
+    assert.equal(next.model, 'd1:free')
+    assert.equal(next.profileId, 'liquid-direct-d1-free')
+    assert.equal(next.lowConfidenceThreshold, undefined, 'the bare free policy carries no tier floor field')
+  })
+
+  await check('typed entitlement exhaustion also commits the one-way transition', async () => {
+    const h = tieredPolicy((_seen, _signal, call) =>
+      call === 1 ? json(403, { error: 'model not enabled for this account' }) : json(200, goodReply((reply) => { reply.model = 'd1:free' })),
+    )
+    const result = await h.policy.decide(request())
+    assert.equal(result.model, 'd1:free')
+    assert.equal(h.events.length, 1)
+    assert.equal(h.events[0]!.detail.availability, 'entitlement')
+  })
+
+  await check('a 5xx carrying credit text (the real outage shape) transitions', async () => {
+    const h = tieredPolicy((_seen, _signal, call) =>
+      call === 1 ? json(503, { error: 'A positive credit balance is required for all requests' }) : json(200, goodReply((reply) => { reply.model = 'd1:free' })),
+    )
+    const result = await h.policy.decide(request())
+    assert.equal(result.model, 'd1:free')
+    assert.equal(h.seen.length, 2)
+  })
+
+  await check('one-way latch: a free-tier failure never returns to paid and never re-fires', async () => {
+    const h = tieredPolicy(() => json(402, { error: 'payment required' }))
+    await fatalOf(h.policy)
+    assert.equal(h.events.length, 1)
+    await fatalOf(h.policy)
+    assert.equal(h.events.length, 1, 'no second transition')
+    assert.equal(h.seen.length, 3, 'paid once, then free twice - paid is never re-attempted')
+    assert.equal(h.seen[2]!.body?.model, 'd1:free')
+  })
+
+  const neverSwitches: Array<[string, Responder, { retryable: boolean }]> = [
+    ['429 rate limit', () => json(429, { error: 'slow down' }), { retryable: true }],
+    ['500 server error', () => json(500, { error: 'upstream' }), { retryable: true }],
+    ['network failure', () => { throw new TypeError('fetch failed') }, { retryable: true }],
+    ['401 auth', () => json(401, { error: 'invalid api key' }), { retryable: false }],
+    ['404 bad request', () => json(404, { error: 'not found' }), { retryable: false }],
+    ['model identity mismatch', () => json(200, goodReply((reply) => { reply.model = 'other' })), { retryable: false }],
+  ]
+  for (const [name, responder, expected] of neverSwitches) {
+    await check(`non-exhaustion failure never switches tier: ${name}`, async () => {
+      const h = tieredPolicy(responder)
+      const fatal = await fatalOf(h.policy)
+      assert.equal(fatal.retryable, expected.retryable)
+      assert.equal(h.events.length, 0, 'no transition event')
+      assert.equal(h.policy.model, 'd1', 'still serving paid identity')
+      assert.equal(h.policy.lowConfidenceThreshold, 0.2, 'paid calibration still applies')
+      assert.ok(h.seen.every((row) => row.body?.model === 'd1'), 'every attempt stayed on the paid model')
+      assert.equal(h.records.some((row) => row.backend?.model === 'd1:free'), false)
+    })
+  }
+} finally {
+  if (profileEnvBefore === undefined) delete process.env.BUDDY_DECISION_PROFILE
+  else process.env.BUDDY_DECISION_PROFILE = profileEnvBefore
+}
 
 process.stdout.write(`typed decision backend: ${passed} passed\n`)
