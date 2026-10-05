@@ -21,12 +21,12 @@ import { bestToolTier } from './reachability.ts'
 import { formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled } from './replanThrottle.ts'
 import type { ReplanInputs, ReplanThrottle } from './replanThrottle.ts'
 import type { DecisionScheduler, DecisionTrigger } from './scheduler.ts'
-import { distance } from './state.ts'
+import { distance, scannedBlockNames } from './state.ts'
 import type { AgentSignals, KnownResource, GoalState, HarvestTool, Vec3Json, WorldState } from './state.ts'
 import { System2RequestCancelledError } from './system2/service.ts'
 import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2/service.ts'
 import { applySystem2RecoveryFence, evaluateSystem2Apply, formatCompiledGoalRows, formatSystem2Discard, formatSystem2PlanApplied, system2BodyOwned } from './system2/authority.ts'
-import type { System2ApplyState, System2RequestContext } from './system2/authority.ts'
+import type { PlanWorldFactsBasis, System2ApplyState, System2RequestContext } from './system2/authority.ts'
 import { SYSTEM2_SEMANTIC_HISTORY_LIMIT, acceptedSystem2PlanGoals, createSystem2SemanticOutcome, finalizeSystem2SemanticOutcomes, system2SemanticBlocker, system2SemanticFingerprint } from './system2/causal-history.ts'
 import { buildSystem2BlockerFacts, emptySystem2PayloadShape, formatSystem2PayloadAbsentLine, formatSystem2PayloadLine, formatSystem2PayloadRefusedLine } from './system2/payload.ts'
 import { bodySurvivalFacts, isDangerousThreat } from './threat.ts'
@@ -455,6 +455,40 @@ export function semanticStateFingerprint(host: System2PlaneHost): string {
 const SYSTEM2_APPLY_DEFER_ATTEMPTS = 20
 const SYSTEM2_APPLY_DEFER_MS = 1500
 
+/**
+ * The durable world-fact names a plan's goals directly name — each goal's
+ * targetItem plus its scanned block-source names, and the station kinds a
+ * craft/smelt/place goal can need. `evaluateSystem2Apply` uses this to decide
+ * whether a world-facts change can void the authored basis at all; facts
+ * outside it re-ground at offer time. A smelt goal's fuel premise is held
+ * supply — `inventoryBasisLost` already owns that direction — so it names
+ * only the furnace family, not the coal/log resource cells the body may be
+ * harvesting while the model answers.
+ */
+export function planWorldFactsBasis(goals: readonly PlannedGoal[]): PlanWorldFactsBasis {
+  const names = new Set<string>()
+  let logLike = false
+  const addScannedSources = (item: string | null) => {
+    if (item === null) return
+    names.add(item)
+    for (const source of scannedBlockNames(item) ?? []) names.add(source)
+  }
+  for (const goal of goals) {
+    const item = goal.targetItem ?? null
+    addScannedSources(item)
+    if (
+      item !== null &&
+      (goal.kind === 'collect' || goal.kind === 'goto') &&
+      (item === 'log' || item === 'planks' || item === 'fuel' || item === 'charcoal' || item.endsWith('_log') || item.endsWith('_wood'))
+    ) {
+      logLike = true
+    }
+    if (goal.kind === 'craft' || goal.kind === 'place') names.add('crafting_table')
+    if (goal.kind === 'smelt') names.add('furnace')
+  }
+  return { names, logLike }
+}
+
 export function system2ApplyIdentity(host: System2PlaneHost,
 state: WorldState | null): Pick<
   System2RequestContext,
@@ -845,8 +879,9 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
           actionInFlight: system2BodyOwned(host.executor.current?.kind ?? null),
         }
       }
+      const planBasis = planWorldFactsBasis(plan.goals)
       let currentContext = buildCurrentContext()
-      let validity = evaluateSystem2Apply(requestContext, currentContext)
+      let validity = evaluateSystem2Apply(requestContext, currentContext, planBasis)
       // A body-owned action in flight is the ONE transient apply fence: the plan
       // is still authored against this exact queue/world, so hold it briefly for
       // the mechanical continuation to land rather than paying a fresh model
@@ -870,7 +905,7 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
         await new Promise((resolveDefer) => setTimeout(resolveDefer, SYSTEM2_APPLY_DEFER_MS))
         if (!host.running || host.modelRecoveryStopping) break
         currentContext = buildCurrentContext()
-        validity = evaluateSystem2Apply(requestContext, currentContext)
+        validity = evaluateSystem2Apply(requestContext, currentContext, planBasis)
       }
       if (!host.running || host.modelRecoveryStopping) {
         staleDiscard()

@@ -168,6 +168,87 @@ function inventoryBasisLost(requestFingerprint: string, currentFingerprint: stri
 }
 
 /**
+ * The world-facts basis a plan's goals directly name: resource/station names
+ * plus whether the *_log family is a named source. The apply fence only needs
+ * "could a lost fact have been part of the authored basis"; which names enter
+ * the set is computed by the plan layer (`planWorldFactsBasis`).
+ */
+export interface PlanWorldFactsBasis {
+  readonly names: ReadonlySet<string>
+  readonly logLike: boolean
+}
+
+interface WorldFactsFingerprint {
+  resources?: ReadonlyArray<{ name?: unknown }>
+  stations?: ReadonlyArray<unknown>
+  furnaces?: ReadonlyArray<unknown>
+}
+
+function parseWorldFactsFingerprint(fingerprint: string): WorldFactsFingerprint | null {
+  try {
+    const parsed: unknown = JSON.parse(fingerprint)
+    if (parsed === null || typeof parsed !== 'object') return null
+    return parsed as WorldFactsFingerprint
+  } catch {
+    return null
+  }
+}
+
+function worldFactNameReferenced(name: unknown, basis: PlanWorldFactsBasis): boolean {
+  if (typeof name !== 'string' || name.length === 0) return false
+  return basis.names.has(name) || (basis.logLike && (name.endsWith('_log') || name.endsWith('_wood')))
+}
+
+/**
+ * Direction-aware, plan-scoped world-facts freshness. The fingerprint protects
+ * plan authorship: a plan must not apply when the durable facts it was authored
+ * against have been lost. Raw equality cannot express that — it discards on
+ * ANY remembered-cell churn, including cells no goal references. Measured live
+ * (portal-p24, run-muvh4ofl / gen-muviaewk, 2026-10-07): `opt=none` over-harvest
+ * falsified remembered coal_ore/stone/gravel cells on each verified dig while
+ * the model answered, and consecutive `queue_empty` responses landed
+ * `world_facts_changed` even though the smelt/furnace goals never named the
+ * churned cells.
+ *
+ * Verdict: only a LOST basis entry the plan names can void it. Newly-remembered
+ * entries never can — added supply cannot break an authored premise (same
+ * direction as `inventoryBasisLost`). Churn on facts the plan does not name
+ * re-grounds at offer time instead.
+ */
+function worldFactsBasisLost(
+  requestFingerprint: string,
+  currentFingerprint: string | undefined,
+  basis: PlanWorldFactsBasis | null | undefined,
+): boolean {
+  if (currentFingerprint === requestFingerprint) return false
+  if (currentFingerprint === undefined) return true
+  // No plan scope (older callers): keep the historical strict verdict.
+  if (basis === null || basis === undefined) return true
+  const request = parseWorldFactsFingerprint(requestFingerprint)
+  const current = parseWorldFactsFingerprint(currentFingerprint)
+  if (request === null || current === null) return true
+  const currentEntries = new Set<string>()
+  for (const resource of current.resources ?? []) currentEntries.add(`r:${JSON.stringify(resource)}`)
+  for (const station of current.stations ?? []) currentEntries.add(`s:crafting_table:${JSON.stringify(station)}`)
+  for (const station of current.furnaces ?? []) currentEntries.add(`s:furnace:${JSON.stringify(station)}`)
+  for (const resource of request.resources ?? []) {
+    if (currentEntries.has(`r:${JSON.stringify(resource)}`)) continue
+    if (worldFactNameReferenced(resource.name, basis)) return true
+  }
+  if (basis.names.has('crafting_table')) {
+    for (const station of request.stations ?? []) {
+      if (!currentEntries.has(`s:crafting_table:${JSON.stringify(station)}`)) return true
+    }
+  }
+  if (basis.names.has('furnace')) {
+    for (const station of request.furnaces ?? []) {
+      if (!currentEntries.has(`s:furnace:${JSON.stringify(station)}`)) return true
+    }
+  }
+  return false
+}
+
+/**
  * Prove that a response still describes the state it was requested against.
  * Every mismatch is retained in the result: a discard is evidence, and the
  * reason must not be hidden behind a generic "stale" label.
@@ -175,6 +256,7 @@ function inventoryBasisLost(requestFingerprint: string, currentFingerprint: stri
 export function evaluateSystem2Apply(
   request: System2RequestContext,
   current: System2ApplyState,
+  planBasis?: PlanWorldFactsBasis | null,
 ): System2ApplyDecision {
   const reasons: System2DiscardReason[] = []
   if (current.queueRevision !== request.queueRevision) reasons.push('queue_revision_changed')
@@ -196,7 +278,7 @@ export function evaluateSystem2Apply(
   ) reasons.push('world_topology_changed')
   if (
     request.worldFactsFingerprint !== undefined &&
-    current.worldFactsFingerprint !== request.worldFactsFingerprint
+    worldFactsBasisLost(request.worldFactsFingerprint, current.worldFactsFingerprint, planBasis)
   ) reasons.push('world_facts_changed')
   if (
     request.threatFingerprint !== undefined &&
