@@ -11526,6 +11526,8 @@ function digRouteCandidate(
     target: Vec3Json
     targetName: string | null
     reason: string
+    /** true when the ordinary walk to `target` is already refused (open_path) */
+    walkUnreachable?: boolean
     extraMeta?: Record<string, string | number | boolean>
   },
   refusals: DigRouteRefusalSink,
@@ -11540,6 +11542,7 @@ function digRouteCandidate(
     selfPosition: state.self.position,
     target: spec.target,
     descent: state.descent,
+    walkUnreachable: spec.walkUnreachable === true,
     // The body's own cell is the only standable cell the sensor knows: a lateral
     // dig here is a shaft exit, which is the difference the marker reports.
     sealed: strandedOnColumn(state),
@@ -11682,6 +11685,8 @@ function wallEntryCandidates(
     target: Vec3Json
     targetName: string | null
     reason: string
+    /** true when the ordinary walk to `target` is already refused (open_path) */
+    walkUnreachable?: boolean
     extraMeta?: Record<string, string | number | boolean>
   },
   refusals: DigRouteRefusalSink,
@@ -11695,8 +11700,12 @@ function wallEntryCandidates(
   }
   // The arrival rule the dig route itself uses: inside the arrival radius the ordinary
   // walk / vertical approach owns the last block, and a dig there would be tunnelling
-  // into the destination. The entry is never consulted at arrival.
-  if (distance(feet, spec.target) <= DIG_ROUTE_ARRIVE_DISTANCE) return { candidates: [], classes: [] }
+  // into the destination. The entry is never consulted at arrival - unless the caller
+  // already knows the walk to the target is refused (`walkUnreachable`), which is the
+  // case these arms exist for: the separating wall IS the last block.
+  if (distance(feet, spec.target) <= DIG_ROUTE_ARRIVE_DISTANCE && spec.walkUnreachable !== true) {
+    return { candidates: [], classes: [] }
+  }
   const standKey = cellKey(state.self.position)
   const liveStructures = liveStructureIndexOf(state)
   const decision = groundWallEntries({
@@ -12262,7 +12271,7 @@ function descentScaffoldForLevel(
 function levelScanCandidates(
   state: WorldState,
   options: CandidateOptions,
-  spec: { target: Vec3Json; targetName: string | null; reason: string; skill: string | null; extraMeta?: Record<string, string | number | boolean> },
+  spec: { target: Vec3Json; targetName: string | null; reason: string; skill: string | null; /** true when the ordinary walk to `target` is already refused (open_path) */ walkUnreachable?: boolean; extraMeta?: Record<string, string | number | boolean> },
   refusals: DigRouteRefusalSink,
 ): { candidates: Candidate[]; classes: string[]; boundary: string | null } {
   const probes = state.levelScan
@@ -12273,8 +12282,11 @@ function levelScanCandidates(
     z: Math.floor(state.self.position.z),
   }
   // The arrival rule the dig route and the wall entry use: inside the arrival radius the
-  // ordinary walk / vertical approach owns the last block.
-  if (distance(feet, spec.target) <= DIG_ROUTE_ARRIVE_DISTANCE) return { candidates: [], classes: [], boundary: null }
+  // ordinary walk / vertical approach owns the last block - unless the caller already
+  // knows that walk is refused (`walkUnreachable`), which is the case this arm exists for.
+  if (distance(feet, spec.target) <= DIG_ROUTE_ARRIVE_DISTANCE && spec.walkUnreachable !== true) {
+    return { candidates: [], classes: [], boundary: null }
+  }
   const standKey = cellKey(state.self.position)
   const liveStructures = liveStructureIndexOf(state)
   const decision = groundLevelScan({
@@ -12892,6 +12904,7 @@ function travelApproachLegs(
       target: spec.target,
       targetName: spec.targetName,
       reason: 'no_walkable_route',
+      walkUnreachable: true,
       extraMeta: spec.extraMeta,
     },
     refusals,
@@ -12907,7 +12920,7 @@ function travelApproachLegs(
       ? wallEntryCandidates(
           state,
           options,
-          { target: spec.target, targetName: spec.targetName, reason: 'no_walkable_route', extraMeta: spec.extraMeta },
+          { target: spec.target, targetName: spec.targetName, reason: 'no_walkable_route', walkUnreachable: true, extraMeta: spec.extraMeta },
           refusals,
         )
       : { candidates: [], classes: [] }
@@ -12927,6 +12940,7 @@ function travelApproachLegs(
             targetName: spec.targetName,
             reason: 'no_walkable_route',
             skill: spec.skill,
+            walkUnreachable: true,
             extraMeta: spec.extraMeta,
           },
           refusals,
@@ -16518,7 +16532,17 @@ function routeOpeningCandidates(
   const dig = digRouteCandidate(
     state,
     options,
-    { target: goalTarget, targetName: null, reason: 'route_withheld' },
+    {
+      target: goalTarget,
+      targetName: null,
+      reason: 'route_withheld',
+      // The walk to the withheld cell is refused by the reachability check that
+      // brought us here - "inside the arrival radius" is not arrival when the
+      // separating wall is exactly the last block nobody can walk. A remembered
+      // destination redirected to keeps the ordinary arrival gate (its own walk
+      // is not the refused one).
+      walkUnreachable: cellKey(goalTarget) === cellKey(blockedTarget),
+    },
     digRefusals,
   )
   if (dig !== null && !out.some((candidate) => candidate.id === dig.id)) out.push(dig)
@@ -16531,7 +16555,7 @@ function routeOpeningCandidates(
     const entries = wallEntryCandidates(
       state,
       options,
-      { target: goalTarget, targetName: null, reason: 'route_withheld' },
+      { target: goalTarget, targetName: null, reason: 'route_withheld', walkUnreachable: cellKey(goalTarget) === cellKey(blockedTarget) },
       digRefusals,
     )
     for (const entry of entries.candidates) {
@@ -16544,7 +16568,7 @@ function routeOpeningCandidates(
       const levels = levelScanCandidates(
         state,
         options,
-        { target: goalTarget, targetName: null, reason: 'route_withheld', skill: null },
+        { target: goalTarget, targetName: null, reason: 'route_withheld', skill: null, walkUnreachable: cellKey(goalTarget) === cellKey(blockedTarget) },
         digRefusals,
       )
       for (const level of levels.candidates) {

@@ -248,6 +248,20 @@ export interface DigRouteInput {
    */
   sealed?: boolean
   /**
+   * True when the caller already knows the ordinary walk to `target` is refused
+   * (`open_path`/`no_path` withheld locomotion). The distance-arrival shortcut
+   * below exists only because a reachable near target is owned by the ordinary
+   * walk: "inside the arrival radius" is arrival only when a walk could take
+   * the last block. When the walk is already refused, the separating wall is
+   * exactly what this route exists to open, so the distance check is skipped
+   * and a strictly-reducing step inside the radius becomes a real route.
+   * Measured live (run-muveeu5r-dx4w / gen-muveeujv-rrvvr7, 2026-10-05): body
+   * pocketed at (41,21,10) behind one wall from MOVE:p41_20_9, PICKUP:e4397
+   * and (41,20,11) - all open_path at 1.33-1.41m; every consult refused
+   * `dig_route:arrived`, produced 0 acquisition routes and a starvation wedge.
+   */
+  walkUnreachable?: boolean
+  /**
    * True when this step's route already proved zero observable change from this
    * stand cell (the ordinary zero-progress route identity). A spent step is never
    * re-grounded here; the body must move before it is offered again.
@@ -325,7 +339,7 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
     refusal: { reason, target, bearing, cell, block, detail },
   })
 
-  if (fromDistance <= arriveDistance) {
+  if (fromDistance <= arriveDistance && input.walkUnreachable !== true) {
     return refuse('arrived', feet, null, `body is ${round2(fromDistance)}m from the target (arrival distance ${arriveDistance})`)
   }
 

@@ -469,9 +469,12 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     break
   }
   const strictlyDecreasing = distances.every((value, index) => index === 0 || value < (distances[index - 1] ?? Number.POSITIVE_INFINITY))
+  // The approach-leg context declares the destination's walk refused, so the dig
+  // route owns the LAST block too (walkUnreachable): the route now digs into the
+  // target cell (13th step, distance -> 0) instead of stopping one block short.
   check(
     '(a) the distance to the target strictly decreases as the body advances, and the route terminates',
-    strictlyDecreasing && terminated && digSteps === 12 && (distances[distances.length - 1] ?? 99) <= DIG_ROUTE_ARRIVE_DISTANCE,
+    strictlyDecreasing && terminated && digSteps === 13 && (distances[distances.length - 1] ?? 99) <= DIG_ROUTE_ARRIVE_DISTANCE,
     `dig_steps=${digSteps} distances=[${distances.map(round2).join(' -> ')}] terminated=${terminated}`,
   )
 }
@@ -1358,6 +1361,53 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/candidate-diagnostics.ts', import.meta.url), 'utf8') +
     readFileSync(new URL('./src/outcome-accounting.ts', import.meta.url), 'utf8')
+// ---------------------------------------------------------------------------
+// (x) the distance-arrival shortcut owns a near target ONLY while the ordinary
+// walk owns the last block. Live gen-muveeujv-rrvvr7 (2026-10-05): body sealed
+// at (41,21,10) behind one wall from MOVE:p41_20_9 (1.41m), PICKUP:e4397
+// (41.13,20,9.13) and (41,20,11) - every consult refused `dig_route:arrived`,
+// 0 acquisition routes, starvation wedge while the separating wall sat dug-able.
+// ---------------------------------------------------------------------------
+{
+  const FEET: Vec3Json = { x: 41, y: 21, z: 10 }
+  const TARGET: Vec3Json = { x: 41, y: 20, z: 9 }
+
+  const ordinary = planDigRoute({ selfPosition: FEET, target: TARGET, descent: shaftDescent(FEET) })
+  check(
+    'the arrival gate still owns a near target when no refused walk was declared',
+    ordinary.kind === 'refuse' && ordinary.refusal.reason === 'arrived',
+    `kind=${ordinary.kind} reason=${ordinary.kind === 'refuse' ? ordinary.refusal.reason : '-'}`,
+  )
+
+  const walked = planDigRoute({ selfPosition: FEET, target: TARGET, descent: shaftDescent(FEET), walkUnreachable: true })
+  check(
+    'a refused-walk near target gets the last-block dig route instead of a false arrived',
+    walked.kind === 'route' &&
+      cellKey(walked.route.cell) === cellKey(TARGET) &&
+      walked.route.toDistance < walked.route.fromDistance,
+    walked.kind === 'route'
+      ? `dir=${walked.route.dir} mode=${walked.route.mode} cell=${key(walked.route.cell)} from=${round2(walked.route.fromDistance)} to=${round2(walked.route.toDistance)}`
+      : `refused reason=${walked.kind === 'refuse' ? walked.refusal.reason : '-'}`,
+  )
+
+  const itemTarget: Vec3Json = { x: 41.13, y: 20, z: 9.13 }
+  const item = planDigRoute({ selfPosition: FEET, target: itemTarget, descent: shaftDescent(FEET), walkUnreachable: true })
+  check(
+    'a refused-walk float-position item target inside the radius also grounds a route',
+    item.kind === 'route' && item.route.toDistance < item.route.fromDistance,
+    item.kind === 'route'
+      ? `dir=${item.route.dir} mode=${item.route.mode} cell=${key(item.route.cell)} from=${round2(item.route.fromDistance)} to=${round2(item.route.toDistance)}`
+      : `refused reason=${item.kind === 'refuse' ? item.refusal.reason : '-'}`,
+  )
+
+  const noSteps = planDigRoute({ selfPosition: FEET, target: TARGET, descent: [], walkUnreachable: true })
+  check(
+    'a refused-walk near target with no usable step names the real cause, never arrived',
+    noSteps.kind === 'refuse' && noSteps.refusal.reason !== 'arrived',
+    `kind=${noSteps.kind} reason=${noSteps.kind === 'refuse' ? noSteps.refusal.reason : '-'}`,
+  )
+}
+
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
