@@ -396,6 +396,37 @@ function appendJsonl(file, record) {
   appendFileSync(file, `${JSON.stringify(record)}\n`)
 }
 
+/**
+ * Reconcile the child's BUDDY_PORT against the registry-declared port for this
+ * run. The ambient environment is inherited verbatim, so a supervisor launched
+ * without BUDDY_PORT spawns a runner that defaults to the wrong world —
+ * measured live (portal-p24): a runner looped ECONNREFUSED on default 25565
+ * while the run's server listened on 26612, burning the recovery window until
+ * the duplicate chain was killed. The registry `port` field is the canonical
+ * same-world provenance for what the child should connect to.
+ *
+ *   unset env + registry port       -> inject with an env_reconcile event
+ *   env set + registry port agree   -> pass through unchanged
+ *   env set + registry disagrees    -> refuse: the child would own a different
+ *                                      world than the registry syncs ownership
+ *                                      for (identity disagreement)
+ *   registry missing/unreadable/no port -> ambient env stands (first boot)
+ */
+export function reconcileBuddyPort({ registryPath, envPort } = {}) {
+  const ambient = (reason) => ({ status: 'ambient', reason, envPort })
+  if (typeof registryPath !== 'string' || !existsSync(registryPath)) return ambient('registry-missing')
+  let current
+  try { current = JSON.parse(readFileSync(registryPath, 'utf8')) } catch { return ambient('registry-unreadable') }
+  const registryPort = current?.port
+  if (!Number.isInteger(registryPort) || registryPort <= 0) return ambient('registry-port-missing')
+  const trimmed = envPort === undefined || envPort === null ? '' : String(envPort).trim()
+  if (trimmed === '') return { status: 'injected', envPort: String(registryPort), registryPort }
+  if (String(registryPort) !== trimmed) {
+    return { status: 'refused', reason: 'port-mismatch', envPort: null, registryPort, requestedEnvPort: trimmed }
+  }
+  return { status: 'agree', envPort: trimmed, registryPort }
+}
+
 /** Parse the resident's authoritative generation-ready provenance line. */
 export function parseGenerationReadyLine(line) {
   if (typeof line !== 'string' || !line.includes('GENERATION_READY')) return null
@@ -672,9 +703,36 @@ export async function supervise(options, deps = {}) {
       attempt += 1
       attempts = attempt
       const startedAt = now()
+      const portReconcile = reconcileBuddyPort({ registryPath: options.registryPath, envPort: process.env.BUDDY_PORT })
+      if (portReconcile.status === 'refused') {
+        emit({
+          type: 'env_reconcile',
+          at: new Date().toISOString(),
+          attempt,
+          status: 'refused',
+          reason: portReconcile.reason,
+          envPort: portReconcile.requestedEnvPort,
+          registryPort: portReconcile.registryPort,
+        })
+        reason = 'env-port-mismatch'
+        exitCode = EXIT_REFUSED
+        break
+      }
+      if (portReconcile.status === 'injected') {
+        emit({
+          type: 'env_reconcile',
+          at: new Date().toISOString(),
+          attempt,
+          status: 'injected',
+          envPort: portReconcile.envPort,
+          registryPort: portReconcile.registryPort,
+        })
+      }
+      const childEnv = { ...process.env, BUDDY_SUPERVISOR: '1', BUDDY_SUPERVISOR_RUN: base }
+      if (typeof portReconcile.envPort === 'string' && portReconcile.envPort !== '') childEnv.BUDDY_PORT = portReconcile.envPort
       const child = spawn(command, {
         cwd: options.driverDir,
-        env: { ...process.env, BUDDY_SUPERVISOR: '1', BUDDY_SUPERVISOR_RUN: base },
+        env: childEnv,
         stdin: 'ignore',
         stdout: 'pipe',
         stderr: 'pipe',

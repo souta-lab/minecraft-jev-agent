@@ -26,6 +26,7 @@ const {
   parseGenerationReadyLine,
   parseResidentProcessLines,
   preflight,
+  reconcileBuddyPort,
   syncActiveRunRegistryOnReady,
 } = await import('./resident-supervisor.mjs')
 
@@ -477,6 +478,38 @@ try {
   assert.match(help.stdout, /--max-restarts/)
   assert.match(help.stdout, /--base-delay-ms/)
   assert.match(help.stdout, /--log/)
+  checks++
+
+  // ---- BUDDY_PORT reconcile: registry port is the canonical same-world -----
+  // provenance for the child's connection target; wrong-env launches refuse.
+  const portReg = join(tmp, 'port-registry.json')
+  writeFileSync(portReg, JSON.stringify({ record: 'capability-active-run', status: 'active', port: 26612 }))
+  assert.deepEqual(reconcileBuddyPort({ registryPath: portReg, envPort: undefined }), {
+    status: 'injected', envPort: '26612', registryPort: 26612,
+  }, 'unset env injects the registry-declared port')
+  assert.deepEqual(reconcileBuddyPort({ registryPath: portReg, envPort: '26612' }), {
+    status: 'agree', envPort: '26612', registryPort: 26612,
+  }, 'agreeing env passes through')
+  assert.deepEqual(reconcileBuddyPort({ registryPath: portReg, envPort: ' 26612 ' }), {
+    status: 'agree', envPort: '26612', registryPort: 26612,
+  }, 'agreement trims whitespace')
+  assert.deepEqual(reconcileBuddyPort({ registryPath: portReg, envPort: '25565' }), {
+    status: 'refused', reason: 'port-mismatch', envPort: null, registryPort: 26612, requestedEnvPort: '25565',
+  }, 'an env port pointing at a different world than the registry refuses')
+  checks++
+  assert.deepEqual(reconcileBuddyPort({ registryPath: join(tmp, 'does-not-exist.json'), envPort: '26612' }), {
+    status: 'ambient', reason: 'registry-missing', envPort: '26612',
+  }, 'missing registry leaves ambient env standing')
+  const unreadable = join(tmp, 'unreadable-registry.json')
+  writeFileSync(unreadable, 'not-json{')
+  assert.deepEqual(reconcileBuddyPort({ registryPath: unreadable, envPort: '26612' }), {
+    status: 'ambient', reason: 'registry-unreadable', envPort: '26612',
+  }, 'unreadable registry leaves ambient env standing')
+  const noPort = join(tmp, 'noport-registry.json')
+  writeFileSync(noPort, JSON.stringify({ record: 'capability-active-run', status: 'active' }))
+  assert.deepEqual(reconcileBuddyPort({ registryPath: noPort, envPort: '26612' }), {
+    status: 'ambient', reason: 'registry-port-missing', envPort: '26612',
+  }, 'a registry without a port field leaves ambient env standing')
   checks++
 
   console.log(`resident-supervisor: ${checks}/${checks} checks passed`)
