@@ -447,6 +447,9 @@ export function admitRegistryShaSuccession({
   isAlive = pidAlive,
   gitHead = (cwd) => gitOutput(['rev-parse', 'HEAD'], cwd),
   gitDirty = (cwd) => { const out = gitOutput(['status', '--porcelain', '--', '.'], cwd); return out === null ? null : out.length > 0 },
+  gitAncestor = (cwd, ancestor, descendant) => {
+    try { execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd, stdio: ['ignore', 'ignore', 'pipe'] }); return true } catch (e) { return e?.status === 1 ? false : null }
+  },
 } = {}) {
   if (ready.treeDirty !== false) return { allowed: false, reason: 'tree-dirty-or-missing' }
   if (isAlive(current.residentPid) && current.residentPid !== childPid) return { allowed: false, reason: 'live-owner' }
@@ -458,6 +461,11 @@ export function admitRegistryShaSuccession({
   if (head !== ready.sourceSha) return { allowed: false, reason: 'sha-not-head' }
   const dirty = gitDirty(worktreeRoot)
   if (dirty !== false) return { allowed: false, reason: 'tree-dirty-now' }
+  // Forward succession only: without ancestry a clean checkout of an older
+  // commit with dead prior owners would be admitted as a rollback.
+  const ancestor = gitAncestor(worktreeRoot, current.generationSourceSha, ready.sourceSha)
+  if (ancestor === null) return { allowed: false, reason: 'ancestor-unreadable' }
+  if (ancestor !== true) return { allowed: false, reason: 'sha-not-descendant' }
   return { allowed: true }
 }
 

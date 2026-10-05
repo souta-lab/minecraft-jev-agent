@@ -242,6 +242,7 @@ try {
     isAlive: allDead,
     gitHead: () => 'c'.repeat(40),
     gitDirty: () => false,
+    gitAncestor: () => true,
     ...over,
   })
   const admit = syncActiveRunRegistryOnReady({
@@ -267,6 +268,8 @@ try {
     [{ gitHead: () => 'd'.repeat(40) }, 'sha-not-head', 'ready sha behind HEAD refuses'],
     [{ gitHead: () => null }, 'head-unreadable', 'unreadable HEAD refuses'],
     [{ gitDirty: () => true }, 'tree-dirty-now', 'worktree dirty at sync refuses'],
+    [{ gitAncestor: () => false }, 'sha-not-descendant', 'rollback (old sha not ancestor of ready) refuses'],
+    [{ gitAncestor: () => null }, 'ancestor-unreadable', 'unreadable ancestry refuses'],
   ]
   writeActiveRunRegistry({
     record: 'capability-active-run', schemaVersion: 1, status: 'active',
