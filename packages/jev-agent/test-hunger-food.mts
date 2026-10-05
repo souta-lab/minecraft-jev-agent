@@ -496,6 +496,114 @@ addCase('(e5) the habitat surface goal resolves to an ASCEND route or a typed SU
   }
 })
 
+// --- (f) sealed pocket ABOVE the habitat band: the arm must still lead out ----
+// Live portal-p24 (gen-muvj9mnn-fe3lb5): a starving body at y62 climbed its own
+// hand-cut staircase under `BODY_STARVING` floor offers, one `step_overhead` ->
+// VERIFIED MINE -> `ASCEND:habitat` leg at a time. The arm's `y>=63` band gate
+// was measured on an OAK CANOPY body (open sky, walkable leaves - "higher is
+// the treetop") and over-closes on the sealed body: crossing y63 kills the only
+// producer still naming the next overhead cell. The facts that separate the two
+// bodies are already sensed: `strandedOnColumn` (no standable cell beyond the
+// body's own) plus a `currentFootprint` headroom cut or a face's `blockedBy`
+// (an overhead obstruction exists). An island/canopy top has neither.
+
+function pocketState(y: number): WorldState {
+  const base = perceive({ cobblestone: 64, iron_pickaxe: 1 }, 0)
+  const feet = { x: 10, y: Math.floor(y), z: -41 }
+  return {
+    ...base,
+    self: {
+      ...base.self,
+      position: { x: feet.x + 0.5, y, z: feet.z + 0.5 },
+      eyePosition: { x: feet.x + 0.5, y: y + 1.62, z: feet.z + 0.5 },
+    },
+    terrain: { ...base.terrain, standable: [{ x: feet.x, y: feet.y, z: feet.z }] },
+    craftingTables: [],
+    furnaces: [],
+    // The pocket's own ceiling (feet+2) blocks the body's jump headroom, and a
+    // face step's `blockedBy` names the next staircase overhead cell - the same
+    // sensed facts the live conveyor reads each tick.
+    headroomCuts: [
+      {
+        pos: { x: feet.x, y: feet.y + 2, z: feet.z },
+        name: 'stone',
+        safe: true,
+        reason: 'safe',
+        currentFootprint: true,
+      },
+    ],
+    stepCuts: [
+      {
+        dir: 'N' as const,
+        dx: 0,
+        dz: -1,
+        cut: { x: feet.x, y: feet.y + 1, z: feet.z - 1 },
+        step: { x: feet.x, y: feet.y + 1, z: feet.z - 1 },
+        name: 'stone',
+        safe: false,
+        reason: 'step overhead is closed',
+        blockedBy: { pos: { x: feet.x, y: feet.y + 2, z: feet.z - 1 }, name: 'stone' },
+      },
+    ],
+  }
+}
+
+addCase('(f1) sealed + stranded ABOVE the band: the habitat arm still emits the next staircase leg', () => {
+  const state = pocketState(64.3)
+  const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+  const ids = ascent.candidates.map((candidate) => candidate.id)
+  const clearance = ascent.candidates.find(
+    (candidate) => candidate.id === 'MINE:b10_66_-42' || candidate.meta.stepOverhead === true,
+  )
+  return {
+    pass: ascent.candidates.length > 0 && (clearance !== undefined || ascent.candidates.some((c) => c.kind === 'MOVE')),
+    detail: `y=${state.self.position.y} candidates=[${ids.join(',')}] refusal=${ascent.refusal?.reason ?? 'none'}`,
+  }
+})
+
+addCase('(f2) stranded above the band with OPEN sky (island/canopy top): the arm stays silent', () => {
+  const state = { ...pocketState(64.3), headroomCuts: [], stepCuts: [] }
+  const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+  return {
+    pass: ascent.candidates.length === 0,
+    detail: `candidates=[${ascent.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(f3) enclosed overhead but NOT stranded (a 2-high cave above the band): the arm stays silent', () => {
+  const base = pocketState(64.3)
+  const feet = { x: 10, y: 64, z: -41 }
+  const standable = [
+    { x: feet.x, y: feet.y, z: feet.z },
+    { x: feet.x + 1, y: feet.y, z: feet.z },
+    { x: feet.x + 2, y: feet.y, z: feet.z },
+    { x: feet.x, y: feet.y, z: feet.z + 1 },
+    { x: feet.x, y: feet.y, z: feet.z + 2 },
+    { x: feet.x + 1, y: feet.y, z: feet.z + 1 },
+    { x: feet.x + 2, y: feet.y, z: feet.z + 1 },
+    { x: feet.x + 1, y: feet.y, z: feet.z + 2 },
+    { x: feet.x + 2, y: feet.y, z: feet.z + 2 },
+    { x: feet.x - 1, y: feet.y, z: feet.z },
+    { x: feet.x, y: feet.y, z: feet.z - 1 },
+    { x: feet.x - 1, y: feet.y, z: feet.z - 1 },
+  ]
+  const state = { ...base, terrain: { ...base.terrain, standable } }
+  const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+  return {
+    pass: ascent.candidates.length === 0,
+    detail: `candidates=[${ascent.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(f4) sealed + stranded BELOW the band: unchanged - the arm leads as before', () => {
+  const state = pocketState(60.3)
+  const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+  return {
+    pass: ascent.candidates.length > 0,
+    detail: `candidates=[${ascent.candidates.map((c) => c.id).join(',')}] refusal=${ascent.refusal?.reason ?? 'none'}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 
 let failures = 0
