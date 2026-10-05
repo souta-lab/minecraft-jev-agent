@@ -540,3 +540,26 @@ A,B,C,D,E,F,G,H all pass. Remaining operational dependency before ordinary
 portal progression: System2 (muse-spark) credit — a provider credential/billing
 dependency, not a code defect. The typed decision plane is proven on Liquid
 direct d1 as primary with no silent fallback.
+
+### p24.10 — `safe_column` `no_producer` hole + craft-envelope acquisition accounting (acf82fa0, LIVE @e9602bf00d7a)
+
+Two fixes, one class. `safe_column` was the last capability kind with no
+producer: a refused ascend column (cell-unsafe, tool-short, or clearance-
+blocked) fell to `no_producer` even when a tool route or the same grounded
+route family `open_path` gets sat ready. Wired: `tool` arm when the blocker
+names a family+tier; the full `routeOpeningCandidates` family always (an
+alternate column can still reach the target); no cell MINE (cells are
+sensor-unsafe or notional — inventing one would be a reachability lie).
+
+Second fix — the last-resort `selfContainedCraftCandidates` envelope counted
+ANY non-WAIT candidate as "goal has work", so an emitted `ASCEND:target`
+acquisition offer silently hid the inputs-held `CRAFT:crafting_table` step
+the dc54ff4/run-mubobiq6 rule exists to provide. Acquisition offers are
+routes TOWARD withheld prerequisites, never the goal's own craft — now
+excluded from the envelope, matching `hasGroundedGoalRoute` beside it.
+
+Proof: acquisition-route 34/34 (+2 safe_column cases: `no_tool`→tool route,
+`no_clearance`→route family), reachability suite restored (the
+unreachable-table/no-suppression contract held), typecheck + 10 suites.
+Deployed: watcher → `gen-muvhqtpi-lokkrz` @build `e9602bf00d7a`; body
+resumed `collect:log` under muse-spark post-swap.
