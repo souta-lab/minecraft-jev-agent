@@ -1067,6 +1067,72 @@ addCase('(p24.9) a plan-less MOVE withheld ascend_plan gets a grounded route, no
   }
 })
 
+// ---------------------------------------------------------------------------
+// (p24.10) `safe_column` refusals get producers instead of `no_producer`:
+// `no_tool` routes to the tool arm (the blocker names its family+tier), and
+// `no_clearance` gets the grounded route family (an unsafe/notional column cell
+// is no honest MINE target - the alternates are other routes, not that dig).
+// ---------------------------------------------------------------------------
+const UNDIGGABLE_CUT: NonNullable<WorldState['stepCuts']>[number] = {
+  dir: 'N',
+  dx: 0,
+  dz: -1,
+  cut: { x: 27, y: 62, z: 14 },
+  step: { x: 27, y: 62, z: 14 },
+  name: 'bedrock',
+  safe: true,
+  reason: 'safe',
+}
+
+const UNSAFE_CUT: NonNullable<WorldState['stepCuts']>[number] = {
+  dir: 'N',
+  dx: 0,
+  dz: -1,
+  cut: { x: 27, y: 62, z: 14 },
+  step: { x: 27, y: 62, z: 14 },
+  name: 'stone',
+  safe: false,
+  reason: 'hazard_adjacent',
+}
+
+addCase('(p24.10) safe_column:no_tool names a route, not no_producer', () => {
+  const state = liveState({
+    inventory: { stick: 2 },
+    headroomCuts: [],
+    stepCuts: [UNDIGGABLE_CUT],
+    standable: [FEET, { x: 29, y: 61, z: 16 }],
+  })
+  const gate = applyReachabilityGate([climbableMoveCandidate()], state, options)
+  const entry = withheldEntry(gate, 'MOVE:b26_67_9')
+  const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
+  const key = missing.find((capability) => capability.startsWith('safe_column:no_tool'))
+  const fact = entry === null || key === undefined ? null : acquisitionFor(entry, key)
+  const routed = gate.candidates.filter((candidate) => candidate.meta.missingCapability === key)
+  return {
+    pass: entry !== null && key !== undefined && fact !== null && fact.reason !== 'no_producer' && routed.length > 0,
+    detail: `missing=[${missing.join(',')}] key=${key ?? 'none'} acquisition=${fact?.reason ?? `routes:${fact?.routes?.length ?? 0}`} routed=[${routed.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p24.10) safe_column:no_clearance gets the grounded route family, not no_producer', () => {
+  const state = liveState({
+    inventory: { stick: 2 },
+    headroomCuts: [],
+    stepCuts: [UNSAFE_CUT],
+    standable: [FEET, { x: 26, y: 61, z: 12 }],
+  })
+  const gate = applyReachabilityGate([climbableMoveCandidate()], state, options)
+  const entry = withheldEntry(gate, 'MOVE:b26_67_9')
+  const missing = (entry?.result.missingCapabilities ?? []).map(capabilityKey)
+  const key = missing.find((capability) => capability.startsWith('safe_column:no_clearance'))
+  const fact = entry === null || key === undefined ? null : acquisitionFor(entry, key)
+  const routed = gate.candidates.filter((candidate) => candidate.meta.missingCapability === key)
+  return {
+    pass: entry !== null && key !== undefined && fact !== null && fact.reason !== 'no_producer' && routed.length > 0,
+    detail: `missing=[${missing.join(',')}] key=${key ?? 'none'} acquisition=${fact?.reason ?? `routes:${fact?.routes?.length ?? 0}`} routed=[${routed.map((c) => c.id).join(',')}]`,
+  }
+})
+
 let failures = 0
 process.stdout.write('acquisition route - a withheld mechanical fact gets a grounded route or a typed refusal\n')
 process.stdout.write('-'.repeat(78) + '\n')

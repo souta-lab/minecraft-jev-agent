@@ -14924,11 +14924,17 @@ export function applyReachabilityGate(
   // not starve a craft goal whose own recipe inputs are all held - the step that
   // crafts/places the station from those inputs is satisfiable NOW. EQUIP is a
   // local self-care action like WAIT/ESCALATE here: offering it must never hide
-  // the inputs-held craft step from Jev.
+  // the inputs-held craft step from Jev. A capability-acquisition offer is the
+  // same kind of non-goal alternative the `hasGroundedGoalRoute` check below
+  // excludes - a route TOWARD a withheld prerequisite, never the goal's own
+  // craft - so it must not satisfy this envelope either.
   if (
     presented.every(
       (candidate) =>
-        candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE' || candidate.kind === 'EQUIP',
+        candidate.kind === 'WAIT' ||
+        candidate.kind === 'ESCALATE' ||
+        candidate.kind === 'EQUIP' ||
+        candidate.meta.capabilityAcquisition === true,
     )
   ) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
@@ -16362,6 +16368,26 @@ function capabilityAcquisitionCandidates(
         // DESCEND remain available as mechanical route-opening facts because
         // they can change the topology even when their immediate landing cell
         // is not closer in Euclidean distance.
+        source.push(...routeOpeningCandidates(state, options, entry.candidate.target, digRefusals))
+      } else if (capability.kind === 'safe_column') {
+        // A refused ascend column already names its binding facts: `no_tool`
+        // carries the blocker's tool family + tier (a block the body provably
+        // cannot break now), `no_clearance` names the column cell whose step
+        // geometry was unsafe or notional. Neither can be answered by a cell
+        // MINE (an unsafe cell must not be offered, a notional cell is no real
+        // blocker), so the producers are the `tool` arm verbatim plus the same
+        // grounded route family `open_path` offers - an alternate column or
+        // detour may still bring the target into reach. `no_producer` was the
+        // only shape before; the facts were named but never routed.
+        if (capability.tool !== null) {
+          for (const item of toolItemsForCapability(state, options, {
+            kind: 'tool',
+            tool: capability.tool,
+            tier: capability.tier ?? 0,
+          })) {
+            source.push(...craftCandidates(state, options, item).candidates)
+          }
+        }
         source.push(...routeOpeningCandidates(state, options, entry.candidate.target, digRefusals))
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
