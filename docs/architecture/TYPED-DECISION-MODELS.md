@@ -374,6 +374,16 @@ Level-3 calibration was measured 2026-10-05 (Gate F, `tools/jev-d1-calibrate.mts
 - **action agreement with recorded Jev answers**: 21/48 — Jev itself oscillated on identical states (Gate E), so disagreement is not a quality regression signal; d1's top-label probability p50 0.764 shows decisive Choice distributions.
 - **latency**: p50 ~0.41 s per batch (includes DECLINE-leg calls); `usage.outputTokens` remains 0.
 
+Level-3 re-measurement 2026-10-05 (post-v7-corpus support, `05a6fe63`; 48 live re-asks sampled across the now-mixed v6+v7 corpus — 6,307 ok calls, including p24.9 d1-era records replayed as recorded questions + DECLINE injection):
+
+- **action agreement**: 29/48 vs recorded answers — higher than the original 21/48 because the corpus now contains d1-era records where recorded and re-asked answers share one model (self-consistency), alongside v6 Jev-era cross-model pairs.
+- **action confidence**: mean 0.663, p50 0.758 — consistent with the original 0.576/0.635; the profile `lowConfidenceThreshold: 0.2` remains correct (13/48 below the Jev-tuned 0.55).
+- **topProb**: p50 0.841 — decisive distributions confirmed.
+- **abandon_option**: adoptAtHalf 25/48 vs recorded 7/48 — d1's higher abandon inclination re-confirmed; profile `abandonThreshold: 0.8` remains correct.
+- **danger confidence**: mean 0.423 (n=8) — matches the original 0.408; the 0.4 gate stands.
+- **should_retreat**: 5 strong_false / 3 uncertain / 0 strong_true — band behaves.
+- **latency**: p50 0.409 s; paid `liquid-direct-d1` healthy end-to-end (48/48 ok, `outputTokens` 0).
+
 ## 13. Backend profile contract
 
 A production decision-model profile should explicitly declare:
