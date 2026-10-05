@@ -279,6 +279,29 @@ Boundary reasons (p24 all): `candidate_set_changed` 1,658,
   left the previous anchor intact), and 5 errored calls on p24 would simply
   not have happened under replay.
 
+### v7-corpus support note (p24.9 window, commit `8cef6101`)
+
+The tool previously required `record.state.semantic` (the v6 envelope) and
+silently dropped every v7 `jev-call` record — `jev-semantic-projection/v7`
+records store the classifier-ready projection directly in `state`, so the
+replay/holdout proof could not read any live d1-era call. `reconstruct` now
+passes v7 records through with the same `counts` normalization; the loader
+filter keeps the original v6/v7 semantics.
+
+Window replay (`--since 2026-10-05T15:44Z`, the starvation-wedge window,
+`gen-muvf88jh-oznn5l` @ `c6ec48dc`): **168 calls, 168 necessary, 0
+replays** — `candidate_set_changed` 104, `safety_changed` 41,
+`resource_evidence_changed` 12, `goal_or_option_changed` 10,
+`first_decision` 1.
+
+Reading: this is a *post-Gate-C* corpus — production already filtered
+replays, so "all necessary" is expected by construction, and the value is a
+**consistency check**: the offline classifier agrees with every production
+boundary decision in the window (zero contradictions). During an active
+terrain wedge the semantic situation genuinely churns per decision — the
+complement of the stable-phase finding that 80.6% of calls were replays.
+The classifier calls when it should and replays when it should.
+
 ### Documented blind spots in the reconstruction
 
 - v6 records do not carry `goalQueue.hasImpossible`; it is reconstructed as
