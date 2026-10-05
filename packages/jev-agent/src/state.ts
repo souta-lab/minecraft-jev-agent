@@ -1077,6 +1077,30 @@ export function descentDigPlan(step: DescentOption): DescentDigRequirement[] {
   return [...passages, primaryItem]
 }
 
+/**
+ * The cell a step's dig profile drops a falling block into the body's head
+ * from - the same measured-death class the cut pool already guards (live
+ * death, gravel@2,64,27 -> and 2026-10-05's `DESCEND:level:E` gravel tunnel
+ * kill at 21.5,60,-46, `cause=damage killer=null contact=false` at health=1).
+ *
+ * `level` opens a 1x2 corridor (wall+head), so a faller directly above `head`
+ * refills the opened head cell. `down` leaves `head` in place above the dug
+ * `wall`, so a falling `head` drops into the landing's head cell when the wall
+ * support is removed. Returns the faller's name only when the probe cell is a
+ * proven falling block - an unread/empty cell keeps the step offerable,
+ * mirroring the cut pool's convention.
+ */
+export function descentStepFallerAt(
+  mode: DescentMode,
+  head: Vec3Json,
+  at: (x: number, y: number, z: number) => { name: string; boundingBox?: string } | null,
+): string | null {
+  const cell = mode === 'down' ? head : { x: head.x, y: head.y + 1, z: head.z }
+  const block = at(cell.x, cell.y, cell.z)
+  if (block === null || block.boundingBox === 'empty') return null
+  return isFallingBlockName(block.name) ? block.name : null
+}
+
 export type GoalState = {
   id: string
   description: string
@@ -4129,6 +4153,12 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     } else if (hazardNearby) {
       reason = 'lava/water in the step column'
       refusal = 'hazard'
+    } else {
+      const fallerName = descentStepFallerAt(mode, head, at)
+      if (fallerName !== null) {
+        reason = `${fallerName} above the step falls into the opened cell`
+        refusal = 'hazard'
+      }
     }
     const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
     const primaryBlock = at(primary.x, primary.y, primary.z)

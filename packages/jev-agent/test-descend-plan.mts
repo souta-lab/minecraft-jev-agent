@@ -17,6 +17,7 @@ import { createVtrReachTestCells } from './test-vtr-reach-test-cells.mts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, DescentOption, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import { descentStepFallerAt } from './src/state.ts'
 
 interface Case {
   name: string
@@ -627,6 +628,68 @@ addCase('(13) a spent down candidate is excluded while a grounded level alternat
       typeof descend.meta.legPolicyBoundary === 'string' &&
       String(descend.meta.legPolicyBoundary).includes('reason=selected_descent_blocked_or_spent'),
     detail: `descend=${descend?.id ?? 'none'} mode=${String(descend?.meta.mode ?? '-')} boundary=${String(descend?.meta.legPolicyBoundary ?? 'none')}`,
+  }
+})
+
+// 2026-10-05 live death, `DESCEND:level:E` gravel tunnel kill at 21.5,60,-46
+// (`cause=damage killer=null contact=false` at health=1, gravel:33 held): the
+// level tunnel's dig profile opened a corridor under gravel, which fell into
+// the head cell and suffocated the body. `buildDescent`'s refusal chain never
+// probed above the profile - the cut pool guards the same class, the descent
+// pool did not. Pin the probe-cell choice per mode here.
+const blockAt = (name: string | null, boundingBox = 'block') =>
+  name === null ? null : { name, boundingBox }
+addCase('level step: gravel above head refuses', () => {
+  const head: Vec3Json = { x: 21, y: 61, z: -46 }
+  const observed = descentStepFallerAt('level', head, (x, y, z) =>
+    x === 21 && y === 62 && z === -46 ? blockAt('gravel') : null)
+  return {
+    pass: observed === 'gravel',
+    detail: `faller=${String(observed)}`,
+  }
+})
+addCase('level step: solid stone above head stays offerable', () => {
+  const head: Vec3Json = { x: 21, y: 61, z: -46 }
+  const observed = descentStepFallerAt('level', head, (x, y, z) =>
+    x === 21 && y === 62 && z === -46 ? blockAt('stone') : null)
+  return {
+    pass: observed === null,
+    detail: `faller=${String(observed)}`,
+  }
+})
+addCase('level step: unread cell above head stays offerable', () => {
+  const head: Vec3Json = { x: 21, y: 61, z: -46 }
+  const observed = descentStepFallerAt('level', head, () => null)
+  return {
+    pass: observed === null,
+    detail: `faller=${String(observed)}`,
+  }
+})
+addCase('down step: falling head cell refuses', () => {
+  const head: Vec3Json = { x: 21, y: 61, z: -46 }
+  const observed = descentStepFallerAt('down', head, (x, y, z) =>
+    x === 21 && y === 61 && z === -46 ? blockAt('sand') : null)
+  return {
+    pass: observed === 'sand',
+    detail: `faller=${String(observed)}`,
+  }
+})
+addCase('down step: faller above an open head is not the dig\'s refill', () => {
+  const head: Vec3Json = { x: 21, y: 61, z: -46 }
+  const observed = descentStepFallerAt('down', head, (x, y, z) =>
+    x === 21 && y === 62 && z === -46 ? blockAt('gravel') : null)
+  return {
+    pass: observed === null,
+    detail: `faller=${String(observed)}`,
+  }
+})
+addCase('level step: empty-box cell above head stays offerable', () => {
+  const head: Vec3Json = { x: 21, y: 61, z: -46 }
+  const observed = descentStepFallerAt('level', head, (x, y, z) =>
+    x === 21 && y === 62 && z === -46 ? blockAt('water', 'empty') : null)
+  return {
+    pass: observed === null,
+    detail: `faller=${String(observed)}`,
   }
 })
 
