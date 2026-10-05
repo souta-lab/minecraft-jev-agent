@@ -29,39 +29,29 @@ import type {
 import { ABANDON_THRESHOLD_DEFAULT, DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES } from './client.ts'
 
 export const AUTHORITY_PRIMARY_INSTRUCTIONS =
-  'You are Jev pi, the local policy head of an autonomous Minecraft agent. Choose exactly ONE id from the grounded ' +
-  'action list: the action that best advances the CURRENT Option in the CURRENT world state. Every id is executable ' +
-  'candidate data supplied by deterministic code; answer with the id verbatim and never invent an id. Candidate cost, ' +
-  'distance, failure history, reachability, and prerequisite-path metadata are evidence. They are not universal ranking ' +
-  'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives. When an ' +
-  'ATTACK candidate is present, ATTACK versus MOVE, RETREAT, or WAIT is your pi decision: weigh the target identity, ' +
-  'distance, your held weapon and observed offhand item/condition, the target\'s held ranged weapon, health, food, ' +
-  'worn armor and its observed condition, ' +
-  'immediate danger, other threats, and what each grounded escape route gains (separation, cover, and reach). Use ' +
-  'observed line of sight as a ' +
-  'projectile-risk fact, not as a guarantee that no projectile is in flight. Consider the current Option and recent ' +
-  'outcomes. Do not attack merely ' +
-  'because a mob exists, and do not ignore ATTACK merely because movement is cheaper. Deterministic code may ground and ' +
-  'safety-check the candidate, but it must not choose attack for you or replace your valid attack choice with a different ' +
-  'semantic action. The current Option allowedSkills is an envelope: SAFETY, CONTROL, and PREREQUISITE are always ' +
-  'available when code has grounded them, alongside the Option-declared skills. A typed optionSkill=PREREQUISITE ' +
-  'candidate is an actionable dependency route for the current Option, not an unrelated mission and not a reason to ' +
-  'choose WAIT. Use the typed role/missing-capability facts as evidence, while retaining authority over WHICH candidate.'
+  'You are the pi head of the Typed Decision Plane for an autonomous Minecraft agent. Choose exactly ONE id from ' +
+  'candidates: the action that best advances the current Option (option.intent/success/preconditions). Answer with ' +
+  'the id verbatim and never invent one. Candidates are grounded and safety-checked by deterministic code; their ' +
+  'labels, criteria tags, inReach, and failureBand are evidence to weigh, not fixed ranking rules. Judge the whole ' +
+  'canonical state: goal/option contract, progress facts, safety/combat facts, candidates, and recentOutcomes. A ' +
+  'candidate tagged optionSkill=PREREQUISITE is a required dependency route for this Option, not a detour and not a ' +
+  'reason to WAIT; SAFETY and CONTROL candidates stay live under threat. When an ATTACK candidate exists, attack ' +
+  'versus MOVE/RETREAT/WAIT is your judgment: weigh the combat block (target, distance buckets, weapons, armor ' +
+  'condition, danger) and what each escape buys (separation, cover, reach). Code grounds and bounds the choice; it ' +
+  'never picks it.'
 
 const BETA_INSTRUCTIONS =
-  'You are Jev beta. Decide whether the CURRENT Option should end now. Use its explicit preconditions/success facts, ' +
-  'typed recent outcomes, and current grounded alternatives. True means end/abandon this Option and ask System 2 for ' +
-  'WHAT comes next. False means keep the current Option. WAIT and ESCALATE are control-plane outcomes, not productive ' +
-  'goal progress; body/search progress is real progress even when the goal item is unchanged. A local path failure is ' +
-  'recovery evidence, not semantic exhaustion. Do not end the Option merely because one action failed if the Option ' +
-  'remains viable. ' +
-  'The code-owned signals.strategicNonProgress block is grounded evidence about the WHOLE recent trajectory, not one ' +
-  'action: when it shows a full recurrence window (exhausted=true) of verified body-only decisions that returned to the ' +
-  'same few states (distinctStates <= maxDistinctStates) with zero goal/search progress, the current local recovery is ' +
-  'reiterating the same state instead of advancing, however successful each individual MOVE was. Treat that as ' +
-  'exhaustion evidence: true means end this Option. Sustained signals.oscillationsDetected against zero goal/search ' +
-  'progress is the same fact. The reverse also holds: a single productive action, one failure, or a window with real ' +
-  'goal/search progress is NOT exhaustion.'
+  'You are the beta head: does the CURRENT Option end now? Judge option.success/preconditions against progress ' +
+  'facts, recentOutcomes, and the grounded alternatives: true means end/abandon this Option and ask System 2 for WHAT ' +
+  'comes next; false means keep it. WAIT and ESCALATE are control-plane outcomes, not productive goal progress; ' +
+  'body/search progress is real progress even when the goal item is unchanged. A local path failure is recovery ' +
+  'evidence, not semantic exhaustion - do not end a viable Option over one failed action. The code-owned ' +
+  'progress.stall block is grounded evidence about the WHOLE recent trajectory, not one action: exhausted=true means ' +
+  'a full window (windowSize >= horizon) of verified body-only decisions returned to the same few states ' +
+  '(distinctStates <= maxDistinctStates) with zero goal/search progress - the local recovery is reiterating one ' +
+  'pocket however successful each MOVE was, which IS exhaustion evidence: end this Option. Sustained ' +
+  'progress.oscillationsDetected against zero goal/search progress is the same fact. A single productive action, ' +
+  'one failure, or a window with real goal/search progress is NOT exhaustion.'
 
 const RETREAT_INSTRUCTIONS =
   'Should the bot retreat immediately for safety based on the current observed threats, health, and grounded escape actions?'
@@ -278,19 +268,33 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
 /**
  * The exact grounded state handed to the model for one evaluate() call. Exported
  * so the authority evidence a head actually sees (including the #360
- * `strategicNonProgress` block) is behaviourally testable, not only log-inspectable.
+ * recurrence block, now `progress.stall`) is behaviourally testable, not only
+ * log-inspectable.
  *
- * Issue #437: when the caller supplies the versioned semantic projection, that
- * projection IS the semantic state - the primitive churn (`tick`, the raw float
- * body position, the per-tick `recentEvents` trace) is replaced by the bounded
- * semantic plane. Every count-bounded evidence block the prompts refer to by
- * name (`signals.strategicNonProgress`, `signals.threat`, `failedCandidates`,
- * `nearestEntities`, ...) is preserved unchanged, because the beta contract
- * reads them by name.
+ * Issue #437 + §18 Gate B: when the caller supplies the versioned semantic
+ * projection, that projection IS the whole canonical DecisionState - the
+ * primitive churn (`tick`, raw float position, the per-tick `recentEvents`
+ * trace) AND the duplicated outer blocks (`self`, `signals`, `nearest*`,
+ * outer `candidates`/`recentOutcomes`/`goalQueue`/`currentOption`/`goal`/
+ * `inventory`) all stay out of inference. Each semantic fact the heads judge is
+ * compiled once inside the projection: banded body/threat facts in `safety`,
+ * the Option contract in `option`, the #360 recurrence block in
+ * `progress.stall`, the queue head in `queue`. Unprojected callers (VTR route
+ * frames, legacy fixtures) keep the historical raw shape.
  */
 export function authorityState(request: JevRequest): Record<string, unknown> {
-  const state = request.state
   const projection = request.semanticProjection ?? null
+  if (projection !== null && typeof projection === 'object') {
+    // §18 Gate B: the versioned semantic projection IS the canonical compact
+    // DecisionState - the ONLY model-facing state. Every field the heads judge
+    // (Option contract, stall evidence, queue head, banded body facts,
+    // grounded candidate identities) lives exactly once inside it; raw
+    // self/signals/nearest*/outer-candidate blocks stay in the jev-call
+    // journal as audit telemetry and are never duplicated into inference.
+    const modelView = projectionModelView(projection as JevSemanticProjection)
+    return { ...modelView, projectionHash: request.projectionHash ?? null }
+  }
+  const state = request.state
   const reachRouteFrame = request.decisionFrame?.kind === 'vtr-reach-route' ? request.decisionFrame : null
   const self = {
     position: state.self.position,
@@ -350,35 +354,7 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
     nearestEntities: state.entities.slice(0, 12),
     signals,
   }
-  if (projection === null || typeof projection !== 'object') {
-    return { tick: state.tick, self, ...shared, recentEvents: state.recentEvents.slice(-16) }
-  }
-  // §437: the semantic plane replaces the primitive trace. The body's exact float
-  // position is mechanical detail (candidate distance/reach facts carry what the
-  // decision needs), and the per-tick event trace is replaced by the projection's
-  // bounded meaningful event kinds plus its previous-decision/outcome block.
-  //
-  // §1/§10: `projectionModelView` is the projection minus its evidence-only
-  // `counts` block, so the payload's top-level keys are exactly the keys the
-  // projection hash covers. Shipping the raw object instead would put the
-  // compressed `rawSkillSteps`/`rawEvents` telemetry into policy input and let the
-  // payload drift from its own cache key.
-  const modelView = projectionModelView(projection as JevSemanticProjection)
-  return {
-    projectionVersion: modelView.version,
-    projectionHash: request.projectionHash ?? null,
-    semantic: modelView,
-    self: {
-      ...self,
-      position: {
-        x: Math.floor(state.self.position.x),
-        y: Math.floor(state.self.position.y),
-        z: Math.floor(state.self.position.z),
-      },
-      dimension: state.self.dimension,
-    },
-    ...shared,
-  }
+  return { tick: state.tick, self, ...shared, recentEvents: state.recentEvents.slice(-16) }
 }
 
 function isRateLimit(error: unknown, depth = 0): boolean {

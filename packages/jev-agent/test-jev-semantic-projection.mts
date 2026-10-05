@@ -118,7 +118,20 @@ const context = { optionInstanceId: 'option:enter_portal#1', dimension: OVERWORL
 function projectionInput(overrides: Partial<SemanticProjectionInput> = {}): SemanticProjectionInput {
   return {
     goal: { key: 'collect:flint:1', targetItem: 'flint', have: 0, required: 1, complete: false, progress: 0 },
-    option: { instanceId: 'option:enter_portal#1', templateId: 'enter_portal', skillKind: 'ENTER_PORTAL', targetKey: 'portal@26,67,9' },
+    option: {
+      instanceId: 'option:enter_portal#1',
+      templateId: 'enter_portal',
+      semanticInstanceId: 'option:enter_portal#1',
+      semanticTemplateId: 'enter_portal',
+      intent: 'enter the portal frame',
+      skillKind: 'ENTER_PORTAL',
+      targetKey: 'portal@26,67,9',
+      preconditions: ['dimension == minecraft:overworld'],
+      success: ['dimension == minecraft:the_nether'],
+      allowedSkills: ['MOVE', 'ENTER_PORTAL', 'WAIT'],
+      verifiedProgress: 0,
+      failures: 0,
+    },
     world: { dimension: OVERWORLD, worldEpoch: 7, generationId: 'g1', leaseHeld: true, alive: true },
     safety: { healthBand: 'healthy', foodBand: 'full', airBand: 'full', dayPhase: 'day', submerged: false, threatKey: null, criticalDamageKey: null, lastDamageKey: null, wornArmor: null, offhand: null },
     progress: {
@@ -126,8 +139,13 @@ function projectionInput(overrides: Partial<SemanticProjectionInput> = {}): Sema
       lastFailureCode: null,
       escalationRecommended: false,
       oscillationsDetected: 0,
-      stallExhausted: false,
-      stallDistinctStates: 1,
+      stall: null,
+    },
+    queue: {
+      depth: 1,
+      empty: false,
+      hasImpossible: false,
+      current: { id: 'g1:nether', description: 'enter the nether', optionInstanceId: 'option:enter_portal#1', semanticOptionInstanceId: 'option:enter_portal#1' },
     },
     inventory: { dirt: 12, oak_log: 3 },
     candidates: [],
@@ -503,7 +521,7 @@ addCase('(5b) a verified kill without its declared drop is a typed search bounda
   })
   const line = formatSkillOutcomePacket(partial)
   const pass =
-    JEV_PROJECTION_VERSION === 6 &&
+    JEV_PROJECTION_VERSION === 7 &&
     terminalReasonFor({ status: 'done', failure: 'drop_not_acquired', verified: true }) === 'drop_not_acquired' &&
     partial.terminalReason === 'drop_not_acquired' &&
     partial.verification.verified === false &&
@@ -729,14 +747,14 @@ addCase('(6) identical retries are compressed while the typed final failure stay
   const afterFirst = buildJevSemanticProjection(
     projectionInput({
       candidates: [walkToPortalLeg('26,67,10')],
-      progress: { consecutiveFailures: 5, lastFailureCode: 'path_timeout', escalationRecommended: false, oscillationsDetected: 1, stallExhausted: false, stallDistinctStates: 2 },
+      progress: { consecutiveFailures: 5, lastFailureCode: 'path_timeout', escalationRecommended: false, oscillationsDetected: 1, stall: { windowSize: 5, distinctStates: 2, bodyDecisions: 5, semanticDecisions: 0, horizon: 24, maxDistinctStates: 4, exhausted: false, exhaustedRepeats: 0 } },
       events: retries.slice(0, 1),
     }),
   )
   const afterFifth = buildJevSemanticProjection(
     projectionInput({
       candidates: [walkToPortalLeg('26,67,10')],
-      progress: { consecutiveFailures: 5, lastFailureCode: 'path_timeout', escalationRecommended: false, oscillationsDetected: 1, stallExhausted: false, stallDistinctStates: 2 },
+      progress: { consecutiveFailures: 5, lastFailureCode: 'path_timeout', escalationRecommended: false, oscillationsDetected: 1, stall: { windowSize: 5, distinctStates: 2, bodyDecisions: 5, semanticDecisions: 0, horizon: 24, maxDistinctStates: 4, exhausted: false, exhaustedRepeats: 0 } },
       events: retries,
     }),
   )
@@ -892,13 +910,26 @@ addCase('(12) a meaningful Option/progress/failure/safety change changes the key
   const option = buildJevSemanticProjection(
     projectionInput({
       candidates: [walkToPortalLeg('26,67,10')],
-      option: { instanceId: 'option:mine_stone#2', templateId: 'mine', skillKind: 'MINE', targetKey: 'stone@10,20,30' },
+      option: {
+        instanceId: 'option:mine_stone#2',
+        templateId: 'mine',
+        semanticInstanceId: 'option:mine_stone#2',
+        semanticTemplateId: 'mine',
+        intent: 'mine stone',
+        skillKind: 'MINE',
+        targetKey: 'stone@10,20,30',
+        preconditions: [],
+        success: ['stone >= 4'],
+        allowedSkills: ['MINE', 'MOVE'],
+        verifiedProgress: 1,
+        failures: 0,
+      },
     }),
   )
   const progress = buildJevSemanticProjection(
     projectionInput({
       candidates: [walkToPortalLeg('26,67,10')],
-      progress: { consecutiveFailures: 3, lastFailureCode: 'path_timeout', escalationRecommended: true, oscillationsDetected: 4, stallExhausted: true, stallDistinctStates: 2 },
+      progress: { consecutiveFailures: 3, lastFailureCode: 'path_timeout', escalationRecommended: true, oscillationsDetected: 4, stall: { windowSize: 24, distinctStates: 2, bodyDecisions: 24, semanticDecisions: 0, horizon: 24, maxDistinctStates: 4, exhausted: true, exhaustedRepeats: 0 } },
     }),
   )
   const safety = buildJevSemanticProjection(

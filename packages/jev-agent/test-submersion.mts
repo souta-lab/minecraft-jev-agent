@@ -86,7 +86,20 @@ const key = (p: Vec3Json): string => `${p.x},${p.y},${p.z}`
 function selfAirProjection(state: WorldState) {
   const input: SemanticProjectionInput = {
     goal: { key: 'collect:log:3', targetItem: 'log', have: 0, required: 3, complete: false, progress: 0 },
-    option: { instanceId: 'option:air-observation', templateId: 'air-observation', skillKind: 'MOVE', targetKey: null },
+    option: {
+      instanceId: 'option:air-observation',
+      templateId: 'air-observation',
+      semanticInstanceId: null,
+      semanticTemplateId: null,
+      intent: 'observe air behaviour',
+      skillKind: 'MOVE',
+      targetKey: null,
+      preconditions: [],
+      success: [],
+      allowedSkills: ['MOVE'],
+      verifiedProgress: 0,
+      failures: 0,
+    },
     world: {
       dimension: state.self.dimension,
       worldEpoch: 1,
@@ -111,8 +124,7 @@ function selfAirProjection(state: WorldState) {
       lastFailureCode: null,
       escalationRecommended: false,
       oscillationsDetected: 0,
-      stallExhausted: false,
-      stallDistinctStates: 1,
+      stall: null,
     },
     inventory: {},
     candidates: [],

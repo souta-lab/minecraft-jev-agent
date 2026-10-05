@@ -107,9 +107,9 @@ const questions = buildAuthorityQuestions([], ['abandon_option'])
 const beta = questions.abandon_option
 assert.ok(beta !== undefined && beta.type === 'boolean')
 const instructions = String(beta.instructions)
-assert.match(instructions, /strategicNonProgress/)
+assert.match(instructions, /progress\.stall/)
 assert.match(instructions, /exhausted=true/)
-assert.match(instructions, /signals\.oscillationsDetected/)
+assert.match(instructions, /progress\.oscillationsDetected/)
 assert.match(instructions, /NOT exhaustion/)
 assert.match(instructions, /body\/search progress is real progress/)
 

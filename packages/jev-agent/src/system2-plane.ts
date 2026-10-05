@@ -15,6 +15,7 @@ import type { EventLogger } from './jev.ts'
 import { airBand, buildJevSemanticProjection, buildSemanticCombatFacts, dayPhase, diffSemanticProjections, foodBand, healthBand, semanticOffhand, semanticWornArmor, threatBand } from './jev/semantic-projection.ts'
 import type { GroundedFact, JevSemanticProjection, PreviousDecisionFacts, SemanticProgressFacts, SkillOutcomePacket } from './jev/semantic-projection.ts'
 import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
+import { describePredicate } from './optionSpec.ts'
 import type { OptionWorldSnapshot } from './optionSpec.ts'
 import { bestToolTier } from './reachability.ts'
 import { formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled } from './replanThrottle.ts'
@@ -232,8 +233,18 @@ export function buildSemanticProjection(host: System2PlaneHost,
     lastFailureCode: host.signals.lastFailureCode ?? null,
     escalationRecommended: host.signals.escalationRecommended === true,
     oscillationsDetected: host.signals.oscillationsDetected ?? 0,
-    stallExhausted: stall === null ? null : stall.exhausted === true,
-    stallDistinctStates: stall === null ? null : stall.distinctStates ?? null,
+    // #360: the whole-trajectory recurrence block the beta head reads. Folded
+    // into the canonical state once - never duplicated under a second name.
+    stall: stall === null ? null : {
+      windowSize: stall.windowSize,
+      distinctStates: stall.distinctStates,
+      bodyDecisions: stall.bodyProgressDecisions,
+      semanticDecisions: stall.semanticProgressDecisions,
+      horizon: stall.horizon,
+      maxDistinctStates: stall.maxDistinctStates,
+      exhausted: stall.exhausted === true,
+      exhaustedRepeats: stall.exhaustedRepeats,
+    },
   }
   const base = buildJevSemanticProjection({
     goal: {
@@ -247,8 +258,16 @@ export function buildSemanticProjection(host: System2PlaneHost,
     option: {
       instanceId: optionId,
       templateId: option?.templateId ?? null,
+      semanticInstanceId: option?.semanticInstanceId ?? null,
+      semanticTemplateId: option?.semanticTemplateId ?? null,
+      intent: option?.semanticIntent ?? null,
       skillKind: option?.kind ?? null,
       targetKey: option === null ? null : JSON.stringify(option.target),
+      preconditions: (option?.preconditions ?? []).map(describePredicate),
+      success: (option?.success ?? []).map(describePredicate),
+      allowedSkills: [...(option?.allowedSkills ?? [])],
+      verifiedProgress: option?.runtime.verifiedProgress ?? 0,
+      failures: option?.runtime.failures ?? 0,
     },
     world: {
       dimension: state.self.dimension,
@@ -304,6 +323,20 @@ export function buildSemanticProjection(host: System2PlaneHost,
             },
     }),
     progress,
+    queue: {
+      depth: state.goalQueue.depth,
+      empty: state.goalQueue.empty,
+      hasImpossible: state.goalQueue.hasImpossible === true,
+      current:
+        state.goalQueue.current === null
+          ? null
+          : {
+              id: state.goalQueue.current.id,
+              description: state.goalQueue.current.description,
+              optionInstanceId: state.goalQueue.current.optionInstanceId ?? null,
+              semanticOptionInstanceId: state.goalQueue.current.semanticOptionInstanceId ?? null,
+            },
+    },
     sense: {
       blockNames: state.blocks.map((block) => block.name),
       threats: state.entities

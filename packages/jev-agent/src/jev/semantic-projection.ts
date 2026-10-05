@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 6
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v6'
+export const JEV_PROJECTION_VERSION = 7
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v7'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -108,6 +108,7 @@ export const JEV_PROJECTION_LIMITS = {
   inventoryItems: 64,
   realizationsPerIdentity: 4,
   failuresExposed: 16,
+  descriptionChars: 160,
 } as const
 
 // ---------------------------------------------------------------------------
@@ -723,9 +724,23 @@ export interface SemanticGoalFacts {
 export interface SemanticOptionFacts {
   instanceId: string | null
   templateId: string | null
+  /** the semantic (System2-named) owner of the queue row, when one exists */
+  semanticInstanceId: string | null
+  semanticTemplateId: string | null
+  /** human-readable Option intent (the WHAT this Option realizes) */
+  intent: string | null
   /** the Option's own declared skills/phase, when one exists */
   skillKind: string | null
   targetKey: string | null
+  /** I(o): code-rendered precondition predicates required to START the Option */
+  preconditions: string[]
+  /** success(s,o): code-rendered predicates the Option needs to COMPLETE */
+  success: string[]
+  /** the grounded skill envelope this Option may use */
+  allowedSkills: string[]
+  /** code-owned counters for THIS Option instance (evidence, never gates) */
+  verifiedProgress: number
+  failures: number
 }
 
 export interface SemanticWorldFacts {
@@ -1118,13 +1133,47 @@ function durabilityBandFromObservation(max: number | null | undefined, used: num
  * stall that advances is a reason to re-ask policy, while an identical retry is
  * not (§5).
  */
+export interface SemanticStallFacts {
+  /** settled decisions in the current recurrence window */
+  windowSize: number
+  /** distinct state keys inside the window */
+  distinctStates: number
+  /** window decisions that showed verified body progress */
+  bodyDecisions: number
+  /** window decisions that showed goal/search progress (a real boundary) */
+  semanticDecisions: number
+  /** the bounded recurrence window (grows per fired boundary) */
+  horizon: number
+  /** the distinct-state bound for "one pocket" */
+  maxDistinctStates: number
+  /** code-proven recurrence exhaustion: a genuine abandon/escalate boundary */
+  exhausted: boolean
+  /** boundaries fired for this Option since the last semantic progress */
+  exhaustedRepeats: number
+}
+
+export interface SemanticQueueFacts {
+  /** goals still pending or active */
+  depth: number
+  empty: boolean
+  /** at least one queued goal is marked impossible (replan evidence) */
+  hasImpossible: boolean
+  current: {
+    id: string
+    /** bounded human-readable queue-head description */
+    description: string
+    optionInstanceId: string | null
+    semanticOptionInstanceId: string | null
+  } | null
+}
+
 export interface SemanticProgressFacts {
   consecutiveFailures: number
   lastFailureCode: string | null
   escalationRecommended: boolean
   oscillationsDetected: number
-  stallExhausted: boolean | null
-  stallDistinctStates: number | null
+  /** #360 whole-trajectory recurrence evidence; null when unobserved */
+  stall: SemanticStallFacts | null
 }
 
 /**
@@ -1170,6 +1219,8 @@ export interface SemanticProjectionInput {
   /** Meaningful combat changes that must invalidate a cached pi choice. */
   combat?: SemanticCombatFacts | null
   progress: SemanticProgressFacts
+  /** the queue head in semantic form; omitted means "not observed" */
+  queue?: SemanticQueueFacts | null
   /** sensed world in semantic form; omitted means "not observed" */
   sense?: SemanticSenseFacts
   inventory: Readonly<Record<string, number>>
@@ -1200,6 +1251,7 @@ export interface JevSemanticProjection {
   safety: SemanticSafetyFacts
   combat: SemanticCombatFacts | null
   progress: SemanticProgressFacts
+  queue: SemanticQueueFacts | null
   sense: SemanticSenseFacts | null
   events: string[]
   inventory: Record<string, number>
@@ -1312,6 +1364,7 @@ export function buildJevSemanticProjection(input: SemanticProjectionInput): JevS
     safety: { ...input.safety },
     combat: input.combat ?? null,
     progress: { ...input.progress },
+    queue: boundedQueue(input.queue),
     sense: boundedSense(input.sense),
     events: meaningfulEventKinds(input.events ?? []),
     inventory: counts,
@@ -1338,6 +1391,24 @@ export function threatBand(distance: number | null | undefined): string {
   if (distance <= 2) return 'contact'
   if (distance <= 8) return 'near'
   return 'far'
+}
+
+function boundedQueue(queue: SemanticQueueFacts | null | undefined): SemanticQueueFacts | null {
+  if (queue === null || queue === undefined) return null
+  return {
+    depth: queue.depth,
+    empty: queue.empty,
+    hasImpossible: queue.hasImpossible,
+    current:
+      queue.current === null
+        ? null
+        : {
+            id: queue.current.id,
+            description: queue.current.description.slice(0, JEV_PROJECTION_LIMITS.descriptionChars),
+            optionInstanceId: queue.current.optionInstanceId,
+            semanticOptionInstanceId: queue.current.semanticOptionInstanceId,
+          },
+  }
 }
 
 function boundedSense(sense: SemanticSenseFacts | undefined): SemanticSenseFacts | null {
@@ -1426,6 +1497,7 @@ function projectionCore(projection: JevSemanticProjection): Record<string, unkno
     safety: projection.safety,
     combat: projection.combat,
     progress: projection.progress,
+    queue: projection.queue,
     sense: projection.sense,
     events: projection.events,
     inventory: projection.inventory,
@@ -1554,6 +1626,8 @@ export function diffSemanticProjections(
   push('option.instanceId', previous.option.instanceId, current.option.instanceId)
   push('option.skillKind', previous.option.skillKind, current.option.skillKind)
   push('option.targetKey', previous.option.targetKey, current.option.targetKey)
+  push('option.intent', previous.option.intent, current.option.intent)
+  push('option.success', previous.option.success, current.option.success)
   push('world.dimension', previous.world.dimension, current.world.dimension)
   push('world.worldEpoch', previous.world.worldEpoch, current.world.worldEpoch)
   push('world.leaseHeld', previous.world.leaseHeld, current.world.leaseHeld)
@@ -1570,8 +1644,10 @@ export function diffSemanticProjections(
   push('progress.consecutiveFailures', previous.progress.consecutiveFailures, current.progress.consecutiveFailures)
   push('progress.lastFailureCode', previous.progress.lastFailureCode, current.progress.lastFailureCode)
   push('progress.escalationRecommended', previous.progress.escalationRecommended, current.progress.escalationRecommended)
-  push('progress.stallExhausted', previous.progress.stallExhausted, current.progress.stallExhausted)
-  push('progress.stallDistinctStates', previous.progress.stallDistinctStates, current.progress.stallDistinctStates)
+  push('progress.stallExhausted', previous.progress.stall?.exhausted ?? null, current.progress.stall?.exhausted ?? null)
+  push('progress.stallDistinctStates', previous.progress.stall?.distinctStates ?? null, current.progress.stall?.distinctStates ?? null)
+  push('queue.current', previous.queue?.current?.id ?? null, current.queue?.current?.id ?? null)
+  push('queue.depth', previous.queue?.depth ?? null, current.queue?.depth ?? null)
   for (const name of current.sense?.blockNames ?? []) {
     if (!(previous.sense?.blockNames ?? []).includes(name) && delta.length < JEV_PROJECTION_LIMITS.meaningfulDelta) {
       delta.push({ fact: 'sensed.block', from: null, to: name })
