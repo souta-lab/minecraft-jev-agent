@@ -25,7 +25,7 @@ The sole production authority path is:
 `proposal -> typed KernelCommand -> applyKernelCommand(KernelState, command) -> KernelState + KernelEvent[] -> transition-scoped adapter capability -> Mineflayer/server effect`.
 
 Fixed ownership:
-- **Jev:** tactical/semantic WHICH/WHETHER among grounded enabled choices.
+- **Typed Decision Plane** *(historically named `Jev` in existing V4.1.2 code/docs)*: tactical/semantic WHICH/WHETHER among grounded enabled choices. `Jev` in those legacy component names refers to the concrete TypeSafe model that originally implemented this plane; it is not the generic name of the architectural responsibility.
 - **System2:** sparse WHAT synthesis, repair, decomposition, and causal hypotheses.
 - **Kernel:** sole lifecycle/resource/effect/trusted-fact/revision/budget/Mission/journal/SUCCESS authority.
 - **Transition Controller:** realizes one admitted transition until VERIFY success, typed terminal, or invalidation.
@@ -37,24 +37,36 @@ Fixed ownership:
 Lifecycle remains `ENABLED -> RUNNABLE -> ACTIVE <-> SUSPENDED`, with observing/blocked/terminal states governed by the Kernel. Crash ambiguity becomes UNKNOWN.
 
 
-### 1.1 Typed decision models are an authority primitive, not a vendor
+### 1.1 System One / typed decision models: terminology and contract
 
-The Jev role is **not** synonymous with `typesafe-ai/jev`, Vercel AI Gateway, TypeSafe AI, Liquid AI, or any one SDK. Jev is the V4.1.2 tactical/semantic WHICH/WHETHER authority. A **typed decision model / System One model** is one implementation class for that role: code supplies bounded state plus predeclared typed questions, and the model returns typed probabilistic decisions over values that code defined in advance.
+Use these names precisely. **System One Model** is TypeSafe AI's name for a new class of machine-facing decision models. **Jev** is TypeSafe AI's first concrete public System One Model, announced 2026-09-15; it is a model name, not an architectural role. **d1** is Liquid AI's separate concrete decision model. The generic responsibility in this project is the **Typed Decision Plane**. Existing V4.1.2 identifiers such as `Jev frame`, `Jev replay`, `Jev authority`, `jev-agent`, and `selectedBy=jev` are historical component/provenance names from the original Jev-backed implementation. Preserve them where renaming would create churn, but do not infer from them that the TypeSafe Jev model *is* the architectural role.
 
-Do not reason about these models as chat LLMs. They are not asked to write plans, invent actions, emit arbitrary JSON, call tools, or provide prose. In production Jev use:
-- code owns the grounded candidate set, question types, criteria, thresholds, lifecycle, leases, guards, and VERIFY;
-- the typed model may choose/evaluate only the alternatives encoded in those questions;
-- model output may never create a new candidate id, target, resource, effect, transition, or success fact;
-- probability/confidence is evidence for a typed answer, not permission to bypass Kernel authority or verification;
-- System2 remains the sparse WHAT/decomposition/repair authority. A typed model backend change must not collapse Jev and System2 into one owner.
+When reading older V4.1.2 prose, translate role-level statements such as “Jev chooses WHICH” as “the Typed Decision Plane chooses WHICH, currently through the configured typed decision model.” Model-specific claims must name the actual provider/model. This is a terminology clarification, not an ownership change.
 
-Treat the wire primitives as semantic types, not provider branding. The baseline System One family is **Noul** (yes/no with `P(true)`), **Choice** (one label from a finite set with a distribution), and **Score** (an ordered scale with a score/distribution). Runtime adapters may expose an internal `boolean` spelling for Noul, but the raw probability must survive end-to-end; never collapse it to a bool at the provider boundary. Choice labels must round-trip exact grounded candidate ids. Score legend ordering must be preserved exactly.
+A System One / typed decision call is **not chat and not open-ended generation**. The caller supplies a shared `state` plus named questions whose output domains are fixed before inference. The model returns typed probabilistic answers that ordinary code composes into a workflow. TypeSafe's public API exposes three primitives: **Noul** (yes/no as `P(true)`), **Choice** (one caller-defined label plus a distribution/confidence), and **Score** (a value on an ordered caller-defined rubric plus distribution/confidence). Several questions may be evaluated against the same state in one request.
 
-**Backend/model/transport are replaceable profiles under the same Jev authority.** A production profile must make explicit: provider identity, model identity, base URL / transport, secret resolver, wire dialect/version, question mapping, answer mapping, timeout, retry policy, availability classification, and observable capability metadata. Outside the narrow typed-model transport/adapter and its tests/telemetry, gameplay code must not branch on provider/model names. Adding a compatible backend is a transport/configuration change, not a new semantic authority path.
+TypeSafe describes Jev as “unstructured state in, typed probabilistic decisions out” and says its Jev stack uses a new architecture, a parallel sampler, and Reinforcement Learning for Calibrated Decisions (RLCD). Those are **Jev/TypeSafe implementation and training claims**, not requirements for another backend to be compatible with this project. A different model such as Liquid d1 may satisfy the same decision contract without sharing Jev's internals or training method.
 
-"TypeSafe-compatible" means compatible **semantics**, not merely an endpoint that accepts similar JSON. Before accepting a backend/model, focused proof must cover at least: mixed question batching; exact Choice-label preservation; Noul `P(true)` preservation; Score legend/order; distributions/confidence shape; usage/model identity; abort/timeout; 429 and 5xx classification; malformed/missing answers; and no silent fallback. A new model may be differently calibrated even when the wire schema matches, so do not inherit confidence thresholds or reliability claims from another model without evidence.
+Do not confuse **type safety with semantic correctness**. The bounded output space prevents free-form type/schema drift (for example inventing a candidate id outside a Choice set), but a valid typed answer can still be the wrong judgment. TypeSafe's own workflow evals contain model disagreements/errors. Calibration is empirical and model-specific; thresholds and reliability claims do not transfer automatically between Jev, d1, or any future model.
 
-The current concept/reference and backend-profile checklist live in `docs/architecture/TYPED-DECISION-MODELS.md`. Keep that document current when the typed-model contract changes; do not encode a transient vendor outage as architecture.
+Do not confuse a native decision model with an LLM in JSON/structured-output mode. An LLM can be wrapped to emit the same schema, but it still performs autoregressive string generation underneath. A native System One/decision model is optimized around bounded decision outputs/probabilities rather than prose generation. For this project the **normalized contract**, not vendor marketing, determines admissibility.
+
+Keep five identities separate:
+- **architectural responsibility:** Typed Decision Plane;
+- **model class/interface family:** System One / typed decision model;
+- **model identity:** e.g. TypeSafe Jev, Liquid d1;
+- **provider/backend:** the service/account serving that model;
+- **transport/profile:** endpoint, auth/secret resolver, wire dialect, timeout/retry/error mapping, and response normalization.
+
+Compatibility has four levels and must not be collapsed into “same JSON”:
+1. **wire/schema compatibility** — request/response can be exchanged;
+2. **primitive semantic compatibility** — Noul/Choice/Score meanings, label identity, probabilities, score ordering, and missing/malformed behavior match the normalized contract;
+3. **behavior/calibration compatibility** — thresholds, confidence, quality, and failure distribution are measured for that model;
+4. **operational compatibility** — timeout/abort, rate limits, auth/credit failures, retries, availability, usage/cost metadata, and provenance behave safely in the resident runtime.
+
+Production code outside the narrow typed-decision adapter/profile and its tests/telemetry must not branch on provider/model names. A backend/model swap is explicit and provenance-visible; it never creates a second selector, a silent fallback authority, or permission for the model to invent actions. Code still owns grounded candidates, thresholds, lifecycle, leases, effects, resource accounting, and VERIFY; System2 still owns sparse WHAT/decomposition/repair; Kernel still owns trusted truth/Mission/SUCCESS.
+
+The current concept/reference, primary-source notes, compatibility matrix, and migration checklist live in `docs/architecture/TYPED-DECISION-MODELS.md`. Keep it current when this contract changes.
 
 ## 2. Project-scoped blanket authorization
 

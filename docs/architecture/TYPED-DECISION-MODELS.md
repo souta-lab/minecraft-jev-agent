@@ -1,89 +1,344 @@
-# Typed Decision Models / System One in V4.1.2
+# Typed Decision Models / System One Models
 
-Status: architecture companion for the permanent V4.1.2 Jev authority. This document explains the model class and the replaceable transport contract; it does **not** create a new authority layer.
+Status: conceptual and integration reference for the permanent V4.1.2 architecture.
+Last reviewed: 2026-10-05.
 
-## 1. What a typed decision model is
+This document exists because the project historically overloaded **Jev** to mean both a concrete TypeSafe AI model and the Minecraft component that used that model. Those are not the same thing. This reference separates the model class, concrete models, architectural responsibility, provider, transport, and compatibility contract so future decision-model backends can be swapped without changing V4.1.2 ownership.
 
-A typed decision model is a machine-facing decision primitive. The caller supplies bounded state plus one or more questions whose output spaces are fixed in advance. The model returns typed values and uncertainty information that ordinary code can consume directly.
+## 1. Terminology map
 
-This is materially different from asking a chat LLM to "return JSON":
+Use these names precisely.
 
-- The output domain is defined before inference rather than generated as arbitrary text.
-- The useful product is a decision/distribution, not prose or reasoning tokens.
-- The software remains responsible for rules, thresholds, executable candidates, resource/lifecycle authority, and outcome verification.
-- Several narrow questions can be answered together over one state snapshot.
-- A typed answer can still be wrong. Calibration and reliability are empirical properties, not architectural assumptions.
+| Term | Meaning | Example here |
+| --- | --- | --- |
+| **System One Model** | TypeSafe AI's name for a new class of models built for machine-facing structured decisions rather than open-ended text generation. | Jev |
+| **decision model / typed decision model** | Generic descriptive term used in this project for models that consume state + bounded typed questions and return typed probabilistic judgments. It is not assumed to be a universal industry standard or a specific training architecture. | Jev, Liquid d1 |
+| **Jev** | TypeSafe AI's first concrete public System One Model. A model identity, not an architectural role. | TypeSafe Jev |
+| **d1** | Liquid AI's separate concrete decision model. It is not Jev and need not share Jev's architecture/training. | Liquid d1 / `d1:free` |
+| **Typed Decision Plane** | This project's generic architectural responsibility for bounded tactical/semantic WHICH/WHETHER judgments among grounded choices. | historically named the “Jev” plane/frame/authority in V4.1.2 code/docs |
+| **System2** | This project's sparse WHAT synthesis/decomposition/repair authority. | Muse/LLM-backed planning lane |
+| **provider/backend** | Service/account actually serving the model. | TypeSafe API, Liquid API |
+| **transport/profile** | Endpoint, auth, wire dialect, timeout/retry/error mapping and normalization used to call one provider/model. | Liquid-direct profile |
 
-TypeSafe calls this model class **System One Models**. Their public API exposes a `systemone` operation and the primitive family Noul / Choice / Score. Jev is TypeSafe's first public System One model. V4.1.2 uses the same conceptual primitive for Jev's WHICH/WHETHER role, but the role is not tied to that particular model or company.
+### Historical V4.1.2 naming
 
-## 2. Primitive semantics
+The frozen V4.1.2 codebase contains names such as `Jev frame`, `Jev replay`, `Jev authority`, `jev-agent`, `JEV_DECISION_EPOCH_START`, and `selectedBy=jev`. These arose because TypeSafe Jev was the original implementation of the bounded decision component. They are **historical component/provenance names**. They do not make Jev a generic role or model class.
 
-### Noul
+When reading old architecture prose, translate a role-level sentence like:
 
-A yes/no question. Preserve `P(true)` as a number in `[0,1]`. Code decides the threshold and what either branch means. Internally this repository may call the mapped representation `boolean`; that spelling must not erase the raw probability.
+> Jev chooses WHICH grounded action runs.
 
-### Choice
+as:
 
-Select exactly one label from a finite caller-defined set and return the distribution/confidence information supplied by the backend. In Minecraft, those labels are grounded candidate ids. A backend must round-trip them exactly; it may not synthesize an action or target.
+> The Typed Decision Plane chooses WHICH grounded action runs, using the configured decision model. In the original implementation that model was Jev.
 
-### Score
+Do not mass-rename stable V4.1.2 event/schema/code identifiers merely for terminology purity; that would create provenance and compatibility churn. New conceptual docs and new provider-neutral code should use the generic term.
 
-Evaluate against an ordered rubric. Preserve the order/legend and returned score/distribution. Code interprets the score; the backend does not own policy thresholds.
+## 2. What TypeSafe actually introduced
 
-## 3. Ownership in Minecraft
+TypeSafe AI announced **System One Models** on 2026-09-15 as a new class of models designed for fast, structured decisions that software can use directly. Their launch material says the stack uses a new model architecture, a parallel sampler, and a training method called **Reinforcement Learning for Calibrated Decisions (RLCD)**. Their first public model is **Jev**.
 
-The typed model is deliberately narrow:
+TypeSafe summarizes Jev as:
 
-`live facts -> semantic projection -> grounded candidates + typed questions -> typed model -> typed answers -> Kernel/controller adoption -> physical transition -> VERIFY`
+> unstructured state in, typed probabilistic decisions out
 
-Jev owns tactical WHICH/WHETHER. System2 owns sparse WHAT/decomposition/repair. Kernel owns lifecycle/resources/effects/trusted truth/Mission/SUCCESS. Changing the typed-model backend changes none of these owners.
+That statement is a good mental model, but keep the scopes straight:
 
-A model must never invent coordinates, blocks, candidate ids, effects, or success facts. If the available grounded options are insufficient, that is a presentation/capability problem for code/System2, not a license for the model transport to become an LLM planner.
+- **System One Model** is TypeSafe's model-class/product terminology.
+- **Jev** is one concrete TypeSafe model in that class.
+- **RLCD**, TypeSafe's parallel sampler, and Jev's internal architecture are TypeSafe/Jev implementation claims.
+- Another decision model does **not** need to use RLCD or Jev internals to satisfy this project's normalized typed-decision contract.
 
-## 4. TypeSafe-compatible backend profile
+Primary references checked for this document:
 
-Compatibility is a behavioral contract, not a vendor name. Each backend profile must declare:
+- TypeSafe launch: `https://typesafe.ai/blog/introducing-system-one-models-and-jev`
+- TypeSafe API: `https://api.typesafe.ai/docs` / `POST /v1/systemone`
+- TypeSafe workflow evals: `https://evals.typesafe.ai/`
 
-- `providerId` and `modelId` (provenance)
-- base URL / transport and wire dialect/version
-- secret resolver and non-secret secret-origin label
-- Noul/Choice/Score request mapping
-- Noul/Choice/Score response mapping
-- model/usage metadata mapping
-- per-attempt timeout and caller cancellation
-- bounded retries and status/error classification
-- availability vs semantic failure classification
-- whether confidence is calibrated, distribution-derived, absent, or provider-specific
+## 3. The request/response shape
 
-Gameplay/controller code consumes one normalized Jev result. Vendor/model checks belong only in this adapter, configuration, focused tests, and telemetry.
+At the interface level, one System One-style request contains:
 
-### Acceptance probe for a new profile
+1. **state** — the shared content/context the questions refer to;
+2. **questions** — a non-empty map of named, typed questions;
+3. **model** — the concrete model identifier.
 
-Before production use, prove with the actual endpoint/model:
+The response returns answers keyed by the same question names, plus model/usage metadata.
 
-1. model discovery or an explicit model-id probe succeeds;
-2. one request batches Noul + Choice + Score;
-3. Choice labels round-trip exact arbitrary ids;
-4. Noul returns raw `P(true)` and it survives normalization;
-5. Score legend/order and returned score/distribution survive normalization;
-6. response model identity and usage are recorded;
-7. caller abort and timeout terminate the request;
-8. 429 / 5xx / authentication-credit failures become typed availability outcomes;
-9. malformed/missing answers fail closed rather than selecting a candidate;
-10. no deterministic or alternate-model fallback occurs unless explicitly configured and provenance-visible.
+Conceptually:
 
-A wire-compatible model is **not** assumed to share another model's calibration. Threshold changes require measured evidence.
+```text
+state + { named typed questions }
+              |
+              v
+       decision model
+              |
+              v
+{ same names -> typed probabilistic answers }
+```
 
-## 5. Current Liquid D1 migration (2026-10-05)
+The surrounding application remains ordinary software. It decides what questions exist, what choices are legal, what thresholds are used, what effects are allowed, and how outcomes are verified.
 
-The currently selected replacement backend is Liquid's direct decision API with primary model `d1`. `d1:free` exists as a distinct model and may be configured explicitly as an availability/cost fallback later; it must never be silently substituted for `d1`.
+## 4. The three primitive question types
 
-Live account discovery on 2026-10-05 returned both model ids:
+### 4.1 Noul
 
-- `d1` — text + image capability metadata
-- `d1:free` — text capability metadata
+A yes/no judgment represented as a probability.
 
-Direct System One probes against Liquid's decision API succeeded for both. A small same-payload latency sample from the campaign host was:
+Conceptual result:
+
+```text
+P(true) in [0, 1]
+```
+
+The model does **not** own the application threshold. Code may interpret `0.91` differently from `0.61`; collapsing the provider result immediately to `true/false` destroys useful information.
+
+This repository historically maps Noul into an internal `boolean` representation. That spelling is acceptable only if the raw `P(true)` survives end-to-end.
+
+### 4.2 Choice
+
+A selection from a finite set defined by the caller.
+
+Conceptual input:
+
+```text
+A -> description of A
+B -> description of B
+C -> description of C
+```
+
+Conceptual result:
+
+```text
+choice = B
+probabilities = { A: ..., B: ..., C: ... }
+confidence = provider/model-defined confidence signal when available
+```
+
+For Minecraft, the labels can be exact grounded candidate IDs. A valid backend must round-trip those labels exactly. The model does not get to invent a fourth action, coordinate, block, entity, tool call, or target outside the offered set.
+
+### 4.3 Score
+
+A judgment on an ordered rubric supplied by the caller.
+
+Conceptual input:
+
+```text
+0 -> safe
+1 -> caution
+2 -> dangerous
+3 -> lethal
+```
+
+Conceptual result includes a score, the ordered legend/rubric, a distribution over levels, and (when supplied) confidence.
+
+Ordering is semantic. A transport that reorders the legend is not compatible even if its JSON validates.
+
+## 5. Parallel questions and code-composed workflows
+
+TypeSafe's API allows multiple question types in one request against the same state. Their workflow material explicitly encourages decomposing an automation task into several narrow judgments and ordinary program rules rather than asking a model to solve an entire policy in prose.
+
+This matters for the Minecraft architecture:
+
+```text
+world facts
+  -> bounded semantic projection
+  -> multiple grounded typed questions
+  -> Typed Decision Plane
+  -> typed judgments
+  -> deterministic adoption/guards
+  -> transition execution
+  -> VERIFY
+```
+
+The decision model contributes judgment. It does not become the planner, lifecycle manager, resource owner, actuator, or verifier.
+
+## 6. Native decision model != LLM with JSON mode
+
+A chat/generative LLM can be constrained by a schema or wrapper to return values shaped like Noul/Choice/Score. That can be useful, and TypeSafe's own eval harness compares LLMs through a System One-compatible wrapper.
+
+But schema equality does not imply the same model class.
+
+A generative LLM typically still performs autoregressive token/string generation underneath and is then constrained/parsed into a schema. TypeSafe describes Jev/System One as taking the opposite direction: the native product is the bounded probabilistic decision rather than a string.
+
+For this project, the important distinction is operational rather than philosophical:
+
+- Does the model natively or reliably preserve the bounded output domain?
+- Does it return useful probabilities/distributions?
+- Is latency/cost appropriate for frequent runtime decisions?
+- Can the runtime fail closed without parsing arbitrary prose?
+- Is calibration measured for our use rather than assumed?
+
+Do not reject a future backend merely because its internals differ from Jev. Do not call it “Jev” merely because it speaks a Jev-shaped API.
+
+## 7. Type safety is not correctness
+
+This point is easy to get wrong.
+
+TypeSafe markets Jev as unable to hallucinate/type-error in the sense that its output is constrained to the predefined typed output space. Their launch material explicitly says schema matching is guaranteed rather than an empirical claim.
+
+That does **not** mean every Jev judgment is semantically correct.
+
+A Choice can legally select the wrong offered candidate. A Noul probability can be poorly calibrated for a new domain. A Score can rank danger incorrectly while still being perfectly well-typed. TypeSafe's own workflow evals show disagreements and misses versus their reference models.
+
+Therefore separate:
+
+- **type/schema validity** — structurally admissible output;
+- **semantic accuracy** — whether the judgment is right;
+- **calibration** — whether stated probabilities/confidence correspond to observed success frequencies;
+- **application safety** — whether surrounding code/Kernel/VERIFY prevents a wrong judgment from becoming an invalid effect or false fact.
+
+Minecraft must rely on all four layers, not marketing shorthand such as “zero hallucinations.”
+
+## 8. Calibration is model-specific
+
+A compatible schema does not make confidence interchangeable.
+
+Thresholds learned with Jev cannot automatically be reused for d1. Even if both expose a field called `confidence`, the statistical meaning and calibration may differ. The same is true for probability sharpness, failure distribution, and behavior under out-of-distribution states.
+
+For every new model, measure:
+
+- decision accuracy on representative private cases;
+- reliability/calibration curves where probabilities drive behavior;
+- high-confidence error rate;
+- abstention/escalation behavior encoded by our workflow;
+- latency tail, not only p50;
+- availability/rate-limit/error distribution;
+- Mission conversion in live Minecraft after focused contract proof.
+
+## 9. Five identities that must remain separate
+
+Never collapse these into one string such as `jev`:
+
+1. **Architectural responsibility** — Typed Decision Plane.
+2. **Model/interface class** — System One / typed decision model.
+3. **Concrete model** — TypeSafe Jev, Liquid d1, future model X.
+4. **Provider/backend** — TypeSafe, Liquid, gateway, self-hosted service, etc.
+5. **Transport/profile** — base URL, API dialect/version, secret resolver, model id, timeout, retries, error mapping, response normalization.
+
+A useful provenance record should be able to answer independently:
+
+```text
+which plane made the decision?
+which concrete model made it?
+which provider served it?
+which transport/profile called it?
+which exact model id/version did the provider report?
+```
+
+## 10. Compatibility is four different questions
+
+“TypeSafe-compatible” is too vague unless the level is named.
+
+### Level 1 — wire/schema compatibility
+
+Can the client and server exchange the request/response at all?
+
+Examples:
+
+- endpoint/path/header shape;
+- `state`, `questions`, `model` fields;
+- answer object parses;
+- batching works.
+
+Necessary, not sufficient.
+
+### Level 2 — primitive semantic compatibility
+
+Do Noul/Choice/Score mean the same thing to our normalized adapter?
+
+Must prove at least:
+
+- Noul returns raw `P(true)`;
+- Choice returns only an offered label and preserves exact label identity;
+- Choice distribution keys match offered labels;
+- Score preserves rubric order and value/distribution meaning;
+- missing/malformed answers fail closed;
+- mixed question batching preserves name-to-answer identity.
+
+### Level 3 — behavioral/calibration compatibility
+
+Does the model behave well enough for the same application policy?
+
+This is empirical. Measure it. Never infer it from an identical API.
+
+Questions include:
+
+- Are confidence/probabilities calibrated similarly?
+- Do existing thresholds still make sense?
+- How does accuracy change by question type and Minecraft state?
+- Does the model have different blind spots from Jev?
+
+A Level-2-compatible model may still require different thresholds or may be unsuitable for production.
+
+### Level 4 — operational compatibility
+
+Can it safely survive long-running production use?
+
+Prove:
+
+- timeout and caller abort;
+- bounded retry behavior;
+- 429/rate-limit classification;
+- authentication/credit/entitlement failures;
+- 5xx/network failures;
+- provider/model identity in logs;
+- usage/cost metadata;
+- no secret leakage;
+- no silent alternate-model or deterministic fallback;
+- resident recovery behavior without generation churn.
+
+Only after all required levels pass should a model become a production Typed Decision Plane backend.
+
+## 11. Mapping into V4.1.2
+
+The generic ownership is:
+
+- **Typed Decision Plane:** bounded tactical/semantic WHICH/WHETHER among grounded enabled choices;
+- **System2:** sparse WHAT synthesis, repair, decomposition, causal hypotheses;
+- **Kernel:** lifecycle/resources/effects/trusted facts/budgets/Mission/journal/SUCCESS;
+- **Transition Controller:** realizes an admitted transition;
+- **VERIFY:** sole SUCCESS authority.
+
+The historical implementation used TypeSafe Jev, so many stable identifiers contain `Jev`. Keep those identifiers where changing them would provide no capability benefit. New provider-neutral adapter code should avoid baking `Jev` into abstractions that are actually model-agnostic.
+
+The plane's normalized path is:
+
+```text
+semantic projection
+  -> grounded candidate identities + typed questions
+  -> configured decision-model profile
+  -> normalized typed answers
+  -> stale/binding/guard checks
+  -> admitted controller action
+```
+
+The model may not create new grounded reality. Coordinates, entities, blocks, inventories, resources, effects, success facts, lifecycle transitions, and Mission progress remain owned by normal V4.1.2 code and VERIFY.
+
+## 12. Jev and d1 are peers, not aliases
+
+### TypeSafe Jev
+
+Facts from TypeSafe's public material:
+
+- concrete first public System One Model;
+- announced 2026-09-15;
+- System One API with Noul / Choice / Score;
+- TypeSafe claims a new architecture, parallel sampler, and RLCD training;
+- optimized for typed probabilistic decisions rather than open-ended strings.
+
+### Liquid d1
+
+For this project, d1 is treated as a **separate concrete decision model** made by Liquid AI. It is not “Jev hosted by Liquid” and should not inherit Jev's behavioral or calibration claims.
+
+Our live Liquid account discovery on 2026-10-05 returned exact model ids:
+
+- `d1` — metadata reported text + image modalities;
+- `d1:free` — metadata reported text modality.
+
+Direct calls using the System One-shaped Liquid endpoint succeeded with both. That establishes useful Level-1 evidence and some Level-2 smoke evidence; it does not prove Level-3 calibration equivalence to Jev.
+
+Current measured host-side latency sanity sample:
 
 | model | sample | p50 | mean | max |
 | --- | ---: | ---: | ---: | ---: |
@@ -92,28 +347,91 @@ Direct System One probes against Liquid's decision API succeeded for both. A sma
 | `d1` | 3 four-question batches | 0.507 s | 0.481 s | 0.509 s |
 | `d1:free` | 3 four-question batches | 0.392 s | 0.418 s | 0.512 s |
 
-All sampled calls returned HTTP 200. This is a connectivity/latency sanity check, **not** a quality or calibration evaluation and not a future latency guarantee.
+All sampled calls returned HTTP 200. This is a connectivity/latency sanity check, **not** a quality, calibration, cost, or future-latency guarantee.
 
-The API key lives outside the repository in a permission-restricted secret file. Never copy it into config, tests, handoff, logs, process arguments, or docs.
+The Liquid API key is stored outside the repository in a permission-restricted secret file. Never place it in docs, git, logs, prompts, handoff, test fixtures, or process arguments.
 
-## 6. Audit-derived rules this abstraction is meant to protect
+## 13. Backend profile contract
 
-The p21-p24 campaign exposed a recurring pattern: a locally successful mechanism can be globally anti-goal when identity, progress accounting, availability, or provenance crosses layers incorrectly. Typed-model integration must therefore preserve the same anti-churn rules as gameplay:
+A production decision-model profile should explicitly declare:
 
-- `VERIFY` of a physical action is not Mission progress.
-- Plan / option / candidate / observed effect must tell one causal story.
-- Three locally successful actions with no resource/frontier/reachability gain are trajectory churn.
-- Three source-changing non-converting fixes require a conversion checkpoint.
-- Repeated deaths/world scars can make a same-world episode less informative than a fresh major.
-- Observer/tooling work is bounded by Mission leverage.
-- Registry/source/generation/goal/handoff drift is a provenance defect, not harmless bookkeeping.
-- Provider unavailability is infrastructure evidence, not semantic evidence; repeated same-fingerprint generation restarts are infra churn.
-- A backend swap must happen at one adapter boundary instead of leaking vendor/model conditionals into candidate generation or controller policy.
+```text
+profile id
+provider id
+concrete model id
+base URL / transport
+wire dialect/version
+secret resolver + non-secret origin label
+question mapping
+answer normalization
+model/usage metadata mapping
+timeout
+retry policy
+availability/error classification
+capability metadata
+```
 
-## 7. Migration rule of thumb
+Gameplay/controller code outside this narrow adapter/profile boundary must not branch on vendor/model names.
 
-When another typed model appears, do **not** ask "how do we rewrite Jev around this vendor?" Ask:
+Changing the profile changes the implementation of the Typed Decision Plane. It does not change V4.1.2 ownership and must not create a second semantic authority.
 
-> Can this backend satisfy the normalized typed-decision profile while leaving candidate grounding, Kernel authority, System2 ownership, controller mechanics, and VERIFY untouched?
+## 14. Acceptance probe before production
 
-If yes: add/configure one backend profile, run the acceptance probe, record exact provenance, and compare live Mission conversion. If no: it is not a drop-in Jev backend; do not bend V4.1.2 around it.
+For each concrete provider/model, focused proof should cover:
+
+1. model discovery or exact model-id probe;
+2. one mixed Noul + Choice + Score request;
+3. exact arbitrary Choice-label round-trip;
+4. Choice distribution keys/normalization;
+5. raw Noul `P(true)` preservation;
+6. Score legend/order + score/distribution preservation;
+7. model identity and usage provenance;
+8. caller abort;
+9. per-attempt timeout;
+10. 429 classification and bounded retries;
+11. 5xx/network classification;
+12. authentication/credit/entitlement failure classification;
+13. malformed/missing answer fail-closed;
+14. no silent deterministic or alternate-model fallback;
+15. secret-origin logging without secret-value logging;
+16. first production decision records intended plane/provider/model/profile/source identity.
+
+Then perform model-specific Level-3 reliability/calibration evaluation before trusting old thresholds.
+
+## 15. Audit-derived rules this abstraction protects
+
+The p21-p24 campaign already established failure modes that must not be rediscovered as if new:
+
+- physical `VERIFY` success is not Mission progress;
+- plan / option / candidate / observed effect must tell one causal story;
+- three local successes with no resource/frontier/reachability gain are trajectory churn;
+- p23's 96 deaths plus heavy world scars demonstrated that a same-world episode can become less informative than a fresh major;
+- p24 demonstrated `collect:log` / surface intent degenerating into deepslate `DESCEND` while `resourceDelta=0`, with local VERIFY incorrectly feeding progress accounting;
+- run/generation/source/goal/handoff drift is a provenance defect;
+- repeated observer/tooling repair can become its own churn lane;
+- repeatedly starting fresh generations against the same unavailable provider is `INFRA_CHURN`, not progress;
+- a backend migration belongs at one adapter/profile boundary rather than leaking provider/model checks into gameplay semantics.
+
+## 16. Migration playbook for the next decision model
+
+When model X appears, do not ask:
+
+> How do we rewrite Jev around model X?
+
+Ask:
+
+> Can model X implement the normalized Typed Decision Plane contract without changing candidate grounding, System2 ownership, Kernel authority, controller mechanics, or VERIFY?
+
+Then:
+
+1. identify the concrete model and provider separately;
+2. establish Level-1 wire compatibility;
+3. prove Level-2 primitive semantics;
+4. add one explicit provider/model profile;
+5. run Level-4 operational/error tests;
+6. measure Level-3 calibration/reliability on representative private cases;
+7. commit exact source/provenance;
+8. run the smallest live sample that can falsify the integration;
+9. compare Mission conversion, not merely local API success.
+
+If the backend requires inventing actions, bypassing Kernel/VERIFY, collapsing System2 into the same unconstrained model call, or weakening typed provenance, it is not a drop-in decision-model backend for V4.1.2.
