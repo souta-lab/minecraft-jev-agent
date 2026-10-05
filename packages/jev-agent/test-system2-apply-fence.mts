@@ -3,6 +3,7 @@ import { describe, it } from 'bun:test'
 import { evaluateSystem2Apply } from './src/system2/authority.ts'
 import type { PlanWorldFactsBasis, System2ApplyState, System2RequestContext } from './src/system2/authority.ts'
 import { planWorldFactsBasis } from './src/system2-plane.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
 import type { PlannedGoal } from './src/goalQueue.ts'
 
 function resource(name: string, x = 0, y = 0, z = 0) {
@@ -169,5 +170,36 @@ describe('System2 apply fence — plan-scoped world-facts basis', () => {
     const decision = evaluateSystem2Apply(requestContext(request), applyState({ worldFactsFingerprint: '{broken' }), basis)
     assert.equal(decision.apply, false)
     assert.ok(decision.reasons.includes('world_facts_changed'))
+  })
+})
+
+describe('System2 apply fence — evidence-plane parity', () => {
+  // A fenced-out answer mutates no queue row: without the discard markers in the
+  // mirrored set, buddy.log shows `DECISION -> <nothing>` and a correct
+  // fail-closed discard is indistinguishable from a dropped apply (measured
+  // 2026-10-05, requestIds 594df569/cb949dbb discarded on inventory/objective
+  // churn while run.jsonl alone carried the reasons).
+  const REFUSED_MARKERS = [
+    'SYSTEM2_PLAN_DISCARDED',
+    'SYSTEM2_STALE_DISCARD',
+    'SYSTEM2_REQUEST_CANCELLED',
+  ] as const
+
+  it('every apply-fence refusal marker is mirrored into the live plane', () => {
+    for (const marker of REFUSED_MARKERS) {
+      assert.ok(MIRRORED_MARKERS.has(marker), `${marker} is not in MIRRORED_MARKERS`)
+    }
+  })
+
+  it('refusal markers resolve from their emitted line prefixes', () => {
+    assert.equal(
+      mirroredEventToken('SYSTEM2_PLAN_DISCARDED request=req-1 reasons=inventory_changed,action_in_flight'),
+      'SYSTEM2_PLAN_DISCARDED',
+    )
+    assert.equal(
+      mirroredEventToken('SYSTEM2_STALE_DISCARD reason=controller_stopped'),
+      'SYSTEM2_STALE_DISCARD',
+    )
+    assert.equal(mirroredEventToken('SYSTEM2_REQUEST_CANCELLED'), 'SYSTEM2_REQUEST_CANCELLED')
   })
 })

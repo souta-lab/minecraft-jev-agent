@@ -1007,6 +1007,18 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SYSTEM2_PLAN_NO_GOALS',
   // The applied half of the same record: what the answer BECAME.
   'SYSTEM2_PLAN_APPLIED',
+  // The refused half: a decision that fails the typed apply fence (stale
+  // queue/objective/inventory/facts, controller stop, or request cancellation)
+  // is a correct fail-closed outcome with named reasons - but it produces NO
+  // queue mutation, so a live plane without it cannot tell "the answer was
+  // discarded on `inventory_changed`" from "the apply path dropped it". Measured
+  // 2026-10-05: two consecutive AUTHORITY_DECISIONs appeared to vanish between
+  // DECISION and APPLY in buddy.log while run.jsonl held the typed discards;
+  // the gap read as an apply-loop defect until the second evidence plane was
+  // opened.
+  'SYSTEM2_PLAN_DISCARDED',
+  'SYSTEM2_STALE_DISCARD',
+  'SYSTEM2_REQUEST_CANCELLED',
   // A Jev-selected escalation is only a successful handoff when this marker
   // names the concrete System2 request that accepted it; suppressed requests
   // use the same marker with `status=unavailable` and a typed blocker.
