@@ -93,6 +93,10 @@ Use exact identity checks, focused tests, backups where useful, reversible commi
 
 Ask the operator only when progress truly requires information unavailable to the agent, such as a missing external credential or genuinely ambiguous product intent. Continue every independent useful task while such a dependency exists.
 
+**Operator presence is never a runtime precondition.** Do not infer or speculate about whether an operator is available, active, watching, or able to respond. Do not pause, park, or convert a technically decidable next action into an approval request because an immediate reply may not arrive. When the repository, campaign state, contracts, and credentials already contain enough information, choose the best reversible Mission-leverage action and execute it.
+
+For unattended campaign continuity, a cleanly stopped/dead Leaf, resident, supervisor, observer, or Devin process is a recoverable lifecycle condition, not a reason to wait. Reconcile exact source/world/provenance, restart/reload the minimum required campaign-owned processes, obtain first fresh evidence, and continue the core loop. Stop only for a real external dependency, a permanent completion condition, or a safety/integrity invariant that cannot be resolved from available project state.
+
 Project-integrity invariants still apply: no cheating/benchmaxxing evidence, no frozen-architecture ownership change, no unrelated user-data mutation, no loss of sealed evidence, and no fabricated/weakened VERIFY or provenance.
 
 ## 3. One-agent execution model
@@ -359,6 +363,8 @@ After restart or a long absence, reconcile before mutation:
 Durable state may claim `active` while all processes are dead; process truth wins. Repair stale durable ownership before resuming evidence claims.
 
 A user prompt of only `continue` means resume the next falsifiable Mission-leverage action. Never ask the operator to restate context already on disk.
+
+After the Jev-best-practices root gate is proven, do not remain parked at the architecture milestone. Treat that proof as authorization to return immediately to the live Mission loop using the latest validated source: reconcile lifecycle, load the intended Liquid d1 Typed Decision Plane and configured System2 provider, restart/reload as needed, and keep driving Minecraft until the next falsifiable blocker or verified Nether entry. Local proof completion is a transition into gameplay, not an unattended stopping point.
 
 Preserve same-world minor continuity when identity is valid; otherwise seal the prior episode and start the next major honestly.
 
