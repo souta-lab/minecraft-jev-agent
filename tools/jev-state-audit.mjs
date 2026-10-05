@@ -125,6 +125,11 @@ function describePredicate(predicate) {
 }
 
 function compactSimulate(state) {
+  // v7 records already store the projection directly in `state` (schema
+  // `jev-semantic-projection/v7`); see jev-replay-eval.
+  if (state.schema === 'jev-semantic-projection/v7') {
+    return { ...state, projectionHash: state.projectionHash ?? null }
+  }
   const semantic = state.semantic
   if (semantic === null || typeof semantic !== 'object') return null
   const currentOption = state.currentOption ?? null
@@ -259,7 +264,7 @@ for (const call of sampled) {
 // ---------------------------------------------------------------------------
 
 const coarseKey = (call) => {
-  const sem = call.state?.semantic ?? {}
+  const sem = call.state?.semantic ?? call.state ?? {}
   const ids = (sem.candidates ?? []).map((c) => c.identity).sort().join('|')
   return JSON.stringify([sem.goal?.key, sem.option?.instanceId, ids])
 }

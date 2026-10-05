@@ -28,6 +28,7 @@ import {
 import {
   buildAuthorityQuestions,
 } from '../packages/jev-agent/src/jev/authority.ts'
+import { ACTION_DECLINE_LABEL } from '../packages/jev-agent/src/jev/client.ts'
 import { projectionModelView } from '../packages/jev-agent/src/jev/semantic-projection.ts'
 import { describePredicate } from '../packages/jev-agent/src/optionSpec.ts'
 
@@ -53,6 +54,11 @@ const BOOL_HIGH = 0.7
 // ---------------------------------------------------------------------------
 
 function reconstruct(state: Record<string, any>): Record<string, any> | null {
+  // v7 records already store the classifier-ready projection directly in
+  // `state` (schema `jev-semantic-projection/v7`); see jev-replay-eval.
+  if (state.schema === 'jev-semantic-projection/v7') {
+    return { ...state, counts: {} }
+  }
   const semantic = state.semantic
   if (semantic === null || typeof semantic !== 'object') return null
   const currentOption = state.currentOption ?? null
@@ -123,7 +129,7 @@ for (const line of readFileSync(file, 'utf8').split('\n')) {
     continue
   }
   if (record.record !== 'jev-call') continue
-  if ((record.state?.semantic ?? null) === null) continue
+  if ((record.state?.semantic ?? null) === null && record.state?.schema !== 'jev-semantic-projection/v7') continue
   if (record.error !== undefined && record.error !== null) continue // calibration needs a real recorded answer
   records.push(record)
 }
@@ -175,7 +181,17 @@ for (const rec of sample) {
   if (proj === null) continue
   const state = { ...projectionModelView(proj as never), projectionHash: rec.state.projectionHash ?? null }
   const questionNames = Object.keys(rec.questions ?? {})
-  const questions = buildAuthorityQuestions(rec.state.candidates ?? [], questionNames as never)
+  // The record stores the exact wire questions the model saw (v6 and v7
+  // alike); replaying them is more faithful than rebuilding from recorded
+  // candidates, whose v7 projection strips the `meta` criteria source.
+  const questions = rec.questions ?? buildAuthorityQuestions(rec.state.candidates ?? [], questionNames as never)
+  // Some recorded questions predate the singleton-offer DECLINE leg; the wire
+  // requires >=2 Choice labels, so inject the same leg production adds.
+  const actionQ = questions.action
+  if (actionQ?.type === 'choice' && Object.keys(actionQ.criteria ?? {}).length === 1) {
+    actionQ.criteria[ACTION_DECLINE_LABEL] =
+      'decline the only grounded action: this Option cannot proceed as offered'
+  }
   const started = Date.now()
   let reply: any = null
   let error: string | null = null
