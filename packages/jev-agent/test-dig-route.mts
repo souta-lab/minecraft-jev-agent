@@ -1408,6 +1408,56 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   )
 }
 
+// ---------------------------------------------------------------------------
+// (m) A reducing step the clearance gate cannot prove is an UNBREAKABLE refusal,
+//     never `no_tool`: `selectClearanceTool` fails only on `not_diggable` /
+//     `unknown_block` (clearance-by-hand already covers every harvest gap), so
+//     the `dig_route:*` starvation token must say `unbreakable` - a `no_tool`
+//     token tells the planner a craft could unlock it (live p24.9 gen-
+//     muveq9fd-y3gy1a: `reason=no_tool block= detail=cannot prove clearance
+//     for  (not_diggable)` while an iron pickaxe sat in the inventory).
+// ---------------------------------------------------------------------------
+{
+  const FEET: Vec3Json = { x: 11, y: 66, z: 24 }
+  const TARGET: Vec3Json = { x: 24, y: 66, z: 24 }
+  const counts = { iron_pickaxe: 1 }
+  const undiggable = shaftDescent(FEET).map((step) => ({
+    ...step,
+    digs: (step.digs ?? []).map((dig) => ({ ...dig, diggable: false })),
+  }))
+  const base = worldState({ feet: FEET, descent: undiggable, counts, enterCell: TARGET })
+  const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
+  const spent = spendEntryRoute(base, options, TARGET)
+  const tick = worldState({ feet: FEET, descent: undiggable, counts, enterCell: TARGET, routes: spent })
+  const grounded = generateGroundedCandidates(tick, options)
+  check(
+    '(m) an unprovable clearance profile refuses unbreakable with the real sub-cause, never a clearance-labeled no_tool',
+    grounded.digRefusals.some((entry) => entry.reason === 'unbreakable' && entry.detail.includes('not_diggable')) &&
+      !grounded.digRefusals.some((entry) => entry.reason === 'no_tool' && entry.detail.includes('cannot prove clearance')),
+    `refusals=[${grounded.digRefusals.map((entry) => `${entry.reason}:${entry.detail}`).join(', ') || 'none'}]`,
+  )
+
+  // The identity-unproven variant the live line also carried (`block=` empty):
+  // a breakable-but-unnamed cell is `unknown_block`, still never a tool gap.
+  // `descentDigPlan`'s fallback for a `down` step's floor cell reads the step's
+  // own `digName`/`digHarvestTool`, so those fields are unnamed too.
+  const unnamed = shaftDescent(FEET).map((step) => ({
+    ...step,
+    digName: null,
+    digHarvestTool: null,
+    digHarvestTier: null,
+    digs: (step.digs ?? []).map((dig) => ({ ...dig, name: '', harvestTool: null, harvestTier: null })),
+  }))
+  const unnamedTick = worldState({ feet: FEET, descent: unnamed, counts, enterCell: TARGET, routes: spent })
+  const unnamedGrounded = generateGroundedCandidates(unnamedTick, options)
+  check(
+    '(m) an identity-unproven profile refuses unbreakable (unknown_block), never a clearance-labeled no_tool',
+    unnamedGrounded.digRefusals.some((entry) => entry.reason === 'unbreakable' && entry.detail.includes('unknown_block')) &&
+      !unnamedGrounded.digRefusals.some((entry) => entry.reason === 'no_tool' && entry.detail.includes('cannot prove clearance')),
+    `refusals=[${unnamedGrounded.digRefusals.map((entry) => `${entry.reason}:${entry.detail}`).join(', ') || 'none'}]`,
+  )
+}
+
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [

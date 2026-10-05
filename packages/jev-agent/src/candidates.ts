@@ -11633,7 +11633,7 @@ function digRouteCandidate(
 function stepGateRefusal(
   state: WorldState,
   step: DescentOption,
-): { reason: 'protected' | 'no_tool'; block: string | null; detail: string } | null {
+): { reason: 'protected' | 'unbreakable'; block: string | null; detail: string } | null {
   const profile = strictStepDigProfile(state, step)
   // #436 U5 (SAFE / protected resources): a step whose profile would break a
   // protected station block or a member of a LIVE structure is never a route,
@@ -11645,11 +11645,20 @@ function stepGateRefusal(
     return { reason: 'protected', ...protectedRefusal }
   }
   if (profile.clearanceChoice.ok) return null
+  // `selectClearanceTool` refuses ONLY on `not_diggable`/`unknown_block`:
+  // clearance-by-hand already subsumes every harvest gap, so this branch can
+  // never be a tool problem. The reason the planner and the `dig_route:*`
+  // starvation token must see is the same verdict the sensor gives an
+  // unproven cell (`unbreakable`), never a `no_tool` claim the body could
+  // mis-spend iron trying to satisfy (live 2026-10-05: `reason=no_tool
+  // block= detail=cannot prove clearance for  (not_diggable)` in the p24.9
+  // starvation ledger while holding an iron pickaxe).
   const requirement = profile.requirement
+  const block = (requirement?.name ?? '') || step.digName || null
   return {
-    reason: 'no_tool',
-    block: requirement?.name ?? step.digName ?? null,
-    detail: `cannot prove clearance for ${requirement?.name ?? 'the binding block'} (${profile.clearanceChoice.reason})`,
+    reason: 'unbreakable',
+    block,
+    detail: `cannot prove clearance for ${block ?? 'the binding block'} (${profile.clearanceChoice.reason})`,
   }
 }
 
