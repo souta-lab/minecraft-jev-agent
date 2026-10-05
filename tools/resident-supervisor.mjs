@@ -427,6 +427,50 @@ export function reconcileBuddyPort({ registryPath, envPort } = {}) {
   return { status: 'agree', envPort: trimmed, registryPort }
 }
 
+/**
+ * Same reconcile for the mission env pair. `resident-config` defaults a missing
+ * BUDDY_MISSION_ITEM/COUNT to iron_ingot:3, so a no-env launch silently works
+ * the wrong mission — no error, just a different goal than the registry's
+ * declared `inventory_at_least(item,count)`. Each field independently: unset
+ * injects the registry-declared value; set must equal it or the spawn refuses
+ * (`mission-mismatch`). Only the inventory_at_least kind is reconcilable —
+ * other declared mission shapes leave ambient env standing, and BUDDY_HOST has
+ * no registry-declared counterpart to reconcile against.
+ */
+export function reconcileBuddyMission({ registryPath, envItem, envCount } = {}) {
+  const ambient = (reason) => ({ status: 'ambient', reason, envItem, envCount })
+  if (typeof registryPath !== 'string' || !existsSync(registryPath)) return ambient('registry-missing')
+  let current
+  try { current = JSON.parse(readFileSync(registryPath, 'utf8')) } catch { return ambient('registry-unreadable') }
+  const mission = typeof current?.mission === 'string'
+    ? current.mission.match(/^inventory_at_least\(([A-Za-z0-9_]+),(\d+)\)$/)
+    : null
+  if (mission === null) return ambient('registry-mission-missing')
+  const registryItem = mission[1]
+  const registryCount = mission[2]
+  const itemTrim = envItem === undefined || envItem === null ? '' : String(envItem).trim()
+  const countTrim = envCount === undefined || envCount === null ? '' : String(envCount).trim()
+  const mismatched = []
+  if (itemTrim !== '' && itemTrim !== registryItem) mismatched.push('item')
+  if (countTrim !== '' && countTrim !== registryCount) mismatched.push('count')
+  if (mismatched.length > 0) {
+    return {
+      status: 'refused', reason: 'mission-mismatch', mismatched,
+      envItem: null, envCount: null,
+      registryItem, registryCount, requestedItem: itemTrim, requestedCount: countTrim,
+    }
+  }
+  const injected = []
+  if (itemTrim === '') injected.push('item')
+  if (countTrim === '') injected.push('count')
+  const outItem = itemTrim === '' ? registryItem : itemTrim
+  const outCount = countTrim === '' ? registryCount : countTrim
+  if (injected.length > 0) {
+    return { status: 'injected', injected, envItem: outItem, envCount: outCount, registryItem, registryCount }
+  }
+  return { status: 'agree', envItem: outItem, envCount: outCount, registryItem, registryCount }
+}
+
 /** Parse the resident's authoritative generation-ready provenance line. */
 export function parseGenerationReadyLine(line) {
   if (typeof line !== 'string' || !line.includes('GENERATION_READY')) return null
@@ -728,8 +772,45 @@ export async function supervise(options, deps = {}) {
           registryPort: portReconcile.registryPort,
         })
       }
+      const missionReconcile = reconcileBuddyMission({
+        registryPath: options.registryPath,
+        envItem: process.env.BUDDY_MISSION_ITEM,
+        envCount: process.env.BUDDY_MISSION_COUNT,
+      })
+      if (missionReconcile.status === 'refused') {
+        emit({
+          type: 'env_reconcile',
+          at: new Date().toISOString(),
+          attempt,
+          status: 'refused',
+          reason: missionReconcile.reason,
+          mismatched: missionReconcile.mismatched,
+          requestedItem: missionReconcile.requestedItem,
+          requestedCount: missionReconcile.requestedCount,
+          registryItem: missionReconcile.registryItem,
+          registryCount: missionReconcile.registryCount,
+        })
+        reason = 'env-mission-mismatch'
+        exitCode = EXIT_REFUSED
+        break
+      }
+      if (missionReconcile.status === 'injected') {
+        emit({
+          type: 'env_reconcile',
+          at: new Date().toISOString(),
+          attempt,
+          status: 'injected',
+          injected: missionReconcile.injected,
+          envItem: missionReconcile.envItem,
+          envCount: missionReconcile.envCount,
+          registryItem: missionReconcile.registryItem,
+          registryCount: missionReconcile.registryCount,
+        })
+      }
       const childEnv = { ...process.env, BUDDY_SUPERVISOR: '1', BUDDY_SUPERVISOR_RUN: base }
       if (typeof portReconcile.envPort === 'string' && portReconcile.envPort !== '') childEnv.BUDDY_PORT = portReconcile.envPort
+      if (typeof missionReconcile.envItem === 'string' && missionReconcile.envItem !== '') childEnv.BUDDY_MISSION_ITEM = missionReconcile.envItem
+      if (typeof missionReconcile.envCount === 'string' && missionReconcile.envCount !== '') childEnv.BUDDY_MISSION_COUNT = missionReconcile.envCount
       const child = spawn(command, {
         cwd: options.driverDir,
         env: childEnv,

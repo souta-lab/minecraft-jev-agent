@@ -26,6 +26,7 @@ const {
   parseGenerationReadyLine,
   parseResidentProcessLines,
   preflight,
+  reconcileBuddyMission,
   reconcileBuddyPort,
   syncActiveRunRegistryOnReady,
 } = await import('./resident-supervisor.mjs')
@@ -510,6 +511,44 @@ try {
   assert.deepEqual(reconcileBuddyPort({ registryPath: noPort, envPort: '26612' }), {
     status: 'ambient', reason: 'registry-port-missing', envPort: '26612',
   }, 'a registry without a port field leaves ambient env standing')
+  checks++
+
+  // ---- BUDDY_MISSION_* reconcile: the mission env pair follows the same -----
+  // registry-declared provenance; a wrong mission refuses instead of silently
+  // working a different goal than the registered run.
+  const missionReg = join(tmp, 'mission-registry.json')
+  writeFileSync(missionReg, JSON.stringify({ record: 'capability-active-run', status: 'active', mission: 'inventory_at_least(obsidian,10)' }))
+  assert.deepEqual(reconcileBuddyMission({ registryPath: missionReg, envItem: undefined, envCount: undefined }), {
+    status: 'injected', injected: ['item', 'count'], envItem: 'obsidian', envCount: '10', registryItem: 'obsidian', registryCount: '10',
+  }, 'both unset injects the full declared mission')
+  assert.deepEqual(reconcileBuddyMission({ registryPath: missionReg, envItem: 'obsidian', envCount: undefined }), {
+    status: 'injected', injected: ['count'], envItem: 'obsidian', envCount: '10', registryItem: 'obsidian', registryCount: '10',
+  }, 'a set-agreeing field is kept while the unset field injects')
+  assert.deepEqual(reconcileBuddyMission({ registryPath: missionReg, envItem: 'obsidian', envCount: '10' }), {
+    status: 'agree', envItem: 'obsidian', envCount: '10', registryItem: 'obsidian', registryCount: '10',
+  }, 'a fully agreeing mission passes through')
+  checks++
+  assert.deepEqual(reconcileBuddyMission({ registryPath: missionReg, envItem: 'iron_ingot', envCount: '10' }), {
+    status: 'refused', reason: 'mission-mismatch', mismatched: ['item'], envItem: null, envCount: null,
+    registryItem: 'obsidian', registryCount: '10', requestedItem: 'iron_ingot', requestedCount: '10',
+  }, 'a different item refuses rather than silently working the wrong mission')
+  assert.deepEqual(reconcileBuddyMission({ registryPath: missionReg, envItem: 'obsidian', envCount: '3' }), {
+    status: 'refused', reason: 'mission-mismatch', mismatched: ['count'], envItem: null, envCount: null,
+    registryItem: 'obsidian', registryCount: '10', requestedItem: 'obsidian', requestedCount: '3',
+  }, 'a different count refuses')
+  assert.deepEqual(reconcileBuddyMission({ registryPath: missionReg, envItem: 'iron_ingot', envCount: '3' }), {
+    status: 'refused', reason: 'mission-mismatch', mismatched: ['item', 'count'], envItem: null, envCount: null,
+    registryItem: 'obsidian', registryCount: '10', requestedItem: 'iron_ingot', requestedCount: '3',
+  }, 'the runner default pair (iron_ingot:3) refuses against obsidian:10')
+  checks++
+  const nonInv = join(tmp, 'noninv-registry.json')
+  writeFileSync(nonInv, JSON.stringify({ record: 'capability-active-run', status: 'active', mission: 'reach_location(0,80,0)' }))
+  assert.deepEqual(reconcileBuddyMission({ registryPath: nonInv, envItem: 'obsidian', envCount: '10' }), {
+    status: 'ambient', reason: 'registry-mission-missing', envItem: 'obsidian', envCount: '10',
+  }, 'a non-inventory_at_least registry mission leaves ambient env standing')
+  assert.deepEqual(reconcileBuddyMission({ registryPath: join(tmp, 'does-not-exist.json'), envItem: 'obsidian', envCount: '10' }), {
+    status: 'ambient', reason: 'registry-missing', envItem: 'obsidian', envCount: '10',
+  }, 'missing registry leaves ambient mission env standing')
   checks++
 
   console.log(`resident-supervisor: ${checks}/${checks} checks passed`)
