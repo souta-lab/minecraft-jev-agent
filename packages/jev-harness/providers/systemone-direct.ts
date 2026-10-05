@@ -44,6 +44,25 @@ export interface DecisionBackendProfile {
   readonly secretFile: string | null
   /** Declared meaning of reported confidence. Thresholds never transfer between models by default. */
   readonly confidence: 'provider-calibrated' | 'provider-reported-unmeasured'
+  /**
+   * §18 Gate F: measured low-confidence floor for the action head, calibrated
+   * per model. Absent = the historical Jev-tuned 0.55 default applies.
+   * liquid-direct-d1: 0.2 — measured 2026-10-05 over 27 real d1 calls on
+   * recorded p24 states: action confidence mean 0.509, p50 0.541, p10 0.172.
+   * The Jev-tuned 0.55 would escalate ~52% of d1 decisions; 0.2 keeps the
+   * escalation for the genuinely uncertain tail (below the measured p10).
+   */
+  readonly lowConfidenceThreshold?: number
+  /**
+   * §18 Gate F: measured beta (abandon_option) adoption threshold, calibrated
+   * per model. Absent = the historical Jev-era 0.5 applies.
+   * liquid-direct-d1: 0.8 — measured 2026-10-05 over 48 real d1 calls on
+   * recorded p24 states: P(abandon) mean 0.358, p50 0.281, p90 0.799; 40% of
+   * sampled frames reached 0.5. At 0.8 adoption stays exceptional (~6%) while
+   * remaining reachable; every observed DECLINE on a singleton offer carried
+   * beta >= 0.68, so the decline->beta path stays coherent.
+   */
+  readonly abandonThreshold?: number
 }
 
 /**
@@ -70,6 +89,8 @@ export const DECISION_PROFILES: Readonly<Record<string, DecisionBackendProfile>>
     baseURL: 'https://api.liquid.ai/decisions',
     secretFile: '/home/s0u7a/.config/mc-ai-secrets/liquid-api.key',
     confidence: 'provider-reported-unmeasured',
+    lowConfidenceThreshold: 0.2,
+    abandonThreshold: 0.8,
   },
   'liquid-direct-d1-free': {
     profileId: 'liquid-direct-d1-free',

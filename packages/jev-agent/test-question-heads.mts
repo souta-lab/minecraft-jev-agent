@@ -16,11 +16,13 @@
 //   6. the typed `decisionReason` (§7.1) is journaled on every call.
 import assert from 'node:assert/strict'
 import {
+  ACTION_DECLINE_LABEL,
   AUTHORITATIVE_QUESTION_NAMES,
   QUESTION_NAMES,
   SAFETY_QUESTION_NAMES,
   SHADOW_QUESTION_NAMES,
   abandonRequested,
+  actionDeclined,
   buildQuestions,
   decisionIdFrom,
   questionNamesFor,
@@ -192,6 +194,52 @@ try {
   threw = true
 }
 assert.ok(threw, 'a choice outside the grounded offer is a failure, never an action')
+
+// --- Gate F: singleton offers get a DECLINE leg (System One needs >=2
+// labels); DECLINE is never an actuation, only beta evidence. ---
+const singleton = buildQuestions([MINE], questionNamesFor('core'))
+const singletonCriteria = (singleton.action as { criteria: Record<string, string> }).criteria
+assert.deepEqual(Object.keys(singletonCriteria).sort(), [ACTION_DECLINE_LABEL, 'MINE:b1_2_3'])
+assert.ok(
+  !(ACTION_DECLINE_LABEL in (buildQuestions([MINE, WAIT], questionNamesFor('core')).action as { criteria: Record<string, string> }).criteria),
+  'DECLINE is never added when WHICH is already a real question',
+)
+const declined = {
+  callId: 'c3', policy: 'typesafe', source: 'jev', model: 'm', latencyMs: 1, usage: null,
+  answers: {
+    action: { name: 'action', type: 'choice', value: ACTION_DECLINE_LABEL, probability: 0.7, confidence: 0.7, probabilities: null, legend: null, note: null },
+    abandon_option: { name: 'abandon_option', type: 'boolean', value: 0, probability: 0.1, confidence: null, probabilities: null, legend: null, note: null },
+  },
+} as unknown as JevResult
+assert.equal(decisionIdFrom(declined), null, 'DECLINE actuates nothing')
+assert.ok(actionDeclined(declined), 'DECLINE surfaces as a decline for the beta path')
+assert.equal(abandonRequested(declined, 0.5), false, 'beta stays separately judged')
+
+// The authority kernel accepts DECLINE only when the offer was a singleton.
+const declinePolicy = new AuthorityJevPolicy(
+  { writer: { path: 'test', write: () => {} }, model: 'liquid/d1', timeoutMs: 1000, maxRetries: 0, rateLimitRetries: 0, rateLimitBaseDelayMs: 1 } as unknown as JevPolicyOptions,
+  { key: 'fixture', origin: 'test' },
+  {
+    evaluate: (async () => ({
+      answers: { action: { choice: ACTION_DECLINE_LABEL }, abandon_option: { probability: 0.4 } },
+      providerMetadata: {},
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    })) as never,
+    sleep: async () => {},
+    random: () => 0.5,
+  },
+)
+const singletonRequest = { ...request, candidates: [MINE], questionNames: questionNamesFor('core') } as unknown as JevRequest
+const declinedResult = await declinePolicy.decide(singletonRequest)
+assert.equal(decisionIdFrom(declinedResult), null)
+assert.ok(actionDeclined(declinedResult))
+let declineRejectedOnWideOffer = false
+try {
+  await declinePolicy.decide(request) // two candidates: DECLINE is an invention here
+} catch {
+  declineRejectedOnWideOffer = true
+}
+assert.ok(declineRejectedOnWideOffer, 'DECLINE on a multi-candidate offer is a non-grounded answer')
 
 // --- no singleton bypass: the source keeps the documented non-bypass and
 // never short-circuits a lone-candidate offer past the model. ---

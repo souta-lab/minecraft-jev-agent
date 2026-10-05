@@ -13,7 +13,7 @@ import type { BetaAuthorityDecision } from './betaAuthority.ts'
 import type { JevAgentOptions } from './controller-shared.ts'
 import type { DecisionLlmResummonLog } from './decisionlog.ts'
 import type { GoalQueue, QueuedGoal } from './goalQueue.ts'
-import { abandonRequested, betaShadowDecision, decisionIdFrom, formatBetaShadow } from './jev.ts'
+import { abandonRequested, actionDeclined, betaShadowDecision, decisionIdFrom, formatBetaShadow } from './jev.ts'
 import type { EventLogger, JevResult } from './jev.ts'
 import { isEfficientLocomotionProgress, NO_LOCOMOTION_OBSERVATION } from './locomotion.ts'
 import type { LocomotionObservation } from './locomotion.ts'
@@ -67,7 +67,10 @@ export function canAuthoritativelyAbandonOption(optionId: string | null): option
 
 export function abandonVerdict(host: AbandonLifecycleHost,
 decision: JevResult, optionId: string | null, planId: string | null): AbandonVerdict {
-  const requested = abandonRequested(decision)
+  // §18 Gate F: declining the sole grounded action on a singleton offer is a
+  // beta-form vote - the Option's only means was refused, so it counts as a
+  // request to end it (deferral/cooldown bounds still apply).
+  const requested = abandonRequested(decision) || actionDeclined(decision)
   const now = Date.now()
   // The wrapper calls this immediately before `betaTerminationBoundary`, so the
   // deferral bound below is keyed on the same plan revision this verdict used.

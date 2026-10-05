@@ -26,7 +26,7 @@ import type {
   KeyResolution,
   QuestionName,
 } from './client.ts'
-import { ABANDON_THRESHOLD_DEFAULT, DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES } from './client.ts'
+import { ABANDON_THRESHOLD_DEFAULT, ACTION_DECLINE_LABEL, DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES, resolveAbandonThreshold } from './client.ts'
 
 export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'You are the pi head of the Typed Decision Plane for an autonomous Minecraft agent. Choose exactly ONE id from ' +
@@ -39,7 +39,8 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'versus MOVE, RETREAT, or WAIT is your pi decision: weigh the combat block (target, distance buckets, weapons, ' +
   'armor condition, danger) and what each escape buys (separation, cover, reach). Do not attack merely because a ' +
   'mob exists - attack only when it serves the Option or survival; code grounds and bounds the choice and must not ' +
-  'choose attack for you.'
+  'choose attack for you. If a DECLINE label is offered (a singleton offer), it means refusing the only grounded ' +
+  'action; choose it only when this Option cannot proceed as offered.'
 
 const BETA_INSTRUCTIONS =
   'You are the beta head: does the CURRENT Option end now? Judge option.success/preconditions against progress ' +
@@ -99,6 +100,13 @@ export function buildAuthorityQuestions(
   if (requested.has('action')) {
     const criteria: Record<string, string> = {}
     for (const candidate of candidates) criteria[candidate.id] = candidateCriteria(candidate)
+    // §18 Gate F: the System One wire requires a Choice to offer >=2 labels.
+    // On a singleton grounded offer the real judgment is "the sole action, or
+    // the Option cannot proceed" - DECLINE is that second leg, never a control.
+    if (candidates.length === 1) {
+      criteria[ACTION_DECLINE_LABEL] =
+        'decline the only grounded action: this Option cannot proceed as offered'
+    }
     out.action = { type: 'choice', instructions: actionInstructions, criteria }
   }
   if (requested.has('abandon_option')) {
@@ -256,9 +264,11 @@ function validThreshold(value: unknown): value is number {
  * current Option instance whenever one exists; the global 0.5 is only the
  * bootstrap/rollback fallback for states without first-class Option metadata.
  */
-export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Record<string, JevAnswer>>): AuthorityDecisionMeta {
+export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Record<string, JevAnswer>>, thresholdFallback?: number): AuthorityDecisionMeta {
   const option = request.state.currentOption ?? null
-  const threshold = validThreshold(option?.abortThreshold) ? option.abortThreshold : ABANDON_THRESHOLD_DEFAULT
+  const threshold = validThreshold(option?.abortThreshold)
+    ? option.abortThreshold
+    : resolveAbandonThreshold(thresholdFallback ?? ABANDON_THRESHOLD_DEFAULT)
   const probability = answers.abandon_option?.probability
   const betaProbability = typeof probability === 'number' && Number.isFinite(probability) ? probability : null
   return {
@@ -865,7 +875,10 @@ export class AuthorityJevPolicy implements JevPolicy {
 
         const action = answers.action
         if (action !== undefined) {
-          const grounded = request.candidates.some((candidate) => candidate.id === action.value)
+          const grounded =
+            request.candidates.some((candidate) => candidate.id === action.value) ||
+            // DECLINE is a legal label only when the offer was a singleton.
+            (action.value === ACTION_DECLINE_LABEL && request.candidates.length === 1)
           if (!grounded) throw new Error(`Jev invented non-grounded action id ${JSON.stringify(action.value)}`)
         }
 
@@ -873,7 +886,7 @@ export class AuthorityJevPolicy implements JevPolicy {
         // participate in the legacy Option/β authority contract, so neither the
         // journal nor the returned Jev result may carry Option identity or β
         // threshold/adoption metadata for this call.
-        const authorityDecision = isReachRouteFrame ? undefined : authorityDecisionMeta(request, answers)
+        const authorityDecision = isReachRouteFrame ? undefined : authorityDecisionMeta(request, answers, this.options.abandonThreshold)
         const usage = readUsage(response.usage)
         const latencyMs = Date.now() - started
         const decisionJournal = authorityDecision === undefined ? {} : { decision: authorityDecision }

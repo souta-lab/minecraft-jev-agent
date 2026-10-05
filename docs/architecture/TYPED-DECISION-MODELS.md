@@ -364,7 +364,15 @@ Live acceptance probe through the production policy path:
 - caller abort -> cancelled (non-retryable); 1 ms attempt timeout -> transient; invalid credential -> HTTP 401 `invalid_api_key` -> decisive `auth`, one attempt, no retry;
 - explicit `d1:free` profile answers with reported model `d1:free`.
 
-Level-3 calibration is **not** established. On two synthetic probe states without a current Option, d1's beta `P(abandon=true)` was 0.72-0.91, while historical Jev beta in comparable live states sat near 0.1-0.2. Treat beta adoption under d1 as a live measurement target; do not retune thresholds without measured evidence.
+Level-3 calibration was measured 2026-10-05 (Gate F, `tools/jev-d1-calibrate.mts`): 48 real d1 calls over recorded p24 decision states replayed through the production adapter and current question wording. Measured facts and the resulting profile-carried thresholds:
+
+- **Wire defect found + fixed**: every singleton offer (one grounded candidate) failed `422 A Choice needs at least 2 options` — 44.1% of p24 and 14.6% of p23 calls were singletons. Fix: singleton `action` Choices carry an explicit `DECLINE` second label (never an actuation; a declined sole action is a beta-form vote routed through `abandonVerdict`). Post-fix: 48/48 calls succeed; d1 chose DECLINE on 14/21 singleton frames, always with beta P >= 0.68 (coherent cross-head behavior).
+- **action confidence**: mean 0.576, p50 0.635, p10 0.230 — the Jev-tuned `lowConfidenceThreshold` 0.55 would escalate ~40% of d1 decisions. Profile field `lowConfidenceThreshold: 0.2` isolates the ~6% genuinely-uncertain tail (env `BUDDY_LOW_CONFIDENCE_THRESHOLD` overrides; other profiles keep 0.55).
+- **abandon_option (beta)**: mean 0.358, p50 0.281, p90 0.799; 40% of frames reached 0.5 vs 0% recorded for Jev (whose beta was pathology-suppressed, see #360). Profile field `abandonThreshold: 0.8` keeps Option-ending exceptional (~6% of sampled frames) instead of routine. Resolution order: Option `abortThreshold` > `BUDDY_ABANDON_THRESHOLD` env > profile field > 0.5 default.
+- **danger confidence**: mean 0.408, p50 0.391 (n=7) — the 0.4 evidence gate keeps roughly the top half; retained.
+- **should_retreat**: 6 strong_false / 1 uncertain / 1 strong_true — the 0.30/0.70 band behaves.
+- **action agreement with recorded Jev answers**: 21/48 — Jev itself oscillated on identical states (Gate E), so disagreement is not a quality regression signal; d1's top-label probability p50 0.764 shows decisive Choice distributions.
+- **latency**: p50 ~0.41 s per batch (includes DECLINE-leg calls); `usage.outputTokens` remains 0.
 
 ## 13. Backend profile contract
 

@@ -363,6 +363,19 @@ export const SITUATION_LEVELS = [
  * path from answers to mutation is `decisionIdFrom(result.answers.action)`.
  */
 export const AUTHORITATIVE_QUESTION_NAMES = ['action', 'abandon_option'] as const
+
+/**
+ * §18 Gate F: a System One `Choice` requires at least two labels, and §6/§18
+ * forbids skipping the model merely because the grounded offer is a singleton.
+ * A one-candidate offer is still a real judgment - "the sole grounded action,
+ * or the Option cannot proceed as offered" - so singleton Choices carry an
+ * explicit DECLINE label as the second leg. DECLINE is never an actuation: it
+ * is beta-form evidence that the sole means was refused, routed to the abandon
+ * verdict (`actionDeclined`). It is NOT a resurrected WAIT/ESCALATE control -
+ * it cannot extend a dead option; it only ends it. Added ONLY to singleton
+ * Choices; with >=2 candidates WHICH is already a real question.
+ */
+export const ACTION_DECLINE_LABEL = 'DECLINE'
 export const SAFETY_QUESTION_NAMES = ['danger', 'should_retreat'] as const
 /**
  * Demoted to shadow metrics (issue #11): still defined and logged by code, but
@@ -383,10 +396,15 @@ export type QuestionSetKind = 'core' | 'threat' | 'stall' | 'all'
 
 export const ABANDON_THRESHOLD_DEFAULT = 0.5
 
-/** `BUDDY_ABANDON_THRESHOLD` overrides the binary beta threshold for replans. */
-export function resolveAbandonThreshold(): number {
-  const raw = Number(process.env.BUDDY_ABANDON_THRESHOLD ?? ABANDON_THRESHOLD_DEFAULT)
-  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : ABANDON_THRESHOLD_DEFAULT
+/**
+ * `BUDDY_ABANDON_THRESHOLD` overrides the binary beta threshold for replans;
+ * otherwise the caller's explicit/model-calibrated `fallback`, otherwise the
+ * historical default. Thresholds never silently transfer between models.
+ */
+export function resolveAbandonThreshold(fallback: number = ABANDON_THRESHOLD_DEFAULT): number {
+  const raw = Number(process.env.BUDDY_ABANDON_THRESHOLD)
+  if (Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw
+  return fallback
 }
 
 /** Resolve a trigger class to the exact question set that is sent. */
@@ -418,6 +436,10 @@ export function buildQuestions(
 ): JevQuestions {
   const actionCriteria: Record<string, string> = {}
   for (const candidate of candidates) actionCriteria[candidate.id] = candidate.label
+  // §18 Gate F: same singleton-offer DECLINE leg as buildAuthorityQuestions.
+  if (candidates.length === 1) {
+    actionCriteria[ACTION_DECLINE_LABEL] = 'decline the only grounded action: this Option cannot proceed as offered'
+  }
 
   const all: Record<QuestionName, EvaluationQuestion> = {
     action: {
@@ -470,7 +492,18 @@ export function decisionIdFrom(result: JevResult): string | null {
   const answer = result.answers.action
   if (answer === undefined) return null
   if (answer.type !== 'choice') return null
+  if (answer.value === ACTION_DECLINE_LABEL) return null // a decline is never an actuation
   return typeof answer.value === 'string' ? answer.value : null
+}
+
+/**
+ * The model declined the sole grounded action on a singleton offer. That is a
+ * beta-form vote ("this Option cannot proceed as offered"), never WHICH
+ * authority - consumers must route it through the abandon verdict machinery.
+ */
+export function actionDeclined(result: JevResult): boolean {
+  const answer = result.answers.action
+  return answer?.type === 'choice' && answer.value === ACTION_DECLINE_LABEL
 }
 
 export function sourceOf(policy: JevPolicyKind): JevSource {
@@ -792,6 +825,11 @@ export interface JevPolicyOptions {
   forceFallback?: boolean
   /** credential resolver seam for tests; defaults to the selected profile's own resolver */
   resolveKey?: () => KeyResolution | null
+  /**
+   * §18 Gate F: explicit beta (abandon_option) adoption threshold. Unset ->
+   * the selected profile's measured calibration, then the historical 0.5.
+   */
+  abandonThreshold?: number
 }
 
 /**

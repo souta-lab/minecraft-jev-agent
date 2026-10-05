@@ -66,7 +66,7 @@ import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { NETHER, OBSIDIAN, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatSkillStep, formatSkillStepAuthority } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
-import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter } from './jev.ts'
+import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, resolveLowConfidenceThreshold } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
 import type { JevPolicy, JevResult } from './jev.ts'
@@ -249,7 +249,7 @@ export const defaultJevAgentOptions: JevAgentOptionDefaults = {
   schedulerCoalesceMs: 40,
   minDecisionIntervalMs: 150,
   minJevIntervalMs: 150,
-  lowConfidenceThreshold: 0.55,
+  lowConfidenceThreshold: resolveLowConfidenceThreshold(),
   stallMs: 25000,
   wedgeRepeatLimit: 5,
   waitLimit: 3,

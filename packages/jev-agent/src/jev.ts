@@ -67,6 +67,18 @@ export function resolveDecisionProfileId(env: Record<string, string | undefined>
 }
 
 /**
+ * §18 Gate F: the low-confidence escalation floor is model-specific. An
+ * explicit `BUDDY_LOW_CONFIDENCE_THRESHOLD` wins (operator override), then the
+ * selected profile's measured calibration, then the historical Jev default.
+ * Thresholds never silently transfer between models.
+ */
+export function resolveLowConfidenceThreshold(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env.BUDDY_LOW_CONFIDENCE_THRESHOLD)
+  if (Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw
+  return DECISION_PROFILES[resolveDecisionProfileId(env)]?.lowConfidenceThreshold ?? 0.55
+}
+
+/**
  * Single swap point. Deterministic local policy is explicit-only; every normal
  * run receives the AuthorityJevPolicy served by exactly ONE explicit backend
  * profile. An unknown profile or a missing credential is fatal: no other
@@ -80,12 +92,15 @@ export function createJevPolicy(options: JevPolicyOptions): JevPolicy {
     throw new FatalModelError('jev-policy-profile', 1, `unknown decision profile ${JSON.stringify(profileId)}; no other profile is substituted`)
   }
   const backend = { profileId: profile.profileId, providerId: profile.providerId }
+  // §18 Gate F: the profile's measured calibration supplies beta/gate defaults;
+  // an explicit caller-provided threshold always wins.
+  const calibrated = { abandonThreshold: profile.abandonThreshold, ...options }
   if (profile.wireDialect === 'ai-gateway-evaluate') {
     const key = (options.resolveKey ?? resolveJevApiKey)()
     if (key === null) {
       throw new FatalModelError('jev-policy-key', 1, 'no gateway key resolved and forceFallback was not set')
     }
-    return new AuthorityJevPolicy(options, key, { backend })
+    return new AuthorityJevPolicy(calibrated, key, { backend })
   }
   const credential = options.resolveKey !== undefined ? options.resolveKey() : resolveProfileCredential(profile)
   if (credential === null) {
@@ -99,7 +114,7 @@ export function createJevPolicy(options: JevPolicyOptions): JevPolicy {
   // The profile pins the model (AI_GATEWAY_MODEL addresses the gateway dialect
   // only), and the backend - not the policy - holds the credential.
   return new AuthorityJevPolicy(
-    { ...options, model: profile.modelId },
+    { ...calibrated, model: profile.modelId },
     { key: '', origin: direct.keyOrigin },
     { evaluate: direct.evaluate, backend },
   )

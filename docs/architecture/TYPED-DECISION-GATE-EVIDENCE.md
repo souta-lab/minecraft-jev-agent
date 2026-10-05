@@ -290,6 +290,69 @@ Boundary reasons (p24 all): `candidate_set_changed` 1,658,
   in that field could differ (not observed to matter: the
   `skill_outcome_boundary` counts are dominated by genuine mandatory reasons).
 
-## Gates F–H
+## Gate F — Liquid d1 calibration measured separately from Jev (PROVEN)
+
+Tool: `tools/jev-d1-calibrate.mts` — replays recorded p24 decision states
+through the PRODUCTION `liquid-direct-d1` adapter (same wire path as
+`createJevPolicy`), reconstructing the v7 model view and the current
+Gate-B/D question wording. 48 real d1 calls (40 core + 8 threat question
+sets, deterministic stride sample). No Jev assumptions transferred.
+
+### Defect found and fixed by calibration
+
+Every singleton grounded offer (exactly one candidate — produced whenever
+WAIT/ESCALATE suppression leaves one productive action) failed on the d1
+wire: `422 A Choice needs at least 2 options` (21/21 singleton frames;
+44.1% of all p24 calls and 14.6% of p23 calls are singletons — the healthy
+hour's `explore:cave` + MOVE shape is exactly this). Jev tolerated 1-label
+Choices; d1 does not. §18 forbids skipping the model on singletons, so the
+fix is at the offer/question layer: singleton `action` Choices now carry an
+explicit `DECLINE` label (`client.ts` `ACTION_DECLINE_LABEL`):
+
+- `buildAuthorityQuestions`/`buildQuestions` add DECLINE only when
+  `candidates.length === 1` — with >=2 candidates WHICH is already real.
+- DECLINE is never an actuation: `decisionIdFrom` returns null for it.
+- The grounding check accepts DECLINE only on singleton offers (a DECLINE on
+  a multi-candidate offer is still "invented non-grounded id" -> fail).
+- A declined sole action is a beta-form vote — `abandonVerdict` treats it as
+  an abandon request under the existing deferral/cooldown bounds, so the
+  Option ends or the request is deferred; it cannot stall the loop and it is
+  not a resurrected WAIT/ESCALATE control.
+- The pi instruction names the DECLINE leg explicitly.
+
+Post-fix live: **48/48 calls succeed**. d1 chose DECLINE on 14/21 singleton
+frames — every one with beta P >= 0.68, i.e. declining the sole action and
+wanting the Option ended co-occur exactly as designed.
+
+### Measured distributions -> thresholds (per-model, profile-carried)
+
+| Head | d1 measurement | Jev-era threshold | d1 threshold | Rationale |
+|---|---|---|---|---|
+| `action` confidence | mean 0.576, p50 0.635, p10 0.230 | `lowConfidenceThreshold` 0.55 | **0.2** (`profile.lowConfidenceThreshold`) | 0.55 would escalate ~40% of d1 calls; 0.2 isolates the ~6% genuinely-uncertain tail |
+| `abandon_option` P | mean 0.358, p50 0.281, p90 0.799; 40% >= 0.5 | 0.5 | **0.8** (`profile.abandonThreshold`) | keeps Option-ending exceptional (~6%) and reachable; Jev's 0-adoption rate was itself pathological (#360) |
+| `danger` confidence | mean 0.408, p50 0.391 (n=7) | `DANGER_CONFIDENCE_THRESHOLD` 0.4 | 0.4 (unchanged) | gate keeps roughly the top half of evidence-quality answers |
+| `should_retreat` P | 6 strong_false / 1 uncertain / 1 strong_true | 0.30/0.70 band | unchanged | band discriminates correctly |
+
+Resolution order (no silent transfer): Option `abortThreshold` (explicit
+per-Option bound) > `BUDDY_ABANDON_THRESHOLD` env > profile
+`abandonThreshold` > 0.5; `BUDDY_LOW_CONFIDENCE_THRESHOLD` env > profile
+`lowConfidenceThreshold` > 0.55. `d1:free` carries NO calibration fields —
+it is unmeasured and keeps the defaults.
+
+Other measured facts: action top-label probability p50 0.764 (decisive
+Choice distributions); agreement with the recorded Jev answer 21/48 (Jev
+itself oscillated on identical states per Gate E — not a quality-regression
+signal); latency p50 ~0.41 s; `usage.outputTokens` 0 throughout.
+
+Regression sweep after the change: `test-question-heads.mts` (now covering
+DECLINE: singleton leg, never actuates, beta-form decline, rejected on wide
+offers), `test-decision-epochs.mts`, `test-decision-state.mts`,
+`test-jev-semantic-projection.mts` 20/20, `test-audit.mts` 10/10,
+`test-typed-decision-backend.mts` 27/27, `test-beta-abandon-deferral.mts`
+12/12, `test-beta-authority.mts` 5/5, `test-beta-option-threshold.mts` PASS,
+`test-beta-stall-evidence.mts` PASS, `test-skill-commitment.mts` 21/21,
+`test-controller-transitions.mts` 7/7. `tsc --noEmit` clean.
+
+## Gates G–H
 
 Pending. Do not resume Minecraft until all pass.
