@@ -10,7 +10,7 @@
 //   'decision' - validating the chosen candidate before the executor starts
 //   'dig'      - re-validating at the moment of the dig, after pathing moved us
 import type { Candidate, CandidateKind } from './candidates.ts'
-import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META, exploredCellKey, parseWaterRouteWitness } from './candidates.ts'
+import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META, exploredCellKey, parseWaterRouteWitness, starvingDeniedPlace } from './candidates.ts'
 import { isBridgeMove } from './bridgeRoute.ts'
 import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './descentScaffold.ts'
 import type { Vec3Json, WorldState } from './state.ts'
@@ -860,8 +860,12 @@ function guardPlace(candidate: Candidate, state: WorldState, context: GuardConte
   const submersion = submergedPlacementRefusal(candidate, state, target)
   if (submersion !== null) return submersion
   // SAFE: placing a station does not end starvation, so a body at critical
-  // health with an empty hunger bar is not kept in that work.
-  if (bodyStarving(state.self)) {
+  // health with an empty hunger bar is not kept in that work. Terrain shaping
+  // (wall-off, pillar footing, scaffold) is never denied - world modification
+  // is a first-class survival affordance - and a smelter placement that can
+  // cook a held ingredient is a starvation route. The offer side shares the
+  // same `starvingDeniedPlace` rule, so a denied placement is never offered.
+  if (starvingDeniedPlace(state, itemName)) {
     return deny(
       candidate.id,
       'STARVING',

@@ -4285,11 +4285,26 @@ function foodSmeltCandidates(state: WorldState, options: CandidateOptions): Cand
 }
 
 /** True when a held item is a furnace input for an edible output (the smelt-cook link). */
-function hasSmeltableFoodIngredient(state: WorldState): boolean {
+export function hasSmeltableFoodIngredient(state: WorldState): boolean {
   const counts = state.inventory.counts
   return Object.entries(FOOD_SMELT_INPUT).some(
     ([output, input]) => isEdibleFoodItem(output) && (counts[input] ?? 0) > 0,
   )
+}
+
+/**
+ * The placement work a starving body is kept out of: station furniture placed
+ * to open a craft/smelt/container chain. Terrain shaping (wall-offs, pillar
+ * footing, scaffolds) is world modification - a first-class survival
+ * affordance - so it is never denied. The one station placement that CAN end
+ * the starvation (a smelter the held ingredients can cook through) stays
+ * legal. The offer side and the execution guard share this rule, so a denied
+ * placement is never offered to the decision plane.
+ */
+export function starvingDeniedPlace(state: WorldState, itemName: string | null): boolean {
+  if (itemName === null || !bodyStarving(state.self)) return false
+  if (!CRAFT_STATIONS.has(itemName) && !FURNACE_STATIONS.has(itemName) && containerBlockForItem(itemName) === null) return false
+  return !(itemName === 'furnace' && hasSmeltableFoodIngredient(state)) && !(itemName === 'smoker' && hasSmeltableFoodIngredient(state))
 }
 
 /**
@@ -8420,7 +8435,8 @@ function placeStationCandidate(
   item: string,
   spot: Vec3Json,
   purpose: string,
-): Candidate {
+): Candidate | null {
+  if (starvingDeniedPlace(state, item)) return null
   return {
     id: `PLACE:${item}:${blockId('p', spot)}`,
     kind: 'PLACE',
@@ -8758,9 +8774,9 @@ function craftCandidates(
           (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
       )
       if (spot !== undefined) {
-        return {
-          candidates: [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)],
-          placeRefusal: null,
+        const stationPlace = placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)
+        if (stationPlace !== null) {
+          return { candidates: [stationPlace], placeRefusal: null }
         }
       }
     }
@@ -9230,6 +9246,10 @@ export function frameBuildGrounded(state: WorldState, focusItem: string): boolea
  */
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
+  // SAFE mirrors guardPlace's STARVING rule at the offer side: a station
+  // placement that cannot end starvation is rejected by the guard anyway, so
+  // offering it only spins a commit->STARVING->reject loop.
+  if (starvingDeniedPlace(state, focusItem)) return []
   // A placement family whose bounded attempts are exhausted must not be
   // re-offered: the ledger already retired it with a typed PLACE_RETRIES_EXHAUSTED.
   if (options.retiredPlaceItems?.has(focusItem) === true) return []
@@ -10498,7 +10518,8 @@ function stationAcquisitionCandidates(
   if (truth.held > 0) {
     const placement = heldStationPlacement(state, options, item, purpose)
     if (placement.spot !== null) {
-      return { candidates: [placeStationCandidate(state, options, item, placement.spot, purpose)], placeRefusal: null }
+      const stationPlace = placeStationCandidate(state, options, item, placement.spot, purpose)
+      return { candidates: stationPlace === null ? [] : [stationPlace], placeRefusal: null }
     }
     if (known !== undefined) {
       return { candidates: [knownStationRetrievalCandidate(state, options, known)], placeRefusal: null }
@@ -10629,7 +10650,8 @@ function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Ca
     return step === null ? [] : [step]
   }
   if (source.kind === 'held-place') {
-    return [placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)]
+    const tablePlace = placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)
+    return tablePlace === null ? [] : [tablePlace]
   }
   if (source.kind === 'remembered') {
     return [knownStationRetrievalCandidate(state, options, source.station)]

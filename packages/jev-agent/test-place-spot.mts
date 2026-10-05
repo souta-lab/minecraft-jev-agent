@@ -417,5 +417,29 @@ const productive = (candidates: readonly Candidate[]): Candidate[] =>
   )
 }
 
+// ---------------------------------------------------------------------------
+// (6) STARVING withholds the held-table placement at the offer side
+// ---------------------------------------------------------------------------
+{
+  const feet: Vec3Json = { x: 0, y: 64, z: 0 }
+  const neighbour: Vec3Json = { x: 2, y: 64, z: 0 }
+  const placeGoal: QueuedGoal = {
+    ...craftGoal('crafting_table'),
+    id: 'g-place-crafting_table',
+    kind: 'place',
+    description: 'place 1 x crafting_table',
+  }
+  const state = heldTableInTunnel([neighbour], { goalQueue: queueWith(placeGoal) })
+  state.self.health = 1
+  state.self.food = 0
+
+  const grounded = generateGroundedCandidates(state, options)
+  check(
+    '(6) starving + place goal: the station placement is withheld at the offer side (guard-mirrored)',
+    placeIds(grounded.candidates).every((id) => !id.startsWith('PLACE:crafting_table')),
+    `places=[${placeIds(grounded.candidates).join(',')}]`,
+  )
+}
+
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)
 if (failures > 0) process.exit(1)

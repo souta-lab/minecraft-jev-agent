@@ -535,6 +535,67 @@ addCase('still rejects TARGET_GONE when the clearance cell is in no sensor pool'
   return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
 })
 
+// --- STARVING places: station work is denied, survival shaping and cook routes stay legal
+addCase('rejects STARVING for a station placement while starving', () => {
+  const fixture = state({
+    self: { x: 0, y: 60, z: 0 },
+    blocks: [],
+    inventory: { slots: [], counts: { crafting_table: 1 }, totalItems: 1 },
+  })
+  fixture.self.health = 1
+  fixture.self.food = 0
+  const chunk = candidate({
+    id: 'PLACE:crafting_table:p1_61_0',
+    kind: 'PLACE',
+    itemName: 'crafting_table',
+    target: { x: 1, y: 61, z: 0 },
+    inReach: true,
+    hasStandableAdjacent: true,
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
+addCase('accepts a smelter placement that can cook held ingredients while starving', () => {
+  const fixture = state({
+    self: { x: 0, y: 60, z: 0 },
+    blocks: [],
+    inventory: { slots: [], counts: { furnace: 1, beef: 1 }, totalItems: 2 },
+  })
+  fixture.self.health = 1
+  fixture.self.food = 0
+  const chunk = candidate({
+    id: 'PLACE:furnace:p1_61_0',
+    kind: 'PLACE',
+    itemName: 'furnace',
+    target: { x: 1, y: 61, z: 0 },
+    inReach: true,
+    hasStandableAdjacent: true,
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
+addCase('accepts a terrain-shaping placement while starving', () => {
+  const fixture = state({
+    self: { x: 0, y: 60, z: 0 },
+    blocks: [],
+    inventory: { slots: [], counts: { cobblestone: 12 }, totalItems: 12 },
+  })
+  fixture.self.health = 1
+  fixture.self.food = 0
+  const chunk = candidate({
+    id: 'PLACE:cobblestone:pillar-footing:p0_59_0',
+    kind: 'PLACE',
+    itemName: 'cobblestone',
+    target: { x: 0, y: 59, z: 0 },
+    inReach: true,
+    hasStandableAdjacent: true,
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
 const expected: Record<string, GuardCode | null> = {
   'accepts an in-reach oak_log': null,
   'accepts an out-of-reach multi-cell portal placement for executor approach': null,
@@ -556,6 +617,9 @@ const expected: Record<string, GuardCode | null> = {
   'accepts a staircase-overhead MINE grounded in stepCuts.blockedBy': null,
   'accepts an own-footprint clearance MINE grounded in headroomCuts': null,
   'still rejects TARGET_GONE when the clearance cell is in no sensor pool': 'TARGET_GONE',
+  'rejects STARVING for a station placement while starving': 'STARVING',
+  'accepts a smelter placement that can cook held ingredients while starving': null,
+  'accepts a terrain-shaping placement while starving': null,
 }
 
 let failures = 0
