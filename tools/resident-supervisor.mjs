@@ -404,7 +404,10 @@ export function parseGenerationReadyLine(line) {
   const generationId = field('id') ?? field('generationId')
   const sourceSha = field('sourceSha')
   if (runId === null || generationId === null || sourceSha === null) return null
-  return { runId, generationId, sourceSha }
+  const buildHash = field('buildHash')
+  const dirtyField = field('treeDirty')
+  const treeDirty = dirtyField === 'true' ? true : dirtyField === 'false' ? false : null
+  return { runId, generationId, sourceSha, buildHash, treeDirty }
 }
 
 function sameResolvedPath(a, b) {
@@ -413,6 +416,49 @@ function sameResolvedPath(a, b) {
     try { return realpathSync(value) } catch { return path.resolve(value) }
   }
   return resolveOne(a) === resolveOne(b)
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try { process.kill(pid, 0); return true } catch (e) { return e?.code === 'EPERM' }
+}
+
+function gitOutput(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  } catch { return null }
+}
+
+/**
+ * Registry SHA succession gate. A recorded `generationSourceSha` that differs
+ * from the new child's ready sha normally refuses ownership transfer, because
+ * a stale or unrelated supervisor must not rewrite the active campaign record.
+ * The one admitted exception is a clean forward restart on the SAME runtime
+ * directory: the prior recorded owner is dead, the ready line proves a clean
+ * tree (treeDirty=false), and the ready sha IS the current HEAD of a worktree
+ * that is still clean now. Everything else fails closed with a typed reason.
+ */
+export function admitRegistryShaSuccession({
+  current,
+  ready,
+  driverDir,
+  childPid,
+  supervisorPid = process.pid,
+  isAlive = pidAlive,
+  gitHead = (cwd) => gitOutput(['rev-parse', 'HEAD'], cwd),
+  gitDirty = (cwd) => { const out = gitOutput(['status', '--porcelain', '--', '.'], cwd); return out === null ? null : out.length > 0 },
+} = {}) {
+  if (ready.treeDirty !== false) return { allowed: false, reason: 'tree-dirty-or-missing' }
+  if (isAlive(current.residentPid) && current.residentPid !== childPid) return { allowed: false, reason: 'live-owner' }
+  if (isAlive(current.supervisorPid) && current.supervisorPid !== supervisorPid) return { allowed: false, reason: 'live-owner' }
+  if (isAlive(current.runnerPid) && current.runnerPid !== supervisorPid && current.runnerPid !== childPid) return { allowed: false, reason: 'live-owner' }
+  const worktreeRoot = path.resolve(driverDir, '..', '..')
+  const head = gitHead(worktreeRoot)
+  if (head === null) return { allowed: false, reason: 'head-unreadable' }
+  if (head !== ready.sourceSha) return { allowed: false, reason: 'sha-not-head' }
+  const dirty = gitDirty(worktreeRoot)
+  if (dirty !== false) return { allowed: false, reason: 'tree-dirty-now' }
+  return { allowed: true }
 }
 
 /**
@@ -428,6 +474,7 @@ export function syncActiveRunRegistryOnReady({
   supervisorPid = process.pid,
   ready,
   updater = updateActiveRunMinor,
+  successionDeps = {},
 } = {}) {
   if (typeof registryPath !== 'string' || !existsSync(registryPath)) return { status: 'skipped', reason: 'registry-missing' }
   if (!Number.isInteger(childPid) || childPid <= 0) return { status: 'skipped', reason: 'invalid-child-pid' }
@@ -438,8 +485,11 @@ export function syncActiveRunRegistryOnReady({
   try { current = JSON.parse(readFileSync(registryPath, 'utf8')) } catch { return { status: 'skipped', reason: 'registry-unreadable' } }
   if (current?.record !== 'capability-active-run' || current.status !== 'active') return { status: 'skipped', reason: 'registry-not-active' }
   if (!sameResolvedPath(current.runtimeDir, driverDir)) return { status: 'skipped', reason: 'runtime-dir-mismatch' }
+  let shaSuccession = false
   if (typeof current.generationSourceSha === 'string' && current.generationSourceSha !== ready.sourceSha) {
-    return { status: 'skipped', reason: 'source-sha-mismatch' }
+    const succession = admitRegistryShaSuccession({ current, ready, driverDir, childPid, supervisorPid, ...successionDeps })
+    if (!succession.allowed) return { status: 'skipped', reason: succession.reason }
+    shaSuccession = true
   }
 
   // A launcher-owned run (tools/capability-run.mjs) registers this supervisor at
@@ -455,7 +505,13 @@ export function syncActiveRunRegistryOnReady({
     internalRunId: ready.runId,
     activeGenerationId: ready.generationId,
   }
-  if (residentRestart) {
+  if (shaSuccession) {
+    fields.sha = ready.sourceSha
+    fields.generationSourceSha = ready.sourceSha
+    fields.generationBuildHash = ready.buildHash ?? null
+    fields.treeDirty = false
+  }
+  if (residentRestart || shaSuccession) {
     fields.boundary = 'resident-restart'
     fields.hostBootSha = ready.sourceSha
   }

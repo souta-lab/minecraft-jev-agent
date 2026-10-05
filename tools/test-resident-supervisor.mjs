@@ -205,7 +205,7 @@ try {
     sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: sourceSha,
   }, registryPath)
   const ready = parseGenerationReadyLine(`[t] GENERATION_READY runId=run-new id=gen-new sourceSha=${sourceSha} buildHash=abc`)
-  assert.deepEqual(ready, { runId: 'run-new', generationId: 'gen-new', sourceSha })
+  assert.deepEqual(ready, { runId: 'run-new', generationId: 'gen-new', sourceSha, buildHash: 'abc', treeDirty: null })
   const synced = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 222, supervisorPid: 111, ready,
   })
@@ -221,10 +221,70 @@ try {
   assert.equal(storedRegistry.activeMinor, 'portal-test.9', 'minor identity must survive supervisor restart')
   const mismatch = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 333, supervisorPid: 111,
-    ready: { runId: 'run-wrong', generationId: 'gen-wrong', sourceSha: 'b'.repeat(40) },
+    ready: { runId: 'run-wrong', generationId: 'gen-wrong', sourceSha: 'b'.repeat(40), treeDirty: true },
   })
-  assert.deepEqual(mismatch, { status: 'skipped', reason: 'source-sha-mismatch' })
+  assert.deepEqual(mismatch, { status: 'skipped', reason: 'tree-dirty-or-missing' })
   assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).residentPid, 222, 'mismatched generation must not rewrite registry')
+  checks++
+
+  // ---- sha succession gate: admitted only on dead owner + clean ready + HEAD + clean tree
+  const allDead = () => false
+  const cleanReady = { runId: 'run-s2', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', treeDirty: false }
+  writeActiveRunRegistry({
+    record: 'capability-active-run', schemaVersion: 1, status: 'active',
+    runId: 'portal-test', runDir: join(registryDir, 'runs/portal-test'),
+    claimToken: 'portal-test#old', activeMinor: 'portal-test.9', segmentId: 'portal-test.9',
+    runtimeDir: driverRegistry, runnerPid: 10, residentPid: 20, supervisorPid: 30,
+    internalRunId: 'run-old', activeGenerationId: 'gen-old',
+    sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: sourceSha,
+  }, registryPath)
+  const depsFor = (over = {}) => ({
+    isAlive: allDead,
+    gitHead: () => 'c'.repeat(40),
+    gitDirty: () => false,
+    ...over,
+  })
+  const admit = syncActiveRunRegistryOnReady({
+    registryPath, driverDir: driverRegistry, childPid: 777, supervisorPid: 555,
+    ready: cleanReady, successionDeps: depsFor(),
+  })
+  assert.equal(admit.status, 'updated', `succession must admit dead owner + clean ready + HEAD match: ${JSON.stringify(admit)}`)
+  const admitted = JSON.parse(readFileSync(registryPath, 'utf8'))
+  assert.equal(admitted.generationSourceSha, 'c'.repeat(40))
+  assert.equal(admitted.sha, 'c'.repeat(40))
+  assert.equal(admitted.generationBuildHash, 'bh2')
+  assert.equal(admitted.treeDirty, false)
+  assert.equal(admitted.hostBootSha, 'c'.repeat(40))
+  assert.equal(admitted.residentPid, 777)
+  assert.equal(admitted.boundary, 'resident-restart')
+  checks++
+
+  // fail-closed variants of the same succession
+  const refused = [
+    [{ isAlive: (pid) => pid === 20 }, 'live-owner', 'live recorded resident refuses'],
+    [{ ready: { ...cleanReady, treeDirty: true } }, 'tree-dirty-or-missing', 'dirty ready refuses'],
+    [{ ready: { ...cleanReady, treeDirty: null } }, 'tree-dirty-or-missing', 'missing treeDirty refuses'],
+    [{ gitHead: () => 'd'.repeat(40) }, 'sha-not-head', 'ready sha behind HEAD refuses'],
+    [{ gitHead: () => null }, 'head-unreadable', 'unreadable HEAD refuses'],
+    [{ gitDirty: () => true }, 'tree-dirty-now', 'worktree dirty at sync refuses'],
+  ]
+  writeActiveRunRegistry({
+    record: 'capability-active-run', schemaVersion: 1, status: 'active',
+    runId: 'portal-test', runDir: join(registryDir, 'runs/portal-test'),
+    claimToken: 'portal-test#old', activeMinor: 'portal-test.9', segmentId: 'portal-test.9',
+    runtimeDir: driverRegistry, runnerPid: 10, residentPid: 20, supervisorPid: 30,
+    internalRunId: 'run-old', activeGenerationId: 'gen-old',
+    sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: sourceSha,
+  }, registryPath)
+  for (const [depOver, reason, label] of refused) {
+    const { ready: readyOver, ...depsOver } = depOver
+    const out = syncActiveRunRegistryOnReady({
+      registryPath, driverDir: driverRegistry, childPid: 777, supervisorPid: 555,
+      ready: readyOver ?? cleanReady, successionDeps: depsFor(depsOver),
+    })
+    assert.deepEqual(out, { status: 'skipped', reason }, `${label}`)
+  }
+  assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).residentPid, 20, 'refused successions must not rewrite registry')
   checks++
 
   // ---- launcher-owned run: first ready is the initial bind, launcher stays runner
