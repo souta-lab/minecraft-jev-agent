@@ -712,7 +712,10 @@ const ASCENT_COLUMN_DIRS: ReadonlyArray<{ dx: number; dz: number }> = [
 ]
 
 /** 0 when the cell lies on the travel bearing, 10 otherwise (mirrors `selectUpStep`). */
-function ascentAlignmentScore(cell: Vec3Json, input: AscentColumnInput): number {
+function ascentAlignmentScore(
+  cell: Vec3Json,
+  input: { selfPosition: Vec3Json; target: Vec3Json | null },
+): number {
   const target = input.target
   if (target === null) return 0
   const signX = Math.sign(target.x - input.selfPosition.x)
@@ -720,6 +723,28 @@ function ascentAlignmentScore(cell: Vec3Json, input: AscentColumnInput): number 
   const dx = cell.x - Math.floor(input.selfPosition.x)
   const dz = cell.z - Math.floor(input.selfPosition.z)
   return dx * signX + dz * signZ > 0 ? 0 : 10
+}
+
+/**
+ * The sensor-named first binding overhead cell of a hand-cut staircase step
+ * (`StepCut.blockedBy`: proven diggable, unprotected, hazard-free destination),
+ * picked by the same travel-bearing + distance rule both upward planners use.
+ * Null when no cut names an overhead blocker.
+ */
+function firstStepOverheadCell(
+  stepCuts: readonly StepCut[] | null | undefined,
+  selfPosition: Vec3Json,
+  target: Vec3Json | null,
+): Vec3Json | null {
+  let best: { cell: Vec3Json; score: number } | null = null
+  for (const cut of stepCuts ?? []) {
+    const blockedBy = cut.blockedBy
+    if (blockedBy === null || blockedBy === undefined) continue
+    const score =
+      ascentAlignmentScore(cut.cut, { selfPosition, target }) + distance(cut.cut, selfPosition) * 0.1
+    if (best === null || score < best.score) best = { cell: blockedBy.pos, score }
+  }
+  return best === null ? null : best.cell
 }
 
 function hazardTouchesColumn(cell: Vec3Json, hazards: readonly Vec3Json[]): boolean {
@@ -795,17 +820,9 @@ export function evaluateAscentColumn(input: AscentColumnInput): AscentColumnDeci
   //     the next cell or grounds `staircase-up` - no placeable block required.
   //     The sealed-pocket live shape (every face tops at the feet+2 ceiling)
   //     resolves here instead of starving on `placeable_block`.
-  let bestOverhead: { cell: Vec3Json; score: number } | null = null
-  for (const cut of input.stepCuts ?? []) {
-    const blockedBy = cut.blockedBy
-    if (blockedBy === null || blockedBy === undefined) continue
-    const score = ascentAlignmentScore(cut.cut, input) + distance(cut.cut, input.selfPosition) * 0.1
-    if (bestOverhead === null || score < bestOverhead.score) {
-      bestOverhead = { cell: blockedBy.pos, score }
-    }
-  }
-  if (bestOverhead !== null) {
-    return { kind: 'refuse', reason: 'step_overhead', cell: bestOverhead.cell, blocker: null }
+  const overhead = firstStepOverheadCell(input.stepCuts, input.selfPosition, input.target)
+  if (overhead !== null) {
+    return { kind: 'refuse', reason: 'step_overhead', cell: overhead, blocker: null }
   }
 
   if (bestUnsafe !== null) {
@@ -872,7 +889,7 @@ function selectUpStep(input: VerticalInput, fromY: number, targetY: number): Ver
  * non-repeating failure a caller can act on (re-plan / abandon / acquire the
  * missing block) instead of re-issuing the same unreachable `y>=N` goal.
  */
-export type UpwardRefusalReason = 'no_placeable' | 'unsafe_column'
+export type UpwardRefusalReason = 'no_placeable' | 'unsafe_column' | 'step_overhead'
 
 export interface UpwardAscentRefusal {
   reason: UpwardRefusalReason
@@ -882,6 +899,13 @@ export interface UpwardAscentRefusal {
   toY: number
   /** the own-column feet cell the refused ascent belongs to */
   cell: Vec3Json
+  /**
+   * `step_overhead` only: the sensor-proven first overhead cell of a hand-cut
+   * staircase step (`StepCut.blockedBy`). Clearing it is the plan's missing
+   * leg, so a caller can offer the dig instead of treating the ascent as a
+   * placeable-block shortage.
+   */
+  blocker?: Vec3Json
 }
 
 interface UpwardPlanDecision {
@@ -893,6 +917,20 @@ function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: nu
   const cell = { x: Math.floor(input.selfPosition.x), y: fromY, z: Math.floor(input.selfPosition.z) }
   const upStep = selectUpStep(input, fromY, targetY)
   if (upStep !== null) return { plan: upStep, refusal: null }
+  // A face whose staircase step is only missing its 2-cell overhead is a
+  // hand-cut clearance route, not a pillar-material shortage: the sensor's
+  // `blockedBy` already proved the binding cell diggable and safe to clear.
+  // Naming it keeps the ascent actionable (the candidate layer offers the
+  // dig) instead of collapsing the fact into `no_placeable` and leaving the
+  // tick with no productive upward option. The same refusal vocabulary the
+  // column evaluator's `step_overhead` verdict already uses.
+  const overhead = firstStepOverheadCell(input.stepCuts, input.selfPosition, input.target)
+  if (overhead !== null) {
+    return {
+      plan: null,
+      refusal: { reason: 'step_overhead', fromY, toY: targetY, cell, blocker: overhead },
+    }
+  }
   if (input.columnSafe === false) {
     return { plan: null, refusal: { reason: 'unsafe_column', fromY, toY: targetY, cell } }
   }
@@ -925,7 +963,11 @@ function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: nu
 
 /** The exact log line emitted when an upward gap has no grounded plan. */
 export function formatAscentRefused(refusal: UpwardAscentRefusal): string {
-  return `ASCENT_REFUSED reason=${refusal.reason} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+  const overhead =
+    refusal.blocker === undefined
+      ? ''
+      : ` overhead=${refusal.blocker.x},${refusal.blocker.y},${refusal.blocker.z}`
+  return `ASCENT_REFUSED reason=${refusal.reason} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}${overhead}`
 }
 
 /**

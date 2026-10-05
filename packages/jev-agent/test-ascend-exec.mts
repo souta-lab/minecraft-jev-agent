@@ -646,6 +646,67 @@ addCase('a staircase-up step paths with an occupancy goal (GoalBlock), never adj
   }
 })
 
+// Measured live (portal-p24.3, run-muue9c3f-7cyn gen-muui8x2m-3rb3v6 ~00:33Z):
+// pocket at y21-24, food decaying, no placeable block; every staircase face's
+// feet+1 destination was blocked only by its overhead cell (`StepCut.blockedBy`,
+// a sensor-proven dig target), yet planUpward collapsed the fact into
+// `no_placeable` and the epoch emitted no upward option - Jev's only work offer
+// was DESCEND floor digs that undid the staircase's altitude (sawtooth). The
+// named overhead cell is the same `step_overhead` fact evaluateAscentColumn
+// reports: the route must surface its MINE instead of the bare refusal.
+addCase('a step_overhead refusal offers the sensor-named overhead MINE, not a bare no_placeable', () => {
+  const world = liveWorld({ diamond_pickaxe: 1 })
+  world.stepCuts = [
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut: { x: 4, y: BODY_FEET.y + 1, z: BODY_FEET.z },
+      step: { x: 4, y: BODY_FEET.y + 1, z: BODY_FEET.z },
+      name: 'stone',
+      safe: false,
+      reason: 'no headroom above the new step',
+      blockedBy: { pos: { x: 4, y: BODY_FEET.y + 2, z: BODY_FEET.z }, name: 'stone' },
+    },
+  ]
+  const grounded = generateGroundedCandidates(world, defaultCandidateOptions)
+  const refusal = (grounded as unknown as { surfaceAscentRefusal?: { reason?: string } | null })
+    .surfaceAscentRefusal
+  const mine = grounded.candidates.find((candidate) => candidate.id === 'MINE:b4_69_18')
+  return {
+    pass:
+      refusal?.reason === 'step_overhead' &&
+      mine !== undefined &&
+      mine.meta.stepOverhead === true &&
+      ascentOf(grounded.candidates) === null,
+    detail: `refusal=${refusal?.reason ?? 'null'} mine=${mine?.id ?? 'none'} meta=${mine?.meta.stepOverhead} ascent=${ascentOf(grounded.candidates)?.id ?? 'none'}`,
+  }
+})
+
+addCase('a step cut with no named overhead still collapses to no_placeable', () => {
+  const world = liveWorld({ diamond_pickaxe: 1 })
+  world.stepCuts = [
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut: { x: 4, y: BODY_FEET.y + 2, z: BODY_FEET.z },
+      step: { x: 4, y: BODY_FEET.y + 2, z: BODY_FEET.z },
+      name: 'stone',
+      safe: false,
+      reason: 'no headroom above the new step',
+    },
+  ]
+  const grounded = generateGroundedCandidates(world, defaultCandidateOptions)
+  const refusal = (grounded as unknown as { surfaceAscentRefusal?: { reason?: string } | null })
+    .surfaceAscentRefusal
+  const overheadMine = grounded.candidates.find((candidate) => candidate.meta.stepOverhead === true)
+  return {
+    pass: refusal?.reason === 'no_placeable' && overheadMine === undefined,
+    detail: `refusal=${refusal?.reason ?? 'null'} overheadMine=${overheadMine?.id ?? 'none'}`,
+  }
+})
+
 let failures = 0
 process.stdout.write(`ascend-exec: selected ASCEND/vertical candidate -> guard -> executor\n`)
 process.stdout.write('-'.repeat(72) + '\n')

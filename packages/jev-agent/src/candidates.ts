@@ -5607,8 +5607,13 @@ function generateRawCandidates(
       label: 'dig or climb back out of the sealed pocket toward the surface',
       extraMeta: { escapeAscent: true },
     })
+    // Only the ascent MOVE carries the context-stable escape id: a `step_overhead`
+    // refusal now also emits the named overhead MINE, whose `MINE:b<cell>` identity
+    // IS the binding fact - renaming it would corrupt the dig's identity.
     candidates.push(
-      ...escape.candidates.map((candidate) => ({ ...candidate, id: escapeId })),
+      ...escape.candidates.map((candidate) =>
+        candidate.kind === 'MOVE' ? { ...candidate, id: escapeId } : candidate,
+      ),
     )
     // When the whole-column plan grounds nothing (no placeable, no reuse, no
     // one-step staircase), the sensor's own stepCuts still name each face's
@@ -5621,8 +5626,12 @@ function generateRawCandidates(
     // shaft bottom y44 with every route out refused (`column_descent:
     // no_safe_step`, `ASCENT_REFUSED no_placeable`), offer collapsed to
     // WAIT/ESCALATE while four sensor-named overhead cells sat unoffered and
-    // the starvation repeat count climbed past 30.
-    if (escape.candidates.length === 0) {
+    // the starvation repeat count climbed past 30. The planner now emits the
+    // best-scored overhead MINE itself on `step_overhead`; this sweep fills in
+    // every OTHER sensor-named overhead cell (Jev picks which face to open)
+    // whenever the arm produced no ascent MOVE, and `present` drops the
+    // duplicate of the planner's own pick.
+    if (!escape.candidates.some((candidate) => candidate.kind === 'MOVE')) {
       const seen = new Set<string>()
       const present = new Set(candidates.map((candidate) => candidate.id))
       for (const cut of state.stepCuts ?? []) {
@@ -7207,8 +7216,18 @@ function ascentRouteTo(
   if (decision.plan === null) {
     const refusal = decision.ascentRefusal
     if (refusal === null) return { candidates: [], refusal: null }
+    // A `step_overhead` refusal already names the sensor-proven clearance cell
+    // (a face's feet+1 step destination is only missing its overhead): offer
+    // its MINE so the hand-cut staircase route is never swallowed by the
+    // pillar-material vocabulary. The same emission the sealed-pocket escape
+    // arm performs; here it accompanies every ascent caller. The refusal still
+    // reports the honest fact - no plan grounds until the cell is cleared.
+    const overhead =
+      refusal.reason === 'step_overhead' && refusal.blocker !== undefined
+        ? stepOverheadCandidates(state, options, { kind: 'headroom', cell: refusal.blocker })
+        : []
     return {
-      candidates: [],
+      candidates: overhead,
       refusal: {
         reason: refusal.reason,
         goalId: spec.goalId,
