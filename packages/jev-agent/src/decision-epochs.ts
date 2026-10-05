@@ -57,6 +57,7 @@ import { isTrackedMoveKind } from './moveFailMemory.ts'
 import type { MoveFailureReason } from './moveFailMemory.ts'
 import { formatSkillEnd, formatSkillInterrupt } from './netherPortalPlan.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
+import type { RepeatedOutcomeResult } from './outcome-ledgers.ts'
 import { PLACE_RETRIES_EXHAUSTED } from './placementGuard.ts'
 import type { PlaceRetryLedger } from './placementGuard.ts'
 import { formatActionRejected, guardRejectionChargesOption, unreachableMove } from './policy.ts'
@@ -167,6 +168,13 @@ export interface DecisionEpochsHost {
   recentSkillOutcomes: SkillOutcomePacket[]
   recordFailure(code: FailureCode | GuardCode | string | null, detail: string): void
   recordMoveFailure(candidate: Candidate, reason: MoveFailureReason): void
+  /**
+   * A deterministic guard refusal is a settled typed outcome at the target even
+   * though the executor never ran: the cross-action repeat bound counts it
+   * exactly like an executed failure, so a mechanically invalid offer retires
+   * instead of re-entering the offer forever (`outcome-ledgers.noteRepeatedOutcome`).
+   */
+  noteRejectedOutcome(result: RepeatedOutcomeResult, candidate: Candidate): void
   retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null
   skillOutcomeBoundary: boolean
   readonly tickCounter: number
@@ -738,6 +746,28 @@ export function onGuardReject(
   if (candidate !== undefined) host.logSmeltStationRetry(candidate)
   host.chargeGuardRejection(record, guarded.code)
   host.recordFailure(guarded.code, guarded.reason)
+  // The same settled-outcome fact, fed to the cross-action repeat bound for the
+  // codes the codebase already classifies as mechanical invalidity of THIS
+  // selection (`guardRejectionChargesOption`: NO_PATH/NO_SUPPORT/LAVA_RISK -
+  // environmental/transient refusals keep their own machinery). The packet
+  // below is the boundary crossing, but the outcome ledger only ever saw
+  // EXECUTOR settles - so a single degenerate offer the guard refuses forever
+  // (measured: MOVE:p40_-61_-2 rejected `NO_SUPPORT` below the world floor 757x
+  // in ~7min at collect:log, `blacklisted=0`, zero ACTION_REPEAT) could never
+  // reach its 6/6 retirement. Charging it here lets the identical (shape, cell)
+  // leave the offer on the same bound an executed failure would hit.
+  if (candidate !== undefined && guardRejectionChargesOption(guarded.code)) {
+    host.noteRejectedOutcome(
+      {
+        actionId: guarded.candidateId,
+        status: 'guard-rejected',
+        failure: guarded.code,
+        itemsGained: 0,
+        blockRemoved: false,
+      },
+      candidate,
+    )
+  }
   // §2: a deterministic guard refusal is a settled typed outcome of THIS
   // selection, so it crosses the boundary as a packet (never as a silent drop).
   host.emitSkillOutcomePacket({

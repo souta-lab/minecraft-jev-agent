@@ -4912,6 +4912,13 @@ export class JevController {
     return ledgers.noteRepeatedOutcome(this.ledgersHost, result, candidate, verified, progressKinds)
   }
 
+  private noteRejectedOutcome(
+    result: ledgers.RepeatedOutcomeResult,
+    candidate: Candidate,
+  ): void {
+    return ledgers.noteRepeatedOutcome(this.ledgersHost, result, candidate, false, [])
+  }
+
   private filterRepeatedOutcomeCandidates(
     candidates: readonly Candidate[],
     state: WorldState,

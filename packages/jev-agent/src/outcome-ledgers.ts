@@ -475,6 +475,20 @@ function knownRetrieveName(candidate: Candidate): string {
 }
 
 /**
+ * The settled-outcome fields the cross-action bound consumes. An executor
+ * `ExecutionResult` supplies them; a deterministic GUARD rejection carries the
+ * same five facts without ever reaching the executor, so both settle into the
+ * same ledger entry (one typed outcome at one target).
+ */
+export interface RepeatedOutcomeResult {
+  actionId: string
+  status: string
+  failure: string | null
+  itemsGained: number
+  blockRemoved: boolean
+}
+
+/**
  * The cross-action bound. One settled action, one typed outcome, one target.
  *
  * The measured class this closes (`m3-live`, read-only): `ASCEND:habitat:p3_68_22`
@@ -492,7 +506,7 @@ function knownRetrieveName(candidate: Candidate): string {
  */
 export function noteRepeatedOutcome(
   host: OutcomeLedgersHost,
-  result: ExecutionResult,
+  result: RepeatedOutcomeResult,
   candidate: Candidate,
   verified: boolean,
   progressKinds: readonly string[],

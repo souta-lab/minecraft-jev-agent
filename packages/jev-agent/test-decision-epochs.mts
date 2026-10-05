@@ -23,9 +23,15 @@ import assert from 'node:assert/strict'
 import {
   decide,
   emitSkillOutcomePacket,
+  onGuardReject,
   repointReplay,
   type DecisionEpochsHost,
 } from './src/decision-epochs.ts'
+import type { DecisionRecord } from './src/decisionlog.ts'
+import { noteRepeatedOutcome } from './src/outcome-ledgers.ts'
+import type { OutcomeLedgersHost, RepeatedOutcomeResult } from './src/outcome-ledgers.ts'
+import type { GuardResult } from './src/policy.ts'
+import { filterRetiredRepeats, RepeatedOutcomeEscalation, REPEATED_OUTCOME_LIMIT_DEFAULT } from './src/repeatedOutcomeEscalation.ts'
 import { buildJevSemanticProjection, JevDecisionEpochs } from './src/jev/semantic-projection.ts'
 import type { DecisionEpoch, SemanticProjectionInput } from './src/jev/semantic-projection.ts'
 import type { Candidate } from './src/candidates.ts'
@@ -394,5 +400,104 @@ withProjection(h.host, {
 await decide(h.host, worldState(10), changedOffer, 'heartbeat', 'chain-10')
 assert.equal(h.calls.length, 6, 'a world-epoch change re-queries')
 assert.equal(h.boundaryReasons[9], 'world_or_lease_changed')
+
+// --- 9. a deterministic guard rejection feeds the cross-action repeat bound. ---
+//
+// The measured wedge (p24 live): `MOVE:p40_-61_-2`, a `verticalRecovery`
+// open_shaft_step whose landing sits below the world floor, was the ONLY
+// grounded offer and the guard refused it `NO_SUPPORT` 757x in ~7min. The
+// outcome packet crossed the boundary every time, but the repeat ledger only
+// ever saw EXECUTOR settles, so the (MOVE:p*, cell) streak stayed blind:
+// `blacklisted=0`, zero ACTION_REPEAT, the identical candidate re-offered
+// forever. `onGuardReject` now charges the mechanical-invalidity codes
+// (`guardRejectionChargesOption`: NO_PATH/NO_SUPPORT/LAVA_RISK) into the same
+// ledger an executed failure feeds, so the identical (shape, cell) retires at
+// the bound and leaves the offer.
+
+function rejectionHarness(): { host: DecisionEpochsHost; ledger: RepeatedOutcomeEscalation } {
+  const ledger = new RepeatedOutcomeEscalation({ limit: REPEATED_OUTCOME_LIMIT_DEFAULT })
+  const ledgersHost = {
+    currentDimension: () => OVERWORLD,
+    bot: { entity: { position: { x: 40, y: -60, z: -2 } } },
+    groundingFingerprints: new Map<string, string>(),
+    queue: { current: { id: 'g1:collect:log' } },
+    options: { worldEpoch: 1 },
+    repeatedOutcomes: ledger,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    tickCounter: 1,
+    notifyRepeatedOutcomes: () => {},
+  } as unknown as OutcomeLedgersHost
+  const g = harness()
+  Object.assign(g.host, {
+    noteCandidateFailure: () => {},
+    recordMoveFailure: () => {},
+    logSmeltStationRetry: () => {},
+    chargeGuardRejection: () => {},
+    recordFailure: () => {},
+    // The same one-line delegate the production controller implements.
+    noteRejectedOutcome: (result: RepeatedOutcomeResult, candidate: Candidate) =>
+      noteRepeatedOutcome(ledgersHost, result, candidate, false, []),
+    emitSkillOutcomePacket: () => ({}) as never,
+  })
+  return { host: g.host, ledger }
+}
+
+const VOID_STEP = candidate({
+  id: 'MOVE:p40_-61_-2',
+  kind: 'MOVE',
+  label: 'step down into the opening the world already has',
+  target: { x: 40, y: -61, z: -2 },
+  meta: { verticalRecovery: 'open_shaft_step', shaftSource: 'sensed_open_floor' },
+})
+const rejectionRecord = {
+  chainId: 'chain-g9',
+  optionId: 'collect:log',
+  goalQueueState: { current: { id: 'g1:collect:log' } },
+  jev: { answers: {} },
+  calibration: [],
+} as unknown as DecisionRecord
+const rejectionResult = { policy: 'typesafe', callId: 'c-g9' } as unknown as JevResult
+
+const g9 = rejectionHarness()
+const voidGuarded: Extract<GuardResult, { ok: false }> = {
+  ok: false,
+  candidateId: VOID_STEP.id,
+  code: 'NO_SUPPORT',
+  reason: '(40,-61,-2) is below the world floor (void)',
+}
+for (let attempt = 0; attempt < REPEATED_OUTCOME_LIMIT_DEFAULT; attempt += 1) {
+  onGuardReject(g9.host, voidGuarded, rejectionResult, rejectionRecord, VOID_STEP)
+}
+assert.equal(
+  g9.ledger.isRetired('MOVE:p*', 'minecraft:overworld:40,-61,-2'),
+  true,
+  'identical mechanical-invalidity refusals retire the (shape, cell) at the bound',
+)
+const filtered9 = filterRetiredRepeats([VOID_STEP, WAIT], g9.ledger, OVERWORLD, { x: 40, y: -60, z: -2 })
+assert.equal(filtered9.kept.length, 1)
+assert.equal(
+  filtered9.kept[0]!.id,
+  'WAIT',
+  'the void step leaves the offer; the emptied envelope is the starvation evidence local_recovery owns',
+)
+
+// A code the codebase classifies as environmental/transient (TARGET_GONE)
+// never reaches the bound.
+const g9b = rejectionHarness()
+const goneGuarded: Extract<GuardResult, { ok: false }> = {
+  ok: false,
+  candidateId: VOID_STEP.id,
+  code: 'TARGET_GONE',
+  reason: 'the target is gone',
+}
+for (let attempt = 0; attempt < REPEATED_OUTCOME_LIMIT_DEFAULT * 2; attempt += 1) {
+  onGuardReject(g9b.host, goneGuarded, rejectionResult, rejectionRecord, VOID_STEP)
+}
+assert.equal(
+  g9b.ledger.isRetired('MOVE:p*', 'minecraft:overworld:40,-61,-2'),
+  false,
+  'environmental/transient refusals keep their own machinery, never the repeat bound',
+)
+assert.equal(g9b.ledger.countFor('MOVE:p*', 'minecraft:overworld:40,-61,-2'), 0)
 
 process.stdout.write('decision-epochs (§18 Gate C): PASS\n')
