@@ -1682,6 +1682,22 @@ export function survivalControlFallback(input: SurvivalControlFallbackInput): Su
   return { candidateId: null, reason: 'no_control_action_offered' }
 }
 
+/**
+ * Gate for the vanished-choice re-ask: the repair exists so a tick never ends
+ * actionless while a hostile holds the danger envelope. `signals.threat` is
+ * populated on every observation, so the evidence object is always non-null
+ * and cannot itself be the gate - `active` is. Measured (`run-muvf885o`,
+ * `gen-muvf88jh`): with no hostile in the envelope, every vanished choice
+ * (WAIT included) queued a `survival_reground` re-ask on identical semantics
+ * - 350 real paid calls across the corpus, a tight loop under a degenerate
+ * single-candidate offer.
+ */
+export function vanishedChoiceNeedsSurvivalReground(
+  threat: Pick<ThreatStateEvidence, 'active'> | null,
+): boolean {
+  return threat?.active === true
+}
+
 /** `SURVIVAL_REGROUND from=... to=... kind=... reason=... offer=... threat=...`. */
 export function formatSurvivalReground(
   from: string,

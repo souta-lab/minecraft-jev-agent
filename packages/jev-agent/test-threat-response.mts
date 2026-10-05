@@ -34,6 +34,7 @@ import { authorityState } from './src/jev/authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
 import { pickHigherPriority } from './src/controller.ts'
+import { ThreatTracker, vanishedChoiceNeedsSurvivalReground } from './src/threat.ts'
 import { DecisionScheduler, PREEMPTIVE_TRIGGERS, RETREAT_DEFER_HIT_BUDGET, SHAPING_DEFER_HIT_BUDGET, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldDeferTriggerDuringSurvivalShapingLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
@@ -1154,6 +1155,41 @@ addCase('a peaceful Nether (no hostile, no damage) has neither threat evidence n
   const combat = combatIds(withCow)
   const pass = self.lastDamage === null && combat.length === 0 && state.entities.length === 0
   return { pass, detail: `lastDamage=${JSON.stringify(self.lastDamage)} combatCandidates=[${combat.join(',')}]` }
+})
+
+addCase('vanished-choice reground gate requires an active danger envelope, not a populated evidence object', () => {
+  // `signals.threat` is written on every observation - the evidence object is
+  // present even with no active threat, so a non-null check queued a priority
+  // `survival_reground` re-ask on EVERY vanished choice. Measured live
+  // (run-muvf885o / gen-muvf88jh): a starving body's vanished WAIT choices
+  // re-asked on identical semantics with mobs 70m+ away; 350 real paid calls
+  // across the corpus.
+  const tracker = new ThreatTracker()
+  const distant = tracker.note({
+    atMs: NOW,
+    entities: [
+      {
+        ...attackingSkeleton(),
+        distance: 70,
+        attackedSelf: false,
+        lineOfSight: false,
+      },
+    ],
+    lastDamage: null,
+  })
+  const pass =
+    vanishedChoiceNeedsSurvivalReground(null) === false &&
+    distant.active === false &&
+    vanishedChoiceNeedsSurvivalReground(distant) === false &&
+    vanishedChoiceNeedsSurvivalReground({ active: true }) === true
+  return {
+    pass,
+    detail:
+      `distant.active=${distant.active} ` +
+      `gate(null)=${vanishedChoiceNeedsSurvivalReground(null)} ` +
+      `gate(distant)=${vanishedChoiceNeedsSurvivalReground(distant)} ` +
+      `gate(active)=${vanishedChoiceNeedsSurvivalReground({ active: true })}`,
+  }
 })
 
 let failures = 0

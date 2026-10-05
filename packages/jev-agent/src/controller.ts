@@ -26,7 +26,7 @@ import { failureCount } from './failureMemory.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, freshestLastDamage, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, freshestLastDamage, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, vanishedChoiceNeedsSurvivalReground, weaponFacts, THREAT_BREAK_CONTACT } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import type { AttackStandFact } from './combatClosure.ts'
 import type { ArmorCraftOffer, ArmorCraftRefusal, ArmorRefusal } from './gearPlan.ts'
@@ -3114,9 +3114,9 @@ export class JevController {
           // ATTACK itself. `requestDecision` only queues the fresh offer for the
           // NEXT tick (the scheduler's own priority path), so this removes the
           // idle tick without adding a model call inside this one and without
-          // choosing anything. A null threat means the situation is no longer a
-          // survival one and the ordinary flow owns it.
-          if (threatEvidence !== null) {
+          // choosing anything. An inactive threat envelope means the situation
+          // is no longer a survival one and the ordinary flow owns it.
+          if (vanishedChoiceNeedsSurvivalReground(threatEvidence)) {
             this.requestDecision('survival_reground', {
               source: 'survival_reground_failed',
               chosenId: vanishedChoice?.id ?? chosenId,
