@@ -57,6 +57,7 @@ import {
   MIN_KEEP_DISTANCE_GAIN,
   THREAT_CLEAR_MS,
   THREAT_DANGER_RADIUS,
+  THREAT_MEMORY_MS,
   ThreatTracker,
   weaponFacts,
 } from './src/threat.ts'
@@ -1328,6 +1329,60 @@ addCase('(e1) the sensor grounds escape cells only while a hostile is inside the
     pass,
     detail: `threatenedCells=${cells.length} minSeparation=${gains.length === 0 ? 'none' : Math.min(...gains).toFixed(2)} peacefulCells=${(peaceful.terrain.escapeCells ?? []).length}`,
   }
+})
+
+addCase('(e1b) historical damage does not keep a distant occluded attacker engaged forever; nearby danger and fresh hits remain', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(0.5, 10, 0.5)
+  const skeleton = { id: 42, name: 'skeleton', kind: 'hostile', position: new Vec3(18.5, 10, 0.5), isValid: true }
+  const bot = {
+    username: 'AI_M3MOB',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null, health: 20, food: 18,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: 0, height: 256 },
+    time: { isDay: true }, registry: null,
+    entities: { 42: skeleton }, inventory: { items: () => [] },
+    blockAt: (p: { y: number }) => (p.y < 10 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }),
+    canSeeBlock: () => false, findBlocks: () => [],
+  } as unknown as Bot
+  const damage = { atMs: NOW, health: 18, sourceId: 42, sourceName: 'skeleton' }
+  const at = (now: number, lastDamage = damage): WorldState => {
+    const clock = Date.now
+    Date.now = () => now
+    try {
+      return buildWorldState(bot, {
+        tick: 4, goal: goalState(), goalQueue: queue(), recentEvents: [],
+        signals: signals({ lastDamage }),
+      }, defaultSensorOptions)
+    } finally { Date.now = clock }
+  }
+  const fresh = at(NOW)
+  const boundary = at(NOW + THREAT_MEMORY_MS)
+  const expiredAt = NOW + THREAT_MEMORY_MS + 1
+  const expired = at(expiredAt)
+  const tracker = new ThreatTracker()
+  const entered = tracker.note({ atMs: NOW, entities: fresh.entities, lastDamage: damage })
+  const quiet = tracker.note({ atMs: expiredAt, entities: expired.entities, lastDamage: damage })
+  const cleared = tracker.note({ atMs: expiredAt + THREAT_CLEAR_MS, entities: expired.entities, lastDamage: damage })
+  const work = bodyState(expired.entities, { timestampMs: expiredAt + THREAT_CLEAR_MS })
+  work.signals.lastDamage = damage
+  work.signals.threat = cleared
+  const raw = generateCandidates(work, defaultCandidateOptions)
+  const offered = applyThreatRestriction(work, raw)
+  skeleton.position = new Vec3(6.5, 10, 0.5)
+  const near = at(expiredAt + THREAT_CLEAR_MS)
+  const nearbyDanger = new ThreatTracker().note({ atMs: near.timestampMs, entities: near.entities, lastDamage: damage })
+  skeleton.position = new Vec3(18.5, 10, 0.5)
+  const hitAgain = at(expiredAt, { ...damage, atMs: expiredAt })
+  const pass =
+    fresh.entities[0]?.attackedSelf === true && boundary.entities[0]?.attackedSelf === true &&
+    expired.entities[0]?.attackedSelf === false && expired.entities[0]?.hostile === true &&
+    entered.active && quiet.active && quiet.clearForMs === 0 &&
+    !cleared.active && cleared.exitReason === 'sustained_clear' &&
+    !offered.restricted && offered.candidates.length === raw.length &&
+    nearbyDanger.active && nearbyDanger.inDanger && near.entities[0]?.attackedSelf === false &&
+    hitAgain.entities[0]?.attackedSelf === true
+  return { pass, detail: `fresh=${fresh.entities[0]?.attackedSelf} boundary=${boundary.entities[0]?.attackedSelf} expired=${expired.entities[0]?.attackedSelf} quiet=${quiet.active} cleared=${cleared.active} workRestricted=${offered.restricted} danger=${nearbyDanger.inDanger} newHit=${hitAgain.entities[0]?.attackedSelf}` }
 })
 
 addCase('(f1) the measured 22:19 death window now offers a real escape, not the 1.4m shuffle', () => {

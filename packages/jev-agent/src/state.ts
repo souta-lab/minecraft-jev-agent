@@ -2715,10 +2715,17 @@ function buildEntities(
   options: SensorOptions,
   selfPosition: Vec3Json,
   lastDamage: LastDamageEvidence | null | undefined,
+  nowMs: number,
 ): EntityState[] {
   const out: EntityState[] = []
   const selfId = bot.entity.id
   const attackerId = lastDamage?.sourceId ?? null
+  // Hostility can retain observed aggression, but `attackedSelf` is the
+  // RECENT engagement witness. Reusing a historical id forever prevents the
+  // threat tracker's existing sustained-clear interval from ever starting.
+  const damageAgeMs = lastDamage === null || lastDamage === undefined ? null : nowMs - lastDamage.atMs
+  const recentAttackerId = damageAgeMs !== null && Number.isFinite(damageAgeMs) &&
+    damageAgeMs >= 0 && damageAgeMs <= THREAT_MEMORY_MS ? attackerId : null
   const hostileRadius = Math.max(options.entityRadius, options.hostileRadius ?? options.entityRadius)
   for (const entity of Object.values(bot.entities)) {
     if (entity.id === selfId) continue
@@ -2753,7 +2760,7 @@ function buildEntities(
       heldItem: mainhandItem,
       activeItemUse: readActiveItemUse(bot, entity, mainhandItem, offhandItem),
       health: typeof entity.health === 'number' && Number.isFinite(entity.health) ? entity.health : null,
-      attackedSelf: attackerId !== null && entity.id === attackerId,
+      attackedSelf: recentAttackerId !== null && entity.id === recentAttackerId,
       // Only a real dropped item carries the key, so every other entity's shape
       // (and every existing fixture/replay) stays byte-identical.
       ...(dropped === null ? {} : { droppedItem: dropped }),
@@ -5962,7 +5969,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const scaffoldCounts = routeScaffoldCounts(inventory.counts, input.goalQueue, input.recipes ?? null)
   const pillarFootingPlacement =
     selectPlaceableBlock(scaffoldCounts) === null ? null : buildPillarFootingPlacement(bot, self)
-  const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
+  const entities = buildEntities(bot, options, self.position, input.signals.lastDamage, timestampMs)
   const survivalDigCells = buildSurvivalDigCells(
     bot,
     self,
