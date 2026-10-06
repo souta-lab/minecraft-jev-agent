@@ -34,7 +34,7 @@ import { authorityState } from './src/jev/authority.ts'
 import { EventLogger } from './src/jev.ts'
 import { guardCandidate } from './src/policy.ts'
 import { pickHigherPriority } from './src/controller.ts'
-import { ThreatTracker, vanishedChoiceNeedsSurvivalReground } from './src/threat.ts'
+import { HOSTILE_RACE_FACTS, ThreatTracker, vanishedChoiceNeedsSurvivalReground } from './src/threat.ts'
 import { DecisionScheduler, PREEMPTIVE_TRIGGERS, RETREAT_DEFER_HIT_BUDGET, SHAPING_DEFER_HIT_BUDGET, shouldDeferDamageDuringRetreatLease, shouldDeferTriggerDuringRetreatLease, shouldDeferTriggerDuringSurvivalShapingLease, shouldInterruptAttackLease, selectPostActionTrigger, TRIGGER_PRIORITY } from './src/scheduler.ts'
 import type { TriggerEvent } from './src/scheduler.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
@@ -1189,6 +1189,22 @@ addCase('vanished-choice reground gate requires an active danger envelope, not a
       `gate(null)=${vanishedChoiceNeedsSurvivalReground(null)} ` +
       `gate(distant)=${vanishedChoiceNeedsSurvivalReground(distant)} ` +
       `gate(active)=${vanishedChoiceNeedsSurvivalReground({ active: true })}`,
+  }
+})
+
+addCase('every HOSTILE_RACE_FACTS key is a real entity name the registry emits', () => {
+  // Dead keys audit (portal-p24.39 family): `baby_zombie` and `spider_jockey`
+  // were rows that could never match - a baby zombie arrives as `zombie` plus
+  // an age metadata flag, and a spider jockey is a spider+skeleton compound
+  // spawn, neither an entity type. The fail-open rule already covers unknown
+  // names; dead rows only claimed coverage the table does not have.
+  const registry = require('minecraft-data')('1.21.11')
+  const dead = Object.keys(HOSTILE_RACE_FACTS).filter(
+    (name) => registry.entitiesByName[name] === undefined,
+  )
+  return {
+    pass: dead.length === 0,
+    detail: `deadKeys=[${dead.join(',')}] facts=${Object.keys(HOSTILE_RACE_FACTS).length}`,
   }
 })
 
