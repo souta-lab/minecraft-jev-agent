@@ -402,6 +402,44 @@ offers), `test-decision-epochs.mts`, `test-decision-state.mts`,
 `test-beta-stall-evidence.mts` PASS, `test-skill-commitment.mts` 21/21,
 `test-controller-transitions.mts` 7/7. `tsc --noEmit` clean.
 
+### 2026-10-06 free-primary bounded dev/holdout measurement — INSUFFICIENT
+
+Permanent primary is now `liquid-direct-d1-free` / `d1:free`, including the
+repository default. Paid d1 remains explicit-only; free has no paid switchback.
+The existing calibration tool was parameterized, not duplicated. Source
+`4f4439cb` uses the production adapter with explicit free profile/model,
+hash-checked corpora, fixed chronological 75%/25% dev/holdout split, 12 core
++ 4 threat stride selections per cohort, a 180s wall budget and a two-failure
+stop bound. Selections and acceptance conditions were sealed before calls.
+
+| Corpus/slice | Calls | Successes | Failures | Stop |
+|---|---:|---:|---:|---|
+| p24 dev | 8 | 6 | 2 | HTTP 429 bound |
+| p24 sealed holdout | 3 | 1 | 2 | HTTP 429 bound |
+| p23 sealed holdout | 0 | 0 | 0 | not attempted after both p24 cohorts hit the operational bound |
+
+Corpus SHA256: p24 `3f53659edfa1cd25b8da059bdade95cbd75c0038303458857d9165f8df3cb007`;
+p23 `5cccd43d362dbeaf4ef1095189c5c0074754e0bcd1ceec12584829ab5a3df91e`.
+Local immutable evidence: `runs/capability-campaign/runs/portal-p26/audit-20261006/calibration/`
+(`predeclaration.json`, sealed selections, result rows, `proof.json`). All
+successful replies normalized as `d1:free`; source, profile, model, request ID,
+usage, distributions and high-confidence reference disagreements are retained.
+No provider substitution, tier switch, retry, resampling or discarded failure.
+
+Six dev action confidences had mean 0.692, p50 0.848; dev beta adopted at
+0.5 on 3/6. The sole holdout answer had confidence 0.983. These distributions
+and reference-model disagreements do **not** establish correctness or justify
+threshold changes. There are only seven successful frames, one holdout and
+zero measured danger/retreat frames, with no independent correctness labels.
+**Free reliability/calibration remains UNMEASURED.** Its profile carries no
+calibration fields and keeps defaults **0.55 confidence / 0.5 abandon**, not
+paid d1's 0.2/0.8. Classification: **C, LOCAL_ONLY**, no Mission delta.
+
+Focused proof: free default/model pin and absent calibration/switchback,
+backend 38/38; calibration tests prove model/profile validation, non-overlapping
+sealed split, deterministic bounded strata, hash rejection before calls,
+wall/sample bounds and immutable output; typecheck passes.
+
 ## Gate G — operational fail-closed, provenance, cost, no churn (PROVEN)
 
 ### Fail-closed matrix (all exercised by tests or live probe)

@@ -387,6 +387,12 @@ Level-3 re-measurement 2026-10-05 (post-v7-corpus support, `05a6fe63`; 48 live r
 - **should_retreat**: 5 strong_false / 3 uncertain / 0 strong_true — band behaves.
 - **latency**: p50 0.409 s; paid `liquid-direct-d1` healthy end-to-end (48/48 ok, `outputTokens` 0).
 
+### Free-primary measurement (2026-10-06)
+
+Bounded sealed-corpus remeasurement through the production adapter at `4f4439cb` made 11 `d1:free` calls: p24 dev 6 successes/2 HTTP 429 failures; p24 holdout 1 success/2 HTTP 429 failures. Both cohorts reached their declared failure bound; the sealed p23 holdout was left unattempted. Every success carried free provider/model/profile provenance and usage. No tier switch or discarded failure occurred.
+
+Seven successful frames, one holdout, zero danger/retreat frames and no independent correctness labels are insufficient for reliability calibration. Free remains **UNMEASURED for calibration**, with no profile threshold fields: confidence defaults to 0.55 and abandon to 0.5. The paid 0.2/0.8 fields remain paid-only. Corpus hashes, sealed selection, measurements and limitations are recorded in `TYPED-DECISION-GATE-EVIDENCE.md` and the immutable p26 audit artifacts. This is measurement work with no Mission delta.
+
 ## 13. Backend profile contract
 
 A production decision-model profile should explicitly declare:
