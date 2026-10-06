@@ -831,14 +831,16 @@ export async function supervise(options, deps = {}) {
       // Preserve the resident's own logs on the supervisor's streams while keeping
       // a bounded ring of lines for marker extraction.
       const captured = []
-      let registrySyncAttempted = false
       const onLine = (line) => {
         captured.push(line)
         if (captured.length > MAX_CAPTURED_LINES) captured.shift()
-        if (options.registrySync && !registrySyncAttempted) {
+        // GENERATION_READY is a live ownership boundary, not a one-shot child
+        // bootstrap marker. Respawn/recovery generations under the same resident
+        // must advance activeGenerationId too, or active-run provenance drifts
+        // immediately after the first death.
+        if (options.registrySync) {
           const ready = parseGenerationReadyLine(line)
           if (ready !== null) {
-            registrySyncAttempted = true
             try {
               const synced = syncActiveRunRegistryOnReady({
                 registryPath: options.registryPath,

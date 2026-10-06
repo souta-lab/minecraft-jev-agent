@@ -52,6 +52,12 @@ if (mode === 'signal-term') {
   process.stdout.write('[' + ts + '] SHUTDOWN reason=SIGTERM\\n')
   process.exit(143)
 }
+if (mode === 'multi-ready') {
+  const sourceSha = process.env.FAKE_SOURCE_SHA
+  process.stdout.write('[' + ts + '] GENERATION_READY runId=run-multi id=gen-one sourceSha=' + sourceSha + ' buildHash=bh treeDirty=false\\n')
+  process.stdout.write('[' + ts + '] GENERATION_READY runId=run-multi id=gen-two sourceSha=' + sourceSha + ' buildHash=bh treeDirty=false\\n')
+  process.exit(0)
+}
 if (mode === 'always-crash') process.exit(1)
 if (mode === 'always-fail' || n <= failTimes) {
   process.stdout.write('[' + ts + '] FATAL code=MODEL_UNAVAILABLE context=planner-authority attempts=3 error=GatewayInternalServerError: Service Unavailable\\n')
@@ -322,6 +328,43 @@ try {
   assert.equal(restarted.residentPid, 903)
   assert.equal(restarted.boundary, 'resident-restart')
   assert.equal(restarted.activeMinor, 'portal-launch')
+  checks++
+
+  // ---- every GENERATION_READY advances live generation ownership ----------
+  const rootMulti = makeRoot('root-multi-ready')
+  const driverMulti = join(rootMulti, 'packages/buddy-driver')
+  const registryMultiDir = join(rootMulti, 'runs', 'capability-campaign')
+  mkdirSync(registryMultiDir, { recursive: true })
+  const registryMultiPath = join(registryMultiDir, 'active-run.json')
+  const multiSha = 'e'.repeat(40)
+  writeActiveRunRegistry({
+    record: 'capability-active-run', schemaVersion: 1, status: 'active',
+    runId: 'portal-multi', runDir: join(registryMultiDir, 'runs/portal-multi'),
+    claimToken: 'portal-multi#old', activeMinor: 'portal-multi.1', segmentId: 'portal-multi.1',
+    runtimeDir: driverMulti, runnerPid: 10, residentPid: 20, supervisorPid: 30,
+    internalRunId: 'run-old', activeGenerationId: 'gen-old',
+    sha: multiSha, generationSourceSha: multiSha, hostBootSha: multiSha,
+  }, registryMultiPath)
+  const artMulti = join(tmp, 'art-multi-ready')
+  const multi = await runSupervisor(
+    ['--root', rootMulti, '--child-script', fakeChild, '--artifact-dir', artMulti, '--max-restarts', '1'],
+    {
+      FAKE_RESIDENT_COUNTER: join(tmp, 'counter-multi-ready'),
+      FAKE_RESIDENT_MODE: 'multi-ready',
+      FAKE_SOURCE_SHA: multiSha,
+    },
+  )
+  assert.equal(multi.status, 0, `multi-ready fake resident should exit cleanly: ${multi.stderr}`)
+  const multiArtifact = readArtifact(artMulti)
+  const syncs = multiArtifact.records.filter((record) => record.type === 'registry_sync')
+  assert.equal(syncs.length, 2, 'both READY lines from one resident must sync ownership')
+  assert.equal(syncs[0].generationId, 'gen-one')
+  assert.equal(syncs[1].generationId, 'gen-two')
+  assert.equal(syncs[1].residentRestart, false, 'same child/run generation advance is not a resident restart')
+  const multiStored = JSON.parse(readFileSync(registryMultiPath, 'utf8'))
+  assert.equal(multiStored.activeGenerationId, 'gen-two', 'registry must follow the latest live generation')
+  assert.equal(multiStored.internalRunId, 'run-multi')
+  assert.equal(multiStored.activeMinor, 'portal-multi.1')
   checks++
 
   // ---- restart on transient exit, then clean stop -------------------------
