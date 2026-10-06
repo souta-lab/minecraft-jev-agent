@@ -120,6 +120,20 @@ export function planDigTime(
   }
 }
 
+/**
+ * The action-level envelope for a candidate that digs: the configured floor per
+ * DECLARED dig cell (a 1x2 step cut is head+foot), capped at the same max the
+ * per-block cancel budget uses. A flat floor made every multi-cell cut exhaust
+ * its commitment mid-dig - and a cancelled dig resets the in-progress block's
+ * damage, so the truncation re-stacked 'stuck' marks on a converging route
+ * (live p24 staircase: every level cut ended BUDGET_EXHAUSTED on hand-mined
+ * stone at ~7.5s/cell).
+ */
+export function digActionBudgetMs(declaredDigCellCount: number, configuredMs: number): number {
+  const declared = Math.max(1, Math.floor(declaredDigCellCount))
+  return Math.min(configuredMs * declared, DIG_BUDGET_MAX_MS)
+}
+
 export function formatDigBudget(plan: DigTimePlan): string {
   return `DIG_BUDGET clientMs=${plan.libraryMs} budgetMs=${plan.budgetMs} configuredMs=${plan.configuredMs} extended=${plan.extended}`
 }

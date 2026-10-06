@@ -18,7 +18,7 @@ import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
 import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
-import { digsBotSupport, formatDigDownRefused, parseWaterRouteWitness } from './candidates.ts'
+import { declaredDigCells, digsBotSupport, formatDigDownRefused, parseWaterRouteWitness } from './candidates.ts'
 import { filterSubmersionDestinations } from './wadePolicy.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
@@ -83,6 +83,7 @@ import { selectClearanceTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import {
   correctDigSpeedMaterials,
+  digActionBudgetMs,
   formatDigBudget,
   formatDigFailed,
   formatDigSpeedRepaired,
@@ -2789,7 +2790,7 @@ export class Executor {
       case 'MINE':
       case 'DESCEND':
       case 'STEP':
-        return this.options.digTimeoutMs
+        return digActionBudgetMs(declaredDigCells(candidate).length, this.options.digTimeoutMs)
       case 'MOVE':
       case 'RETREAT':
       case 'RETRIEVE':

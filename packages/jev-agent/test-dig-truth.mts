@@ -37,6 +37,7 @@ import {
   DIG_BUDGET_MAX_MS,
   DIG_BUDGET_SLACK_MS,
   correctDigSpeedMaterials,
+  digActionBudgetMs,
   expectedDigTimeMs,
   formatDigBudget,
   formatDigFailed,
@@ -218,6 +219,33 @@ addCase('(c) an infinite schedule keeps the floor so the typed dig_error surface
       plan.budgetMs === FLAT_BUDGET_MS &&
       plan.extended === false,
     detail: formatDigBudget(plan),
+  }
+})
+
+// --- (e) the action envelope covers the DECLARED dig plan, not one block -----
+// Live (run-muw033r6 / gen-muw1tnoe): a 1x2 staircase cut declares two cells
+// (head+foot); hand-mined stone is ~7.5s/cell, so every cut ended
+// BUDGET_EXHAUSTED at the flat 15s floor, the aborted block's damage reset, and
+// each exhaustion stacked a 'stuck' failure mark on a converging route.
+
+addCase('(e) the action envelope scales by declared dig cells', () => {
+  const one = digActionBudgetMs(1, FLAT_BUDGET_MS)
+  const two = digActionBudgetMs(2, FLAT_BUDGET_MS)
+  const none = digActionBudgetMs(0, FLAT_BUDGET_MS)
+  return {
+    pass:
+      one === FLAT_BUDGET_MS &&
+      two === FLAT_BUDGET_MS * 2 &&
+      none === FLAT_BUDGET_MS,
+    detail: `1cell=${one}ms 2cell=${two}ms 0cell=${none}ms floor=${FLAT_BUDGET_MS}ms`,
+  }
+})
+
+addCase('(e) the envelope is capped at the per-block dig max', () => {
+  const capped = digActionBudgetMs(8, FLAT_BUDGET_MS)
+  return {
+    pass: capped === DIG_BUDGET_MAX_MS,
+    detail: `8cell=${capped}ms max=${DIG_BUDGET_MAX_MS}ms`,
   }
 })
 
