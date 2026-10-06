@@ -12912,9 +12912,10 @@ export class Executor {
     )
 
     const stockDrop = this.nearestDropEntity(itemName, target, DROP_SEARCH_RADIUS)
-    // A drop already inside the automatic-pickup volume needs no navigation:
-    // putting it through the stock collectblock walk just burns its budget.
-    if (stockDrop !== null && this.bot.collectBlock !== undefined && initialProximity > 2.0) {
+    // Only contact justifies skipping navigation. A close drop can still be
+    // outside pickup volume or behind terrain; direct bearing cannot realize
+    // every short route. Reuse the same bounded collector for those approaches.
+    if (stockDrop !== null && this.bot.collectBlock !== undefined && initialProximity > PICKUP_CONTACT_RADIUS) {
       const stockBudgetMs = Math.min(STOCK_COLLECT_BUDGET_MS, Math.max(1000, Math.floor(this.options.verifyTimeoutMs / 3)))
       const collectRun =
         this.options.actuationPort !== undefined

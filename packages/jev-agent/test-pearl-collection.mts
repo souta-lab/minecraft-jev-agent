@@ -385,6 +385,67 @@ function makeExecutor(fixture: KillFixture, goalItem: string): Executor {
   })
 }
 
+// A close drop may still be separated by terrain. Direct controls cannot
+// cross this fixture's obstruction; the existing collector can follow the
+// alternate route, after which the modelled server banks the item.
+addCase('(pickup route) a 1.6m drop outside contact uses the route and verifies inventory gain', async () => {
+  const fixture = makeKillFixture({
+    mobName: 'zombie', mobHeight: 1.8, dropItem: 'cobblestone',
+    mobPosition: { x: 1, y: 64, z: 0 },
+    dropPosition: { x: 1.6, y: 64, z: 0 }, hits: 1,
+  })
+  fixture.bot.attack(fixture.bot.entities[31]!)
+  let routes = 0
+  Object.assign(fixture.bot, {
+    physicsEnabled: false,
+    collectBlock: {
+      collect: async (entity: { id: number }) => {
+        if (entity.id !== 77) throw new Error('wrong drop identity')
+        routes += 1
+        fixture.bot.entity.position.x = 1.6
+      },
+    },
+  })
+  const candidate: Candidate = {
+    id: 'PICKUP:e77', kind: 'PICKUP', label: 'collect sensed cobblestone',
+    targetName: 'cobblestone', target: { x: 1.6, y: 64, z: 0 },
+    targetEntityId: 77, itemName: 'cobblestone', requiresTool: false,
+    toolName: null, inReach: true, hasStandableAdjacent: true,
+    meta: { tick: 1, pickupItem: 'cobblestone', pickupEntityId: 77 },
+  }
+  const result = await fixtureClaim(makeExecutor(fixture, 'cobblestone'), candidate).completion
+  return {
+    pass: routes === 1 && result.verified === true && result.itemsGained === 1 && fixture.held() === 1,
+    detail: `routes=${routes} status=${result.status} verified=${result.verified} gained=${result.itemsGained} held=${fixture.held()}`,
+  }
+})
+
+addCase('(pickup route) an unavailable close route stays bounded and cannot claim an item', async () => {
+  const fixture = makeKillFixture({
+    mobName: 'zombie', mobHeight: 1.8, dropItem: 'cobblestone',
+    mobPosition: { x: 1, y: 64, z: 0 },
+    dropPosition: { x: 1.6, y: 64, z: 0 }, hits: 1,
+  })
+  fixture.bot.attack(fixture.bot.entities[31]!)
+  let routes = 0
+  Object.assign(fixture.bot, {
+    physicsEnabled: false,
+    collectBlock: { collect: async () => { routes += 1; throw new Error('no path to this drop') } },
+  })
+  const candidate: Candidate = {
+    id: 'PICKUP:e77', kind: 'PICKUP', label: 'collect sensed cobblestone',
+    targetName: 'cobblestone', target: { x: 1.6, y: 64, z: 0 },
+    targetEntityId: 77, itemName: 'cobblestone', requiresTool: false,
+    toolName: null, inReach: true, hasStandableAdjacent: true,
+    meta: { tick: 1, pickupItem: 'cobblestone', pickupEntityId: 77 },
+  }
+  const result = await fixtureClaim(makeExecutor(fixture, 'cobblestone'), candidate).completion
+  return {
+    pass: routes === 1 && result.verified === false && result.failure === 'pickup_failed' && fixture.held() === 0 && fixture.dropOnGround(),
+    detail: `routes=${routes} status=${result.status} verified=${result.verified} failure=${result.failure} held=${fixture.held()}`,
+  }
+})
+
 // ===========================================================================
 // (i-a) an enderman sensed at hunt range WITH a legal stance is OFFERED
 // ===========================================================================
@@ -500,6 +561,8 @@ addCase('(iii) kill an enderman -> its pearl drop -> the pearl in the inventory 
     mobPosition: { x: 1, y: 64, z: 0 },
     hits: 3,
   })
+  let routes = 0
+  Object.assign(fixture.bot, { collectBlock: { collect: async () => { routes += 1 } } })
   const executor = makeExecutor(fixture, PEARL)
   const candidate = huntCandidate({
     entityId: 31,
@@ -518,6 +581,7 @@ addCase('(iii) kill an enderman -> its pearl drop -> the pearl in the inventory 
     completion.dropAcquired === true &&
     completion.itemsGained >= 1 &&
     fixture.held() >= 1 &&
+    routes === 0 &&
     fixture.swings() >= 3 &&
     outcomes.some((line) => line.includes('outcome=KILL_VERIFIED') && line.includes('dropAcquired=true'))
   return {
