@@ -195,10 +195,11 @@ function piece(name: string): { name: string; count: number; slot: number } {
     `diamond=${JSON.stringify(armorFallMitigation(armor('diamond')))} iron=${JSON.stringify(armorFallMitigation(armor('iron')))} unknown=${armorFallMitigation(armor('mystery')).points} turtle=${armorFallMitigation(armor('turtle_helmet')).points}`,
   )
   check(
-    `(rule) the survivable drop is health-derived: 16 at health 20, 6 at health 10, 0 at the critical floor ${CRITICAL_DAMAGE_HEALTH}, unknown health = unknown`,
+    `(rule) the survivable drop is health-derived: 16 at health 20, 6 at health 10, harmless 3 at the critical floor ${CRITICAL_DAMAGE_HEALTH}, unknown health = unknown`,
     maxSurvivableDrop(20) === 16 &&
       maxSurvivableDrop(10) === 6 &&
-      maxSurvivableDrop(CRITICAL_DAMAGE_HEALTH) === 0 &&
+      maxSurvivableDrop(CRITICAL_DAMAGE_HEALTH) === 3 &&
+      maxSurvivableDrop(0.25) === 3 &&
       maxSurvivableDrop(null) === null &&
       maxSurvivableDrop(20, armorFallMitigation(armor('diamond')).points, 8)! > maxSurvivableDrop(20)!,
     `h20=${maxSurvivableDrop(20)} h10=${maxSurvivableDrop(10)} hCrit=${maxSurvivableDrop(CRITICAL_DAMAGE_HEALTH)} unknown=${maxSurvivableDrop(null)} diamond20=${maxSurvivableDrop(20, 20, 8)}`,
@@ -713,6 +714,20 @@ function highEdge(groundAt: number): Grid {
       guarded.trace.join(',') === unguarded.trace.join(','),
     `stops=${guarded.stopLines.length} status=${guarded.status} health=1 guarded=[${guarded.trace.join(',')}]`,
   )
+  const criticalHealth = CRITICAL_DAMAGE_HEALTH / 2
+  const critical = await runLeg(FEET, grid, { health: criticalHealth }, { actuation: 'pathfinder' })
+  check(
+    '(iii-b) living critical health admits a harmless stock-path descent with drop bound 3',
+    maxSurvivableDrop(criticalHealth) === 3 && critical.dropBound === 3 &&
+      critical.stopLines.length === 0 && critical.status === 'done' && critical.verified === true,
+    `health=${criticalHealth} safeDrop=${maxSurvivableDrop(criticalHealth)} planner=${critical.dropBound} status=${critical.status} failure=${critical.failure} stops=${critical.stopLines.join('|')}`,
+  )
+  check(
+    '(iii-c) critical damaging falls stay fatal; dead and unknown bounds stay distinct',
+    fallSurvivability(classifyStepLanding(dropOnto(4)), { health: criticalHealth }).fatal &&
+      maxSurvivableDrop(0) === 0 && maxSurvivableDrop(null) === null,
+    `damagingFatal=${fallSurvivability(classifyStepLanding(dropOnto(4)), { health: criticalHealth }).fatal} dead=${maxSurvivableDrop(0)} unknown=${maxSurvivableDrop(null)}`,
+  )
   // ordinary flat + 1-block step-UP terrain, full health: the canonical walk.
   const rise = new Map<string, GridCell>()
   fill(rise, 26, 33, 54, 54, -21, -19, 'stone')
@@ -799,11 +814,13 @@ function highEdge(groundAt: number): Grid {
   const bridgeLeg = source.slice(source.indexOf('private async runBridgeLeg('), source.indexOf('private async runBridgeLeg(') + 26000)
   const bridgeAdvance = [...bridgeLeg.matchAll(/await this\.pathTo\(/g)].length
   const pinSites = [...source.matchAll(/this\.applySurvivableDropBound\(\)/g)].length
+  const stockMovementGoals = [...source.matchAll(/this\.bot\.pathfinder\.setGoal\(goal\)/g)]
   check(
-    '(v) the bridge advance goes through the SAME guarded actuator path (`pathTo`), and every stock `setGoal` site pins the survivable drop bound',
+    '(v) the bridge advance goes through the SAME guarded actuator path (`pathTo`), and stock movement goal commits pin the survivable drop bound',
     guardCallSites === 2 && // the 2 guarded actuators every advance funnels through
       bridgeAdvance >= 2 &&
-      pinSites === 3 && // the 3 stock `setGoal` sites
+      stockMovementGoals.length === 3 &&
+      stockMovementGoals.every((match) => /this\.applySurvivableDropBound\(\)\s*$/.test(source.slice(0, match.index))) &&
       source.includes('private async runBridgeLeg(') &&
       /await this\.pathTo\((target|span\.landing), epoch, signal, 'GoalBlock'/.test(bridgeLeg),
     `guardSites=${guardCallSites} bridgePathTo=${bridgeAdvance} dropBoundPins=${pinSites}`,

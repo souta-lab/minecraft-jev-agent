@@ -380,10 +380,12 @@ export function armorReducedFallDamage(rawDamage: number, points: number, toughn
 }
 
 /**
- * The deepest drop this body may take and still be ABOVE the critical-health
- * floor afterwards. The floor is the repository's single critical number
+ * The deepest drop this living body may take without damage, or with health
+ * still ABOVE the critical-health floor afterwards. Harmless drops preserve an
+ * already-critical body, matching fallSurvivability's zero-damage verdict.
+ * The floor is the repository's single critical number
  * (`criticalDamage.ts CRITICAL_DAMAGE_HEALTH`: "at this health the body cannot
- * absorb another damage event"), so a landing that leaves the body at or below it
+ * absorb another damage event"), so a damaging landing that leaves the body at or below it
  * is the fatal boundary - it either kills the body outright or leaves it one hit
  * from death. `null` when the health is unknown: the guard then refuses nothing
  * (UNKNOWN is not false).
@@ -397,7 +399,7 @@ export function maxSurvivableDrop(
   let best = 0
   for (let drop = 1; drop <= MAX_SURVIVABLE_DROP_SCAN; drop += 1) {
     const damage = armorReducedFallDamage(fallDamageHp(drop, null), armorPoints, toughness)
-    if (health - damage > CRITICAL_DAMAGE_HEALTH) best = drop
+    if ((health > 0 && damage === 0) || health - damage > CRITICAL_DAMAGE_HEALTH) best = drop
     else break // damage is monotone in the drop, so no deeper drop can recover
   }
   return best
