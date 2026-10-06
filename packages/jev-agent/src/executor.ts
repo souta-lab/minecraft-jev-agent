@@ -737,6 +737,8 @@ const DROP_SEARCH_RADIUS = 4
 
 const PLACED_APPROACH_HORIZONTAL = 2.8
 const PLACED_STOCK_BUDGET_MS = 3000
+const PLACED_STAND_PROBE_LIMIT = 8
+const PLACED_STAND_PROBE_MS = 100
 const PLACED_NUDGE_BUDGET_MS = 1800
 const PLACED_NUDGE_TOTAL_MS = 5000
 const PLACED_MAX_STEP_CUTS = 3
@@ -12149,7 +12151,7 @@ export class Executor {
       )
     }
     const startDistance = this.horizontalToFeet(block)
-    const destination = stands[0]
+    let destination = stands[0]
     if (destination === undefined) {
       this.notifyPathFailed(block, 'stuck')
       throw new ExecutorError('path_stuck', `no interaction stand for ${label} at (${block.x},${block.y},${block.z})`)
@@ -12157,9 +12159,29 @@ export class Executor {
     const arrivedAt = (): Vec3Json | null => this.standAt(block, stands)
 
     if (this.options.actuation === 'pathfinder') {
+      // A geometrically valid stand can be behind an obstacle. Probe the same
+      // station's alternative stands before committing to a direct approach;
+      // this selects HOW to reach the selected station, with no new effects.
+      this.applySurvivableDropBound()
+      for (const stand of stands.slice(0, PLACED_STAND_PROBE_LIMIT)) {
+        this.ensureOwned(epoch, signal)
+        try {
+          const plan = this.bot.pathfinder.getPathTo(
+            this.bot.pathfinder.movements,
+            new goals.GoalBlock(stand.x, stand.y, stand.z),
+            PLACED_STAND_PROBE_MS,
+          )
+          if (plan.status !== 'success') continue
+          destination = stand
+          break
+        } catch {
+          // An unavailable/incomplete probe is UNKNOWN, not a path refusal.
+        }
+      }
       let result: PathOutcome = 'noPath'
       try {
-        const goal = new goals.GoalNear(destination.x, destination.y, destination.z, 1)
+        // GoalNear(1) can finish in a cell that is not an interaction stand.
+        const goal = new goals.GoalBlock(destination.x, destination.y, destination.z)
         const outcome = this.waitForGoal(epoch, signal, PLACED_STOCK_BUDGET_MS)
         this.applySurvivableDropBound()
         this.bot.pathfinder.setGoal(goal)
@@ -12213,8 +12235,22 @@ export class Executor {
       if (cuts >= PLACED_MAX_STEP_CUTS) continue
       const cut = this.findApproachStepCut(block)
       if (cut === null) continue
-      cuts += 1
       const cutBlock = this.currentBlockAt(cut)
+      const commitment = this.activeCommitment
+      if (
+        commitment !== null &&
+        effectViolation(this.options.effectEnvelopeOverride ?? commitment.allowedEffects, {
+          type: 'dig',
+          position: cut,
+          blockName: cutBlock?.name ?? null,
+        }) !== null
+      ) {
+        throw new ExecutorError(
+          'path_stuck',
+          `approach to ${label} needs a separate clearance action at (${cut.x},${cut.y},${cut.z})`,
+        )
+      }
+      cuts += 1
       const cutOk = await this.cutApproachStep(cut, epoch, signal)
       this.logger.info(
         'executor',

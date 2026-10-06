@@ -22,6 +22,7 @@
 //
 // Run: bun --test test-station-interaction-stand.mts
 import { readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import type { Bot } from 'mineflayer'
@@ -75,6 +76,7 @@ class P {
 interface FakeBlock {
   name: string
   boundingBox: 'block' | 'empty'
+  diggable: boolean
   position: P
 }
 
@@ -99,7 +101,7 @@ function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: 
     // Loaded area, station in open air: an unlisted cell is open space, not an
     // unloaded chunk (see #382 - null is not passable).
     const resolved = name ?? 'air'
-    return { name: resolved, boundingBox: resolved === 'air' ? 'empty' : 'block', position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)) }
+    return { name: resolved, boundingBox: resolved === 'air' ? 'empty' : 'block', diggable: resolved !== 'air', position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)) }
   }
   const table = blockAt(TABLE as { x: number; y: number; z: number }) as FakeBlock
   const itemsByName = registry.itemsByName as Record<string, { id: number }>
@@ -248,6 +250,82 @@ addCase('(b) an already-correctly-positioned bot opens the table with the derive
     pass,
     detail: `status=${result.status} gained=${result.itemsGained} openCalls=${JSON.stringify(fixture.openCalls)} detail=${result.detail}`,
   }
+})
+
+// The recovery shape in p25: the closest station stand has a blocked route
+// through the body's own scaffold. Another stand around that scaffold is
+// reachable without digging. A CRAFT must use that route rather than acquire
+// undeclared clearance effects in its direct-bearing fallback.
+addCase('(b2) a blocked nearest station stand uses a reachable alternative and an exact goal, then crafts', async () => {
+  const terrain = openTableTerrain()
+  for (let x = -7; x <= -3; x += 1) {
+    for (let z = -3; z <= 3; z += 1) terrain.set(`${x},63,${z}`, 'stone')
+  }
+  const fixture = makeStationBot({ x: -5.5, y: 64, z: 0.5 }, terrain, true)
+  const bot = fixture.bot as unknown as {
+    entity: { position: P }
+    on: EventEmitter['on']
+    removeListener: EventEmitter['removeListener']
+    dig: () => Promise<void>
+    pathfinder: {
+      movements: unknown
+      getPathTo: (movements: unknown, goal: { x: number; y: number; z: number }, budget: number) => unknown
+      setGoal: (goal: { x: number; y: number; z: number; constructor: { name: string } } | null) => void
+    }
+  }
+  const events = new EventEmitter()
+  bot.on = events.on.bind(events)
+  bot.removeListener = events.removeListener.bind(events)
+  let digs = 0
+  let selectedGoal: { x: number; y: number; z: number; exact: boolean } | null = null
+  const probes: Vec3Json[] = []
+  bot.dig = async () => { digs += 1 }
+  bot.pathfinder.getPathTo = (_movements, goal) => {
+    probes.push({ x: goal.x, y: goal.y, z: goal.z })
+    return { status: goal.z === 0 ? 'noPath' : 'success', path: [] }
+  }
+  bot.pathfinder.setGoal = (goal) => {
+    if (goal === null) return
+    selectedGoal = { x: goal.x, y: goal.y, z: goal.z, exact: goal.constructor.name === 'GoalBlock' }
+    queueMicrotask(() => {
+      if (goal.z === 0) {
+        events.emit('path_update', { status: 'noPath', path: [] })
+        return
+      }
+      bot.entity.position.set(goal.x + 0.5, goal.y, goal.z + 0.5)
+      events.emit('goal_reached')
+    })
+  }
+  const executor = new Executor(fixture.bot, new EventLogger(null, false), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+  })
+  const result = await fixtureClaim(executor, craftCandidate()).completion
+  const selected = selectedGoal as { x: number; y: number; z: number; exact: boolean } | null
+  const pass =
+    result.status === 'done' && result.itemsGained === 1 &&
+    probes.length >= 2 && probes.length <= 8 && probes[0]?.z === 0 &&
+    selected !== null && selected.z !== 0 && selected.exact &&
+    fixture.openCalls.length === 1 && digs === 0
+  return { pass, detail: `status=${result.status} probes=${JSON.stringify(probes)} selected=${JSON.stringify(selected)} digs=${digs} opens=${fixture.openCalls.length}` }
+})
+
+addCase('(b3) an unrouteable table approach needing a scaffold cut returns typed clearance without digging', async () => {
+  const terrain = openTableTerrain()
+  for (let x = -7; x <= -3; x += 1) terrain.set(`${x},63,0`, 'stone')
+  terrain.set('-5,64,0', 'birch_planks')
+  terrain.set('-5,65,0', 'birch_planks')
+  const fixture = makeStationBot({ x: -5.5, y: 64, z: 0.5 }, terrain, true)
+  let digs = 0
+  fixture.bot.dig = async () => { digs += 1 }
+  const executor = new Executor(fixture.bot, new EventLogger(null, false), {
+    ...defaultExecutorOptions,
+    actuation: 'packet',
+  })
+  const result = await fixtureClaim(executor, craftCandidate()).completion
+  const pass = result.status === 'failed' && result.failure === 'path_stuck' &&
+    result.detail.includes('separate clearance action') && digs === 0 && fixture.openCalls.length === 0
+  return { pass, detail: `failure=${result.failure} detail=${result.detail} digs=${digs} opens=${fixture.openCalls.length}` }
 })
 
 // (c) the geometric face for every stand orientation.
