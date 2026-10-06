@@ -36,9 +36,9 @@ import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import type { System2ToolGap } from './system2/service.ts'
 import type { HarvestTool } from './state.ts'
 import { SYSTEM2_PAYLOAD, SYSTEM2_PAYLOAD_ABSENT, SYSTEM2_PAYLOAD_REFUSED } from './system2/payload.ts'
-import { bestToolTier } from './reachability.ts'
+import { PILLAR_PLACE_PRIORITY } from './verticalPlan.ts'
 import { NO_ATTACK_STAND, formatNoAttackStand } from './combatClosure.ts'
-import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability } from './reachability.ts'
+import { bestToolTier, capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability } from './reachability.ts'
 import type { KnownResourceEvidence, KnownResourceFalsifiedReason, Vec3Json, WorldState } from './state.ts'
 import { formatApproachLeg } from './zeroProgressRoute.ts'
 import type { DigMemory } from './worldMemory.ts'
@@ -1561,6 +1561,32 @@ export function candidateStarvationMissing(
     }
   }
   return out
+}
+
+/**
+ * A `blocked_affordance` ledger reason whose missing fact is a HELD-ITEM
+ * capability - `placeable_block`, `tool:<name>@<tier>`, or the same tool tail
+ * carried by `safe_column:no_tool`/tool-gated `descend_plan` keys - stops
+ * being a CAN-refusal the moment the item is held. The refusal was measured
+ * evidence when recorded and stale evidence after acquisition: mechanical
+ * refusals (paths, headroom, clearance, plans) name world geometry and stay
+ * durable, but an acquired item must not keep asserting "route around this"
+ * to System2 while the route is open. Revalidated at every read site against
+ * the live inventory snapshot.
+ */
+const BLOCKED_AFFORDANCE_PLACEABLE_TAIL = /(?:^|:)placeable_block$/
+const BLOCKED_AFFORDANCE_TOOL_TAIL = /(?:^|:)(pickaxe|axe|shovel)@(\d+)$/
+
+export function blockedAffordanceResolvedByInventory(
+  reason: string,
+  inventory: Readonly<Record<string, number>>,
+): boolean {
+  if (BLOCKED_AFFORDANCE_PLACEABLE_TAIL.test(reason)) {
+    return PILLAR_PLACE_PRIORITY.some((item) => (inventory[item] ?? 0) > 0)
+  }
+  const toolTail = BLOCKED_AFFORDANCE_TOOL_TAIL.exec(reason)
+  if (toolTail === null) return false
+  return bestToolTier(inventory, toolTail[1] as HarvestTool) >= Number(toolTail[2])
 }
 
 /**

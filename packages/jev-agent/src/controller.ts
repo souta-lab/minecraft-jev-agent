@@ -96,7 +96,7 @@ import type { EscalationHost } from './escalation.ts'
 import type { EscalationReason } from './escalation.ts'
 import type { PendingDecision } from './decision-epochs.ts'
 import * as diagnostics from './candidate-diagnostics.ts'
-import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalPreconditionCause, goalStarvationBlockedBy, MAX_STARVATION_MISSING, mirroredEventToken, withheldToolGaps } from './candidate-diagnostics.ts'
+import { blockedAffordanceResolvedByInventory, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalPreconditionCause, goalStarvationBlockedBy, MAX_STARVATION_MISSING, mirroredEventToken, withheldToolGaps } from './candidate-diagnostics.ts'
 import type { CandidateDiagnosticsHost } from './candidate-diagnostics.ts'
 import * as evidence from './grounded-evidence.ts'
 import type { GroundedEvidenceHost } from './grounded-evidence.ts'
@@ -746,11 +746,37 @@ export class JevController {
    * case work returns there but are not asserted as live blockers.
    */
   private repeatedBlockerFacts(): readonly { reason: string; goals: readonly string[]; count: number }[] {
+    this.pruneResolvedBlockedAffordances()
     const out: { reason: string; goals: readonly string[]; count: number }[] = []
     for (const entry of this.blockedAffordanceLedger.values()) {
       out.push({ reason: entry.reason, goals: [...entry.goals], count: entry.count })
     }
     return out
+  }
+  /**
+   * Ledger entries carry the CAN-refusal that exhausted a bounded window at the
+   * time it was written. A refusal whose missing fact is a HELD-ITEM capability
+   * (`placeable_block`, `tool:*@*`) dissolves the moment the item is acquired -
+   * measured live (portal-p24, run-muvw7u6j): a `placeable_block` blocker
+   * recorded with `inv={}` kept asserting itself to System2 while the body held
+   * `dirt:48`. Mechanical refusals (paths, headroom, plans) are world geometry
+   * and stay durable; an entry whose capability is now held is deleted so a
+   * re-plan sees the route as open again. If the affordance re-fails it
+   * re-records fresh at its own boundary.
+   */
+  private pruneResolvedBlockedAffordances(): void {
+    if (this.blockedAffordanceLedger.size === 0) return
+    const inventory = this.inventorySnapshot()
+    for (const [key, entry] of this.blockedAffordanceLedger) {
+      if (!blockedAffordanceResolvedByInventory(entry.reason, inventory)) continue
+      this.blockedAffordanceLedger.delete(key)
+      this.logger.info(
+        'agent',
+        `BLOCKED_AFFORDANCE_RESOLVED reason=${entry.reason} cell=${entry.cell} goals=${[...entry.goals].join('/')}`,
+        { reason: entry.reason, cell: entry.cell, count: entry.count },
+        this.tickCounter,
+      )
+    }
   }
   /**
    * #plan-reconciliation: dedupe for the ROW_NOT_EXECUTABLE_HERE line. The
@@ -2562,6 +2588,10 @@ export class JevController {
         // and failed" instead of one transient blocker string. Appended LAST so
         // persisted history can only fill capacity the live tick did not use.
         // Code owns the CAN-fact; System2 still owns the replacement WHAT.
+        // Held-item capability refusals (`placeable_block`, `tool:*@*`) dissolve
+        // on acquisition; the prune drops those entries before they can be
+        // projected as still-live blockers here or in the System2 payload.
+        this.pruneResolvedBlockedAffordances()
         for (const entry of this.blockedAffordanceLedger.values()) {
           if (missing.length >= MAX_STARVATION_MISSING) break
           const token = `blocked_affordance:${entry.reason}@${entry.cell}:x${entry.count}`
