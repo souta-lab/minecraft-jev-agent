@@ -440,6 +440,14 @@ backend 38/38; calibration tests prove model/profile validation, non-overlapping
 sealed split, deterministic bounded strata, hash rejection before calls,
 wall/sample bounds and immutable output; typecheck passes.
 
+Verification correction: `4f4439cb`/`23e6ffb3` had TS2339 in the test's
+`JevPolicy.abandonThreshold` assertion. The original typecheck claim was
+incorrect. The assertion now uses the actual typed profile field. The exact
+`bunx tsc -p packages/jev-agent/tsconfig.json --noEmit` gate, calibration-tool
+test and backend 38/38 all return zero on the corrective source. The retained
+provider measurements remain bound to their original SHA; this test correction
+does not alter the adapter, payload, free thresholds or recorded answers.
+
 ## Gate G — operational fail-closed, provenance, cost, no churn (PROVEN)
 
 ### Fail-closed matrix (all exercised by tests or live probe)

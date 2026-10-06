@@ -346,7 +346,7 @@ await check('Liquid d1:free is the permanent default without paid calibration or
   assert.equal(policy.profileId, 'liquid-direct-d1-free')
   assert.equal(policy.model, 'd1:free')
   assert.equal(policy.lowConfidenceThreshold, undefined, 'no measured free calibration is claimed')
-  assert.equal(policy.abandonThreshold, undefined)
+  assert.equal(DECISION_PROFILES[DEFAULT_DECISION_PROFILE_ID]?.abandonThreshold, undefined)
   assert.equal(profileLowConfidenceFloor(DECISION_PROFILES[DEFAULT_DECISION_PROFILE_ID], {}), 0.55)
   assert.equal(DECISION_PROFILES[DEFAULT_DECISION_PROFILE_ID]!.paidExhaustionFallbackProfileId, undefined)
   assert.equal(process.env.AI_GATEWAY_API_KEY, gatewayEnvBefore)
