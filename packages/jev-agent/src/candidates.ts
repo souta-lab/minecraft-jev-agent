@@ -7924,18 +7924,19 @@ function descendCandidates(
   const goalIsUnderground = focusHasUndergroundSource(focusItem)
   const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
 
-  // Feasibility (CAN) rule for a SPECIFIC focus item whose source is not
+  // Feasibility (CAN) rule for a named focus whose source is not
   // underground and has no sensed/tunnel target: a staircase or level tunnel
   // step cannot reach that source, so it is withheld instead of being re-offered
   // forever (live `collect 1 x flint (from gravel)` carved a tunnel network while
   // the goal never moved). Descending stays legitimate for underground resources
   // (`goalIsUnderground`: ore/obsidian/stone goals), for an explicit
-  // `descend_to:Y` predicate (vertical recovery), for a sensed/tunnel target, and
-  // for resource-class goals (early-game `log`/`planks` keep the historical
-  // behaviour). Withholding only; the remaining candidates keep their order.
-  const focusIsSpecific = focusItem !== null && !isResourceClass(focusItem)
+  // `descend_to:Y` predicate (vertical recovery), or for a sensed/tunnel target.
+  // A resource class matches inventory; it does not prove
+  // a terrain producer. Exempting classes let `collect food` label arbitrary
+  // dirt excavation as a food route alongside the source-bound forage arm.
+  // Withholding only; the remaining candidates keep their order.
   const hasGoalTarget = terminus !== null || target !== null || tunnelTargets.length > 0
-  if (focusIsSpecific && descendTargetY === null && !goalIsUnderground && !hasGoalTarget) return []
+  if (focusItem !== null && descendTargetY === null && !goalIsUnderground && !hasGoalTarget) return []
 
   const targetBelow = terminus !== null ? terminus.y < feet.y : target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground

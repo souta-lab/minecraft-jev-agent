@@ -959,6 +959,48 @@ addCase('(iv-d) a leg two arms ground for different purposes emits once, carryin
 
 // --- (v) a fed body: the food tiers add nothing -------------------------------
 
+function collectFoodRouteState(fixedSouth = false): WorldState {
+  const current = { ...collectGoal(), id: 'g11:collect:food', description: 'collect food', targetItem: 'food', requiredCount: 5 }
+  const walls = ([[1, 0], [-1, 0], [0, 1], [0, -1]] as const).map(([x, z]) =>
+    ({ at: { x, y: 64, z }, name: 'dirt' }),
+  )
+  return buildWorldState(
+    fakeBot({ counts: {}, food: 10, health: 1, blocks: [...walls, { at: { x: 55, y: 64, z: 0 }, name: 'sweet_berry_bush' }] }),
+    {
+      tick: 1,
+      goal: makeGoal('food', 5),
+      goalQueue: queueWith(current),
+      focusItem: 'food',
+      recentEvents: [],
+      signals: signals(fixedSouth ? { digDir: 'S', digMode: 'level', digDirCount: 2 } : {}),
+    },
+    defaultSensorOptions,
+  )
+}
+
+addCase('(iv-e) collect-food class does not ground targetless excavation alongside a real berry route', () => {
+  const state = collectFoodRouteState()
+  const result = grounded(state)
+  const descents = result.candidates.filter((c) => c.kind === 'DESCEND')
+  const unbound = descents.filter((c) => c.meta.foodCell !== '55,64,0' || typeof c.meta.descentRouteTarget !== 'string')
+  return {
+    pass: descents.length > 0 && unbound.length === 0 && descents.every((c) =>
+      c.meta.foodTarget === 'sweet_berries' && Number(c.meta.descentRouteTo) < Number(c.meta.descentRouteFrom)),
+    detail: `descents=${descents.map((c) => c.id).join(',')} unbound=${unbound.map((c) => c.id).join(',')} gap=${result.foodGap === null ? 'none' : 'reported'}`,
+  }
+})
+
+addCase('(iv-f) prior southward commitment cannot continue an unbound food-class route away from the sensed source', () => {
+  const result = grounded(collectFoodRouteState(true))
+  const descents = result.candidates.filter((c) => c.kind === 'DESCEND')
+  return {
+    pass: descents.length > 0 && descents.every((c) =>
+      c.meta.foodCell === '55,64,0' && c.meta.descentRouteTarget === '55,64,0' &&
+      Number(c.meta.descentRouteTo) < Number(c.meta.descentRouteFrom)),
+    detail: `descents=${descents.map((c) => `${c.id}:${String(c.meta.foodCell)}`).join(',')}`,
+  }
+})
+
 addCase('(v) a fed body: no food tag, no gap, and the offer is the hungry offer minus the food tiers', () => {
   const blocks = [
     ...canopyBlocks(4),
