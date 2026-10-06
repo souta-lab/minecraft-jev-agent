@@ -1769,6 +1769,12 @@ export function scannedBlockNames(focusItem: string | null): readonly string[] |
 export const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
   ender_pearl: new Set(['enderman']),
   blaze_rod: new Set(['blaze']),
+  // The starvation half of the table: rotten flesh is edible (foods.json) and
+  // its producers are the hostile mobs that actively find the body at night -
+  // the only food source a hostile-only world offers. Whether to hunt one is
+  // still Jev's call (the ATTACK candidate carries the combat-kit/race facts);
+  // this table only makes the route nameable at all.
+  rotten_flesh: new Set(['zombie', 'zombie_villager', 'husk', 'drowned', 'zoglin', 'zombie_piglin']),
 }
 
 /**

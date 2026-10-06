@@ -25,6 +25,7 @@ import { createRequire } from 'node:module'
 import {
   defaultCandidateOptions,
   foodHabitatAscent,
+  foodSourceGap,
   generateCandidates,
   generateGroundedCandidates,
 } from './src/candidates.ts'
@@ -240,14 +241,107 @@ addCase('(c3) an animal outside the sensor radius is not invented as a route', (
   }
 })
 
-addCase('(c4) a hostile-only world still offers no fake food route', () => {
-  const zombie = { id: 7, name: 'zombie', kind: 'HostileMob', username: undefined, position: new Vec3(12, 64, 0), isValid: true }
-  const state = perceive({}, 0, [zombie])
+const hostile = (name: string, distance: number, id = 7): Record<string, unknown> => ({
+  id,
+  name,
+  kind: 'HostileMob',
+  username: undefined,
+  position: new Vec3(ORIGIN.x + distance, ORIGIN.y, ORIGIN.z),
+  isValid: true,
+})
+
+addCase('(c4) a sensed edible-drop hostile is a food route: zombie -> rotten_flesh', () => {
+  const state = perceive({}, 0, [hostile('zombie', 12)])
   const { candidates } = offered(state)
-  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'animal')
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'mob_drop')
+  return {
+    pass:
+      hunt !== undefined &&
+      hunt.kind === 'ATTACK' &&
+      hunt.targetEntityId === 7 &&
+      hunt.meta.foodTarget === 'zombie' &&
+      hunt.meta.foodAnimal === true &&
+      hunt.meta.dropItem === 'rotten_flesh',
+    detail: `route=${hunt?.id ?? 'none'} dropItem=${String(hunt?.meta.dropItem)} target=${String(hunt?.meta.foodTarget)}`,
+  }
+})
+
+addCase('(c4b) a hostile with no edible drop still offers no food route', () => {
+  const state = perceive({}, 0, [hostile('skeleton', 12)])
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => typeof candidate.meta.foodRoute === 'string')
   return {
     pass: hunt === undefined,
-    detail: `route=${hunt?.id ?? 'none'} hostileSensed=${state.entities.filter((e) => e.hostile).length}`,
+    detail: `route=${hunt?.id ?? 'none'} (skeleton drops no edible item)`,
+  }
+})
+
+addCase('(c4c) a food-mob hunt is offered beyond the 8m melee reaction range', () => {
+  const state = perceive({}, 0, [hostile('zombie', 20)])
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'mob_drop')
+  return {
+    pass: hunt !== undefined && hunt.targetEntityId === 7,
+    detail: `route=${hunt?.id ?? 'none'} (hunt range 24m; localHostiles only reach 8m)`,
+  }
+})
+
+addCase('(c4d) holding food suppresses the food-mob hunt (EAT is the route)', () => {
+  const state = perceive({ cooked_beef: 1 }, 0, [hostile('zombie', 12)])
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'mob_drop')
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: hunt === undefined && eat !== undefined,
+    detail: `hunt=${hunt?.id ?? 'none'} eat=${eat?.id ?? 'none'}`,
+  }
+})
+
+addCase('(c4e) a fed body gets no food-mob hunt offer', () => {
+  const state = perceive({}, 20, [hostile('zombie', 12)])
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'mob_drop')
+  return {
+    pass: hunt === undefined,
+    detail: `route=${hunt?.id ?? 'none'}`,
+  }
+})
+
+addCase('(c4f) a sensed edible-drop mob with the route withheld reports source_withheld, not no_source', () => {
+  const state = perceive({}, 0, [hostile('zombie', 12)])
+  const gap = foodSourceGap(state, defaultCandidateOptions, [])
+  return {
+    pass:
+      gap !== null &&
+      gap.sensedFoodMob === true &&
+      gap.reason === 'source_withheld' &&
+      gap.missingLink === 'no_route_to_sensed_source',
+    detail: `sensedFoodMob=${gap?.sensedFoodMob} reason=${gap?.reason} link=${gap?.missingLink}`,
+  }
+})
+
+addCase('(c4g) desperation food held: EAT:rotten_flesh is offered and the hunt keeps offering', () => {
+  const state = perceive({ rotten_flesh: 2 }, 0, [hostile('zombie', 12)])
+  const { candidates } = offered(state)
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'mob_drop')
+  return {
+    pass:
+      eat !== undefined &&
+      eat.id === 'EAT:rotten_flesh' &&
+      eat.meta.desperationFood === true &&
+      hunt !== undefined,
+    detail: `eat=${eat?.id ?? 'none'} desperation=${String(eat?.meta.desperationFood)} hunt=${hunt?.id ?? 'none'}`,
+  }
+})
+
+addCase('(c4h) ordinary food beats the desperation tier when both are held', () => {
+  const state = perceive({ rotten_flesh: 2, cooked_beef: 1 }, 0, [])
+  const { candidates } = offered(state)
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: eat !== undefined && eat.id === 'EAT:cooked_beef' && eat.meta.desperationFood === undefined,
+    detail: `eat=${eat?.id ?? 'none'} (flesh must never outrank real food)`,
   }
 })
 
@@ -444,6 +538,16 @@ addCase('(e4) a sensed animal is a grounded food route: no explore refusal', () 
   const state = perceive({}, 0, [animal('cow', 12)])
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
   const hunt = grounded.candidates.some((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass: hunt && grounded.exploreRouteBlocked === null,
+    detail: `hunt=${hunt} blocked=${grounded.exploreRouteBlocked?.reason ?? 'none'}`,
+  }
+})
+
+addCase('(e4b) a sensed edible-drop hostile is a grounded food route too: no explore refusal', () => {
+  const state = perceive({}, 0, [hostile('zombie', 12)])
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const hunt = grounded.candidates.some((candidate) => candidate.meta.foodRoute === 'mob_drop')
   return {
     pass: hunt && grounded.exploreRouteBlocked === null,
     detail: `hunt=${hunt} blocked=${grounded.exploreRouteBlocked?.reason ?? 'none'}`,

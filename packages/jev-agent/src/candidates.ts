@@ -94,7 +94,7 @@ import {
   planDescentScaffoldStep,
 } from './descentScaffold.ts'
 import type { DescentScaffoldPlan, DescentScaffoldRefusal } from './descentScaffold.ts'
-import { FOOD_SMELT_INPUT, fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
+import { DESPERATION_EDIBLES, FOOD_SMELT_INPUT, fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, interactionFaceDistance, missingToolCapability, reachabilityFingerprint, reachabilityTargetSignature } from './reachability.ts'
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
@@ -361,6 +361,19 @@ export function producerDropFor(entityName: string): string | null {
     if (producers.has(entityName)) return item
   }
   return null
+}
+
+/**
+ * The FOOD drop a hostile is a producer for, or null: edible per the running
+ * data version (an ordinary hunt) OR a desperation edible (`rotten_flesh` at
+ * the starvation floor - `NON_SURVIVAL_EDIBLES` keeps it out of ordinary food
+ * choice, `DESPERATION_EDIBLES` names it as the route a hostile-only world
+ * actually offers). Anything else - pearls, rods, bone, gunpowder - is a
+ * collect-goal producer, never a food route.
+ */
+function foodMobDrop(entityName: string): string | null {
+  const drop = producerDropFor(entityName)
+  return drop !== null && (isEdibleFoodItem(drop) || DESPERATION_EDIBLES.has(drop)) ? drop : null
 }
 
 export const COMBAT_CANDIDATE_RANGE = THREAT_DANGER_RADIUS
@@ -4140,10 +4153,14 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
     case 'ATTACK':
       // A `goalDrop` ATTACK is the direct grounded producer route for the active
       // mob-drop collect goal (the executor verifies the kill and the drop); a
-      // `foodRoute=animal` ATTACK is the same kind of route for the survival food
-      // goal (the ATTACK executor walks to the animal and kills it). Ordinary
-      // combat is a local reaction, not a goal route.
-      return typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal'
+      // `foodRoute` ATTACK is the same kind of route for the survival food
+      // goal (the ATTACK executor walks to the animal or the edible-drop mob
+      // and kills it). Ordinary combat is a local reaction, not a goal route.
+      return (
+        typeof candidate.meta.goalDrop === 'string' ||
+        candidate.meta.foodRoute === 'animal' ||
+        candidate.meta.foodRoute === 'mob_drop'
+      )
     case 'DESCEND':
       return candidate.meta.grounded === true
     case 'CONTAINER':
@@ -4367,8 +4384,9 @@ export function foodSourceGap(
   const hungry = bodyHungry(state, options)
   if (!hungry) return null
   const held = pickFood(state)
+  const heldDesperation = held === null ? pickDesperationFood(state) : null
   const offered = [
-    ...(held === null ? [] : ['eat']),
+    ...(held === null && heldDesperation === null ? [] : ['eat']),
     ...candidates
       .filter((candidate) => typeof candidate.meta.foodRoute === 'string')
       .map((candidate) => String(candidate.meta.foodRoute)),
@@ -4378,6 +4396,12 @@ export function foodSourceGap(
   const huntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
   const sensedAnimal = state.entities.some(
     (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= huntRange,
+  )
+  // The hostile half of the same truth: an edible-drop producer (zombie ->
+  // rotten_flesh) inside the hunt range is a food source even when the ATTACK
+  // offer itself was withheld, so `no_source_sensed` must not claim it away.
+  const sensedFoodMob = state.entities.some(
+    (entity) => entity.hostile === true && entity.distance <= huntRange && foodMobDrop(entity.name) !== null,
   )
   const sensedEdibleBlock = state.blocks.some((block) => block.foodRoute === 'forage')
   // The ACQUIRE tier counts only when the sensed ingredient really would
@@ -4399,11 +4423,12 @@ export function foodSourceGap(
   const cookableRecipe =
     smeltableIngredient || foodCookCandidates(state, options).length > 0
   const sensedFurnace = smeltableIngredient && directSmeltFurnace(state, options) !== null
-  const sourceExists = sensedAnimal || sensedEdibleBlock || sensedIngredientBlock || cookableRecipe
+  const sourceExists = sensedAnimal || sensedFoodMob || sensedEdibleBlock || sensedIngredientBlock || cookableRecipe
   return {
     offered: uniqueOffered,
-    heldEdible: held !== null,
+    heldEdible: held !== null || heldDesperation !== null,
     sensedAnimal,
+    sensedFoodMob,
     sensedEdibleBlock,
     sensedIngredientBlock,
     cookableRecipe,
@@ -4417,6 +4442,7 @@ export function foodSourceGap(
       sensedEdibleBlock,
       sensedIngredientBlock,
       sensedAnimal,
+      sensedFoodMob,
       smeltableIngredient,
       sensedFurnace,
       cookableRecipe,
@@ -4434,15 +4460,19 @@ function firstMissingFoodLink(facts: {
   sensedEdibleBlock: boolean
   sensedIngredientBlock: boolean
   sensedAnimal: boolean
+  sensedFoodMob: boolean
   smeltableIngredient: boolean
   sensedFurnace: boolean
   cookableRecipe: boolean
 }): FoodSourceMissingLink {
   if (facts.heldEdible) return 'no_edible_held'
   // A source IS sensed and no route is on offer: the missing link is the ROUTE
-  // to it (in-reach dig, walk-up stand, column base or dig-access walk). This is
-  // the shape that used to be reported as if the world held no food at all.
-  if (facts.sensedEdibleBlock || facts.sensedIngredientBlock) return 'no_route_to_sensed_source'
+  // to it (in-reach dig, walk-up stand, column base or dig-access walk - or, for
+  // an edible-drop hostile, the withheld hunt ATTACK). This is the shape that
+  // used to be reported as if the world held no food at all.
+  if (facts.sensedEdibleBlock || facts.sensedIngredientBlock || facts.sensedFoodMob) {
+    return 'no_route_to_sensed_source'
+  }
   if (facts.smeltableIngredient && !facts.sensedFurnace) return 'no_reachable_furnace'
   if (facts.cookableRecipe) return 'no_cookable_recipe'
   return 'no_edible_source_sensed'
@@ -5068,17 +5098,26 @@ function generateRawCandidates(
   }
   // Food acquisition: when the resident is hungry (at or below `eatBelowFood`)
   // and holds no food, offer the grounded ATTACK affordance for every sensed
-  // passive food animal so Jev can choose to hunt. Code only reports CAN (a real
-  // sensed entity); the choice of WHICH action/target stays with Jev. The range
-  // is the sensor's entity radius, not the 8m melee range, because the ATTACK
-  // executor already paths to the entity with GoalFollow.
+  // passive food animal so Jev can choose to hunt - and, since the
+  // `MOB_DROP_PRODUCERS` table now carries edible drops, for every sensed
+  // hostile whose declared drop is itself edible (zombie -> rotten_flesh).
+  // That second half is what kept turning `FOOD_SOURCE_NONE` into an untruth:
+  // the starving spawn-camp bodies were repeatedly killed by the only food
+  // source on the map. Code only reports CAN (a real sensed entity whose drop
+  // the running data version calls edible); the choice of WHICH action/target
+  // stays with Jev, and the melee race/combat-kit facts on the candidate say
+  // whether the kill is survivable. The range is the sensor's entity radius,
+  // not the 8m melee range, because the ATTACK executor already paths to the
+  // entity with GoalFollow.
   const heldFood = pickFood(state)
   const hungry = state.self.food <= options.eatBelowFood
   const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
   const huntTargets =
     heldFood === null && hungry
       ? state.entities.filter(
-          (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
+          (entity) =>
+            entity.distance <= foodHuntRange &&
+            (entity.hostile === true ? foodMobDrop(entity.name) !== null : FOOD_ANIMALS.has(entity.name)),
         )
       : []
   // The ordinary combat budget bounds local reaction candidates only. A sensed
@@ -5214,9 +5253,18 @@ function generateRawCandidates(
           ? {}
           : { producerMob: entity.name, producerRoute: 'mob_drop' as const }),
         // Typed CAN fact: this ATTACK is the grounded route to food, and which
-        // animal it targets. The marker reader/log must not infer it from the
-        // entity name alone (a hostile and a food animal can share no name).
-        ...(isFoodTarget ? { foodAnimal: true, foodRoute: 'animal', foodTarget: entity.name } : {}),
+        // entity it targets. `foodRoute` names the route class: `animal` for a
+        // passive food animal, `mob_drop` for a hostile whose declared drop is
+        // edible (zombie -> rotten_flesh). The marker reader/log must not infer
+        // it from the entity name alone (a hostile and a food animal can share
+        // no name).
+        ...(isFoodTarget
+          ? {
+              foodAnimal: true,
+              foodRoute: entity.hostile === true ? 'mob_drop' : 'animal',
+              foodTarget: entity.name,
+            }
+          : {}),
         // issue #436/#11 (operator directive): this candidate exists because the
         // entity is ATTACKABLE and in range - not because a flag said so. The gate
         // consults this fact, never the hostile flag.
@@ -5332,6 +5380,28 @@ function generateRawCandidates(
       inReach: true,
       hasStandableAdjacent: true,
       meta: { tick: state.tick, food: state.self.food },
+    })
+  }
+  // The desperation half of the same arm: no ordinary food held, but a
+  // drain-not-damage edible is (`DESPERATION_EDIBLES` - rotten_flesh). Same
+  // hungry gate and the same EAT kind; `desperationFood` names the class so the
+  // run log can tell a starvation eat from an ordinary meal, and Jev still owns
+  // WHETHER it is worth the Hunger effect.
+  const desperationFood = foodName === null ? pickDesperationFood(state) : null
+  if (desperationFood !== null && hungry) {
+    candidates.push({
+      id: `EAT:${desperationFood}`,
+      kind: 'EAT',
+      label: `eat ${desperationFood} (desperation food, food=${state.self.food})`,
+      targetName: desperationFood,
+      target: null,
+      targetEntityId: null,
+      itemName: desperationFood,
+      requiresTool: false,
+      toolName: null,
+      inReach: true,
+      hasStandableAdjacent: true,
+      meta: { tick: state.tick, food: state.self.food, desperationFood: true },
     })
   }
   // The grounded FORAGE/ACQUIRE routes: the sensed blocks the running data
@@ -13945,6 +14015,25 @@ export function pickFood(state: WorldState): string | null {
   let bestCount = 0
   for (const [name, count] of Object.entries(state.inventory.counts)) {
     if (!matchesResourceClass(name, 'food')) continue
+    if (count > bestCount) {
+      best = name
+      bestCount = count
+    }
+  }
+  return best
+}
+
+/**
+ * The desperation food the bot would eat when it holds no ordinary food
+ * (`DESPERATION_EDIBLES` - rotten_flesh), or null. Same count-order pick as
+ * `pickFood`, kept a separate tier so a flesh stack can never answer the
+ * ordinary-food question and the eat arm can still say "this is all there is".
+ */
+export function pickDesperationFood(state: WorldState): string | null {
+  let best: string | null = null
+  let bestCount = 0
+  for (const [name, count] of Object.entries(state.inventory.counts)) {
+    if (!DESPERATION_EDIBLES.has(name)) continue
     if (count > bestCount) {
       best = name
       bestCount = count

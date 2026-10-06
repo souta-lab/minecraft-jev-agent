@@ -494,6 +494,18 @@ export const NON_SURVIVAL_EDIBLES: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * DESPERATION EDIBLES: the members of `NON_SURVIVAL_EDIBLES` whose drawback is
+ * drain, not damage. `rotten_flesh` is the only one - its vanilla Hunger effect
+ * drains roughly a quarter of the +4 food it gives, so at the starvation floor
+ * it is still net-positive, while every poison-class entry above can finish a
+ * weak body outright. It stays excluded from ordinary food choice (`isFoodItem`
+ * still says no, so a flesh stack can never outrank a steak it merely
+ * outnumbers); the survival arms read it only as the food route a hostile-only
+ * world actually offers.
+ */
+export const DESPERATION_EDIBLES: ReadonlySet<string> = new Set(['rotten_flesh'])
+
+/**
  * DATA GAPS: vanilla-edible items this data version's `foods.json` does not
  * list. Corrected here by exception instead of re-listing the whole food set;
  * `kelp` is edible in vanilla (1 point) while only its smelted form

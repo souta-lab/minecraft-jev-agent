@@ -622,7 +622,9 @@ addCase('(iv-b) the item -> mob mapping is DATA, not an enderman branch', () => 
   // item" is a table lookup, the ordinary ground mob has NO row, and nothing in
   // the producer path names a mob or a coordinate.
   const endermanDrop = producerDropFor('enderman')
-  const ordianryMobDrop = producerDropFor('zombie')
+  // zombie now HAS a row (rotten_flesh is a declared edible producer); the
+  // no-row stand-in is a mob whose drops are all undeclared.
+  const ordianryMobDrop = producerDropFor('skeleton')
   const pearlProducers = PRODUCERS[PEARL]
   return {
     pass:
@@ -633,8 +635,8 @@ addCase('(iv-b) the item -> mob mapping is DATA, not an enderman branch', () => 
       // the mapping is a Set of mob names, so a second producer is a DATA edit
       pearlProducers instanceof Set &&
       producerMobForItem(PEARL) === 'enderman' &&
-      producerMobForItem('rotten_flesh') === null,
-    detail: `producerDropFor(enderman)=${endermanDrop ?? 'none'} producerDropFor(zombie)=${ordianryMobDrop ?? 'none'} producers(${PEARL})=${pearlProducers === undefined ? 'none' : [...pearlProducers].join('|')} producerMobForItem(${PEARL})=${producerMobForItem(PEARL) ?? 'none'}`,
+      producerMobForItem('bone') === null,
+    detail: `producerDropFor(enderman)=${endermanDrop ?? 'none'} producerDropFor(skeleton)=${ordianryMobDrop ?? 'none'} producers(${PEARL})=${pearlProducers === undefined ? 'none' : [...pearlProducers].join('|')} producerMobForItem(${PEARL})=${producerMobForItem(PEARL) ?? 'none'}`,
   }
 })
 
