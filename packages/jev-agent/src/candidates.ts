@@ -6475,7 +6475,12 @@ function mineCandidates(
   )
   const fallback =
     focusItem === null && matching.length === 0 ? mineable.filter((block) => block.kind === 'log') : matching
-  const pool = [...fallback, ...structureApproach]
+  // A resource-free level predicate names no producer to harvest. Null focus
+  // must not turn it into an all-resource collection option (including trees
+  // above the body). Its controlled descent below owns terrain clearance;
+  // explicit food/capability producer calls keep their declared block filter.
+  const resourceFreeDescent = focusItem === null && descendTargetY !== null && blockFilter === null
+  const pool = resourceFreeDescent ? [] : [...fallback, ...structureApproach]
   const isStructureFabricCell = (block: BlockState): boolean =>
     structureFabricNames !== null && structureFabricNames.has(block.name)
   const mineActions: Candidate[] = []

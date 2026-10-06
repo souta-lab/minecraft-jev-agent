@@ -326,6 +326,27 @@ addCase('an overhead drop without a closing route does not acquire unrelated exc
   }
 })
 
+addCase('resource-free descent excludes arbitrary tree harvest while retaining a grounded down step', () => {
+  const tree = ore({ x: FEET.x + 1, y: FEET.y + 2, z: FEET.z }, {
+    kind: 'log', name: 'oak_log', yield: 'oak_log', harvestTool: null,
+    harvestTier: null, inReach: true, hasAdjacentStandable: true,
+    adjacentStandable: FEET,
+  })
+  const state = world({
+    focusItem: 'log', blocks: [tree], counts: { oak_log: 5 },
+    current: { kind: 'descend', targetItem: null, targetY: FEET.y - 1 },
+    descent: [downStep('D', 0, 0)],
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const unrelated = grounded.candidates.filter((c) => c.targetName === 'oak_log' &&
+    c.meta.missingCapability === undefined && c.meta.foodRoute === undefined)
+  const down = descendSteps(grounded.candidates)
+  return {
+    pass: unrelated.length === 0 && down.some((c) => Number(c.meta.stepY) < FEET.y),
+    detail: `unrelated=[${unrelated.map((c) => c.id).join(',')}] down=[${down.map((c) => c.id).join(',')}]`,
+  }
+})
+
 // --- (a) the measured shape ------------------------------------------------------
 
 addCase('a descend row passing a buried producer offers the exposure probe beside the descend step', () => {
