@@ -91,7 +91,7 @@ import {
   runBoundedDig,
 } from './digTruth.ts'
 import type { DigMechanism, DigTimePlan } from './digTruth.ts'
-import { craftAtTable } from './craftWindow.ts'
+import { craftAtTable, craftInInventory } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
 import {
@@ -8266,7 +8266,6 @@ export class Executor {
     // One CRAFT decision performs ONE craft (producing `recipe.result.count`
     // items); the loop re-decides if more are needed. Passing the result count
     // here would run that many crafts and over-produce.
-    const craftCount = 1
     let recipe = this.bot.recipesFor(itemId, null, 1, table ?? null)[0]
     if (recipe === undefined) {
       await delay(300, signal)
@@ -8304,7 +8303,8 @@ export class Executor {
       // At a table we own the window interaction (openBlock + explicit resync)
       // because bot.craft's crafting-table delivery silently no-ops when the
       // server has moved on (PrismarineJS/mineflayer#3906). The 2x2 player-grid
-      // path still uses bot.craft. On a Leaf live run, a timed-out player-grid
+      // path uses stock bot.craft with authoritative inventory resync before
+      // reading a gain or compiling the next prerequisite. A timed-out grid
       // craft can leave `currentWindow` as minecraft:crafting even though the
       // action rejected. If that stale window is carried into the next retry,
       // bot.craft keeps operating on the dead session and every retry can
@@ -8315,7 +8315,7 @@ export class Executor {
       if (table === null) {
         try {
           this.assertEffect({ type: 'station', station: 'inventory_crafting_grid' })
-          await this.bot.craft(recipe, craftCount)
+          await craftInInventory(this.bot, recipe as unknown as CraftRecipeLike)
         } finally {
           await this.closeAbandonedCraftWindow()
         }

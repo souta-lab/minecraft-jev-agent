@@ -49,6 +49,27 @@ type SyncableBot = Bot & { _syncWindow?: (window: Window) => Promise<void> }
 type InteractionFace = Parameters<Bot['openBlock']>[1]
 
 /**
+ * Keep stock 2x2 crafting, but reconcile its optimistic inventory with the
+ * server before and after the attempt. A local slot gain is not an ack: using
+ * it immediately can send the next craft ingredients the server never gave us.
+ */
+export async function craftInInventory(bot: Bot, recipe: CraftRecipeLike): Promise<void> {
+  if (bot.currentWindow !== null) throw new Error('inventory crafting requires no open container window')
+  const sync = (bot as SyncableBot)._syncWindow
+  if (sync === undefined && bot.supportFeature('stateIdUsed')) {
+    throw new Error('inventory crafting requires server inventory resync support')
+  }
+  await sync?.call(bot, bot.inventory)
+  try {
+    await bot.craft(recipe as Parameters<Bot['craft']>[0], 1)
+  } finally {
+    // Failed stock attempts can also leave optimistic cursor/slot contents.
+    // Reconcile before the executor retries, terminalizes or projects them.
+    await sync?.call(bot, bot.inventory)
+  }
+}
+
+/**
  * Craft one `recipe` at a placed crafting table, opening/closing the window.
  * `face` is the geometric side of the table the body stands at; the server
  * validates the interaction against it, so it is forwarded to `openBlock`.
