@@ -465,6 +465,7 @@ interface GuardRejectRuntime {
   /** not under test: the packet's Option identity is irrelevant to the marker */
   currentOptionContext: () => null
   noteCandidateFailure: (id: string) => void
+  noteRejectedOutcome: () => void
   recordMoveFailure: (candidate: Candidate, reason: string) => void
   chargeGuardRejection: (record: DecisionRecord, code: GuardCode) => void
   recordFailure: (code: string, detail: string) => void
@@ -514,6 +515,7 @@ addCase('a guard-dropped selection emits ACTION_REJECTED with its code and reaso
   controller.currentOptionContext = () => null
   // The rejection bookkeeping is not under test here; the marker is.
   controller.noteCandidateFailure = () => undefined
+  controller.noteRejectedOutcome = () => undefined
   controller.recordMoveFailure = () => undefined
   controller.chargeGuardRejection = () => undefined
   controller.recordFailure = () => undefined

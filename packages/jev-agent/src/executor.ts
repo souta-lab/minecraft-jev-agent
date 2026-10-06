@@ -12506,7 +12506,11 @@ export class Executor {
       { actuation: this.options.actuation, plannedByPathfinder: planned.length > 0 },
     )
     for (const waypoint of chain) {
-      const arrived = await this.stepTo(waypoint, range, epoch, signal)
+      // `range` belongs to the committed destination, not the route's turns.
+      // RETRIEVE's 2m radius skipped nodes in a one-cell return tunnel and
+      // steered the next leg through its solid corner. Reach each planned
+      // cell's centre before continuing; the final predicate is unchanged.
+      const arrived = await this.stepTo(waypoint, planned.length > 0 ? 0.15 : range, epoch, signal)
       if (!arrived) {
         this.notifyPathFailed(target, 'stuck')
         throw new ExecutorError(

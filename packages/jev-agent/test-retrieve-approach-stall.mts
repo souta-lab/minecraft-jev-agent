@@ -212,7 +212,8 @@ addCase('a pillar leg with durable height remains a valid bounded continuation',
 
 addCase('vertical executor steps require level-verified path completion', () => {
   const source = readFileSync(fileURLToPath(new URL('./src/executor.ts', import.meta.url)), 'utf8')
-  const staircaseRequiresLevel = source.includes('await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })')
+  const staircase = source.slice(source.indexOf('private async digRetrievalStaircase('), source.indexOf('private async runVerticalLeg('))
+  const staircaseRequiresLevel = (staircase.match(/await this\.pathTo\(step, epoch, signal, 'GoalBlock', \{ requireLevel: true \}\)/g) ?? []).length === 2
   const reuseRequiresLevel = source.includes('await this.pathToNear(tunnel, 1, epoch, signal, { requireLevel: true })')
   const pass = staircaseRequiresLevel && reuseRequiresLevel
   return { pass, detail: `staircase=${staircaseRequiresLevel} reuse=${reuseRequiresLevel}` }
