@@ -1774,7 +1774,7 @@ export const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> =
   // the only food source a hostile-only world offers. Whether to hunt one is
   // still Jev's call (the ATTACK candidate carries the combat-kit/race facts);
   // this table only makes the route nameable at all.
-  rotten_flesh: new Set(['zombie', 'zombie_villager', 'husk', 'drowned', 'zoglin', 'zombie_piglin']),
+  rotten_flesh: new Set(['zombie', 'zombie_villager', 'husk', 'drowned', 'zoglin', 'zombified_piglin']),
 }
 
 /**

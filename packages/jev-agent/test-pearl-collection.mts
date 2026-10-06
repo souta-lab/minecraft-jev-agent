@@ -75,6 +75,7 @@ import { fixtureClaim } from './test-claim-context.mts'
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11') as {
   itemsByName: Record<string, { id: number }>
+  entitiesByName: Record<string, { id: number; name: string }>
 }
 
 const PEARL = 'ender_pearl'
@@ -637,6 +638,24 @@ addCase('(iv-b) the item -> mob mapping is DATA, not an enderman branch', () => 
       producerMobForItem(PEARL) === 'enderman' &&
       producerMobForItem('bone') === null,
     detail: `producerDropFor(enderman)=${endermanDrop ?? 'none'} producerDropFor(skeleton)=${ordianryMobDrop ?? 'none'} producers(${PEARL})=${pearlProducers === undefined ? 'none' : [...pearlProducers].join('|')} producerMobForItem(${PEARL})=${producerMobForItem(PEARL) ?? 'none'}`,
+  }
+})
+
+addCase('(iv-c) every declared producer mob is a real entity name the game emits', () => {
+  // `zombie_piglin` was a dead key: 1.16+ emits `zombified_piglin`, so the row
+  // could never match a live entity name. Pin the whole table's liveness
+  // against the registry names the sensor actually sees.
+  const zombified = producerDropFor('zombified_piglin')
+  const deadName = producerDropFor('zombie_piglin')
+  const fleshProducers = [...(PRODUCERS.rotten_flesh ?? new Set())].sort()
+  const allReal = fleshProducers.every((name) => REGISTRY.entitiesByName[name] !== undefined)
+  return {
+    pass:
+      zombified === 'rotten_flesh' &&
+      deadName === null &&
+      fleshProducers.length === 6 &&
+      allReal,
+    detail: `zombified=${zombified ?? 'none'} zombie_piglin=${deadName ?? 'none'} fleshProducers=[${fleshProducers.join(',')}] allReal=${allReal}`,
   }
 })
 
