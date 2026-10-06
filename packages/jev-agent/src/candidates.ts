@@ -4159,8 +4159,7 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
       return (
         typeof candidate.meta.goalDrop === 'string' ||
         candidate.meta.foodRoute === 'animal' ||
-        candidate.meta.foodRoute === 'mob_drop' ||
-        candidate.meta.foodRoute === 'drop'
+        candidate.meta.foodRoute === 'mob_drop'
       )
     case 'DESCEND':
       return candidate.meta.grounded === true
