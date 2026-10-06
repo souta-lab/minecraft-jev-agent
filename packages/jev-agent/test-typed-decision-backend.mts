@@ -15,6 +15,7 @@ import {
   DECISION_PROFILES,
   DEFAULT_DECISION_PROFILE_ID,
   createDirectDecisionBackend,
+  profileLowConfidenceFloor,
 } from '../jev-harness/providers/systemone-direct.ts'
 
 const FIXTURE_KEY = 'liquid_fixture_k3y_0123456789abcdef'
@@ -334,16 +335,20 @@ function factoryOptions(overrides: Partial<JevPolicyOptions> = {}): JevPolicyOpt
   } as unknown as JevPolicyOptions
 }
 
-await check('Liquid direct d1 is the committed default profile', () => {
-  assert.equal(DEFAULT_DECISION_PROFILE_ID, 'liquid-direct-d1')
-  assert.equal(resolveDecisionProfileId({}), 'liquid-direct-d1')
-  assert.equal(resolveDecisionProfileId({ BUDDY_DECISION_PROFILE: '  ' }), 'liquid-direct-d1')
+await check('Liquid d1:free is the permanent default without paid calibration or switchback', () => {
+  assert.equal(DEFAULT_DECISION_PROFILE_ID, 'liquid-direct-d1-free')
+  assert.equal(resolveDecisionProfileId({}), 'liquid-direct-d1-free')
+  assert.equal(resolveDecisionProfileId({ BUDDY_DECISION_PROFILE: '  ' }), 'liquid-direct-d1-free')
   assert.equal(resolveDecisionProfileId({ BUDDY_DECISION_PROFILE: 'typesafe-gateway-jev' }), 'typesafe-gateway-jev')
   const policy = createJevPolicy(factoryOptions({ decisionProfile: resolveDecisionProfileId({}) }))
   assert.equal(policy.kind, 'typesafe')
   assert.equal(policy.provider, 'liquid')
-  assert.equal(policy.profileId, 'liquid-direct-d1')
-  assert.equal(policy.model, 'd1')
+  assert.equal(policy.profileId, 'liquid-direct-d1-free')
+  assert.equal(policy.model, 'd1:free')
+  assert.equal(policy.lowConfidenceThreshold, undefined, 'no measured free calibration is claimed')
+  assert.equal(policy.abandonThreshold, undefined)
+  assert.equal(profileLowConfidenceFloor(DECISION_PROFILES[DEFAULT_DECISION_PROFILE_ID], {}), 0.55)
+  assert.equal(DECISION_PROFILES[DEFAULT_DECISION_PROFILE_ID]!.paidExhaustionFallbackProfileId, undefined)
   assert.equal(process.env.AI_GATEWAY_API_KEY, gatewayEnvBefore)
 })
 
@@ -352,7 +357,7 @@ await check('the profile pins its model: a gateway model override cannot redirec
   assert.equal(policy.model, 'd1')
 })
 
-await check('TypeSafe gateway Jev and d1:free stay explicitly selectable, never implicit', () => {
+await check('TypeSafe gateway remains explicit; free-primary stays model-pinned', () => {
   const gateway = createJevPolicy(factoryOptions({ decisionProfile: 'typesafe-gateway-jev' }))
   assert.equal(gateway.provider, 'typesafe-ai')
   assert.equal(gateway.model, 'typesafe-ai/jev')
@@ -361,7 +366,7 @@ await check('TypeSafe gateway Jev and d1:free stay explicitly selectable, never 
   const free = createJevPolicy(factoryOptions({ decisionProfile: 'liquid-direct-d1-free' }))
   assert.equal(free.provider, 'liquid')
   assert.equal(free.model, 'd1:free')
-  assert.notEqual(DEFAULT_DECISION_PROFILE_ID, 'liquid-direct-d1-free')
+  assert.equal(DEFAULT_DECISION_PROFILE_ID, 'liquid-direct-d1-free')
 })
 
 await check('an unknown profile is fatal; nothing is substituted', () => {

@@ -355,7 +355,7 @@ The Liquid API key is stored outside the repository in a permission-restricted s
 
 ### Liquid-direct profile (implemented 2026-10-05)
 
-The seam lives at `packages/jev-harness/providers/systemone-direct.ts` (the only firewall-allowed home for a provider SDK) and plugs into the unchanged `AuthorityJevPolicy` transport seam; `createJevPolicy` selects exactly one profile (`BUDDY_DECISION_PROFILE`, default `liquid-direct-d1`; `typesafe-gateway-jev` and `liquid-direct-d1-free` are explicit-only). The policy never holds the Liquid credential and never installs it as `AI_GATEWAY_API_KEY`.
+The seam lives at `packages/jev-harness/providers/systemone-direct.ts` (the only firewall-allowed home for a provider SDK) and plugs into the unchanged `AuthorityJevPolicy` transport seam. Since the permanent operator mandate of 2026-10-06, `DEFAULT_DECISION_PROFILE_ID` is **`liquid-direct-d1-free` / `d1:free`**. `BUDDY_DECISION_PROFILE` selects one explicit profile; paid d1 and TypeSafe gateway Jev require explicit configuration. Free-primary has no fallback or paid switchback. The policy never holds the Liquid credential and never installs it as `AI_GATEWAY_API_KEY`.
 
 Live acceptance probe through the production policy path:
 
@@ -365,7 +365,9 @@ Live acceptance probe through the production policy path:
 - explicit `d1:free` profile answers with reported model `d1:free`.
 - The predeclared paid-to-free transition requires decisive credit/quota/entitlement exhaustion. HTTP 5xx and 408 retain their transient server/timeout classification even when their message mentions billing or credit; they never switch tiers.
 
-Level-3 calibration was measured 2026-10-05 (Gate F, `tools/jev-d1-calibrate.mts`): 48 real d1 calls over recorded p24 decision states replayed through the production adapter and current question wording. Measured facts and the resulting profile-carried thresholds:
+The existing `tools/jev-d1-calibrate.mts` now accepts explicit profile/model, a hash-sealed corpus, chronological dev/holdout split and bounded sample/wall budget. It defaults to free-primary, validates model/profile identity before calls, preserves output evidence, and records source/profile/model/usage provenance. Replay agreement with recorded model answers measures consistency, not independently verified correctness. Free-specific threshold changes require their own consequence-specific correctness/calibration evidence; paid distribution evidence is insufficient.
+
+Paid d1 calibration was measured 2026-10-05 (Gate F, `tools/jev-d1-calibrate.mts`): 48 real d1 calls over recorded p24 decision states replayed through the production adapter and current question wording. Measured facts and the resulting **paid-profile-only** thresholds:
 
 - **Wire defect found + fixed**: every singleton offer (one grounded candidate) failed `422 A Choice needs at least 2 options` — 44.1% of p24 and 14.6% of p23 calls were singletons. Fix: singleton `action` Choices carry an explicit `DECLINE` second label (never an actuation; a declined sole action is a beta-form vote routed through `abandonVerdict`). Post-fix: 48/48 calls succeed; d1 chose DECLINE on 14/21 singleton frames, always with beta P >= 0.68 (coherent cross-head behavior).
 - **action confidence**: mean 0.576, p50 0.635, p10 0.230 — the Jev-tuned `lowConfidenceThreshold` 0.55 would escalate ~40% of d1 decisions. Profile field `lowConfidenceThreshold: 0.2` isolates the ~6% genuinely-uncertain tail (env `BUDDY_LOW_CONFIDENCE_THRESHOLD` overrides; other profiles keep 0.55).

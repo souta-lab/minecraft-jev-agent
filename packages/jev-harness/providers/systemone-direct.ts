@@ -116,8 +116,8 @@ export const DECISION_PROFILES: Readonly<Record<string, DecisionBackendProfile>>
   },
 }
 
-/** Operator-selected primary Typed Decision Plane backend (2026-10-05). */
-export const DEFAULT_DECISION_PROFILE_ID = 'liquid-direct-d1'
+/** Permanent operator-selected primary (2026-10-06); free never switches back to paid. */
+export const DEFAULT_DECISION_PROFILE_ID = 'liquid-direct-d1-free'
 
 export interface DecisionCredential {
   readonly key: string
