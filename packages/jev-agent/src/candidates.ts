@@ -27,7 +27,7 @@ import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, Entit
 import { DEFAULT_EAT_BELOW_FOOD, bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyIsSubmerged, bodyNeedsBreathEscape, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames, waterRouteBreathOk } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
-import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, goalResourceMatches, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
 import type { FoodSourceGap, FoodSourceMissingLink } from './foodSources.ts'
@@ -4159,7 +4159,8 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
       return (
         typeof candidate.meta.goalDrop === 'string' ||
         candidate.meta.foodRoute === 'animal' ||
-        candidate.meta.foodRoute === 'mob_drop'
+        candidate.meta.foodRoute === 'mob_drop' ||
+        candidate.meta.foodRoute === 'drop'
       )
     case 'DESCEND':
       return candidate.meta.grounded === true
@@ -4403,6 +4404,16 @@ export function foodSourceGap(
   const sensedFoodMob = state.entities.some(
     (entity) => entity.hostile === true && entity.distance <= huntRange && foodMobDrop(entity.name) !== null,
   )
+  // The cheapest food source of all: a dropped item the body could just walk
+  // onto and eat (the product of a food-route kill, or any edible loot the
+  // world left). Without this arm `no_source_sensed` reports "the world holds
+  // no food" while flesh lies on the ground next to the body.
+  const sensedFoodDrop = state.entities.some(
+    (entity) =>
+      typeof entity.droppedItem === 'string' &&
+      entity.distance <= huntRange &&
+      goalResourceMatches(entity.droppedItem, 'food'),
+  )
   const sensedEdibleBlock = state.blocks.some((block) => block.foodRoute === 'forage')
   // The ACQUIRE tier counts only when the sensed ingredient really would
   // complete an edible recipe: a mushroom with no plan is not a route, so the
@@ -4423,12 +4434,13 @@ export function foodSourceGap(
   const cookableRecipe =
     smeltableIngredient || foodCookCandidates(state, options).length > 0
   const sensedFurnace = smeltableIngredient && directSmeltFurnace(state, options) !== null
-  const sourceExists = sensedAnimal || sensedFoodMob || sensedEdibleBlock || sensedIngredientBlock || cookableRecipe
+  const sourceExists = sensedAnimal || sensedFoodMob || sensedFoodDrop || sensedEdibleBlock || sensedIngredientBlock || cookableRecipe
   return {
     offered: uniqueOffered,
     heldEdible: held !== null || heldDesperation !== null,
     sensedAnimal,
     sensedFoodMob,
+    sensedFoodDrop,
     sensedEdibleBlock,
     sensedIngredientBlock,
     cookableRecipe,
@@ -4443,6 +4455,7 @@ export function foodSourceGap(
       sensedIngredientBlock,
       sensedAnimal,
       sensedFoodMob,
+      sensedFoodDrop,
       smeltableIngredient,
       sensedFurnace,
       cookableRecipe,
@@ -4461,6 +4474,7 @@ function firstMissingFoodLink(facts: {
   sensedIngredientBlock: boolean
   sensedAnimal: boolean
   sensedFoodMob: boolean
+  sensedFoodDrop: boolean
   smeltableIngredient: boolean
   sensedFurnace: boolean
   cookableRecipe: boolean
@@ -4468,9 +4482,10 @@ function firstMissingFoodLink(facts: {
   if (facts.heldEdible) return 'no_edible_held'
   // A source IS sensed and no route is on offer: the missing link is the ROUTE
   // to it (in-reach dig, walk-up stand, column base or dig-access walk - or, for
-  // an edible-drop hostile, the withheld hunt ATTACK). This is the shape that
-  // used to be reported as if the world held no food at all.
-  if (facts.sensedEdibleBlock || facts.sensedIngredientBlock || facts.sensedFoodMob) {
+  // an edible-drop hostile, the withheld hunt ATTACK; for a sensed edible drop,
+  // the withheld PICKUP walk). This is the shape that used to be reported as if
+  // the world held no food at all.
+  if (facts.sensedEdibleBlock || facts.sensedIngredientBlock || facts.sensedFoodMob || facts.sensedFoodDrop) {
     return 'no_route_to_sensed_source'
   }
   if (facts.smeltableIngredient && !facts.sensedFurnace) return 'no_reachable_furnace'
@@ -6216,7 +6231,10 @@ function pickupDropAdvancesFocus(
   recipes: RecipeIndex | null,
 ): boolean {
   if (focusItem === null || dropItem === null || dropItem.length === 0) return true
-  if (resourceMatches(dropItem, focusItem)) return true
+  // A drop advances the goal iff holding it would count toward the goal -
+  // `goalResourceMatches`, so a `rotten_flesh` drop is a `collect:food` route
+  // product the same way it is goal progress (the desperation tier).
+  if (goalResourceMatches(dropItem, focusItem)) return true
   if (isResourceClass(focusItem)) {
     return focusItem === 'planks' && matchesResourceClass(dropItem, 'log')
   }
@@ -13824,7 +13842,14 @@ function pickupCandidates(
     .filter((entity) => {
       const item = entity.droppedItem
       if (typeof item !== 'string' || item.length === 0) return false
-      if (!pickupDropAdvancesFocus(focusItem, item, recipes)) return false
+      if (!pickupDropAdvancesFocus(focusItem, item, recipes)) {
+        // The hunger arm offers food routes under ANY goal, so an edible drop a
+        // starving body passes must be collectible regardless of focus - the
+        // product of a food-route kill (`rotten_flesh` under `collect:log`) is
+        // invisible to the goal filter, which would break kill -> pickup.
+        const hungry = Number.isFinite(state.self.food) && state.self.food <= options.eatBelowFood
+        if (!hungry || !goalResourceMatches(item, 'food')) return false
+      }
       // A drop inside a proven death zone is a corpse-loot pull: portal-p7
       // measured the bot vacuuming its own death loot back into the kill
       // pocket (PICKUP:e1950 at 3220.5,63,2808.3). Same CAN/SAFE withholding
@@ -13911,6 +13936,11 @@ function pickupCandidateForEntity(
       pickupItem: item,
       pickupEntityId: entity.id,
       distance: entity.distance,
+      // A hungry body's edible-drop pickup is a food route (`collectsFood`,
+      // `foodSourceGap.offered`, survival-set membership all read `foodRoute`).
+      ...(Number.isFinite(state.self.food) && state.self.food <= options.eatBelowFood && goalResourceMatches(item, 'food')
+        ? { foodRoute: 'drop' }
+        : {}),
       // The drop is a WORLD entity, not a remembered coordinate: the executor
       // must re-locate the item entity by name near this position rather than
       // trusting a stale cell (an item keeps falling for a few ticks).

@@ -188,6 +188,8 @@ export interface FoodSourceGap {
   sensedAnimal: boolean
   /** a hostile whose declared mob drop is edible is sensed inside the hunt range */
   sensedFoodMob: boolean
+  /** a dropped item the body could eat (ordinary or desperation tier) is sensed */
+  sensedFoodDrop: boolean
   /** a sensed block yields an edible item */
   sensedEdibleBlock: boolean
   /** a sensed block yields an ingredient of an edible recipe */
@@ -235,6 +237,7 @@ export function formatFoodSourceGap(gap: FoodSourceGap): string {
   if (!gap.heldEdible) missing.push('no_edible_held')
   if (!gap.sensedAnimal) missing.push('no_food_animal_sensed')
   if (!gap.sensedFoodMob) missing.push('no_food_mob_sensed')
+  if (!gap.sensedFoodDrop) missing.push('no_food_drop_sensed')
   if (!gap.sensedEdibleBlock) missing.push('no_edible_block_sensed')
   if (!gap.sensedIngredientBlock) missing.push('no_ingredient_block_sensed')
   if (!gap.cookableRecipe) missing.push('no_cookable_recipe')

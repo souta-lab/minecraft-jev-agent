@@ -143,18 +143,49 @@ function queueWith(current: QueuedGoal): GoalQueueState {
   return { ...emptyGoalQueueState(), depth: 1, current, empty: false, goals: [current] }
 }
 
+function logGoal(): QueuedGoal {
+  return {
+    id: 'g9:collect:log',
+    kind: 'collect',
+    description: 'collect 5 x log',
+    targetItem: 'log',
+    requiredCount: 5,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
+/** A dropped item entity (`item` + `getDroppedItem`), the shape the sensor reads. */
+function drop(item: string, distance: number, id = 77): Record<string, unknown> {
+  return {
+    id,
+    name: 'item',
+    kind: 'object',
+    position: new Vec3(ORIGIN.x + distance, ORIGIN.y, ORIGIN.z),
+    isValid: true,
+    getDroppedItem: () => ({ name: item }),
+  }
+}
+
 function perceive(
   counts: Record<string, number>,
   food: number,
   entities: Record<string, unknown>[] = [],
   dimension = 'minecraft:overworld',
+  goalItem = 'food',
 ): WorldState {
+  const queued = goalItem === 'log' ? logGoal() : foodGoal()
   return buildWorldState(
     fakeBot(counts, food, entities, dimension),
     {
       tick: 1,
-      goal: makeGoal('food', 3),
-      goalQueue: queueWith(foodGoal()),
+      goal: makeGoal(goalItem, goalItem === 'log' ? 5 : 3),
+      goalQueue: queueWith(queued),
       focusItem: 'beef',
       recentEvents: [],
       signals: signals(),
@@ -805,6 +836,90 @@ addCase('(dimension) a hungry body in the Nether gets NO animal-habitat ascent',
   return {
     pass: ascent.candidates.length === 0,
     detail: `dimension=${state.self.dimension} candidates=[${ascent.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (h) Dropped edible loot must complete the kill -> pickup -> eat loop. The
+// pickup arm used the NARROW food class for focus-matching, so the product of
+// a food-route kill (`rotten_flesh`) was invisible to PICKUP under
+// `collect:food` - and under any other focus while starving, since the hunger
+// arm offers routes across goals but nothing collected the drop.
+// ---------------------------------------------------------------------------
+
+addCase('(h1) hungry + flesh drop under collect:food: PICKUP offered with foodRoute=drop', () => {
+  const state = perceive({}, 5, [drop('rotten_flesh', 6, 88)])
+  const { candidates } = offered(state)
+  const pickup = candidates.find((candidate) => candidate.kind === 'PICKUP')
+  return {
+    pass:
+      pickup !== undefined &&
+      pickup.meta.pickupItem === 'rotten_flesh' &&
+      pickup.meta.foodRoute === 'drop',
+    detail: `pickup=${pickup?.id ?? 'none'} item=${String(pickup?.meta.pickupItem)} route=${String(pickup?.meta.foodRoute)}`,
+  }
+})
+
+addCase('(h2) NOT hungry + flesh drop under collect:food: PICKUP still offered (goal-advancing), no foodRoute marker', () => {
+  const state = perceive({}, 20, [drop('rotten_flesh', 6, 88)])
+  const { candidates } = offered(state)
+  const pickup = candidates.find((candidate) => candidate.kind === 'PICKUP')
+  return {
+    pass: pickup !== undefined && pickup.meta.foodRoute === undefined,
+    detail: `pickup=${pickup?.id ?? 'none'} route=${String(pickup?.meta.foodRoute)}`,
+  }
+})
+
+addCase('(h3) NOT hungry + flesh drop under collect:log: unrelated loot stays filtered', () => {
+  const state = perceive({}, 20, [drop('rotten_flesh', 6, 88)], 'minecraft:overworld', 'log')
+  const { candidates } = offered(state)
+  const pickup = candidates.find((candidate) => candidate.kind === 'PICKUP')
+  return {
+    pass: pickup === undefined,
+    detail: `pickup=${pickup?.id ?? 'none'} ids=[${candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(h4) hungry + flesh drop under collect:log: the hunger arm collects the kill product across focus', () => {
+  const state = perceive({}, 5, [drop('rotten_flesh', 6, 88)], 'minecraft:overworld', 'log')
+  const { candidates } = offered(state)
+  const pickup = candidates.find((candidate) => candidate.kind === 'PICKUP')
+  return {
+    pass: pickup !== undefined && pickup.meta.foodRoute === 'drop',
+    detail: `pickup=${pickup?.id ?? 'none'} route=${String(pickup?.meta.foodRoute)}`,
+  }
+})
+
+addCase('(h5) hungry + NON-food drop under collect:log: the hungry accept is food-only (dirt stays filtered)', () => {
+  const state = perceive({}, 5, [drop('dirt', 6, 88)], 'minecraft:overworld', 'log')
+  const { candidates } = offered(state)
+  const pickup = candidates.find((candidate) => candidate.kind === 'PICKUP')
+  return {
+    pass: pickup === undefined,
+    detail: `pickup=${pickup?.id ?? 'none'}`,
+  }
+})
+
+addCase('(h6) sensed flesh drop with no route: source_withheld / no_route_to_sensed_source, never no_source_sensed', () => {
+  const state = perceive({}, 5, [drop('rotten_flesh', 6, 88)])
+  const gap = foodSourceGap(state, defaultCandidateOptions, [])
+  return {
+    pass:
+      gap !== null &&
+      gap.sensedFoodDrop === true &&
+      gap.reason === 'source_withheld' &&
+      gap.missingLink === 'no_route_to_sensed_source',
+    detail: `gap=${gap === null ? 'null' : `sensedFoodDrop=${gap.sensedFoodDrop} reason=${gap.reason} missingLink=${gap.missingLink}`}`,
+  }
+})
+
+addCase('(h7) sensed flesh drop WITH the pickup offered: no gap marker at all', () => {
+  const state = perceive({}, 5, [drop('rotten_flesh', 6, 88)])
+  const { candidates } = offered(state)
+  const gap = foodSourceGap(state, defaultCandidateOptions, candidates)
+  return {
+    pass: gap === null,
+    detail: `gap=${gap === null ? 'null' : `reason=${gap.reason} offered=${JSON.stringify(gap.offered)}`}`,
   }
 })
 
